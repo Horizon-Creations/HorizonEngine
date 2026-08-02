@@ -11,9 +11,6 @@
 class HE_API RendererFactory
 {
 public:
-    // Alias kept for backward compatibility — prefer HE::RendererBackend directly.
-    using Backend = HE::RendererBackend;
-
     // Implemented in HorizonRendering/src/RendererFactory.cpp
-    static std::unique_ptr<IRenderer> Create(Backend backend);
+    static std::unique_ptr<IRenderer> Create(HE::RendererBackend backend);
 };

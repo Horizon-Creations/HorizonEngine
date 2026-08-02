@@ -59,5 +59,9 @@ HE_API bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& o
 HE_API UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e);
 // False when the element or any ancestor is invisible.
 HE_API bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e);
+// Let every element that auto-sizes fit itself to its content. Call BEFORE
+// uiElementRect so the rects already reflect the new sizes; cheap enough to run
+// each frame (only text elements with AutoSize on do any work).
+HE_API void uiApplyAutoSize(UIWidgetTree& tree);
 
 } // namespace HE

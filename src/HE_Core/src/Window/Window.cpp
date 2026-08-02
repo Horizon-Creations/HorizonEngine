@@ -24,7 +24,7 @@ namespace HE
         SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
         switch (props.api)
         {
-        case GraphicsAPI::OpenGL:
+        case RendererBackend::OpenGL:
 #ifdef __APPLE__
             // macOS caps OpenGL at 4.1 Core and requires a forward-compatible context
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -43,14 +43,14 @@ namespace HE
             // D3D uses the logical size (GetWidth/Height) so it is left unchanged.
             flags |= SDL_WINDOW_OPENGL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::Vulkan:
+        case RendererBackend::Vulkan:
             flags |= SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::Metal:
+        case RendererBackend::Metal:
             flags |= SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
             break;
-        case GraphicsAPI::D3D11:
-        case GraphicsAPI::D3D12:
+        case RendererBackend::D3D11:
+        case RendererBackend::D3D12:
             // Plain window — D3D creates its own swap chain via HWND
             break;
         }
@@ -63,7 +63,17 @@ namespace HE
         if (!m_window)
             throw std::runtime_error("SDL_CreateWindow failed: " + std::string(SDL_GetError()));
 
-        if (props.api == GraphicsAPI::OpenGL)
+        // m_width/m_height are the logical (points) size by construction — that is what
+        // SDL_CreateWindow was given. The drawable size only equals it when HiDPI is off,
+        // so seed it from SDL instead of assuming.
+        {
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+            m_pixelWidth  = pw > 0 ? static_cast<uint32_t>(pw) : m_width;
+            m_pixelHeight = ph > 0 ? static_cast<uint32_t>(ph) : m_height;
+        }
+
+        if (props.api == RendererBackend::OpenGL)
         {
             m_glContext = SDL_GL_CreateContext(m_window);
             if (!m_glContext)
@@ -90,13 +100,33 @@ namespace HE
                 event.window.windowID == SDL_GetWindowID(m_window))
                 m_shouldClose = true;
 
+            // Keep the cached size current after a user resize — without this the getters
+            // kept returning the creation size forever. SDL3 splits the notification in two
+            // events that differ on HiDPI, so they must not be mixed up: RESIZED carries the
+            // logical size in points, PIXEL_SIZE_CHANGED the drawable size in pixels (2x the
+            // points on a Retina display). GetWidth/GetHeight have always meant the points
+            // size (what SDL_CreateWindow / SetSize were given), so only RESIZED feeds them;
+            // the pixel event feeds GetPixelWidth/GetPixelHeight.
+            // Both are only cached when positive: a minimise reports 0x0 on some platforms
+            // and consumers divide by these (aspect ratio, swapchain extent).
+            if ((event.type == SDL_EVENT_WINDOW_RESIZED ||
+                 event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) &&
+                event.window.windowID == SDL_GetWindowID(m_window) &&
+                event.window.data1 > 0 && event.window.data2 > 0)
+            {
+                const uint32_t w = static_cast<uint32_t>(event.window.data1);
+                const uint32_t h = static_cast<uint32_t>(event.window.data2);
+                if (event.type == SDL_EVENT_WINDOW_RESIZED) { m_width      = w; m_height      = h; }
+                else                                        { m_pixelWidth = w; m_pixelHeight = h; }
+            }
+
             if (m_eventCallback) m_eventCallback(event);
         }
     }
 
     void Window::SwapBuffers()
     {
-        if (m_api == GraphicsAPI::OpenGL)
+        if (m_api == RendererBackend::OpenGL)
             SDL_GL_SwapWindow(m_window);
         // D3D/Vulkan present is called by the backend inside Render()
     }
@@ -113,12 +143,23 @@ namespace HE
             SDL_SetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
             m_width  = width;
             m_height = height;
+            // Pull the matching drawable size right away instead of waiting for the
+            // SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED that follows, so the two caches never
+            // disagree within the same frame. If the platform applies the resize
+            // asynchronously the event still corrects it.
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+            if (pw > 0 && ph > 0)
+            {
+                m_pixelWidth  = static_cast<uint32_t>(pw);
+                m_pixelHeight = static_cast<uint32_t>(ph);
+            }
         }
     }
 
     void Window::SetVSync(bool enabled)
     {
-        if (m_api == GraphicsAPI::OpenGL && m_window && m_glContext)
+        if (m_api == RendererBackend::OpenGL && m_window && m_glContext)
         {
             SDL_GL_MakeCurrent(m_window, static_cast<SDL_GLContext>(m_glContext));
             SDL_GL_SetSwapInterval(enabled ? 1 : 0);
@@ -139,6 +180,8 @@ namespace HE
     uint32_t    Window::GetWindowId()    const { return m_window ? SDL_GetWindowID(m_window) : 0; }
     uint32_t    Window::GetWidth()       const { return m_width; }
     uint32_t    Window::GetHeight()      const { return m_height; }
+    uint32_t    Window::GetPixelWidth()  const { return m_pixelWidth; }
+    uint32_t    Window::GetPixelHeight() const { return m_pixelHeight; }
     SDL_Window* Window::GetNativeWindow()const { return m_window; }
     void*       Window::GetGLContext()   const { return m_glContext; }
 }

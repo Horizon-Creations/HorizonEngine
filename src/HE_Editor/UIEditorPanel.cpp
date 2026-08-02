@@ -1,8 +1,12 @@
 #include "UIEditorPanel.h"
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
+#include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"                   // shared per-tab state map
+#include "EditorWidgets.h"                      // shared Content-Browser asset drop target
 #include "GraphEditor.h"                        // shared node-graph canvas
-#include "HcClassList.h"                        // Create Object class picker
+#include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
+#include "HcEditorUtil.h"                       // Create Object class picker
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <UIWidget/UIWidgetTree.h>
@@ -12,7 +16,6 @@
 #include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <imgui.h>
@@ -37,6 +40,7 @@ using HE::UIPropType;
 using HE::UIPropValue;
 using HE::UIEventDesc;
 namespace HC = HorizonCode;
+namespace HGH = HcGraphHost;
 using NT = HC::NodeType;
 using PT = HC::PinType;
 
@@ -92,7 +96,7 @@ struct State
 	std::string name;                // filename for the header
 	std::string relPath;             // content-root-relative path of this asset
 };
-std::map<std::string, State> g_states;
+AssetPanelState<State> s_states;
 
 // ── Layout math (via UIWidgetTree's shared layout, mirrors the runtime) ───────
 ImVec2 anchorPoint(uint8_t a)
@@ -214,19 +218,23 @@ void loadState(State& st, AppContext& ctx, const std::string& assetPath)
 	st.dirty = false;
 }
 
-void saveState(State& st, AppContext& ctx)
+// Returns false when the write did not happen — the close/quit prompt reports a
+// failed save instead of quietly continuing and dropping the edits.
+bool saveState(State& st, AppContext& ctx)
 {
-	if (!ctx.contentManager) return;
+	if (!ctx.contentManager) return false;
 	UIWidgetAsset* a = ctx.contentManager->getWidgetMutable(st.assetId);
 	if (!a)
 	{
 		Logger::Log(Logger::LogLevel::Error,
 			"UIEditorPanel: widget asset vanished — cannot save");
-		return;
+		return false;
 	}
 	a->treeJson  = HE::uiWidgetTreeToJson(st.tree);
 	a->graphJson = HC::toJson(st.graph);
-	if (ctx.contentManager->saveAsset(*a)) st.dirty = false;
+	if (!ctx.contentManager->saveAsset(*a)) return false;
+	st.dirty = false;
+	return true;
 }
 
 // Keep the live asset in sync on every edit, so PIE picks up unsaved edits too
@@ -317,24 +325,12 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 		ImGui::EndCombo();
 	}
 	if (ImGui::IsItemHovered() && !path.empty()) ImGui::SetTooltip("%s", path.c_str());
-	if (ImGui::BeginDragDropTarget())
+	// Path-valued slot: the widget's own undo (committed by the caller) covers it,
+	// so only the drop resolution is shared.
+	if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, wantType))
 	{
-		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-		{
-			std::string rel = ctx.contentManager
-				? ctx.contentManager->toContentRelativePath(static_cast<const char*>(p->Data))
-				: std::string();
-			if (!rel.empty() && ctx.contentManager)
-			{
-				const HE::UUID id = ctx.contentManager->loadAsset(rel);
-				if (id != HE::UUID{} && ctx.contentManager->assetType(id) == wantType)
-				{
-					path = rel;
-					changed = true;
-				}
-			}
-		}
-		ImGui::EndDragDropTarget();
+		path    = drop.relPath;
+		changed = true;
 	}
 	return changed;
 }
@@ -454,8 +450,14 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	case UIPropType::String:
 	{
 		std::string v = e.getProp(pd.name).s;
-		if (ImGui::InputText((pd.name + id).c_str(), &v))
-			{ e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
+		// Multi-line properties (Text) get a real text box so a newline can be
+		// typed — a single-line InputText swallows Enter and the value could
+		// never contain one.
+		const bool changed = pd.multiline
+			? ImGui::InputTextMultiline((pd.name + id).c_str(), &v,
+			                            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 4.0f))
+			: ImGui::InputText((pd.name + id).c_str(), &v);
+		if (changed) { e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
 	}
@@ -876,6 +878,10 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	dl->AddRect(cTL, ImVec2(cTL.x + canvasPx.x, cTL.y + canvasPx.y),
 	            IM_COL32(90, 90, 100, 255));
 
+	// Auto-sizing elements fit themselves before the rects resolve, so the
+	// designer shows the same box the runtime will (see uiApplyAutoSize).
+	HE::uiApplyAutoSize(st.tree);
+
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
 	std::vector<DrawItem> items;
@@ -1037,25 +1043,22 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 //  Graph mode — HorizonCode visual-scripting editor
 // ═══════════════════════════════════════════════════════════════════════════════
 
-constexpr float kGNodeW  = 168.0f;
-constexpr float kGTitleH = 22.0f;
-constexpr float kGRowH   = 18.0f;
-constexpr float kGPinR   = 4.5f;
-
-struct GPinRanges { int execIn0, execOut0, dataIn0, dataOut0, end; };
-GPinRanges graphPinRanges(const HC::Node& n)
-{
-	const HC::NodeSig sig = HC::signatureOf(n);
-	GPinRanges r;
-	r.execIn0  = 0;
-	r.execOut0 = r.execIn0  + (int)sig.execIns.size();
-	r.dataIn0  = r.execOut0 + (int)sig.execOuts.size();
-	r.dataOut0 = r.dataIn0  + (int)sig.dataIns.size();
-	r.end      = r.dataOut0 + (int)sig.dataOuts.size();
-	return r;
-}
-
-ImU32 graphPinColor(PT t) { return HcEditorUtil::pinTypeColor(t); }
+// Shared with the Level Script / Game Instance / HorizonCode Class editors (see
+// HcGraphHost): pin layout, node plumbing, the node menus, the clipboard
+// shortcuts, and the node-detail rows every frontend spells identically
+// (HcGraphHost::drawCommonNodeDetails).
+//
+// What is still written out in this file, and why:
+//   • the canvas hooks — element-bound node titles, the element/variable drops,
+//     the widget's own undo commit;
+//   • drawGraphNodeDetails — the VARIABLE editor (there is no HcGraphHost
+//     counterpart) plus the node rows that read differently here than in a level
+//     script: Event (bound to a UI element), Get/Set Property (widget-only),
+//     FunctionEntry, FunctionCall and Bind/Emit Event;
+//   • drawGraphVariables — a UI-element browser the other frontends have no use
+//     for, plus a variables/functions list laid out differently from theirs.
+// Every OTHER node type in drawGraphNodeDetails is shared already; do not add a
+// case back here without a reason of the same kind.
 
 std::string elemLabel(const State& st, int elemId)
 {
@@ -1094,114 +1097,28 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 	}
 }
 
-struct GPinInfo { ImVec2 pos; bool input; bool isExec; PT type; };
-bool graphPinInfo(const HC::Node& n, int unifiedPin, const ImVec2& nodePos,
-                  float s, GPinInfo& out)
-{
-	const GPinRanges r = graphPinRanges(n);
-	const HC::NodeSig sig = HC::signatureOf(n);
-	const float width  = kGNodeW * s;
-	const float titleH = kGTitleH * s, rowH = kGRowH * s;
-	auto rowCenter = [&](int row){ return nodePos.y + titleH + (row + 0.5f) * rowH; };
-
-	if (unifiedPin >= r.execIn0 && unifiedPin < r.execOut0)
-	{
-		const int i = unifiedPin - r.execIn0;
-		out = { ImVec2(nodePos.x, rowCenter(i)), true, true, PT::Exec };
-		return true;
-	}
-	if (unifiedPin >= r.execOut0 && unifiedPin < r.dataIn0)
-	{
-		const int i = unifiedPin - r.execOut0;
-		out = { ImVec2(nodePos.x + width, rowCenter(i)), false, true, PT::Exec };
-		return true;
-	}
-	if (unifiedPin >= r.dataIn0 && unifiedPin < r.dataOut0)
-	{
-		const int i = unifiedPin - r.dataIn0;
-		const int row = (int)sig.execIns.size() + i;
-		out = { ImVec2(nodePos.x, rowCenter(row)), true, false, sig.dataIns[i].type };
-		return true;
-	}
-	if (unifiedPin >= r.dataOut0 && unifiedPin < r.end)
-	{
-		const int i = unifiedPin - r.dataOut0;
-		const int row = (int)sig.execOuts.size() + i;
-		out = { ImVec2(nodePos.x + width, rowCenter(row)), false, false, sig.dataOuts[i].type };
-		return true;
-	}
-	return false;
-}
-
-const char* graphPinLabel(const HC::Node& n, int unifiedPin)
-{
-	const GPinRanges r = graphPinRanges(n);
-	const HC::NodeSig sig = HC::signatureOf(n);
-	if (unifiedPin >= r.execIn0  && unifiedPin < r.execOut0) return sig.execIns [unifiedPin - r.execIn0 ].name;
-	if (unifiedPin >= r.execOut0 && unifiedPin < r.dataIn0)  return sig.execOuts[unifiedPin - r.execOut0].name;
-	if (unifiedPin >= r.dataIn0  && unifiedPin < r.dataOut0) return sig.dataIns [unifiedPin - r.dataIn0 ].name;
-	if (unifiedPin >= r.dataOut0 && unifiedPin < r.end)      return sig.dataOuts[unifiedPin - r.dataOut0].name;
-	return "";
-}
-
-std::string uniqueFunctionName(const State& st)
-{
-	for (int i = 1; i < 1000; ++i)
-	{
-		const std::string name = i == 1 ? "NewFunction" : ("NewFunction" + std::to_string(i));
-		bool taken = false;
-		for (const auto& gn : st.graph.nodes)
-			if (gn.type == NT::FunctionEntry && gn.s == name) { taken = true; break; }
-		if (!taken) return name;
-	}
-	return "NewFunction";
-}
-
-// Display name for a HorizonCode data pin type (used by the variables UI).
-const char* pinTypeName(PT t)
-{
-	switch (t)
-	{
-		case PT::Float:  return "Float";
-		case PT::Bool:   return "Bool";
-		case PT::Int:    return "Int";
-		case PT::String: return "String";
-		case PT::Vec2:   return "Vec2";
-		case PT::Color:  return "Color";
-		case PT::Ref:    return "Object";
-		default:         return "Exec";
-	}
-}
-
-std::string uniqueVarName(const State& st)
-{
-	for (int i = 1; i < 1000; ++i)
-	{
-		const std::string name = i == 1 ? "NewVar" : ("NewVar" + std::to_string(i));
-		if (!st.graph.findVariable(name)) return name;
-	}
-	return "NewVar";
-}
-
+// Add a node into the visible sub-graph (the shared helper, bound to this
+// widget's current sub-graph).
 int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 {
-	HC::Node n;
-	n.type = type;
-	n.x = graphPos.x; n.y = graphPos.y;
-	n.subgraph = st.currentGraph;   // new nodes belong to the visible sub-graph
-	if (type == NT::ConstColor) { n.f[0] = n.f[1] = n.f[2] = n.f[3] = 1.0f; }
-	if (type == NT::FunctionEntry) n.s = uniqueFunctionName(st);
-	return st.graph.addNode(std::move(n));
+	return HGH::addNode(st.graph, type, graphPos, st.currentGraph);
 }
 
-void removeGraphPinLinks(HC::Graph& g, int nodeId, int pin)
-{
-	g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
-		[&](const HC::Link& l){
-			return (l.srcNode == nodeId && l.srcPin == pin) ||
-			       (l.dstNode == nodeId && l.dstPin == pin);
-		}), g.links.end());
-}
+// Which node types this frontend offers: a widget graph has a self-widget
+// (Show/Hide Self) and element properties, so it lists the Property and Widget
+// categories the level-script editor leaves out.
+const HGH::MenuOpts kMenus = {
+	/*addCategories*/ { "Property", "Flow", "Events", "Reference",
+	                    "Literals", "Math", "Logic", "String",
+	                    "Widget", "UI", "Array", "Debug" },
+	/*addExcluded*/   { NT::Event, NT::FunctionEntry,
+	                    NT::GetVariable, NT::SetVariable },
+	/*dragExcluded*/  { NT::Event, NT::FunctionEntry, NT::FunctionCall,
+	                    NT::FunctionReturn, NT::GetVariable, NT::SetVariable,
+	                    NT::GetProperty, NT::SetProperty, NT::EngineCall,
+	                    NT::CallExternal, NT::GetExternal, NT::SetExternal,
+	                    NT::BindEvent },
+};
 
 // Add or focus an Event node for `elem`/`eventName`; switch to Graph mode.
 void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
@@ -1237,6 +1154,12 @@ void addOrFocusEvent(State& st, AppContext& ctx, const std::string& eventName,
 }
 
 // ── Graph left panel: element variables + functions ──────────────────────────
+// Deliberately NOT shared with LevelScriptPanel's drawVariables: only the type
+// label is (HcGraphHost::variableTypeLabel). The lists agree on what a variable
+// IS but not on how it is presented — this one opens with a UI-element browser
+// the other frontends have nothing to put in, shows the type as a trailing
+// TextDisabled + tooltip instead of inside the row label, and drags a
+// "HE_UIWGRAPH_ELEM"/"HE_UIWGRAPH_VAR" payload.
 void drawGraphVariables(State& st, AppContext& ctx)
 {
 	// ── Widget elements (drag → Get/Set a UI element property) ────────────────
@@ -1284,7 +1207,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	if (ImGui::SmallButton("+##addvar"))
 	{
 		HC::Variable v;
-		v.name = uniqueVarName(st);
+		v.name = HGH::uniqueVarName(st.graph);
 		v.type = PT::Float;
 		st.graph.variables.push_back(v);
 		st.selectedVar = v.name;
@@ -1311,10 +1234,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 			ImGui::Text("%s", v.name.c_str());
 			ImGui::EndDragDropSource();
 		}
-		// Object variables show their class name as the type, not a bare "Object".
-		const std::string typeStr = ((v.type == PT::Ref && !v.className.empty())
-			? std::filesystem::path(v.className).stem().string()
-			: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
+		const std::string typeStr = HGH::variableTypeLabel(v);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%s — drag to graph for Get/Set", typeStr.c_str());
 		ImGui::SameLine();
@@ -1333,7 +1253,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		if (ImGui::SmallButton("+##addlvar"))
 		{
 			HC::Variable v;
-			v.name = uniqueVarName(st);
+			v.name = HGH::uniqueVarName(st.graph);
 			v.type = PT::Float;
 			v.scope = st.currentGraph;   // owned by the open function
 			st.graph.variables.push_back(v);
@@ -1359,7 +1279,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	if (ImGui::SmallButton("+##addfn"))
 	{
 		// A function is its own sub-graph: a start (entry) + a Return node.
-		HC::Node fn; fn.type = NT::FunctionEntry; fn.s = uniqueFunctionName(st);
+		HC::Node fn; fn.type = NT::FunctionEntry; fn.s = HGH::uniqueFunctionName(st.graph);
 		fn.x = 40.0f; fn.y = 40.0f;
 		const int fnId = st.graph.addNode(std::move(fn));
 		HC::Node* entry = st.graph.findNode(fnId);
@@ -1400,6 +1320,13 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	if (!n)
 	{
 		// A graph variable selected in the left panel → edit it here.
+		//
+		// STILL DUPLICATED, knowingly: LevelScriptPanel::drawVariableDetails is a
+		// near-identical copy. Unlike the node-detail rows below it, this one cannot
+		// go through HcGraphHost::Host as it stands — it needs three pieces of
+		// per-host scratch state the Host does not model (the name-edit buffer, which
+		// variable that buffer belongs to, and the host's selected-variable name).
+		// Fixing it properly means giving Host a small "selection" block first.
 		if (HC::Variable* v = !st.selectedVar.empty() ? st.graph.findVariable(st.selectedVar) : nullptr)
 		{
 			ImGui::TextDisabled("Variable");
@@ -1451,9 +1378,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 						if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
 						{
 							gn.propType = v->type;
-							const GPinRanges r = graphPinRanges(gn);
+							const HGH::PinRanges r = HGH::pinRanges(gn);
 							const int valuePin = gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
-							removeGraphPinLinks(st.graph, gn.id, valuePin);
+							HGH::removePinLinks(st.graph, gn.id, valuePin);
 						}
 				}
 				commitEdit(st, ctx);
@@ -1483,8 +1410,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
 					{
 						gn.isArray = arr;
-						const GPinRanges r = graphPinRanges(gn);
-						removeGraphPinLinks(st.graph, gn.id, gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
+						const HGH::PinRanges r = HGH::pinRanges(gn);
+						HGH::removePinLinks(st.graph, gn.id, gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
 					}
 				commitEdit(st, ctx);
 			}
@@ -1564,7 +1491,23 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		}
 	};
 
-	switch (n->type)
+	// Rows that read the same in every HorizonCode frontend come from HcGraphHost;
+	// the switch below only covers what this editor words differently (see the file
+	// header above this section for the full list). onEdit maps the shared rows onto
+	// this panel's two-stage edit model: a dragged value only marks the asset dirty,
+	// a finished one snapshots for undo.
+	HGH::Host common;
+	common.graph   = &st.graph;
+	common.content = ctx.contentManager;
+	common.onEdit  = [&](bool c){ if (c) committed = true; else st.dirty = true; };
+	if (HGH::drawCommonNodeDetails(common, *n))
+	{
+		// The single widget-specific addition to a shared row: this editor's variable
+		// list is the left-hand panel, so an unset Get/Set Variable points at it.
+		if ((n->type == NT::GetVariable || n->type == NT::SetVariable) && n->s.empty())
+			ImGui::TextDisabled("Pick a variable from the list on the left.");
+	}
+	else switch (n->type)
 	{
 	case NT::Event:
 	{
@@ -1646,9 +1589,9 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					// Value-pin type changed → drop links that no longer typecheck.
 					if (n->propType != before)
 					{
-						const GPinRanges r = graphPinRanges(*n);
+						const HGH::PinRanges r = HGH::pinRanges(*n);
 						const int valuePin = n->type == NT::GetProperty ? r.dataOut0 : r.dataIn0;
-						removeGraphPinLinks(st.graph, n->id, valuePin);
+						HGH::removePinLinks(st.graph, n->id, valuePin);
 					}
 					committed = true;
 				}
@@ -1657,59 +1600,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
-	case NT::ArrayMake:
-	case NT::ArrayLength:
-	case NT::ArrayGet:
-	case NT::ArrayAdd:
-	case NT::ArraySet:
-	case NT::ArrayInsert:
-	case NT::ArrayRemove:
-	case NT::ArrayContains:
-	case NT::ArrayIndexOf:
-	case NT::ForEach:
-	{
-		// Element type — object classes allowed too (the class path rides in s,
-		// which array-op nodes don't use otherwise).
-		const PT before = n->propType;
-		if (HcEditorUtil::drawTypePicker("Element", ctx.contentManager, n->propType, &n->s) && n->propType != before)
-		{
-			st.graph.links.erase(std::remove_if(st.graph.links.begin(), st.graph.links.end(),
-				[&](const HC::Link& l){ return l.srcNode == n->id || l.dstNode == n->id; }), st.graph.links.end());
-			committed = true;
-		}
-		ImGui::TextDisabled("Element type of the array.");
-		break;
-	}
-	case NT::ConstFloat:
-		if (ImGui::DragFloat("Value", &n->f[0], 0.1f)) st.dirty = true;
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		break;
-	case NT::ConstInt:
-	{
-		int v = (int)n->f[0];
-		if (ImGui::DragInt("Value", &v, 1)) { n->f[0] = (float)v; st.dirty = true; }
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		break;
-	}
-	case NT::ConstBool:
-	{
-		bool b = n->f[0] != 0.0f;
-		if (ImGui::Checkbox("Value", &b)) { n->f[0] = b ? 1.0f : 0.0f; committed = true; }
-		break;
-	}
-	case NT::ConstString:
-		ImGui::InputText("Value", &n->s);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		break;
-	case NT::ConstVec2:
-		if (ImGui::DragFloat2("Value", n->f, 0.1f)) st.dirty = true;
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		break;
-	case NT::ConstColor:
-		if (ImGui::ColorEdit4("Value", n->f)) st.dirty = true;
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		break;
-
+	// Kept here: this editor's access labels and the "who can call this" hint are
+	// widget-specific (horizon.callWidgetFunction, not Lua/Python).
 	case NT::FunctionEntry:
 	{
 		std::string oldName = n->s;
@@ -1733,6 +1625,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
+	// Kept here: this copy lists unnamed functions too, the level-script copy skips
+	// them. Same widget otherwise.
 	case NT::FunctionCall:
 	{
 		if (ImGui::BeginCombo("Function", n->s.empty() ? "(none)" : n->s.c_str()))
@@ -1746,40 +1640,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		break;
 	}
 
-	case NT::FunctionReturn:
-		if (HcEditorUtil::drawReturnFunctionPicker(st.graph, *n)) committed = true;
-		break;
-
-	case NT::GetVariable:
-	case NT::SetVariable:
-	{
-		if (ImGui::BeginCombo("Variable", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& v : st.graph.variables)
-			{
-				// A function-local is only usable inside its owning sub-graph.
-				if (v.scope != 0 && v.scope != n->subgraph) continue;
-				if (ImGui::Selectable(v.name.c_str(), n->s == v.name))
-				{
-					const PT before = n->propType; const bool wasArr = n->isArray;
-					n->s = v.name;
-					n->propType = v.type;               // node takes the variable's type
-					n->isArray = v.isArray;             // …and its array-ness
-					if (n->propType != before || n->isArray != wasArr)
-					{
-						const GPinRanges r = graphPinRanges(*n);
-						const int valuePin = n->type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
-						removeGraphPinLinks(st.graph, n->id, valuePin);
-					}
-					committed = true;
-				}
-			}
-			ImGui::EndCombo();
-		}
-		if (n->s.empty()) ImGui::TextDisabled("Pick a variable from the list on the left.");
-		break;
-	}
-
+	// Kept here: the hint says "widget's Event" where the level script says
+	// "script's Event".
 	case NT::BindEvent:
 	case NT::EmitEvent:
 	{
@@ -1790,66 +1652,6 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 			: "Broadcast to everyone bound to this\nwidget's event of this name.");
 		break;
 	}
-	case NT::CallExternal:
-	{
-		ImGui::InputText("Function", &n->s);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
-		break;
-	}
-	case NT::CreateWidget:
-	{
-		if (ImGui::BeginCombo("Widget", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Widget))
-				if (ImGui::Selectable((a.label + "##" + a.path).c_str(), n->s == a.path))
-					{ n->s = a.path; committed = true; }
-			ImGui::EndCombo();
-		}
-		ImGui::TextDisabled("Which UI Widget asset to instantiate.\nOutputs the new widget's id.");
-		break;
-	}
-	case NT::CreateObject:
-	{
-		if (ImGui::BeginCombo("Class", n->s.empty() ? "(none)" : n->s.c_str()))
-		{
-			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
-				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n->s == c.path))
-					{ n->s = c.path; committed = true; }
-			ImGui::EndCombo();
-		}
-		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
-		break;
-	}
-	case NT::GetExternal:
-	case NT::SetExternal:
-	{
-		ImGui::InputText("Variable", &n->s);
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		int t = (int)n->propType;
-		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
-		{
-			const PT nt = (PT)t;
-			if (nt != PT::Exec && nt != n->propType)
-			{
-				n->propType = nt;
-				const GPinRanges r = graphPinRanges(*n);
-				const int valuePin = n->type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
-				removeGraphPinLinks(st.graph, n->id, valuePin);
-				committed = true;
-			}
-		}
-		ImGui::TextDisabled("Reads/writes a public variable on the\nTarget object.");
-		break;
-	}
-
-	case NT::EngineCall:
-		// scene.load / scene.loadAdditive: pick the scene from a dropdown
-		// instead of typing the path.
-		if (HcEditorUtil::drawSceneParamPicker(*n, ctx.contentManager)) committed = true;
-		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
-		break;
-
 	default:
 		ImGui::TextDisabled("No editable properties.");
 		break;
@@ -1868,73 +1670,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 }
 
 // ── Graph node canvas ────────────────────────────────────────────────────────
-// Build the GraphEditor pin list for a HorizonCode node (unified pin index =
-// the Pin id; side/exec/type from the node signature).
-std::vector<GraphEditor::Pin> hcNodePins(const HC::Node& n)
-{
-	std::vector<GraphEditor::Pin> out;
-	const GPinRanges r = graphPinRanges(n);
-	const HC::NodeSig sig = HC::signatureOf(n);
-	for (int pin = 0; pin < r.end; ++pin)
-	{
-		GPinInfo info;
-		if (!graphPinInfo(n, pin, ImVec2(0, 0), 1.0f, info)) continue; // pos unused here
-		GraphEditor::Pin p;
-		p.id     = pin;
-		p.label  = graphPinLabel(n, pin);
-		p.color  = graphPinColor(info.type);
-		p.input  = info.input;
-		p.isExec = info.isExec;
-		if (!info.isExec) // array data pins draw as a 2×2 grid
-		{
-			const int di = pin - (info.input ? r.dataIn0 : r.dataOut0);
-			const auto& pins = info.input ? sig.dataIns : sig.dataOuts;
-			if (di >= 0 && di < (int)pins.size()) p.isArray = pins[di].isArray;
-		}
-		out.push_back(std::move(p));
-	}
-	return out;
-}
-
-// Load a HorizonCode class / widget asset's graph (for cross-class member menus).
-bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
-{
-	if (!content || path.empty()) return false;
-	const HE::UUID id = content->loadAsset(path);
-	if (const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id); a && !a->graphJson.empty())
-		return HC::fromJson(a->graphJson, out);
-	if (const UIWidgetAsset* w = content->getWidget(id); w && !w->graphJson.empty())
-		return HC::fromJson(w->graphJson, out);
-	return false;
-}
-
-// The class graph a Ref-producing node points at (this widget's own graph for Get
-// Self, the GameInstance for Get Game Instance, an asset for Create/typed vars).
-const HC::Graph* resolveClassGraph(const HC::Node& src, const HC::Graph& self,
-                                   const HC::Graph* gi, ContentManager* cm, HC::Graph& scratch)
-{
-	switch (src.type)
-	{
-		case NT::GetSelf:         return &self;
-		case NT::GetGameInstance: return gi;
-		case NT::CreateObject:
-		case NT::CreateWidget:    return loadClassGraph(cm, src.s, scratch) ? &scratch : nullptr;
-		case NT::GetVariable:
-		case NT::SetVariable: // the set node passes the value through as its output
-		{
-			const HC::Variable* v = self.findVariable(src.s);
-			if (v && v->type == PT::Ref && !v->className.empty())
-				return loadClassGraph(cm, v->className, scratch) ? &scratch : nullptr;
-			return nullptr;
-		}
-		case NT::ForEach: // Element of an object array (class adopted on connect)
-			if (src.propType == PT::Ref && !src.s.empty())
-				return loadClassGraph(cm, src.s, scratch) ? &scratch : nullptr;
-			return nullptr;
-		default: return nullptr;
-	}
-}
-
+// The canvas itself, the node palette, the drag-off menu and the clipboard
+// shortcuts come from HcGraphHost (shared with the Level Script / Game Instance
+// / HorizonCode Class editors). Host-specific here: element-bound node titles,
+// the widget lifecycle events at the top of the add menu, the element/variable
+// drops, and the widget's own undo commit.
 void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
 	// Sync the host's selection/focus into the shared canvas state.
@@ -1945,300 +1685,33 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	{ const HC::Node* e = st.graph.findNode(st.currentGraph);
 	  if (!e || e->type != NT::FunctionEntry) st.currentGraph = 0; }
 
-	GraphEditor::Model m;
-	m.compactPureNodes = true; // getters/literals draw as compact chips
+	HGH::Host host;
+	host.graph        = &st.graph;
+	host.ge           = &st.geState;
+	host.selectedNode = &st.selectedGraphNode;
+	host.currentGraph = st.currentGraph;
+	host.content      = ctx.contentManager;
+	host.giGraph      = ctx.gameInstanceGraph;
 	// The last compile check's error node gets a red halo.
-	m.nodeOutline = [&st](int id) -> ImU32
-	{
-		return (st.compileHas && !st.compileOk && id == st.compileNode)
-			? IM_COL32(230, 70, 70, 255) : 0;
-	};
-	m.nodeIds = [&st]{ std::vector<int> ids; ids.reserve(st.graph.nodes.size());
-		for (const auto& n : st.graph.nodes) if (n.subgraph == st.currentGraph) ids.push_back(n.id); return ids; };
-	m.getPos = [&st](int id, float& x, float& y){ if (const HC::Node* n = st.graph.findNode(id)) { x = n->x; y = n->y; } };
-	m.setPos = [&st](int id, float x, float y){ if (HC::Node* n = st.graph.findNode(id)) { n->x = x; n->y = y; } };
-	m.title  = [&st](int id){ const HC::Node* n = st.graph.findNode(id); return n ? graphNodeTitle(st, *n) : std::string(); };
-	m.headerColor = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
-		return n ? HcEditorUtil::nodeHeaderColor(*n) : GraphEditor::categoryColor(""); };
-	m.pins = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
-		return n ? hcNodePins(*n) : std::vector<GraphEditor::Pin>{}; };
-	m.links = [&st]{ std::vector<std::array<int,4>> ls; ls.reserve(st.graph.links.size());
-		for (const auto& l : st.graph.links) { const HC::Node* s = st.graph.findNode(l.srcNode);
-			if (s && s->subgraph == st.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
-		return ls; };
-	m.connect = [&st](int oN, int oP, int iN, int iP){
-		// ForEach is generic until wired: adopt the source array's element type
-		// (Array/Element pins retype + recolor) before the typed connect.
-		HC::adoptForEachElementType(st.graph, oN, oP, iN, iP);
-		return st.graph.connect(oN, oP, iN, iP); };
-	m.clearPinLinks = [&st](int node, int pin, bool){ removeGraphPinLinks(st.graph, node, pin); };
-	m.removeNode = [&st](int id){ st.graph.removeNode(id); };
-	// Literal nodes edit their value inline on the node body.
-	m.nodeBodyHeight = [&st](int id){ const HC::Node* n = st.graph.findNode(id);
-		return n ? HcEditorUtil::literalNodeBodyHeight(*n) : 0.0f; };
-	m.drawNodeBody = [&st, &ctx](int id, ImVec2, ImVec2, float){
-		HC::Node* n = st.graph.findNode(id); if (!n) return;
-		bool committed = false;
-		if (HcEditorUtil::drawLiteralNodeBody(*n, committed)) st.dirty = true;
+	host.errorNode    = (st.compileHas && !st.compileOk) ? st.compileNode : 0;
+	host.title        = [&st](const HC::Node& n){ return graphNodeTitle(st, n); };
+	// A value still being dragged only marks the tab dirty; a finished edit also
+	// pushes an undo snapshot and re-applies the graph to the live asset.
+	host.onEdit       = [&st, &ctx](bool committed){
+		st.dirty = true;
 		if (committed) commitEdit(st, ctx); };
-	// Unwired simple inputs (Bool/Int/Float/String) edit their default right on
-	// the pin — no literal node needed for a constant.
-	m.pinHasInlineEditor = [&st](int nid, int pin){
-		const HC::Node* n = st.graph.findNode(nid);
-		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
-	m.drawPinInlineEditor = [&st, &ctx](int nid, int pin){
-		HC::Node* n = st.graph.findNode(nid); if (!n) return;
-		bool committed = false;
-		HcEditorUtil::drawPinDefaultEditor(*n, pin, committed);
-		if (committed) { st.dirty = true; commitEdit(st, ctx); } };
-	m.multiSelect = true; // shift-click / box-select; drag + Delete act on all
-	// Hovering a node shows what it does + its inputs/outputs.
-	m.nodeTooltip = [&st](int id){
-		const HC::Node* n = st.graph.findNode(id);
-		return n ? HcEditorUtil::nodeTooltipText(*n) : std::string(); };
-	// Right-click a node → context menu. When the clicked node is part of a
-	// multi-selection, Delete removes the whole selection.
-	m.drawNodeContextMenu = [&st, &ctx](int nodeId)
-	{
-		const bool inSel = std::find(st.geState.selection.begin(), st.geState.selection.end(), nodeId)
-			!= st.geState.selection.end();
-		const bool multi = inSel && st.geState.selection.size() > 1;
-		if (ImGui::MenuItem(multi ? "Duplicate Selection" : "Duplicate Node"))
-		{
-			const std::vector<int> src = multi ? st.geState.selection : std::vector<int>{ nodeId };
-			const std::vector<int> fresh = HC::duplicateNodes(st.graph, src);
-			if (!fresh.empty())
-			{
-				st.geState.selection = fresh;    // select the clones (ready to drag)
-				st.selectedGraphNode = fresh.front();
-				commitEdit(st, ctx);
-			}
-		}
-		if (ImGui::MenuItem(multi ? "Delete Selection" : "Delete Node"))
-		{
-			const std::vector<int> doomed = multi ? st.geState.selection : std::vector<int>{ nodeId };
-			for (int id : doomed) st.graph.removeNode(id);
-			st.geState.selection.clear();
-			st.selectedGraphNode = 0;
-			commitEdit(st, ctx);
-		}
-	};
-	// Drag off ANY pin → a filtered menu of everything that can take it. Ref
-	// outputs additionally lead with the target class's public members; exec pins
-	// list every exec-capable node; data pins list nodes with a matching input
-	// (or output, when dragging backwards off an input). The pick is auto-wired.
-	m.drawPinDragMenu = [&st, &ctx](int srcNode, int srcPin, bool srcInput, ImVec2 pos) -> int {
-		HC::Node* sn = st.graph.findNode(srcNode);
-		if (!sn) return 0;
+	host.menus        = &kMenus;
+
+	GraphEditor::Model m = HGH::buildModel(host);
+
+	// Searchable add-node palette: the widget lifecycle events + the shared tail
+	// (generic node categories + per-function Call + engine API + Get/Set).
+	m.drawAddMenu = [&st, &host]() -> int {
 		int created = 0;
-
-		// Classify the dragged pin (exec vs data; data type + array-ness).
-		const HC::NodeSig sig = HC::signatureOf(*sn);
-		const GPinRanges rr = graphPinRanges(*sn);
-		const bool isExecPin = srcPin < rr.dataIn0;
-		PT dragType = PT::Float; bool dragArray = false;
-		if (!isExecPin)
-		{
-			if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
-			{ const auto& pd = sig.dataOuts[srcPin - rr.dataOut0]; dragType = pd.type; dragArray = pd.isArray; }
-			else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
-			{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  dragType = pd.type; dragArray = pd.isArray; }
-		}
-
-		static std::string s_dragSearch;
-		if (ImGui::IsWindowAppearing()) { s_dragSearch.clear(); ImGui::SetKeyboardFocusHere(); }
-		ImGui::SetNextItemWidth(232.0f);
-		ImGui::InputTextWithHint("##dragSearch", "Search…", &s_dragSearch);
-		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
-			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
-		const std::string q = lower(s_dragSearch);
-		auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
-
-		ImGui::BeginChild("##hcw_pindrag", ImVec2(240.0f, 320.0f));
-
-		// Wire the new node to the dragged pin (direction depends on the drag side).
-		// adoptForEachElementType first: a ForEach on either end takes the array's
-		// element type (and class) before the typed connect.
-		auto wireAt = [&](int newId, int pin){
-			if (srcInput) { HC::adoptForEachElementType(st.graph, newId, pin, srcNode, srcPin);
-			                st.graph.connect(newId, pin, srcNode, srcPin); }
-			else          { HC::adoptForEachElementType(st.graph, srcNode, srcPin, newId, pin);
-			                st.graph.connect(srcNode, srcPin, newId, pin); } };
-
-		// ── Ref output: the target class's public members lead ────────────────
-		const bool isRefOut = !isExecPin && !srcInput && dragType == PT::Ref && !dragArray;
-		if (isRefOut)
-		{
-			auto wire = [&](int newId){ if (HC::Node* nn = st.graph.findNode(newId))
-				st.graph.connect(srcNode, srcPin, newId, graphPinRanges(*nn).dataIn0); };
-			HC::Graph scratch;
-			const HC::Graph* cls = resolveClassGraph(*sn, st.graph, ctx.gameInstanceGraph,
-			                                         ctx.contentManager, scratch);
-			if (cls)
-			{
-				bool fh = false;
-				for (const auto& fn : cls->nodes)
-					if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty() &&
-					    matches("Call " + fn.s))
-					{
-						if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-						if (ImGui::Selectable(("Call " + fn.s).c_str()))
-						{
-							const int id = addGraphNode(st, NT::CallExternal, pos);
-							HC::Node* nn = st.graph.findNode(id);
-							nn->s = fn.s; nn->params = fn.params; nn->results = fn.results;
-							wire(id); created = id; ImGui::CloseCurrentPopup();
-						}
-					}
-				bool vh = false;
-				for (const auto& var : cls->variables)
-					if (var.access == 0)
-					{
-						if (!vh && (matches("Get " + var.name) || matches("Set " + var.name)))
-						{ ImGui::TextDisabled("Variables"); vh = true; }
-						if (matches("Get " + var.name) && ImGui::Selectable(("Get " + var.name).c_str()))
-						{ const int id = addGraphNode(st, NT::GetExternal, pos); HC::Node* nn = st.graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
-						if (matches("Set " + var.name) && ImGui::Selectable(("Set " + var.name).c_str()))
-						{ const int id = addGraphNode(st, NT::SetExternal, pos); HC::Node* nn = st.graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
-					}
-				if (fh || vh) ImGui::Separator();
-			}
-			else ImGui::TextDisabled("(untyped object)");
-
-			ImGui::TextDisabled("Reference");
-			auto refItem = [&](const char* lbl, NT t){
-				if (matches(lbl) && ImGui::Selectable(lbl))
-				{ const int id = addGraphNode(st, t, pos); wire(id); created = id; ImGui::CloseCurrentPopup(); } };
-			refItem("Call Function (Ref)", NT::CallExternal);
-			refItem("Bind Event",          NT::BindEvent);
-			refItem("Get (Ref)",           NT::GetExternal);
-			refItem("Set (Ref)",           NT::SetExternal);
-			refItem("Destroy Object",      NT::DestroyObject);
-			ImGui::Separator();
-		}
-
-		// ── Generic nodes with a compatible pin ────────────────────────────────
-		{
-			bool gh = false;
-			for (NT t : HC::nodeRegistry())
-			{
-				if (t == NT::Event || t == NT::FunctionEntry || t == NT::FunctionCall ||
-				    t == NT::FunctionReturn || t == NT::GetVariable || t == NT::SetVariable ||
-				    t == NT::GetProperty || t == NT::SetProperty || t == NT::EngineCall ||
-				    t == NT::CallExternal || t == NT::GetExternal || t == NT::SetExternal ||
-				    t == NT::BindEvent) continue;
-				const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
-				if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
-				if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
-				if (ImGui::Selectable(HC::nodeDisplayName(t)))
-				{
-					const int id = addGraphNode(st, t, pos);
-					HC::Node* nn = st.graph.findNode(id);
-					if (!isExecPin) nn->propType = dragType; // keep the matched signature
-					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
-				}
-				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
-			}
-			if (gh) ImGui::Spacing();
-		}
-
-		// ── Engine API calls with a compatible pin ─────────────────────────────
-		{
-			bool eh = false;
-			for (const HE::api::ApiFn& fn : HE::api::registry())
-			{
-				const int pin = HcEditorUtil::dragMatchApiPin(fn, dragType, dragArray, srcInput, isExecPin);
-				const char* shown = fn.displayName ? fn.displayName : fn.id;
-				if (pin < 0 || !matches(shown)) continue;
-				if (!eh) { ImGui::TextDisabled("Engine"); eh = true; }
-				if (ImGui::Selectable((std::string(shown) + "##" + fn.id).c_str()))
-				{
-					const int id = addGraphNode(st, NT::EngineCall, pos);
-					HC::Node* nn = st.graph.findNode(id);
-					nn->s = fn.id; nn->hasArg = fn.isExec;
-					nn->params.clear(); nn->results.clear();
-					for (const auto& p : fn.params)  nn->params.push_back({ p.name, p.type, p.isArray });
-					for (const auto& r : fn.results) nn->results.push_back({ r.name, r.type, r.isArray });
-					wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
-				}
-			}
-			if (eh) ImGui::Spacing();
-		}
-
-		// ── This graph's variables (Set on exec/matching value; Get feeds inputs;
-		//    locals only inside their owning function) ──
-		{
-			bool vh = false;
-			for (const auto& v : st.graph.variables)
-			{
-				if (v.scope != 0 && v.scope != st.currentGraph) continue;
-				const bool setOk = (isExecPin && !srcInput) ||
-					(!isExecPin && !srcInput && v.type == dragType && v.isArray == dragArray);
-				const bool getOk = !isExecPin && srcInput && v.type == dragType && v.isArray == dragArray;
-				auto add = [&](bool get){
-					const int id = addGraphNode(st, get ? NT::GetVariable : NT::SetVariable, pos);
-					HC::Node* nn = st.graph.findNode(id);
-					nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
-					const GPinRanges r = graphPinRanges(*nn);
-					wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
-					created = id; ImGui::CloseCurrentPopup(); };
-				if (setOk && matches("Set " + v.name))
-				{
-					if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-					if (ImGui::Selectable(("Set " + v.name).c_str())) add(false);
-				}
-				if (getOk && matches("Get " + v.name))
-				{
-					if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-					if (ImGui::Selectable(("Get " + v.name).c_str())) add(true);
-				}
-			}
-			if (vh) ImGui::Spacing();
-		}
-
-		// ── Declared functions (exec drags call them) ──────────────────────────
-		if (isExecPin)
-		{
-			bool fh = false;
-			for (const auto& e : st.graph.nodes)
-			{
-				if (e.type != NT::FunctionEntry || e.s.empty() || !matches("Call " + e.s)) continue;
-				if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-				if (ImGui::Selectable(("Call " + e.s).c_str()))
-				{
-					const int id = addGraphNode(st, NT::FunctionCall, pos);
-					st.graph.findNode(id)->s = e.s;
-					HC::syncFunctionSignatures(st.graph);
-					HC::Node* nn = st.graph.findNode(id);
-					const GPinRanges r = graphPinRanges(*nn);
-					wireAt(id, srcInput ? r.execOut0 : r.execIn0);
-					created = id; ImGui::CloseCurrentPopup();
-				}
-			}
-		}
-
-		ImGui::EndChild();
-		return created;
-	};
-	// Searchable add-node palette (mirrors the material editor's). Events +
-	// FunctionEntry are created elsewhere (Designer events / the + Function
-	// button); Get/Set Variable are offered per declared variable.
-	m.drawAddMenu = [&st]() -> int {
-		int created = 0;
-		static std::string s_search;
-		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
-		ImGui::Separator();
-		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
-			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
-		const std::string q = lower(s_search);
+		const std::string q = HGH::beginAddMenu();
 		auto matches = [&](const std::string& name, const std::string& cat)
-		{ return q.empty() || lower(name).find(q) != std::string::npos
-		      || lower(cat).find(q) != std::string::npos; };
-
-		ImGui::BeginChild("##nodeList", ImVec2(232.0f, 300.0f));
+		{ return q.empty() || HGH::lower(name).find(q) != std::string::npos
+		      || HGH::lower(cat).find(q) != std::string::npos; };
 
 		// Widget lifecycle events (Construct on create, Tick per frame, Destruct on
 		// destroy) + Custom Event — addable straight from the menu, event graph only,
@@ -2256,7 +1729,7 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				if (!matches(ev, "Events")) continue;
 				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
 				const bool u = used(ev);
-				if (ImGui::Selectable(ev, false, u ? ImGuiSelectableFlags_Disabled : 0) && !u)
+				if (HcEditorUtil::searchMenuItem(ev, u))
 				{
 					const int id = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos);
 					HC::Node* nn = st.graph.findNode(id);
@@ -2270,104 +1743,17 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (matches("Custom Event", "Events"))
 			{
 				if (!eh) { ImGui::TextDisabled("Events"); eh = true; }
-				if (ImGui::Selectable("Custom Event"))
+				if (HcEditorUtil::searchMenuItem("Custom Event"))
 				{ created = addGraphNode(st, NT::Event, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 			}
 			if (eh) ImGui::Spacing();
 		}
 
-		static const char* kCats[] = { "Property", "Flow", "Events", "Reference",
-		                               "Literals", "Math", "Logic", "String",
-		                               "Widget", "UI", "Array", "Debug" };
-		for (const char* cat : kCats)
-		{
-			bool header = false;
-			for (NT t : HC::nodeRegistry())
-			{
-				if (t == NT::Event || t == NT::FunctionEntry ||
-				    t == NT::GetVariable || t == NT::SetVariable) continue;
-				if (std::string(HC::nodeCategory(t)) != cat) continue;
-				if (!matches(HC::nodeDisplayName(t), cat)) continue;
-				if (!header) { ImGui::TextDisabled("%s", cat); header = true; }
-				if (ImGui::Selectable(HC::nodeDisplayName(t)))
-				{ created = addGraphNode(st, t, st.geState.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
-				if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
-					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
-			}
-			if (header) ImGui::Spacing();
-		}
-		// Call <function> for each declared function, plus a Return node.
-		bool fh = false;
-		for (const auto& e : st.graph.nodes)
-		{
-			if (e.type != NT::FunctionEntry || e.s.empty()) continue;
-			const std::string lbl = "Call " + e.s;
-			if (!matches(lbl, "Functions")) continue;
-			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-			if (ImGui::Selectable(lbl.c_str()))
-			{
-				const int id = addGraphNode(st, NT::FunctionCall, st.geState.addMenuGraphPos);
-				st.graph.findNode(id)->s = e.s;
-				HC::syncFunctionSignatures(st.graph);
-				created = id; ImGui::CloseCurrentPopup();
-			}
-		}
-		// A Return node — only inside a function sub-graph, auto-bound to that
-		// function so its pins mirror the declared outputs.
-		if (st.currentGraph != 0 && matches("Return", "Functions"))
-		{
-			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-			if (ImGui::Selectable("Return"))
-			{
-				const int id = addGraphNode(st, NT::FunctionReturn, st.geState.addMenuGraphPos);
-				if (const HC::Node* owner = st.graph.findNode(st.currentGraph))
-				{ HC::Node* rn = st.graph.findNode(id); rn->s = owner->s; rn->results = owner->results; }
-				HC::syncFunctionSignatures(st.graph);
-				created = id; ImGui::CloseCurrentPopup();
-			}
-		}
-		if (fh) ImGui::Spacing();
-
-		// Engine API calls — the HE::api registry surfaced as one generic
-		// EngineCall node per function, grouped by subsystem, same search box.
-		if (std::string picked = HcEditorUtil::drawEngineApiMenu(q); !picked.empty())
-		{
-			if (const HE::api::ApiFn* fn = HE::api::find(picked))
-			{
-				const int id = addGraphNode(st, NT::EngineCall, st.geState.addMenuGraphPos);
-				HC::Node* nn = st.graph.findNode(id);
-				nn->s = fn->id;
-				nn->hasArg = fn->isExec;             // exec node vs pure data node
-				nn->params.clear(); nn->results.clear();
-				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
-				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
-				created = id;
-			}
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::Spacing();
-
-		// Get/Set for each declared variable (locals only inside their function).
-		bool vh = false;
-		for (const auto& v : st.graph.variables)
-			for (int k = 0; k < 2; ++k)
-			{
-				if (v.scope != 0 && v.scope != st.currentGraph) continue;
-				const std::string lbl = (k == 0 ? "Get " : "Set ") + v.name;
-				if (!matches(lbl, "Variables")) continue;
-				if (!vh) { ImGui::TextDisabled("Variables"); vh = true; }
-				if (ImGui::Selectable(lbl.c_str()))
-				{
-					const int id = addGraphNode(st, k == 0 ? NT::GetVariable : NT::SetVariable,
-					                            st.geState.addMenuGraphPos);
-					HC::Node* nn = st.graph.findNode(id);
-					nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
-					created = id; ImGui::CloseCurrentPopup();
-				}
-			}
-		ImGui::EndChild();
+		if (const int c = HGH::drawAddMenuTail(host, q)) created = c;
+		HGH::endAddMenu();
 		return created;
 	};
+
 	m.dropPayloads = { "HE_UIWGRAPH_ELEM", "HE_UIWGRAPH_VAR" };
 	m.onDrop = [&st](const char* type, const void* data, ImVec2 gp){
 		st.geState.addMenuGraphPos = gp;
@@ -2377,9 +1763,12 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			{ st.gDropVar = static_cast<const char*>(data); st.gOpenVarDrop = true; }
 	};
 
+	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
 	st.selectedGraphNode = st.geState.selected;
 	if (changed) commitEdit(st, ctx);
+
+	HGH::handleGraphKeys(host, canvasOrigin, avail);
 
 	// Variables-panel drop → Get/Set popup for the dropped element's properties.
 	if (st.gOpenDropPopup) { ImGui::OpenPopup("##graph_elem_drop"); st.gOpenDropPopup = false; }
@@ -2449,27 +1838,27 @@ namespace UIEditorPanel
 
 bool isWidgetAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isW = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::Widget);
-	s_typeCache[path] = isW;
-	return isW;
+	return EditorAssetTypeCache::is(path, HE::AssetType::Widget);
 }
 
-bool isDirty(const std::string& assetPath)
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
+
+void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
+
+bool save(AppContext& ctx, const std::string& assetPath)
 {
-	auto it = g_states.find(assetPath);
-	return it != g_states.end() && it->second.dirty;
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveState(*st, ctx);
 }
-
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
 
 void render(AppContext& ctx, const std::string& assetPath,
             const ImVec2& pos, const ImVec2& size)
 {
-	State& st = g_states[assetPath];
+	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
 
 	ImGui::SetNextWindowPos(pos);
@@ -2505,7 +1894,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 	ImGui::Separator();
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
-	const bool typing = ImGui::IsAnyItemActive();
+	// WantTextInput as well as IsAnyItemActive: an InputText that has keyboard
+	// focus without being "active" this frame still owns the keystrokes.
+	const bool typing = ImGui::IsAnyItemActive() || ImGui::GetIO().WantTextInput;
 	if (!typing && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
 	{
 		const bool ctrl = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
@@ -2516,8 +1907,9 @@ void render(AppContext& ctx, const std::string& assetPath,
 		    (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)))
 			{ restoreSnapshot(st, st.undoPos + 1); applyToAsset(st, ctx); }
 
-		const bool del = ImGui::IsKeyPressed(ImGuiKey_Delete) ||
-		                 ImGui::IsKeyPressed(ImGuiKey_Backspace);
+		// Delete only — Backspace is the text-editing key and a near-miss on it
+		// used to destroy the selected element/node (same rule as GraphEditor).
+		const bool del = ImGui::IsKeyPressed(ImGuiKey_Delete);
 		if (st.viewMode == 0)
 		{
 			if (del && st.selected != 0)

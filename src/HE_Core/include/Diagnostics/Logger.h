@@ -17,6 +17,4 @@ public:
 	// Pass nullptr to uninstall.
 	using Sink = void(*)(LogLevel level, const char* message, void* user);
 	static void setSink(Sink sink, void* user);
-private:
-	std::string logfile;
 };

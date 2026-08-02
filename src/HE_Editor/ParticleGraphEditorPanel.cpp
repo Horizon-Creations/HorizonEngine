@@ -1,10 +1,12 @@
 #include "ParticleGraphEditorPanel.h"
 #include <cstdint>
-#include "EditorApplication.h" // AppContext
-#include "GraphEditor.h"       // shared node-graph canvas frontend
+#include "EditorApplication.h"      // AppContext
+#include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
+#include "EditorWidgets.h"          // shared Content-Browser asset drop target
+#include "GraphEditor.h"            // shared node-graph canvas frontend
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <ContentManager/HAsset.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
@@ -15,8 +17,6 @@
 #include <imgui.h>
 #include <algorithm>
 #include <array>
-#include <filesystem>
-#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -47,17 +47,14 @@ struct State
 	float previewYaw = 0.6f, previewPitch = 0.2f, previewDist = 1.6f;
 };
 
-static std::map<std::string, State> g_states;
+static AssetPanelState<State> s_states;
 
 static State& stateFor(const std::string& path, AppContext& ctx)
 {
-	State& st = g_states[path];
+	State& st = s_states[path];
 	if (st.loaded || !ctx.contentManager) return st;
 
-	st.name = std::filesystem::path(path).filename().string();
-	const std::string rel = ctx.contentManager->toContentRelativePath(path);
-	st.relPath = rel.empty() ? path : rel;
-	st.assetId = ctx.contentManager->loadAsset(st.relPath);
+	st.assetId = openPanelAsset(ctx, path, st.name, st.relPath);
 
 	st.graph = HE::ParticleGraph::makeDefault();
 	if (const ParticleGraphAsset* asset = ctx.contentManager->getParticleGraph(st.assetId);
@@ -73,16 +70,42 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 
 bool isParticleAsset(const std::string& path)
 {
-	static std::map<std::string, bool> s_typeCache;
-	if (auto it = s_typeCache.find(path); it != s_typeCache.end()) return it->second;
-	HAsset::Reader r;
-	const bool isPt = r.open(path) &&
-		r.assetType() == static_cast<uint16_t>(HE::AssetType::ParticleSystem);
-	s_typeCache[path] = isPt;
-	return isPt;
+	return EditorAssetTypeCache::is(path, HE::AssetType::ParticleSystem);
 }
 
-void forget(const std::string& assetPath) { g_states.erase(assetPath); }
+bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
+
+void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+void forget(const std::string& assetPath) { s_states.forget(assetPath); }
+
+// Persist a tab's graph. The header's Save button AND the close/quit prompt's
+// "Save All" both come through here, so the two can never drift apart.
+static bool saveToDisk(State& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	ParticleGraphAsset* asset = ctx.contentManager->getParticleGraphMutable(st.assetId);
+	if (!asset) return false;
+	asset->nodeGraphJson = HE::particleGraphToJson(st.graph);
+	if (!ctx.contentManager->saveAsset(*asset)) return false;
+	st.dirty = false;
+	// Live entities already using this asset should reflect the edit now, not only
+	// the next time their own particleAssetId changes — same idea as
+	// InvalidateMaterial after a Material save.
+	if (ctx.world)
+		for (auto [e, ps] : ctx.world->registry().view<ParticleSystemComponent>().each())
+			if (ps.particleAssetId == st.assetId) ParticleSystem::markConfigDirty(ps);
+	Logger::Log(Logger::LogLevel::Info, ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
+	return true;
+}
+
+bool save(AppContext& ctx, const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	// A tab this panel never opened has nothing to write — the caller asks every
+	// panel about every path, so "not mine" must read as success.
+	if (!st || !st->dirty) return true;
+	return saveToDisk(*st, ctx);
+}
 
 namespace
 {
@@ -116,20 +139,9 @@ float nodeBodyHeightFor(HE::ParticleNodeType t)
 
 // Scale embedded ImGui widgets to the canvas zoom — FramePadding/ItemSpacing are
 // pixel-space and won't track a shrunken node box on their own (same technique
-// the Material/HorizonCode editors use for their own node-body widgets).
-void pushWidgetScale(float z)
-{
-	const ImGuiStyle& s = ImGui::GetStyle();
-	const ImVec2 fp = s.FramePadding, is = s.ItemSpacing, iis = s.ItemInnerSpacing;
-	const float  fr = s.FrameRounding, gm = s.GrabMinSize;
-	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,     ImVec2(fp.x * z, fp.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,      ImVec2(is.x * z, is.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(iis.x * z, iis.y * z));
-	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,    fr * z);
-	ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,      gm * z);
-	ImGui::SetWindowFontScale(z);
-}
-void popWidgetScale() { ImGui::SetWindowFontScale(1.0f); ImGui::PopStyleVar(5); }
+// the Material/HorizonCode editors use). The one copy lives with the canvas.
+using GraphEditor::pushWidgetScale;
+using GraphEditor::popWidgetScale;
 } // namespace
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
@@ -151,18 +163,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SameLine();
 	ImGui::TextDisabled("particle system%s", st.dirty ? "  (unsaved)" : "");
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100.0f);
-	if (ImGui::Button("Save##ptsave") && asset)
-	{
-		asset->nodeGraphJson = HE::particleGraphToJson(st.graph);
-		if (ctx.contentManager->saveAsset(*asset)) st.dirty = false;
-		// Live entities already using this asset should reflect the edit now,
-		// not only the next time their own particleAssetId changes — same idea
-		// as InvalidateMaterial after a Material save.
-		if (ctx.world)
-			for (auto [e, ps] : ctx.world->registry().view<ParticleSystemComponent>().each())
-				if (ps.particleAssetId == st.assetId) ParticleSystem::markConfigDirty(ps);
-		Logger::Log(Logger::LogLevel::Info, ("ParticleGraphEditor: saved '" + st.name + "'").c_str());
-	}
+	if (ImGui::Button("Save##ptsave") && asset) saveToDisk(st, ctx);
 	if (!asset)
 		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
 	ImGui::Separator();
@@ -357,24 +358,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				ImGui::PushID(label);
 				ImGui::SetNextItemAllowOverlap();
 				ImGui::InvisibleButton("##slot", ImVec2(std::max(bodyMax.x - bodyMin.x, 1.0f), 22.0f * zoom));
-				if (ImGui::BeginDragDropTarget())
+				// The graph's own JSON undo stack covers this (structuralEdit), so no
+				// world snapshot — hence the drop half only, not the whole slot widget.
+				if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, want))
 				{
-					if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
-					{
-						const std::string rel = ctx.contentManager
-							? ctx.contentManager->toContentRelativePath(static_cast<const char*>(pl->Data))
-							: std::string();
-						if (!rel.empty() && ctx.contentManager)
-						{
-							const HE::UUID dropped = ctx.contentManager->loadAsset(rel);
-							if (dropped != HE::UUID{} && ctx.contentManager->assetType(dropped) == want)
-							{
-								target = dropped;
-								structuralEdit = true;
-							}
-						}
-					}
-					ImGui::EndDragDropTarget();
+					target = drop.id;
+					structuralEdit = true;
 				}
 				ImGui::PopID();
 			};

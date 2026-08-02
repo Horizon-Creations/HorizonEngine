@@ -221,7 +221,65 @@ exceeded" error in the log.
 
 ---
 
-## 6. Related design docs
+## 6. Editor shortcuts
+
+The graph canvas is shared with the material / particle / animator editors, so the
+navigation keys work in all of them; the node keys are HorizonCode's. Every
+shortcut is ignored while a text field has the keyboard (a rename box, a search
+field), and only fires while the cursor is over the canvas.
+
+### Drop a node — hold the key, click empty canvas
+
+| Key | Node | Key | Node |
+|-----|------|-----|------|
+| `B` | Branch   | `O` | Do Once |
+| `S` | Sequence | `P` | Print |
+| `D` | Delay    | `V` | Is Valid |
+| `F` | For Each | `N` | Not |
+
+`B`/`S`/`D`/`F`/`O` are Unreal's Blueprint bindings, key for key.
+
+**The same keys work mid-wire.** Drag a link off any pin and hit the key instead of
+releasing: the node appears at the cursor **already connected** (the drag-off menu's
+result without the menu). If the node has no pin that fits what you dragged, it is
+still created — unwired. Pressing a key while the drag-off *menu* is already open
+types into its search box instead, which is what you want there.
+
+Literals have no shortcut on purpose: an unwired simple data input (Bool/Int/Float/
+String) edits its value right on the pin, so a literal node is the exception now.
+
+### Palettes
+
+| Key | Opens |
+|-----|-------|
+| `Space` | the add-node palette at the cursor (same as right-click), search focused |
+| `G` + click | this graph's variables → **Get** node |
+| `Shift`+`G` + click | this graph's variables → **Set** node |
+| `E` + click | the engine API registry → **Engine Call** node |
+
+All four are search fields: type a few letters, `↑`/`↓` to move the highlight,
+`Enter` to insert.
+
+### Selection, navigation, tidying
+
+| Key | Does |
+|-----|------|
+| `Delete` | remove the selection (Backspace deliberately does **not** — it is the text-editing key) |
+| `Ctrl`/`Cmd`+`A` | select every node in the visible graph or function body |
+| `Home` | fit the whole graph in view |
+| `F` (tap, no click) | frame the selection — nothing selected frames everything |
+| `Q` | straighten the selection's wires: downstream nodes slide until each wire runs horizontally. With a single node selected, its neighbours move onto it instead |
+| `Ctrl`/`Cmd`+`C`/`X`/`V`/`D` | copy / cut / paste / duplicate (the clipboard is shared across all HorizonCode editors) |
+| `Alt`+click a pin | break that pin's links |
+
+`F` carries both a node and a command: the click is what tells them apart — `F`
+plus a click drops a For Each, `F` released without one frames the selection.
+
+The bindings live in one table, `src/HE_Editor/HcGraphShortcuts.cpp`.
+
+---
+
+## 7. Related design docs
 
 - `horizoncode-completion-plan.md` — feature roadmap / status tracker.
 - `horizoncode-cpp-codegen-plan.md` — the codegen design (implemented; see below).

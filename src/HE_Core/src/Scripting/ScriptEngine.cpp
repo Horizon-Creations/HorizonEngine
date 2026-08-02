@@ -96,13 +96,13 @@ ScriptEngine::InstanceId ScriptEngine::createInstance(const std::string& scriptN
     while (lua_next(m_L, -3) != 0)
     {
         // stack: script_table, instance_table, key, value
-        lua_pushvalue(m_L, -2); // duplicate key
-        lua_insert(m_L, -2);    // stack: ..., key(dup), key, value → ..., key(dup), value
-        // Actually we want: instance[key] = value
-        // stack: script_table, instance_table, key, value
-        // We need to rawset(instance_table, key, value)
-        // rawset pops key and value
-        lua_rawset(m_L, -4); // instance_table[key] = value; pops key+value
+        // The key has to be duplicated before the store: lua_rawset consumes a
+        // key/value pair, but lua_next needs the original key still on top to
+        // find the next entry. Push a copy and slide it under the value so
+        // rawset eats the copy and leaves the original behind.
+        lua_pushvalue(m_L, -2); // key copy on top
+        lua_insert(m_L, -2);    // stack: script, instance, key, key(copy), value
+        lua_rawset(m_L, -4);    // instance_table[key] = value; pops copy+value
     }
     // stack: script_table, instance_table
     lua_remove(m_L, -2); // drop script_table, leave instance_table on top
@@ -131,52 +131,41 @@ void ScriptEngine::destroyInstance(InstanceId id)
     m_instances.erase(it);
 }
 
+// Shared prologue of every callOnX below: push instance.<method> and the `self`
+// argument, leaving the stack as [function, self] ready for pcall(1 + extra args).
+// Returns false with a CLEAN stack when the method is not defined — an undefined
+// callback is a silent no-op in every one of them, never an error (m_lastError is
+// deliberately left untouched in that case, as it always has been).
+static bool pushInstanceMethod(lua_State* L, int instanceRef, const char* method)
+{
+    lua_rawgeti(L, LUA_REGISTRYINDEX, instanceRef); // instance table
+    lua_getfield(L, -1, method);                    // function (or nil)
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 2); // pop nil + instance
+        return false;
+    }
+    lua_rawgeti(L, LUA_REGISTRYINDEX, instanceRef); // self = instance table
+    lua_remove(L, -3);                              // remove instance from bottom
+    return true;
+}
+
 bool ScriptEngine::callOnStart(InstanceId id)
 {
     auto it = m_instances.find(id);
-    if (it == m_instances.end())
-    {
-        m_lastError = "Invalid instance id";
-        return false;
-    }
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
 
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef); // instance table
-
-    lua_getfield(m_L, -1, "onStart"); // function (or nil)
-    if (lua_isnil(m_L, -1))
-    {
-        lua_pop(m_L, 2); // pop nil + instance
-        return true;     // not defined → silent success
-    }
-
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef); // self = instance table
-    lua_remove(m_L, -3);                                     // remove instance from bottom
-
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onStart")) return true; // not defined
     return pcall(1, 0);
 }
 
 bool ScriptEngine::callOnUpdate(InstanceId id, float dt)
 {
     auto it = m_instances.find(id);
-    if (it == m_instances.end())
-    {
-        m_lastError = "Invalid instance id";
-        return false;
-    }
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
 
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-
-    lua_getfield(m_L, -1, "onUpdate");
-    if (lua_isnil(m_L, -1))
-    {
-        lua_pop(m_L, 2);
-        return true;
-    }
-
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef); // self
-    lua_remove(m_L, -3);
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onUpdate")) return true;
     lua_pushnumber(m_L, static_cast<lua_Number>(dt));
-
     return pcall(2, 0);
 }
 
@@ -185,12 +174,7 @@ bool ScriptEngine::callOnCollisionEnter(InstanceId id, uint32_t otherEntityId)
     auto it = m_instances.find(id);
     if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
 
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_getfield(m_L, -1, "onCollisionEnter");
-    if (lua_isnil(m_L, -1)) { lua_pop(m_L, 2); return true; }
-
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_remove(m_L, -3);
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCollisionEnter")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
@@ -200,12 +184,7 @@ bool ScriptEngine::callOnCollisionExit(InstanceId id, uint32_t otherEntityId)
     auto it = m_instances.find(id);
     if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
 
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_getfield(m_L, -1, "onCollisionExit");
-    if (lua_isnil(m_L, -1)) { lua_pop(m_L, 2); return true; }
-
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_remove(m_L, -3);
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCollisionExit")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
@@ -217,12 +196,7 @@ bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 
     const char* fn = ev == UIScriptEvent::Click      ? "onClick" :
                      ev == UIScriptEvent::HoverEnter ? "onHoverEnter" : "onHoverExit";
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_getfield(m_L, -1, fn);
-    if (lua_isnil(m_L, -1)) { lua_pop(m_L, 2); return true; }
-
-    lua_rawgeti(m_L, LUA_REGISTRYINDEX, it->second.luaRef);
-    lua_remove(m_L, -3);
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
     return pcall(1, 0);
 }
 

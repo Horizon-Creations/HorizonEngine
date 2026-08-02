@@ -51,16 +51,7 @@ void update(HorizonWorld& world, InputState& state,
                 mouseY < pos.y || mouseY > pos.y + size.y)
                 continue;
 
-            int depth = 0;
-            for (auto cur = e; depth < 255; )
-            {
-                const auto* h = reg.try_get<HierarchyComponent>(cur);
-                if (!h || h->parent == entt::null ||
-                    !reg.all_of<UIElementComponent>(h->parent)) break;
-                cur = h->parent;
-                ++depth;
-            }
-            const int key = elem.layer * 256 + depth;
+            const int key = UISystem::sortKey(elem.layer, UISystem::nestingDepth(reg, e));
             if (top == 0 || key >= topKey)
             {
                 top = static_cast<uint32_t>(e);

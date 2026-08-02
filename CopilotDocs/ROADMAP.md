@@ -40,7 +40,9 @@ andere hängt daran.
    Empfehlung: GLSL 410 als einzige Quellsprache, Laufzeit-Kompilierung pro
    Backend wie bisher. Für Metal kurzfristig handgeschriebene MSL-Pendants
    neben der GLSL-Datei (`shader.vert.glsl` + `shader.metal`); mittelfristig
-   `glslc → SPIR-V → SPIRV-Cross → MSL` in den shader_compiler einbauen.
+   `glslc → SPIR-V → SPIRV-Cross → MSL` einbauen — gelandet ist das als
+   In-Process-Bibliothek `he_shadercompiler`
+   (`src/HE_Tools/ShaderCompiler/ShaderCompiler.h`), nicht als CLI.
    Entry-Point-Konvention `vertexMain`/`fragmentMain` ist im
    MetalShaderManager bereits angelegt.
 2. **CommandBuffer + RenderWorld + RenderObject implementieren** (reine
@@ -151,7 +153,9 @@ Parallelisierbar, jeweils eigenes Modul:
 - **Memory:** `Ref<T>` (intrusive refcount) implementieren und im
   ContentManager nutzen — Voraussetzung für Asset-Unloading
   (KeepCPUAssets-Flag existiert schon, tut aber nichts). PoolAllocator erst
-  bei nachgewiesenem Bedarf.
+  bei nachgewiesenem Bedarf. *(Gelandet ist stattdessen `AssetRef<T>` +
+  `pinAsset`/`unpinAsset` im ContentManager; ein intrusiver `Ref<T>` wurde
+  dadurch überflüssig und entfällt — siehe MASTERPLAN 0.3.)*
 - **Tests:** Catch2 oder doctest; zuerst SlotMap, HAsset round-trip,
   SceneSerializer round-trip, ContentManager. CTest-Gerüst existiert im
   Build-Verzeichnis bereits.

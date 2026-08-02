@@ -18,6 +18,8 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
+#include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -36,6 +38,12 @@
 #include <glm/gtc/quaternion.hpp>
 #include <filesystem>
 
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
+
 GameApplication::GameApplication(std::string startupPath)
 	: HE::Application(std::move(startupPath)) {}
 GameApplication::~GameApplication() = default;
@@ -49,18 +57,18 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	cfg.windowprops.vsync  = true;
 	cfg.windowprops.mode   = HE::WindowMode::Fullscreen;
 #ifdef __APPLE__
-	cfg.backend = RendererFactory::Backend::Metal;
+	cfg.backend = HE::RendererBackend::Metal;
 #else
-	cfg.backend = RendererFactory::Backend::OpenGL;
+	cfg.backend = HE::RendererBackend::OpenGL;
 #endif
 	return cfg;
 }
 
 std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 {
-	auto m_backend = GetConfig().backend;
+	const auto backend = GetConfig().backend;
 	Logger::Log(Logger::LogLevel::Info, "GameApplication: creating renderer");
-	return RendererFactory::Create(m_backend);
+	return RendererFactory::Create(backend);
 }
 
 void GameApplication::OnInit()
@@ -281,26 +289,9 @@ void GameApplication::OnInit()
 	}
 	setWorld(m_world.get());
 
-	// Ensure a camera the free-fly controller can drive. A scene authored without
-	// one otherwise renders through the extractor's fixed fallback camera, which
-	// can't move — so the game would look frozen. Only added when the scene has
-	// no camera at all; an authored camera is never overridden.
-	{
-		auto& reg = m_world->registry();
-		bool hasCamera = false;
-		for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
-		if (!hasCamera)
-		{
-			auto camE = m_world->createEntity("GameCamera");
-			TransformComponent tc;
-			tc.position = glm::vec3(0.0f, 2.0f, 8.0f); // back + up, looking toward -Z
-			reg.emplace<TransformComponent>(camE, tc);
-			CameraComponent cc; cc.isMain = true;
-			reg.emplace<CameraComponent>(camE, cc);
-			Logger::Log(Logger::LogLevel::Info,
-				"GameApplication: added a default free-fly camera (scene had none)");
-		}
-	}
+	if (ensureDefaultCamera(*m_world))
+		Logger::Log(Logger::LogLevel::Info,
+			"GameApplication: added a default free-fly camera (scene had none)");
 
 	// Player controller/character classes + input events: discover the project's
 	// input assets, spawn the player instances on the shared runtime (Construct +
@@ -328,19 +319,9 @@ void GameApplication::OnInit()
 		}
 	}
 
-	// Reference-graph streaming seed: kick off async loads for the assets this scene
-	// actually references. Their baked transitive dependencies (materials → textures)
-	// follow automatically via the frontier in pollAsyncResults, so the loader pulls
-	// only the closure the scene needs — unused pak assets are never loaded. The
-	// async UUID loader resolves from mounted paks first and falls back to the disk
-	// registry, so this also works for a WIP build running on loose content.
-	{
-		const auto refs = SceneSystems::collectAssetRefs(*m_world);
-		for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
-		Logger::Log(Logger::LogLevel::Info,
-			("GameApplication: streaming " + std::to_string(refs.size()) +
-			 " scene-referenced asset roots").c_str());
-	}
+	Logger::Log(Logger::LogLevel::Info,
+		("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
+		 " scene-referenced asset roots").c_str());
 
 	// Native C++ game logic: an optional GameLogic library next to the executable
 	// (built from the game's C++ project). Once loaded, the base Application loop
@@ -369,6 +350,28 @@ void GameApplication::OnInit()
 	// Level script "OnLevelLoaded" fires once the world + scripts are up; the
 	// matching "OnLevelUnloaded" fires at shutdown.
 	if (m_world) m_world->fireLevelLoaded();
+}
+
+// ── Shared scene bring-up steps ──────────────────────────────────────────────
+
+bool GameApplication::ensureDefaultCamera(HorizonWorld& world)
+{
+	auto& reg = world.registry();
+	for (auto e : reg.view<CameraComponent>()) { (void)e; return false; } // authored camera wins
+	auto camE = world.createEntity("GameCamera");
+	TransformComponent tc;
+	tc.position = glm::vec3(0.0f, 2.0f, 8.0f); // back + up, looking toward -Z
+	reg.emplace<TransformComponent>(camE, tc);
+	CameraComponent cc; cc.isMain = true;
+	reg.emplace<CameraComponent>(camE, cc);
+	return true;
+}
+
+size_t GameApplication::streamSceneAssets(HorizonWorld& world)
+{
+	const auto refs = SceneSystems::collectAssetRefs(world);
+	for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+	return refs.size();
 }
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -440,52 +443,43 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	m_world->setScriptRuntime(&m_gameInstance.runtime());
 	setWorld(m_world.get());
 
-	auto& reg = m_world->registry();
-	bool hasCamera = false;
-	for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
-	if (!hasCamera)
-	{
-		auto camE = m_world->createEntity("GameCamera");
-		TransformComponent tc; tc.position = glm::vec3(0.0f, 2.0f, 8.0f);
-		reg.emplace<TransformComponent>(camE, tc);
-		CameraComponent cc; cc.isMain = true;
-		reg.emplace<CameraComponent>(camE, cc);
-	}
+	ensureDefaultCamera(*m_world);
 
 	if (m_audioEngine.isInitialized())
 		AudioSystem::playOnStart(*m_world, m_audioEngine, &contentManager());
 
 	// Seamlessness comes from the async streaming pipeline: the swap itself is a
 	// cheap main-thread deserialize; meshes/textures stream in the background.
-	const auto refs = SceneSystems::collectAssetRefs(*m_world);
-	for (HE::UUID r : refs) contentManager().loadAssetAsync(r);
+	const size_t refCount = streamSceneAssets(*m_world);
 
 	startScripts();
 	m_world->fireLevelLoaded();
 	Logger::Log(Logger::LogLevel::Info,
 		("GameApplication: switched to scene '" + label + "' ("
-		 + std::to_string(refs.size()) + " asset roots streaming)").c_str());
+		 + std::to_string(refCount) + " asset roots streaming)").c_str());
 }
 
 void GameApplication::executeSceneRequests()
 {
+	using Kind = HE::api::scene::RequestKind;
 	const auto requests = HE::api::scene::takeRequests();
 	for (const auto& r : requests)
 	{
-		if (r.kind == 0)      // full switch — or, hidden, a background PRELOAD
+		switch (r.kindOf())
 		{
-			if (!r.hidden) { performSceneSwitch(r.path); continue; }
+		case Kind::Switch:      // full switch — or, hidden, a background PRELOAD
+		{
+			if (!r.hidden) { performSceneSwitch(r.path); break; }
 			auto pending = std::make_unique<HorizonWorld>();
 			if (!loadSceneInto(*pending, r.path, /*additive=*/false, nullptr))
 			{
 				Logger::Log(Logger::LogLevel::Warning,
 					("GameApplication: scene.load (hidden) failed — '" + r.path + "' not found").c_str());
-				continue;
+				break;
 			}
 			// Warm the pending scene's assets NOW so the later activate() swap
 			// presents without a streaming pop.
-			const auto refs = SceneSystems::collectAssetRefs(*pending);
-			for (HE::UUID ar : refs) contentManager().loadAssetAsync(ar);
+			const size_t refCount = streamSceneAssets(*pending);
 			if (m_pendingWorld)
 				Logger::Log(Logger::LogLevel::Warning,
 					("GameApplication: replacing pending scene '" + m_pendingScenePath + "'").c_str());
@@ -494,29 +488,31 @@ void GameApplication::executeSceneRequests()
 			HE::api::scene::notePendingLevel(true);
 			Logger::Log(Logger::LogLevel::Info,
 				("GameApplication: preloaded scene '" + r.path + "' ("
-				 + std::to_string(refs.size()) + " asset roots streaming) — awaiting activate").c_str());
+				 + std::to_string(refCount) + " asset roots streaming) — awaiting activate").c_str());
+			break;
 		}
-		else if (r.kind == 3) // activate the preloaded level
+		case Kind::Activate:    // activate the preloaded level
 		{
 			if (!m_pendingWorld)
 			{
 				Logger::Log(Logger::LogLevel::Warning,
 					"GameApplication: scene.activate with no pending scene (load hidden first)");
-				continue;
+				break;
 			}
 			swapToWorld(std::move(m_pendingWorld), m_pendingScenePath);
 			m_pendingScenePath.clear();
 			HE::api::scene::notePendingLevel(false);
+			break;
 		}
-		else if (r.kind == 1) // additive zone
+		case Kind::Additive:    // additive zone
 		{
-			if (!m_world) continue;
+			if (!m_world) break;
 			std::vector<entt::entity> created;
 			if (!loadSceneInto(*m_world, r.path, /*additive=*/true, &created))
 			{
 				Logger::Log(Logger::LogLevel::Warning,
 					("GameApplication: scene.loadAdditive failed — '" + r.path + "' not found").c_str());
-				continue;
+				break;
 			}
 			// Register the zone centrally (queries/show/hide/position work off it).
 			// Root = the merged scene's fresh sub-root: the created entity parented
@@ -545,30 +541,32 @@ void GameApplication::executeSceneRequests()
 			// Stream the merged zone's assets + start its ECS scripts. playOnStart
 			// audio is deliberately NOT re-fired (it would restart existing
 			// sources); zone audio starts from its scripts/graphs.
-			const auto refs = SceneSystems::collectAssetRefs(*m_world);
-			for (HE::UUID ar : refs) contentManager().loadAssetAsync(ar);
+			streamSceneAssets(*m_world);
 			const int started = startScriptsFor(created);
 			Logger::Log(Logger::LogLevel::Info,
 				("GameApplication: zone " + std::to_string(r.zone) + " loaded ('" + r.path +
 				 "', " + std::to_string(created.size()) + " entities, " +
 				 std::to_string(started) + " scripts" + (r.hidden ? ", hidden" : "") + ")").c_str());
+			break;
 		}
-		else if (r.kind == 4) // show/hide a zone (queued so it orders after a load)
+		case Kind::ZoneVisible: // show/hide a zone (queued so it orders after a load)
 		{
-			if (!m_world) continue;
+			if (!m_world) break;
 			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
 			HE::api::scene::setZoneVisible(c, r.zone, r.flag);
+			break;
 		}
-		else if (r.kind == 5) // move a zone (queued so it orders after a load)
+		case Kind::ZonePosition: // move a zone (queued so it orders after a load)
 		{
-			if (!m_world) continue;
+			if (!m_world) break;
 			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
 			HE::api::scene::setZonePosition(c, r.zone, r.pos);
+			break;
 		}
-		else if (r.kind == 2) // unload additive zone
+		case Kind::UnloadZone:  // unload additive zone
 		{
 			const HE::api::scene::ZoneInfo* z = HE::api::scene::zoneInfo(r.zone);
-			if (!z || !m_world) continue;
+			if (!z || !m_world) break;
 			auto& reg = m_world->registry();
 			int gone = 0;
 			for (uint32_t id : z->entities)
@@ -584,6 +582,8 @@ void GameApplication::executeSceneRequests()
 			Logger::Log(Logger::LogLevel::Info,
 				("GameApplication: zone " + std::to_string(r.zone) + " unloaded ("
 				 + std::to_string(gone) + " entities)").c_str());
+			break;
+		}
 		}
 	}
 }
@@ -591,25 +591,7 @@ void GameApplication::executeSceneRequests()
 int GameApplication::startScriptsFor(const std::vector<entt::entity>& entities)
 {
 	if (!m_world || !m_scriptContext) return 0;
-	auto& reg = m_world->registry();
-	int started = 0;
-	for (entt::entity entity : entities)
-	{
-		if (!reg.valid(entity)) continue;
-		auto* sc = reg.try_get<ScriptComponent>(entity);
-		if (!sc || !sc->enabled) continue;
-		const ScriptAsset* asset = contentManager().getScript(sc->scriptAssetId);
-		if (!asset || asset->sourceCode.empty()) continue;
-		if (!m_scriptContext->isScriptLoaded(sc->moduleName, asset->language))
-			m_scriptContext->loadScript(sc->moduleName, asset->sourceCode, asset->language);
-		auto instId = m_scriptContext->createInstance(sc->moduleName, entity, asset->language);
-		if (instId == ScriptEngine::kInvalidInstance) continue;
-		m_scriptContext->injectProperties(instId, sc->properties);
-		m_scriptContext->callOnStart(instId);
-		m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
-		++started;
-	}
-	return started;
+	return m_scriptContext->startScriptsFor(entities, contentManager(), m_scriptInstances);
 }
 
 void GameApplication::startScripts()
@@ -620,22 +602,7 @@ void GameApplication::startScripts()
 	// no-op; onStart/onUpdate + horizon.setMaterialParam work.
 	m_scriptContext->setContentManager(&contentManager());
 
-	int started = 0;
-	auto& reg = m_world->registry();
-	for (auto [entity, sc] : reg.view<ScriptComponent>().each())
-	{
-		if (!sc.enabled) continue;
-		const ScriptAsset* asset = contentManager().getScript(sc.scriptAssetId);
-		if (!asset || asset->sourceCode.empty()) continue;
-		if (!m_scriptContext->isScriptLoaded(sc.moduleName, asset->language))
-			m_scriptContext->loadScript(sc.moduleName, asset->sourceCode, asset->language);
-		auto instId = m_scriptContext->createInstance(sc.moduleName, entity, asset->language);
-		if (instId == ScriptEngine::kInvalidInstance) continue;
-		m_scriptContext->injectProperties(instId, sc.properties);
-		m_scriptContext->callOnStart(instId);
-		m_scriptInstances[static_cast<uint32_t>(entity)] = instId;
-		++started;
-	}
+	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 	if (started > 0)
 		Logger::Log(Logger::LogLevel::Info,
 			("GameApplication: started " + std::to_string(started) + " ECS script(s)").c_str());
@@ -721,68 +688,14 @@ void GameApplication::setMouseCaptured(bool captured)
 void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
-	auto& reg = m_world->registry();
 
-	// The scene's main camera (prefer isMain; else the first camera found).
-	entt::entity cam = entt::null;
-	for (auto [e, t, c] : reg.view<TransformComponent, CameraComponent>().each())
-	{
-		if (cam == entt::null) cam = e;
-		if (c.isMain) { cam = e; break; }
-	}
-	if (cam == entt::null) return; // nothing to drive (fallback camera is fixed)
+	// The cursor is warped back to this window's centre every frame (see
+	// FlyCameraController) — but only while WE have focus, so an alt-tabbed game
+	// never yanks the cursor away from another app.
+	SDL_Window* warpWin = window() ? window()->GetNativeWindow() : nullptr;
+	if (warpWin && !(SDL_GetWindowFlags(warpWin) & SDL_WINDOW_INPUT_FOCUS)) warpWin = nullptr;
 
-	auto& t = reg.get<TransformComponent>(cam);
-
-	// Mouse look from the relative motion accumulated since last frame.
-	float dx = 0.0f, dy = 0.0f;
-	SDL_GetRelativeMouseState(&dx, &dy);
-
-	// Park the cursor back at the window centre after each frame's relative motion.
-	// With relative mode engaged this is a pure internal position update (no motion
-	// events); when it is NOT engaged (focus transition, platform quirk) the OS cursor
-	// physically drifts and would stall the look at the screen edge — the warp keeps it
-	// centred either way. SDL pre-sets last_x/last_y to the warp target, so the warp
-	// never pollutes the relative accumulator. Skipped while unfocused (alt-tabbed) so
-	// we never yank the cursor away from another app.
-	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
-	{
-		if (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)
-		{
-			int ww = 0, wh = 0;
-			SDL_GetWindowSize(w, &ww, &wh);
-			SDL_WarpMouseInWindow(w, ww * 0.5f, wh * 0.5f);
-		}
-	}
-
-	constexpr float kSensitivity = 0.12f; // degrees per pixel
-	t.rotation.y -= dx * kSensitivity;    // yaw
-	t.rotation.x -= dy * kSensitivity;    // pitch
-	t.rotation.x = std::clamp(t.rotation.x, -89.0f, 89.0f);
-
-	// Movement along the camera's own axes (rotation matches SceneGraph: the
-	// worldMatrix is built from glm::quat(radians(rotation))).
-	const glm::quat q = glm::quat(glm::radians(t.rotation));
-	const glm::vec3 forward = q * glm::vec3(0.0f, 0.0f, -1.0f);
-	const glm::vec3 right   = q * glm::vec3(1.0f, 0.0f, 0.0f);
-	const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
-
-	Input& in = input();
-	glm::vec3 move(0.0f);
-	if (in.IsKeyDown(SDL_SCANCODE_W)) move += forward;
-	if (in.IsKeyDown(SDL_SCANCODE_S)) move -= forward;
-	if (in.IsKeyDown(SDL_SCANCODE_D)) move += right;
-	if (in.IsKeyDown(SDL_SCANCODE_A)) move -= right;
-	if (in.IsKeyDown(SDL_SCANCODE_E) || in.IsKeyDown(SDL_SCANCODE_SPACE)) move += worldUp;
-	if (in.IsKeyDown(SDL_SCANCODE_Q) || in.IsKeyDown(SDL_SCANCODE_LCTRL)) move -= worldUp;
-
-	if (glm::dot(move, move) > 0.0f)
-	{
-		float speed = 6.0f; // units/sec
-		if (in.IsKeyDown(SDL_SCANCODE_LSHIFT) || in.IsKeyDown(SDL_SCANCODE_RSHIFT)) speed *= 3.0f;
-		t.position += glm::normalize(move) * speed * dt;
-	}
-	t.dirty = true;
+	HE::FlyCameraController::update(m_world->registry(), input(), dt, warpWin);
 }
 
 bool GameApplication::OnEvent(const SDL_Event& event)
@@ -811,7 +724,11 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 
 	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
 	{
-		// V: static VSync toggle for packaged builds (no settings menu yet).
+#ifdef HE_GAME_DEV_HOTKEYS
+		// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
+		// settings menu yet, and a stray V must not silently flip the player's
+		// present mode; the define is set only for non-Release configurations
+		// (HE_Game/CMakeLists.txt), so shipping builds don't compile this in.
 		if (event.key.key == SDLK_V)
 		{
 			m_vsyncOn = !m_vsyncOn;
@@ -820,6 +737,7 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
 			return true;
 		}
+#endif
 		// Esc: release/re-grab the mouse.
 		if (event.key.key == SDLK_ESCAPE)
 		{
@@ -830,34 +748,17 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 	return false;
 }
 
-// Push the current SDL keyboard/mouse state into HE::api::input so the input.*
-// registry nodes and scripts can poll it. Mouse delta + scroll are left at 0 here
-// to avoid consuming SDL's relative-motion accumulator the camera controller uses;
-// position + buttons + keys (by SDL scancode name, e.g. "W"/"Space") are polled.
-static void pushEngineInputSnapshot()
-{
-	int n = 0;
-	const bool* ks = SDL_GetKeyboardState(&n);
-	std::vector<std::string> down;
-	if (ks)
-		for (int sc = 0; sc < n; ++sc)
-			if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
-	float mx = 0.0f, my = 0.0f;
-	const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-	uint32_t buttons = 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
-	if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
-	HE::api::input::setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
-	HE::api::input::setKeysDown(down);
-}
-
 void GameApplication::OnRender(float deltaTime)
 {
+	// The base Application tolerates a null renderer ("running without graphics"),
+	// so every renderer touch below goes through this one handle and its null check
+	// — the checks used to be applied to some calls and forgotten on others.
+	IRenderer* const r = renderer();
+
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
-	pushEngineInputSnapshot();
+	HE::api::input::pushSdlSnapshot();
 
 	// Deferred scene transitions requested by scripts/graphs last frame: executed
 	// at the frame START so nothing downstream touches a half-swapped world.
@@ -867,7 +768,7 @@ void GameApplication::OnRender(float deltaTime)
 	{
 		std::vector<DebugLine> dbg;
 		HE::api::debug::collect(deltaTime, dbg);
-		if (renderer()) renderer()->SetDebugLines(dbg);
+		if (r) r->SetDebugLines(dbg);
 	}
 
 	// Register assets that finished streaming since last frame (main-thread insert —
@@ -881,8 +782,8 @@ void GameApplication::OnRender(float deltaTime)
 	// resident — building the pipeline here (before the material is first drawn)
 	// keeps the first frame that shows it from stalling on a synchronous
 	// cross-compile inside the encoder loop. Non-material ids are skipped.
-	if (!justRegistered.empty() && renderer())
-		renderer()->WarmupMaterials(justRegistered);
+	if (!justRegistered.empty() && r)
+		r->WarmupMaterials(justRegistered);
 
 	// Built-in free-fly camera (mouse look + WASD) so the game is navigable —
 	// runs before the systems tick so LOD/particles follow the new camera pos.
@@ -922,9 +823,11 @@ void GameApplication::OnRender(float deltaTime)
 			break;
 		}
 		const bool gpuParticles = GlobalState::getInstance().getCustomConfigBool("GpuParticles", true) &&
-		                          renderer()->GetCapabilities().supportsGpuParticles;
+		                          r && r->GetCapabilities().supportsGpuParticles;
+		// Unbraced on purpose: the scope reaches to the end of this `if (m_world)`
+		// block, so the GI + environment pushes below are timed with it (as before).
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
-		SceneSystems::tick(*m_world, contentManager(), renderer(), camPos, deltaTime,
+		SceneSystems::tick(*m_world, contentManager(), r, camPos, deltaTime,
 		                   nullptr, gpuParticles);
 
 		// Global Illumination: same GlobalState config.json key the editor's
@@ -932,59 +835,47 @@ void GameApplication::OnRender(float deltaTime)
 		// GILightRadius), read directly here — mirrors the GpuParticles pattern above,
 		// NOT the SSAO/Bloom gap (those settings are never pushed by the packaged
 		// game at all). Capability-gated so non-Metal/non-raytracing builds no-op.
-		const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
-		                       renderer()->GetCapabilities().supportsGlobalIllumination;
-		renderer()->SetGISettings(IRenderer::GISettings{
-			giEnabled,
-			static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
-			static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
-
-		// Push the scene environment to the renderer. The base Application renders the
-		// world but never pushes EnvironmentSettings (that lived only in the editor), so
-		// without this the weather sky / clouds / fog / flash would not show in-game.
-		// The Sky is a scene entity now — no Sky entity → skip the sky pass.
-		const Entity gEnvEntity = m_world->environmentEntity();
-		auto* env = (gEnvEntity == entt::null)
-			? nullptr : m_world->registry().try_get<EnvironmentComponent>(gEnvEntity);
-		if (!env)
-			renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
-		if (env)
+		if (r)
 		{
-			if (env->dayNightCycle && env->autoAdvance && deltaTime > 0.0f)
-			{
-				const float dayFrac = deltaTime / std::max(env->cycleSeconds, 1.0f);
-					if (env->moonPhaseAuto) { env->moonPhase += dayFrac / std::max(env->moonCycleDays, 0.1f); env->moonPhase -= std::floor(env->moonPhase); }
-				env->timeOfDay += dayFrac;
-				env->timeOfDay -= std::floor(env->timeOfDay);
-			}
-			renderer()->SetEnvironmentSettings(IRenderer::EnvironmentSettings{
-				.dayNightCycle = env->dayNightCycle, .timeOfDay = env->timeOfDay,
-				.sunColor = env->sunColor, .sunIntensity = env->sunIntensity,
-				.moonColor = env->moonColor, .moonIntensity = env->moonIntensity, .moonPhase = env->moonPhase,
-				.cloudCoverage = env->cloudCoverage,
-				.fogDensity = env->fogDensity, .fogHeightFalloff = env->fogHeightFalloff,
-				.auroraIntensity = env->auroraIntensity,
-				.milkyWayIntensity = env->milkyWayIntensity, .nebulaIntensity = env->nebulaIntensity,
-				.nebulaColor = env->nebulaColor, .nebulaColor2 = env->nebulaColor2,
-				.nebulaColor3 = env->nebulaColor3, .nebulaSeed = env->nebulaSeed,
-				.nebulaCoverage = env->nebulaCoverage,
-				.nebulaQuality = env->nebulaQuality,
-				.auroraColor = env->auroraColor,
-				.auroraColorTop = env->auroraColorTop,
-				.auroraHeight = env->auroraHeight, .auroraFragmentation = env->auroraFragmentation,
-				.windDirection = env->windDirection, .windSpeed = env->windSpeed, .flash = env->flash,
-				.wetness = env->wetness, .snowAmount = env->snowAmount, .rainAmount = env->rainAmount,
-				.cloudMode = env->cloudMode, .cloudHeight = env->cloudHeight,
-				.cloudQuality = env->cloudQuality, .lowResClouds = env->lowResClouds,
-				.cloudDensity = env->cloudDensity, .cloudFluffiness = env->cloudFluffiness,
-				.cloudTint = env->cloudTint,
-				.contrailAmount = env->contrailAmount,
-				.cirrusAmount = env->cirrusAmount, .cirrusSeed = env->cirrusSeed,
-				.godRays = env->godRays, .shootingStars = env->shootingStars, .lensFlare = env->lensFlare,
-				.starBrightness = env->starBrightness, .starColor = env->starColor,
-				.starSize = env->starSize, .starSizeVariation = env->starSizeVariation,
-				.starGlow = env->starGlow, .starTwinkle = env->starTwinkle,
-				.starDensity = env->starDensity});
+			const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
+			                       r->GetCapabilities().supportsGlobalIllumination;
+			r->SetGISettings(IRenderer::GISettings{
+				giEnabled,
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))});
+
+			// SSR — same config.json keys the editor writes, capability-gated
+			// (Metal deferred tile mode only in v1).
+			const bool ssrEnabled =
+				GlobalState::getInstance().getCustomConfigBool("SSREnabled", false) &&
+				r->GetCapabilities().supportsScreenSpaceReflections;
+			IRenderer::SSRSettings ssr;
+			ssr.enabled      = ssrEnabled;
+			ssr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRIntensity", 1.0f));
+			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
+			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
+			r->SetSSRSettings(ssr);
+
+			// Render path — same config.json key the editor's Preferences combo
+			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
+			const bool deferredPath =
+				GlobalState::getInstance().getCustomConfigInt("RenderPath", 0) == 1 &&
+				r->GetCapabilities().supportsDeferredRendering;
+			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+
+			// Push the scene environment to the renderer. The base Application renders the
+			// world but never pushes EnvironmentSettings (that lived only in the editor), so
+			// without this the weather sky / clouds / fog / flash would not show in-game.
+			// The Sky is a scene entity now — no Sky entity → skip the sky pass.
+			// makeEnvironmentSettings also ADVANCES the day-night cycle by deltaTime, so
+			// it must stay exactly this one call per frame.
+			const Entity gEnvEntity = m_world->environmentEntity();
+			auto* env = (gEnvEntity == entt::null)
+				? nullptr : m_world->registry().try_get<EnvironmentComponent>(gEnvEntity);
+			if (!env)
+				r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
+			else
+				r->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, deltaTime));
 		}
 	}
 }

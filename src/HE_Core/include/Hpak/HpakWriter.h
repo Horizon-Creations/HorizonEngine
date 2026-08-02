@@ -76,7 +76,7 @@ private:
         uint64_t             contentHash;  // hash64 of `data`
         uint8_t              codec;        // Hpak::Codec
         uint8_t              flags;        // Hpak::kFlag*
-        uint8_t              nonce[12];    // reserved (zero for XOR)
+        uint8_t              nonce[12];    // AES-GCM nonce; zero when unencrypted
     };
     std::vector<PendingEntry> m_entries;
     std::vector<std::pair<HE::UUID, uint64_t>> m_srcHashes; // filled by addDirectory

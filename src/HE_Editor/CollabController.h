@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -58,11 +59,26 @@ public:
 	void onWorldReplaced(std::function<void()> fn) { m_onWorldReplaced = std::move(fn); }
 
 	// ── Lifecycle ──
-	// Opens a session on `port` (0 = OS-assigned) and generates a join code.
+	// Opens a session on `port` (0 = OS-assigned), generates a session id and a
+	// join code, and publishes the endpoint to the session directory so peers can
+	// find it without being told an address.
 	bool startHosting(std::uint16_t port, const std::string& displayName);
+
+	// The guest-facing path: a session id and a join code are all a peer needs.
+	// The address is resolved through the directory, which is why this completes
+	// asynchronously — watch status() and directoryBusy().
+	bool joinBySessionId(const std::string& sessionId, const std::string& joinCode,
+	                     const std::string& displayName);
+
+	// Direct connect, bypassing the directory. Kept for LAN use and diagnostics
+	// when the directory is unreachable.
 	bool joinSession(const std::string& host, std::uint16_t port,
 	                 const std::string& joinCode, const std::string& displayName);
 	void leave();
+
+	// Directory endpoint. Defaults to the public one; override with the
+	// HE_COLLAB_DIRECTORY environment variable when testing against another.
+	static std::string directoryEndpoint();
 
 	// Pump transport → session → collaboration. Call once per frame.
 	void update(std::uint64_t nowMs);
@@ -74,9 +90,20 @@ public:
 	                                            m_status == Status::Joined; }
 	bool               isHost() const { return m_isHost; }
 	const std::string& joinCode() const { return m_joinCode; }
+	const std::string& sessionId() const { return m_sessionId; }
 	const std::string& localAddress() const { return m_localAddress; }
 	std::uint16_t      port() const { return m_port; }
 	const std::string& lastError() const { return m_error; }
+
+	// A directory call (register or lookup) is in flight. The UI shows a spinner
+	// rather than an address the host does not have yet.
+	bool               directoryBusy() const;
+	// Human-readable directory outcome, e.g. why publishing failed.
+	const std::string& directoryStatus() const { return m_directoryStatus; }
+	// The directory managed to connect back to this host. False means peers on
+	// other networks will not get through — port forwarding or a relay is needed.
+	bool               reachable() const { return m_reachable; }
+	bool               reachabilityKnown() const { return m_reachabilityKnown; }
 
 	// 0..1 while a snapshot is arriving; 1 when complete.
 	float snapshotProgress() const;
@@ -98,8 +125,29 @@ public:
 private:
 	void teardown();
 	void wireCallbacks();
+	void pumpDirectory(std::uint64_t nowMs);
+	bool beginLink(const std::string& host, std::uint16_t port,
+	               const std::string& joinCode, const std::string& displayName);
 
 	class SceneStateProvider;
+
+	// Directory results are produced off-thread — an HTTPS round trip on the
+	// frame thread would stall the editor for seconds.
+	struct RegisterResult
+	{
+		bool        ok = false;
+		std::string publicIp;
+		bool        reachable = false;
+		std::string token;
+		std::string error;
+	};
+	struct LookupResult
+	{
+		bool          ok = false;
+		std::string   host;
+		std::uint16_t port = 0;
+		std::string   error;
+	};
 
 	std::unique_ptr<SceneStateProvider>        m_provider;
 	std::unique_ptr<HE::Net::SecureTransport>  m_secure;   // owns the TcpTransport
@@ -111,9 +159,23 @@ private:
 	bool          m_isHost = false;
 
 	std::string   m_joinCode;
+	std::string   m_sessionId;
 	std::string   m_localAddress;
 	std::uint16_t m_port = 0;
 	std::string   m_error;
+
+	// Directory state
+	std::future<RegisterResult> m_registerFuture;
+	std::future<LookupResult>   m_lookupFuture;
+	std::string   m_directoryToken;      // needed to heartbeat / unregister
+	std::string   m_directoryStatus;
+	bool          m_reachable          = false;
+	bool          m_reachabilityKnown  = false;
+	std::uint64_t m_lastHeartbeatMs    = 0;
+	// Held while a lookup is in flight, so the connect can be made once the
+	// address arrives.
+	std::string   m_pendingJoinCode;
+	std::string   m_pendingDisplayName;
 
 	std::uint32_t m_snapshotGot   = 0;
 	std::uint32_t m_snapshotTotal = 0;

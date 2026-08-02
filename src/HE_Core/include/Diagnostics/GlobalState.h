@@ -32,12 +32,11 @@ public:
 	std::string getDumpsDir() const;
 
 	// config
-	const HE::GraphicsAPI&            getSelectedRHI()       const { return engineStatus.selectedRHI; }
-	const HE::OS&                     getCurrentOS()          const { return engineStatus.currentOS; }
-	const std::string&                getLastProjectPath()    const { return engineStatus.lastProjectPath; }
-	const std::vector<std::string>&   getKnownProjects()      const { return engineStatus.knownProjects; }
-	void setSelectedRHI(HE::GraphicsAPI rhi)                        { engineStatus.selectedRHI = rhi; }
-	void setLastProjectPath(const std::string& path)                { engineStatus.lastProjectPath = path; }
+	const HE::RendererBackend&        getSelectedRHI()        const { return m_engineStatus.selectedRHI; }
+	const std::string&                getLastProjectPath()    const { return m_engineStatus.lastProjectPath; }
+	const std::vector<std::string>&   getKnownProjects()      const { return m_engineStatus.knownProjects; }
+	void setSelectedRHI(HE::RendererBackend rhi)                    { m_engineStatus.selectedRHI = rhi; }
+	void setLastProjectPath(const std::string& path)                { m_engineStatus.lastProjectPath = path; }
 	// Adds path to front of known-projects list (deduplicates, max 10)
 	void addKnownProject(const std::string& path);
 	// Removes a path from the known-projects list
@@ -64,13 +63,13 @@ public:
 
 	// Thread-safe read accessor: hält den shared_lock für die Lebensdauer des zurückgegebenen lock-Objekts.
 	// Verwendung: auto [folder, lock] = globalState->lockContentFolder();
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
 	{
-		return { contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
+		return { m_contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
 	}
 
 	// Engine-wide default-content tree (EditorDeps/EngineContent, next to the
-	// editor executable — NOT project-specific). Mirrors contentFolder/
+	// editor executable — NOT project-specific). Mirrors m_contentFolder/
 	// refreshContentFolder() exactly; the only difference is the root path is
 	// passed in directly instead of derived from lastProjectPath, since the
 	// engine content root never changes for the life of the process.
@@ -84,13 +83,13 @@ public:
 
 	std::atomic<uint64_t> engineFolderVersion{0};
 
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockEngineFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockEngineFolder() const
 	{
-		return { engineFolder, std::shared_lock<std::shared_mutex>(m_engineFolderMutex) };
+		return { m_engineFolder, std::shared_lock<std::shared_mutex>(m_engineFolderMutex) };
 	}
 
 	// Project-local native C++ source tree (<projectRoot>/Source), a sibling of
-	// Content that only C++ projects have. Mirrors contentFolder/
+	// Content that only C++ projects have. Mirrors m_contentFolder/
 	// refreshContentFolder(); the root is derived from lastProjectPath. An absent
 	// Source folder yields an empty tree (root fullPath still set) rather than an
 	// error, so the browser can simply choose not to show the root.
@@ -98,29 +97,28 @@ public:
 
 	std::atomic<uint64_t> sourceFolderVersion{0};
 
-	std::pair<const Folder&, std::shared_lock<std::shared_mutex>> lockSourceFolder() const
+	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockSourceFolder() const
 	{
-		return { sourceFolder, std::shared_lock<std::shared_mutex>(m_sourceFolderMutex) };
+		return { m_sourceFolder, std::shared_lock<std::shared_mutex>(m_sourceFolderMutex) };
 	}
 private:
 	// Private constructor to prevent instantiation
 	GlobalState() {}
 
 	//Structs
-	EngineStatus engineStatus;
-	Folder contentFolder;
+	EngineStatus m_engineStatus;
+	HE::Folder m_contentFolder;
 	mutable std::shared_mutex m_contentFolderMutex;
 
-	Folder engineFolder;
+	HE::Folder m_engineFolder;
 	mutable std::shared_mutex m_engineFolderMutex;
 
-	Folder sourceFolder;
+	HE::Folder m_sourceFolder;
 	mutable std::shared_mutex m_sourceFolderMutex;
 
 	//Custom config entries
-	json customConfig;
+	json m_customConfig;
 
 	//logging
-	std::ofstream logFileStream;
-	std::string logfile;
+	std::ofstream m_logFileStream;
 };

@@ -140,3 +140,87 @@ TEST_CASE("ContentManager getAnimatorStateMachineMutable allows in-place edits")
     REQUIRE(animatorStateMachineFromJson(got->graphJson, parsed));
     CHECK(parsed.startState == "Edited");
 }
+
+// ═══ On-disk format: what today's parser must keep accepting ═════════════════
+
+TEST_CASE("animatorStateMachineFromJson loads a hand-written OLD-format document")
+{
+    // Byte-for-byte the shape the shipped editor writes: compact dump, states
+    // with id/name/clipId{hi,lo}/looping/x/y, transitions referencing states BY
+    // NAME, defaultParams as a plain object. Kept as a literal so a refactor of
+    // the writer can never quietly redefine what "loadable" means.
+    const std::string old =
+        R"({"version":1,"startState":"Idle",)"
+        R"("states":[{"id":1,"name":"Idle","clipId":{"hi":7,"lo":9},"looping":true,"x":10.0,"y":20.0},)"
+        R"({"id":2,"name":"Run","clipId":{"hi":0,"lo":0},"looping":false,"x":200.0,"y":20.0}],)"
+        R"("transitions":[{"fromState":"Idle","toState":"Run","paramName":"Speed","op":0,)"
+        R"("threshold":0.25,"duration":0.15}],)"
+        R"("defaultParams":{"Speed":1.5}})";
+
+    AnimatorStateMachineGraph g;
+    REQUIRE(animatorStateMachineFromJson(old, g));
+    CHECK(g.startState == "Idle");
+    REQUIRE(g.states.size() == 2);
+    CHECK(g.states[0].id == 1);
+    CHECK(g.states[0].name == "Idle");
+    CHECK(g.states[0].clipId.hi == 7);
+    CHECK(g.states[0].clipId.lo == 9);
+    CHECK(g.states[0].looping);
+    CHECK(g.states[0].x == doctest::Approx(10.0f));
+    CHECK(g.states[1].name == "Run");
+    CHECK_FALSE(g.states[1].looping);
+    REQUIRE(g.transitions.size() == 1);
+    CHECK(g.transitions[0].fromState == "Idle");
+    CHECK(g.transitions[0].toState == "Run");
+    CHECK(g.transitions[0].paramName == "Speed");
+    CHECK(g.transitions[0].op == TransitionOp::Greater);
+    CHECK(g.transitions[0].threshold == doctest::Approx(0.25f));
+    CHECK(g.transitions[0].duration == doctest::Approx(0.15f));
+    REQUIRE(g.defaultParams.count("Speed") == 1);
+    CHECK(g.defaultParams.at("Speed") == doctest::Approx(1.5f));
+}
+
+TEST_CASE("animatorStateMachineFromJson reads every in-range TransitionOp")
+{
+    for (int op = 0; op <= 2; ++op)
+    {
+        const std::string json =
+            R"({"startState":"","states":[],"transitions":[{"fromState":"A","toState":"B",)"
+            R"("paramName":"p","op":)" + std::to_string(op) +
+            R"(,"threshold":0.5,"duration":0.2}],"defaultParams":{}})";
+        AnimatorStateMachineGraph g;
+        REQUIRE(animatorStateMachineFromJson(json, g));
+        REQUIRE(g.transitions.size() == 1);
+        CHECK(g.transitions[0].op == static_cast<TransitionOp>(op));
+    }
+}
+
+TEST_CASE("animatorStateMachineFromJson clamps an OUT-OF-RANGE TransitionOp")
+{
+    // A file from a newer editor (or a hand-edit) can name an operator this build
+    // has no enumerator for. Casting it blind produced a TransitionOp outside the
+    // enum, which the evaluating switch then compared against — an undefined
+    // transition decision. Unknown ops read as the field default (Greater).
+    for (int op : { 3, 99, -1 })
+    {
+        const std::string json =
+            R"({"startState":"","states":[],"transitions":[{"fromState":"A","toState":"B",)"
+            R"("paramName":"p","op":)" + std::to_string(op) +
+            R"(,"threshold":0.5,"duration":0.2}],"defaultParams":{}})";
+        AnimatorStateMachineGraph g;
+        REQUIRE(animatorStateMachineFromJson(json, g));
+        REQUIRE(g.transitions.size() == 1);
+        CHECK(g.transitions[0].op == TransitionOp::Greater);
+    }
+}
+
+TEST_CASE("animatorStateMachineFromJson survives a state whose clipId is not an object")
+{
+    const std::string json =
+        R"({"startState":"","states":[{"id":1,"name":"A","clipId":42,"looping":true}],)"
+        R"("transitions":[],"defaultParams":{}})";
+    AnimatorStateMachineGraph g;
+    REQUIRE(animatorStateMachineFromJson(json, g));
+    REQUIRE(g.states.size() == 1);
+    CHECK(g.states[0].clipId == HE::UUID{}); // null UUID, not a throw
+}

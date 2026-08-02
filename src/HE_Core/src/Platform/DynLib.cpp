@@ -15,17 +15,17 @@ DynLib::~DynLib()
 }
 
 DynLib::DynLib(DynLib&& other) noexcept
-    : handle_(other.handle_)
+    : m_handle(other.m_handle)
 {
-    other.handle_ = nullptr;
+    other.m_handle = nullptr;
 }
 
 DynLib& DynLib::operator=(DynLib&& other) noexcept
 {
     if (this != &other) {
         unload();
-        handle_ = other.handle_;
-        other.handle_ = nullptr;
+        m_handle = other.m_handle;
+        other.m_handle = nullptr;
     }
     return *this;
 }
@@ -34,31 +34,31 @@ bool DynLib::load(const std::filesystem::path& path)
 {
     unload();
 #if defined(_WIN32)
-    handle_ = static_cast<void*>(::LoadLibraryW(path.wstring().c_str()));
+    m_handle = static_cast<void*>(::LoadLibraryW(path.wstring().c_str()));
 #else
-    handle_ = ::dlopen(path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
+    m_handle = ::dlopen(path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
 #endif
-    return handle_ != nullptr;
+    return m_handle != nullptr;
 }
 
 void DynLib::unload()
 {
-    if (!handle_) return;
+    if (!m_handle) return;
 #if defined(_WIN32)
-    ::FreeLibrary(static_cast<HMODULE>(handle_));
+    ::FreeLibrary(static_cast<HMODULE>(m_handle));
 #else
-    ::dlclose(handle_);
+    ::dlclose(m_handle);
 #endif
-    handle_ = nullptr;
+    m_handle = nullptr;
 }
 
 void* DynLib::getSymbol(const std::string& name) const
 {
-    if (!handle_) return nullptr;
+    if (!m_handle) return nullptr;
 #if defined(_WIN32)
-    return reinterpret_cast<void*>(::GetProcAddress(static_cast<HMODULE>(handle_), name.c_str()));
+    return reinterpret_cast<void*>(::GetProcAddress(static_cast<HMODULE>(m_handle), name.c_str()));
 #else
-    return ::dlsym(handle_, name.c_str());
+    return ::dlsym(m_handle, name.c_str());
 #endif
 }
 

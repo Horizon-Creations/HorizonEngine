@@ -22,6 +22,15 @@ if(APPLE)
     )
 endif()
 
+# ── Development-only hotkeys ─────────────────────────────────────────────────
+# Debug keys that must NOT be live in a shipped game (today: V = VSync toggle —
+# a player has no settings menu to undo it with, and a stray V would silently
+# change their present mode). Release/MinSizeRel are what the CI packages and
+# what the exporter ships as the game runtime, so they compile these out.
+target_compile_definitions(HorizonGame PRIVATE
+	$<$<CONFIG:Debug,RelWithDebInfo>:HE_GAME_DEV_HOTKEYS>
+)
+
 if(DEFINED HE_PROJECT_SECRET)
 	target_compile_definitions(HorizonGame
 		PRIVATE HE_PROJECT_SECRET="${HE_PROJECT_SECRET}"
@@ -52,6 +61,21 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 	COMMENT "Deploying HorizonGame.exe to ${DEPLOY_GAME}"
 	VERBATIM
 )
+
+# Runtime-loaded shader binaries (Vulkan .spv + D3D12 DXR .cso) live in
+# ${CMAKE_BINARY_DIR}/Shaders and are loaded from <exe dir>/Shaders at runtime
+# — same pattern as the editor deploy (HE_Editor/CMakeLists.txt). Without this
+# a packaged game loses Vulkan entirely and D3D12 GI silently drops to the
+# software kernels.
+if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"${CMAKE_BINARY_DIR}/Shaders"
+			"${DEPLOY_GAME}/Shaders"
+		COMMENT "Deploying runtime shader binaries to the game"
+		VERBATIM
+	)
+endif()
 
 # ── Post-build: bundle the CPython runtime for shipping (Windows) ─────────────
 # HorizonScene links Python3::Python, so HorizonScene.dll has python3XY.dll in its

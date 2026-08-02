@@ -15,7 +15,7 @@ public:
 	HorizonWorld();
 	~HorizonWorld() = default;
 
-	Entity rootEntity() const { return rootEntity_; }
+	Entity rootEntity() const { return m_rootEntity; }
 
 	Entity createEntity(const std::string& name = "Entity");
 	// Destroys the entity and its entire subtree.
@@ -69,18 +69,18 @@ public:
 	// Template helpers — must stay in header
 	void addComponent(Entity entity, auto&& component)
 	{
-		registry_.emplace<std::decay_t<decltype(component)>>(entity, std::forward<decltype(component)>(component));
+		m_registry.emplace<std::decay_t<decltype(component)>>(entity, std::forward<decltype(component)>(component));
 	}
 	bool hasComponent(Entity entity, auto&& componentType)
 	{
-		return registry_.all_of<std::decay_t<decltype(componentType)>>(entity);
+		return m_registry.all_of<std::decay_t<decltype(componentType)>>(entity);
 	}
 	void removeComponent(Entity entity, auto&& componentType)
 	{
-		registry_.remove<std::decay_t<decltype(componentType)>>(entity);
+		m_registry.remove<std::decay_t<decltype(componentType)>>(entity);
 	}
 
-	entt::registry& registry() { return registry_; }
+	entt::registry& registry() { return m_registry; }
 
 	// Live UI widgets (UMG-style) — NOT entities; they exist outside the scene
 	// graph and render directly. By default a world owns its widgets (clear()
@@ -146,8 +146,8 @@ private:
 	// once from the constructor. See the .cpp for the full rationale.
 	void reserveComponentStorage();
 
-	entt::registry registry_;
-	Entity         rootEntity_      = entt::null;
+	entt::registry m_registry;
+	Entity         m_rootEntity     = entt::null;
 	bool           m_hierarchyDirty = true;
 	// Declared before the widget managers so it outlives them (they point at it).
 	HorizonCode::Runtime  m_ownScripts;          // used unless an app runtime is injected

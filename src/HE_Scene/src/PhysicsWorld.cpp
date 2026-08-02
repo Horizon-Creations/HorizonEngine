@@ -33,6 +33,7 @@ JPH_SUPPRESS_WARNINGS
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // ─── Layer definitions ────────────────────────────────────────────────────────
@@ -118,16 +119,36 @@ public:
         PhysicsWorld::CollisionEvent ev;
         ev.entityA = static_cast<uint32_t>(b1.GetUserData());
         ev.entityB = static_cast<uint32_t>(b2.GetUserData());
+
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_entered.push_back(ev);
+        // Jolt reports contacts per *sub shape* pair, so one body pair can produce
+        // several callbacks (compound/mesh shapes). Gameplay only cares about the
+        // body pair, hence the ref count: enter fires on the first sub-shape
+        // contact, exit on the last one.
+        ActiveContact& contact = m_active[bodyPairKey(b1.GetID(), b2.GetID())];
+        if (contact.refCount++ == 0)
+        {
+            // Cache the entity ids *here*: OnContactRemoved is not allowed to look
+            // at the bodies at all, so this is the only place we can resolve them.
+            contact.event = ev;
+            m_entered.push_back(ev);
+        }
     }
 
     void OnContactRemoved(const JPH::SubShapeIDPair& pair) override
     {
-        // Reverse-lookup: iterate body interface to find entity IDs from body IDs
-        (void)pair; // Body IDs aren't directly accessible here without the system ptr
-        // Exit events via OnContactRemoved require body lookups; store for later.
-        // For simplicity, store body ID pair and resolve during poll.
+        // Called from the physics job with all bodies locked — and the bodies may
+        // already have been destroyed. We therefore never touch them here and
+        // resolve the entity ids from the cache filled in OnContactAdded.
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_active.find(bodyPairKey(pair.GetBody1ID(), pair.GetBody2ID()));
+        if (it == m_active.end())
+            return;   // contact belongs to a torn-down scene (see reset()) — drop it
+        if (--it->second.refCount == 0)
+        {
+            m_exited.push_back(it->second.event);
+            m_active.erase(it);
+        }
     }
 
     std::vector<PhysicsWorld::CollisionEvent> pollEntered()
@@ -146,8 +167,39 @@ public:
         return result;
     }
 
+    // Forget every buffered event and every tracked contact. PhysicsWorld::clear()
+    // calls this after destroying the bodies: Jolt still emits OnContactRemoved for
+    // their cached contacts during the next Update(), and without this the listener
+    // would report exit events for entities of the previous scene.
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_active.clear();
+        m_entered.clear();
+        m_exited.clear();
+    }
+
 private:
+    struct ActiveContact
+    {
+        uint32_t                     refCount = 0;
+        PhysicsWorld::CollisionEvent event;
+    };
+
+    // Jolt already hands out body pairs sorted by BodyID, but sort defensively so
+    // the add- and remove-side keys can never disagree. Index+sequence number is
+    // used (not the raw index) so a recycled body slot yields a different key.
+    static uint64_t bodyPairKey(const JPH::BodyID& a, const JPH::BodyID& b)
+    {
+        uint32_t lo = a.GetIndexAndSequenceNumber();
+        uint32_t hi = b.GetIndexAndSequenceNumber();
+        if (lo > hi)
+            std::swap(lo, hi);
+        return (static_cast<uint64_t>(lo) << 32) | static_cast<uint64_t>(hi);
+    }
+
     std::mutex m_mutex;
+    std::unordered_map<uint64_t, ActiveContact> m_active;
     std::vector<PhysicsWorld::CollisionEvent> m_entered;
     std::vector<PhysicsWorld::CollisionEvent> m_exited;
 };
@@ -527,5 +579,9 @@ void PhysicsWorld::clear()
     }
     m_impl->entityToBody.clear();
     m_impl->entityToCharacter.clear();
+    // After the bodies are gone: drop the contact bookkeeping, otherwise the
+    // OnContactRemoved callbacks Jolt fires for them would emit exit events
+    // referring to entities that no longer exist.
+    m_impl->contactListener.reset();
     m_impl->initialized = false;
 }

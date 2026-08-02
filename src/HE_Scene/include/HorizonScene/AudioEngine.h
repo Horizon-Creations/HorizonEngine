@@ -59,7 +59,21 @@ public:
     void stopAll();
     bool isPlaying(uint64_t handle) const;
 
+    // Sample rate the playing sound is actually being fed to the mixer with, in Hz.
+    // Should equal the rate passed to play()/playSpatial(); 0 = unknown handle.
+    int  getSoundSampleRate(uint64_t handle) const;
+
 private:
+    // Positional setup for a spatial sound — see playSpatial().
+    struct SpatialParams { float x, y, z, minDist, maxDist; };
+
+    // Shared body of play() and playSpatial(): they only differ in the
+    // spatialization flag and in the positional setup applied before the sound
+    // starts. spatial == nullptr ⇒ non-spatial (play()).
+    uint64_t startSound(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
+                        float volume, float pitch, bool loop, const std::string& busName,
+                        const SpatialParams* spatial);
+
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     uint64_t              m_nextHandle = 1;

@@ -275,7 +275,7 @@ TEST_CASE("ScriptContext: Python script routes and reaches the world")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("pym", kMover, ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("pym", kMover, HE::ScriptLanguage::Python));
     CHECK(ctx.isScriptLoaded("pym"));
 
     auto e  = makeEntity(world, "Hero");
@@ -308,7 +308,7 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
     // frontend, matching the Lua horizon.math.* exposure.
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("pymath", kPyMath, ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("pymath", kPyMath, HE::ScriptLanguage::Python));
 
     auto e  = makeEntity(world, "MathHero");
     auto id = ctx.createInstance("pymath", e);
@@ -338,7 +338,7 @@ TEST_CASE("ScriptContext: registry-driven horizon.random.* (Python)")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("pyrand", kPyRandom, ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("pyrand", kPyRandom, HE::ScriptLanguage::Python));
 
     auto e  = makeEntity(world, "RandHero");
     auto id = ctx.createInstance("pyrand", e);
@@ -372,7 +372,7 @@ TEST_CASE("ScriptContext: registry-driven horizon.time.*/input.* (Python)")
 
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("pyti", kPyTimeInput, ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("pyti", kPyTimeInput, HE::ScriptLanguage::Python));
 
     auto e  = makeEntity(world, "TimeInputHero");
     auto id = ctx.createInstance("pyti", e);
@@ -390,8 +390,8 @@ TEST_CASE("ScriptContext: Lua and Python coexist without id collision")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("pym", kMover,   ScriptLanguage::Python));
-    REQUIRE(ctx.loadScript("lm",  kLuaSetX, ScriptLanguage::Lua));
+    REQUIRE(ctx.loadScript("pym", kMover,   HE::ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("lm",  kLuaSetX, HE::ScriptLanguage::Lua));
     CHECK(ctx.loadedScriptCount() == 2);
 
     auto ePy  = makeEntity(world, "Py");
@@ -415,7 +415,7 @@ TEST_CASE("ScriptContext: Python runtime error surfaces via lastError")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("boom", kRaises, ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("boom", kRaises, HE::ScriptLanguage::Python));
     auto e  = makeEntity(world, "E");
     auto id = ctx.createInstance("boom", e);
     CHECK_FALSE(ctx.callOnStart(id));
@@ -486,15 +486,15 @@ TEST_CASE("ScriptContext: same moduleName in two languages routes by language")
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("shared", kLuaSetX, ScriptLanguage::Lua));
-    REQUIRE(ctx.loadScript("shared", kMover,   ScriptLanguage::Python));
-    CHECK(ctx.isScriptLoaded("shared", ScriptLanguage::Lua));
-    CHECK(ctx.isScriptLoaded("shared", ScriptLanguage::Python));
+    REQUIRE(ctx.loadScript("shared", kLuaSetX, HE::ScriptLanguage::Lua));
+    REQUIRE(ctx.loadScript("shared", kMover,   HE::ScriptLanguage::Python));
+    CHECK(ctx.isScriptLoaded("shared", HE::ScriptLanguage::Lua));
+    CHECK(ctx.isScriptLoaded("shared", HE::ScriptLanguage::Python));
 
     auto eL = makeEntity(world, "L");
     auto eP = makeEntity(world, "P");
-    auto idL = ctx.createInstance("shared", eL, ScriptLanguage::Lua);
-    auto idP = ctx.createInstance("shared", eP, ScriptLanguage::Python);
+    auto idL = ctx.createInstance("shared", eL, HE::ScriptLanguage::Lua);
+    auto idP = ctx.createInstance("shared", eP, HE::ScriptLanguage::Python);
     REQUIRE(idL != ScriptEngine::kInvalidInstance);
     REQUIRE(idP != ScriptEngine::kInvalidInstance);
     CHECK(idL != idP);
@@ -512,13 +512,13 @@ TEST_CASE("ScriptContext: hotReload routes by language when a name exists in bot
 {
     HorizonWorld world;
     ScriptContext ctx(world);
-    REQUIRE(ctx.loadScript("dup", kLuaSetX, ScriptLanguage::Lua));    // Lua onStart → x=3
-    REQUIRE(ctx.loadScript("dup", kMover,   ScriptLanguage::Python)); // Py on_start → (7,8,9)
+    REQUIRE(ctx.loadScript("dup", kLuaSetX, HE::ScriptLanguage::Lua));    // Lua onStart → x=3
+    REQUIRE(ctx.loadScript("dup", kMover,   HE::ScriptLanguage::Python)); // Py on_start → (7,8,9)
 
     auto eL = makeEntity(world, "L");
     auto eP = makeEntity(world, "P");
-    auto idL = ctx.createInstance("dup", eL, ScriptLanguage::Lua);
-    auto idP = ctx.createInstance("dup", eP, ScriptLanguage::Python);
+    auto idL = ctx.createInstance("dup", eL, HE::ScriptLanguage::Lua);
+    auto idP = ctx.createInstance("dup", eP, HE::ScriptLanguage::Python);
     REQUIRE(idL != ScriptEngine::kInvalidInstance);
     REQUIRE(idP != ScriptEngine::kInvalidInstance);
 
@@ -526,7 +526,7 @@ TEST_CASE("ScriptContext: hotReload routes by language when a name exists in bot
     // Lua source to the Python backend and fail; language routing sends it to Lua.
     static const char* kLuaV2 =
         "local M={}\nfunction M.onStart(self) horizon.setPosition(self.entityId, 9,0,0) end\nreturn M\n";
-    CHECK(ctx.hotReloadScript("dup", kLuaV2, ScriptLanguage::Lua));
+    CHECK(ctx.hotReloadScript("dup", kLuaV2, HE::ScriptLanguage::Lua));
 
     static const char* kPyV2 = R"py(
 import horizon
@@ -534,7 +534,7 @@ class Mover(horizon.Behavior):
     def on_start(self):
         horizon.setPosition(self.entity_id, 42.0, 0.0, 0.0)
 )py";
-    CHECK(ctx.hotReloadScript("dup", kPyV2, ScriptLanguage::Python));
+    CHECK(ctx.hotReloadScript("dup", kPyV2, HE::ScriptLanguage::Python));
 
     REQUIRE(ctx.callOnStart(idL));  // Lua v2  → x = 9
     REQUIRE(ctx.callOnStart(idP));  // Py  v2  → x = 42

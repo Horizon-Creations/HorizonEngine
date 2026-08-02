@@ -1,9 +1,15 @@
 #include "CollabController.h"
 
+#include <Net/HttpsClient.h>
 #include <Net/NetSession.h>
 #include <Net/SecureTransport.h>
+#include <Net/SessionDirectory.h>
 #include <Net/Socket.h>
 #include <Net/TcpTransport.h>
+
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -110,6 +116,100 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	m_status = Status::Hosting;
 	Logger::Log(Logger::LogLevel::Info,
 	            ("Collab: hosting on " + m_localAddress + ":" + std::to_string(m_port)).c_str());
+
+	// Publish the endpoint so peers only ever need the session id. This is an
+	// HTTPS round trip, so it runs off-thread — doing it here would stall the
+	// editor for as long as the request takes.
+	m_sessionId       = SessionDirectory::newSessionId();
+	m_directoryStatus = "Publishing session...";
+
+	const std::string endpoint = directoryEndpoint();
+	const std::string sid      = m_sessionId;
+	const std::uint16_t port16 = m_port;
+	m_registerFuture = std::async(std::launch::async, [endpoint, sid, port16, displayName] {
+		RegisterResult r;
+		if (!HE::Net::httpsAvailable())
+		{
+			r.error = "No HTTPS support in this build — share the address manually.";
+			return r;
+		}
+		SessionDirectory dir(endpoint);
+		SessionRegistration reg;
+		const DirectoryStatus st = dir.registerSession(sid, port16, displayName,
+		                                               "HorizonEngine", 1, reg);
+		if (st != DirectoryStatus::Ok)
+		{
+			r.error = "Session directory unreachable — share the address manually.";
+			return r;
+		}
+		r.ok        = true;
+		r.publicIp  = reg.publicIp;
+		r.reachable = reg.reachable;
+		r.token     = reg.token;
+		return r;
+	});
+
+	return true;
+}
+
+std::string CollabController::directoryEndpoint()
+{
+	if (const char* env = std::getenv("HE_COLLAB_DIRECTORY"); env && *env) return env;
+	return "https://horizoncreations.dev/HorizonEngine/session-api.php";
+}
+
+bool CollabController::joinBySessionId(const std::string& sessionId,
+                                       const std::string& joinCode,
+                                       const std::string& displayName)
+{
+	teardown();
+	m_error.clear();
+
+	if (sessionId.empty() || joinCode.empty())
+	{
+		m_error  = "Session ID and join code are both required.";
+		m_status = Status::Failed;
+		return false;
+	}
+	if (!HE::Net::httpsAvailable())
+	{
+		m_error  = "This build has no HTTPS support, so a session ID cannot be resolved.";
+		m_status = Status::Failed;
+		return false;
+	}
+
+	// Remember what the connect will need once the address arrives.
+	m_sessionId          = sessionId;
+	m_pendingJoinCode    = joinCode;
+	m_pendingDisplayName = displayName;
+	m_isHost             = false;
+	m_status             = Status::Connecting;
+	m_directoryStatus    = "Looking up session...";
+
+	const std::string endpoint = directoryEndpoint();
+	const std::string sid      = sessionId;
+	m_lookupFuture = std::async(std::launch::async, [endpoint, sid] {
+		LookupResult r;
+		SessionDirectory dir(endpoint);
+		SessionLookup look;
+		const DirectoryStatus st = dir.lookup(sid, look);
+		switch (st)
+		{
+		case DirectoryStatus::Ok:
+			r.ok   = true;
+			r.host = look.host;
+			r.port = look.port;
+			break;
+		case DirectoryStatus::NotFound:
+			r.error = "No session with that ID — check it, or the host may have closed it.";
+			break;
+		default:
+			r.error = "Could not reach the session directory.";
+			break;
+		}
+		return r;
+	});
+
 	return true;
 }
 
@@ -119,6 +219,15 @@ bool CollabController::joinSession(const std::string& host, std::uint16_t port,
 {
 	teardown();
 	m_error.clear();
+	return beginLink(host, port, joinCode, displayName);
+}
+
+// Shared by the direct path and the one that resolved an address from the
+// directory, so both establish the link identically.
+bool CollabController::beginLink(const std::string& host, std::uint16_t port,
+                                 const std::string& joinCode,
+                                 const std::string& displayName)
+{
 
 	if (joinCode.empty())
 	{
@@ -201,6 +310,18 @@ void CollabController::wireCallbacks()
 
 void CollabController::leave()
 {
+	// Remove the directory entry so peers stop being handed a dead endpoint.
+	// Detached because leaving must feel instant; if it fails the entry simply
+	// expires on its TTL instead.
+	if (m_isHost && !m_directoryToken.empty() && !m_sessionId.empty())
+	{
+		std::thread([endpoint = directoryEndpoint(), sid = m_sessionId,
+		             token = m_directoryToken] {
+			SessionDirectory dir(endpoint);
+			dir.unregisterSession(sid, token);
+		}).detach();
+	}
+
 	teardown();
 	m_status = Status::Idle;
 	m_error.clear();
@@ -216,16 +337,33 @@ void CollabController::teardown()
 
 	m_isHost        = false;
 	m_joinCode.clear();
+	m_sessionId.clear();
 	m_localAddress.clear();
 	m_port          = 0;
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
+
+	// Drop any directory work still in flight. Destroying a std::async future
+	// blocks until its thread finishes, which is why the calls carry timeouts.
+	if (m_registerFuture.valid()) m_registerFuture = {};
+	if (m_lookupFuture.valid())   m_lookupFuture   = {};
+	m_directoryToken.clear();
+	m_directoryStatus.clear();
+	m_reachable         = false;
+	m_reachabilityKnown = false;
+	m_pendingJoinCode.clear();
+	m_pendingDisplayName.clear();
 }
 
 // ─── Pump ────────────────────────────────────────────────────────────────────
 
 void CollabController::update(std::uint64_t nowMs)
 {
+	// Before the early-out: while a session id is being looked up there is no
+	// transport yet, and that is exactly when the lookup result has to be
+	// collected.
+	pumpDirectory(nowMs);
+
 	if (!m_secure || !m_net || !m_collab) return;
 
 	m_secure->update();   // drives the transport + handshake
@@ -238,6 +376,82 @@ void CollabController::update(std::uint64_t nowMs)
 	{
 		m_error  = "The connection to the host was lost.";
 		m_status = Status::Failed;
+	}
+}
+
+// ─── Session directory ───────────────────────────────────────────────────────
+
+bool CollabController::directoryBusy() const
+{
+	return m_registerFuture.valid() || m_lookupFuture.valid();
+}
+
+void CollabController::pumpDirectory(std::uint64_t nowMs)
+{
+	using namespace std::chrono_literals;
+
+	// ── Host: collect the registration result ──
+	if (m_registerFuture.valid() &&
+	    m_registerFuture.wait_for(0s) == std::future_status::ready)
+	{
+		const RegisterResult r = m_registerFuture.get();
+		if (r.ok)
+		{
+			m_directoryToken     = r.token;
+			m_reachable          = r.reachable;
+			m_reachabilityKnown  = true;
+			m_lastHeartbeatMs    = nowMs;
+			if (!r.publicIp.empty()) m_localAddress = r.publicIp;
+			m_directoryStatus = r.reachable
+				? "Session published — peers can join with the ID."
+				// Not an error: the entry exists, but nobody outside this network
+				// will get through it. Saying so now beats an unexplained timeout
+				// on the guest's side later.
+				: "Published, but this machine is not reachable from outside. "
+				  "Peers on other networks need the port forwarded.";
+		}
+		else
+		{
+			m_directoryStatus = r.error;
+			// Hosting itself is unaffected — the session still works for anyone
+			// given the address directly.
+		}
+	}
+
+	// ── Host: keep the entry alive ──
+	// The directory expires entries after ~150 s, so refresh well inside that.
+	if (m_isHost && !m_directoryToken.empty() && !m_registerFuture.valid() &&
+	    nowMs - m_lastHeartbeatMs > 60'000)
+	{
+		m_lastHeartbeatMs = nowMs;
+		const std::string endpoint = directoryEndpoint();
+		const std::string sid      = m_sessionId;
+		const std::string token    = m_directoryToken;
+		// Fire and forget: a missed heartbeat only shortens the entry's life.
+		std::thread([endpoint, sid, token] {
+			SessionDirectory dir(endpoint);
+			dir.heartbeat(sid, token);
+		}).detach();
+	}
+
+	// ── Client: the lookup finished; now connect ──
+	if (m_lookupFuture.valid() &&
+	    m_lookupFuture.wait_for(0s) == std::future_status::ready)
+	{
+		const LookupResult r = m_lookupFuture.get();
+		if (!r.ok)
+		{
+			m_error           = r.error;
+			m_directoryStatus.clear();
+			m_status          = Status::Failed;
+			return;
+		}
+		m_directoryStatus = "Connecting to " + r.host + "...";
+		if (!beginLink(r.host, r.port, m_pendingJoinCode, m_pendingDisplayName))
+		{
+			// beginLink already set the error and status.
+			return;
+		}
 	}
 }
 

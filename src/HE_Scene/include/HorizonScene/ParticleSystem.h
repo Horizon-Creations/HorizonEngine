@@ -17,8 +17,10 @@ namespace ParticleSystem {
     // ParticleSystemComponent's comment on why). `physics` enables per-particle
     // collision (config.collisionEnabled) — nullptr (no physics running, e.g. in a
     // preview) behaves exactly like collisionEnabled=false.
-    // cameraPos positions camera-following volume emitters (e.g. precipitation).
-    void update(HorizonWorld& world, ContentManager& cm, float dt, const glm::vec3& cameraPos = glm::vec3(0.0f),
+    // Emitters are entity-bound only — the camera-following precipitation volume
+    // lives in WeatherSystem, which simulates its own pool and never comes through
+    // here, so this needs no camera position.
+    void update(HorizonWorld& world, ContentManager& cm, float dt,
                const PhysicsWorld* physics = nullptr);
 
     // Force a re-resolve on the next update() — call after editing the graph of the

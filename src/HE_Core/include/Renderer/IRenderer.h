@@ -1,7 +1,10 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Types/Enums.h" // HE::RenderPath
 #include "Types/UUID.h"
 #include "DebugDraw/DebugDraw.h"
+#include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
+#include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
@@ -41,6 +44,16 @@ struct ParticlePreviewInstance
     float     alpha = 1.0f;
 };
 
+// Which asset an IRenderer::RenderAssetThumbnail call is being asked to draw.
+// Deliberately a small closed set rather than "any AssetType": a thumbnail needs
+// a geometric/shaded representation, which only these three have.
+enum class ThumbnailKind
+{
+    Material     = 0, // the material on a unit sphere
+    StaticMesh   = 1, // the mesh itself, camera auto-framed on its bounds
+    SkeletalMesh = 2, // the mesh in bind pose (no clip evaluated)
+};
+
 // ─── IRenderer ────────────────────────────────────────────────────────────────
 // Pure interface — lives in HorizonCore so Application can hold a renderer
 // without creating a circular dependency with HorizonRendering.
@@ -54,9 +67,10 @@ public:
         bool supportsShadows        = false;
         bool supportsPostProcessing = false;
         bool supportsHDR            = false;
-        // GPU-simulated weather particles (transform feedback). True only on
-        // backends + drivers that can run the GPU precipitation path; the editor
-        // greys out the toggle when false. GL reports true (TF is core in 4.1).
+        // GPU-simulated weather particles. True only on backends that implement
+        // the GPU precipitation path; the editor greys out the toggle when false.
+        // OpenGL (transform feedback, core in 4.1) and Metal (compute kernel)
+        // report true; D3D11/D3D12/Vulkan report false and stay on the CPU pool.
         bool supportsGpuParticles   = false;
         // Ray-traced DDGI (dynamic diffuse global illumination). Metal-only, and
         // only when the device + OS actually support GPU ray tracing (checked once
@@ -64,6 +78,18 @@ public:
         // every other backend; the editor greys out the GI toggle when false and
         // the backend keeps rendering CSM shadows + AO/ambient as today.
         bool supportsGlobalIllumination = false;
+        // Deferred render path (G-buffer + fullscreen lighting resolve, see
+        // docs/deferred-renderer-plan.md). Metal + OpenGL when built with the
+        // shader cross-compiler (the resolve shader is generated from the shared
+        // lighting preamble at runtime); the editor greys out the Render Path
+        // combo when false and the backend stays forward regardless of
+        // SetRenderPath.
+        bool supportsDeferredRendering = false;
+        // Screen-space reflections (docs/ssr-plan.md). v1: Metal only, and only
+        // in the DEFERRED render path's tile mode (the reflection pass reads the
+        // stored G-buffer + the resolved HDR colour — lag-free, no history).
+        // The editor greys out the SSR toggle when false.
+        bool supportsScreenSpaceReflections = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -192,103 +218,40 @@ public:
     };
     virtual void SetGISettings(const GISettings& /*settings*/) {}
 
+    // ── Screen-space reflections (docs/ssr-plan.md) ────────────────────────
+    // Pushed by the editor's preferences / the packaged game's GlobalState read.
+    // v1 effective only on Metal in the deferred path (Capabilities::
+    // supportsScreenSpaceReflections gates the UI); other backends ignore it and
+    // metallic surfaces keep reflecting the sky cubemap only. Disabled = the
+    // image is byte-identical to SSR never having existed.
+    struct SSRSettings
+    {
+        bool  enabled      = false;
+        float intensity    = 1.0f;   // 0…1 mix against the sky cubemap
+        float maxRoughness = 0.6f;   // above this no SSR (smooth fade toward it)
+        float maxDistance  = 30.0f;  // world-space ray length
+        float thickness    = 0.5f;   // depth-buffer thickness assumption
+        int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
+    };
+    virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
+
+    // ── Render path (Forward | Deferred) ────────────────────────────────────
+    // Pushed by the editor's preferences / the packaged game's GlobalState read,
+    // like SetGISettings. Backends without deferred support (Capabilities::
+    // supportsDeferredRendering == false) ignore it and stay forward. Takes
+    // effect at the start of the next frame — never mid-frame.
+    virtual void SetRenderPath(HE::RenderPath path) { m_renderPath = path; }
+    HE::RenderPath GetRenderPath() const { return m_renderPath; }
+
     // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
     // cascade split placement can be verified visually. No-op on other backends.
     virtual void SetShadowDebug(bool /*on*/) {}
 
     // ── Environment / day-night cycle ───────────────────────────────────────
-    // Pushed by the editor. When dayNightCycle is on, the renderer's extractor
-    // drives the sun from timeOfDay (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset,
-    // 0/1 midnight) — moving the sky, the image-based ambient and the shadows
-    // together. Off = the scene's own directional light is used.
-    struct EnvironmentSettings
-    {
-        // Master sky switch. False when the scene has no Sky entity (removed via the
-        // Environment window): the backend skips the procedural sky pass entirely and
-        // the background is left at the frame's clear colour. Defaults true so any
-        // code path that forgets to set it keeps rendering the sky as before.
-        bool  skyEnabled    = true;
-        bool  dayNightCycle = false;
-        float timeOfDay     = 0.5f; // noon
-        // Sun & moon directional lights driven by the day-night cycle. Colour and
-        // brightness are user-adjustable; each luminary is faded out as it sets.
-        glm::vec3 sunColor      = glm::vec3(1.0f, 0.97f, 0.90f); // warm daylight
-        float     sunIntensity  = 2.2f;
-        glm::vec3 moonColor     = glm::vec3(0.55f, 0.65f, 0.95f); // cool moonlight
-        float     moonIntensity = 0.66f;
-        float     moonPhase     = 0.5f;  // 0/1 new … 0.5 full
-        // Procedural cloud amount (0 = clear sky … 1 = full overcast). At full
-        // overcast the sun/moon directional light is switched off (optimisation)
-        // and replaced by a soft scattered ambient fill.
-        float     cloudCoverage = 0.5f;
-        // Atmospheric fog / aerial perspective. Distant scene geometry is blended
-        // toward the procedural sky colour in its view direction, so it melts into
-        // the horizon (and warms toward the sun at sunset). 0 density = no fog.
-        // heightFalloff > 0 makes the fog pool near the ground and thin with
-        // altitude (analytic exponential height fog); 0 = uniform distance fog.
-        float     fogDensity      = 0.0f;
-        float     fogHeightFalloff = 0.1f;
-        // Night-sky aurora borealis intensity (0 = off). Drifting light ribbons
-        // that sweep across the sky, drawn only at night.
-        float     auroraIntensity = 0.0f;
-        // Milky Way (dense star band) brightness, space-nebula intensity, and the
-        // base colours for the nebula and the aurora ribbons. Stars + nebula
-        // rotate with time-of-day to mimic Earth's rotation.
-        float     milkyWayIntensity = 0.6f;
-        float     nebulaIntensity   = 0.3f;
-        glm::vec3 nebulaColor       = glm::vec3(0.36f, 0.60f, 1.00f);
-        glm::vec3 nebulaColor2      = glm::vec3(1.00f, 0.60f, 0.28f);
-        glm::vec3 nebulaColor3      = glm::vec3(0.90f, 0.30f, 0.16f);
-        float     nebulaSeed        = 0.0f;
-        float     nebulaCoverage    = 0.5f; // 0 = none .. 1 = nearly the whole band covered
-        int       nebulaQuality      = 1;   // 0 Performance, 1 High, 2 Max (Metal + OpenGL)
-        glm::vec3 auroraColor       = glm::vec3(0.25f, 0.95f, 0.50f);
-        glm::vec3 auroraColorTop     = glm::vec3(0.62f, 0.26f, 0.95f);
-        float     auroraHeight        = 0.18f;
-        float     auroraFragmentation = 0.4f;
-        // Cloud wind: the compass direction the clouds drift toward (degrees, 0 =
-        // toward -Z/north, increasing clockwise) and a speed multiplier. The
-        // backend turns these into a horizontal drift vector for the cloud noise.
-        float     windDirection = 30.0f;
-        float     windSpeed     = 1.0f;
-        // Lightning flash brightness (0 = none … 1 = full strike). Driven by the
-        // WeatherSystem during storms; added to the sky colour in the backend.
-        float     flash         = 0.0f;
-        // Ground response to weather (0..1). wetness darkens + glosses lit surfaces;
-        // snowAmount lays white snow on up-facing surfaces. Read by the lit shader.
-        float     wetness    = 0.0f;
-        float     snowAmount = 0.0f;
-        float     rainAmount = 0.0f;   // drives the sky rainbow (rain + sun) — Metal/OpenGL sky pass
-        // Cloud render mode (OpenGL): 0 = sky-dome (default), 1 = 3D volumetric clouds
-        // anchored in the world so they parallax as the camera moves. cloudHeight = the
-        // 3D layer's height above the camera in world units. Other backends ignore these.
-        int       cloudMode   = 0;
-        float     cloudHeight = 200.0f;
-        // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
-        int       cloudQuality = 1;
-        bool      lowResClouds = false; // quarter-res cloud pre-pass + upsample (perf; default off)
-        // Cloud appearance (OpenGL 3D path): density scales opacity, fluffiness
-        // drives the cauliflower erosion, tint colours the clouds.
-        float     cloudDensity    = 1.0f;
-        float     cloudFluffiness = 0.6f;
-        glm::vec3 cloudTint       = glm::vec3(1.0f);
-        // Contrails: scattered vapour-trail lines that fill an empty daytime sky.
-        float     contrailAmount  = 0.0f;
-        // Thin high cirrus clouds: amount = cover/brightness, seed re-rolls the pattern.
-        float     cirrusAmount    = 0.0f;
-        float     cirrusSeed      = 0.0f;
-        float     godRays         = 0.0f;   // crepuscular sun-shaft strength — Metal/OpenGL sky pass
-        float     shootingStars   = 0.0f;   // meteor frequency (0 = none) — Metal/OpenGL night sky
-        float     lensFlare       = 0.0f;   // camera sun lens-flare strength (0 = off) — post-process overlay
-        // Star field brightness + colour tint, overall size and size variation.
-        float     starBrightness    = 1.0f;
-        glm::vec3 starColor         = glm::vec3(1.0f);
-        float     starSize          = 1.0f;
-        float     starSizeVariation = 0.5f;
-        float     starGlow          = 1.0f;
-        float     starTwinkle       = 0.6f;
-        float     starDensity       = 0.5f;
-    };
+    // The ~60-field sky / day-night / weather-appearance block. It lives in its
+    // own header (Renderer/EnvironmentSettings.h) because of its size; the alias
+    // keeps every existing `IRenderer::EnvironmentSettings` spelling valid.
+    using EnvironmentSettings = ::EnvironmentSettings;
     virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }
 
@@ -401,10 +364,55 @@ public:
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/)
     { return nullptr; }
 
+    // ── Asset thumbnails ───────────────────────────────────────────────────
+    // Render `assetId` into a PRIVATE offscreen target and read it back as
+    // tightly packed, top-down RGBA8 (`size`×`size`×4 bytes, transparent where
+    // nothing was drawn). Unlike the Render*Preview calls above this returns
+    // pixels rather than a GPU handle, so the caller can cache the result on
+    // disk and re-upload it as a plain texture — the Content Browser draws one
+    // thumbnail per asset and must not re-render them every frame. It also uses
+    // a target of its own: sharing the interactive preview's would overwrite
+    // whatever the Material Editor is currently showing.
+    //
+    // Synchronous (renders and waits), so the caller has to budget how many it
+    // asks for per frame. Returns false on backends without a thumbnail path,
+    // or when the asset cannot be resolved.
+    virtual bool RenderAssetThumbnail(class ContentManager& /*cm*/, ThumbnailKind /*kind*/,
+                                      const HE::UUID& /*assetId*/, uint32_t /*size*/,
+                                      std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
+
+    // Same, for a particle system: it has no single asset to point at — a tile is
+    // a snapshot of a SIMULATED pool, which the caller steps (ParticleSystem::
+    // stepPool lives in HE_Scene; the renderer never simulates) and hands over
+    // already resolved, exactly as for RenderParticlePreview. Reads back to
+    // top-down RGBA8 like RenderAssetThumbnail; the target is private to the
+    // thumbnail path, not the interactive particle preview's.
+    virtual bool RenderParticleThumbnail(class ContentManager& /*cm*/,
+                                         const HE::UUID& /*materialId*/,
+                                         const std::vector<ParticlePreviewInstance>& /*particles*/,
+                                         uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
+
+    // Same, for a UI widget: the caller instantiates the widget and extracts its
+    // draw quads (WidgetManager, HE_Scene), then hands them over — the renderer
+    // knows how to draw UIRenderObjects but nothing about widget assets. `size`
+    // is the tile edge; the quads must already be laid out for a square viewport
+    // of that many pixels, since UI layout is resolution-dependent.
+    virtual bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& /*uiObjects*/,
+                                       uint32_t /*size*/, std::vector<uint8_t>& /*outRgba8*/)
+    { return false; }
+
     // Drop cached GPU buffers for a mesh so ResolveMesh re-uploads from the
     // ContentManager next frame. Call after replaceStaticMesh so sculpt/edit
     // changes are not masked by the renderer's VBO cache.
     virtual void InvalidateMesh(const HE::UUID& /*meshId*/) {}
+
+    // Same for a texture: drop the cached GPU texture so it re-uploads from the
+    // ContentManager. Call after replaceTexture — e.g. the landscape weightmap,
+    // which is rewritten in place on every paint stroke and would otherwise stay
+    // frozen at whatever the first upload captured.
+    virtual void InvalidateTexture(const HE::UUID& /*textureId*/) {}
 
     // ── ImGui texture helpers ──────────────────────────────────────────────
     // Upload raw RGBA8 pixel data and return a backend-specific texture handle
@@ -440,6 +448,7 @@ public:
 
 protected:
     OverlayCallback      m_overlayCallback;
+    HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;
     EditorCameraOverride m_editorCamera;

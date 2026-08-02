@@ -3,6 +3,12 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/ParticleShaderTemplates.h>
+#include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
+#include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
+#include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
+#include <HorizonRendering/LightPacking.h>   // shared GPU light packing
+#include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
+#include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
@@ -20,168 +26,20 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-// Builds a tiling NxNxN two-channel noise volume (interleaved RG16):
-//   R = value noise whose lattice values are exactly the sky shader's
-//       starHash(i,j,k). With the shader pre-smoothstepping the fractional sample
-//       coordinate, the GPU's trilinear filter reproduces the old smoothstep value
-//       noise exactly (within one tile) — so starFbm3 stays a texture fetch with no
-//       visible change (nebula/stars unaffected, byte-for-byte).
-//   G = tiling inverted-Worley (cellular) field, bright at the cell feature points.
-//       fBm of this is the billowy "cauliflower" shape that turns the clouds from
-//       wispy value-noise blobs into rounded cumuli. Worley is C0-smooth so plain
-//       trilinear sampling of the bake is fine (no pre-smoothstep trick needed).
-// R16-per-channel keeps the threshold ramps band-free. Shared with the Metal gen.
-static std::vector<uint16_t> BuildSkyNoise3D(int n)
-{
-	auto hash = [](glm::vec3 p) {
-		p = glm::fract(p * 0.1031f);
-		p += glm::dot(p, glm::vec3(p.z, p.y, p.x) + 31.32f);
-		return glm::fract((p.x + p.y) * p.z);
-	};
-	// Decorrelated per-cell jitter for the Worley feature points (sin-free so it is
-	// bit-deterministic across compilers — both backends bake CPU-side).
-	auto hash3 = [](glm::vec3 c) {
-		glm::vec3 p = glm::fract(c * glm::vec3(0.1031f, 0.1030f, 0.0973f));
-		p += glm::dot(p, glm::vec3(p.y, p.z, p.x) + 33.33f);
-		return glm::fract(glm::vec3((p.x + p.y) * p.z, (p.x + p.z) * p.y, (p.y + p.z) * p.x));
-	};
-	const int kWorleyGrid = 48;   // feature cells per axis across the tile
-	auto worley = [&](glm::vec3 uv) {
-		glm::vec3 pc = uv * static_cast<float>(kWorleyGrid);
-		glm::vec3 id = glm::floor(pc);
-		glm::vec3 fp = pc - id;
-		float f1 = 1e9f;
-		for (int k = -1; k <= 1; ++k)
-			for (int j = -1; j <= 1; ++j)
-				for (int i = -1; i <= 1; ++i)
-				{
-					glm::vec3 off(static_cast<float>(i), static_cast<float>(j), static_cast<float>(k));
-					glm::vec3 wrapped = glm::mod(id + off, static_cast<float>(kWorleyGrid)); // seamless tile
-					glm::vec3 d = (off + hash3(wrapped)) - fp;
-					f1 = std::min(f1, glm::dot(d, d));   // nearest feature (squared)
-				}
-		return glm::clamp(1.0f - std::sqrt(f1), 0.0f, 1.0f);
-	};
-	std::vector<uint16_t> d(static_cast<size_t>(n) * n * n * 2);
-	const float inv = 1.0f / static_cast<float>(n);
-
-	// Serial nested loops (one-time init): each voxel is fully independent.
-	// Matches the D3D11/D3D12/Vulkan bakes — portable across compilers without
-	// the parallel STL (<execution> is unimplemented in libc++/Apple Clang).
-	for (int z = 0; z < n; ++z)
-		for (int y = 0; y < n; ++y)
-			for (int x = 0; x < n; ++x)
-			{
-				const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
-				glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
-				d[idx + 0] = static_cast<uint16_t>(
-					glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
-				d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
-			}
-	return d;
-}
-
-// CPU port of the shader's analytic skyColor(dir,sunDir) — used to bake the
-// image-based-ambient cubemap so the scene shader samples it once instead of
-// re-evaluating this function twice per lit pixel. Mirrors kSkyFuncGLSL exactly
-// (except the sun terms: the IBL keeps a disk so the ambient carries sun energy).
-static glm::vec2 AtmoRaySphereCPU(glm::vec3 ro, glm::vec3 rd, float R)
-{
-	float b = glm::dot(ro, rd);
-	float c = glm::dot(ro, ro) - R * R;
-	float d = b * b - c;
-	if (d < 0.0f) return glm::vec2(1.0e9f, -1.0e9f);
-	d = std::sqrt(d);
-	return glm::vec2(-b - d, -b + d);
-}
-// Mirror of the shader atmoScatter() — see kSkyFuncGLSL for the model notes.
-static glm::vec3 AtmoScatterCPU(glm::vec3 dir, glm::vec3 sunDir)
-{
-	const float Rg = 6360.0e3f, Ra = 6440.0e3f;
-	const glm::vec3 bR(5.802e-6f, 13.558e-6f, 33.1e-6f);
-	const float bM = 3.996e-6f;
-	const glm::vec3 bO(0.650e-6f, 1.881e-6f, 0.085e-6f);
-	const float HR = 8500.0f, HM = 1200.0f;
-	glm::vec3 ro(0.0f, Rg + 200.0f, 0.0f);
-	glm::vec2 tA = AtmoRaySphereCPU(ro, dir, Ra);
-	if (tA.y <= 0.0f) return glm::vec3(0.0f);
-	float t0 = std::max(tA.x, 0.0f), t1 = tA.y;
-	glm::vec2 tG = AtmoRaySphereCPU(ro, dir, Rg);
-	if (tG.x > 0.0f) t1 = std::min(t1, tG.x);
-	float ds = (t1 - t0) / 12.0f;
-	float mu = glm::dot(dir, sunDir);
-	float phR = 0.05968310f * (1.0f + mu * mu);
-	const float g = 0.76f, g2 = g * g;
-	float phM = 0.11936620f * ((1.0f - g2) * (1.0f + mu * mu)) /
-	            ((2.0f + g2) * std::pow(1.0f + g2 - 2.0f * g * mu, 1.5f));
-	glm::vec3 sumR(0.0f), sumM(0.0f);
-	float odR = 0.0f, odM = 0.0f, odO = 0.0f;
-	for (int i = 0; i < 12; ++i)
-	{
-		glm::vec3 p = ro + dir * (t0 + (float(i) + 0.5f) * ds);
-		float hgt = glm::length(p) - Rg;
-		float dR  = std::exp(-hgt / HR) * ds;
-		float dM  = std::exp(-hgt / HM) * ds;
-		float dO  = std::max(0.0f, 1.0f - std::abs(hgt - 25.0e3f) / 15.0e3f) * ds;
-		odR += dR; odM += dM; odO += dO;
-		if (AtmoRaySphereCPU(p, sunDir, Rg).x > 0.0f) continue;
-		float sl = AtmoRaySphereCPU(p, sunDir, Ra).y * 0.2f;
-		float sR = 0.0f, sM = 0.0f, sO = 0.0f;
-		for (int j = 0; j < 5; ++j)
-		{
-			glm::vec3 q = p + sunDir * ((float(j) + 0.5f) * sl);
-			float hq = glm::length(q) - Rg;
-			sR += std::exp(-hq / HR) * sl;
-			sM += std::exp(-hq / HM) * sl;
-			sO += std::max(0.0f, 1.0f - std::abs(hq - 25.0e3f) / 15.0e3f) * sl;
-		}
-		glm::vec3 tau = bR * (odR + sR) + (bM * 1.11f) * (odM + sM) + bO * (odO + sO);
-		glm::vec3 tr  = glm::exp(-tau);
-		sumR += tr * dR;
-		sumM += tr * dM;
-	}
-	glm::vec3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0f;
-	// Fake multiple-scatter in-fill — mirrors the shader atmoScatter().
-	glm::vec3 Tcam = glm::exp(-(bR * odR + (bM * 1.11f) * odM + bO * odO));
-	L += (glm::vec3(1.0f) - Tcam) * glm::vec3(0.30f, 0.42f, 0.60f) * (0.35f * glm::smoothstep(0.0f, 0.35f, sunDir.y));
-	return L;
-}
-static glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
-{
-	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
-	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
-	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
-	float dusk = glm::smoothstep(-0.14f, 0.04f, sunY) * (1.0f - glm::smoothstep(0.04f, 0.26f, sunY));
-	float toNight = 1.0f - glm::smoothstep(-0.24f, -0.06f, sunY);
-	// Physically-based base sky (mirrors the shader), plus the deep-night floor.
-	glm::vec3 sky = AtmoScatterCPU(glm::normalize(glm::vec3(dir.x, std::max(dir.y, 0.004f), dir.z)), sunDir); // horizon clamp (see shader)
-	float h = glm::clamp(dir.y, 0.0f, 1.0f);
-	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
-	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
-	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.12f, dir.y));
-	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
-	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
-	float s = std::max(glm::dot(dir, sunDir), 0.0f);
-	float sunVis = std::max(day, dusk);
-	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
-	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
-	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
-	float night = 1.0f - day;
-	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
-	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
-	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
-	sky += glm::vec3(0.015f,0.018f,0.030f) * night;
-	return sky;
-}
-
 // Builds the six cube faces of the image-based-ambient environment map for the
 // given sun direction (face = +X,-X,+Y,-Y,+Z,-Z in GL order). Returns tightly
 // packed RGBA32F, faces back to back, faceN texels each.
+//
+// The maths (AtmoRaySphereCPU / AtmoScatterCPU / SkyColorCPU and the face
+// direction switch) used to be an 88-line verbatim copy of the Metal backend's;
+// it now lives in HorizonRendering/SkyEnvBake.h and both backends call it. What
+// stays here is only the PARALLELISATION, which is GL-side on purpose: Metal
+// bakes one face at a time on demand, this backend bakes all six at once.
 static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
 {
 	std::vector<float> px(static_cast<size_t>(faceN) * faceN * 6 * 4);
 	// Parallelize over the 6*faceN rows (face,row): each row is independent and
-	// SkyColorCPU is a pure function, so this is data-race-free. Uses the engine's
+	// HE::SkyColorCPU is a pure function, so this is data-race-free. Uses the engine's
 	// portable thread pool — NOT std::execution::par (which libc++/macOS lacks). At
 	// 128² this serial bake was ~47 ms (a per-frame stall under day-night auto-advance);
 	// parallel it is a few ms.
@@ -189,23 +47,8 @@ static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
 	{
 		const int f = static_cast<int>(idx / faceN);
 		const int t = static_cast<int>(idx % faceN);
-		for (int s = 0; s < faceN; ++s)
-		{
-			float u = (s + 0.5f) / faceN * 2.0f - 1.0f;
-			float v = (t + 0.5f) / faceN * 2.0f - 1.0f;
-			glm::vec3 d;
-			switch (f) {
-				case 0: d = glm::vec3( 1.0f, -v, -u); break; // +X
-				case 1: d = glm::vec3(-1.0f, -v,  u); break; // -X
-				case 2: d = glm::vec3( u,  1.0f,  v); break; // +Y
-				case 3: d = glm::vec3( u, -1.0f, -v); break; // -Y
-				case 4: d = glm::vec3( u, -v,  1.0f); break; // +Z
-				default:d = glm::vec3(-u, -v, -1.0f); break; // -Z
-			}
-			glm::vec3 c = SkyColorCPU(glm::normalize(d), sunDir);
-			size_t i = ((static_cast<size_t>(f) * faceN + t) * faceN + s) * 4;
-			px[i+0] = c.r; px[i+1] = c.g; px[i+2] = c.b; px[i+3] = 1.0f;
-		}
+		HE::BuildSkyEnvFaceRow(faceN, f, t, sunDir,
+		                       &px[((static_cast<size_t>(f) * faceN + t) * faceN) * 4]);
 	});
 	return px;
 }
@@ -264,8 +107,94 @@ uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
 uniform float     uWetness;          // 0..1 wet-surface darken + gloss
 uniform float     uSnow;             // 0..1 snow cover on up-facing surfaces
 
+// ── Ray-traced GI (GL 4.3 compute port; samplers/uniforms are 4.1-safe, the
+// compute kernels that FILL them are gated on m_giSupported). When enabled,
+// the mask replaces the CSM lookup and the probe atlases replace the
+// AO-gated IBL ambient — mirrors the Metal fragmentMain branches.
+uniform int       uGIEnabled;
+uniform sampler2D uGIShadow;      // half-res screen-space shadow mask
+uniform sampler2D uGIIrr;         // DDGI irradiance atlas (RGBA16F)
+uniform sampler2D uGIVis;         // DDGI visibility atlas (RG16F)
+uniform sampler2D uGILocal;       // half-res local-light visibility mask (1 channel per light, first 4)
+uniform vec4      uGIGridOrigin;  // xyz = grid origin, w = spacing
+uniform vec4      uGIGridCounts;  // xyz = probe counts, w = probesPerRow
+uniform float     uGIIntensity;
+
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
+
+// Signed-octahedral mapping (direction → texel UV) — must match the probe
+// kernel's octDecode (kGiProbeCS) and the Metal octEncode byte-for-byte.
+vec2 giOctEncode(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+const int GI_PROBE_OCT = 8; // must match OpenGLRenderer::kGIProbeOctSize
+
+// DDGI probe sampling — trilinear over the 8 surrounding probes × soft
+// backface × Chebyshev visibility. Direct port of Metal's
+// sampleDDGIIrradiance (same v1 notes: raw per-direction radiance, not
+// cosine-preintegrated).
+vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
+{
+	int gx = int(uGIGridCounts.x), gy = int(uGIGridCounts.y), gz = int(uGIGridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int probesPerRow = max(1, int(uGIGridCounts.w));
+	int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+	vec2 atlasSizeTexels = vec2(float(probesPerRow), float(probeRows)) * float(GI_PROBE_OCT);
+	float spacing = max(uGIGridOrigin.w, 1e-4);
+
+	vec3 gridSpace = (P - uGIGridOrigin.xyz) / spacing;
+	vec3 base      = floor(gridSpace);
+	vec3 fracP     = gridSpace - base;
+
+	vec3  sumColor  = vec3(0.0);
+	float sumWeight = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		vec3 cell = base + offs;
+		if (any(lessThan(cell, vec3(0.0))) ||
+		    cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+		vec3 trilinear = mix(1.0 - fracP, fracP, offs);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
+		if (weight <= 1e-5) continue;
+
+		vec3 probePos   = uGIGridOrigin.xyz + cell * spacing;
+		vec3 toProbe    = probePos - P;
+		float dist      = max(length(toProbe), 1e-4);
+		vec3 dirToProbe = toProbe / dist;
+
+		weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+		vec2 tileOrigin = vec2(float(probeIndex % probesPerRow),
+		                       float(probeIndex / probesPerRow)) * float(GI_PROBE_OCT);
+
+		vec2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+		vec2 visSample = texture(uGIVis, visUV).rg;
+		float mean = visSample.x, mean2 = visSample.y;
+		float variance = abs(mean2 - mean * mean);
+		float chebyshev = 1.0;
+		if (dist > mean)
+		{
+			float d = dist - mean;
+			chebyshev = variance / (variance + d * d);
+			chebyshev = chebyshev * chebyshev * chebyshev;
+		}
+		weight *= max(chebyshev, 0.05);
+
+		vec2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+		sumColor  += texture(uGIIrr, irrUV).rgb * weight;
+		sumWeight += weight;
+	}
+	return sumColor / max(sumWeight, 1e-4);
+}
 
 // Atmospheric fog / aerial perspective: blend the lit colour toward the sky in
 // the fragment's view direction, so distant geometry melts into the horizon
@@ -349,6 +278,51 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 	return vis;
 }
 
+// Local-light (point/spot) shadow atlas: one sampler2DArray shared by all
+// shadow-casting point/spot lights. A spot light owns 1 perspective layer, a
+// point light 6 cube-face layers (+X −X +Y −Y +Z −Z — face picked here by the
+// fragment→light vector's major axis). The light's first layer index rides in
+// uLightParams[i].y (-1 = casts no shadow). Mirrors Metal's localShadowFactor.
+const int LOCAL_SHADOW_LAYERS = 16;
+uniform sampler2DArray uLocalShadowMap;
+uniform mat4 uLocalShadowVP[LOCAL_SHADOW_LAYERS]; // per-layer light view-proj (GL clip)
+
+float localShadowFactor(int i, vec3 worldPos, vec3 N)
+{
+	int base = int(uLightParams[i].y);
+	if (base < 0) return 1.0;
+	int layer = base;
+	if (int(uLightPos[i].w) == 1) // point: major-axis cube-face pick
+	{
+		vec3 d = worldPos - uLightPos[i].xyz;
+		vec3 a = abs(d);
+		int face;
+		if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+		else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+		else                               face = (d.z > 0.0) ? 4 : 5;
+		layer = base + face;
+	}
+	vec3  toL = normalize(uLightPos[i].xyz - worldPos);
+	float ndl = clamp(dot(N, toL), 0.0, 1.0);
+	vec4 lp = uLocalShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
+	if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
+	vec3 p = lp.xyz / lp.w;
+	p = p * 0.5 + 0.5;                       // GL NDC [-1,1] → [0,1]
+	vec2 texel = 1.0 / vec2(textureSize(uLocalShadowMap, 0).xy);
+	if (p.z > 1.0 || p.z < 0.0
+	    || any(lessThan(p.xy, texel)) || any(greaterThan(p.xy, 1.0 - texel)))
+		return 1.0;
+	float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+	float vis = 0.0;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			float cd = texture(uLocalShadowMap, vec3(p.xy + vec2(x, y) * texel, float(layer))).r;
+			vis += (p.z - bias > cd) ? 0.0 : 1.0;
+		}
+	return vis / 9.0;
+}
+
 void main()
 {
 	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
@@ -392,7 +366,11 @@ void main()
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	vec3 Nup     = normalize(vec3(N.x, max(N.y, 0.1), N.z));
 	vec3 ambDiff = texture(uSkyEnv, Nup).rgb    * diffuseColor;
-	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * specColor;
+	// Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
+	float NdV = clamp(dot(N, V), 0.0, 1.0);
+	vec3 fresnelSpec = specColor
+		+ (max(vec3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
+	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * fresnelSpec;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
@@ -400,9 +378,17 @@ void main()
 	// Flat ambient fill (never-black floor + overcast replacement) is intentionally
 	// kept outside the AO product so SSAO over-darkening at grazing angles cannot
 	// zero it out. It is the minimum guaranteed brightness on any surface.
-	vec3 result  = ambient * ao + uAmbient * diffuseColor;
+	// GI replaces the AO-gated IBL term with probe-sampled indirect diffuse; the
+	// flat floor stays in BOTH branches (never-black guarantee — probes bounce
+	// only actual lights and go dark under full overcast/night). Specular IBL
+	// (ambSpec) is kept either way — the GI slice is diffuse-only.
+	vec3 result = (uGIEnabled == 1)
+		? sampleDDGIIrradiance(vWorldPos, N) * diffuseColor * uGIIntensity
+		      + ambSpec * (1.0 - 0.6 * wRough) + uAmbient * diffuseColor
+		: ambient * ao + uAmbient * diffuseColor;
 
 	int dbgCascade = 0;   // cascade chosen by the directional shadow (debug tint)
+	int giLocalIdx = 0;   // counter over non-directional lights → local-mask channel
 	for (int i = 0; i < uLightCount; ++i)
 	{
 		int   type  = int(uLightPos[i].w);
@@ -430,8 +416,26 @@ void main()
 		// Only the (first) directional light casts shadows. Explicit if (not a
 		// ternary) so the `out` cascade index is written only on the directional
 		// branch — strict GLSL compilers reject out-params inside a ?: selection.
+		// GI replaces CSM entirely when active: the ray-traced mask is sampled at
+		// the same screen-space UV convention the AO texture uses.
 		float sh = 1.0;
-		if (type == 0) sh = computeShadow(vWorldPos, N, L, dbgCascade);
+		if (type == 0)
+		{
+			if (uGIEnabled == 1) sh = texture(uGIShadow, gl_FragCoord.xy / uViewport).r;
+			else                 sh = computeShadow(vWorldPos, N, L, dbgCascade);
+		}
+		else
+		{
+			// Local (point/spot) lights: shadow-mapped when the light casts
+			// shadows (uLightParams[i].y = atlas base layer, set by the
+			// extractor). When GI is active the ray-traced hard mask (first 4
+			// local lights) is combined in via min() — the map covers lights
+			// the mask can't.
+			sh = localShadowFactor(i, vWorldPos, N);
+			if (uGIEnabled == 1 && giLocalIdx < 4)
+				sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx]);
+			giLocalIdx++;
+		}
 
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
@@ -450,6 +454,45 @@ void main()
 		result *= tint[min(dbgCascade, 3)];
 	}
 	FragColor = vec4(result, uOpacity);
+}
+)GLSL";
+
+// ─── Deferred G-buffer fragment (built-in PBR materials) ─────────────────────
+// Writes surface ATTRIBUTES instead of shading them; the fullscreen resolve
+// (MaterialShaderLibrary::deferredResolve → heLitP) lights them once per
+// visible pixel. Weather/fog/IBL deliberately NOT applied here — they run in
+// the resolve on these attributes, so the result matches forward by
+// construction. Specular 0.5 = the dielectric F0 0.04 the built-in forward
+// shader uses; emissive 0, material AO 1. Links against kUnlitVS (single) and
+// kInstancedVS (instanced batches) — both emit the same varyings.
+static const char* kGBufFS = R"GLSL(
+#version 410 core
+in vec3 vNormal;
+in vec2 vUV;
+in vec3 vWorldPos;
+uniform vec3      uColor;
+uniform bool      uHasTexture;
+uniform sampler2D uTexture;
+uniform float     uMetallic;
+uniform float     uRoughness;
+layout(location = 0) out vec4 oGB0; // rgb BaseColor, a Metallic
+layout(location = 1) out vec4 oGB1; // rg oct Normal, b Roughness, a Specular
+layout(location = 2) out vec4 oGB2; // rgb Emissive, a Material-AO
+// Signed-octahedral mapping (Meyer et al. 2010) — same encode as the shared
+// lighting preamble's heOctEncode, so the resolve's decode round-trips.
+vec2 octEncode(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+void main()
+{
+	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
+	vec3 N = normalize(vNormal);
+	oGB0 = vec4(albedo, clamp(uMetallic, 0.0, 1.0));
+	oGB1 = vec4(octEncode(N) * 0.5 + 0.5, clamp(uRoughness, 0.0, 1.0), 0.5);
+	oGB2 = vec4(0.0, 0.0, 0.0, 1.0);
 }
 )GLSL";
 
@@ -529,6 +572,59 @@ void main()
     float diff = max(dot(N, L), 0.0);
     vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
     FragColor = vec4(albedo * (0.35 + 0.65 * diff), 1.0);
+}
+)GLSL";
+
+// ─── Mesh-thumbnail shaders (RenderAssetThumbnail) ──────────────────────────
+// The unskinned counterpart of kSkelPreview*: static meshes, skeletal meshes in
+// bind pose, and the preview sphere for materials that have NO node graph (the
+// built-in PBR ones — resolveMaterialShader finds nothing to compile for them,
+// and a Content Browser tile still has to show something). Same sun direction
+// and ambient as the skeletal preview so every thumbnail is lit alike; the
+// highlight is driven by metallic/roughness so two flat materials that differ
+// only in their PBR scalars still produce different tiles.
+static const char* kMeshPreviewVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vWorldPos;
+void main()
+{
+    vNormal     = mat3(uModel) * aNormal;
+    vUV         = aUV;
+    vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kMeshPreviewFS = R"GLSL(
+#version 410 core
+in vec3 vNormal;
+in vec2 vUV;
+in vec3 vWorldPos;
+out vec4 FragColor;
+uniform vec3  uColor;
+uniform bool  uHasTex;
+uniform sampler2D uTex;
+uniform vec3  uCamPos;
+uniform vec2  uPbr;   // x = metallic, y = roughness
+void main()
+{
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(0.45, 0.75, 0.55));
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 H = normalize(L + V);
+    float diff  = max(dot(N, L), 0.0);
+    float rough = clamp(uPbr.y, 0.05, 1.0);
+    float spec  = pow(max(dot(N, H), 0.0), mix(128.0, 8.0, rough))
+                * (1.0 - rough) * mix(0.25, 1.0, clamp(uPbr.x, 0.0, 1.0));
+    vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
+    FragColor = vec4(albedo * (0.32 + 0.68 * diff) + vec3(spec), 1.0);
 }
 )GLSL";
 
@@ -2444,13 +2540,480 @@ void main()
 )GLSL";
 
 // ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
-// Number of hemisphere kernel samples; shared by the C++ kernel and the shader.
-static constexpr int kSSAOKernel = 32;
+// The hemisphere kernel sample count is HE::kSsaoKernelSize (SsaoKernel.h) —
+// the uKernel[32] declaration below must stay in step with it.
 
 // Pre-pass: rasterise the scene and write the per-pixel VIEW-SPACE position
 // (xyz, with a = 1 marking valid geometry vs. the cleared background). Working in
 // view space sidesteps every depth-buffer / clip-space convention difference
 // between the backends — the SSAO maths is then identical on GL and Metal.
+// ─── Global Illumination (GL 4.3 compute port, Windows/Linux) ────────────────
+// Software ray tracing against the CPU-built HE::GiBvh (see GiBvh.h): the GLSL
+// traversal below mirrors giBvhIntersect() 1:1 — same slab test, same
+// Möller-Trumbore (two-sided), same 64-entry stack — so tests/test_gi_bvh.cpp
+// validates the exact algorithm these kernels run. Node/instance ints travel
+// as float bit patterns in vec4 rows (floatBitsToInt) so the std430 blocks are
+// layout-proof across drivers. The raster/temporal/blur stages stay #version
+// 410 (compilable everywhere incl. macOS); only the two compute kernels are
+// 430 and only ever compiled behind m_giSupported.
+
+// World-space G-buffer pre-pass (position + normal, MRT) — the GI counterpart
+// of kSSAOPosVS/FS. CRITICAL (Metal lesson, commit 5846efc): rendered with the
+// SAME extraction/camera as the scene pass, or the screen-space mask
+// misaligns and shadows swim with camera rotation.
+static const char* kGiGBufVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+out vec3 vNormal;
+void main()
+{
+	vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
+	vNormal     = mat3(uModel) * aNormal;
+	gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+static const char* kGiGBufFS = R"GLSL(
+#version 410 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+layout(location = 0) out vec4 oPos;
+layout(location = 1) out vec4 oNorm;
+void main()
+{
+	oPos  = vec4(vWorldPos, 1.0);            // a = 1 → valid geometry
+	oNorm = vec4(normalize(vNormal), 0.0);
+}
+)GLSL";
+
+// Shared BVH declarations + traversal, string-prepended into both compute
+// kernels (GLSL has no #include). Instances are the TLAS analogue: the ray is
+// transformed into object space by invTransform with an UNNORMALISED
+// direction, so the parametric t stays world-comparable across instances.
+static const char* kGiTraversalGLSL = R"GLSL(
+struct GiNode { vec4 d0; vec4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
+struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
+struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
+layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
+layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
+uniform int uGiInstanceCount;
+
+// Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
+bool giTriHit(GiTri tri, vec3 o, vec3 d, float tMin, float tMax, out float tOut)
+{
+	tOut = 0.0;
+	vec3 e1 = tri.v1.xyz - tri.v0.xyz;
+	vec3 e2 = tri.v2.xyz - tri.v0.xyz;
+	vec3 p  = cross(d, e2);
+	float det = dot(e1, p);
+	if (abs(det) < 1e-9) return false;
+	float invDet = 1.0 / det;
+	vec3 s = o - tri.v0.xyz;
+	float u = dot(s, p) * invDet;
+	if (u < 0.0 || u > 1.0) return false;
+	vec3 q = cross(s, e1);
+	float v = dot(d, q) * invDet;
+	if (v < 0.0 || u + v > 1.0) return false;
+	float t = dot(e2, q) * invDet;
+	if (t <= tMin || t >= tMax) return false;
+	tOut = t;
+	return true;
+}
+
+// BLAS traversal (one instance), object-space ray. anyHit: first accepted hit
+// wins. Mirrors GiBvh.cpp's giBvhIntersect() — same stack bound.
+bool giBlasHit(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tMax,
+               bool anyHit, out float tOut)
+{
+	tOut = tMax;
+	vec3 invD = 1.0 / d;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = nodeOfs;
+	bool hit = false;
+	float best = tMax;
+	while (sp > 0)
+	{
+		GiNode n = giNodes[stack[--sp]];
+		vec3 t0 = (n.d0.xyz - o) * invD;
+		vec3 t1 = (n.d1.xyz - o) * invD;
+		vec3 lo = min(t0, t1);
+		vec3 hi = max(t0, t1);
+		float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+		float tF = min(min(hi.x, hi.y), min(hi.z, best));
+		if (tN > tF) continue;
+		int leftFirst = floatBitsToInt(n.d0.w);
+		int triCount  = floatBitsToInt(n.d1.w);
+		if (triCount > 0)
+		{
+			for (int i = 0; i < triCount; ++i)
+			{
+				float t;
+				if (giTriHit(giTris[triOfs + leftFirst + i], o, d, tMin, best, t))
+				{
+					hit = true; best = t; tOut = t;
+					if (anyHit) return true;
+				}
+			}
+		}
+		else if (sp + 2 <= 64)
+		{
+			stack[sp++] = nodeOfs + leftFirst;
+			stack[sp++] = nodeOfs + leftFirst + 1;
+		}
+	}
+	return hit;
+}
+
+// TLAS analogue: linear instance loop (v1 — instance counts here are small;
+// a top-level BVH is a documented perf follow-up). World-space ray in/out.
+bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	for (int i = 0; i < uGiInstanceCount; ++i)
+	{
+		vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+		vec3 dL = mat3(giInsts[i].invTransform) * d;
+		float t;
+		if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, tMax, true, t))
+			return true;
+	}
+	return false;
+}
+
+// Closest hit across all instances; returns instance index (-1 = miss).
+int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
+{
+	int   bestInst = -1;
+	float best     = tMax;
+	for (int i = 0; i < uGiInstanceCount; ++i)
+	{
+		vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+		vec3 dL = mat3(giInsts[i].invTransform) * d;
+		float t;
+		if (giBlasHit(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, false, t))
+		{
+			best = t; bestInst = i;
+		}
+	}
+	tOut = best;
+	return bestInst;
+}
+)GLSL";
+
+// Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
+// light (giDominantDirectionalLight pick — Metal lesson 5e45643: NEVER the
+// sky-dome sun). Same hash/cone/bias constants as Metal's giShadowRay.
+static const char* kGiShadowCS = R"GLSL(
+uniform sampler2D uGPos;
+uniform sampler2D uGNorm;
+layout(r16f,    binding = 0) uniform writeonly image2D uOut;
+layout(rgba16f, binding = 1) uniform writeonly image2D uOutLocal;
+uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = angular radius (radians)
+uniform vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height
+uniform vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
+uniform vec4 uLocalExtra;       // x = local light count
+
+vec2 giHash2(uvec2 gid, float seed)
+{
+	vec2 p = vec2(gid) + seed * 13.37;
+	return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
+	            fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+}
+vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
+{
+	vec3 up = (abs(L.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	vec3 T  = normalize(cross(up, L));
+	vec3 B  = cross(L, T);
+	float r   = sin(angleRad) * sqrt(xi.x);
+	float phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+	uvec2 gid = gl_GlobalInvocationID.xy;
+	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+	vec4 pv = texelFetch(uGPos, ivec2(gid), 0);
+	if (pv.a < 0.5) // background → everything unoccluded
+	{
+		imageStore(uOut,      ivec2(gid), vec4(1.0));
+		imageStore(uOutLocal, ivec2(gid), vec4(1.0));
+		return;
+	}
+	vec3 N = normalize(texelFetch(uGNorm, ivec2(gid), 0).xyz);
+	vec3 L = uSunDirRadius.xyz;
+
+	// ── Directional light (cone-jittered, temporally accumulated) ─────────
+	float sunVis = 0.0;
+	// Grazing/back-facing relative to the light: direct lighting's dot(N,L)
+	// term already zeroes this out, so skip the trace entirely.
+	if (dot(N, L) > 0.0)
+	{
+		vec2 xi  = giHash2(gid, uFrame.x);
+		vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
+		// Same self-intersection guards as Metal: normal-offset origin + min t.
+		vec3 origin = pv.xyz + N * 0.05;
+		sunVis = giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+	}
+	imageStore(uOut, ivec2(gid), vec4(sunVis));
+
+	// ── Local (point/spot) lights: one HARD occlusion ray each toward the
+	// first 4 — point/spot lights previously had NO shadowing at all (CSM
+	// never covered them), so they shone straight through geometry. The rays
+	// are deliberately UNjittered: deterministic → no noise → no temporal
+	// pass needed, the mask reacts instantly and artefact-free. One visibility
+	// channel per light, the scene shader indexes by its local-light counter.
+	vec4 localVis = vec4(1.0);
+	int localCount = clamp(int(uLocalExtra.x), 0, 4);
+	for (int i = 0; i < localCount; ++i)
+	{
+		vec3  toL   = uLocalPosRange[i].xyz - pv.xyz;
+		float distL = length(toL);
+		if (distL <= 0.05) continue; // on top of the light → lit
+		if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
+		vec3 dirL = toL / distL;
+		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
+		if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+			localVis[i] = 0.0;
+	}
+	imageStore(uOutLocal, ivec2(gid), localVis);
+}
+)GLSL";
+
+// Temporal accumulation: reproject via last frame's viewProj, history carries
+// the world position (rgb) + shadow scalar (a). The tolerance is deliberately
+// TIGHT (Metal lesson 58ee312: a loose depth-scaled tolerance accepts
+// wrong-surface reprojects at cube edges). GL NDC → UV has NO y-flip.
+static const char* kGiTemporalFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uGPos;
+uniform sampler2D uRaw;
+uniform sampler2D uHistory;
+uniform mat4  uPrevViewProj;
+uniform float uBlend; // history weight (0 on first GI frame)
+out vec4 FragColor;
+void main()
+{
+	vec4  pv   = texture(uGPos, vUV);
+	float rawV = texture(uRaw, vUV).r;
+	if (pv.a < 0.5) { FragColor = vec4(0.0, 0.0, 0.0, rawV); return; }
+
+	vec4 clip = uPrevViewProj * vec4(pv.xyz, 1.0);
+	if (clip.w <= 0.0) { FragColor = vec4(pv.xyz, rawV); return; }
+	vec2 ndc    = clip.xy / clip.w;
+	vec2 prevUV = ndc * 0.5 + 0.5;
+	if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0))))
+	{ FragColor = vec4(pv.xyz, rawV); return; }
+
+	vec4  hist      = texture(uHistory, prevUV);
+	float posError  = length(pv.xyz - hist.rgb);
+	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+	float w = (posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	// Neighbourhood clamp: guards OCCLUDER motion (the position check above
+	// only covers receiver/camera motion) — moved shadows update in 1-2 frames
+	// instead of smearing for ~30.
+	vec2 texel = 1.0 / vec2(textureSize(uRaw, 0));
+	float nMin = rawV, nMax = rawV;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+		{
+			float r = texture(uRaw, vUV + vec2(float(x), float(y)) * texel).r;
+			nMin = min(nMin, r);
+			nMax = max(nMax, r);
+		}
+	FragColor = vec4(pv.xyz, mix(rawV, clamp(hist.a, nMin, nMax), w));
+}
+)GLSL";
+
+static const char* kGiBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uSrc; // temporal history: rgb = world pos, a = shadow
+out vec4 FragColor;
+void main()
+{
+	vec2 texel = 1.0 / vec2(textureSize(uSrc, 0));
+	float sum = 0.0;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+			sum += texture(uSrc, vUV + vec2(float(x), float(y)) * texel).a;
+	FragColor = vec4(sum / 9.0, 0.0, 0.0, 1.0);
+}
+)GLSL";
+
+// DDGI probe update — gather formulation like Metal's giProbeUpdate: one
+// thread per octahedral texel traces ITS OWN ray (no atomics; each thread owns
+// exactly one texel per dispatch). One workgroup per probe in the frame's
+// round-robin batch. Bounce estimate = dominant directional + up to 8 local
+// lights (Metal lessons 5e45643/0787c23 baked in from the start).
+static const char* kGiProbeCS = R"GLSL(
+layout(rgba16f, binding = 0) uniform image2D uIrr;
+layout(rg16f,   binding = 1) uniform image2D uVis;
+uniform vec4 uGridOrigin;   // xyz = grid origin, w = spacing
+uniform vec4 uGridCounts;   // xyz = probe counts, w = probesPerRow
+uniform vec4 uRayParams;    // x = max dist, y = hysteresis, z = cursor start, w = probes this batch
+uniform vec4 uSunDirRadius; // xyz = direction TOWARD the light, w = local light count
+uniform vec4 uSunColor;     // rgb = colour * intensity
+uniform vec4 uSkyAmbient;   // rgb = miss colour
+uniform vec4 uLightPosRange[8];  // xyz pos, w range
+uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+
+const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
+
+vec3 octDecode(vec2 e)
+{
+	vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0)
+	{
+		vec2 signN = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+		n.xy = (1.0 - abs(n.yx)) * signN;
+	}
+	return normalize(n);
+}
+
+// direction -> octahedral UV, inverse of octDecode (needed for the
+// multi-bounce field lookup below; matches the scene shader's giOctEncode
+// byte-for-byte).
+vec2 octEncodeP(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// PREVIOUS-frame irradiance field at an arbitrary surface point: trilinear
+// over the 8 surrounding probes, point-read of each probe's octahedral tile
+// in the hit normal's direction. No Chebyshev here — this feeds the low-
+// frequency multi-bounce term, where leaking is dampened by albedo anyway.
+// uIrr is the READ_WRITE image this kernel EMA-updates — imageLoad gives the
+// previous frame's values (only this thread's own texel is written later).
+vec3 giSampleFieldIrradiance(vec3 pos, vec3 n)
+{
+	int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int probesPerRow = max(1, int(uGridCounts.w));
+	float spacing = max(uGridOrigin.w, 1e-4);
+	vec3 gridSpace = (pos - uGridOrigin.xyz) / spacing;
+	vec3 base  = floor(gridSpace);
+	vec3 fracP = gridSpace - base;
+	vec2 oct = octEncodeP(n) * 0.5 + 0.5;
+	ivec2 octTexel = ivec2(clamp(oct * float(kOctSize), 0.0, float(kOctSize) - 1.0));
+	vec3  sum  = vec3(0.0);
+	float sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		vec3 cell = base + offs;
+		if (any(lessThan(cell, vec3(0.0))) ||
+		    cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		vec3 tri = mix(1.0 - fracP, fracP, offs);
+		float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		ivec2 tile = ivec2((probeIndex % probesPerRow) * kOctSize,
+		                   (probeIndex / probesPerRow) * kOctSize);
+		sum  += imageLoad(uIrr, tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	return sum / max(sumW, 1e-4);
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+	ivec2 texel   = ivec2(gl_LocalInvocationID.xy);
+	int   batchIdx = int(gl_WorkGroupID.x);
+	int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+	int probeCount = gx * gy * gz;
+	if (probeCount <= 0 || batchIdx >= int(uRayParams.w)) return;
+	int probeIndex = (int(uRayParams.z) + batchIdx) % probeCount;
+
+	int pz = probeIndex / (gx * gy);
+	int py = (probeIndex / gx) % gy;
+	int px = probeIndex % gx;
+	vec3 probePos = uGridOrigin.xyz + vec3(float(px), float(py), float(pz)) * uGridOrigin.w;
+
+	vec2 uv  = (vec2(texel) + 0.5) / float(kOctSize) * 2.0 - 1.0;
+	vec3 dir = octDecode(uv);
+
+	float dist;
+	int hitInst = giSceneClosestHit(probePos, dir, 0.01, max(uRayParams.x, 1.0), dist);
+
+	vec3 radiance;
+	if (hitInst < 0)
+	{
+		radiance = uSkyAmbient.rgb;
+		dist     = uRayParams.x;
+	}
+	else
+	{
+		vec3 albedo    = giInsts[hitInst].baseColor.rgb;
+		vec3 hitNormal = -dir;
+		vec3 hitPos = probePos + dir * dist;
+		float ndl = max(dot(hitNormal, uSunDirRadius.xyz), 0.0);
+		// Secondary shadow ray: hit surfaces are no longer assumed fully
+		// sun-lit — without this, probes flood shadowed regions with bright
+		// sun bounce (objects under a large occluder visibly glow).
+		if (ndl > 0.0 && giSceneAnyHit(hitPos + hitNormal * 0.05, uSunDirRadius.xyz, 0.02, 10000.0))
+			ndl = 0.0;
+		radiance = albedo * uSunColor.rgb * ndl;
+		int lightCount = int(uSunDirRadius.w);
+		for (int i = 0; i < lightCount; ++i)
+		{
+			vec3 toL = uLightPosRange[i].xyz - hitPos;
+			float d  = max(length(toL), 1e-4);
+			float range = max(uLightPosRange[i].w, 1e-4);
+			if (d >= range) continue; // outside the attenuation radius
+			vec3 L = toL / d;
+			float ndl2 = max(dot(hitNormal, L), 0.0);
+			if (ndl2 <= 0.0) continue;
+			float atten = 1.0 - d / range;
+			atten *= atten;
+			if (uLightColorType[i].w > 1.5)
+			{
+				float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+				float cosCone = uLightDirCos[i].w;
+				atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+			}
+			if (atten <= 0.0) continue;
+			// Secondary occlusion ray to the light — no bounce leaking.
+			if (giSceneAnyHit(hitPos + hitNormal * 0.05, L, 0.02, max(d - 0.1, 0.02)))
+				continue;
+			radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+		}
+		// Multi-bounce feedback (DDGI recursion): light already gathered in the
+		// probe field re-reflects off this surface — a red wall visibly bleeds
+		// red onto neighbouring geometry, and the series converges toward
+		// infinite bounces through the EMA. albedo < 1 keeps it stable.
+		radiance += albedo * giSampleFieldIrradiance(hitPos, hitNormal);
+	}
+
+	int probesPerRow = max(1, int(uGridCounts.w));
+	ivec2 outCoord = ivec2((probeIndex % probesPerRow) * kOctSize + texel.x,
+	                       (probeIndex / probesPerRow) * kOctSize + texel.y);
+
+	// Adaptive hysteresis (see the Metal kernels): deterministic gather rays →
+	// deltas are real scene changes; converge fast on change, stay smooth else.
+	float baseH = clamp(uRayParams.y, 0.0, 0.98);
+	vec4 oldIrr = imageLoad(uIrr, outCoord);
+	float hIrr = mix(baseH, 0.3, clamp(length(radiance - oldIrr.rgb) * 4.0, 0.0, 1.0));
+	imageStore(uIrr, outCoord, vec4(mix(radiance, oldIrr.rgb, hIrr), 1.0));
+	vec4 oldVis = imageLoad(uVis, outCoord);
+	vec2 newVisSample = vec2(dist, dist * dist);
+	float hVis = mix(baseH, 0.3, clamp(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0), 0.0, 1.0));
+	imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0));
+}
+)GLSL";
+
 static const char* kSSAOPosVS = R"GLSL(
 #version 410 core
 layout(location = 0) in vec3 aPos;
@@ -2469,6 +3032,27 @@ static const char* kSSAOPosFS = R"GLSL(
 in vec3 vViewPos;
 out vec4 FragColor;
 void main() { FragColor = vec4(vViewPos, 1.0); } // a = 1 → valid geometry
+)GLSL";
+
+// Deferred (plan P5): reconstruct the view-space position from the G-buffer
+// depth instead of re-rasterizing the scene — the whole geometry pre-pass above
+// collapses into one fullscreen draw when the G-buffer exists this frame.
+// Shares the tonemap fullscreen-triangle VS (vUV, bottom-left origin, matching
+// the GL depth convention d*2-1 → ndc z).
+static const char* kSSAODepthPosFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepth;    // G-buffer depth texture
+uniform mat4      uInvProj;  // inverse camera projection (GL convention)
+out vec4 FragColor;
+void main()
+{
+	float d = texture(uDepth, vUV).r;
+	if (d >= 1.0) { FragColor = vec4(0.0); return; } // background → a = 0
+	vec4 clip = vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec4 v = uInvProj * clip;
+	FragColor = vec4(v.xyz / max(v.w, 1e-8), 1.0);   // a = 1 → valid geometry
+}
 )GLSL";
 
 // Occlusion estimate (fullscreen, shares the tonemap fullscreen-triangle VS).
@@ -2784,7 +3368,24 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)))
 		throw std::runtime_error("OpenGLRenderer: gladLoadGLLoader failed");
 
+	// Ray-traced GI needs compute shaders + SSBOs + image load/store — all core
+	// in GL 4.3. Windows/Linux drivers give 4.3+; macOS GL is capped at 4.1, so
+	// this stays false there and the Metal backend covers GI on Apple instead.
+	m_giSupported = (GLAD_GL_VERSION_4_3 != 0);
+	Logger::Log(Logger::LogLevel::Info,
+	            m_giSupported ? "OpenGLRenderer: GL 4.3+ — GI (compute) supported"
+	                          : "OpenGLRenderer: GL < 4.3 — GI unavailable (CSM/AO fallback)");
+
 	m_shaderManager = OpenGLShaderManager();
+
+	// Deferred-path debug/headless knobs (mirrors the Metal backend):
+	// HE_RENDER_PATH=1/deferred forces the path without touching config,
+	// HE_DUMP_GBUFFER=1..4 makes the resolve output a raw G-buffer view.
+	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
+		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
+			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
+		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
 
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
@@ -2890,9 +3491,12 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
+	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
+	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
+	m_giLocsUnlit    = FetchGISceneLocs(m_unlitProgram);
 }
 
 #if defined(HE_HAVE_SHADERC)
@@ -2902,6 +3506,13 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
 {
 	if (!m_contentManager) return false;
 	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+}
+
+bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+                                             std::string& vertBody)
+{
+	if (!m_contentManager) return false;
+	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -2986,7 +3597,7 @@ void glSaveCachedProgram(const std::filesystem::path& path, GLuint prog)
 }
 } // namespace
 
-unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled)
 {
@@ -3029,6 +3640,30 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 			const std::string nm = "heTexP" + std::to_string(k);
 			if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 		}
+		// GI screen-space shadow masks for heLitP() — units 9/10 (0-8 are taken
+		// by the material/scene inputs).
+		if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
+		if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
+		// heCsm (CSM fallback, sampler2DArray) — unit 11. GL keeps csmSplits.w = 0
+		// (single shadow map, never sampled), but the unit MUST be assigned: left
+		// at 0 it would alias heTex0's unit with a different sampler type, which
+		// is a draw-time validation error on strict drivers.
+		if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
+		// heLocalShadow (local point/spot shadow atlas, sampler2DArray) — unit 12,
+		// where DrawScene binds the atlas alongside the built-in shaders' unit 11.
+		if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
+		// heLandscapeWeights (landscape layer weightmap) — unit 13. Bound PER DRAW
+		// from the terrain chunk's parent landscape, so two landscapes can share a
+		// material and still carry their own paint.
+		if (GLint l = glGetUniformLocation(prog, "heLandscapeWeights"); l >= 0) glUniform1i(l, 13);
+		// heSkyEnv (samplerCube, image-based ambient + fog colour) = unit 14,
+		// heAO (screen-space SSAO/HBAO/GTAO result) = unit 15. Per-FRAME state,
+		// bound alongside the other shared material inputs in DrawScene.
+		if (GLint l = glGetUniformLocation(prog, "heSkyEnv"); l >= 0) glUniform1i(l, 14);
+		if (GLint l = glGetUniformLocation(prog, "heAO");     l >= 0) glUniform1i(l, 15);
+		// DDGI probe atlases = units 16/17 (irradiance / visibility).
+		if (GLint l = glGetUniformLocation(prog, "heGIIrradiance"); l >= 0) glUniform1i(l, 16);
+		if (GLint l = glGetUniformLocation(prog, "heGIVisibility"); l >= 0) glUniform1i(l, 17);
 		glUseProgram(0);
 	};
 
@@ -3107,7 +3742,7 @@ unsigned int OpenGLRenderer::getOrBuildMaterialProgram(uint64_t key, const std::
 // splicing + relies on the driver compiler only; null → generate the templates from
 // `config` right now via HE::generateParticleShaderSource (see that function's
 // comment on why it takes the resolved config, not the graph).
-unsigned int OpenGLRenderer::getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+unsigned int OpenGLRenderer::GetOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
                                                        const ParticleShaderVariant* precompiled)
 {
 	if (auto it = m_particlePrograms.find(key); it != m_particlePrograms.end()) return it->second;
@@ -3158,7 +3793,7 @@ unsigned int OpenGLRenderer::getOrBuildParticleProgram(uint64_t key, const HE::P
 // repurposed — model[0]=rect px, model[1]=uvRect, model[2].xy=viewport px, color=
 // tint; see MaterialShaderLibrary::uiVertex). Same fragment hash as the mesh path,
 // but a different vertex → own cache. Cached by hash; 0 cached on failure.
-unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materialId)
+unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materialId)
 {
 	uint64_t key = 0; std::string fragGlsl, vertBody;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
@@ -3197,6 +3832,13 @@ unsigned int OpenGLRenderer::getOrBuildUIMaterialProgram(const HE::UUID& materia
 				const std::string nm = "heTexP" + std::to_string(k);
 				if (GLint l = glGetUniformLocation(prog, nm.c_str()); l >= 0) glUniform1i(l, k + 1);
 			}
+			// GI masks for heLitP() — units 9/10 (UI materials never sample them:
+			// giParams.z stays 0 on the UI path, but the units must be assigned).
+			if (GLint l = glGetUniformLocation(prog, "heGIShadow"); l >= 0) glUniform1i(l, 9);
+			if (GLint l = glGetUniformLocation(prog, "heGILocal");  l >= 0) glUniform1i(l, 10);
+			// heCsm — unit 11, same aliasing rationale as the mesh-material path.
+			if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
+			if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
 			glUseProgram(0);
 			program = prog;
 		}
@@ -3283,9 +3925,12 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedCameraFwd          = loc("uCameraFwd");
 	m_uSkinnedShadowDebug        = loc("uShadowDebug");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
+	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
+	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
+	m_giLocsSkinned              = FetchGISceneLocs(m_skinnedProgram);
 }
 
 void OpenGLRenderer::CreateInstancedPipeline()
@@ -3337,9 +3982,12 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstShadowDebug      = loc("uShadowDebug");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
+	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
+	m_uInstLocalShadowMap   = loc("uLocalShadowMap");
 	m_uInstAO               = loc("uAO");
 	m_uInstViewport         = loc("uViewport");
 	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
+	m_giLocsInstanced       = FetchGISceneLocs(m_instancedProgram);
 }
 
 void OpenGLRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -3389,6 +4037,19 @@ void OpenGLRenderer::CreateShadowResources()
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
 	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	const float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
+
+	// Local (point/spot) shadow atlas: same depth-array pattern, 16 layers
+	// (spot = 1 layer, point = 6 cube-face layers), lower per-view resolution.
+	glGenTextures(1, &m_localShadowDepthTex);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex);
+	glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+	             m_localShadowSize, m_localShadowSize, ShadowData::kMaxLocalShadowLayers,
+	             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, border);
 
 	// FBO is completed per cascade in the pass; attach layer 0 here so the initial
@@ -3481,7 +4142,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 #else
 	constexpr int kNoiseN = 64;
 #endif
-	const std::vector<uint16_t> noise = BuildSkyNoise3D(kNoiseN);
+	const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
 	glTexImage3D(GL_TEXTURE_3D, 0, GL_RG16, kNoiseN, kNoiseN, kNoiseN, 0,
@@ -3679,12 +4340,12 @@ void OpenGLRenderer::DestroyBloomTargets()
 	m_bloomW = m_bloomH = 0;
 }
 
-void OpenGLRenderer::EnsureCloudFBO(int width, int height)
+void OpenGLRenderer::EnsureCloudTarget(int width, int height)
 {
 	width  = std::max(1, width);
 	height = std::max(1, height);
 	if (m_cloudFBO && width == m_cloudW && height == m_cloudH) return;
-	DestroyCloudFBO();
+	DestroyCloudTarget();
 	glGenFramebuffers(1, &m_cloudFBO);
 	glGenTextures(1, &m_cloudTex);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
@@ -3703,7 +4364,7 @@ void OpenGLRenderer::EnsureCloudFBO(int width, int height)
 	m_cloudH = height;
 }
 
-void OpenGLRenderer::DestroyCloudFBO()
+void OpenGLRenderer::DestroyCloudTarget()
 {
 	if (m_cloudFBO) glDeleteFramebuffers(1, &m_cloudFBO);
 	if (m_cloudTex) glDeleteTextures(1, &m_cloudTex);
@@ -3752,36 +4413,9 @@ unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
 }
 
 // ─── SSAO ────────────────────────────────────────────────────────────────────
-// Deterministic [0,1) RNG so the GL and Metal backends build the *identical*
-// hemisphere kernel and rotation noise — a prerequisite for GL == Metal parity.
-struct SsaoRng { uint32_t s; float next() { s = s * 1664525u + 1013904223u; return float(s >> 8) * (1.0f / 16777216.0f); } };
-
-// Cosine-ish hemisphere kernel oriented to +Z, packed toward the origin so close
-// occluders dominate. Shared verbatim with the Metal backend.
-static std::vector<glm::vec3> BuildSSAOKernel(int n)
-{
-	SsaoRng rng{ 0x9E3779B9u };
-	std::vector<glm::vec3> k(n);
-	for (int i = 0; i < n; ++i)
-	{
-		glm::vec3 s(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, rng.next());
-		s = glm::normalize(s) * rng.next();
-		float t = static_cast<float>(i) / static_cast<float>(n);
-		s *= 0.1f + 0.9f * t * t;   // accelerate the distribution toward the centre
-		k[i] = s;
-	}
-	return k;
-}
-// 4×4 tile of random rotation vectors in the tangent plane (z = 0). Returned as
-// vec3 so the upload matches GL_RGB. Shared verbatim with the Metal backend.
-static std::vector<glm::vec3> BuildSSAONoise(int n)
-{
-	SsaoRng rng{ 0x2545F491u };
-	std::vector<glm::vec3> v(n);
-	for (int i = 0; i < n; ++i)
-		v[i] = glm::vec3(rng.next() * 2.0f - 1.0f, rng.next() * 2.0f - 1.0f, 0.0f);
-	return v;
-}
+// Kernel + rotation noise come from HorizonRendering/SsaoKernel.h: the same
+// deterministic samples every backend bakes, which is what makes GL == Metal ==
+// Vulkan == D3D SSAO parity possible.
 
 void OpenGLRenderer::CreateSSAOPipeline()
 {
@@ -3796,6 +4430,18 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		glDeleteShader(vs); glDeleteShader(fs);
 		m_uPosMVP       = glGetUniformLocation(m_ssaoPosProgram, "uMVP");
 		m_uPosModelView = glGetUniformLocation(m_ssaoPosProgram, "uModelView");
+	}
+	// Deferred P5 pre-pass variant: view-pos from the G-buffer depth (fullscreen).
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAODepthPosFS);
+		m_ssaoDepthPosProgram = glCreateProgram();
+		glAttachShader(m_ssaoDepthPosProgram, vs);
+		glAttachShader(m_ssaoDepthPosProgram, fs);
+		glLinkProgram(m_ssaoDepthPosProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uDepthPosDepth   = glGetUniformLocation(m_ssaoDepthPosProgram, "uDepth");
+		m_uDepthPosInvProj = glGetUniformLocation(m_ssaoDepthPosProgram, "uInvProj");
 	}
 	// Occlusion program (reuses the tonemap fullscreen-triangle VS).
 	{
@@ -3835,14 +4481,14 @@ void OpenGLRenderer::CreateSSAOPipeline()
 	}
 	// Upload the (constant) hemisphere kernel once.
 	{
-		const std::vector<glm::vec3> kernel = BuildSSAOKernel(kSSAOKernel);
+		const std::vector<glm::vec3> kernel = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
 		glUseProgram(m_ssaoProgram);
-		glUniform3fv(m_uSsaoKernel, kSSAOKernel, glm::value_ptr(kernel[0]));
+		glUniform3fv(m_uSsaoKernel, HE::kSsaoKernelSize, glm::value_ptr(kernel[0]));
 		glUseProgram(0);
 	}
 	// 4×4 rotation-noise texture (NEAREST + REPEAT so it tiles per 4×4 screen block).
 	{
-		const std::vector<glm::vec3> noise = BuildSSAONoise(16);
+		const std::vector<glm::vec3> noise = HE::BuildSSAONoise(HE::kSsaoNoiseCount);
 		glGenTextures(1, &m_ssaoNoiseTex);
 		glBindTexture(GL_TEXTURE_2D, m_ssaoNoiseTex);
 		// RGBA32F so the rotation vectors are bit-identical to the Metal backend's.
@@ -3871,6 +4517,550 @@ void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoRadius    = s.radius;
 	m_ssaoIntensity = s.intensity;
 	m_ssaoMethod    = s.method;
+}
+
+void OpenGLRenderer::SetGISettings(const GISettings& s)
+{
+	m_giEnabled            = s.enabled && m_giSupported;
+	m_giIndirectIntensity  = std::max(0.0f, s.indirectIntensity);
+	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
+	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
+	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
+
+// ─── Global Illumination: CPU BVH acceleration structures (GL-A) ─────────────
+// The software counterpart of Metal's EncodeGIAccelBuild: per-mesh BLASes are
+// built once on the CPU (HE::buildGiBvh — the traversal the GLSL kernels will
+// mirror is unit-tested in test_gi_bvh.cpp) and concatenated into two shared
+// SSBOs; instances are a flat per-frame array referencing BLAS ranges. In
+// GL-A nothing samples these yet — upload only, zero visual change.
+
+OpenGLRenderer::GIBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
+{
+	GIBlasRange range;
+	if (!m_contentManager) return range;
+	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
+	if (!asset || asset->indices.empty()) return range;
+
+	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
+	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
+	// tightly packed 3-float positions.
+	HE::GiBvh bvh;
+	if (asset->cooked && !asset->interleaved.empty())
+		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+		                     asset->indices.data(), asset->indices.size());
+	else if (!asset->vertices.empty())
+		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+		                     asset->indices.data(), asset->indices.size());
+	if (!bvh.valid()) return range;
+
+	range.nodeOffset = static_cast<int32_t>(m_giNodesCpu.size());
+	range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
+	range.triOffset  = static_cast<int32_t>(m_giTrisCpu.size());
+	range.triCount   = static_cast<int32_t>(bvh.triangles.size());
+	range.valid      = true;
+	m_giNodesCpu.insert(m_giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
+	m_giTrisCpu.insert(m_giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
+	m_giBlasDirty = true;
+	return range;
+}
+
+void OpenGLRenderer::UpdateGIAccel()
+{
+	m_giInstanceCount = 0;
+	if (!m_giEnabled || !m_giSupported) return;
+
+	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
+	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
+	// arbitrary directions, an off-screen caster still occludes/bounces.
+	m_giInstancesCpu.clear();
+	auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
+	{
+		auto it = m_giBlasCache.find(id);
+		if (it == m_giBlasCache.end())
+			it = m_giBlasCache.emplace(id, BuildGIBlas(id)).first;
+		return it->second;
+	};
+	for (const RenderObject& obj : m_renderWorld.objects)
+	{
+		if (!obj.castsShadow) continue;
+		// Default-cube fallback — an entity without a resolvable mesh asset
+		// RENDERS as the default cube (draw-loop fallback), so it must occlude
+		// as one too, or plain cube entities cast no GI shadow at all.
+		GIBlasRange range = resolveRange(obj.meshAssetId);
+		if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
+		if (!range.valid) continue;
+		GIInstanceGpu inst;
+		inst.invTransform = glm::inverse(obj.transform);
+		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+		inst.nodeOffset   = range.nodeOffset;
+		inst.triOffset    = range.triOffset;
+		m_giInstancesCpu.push_back(inst);
+	}
+	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
+	if (m_giInstanceCount == 0) return;
+
+	// SSBO uploads: nodes/tris only when a new BLAS was appended, instances
+	// every frame (transforms move). GL_SHADER_STORAGE_BUFFER is a 4.3 enum but
+	// only reached behind m_giSupported.
+	if (!m_giNodeSSBO)     glGenBuffers(1, &m_giNodeSSBO);
+	if (!m_giTriSSBO)      glGenBuffers(1, &m_giTriSSBO);
+	if (!m_giInstanceSSBO) glGenBuffers(1, &m_giInstanceSSBO);
+	if (m_giBlasDirty)
+	{
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giNodeSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(m_giNodesCpu.size() * sizeof(HE::GiBvhNode)),
+		             m_giNodesCpu.data(), GL_STATIC_DRAW);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giTriSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(m_giTrisCpu.size() * sizeof(HE::GiBvhTriangle)),
+		             m_giTrisCpu.data(), GL_STATIC_DRAW);
+		m_giBlasDirty = false;
+	}
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giInstanceSSBO);
+	glBufferData(GL_SHADER_STORAGE_BUFFER,
+	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GIInstanceGpu)),
+	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void OpenGLRenderer::DestroyGIAccel()
+{
+	if (m_giNodeSSBO)     { glDeleteBuffers(1, &m_giNodeSSBO);     m_giNodeSSBO = 0; }
+	if (m_giTriSSBO)      { glDeleteBuffers(1, &m_giTriSSBO);      m_giTriSSBO = 0; }
+	if (m_giInstanceSSBO) { glDeleteBuffers(1, &m_giInstanceSSBO); m_giInstanceSSBO = 0; }
+	m_giBlasCache.clear();
+	m_giNodesCpu.clear();
+	m_giTrisCpu.clear();
+	m_giInstancesCpu.clear();
+	m_giInstanceCount = 0;
+	m_giBlasDirty     = false;
+}
+
+OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int program) const
+{
+	GISceneLocs l;
+	l.enabled    = glGetUniformLocation(program, "uGIEnabled");
+	l.shadowTex  = glGetUniformLocation(program, "uGIShadow");
+	l.irrTex     = glGetUniformLocation(program, "uGIIrr");
+	l.visTex     = glGetUniformLocation(program, "uGIVis");
+	l.localTex   = glGetUniformLocation(program, "uGILocal");
+	l.gridOrigin = glGetUniformLocation(program, "uGIGridOrigin");
+	l.gridCounts = glGetUniformLocation(program, "uGIGridCounts");
+	l.intensity  = glGetUniformLocation(program, "uGIIntensity");
+	return l;
+}
+
+// Pushes the GI scene uniforms onto the CURRENTLY BOUND program (texture
+// units are shared; only location integers differ between the three programs
+// sharing kUnlitFS). Inactive → just flips uGIEnabled off.
+void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active)
+{
+	if (L.enabled >= 0) glUniform1i(L.enabled, active ? 1 : 0);
+	if (!active) return;
+	glUniform1i(L.shadowTex, 5);
+	glUniform1i(L.irrTex,    6);
+	glUniform1i(L.visTex,    7);
+	glUniform1i(L.localTex,  8);
+	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(L.gridCounts, static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+	glUniform1f(L.intensity, m_giIndirectIntensity);
+}
+
+// Lazily builds the five GI programs on the first GI-active frame. The two
+// compute stages are GLSL 430 (traversal prefix + kernel, string-concatenated
+// — GLSL has no #include) and only ever reach the compiler behind
+// m_giSupported. A compile/link failure on an exotic driver logs + disables GI
+// for the session instead of throwing the app down (blind-port safety).
+void OpenGLRenderer::CreateGIPipelines()
+{
+	if (m_giPipelinesBuilt) return;
+	m_giPipelinesBuilt = true; // one attempt per session, success or not
+	try
+	{
+		auto link = [](GLuint vs, GLuint fs) -> GLuint
+		{
+			GLuint prog = glCreateProgram();
+			glAttachShader(prog, vs);
+			glAttachShader(prog, fs);
+			glLinkProgram(prog);
+			glDeleteShader(vs); glDeleteShader(fs);
+			GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (!ok)
+			{
+				GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				glDeleteProgram(prog);
+				throw std::runtime_error(std::string("GI program link failed: ") + log);
+			}
+			return prog;
+		};
+		auto linkCompute = [](const std::string& src) -> GLuint
+		{
+			GLuint cs   = CompileStage(GL_COMPUTE_SHADER, src.c_str());
+			GLuint prog = glCreateProgram();
+			glAttachShader(prog, cs);
+			glLinkProgram(prog);
+			glDeleteShader(cs);
+			GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+			if (!ok)
+			{
+				GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				glDeleteProgram(prog);
+				throw std::runtime_error(std::string("GI compute link failed: ") + log);
+			}
+			return prog;
+		};
+
+		m_giGBufProgram = link(CompileStage(GL_VERTEX_SHADER,   kGiGBufVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS));
+		m_giTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
+		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		const std::string header = "#version 430 core\n";
+		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
+		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
+		Logger::Log(Logger::LogLevel::Info, "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
+	}
+	catch (const std::exception& e)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+		            (std::string("OpenGLRenderer: GI pipeline build failed — GI disabled: ") + e.what()).c_str());
+		if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
+		if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
+		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
+		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
+		m_giSupported = false;
+	}
+}
+
+void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
+{
+	width = std::max(1, width); height = std::max(1, height);
+	if (m_giGBufFBO && width == m_giShadowW && height == m_giShadowH) return;
+	DestroyGIShadowTargets();
+	m_giShadowW = width; m_giShadowH = height;
+
+	auto makeTex = [&](GLenum internal, GLenum filter) -> GLuint
+	{
+		GLuint t = 0;
+		glGenTextures(1, &t);
+		glBindTexture(GL_TEXTURE_2D, t);
+		// Immutable storage (4.2+, behind the 4.3 gate) — image load/store safe.
+		glTexStorage2D(GL_TEXTURE_2D, 1, internal, width, height);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(filter));
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return t;
+	};
+
+	// World-space G-buffer: pos + normal MRT + depth.
+	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
+	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
+	glGenTextures(1, &m_giGBufDepth);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufDepth);
+	glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT24, width, height);
+	glGenFramebuffers(1, &m_giGBufFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giGBufPosTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_giGBufNormTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,  GL_TEXTURE_2D, m_giGBufDepth, 0);
+	const GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+	glDrawBuffers(2, bufs);
+
+	// Raw mask (compute image store) + ping-pong temporal history + blurred result.
+	m_giRawTex = makeTex(GL_R16F, GL_NEAREST);
+	// Per-pixel local (point/spot) light visibility — 1 channel per light,
+	// first 4. Deterministic hard rays → no temporal/blur chain; the scene
+	// shader samples it directly (LINEAR = free bilinear upsample, like the
+	// blurred sun mask).
+	m_giLocalMaskTex = makeTex(GL_RGBA16F, GL_LINEAR);
+	for (int i = 0; i < 2; ++i)
+	{
+		m_giHistTex[i] = makeTex(GL_RGBA16F, GL_NEAREST);
+		glGenFramebuffers(1, &m_giHistFBO[i]);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giHistFBO[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giHistTex[i], 0);
+	}
+	// The scene shader samples the result full-res — LINEAR = free bilinear upsample.
+	m_giResultTex = makeTex(GL_R16F, GL_LINEAR);
+	glGenFramebuffers(1, &m_giResultFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_giHistValid = false; // fresh targets → no usable history
+}
+
+void OpenGLRenderer::DestroyGIShadowTargets()
+{
+	if (m_giGBufFBO)     { glDeleteFramebuffers(1, &m_giGBufFBO);   m_giGBufFBO = 0; }
+	if (m_giGBufPosTex)  { glDeleteTextures(1, &m_giGBufPosTex);    m_giGBufPosTex = 0; }
+	if (m_giGBufNormTex) { glDeleteTextures(1, &m_giGBufNormTex);   m_giGBufNormTex = 0; }
+	if (m_giGBufDepth)   { glDeleteTextures(1, &m_giGBufDepth);     m_giGBufDepth = 0; }
+	if (m_giRawTex)      { glDeleteTextures(1, &m_giRawTex);        m_giRawTex = 0; }
+	if (m_giLocalMaskTex) { glDeleteTextures(1, &m_giLocalMaskTex); m_giLocalMaskTex = 0; }
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_giHistFBO[i]) { glDeleteFramebuffers(1, &m_giHistFBO[i]); m_giHistFBO[i] = 0; }
+		if (m_giHistTex[i]) { glDeleteTextures(1, &m_giHistTex[i]);     m_giHistTex[i] = 0; }
+	}
+	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
+	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	m_giShadowW = m_giShadowH = 0;
+	m_giHistValid = false;
+}
+
+// One-shot probe-grid fit over the scene AABB (Metal lesson: refresh
+// worldBounds from the real mesh bounds first — the extractor leaves them
+// invalid or proxy-sized, so unioning them raw undersizes the grid).
+void OpenGLRenderer::EnsureGIProbeGrid()
+{
+	if (m_giProbeGridBuilt) return;
+	if (m_renderWorld.objects.empty()) return;
+
+	HE::AABB sceneBox;
+	for (RenderObject& obj : m_renderWorld.objects)
+	{
+		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+		if (obj.worldBounds.isValid())
+			sceneBox.expand(obj.worldBounds);
+	}
+	if (!sceneBox.isValid()) return;
+
+	const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
+	m_giGridCounts = glm::ivec3(
+		std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
+		std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
+	const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGIProbeSpacing;
+	m_giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
+	m_giProbeCount   = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
+	m_giProbesPerRow = std::min(m_giProbeCount, 32);
+	m_giProbeCursor  = 0;
+	m_giProbeGridBuilt = true;
+	Logger::Log(Logger::LogLevel::Info,
+	            ("OpenGLRenderer: GI probe grid " + std::to_string(m_giGridCounts.x) + "x"
+	             + std::to_string(m_giGridCounts.y) + "x" + std::to_string(m_giGridCounts.z)
+	             + " (" + std::to_string(m_giProbeCount) + " probes)").c_str());
+}
+
+void OpenGLRenderer::EnsureGIProbeAtlas()
+{
+	if (m_giIrrAtlas || m_giProbeCount <= 0) return;
+	const int rows = (m_giProbeCount + m_giProbesPerRow - 1) / m_giProbesPerRow;
+	const int w = m_giProbesPerRow * kGIProbeOctSize;
+	const int h = rows * kGIProbeOctSize;
+
+	auto makeAtlas = [&](GLenum internal) -> GLuint
+	{
+		GLuint t = 0;
+		glGenTextures(1, &t);
+		glBindTexture(GL_TEXTURE_2D, t);
+		glTexStorage2D(GL_TEXTURE_2D, 1, internal, w, h);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return t;
+	};
+	m_giIrrAtlas = makeAtlas(GL_RGBA16F);
+	m_giVisAtlas = makeAtlas(GL_RG16F);
+
+	// glTexStorage2D contents are undefined and the probe kernel EMA-reads its
+	// own previous value — clear both once via a throwaway FBO
+	// (glClearTexImage is 4.4, one step above the 4.3 gate).
+	GLuint fbo = 0;
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giIrrAtlas, 0);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giVisAtlas, 0);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroyGIProbeAtlas()
+{
+	if (m_giIrrAtlas) { glDeleteTextures(1, &m_giIrrAtlas); m_giIrrAtlas = 0; }
+	if (m_giVisAtlas) { glDeleteTextures(1, &m_giVisAtlas); m_giVisAtlas = 0; }
+	m_giProbeGridBuilt = false;
+	m_giProbeCount = 0;
+	m_giProbeCursor = 0;
+}
+
+unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width, int height,
+                                            const glm::mat4& viewProj)
+{
+	CreateGIPipelines();
+	if (!m_giGBufProgram || !m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram)
+		return 0;
+	EnsureGIShadowTargets(width, height);
+	if (!m_giGBufFBO) return 0;
+
+	// ── 1. World-space G-buffer (position + normal, half-res MRT). Same draw
+	// set as the scene pass — every shaded pixel needs a mask value.
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
+	glViewport(0, 0, width, height);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_TRUE);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // a = 0 → background
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUseProgram(m_giGBufProgram);
+	const GLint uMVP   = glGetUniformLocation(m_giGBufProgram, "uMVP");
+	const GLint uModel = glGetUniformLocation(m_giGBufProgram, "uModel");
+	{
+		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
+		for (const DrawCall& dc : cmds.drawCalls())
+		{
+			if (!dc.contributesAO) continue; // precip/particles don't shade the mask
+			if (!valid || dc.meshAssetId != lastId)
+			{ cMesh = ResolveMesh(dc.meshAssetId); lastId = dc.meshAssetId; valid = true; }
+			const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			if (!mesh) continue;
+			glBindVertexArray(mesh->vao);
+			auto drawOne = [&](const glm::mat4& t)
+			{
+				glUniformMatrix4fv(uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * t));
+				glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(t));
+				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			};
+			if (!dc.instanceTransforms.empty())
+				for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+			else
+				drawOne(dc.transform);
+		}
+	}
+
+	// ── 2. Shadow rays (compute, 1 ray/pixel against the BVH SSBOs) ──────────
+	glUseProgram(m_giShadowCSProgram);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGPos"), 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufNormTex);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGNorm"), 1);
+	glBindImageTexture(0, m_giRawTex,       0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+	glBindImageTexture(1, m_giLocalMaskTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+	glm::vec3 towardLight, lightColorIntensity;
+	m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
+	m_giFrameSeed += 1.0f;
+	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uSunDirRadius"),
+	            towardLight.x, towardLight.y, towardLight.z, glm::radians(m_giLightRadius));
+	glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uFrame"),
+	            m_giFrameSeed, static_cast<float>(width), static_cast<float>(height), 0.0f);
+	// First 4 local (point/spot) lights of the same 8-light window the scene
+	// shader iterates — its channel index is a plain counter over type != 0
+	// in the SAME order (see HE::BuildMaskedLocalLights for the full why).
+	{
+		const HE::PackedLocalShadowLights masked = HE::BuildMaskedLocalLights(m_renderWorld);
+		glUniform4fv(glGetUniformLocation(m_giShadowCSProgram, "uLocalPosRange"),
+		             HE::kMaxMaskedLocalLights, glm::value_ptr(masked.posRange[0]));
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
+		            static_cast<float>(masked.count), 0.0f, 0.0f, 0.0f);
+	}
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
+	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
+	// The temporal pass SAMPLES the image-stored raw mask next.
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	// ── 3. Temporal accumulation (fullscreen, ping-pong history) ─────────────
+	const int curIdx = m_giHistIdx, prevIdx = 1 - curIdx;
+	glDisable(GL_DEPTH_TEST);
+	glBindVertexArray(m_fsVAO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giHistFBO[curIdx]);
+	glUseProgram(m_giTemporalProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uGPos"), 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_giRawTex);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uRaw"), 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_giHistTex[prevIdx]);
+	glUniform1i(glGetUniformLocation(m_giTemporalProgram, "uHistory"), 2);
+	glUniformMatrix4fv(glGetUniformLocation(m_giTemporalProgram, "uPrevViewProj"),
+	                   1, GL_FALSE, glm::value_ptr(m_giPrevViewProj));
+	glUniform1f(glGetUniformLocation(m_giTemporalProgram, "uBlend"), m_giHistValid ? 0.9f : 0.0f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	m_giHistValid   = true;
+	m_giHistIdx     = prevIdx;
+	m_giPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+	// ── 4. Spatial blur → the mask the scene shader samples ─────────────────
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
+	glUseProgram(m_giBlurProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_giHistTex[curIdx]);
+	glUniform1i(glGetUniformLocation(m_giBlurProgram, "uSrc"), 0);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_DEPTH_TEST);
+	return m_giResultTex;
+}
+
+void OpenGLRenderer::DispatchGIProbeUpdate()
+{
+	if (!m_giProbeCSProgram || m_giInstanceCount == 0) return;
+	EnsureGIProbeGrid();
+	if (!m_giProbeGridBuilt) return;
+	EnsureGIProbeAtlas();
+	if (!m_giIrrAtlas || !m_giVisAtlas) return;
+
+	const int budget = std::min(m_giProbeBudgetPerFrame > 0 ? m_giProbeBudgetPerFrame : 1, m_giProbeCount);
+
+	glUseProgram(m_giProbeCSProgram);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	glBindImageTexture(0, m_giIrrAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
+	glBindImageTexture(1, m_giVisAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RG16F);
+
+	auto loc = [&](const char* n) { return glGetUniformLocation(m_giProbeCSProgram, n); };
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+	glUniform4f(loc("uRayParams"), maxDist, 0.92f,
+	            static_cast<float>(m_giProbeCursor), static_cast<float>(budget));
+
+	// Dominant directional + up to 8 local lights — the same bounce estimate
+	// (and the same night/local-light lessons) as Metal's EncodeGIProbeUpdate.
+	glm::vec3 towardLight, lightColorIntensity;
+	m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
+	const HE::PackedLightArray lights = HE::BuildPackedLightArray(m_renderWorld);
+	glUniform4f(loc("uSunDirRadius"), towardLight.x, towardLight.y, towardLight.z,
+	            static_cast<float>(lights.count));
+	glUniform4f(loc("uSunColor"), lightColorIntensity.r, lightColorIntensity.g, lightColorIntensity.b, 0.0f);
+	glUniform4f(loc("uSkyAmbient"), m_renderWorld.ambient.r, m_renderWorld.ambient.g, m_renderWorld.ambient.b, 0.0f);
+	if (lights.count > 0)
+	{
+		glUniform4fv(loc("uLightPosRange"),  lights.count, glm::value_ptr(lights.posRange[0]));
+		glUniform4fv(loc("uLightColorType"), lights.count, glm::value_ptr(lights.colorType[0]));
+		glUniform4fv(loc("uLightDirCos"),    lights.count, glm::value_ptr(lights.dirCos[0]));
+	}
+	glUniform1i(loc("uGiInstanceCount"), m_giInstanceCount);
+
+	glDispatchCompute(static_cast<GLuint>(budget), 1, 1);
+	// Next frame's dispatch EMA-reads these texels, and the scene pass samples
+	// them as textures right after — both need the barrier.
+	glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	m_giProbeCursor = (m_giProbeCursor + budget) % m_giProbeCount;
 }
 
 void OpenGLRenderer::EnsureSSAOTargets(int width, int height)
@@ -3938,13 +5128,33 @@ void OpenGLRenderer::DestroySSAOTargets()
 // Pre-pass (view position) → occlusion → blur. Leaves GL_TEXTURE0 active and the
 // depth test disabled; the caller re-binds its own target + depth state.
 unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
-	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj)
+	const glm::mat4& viewProj, const glm::mat4& view, const glm::mat4& proj,
+	bool fromGBufferDepth)
 {
 	if (!m_ssaoPosProgram || !m_ssaoProgram || !m_ssaoBlurProgram) return 0;
+	if (fromGBufferDepth && (!m_ssaoDepthPosProgram || !m_gbDepthTex)) fromGBufferDepth = false;
 	EnsureSSAOTargets(pw, ph);
 	if (!m_ssaoPosFBO) return 0;
 
 	// ── 1. View-space position pre-pass ────────────────────────────────────
+	if (fromGBufferDepth)
+	{
+		// Deferred P5: one fullscreen draw reading the G-buffer depth — no
+		// extract/cull/sort, no geometry re-rasterization.
+		glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
+		glViewport(0, 0, pw, ph);
+		glDisable(GL_DEPTH_TEST);
+		glUseProgram(m_ssaoDepthPosProgram);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+		glUniform1i(m_uDepthPosDepth, 0);
+		glUniformMatrix4fv(m_uDepthPosInvProj, 1, GL_FALSE,
+		                   glm::value_ptr(glm::inverse(proj)));
+		glBindVertexArray(m_fsVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+	else
+	{
 	glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoPosFBO);
 	glViewport(0, 0, pw, ph);
 	glEnable(GL_DEPTH_TEST);
@@ -3984,6 +5194,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 		}
 	}
+	}
 
 	// ── 2. Occlusion (fullscreen) ──────────────────────────────────────────
 	glDisable(GL_DEPTH_TEST);
@@ -4018,7 +5229,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 
 // The R8 atlas texture for a font key (0 = the shared default), uploaded lazily
 // from UIFontCache the first time a glyph quad references it.
-unsigned int OpenGLRenderer::uiFontAtlasTexture(uint32_t key)
+unsigned int OpenGLRenderer::UIFontAtlasTexture(uint32_t key)
 {
 	if (key == 0) return m_uiFontTexture ? m_uiFontTexture : m_whiteTex;
 	if (auto it = m_uiFontAtlases.find(key); it != m_uiFontAtlases.end()) return it->second;
@@ -4080,7 +5291,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
 		const unsigned int matProg = obj.type == 0 && obj.materialAssetId != HE::UUID{}
-			? getOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
+			? GetOrBuildUIMaterialProgram(obj.materialAssetId) : 0;
 		if (matProg)
 		{
 			if (boundMaterial != matProg)
@@ -4100,9 +5311,9 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			// every UI quad this frame, so upload it once per pass.
 			if (!uiLightUploaded)
 			{
-				HE::MaterialShaderLibrary::Lighting lit;
-				const glm::vec3 sd = m_renderWorld.sunDirection;
-				const glm::vec3 sc = GetEnvironment().sunColor;
+				HE::MaterialShaderLibrary::Lighting lit{};
+				glm::vec3 sd, sc;
+				m_renderWorld.dominantDirectionalLight(sd, sc);
 				const glm::vec3 am = m_renderWorld.ambient;
 				lit.sunDir[0]   = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
 				lit.sunDir[3]   = static_cast<float>(SDL_GetTicks()) / 1000.0f;
@@ -4111,6 +5322,10 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				lit.camPos[0]   = m_renderWorld.camera.position.x;
 				lit.camPos[1]   = m_renderWorld.camera.position.y;
 				lit.camPos[2]   = m_renderWorld.camera.position.z;
+				// Full light window for heLitP() — same first-8 order as the built-in
+				// PBR shaders. Shared fill (HE::FillMaterialLightWindow); the UI pass
+				// has no local shadow atlas, so it passes false.
+				HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -4155,7 +5370,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			glUniform2f(m_uUIViewport, static_cast<float>(pw), static_cast<float>(ph));
 			// Font atlas on unit 0 (uFontAtlas); glyphs sample it, solid quads ignore it.
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(0));
+			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(0));
 			boundAtlasKey = 0;
 			basicBound = true; boundMaterial = 0;
 		}
@@ -4163,7 +5378,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
 		{
 			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, uiFontAtlasTexture(obj.fontAtlasKey));
+			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(obj.fontAtlasKey));
 			boundAtlasKey = obj.fontAtlasKey;
 		}
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
@@ -4218,6 +5433,211 @@ void OpenGLRenderer::DestroyHDRTarget()
 	if (m_hdrColor) { glDeleteTextures(1, &m_hdrColor);     m_hdrColor = 0; }
 	if (m_hdrDepth) { glDeleteRenderbuffers(1, &m_hdrDepth);m_hdrDepth = 0; }
 	m_hdrW = m_hdrH = 0;
+}
+
+void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
+{
+	if (m_gbFBO && width == m_gbW && height == m_gbH)
+		return;
+	DestroyGBufferTargets();
+
+	glGenFramebuffers(1, &m_gbFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+
+	auto makeColor = [&](unsigned int& tex, GLenum internalFmt, int attachment)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, width, height, 0, GL_RGBA,
+		             internalFmt == GL_SRGB8_ALPHA8 ? GL_UNSIGNED_BYTE : GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attachment,
+		                       GL_TEXTURE_2D, tex, 0);
+	};
+	// GB0 sRGB (BaseColor is perceptual 8-bit — written with GL_FRAMEBUFFER_SRGB
+	// enabled during the G-buffer pass, decoded automatically on sampling), the
+	// attribute targets RGBA16F. Matches the Metal G-buffer formats.
+	makeColor(m_gbColor0, GL_SRGB8_ALPHA8, 0);
+	makeColor(m_gbColor1, GL_RGBA16F,      1);
+	makeColor(m_gbColor2, GL_RGBA16F,      2);
+	const GLenum bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(3, bufs);
+
+	// Depth as a TEXTURE (the resolve samples it for world-pos reconstruction);
+	// same internal format as m_hdrDepth so the depth blit between them is legal.
+	glGenTextures(1, &m_gbDepthTex);
+	glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+	             GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbDepthTex, 0);
+
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		Logger::Log(Logger::LogLevel::Error, "OpenGLRenderer: G-buffer FBO incomplete");
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_gbW = width;
+	m_gbH = height;
+}
+
+void OpenGLRenderer::DestroyGBufferTargets()
+{
+	if (m_gbFBO)      { glDeleteFramebuffers(1, &m_gbFBO); m_gbFBO = 0; }
+	if (m_gbColor0)   { glDeleteTextures(1, &m_gbColor0);  m_gbColor0 = 0; }
+	if (m_gbColor1)   { glDeleteTextures(1, &m_gbColor1);  m_gbColor1 = 0; }
+	if (m_gbColor2)   { glDeleteTextures(1, &m_gbColor2);  m_gbColor2 = 0; }
+	if (m_gbDepthTex) { glDeleteTextures(1, &m_gbDepthTex);m_gbDepthTex = 0; }
+	m_gbW = m_gbH = 0;
+}
+
+bool OpenGLRenderer::EnsureDeferredPipelines()
+{
+	if (m_gbufferProgram && m_deferredResolveProgram) return true;
+	if (m_deferredPipelinesTried) return false; // failed once — stay forward
+	m_deferredPipelinesTried = true;
+
+#if !defined(HE_HAVE_SHADERC)
+	// The resolve shader is generated from the shared lighting preamble at
+	// runtime — without the cross-compiler there is no deferred path.
+	return false;
+#else
+	auto link = [](const char* what, GLuint vs, GLuint fs) -> GLuint
+	{
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: ") + what + " link failed: " + log).c_str());
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+
+	try
+	{
+		// Built-in-PBR G-buffer programs: the unlit/instanced vertex stages with
+		// the MRT attribute fragment.
+		GLuint gbFS = CompileStage(GL_FRAGMENT_SHADER, kGBufFS);
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER, kUnlitVS);
+			m_gbufferProgram = link("G-buffer program", vs, gbFS);
+			glDeleteShader(vs);
+		}
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER, kInstancedVS);
+			m_gbufferInstancedProgram = link("instanced G-buffer program", vs, gbFS);
+			glDeleteShader(vs);
+		}
+		glDeleteShader(gbFS);
+		if (m_gbufferProgram)
+		{
+			glUseProgram(m_gbufferProgram);
+			m_uGBMVP        = glGetUniformLocation(m_gbufferProgram, "uMVP");
+			m_uGBModel      = glGetUniformLocation(m_gbufferProgram, "uModel");
+			m_uGBColor      = glGetUniformLocation(m_gbufferProgram, "uColor");
+			m_uGBMetallic   = glGetUniformLocation(m_gbufferProgram, "uMetallic");
+			m_uGBRoughness  = glGetUniformLocation(m_gbufferProgram, "uRoughness");
+			m_uGBHasTexture = glGetUniformLocation(m_gbufferProgram, "uHasTexture");
+			m_uGBTexture    = glGetUniformLocation(m_gbufferProgram, "uTexture");
+			glUniform1i(m_uGBTexture, 0);
+		}
+		if (m_gbufferInstancedProgram)
+		{
+			glUseProgram(m_gbufferInstancedProgram);
+			m_uGBInstViewProj   = glGetUniformLocation(m_gbufferInstancedProgram, "uViewProj");
+			m_uGBInstColor      = glGetUniformLocation(m_gbufferInstancedProgram, "uColor");
+			m_uGBInstMetallic   = glGetUniformLocation(m_gbufferInstancedProgram, "uMetallic");
+			m_uGBInstRoughness  = glGetUniformLocation(m_gbufferInstancedProgram, "uRoughness");
+			m_uGBInstHasTexture = glGetUniformLocation(m_gbufferInstancedProgram, "uHasTexture");
+			m_uGBInstTexture    = glGetUniformLocation(m_gbufferInstancedProgram, "uTexture");
+			glUniform1i(m_uGBInstTexture, 0);
+		}
+		glUseProgram(0);
+
+		// Fullscreen lighting resolve — cross-compiled from the SAME lighting
+		// preamble as every material fragment (one shading source, plan §4.2).
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& v = m_matShaderLib.fullscreenVertex(Backend::GLSL410);
+		const auto& f = m_matShaderLib.deferredResolve(Backend::GLSL410);
+		if (v.ok && f.ok)
+		{
+			GLuint vs = CompileStage(GL_VERTEX_SHADER,   v.source.c_str());
+			GLuint fs = CompileStage(GL_FRAGMENT_SHADER, f.source.c_str());
+			m_deferredResolveProgram = link("deferred resolve program", vs, fs);
+			glDeleteShader(vs); glDeleteShader(fs);
+			if (m_deferredResolveProgram)
+			{
+				// UBO blocks: HeLighting → 0 (the resolve-only fill buffer is bound
+				// there during the resolve draw), HeResolve → 3. Samplers: the
+				// G-buffer inputs on units 0..3, everything the preamble declares
+				// on the SAME units as material programs (setupProgram convention),
+				// so the frame's shared binds cover them.
+				const GLuint lIdx = glGetUniformBlockIndex(m_deferredResolveProgram, "HeLighting");
+				if (lIdx != GL_INVALID_INDEX) glUniformBlockBinding(m_deferredResolveProgram, lIdx, 0);
+				const GLuint rIdx = glGetUniformBlockIndex(m_deferredResolveProgram, "HeResolve");
+				if (rIdx != GL_INVALID_INDEX) glUniformBlockBinding(m_deferredResolveProgram, rIdx, 3);
+				glUseProgram(m_deferredResolveProgram);
+				auto smp = [&](const char* nm, int unit) {
+					if (GLint l = glGetUniformLocation(m_deferredResolveProgram, nm); l >= 0)
+						glUniform1i(l, unit);
+				};
+				smp("heGB0", 0); smp("heGB1", 1); smp("heGB2", 2); smp("heGBDepth", 3);
+				smp("heGIShadow", 9);  smp("heGILocal", 10);
+				smp("heCsm", 11);      smp("heLocalShadow", 12);
+				smp("heSkyEnv", 14);   smp("heAO", 15);
+				smp("heGIIrradiance", 16); smp("heGIVisibility", 17);
+				glUseProgram(0);
+			}
+		}
+		else
+			Logger::Log(Logger::LogLevel::Error,
+				(std::string("OpenGLRenderer: deferred resolve shader compile failed\n")
+				 + v.log + f.log).c_str());
+	}
+	catch (const std::exception& e)
+	{
+		Logger::Log(Logger::LogLevel::Error,
+			(std::string("OpenGLRenderer: deferred pipeline build failed: ") + e.what()).c_str());
+	}
+
+	// UBOs for the resolve draw: HeResolve (mat4 + vec4) and the resolve-only
+	// HeLighting fill (the shared m_matLightUBO must keep the material fill —
+	// custom-material programs alias heCsm onto the local-atlas unit, so THEY
+	// must keep csmSplits.w = 0 while the resolve gets real CSM matrices).
+	if (m_deferredResolveProgram && !m_resolveUBO)
+	{
+		glGenBuffers(1, &m_resolveUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ResolveUniforms)),
+			nullptr, GL_DYNAMIC_DRAW);
+		glGenBuffers(1, &m_resolveLightUBO);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+		glBufferData(GL_UNIFORM_BUFFER,
+			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)),
+			nullptr, GL_DYNAMIC_DRAW);
+		glBindBuffer(GL_UNIFORM_BUFFER, 0);
+	}
+
+	const bool ok = m_gbufferProgram && m_gbufferInstancedProgram && m_deferredResolveProgram;
+	if (!ok)
+		Logger::Log(Logger::LogLevel::Warning,
+			"OpenGLRenderer: deferred render path unavailable — staying on forward");
+	return ok;
+#endif
 }
 
 // ─── Block-compressed texture support ─────────────────────────────────────────
@@ -4634,6 +6054,13 @@ void OpenGLRenderer::InvalidateMesh(const HE::UUID& meshId)
 		m_pendingMeshInvalidations.push_back(meshId);
 }
 
+void OpenGLRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+	// Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs.
+	if (textureId != HE::UUID{})
+		m_pendingTexInvalidations.push_back(textureId);
+}
+
 void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
 	// Build each custom-shader material's GL program NOW so the first draw doesn't
@@ -4651,31 +6078,43 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-		if (getOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
+		if (GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre)) ++built;
+		// Deferred path active → also warm the G-buffer variant so the first
+		// deferred frame doesn't hitch on its cross-compile.
+		if (m_renderPath == HE::RenderPath::Deferred)
+		{
+			uint64_t gbKey; std::string gbFrag, gbVert;
+			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
+			    && !m_materialPrograms.count(gbKey)
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr))
+				++built;
+		}
 	}
 	if (built > 0)
 		Logger::Log(Logger::LogLevel::Info,
 			("OpenGLRenderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
 }
 
-void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                           uint32_t size, float yaw, float pitch, float dist,
-                                           int shape)
+// Draw one material-graph preview primitive into whatever target is bound. Split
+// out of RenderMaterialPreview so the interactive preview and the Content-Browser
+// thumbnail can share the exact same shading while rendering into DIFFERENT
+// targets — a thumbnail that reused m_previewFBO would silently replace whatever
+// the Material Editor is showing. The caller owns FBO/viewport/clear and the
+// depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
+bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
+                                                 float dist, int shape)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
-
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
-	// nothing to preview). Reuses the same program cache + precompiled-variant path.
+	// nothing to draw). Reuses the same program cache + precompiled-variant path.
 	uint64_t shKey; std::string shFrag, shVert;
-	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return nullptr;
+	if (!resolveMaterialShader(materialId, shKey, shFrag, shVert)) return false;
 	const MaterialShaderVariant* pre = nullptr;
-	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(materialId) : nullptr;
 	if (ma)
 		for (const auto& var : ma->precompiledShaders)
 			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-	const unsigned int prog = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-	if (!prog) return nullptr;
+	const unsigned int prog = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+	if (!prog) return false;
 
 	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
 	// layout), rebuilt when the requested shape changes. Geometry is shared with the
@@ -4700,38 +6139,6 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 		glBindVertexArray(0);
 	}
 
-	// ── Lazy / resized offscreen target.
-	if (!m_previewFBO || m_previewSize != S)
-	{
-		if (m_previewColor) glDeleteTextures(1, &m_previewColor);
-		if (m_previewDepth) glDeleteRenderbuffers(1, &m_previewDepth);
-		if (!m_previewFBO) glGenFramebuffers(1, &m_previewFBO);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
-		glGenTextures(1, &m_previewColor);
-		glBindTexture(GL_TEXTURE_2D, m_previewColor);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_previewColor, 0);
-		glGenRenderbuffers(1, &m_previewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_previewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_previewDepth);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		m_previewSize = S;
-	}
-
-	// ── Draw the sphere into the preview target. Save/restore the caller's FBO+viewport.
-	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
-	glViewport(0, 0, S, S);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
-	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
-
 	glUseProgram(prog);
 	// Orbit camera around the sphere at the origin (yaw/pitch/dist from the editor).
 	const float cp = std::cos(pitch), sp = std::sin(pitch);
@@ -4748,12 +6155,18 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
 
-	HE::MaterialShaderLibrary::Lighting lit;
+	HE::MaterialShaderLibrary::Lighting lit{};
 	const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
 	lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z; lit.sunDir[3] = 0.0f;
 	lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
 	lit.ambient[0] = lit.ambient[1] = lit.ambient[2] = 0.28f;
 	lit.camPos[0] = camPos.x; lit.camPos[1] = camPos.y; lit.camPos[2] = camPos.z;
+	// Studio sun as the single array light so heLitP() previews shade correctly.
+	lit.lightPos[0][3]   = 0.0f; // directional
+	lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
+	lit.lightColor[0][0] = lit.lightColor[0][1] = lit.lightColor[0][2] = 1.05f;
+	lit.lightColor[0][3] = 1.0f;
+	lit.counts[0]        = 1.0f;
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
@@ -4788,6 +6201,274 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glDrawElements(GL_TRIANGLES, m_previewIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
+	return true;
+}
+
+// The non-graph counterpart: any pos/normal/uv VAO, shaded by the small
+// kMeshPreview* program. Used for mesh thumbnails and for materials whose only
+// description is their PBR scalars. Same caller contract as above.
+void OpenGLRenderer::DrawMeshPreviewGeometry(unsigned int vao, int indexCount, unsigned int texture,
+                                             const glm::vec3& center, float extent,
+                                             const glm::vec3& baseColor, float metallic,
+                                             float roughness, float yaw, float pitch, float dist)
+{
+	if (!vao || indexCount <= 0) return;
+	if (!m_meshPreviewProgram)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kMeshPreviewVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kMeshPreviewFS);
+		m_meshPreviewProgram = glCreateProgram();
+		glAttachShader(m_meshPreviewProgram, vs);
+		glAttachShader(m_meshPreviewProgram, fs);
+		glLinkProgram(m_meshPreviewProgram);
+		glDeleteShader(vs); glDeleteShader(fs);
+		m_uMeshPvMVP    = glGetUniformLocation(m_meshPreviewProgram, "uMVP");
+		m_uMeshPvModel  = glGetUniformLocation(m_meshPreviewProgram, "uModel");
+		m_uMeshPvColor  = glGetUniformLocation(m_meshPreviewProgram, "uColor");
+		m_uMeshPvHasTex = glGetUniformLocation(m_meshPreviewProgram, "uHasTex");
+		m_uMeshPvCamPos = glGetUniformLocation(m_meshPreviewProgram, "uCamPos");
+		m_uMeshPvPbr    = glGetUniformLocation(m_meshPreviewProgram, "uPbr");
+	}
+	if (!m_meshPreviewProgram) return;
+
+	// Orbit camera auto-framed on the caller's bounds — meshes vary wildly in size
+	// and pivot, so `dist` scales the extent rather than being an absolute distance.
+	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.05f);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 model(1.0f);
+	const glm::mat4 mvp = proj * view * model;
+
+	glUseProgram(m_meshPreviewProgram);
+	glUniformMatrix4fv(m_uMeshPvMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+	glUniformMatrix4fv(m_uMeshPvModel, 1, GL_FALSE, glm::value_ptr(model));
+	glUniform3fv(m_uMeshPvColor,  1, glm::value_ptr(baseColor));
+	glUniform3fv(m_uMeshPvCamPos, 1, glm::value_ptr(camPos));
+	glUniform2f(m_uMeshPvPbr, metallic, roughness);
+	glUniform1i(m_uMeshPvHasTex, texture != 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glBindVertexArray(vao);
+	glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+	glBindVertexArray(0);
+}
+
+// Lazily (re)create the shared thumbnail target at `S`×`S`. Its own FBO, see the
+// header note: a thumbnail rendered into one of the interactive preview targets
+// would replace whatever editor panel is currently showing that preview.
+bool OpenGLRenderer::EnsureThumbnailTarget(int S)
+{
+	if (!m_thumbFBO || m_thumbSize != S)
+	{
+		if (m_thumbColor) glDeleteTextures(1, &m_thumbColor);
+		if (m_thumbDepth) glDeleteRenderbuffers(1, &m_thumbDepth);
+		if (!m_thumbFBO) glGenFramebuffers(1, &m_thumbFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+		glGenTextures(1, &m_thumbColor);
+		glBindTexture(GL_TEXTURE_2D, m_thumbColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_thumbColor, 0);
+		glGenRenderbuffers(1, &m_thumbDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_thumbDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_thumbDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_thumbSize = S;
+	}
+	return m_thumbFBO != 0;
+}
+
+// Read the thumbnail target back as tightly packed, TOP-DOWN RGBA8. GL reads
+// bottom-up; the caller's contract (and every image format it will be written
+// to) is top-down, so flip row by row on the way out.
+void OpenGLRenderer::ReadThumbnailTarget(int S, std::vector<uint8_t>& outRgba8)
+{
+	outRgba8.assign(static_cast<size_t>(S) * S * 4, 0);
+	std::vector<uint8_t> raw(static_cast<size_t>(S) * S * 4);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
+	const size_t rowBytes = static_cast<size_t>(S) * 4;
+	for (int y = 0; y < S; ++y)
+		std::memcpy(outRgba8.data() + static_cast<size_t>(y) * rowBytes,
+		            raw.data() + static_cast<size_t>(S - 1 - y) * rowBytes, rowBytes);
+}
+
+bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                          const HE::UUID& assetId, uint32_t size,
+                                          std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (assetId == HE::UUID{}) return false;
+	if (!EnsureThumbnailTarget(S)) return false;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — the grid composites over its own tile
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	// Fixed three-quarter view — a thumbnail has no orbit interaction, and one
+	// shared angle makes a grid of tiles comparable at a glance.
+	//
+	// The three framing distances all target the same ~90%-of-half-frame fill, so
+	// mesh and material tiles sit equally in their cells. They differ because the
+	// paths differ in FOV and in what the distance is measured against:
+	//   • kMeshFrameDist scales the bounds' half-DIAGONAL, and fitting that into
+	//     the mesh path's 35° FOV takes ≥ extent/tan(17.5°) ≈ 3.17·extent.
+	//   • the two sphere distances are absolute (unit radius). A sphere's
+	//     silhouette fills tan(asin(r/D))/tan(fov/2) of the half-frame, NOT r/D —
+	//     the naive form is what left the material tiles cropped: the old 3.1 at
+	//     32° works out to 119%, i.e. a fifth of the sphere outside the tile.
+	constexpr float kYaw = 0.7f, kPitch = 0.45f;
+	constexpr float kMeshFrameDist    = 3.6f;  // × extent, 35° FOV
+	constexpr float kMatGraphDist     = 4.0f;  // unit sphere, 32° FOV → 90.0%
+	constexpr float kMatFallbackDist  = 3.66f; // unit sphere, 35° FOV → 90.1%
+	bool drew = false;
+	if (kind == ThumbnailKind::Material)
+	{
+		// Graph material → the real shader; otherwise the built-in PBR scalars on
+		// the same sphere, so EVERY material asset produces a tile.
+		drew = DrawMaterialPreviewGeometry(assetId, kYaw, kPitch, kMatGraphDist, 0 /*sphere*/);
+		if (!drew)
+		{
+			const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+			if (!m_previewVAO || m_previewShape != 0)
+			{
+				// Reuse the material preview's sphere VAO — building it here keeps the
+				// fallback independent of whether an interactive preview ever ran.
+				std::vector<float> verts; std::vector<uint32_t> idx;
+				HE::buildPreviewMesh(0, verts, idx);
+				m_previewIdxCount = (int)idx.size();
+				m_previewShape    = 0;
+				if (!m_previewVAO) glGenVertexArrays(1, &m_previewVAO);
+				glBindVertexArray(m_previewVAO);
+				if (!m_previewVBO) glGenBuffers(1, &m_previewVBO);
+				glBindBuffer(GL_ARRAY_BUFFER, m_previewVBO);
+				glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+				if (!m_previewIBO) glGenBuffers(1, &m_previewIBO);
+				glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_previewIBO);
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(uint32_t), idx.data(), GL_STATIC_DRAW);
+				glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+				glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+				glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+				glBindVertexArray(0);
+			}
+			unsigned int baseTex = 0;
+			if (ma)
+			{
+				const HE::UUID tid = ma->textureIds.empty()   ? HE::UUID{} : ma->textureIds[0];
+				const std::string tp = ma->texturePaths.empty() ? std::string{} : ma->texturePaths[0];
+				if (tid != HE::UUID{} || !tp.empty()) baseTex = ResolveGraphTexture(tid, tp);
+			}
+			// Wider FOV here than the graph path, hence the shorter distance — both
+			// land on the same apparent sphere size (see the constants above).
+			DrawMeshPreviewGeometry(m_previewVAO, m_previewIdxCount, baseTex,
+				glm::vec3(0.0f), 1.0f,
+				ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(0.8f),
+				ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f,
+				kYaw, kPitch, kMatFallbackDist);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::StaticMesh)
+	{
+		if (const GpuMesh* mesh = ResolveMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			DrawMeshPreviewGeometry(mesh->vao, mesh->indexCount, mesh->texture, c, e,
+				glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+	else if (kind == ThumbnailKind::SkeletalMesh)
+	{
+		// Bind pose: the stored vertex positions ARE the bind pose, so the plain
+		// mesh program is enough — no bone matrices, no skinning shader. The extra
+		// bone attributes on this VAO are simply unused by that program.
+		if (const GpuSkeletalMesh* mesh = ResolveSkeletalMesh(assetId))
+		{
+			const HE::AABB& b = mesh->localBounds;
+			const glm::vec3 c = b.isValid() ? (b.min + b.max) * 0.5f : glm::vec3(0.0f);
+			const float e = b.isValid() ? glm::length(b.max - b.min) * 0.5f : 1.0f;
+			DrawMeshPreviewGeometry(mesh->vao, mesh->indexCount, mesh->texture, c, e,
+				glm::vec3(0.78f), 0.0f, 0.55f, kYaw, kPitch, kMeshFrameDist);
+			drew = true;
+		}
+	}
+
+	if (drew) ReadThumbnailTarget(S, outRgba8);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return drew;
+}
+
+void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	// Nothing to preview for a built-in-PBR material (no node-graph program) — bail
+	// out BEFORE allocating the target, so a material without a graph never costs an
+	// FBO. The thumbnail path handles that case with its own fallback program.
+	{
+		uint64_t probeKey; std::string probeFrag, probeVert;
+		if (!resolveMaterialShader(materialId, probeKey, probeFrag, probeVert)) return nullptr;
+	}
+
+	// ── Lazy / resized offscreen target.
+	if (!m_previewFBO || m_previewSize != S)
+	{
+		if (m_previewColor) glDeleteTextures(1, &m_previewColor);
+		if (m_previewDepth) glDeleteRenderbuffers(1, &m_previewDepth);
+		if (!m_previewFBO) glGenFramebuffers(1, &m_previewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+		glGenTextures(1, &m_previewColor);
+		glBindTexture(GL_TEXTURE_2D, m_previewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_previewColor, 0);
+		glGenRenderbuffers(1, &m_previewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_previewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_previewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_previewSize = S;
+	}
+
+	// ── Draw the sphere into the preview target. Save/restore the caller's FBO+viewport.
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_previewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape))
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+		glUseProgram(0);
+		return nullptr;
+	}
 
 	// Headless witness: dump the preview target to a PPM (HE_PREVIEW_DUMP=path).
 	if (const char* dp = std::getenv("HE_PREVIEW_DUMP"); dp && *dp)
@@ -4992,15 +6673,10 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_skelPreviewColor));
 }
 
-void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
-                                           const HE::UUID& materialId,
-                                           const std::vector<ParticlePreviewInstance>& particles,
-                                           uint32_t size, float yaw, float pitch, float dist)
+// Compile the billboard program + its instance VAO once. Split out so both the
+// interactive preview and the Content-Browser thumbnail can reach it.
+bool OpenGLRenderer::EnsureParticlePreviewProgram()
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
-	if (!m_contentManager) m_contentManager = &cm;
-
-	// ── Lazy billboard program.
 	if (!m_particlePreviewProgram)
 	{
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kParticlePreviewVS);
@@ -5034,45 +6710,34 @@ void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& 
 		glVertexAttribDivisor(3, 1);
 		glBindVertexArray(0);
 	}
-	if (!m_particlePreviewProgram) return nullptr;
+	return m_particlePreviewProgram != 0;
+}
 
-	// ── Lazy / resized offscreen target.
-	if (!m_particlePreviewFBO || m_particlePreviewSize != S)
-	{
-		if (m_particlePreviewColor) glDeleteTextures(1, &m_particlePreviewColor);
-		if (m_particlePreviewDepth) glDeleteRenderbuffers(1, &m_particlePreviewDepth);
-		if (!m_particlePreviewFBO) glGenFramebuffers(1, &m_particlePreviewFBO);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
-		glGenTextures(1, &m_particlePreviewColor);
-		glBindTexture(GL_TEXTURE_2D, m_particlePreviewColor);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_particlePreviewColor, 0);
-		glGenRenderbuffers(1, &m_particlePreviewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_particlePreviewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_particlePreviewDepth);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		m_particlePreviewSize = S;
-	}
-
+// Draw the particle cloud into whatever target is bound (caller owns FBO,
+// viewport and clear). Shared by RenderParticlePreview and the thumbnail path so
+// the two can never drift; the thumbnail must NOT reuse the preview's own target
+// or it would overwrite what the Particle Graph Editor is showing.
+void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
+                                                const std::vector<ParticlePreviewInstance>& particles,
+                                                float yaw, float pitch, float dist)
+{
 	// ── Orbit camera auto-framed around the LIVE particles' bounds (an emitter's
 	// extent depends entirely on velocity/gravity/lifetime, unlike a fixed mesh).
+	// Each particle is a BILLBOARD of radius `size`, so the bounds have to include
+	// that radius — framing on the centres alone crops every quad by half its
+	// width, which for a tight cloud of large sprites fills the whole frame.
 	glm::vec3 bmin(1e30f), bmax(-1e30f);
-	for (const auto& p : particles) { bmin = glm::min(bmin, p.position); bmax = glm::max(bmax, p.position); }
+	for (const auto& p : particles)
+	{
+		const glm::vec3 r(p.size * 0.5f);
+		bmin = glm::min(bmin, p.position - r);
+		bmax = glm::max(bmax, p.position + r);
+	}
 	const bool valid = !particles.empty() && bmin.x <= bmax.x;
 	const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
 	const float extent = valid ? glm::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
 	const float camDist = std::max(0.05f, dist) * std::max(extent, 0.1f);
 
-	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
-	glViewport(0, 0, S, S);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE); glDepthFunc(GL_LESS);
 	glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable(GL_CULL_FACE);
@@ -5115,6 +6780,103 @@ void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& 
 
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
+}
+
+bool OpenGLRenderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                             const std::vector<ParticlePreviewInstance>& particles,
+                                             uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (particles.empty() || !EnsureParticlePreviewProgram()) return false;
+	if (!EnsureThumbnailTarget(S)) return false;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	// Same fixed three-quarter framing as the mesh tiles, so a grid of assets
+	// reads as one set. 2.6 leaves the cloud a margin at the 35° FOV.
+	DrawParticlePreviewGeometry(materialId, particles, 0.7f, 0.45f, 2.9f);
+	ReadThumbnailTarget(S, outRgba8);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return true;
+}
+
+bool OpenGLRenderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+                                           uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+	const int S = std::clamp(static_cast<int>(size), 16, 512);
+	if (uiObjects.empty() || !EnsureThumbnailTarget(S)) return false;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_thumbFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	// RenderUIPass draws m_renderWorld.uiObjects into whatever is bound, so the
+	// tile borrows that list for one pass and puts the frame's own back. Swapping
+	// (not copying) keeps the scene's objects intact even if this throws.
+	std::vector<UIRenderObject> saved;
+	saved.swap(m_renderWorld.uiObjects);
+	m_renderWorld.uiObjects = uiObjects;
+	RenderUIPass(S, S);
+	m_renderWorld.uiObjects.swap(saved);
+
+	ReadThumbnailTarget(S, outRgba8);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return true;
+}
+
+void* OpenGLRenderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (!EnsureParticlePreviewProgram()) return nullptr;
+
+	// ── Lazy / resized offscreen target.
+	if (!m_particlePreviewFBO || m_particlePreviewSize != S)
+	{
+		if (m_particlePreviewColor) glDeleteTextures(1, &m_particlePreviewColor);
+		if (m_particlePreviewDepth) glDeleteRenderbuffers(1, &m_particlePreviewDepth);
+		if (!m_particlePreviewFBO) glGenFramebuffers(1, &m_particlePreviewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+		glGenTextures(1, &m_particlePreviewColor);
+		glBindTexture(GL_TEXTURE_2D, m_particlePreviewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_particlePreviewColor, 0);
+		glGenRenderbuffers(1, &m_particlePreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_particlePreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_particlePreviewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_particlePreviewSize = S;
+	}
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_particlePreviewFBO);
+	glViewport(0, 0, S, S);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	DrawParticlePreviewGeometry(materialId, particles, yaw, pitch, dist);
 
 	if (const char* dp = std::getenv("HE_PARTICLE_PREVIEW_DUMP"); dp && *dp)
 	{
@@ -5224,16 +6986,32 @@ void OpenGLRenderer::Shutdown()
 		if (mesh.texture) glDeleteTextures(1, &mesh.texture);
 	}
 	m_meshCache.clear();
+	DestroyGIAccel();
 	for (auto& [id, tex] : m_materialTexCache)
 		if (tex) glDeleteTextures(1, &tex);
 	m_materialTexCache.clear();
 	DestroyViewportTarget();
 	DestroyHDRTarget();
+	DestroyGBufferTargets();
+	if (m_ssaoDepthPosProgram)     { glDeleteProgram(m_ssaoDepthPosProgram);     m_ssaoDepthPosProgram = 0; }
+	if (m_gbufferProgram)          { glDeleteProgram(m_gbufferProgram);          m_gbufferProgram = 0; }
+	if (m_gbufferInstancedProgram) { glDeleteProgram(m_gbufferInstancedProgram); m_gbufferInstancedProgram = 0; }
+	if (m_deferredResolveProgram)  { glDeleteProgram(m_deferredResolveProgram);  m_deferredResolveProgram = 0; }
+	if (m_resolveUBO)      { glDeleteBuffers(1, &m_resolveUBO);      m_resolveUBO = 0; }
+	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
+	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
-	DestroyCloudFBO();
+	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroyGpuTimer();
 	DestroySSAOTargets();
+	DestroyGIShadowTargets();
+	DestroyGIProbeAtlas();
+	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
+	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
+	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
+	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
+	if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
 	for (auto& r : m_retiredTextures)
 		glDeleteTextures(1, &r.texture);
 	m_retiredTextures.clear();
@@ -5256,6 +7034,12 @@ void OpenGLRenderer::Shutdown()
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
 #endif
+	// Content-Browser thumbnail target + its mesh program — outside the shaderc
+	// guard above, since the mesh path needs no cross-compiler.
+	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
+	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
+	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
+	if (m_meshPreviewProgram) { glDeleteProgram(m_meshPreviewProgram);    m_meshPreviewProgram = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);
@@ -5274,6 +7058,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
+	if (m_localShadowDepthTex) { glDeleteTextures(1, &m_localShadowDepthTex); m_localShadowDepthTex = 0; }
 	if (m_moonTex)        { glDeleteTextures(1, &m_moonTex);         m_moonTex = 0; }
 	if (m_noiseTex)       { glDeleteTextures(1, &m_noiseTex);        m_noiseTex = 0; }
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
@@ -5399,6 +7184,60 @@ void OpenGLRenderer::DestroyViewportTarget()
 	m_viewportW = m_viewportH = 0;
 }
 
+// Per-frame light window + CSM/local-shadow uniforms for ONE of the three scene
+// programs. The unlit, instanced and skinned programs are linked from the same
+// shared kUnlitFS text, so they declare byte-identical uniforms and only the
+// location integers differ — this used to be three verbatim copies of the fill
+// loop inside DrawScene (which had already drifted apart in indentation).
+// The matching sampler TEXTURE BINDS stay at the call sites: they are shared
+// state that only some of the three re-assert, each for its own documented
+// reason. The caller must have the target program bound.
+void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneShadowFrame& F) const
+{
+	// Lights (clamped to the shader's MAX_LIGHTS, which IS the engine's shared
+	// light window — a local `constexpr int kMaxLights = 8` here could drift away
+	// from it silently).
+	using HE::kMaxLightWindow;
+	const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLightWindow);
+	glm::vec4 pos[kMaxLightWindow], dir[kMaxLightWindow], color[kMaxLightWindow], params[kMaxLightWindow];
+	for (int i = 0; i < count; ++i)
+	{
+		const LightData& l = m_renderWorld.lights[i];
+		pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+		dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+		color[i]  = glm::vec4(l.color,     l.intensity);
+		// y = local shadow atlas base layer (-1 = no shadow); forced off
+		// when the atlas texture is unavailable this frame.
+		params[i] = glm::vec4(l.range,
+		                      F.localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+		                      0.0f, 0.0f);
+	}
+	glUniform1i(L.lightCount, count);
+	if (count > 0)
+	{
+		glUniform4fv(L.lightPos,    count, glm::value_ptr(pos[0]));
+		glUniform4fv(L.lightDir,    count, glm::value_ptr(dir[0]));
+		glUniform4fv(L.lightColor,  count, glm::value_ptr(color[0]));
+		glUniform4fv(L.lightParams, count, glm::value_ptr(params[0]));
+	}
+	glUniform3fv(L.cameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
+
+	// CSM: the sampling is gated by uShadowEnabled, the per-cascade
+	// matrices/splits/forward drive the cascade selection.
+	glUniform1i(L.shadowEnabled, F.shadows ? 1 : 0);
+	glUniform1i(L.shadowDebug,   m_debugShadowCascades ? 1 : 0);
+	glUniformMatrix4fv(L.cascadeVP, kGLCsmCascades, GL_FALSE, F.cascadeVPData);
+	glUniform4fv(L.cascadeSplits, 1, glm::value_ptr(F.cascadeSplits));
+	glUniform3fv(L.cameraFwd, 1, glm::value_ptr(F.cameraFwd));
+	glUniform1i(L.shadowMap, 1);
+	// Local (point/spot) shadow atlas on unit 11 — the sampler is always assigned
+	// (sampling is gated per light by uLightParams[i].y), the matrices only when
+	// there are any layers.
+	glUniform1i(L.localShadowMap, 11);
+	if (F.localShadows)
+		glUniformMatrix4fv(L.localShadowVP, F.nLocalLayers, GL_FALSE, F.localVPData);
+}
+
 void OpenGLRenderer::DrawScene(int pw, int ph)
 {
 	// Reset the render counters before the early-return guards so a non-rendered
@@ -5420,6 +7259,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	m_pendingMaterialInvalidations.clear();
 
 	for (const HE::UUID& id : m_pendingMeshInvalidations)
+	{
 		if (auto it = m_meshCache.find(id); it != m_meshCache.end())
 		{
 			auto& m = it->second;
@@ -5428,7 +7268,32 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m.ebo) glDeleteBuffers(1, &m.ebo);
 			m_meshCache.erase(it);
 		}
+		// GI BLAS ranges live in concatenated arrays — a single mesh can't be
+		// spliced out cheaply, so an edited mesh drops the whole cache; it
+		// rebuilds lazily on the next GI-active frame (mirrors Metal's per-mesh
+		// BLAS release, just coarser).
+		if (m_giBlasCache.count(id))
+		{
+			m_giBlasCache.clear();
+			m_giNodesCpu.clear();
+			m_giTrisCpu.clear();
+			m_giBlasDirty = true;
+		}
+	}
 	m_pendingMeshInvalidations.clear();
+
+	// Textures rewritten in place (landscape weightmap paints) drop their cached
+	// GL texture so the next ResolveGraphTexture re-uploads the new pixels.
+	for (const HE::UUID& id : m_pendingTexInvalidations)
+	{
+		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+		if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+		{
+			if (it->second) glDeleteTextures(1, &it->second);
+			m_graphTexCache.erase(it);
+		}
+	}
+	m_pendingTexInvalidations.clear();
 
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	m_extractor.setDayNight(env.dayNightCycle, env.timeOfDay,
@@ -5441,6 +7306,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                    &m_editorCamera);
 	m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
 	                      m_renderWorld);
+
+	// GI acceleration structures (GL 4.3 compute port, Checkpoint GL-A): CPU
+	// BLAS build + SSBO upload from THIS extraction — no-op unless GI is on and
+	// the context is 4.3+. Nothing samples the buffers yet (GL-B adds the
+	// shadow-ray kernel), so GI-off rendering stays byte-identical.
+	UpdateGIAccel();
 	// NB: do NOT early-out when there are no (visible) objects — the skybox is the
 	// background and must still be drawn, or the viewport falls back to a stale
 	// gray clear when the camera looks away from the scene.
@@ -5476,6 +7347,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 
 	const bool shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
+	// Local (point/spot) shadow atlas — independent of the directional CSM, so
+	// night scenes with only shadow-casting point lights still get their maps.
+	const int  nLocalLayers = std::clamp(m_renderWorld.shadow.localLayerCount, 0,
+	                                     ShadowData::kMaxLocalShadowLayers);
+	const bool localShadows = nLocalLayers > 0 && m_shadowFBO != 0 && m_localShadowDepthTex != 0;
+	const float* localVPData = glm::value_ptr(m_renderWorld.shadow.localViewProj[0]);
 
 	// ── Cascaded shadow map uniforms (shared across unlit/skinned/instanced) ──
 	// World forward (−Z of the camera-to-world matrix) for planar view-Z cascade
@@ -5494,6 +7371,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Upload kGLCsmCascades matrices (contiguous in ShadowData); unused tail slots
 	// are identity and never sampled (the shader clamps the cascade index to count).
 	const float* cascadeVPData = glm::value_ptr(sh.cascadeViewProj[0]);
+	// Everything BindSceneLighting needs that is not renderer state — built once,
+	// pushed onto each of the three scene programs below.
+	const SceneShadowFrame shadowFrame{ cascadeVPData, cascadeSplits, camFwd,
+	                                    localVPData, nLocalLayers, shadows, localShadows };
 
 	// ShadowPass → depth map; GeometryPass → HDR scene color; PostProcessPass
 	// tonemaps that into the backbuffer/viewport.
@@ -5516,7 +7397,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// inside the cascade coverage. Mirrors the Metal backend's EncodeShadowMap.
 		if (io.output.id == kShadowMapTarget)
 		{
-			if (!shadows) return;
+			if (!shadows && !localShadows) return;
 			GpuPassScope _shadowTimer(this, "Shadow"); // ends (glEndQuery) at this branch's return
 			glBindFramebuffer(GL_FRAMEBUFFER, m_shadowFBO);
 			glViewport(0, 0, m_shadowSize, m_shadowSize);
@@ -5526,20 +7407,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glEnable(GL_POLYGON_OFFSET_FILL);
 			glPolygonOffset(2.0f, 4.0f);
 
-			const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
-			for (int c = 0; c < cascades; ++c)
+			// Depth-only render of every shadow caster into one layer of `target` —
+			// shared by the CSM cascades and the local (point/spot) shadow views.
+			// Cull + sort against the view's light frustum into scratch buffers
+			// (NOT m_visible/m_sortedIndices — those hold the camera cull the
+			// geometry pass consumes). Sorting keeps draws grouped by mesh id so
+			// the per-mesh resolve memoisation stays valid.
+			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp)
 			{
-				// Render this cascade into its own depth-array layer.
-				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-				                          m_shadowDepthTex, 0, c);
+				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
-
-				// Cull + sort against this cascade's light frustum into scratch
-				// buffers (NOT m_visible/m_sortedIndices — those hold the camera cull
-				// the geometry pass consumes). Sorting keeps draws grouped by mesh id
-				// so the per-mesh resolve memoisation below stays valid.
-				const glm::mat4& cvp = m_renderWorld.shadow.cascadeViewProj[c];
-				m_culler.cull(m_renderWorld, cvp, m_shadowVisible);
+				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
 				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
 
 				HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
@@ -5548,7 +7426,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					const RenderObject& obj = m_renderWorld.objects[idx];
 					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
 					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
-					                   glm::value_ptr(cvp * obj.transform));
+					                   glm::value_ptr(vp * obj.transform));
 					if (!shMeshValid || obj.meshAssetId != shMeshId)
 					{
 						shMesh      = ResolveMesh(obj.meshAssetId);
@@ -5559,6 +7437,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindVertexArray(mesh->vao);
 					glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
 				}
+			};
+
+			if (shadows)
+			{
+				const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
+				for (int c = 0; c < cascades; ++c)
+					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c]);
+			}
+			if (localShadows)
+			{
+				glViewport(0, 0, m_localShadowSize, m_localShadowSize);
+				for (int v = 0; v < nLocalLayers; ++v)
+					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v]);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -5640,11 +7531,30 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
+		// ── Ray-traced GI (compute): shadow mask + probe update ─────────────
+		// Replaces CSM sampling AND SSAO/IBL-ambient in the scene shader when
+		// active. Uses THIS extraction's camera/draw set (Metal aspect lesson:
+		// mask and scene pass must share one camera). Half-res like Metal.
+		unsigned int giShadowTex = 0u;
+		if (m_giEnabled && m_giSupported && m_giInstanceCount > 0)
+		{
+			GpuPassScope _giTimer(this, "GIShadow");
+			giShadowTex = RenderGIShadow(cmds, std::max(1, pw / 2), std::max(1, ph / 2), viewProj);
+			DispatchGIProbeUpdate();
+		}
+		const bool giShadingActive = giShadowTex != 0 && m_giIrrAtlas != 0 && m_giVisAtlas != 0;
+
 		// ── SSAO: view-space position pre-pass → occlusion → blur ───────────
 		// Computed before shading (using these same geometry draw calls) so the
-		// scene shader can darken its ambient term. Skipped (zero cost) when off.
+		// scene shader can darken its ambient term. Skipped (zero cost) when off
+		// — including when GI shades this frame (probe indirect replaces AO).
+		// Deferred (docs/deferred-renderer-plan.md): decided here, before SSAO —
+		// in deferred mode the AO pre-pass reads the G-buffer depth (plan P5), so
+		// SSAO runs AFTER the G-buffer loop below instead of here.
+		const bool deferredActive =
+			m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 		unsigned int aoTex = 0u;
-		if (m_ssaoEnabled)
+		if (m_ssaoEnabled && !giShadingActive && !deferredActive)
 		{
 			GpuPassScope _ssaoTimer(this, "SSAO");
 			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
@@ -5660,6 +7570,32 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// "Opaque" / "Sky+Clouds" markers). The geometry branch has no early return, so
 		// these explicit begin/end pairs always balance.
 		GpuTimerBeginPass("Opaque");
+		// ── Deferred render path: rasterize the opaque geometry into the G-buffer
+		// instead of shading it here; the lighting happens once, in the fullscreen
+		// resolve below (deferredActive was decided above, before the SSAO block).
+		if (deferredActive)
+		{
+			EnsureGBufferTargets(pw, ph);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_gbFBO);
+			glViewport(0, 0, pw, ph);
+			glEnable(GL_DEPTH_TEST);
+			glDepthFunc(GL_LESS);
+			glDepthMask(GL_TRUE);
+			const float c0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			const float c1[4] = { 0.5f, 0.5f, 1.0f, 0.5f }; // encoded +Z normal, mid rough/spec
+			const float c2[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			const float d1    = 1.0f;
+			glClearBufferfv(GL_COLOR, 0, c0);
+			glClearBufferfv(GL_COLOR, 1, c1);
+			glClearBufferfv(GL_COLOR, 2, c2);
+			glClearBufferfv(GL_DEPTH, 0, &d1);
+			// GB0 is SRGB8 — enable the encode-on-write so the linear shader
+			// output round-trips through the 8-bit target (disabled again after
+			// the G-buffer loop; GB1/GB2 are float targets, unaffected).
+			glEnable(GL_FRAMEBUFFER_SRGB);
+		}
+		else
+		{
 		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
 		glViewport(0, 0, pw, ph);
 		// Explicit depth state for the opaque geometry: test on, write on, LESS, so
@@ -5669,6 +7605,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glDepthMask(GL_TRUE);
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		}
 
 		// (The procedural skybox is drawn AFTER the geometry below, with a
 		// depth-test == far, so the heavy sky shader only runs on the background
@@ -5690,49 +7627,56 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1f(m_uWetness,          GetEnvironment().wetness);
 		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
 		// SSAO occlusion on unit 4 (white fallback when off → ao = 1, no change).
-		const bool aoActive = m_ssaoEnabled && aoTex != 0;
+		// Mutable (not const): in deferred mode SSAO runs AFTER the G-buffer loop
+		// (P5, reads its depth) and updates aoTex/aoActive there — every consumer
+		// below the resolve (skinned/transparency binds, fillMatLight) reads the
+		// refreshed values.
+		bool aoActive = m_ssaoEnabled && aoTex != 0;
 		glActiveTexture(GL_TEXTURE4);
 		glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 		glUniform1i(m_uAO, 4);
 		glActiveTexture(GL_TEXTURE0);
 		glUniform2f(m_uViewport, static_cast<float>(pw), static_cast<float>(ph));
 		glUniform1i(m_uSSAOEnabled, aoActive ? 1 : 0);
+		// GI inputs on units 5/6/7 (white fallbacks keep the samplers valid for
+		// every program sharing kUnlitFS when GI is off this frame).
+		glActiveTexture(GL_TEXTURE5);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
+		glActiveTexture(GL_TEXTURE6);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+		glActiveTexture(GL_TEXTURE7);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+		// Per-pixel local (point/spot) light visibility mask on unit 8 — written
+		// by the shadow kernel alongside the sun mask (white = unoccluded when off).
+		glActiveTexture(GL_TEXTURE8);
+		glBindTexture(GL_TEXTURE_2D, (giShadingActive && m_giLocalMaskTex) ? m_giLocalMaskTex : m_whiteTex);
+		// heLitP() masks (custom materials), units 9/10: sun mask + local mask.
+		glActiveTexture(GL_TEXTURE9);
+		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
+		glActiveTexture(GL_TEXTURE10);
+		glBindTexture(GL_TEXTURE_2D, (giShadingActive && m_giLocalMaskTex) ? m_giLocalMaskTex : m_whiteTex);
+		glActiveTexture(GL_TEXTURE0);
+		PushGISceneUniforms(m_giLocsUnlit, giShadingActive);
 
-		// Lights (clamped to the shader's MAX_LIGHTS)
-		{
-			constexpr int kMaxLights = 8;
-			const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
-			glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
-			for (int i = 0; i < count; ++i)
-			{
-				const LightData& l = m_renderWorld.lights[i];
-				pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-				dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-				color[i]  = glm::vec4(l.color,     l.intensity);
-				params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
-			}
-			glUniform1i(m_uLightCount, count);
-			if (count > 0)
-			{
-				glUniform4fv(m_uLightPos,    count, glm::value_ptr(pos[0]));
-				glUniform4fv(m_uLightDir,    count, glm::value_ptr(dir[0]));
-				glUniform4fv(m_uLightColor,  count, glm::value_ptr(color[0]));
-				glUniform4fv(m_uLightParams, count, glm::value_ptr(params[0]));
-			}
-			glUniform3fv(m_uCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
-		}
+		// Lights + CSM/local-shadow uniforms (clamped to the shader's MAX_LIGHTS).
+		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
+		                    m_uCameraPos, m_uShadowEnabled, m_uShadowDebug, m_uCascadeVP,
+		                    m_uCascadeSplits, m_uCameraFwd, m_uShadowMap,
+		                    m_uLocalShadowMap, m_uLocalShadowVP }, shadowFrame);
 
 		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
 		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
 		// target; the per-cascade matrices/splits/forward drive the selection.
-		glUniform1i(m_uShadowEnabled, shadows ? 1 : 0);
-		glUniform1i(m_uShadowDebug,   m_debugShadowCascades ? 1 : 0);
-		glUniformMatrix4fv(m_uCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
-		glUniform4fv(m_uCascadeSplits, 1, glm::value_ptr(cascadeSplits));
-		glUniform3fv(m_uCameraFwd, 1, glm::value_ptr(camFwd));
-		glUniform1i(m_uShadowMap, 1);
 		glActiveTexture(GL_TEXTURE1);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+		// Local (point/spot) shadow atlas on unit 11 — always bound (sampling is
+		// gated per light by uLightParams[i].y), matrices only when there are any.
+		glActiveTexture(GL_TEXTURE11);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+		// Same atlas on unit 12 for CUSTOM-material programs (their heCsm alias
+		// occupies unit 11 in the preamble's sampler assignment).
+		glActiveTexture(GL_TEXTURE12);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
 		glActiveTexture(GL_TEXTURE0); // base color binds here in the loop
 
 		// Mirror per-frame uniforms onto the instanced program (texture units are
@@ -5751,34 +7695,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
-			{
-				constexpr int kMaxLights = 8;
-				const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
-				glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
-				for (int i = 0; i < count; ++i)
-				{
-					const LightData& l = m_renderWorld.lights[i];
-					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-					color[i]  = glm::vec4(l.color,     l.intensity);
-					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
-				}
-				glUniform1i(m_uInstLightCount, count);
-				if (count > 0)
-				{
-					glUniform4fv(m_uInstLightPos,    count, glm::value_ptr(pos[0]));
-					glUniform4fv(m_uInstLightDir,    count, glm::value_ptr(dir[0]));
-					glUniform4fv(m_uInstLightColor,  count, glm::value_ptr(color[0]));
-					glUniform4fv(m_uInstLightParams, count, glm::value_ptr(params[0]));
-				}
-				glUniform3fv(m_uInstCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
-			}
-			glUniform1i(m_uInstShadowEnabled, shadows ? 1 : 0);
-			glUniform1i(m_uInstShadowDebug,   m_debugShadowCascades ? 1 : 0);
-			glUniformMatrix4fv(m_uInstCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
-			glUniform4fv(m_uInstCascadeSplits, 1, glm::value_ptr(cascadeSplits));
-			glUniform3fv(m_uInstCameraFwd, 1, glm::value_ptr(camFwd));
-			glUniform1i(m_uInstShadowMap, 1);
+			PushGISceneUniforms(m_giLocsInstanced, giShadingActive);
+			// Same lights + CSM block as the unlit program; the shadow ATLASES are
+			// already bound on units 1/11 above (texture units are shared).
+			BindSceneLighting({ m_uInstLightCount, m_uInstLightPos, m_uInstLightDir,
+			                    m_uInstLightColor, m_uInstLightParams, m_uInstCameraPos,
+			                    m_uInstShadowEnabled, m_uInstShadowDebug, m_uInstCascadeVP,
+			                    m_uInstCascadeSplits, m_uInstCameraFwd, m_uInstShadowMap,
+			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP }, shadowFrame);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -5801,12 +7725,310 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // Custom translucent material: its GL program + param block +
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
-		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0; };
+		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
+		                // Deferred forward-routed opaque draws only: the landscape
+		                // weightmap resolved at collect time (0 → layer-0 default).
+		                unsigned int wmTex = 0; };
 		std::vector<TPDraw> transparent;
+		// Deferred: opaque draws whose custom material has no G-buffer variant —
+		// replayed forward right after the lighting resolve.
+		std::vector<TPDraw> deferredForward;
 		const glm::vec3 camPos = m_renderWorld.camera.position;
+
+#if defined(HE_HAVE_SHADERC)
+		// The heLitP lighting ABI fill for custom-material programs — shared by
+		// the forward opaque loop, the deferred G-buffer loop (Time input) and
+		// the deferred replay passes, so the values can never drift between them.
+		auto fillMatLight = [&](HE::MaterialShaderLibrary::Lighting& lit)
+		{
+			// Dominant directional (NOT the raw env sun — night/cloud lesson,
+			// see RenderWorld::dominantDirectionalLight) + the full light window.
+			glm::vec3 matSunDir, matSunColor;
+			m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
+			const glm::vec3 sc = matSunColor;
+			lit.sunDir[0]=matSunDir.x; lit.sunDir[1]=matSunDir.y; lit.sunDir[2]=matSunDir.z;
+			// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
+			// for deterministic headless captures, mirroring the sky clock).
+			static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+			lit.sunDir[3] = s_timeOv && *s_timeOv
+				? static_cast<float>(std::atof(s_timeOv))
+				: static_cast<float>(SDL_GetTicks()) / 1000.0f;
+			lit.camPos[0] = m_renderWorld.camera.position.x;
+			lit.camPos[1] = m_renderWorld.camera.position.y;
+			lit.camPos[2] = m_renderWorld.camera.position.z;
+			lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
+			lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+			lit.giParams[0] = static_cast<float>(pw);
+			lit.giParams[1] = static_cast<float>(ph);
+			lit.giParams[2] = giShadingActive ? 1.0f : 0.0f;
+			// Aerial perspective + the "is it bound" gates for the shared
+			// ambient inputs (units 14/15).
+			lit.fog[0] = GetEnvironment().fogDensity;
+			lit.fog[1] = GetEnvironment().fogHeightFalloff;
+			lit.fog[2] = m_skyEnvCube ? 1.0f : 0.0f;
+			lit.fog[3] = aoActive     ? 1.0f : 0.0f;
+			// Weather surface response (same values as the built-in programs).
+			lit.weather[0] = GetEnvironment().wetness;
+			lit.weather[1] = GetEnvironment().snowAmount;
+			// DDGI probe grid — the same values PushGISceneUniforms hands
+			// the built-in programs, so heLitP's indirect diffuse matches.
+			lit.giGridOrigin[0] = m_giGridOrigin.x;
+			lit.giGridOrigin[1] = m_giGridOrigin.y;
+			lit.giGridOrigin[2] = m_giGridOrigin.z;
+			lit.giGridOrigin[3] = kGIProbeSpacing;
+			lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
+			lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
+			lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
+			lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
+			lit.giProbe[0] = m_giIndirectIntensity;
+			lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
+			// Full light window for heLitP() — same first-8 order as the built-in
+			// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also
+			// writes the per-light atlas layer into lightParams[i].y when
+			// `localShadows` says the atlas is bound this frame.
+			HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+			// Local (point/spot) shadow atlas for heLitP — same matrices the
+			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
+			// PRE-BAKED so the shared preamble stays convention-free.
+			if (localShadows)
+			{
+				glm::mat4 zRemap(1.0f);
+				zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+				for (int c = 0; c < nLocalLayers; ++c)
+				{
+					const glm::mat4 m = zRemap * m_renderWorld.shadow.localViewProj[c];
+					std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+				}
+			}
+		};
+#endif
 
 		glUniform1f(m_uOpacity, 1.0f); // opaque pass writes alpha 1
 		m_matLightUploadedThisFrame = false; // lighting UBO re-uploaded at most once this frame
+
+		// ── Deferred G-buffer loop: the same routing as the forward loop below,
+		// only with G-buffer programs and without any lighting binds (plan §4.1).
+		// Translucent draws collect into `transparent` exactly like forward;
+		// custom materials WITHOUT a G-buffer variant collect into
+		// `deferredForward` and replay right after the lighting resolve.
+		if (deferredActive)
+		{
+#if defined(HE_HAVE_SHADERC)
+			// G-buffer graph fragments may read the Time input (heLight.sunDir.w)
+			// — upload the standard fill once, before any custom G-buffer draw.
+			{
+				HE::MaterialShaderLibrary::Lighting lit{};
+				fillMatLight(lit);
+				if (m_matLightUBO)
+				{
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					m_matLightUploadedThisFrame = true;
+				}
+			}
+#endif
+			glUseProgram(m_gbufferProgram);
+			for (const DrawCall& dc : cmds.drawCalls())
+			{
+				if (!matValid || dc.materialAssetId != lastMatId)
+				{
+					cHasOverride = ResolveMaterialTexture(dc.materialAssetId, cOverrideTex);
+					cBaseColor   = glm::vec3(1.0f); cMetallic = 0.0f; cRoughness = 0.5f; cOpacity = 1.0f;
+					cHasMat      = ResolveMaterialParams(dc.materialAssetId, cBaseColor, cMetallic, cRoughness, cOpacity);
+					lastMatId    = dc.materialAssetId; matValid = true;
+				}
+				if (!meshValid || dc.meshAssetId != lastMeshId)
+				{
+					cMesh      = ResolveMesh(dc.meshAssetId);
+					lastMeshId = dc.meshAssetId; meshValid = true;
+				}
+				const GpuMesh*     mesh = cMesh;
+				const unsigned int tex  = cHasOverride ? cOverrideTex
+				                                       : (mesh ? mesh->texture : 0u);
+				glm::vec3 baseColor = cBaseColor;
+				if (!cHasMat)
+					baseColor = (tex != 0) ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+				baseColor *= glm::vec3(dc.instanceTint);
+				const float opacity = cOpacity * dc.instanceTint.a;
+				const GpuMesh* drawMesh = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
+				if (!drawMesh) continue;
+				const unsigned int vao        = drawMesh->vao;
+				const int          indexCount = drawMesh->indexCount;
+
+				// Custom-material programs: forward (transparency + forward-routing)
+				// and, when the material has a G-buffer variant, its MRT program.
+				unsigned int matProg = 0, gbProg = 0; bool hasCustom = false;
+				std::vector<float> mParams; unsigned int mGtex[4] = { 0, 0, 0, 0 }; int mGtexCount = 0;
+#if defined(HE_HAVE_SHADERC)
+				{
+					uint64_t shKey; std::string shFrag, shVert;
+					if (resolveMaterialShader(dc.materialAssetId, shKey, shFrag, shVert))
+					{
+						hasCustom = true;
+						const MaterialShaderVariant* pre = nullptr;
+						const MaterialAsset* ma = m_contentManager
+							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr;
+						if (ma)
+							for (const auto& var : ma->precompiledShaders)
+								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
+						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						// G-buffer variant — runtime cross-compiled only (baked packs
+						// carry no G-buffer GLSL yet).
+						uint64_t gbKey; std::string gbFrag, gbVert;
+						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr);
+						if (ma)
+						{
+							mParams = !dc.paramOverride.empty() ? dc.paramOverride
+							                                    : ma->shaderParamData;
+							const size_t nTex = std::min<size_t>(4,
+								std::max(ma->graphTexturePaths.size(), ma->graphTextureIds.size()));
+							for (size_t i = 0; i < nTex; ++i)
+							{
+								const HE::UUID    gid = i < ma->graphTextureIds.size()   ? ma->graphTextureIds[i]   : HE::UUID{};
+								const std::string gp  = i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{};
+								mGtex[mGtexCount++] = ResolveGraphTexture(gid, gp);
+							}
+						}
+					}
+				}
+#endif
+				if (opacity < RenderSorter::kOpaqueOpacityThreshold)
+				{
+					// Same collection as the forward loop's transparent branch.
+					auto pushTP = [&](const glm::mat4& t) {
+						TPDraw tp{ viewProj * t, t, baseColor,
+						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
+						           RenderSorter::backToFrontKey(t, camPos) };
+						tp.matProg = matProg;
+						tp.params  = mParams;
+						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+						tp.gtexCount = mGtexCount;
+						transparent.push_back(std::move(tp));
+					};
+					if (!dc.instanceTransforms.empty())
+						for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+					else
+						pushTP(dc.transform);
+					continue;
+				}
+				if (!dc.instanceTransforms.empty() && m_gbufferInstancedProgram && m_instanceVBO)
+				{
+					// Instanced batches always take the built-in instanced program —
+					// the same routing the forward loop uses.
+					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+					glBufferData(GL_ARRAY_BUFFER,
+					             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+					             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+					glBindBuffer(GL_ARRAY_BUFFER, 0);
+					glUseProgram(m_gbufferInstancedProgram);
+					glUniformMatrix4fv(m_uGBInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+					glUniform3fv(m_uGBInstColor,     1, glm::value_ptr(baseColor));
+					glUniform1f(m_uGBInstMetallic,   cMetallic);
+					glUniform1f(m_uGBInstRoughness,  cRoughness);
+					glBindVertexArray(vao);
+					glUniform1i(m_uGBInstHasTexture, tex != 0);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, tex);
+					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
+					                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
+					                   static_cast<uint32_t>(dc.instanceTransforms.size());
+					glUseProgram(m_gbufferProgram);
+					continue;
+				}
+				if (hasCustom && !gbProg)
+				{
+					// No G-buffer variant → forward replay after the resolve.
+					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
+					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+					tp.matProg = matProg;
+					tp.params  = mParams;
+					for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
+					tp.gtexCount = mGtexCount;
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						tp.wmTex = ResolveGraphTexture(wid, {});
+					}
+					deferredForward.push_back(std::move(tp));
+					continue;
+				}
+#if defined(HE_HAVE_SHADERC)
+				if (gbProg)
+				{
+					// Custom material → its G-buffer MRT program, same per-draw
+					// binds as the forward custom branch (minus the lighting-only
+					// inputs the resolve owns).
+					glUseProgram(gbProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = viewProj * dc.transform;
+					obj.model = dc.transform;
+					obj.color = glm::vec4(baseColor, 1.0f);
+					obj.flags = glm::vec4(tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);   // block "U"
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
+					if (!mParams.empty())
+					{
+						float padded[64] = { 0 };
+						std::memcpy(padded, mParams.data(),
+						            std::min(mParams.size(), size_t(64)) * sizeof(float));
+						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
+						{
+							std::memcpy(m_lastMatParams, padded, sizeof(padded));
+							m_haveMatParams = true;
+							glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+							glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+							glBindBuffer(GL_UNIFORM_BUFFER, 0);
+						}
+					}
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO); // block "HeParams"
+					glBindVertexArray(vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, tex);
+					for (int i = 0; i < mGtexCount; ++i)
+					{
+						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+						glBindTexture(GL_TEXTURE_2D, mGtex[i]);
+					}
+					// Landscape layer weightmap on unit 13, per draw (as forward).
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
+					}
+					glActiveTexture(GL_TEXTURE0);
+					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+					glUseProgram(m_gbufferProgram);
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+					continue;
+				}
+#endif
+				// Built-in PBR → the built-in G-buffer program.
+				glUniformMatrix4fv(m_uGBMVP,   1, GL_FALSE, glm::value_ptr(viewProj * dc.transform));
+				glUniformMatrix4fv(m_uGBModel, 1, GL_FALSE, glm::value_ptr(dc.transform));
+				glUniform3fv(m_uGBColor, 1, glm::value_ptr(baseColor));
+				glUniform1f(m_uGBMetallic,  cMetallic);
+				glUniform1f(m_uGBRoughness, cRoughness);
+				glBindVertexArray(vao);
+				glUniform1i(m_uGBHasTexture, tex != 0);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, tex);
+				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
+			}
+			glUseProgram(m_unlitProgram);
+		}
+		else
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			// An explicit MaterialComponent override wins over the mesh's own
@@ -5849,7 +8071,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			const unsigned int vao        = drawMesh->vao;
 			const int          indexCount = drawMesh->indexCount;
 
-			if (opacity < 0.999f)
+			if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 			{
 				// Translucent graph materials keep their own program + state in the pass.
 				unsigned int tpProg = 0; std::vector<float> tpParams;
@@ -5865,7 +8087,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						if (ma)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-						tpProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+						tpProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 						if (tpProg && ma)
 						{
 							tpParams = !dc.paramOverride.empty() ? dc.paramOverride
@@ -5885,10 +8107,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Transparent instanced batches: push one TPDraw per instance so
 				// each object is sorted individually by distance.
 				auto pushTP = [&](const glm::mat4& t) {
-					const glm::vec3 d = glm::vec3(t[3]) - camPos;
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
-					           glm::dot(d, d) };
+					           RenderSorter::backToFrontKey(t, camPos) };
 					tp.matProg = tpProg;
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
@@ -5943,7 +8164,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
-					matProg = getOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
+					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 				}
 				if (matProg)
 				{
@@ -5956,20 +8177,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(cMetallic, cRoughness, opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					HE::MaterialShaderLibrary::Lighting lit;
-					const glm::vec3 sc = GetEnvironment().sunColor;
-					lit.sunDir[0]=sunDir.x; lit.sunDir[1]=sunDir.y; lit.sunDir[2]=sunDir.z;
-					// Engine seconds for the node graph's Time input (HE_SKY_TIME pins it
-					// for deterministic headless captures, mirroring the sky clock).
-					static const char* s_timeOv = std::getenv("HE_SKY_TIME");
-					lit.sunDir[3] = s_timeOv && *s_timeOv
-						? static_cast<float>(std::atof(s_timeOv))
-						: static_cast<float>(SDL_GetTicks()) / 1000.0f;
-					lit.camPos[0] = m_renderWorld.camera.position.x;
-					lit.camPos[1] = m_renderWorld.camera.position.y;
-					lit.camPos[2] = m_renderWorld.camera.position.z;
-					lit.sunColor[0]=sc.r; lit.sunColor[1]=sc.g; lit.sunColor[2]=sc.b;
-					lit.ambient[0]=m_renderWorld.ambient.r; lit.ambient[1]=m_renderWorld.ambient.g; lit.ambient[2]=m_renderWorld.ambient.b;
+					HE::MaterialShaderLibrary::Lighting lit{};
+					fillMatLight(lit); // shared heLitP ABI fill (see the lambda above)
 					// Lighting is identical for every material draw this frame → upload once.
 					if (!m_matLightUploadedThisFrame)
 					{
@@ -6026,6 +8235,32 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						}
 						glActiveTexture(GL_TEXTURE0);
 					}
+					// Shared material inputs: sky env cubemap (14) for image-based
+					// ambient + the fog colour, screen-space AO (15). Per-FRAME state,
+					// re-asserted here because the units are only ever used by these
+					// material programs. Gated by heLight.fog.z/.w.
+					glActiveTexture(GL_TEXTURE14);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glActiveTexture(GL_TEXTURE15);
+					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+					// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
+					// valid when GI is off; heLight.giProbe.y gates the reads).
+					glActiveTexture(GL_TEXTURE16);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE17);
+					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+					glActiveTexture(GL_TEXTURE0);
+					// Landscape layer weightmap on unit 13 — PER DRAW (it belongs to
+					// the terrain the chunk is part of, not to the material). Objects
+					// that aren't landscape chunks get the 1x1 (1,0,0,0) default, so a
+					// layer-blend node resolves to layer 0 instead of black.
+					{
+						const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+							? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
+						glActiveTexture(GL_TEXTURE0);
+					}
 					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
 					++m_counters.draws;
@@ -6047,6 +8282,200 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 		}
 
+		// ── Deferred: fullscreen lighting resolve + forward-routed replay ────
+		if (deferredActive)
+		{
+			glDisable(GL_FRAMEBUFFER_SRGB);
+
+			// P5: SSAO from the G-buffer depth (one fullscreen reconstruction
+			// instead of the geometry pre-pass). Runs here — after the G-buffer,
+			// before the resolve that samples the result on unit 15.
+			if (m_ssaoEnabled && !giShadingActive)
+			{
+				GpuPassScope _ssaoTimer(this, "SSAO");
+				aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+				                   m_renderWorld.camera.projection, /*fromGBufferDepth=*/true);
+				aoActive = m_ssaoEnabled && aoTex != 0;
+				// Refresh the AO binds the per-frame setup made while aoTex was
+				// still 0: built-in unit 4 (uAO) + its enable flag on the unlit
+				// program (transparency replay reads it), custom-material unit 15.
+				glActiveTexture(GL_TEXTURE4);
+				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+				glActiveTexture(GL_TEXTURE0);
+				glUseProgram(m_unlitProgram);
+				glUniform1i(m_uSSAOEnabled, aoActive ? 1 : 0);
+#if defined(HE_HAVE_SHADERC)
+				// The pre-loop lighting upload (Time for G-buffer graphs) carried
+				// fog.w = 0 — re-upload with the fresh AO gate for the forward-
+				// routed and transparent custom-material draws.
+				if (m_matLightUBO)
+				{
+					HE::MaterialShaderLibrary::Lighting lit{};
+					fillMatLight(lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+				}
+#endif
+			}
+
+			// Depth: G-buffer → HDR FBO, so the forward tail (skinned/sky/
+			// transparency) depth-tests against the deferred geometry while the
+			// resolve SAMPLES the depth texture (attachment + sampled input of
+			// one FBO would be a feedback loop).
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, m_gbFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_hdrFBO);
+			glBlitFramebuffer(0, 0, pw, ph, 0, 0, pw, ph, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+			glViewport(0, 0, pw, ph);
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT); // depth was just blitted — keep it
+
+#if defined(HE_HAVE_SHADERC)
+			if (m_deferredResolveProgram && m_resolveLightUBO)
+			{
+				// Resolve-only lighting fill: the standard heLitP ABI PLUS the CSM
+				// cascade matrices (GL z remap pre-baked, like localShadowVP). A
+				// SEPARATE buffer from m_matLightUBO: custom-material programs
+				// alias heCsm onto the local-atlas unit, so THEIR fill must keep
+				// csmSplits.w = 0 — only the resolve binds the real CSM array.
+				HE::MaterialShaderLibrary::Lighting lit{};
+				fillMatLight(lit);
+				if (!giShadingActive && shadowFrame.shadows && m_shadowDepthTex)
+				{
+					glm::mat4 zRemap(1.0f);
+					zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+					const int nc = std::min(nCascades, 3);
+					for (int c = 0; c < nc; ++c)
+					{
+						const glm::mat4 m = zRemap * m_renderWorld.shadow.cascadeViewProj[c];
+						std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+					}
+					lit.csmSplits[0] = cascadeSplits.x;
+					lit.csmSplits[1] = cascadeSplits.y;
+					lit.csmSplits[2] = cascadeSplits.z;
+					lit.csmSplits[3] = static_cast<float>(nc);
+					lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+				}
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+
+				// HeResolve: world-pos reconstruction (GL: ndc.y sign +1, depth
+				// [0,1] → ndc z = d*2-1) + the HE_DUMP_GBUFFER debug view.
+				HE::MaterialShaderLibrary::ResolveUniforms ru;
+				std::memcpy(ru.invViewProj, glm::value_ptr(invViewProj), 16 * sizeof(float));
+				ru.depthParams[0] = 1.0f;
+				ru.depthParams[1] = 2.0f;
+				ru.depthParams[2] = -1.0f;
+				ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveUBO);
+				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ru), &ru);
+				glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+				// G-buffer inputs on units 0..3; the real CSM array replaces the
+				// local atlas on unit 11 for the duration of the resolve draw.
+				glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gbColor0);
+				glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gbColor1);
+				glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gbColor2);
+				glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_gbDepthTex);
+				glActiveTexture(GL_TEXTURE11);
+				glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+				// Shared material inputs the preamble samples (sky env / AO / DDGI
+				// atlases) — the same units the custom-material draws use.
+				glActiveTexture(GL_TEXTURE14);
+				glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+				glActiveTexture(GL_TEXTURE15);
+				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
+				glActiveTexture(GL_TEXTURE16);
+				glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giIrrAtlas : m_whiteTex);
+				glActiveTexture(GL_TEXTURE17);
+				glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
+				glActiveTexture(GL_TEXTURE0);
+
+				glUseProgram(m_deferredResolveProgram);
+				glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_resolveLightUBO);
+				glBindBufferBase(GL_UNIFORM_BUFFER, 3, m_resolveUBO);
+				glDisable(GL_DEPTH_TEST);
+				glDepthMask(GL_FALSE);
+				glBindVertexArray(m_fsVAO);
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+				++m_counters.draws;
+				glEnable(GL_DEPTH_TEST);
+				glDepthMask(GL_TRUE);
+				glDepthFunc(GL_LESS);
+				// Restore the material-programs' state: their lighting UBO on
+				// binding 0 and the local atlas back on unit 11.
+				glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+				glActiveTexture(GL_TEXTURE11);
+				glBindTexture(GL_TEXTURE_2D_ARRAY,
+				              m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
+				glActiveTexture(GL_TEXTURE0);
+			}
+
+			// Forward-routed opaque draws (custom materials without a G-buffer
+			// variant): full depth test + write against the blitted depth, no
+			// blending — the same custom-material draw the forward loop performs.
+			for (const TPDraw& t : deferredForward)
+			{
+				if (t.matProg)
+				{
+					glUseProgram(t.matProg);
+					struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
+					obj.mvp   = t.mvp;
+					obj.model = t.model;
+					obj.color = glm::vec4(t.baseColor, 1.0f);
+					obj.flags = glm::vec4(t.tex != 0 ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
+					float padded[64] = { 0 };
+					std::memcpy(padded, t.params.data(),
+					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					m_haveMatParams = false;
+					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_matObjUBO);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 2, m_matParamUBO);
+					glBindVertexArray(t.vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, t.tex);
+					for (int i = 0; i < t.gtexCount; ++i)
+					{
+						glActiveTexture(GL_TEXTURE1 + (GLenum)i);
+						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
+					}
+					if (t.wmTex)
+					{
+						glActiveTexture(GL_TEXTURE13);
+						glBindTexture(GL_TEXTURE_2D, t.wmTex);
+					}
+					glActiveTexture(GL_TEXTURE0);
+					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
+					continue;
+				}
+				// Custom shader failed to build entirely → built-in forward PBR.
+				glUseProgram(m_unlitProgram);
+				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(t.mvp));
+				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(t.model));
+				glUniform3fv(m_uColor, 1, glm::value_ptr(t.baseColor));
+				glUniform1f(m_uMetallic,  t.metallic);
+				glUniform1f(m_uRoughness, t.roughness);
+				glUniform1f(m_uOpacity,   1.0f);
+				glUniform1i(m_uHasTexture, t.tex != 0);
+				glBindVertexArray(t.vao);
+				glBindTexture(GL_TEXTURE_2D, t.tex);
+				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+				++m_counters.draws;
+				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
+			}
+#endif
+			glUseProgram(m_unlitProgram); // restore for the skinned/sky passes
+		}
+
 		// ── Skinned draws (after opaque statics, before sky) ────────────────────
 		if (m_skinnedProgram && !cmds.skinnedDrawCalls().empty())
 		{
@@ -6057,17 +8486,20 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uSkinnedAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
 			glUniform1f(m_uSkinnedFogDensity,       GetEnvironment().fogDensity);
 			glUniform1f(m_uSkinnedFogHeightFalloff, GetEnvironment().fogHeightFalloff);
-			glUniform1i(m_uSkinnedShadowEnabled, shadows ? 1 : 0);
-			glUniform1i(m_uSkinnedShadowDebug,   m_debugShadowCascades ? 1 : 0);
-			glUniformMatrix4fv(m_uSkinnedCascadeVP, kGLCsmCascades, GL_FALSE, cascadeVPData);
-			glUniform4fv(m_uSkinnedCascadeSplits, 1, glm::value_ptr(cascadeSplits));
-			glUniform3fv(m_uSkinnedCameraFwd, 1, glm::value_ptr(camFwd));
-			glUniform1i(m_uSkinnedShadowMap, 1);
+			// Same lights + CSM block as the unlit program.
+			BindSceneLighting({ m_uSkinnedLightCount, m_uSkinnedLightPos, m_uSkinnedLightDir,
+			                    m_uSkinnedLightColor, m_uSkinnedLightParams, m_uSkinnedCameraPos,
+			                    m_uSkinnedShadowEnabled, m_uSkinnedShadowDebug, m_uSkinnedCascadeVP,
+			                    m_uSkinnedCascadeSplits, m_uSkinnedCameraFwd, m_uSkinnedShadowMap,
+			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP }, shadowFrame);
 			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
 			// bind run between the unlit setup and here; this guarantees the skinned
 			// sampler2DArray reads the shadow array, not a stale 2D texture.
 			glActiveTexture(GL_TEXTURE1);
 			glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+			// Local (point/spot) shadow atlas on unit 11 (same re-assert rationale).
+			glActiveTexture(GL_TEXTURE11);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex ? m_localShadowDepthTex : m_shadowDepthTex);
 			glActiveTexture(GL_TEXTURE3);
 			glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 			glUniform1i(m_uSkinnedSkyEnv, 3);
@@ -6077,28 +8509,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE0);
 			glUniform2f(m_uSkinnedViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uSkinnedSSAOEnabled, aoActive ? 1 : 0);
-			glUniform3fv(m_uSkinnedCameraPos, 1, glm::value_ptr(m_renderWorld.camera.position));
-			{
-				constexpr int kMaxLights = 8;
-				const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), kMaxLights);
-				glm::vec4 pos[kMaxLights], dir[kMaxLights], color[kMaxLights], params[kMaxLights];
-				for (int i = 0; i < count; ++i)
-				{
-					const LightData& l = m_renderWorld.lights[i];
-					pos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-					dir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-					color[i]  = glm::vec4(l.color,     l.intensity);
-					params[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
-				}
-				glUniform1i(m_uSkinnedLightCount, count);
-				if (count > 0)
-				{
-					glUniform4fv(m_uSkinnedLightPos,    count, glm::value_ptr(pos[0]));
-					glUniform4fv(m_uSkinnedLightDir,    count, glm::value_ptr(dir[0]));
-					glUniform4fv(m_uSkinnedLightColor,  count, glm::value_ptr(color[0]));
-					glUniform4fv(m_uSkinnedLightParams, count, glm::value_ptr(params[0]));
-				}
-			}
+			PushGISceneUniforms(m_giLocsSkinned, giShadingActive);
 
 			constexpr int kMaxBones = 128;
 			// Scratch buffer for the full bone matrix upload per draw call.
@@ -6213,9 +8624,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				// Wind control → horizontal cloud drift vector. Direction 0° drifts
 				// toward -Z (north), increasing clockwise; speed scales the rate.
-				const float wr = glm::radians(GetEnvironment().windDirection);
-				const glm::vec3 wind = glm::vec3(std::sin(wr), 0.0f, -std::cos(wr))
-				                     * (GetEnvironment().windSpeed * 0.025f);
+				const glm::vec3 wind = HE::CloudWindVector(GetEnvironment());
 				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
 			}
 			glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
@@ -6227,7 +8636,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (lowRes)
 			{
 				GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
-				EnsureCloudFBO(std::max(1, pw / 2), std::max(1, ph / 2));
+				EnsureCloudTarget(std::max(1, pw / 2), std::max(1, ph / 2));
 				// Render the pre-pass with the CURRENT camera (this backend draws the sky after
 				// extraction, so the current view is available inline). Compositing at the current
 				// screen UV then lines the clouds up 1:1 with the sky — no lag/swim when panning.
@@ -6259,8 +8668,6 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDrawArrays(GL_TRIANGLES, 0, 3);
 			glDepthFunc(GL_LESS);   // restore default for the next pass
 			glDepthMask(GL_TRUE);
-			m_lastInvViewProj = invViewProj;   // (kept for compatibility; pre-pass now uses the current camera)
-			m_lastSunDir      = sunDir;
 		}
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
@@ -6432,6 +8839,8 @@ void OpenGLRenderer::Render()
 // triangle-strip (gl_VertexID) into a camera-facing billboard. Runs on GL 4.1.
 namespace {
 constexpr int kParticleFloats = 8;   // pos3 vel3 life seed
+static_assert(kParticleFloats == HE::kWeatherParticleFloats,
+              "the VAO strides below and the shared seeder must agree on the record width");
 constexpr int kParticleMax    = 1000000;
 
 const char* kParticleSimVS = R"(#version 410 core
@@ -6614,28 +9023,12 @@ void OpenGLRenderer::EnsureParticleBuffers(int count)
 
 void OpenGLRenderer::SeedParticleBuffer(int count)
 {
-    // Pre-distribute the pool down the fall column so it doesn't all spawn at once.
-    // seed = (i+0.5)/count gives an even spread, so step(seed,coverage) yields exactly
-    // a `coverage` fraction of live drops.
-    const GpuParticleParams& p = m_gpuParticles;
+    // Shared with Metal (HE::SeedWeatherParticles) — the RNG, the (i+0.5)/count
+    // spread and the wind/life maths are a cross-backend contract, only the lane
+    // order differs. This backend's TF sim shader reads pos, vel, life, seed.
     std::vector<float> data(static_cast<size_t>(count) * kParticleFloats);
-    const float top = p.cameraPos.y + p.boxTop;
-    uint32_t rng = 0x9E3779B9u;
-    auto frand = [&]() { rng = rng * 1664525u + 1013904223u; return (rng >> 8) * (1.0f / 16777216.0f); };
-    for (int i = 0; i < count; ++i)
-    {
-        const float seed = (i + 0.5f) / static_cast<float>(count);
-        const float y    = p.groundLevel + frand() * std::max(top - p.groundLevel, 1.0f);
-        float* d = &data[static_cast<size_t>(i) * kParticleFloats];
-        d[0] = p.cameraPos.x + (frand() * 2.0f - 1.0f) * p.boxHalf;
-        d[1] = y;
-        d[2] = p.cameraPos.z + (frand() * 2.0f - 1.0f) * p.boxHalf;
-        d[3] = p.windVec.x * (p.isSnow ? 0.3f : 1.2f);
-        d[4] = -p.fallSpeed;
-        d[5] = p.windVec.z * (p.isSnow ? 0.3f : 1.2f);
-        d[6] = (y - p.groundLevel) / std::max(p.fallSpeed, 0.01f); // life so it dies at the ground
-        d[7] = seed;
-    }
+    HE::SeedWeatherParticles(m_gpuParticles, count,
+                             HE::WeatherParticleLayout::PosVelLifeSeed, data.data());
     glBindBuffer(GL_ARRAY_BUFFER, m_particleBuf[m_particleCur]);
     glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(data.size() * sizeof(float)), data.data());
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -6743,7 +9136,7 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		if (batch.instances.empty()) continue;
 
 		// A precompiled OpenGL variant (export-baked, CHUNK_PPSD) wins over an
-		// on-demand-compiled + hash-cached one — see getOrBuildParticleProgram.
+		// on-demand-compiled + hash-cached one — see GetOrBuildParticleProgram.
 		const ParticleShaderVariant* precompiled = nullptr;
 		if (const ParticleGraphAsset* asset = m_contentManager ? m_contentManager->getParticleGraph(batch.particleAssetId) : nullptr)
 			for (const auto& var : asset->precompiledShaders)
@@ -6752,7 +9145,7 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		const uint64_t key = precompiled
 			? (0x50505344ull /*"PPSD"*/ ^ (static_cast<uint64_t>(batch.particleAssetId.hi) * 0x9E3779B97F4A7C15ULL) ^ batch.particleAssetId.lo)
 			: HE::hashParticleShaderConfig(batch.config);
-		const unsigned int program = getOrBuildParticleProgram(key, batch.config, precompiled);
+		const unsigned int program = GetOrBuildParticleProgram(key, batch.config, precompiled);
 		if (!program) continue;
 
 		unsigned int tex = 0;
@@ -6807,6 +9200,14 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Transform feedback is core in GL 4.1, so the GPU precipitation path runs on
 	// every GL context this backend creates (incl. macOS 4.1).
 	c.supportsGpuParticles   = true;
+	// Ray-traced GI via compute + CPU BVH: needs a GL 4.3 context (Windows/
+	// Linux). macOS GL is 4.1 → false there (Metal covers GI on Apple).
+	c.supportsGlobalIllumination = m_giSupported;
+#if defined(HE_HAVE_SHADERC)
+	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
+	// enough, but the shader cross-compiler must be built in.
+	c.supportsDeferredRendering  = true;
+#endif
 	return c;
 }
 
@@ -6878,9 +9279,9 @@ void OpenGLRenderer::GpuTimerBeginFrame()
 		m_lastGpuStats = FrameGpuStats{};
 	}
 
-	const int slotIdx  = static_cast<int>(m_gpuFrameIdx % kGpuTimerRing);
+	const int slotIdx  = static_cast<int>(m_gpuFrameIdx % HE::kGpuTimerRing);
 	GpuTimerSlot& slot = m_gpuSlots[slotIdx];
-	// This slot was last used kGpuTimerRing frames ago, so its results are certainly
+	// This slot was last used HE::kGpuTimerRing frames ago, so its results are certainly
 	// ready — reaping here never stalls (no-op if the detailed path already reaped it).
 	GpuTimerReap(slot);
 	slot.passes.clear();

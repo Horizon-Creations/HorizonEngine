@@ -10,7 +10,7 @@ GameLogicLoader::~GameLogicLoader() = default;
 
 bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 {
-	if (lib_.isLoaded())
+	if (m_lib.isLoaded())
 	{
 		Logger::Log(Logger::LogLevel::Warning,
 			"GameLogicLoader: load() called while a library is loaded — ignoring");
@@ -39,33 +39,33 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 			std::filesystem::copy_options::overwrite_existing, ec);
 		if (!ec) loadPath = copy;                        // copy failure → load the original directly
 	}
-	loadedCopyPath_ = (loadPath != dllPath) ? loadPath : std::filesystem::path{};
+	m_loadedCopyPath = (loadPath != dllPath) ? loadPath : std::filesystem::path{};
 
-	if (!lib_.load(loadPath))
+	if (!m_lib.load(loadPath))
 	{
 		Logger::Log(Logger::LogLevel::Error,
 			("GameLogicLoader: failed to load " + loadPath.string()).c_str());
 		return false;
 	}
 
-	auto createFn = reinterpret_cast<FnCreateGameLogic>(lib_.getSymbol("HE_CreateGameLogic"));
-	destroyFn_    = reinterpret_cast<FnDestroyGameLogic>(lib_.getSymbol("HE_DestroyGameLogic"));
-	if (!createFn || !destroyFn_)
+	auto createFn = reinterpret_cast<FnCreateGameLogic>(m_lib.getSymbol("HE_CreateGameLogic"));
+	m_destroyFn    = reinterpret_cast<FnDestroyGameLogic>(m_lib.getSymbol("HE_DestroyGameLogic"));
+	if (!createFn || !m_destroyFn)
 	{
 		Logger::Log(Logger::LogLevel::Error,
 			("GameLogicLoader: missing HE_CreateGameLogic/HE_DestroyGameLogic exports in "
 			 + loadPath.string()).c_str());
-		destroyFn_ = nullptr;
-		lib_.unload();
+		m_destroyFn = nullptr;
+		m_lib.unload();
 		return false;
 	}
 
-	logic_ = createFn();
-	if (!logic_)
+	m_logic = createFn();
+	if (!m_logic)
 	{
 		Logger::Log(Logger::LogLevel::Error, "GameLogicLoader: HE_CreateGameLogic returned null");
-		destroyFn_ = nullptr;
-		lib_.unload();
+		m_destroyFn = nullptr;
+		m_lib.unload();
 		return false;
 	}
 
@@ -76,23 +76,23 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 
 void GameLogicLoader::unload(HorizonWorld& world)
 {
-	if (logic_)
+	if (m_logic)
 	{
-		logic_->onStop(world);
-		if (destroyFn_) destroyFn_(logic_);
-		logic_ = nullptr;
+		m_logic->onStop(world);
+		if (m_destroyFn) m_destroyFn(m_logic);
+		m_logic = nullptr;
 	}
-	destroyFn_ = nullptr;
-	if (lib_.isLoaded())
-		lib_.unload();   // best-effort on macOS; unique-name copies make staleness harmless
+	m_destroyFn = nullptr;
+	if (m_lib.isLoaded())
+		m_lib.unload();   // best-effort on macOS; unique-name copies make staleness harmless
 
 	// Remove the hot-copy we loaded from (best-effort; may fail while the OS
 	// still has the image pinned — the numbered names avoid any collision).
-	if (!loadedCopyPath_.empty())
+	if (!m_loadedCopyPath.empty())
 	{
 		std::error_code ec;
-		std::filesystem::remove(loadedCopyPath_, ec);
-		loadedCopyPath_.clear();
+		std::filesystem::remove(m_loadedCopyPath, ec);
+		m_loadedCopyPath.clear();
 	}
 }
 
@@ -102,7 +102,7 @@ bool GameLogicLoader::reload(const std::filesystem::path& dllPath, HorizonWorld&
 	return load(dllPath);
 }
 
-bool GameLogicLoader::isLoaded() const { return logic_ != nullptr; }
-IGameLogic* GameLogicLoader::logic() const { return logic_; }
+bool GameLogicLoader::isLoaded() const { return m_logic != nullptr; }
+IGameLogic* GameLogicLoader::logic() const { return m_logic; }
 
 } // namespace HE

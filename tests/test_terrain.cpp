@@ -4,6 +4,12 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/Components/TerrainChunkComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
 
@@ -319,4 +325,227 @@ TEST_CASE("TerrainComponent sculptHeights survive save/load (base64 round-trip)"
     REQUIRE(loaded->sculptHeights.size() == tc.sculptHeights.size());
     for (size_t i = 0; i < tc.sculptHeights.size(); ++i)
         CHECK(loaded->sculptHeights[i] == doctest::Approx(tc.sculptHeights[i]));
+}
+
+// ── Chunk material follows the Landscape entity ────────────────────────────────
+// The Landscape entity itself has no mesh — its generated chunk children are what
+// render. Chunks used to be pinned to the built-in terrain material at creation,
+// so assigning (or recolouring) a material on the Landscape never reached screen.
+TEST_CASE("TerrainSystem propagates the Landscape's material to its chunks")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+
+    Entity te = world.createEntity("Landscape");
+    reg.emplace<TransformComponent>(te);
+    TerrainComponent tc;
+    tc.resolution = 9;      // small: 2ⁿ+1 already, no resample
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.dirty = true;
+    reg.emplace<TerrainComponent>(te, tc);
+
+    // First tick builds the chunk entities.
+    TerrainSystem::updateTerrains(world, cm);
+    size_t chunks = 0;
+    for (auto ce : reg.view<TerrainChunkComponent>()) { (void)ce; ++chunks; }
+    REQUIRE(chunks > 0);
+
+    // Assign a different material to the Landscape (no heightfield change → the
+    // terrain is NOT dirty, so the sync must not be gated on the rebuild path).
+    const HE::UUID custom{ 0xABCDEF01ull, 0x1234ull };
+    reg.get<MaterialComponent>(te).materialAssetId = custom;
+    TerrainSystem::updateTerrains(world, cm);
+
+    for (auto [ce, tcc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+        CHECK(mc.materialAssetId == custom);
+
+    // Per-entity param overrides ride along too.
+    MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 0.25f;
+    reg.get<MaterialComponent>(te).paramOverrides = { ov };
+    TerrainSystem::updateTerrains(world, cm);
+    for (auto [ce, tcc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+    {
+        REQUIRE(mc.paramOverrides.size() == 1);
+        CHECK(mc.paramOverrides[0].name == "Tint");
+        CHECK(mc.paramOverrides[0].value[0] == doctest::Approx(0.25f));
+    }
+}
+
+// ── Texture tiling ────────────────────────────────────────────────────────────
+// Terrain UVs run 0..1 across the WHOLE landscape, so a texture was stretched
+// over the entire terrain instead of tiling.
+TEST_CASE("Terrain UVs scale with uvTiling and stay continuous across chunks")
+{
+    TerrainComponent tc;
+    tc.resolution = 9;
+    tc.sizeX = tc.sizeZ = 64.0f;
+
+    // Default is the historical 0..1 range (no behaviour change on old scenes).
+    CHECK(tc.uvTiling == doctest::Approx(1.0f));
+    {
+        const StaticMeshAsset m = generateTerrainMesh(tc);
+        float mx = 0.0f;
+        for (size_t i = 0; i < m.uvs.size(); ++i) mx = std::max(mx, m.uvs[i]);
+        CHECK(mx == doctest::Approx(1.0f));
+    }
+    tc.uvTiling = 16.0f;
+    {
+        const StaticMeshAsset m = generateTerrainMesh(tc);
+        float mx = 0.0f;
+        for (size_t i = 0; i < m.uvs.size(); ++i) mx = std::max(mx, m.uvs[i]);
+        CHECK(mx == doctest::Approx(16.0f));
+    }
+
+    // Chunk meshes use GLOBAL uvs, so neighbouring chunks continue the pattern:
+    // chunk (0,0) of a 2x2 grid ends exactly where chunk (1,0) begins.
+    const std::vector<float> field = computeTerrainHeightField(tc);
+    const StaticMeshAsset a = generateTerrainChunkMesh(field, tc.resolution, tc.sizeX, tc.sizeZ,
+                                                       0.0f, 0.0f, 0.5f, 1.0f, 5, tc.uvTiling);
+    const StaticMeshAsset b = generateTerrainChunkMesh(field, tc.resolution, tc.sizeX, tc.sizeZ,
+                                                       0.5f, 0.0f, 1.0f, 1.0f, 5, tc.uvTiling);
+    float aMaxU = 0.0f, bMinU = 1e30f;
+    for (size_t i = 0; i < a.uvs.size(); i += 2) aMaxU = std::max(aMaxU, a.uvs[i]);
+    for (size_t i = 0; i < b.uvs.size(); i += 2) bMinU = std::min(bMinU, b.uvs[i]);
+    CHECK(aMaxU == doctest::Approx(8.0f));   // 0.5 * 16
+    CHECK(bMinU == doctest::Approx(8.0f));   // seam matches → no visible repeat break
+}
+
+TEST_CASE("TerrainComponent uvTiling and lodDistanceScale round-trip")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("t");
+    TerrainComponent tc;
+    tc.uvTiling = 12.5f;
+    tc.lodDistanceScale = 3.25f;   // was editable but never persisted
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, bytes));
+    const TerrainComponent* l = nullptr;
+    for (auto ent : w2.registry().view<TerrainComponent>())
+        l = &w2.registry().get<TerrainComponent>(ent);
+    REQUIRE(l != nullptr);
+    CHECK(l->uvTiling == doctest::Approx(12.5f));
+    CHECK(l->lodDistanceScale == doctest::Approx(3.25f));
+}
+
+// ── Layer painting ────────────────────────────────────────────────────────────
+TEST_CASE("TerrainPaint allocates a weightmap that is fully layer 0")
+{
+    TerrainComponent tc;
+    tc.weightRes = 8;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(tc.layerWeights.size() == 8u * 8u * 4u);
+    for (size_t i = 0; i < tc.layerWeights.size(); i += 4)
+    {
+        CHECK(tc.layerWeights[i + 0] == 255); // layer 0 …
+        CHECK(tc.layerWeights[i + 1] == 0);   // … and nothing else, which is what
+        CHECK(tc.layerWeights[i + 2] == 0);   // an unpainted landscape already
+        CHECK(tc.layerWeights[i + 3] == 0);   // renders as (1x1 default = 1,0,0,0)
+    }
+    CHECK(tc.weightsDirty);
+    // Idempotent: a correctly sized map is left alone.
+    tc.layerWeights[0] = 42;
+    TerrainPaint::ensureWeightmap(tc);
+    CHECK(tc.layerWeights[0] == 42);
+}
+
+TEST_CASE("TerrainPaint moves weight toward the painted layer and keeps the sum at 255")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 32;
+    TerrainPaint::ensureWeightmap(tc);
+
+    // Paint layer 1 at the centre with a hard-edged brush.
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, /*layer=*/1,
+                                /*radius=*/8.0f, /*falloff=*/0.0f, /*strength=*/0.5f));
+
+    const uint32_t wr = tc.weightRes;
+    auto texel = [&](int x, int z) { return &tc.layerWeights[(static_cast<size_t>(z) * wr + x) * 4]; };
+    const int c = static_cast<int>(wr) / 2;
+
+    // Centre moved halfway to layer 1 …
+    const uint8_t* mid = texel(c, c);
+    CHECK(mid[1] > 100);
+    CHECK(mid[1] < 160);
+    CHECK(mid[0] > 100);
+    // … and every touched texel still sums to exactly 255 (no drift over strokes).
+    for (size_t i = 0; i < tc.layerWeights.size(); i += 4)
+    {
+        const int sum = tc.layerWeights[i] + tc.layerWeights[i+1]
+                      + tc.layerWeights[i+2] + tc.layerWeights[i+3];
+        CHECK(sum == 255);
+    }
+    // A corner far outside the brush is untouched.
+    const uint8_t* corner = texel(0, 0);
+    CHECK(corner[0] == 255);
+    CHECK(corner[1] == 0);
+
+    // Repeated strokes converge on the layer instead of overshooting.
+    for (int i = 0; i < 12; ++i)
+        TerrainPaint::paint(tc, 0.0f, 0.0f, 1, 8.0f, 0.0f, 0.5f);
+    CHECK(texel(c, c)[1] == 255);
+    CHECK(texel(c, c)[0] == 0);
+
+    // Painting a different layer over it takes the weight back — reversible.
+    for (int i = 0; i < 12; ++i)
+        TerrainPaint::paint(tc, 0.0f, 0.0f, 0, 8.0f, 0.0f, 0.5f);
+    CHECK(texel(c, c)[0] == 255);
+    CHECK(texel(c, c)[1] == 0);
+}
+
+TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 64;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 2, /*radius=*/4.0f,
+                                /*falloff=*/12.0f, /*strength=*/1.0f));
+    const uint32_t wr = tc.weightRes;
+    auto at = [&](int x, int z) { return tc.layerWeights[(static_cast<size_t>(z) * wr + x) * 4 + 2]; };
+    const int c = static_cast<int>(wr) / 2;
+    // Inside the full-strength radius → saturated; further out → progressively less.
+    CHECK(at(c, c) == 255);
+    // 1 texel = 1 m here (64 m / 64 texels); the brush reaches radius+falloff = 16 m.
+    const uint8_t near = at(c + 6,  c);  // ~6.5 m: inside the falloff band
+    const uint8_t far  = at(c + 20, c);  // ~20.5 m: past radius+falloff
+    CHECK(near > 0);
+    CHECK(near < 255);
+    CHECK(far == 0);
+
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, 4, 4.0f, 0.0f, 1.0f)); // only 4 layers
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, -1, 4.0f, 0.0f, 1.0f));
+}
+
+TEST_CASE("Painted layer weights round-trip through the scene file")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.weightRes = 16;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 4.0f, -3.0f, 3, 6.0f, 2.0f, 0.7f);
+    const std::vector<uint8_t> expected = tc.layerWeights;
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, bytes));
+    const TerrainComponent* l = nullptr;
+    for (auto ent : w2.registry().view<TerrainComponent>())
+        l = &w2.registry().get<TerrainComponent>(ent);
+    REQUIRE(l != nullptr);
+    CHECK(l->weightRes == 16);
+    REQUIRE(l->layerWeights.size() == expected.size());
+    CHECK(l->layerWeights == expected);
+    CHECK(l->weightsDirty);   // needs an upload on the first tick after load
 }

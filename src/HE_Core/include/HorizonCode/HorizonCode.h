@@ -65,10 +65,10 @@ enum class NodeType : uint8_t
     // Target property access (elem + s = property name + propType = value type).
     GetProperty, SetProperty,
     // Host actions on the running widget itself ("self").
-    ShowWidget, HideWidget,
+    ShowSelf, HideSelf,
     // Create + manage widgets by id (from any graph — level, GameInstance, …).
     CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
-    ShowWidgetId, HideWidgetId, DestroyWidget, // dataIn Widget (Int id)
+    ShowWidget, HideWidget, DestroyWidget, // dataIn Widget (Int id)
     // Instantiate a HorizonCode class asset as a live runtime object.
     CreateObject,    // s = HorizonCode class asset path; dataOut Object (Ref)
     DestroyObject,   // dataIn Object (Ref)
@@ -213,6 +213,20 @@ struct Link { int srcNode = 0, srcPin = 0, dstNode = 0, dstPin = 0; };
 struct PinDesc { const char* name; PinType type; bool isArray = false; };
 struct NodeSig { std::vector<PinDesc> execIns, execOuts, dataIns, dataOuts; };
 HE_API NodeSig signatureOf(const Node& n);
+
+// signatureOf() materialises four heap vectors per call. The pin-range and
+// pin-type queries in the hot paths need only the counts or a single pin —
+// Graph::connect asks 6× per attempted link, the interpreter once per executed
+// node — so they go through these ALLOCATION-FREE accessors instead. Same switch,
+// same answers; they just fill a reusable scratch signature and copy out the
+// scalar bits. (HcCodegen and the editor panels still build full NodeSigs; they
+// can adopt these too.)
+struct NodeSigCounts { int execIns = 0, execOuts = 0, dataIns = 0, dataOuts = 0; };
+HE_API NodeSigCounts signatureCountsOf(const Node& n);
+// One data pin's descriptor; false (leaving `out` untouched) when `index` is out
+// of range. `out.name` points into `n` or at a string literal, exactly like
+// signatureOf's, so it outlives the call.
+HE_API bool dataPinDescOf(const Node& n, bool input, int index, PinDesc& out);
 
 // Static metadata for the editor add-menu (category + display name).
 HE_API const char* nodeDisplayName(NodeType t);

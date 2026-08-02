@@ -1,12 +1,6 @@
 #pragma once
-#include <filesystem>
-#include <Diagnostics/Logger.h>
-#include <string>
-#include <fstream>
 #include <Types/Enums.h>
 #include <vector>
-
-namespace fs = std::filesystem;
 
 struct ShaderHandle
 {
@@ -27,16 +21,20 @@ class ShaderManager
 public:
 	virtual ~ShaderManager() = default;
 
-	//Gibt einen ShaderHandle zurück der eine interne ID enthält, die den Shader repräsentiert. Der Shader wird anhand des übergebenen Pfads geladen.
+	// Loads the shader at the given path and returns a handle carrying the
+	// backend-internal id that represents it.
 	virtual ShaderHandle load(const char* path, HE::ShaderType type) = 0;
-	//Gibt den mit der übergebenen ID repräsentierten Shader frei. Alle Ressourcen, die mit diesem Shader verbunden sind, sollten ebenfalls freigegeben werden.
+	// Releases the shader the handle represents. Every resource tied to that
+	// shader should be released with it.
 	virtual void release(ShaderHandle handle) = 0;
-	// Kompiliert den Shader, der durch den übergebenen Handle repräsentiert wird. Gibt true zurück, wenn die Kompilierung erfolgreich war, andernfalls false.
+	// Compiles the shader the handle represents. Returns true on success.
 	virtual bool compile(ShaderHandle& handle) = 0;
 
-	// Erstellt ein Shader-Programm aus den übergebenen Shader-Handles. Alle Shader müssen bereits kompiliert sein. Gibt einen ShaderProgramHandle zurück, der das erstellte Programm repräsentiert.
+	// Links a shader program from the given handles — all of them must already be
+	// compiled. Returns a handle representing the created program.
 	virtual ShaderProgramHandle createProgram(const std::vector<ShaderHandle>& shaders) = 0;
-	// Gibt das mit der übergebenen ID repräsentierte Shader-Programm frei. Alle Ressourcen, die mit diesem Programm verbunden sind, sollten ebenfalls freigegeben werden.
+	// Releases the program the handle represents. Every resource tied to that
+	// program should be released with it.
 	virtual void releaseProgram(ShaderProgramHandle handle) = 0;
 
 	virtual void cleanup() = 0;

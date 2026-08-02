@@ -59,6 +59,31 @@ TEST_CASE("EngineApi: registry is populated and well-formed")
     }
 }
 
+TEST_CASE("EngineApi: cppCall names one real, distinct callee per row")
+{
+    // cppCall is staged input for the planned direct-call codegen and nothing
+    // emits it yet, so only this test keeps it honest. Two rules:
+    //   * it names a function in the HE::api tree (not a bare name, not a stale
+    //     ScriptApi:: path), so a mechanical emitter can write it verbatim;
+    //   * no two rows share a callee. Sharing means the shared function needs an
+    //     argument that distinguishes the rows, and that argument is NOT in
+    //     `params` — an emitter would generate a call with the wrong arity. That
+    //     was real: scene.showZone/hideZone both named requestZoneVisible(int,
+    //     bool) while declaring params {zone}, so both would have emitted
+    //     requestZoneVisible(zone). They now name their own one-argument wrappers.
+    std::unordered_map<std::string, std::string> calleeToId;   // cppCall → first id
+    for (const auto& fn : HE::api::registry())
+    {
+        const std::string callee = fn.cppCall;
+        INFO("row: " << fn.id << " → " << callee);
+        CHECK(callee.rfind("HE::api::", 0) == 0);
+        CHECK(callee.length() > std::strlen("HE::api::"));
+        const auto [it, fresh] = calleeToId.emplace(callee, fn.id);
+        INFO("also claimed by: " << it->second);
+        CHECK(fresh);
+    }
+}
+
 TEST_CASE("EngineApi: find() resolves ids, rejects unknown")
 {
     CHECK(HE::api::find("transform.setPosition") != nullptr);

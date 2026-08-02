@@ -4,6 +4,9 @@
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
+#include "HorizonScene/Components/ScriptComponent.h"
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 
 #include <string>
 #include <vector>
@@ -380,9 +383,15 @@ static int lua_horizon_hideCursor(lua_State* L)
 // group of engine functions is exposed by iterating the registry — no per-function
 // C shim. The Value ABI carries a vec2 as 2 numbers and a Color as 4 (the same
 // spread the hand-written bindings use), so scalars/vectors read and return the
-// familiar way. First registry-driven group: the pure Math library (horizon.math.*,
-// which no frontend could reach before). Gameplay groups keep their ergonomic
-// hand-written bindings until ScriptApi is inverted onto HE::api.
+// familiar way. WHICH namespaces arrive here is decided by HE::api::isScriptGroup,
+// not by this file — it started as math only and has grown since; read that list,
+// not this comment, for the current surface.
+// The FLAT gameplay functions above (horizon.setPosition, horizon.setUIText, the
+// widget calls, …) keep their ergonomic hand-written shims. Routing them through
+// here instead would change their script-visible arity (a packed vec3 spreads as 4
+// numbers on this path), i.e. it breaks existing user scripts — so it is a
+// migration, not a cleanup, and is deliberately deferred:
+// docs/rework-2026-07-deferrals.md §1.
 
 static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinType t)
 {
@@ -446,16 +455,9 @@ static void registerEngineApiGroups(lua_State* L)
         const auto dot = id.find('.');
         if (dot == std::string::npos) continue;           // only namespaced ("math.clamp")
         const std::string group = id.substr(0, dot), name = id.substr(dot + 1);
-        // Registry-driven groups exposed as horizon.<group>.<fn>. The flat
-        // gameplay functions keep their ergonomic hand-written bindings until
-        // ScriptApi is inverted onto HE::api. NB: a packed vec3 (Color) param
-        // spreads as 4 numbers (x, y, z, _) on this path. Widening = add a name.
-        static const char* kGroups[] = { "math", "random", "time", "input",
-                                         "string", "camera", "env", "entity", "audio",
-	                                 "debug", "fs", "save", "scene" };
-        bool exposed = false;
-        for (const char* gname : kGroups) if (group == gname) { exposed = true; break; }
-        if (!exposed) continue;
+        // Registry-driven groups exposed as horizon.<group>.<fn> — one shared list
+        // (HE::api::isScriptGroup) so Lua and Python expose the same surface.
+        if (!HE::api::isScriptGroup(group)) continue;
         lua_getfield(L, -1, group.c_str());               // [horizon, group?]
         if (!lua_istable(L, -1))
         {
@@ -571,7 +573,7 @@ void ScriptContext::setContentManager(ContentManager* cm)
 
 IScriptBackend* ScriptContext::backendForId(InstanceId id)
 {
-    if (langOf(id) == ScriptLanguage::Python && m_py) return m_py.get();
+    if (langOf(id) == HE::ScriptLanguage::Python && m_py) return m_py.get();
     return &m_engine;
 }
 
@@ -582,9 +584,9 @@ IScriptBackend* ScriptContext::backendForName(const std::string& name)
 }
 
 bool ScriptContext::loadScript(const std::string& name, const std::string& source,
-                               ScriptLanguage lang)
+                               HE::ScriptLanguage lang)
 {
-    if (lang == ScriptLanguage::Python)
+    if (lang == HE::ScriptLanguage::Python)
     {
         if (!m_py) { m_lastBackend = &m_engine; return false; } // built without Python
         m_lastBackend = m_py.get();
@@ -598,16 +600,16 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
                                                         entt::entity       entity)
 {
     IScriptBackend* backend = backendForName(scriptName);
-    const ScriptLanguage lang = (backend == m_py.get()) ? ScriptLanguage::Python
-                                                        : ScriptLanguage::Lua;
+    const HE::ScriptLanguage lang = (backend == m_py.get()) ? HE::ScriptLanguage::Python
+                                                        : HE::ScriptLanguage::Lua;
     return createInstance(scriptName, entity, lang);
 }
 
 ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& scriptName,
                                                         entt::entity       entity,
-                                                        ScriptLanguage     lang)
+                                                        HE::ScriptLanguage     lang)
 {
-    IScriptBackend* backend = (lang == ScriptLanguage::Python)
+    IScriptBackend* backend = (lang == HE::ScriptLanguage::Python)
                                   ? static_cast<IScriptBackend*>(m_py.get())
                                   : &m_engine;
     if (!backend) return IScriptBackend::kInvalidInstance; // Python requested, unavailable
@@ -621,6 +623,55 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
 void ScriptContext::destroyInstance(ScriptEngine::InstanceId id)
 {
     backendForId(id)->destroyInstance(rawId(id));
+}
+
+// ─── Bulk start of a scene's ECS scripts ──────────────────────────────────────
+
+ScriptEngine::InstanceId ScriptContext::startEntityScript(entt::entity entity, ContentManager& cm)
+{
+    if (!m_world) return ScriptEngine::kInvalidInstance;
+    auto& reg = m_world->registry();
+    if (!reg.valid(entity)) return ScriptEngine::kInvalidInstance;
+    auto* sc = reg.try_get<ScriptComponent>(entity);
+    if (!sc || !sc->enabled) return ScriptEngine::kInvalidInstance;
+    const ScriptAsset* asset = cm.getScript(sc->scriptAssetId);
+    if (!asset || asset->sourceCode.empty()) return ScriptEngine::kInvalidInstance;
+    if (!isScriptLoaded(sc->moduleName, asset->language))
+        loadScript(sc->moduleName, asset->sourceCode, asset->language);
+    const auto instId = createInstance(sc->moduleName, entity, asset->language);
+    if (instId == ScriptEngine::kInvalidInstance) return ScriptEngine::kInvalidInstance;
+    injectProperties(instId, sc->properties);
+    callOnStart(instId);
+    return instId;
+}
+
+int ScriptContext::startWorldScripts(ContentManager& cm, InstanceMap& out)
+{
+    if (!m_world) return 0;
+    int started = 0;
+    for (auto [entity, sc] : m_world->registry().view<ScriptComponent>().each())
+    {
+        const auto instId = startEntityScript(entity, cm);
+        if (instId == ScriptEngine::kInvalidInstance) continue;
+        out[static_cast<uint32_t>(entity)] = instId;
+        ++started;
+    }
+    return started;
+}
+
+int ScriptContext::startScriptsFor(const std::vector<entt::entity>& entities,
+                                   ContentManager& cm, InstanceMap& out)
+{
+    if (!m_world) return 0;
+    int started = 0;
+    for (entt::entity entity : entities)
+    {
+        const auto instId = startEntityScript(entity, cm);
+        if (instId == ScriptEngine::kInvalidInstance) continue;
+        out[static_cast<uint32_t>(entity)] = instId;
+        ++started;
+    }
+    return started;
 }
 
 bool ScriptContext::callOnStart(ScriptEngine::InstanceId id)
@@ -660,9 +711,9 @@ bool ScriptContext::hotReloadScript(const std::string& name, const std::string& 
 }
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source,
-                                    ScriptLanguage lang)
+                                    HE::ScriptLanguage lang)
 {
-    IScriptBackend* b = (lang == ScriptLanguage::Python)
+    IScriptBackend* b = (lang == HE::ScriptLanguage::Python)
                             ? static_cast<IScriptBackend*>(m_py.get())
                             : &m_engine;
     if (!b) { m_lastBackend = &m_engine; return false; } // Python requested, unavailable
@@ -676,9 +727,9 @@ bool ScriptContext::isScriptLoaded(const std::string& name) const
     return m_py && m_py->isScriptLoaded(name);
 }
 
-bool ScriptContext::isScriptLoaded(const std::string& name, ScriptLanguage lang) const
+bool ScriptContext::isScriptLoaded(const std::string& name, HE::ScriptLanguage lang) const
 {
-    if (lang == ScriptLanguage::Python) return m_py && m_py->isScriptLoaded(name);
+    if (lang == HE::ScriptLanguage::Python) return m_py && m_py->isScriptLoaded(name);
     return m_engine.isScriptLoaded(name);
 }
 

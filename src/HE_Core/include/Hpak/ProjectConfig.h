@@ -12,9 +12,11 @@ struct HE_API ProjectConfig {
     std::string  mainSceneName;         // fallback: filename of a loose startup .hescene (empty = none)
     uint8_t      projectUuidBytes[16] = {}; // legacy (unused by the AES-GCM path)
     bool         enableModSupport = false;
-    // AES-256 key for the pak. NOTE: this ships with the game, so it is
+    // AES-256-GCM key for the pak. NOTE: this ships with the game, so it is
     // obfuscation against casual ripping, not a security boundary. The runtime
-    // reads it here and hands it to ContentManager::loadPak().
+    // reads it here and hands it to ContentManager::mountPak() (GameApplication).
+    // Only populated as a fallback: when the exporter could patch the key block
+    // into the game executable it stays all-zero and just `encrypted` is set.
     bool         encrypted = false;
     uint8_t      encKey[32] = {};
     // Startup scene packed into the .hpak as a binary (CBOR) entry. When

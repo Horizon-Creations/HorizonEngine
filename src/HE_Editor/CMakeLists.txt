@@ -109,13 +109,36 @@ add_executable(HorizonEditor WIN32
 	LevelScriptPanel.cpp
 	InputAssetPanel.cpp
 	SkeletalMeshEditorPanel.cpp
+	StaticMeshEditorPanel.cpp
 	ParticleGraphEditorPanel.cpp
 	AnimatorStateMachineEditorPanel.cpp
-	HcClassList.cpp
+	ExportDialogPanel.cpp
+	ContentBrowserPanel.cpp
+	InspectorPanel.cpp
+	TerrainTools.cpp
+	ViewportPanel.cpp
+	OutlinerPanel.cpp
+	ProjectHubPanel.cpp
+	TutorialPanel.cpp
+	TutorialSteps.cpp
+	ProfilerPanel.cpp
+	EnvironmentPanel.cpp
+	EditorSettingsPanel.cpp
+	ToolchainDialog.cpp
+	PlayReportPanel.cpp
+	HcEditorUtil.cpp
+	HcGraphClipboard.cpp
+	HcGraphHost.cpp
+	HcGraphShortcuts.cpp
 	GraphEditor.cpp
 	CollabController.cpp
+	CollabPanel.cpp
+	EditorAssetTypeCache.cpp
+	AssetThumbnailCache.cpp
+	EditorPanelState.cpp
+	EditorWidgets.cpp
 	stb_image_impl.cpp
- "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcClassList.h" "SkeletalMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h")
+ "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "ExportDialogPanel.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "OutlinerPanel.h" "ProjectHubPanel.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ToolchainDialog.h" "PlayReportPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h
@@ -275,11 +298,12 @@ file(GENERATE
 	OUTPUT "$<TARGET_FILE_DIR:HorizonEditor>/he_sdk_config.json"
 	CONTENT "{\n  \"includeDirs\": [\"${CMAKE_SOURCE_DIR}/src/HE_Core/include\", \"${glm_SOURCE_DIR}\"],\n  \"libDir\": \"$<TARGET_FILE_DIR:HorizonCore>\"\n}\n")
 
-# The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime. They are compiled
-# to ${CMAKE_BINARY_DIR}/Shaders by the VulkanShaders target (a dependency of
-# RendererVulkan). Without this copy the editor crashes/falls over on the Vulkan
-# RHI ("shader not found"). Deploy them next to the exe and into DEPLOY_EDITOR.
-if(HE_VULKAN_ENABLED)
+# The Vulkan backend loads <exe dir>/Shaders/*.spv at runtime, and the D3D12
+# backend loads <exe dir>/Shaders/gi_*_hw.cso (DXR RayQuery kernels compiled by
+# dxc — see HE_D3D12_GI_SHADERS). Both land in ${CMAKE_BINARY_DIR}/Shaders.
+# Without this copy the Vulkan RHI falls over ("shader not found") and D3D12
+# silently stays on software GI. Deploy next to the exe and into DEPLOY_EDITOR.
+if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
 	add_custom_command(TARGET HorizonEditor POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E copy_directory
 			"${CMAKE_BINARY_DIR}/Shaders"

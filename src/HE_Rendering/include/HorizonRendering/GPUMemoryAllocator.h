@@ -9,6 +9,10 @@
 // The allocator does NOT call GPU APIs — it only tracks byte budgets and
 // LRU order. The RenderResourceManager supplies the eviction callback which
 // actually tears down the GPU resource.
+//
+// STAGED API — no production consumer yet: it is only reached through
+// RenderResourceManager, which the backends do not use either (see that header).
+// Kept for the roadmap's GPU upload-budgeting item, not dead code to prune.
 class GPUMemoryAllocator {
 public:
     using EvictCallback = std::function<void(RenderHandle)>;

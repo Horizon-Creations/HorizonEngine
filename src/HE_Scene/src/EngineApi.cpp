@@ -16,6 +16,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <DebugDraw/DebugDraw.h>
+#include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -25,9 +26,16 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <string_view>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
+
+// File-local alias. It used to arrive transitively from the public
+// HorizonRendering/ShaderManager.h, which declared it at global scope and so
+// leaked `fs` into every consumer of that header.
+namespace fs = std::filesystem;
+
 
 // The engine surface (transform/physics/material/ui/widget/cursor/entity) is a
 // thin promotion of the language-neutral ScriptApi — same behavior, now bundled
@@ -40,6 +48,21 @@ namespace HE::api {
 
 // ── Debug ────────────────────────────────────────────────────────────────────
 void log(Ctx&, const std::string& message) { ScriptApi::log(message.c_str()); }
+
+namespace {
+// Flip every renderable component the entity carries. One definition for both
+// callers — the per-entity toggle (entity::setVisible) and zone hiding
+// (scene::setZoneVisible) mean exactly the same thing by "visible", so a
+// component type added here must show up in both. Caller validates the entity.
+void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
+{
+    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
+    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
+    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
+    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
+    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
+}
+} // namespace
 
 // ── Entities ─────────────────────────────────────────────────────────────────
 namespace entity {
@@ -66,13 +89,7 @@ bool exists(Ctx& c, Entity e)
 void setVisible(Ctx& c, Entity e, bool visible)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return;
-    auto& reg = c.world->registry();
-    const auto en = (entt::entity)e;
-    if (auto* m  = reg.try_get<MeshComponent>(en))           m->visible  = visible;
-    if (auto* sm = reg.try_get<SkeletalMeshComponent>(en))   sm->visible = visible;
-    if (auto* l  = reg.try_get<LightComponent>(en))          l->visible  = visible;
-    if (auto* ps = reg.try_get<ParticleSystemComponent>(en)) ps->visible = visible;
-    if (auto* f  = reg.try_get<FoliageComponent>(en))        f->visible  = visible;
+    setEntityVisible(c.world->registry(), (entt::entity)e, visible);
 }
 bool getVisible(Ctx& c, Entity e)
 {
@@ -436,22 +453,24 @@ std::unordered_map<int, ZoneInfo>& zones() { static std::unordered_map<int, Zone
 bool& pendingLevel() { static bool p = false; return p; }
 } // namespace
 void load(const std::string& scenePath, bool hidden)
-{ Request r; r.kind = 0; r.path = scenePath; r.hidden = hidden; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::Switch; r.path = scenePath; r.hidden = hidden; requests().push_back(std::move(r)); }
 int loadAdditive(const std::string& scenePath, bool hidden, const glm::vec3& position)
 {
-    Request r; r.kind = 1; r.path = scenePath; r.zone = nextZone()++;
+    Request r; r.kind = (int)RequestKind::Additive; r.path = scenePath; r.zone = nextZone()++;
     r.hidden = hidden; r.pos = position;
     requests().push_back(r);
     return r.zone;
 }
 void unloadZone(int zone)
-{ Request r; r.kind = 2; r.zone = zone; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::UnloadZone; r.zone = zone; requests().push_back(std::move(r)); }
 void activate()
-{ Request r; r.kind = 3; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::Activate; requests().push_back(std::move(r)); }
 void requestZoneVisible(int zone, bool visible)
-{ Request r; r.kind = 4; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::ZoneVisible; r.zone = zone; r.flag = visible; requests().push_back(std::move(r)); }
+void showZone(int zone) { requestZoneVisible(zone, true); }
+void hideZone(int zone) { requestZoneVisible(zone, false); }
 void requestZonePosition(int zone, const glm::vec3& p)
-{ Request r; r.kind = 5; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
+{ Request r; r.kind = (int)RequestKind::ZonePosition; r.zone = zone; r.pos = p; requests().push_back(std::move(r)); }
 std::vector<Request> takeRequests()
 {
     std::vector<Request> out = std::move(requests());
@@ -503,18 +522,6 @@ void setZonePosition(Ctx& c, int zone, const glm::vec3& p)
     // zone's sub-root moves the whole zone.
     c.world->registry().get_or_emplace<TransformComponent>(e).position = p;
 }
-namespace {
-// Flip every renderable component the entity carries (zone hiding and the
-// per-entity visibility toggle share this).
-void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
-{
-    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
-    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
-    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
-    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
-    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
-}
-} // namespace
 void setZoneVisible(Ctx& c, int zone, bool visible)
 {
     const ZoneInfo* z = zoneInfo(zone);
@@ -675,6 +682,23 @@ bool      mouseButton(int i)            { return i >= 0 && i < 32 && (snap().but
 glm::vec2 mousePosition()               { return snap().pos; }
 glm::vec2 mouseDelta()                  { return snap().delta; }
 float     scrollDelta()                 { return snap().scroll; }
+void pushSdlSnapshot()
+{
+    int n = 0;
+    const bool* ks = SDL_GetKeyboardState(&n);
+    std::vector<std::string> down;
+    if (ks)
+        for (int sc = 0; sc < n; ++sc)
+            if (ks[sc]) { const char* name = SDL_GetScancodeName((SDL_Scancode)sc); if (name && name[0]) down.emplace_back(name); }
+    float mx = 0.0f, my = 0.0f;
+    const SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
+    uint32_t buttons = 0;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
+    if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
+    setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
+    setKeysDown(down);
+}
 } // namespace input
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -1004,10 +1028,10 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofBool(scene::hasPendingLevel()) }; } });
         // Show/Hide/Move queue as requests so they order correctly with a Load
         // Additive in the SAME exec chain (the load itself is deferred).
-        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
-            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), true); return VV{}; } });
-        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::requestZoneVisible",
-            [](Ctx&, const VV& a){ scene::requestZoneVisible(aI(a, 0), false); return VV{}; } });
+        t.push_back({ "scene.showZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::showZone",
+            [](Ctx&, const VV& a){ scene::showZone(aI(a, 0)); return VV{}; } });
+        t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::hideZone",
+            [](Ctx&, const VV& a){ scene::hideZone(aI(a, 0)); return VV{}; } });
         t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Color}}, "HE::api::scene::zonePosition",
             [](Ctx& c, const VV& a){ return VV{ v3(scene::zonePosition(c, aI(a, 0))) }; } });
         t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::requestZonePosition",
@@ -1148,11 +1172,36 @@ const std::vector<ApiFn>& registry()
     return table;
 }
 
+bool isScriptGroup(std::string_view group)
+{
+    static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
+                                                    "string", "camera", "env", "entity", "audio",
+                                                    "debug", "fs", "save", "scene" };
+    for (std::string_view g : kGroups) if (group == g) return true;
+    return false;
+}
+
 const ApiFn* find(const std::string& id)
 {
-    for (const auto& fn : registry())
-        if (id == fn.id) return &fn;
-    return nullptr;
+    // Every script call (Lua, Python, the HorizonCode interpreter) and every
+    // codegen validation pass lands here, so this must not be a linear walk over
+    // ~140 rows. The index is built once from registry(), whose vector lives for
+    // the process and never reallocates after construction — so the ApiFn* stay
+    // valid, and string_view keys can borrow the rows' string-literal ids instead
+    // of copying them. Function-local static ⇒ the build is thread-safe, which it
+    // needs to be: codegen runs on a worker thread while scripts run on the main one.
+    // Duplicate ids (should not exist) resolve to the first row, as the scan did.
+    static const std::unordered_map<std::string_view, const ApiFn*> index = []
+    {
+        const std::vector<ApiFn>& table = registry();
+        std::unordered_map<std::string_view, const ApiFn*> m;
+        m.reserve(table.size());
+        for (const ApiFn& fn : table) m.emplace(fn.id, &fn);
+        return m;
+    }();
+
+    const auto it = index.find(std::string_view(id));
+    return it == index.end() ? nullptr : it->second;
 }
 
 } // namespace HE::api

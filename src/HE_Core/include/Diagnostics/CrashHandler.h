@@ -3,17 +3,17 @@
 #include <string>
 
 // Signal-based crash handler: catches SIGSEGV, SIGABRT, SIGILL, SIGFPE, SIGBUS,
-// writes a crash report (timestamp + signal + stack trace) to a .crash file next
-// to the log, and then re-raises the signal so the OS can generate a core dump.
+// writes a crash report (timestamp + signal + stack trace) to a .crash file, and
+// then re-raises the signal so the OS can generate a core dump. POSIX only —
+// install() is a no-op on Windows (no SEH handler yet).
 //
 // Call CrashHandler::install() once at application startup before any other
-// work. The crash file path defaults to "<logDir>/he_crash_<timestamp>.crash".
-// Pass a directory override to install() to redirect crash files.
+// work. The crash file path is "<crashDir>/he_crash_<timestamp>.crash".
 class HE_API CrashHandler
 {
 public:
     // Install signal handlers. crashDir is the directory for .crash files;
-    // empty string → same directory as the engine log file.
+    // empty string → the system temp directory ($TMPDIR), NOT the log directory.
     static void install(const std::string& crashDir = "");
 
     // Uninstall (restore previous signal handlers). Rarely needed.

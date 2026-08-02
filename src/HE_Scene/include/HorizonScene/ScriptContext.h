@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class HorizonWorld;
 class PhysicsWorld;
@@ -41,7 +42,7 @@ public:
     // Load a named script in the given language (Lua by default). Python routes
     // to the CPython backend when the engine was built with it; otherwise fails.
     bool loadScript(const std::string& name, const std::string& source,
-                    ScriptLanguage lang = ScriptLanguage::Lua);
+                    HE::ScriptLanguage lang = HE::ScriptLanguage::Lua);
 
     // Create an instance of a named script bound to an entity.
     // self.entityId is set to the raw entt::entity value.
@@ -54,9 +55,31 @@ public:
                                             entt::entity       entity);
     ScriptEngine::InstanceId createInstance(const std::string& scriptName,
                                             entt::entity       entity,
-                                            ScriptLanguage     lang);
+                                            HE::ScriptLanguage     lang);
 
     void destroyInstance(ScriptEngine::InstanceId id);
+
+    // ── Bulk start of a scene's ECS scripts ───────────────────────────────
+    // entity → live instance, as the hosting app keeps it (game runtime and
+    // play-in-editor both map by the raw entt handle).
+    using InstanceMap = std::unordered_map<uint32_t, ScriptEngine::InstanceId>;
+
+    // Start ONE entity's enabled ScriptComponent: load its module (once per
+    // name+language), create the instance, inject the authored property overrides
+    // and fire onStart. Returns kInvalidInstance when the entity is stale, has no
+    // enabled ScriptComponent, its script asset is missing/empty, or the backend
+    // refused to create the instance — the caller simply skips it.
+    ScriptEngine::InstanceId startEntityScript(entt::entity entity, ContentManager& cm);
+
+    // Start every enabled ScriptComponent in the bound world, recording
+    // entity → instance in `out`. Returns how many actually started. This is the
+    // packaged game's startup path AND the editor's enter-play-mode path — they
+    // must stay the same code so a shipped game behaves like PIE.
+    int startWorldScripts(ContentManager& cm, InstanceMap& out);
+
+    // Same, restricted to `entities` (an additively loaded zone's fresh entities).
+    int startScriptsFor(const std::vector<entt::entity>& entities,
+                        ContentManager& cm, InstanceMap& out);
 
     // Call onStart(self) on the instance.
     bool callOnStart(ScriptEngine::InstanceId id);
@@ -79,7 +102,7 @@ public:
     // 2-arg form routes by which backend owns the name (ambiguous across
     // languages); prefer the 3-arg form with the script's known language.
     bool hotReloadScript(const std::string& name, const std::string& source);
-    bool hotReloadScript(const std::string& name, const std::string& source, ScriptLanguage lang);
+    bool hotReloadScript(const std::string& name, const std::string& source, HE::ScriptLanguage lang);
 
     // Inject stored property overrides into a live instance before onStart.
     void injectProperties(ScriptEngine::InstanceId id,
@@ -88,7 +111,7 @@ public:
     // True if the name is loaded in either backend; the 2-arg form checks the
     // specific language (so a Lua-loaded name reads as not-loaded for Python).
     bool   isScriptLoaded(const std::string& name) const;
-    bool   isScriptLoaded(const std::string& name, ScriptLanguage lang) const;
+    bool   isScriptLoaded(const std::string& name, HE::ScriptLanguage lang) const;
     size_t loadedScriptCount() const;
     size_t instanceCount() const;
     const std::string& lastError() const;
@@ -111,12 +134,12 @@ private:
     // Language lives in the high byte of the public InstanceId. Lua == 0 keeps
     // existing ids untouched; backends store instances under their own raw ids.
     static constexpr int kLangShift = 56;
-    static InstanceId tagId(InstanceId raw, ScriptLanguage lang)
+    static InstanceId tagId(InstanceId raw, HE::ScriptLanguage lang)
     { return raw | (static_cast<InstanceId>(static_cast<uint8_t>(lang)) << kLangShift); }
     static InstanceId rawId(InstanceId id)
     { return id & ((static_cast<InstanceId>(1) << kLangShift) - 1); }
-    static ScriptLanguage langOf(InstanceId id)
-    { return static_cast<ScriptLanguage>(static_cast<uint8_t>(id >> kLangShift)); }
+    static HE::ScriptLanguage langOf(InstanceId id)
+    { return static_cast<HE::ScriptLanguage>(static_cast<uint8_t>(id >> kLangShift)); }
 
     // Backend selection: by id (per-instance calls) or by name (name-keyed calls).
     IScriptBackend* backendForId(InstanceId id);

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class HorizonWorld;
@@ -299,6 +300,12 @@ namespace scene {
     // requested the SAME frame (the direct setters below only see zones that
     // already finished loading).
     void requestZoneVisible(int zone, bool visible);
+    // Show Zone / Hide Zone as two callees rather than one with a bool: the
+    // registry rows below expose them as separate functions, and ApiFn::cppCall
+    // has to name a function whose signature matches that row's params exactly
+    // (a shared requestZoneVisible would drop the bool that tells them apart).
+    void showZone(int zone);
+    void hideZone(int zone);
     void requestZonePosition(int zone, const glm::vec3& p);
 
     // ── Zone queries / control (direct; operate on the app-maintained table) ──
@@ -313,16 +320,29 @@ namespace scene {
     bool                     hasPendingLevel();              // a hidden load awaits activate()
 
     // ── App hooks ─────────────────────────────────────────────────────────────
+    // What a queued Request asks the app to do. The app dispatch (game runtime and
+    // editor PIE) switches on Request::kindOf() instead of repeating the raw numbers.
+    enum class RequestKind : int
+    {
+        Switch       = 0,  // full world switch — or, with hidden, a background PRELOAD
+        Additive     = 1,  // additive zone load
+        UnloadZone   = 2,  // unload an additive zone
+        Activate     = 3,  // present the level preloaded by Switch + hidden
+        ZoneVisible  = 4,  // show/hide a zone (queued so it orders after a load)
+        ZonePosition = 5,  // move a zone (queued so it orders after a load)
+    };
     struct Request
     {
+        // Stays `int` on the wire: the numbering is the queue's public contract
+        // (test_engine_api.cpp asserts it) and RequestKind is the typed view of it.
         int         kind = 0;
         std::string path;
         int         zone = 0;
-        bool        hidden = false;          // load: defer presentation
-        bool        flag = false;            // kind 4: target visibility
-        glm::vec3   pos{ 0.0f };             // kind 1: placement; kind 5: target position
+        bool        hidden = false;                 // load: defer presentation
+        bool        flag = false;                   // ZoneVisible: target visibility
+        glm::vec3   pos{ 0.0f };                    // Additive: placement; ZonePosition: target
+        RequestKind kindOf() const { return static_cast<RequestKind>(kind); }
     };
-    // kinds: 0 switch, 1 additive, 2 unloadZone, 3 activate, 4 zoneVisible, 5 zonePosition
     std::vector<Request> takeRequests();
     struct ZoneInfo { std::string path; uint32_t root = 0; std::vector<uint32_t> entities; };
     void            noteZoneLoaded(int zone, ZoneInfo info);
@@ -408,6 +428,14 @@ namespace input {
     void setMouse(const glm::vec2& pos, const glm::vec2& delta, uint32_t buttonMask, float scroll);
     void setKeysDown(const std::vector<std::string>& downKeyNames);
     void clear();
+    // Push the current SDL keyboard/mouse state into the snapshot above, so the
+    // input.* registry nodes and scripts poll fresh values this frame. Mouse delta +
+    // scroll are left at 0 here to avoid consuming SDL's relative-motion accumulator
+    // the free-fly camera controller uses; position + buttons + keys (by SDL scancode
+    // name, e.g. "W"/"Space") are polled. Called once per frame by whichever app owns
+    // the SDL window — the packaged game every frame, the editor only while playing
+    // (edit mode leaves the snapshot untouched).
+    void pushSdlSnapshot();
     // Script queries.
     bool      keyDown(const std::string& name);
     bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle
@@ -419,7 +447,8 @@ namespace input {
 // ── Machine-readable registry ─────────────────────────────────────────────────
 // One ApiFn per function. The interpreter looks a function up by `id` and calls
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;
-// codegen emits `cppCall(args…)`. This is the single source of truth.
+// codegen emits the generic `hc::callApi(ctx, "<id>", …)` thunk, which lands on
+// the same `invoke`. This is the single source of truth.
 
 struct ApiParam { const char* name; PinType type; bool isArray = false; };
 
@@ -430,7 +459,12 @@ struct ApiFn
     bool        isExec;      // true = side-effecting (exec node); false = pure data node
     std::vector<ApiParam> params;    // typed inputs (in call order)
     std::vector<ApiParam> results;   // typed outputs (in return order)
-    const char* cppCall;     // fully-qualified C++ callee, for the codegen back-end
+    // Fully-qualified C++ callee this row stands for. Staged input for a planned
+    // codegen migration (emit the direct call instead of routing through
+    // hc::callApi) — nothing emits it today, so it is only as correct as the
+    // invariant test in test_engine_api.cpp keeps it: one distinct callee per row,
+    // its signature matching `params` in order.
+    const char* cppCall;
     // Marshalling thunk: HorizonCode Values in → typed C++ call → Values out.
     // Missing/extra args are tolerated (defaults fill in), mirroring the API's
     // null-Ctx forgiveness.
@@ -445,5 +479,14 @@ struct ApiFn
 const std::vector<ApiFn>& registry();
 // Look up a single entry by id; nullptr if unknown.
 const ApiFn* find(const std::string& id);
+
+// True for a registry id's namespace ("math" of "math.clamp") that the text
+// scripting frontends expose as horizon.<group>.<fn>. Lua (ScriptContext) and
+// Python (PyScriptBackend) MUST agree on this, or the same script works in one
+// language and not the other — hence one list, not one per backend. The flat
+// gameplay functions keep their ergonomic hand-written bindings until ScriptApi
+// is inverted onto HE::api. NB: a packed vec3 (Color) param spreads as 4 numbers
+// (x, y, z, _) on this path. Widening the surface = adding a name to the list.
+bool isScriptGroup(std::string_view group);
 
 } // namespace HE::api

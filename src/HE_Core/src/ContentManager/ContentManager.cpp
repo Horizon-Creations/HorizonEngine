@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "ContentManager/HAsset.h"
+#include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Hpak/HpakReader.h"
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + kAssetPathIndexEntry
 #include "JobSystem/JobSystem.h"
@@ -78,8 +79,8 @@ static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
     return true;
 }
 
-// ─── getAssetType ─────────────────────────────────────────────────────────────
-HE::AssetType ContentManager::getAssetType(const std::string path) const
+// ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
+HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
 	std::ifstream f(path, std::ios::binary);
 	if (!f.is_open()) return HE::AssetType::Unknown;
@@ -191,9 +192,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
 		{
 			size_t o=0;
-			HAsset::Reader::readPOD(c->data,o,a.width);
-			HAsset::Reader::readPOD(c->data,o,a.height);
-			HAsset::Reader::readPOD(c->data,o,a.channels);
+			// Handles both the current uint32 layout and the legacy size_t one.
+			HAsset::readTextureHeader(c->data,o,a.width,a.height,a.channels);
 			// Cook tail (mipLevels, format, srgb) — guarded so pre-cook TXMI
 			// chunks (width/height/channels only) keep their defaults.
 			if (o + sizeof(uint32_t) <= c->data.size()) HAsset::Reader::readPOD(c->data,o,a.mipLevels);
@@ -242,6 +242,12 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readVec(c->data,o,a.instanceSwitchValues);
 			HAsset::Reader::readPOD(c->data,o,a.blendMode);              // 0 opaque/1 masked/2 translucent
 			HAsset::Reader::readString(c->data,o,a.customShaderVertGlsl);// WPO vertex body
+			HAsset::Reader::readVec(c->data,o,a.graphLayerNames);        // landscape paint layers
+			// Deferred G-buffer fragment variant (append-only tail; absent in older
+			// files → empty → forward-routed in deferred). For assets WITH a graph
+			// the load-time regeneration overwrites it anyway; the serialized copy
+			// is what lets PACKAGED materials (graph stripped) render deferred.
+			HAsset::Reader::readString(c->data,o,a.customShaderGBufGlsl);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -269,7 +275,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SRC))
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_SLNG); c && !c->data.empty())
-			a.language = static_cast<ScriptLanguage>(c->data[0]); // absent → default Lua
+			a.language = static_cast<HE::ScriptLanguage>(c->data[0]); // absent → default Lua
 		handle = m_scriptAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::MaterialFunction:
@@ -387,9 +393,103 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	// Material INSTANCES derive their effective shader/params from their parent —
 	// runs after the registry maps above so the recursive parent load is safe.
 	if (type == HE::AssetType::Material)
+	{
 		if (const MaterialAsset* m = getMaterial(id); m && !m->parentMaterialPath.empty())
 			syncMaterialInstance(id);
+		// BASE materials with a node graph: regenerate the baked GLSL from the graph
+		// (the source of truth) so assets saved under an older codegen automatically
+		// pick up shader-library upgrades (e.g. heLit → heLitP shadowing) without a
+		// manual re-save. Skipped when precompiled per-backend blobs are present
+		// (packed builds — the blobs were compiled from the baked GLSL and must
+		// stay consistent with it).
+		else if (m && !m->nodeGraphJson.empty() && m->precompiledShaders.empty())
+			regenerateMaterialFromGraph(id);
+	}
 	return id;
+}
+
+// ─── Graph → material codegen helpers (shared by base + instance regeneration) ─
+// Function-graph resolution for HE::generateFragment. `fnStore` OWNS the parsed
+// graphs and must outlive the call: generateFragment keeps the raw pointers the
+// loader hands back. `cm` supplies loadAsset/getMaterialFunction.
+static HE::MatFunctionLoader makeMatFunctionLoader(
+	ContentManager& cm, std::map<std::string, HE::MaterialGraph>& fnStore)
+{
+	return [&cm, &fnStore](const std::string& path) -> const HE::MaterialGraph*
+	{
+		if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
+		const MaterialFunctionAsset* fn = cm.getMaterialFunction(cm.loadAsset(path));
+		if (!fn || fn->nodeGraphJson.empty()) return nullptr;
+		HE::MaterialGraph fg;
+		if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
+		return &(fnStore[path] = std::move(fg));
+	};
+}
+
+// Replace a material's exposed-parameter arrays with a fresh codegen result (slot
+// order = gen.params order). `preserved` (optional) supplies values to keep BY NAME:
+// regenerateMaterialFromGraph passes the material's current values (a user edits
+// values without recompiling), syncMaterialInstance passes nullptr because it
+// re-applies only its explicitly overridden slots afterwards.
+static void applyGraphParams(MaterialAsset& m, const HE::MatShaderGen& gen,
+                             const std::map<std::string, std::array<float, 4>>* preserved)
+{
+	m.graphParamNames.clear(); m.graphParamTypes.clear();
+	m.graphParamMinMax.clear(); m.graphParamGroups.clear();
+	m.graphParamTooltips.clear(); m.shaderParamData.clear();
+	for (const auto& slot : gen.params)
+	{
+		m.graphParamNames.push_back(slot.name);
+		m.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+		m.graphParamMinMax.insert(m.graphParamMinMax.end(), { slot.minV, slot.maxV });
+		m.graphParamGroups.push_back(slot.group);
+		m.graphParamTooltips.push_back(slot.tooltip);
+		const std::array<float, 4>* keep = nullptr;
+		if (preserved)
+			if (auto it = preserved->find(slot.name); it != preserved->end()) keep = &it->second;
+		if (keep) m.shaderParamData.insert(m.shaderParamData.end(), keep->begin(), keep->end());
+		else      m.shaderParamData.insert(m.shaderParamData.end(), slot.value, slot.value + 4);
+	}
+}
+
+// Snapshot a material's current param values by name (slot i ↔ floats [i*4, i*4+4)).
+static std::map<std::string, std::array<float, 4>> snapshotGraphParams(const MaterialAsset& m)
+{
+	std::map<std::string, std::array<float, 4>> values;
+	for (size_t i = 0; i < m.graphParamNames.size(); ++i)
+		if (i * 4 + 3 < m.shaderParamData.size())
+			values[m.graphParamNames[i]] = { m.shaderParamData[i*4+0], m.shaderParamData[i*4+1],
+			                                 m.shaderParamData[i*4+2], m.shaderParamData[i*4+3] };
+	return values;
+}
+
+// Re-run the graph → GLSL codegen for a BASE material at load time. Mirrors
+// syncMaterialInstance's regeneration half: param VALUES are preserved by name
+// (users edit values without recompiling, so the baked shaderParamData can
+// legitimately differ from the graph's node defaults).
+void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
+{
+	MaterialAsset* mat = getMaterialMutable(materialId);
+	if (!mat || mat->nodeGraphJson.empty()) return;
+
+	HE::MaterialGraph g;
+	if (!HE::materialGraphFromJson(mat->nodeGraphJson, g)) return;
+
+	const std::map<std::string, std::array<float, 4>> oldValues = snapshotGraphParams(*mat);
+
+	// Function graphs resolve through this manager; storage must outlive the call.
+	std::map<std::string, HE::MaterialGraph> fnStore;
+	HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
+	const HE::MatShaderGen gen = HE::generateFragment(g, loader, nullptr);
+	if (gen.glsl.empty()) return;
+
+	mat->customShaderFragGlsl = gen.glsl;
+	mat->customShaderGBufGlsl = gen.glslGBuffer;
+	mat->customShaderVertGlsl = gen.vertexBody;
+	mat->blendMode            = gen.blendMode;
+	mat->graphTexturePaths    = gen.textures;
+	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
+	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
 }
 
 // ─── Material instances ───────────────────────────────────────────────────────
@@ -416,12 +516,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		                 inst->instanceOverriddenParams.end(), nm)
 		       != inst->instanceOverriddenParams.end();
 	};
-	std::map<std::string, std::array<float, 4>> oldValues;
-	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
-		if (i * 4 + 3 < inst->shaderParamData.size())
-			oldValues[inst->graphParamNames[i]] = { inst->shaderParamData[i*4+0],
-				inst->shaderParamData[i*4+1], inst->shaderParamData[i*4+2],
-				inst->shaderParamData[i*4+3] };
+	const std::map<std::string, std::array<float, 4>> oldValues = snapshotGraphParams(*inst);
 
 	if (!inst->instanceSwitchNames.empty() && !parent->nodeGraphJson.empty())
 	{
@@ -437,29 +532,13 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 				ov[inst->instanceSwitchNames[i]] = inst->instanceSwitchValues[i] != 0;
 			// Function graphs resolve through this manager; storage must outlive the call.
 			std::map<std::string, HE::MaterialGraph> fnStore;
-			HE::MatFunctionLoader loader = [&](const std::string& path) -> const HE::MaterialGraph*
-			{
-				if (auto it = fnStore.find(path); it != fnStore.end()) return &it->second;
-				const MaterialFunctionAsset* fn = getMaterialFunction(loadAsset(path));
-				if (!fn || fn->nodeGraphJson.empty()) return nullptr;
-				HE::MaterialGraph fg;
-				if (!HE::materialGraphFromJson(fn->nodeGraphJson, fg)) return nullptr;
-				return &(fnStore[path] = std::move(fg));
-			};
+			HE::MatFunctionLoader loader = makeMatFunctionLoader(*this, fnStore);
 			const HE::MatShaderGen gen = HE::generateFragment(g, loader, &ov);
 			inst->customShaderFragGlsl = gen.glsl;
-			inst->graphParamNames.clear(); inst->graphParamTypes.clear();
-			inst->graphParamMinMax.clear(); inst->graphParamGroups.clear();
-			inst->graphParamTooltips.clear(); inst->shaderParamData.clear();
-			for (const auto& slot : gen.params)
-			{
-				inst->graphParamNames.push_back(slot.name);
-				inst->graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
-				inst->graphParamMinMax.insert(inst->graphParamMinMax.end(), { slot.minV, slot.maxV });
-				inst->graphParamGroups.push_back(slot.group);
-				inst->graphParamTooltips.push_back(slot.tooltip);
-				for (int k = 0; k < 4; ++k) inst->shaderParamData.push_back(slot.value[k]);
-			}
+			inst->customShaderGBufGlsl = gen.glslGBuffer;
+			// nullptr: start from the permutation's defaults — the overridden slots are
+			// re-applied from oldValues below, the rest must follow the parent.
+			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
 			inst->blendMode            = gen.blendMode;
 			inst->customShaderVertGlsl = gen.vertexBody;
@@ -471,6 +550,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 	{
 		// Pure param overrides: byte-identical shader → the SAME cached pipeline.
 		inst->customShaderFragGlsl = parent->customShaderFragGlsl;
+		inst->customShaderGBufGlsl = parent->customShaderGBufGlsl;
 		inst->graphParamNames      = parent->graphParamNames;
 		inst->graphParamTypes      = parent->graphParamTypes;
 		inst->graphParamMinMax     = parent->graphParamMinMax;
@@ -645,7 +725,8 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
-	globalPool().submit([this, relativePath, fullPath,
+	// Captures the sink, never `this` — the job may outlive this ContentManager.
+	globalPool().submit([relativePath, fullPath, sink = m_asyncSink,
 	                     cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -664,8 +745,8 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 			result.failed = true;
 		}
 
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
-		m_asyncResults.push(std::move(result));
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
 	});
 }
 
@@ -674,13 +755,13 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 {
 	std::vector<AsyncResult> ready;
 	{
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
+		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
 		// Pull at most `maxRegistrations` completed jobs; leave the rest queued so
 		// a burst is spread over frames (registration/parse runs on this thread).
-		while (!m_asyncResults.empty() && ready.size() < maxRegistrations)
+		while (!m_asyncSink->results.empty() && ready.size() < maxRegistrations)
 		{
-			ready.push_back(std::move(m_asyncResults.front()));
-			m_asyncResults.pop();
+			ready.push_back(std::move(m_asyncSink->results.front()));
+			m_asyncSink->results.pop();
 		}
 	}
 
@@ -776,7 +857,8 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 	const bool              enc  = mount.encrypted;
 	std::array<uint8_t, 32> key  = mount.key;
 
-	globalPool().submit([this, id, path, enc, key, coalesceKey,
+	// Captures the sink, never `this` — the job may outlive this ContentManager.
+	globalPool().submit([id, path, enc, key, coalesceKey, sink = m_asyncSink,
 	                     cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -792,8 +874,8 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 		}
 		else result.failed = true;
 
-		std::unique_lock<std::mutex> lock(m_resultsMutex);
-		m_asyncResults.push(std::move(result));
+		std::unique_lock<std::mutex> lock(sink->mutex);
+		sink->results.push(std::move(result));
 	});
 }
 
@@ -803,10 +885,10 @@ size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& e
 	// Reserved pak entries are NOT streamable assets: the asset path index and the
 	// scene index are JSON metadata blobs read directly by their known UUID (via
 	// readMountedEntry), never parsed as .hasset. Streaming them would burn an
-	// async job on a guaranteed parse failure. (kAssetPathIndexEntry lives here in
-	// ProjectExporter.h; "__scene_index__" mirrors HE::api::scene::kSceneIndexEntry.)
+	// async job on a guaranteed parse failure. (Both names live in ProjectExporter.h;
+	// kSceneIndexEntry mirrors HE::api::scene::kSceneIndexEntry.)
 	const HE::UUID assetIdx = sceneUuidForPath(kAssetPathIndexEntry);
-	const HE::UUID sceneIdx = sceneUuidForPath("__scene_index__");
+	const HE::UUID sceneIdx = sceneUuidForPath(kSceneIndexEntry);
 	const HE::UUID giIdx    = sceneUuidForPath(kGameInstanceEntry);
 	size_t submitted = 0;
 	for (const auto& [id, mountIdx] : m_pakResidency)
@@ -955,7 +1037,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	case HE::AssetType::Texture:
 	{
 		auto& a = static_cast<TextureAsset&>(asset);
-		{ std::vector<uint8_t> b; HAsset::Writer::appendPOD(b,a.width); HAsset::Writer::appendPOD(b,a.height); HAsset::Writer::appendPOD(b,a.channels);
+		{ std::vector<uint8_t> b; HAsset::appendTextureHeader(b,a.width,a.height,a.channels);
 		  HAsset::Writer::appendPOD(b, a.mipLevels);
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.format));
 		  HAsset::Writer::appendPOD(b, static_cast<uint8_t>(a.srgb ? 1 : 0));
@@ -965,6 +1047,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	case HE::AssetType::Material:
 	{
+		// ⚠ FIELD-SYNCHRONISED WITH rewriteRefsForPack's MTRL branch (HpakWriter.cpp):
+		// the packer re-serializes this chunk by walking the field order below to find
+		// byte offsets (it copies the scalar tail verbatim rather than parsing it).
+		// Adding/removing/reordering a field here without mirroring it there makes the
+		// packer cut at the wrong offsets — packed materials then lose params or their
+		// WPO vertex body, silently (all reads are bounds-checked and just stop early).
 		auto& a = static_cast<MaterialAsset&>(asset);
 		std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.shaderPath); HAsset::Writer::appendVec(b,a.texturePaths);
 		HAsset::Writer::appendPOD(b,a.baseColor[0]); HAsset::Writer::appendPOD(b,a.baseColor[1]); HAsset::Writer::appendPOD(b,a.baseColor[2]);
@@ -986,6 +1074,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendVec(b,a.instanceSwitchValues);              // …(name + 0/1)
 		HAsset::Writer::appendPOD(b,a.blendMode);                         // blend mode
 		HAsset::Writer::appendString(b,a.customShaderVertGlsl);           // WPO vertex body
+		HAsset::Writer::appendVec(b,a.graphLayerNames);                   // landscape paint layers
+		// Deferred G-buffer fragment variant — post-v9 tail, which the packer
+		// (HpakWriter's MTRL branch) copies byte-verbatim into shipped paks, so
+		// packaged games can build the G-buffer pipeline without the node graph.
+		HAsset::Writer::appendString(b,a.customShaderGBufGlsl);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -1104,29 +1197,16 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	return w.write(fullPath, typeId);
 }
 
-// ─── Typed getters ───────────────────────────────────────────────────────────
-template<typename T>
-static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& index,
-                            const SlotMap<T>& map, HE::UUID id)
+// ─── Shader-variant chunk codecs (PSHD / PPSD) ───────────────────────────────
+// The single source of truth for the precompiled-shader byte layout, shared by
+// the exporter (encode) and the runtime loader above (decode). Material (PSHD)
+// and particle (PPSD) variants have identical wire shapes and differ only in the
+// C++ type they carry (see MaterialShaderVariant / ParticleShaderVariant in
+// Assets.h), so one template serves both — a layout change stays in one place.
+namespace
 {
-	auto it = index.find(id);
-	if (it == index.end()) return nullptr;
-	// SlotHandles are per-SlotMap, so the same {index,generation} can be valid in
-	// several maps. Confirm the stored asset really carries this UUID, otherwise a
-	// wrong-type lookup (e.g. getStaticMesh on a material id) would alias.
-	const T* a = map.get(it->second);
-	return (a && a->id == id) ? a : nullptr;
-}
-
-const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
-const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
-const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
-const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
-const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
-const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
-namespace HE
-{
-std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)
+template<typename Variant>
+std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 {
 	// No variants → no blob, so the exporter's `if (!pshd.empty())` guard skips the
 	// chunk entirely (rather than baking a count-0 PSHD that decodes to nothing).
@@ -1141,47 +1221,17 @@ std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShad
 	}
 	return b;
 }
-std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
-{
-	std::vector<MaterialShaderVariant> out;
-	size_t o = 0; uint8_t count = 0;
-	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
-	out.reserve(count);
-	for (uint8_t i = 0; i < count; ++i)
-	{
-		MaterialShaderVariant v;
-		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
-		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
-		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
-		out.push_back(std::move(v));
-	}
-	return out;
-}
 
-// PPSD — identical wire shape to encode/decodeMaterialShaderVariants above, distinct
-// type only (see ParticleShaderVariant in Assets.h).
-std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
+template<typename Variant>
+std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 {
-	if (vars.empty()) return {};
-	std::vector<uint8_t> b;
-	HAsset::Writer::appendPOD(b, static_cast<uint8_t>(std::min<size_t>(vars.size(), 255)));
-	for (const auto& v : vars)
-	{
-		HAsset::Writer::appendPOD(b, v.backend);
-		HAsset::Writer::appendString(b, v.vertex);
-		HAsset::Writer::appendString(b, v.fragment);
-	}
-	return b;
-}
-std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
-{
-	std::vector<ParticleShaderVariant> out;
+	std::vector<Variant> out;
 	size_t o = 0; uint8_t count = 0;
 	if (!HAsset::Reader::readPOD(bytes, o, count)) return out;
 	out.reserve(count);
 	for (uint8_t i = 0; i < count; ++i)
 	{
-		ParticleShaderVariant v;
+		Variant v;
 		if (!HAsset::Reader::readPOD(bytes, o, v.backend))     break;
 		if (!HAsset::Reader::readString(bytes, o, v.vertex))   break;
 		if (!HAsset::Reader::readString(bytes, o, v.fragment)) break;
@@ -1189,77 +1239,71 @@ std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vecto
 	}
 	return out;
 }
+} // namespace
+
+namespace HE
+{
+std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShaderVariant>& vars)
+{ return encodeShaderVariants(vars); }
+std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
+{ return decodeShaderVariants<MaterialShaderVariant>(bytes); }
+std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
+{ return encodeShaderVariants(vars); }
+std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
+{ return decodeShaderVariants<ParticleShaderVariant>(bytes); }
 } // namespace HE
 
+// ─── Typed getters ───────────────────────────────────────────────────────────
+template<typename T>
+static const T* lookupAsset(const std::unordered_map<HE::UUID, SlotHandle>& index,
+                            const SlotMap<T>& map, HE::UUID id)
+{
+	auto it = index.find(id);
+	if (it == index.end()) return nullptr;
+	// SlotHandles are per-SlotMap, so the same {index,generation} can be valid in
+	// several maps. Confirm the stored asset really carries this UUID, otherwise a
+	// wrong-type lookup (e.g. getStaticMesh on a material id) would alias.
+	const T* a = map.get(it->second);
+	return (a && a->id == id) ? a : nullptr;
+}
+
+// Mutable twin of lookupAsset — same UUID re-check against SlotHandle aliasing.
+template<typename T>
+static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& index,
+                             SlotMap<T>& map, HE::UUID id)
+{
+	auto it = index.find(id);
+	if (it == index.end()) return nullptr;
+	T* a = map.get(it->second);
+	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
+}
+
+const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
+const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
+const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
+const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }
+const FontAsset*          ContentManager::getFont(HE::UUID id) const          { return lookupAsset(m_handleToUUID, m_fontAssets, id); }
 const ScriptAsset*        ContentManager::getScript(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_scriptAssets, id); }
 const MaterialFunctionAsset* ContentManager::getMaterialFunction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_materialFunctionAssets, id); }
-MaterialFunctionAsset* ContentManager::getMaterialFunctionMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	MaterialFunctionAsset* a = m_materialFunctionAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+MaterialFunctionAsset*    ContentManager::getMaterialFunctionMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_materialFunctionAssets, id); }
 const UIWidgetAsset*      ContentManager::getWidget(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_widgetAssets, id); }
-UIWidgetAsset* ContentManager::getWidgetMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	UIWidgetAsset* a = m_widgetAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+UIWidgetAsset*            ContentManager::getWidgetMutable(HE::UUID id)       { return lookupAssetMutable(m_handleToUUID, m_widgetAssets, id); }
 const HorizonCodeClassAsset* ContentManager::getHorizonCodeClass(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_hcClassAssets, id); }
-HorizonCodeClassAsset* ContentManager::getHorizonCodeClassMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	HorizonCodeClassAsset* a = m_hcClassAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
-const InputActionAsset* ContentManager::getInputAction(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputActionAssets, id); }
-InputActionAsset* ContentManager::getInputActionMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	InputActionAsset* a = m_inputActionAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+HorizonCodeClassAsset*    ContentManager::getHorizonCodeClassMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_hcClassAssets, id); }
+const InputActionAsset*   ContentManager::getInputAction(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_inputActionAssets, id); }
+InputActionAsset*         ContentManager::getInputActionMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_inputActionAssets, id); }
 const InputMappingContextAsset* ContentManager::getInputMappingContext(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_inputMappingAssets, id); }
-InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	InputMappingContextAsset* a = m_inputMappingAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+InputMappingContextAsset* ContentManager::getInputMappingContextMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_inputMappingAssets, id); }
 const ParticleGraphAsset* ContentManager::getParticleGraph(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_particleGraphAssets, id); }
-ParticleGraphAsset* ContentManager::getParticleGraphMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	ParticleGraphAsset* a = m_particleGraphAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+ParticleGraphAsset*       ContentManager::getParticleGraphMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_particleGraphAssets, id); }
 const AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachine(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_animatorStateMachineAssets, id); }
-AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	AnimatorStateMachineAsset* a = m_animatorStateMachineAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+AnimatorStateMachineAsset* ContentManager::getAnimatorStateMachineMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_animatorStateMachineAssets, id); }
 const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_shaderAssets, id); }
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
-
-MaterialAsset* ContentManager::getMaterialMutable(HE::UUID id)
-{
-	auto it = m_handleToUUID.find(id);
-	if (it == m_handleToUUID.end()) return nullptr;
-	MaterialAsset* a = m_materialAssets.get(it->second);
-	return (a && a->id == id) ? a : nullptr; // reject wrong-type aliasing
-}
+MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
 
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
                                       const float* values, int count)
@@ -1393,6 +1437,11 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		return true;
 	};
 
+	// This chain MUST list every SlotMap member of the class. A type missing here
+	// makes unloadAsset() return false for it, which silently disables hot reload
+	// (pollHotReload unloads-then-reloads) and leaks the slot on manual delete —
+	// exactly what happened to InputAction/InputMappingContext/ParticleGraph/
+	// AnimatorStateMachine after those maps were added.
 	const bool removed =
 		tryRemove(m_staticMeshAssets)   || tryRemove(m_skeletalMeshAssets) ||
 		tryRemove(m_textureAssets)      || tryRemove(m_materialAssets)     ||
@@ -1401,7 +1450,9 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_shaderAssets)       || tryRemove(m_animClipAssets) ||
 		tryRemove(m_propAnimClipAssets) || tryRemove(m_materialFunctionAssets) ||
 		tryRemove(m_widgetAssets)       || tryRemove(m_hcClassAssets)     ||
-		tryRemove(m_prefabAssets);
+		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
+		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
+		tryRemove(m_animatorStateMachineAssets);
 	if (!removed)
 		return false;
 
@@ -1474,7 +1525,7 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 
 		// Skip files that aren't valid .hasset yet (mid-write / partial save).
 		// Avoids evicting the live asset before the new version is readable.
-		if (getAssetType(fullPath) == HE::AssetType::Unknown) continue;
+		if (sniffAssetTypeFromFile(fullPath) == HE::AssetType::Unknown) continue;
 
 		// File changed — unload old entry (removes from m_pathMtime) then reload.
 		auto pathIt = m_pathToUUID.find(relPath);
@@ -1486,6 +1537,99 @@ std::vector<HE::UUID> ContentManager::pollHotReload()
 			changed.push_back(newId);
 	}
 	return changed;
+}
+
+// ─── retargetAssetReferences ─────────────────────────────────────────────────
+size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
+                                                const std::string& newRel,
+                                                bool folder)
+{
+	namespace fs = std::filesystem;
+	if (m_contentRoot.empty() || oldRel.empty() || newRel.empty() || oldRel == newRel)
+		return 0;
+
+	// Scene references are project-relative ("Content/Level.hescene"), so the
+	// rules need the content directory's own name as their second form.
+	const std::string contentDir = fs::path(m_contentRoot).filename().generic_string();
+	const std::vector<HE::AssetRefs::Rule> rules =
+		HE::AssetRefs::moveRules(oldRel, newRel, folder, contentDir);
+	if (rules.empty()) return 0;
+
+	// Engine DEFAULTS are read-only ground and never move; their project-local
+	// overrides live under the content root, so one walk covers everything.
+	size_t rewritten = HE::AssetRefs::retargetTree(m_contentRoot, rules);
+
+	// The project manifest names the startup scene by the same project-relative
+	// path a moved scene just invalidated.
+	{
+		std::error_code ec;
+		const fs::path projectRoot = fs::path(m_contentRoot).parent_path();
+		for (const auto& e : fs::directory_iterator(projectRoot, ec))
+		{
+			if (ec) break;
+			std::error_code fec;
+			if (!e.is_regular_file(fec) || fec || e.path().extension() != ".heproj") continue;
+			std::string text;
+			{
+				std::ifstream f(e.path(), std::ios::binary);
+				if (!f) continue;
+				text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+			}
+			if (!HE::AssetRefs::retargetJsonText(text, rules)) continue;
+			std::ofstream o(e.path(), std::ios::binary | std::ios::trunc);
+			if (!o) continue;
+			o.write(text.data(), static_cast<std::streamsize>(text.size()));
+			if (o) ++rewritten;
+		}
+	}
+
+	// Re-key the in-memory indices: every one of them is keyed by (or holds) the
+	// path the file no longer has. Without this, loadAsset() of the new path would
+	// register a SECOND copy of the same UUID, saveAsset() of an already-open
+	// asset would write back to the vacated location, and ensureResident() would
+	// look the moved file up where it used to be.
+	auto rekeyMap = [&](auto& map)
+	{
+		using MapT = std::decay_t<decltype(map)>;
+		MapT moved;
+		for (auto it = map.begin(); it != map.end(); )
+		{
+			std::string key = it->first;
+			if (HE::AssetRefs::retargetValue(key, rules))
+			{
+				moved.emplace(std::move(key), std::move(it->second));
+				it = map.erase(it);
+			}
+			else ++it;
+		}
+		for (auto& [k, v] : moved) map[k] = std::move(v);
+	};
+	rekeyMap(m_pathToUUID);
+	rekeyMap(m_pathMtime);
+	for (auto& [id, path] : m_diskRegistry) HE::AssetRefs::retargetValue(path, rules);
+
+	// …and the `path` an already-loaded asset carries, which is where saveAsset()
+	// writes it back to.
+	auto rekeyAssetPaths = [&](auto& slotMap)
+	{
+		for (auto& asset : slotMap) HE::AssetRefs::retargetValue(asset.path, rules);
+	};
+	rekeyAssetPaths(m_staticMeshAssets);   rekeyAssetPaths(m_skeletalMeshAssets);
+	rekeyAssetPaths(m_textureAssets);      rekeyAssetPaths(m_materialAssets);
+	rekeyAssetPaths(m_sceneAssets);        rekeyAssetPaths(m_scriptAssets);
+	rekeyAssetPaths(m_materialFunctionAssets); rekeyAssetPaths(m_widgetAssets);
+	rekeyAssetPaths(m_hcClassAssets);      rekeyAssetPaths(m_inputActionAssets);
+	rekeyAssetPaths(m_inputMappingAssets); rekeyAssetPaths(m_particleGraphAssets);
+	rekeyAssetPaths(m_animatorStateMachineAssets);
+	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
+	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
+	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
+
+	if (rewritten > 0)
+		Logger::Log(Logger::LogLevel::Info,
+			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
+			 oldRel + "' to '" + newRel + "'").c_str());
+	return rewritten;
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
@@ -1825,6 +1969,19 @@ void ContentManager::initDefaultAssets()
 	white.height   = 1;
 	white.channels = 4;
 	registerTexture(std::move(white));
+
+	// ── Default landscape weightmap (kDefaultLayer0WeightTextureId) ──────────
+	// Bound for terrain chunks whose landscape has no painted weights yet, so a
+	// layer-blend material shows layer 0 instead of an average or a black hole.
+	TextureAsset w0;
+	w0.id       = HE::kDefaultLayer0WeightTextureId;
+	w0.name     = "DefaultLayer0Weight";
+	w0.path     = "mem://default_layer0_weight";
+	w0.data     = { 255, 0, 0, 0 };
+	w0.width    = 1;
+	w0.height   = 1;
+	w0.channels = 4;
+	registerTexture(std::move(w0));
 
 	// ── Default material (kDefaultMaterialId) ─────────────────────────────────
 	// PBR defaults: white base colour, non-metallic, mid roughness, fully opaque.

@@ -55,6 +55,22 @@ private:
     // elements, drive button states and dispatch onClick/onHover* to scripts.
     void updateUIInput();
 
+    // Ensure a camera the free-fly controller can drive. A scene authored without
+    // one otherwise renders through the extractor's fixed fallback camera, which
+    // can't move — so the game would look frozen. Only added when the scene has no
+    // camera at all; an authored camera is never overridden. Returns true if one
+    // was added (the startup path logs that, a scene switch does not).
+    static bool ensureDefaultCamera(HorizonWorld& world);
+
+    // Reference-graph streaming seed: kick off async loads for the assets this scene
+    // actually references. Their baked transitive dependencies (materials → textures)
+    // follow automatically via the frontier in pollAsyncResults, so the loader pulls
+    // only the closure the scene needs — unused pak assets are never loaded. The
+    // async UUID loader resolves from mounted paks first and falls back to the disk
+    // registry, so this also works for a WIP build running on loose content.
+    // Returns the number of seeded asset roots (for the log lines).
+    size_t streamSceneAssets(HorizonWorld& world);
+
     ProjectConfig                 m_config;
     // App-wide HorizonCode host: owns the runtime the world runs on and the
     // GameInstance (OnInit fires before the scene loads; OnShutdown at exit).

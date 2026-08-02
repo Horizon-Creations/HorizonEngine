@@ -261,6 +261,158 @@ TEST_CASE("UISystem::extract button uses hovered color when hovered")
     CHECK(out[0].color.g == doctest::Approx(0.8f));
 }
 
+// extract() used to iterate EVERY UIElementComponent for EVERY active canvas,
+// so a second canvas doubled the whole UI — each element once more, laid out
+// with the other canvas' scale. Elements now belong to the canvas they hang
+// under in the hierarchy.
+TEST_CASE("UISystem::extract emits an element only for its own canvas")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    // Canvas A is 1920×1080 (scale 1 at a 1920×1080 viewport), canvas B is
+    // 960×540 (scale 2) — so the two canvases produce distinguishable rects.
+    auto ca = world.createEntity("canvasA");
+    reg.emplace<UICanvasComponent>(ca);
+    auto cb = world.createEntity("canvasB");
+    UICanvasComponent cvB;
+    cvB.width  = 960.0f;
+    cvB.height = 540.0f;
+    reg.emplace<UICanvasComponent>(cb, cvB);
+
+    auto makeElement = [&](const char* name, Entity canvas, glm::vec4 tint)
+    {
+        auto e = world.createEntity(name);
+        UIElementComponent el;
+        el.position = {100.0f, 0.0f};
+        el.size     = {100.0f, 30.0f};
+        el.pivot    = {0.0f, 0.0f};
+        el.anchor   = UIAnchor::TopLeft;
+        reg.emplace<UIElementComponent>(e, el);
+        UIImageComponent img;
+        img.tint = tint;
+        reg.emplace<UIImageComponent>(e, img);
+        CHECK(world.reparentEntity(e, canvas));
+        return e;
+    };
+    makeElement("elemA", ca, {1.0f, 0.0f, 0.0f, 1.0f});
+    makeElement("elemB", cb, {0.0f, 1.0f, 0.0f, 1.0f});
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+
+    REQUIRE(out.size() == 2); // was 4 before the membership check
+    int nA = 0, nB = 0;
+    for (const auto& ro : out)
+    {
+        if (ro.color.r > 0.5f)
+        {
+            ++nA;
+            CHECK(ro.position.x == doctest::Approx(100.0f)); // canvas A: scale 1
+            CHECK(ro.size.x     == doctest::Approx(100.0f));
+        }
+        else
+        {
+            ++nB;
+            CHECK(ro.position.x == doctest::Approx(200.0f)); // canvas B: scale 2
+            CHECK(ro.size.x     == doctest::Approx(200.0f));
+        }
+    }
+    CHECK(nA == 1);
+    CHECK(nB == 1);
+}
+
+// Unparented elements (legacy scenes / the editor's add-component flow) have no
+// canvas of their own; they must still render, but only once — under the first
+// active canvas, not under every one.
+TEST_CASE("UISystem::extract emits a canvas-less element exactly once")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    reg.emplace<UICanvasComponent>(world.createEntity("canvasA"));
+    reg.emplace<UICanvasComponent>(world.createEntity("canvasB"));
+
+    auto ee = world.createEntity("orphan"); // stays a child of the world root
+    UIElementComponent el;
+    el.pivot = {0.0f, 0.0f};
+    reg.emplace<UIElementComponent>(ee, el);
+    reg.emplace<UIImageComponent>(ee);
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    CHECK(out.size() == 1); // was 2 (once per canvas)
+}
+
+// An element under a disabled canvas is hidden — it must not fall through to
+// the active canvas that happens to be the fallback for canvas-less elements.
+TEST_CASE("UISystem::extract hides elements of an inactive canvas")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto active = world.createEntity("canvasActive");
+    reg.emplace<UICanvasComponent>(active);
+
+    auto off = world.createEntity("canvasOff");
+    UICanvasComponent cvOff;
+    cvOff.active = false;
+    reg.emplace<UICanvasComponent>(off, cvOff);
+
+    auto ee = world.createEntity("hidden");
+    UIElementComponent el;
+    el.pivot = {0.0f, 0.0f};
+    reg.emplace<UIElementComponent>(ee, el);
+    reg.emplace<UIImageComponent>(ee);
+    REQUIRE(world.reparentEntity(ee, off));
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    CHECK(out.empty());
+}
+
+// The single-canvas layout/order path is unchanged: nested children still sort
+// after their parent, and canvas-less siblings still render.
+TEST_CASE("UISystem::extract single canvas keeps parent-before-child order")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto ce = world.createEntity("canvas");
+    reg.emplace<UICanvasComponent>(ce);
+
+    auto parent = world.createEntity("panel");
+    UIElementComponent pel;
+    pel.position = {0.0f, 0.0f};
+    pel.size     = {400.0f, 200.0f};
+    pel.pivot    = {0.0f, 0.0f};
+    reg.emplace<UIElementComponent>(parent, pel);
+    UIImageComponent pimg;
+    pimg.tint = {1.0f, 0.0f, 0.0f, 1.0f};
+    reg.emplace<UIImageComponent>(parent, pimg);
+    REQUIRE(world.reparentEntity(parent, ce));
+
+    auto child = world.createEntity("child");
+    UIElementComponent cel;
+    cel.position = {10.0f, 10.0f};
+    cel.size     = {50.0f, 20.0f};
+    cel.pivot    = {0.0f, 0.0f};
+    reg.emplace<UIElementComponent>(child, cel);
+    UIImageComponent cimg;
+    cimg.tint = {0.0f, 1.0f, 0.0f, 1.0f};
+    reg.emplace<UIImageComponent>(child, cimg);
+    REQUIRE(world.reparentEntity(child, parent));
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].color.r == doctest::Approx(1.0f)); // panel first (depth 0)
+    CHECK(out[1].color.g == doctest::Approx(1.0f)); // child over it (depth 1)
+    CHECK(out[1].position.x == doctest::Approx(10.0f)); // anchored inside parent
+    CHECK(out[0].layer < out[1].layer);
+}
+
 // ── Round-trip serialization ─────────────────────────────────────────────────
 
 TEST_CASE("UICanvasComponent round-trips through SceneSerializer")

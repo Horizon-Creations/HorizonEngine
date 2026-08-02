@@ -1,7 +1,14 @@
 #include "Backends/Vulkan/VulkanShaderManager.h"
+#include <Diagnostics/Logger.h>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
+
+// File-local: ShaderManager.h used to leak a global `namespace fs` alias into
+// every consumer of the public header, so this TU got it for free.
+namespace fs = std::filesystem;
 
 ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
 {

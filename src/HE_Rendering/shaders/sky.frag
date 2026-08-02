@@ -1,5 +1,53 @@
 #version 450
 
+// ─── DRIFT WARNING: reduced second copy of the GL sky shader ─────────────────
+// This file is NOT the reference implementation. The engine's sky lives twice:
+//
+//   reference : src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//               `kSkyFS`        — the sky fragment shader
+//               `kSkyFuncGLSL`  — the shared analytic sky, spliced in at the
+//                                 `//#SKYFUNC#` marker (Metal mirrors both in MSL)
+//   this file : a hand-maintained, feature-reduced port for the Vulkan backend
+//
+// They are edited independently, so the GL/Metal sky has moved ahead. Verified
+// against the GL source (audit 1a); everything below is present in `kSkyFS` /
+// `kSkyFuncGLSL` and MISSING here:
+//
+//   * atmoScatter / atmoRaySphere — the single-scattering atmosphere (Rayleigh +
+//     Mie + ozone). `skyColor()` below is the OLD hand-tuned day/dusk/night
+//     gradient, so sunset reddening and the blue hour are approximated, not
+//     integrated. This is the biggest visual difference.
+//   * applyClouds3D + cloudBillowFbm / cloudCoverFbm — the 3D volumetric cloud
+//     raymarch (cloudMode 1). Only the 2D dome `applyClouds()` exists here.
+//     NOTE: `hgPhase()` IS present — it is used by the 2D cloud path. What is
+//     missing is its SECOND use inside applyClouds3D, not the function.
+//   * applyAurora3D + auroraMeander — the 3D aurora curtain. The flat 2D
+//     `aurora()` below is the older version, so this file is not aurora-less.
+//   * cirrus / cirrusFbm (high cirrus layer) and contrails
+//   * sunDisk, sunGlare, moonCorona, and the procedural moon surface
+//     (moonFbm / moonHash / moonNoise) used when no moon texture is bound
+//   * crepuscular / godrayClear (god rays), rainbow (rain-driven),
+//     shootingStars (meteors)
+//   * nebIso / mwRift / skyHsv — the 3-colour nebula + Milky Way rift. The
+//     `nebula()` below is the older single-colour version.
+//   * skyIgn — interleaved-gradient noise used to dither the raymarch steps
+//
+// The SkyEnv block below is likewise a reduced form of HE::SkyFrameParams
+// (include/HorizonRendering/SkyFrameParams.h, 336 bytes vs 160 here). The
+// renderer therefore reads named fields out of BuildSkyFrameParams instead of
+// memcpy'ing it — see VulkanRenderer::drawSky. Everything past `nebulaColor` in
+// SkyFrameParams has no slot here: cameraPos/cloudMode, cloud height/density/
+// fluffiness/tint/quality, low-res-cloud compositing, contrail + cirrus amounts,
+// cirrus/nebula seeds, aurora height/fragmentation/top colour, nebula colours 2
+// and 3, nebula coverage/quality, god rays, shooting stars, the whole star block
+// (colour, brightness, size, size variation, density, glow, twinkle), moon phase
+// and rain amount.
+//
+// Audit 1a decision: DOCUMENT the drift, do not port. Porting the features (or
+// better, generating all three backends from one source) is tracked separately.
+// Until then: a change to the GL sky is NOT automatically visible on Vulkan.
+// ─────────────────────────────────────────────────────────────────────────────
+
 layout(location = 0) in vec2 vNDC;
 layout(location = 0) out vec4 FragColor;
 

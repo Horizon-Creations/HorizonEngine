@@ -103,15 +103,50 @@ enum class MatNodeType : uint8_t
     NormalMapSample,// tangent-space normal map → WORLD-space normal, using a screen-space
                     // cotangent frame (dFdx/dFdy of vWorldPos+vUV, Mikkelsen) — no vertex
                     // tangents needed. s = texture path (like TextureSample), p[0] = strength.
+
+    // ── v10: landscape layers ──
+    LandscapeLayerBlend, // one input per named layer, blended by the landscape's painted
+                         // weightmap (RGBA8, channel k = layer k). s = '\n'-separated layer
+                         // names (these become MaterialAsset::graphLayerNames, which is what
+                         // the Landscape paint tool lists). Sampled at the RAW mesh UV — the
+                         // weightmap spans the whole terrain, so per-layer detail tiling is
+                         // authored with the UV node's Tiling instead of the terrain's.
 };
+
+// Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
+// channel each. More would mean several weightmap textures + shader permutations.
+inline constexpr int kMatMaxLandscapeLayers = 4;
+
+// Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
+// blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
+HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
 
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
 //   Opaque      — no Opacity pin; alpha forced to 1.
-//   Masked      — pin 4 becomes OpacityMask: fragments below the cutoff (p[2]) discard.
-//                 Stays in the OPAQUE pass (no sorting), holes are hard-edged.
-//   Translucent — pin 4 is Opacity: drawn in the sorted alpha-blend pass.
+//   Masked      — kMatOutputOpacityPin becomes OpacityMask: fragments below the cutoff
+//                 (p[2]) discard. Stays in the OPAQUE pass (no sorting), hard-edged holes.
+//   Translucent — kMatOutputOpacityPin is Opacity: drawn in the sorted alpha-blend pass.
 enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
+
+// Output-node input pin indices (see the Output entry in the node registry).
+// Links are stored by pin INDEX, so these are part of the on-disk format: any
+// reorder needs a kMatGraphVersion bump plus a remap in materialGraphFromJson.
+enum : int {
+    kMatOutputBaseColorPin = 0,
+    kMatOutputMetallicPin  = 1,
+    kMatOutputSpecularPin  = 2,
+    kMatOutputRoughnessPin = 3,
+    kMatOutputEmissivePin  = 4,
+    kMatOutputOpacityPin   = 5,   // Opacity / OpacityMask, per blend mode
+    kMatOutputNormalPin    = 6,
+    kMatOutputAOPin        = 7,
+    kMatOutputWPOPin       = 8,
+};
+
+// Serialized graph format version. v2 inserted Specular at pin 2 and Ambient
+// Occlusion at pin 7 of the Output node, shifting everything after them.
+constexpr int kMatGraphVersion = 2;
 
 struct MatGraphNode
 {
@@ -184,9 +219,10 @@ HE_API const MatNodeDesc&              matNodeDesc(MatNodeType type);
 HE_API const MatNodeDesc*              matNodeDescByName(const std::string& name);
 
 // The Output node's DISPLAYED input pins for a blend mode, plus the registry pin index
-// each row maps to (indices stay stable across modes so serialized links never break:
-// 0 BaseColor, 1 Metallic, 2 Roughness, 3 Emissive, 4 Opacity/OpacityMask, 5 Normal,
-// 6 WPO). Opaque hides pin 4; Masked renames it to OpacityMask.
+// each row maps to — those indices are exactly the kMatOutput*Pin constants above (named
+// rather than spelled out here, so this comment cannot rot when a pin is inserted). They
+// stay stable across modes so serialized links never break: Opaque hides
+// kMatOutputOpacityPin, Masked renames it to OpacityMask.
 HE_API void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex);
 
 // Interface pins of a FUNCTION graph: its FnInput nodes (sorted by id) become the call
@@ -227,6 +263,13 @@ struct MatParamSlot
 struct MatShaderGen
 {
     std::string               glsl;     // canonical fragment (→ MaterialAsset::customShaderFragGlsl)
+    // Deferred G-buffer variant: SAME graph evaluation (byte-identical body and
+    // attribute expressions), but the tail writes base/metallic/normal/roughness/
+    // specular/emissive/AO into three MRT outputs (oGB0/oGB1/oGB2) instead of
+    // calling heLitP — the lighting happens once, in the fullscreen resolve
+    // (MaterialShaderLibrary::deferredResolve). Empty only when glsl is empty.
+    // → MaterialAsset::customShaderGBufGlsl (derived, regenerated at load).
+    std::string               glslGBuffer;
     std::vector<MatParamSlot> params;   // HeParams layout (→ MaterialAsset::shaderParamData)
     // Content-relative paths of the project textures referenced by Texture Sample nodes,
     // in slot order (heTexP0..heTexP3). → MaterialAsset::graphTexturePaths. Max 4.
@@ -241,11 +284,26 @@ struct MatShaderGen
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
     std::string vertexBody;
+    // Landscape paint layers this material declares, in weightmap-channel order
+    // (→ MaterialAsset::graphLayerNames). Non-empty makes it a LANDSCAPE material:
+    // the Landscape tool lists exactly these as its paintable layers, so the
+    // material — not the terrain — is the single source of truth for what a layer
+    // means. Empty for every ordinary material.
+    std::vector<std::string> layerNames;
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend
 // binding pins stay static).
 inline constexpr int kMatMaxGraphTextures = 4;
+
+// Exposed parameters a single material graph may declare — the length of the
+// HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
+// generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).
+// A graph with MORE distinct parameter names bakes the surplus ones as literal
+// constants instead of indexing the UBO: the layout used to be clamped only
+// AFTER emission, so the generated shader kept reading heParams.v[16] and up —
+// out of bounds in the declared array.
+inline constexpr int kMatMaxParams = 16;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function

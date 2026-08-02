@@ -1,7 +1,6 @@
 #include "MeshImporter.h"
 #include <algorithm>
 #include <cstdint>
-#include "TextureImporter.h"
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 
@@ -10,7 +9,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <cstring>
 
 namespace
 {
@@ -21,66 +19,13 @@ void logError(const std::string& msg)
 }
 
 // Appends one primitive's geometry to the merged mesh, transformed by `world`.
+// The per-vertex work itself is Importer::appendPrimitive — shared with
+// SkeletalMeshImporter, which reads the same streams (plus JOINTS_0/WEIGHTS_0).
 void appendPrimitive(StaticMeshAsset& mesh, const cgltf_primitive& prim,
                      const glm::mat4& world, float uniformScale)
 {
-	if (prim.type != cgltf_primitive_type_triangles)
-		return;
-
-	const cgltf_accessor* posAcc  = nullptr;
-	const cgltf_accessor* normAcc = nullptr;
-	const cgltf_accessor* uvAcc   = nullptr;
-	for (cgltf_size i = 0; i < prim.attributes_count; ++i)
-	{
-		const cgltf_attribute& attr = prim.attributes[i];
-		if      (attr.type == cgltf_attribute_type_position)                      posAcc  = attr.data;
-		else if (attr.type == cgltf_attribute_type_normal)                        normAcc = attr.data;
-		else if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0)   uvAcc   = attr.data;
-	}
-	if (!posAcc)
-		return;
-
-	const uint32_t  baseVertex = static_cast<uint32_t>(mesh.vertices.size() / 3);
-	const glm::mat3 normalMat  = glm::transpose(glm::inverse(glm::mat3(world)));
-
-	for (cgltf_size v = 0; v < posAcc->count; ++v)
-	{
-		float p[3] = {};
-		cgltf_accessor_read_float(posAcc, v, p, 3);
-		glm::vec3 wp = glm::vec3(world * glm::vec4(p[0], p[1], p[2], 1.0f)) * uniformScale;
-		mesh.vertices.insert(mesh.vertices.end(), { wp.x, wp.y, wp.z });
-
-		if (normAcc && v < normAcc->count)
-		{
-			float n[3] = {};
-			cgltf_accessor_read_float(normAcc, v, n, 3);
-			glm::vec3 wn = glm::normalize(normalMat * glm::vec3(n[0], n[1], n[2]));
-			mesh.normals.insert(mesh.normals.end(), { wn.x, wn.y, wn.z });
-		}
-		else
-			mesh.normals.insert(mesh.normals.end(), { 0.0f, 0.0f, 0.0f });
-
-		if (uvAcc && v < uvAcc->count)
-		{
-			float uv[2] = {};
-			cgltf_accessor_read_float(uvAcc, v, uv, 2);
-			mesh.uvs.insert(mesh.uvs.end(), { uv[0], uv[1] });
-		}
-		else
-			mesh.uvs.insert(mesh.uvs.end(), { 0.0f, 0.0f });
-	}
-
-	if (prim.indices)
-	{
-		for (cgltf_size i = 0; i < prim.indices->count; ++i)
-			mesh.indices.push_back(baseVertex
-				+ static_cast<uint32_t>(cgltf_accessor_read_index(prim.indices, i)));
-	}
-	else
-	{
-		for (cgltf_size i = 0; i < posAcc->count; ++i)
-			mesh.indices.push_back(baseVertex + static_cast<uint32_t>(i));
-	}
+	Importer::MeshVertexStreams streams{ mesh.vertices, mesh.normals, mesh.uvs };
+	Importer::appendPrimitive(prim, world, uniformScale, streams, mesh.indices);
 }
 
 // True if any appended normal is still the (0,0,0) placeholder.
@@ -119,57 +64,6 @@ void generateNormals(StaticMeshAsset& mesh)
 			mesh.normals[i] = n.x; mesh.normals[i+1] = n.y; mesh.normals[i+2] = n.z;
 		}
 	}
-}
-
-// Finds the first base-color texture in the glTF and imports it. Returns the
-// asset path of the written texture, or empty.
-std::string importBaseColorTexture(const cgltf_data* data,
-                                   const std::filesystem::path& sourcePath,
-                                   const std::filesystem::path& contentRoot,
-                                   const std::filesystem::path& relativeOutputDir,
-                                   const std::string& meshStem)
-{
-	const cgltf_texture* texture = nullptr;
-	for (cgltf_size m = 0; m < data->materials_count && !texture; ++m)
-	{
-		const cgltf_material& mat = data->materials[m];
-		if (mat.has_pbr_metallic_roughness && mat.pbr_metallic_roughness.base_color_texture.texture)
-			texture = mat.pbr_metallic_roughness.base_color_texture.texture;
-	}
-	if (!texture || !texture->image)
-		return {};
-
-	const cgltf_image* img = texture->image;
-	const std::string texName = meshStem + "_basecolor";
-
-	if (img->uri && std::strncmp(img->uri, "data:", 5) != 0)
-	{
-		// External file referenced relative to the glTF
-		char decoded[1024];
-		std::strncpy(decoded, img->uri, sizeof(decoded) - 1);
-		decoded[sizeof(decoded) - 1] = '\0';
-		cgltf_decode_uri(decoded);
-		const std::filesystem::path texFile = sourcePath.parent_path() / decoded;
-		auto tex = TextureImporter::import(texFile, contentRoot, relativeOutputDir);
-		return tex ? tex->path : std::string{};
-	}
-
-	if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data)
-	{
-		// Embedded in the binary buffer (.glb or data URI)
-		const auto* bytes = static_cast<const uint8_t*>(img->buffer_view->buffer->data)
-		                  + img->buffer_view->offset;
-		auto tex = TextureImporter::decodeFromMemory(bytes, img->buffer_view->size);
-		if (!tex)
-			return {};
-		tex->type = HE::AssetType::Texture;
-		tex->name = texName;
-		tex->path = Importer::toAssetPath(relativeOutputDir / (texName + ".hasset"));
-		if (!Importer::writeAsset(*tex, contentRoot))
-			return {};
-		return tex->path;
-	}
-	return {};
 }
 
 } // namespace
@@ -234,21 +128,8 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 
 	// Material + base color texture
 	if (settings.importMaterials)
-	{
-		const std::string texPath = importBaseColorTexture(
+		mesh->materialPath = Importer::importBaseColorMaterial(
 			data, sourcePath, contentRoot, relativeOutputDir, mesh->name);
-		if (!texPath.empty())
-		{
-			MaterialAsset mat;
-			mat.type       = HE::AssetType::Material;
-			mat.name       = mesh->name + "_mat";
-			mat.path       = Importer::toAssetPath(relativeOutputDir / (mat.name + ".hasset"));
-			mat.shaderPath = "builtin/unlit";
-			mat.texturePaths.push_back(texPath);
-			if (Importer::writeAsset(mat, contentRoot))
-				mesh->materialPath = mat.path;
-		}
-	}
 
 	cgltf_free(data);
 

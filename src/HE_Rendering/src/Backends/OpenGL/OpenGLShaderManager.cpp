@@ -1,6 +1,15 @@
 #include "Backends/OpenGL/OpenGLShaderManager.h"
 #include <glad/glad.h>
+#include <Diagnostics/Logger.h>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
+#include <string>
+
+// File-local — the shared HorizonRendering/ShaderManager.h used to leak this
+// alias into every consumer of the public header (down to HE_Editor); each
+// backend shader manager that wants `fs::` declares it for itself instead.
+namespace fs = std::filesystem;
 
 ShaderHandle OpenGLShaderManager::load(const char* path, HE::ShaderType type)
 {

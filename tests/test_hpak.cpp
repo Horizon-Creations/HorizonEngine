@@ -70,6 +70,40 @@ static void flipByteAt(const std::filesystem::path& p, std::streamoff offset)
     f.seekp(offset); f.write(&c, 1);
 }
 
+// OR extra entryFlags onto every TOC entry of a written pak and repair the TOC
+// hash so open() still accepts it. HpakWriter never emits the reserved flags, so
+// forging the TOC is the only way to exercise the reader's rejection path.
+static bool orEntryFlagsInPak(const std::filesystem::path& p, uint8_t extraFlags)
+{
+    std::vector<uint8_t> bytes;
+    {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return false;
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    if (bytes.size() < sizeof(Hpak::FileHeader)) return false;
+    Hpak::FileHeader hdr{};
+    std::memcpy(&hdr, bytes.data(), sizeof(hdr));
+    const size_t tocOff   = sizeof(Hpak::FileHeader);
+    const size_t tocBytes = static_cast<size_t>(hdr.entryCount) * sizeof(Hpak::EntryDesc);
+    if (bytes.size() < tocOff + tocBytes) return false;
+    for (uint32_t i = 0; i < hdr.entryCount; ++i)
+    {
+        const size_t at = tocOff + static_cast<size_t>(i) * sizeof(Hpak::EntryDesc);
+        Hpak::EntryDesc d{};
+        std::memcpy(&d, bytes.data() + at, sizeof(d));
+        d.entryFlags |= extraFlags;
+        std::memcpy(bytes.data() + at, &d, sizeof(d));
+    }
+    hdr.tocHash = Hpak::hash64(bytes.data() + tocOff, tocBytes);
+    std::memcpy(bytes.data(), &hdr, sizeof(hdr));
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    return out.good();
+}
+
 // ─── Format layout ─────────────────────────────────────────────────────────────
 
 TEST_CASE("hpak v2 struct sizes are fixed")
@@ -364,6 +398,42 @@ TEST_CASE("Corrupt data byte → readEntry() returns empty (contentHash mismatch
     removeQuiet(tmp);
 }
 
+TEST_CASE("Reserved entry flags → readEntry() refuses instead of mis-decoding")
+{
+    // kFlagUsesDict says "this payload was compressed against a shared zstd
+    // dictionary". The reader has no dictionary, so decoding it anyway produces
+    // garbage (or a wrong-but-plausible asset) rather than an error — it must be
+    // rejected outright. Same for kFlagBlockFramed. The stored bytes here are
+    // perfectly valid, so ONLY the flag can make the read fail.
+    const HE::UUID id{0xD1, 0xC7};
+    const auto blob = makeMaterialBlob(id, "dict_guard");
+
+    for (const uint8_t flag : { Hpak::kFlagUsesDict, Hpak::kFlagBlockFramed })
+    {
+        HpakWriter packer; packer.addEntry(id, blob, {Hpak::Codec::Zstd});
+        auto tmp = std::filesystem::temp_directory_path() / "he_test_reserved_flag.hpak";
+        REQUIRE(packer.write(tmp.string()));
+
+        // Sanity: without the flag the very same archive decodes fine.
+        { HpakReader ok; REQUIRE(ok.open(tmp.string())); CHECK(ok.readEntry(id) == blob); }
+
+        REQUIRE(orEntryFlagsInPak(tmp, flag));
+
+        HpakReader reader;
+        REQUIRE(reader.open(tmp.string()));   // TOC hash repaired → archive still opens
+        CHECK(reader.hasEntry(id));           // entry is still there…
+        CHECK(reader.readEntry(id).empty());  // …but must NOT decode
+
+        // readStoredEntry stays permissive: it is the verbatim re-pack path, and
+        // HpakWriter is what refuses to carry such an entry over.
+        HpakReader::StoredEntry se;
+        CHECK(reader.readStoredEntry(id, se));
+        CHECK((se.flags & flag) != 0);
+
+        removeQuiet(tmp);
+    }
+}
+
 TEST_CASE("A failed read does not poison subsequent reads on the same reader")
 {
     // Regression: the reader holds one persistent file handle. A failed read
@@ -475,7 +545,7 @@ static TypeIds authorAllTypes(const std::filesystem::path& dir)
 
     ScriptAsset script; script.type = HE::AssetType::Script; script.name = "script"; script.path = "script.hasset";
     script.sourceCode = "function on_update(dt) end";
-    script.language   = ScriptLanguage::Python; // exercise CHUNK_SLNG through pack/mount
+    script.language   = HE::ScriptLanguage::Python; // exercise CHUNK_SLNG through pack/mount
     REQUIRE(cm.saveAsset(script)); ids.script = script.id;
 
     ShaderAsset shader; shader.type = HE::AssetType::Shader; shader.name = "shader"; shader.path = "shader.hasset";
@@ -550,7 +620,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     const ScriptAsset* scr = cm.getScript(ids.script);
     REQUIRE(scr != nullptr);
     CHECK(scr->sourceCode == "function on_update(dt) end");
-    CHECK(scr->language == ScriptLanguage::Python); // CHUNK_SLNG survived pack + mount
+    CHECK(scr->language == HE::ScriptLanguage::Python); // CHUNK_SLNG survived pack + mount
 
     const ShaderAsset* sh = cm.getShader(ids.shader);
     REQUIRE(sh != nullptr);
@@ -769,6 +839,57 @@ TEST_CASE("Cook: BC3 block decodes close to the original (RGBA channel order)")
 }
 #endif
 
+TEST_CASE("Cook: a legacy (size_t) TXMI texture still cooks and mounts")
+{
+    // The packer's cookTexture is the SECOND reader of the TXMI header, so it has
+    // to accept the pre-uint32 layout too — otherwise packing a project authored
+    // by an older 64-bit build reads garbage dimensions (and silently skips the
+    // cook, or worse, cooks against the wrong size).
+    auto dir = std::filesystem::temp_directory_path() / "he_txmi_legacy";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+
+    const HE::UUID texId{0x7E, 0x13};
+    std::vector<uint8_t> meta;
+    HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Texture));
+    HAsset::Writer::appendPOD(meta, texId.hi);
+    HAsset::Writer::appendPOD(meta, texId.lo);
+    HAsset::Writer::appendString(meta, "legacy");
+    HAsset::Writer::appendString(meta, "legacy.hasset");
+
+    std::vector<uint8_t> txmi;                                    // 8x8 RGBA8, no cook tail
+    HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(8));    // width  as size_t
+    HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(8));    // height as size_t
+    HAsset::Writer::appendPOD(txmi, static_cast<uint64_t>(4));    // channels as size_t
+    const std::vector<uint8_t> pixels(8 * 8 * 4, 0x40);
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(HAsset::CHUNK_TXMI, txmi.data(), txmi.size());
+    w.addChunk(HAsset::CHUNK_PIXL, pixels.data(), pixels.size());
+    REQUIRE(w.write((dir / "legacy.hasset").string(),
+                    static_cast<uint16_t>(HE::AssetType::Texture)));
+
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true; // RGBA8 + baked mips
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, s) == 1);
+    auto pak = std::filesystem::temp_directory_path() / "he_txmi_legacy.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string()));
+    const TextureAsset* t = cm.getTexture(texId);
+    REQUIRE(t != nullptr);
+    CHECK(t->width  == 8);          // legacy dimensions read correctly…
+    CHECK(t->height == 8);
+    CHECK(t->channels == 4);
+    CHECK(t->mipLevels == 4);       // …so the cook could build 8,4,2,1
+    CHECK(t->data.size() == (64 + 16 + 4 + 1) * 4);
+
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
+}
+
 TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
 TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }
 TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hpak::Codec::Zstd);  }
@@ -842,7 +963,7 @@ TEST_CASE("Cook: static mesh ships pre-interleaved + baked AABB; uncooked stays 
 
 // Builds a Script .hasset blob in memory; omit the language to test back-compat.
 static std::vector<uint8_t> makeScriptBlob(HE::UUID id, const char* src,
-                                           bool withLang, ScriptLanguage lang)
+                                           bool withLang, HE::ScriptLanguage lang)
 {
     std::vector<uint8_t> meta;
     HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Script));
@@ -865,18 +986,18 @@ TEST_CASE("Script language: CHUNK_SLNG round-trips, absent chunk defaults to Lua
     SUBCASE("explicit Python survives load")
     {
         const HE::UUID id{0x11, 0x22};
-        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "x", true, ScriptLanguage::Python));
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "x", true, HE::ScriptLanguage::Python));
         const ScriptAsset* s = cm.getScript(uuid);
         REQUIRE(s != nullptr);
-        CHECK(s->language == ScriptLanguage::Python);
+        CHECK(s->language == HE::ScriptLanguage::Python);
     }
     SUBCASE("missing SLNG chunk loads as Lua (back-compat with old .hasset files)")
     {
         const HE::UUID id{0x33, 0x44};
-        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "y", false, ScriptLanguage::Lua));
+        auto uuid = cm.loadAssetFromMemory(makeScriptBlob(id, "y", false, HE::ScriptLanguage::Lua));
         const ScriptAsset* s = cm.getScript(uuid);
         REQUIRE(s != nullptr);
-        CHECK(s->language == ScriptLanguage::Lua);
+        CHECK(s->language == HE::ScriptLanguage::Lua);
     }
 }
 

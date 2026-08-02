@@ -1,5 +1,54 @@
 #version 450
 
+// ─── DRIFT WARNING: reduced second copy of the GL scene shader ───────────────
+// This file is NOT the reference implementation. The engine's lit scene shader
+// lives twice:
+//
+//   reference : src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//               `kUnlitFS`      — the lit (misnamed) scene fragment shader
+//               `kSkyFuncGLSL`  — the shared analytic sky, spliced in at the
+//                                 `//#SKYFUNC#` marker (Metal mirrors both in MSL)
+//   this file : a hand-maintained, feature-reduced port for the Vulkan backend
+//
+// They are edited independently, so the GL/Metal scene shader has moved ahead.
+// Verified against the GL source (audit 1a); everything below is present in
+// `kUnlitFS` / `kSkyFuncGLSL` and MISSING here:
+//
+//   * atmoScatter / atmoRaySphere — the single-scattering atmosphere. The
+//     `skyColor()` below is the OLD hand-tuned gradient (the same reduced copy
+//     as in sky.frag), and it feeds BOTH the ambient IBL and the fog colour, so
+//     ambient light and fog tint differ from GL/Metal, not just the background.
+//   * Cascaded shadow maps — GL has uCascadeVP / uCascadeSplits / uCameraFwd and
+//     `computeShadow()` with planar view-Z cascade selection, plus the
+//     uShadowDebug cascade tint. This file has a single `lightVP` +
+//     `shadowFactor()` (the known D3D11/D3D12/Vulkan single-map limitation).
+//   * Point/spot shadow maps — GL's uLocalShadowMap atlas + uLocalShadowVP +
+//     `localShadowFactor()`. Local lights are unshadowed here unless ray-traced
+//     GI is active and writes the uGILocal mask.
+//   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
+//     specular. This file evaluates skyColor() analytically per fragment.
+//   * uAmbient — the flat ambient fill (never-black floor / overcast term).
+//     RenderWorld::ambient never reaches this shader.
+//   * uWetness / uSnow — the weather surface response (wet darken + gloss, snow
+//     cover on up-facing surfaces).
+//
+// Deliberately NOT drift: the GI block (giOctEncode / sampleDDGIIrradiance /
+// uGIShadow / uGILocal) is a byte-for-byte port and must stay in sync with
+// gi_probe.comp and the GL/Metal originals — and with `kLightingPreamble` in
+// src/HE_Rendering/src/material/MaterialShaderLibrary.cpp, which is what graph
+// materials are shaded with. tests/test_culling.cpp's "GI kernels: the constants
+// the hand-kept copies must share" string-compares this block against that one.
+//
+// Audit 1a decision: DOCUMENT the drift, do not port. Until it is generated from
+// one source, a change to the GL scene shader is NOT automatically visible on
+// Vulkan.
+//
+// Known drift (ssr-plan P4, 2026-07-31): heLitP/GL/Metal/D3D11/D3D12 weight the
+// specular IBL with a roughness-aware Schlick Fresnel (fresnelSpec = F0 +
+// (max(1-rough, F0) - F0) * (1-NdV)^5) instead of the flat F0 below. Vulkan
+// still uses flat F0 until this shader is regenerated from one source.
+// ─────────────────────────────────────────────────────────────────────────────
+
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUV;
@@ -17,6 +66,9 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  sunDir;   // xyz = sun direction
     vec4  fog;      // x=fogDensity, y=fogHeightFalloff
     vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
+    vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
+    vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
+    vec4  giParams;     // x = indirectIntensity, y = giEnabled(1.0), zw = 0
 } uf;
 
 layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
@@ -36,6 +88,90 @@ layout(set = 2, binding = 0) uniform sampler2D uAlbedo;
 // SSAO occlusion texture (1x1 white when SSAO is disabled so ao = 1.0).
 // Binding 3 must match the scene descriptor set layout in VulkanRenderer.cpp.
 layout(set = 0, binding = 3) uniform sampler2D uAO;
+
+// ── Ray-traced GI inputs (software ray tracing, gi_*.comp) ───────────────────
+// Half-res screen-space shadow mask + DDGI probe atlases. Bound to 1x1 white
+// fallbacks when GI is off (giParams.y == 0 → never sampled). The atlases live
+// in VK_IMAGE_LAYOUT_GENERAL (imageStore targets), so their descriptors are
+// written with GENERAL — legal for sampling.
+layout(set = 0, binding = 4) uniform sampler2D uGIShadow;
+layout(set = 0, binding = 5) uniform sampler2D uGIIrr;
+layout(set = 0, binding = 6) uniform sampler2D uGIVis;
+// Per-pixel local (point/spot) light visibility mask — 1 channel per light
+// (first 4, counter over non-directional lights), written by the shadow kernel.
+layout(set = 0, binding = 7) uniform sampler2D uGILocal;
+
+// Signed-octahedral mapping (direction → texel UV) — must match gi_probe.comp's
+// octDecode and the GL/Metal octEncode byte-for-byte.
+vec2 giOctEncode(vec3 n)
+{
+    vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+const int GI_PROBE_OCT = 8; // must match the renderer-side atlas tiling
+
+// DDGI probe sampling — trilinear over the 8 surrounding probes × soft
+// backface × Chebyshev visibility. Direct port of the GL/Metal
+// sampleDDGIIrradiance (same v1 notes: raw per-direction radiance).
+vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
+{
+    int gx = int(uf.giGridCounts.x), gy = int(uf.giGridCounts.y), gz = int(uf.giGridCounts.z);
+    if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+    int probesPerRow = max(1, int(uf.giGridCounts.w));
+    int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+    vec2 atlasSizeTexels = vec2(float(probesPerRow), float(probeRows)) * float(GI_PROBE_OCT);
+    float spacing = max(uf.giGridOrigin.w, 1e-4);
+
+    vec3 gridSpace = (P - uf.giGridOrigin.xyz) / spacing;
+    vec3 base      = floor(gridSpace);
+    vec3 fracP     = gridSpace - base;
+
+    vec3  sumColor  = vec3(0.0);
+    float sumWeight = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        vec3 cell = base + offs;
+        if (any(lessThan(cell, vec3(0.0))) ||
+            cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+            continue;
+        int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+        vec3 trilinear = mix(1.0 - fracP, fracP, offs);
+        float weight = trilinear.x * trilinear.y * trilinear.z;
+        if (weight <= 1e-5) continue;
+
+        vec3 probePos   = uf.giGridOrigin.xyz + cell * spacing;
+        vec3 toProbe    = probePos - P;
+        float dist      = max(length(toProbe), 1e-4);
+        vec3 dirToProbe = toProbe / dist;
+
+        weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+        vec2 tileOrigin = vec2(float(probeIndex % probesPerRow),
+                               float(probeIndex / probesPerRow)) * float(GI_PROBE_OCT);
+
+        vec2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        vec2 visSample = texture(uGIVis, visUV).rg;
+        float mean = visSample.x, mean2 = visSample.y;
+        float variance = abs(mean2 - mean * mean);
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float d = dist - mean;
+            chebyshev = variance / (variance + d * d);
+            chebyshev = chebyshev * chebyshev * chebyshev;
+        }
+        weight *= max(chebyshev, 0.05);
+
+        vec2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(GI_PROBE_OCT)) / atlasSizeTexels;
+        sumColor  += texture(uGIIrr, irrUV).rgb * weight;
+        sumWeight += weight;
+    }
+    return sumColor / max(sumWeight, 1e-4);
+}
 
 // ── Procedural sky ────────────────────────────────────────────────────────────
 vec3 skyColor(vec3 dir, vec3 sunDir)
@@ -147,8 +283,14 @@ void main()
     float ao = (uf.viewport.z > 0.5)
         ? texture(uAO, gl_FragCoord.xy / uf.viewport.xy).r
         : 1.0;
-    vec3 result  = ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
+    // GI replaces the AO-gated diffuse IBL with probe-sampled indirect diffuse
+    // (specular IBL kept — the GI slice is diffuse-only), mirroring GL/Metal.
+    vec3 result = (uf.giParams.y > 0.5)
+        ? sampleDDGIIrradiance(vWorldPos, N) * base * kd * uf.giParams.x
+              + ambSpec * (1.0 - 0.6 * rough)
+        : ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
+    int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
         int   type  = int(uf.lightPos[i].w);
@@ -173,7 +315,24 @@ void main()
                 atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
             }
         }
-        float sh = (type == 0) ? shadowFactor(vWorldPos, N, L) : 1.0;
+        float sh = 1.0;
+        if (type == 0)
+        {
+            // GI replaces the shadow map entirely when active: ray-traced mask
+            // sampled at the same screen-space UV convention as uAO.
+            if (uf.giParams.y > 0.5) sh = texture(uGIShadow, gl_FragCoord.xy / uf.viewport.xy).r;
+            else                     sh = shadowFactor(vWorldPos, N, L);
+        }
+        else
+        {
+            // Local (point/spot) lights: ray-traced hard shadows when GI is
+            // active — one visibility channel per light (first 4), written by
+            // the shadow kernel from unjittered secondary rays (they had no
+            // shadowing at all before — shone straight through geometry).
+            if (uf.giParams.y > 0.5 && giLocalIdx < 4)
+                sh = texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx];
+            giLocalIdx++;
+        }
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
     }
     // Atmospheric fog

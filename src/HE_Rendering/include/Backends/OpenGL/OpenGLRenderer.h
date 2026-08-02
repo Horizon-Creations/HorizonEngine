@@ -8,6 +8,8 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/RenderConstants.h>
+#include <HorizonRendering/GiBvh.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -51,9 +53,18 @@ public:
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
+	bool  RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+	                           uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+	                              const std::vector<ParticlePreviewInstance>& particles,
+	                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool  RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+	                            uint32_t size, std::vector<uint8_t>& outRgba8) override;
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
+	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetGISettings(const GISettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -91,8 +102,7 @@ private:
 		uint64_t frameIdx   = 0;
 		bool     pending    = false;                     // has un-reaped results
 	};
-	static constexpr int kGpuTimerRing = 4;
-	GpuTimerSlot  m_gpuSlots[kGpuTimerRing];
+	GpuTimerSlot  m_gpuSlots[HE::kGpuTimerRing];
 	bool          m_gpuTimerSupported   = false;  // false on Apple GL (unreliable)
 	bool          m_gpuTimerInit        = false;  // timestamp queries allocated
 	uint64_t      m_gpuFrameIdx         = 0;
@@ -151,6 +161,30 @@ private:
 	void CreateInstancedPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void DrawScene(int width, int height);
+
+	// ── Per-frame scene lighting + CSM uniforms (one block, three programs) ──
+	// The unlit, instanced and skinned programs are all linked from the shared
+	// kUnlitFS text, so they declare byte-identical light/shadow uniforms and
+	// only the location integers differ. One location set per program + one
+	// writer, instead of three copies of the fill loop inside DrawScene.
+	struct SceneLightingLocs
+	{
+		int lightCount, lightPos, lightDir, lightColor, lightParams, cameraPos;
+		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
+		int localShadowMap, localShadowVP;
+	};
+	// The per-frame shadow inputs the block needs (all DrawScene locals).
+	struct SceneShadowFrame
+	{
+		const float* cascadeVPData;  // kGLCsmCascades contiguous mat4 (GL clip space)
+		glm::vec4    cascadeSplits;  // xyz = far distance per cascade, w = count
+		glm::vec3    cameraFwd;      // world forward, for planar cascade selection
+		const float* localVPData;    // nLocalLayers contiguous mat4
+		int          nLocalLayers;
+		bool         shadows;
+		bool         localShadows;
+	};
+	void BindSceneLighting(const SceneLightingLocs& locs, const SceneShadowFrame& frame) const;
 	// (Re)creates the offscreen viewport FBO at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -242,6 +276,43 @@ private:
 	unsigned int m_particlePreviewProgram = 0, m_particlePreviewInstVBO = 0, m_particlePreviewVAO = 0;
 	int          m_uPPvViewProj = -1, m_uPPvCamRight = -1, m_uPPvCamUp = -1, m_uPPvHasTex = -1;
 
+	// ── Content-Browser thumbnails (RenderAssetThumbnail) ────────────────────
+	// Its own FBO, deliberately NOT any of the preview targets above: a thumbnail
+	// is rendered while the Material Editor may be showing its live preview, and
+	// sharing m_previewFBO would replace that preview's contents with whatever
+	// asset the grid happened to ask for. Read back to RGBA8 and cached by the
+	// editor, so this target only ever holds one thumbnail at a time.
+	unsigned int m_thumbFBO = 0, m_thumbColor = 0, m_thumbDepth = 0;
+	int          m_thumbSize = 0;
+	// Unlit-ish mesh program shared by the mesh thumbnails and by materials that
+	// have no node graph (built-in PBR): pos/normal/uv in, fixed sun + ambient
+	// plus a roughness/metallic-driven highlight, so a flat material still reads
+	// as a shaded sphere instead of a silhouette.
+	unsigned int m_meshPreviewProgram = 0;
+	int          m_uMeshPvMVP = -1, m_uMeshPvModel = -1, m_uMeshPvColor = -1;
+	int          m_uMeshPvHasTex = -1, m_uMeshPvCamPos = -1, m_uMeshPvPbr = -1;
+	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
+	bool EnsureThumbnailTarget(int S);
+	// Read the bound thumbnail target back as tightly packed, TOP-DOWN RGBA8.
+	void ReadThumbnailTarget(int S, std::vector<uint8_t>& outRgba8);
+	// Draws one material-graph preview primitive into the CURRENTLY BOUND target
+	// (caller owns FBO/viewport/clear). False when the material has no node-graph
+	// program — the thumbnail path then falls back to m_meshPreviewProgram.
+	bool DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
+	                                 float dist, int shape);
+	// Compile the billboard program + instance VAO once; false on failure.
+	bool EnsureParticlePreviewProgram();
+	// Draw the particle cloud into the CURRENTLY BOUND target — shared by the
+	// interactive preview and the thumbnail so the two can never drift.
+	void DrawParticlePreviewGeometry(const HE::UUID& materialId,
+	                                 const std::vector<ParticlePreviewInstance>& particles,
+	                                 float yaw, float pitch, float dist);
+	// Same contract for the mesh program: `vao`/`indexCount`/`texture` describe the
+	// geometry, `center`/`extent` frame the orbit camera.
+	void DrawMeshPreviewGeometry(unsigned int vao, int indexCount, unsigned int texture,
+	                             const glm::vec3& center, float extent, const glm::vec3& baseColor,
+	                             float metallic, float roughness, float yaw, float pitch, float dist);
+
 	// GPU-instanced ParticleGraph particle rendering (the real scene draw path, see
 	// RenderWorld::particleBatches) — one compiled program per unique color/alpha-
 	// over-life config, hash-keyed cache mirroring m_materialPrograms; a single
@@ -249,18 +320,24 @@ private:
 	// frame, so one scratch buffer suffices). Drawn in the transparent pass.
 	std::unordered_map<uint64_t, unsigned int> m_particlePrograms; // hash → program (0 = failed)
 	unsigned int m_particleInstVBO = 0, m_particleVAO = 0;
-	unsigned int getOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
+	unsigned int GetOrBuildParticleProgram(uint64_t key, const HE::ParticleEmitterConfig& config,
 	                                       const ParticleShaderVariant* precompiled);
 
-	unsigned int getOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
+	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                   std::string& vertBody);
+	// Deferred G-buffer variant (customShaderGBufGlsl): false → the material has
+	// none and its draws run forward in the lighting pass. The returned key is a
+	// hash of the G-buffer SOURCE, so its programs share m_materialPrograms
+	// without ever colliding with the forward key space.
+	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
+	                                     std::string& vertBody);
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
-	unsigned int getOrBuildUIMaterialProgram(const HE::UUID& materialId);
+	unsigned int GetOrBuildUIMaterialProgram(const HE::UUID& materialId);
 
 	int          m_uMVP           = -1;
 	int          m_uModel         = -1;
@@ -286,6 +363,8 @@ private:
 	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
+	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
+	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
@@ -323,6 +402,8 @@ private:
 	int          m_uSkinnedCameraFwd       = -1;
 	int          m_uSkinnedShadowDebug     = -1;
 	int          m_uSkinnedShadowMap       = -1;
+	int          m_uSkinnedLocalShadowVP   = -1;
+	int          m_uSkinnedLocalShadowMap  = -1;
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
@@ -355,6 +436,8 @@ private:
 	int          m_uInstCameraFwd           = -1;
 	int          m_uInstShadowDebug         = -1;
 	int          m_uInstShadowMap           = -1;
+	int          m_uInstLocalShadowVP       = -1;
+	int          m_uInstLocalShadowMap      = -1;
 	int          m_uInstShadowEnabled       = -1;
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
@@ -393,7 +476,7 @@ private:
 	void SimulateGpuParticles();
 	void DrawGpuParticles(const glm::mat4& viewProj, const glm::vec3& camPos);
 	// Draws RenderWorld::particleBatches (ParticleGraph particles), one GPU-
-	// instanced glDrawArraysInstanced per batch — see getOrBuildParticleProgram.
+	// instanced glDrawArraysInstanced per batch — see GetOrBuildParticleProgram.
 	void DrawParticleGraphBatches(const glm::mat4& viewProj, const glm::mat4& view);
 
 	// Base-color textures for MaterialComponent overrides, keyed by material
@@ -403,6 +486,7 @@ private:
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
+	std::vector<HE::UUID>                       m_pendingTexInvalidations;
 
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	// m_shadowDepthTex is a GL_TEXTURE_2D_ARRAY (one Depth24 layer per cascade);
@@ -411,7 +495,11 @@ private:
 	// backend's CSM (D3D/Vulkan still use the legacy single map).
 	unsigned int m_shadowFBO      = 0;
 	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
-	int          m_shadowSize     = 2048;
+	int          m_shadowSize     = HE::kShadowMapResolution;
+	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
+	// point cube face (16 layers, see ShadowData::kMaxLocalShadowLayers).
+	unsigned int m_localShadowDepthTex = 0; // GL_TEXTURE_2D_ARRAY, Depth24
+	int          m_localShadowSize     = 1024;
 	unsigned int m_depthProgram   = 0;   // depth-only pass (cascadeVP * model * pos)
 	int          m_uDepthMVP      = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
@@ -501,6 +589,33 @@ private:
 	void EnsureHDRTarget(int width, int height);
 	void DestroyHDRTarget();
 
+	// ── Deferred render path (G-buffer + fullscreen lighting resolve) ────────
+	// docs/deferred-renderer-plan.md. MRT FBO: GB0 = SRGB8_ALPHA8 (BaseColor +
+	// Metallic, written with GL_FRAMEBUFFER_SRGB enabled), GB1/GB2 = RGBA16F
+	// (oct Normal/Roughness/Specular, HDR Emissive/Material-AO), depth as a
+	// TEXTURE (sampled by the resolve; blitted into m_hdrDepth for the forward
+	// tail). Pipelines are built lazily on the first deferred frame; a build
+	// failure logs once and the renderer stays forward.
+	unsigned int m_gbFBO      = 0;
+	unsigned int m_gbColor0   = 0, m_gbColor1 = 0, m_gbColor2 = 0;
+	unsigned int m_gbDepthTex = 0;
+	int          m_gbW = 0, m_gbH = 0;
+	unsigned int m_gbufferProgram          = 0; // built-in PBR → G-buffer (kUnlitVS + kGBufFS)
+	unsigned int m_gbufferInstancedProgram = 0; // instanced variant (kInstancedVS + kGBufFS)
+	unsigned int m_deferredResolveProgram  = 0; // fullscreen heLitP resolve (shared preamble)
+	unsigned int m_resolveUBO      = 0;         // HeResolve block (binding 3)
+	unsigned int m_resolveLightUBO = 0;         // resolve-only HeLighting fill (incl. CSM matrices)
+	bool         m_deferredPipelinesTried = false;
+	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
+	// Built-in G-buffer program uniform locations (same names as the unlit set).
+	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
+	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1;
+	int m_uGBInstViewProj = -1, m_uGBInstColor = -1, m_uGBInstMetallic = -1,
+	    m_uGBInstRoughness = -1, m_uGBInstHasTexture = -1, m_uGBInstTexture = -1;
+	void EnsureGBufferTargets(int width, int height);
+	void DestroyGBufferTargets();
+	bool EnsureDeferredPipelines(); // true when the G-buffer + resolve programs exist
+
 	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
 	// The tonemap pass writes its LDR result into m_ldrColor instead of straight
 	// to the output; this pass reads that texture, runs FXAA on the perceptual
@@ -526,7 +641,7 @@ private:
 	unsigned int m_uiFontTexture = 0;   // R8 UI font atlas (HE::sharedUIFont), lazy
 	// Imported Font asset atlases, uploaded lazily on first sight (key → R8 tex).
 	std::unordered_map<uint32_t, unsigned int> m_uiFontAtlases;
-	unsigned int uiFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
+	unsigned int UIFontAtlasTexture(uint32_t key); // key 0 → the shared atlas
 	void         RenderUIPass(int pw, int ph);
 
 	// ── Bloom (bright-pass + separable Gaussian blur on the HDR target) ──────
@@ -547,8 +662,8 @@ private:
 	int          m_bloomH        = 0;
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Reuses m_skyProgram with uCloudPrepass=1 to raymarch clouds into m_cloudTex (rgb=L,
-	// a=T) at quarter res; the sky pass upsamples + composites it. Uses the previous
-	// frame's view/sun (1-frame lag, imperceptible) so the pre-pass needs no re-extract.
+	// a=T) at quarter res; the sky pass upsamples + composites it. Runs with the CURRENT
+	// camera (this backend draws the sky after extraction), so there is no 1-frame lag.
 	unsigned int m_cloudFBO = 0;
 	unsigned int m_cloudTex = 0;               // RGBA16F, quarter-res (L, T)
 	int          m_cloudW   = 0;
@@ -559,10 +674,8 @@ private:
 	int          m_uSkyRainAmount   = -1;
 	int          m_uSkyGodRays      = -1;
 	int          m_uSkyShootingStars = -1;
-	glm::mat4    m_lastInvViewProj = glm::mat4(1.0f); // (legacy; the cloud pre-pass now uses the current camera)
-	glm::vec3    m_lastSunDir      = glm::vec3(0.0f, 1.0f, 0.0f);
-	void         EnsureCloudFBO(int width, int height);
-	void         DestroyCloudFBO();
+	void         EnsureCloudTarget(int width, int height);
+	void         DestroyCloudTarget();
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
@@ -579,6 +692,10 @@ private:
 	// the image-based ambient in crevices. Runs before the geometry pass; skipped
 	// entirely (zero cost) when disabled. Always full-resolution.
 	unsigned int m_ssaoPosProgram = 0;   // pre-pass: writes view-space position
+	// Deferred P5: view-pos reconstruction from the G-buffer depth (fullscreen).
+	unsigned int m_ssaoDepthPosProgram = 0;
+	int          m_uDepthPosDepth   = -1;
+	int          m_uDepthPosInvProj = -1;
 	int          m_uPosMVP        = -1;   // clip = viewProj * model
 	int          m_uPosModelView  = -1;   // view * model (view-space position out)
 	unsigned int m_ssaoProgram    = 0;   // fullscreen occlusion estimate
@@ -613,9 +730,103 @@ private:
 	void DestroySSAOTargets();
 	// Pre-pass + occlusion + blur using the geometry draw calls; returns the
 	// blurred AO texture id (or 0 if unavailable). Restores GL_TEXTURE0 active.
+	// fromGBufferDepth (deferred, plan P5): reconstruct the view-space positions
+	// from m_gbDepthTex in one fullscreen draw instead of the geometry pre-pass.
 	unsigned int RenderSSAO(const CommandBuffer& cmds, int pw, int ph,
 	                        const glm::mat4& viewProj, const glm::mat4& view,
-	                        const glm::mat4& proj);
+	                        const glm::mat4& proj, bool fromGBufferDepth = false);
+
+	// ── Global Illumination (GL 4.3+ compute port, Windows/Linux — blind) ──────
+	// Software counterpart of the Metal ray-traced DDGI path: CPU-built BVH
+	// (HE::GiBvh, unit-tested BLAS per mesh) concatenated into shared SSBOs +
+	// a flat per-frame instance array (the TLAS analogue; kernels transform the
+	// ray by invTransform and traverse the referenced BLAS range). Gated on a
+	// GL 4.3 context (GLAD_GL_VERSION_4_3) — macOS GL is 4.1 and never enters.
+	// Checkpoint GL-A: capability + settings + accel upload only, nothing
+	// samples these buffers yet (GI-off rendering stays byte-identical).
+	struct GIBlasRange
+	{
+		int32_t nodeOffset = 0, nodeCount = 0;
+		int32_t triOffset  = 0, triCount  = 0;
+		bool    valid      = false;
+	};
+	// Matches the std430 GiInstance block the GL-B kernels will declare: two
+	// mat4 rows + colour + BLAS offsets (16-byte aligned).
+	struct GIInstanceGpu
+	{
+		glm::mat4 invTransform{1.0f};   // world → object (rays enter BLAS space)
+		glm::vec4 baseColor{1.0f};      // probe one-bounce tint (GL-C)
+		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+	};
+	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
+	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
+	void         DestroyGIAccel();
+
+	// GL-B/GL-C: shadow-ray + probe passes. Pipelines are built lazily on the
+	// first GI-active frame (4.3 compute programs — never compiled on 4.1).
+	void         CreateGIPipelines();
+	void         EnsureGIShadowTargets(int width, int height);
+	void         DestroyGIShadowTargets();
+	void         EnsureGIProbeGrid();   // one-shot grid fit over the scene AABB
+	void         EnsureGIProbeAtlas();
+	void         DestroyGIProbeAtlas();
+	// Half-res G-buffer → compute shadow rays → temporal → blur. Returns the
+	// blurred mask texture (0 if unavailable). Uses THIS frame's extraction.
+	unsigned int RenderGIShadow(const CommandBuffer& cmds, int width, int height,
+	                            const glm::mat4& viewProj);
+	void         DispatchGIProbeUpdate();
+
+	static constexpr float kGIProbeSpacing     = 4.0f; // metres between probes
+	static constexpr int   kGIMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
+	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size
+
+	bool         m_giPipelinesBuilt   = false;
+	unsigned int m_giGBufProgram      = 0;
+	unsigned int m_giShadowCSProgram  = 0;
+	unsigned int m_giTemporalProgram  = 0;
+	unsigned int m_giBlurProgram      = 0;
+	unsigned int m_giProbeCSProgram   = 0;
+	// G-buffer + mask targets (all half-res).
+	unsigned int m_giGBufFBO   = 0, m_giGBufPosTex = 0, m_giGBufNormTex = 0, m_giGBufDepth = 0;
+	unsigned int m_giRawTex    = 0;                       // r16f, compute image store
+	unsigned int m_giLocalMaskTex = 0;                    // rgba16f, per-pixel local-light visibility (1 channel per light, first 4)
+	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
+	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
+	int          m_giShadowW = 0, m_giShadowH = 0;
+	int          m_giHistIdx = 0;
+	bool         m_giHistValid = false;
+	glm::mat4    m_giPrevViewProj{1.0f};
+	float        m_giFrameSeed = 0.0f;
+	// Probe grid + atlases.
+	glm::vec3    m_giGridOrigin{0.0f};
+	glm::ivec3   m_giGridCounts{0};
+	int          m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
+	bool         m_giProbeGridBuilt = false;
+	unsigned int m_giIrrAtlas = 0, m_giVisAtlas = 0;
+	// Per-program GI uniform locations for the three programs sharing kUnlitFS.
+	struct GISceneLocs
+	{
+		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1, localTex = -1;
+		int gridOrigin = -1, gridCounts = -1, intensity = -1;
+	};
+	GISceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
+	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
+	void         PushGISceneUniforms(const GISceneLocs& locs, bool active);
+	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
+	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
+	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
+	std::vector<GIInstanceGpu>     m_giInstancesCpu;  // rebuilt per frame
+	bool         m_giBlasDirty       = false;         // node/tri SSBOs need re-upload
+	unsigned int m_giNodeSSBO        = 0;
+	unsigned int m_giTriSSBO         = 0;
+	unsigned int m_giInstanceSSBO    = 0;
+	int          m_giInstanceCount   = 0;
+	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize
+	bool         m_giEnabled         = false;
+	float        m_giIndirectIntensity = 1.0f;
+	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
+	int          m_giRaysPerProbe        = 128;
+	int          m_giProbeBudgetPerFrame = 256;
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window

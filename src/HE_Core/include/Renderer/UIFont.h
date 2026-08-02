@@ -53,10 +53,43 @@ namespace UIFontCache
     HE_API const BakedUIFont* find(std::uint32_t key);
 }
 
+// ── Multi-line text layout ────────────────────────────────────────────────────
+// A run is split into lines at '\n' and, with `wrap`, additionally word-wrapped
+// at the rect width. The whole block is centred vertically in the rect; each
+// line is centred horizontally when `centerH`. A single line without newlines
+// lays out byte-identically to the original single-line path.
+struct UITextLayout
+{
+    bool  centerH     = false;  // horizontally centre each line inside the rect
+    bool  wrap        = false;  // word-wrap at the rect width
+    float lineSpacing = 1.15f;  // baseline-to-baseline distance, in units of sizePx
+};
+
+// Split `text` into the lines it will render as: always at '\n', plus greedy
+// word-wrapping at `wrapWidth` when `wrap` (a single word wider than the line is
+// hard-broken). wrapWidth <= 0 disables wrapping regardless of the flag.
+HE_API std::vector<std::string> layoutUITextLines(const BakedUIFont& font,
+                                                  const std::string& text, float sizePx,
+                                                  float wrapWidth, bool wrap);
+
+// Pixel extent the run occupies at `sizePx`: x = widest line, y = the block
+// height ((lines-1) * lineSpacing * sizePx + sizePx). Lets callers size an
+// element to fit its own text (see UIElement auto-size).
+HE_API glm::vec2 measureUIText(const BakedUIFont& font, const std::string& text,
+                               float sizePx, float wrapWidth, const UITextLayout& opts);
+HE_API glm::vec2 measureUIText(const std::string& text, float sizePx,
+                               float wrapWidth, const UITextLayout& opts);
+
 // Append per-glyph UIRenderObjects (type 2) for `text` at `sizePx`, laid out
 // inside `rect` (vertically centered; horizontally centered when `centerH`).
 // The overload draws with a specific baked font + stamps `atlasKey` on each quad
 // so the renderer samples the matching atlas; the short form uses sharedUIFont.
+HE_API void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
+                             const std::string& text, const glm::vec2& rectPos,
+                             const glm::vec2& rectSize, float sizePx,
+                             const glm::vec4& color, int layer,
+                             const UITextLayout& opts,
+                             std::vector<UIRenderObject>& out);
 HE_API void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
                              const std::string& text, const glm::vec2& rectPos,
                              const glm::vec2& rectSize, float sizePx,
