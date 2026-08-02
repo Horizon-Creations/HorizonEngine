@@ -15,16 +15,31 @@
 //   • every frame is authenticated (GCM tag), so tampering drops the link,
 //   • a peer is never surfaced upward as Connected until it has authenticated.
 //
-// Handshake (host challenges, client responds):
-//   host → client   Challenge  [0x01][version][32-byte hostNonce]
-//   client → host   Response   [0x02][32-byte clientNonce][32-byte mac]
-//   host → client   Accept     [0x03]                     (or Reject [0x04])
+// Handshake (host challenges, client responds) — protocol v2, with an ephemeral
+// X25519 exchange so sessions have forward secrecy:
+//   host → client   Challenge  [0x01][version][32 hostNonce][32 hostPub]
+//   client → host   Response   [0x02][32 clientNonce][32 clientPub][32 mac]
+//   host → client   Accept     [0x03]                        (or Reject [0x04])
 //
-//   mac        = HMAC(secret, "HN-auth-v1" || hostNonce || clientNonce)
-//   sessionKey = HMAC(secret, "HN-key-v1"  || hostNonce || clientNonce)
+//   transcript = hostNonce || clientNonce || hostPub || clientPub
+//   mac        = HMAC(joinSecret, "HN-auth-v2" || transcript)
+//   shared     = X25519(ourEphemeralPriv, peerPub)
+//   prk        = HMAC(key = shared, "HN-key-v2" || transcript)
+//   sessionKey = HMAC(key = prk,    joinSecret)
 //
-// The two derivations use distinct domain-separation labels, so the mac that
-// travels in the clear reveals nothing about the session key.
+// Why this shape:
+//   • The session key comes from the ephemeral exchange, and both private halves
+//     are wiped once the handshake completes. Recording the traffic and learning
+//     the join secret afterwards no longer decrypts it — the earlier v1 design,
+//     where the key was a deterministic function of the secret and two public
+//     nonces, did allow exactly that.
+//   • The join secret is still mixed into the final key, so breaking the curve
+//     alone is not enough either. Neither input suffices on its own.
+//   • The mac authenticates the whole transcript *including both public keys*,
+//     so a man in the middle cannot substitute its own ephemeral key: it cannot
+//     produce a valid mac without the secret.
+//   • Distinct domain-separation labels keep the wire-visible mac from revealing
+//     anything about the session key.
 //
 // IMPORTANT: the join secret must be *high-entropy and machine-generated* (see
 // generateJoinSecret). An observer can capture a challenge/response pair and
@@ -96,6 +111,12 @@ public:
     // Handshake state of a peer — useful for diagnostics and tests.
     HandshakeState stateOf(ConnectionId conn) const;
 
+    // A short one-way digest of the negotiated session key (never the key
+    // itself). Two peers on the same connection compute the same value, so it
+    // can be shown in the UI to confirm out-of-band that two users really are in
+    // the same session. Empty when the peer is not established.
+    std::string sessionFingerprint(ConnectionId conn) const;
+
 private:
     SecureTransport() = default;
 
@@ -103,6 +124,11 @@ private:
         HandshakeState state = HandshakeState::AwaitingChallenge;
         std::uint8_t   hostNonce[32]{};
         std::uint8_t   clientNonce[32]{};
+        std::uint8_t   hostPub[32]{};
+        std::uint8_t   clientPub[32]{};
+        // Ephemeral private scalar. Wiped as soon as the shared secret is
+        // computed — keeping it would defeat the point of the exchange.
+        std::uint8_t   ephemeralPriv[32]{};
         std::uint8_t   sessionKey[32]{};
         std::uint64_t  sendCounter = 0;
         std::uint64_t  lastRecvCounter = 0;
@@ -115,7 +141,9 @@ private:
                          const std::vector<std::uint8_t>& frame);
     void handleData(ConnectionId conn, Peer& p,
                     const std::vector<std::uint8_t>& frame);
-    void deriveSecrets(Peer& p, std::uint8_t outMac[32]);
+    // Computes the transcript mac and the session key from the exchanged nonces
+    // and public keys. Returns false when the ECDH step fails.
+    bool deriveSecrets(Peer& p, std::uint8_t outMac[32]);
     void failPeer(ConnectionId conn, Peer& p);
 
     std::unique_ptr<ITransport>                 m_inner;

@@ -24,6 +24,10 @@ public:
     SpyEndpoint*                       peer       = nullptr;
     std::vector<std::vector<std::uint8_t>> sentFrames;
     bool                               corruptNext = false;
+    // Flip a byte at a chosen offset instead of the middle — lets a test target
+    // a specific field (e.g. the ephemeral public key) rather than whatever
+    // happens to sit at the halfway point.
+    int                                corruptAtIndex = -1;
     bool                               connected   = true;
 
     using ITransport::send;
@@ -37,7 +41,11 @@ public:
         sentFrames.push_back(frame);
         if (corruptNext && !frame.empty()) {
             corruptNext = false;
-            frame[frame.size() / 2] ^= 0xFF;   // flip a byte in flight
+            const std::size_t at = (corruptAtIndex >= 0 &&
+                                    static_cast<std::size_t>(corruptAtIndex) < frame.size())
+                                       ? static_cast<std::size_t>(corruptAtIndex)
+                                       : frame.size() / 2;
+            frame[at] ^= 0xFF;   // flip a byte in flight
         }
         if (peer) peer->inbound.push_back(NetEvent{ NetEventType::Data, 1, std::move(frame) });
     }
@@ -182,6 +190,110 @@ TEST_CASE("SecureTransport: the join secret never appears on the wire")
             CHECK_FALSE(contains);
         }
     }
+}
+
+// ─── Forward secrecy (ephemeral X25519, handshake v2) ────────────────────────
+
+TEST_CASE("SecureTransport: both ends of a session agree on the fingerprint")
+{
+    auto pair = makeSecurePair("JOINSECRET123", "JOINSECRET123");
+    pumpRounds(*pair.host, *pair.client);
+    REQUIRE(pair.host->connectionCount() == 1);
+
+    const std::string hostFp   = pair.host->sessionFingerprint(1);
+    const std::string clientFp = pair.client->sessionFingerprint(1);
+
+    CHECK_FALSE(hostFp.empty());
+    // Both sides must derive the identical session key, or nothing they send
+    // could be decrypted by the other.
+    CHECK(hostFp == clientFp);
+}
+
+TEST_CASE("SecureTransport: the same join secret yields a different key each session")
+{
+    // Necessary but NOT sufficient for forward secrecy: the old v1 handshake
+    // also produced per-session keys, because its nonces were random too. What
+    // this rules out is key reuse across sessions sharing a secret. The
+    // distinguishing evidence is in the next test.
+    auto first = makeSecurePair("SAME-SECRET-BOTH", "SAME-SECRET-BOTH");
+    pumpRounds(*first.host, *first.client);
+    REQUIRE(first.host->connectionCount() == 1);
+    const std::string firstFp = first.host->sessionFingerprint(1);
+
+    auto second = makeSecurePair("SAME-SECRET-BOTH", "SAME-SECRET-BOTH");
+    pumpRounds(*second.host, *second.client);
+    REQUIRE(second.host->connectionCount() == 1);
+    const std::string secondFp = second.host->sessionFingerprint(1);
+
+    CHECK_FALSE(firstFp.empty());
+    CHECK(firstFp != secondFp);
+}
+
+TEST_CASE("SecureTransport: the handshake carries fresh ephemeral keys each session")
+{
+    // This is what actually separates v2 from v1: the transcript contains
+    // ephemeral public keys whose private halves are never transmitted and are
+    // wiped after use. Forward secrecy follows from that — an eavesdropper who
+    // later learns the join secret still lacks the private scalars, and they no
+    // longer exist anywhere. A unit test cannot prove the absence of a
+    // derivation, but it can prove the mechanism is present and per-session.
+    auto first  = makeSecurePair("SAME-SECRET-BOTH", "SAME-SECRET-BOTH");
+    pumpRounds(*first.host, *first.client);
+    REQUIRE(first.host->connectionCount() == 1);
+
+    auto second = makeSecurePair("SAME-SECRET-BOTH", "SAME-SECRET-BOTH");
+    pumpRounds(*second.host, *second.client);
+    REQUIRE(second.host->connectionCount() == 1);
+
+    // Challenge layout: [msg][version][32 nonce][32 ephemeral pubkey].
+    REQUIRE_FALSE(first.hostRaw->sentFrames.empty());
+    REQUIRE_FALSE(second.hostRaw->sentFrames.empty());
+    const auto& c1 = first.hostRaw->sentFrames[0];
+    const auto& c2 = second.hostRaw->sentFrames[0];
+
+    REQUIRE(c1.size() == 2 + 32 + 32);   // v1 challenges were 32 bytes shorter
+    REQUIRE(c2.size() == 2 + 32 + 32);
+    CHECK(c1[1] == 2);                   // protocol version 2
+
+    const std::vector<std::uint8_t> pub1(c1.begin() + 34, c1.end());
+    const std::vector<std::uint8_t> pub2(c2.begin() + 34, c2.end());
+    CHECK(pub1.size() == 32);
+    CHECK(pub1 != pub2);                 // a fresh keypair per session
+
+    // And the client contributes its own, so neither side alone fixes the key.
+    REQUIRE_FALSE(first.clientRaw->sentFrames.empty());
+    const auto& r1 = first.clientRaw->sentFrames[0];
+    REQUIRE(r1.size() == 1 + 32 + 32 + 32);
+    const std::vector<std::uint8_t> clientPub(r1.begin() + 33, r1.begin() + 65);
+    CHECK(clientPub != pub1);
+}
+
+TEST_CASE("SecureTransport: substituting the ephemeral public key breaks the handshake")
+{
+    auto pair = makeSecurePair("JOINSECRET123", "JOINSECRET123");
+
+    // Corrupt a byte inside the host's ephemeral public key in the Challenge:
+    // layout is [msg][version][32 nonce][32 pubkey], so offset 34 is the first
+    // key byte. This is what a man in the middle would attempt — swapping in a
+    // key it controls to read the traffic.
+    pair.hostRaw->corruptNext    = true;
+    pair.hostRaw->corruptAtIndex = 2 + 32 + 4;
+
+    pumpRounds(*pair.host, *pair.client);
+
+    // The mac covers the transcript including both public keys, so the host sees
+    // a mac over a key it never sent and refuses. No session is established, and
+    // nothing is surfaced to the application.
+    CHECK(pair.host->connectionCount() == 0);
+    CHECK(pair.client->connectionCount() == 0);
+    CHECK(drainSecure(*pair.host).empty());
+}
+
+TEST_CASE("SecureTransport: no fingerprint before the handshake completes")
+{
+    auto pair = makeSecurePair("JOINSECRET123", "JOINSECRET123");
+    CHECK(pair.host->sessionFingerprint(1).empty());
+    CHECK(pair.host->sessionFingerprint(999).empty());   // unknown peer
 }
 
 // ─── Encrypted data ──────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 #include "Net/SecureTransport.h"
 
+#include <Crypto/X25519.h>
 #include <Hpak/Aes256Gcm.h>
 #include <Hpak/KeyDerivation.h>
 
@@ -17,16 +18,19 @@ constexpr std::uint8_t kMsgResponse  = 0x02;
 constexpr std::uint8_t kMsgAccept    = 0x03;
 constexpr std::uint8_t kMsgReject    = 0x04;
 
-constexpr std::uint8_t kProtocolVersion = 1;
+// v2 adds the ephemeral X25519 exchange. The version is checked on the wire, so
+// a v1 peer is rejected rather than silently negotiating a weaker session.
+constexpr std::uint8_t kProtocolVersion = 2;
 constexpr std::size_t  kNonceLen        = 32;
+constexpr std::size_t  kPubKeyLen       = 32;
 constexpr std::size_t  kMacLen          = 32;
 constexpr std::size_t  kCounterLen      = 8;
 constexpr std::size_t  kGcmTagLen       = 16;
 
-// Domain-separation labels: the wire-visible mac and the secret session key are
-// derived from the same join secret, so they must not be the same HMAC.
-constexpr char kAuthLabel[] = "HN-auth-v1";
-constexpr char kKeyLabel[]  = "HN-key-v1";
+// Domain-separation labels: the wire-visible mac and the secret session key must
+// never be the same HMAC over the same inputs.
+constexpr char kAuthLabel[] = "HN-auth-v2";
+constexpr char kKeyLabel[]  = "HN-key-v2";
 
 // Direction tags keep host→client and client→host nonces disjoint under one key.
 constexpr std::uint32_t kDirHostToClient = 1;
@@ -61,6 +65,13 @@ std::uint64_t readU64BE(const std::uint8_t* p) {
     std::uint64_t v = 0;
     for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
     return v;
+}
+
+// Overwrite key material once it is no longer needed. `volatile` keeps the
+// compiler from optimising the wipe away as a dead store.
+void secureWipe(std::uint8_t* p, std::size_t n) {
+    volatile std::uint8_t* v = p;
+    for (std::size_t i = 0; i < n; ++i) v[i] = 0;
 }
 
 void makeGcmNonce(std::uint8_t out[12], std::uint32_t direction, std::uint64_t counter) {
@@ -106,6 +117,10 @@ std::unique_ptr<SecureTransport> SecureTransport::wrap(
     const bool crypto = Hpak::cryptoAvailable();
     // Refuse rather than silently downgrade to plaintext on a public network.
     if (cfg.requireEncryption && !crypto) return nullptr;
+    // The handshake needs an ephemeral key exchange even in plaintext mode —
+    // without X25519 there is no key agreement at all, so nothing can be
+    // established rather than something weaker being negotiated silently.
+    if (!HE::Crypto::x25519Available()) return nullptr;
 
     std::unique_ptr<SecureTransport> t(new SecureTransport());
     t->m_inner           = std::move(inner);
@@ -156,15 +171,23 @@ void SecureTransport::drainInner() {
 void SecureTransport::onInnerConnected(ConnectionId conn) {
     Peer p;
     if (m_cfg.role == NetRole::Host) {
-        // Host drives: emit a fresh challenge immediately.
+        // Host drives: emit a fresh challenge immediately, carrying a keypair
+        // generated for this connection alone.
         fillRandom(p.hostNonce, kNonceLen);
+        if (!HE::Crypto::x25519GenerateKeypair(p.ephemeralPriv, p.hostPub)) {
+            // Without an ephemeral key there is no forward secrecy, so refuse
+            // rather than fall back to a weaker session.
+            m_inner->disconnect(conn);
+            return;
+        }
         p.state = HandshakeState::AwaitingResponse;
 
         std::vector<std::uint8_t> msg;
-        msg.reserve(2 + kNonceLen);
+        msg.reserve(2 + kNonceLen + kPubKeyLen);
         msg.push_back(kMsgChallenge);
         msg.push_back(kProtocolVersion);
         msg.insert(msg.end(), p.hostNonce, p.hostNonce + kNonceLen);
+        msg.insert(msg.end(), p.hostPub, p.hostPub + kPubKeyLen);
 
         m_peers[conn] = p;
         m_inner->send(conn, msg.data(), msg.size(), SendMode::ReliableOrdered);
@@ -187,24 +210,54 @@ void SecureTransport::onInnerData(ConnectionId conn,
 
 // ─── Handshake ───────────────────────────────────────────────────────────────
 
-void SecureTransport::deriveSecrets(Peer& p, std::uint8_t outMac[32]) {
-    // Both derivations bind to *both* nonces, so neither side can pin the
-    // transcript to a value it chose alone.
-    std::uint8_t authMsg[sizeof(kAuthLabel) - 1 + kNonceLen * 2];
-    std::memcpy(authMsg, kAuthLabel, sizeof(kAuthLabel) - 1);
-    std::memcpy(authMsg + sizeof(kAuthLabel) - 1, p.hostNonce, kNonceLen);
-    std::memcpy(authMsg + sizeof(kAuthLabel) - 1 + kNonceLen, p.clientNonce, kNonceLen);
-
-    std::uint8_t keyMsg[sizeof(kKeyLabel) - 1 + kNonceLen * 2];
-    std::memcpy(keyMsg, kKeyLabel, sizeof(kKeyLabel) - 1);
-    std::memcpy(keyMsg + sizeof(kKeyLabel) - 1, p.hostNonce, kNonceLen);
-    std::memcpy(keyMsg + sizeof(kKeyLabel) - 1 + kNonceLen, p.clientNonce, kNonceLen);
+bool SecureTransport::deriveSecrets(Peer& p, std::uint8_t outMac[32]) {
+    // The transcript binds both nonces *and* both ephemeral public keys, so
+    // neither side can pin it to a value it chose alone, and a man in the middle
+    // cannot swap in its own key without invalidating the mac.
+    constexpr std::size_t kTranscriptLen = kNonceLen * 2 + kPubKeyLen * 2;
+    std::uint8_t transcript[kTranscriptLen];
+    std::memcpy(transcript,                                     p.hostNonce,   kNonceLen);
+    std::memcpy(transcript + kNonceLen,                         p.clientNonce, kNonceLen);
+    std::memcpy(transcript + kNonceLen * 2,                     p.hostPub,     kPubKeyLen);
+    std::memcpy(transcript + kNonceLen * 2 + kPubKeyLen,        p.clientPub,   kPubKeyLen);
 
     const auto* secret = reinterpret_cast<const std::uint8_t*>(m_cfg.joinSecret.data());
     const std::size_t secretLen = m_cfg.joinSecret.size();
 
+    // ── Authentication: proves knowledge of the join secret over this exact
+    //    transcript. This is the only value that travels on the wire.
+    std::uint8_t authMsg[sizeof(kAuthLabel) - 1 + kTranscriptLen];
+    std::memcpy(authMsg, kAuthLabel, sizeof(kAuthLabel) - 1);
+    std::memcpy(authMsg + sizeof(kAuthLabel) - 1, transcript, kTranscriptLen);
     KeyDerivation::hmac(secret, secretLen, authMsg, sizeof(authMsg), outMac);
-    KeyDerivation::hmac(secret, secretLen, keyMsg,  sizeof(keyMsg),  p.sessionKey);
+
+    // ── Session key: rooted in the ephemeral exchange, so it cannot be
+    //    recomputed later from the join secret alone.
+    const std::uint8_t* peerPub =
+        (m_cfg.role == NetRole::Host) ? p.clientPub : p.hostPub;
+
+    std::uint8_t shared[32];
+    if (!HE::Crypto::x25519SharedSecret(p.ephemeralPriv, peerPub, shared)) {
+        return false;
+    }
+    // The ephemeral private key has done its job; keeping it would defeat the
+    // forward secrecy this whole exchange exists to provide.
+    secureWipe(p.ephemeralPriv, sizeof(p.ephemeralPriv));
+
+    // Two-step derivation. The curve output is a point, not uniform bytes, so it
+    // is run through HMAC rather than used directly; folding the join secret in
+    // afterwards means neither the curve nor the secret is sufficient alone.
+    std::uint8_t keyMsg[sizeof(kKeyLabel) - 1 + kTranscriptLen];
+    std::memcpy(keyMsg, kKeyLabel, sizeof(kKeyLabel) - 1);
+    std::memcpy(keyMsg + sizeof(kKeyLabel) - 1, transcript, kTranscriptLen);
+
+    std::uint8_t prk[32];
+    KeyDerivation::hmac(shared, sizeof(shared), keyMsg, sizeof(keyMsg), prk);
+    KeyDerivation::hmac(prk, sizeof(prk), secret, secretLen, p.sessionKey);
+
+    secureWipe(shared, sizeof(shared));
+    secureWipe(prk, sizeof(prk));
+    return true;
 }
 
 void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
@@ -215,19 +268,28 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
     // ── Client: challenge received → answer with the mac ──
     if (msg == kMsgChallenge && m_cfg.role == NetRole::Client &&
         p.state == HandshakeState::AwaitingChallenge) {
-        if (frame.size() != 2 + kNonceLen)      { failPeer(conn, p); return; }
-        if (frame[1] != kProtocolVersion)       { failPeer(conn, p); return; }
+        if (frame.size() != 2 + kNonceLen + kPubKeyLen) { failPeer(conn, p); return; }
+        // A mismatched version means the peer speaks a different handshake;
+        // reject rather than negotiate down to a weaker one.
+        if (frame[1] != kProtocolVersion)               { failPeer(conn, p); return; }
 
         std::memcpy(p.hostNonce, frame.data() + 2, kNonceLen);
+        std::memcpy(p.hostPub,   frame.data() + 2 + kNonceLen, kPubKeyLen);
+
         fillRandom(p.clientNonce, kNonceLen);
+        if (!HE::Crypto::x25519GenerateKeypair(p.ephemeralPriv, p.clientPub)) {
+            failPeer(conn, p);
+            return;
+        }
 
         std::uint8_t mac[kMacLen];
-        deriveSecrets(p, mac);
+        if (!deriveSecrets(p, mac)) { failPeer(conn, p); return; }
 
         std::vector<std::uint8_t> out;
-        out.reserve(1 + kNonceLen + kMacLen);
+        out.reserve(1 + kNonceLen + kPubKeyLen + kMacLen);
         out.push_back(kMsgResponse);
         out.insert(out.end(), p.clientNonce, p.clientNonce + kNonceLen);
+        out.insert(out.end(), p.clientPub, p.clientPub + kPubKeyLen);
         out.insert(out.end(), mac, mac + kMacLen);
 
         p.state = HandshakeState::AwaitingAccept;
@@ -238,14 +300,18 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
     // ── Host: response received → verify and accept or reject ──
     if (msg == kMsgResponse && m_cfg.role == NetRole::Host &&
         p.state == HandshakeState::AwaitingResponse) {
-        if (frame.size() != 1 + kNonceLen + kMacLen) { failPeer(conn, p); return; }
+        if (frame.size() != 1 + kNonceLen + kPubKeyLen + kMacLen) {
+            failPeer(conn, p);
+            return;
+        }
 
         std::memcpy(p.clientNonce, frame.data() + 1, kNonceLen);
+        std::memcpy(p.clientPub,   frame.data() + 1 + kNonceLen, kPubKeyLen);
 
         std::uint8_t expected[kMacLen];
-        deriveSecrets(p, expected);
+        if (!deriveSecrets(p, expected)) { failPeer(conn, p); return; }
 
-        const std::uint8_t* got = frame.data() + 1 + kNonceLen;
+        const std::uint8_t* got = frame.data() + 1 + kNonceLen + kPubKeyLen;
         if (!constantTimeEqual(expected, got, kMacLen)) {
             const std::uint8_t reject[2] = { kMsgReject, 0x01 };
             m_inner->send(conn, reject, sizeof(reject), SendMode::ReliableOrdered);
@@ -378,6 +444,31 @@ std::size_t SecureTransport::connectionCount() const {
 HandshakeState SecureTransport::stateOf(ConnectionId conn) const {
     const auto it = m_peers.find(conn);
     return (it == m_peers.end()) ? HandshakeState::Failed : it->second.state;
+}
+
+std::string SecureTransport::sessionFingerprint(ConnectionId conn) const {
+    const auto it = m_peers.find(conn);
+    if (it == m_peers.end() || it->second.state != HandshakeState::Established) {
+        return {};
+    }
+
+    // One-way digest, never the key itself: HMAC keyed by the session key over a
+    // fixed label. Both peers derive the same session key, so both show the same
+    // fingerprint — which is what makes it usable as an out-of-band check.
+    static constexpr char kFingerprintLabel[] = "HN-fingerprint-v2";
+    std::uint8_t digest[32];
+    KeyDerivation::hmac(it->second.sessionKey, 32,
+                        reinterpret_cast<const std::uint8_t*>(kFingerprintLabel),
+                        sizeof(kFingerprintLabel) - 1, digest);
+
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.reserve(16);
+    for (int i = 0; i < 8; ++i) {   // 64 bits is plenty for a visual check
+        out.push_back(kHex[digest[i] >> 4]);
+        out.push_back(kHex[digest[i] & 0x0F]);
+    }
+    return out;
 }
 
 } // namespace HE::Net

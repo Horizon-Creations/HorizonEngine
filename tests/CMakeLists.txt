@@ -51,6 +51,7 @@ add_executable(he_tests
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
+    test_crypto_x25519.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
     test_net_tcp.cpp

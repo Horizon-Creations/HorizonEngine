@@ -24,6 +24,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/HpakReader.cpp
 	src/Hpak/Aes256Gcm.cpp
 	src/Hpak/KeyDerivation.cpp
+	src/Crypto/X25519.cpp
 	src/Hpak/ProjectConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Events/EventBus.cpp
