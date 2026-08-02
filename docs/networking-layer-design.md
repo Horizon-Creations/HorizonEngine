@@ -1,9 +1,10 @@
 # HorizonNet — Networking Layer Design
 
-Status: **Checkpoints N1 + N2 done** — Layer 0–2 abstractions, in-process
-loopback transport, real TCP transport, and an authenticated + encrypted
-channel, all unit-tested. Session protocol (N3), presence (N4), locking (N5) and
-live deltas (N6) are next.
+Status: **Checkpoints N1 + N2 done, N2.5 partly done** — Layer 0–2 abstractions,
+loopback + real TCP transport, an authenticated/encrypted channel, and the
+discovery half of N2.5 (UDP, HTTP client, UPnP port mapping, session-directory
+endpoint). The directory *client* still needs a TLS-capable HTTP stack (N2.5b).
+Session protocol (N3), presence (N4), locking (N5) and live deltas (N6) follow.
 
 ## Why one layer serves two very different consumers
 
@@ -138,12 +139,70 @@ any zero-pad in the payload's final byte.
 
 - **N1** ✅ — Layer 0–2 abstractions + LoopbackTransport + serialization + doctest coverage.
 - **N2** ✅ — real network transport: Layer 0 sockets (shared later with the source-control HTTPS stack) + `TcpTransport` + `SecureTransport` (challenge-response auth, AES-256-GCM frames).
-- **N2.5** — discovery: UPnP/NAT-PMP port mapping, a `session-api.php` session directory on the website (host registers `{sessionId, port, …}`, server records the public IP; clients look up by session id), and an external reachability check before publishing.
+- **N2.5a** ✅ — discovery: UDP sockets, plaintext HTTP client, UPnP IGD port mapping, `session-api.php` (register/lookup/heartbeat/unregister with server-side reachability probe).
+- **N2.5b** — session-directory *client*: needs HTTPS, which the engine cannot do today (only `OpenSSL::Crypto` / `mbedcrypto` are linked — crypto primitives, no TLS). Options: link `OpenSSL::SSL` / `mbedtls`+`mbedx509`, or use the platform HTTP stacks (WinHTTP / NSURLSession / libcurl). The latter is preferable — certificate validation, proxies and redirects are exactly where hand-rolled TLS goes wrong. Also pending: NAT-PMP/PCP as a second mapping path (needs default-gateway lookup, unlike SSDP which self-discovers).
 - **N3** — session protocol: join/leave, participant list, **late-join snapshot** via `SceneSerializer::saveToMemory`.
 - **N4** — **presence**: remote cameras as frustum gizmos, remote selection highlighting. First visible collab payoff, no correctness risk.
 - **N5** — **authoritative lock table** on the host (`RealtimeLockProvider`), which removes the polling race window LFS locks have.
 - **N6** — **live deltas**: dirty-entity replication via `serializeSubtree`, a quantized transform fast path, per-tick coalescing, and UUID-only asset references with a "missing asset" hint.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
+
+## Discovery (N2.5)
+
+How a peer finds a host it has no other way of addressing.
+
+| File | Role |
+|---|---|
+| `Net/Socket.h` (UDP part) | `socketCreateUdp` / `SendTo` / `RecvFrom` / `socketLocalAddress()` |
+| `Net/HttpClient.{h,cpp}` | minimal HTTP/1.1 — **plaintext only**, for LAN router calls |
+| `Net/PortMapper.{h,cpp}` | SSDP discovery + UPnP IGD `AddPortMapping` / `GetExternalIPAddress` |
+| `Website/HorizonEngine/session-api.php` | session directory: register / lookup / heartbeat / unregister |
+
+**Local address** is found by "connecting" a UDP socket to a public address —
+this transmits nothing, it only makes the kernel choose a route — then reading
+back the socket's local end. Enumerating interfaces and guessing is unreliable on
+machines with VPNs, VMs or several NICs.
+
+**Session directory contract.** The host address is always taken from
+`REMOTE_ADDR`, never from the request body: a client-supplied address would let
+anyone redirect peers to a host of their choosing. `register` returns a
+management token that `heartbeat`/`unregister` require, so knowing a session id
+is not enough to drop or hijack an entry. The join secret is never sent to the
+directory — authentication is engine-to-engine. Entries expire on a TTL and are
+swept on write.
+
+**Reachability is verified server-side** before an entry goes live: the endpoint
+opens a TCP connection back to the host. Publishing an unreachable endpoint is
+worse than failing, because peers would sit in a timeout with no explanation.
+
+**CGNAT detection.** `PortMapper::isPrivateOrCgnat` flags `100.64.0.0/10` along
+with the RFC1918 ranges. A router reporting one of those as its *external*
+address proves another NAT layer sits above it, so no port mapping can ever be
+reachable — the UI should say so rather than let the user retry forever.
+
+### ⚠ macOS Local Network privacy
+
+From macOS Sequoia on, sends to LAN and multicast addresses fail with
+`EHOSTUNREACH` unless the app holds the Local Network permission — while internet
+traffic keeps working, which makes it look like a routing bug rather than a
+missing entitlement. Measured on this machine: `sendto` to `8.8.8.8` succeeds
+while `239.255.255.250` and the LAN gateway both fail. The editor bundle
+therefore declares `NSLocalNetworkUsageDescription`
+(`scripts/package_macos.sh`), and the user must approve the prompt.
+
+### Verification status — be precise about this
+
+- **Tested**: URL/response parsing (incl. chunked), SSDP message construction and
+  `LOCATION` extraction, device-description parsing (the WAN service's *own*
+  control URL, not a neighbouring one), SOAP construction with XML escaping,
+  CGNAT ranges, UDP round-trip over loopback, and a full HTTP GET against a real
+  server socket.
+- **Not verified**: SSDP/SOAP against an actual router, because macOS Local
+  Network privacy blocks LAN sends from a bare CLI test binary. The pure logic is
+  covered, but the live handshake with a real IGD remains unproven — treat it as
+  unverified until someone runs it from a granted app bundle.
+- **Not verified**: `session-api.php` was never executed (no PHP runtime
+  available here). Reviewed only.
 
 ## Connectivity over the internet
 

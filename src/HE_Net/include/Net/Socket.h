@@ -88,4 +88,39 @@ HE_NET_API SocketResult socketSend(SocketHandle h, const std::uint8_t* data,
 HE_NET_API SocketResult socketRecv(SocketHandle h, std::uint8_t* buf,
                                    std::size_t len, std::size_t& outReceived);
 
+// Block until the socket is readable, or the timeout elapses. Only for one-shot
+// request/response exchanges on a worker thread (SSDP discovery, router SOAP
+// calls) — never on the transport path the editor frame loop pumps.
+HE_NET_API bool socketWaitReadable(SocketHandle h, int timeoutMs);
+
+// ─── UDP ─────────────────────────────────────────────────────────────────────
+// Needed for router port mapping: SSDP discovery is multicast UDP, and NAT-PMP
+// is a small binary UDP protocol.
+
+HE_NET_API SocketHandle socketCreateUdp();
+// Bind to a local port (0 = any). Required before receiving.
+HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
+// Allow sending to multicast groups (SSDP's 239.255.255.250).
+HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
+
+HE_NET_API SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data,
+                                     std::size_t len, const std::string& host,
+                                     std::uint16_t port, std::size_t& outSent);
+// `outFromHost`/`outFromPort` identify the responder — SSDP replies arrive from
+// the router's own address, which is how it is located.
+HE_NET_API SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf,
+                                       std::size_t len, std::size_t& outReceived,
+                                       std::string& outFromHost,
+                                       std::uint16_t& outFromPort);
+
+// ─── Local address ───────────────────────────────────────────────────────────
+
+// The LAN address of the interface that would be used to reach the internet.
+// Determined by "connecting" a UDP socket to a public address — this sends no
+// packets, it only makes the kernel pick a route — then reading the socket's
+// local end. Far more reliable than enumerating interfaces and guessing which
+// one matters on a machine with VPNs, VMs or several NICs.
+// Returns an empty string on failure.
+HE_NET_API std::string socketLocalAddress();
+
 } // namespace HE::Net
