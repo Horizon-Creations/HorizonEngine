@@ -53,6 +53,8 @@ add_executable(he_tests
     test_gamelogic_loader.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
+    test_net_tcp.cpp
+    test_net_secure.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
