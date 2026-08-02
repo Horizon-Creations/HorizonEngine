@@ -15,13 +15,13 @@ ShaderHandle OpenGLShaderManager::load(const char* path, HE::ShaderType type)
 {
 	if (!fs::exists(path))
 	{
-		Logger::Log(Logger::LogLevel::Error, (std::string("OpenGLShaderManager: shader file not found: ") + path).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLShaderManager: shader file not found: ") + path).c_str());
 		return { 0, false };// invalid handle
 	}
 	std::ifstream file(path);
 	if (!file.is_open())
 	{
-		Logger::Log(Logger::LogLevel::Error, (std::string("OpenGLShaderManager: failed to open shader file: ") + path).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLShaderManager: failed to open shader file: ") + path).c_str());
 		return { 0, false };// invalid handle
 	}
 	std::stringstream buffer;
@@ -60,7 +60,7 @@ bool OpenGLShaderManager::compile(ShaderHandle& handle)
 	{
 		GLchar infoLog[512];
 		glGetShaderInfoLog(handle.id, 512, nullptr, infoLog);
-		Logger::Log(Logger::LogLevel::Error, (std::string("OpenGLShaderManager: shader compilation failed: ") + infoLog).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLShaderManager: shader compilation failed: ") + infoLog).c_str());
 		return false;
 	}
 	handle.ready = true;
@@ -80,7 +80,7 @@ ShaderProgramHandle OpenGLShaderManager::createProgram(const std::vector<ShaderH
 	{
 		GLchar infoLog[512];
 		glGetProgramInfoLog(program.id, 512, nullptr, infoLog);
-		Logger::Log(Logger::LogLevel::Error, (std::string("OpenGLShaderManager: shader program linking failed: ") + infoLog).c_str());
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLShaderManager: shader program linking failed: ") + infoLog).c_str());
 		return { 0, false };// invalid handle
 	}
 	program.ready = true;

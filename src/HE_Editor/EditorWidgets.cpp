@@ -60,7 +60,7 @@ AssetDrop acceptAssetDrop(AppContext& ctx, HE::AssetType want, const char* rejec
 		}
 		else if (rejectNoun)
 		{
-			Logger::Log(Logger::LogLevel::Warning,
+			HE_LOG_WARN(Editor, "%s",
 				(std::string("Editor: dropped asset is not a ") + rejectNoun).c_str());
 		}
 	}

@@ -12,7 +12,7 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 	std::ifstream f(sourcePath);
 	if (!f.is_open())
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("MaterialImporter: cannot open " + sourcePath.string()).c_str());
 		return nullptr;
 	}
@@ -20,7 +20,7 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 	nlohmann::json j = nlohmann::json::parse(f, nullptr, /*allow_exceptions=*/false);
 	if (j.is_discarded() || !j.is_object())
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("MaterialImporter: invalid JSON in " + sourcePath.string()).c_str());
 		return nullptr;
 	}
@@ -45,7 +45,7 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Tool, "%s",
 		("MaterialImporter: " + sourcePath.filename().string() + " -> " + asset->path).c_str());
 	return asset;
 }

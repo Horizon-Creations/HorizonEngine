@@ -226,7 +226,7 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             if (ImGui::Button("Dump Now"))
             {
                 std::string p = prof.dumpNow();
-                if (!p.empty()) Logger::Log(Logger::LogLevel::Info, ("Profiler dump: " + p).c_str());
+                if (!p.empty()) HE_LOG_INFO(Editor, "%s", ("Profiler dump: " + p).c_str());
             }
             ImGui::SameLine();
             if (ImGui::Button("Open Dumps Folder"))

@@ -12,7 +12,7 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 {
 	if (m_lib.isLoaded())
 	{
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(GameLogic, "%s",
 			"GameLogicLoader: load() called while a library is loaded — ignoring");
 		return false;
 	}
@@ -43,7 +43,7 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 
 	if (!m_lib.load(loadPath))
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(GameLogic, "%s",
 			("GameLogicLoader: failed to load " + loadPath.string()).c_str());
 		return false;
 	}
@@ -52,7 +52,7 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 	m_destroyFn    = reinterpret_cast<FnDestroyGameLogic>(m_lib.getSymbol("HE_DestroyGameLogic"));
 	if (!createFn || !m_destroyFn)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(GameLogic, "%s",
 			("GameLogicLoader: missing HE_CreateGameLogic/HE_DestroyGameLogic exports in "
 			 + loadPath.string()).c_str());
 		m_destroyFn = nullptr;
@@ -63,13 +63,13 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 	m_logic = createFn();
 	if (!m_logic)
 	{
-		Logger::Log(Logger::LogLevel::Error, "GameLogicLoader: HE_CreateGameLogic returned null");
+		HE_LOG_ERROR(GameLogic, "%s", "GameLogicLoader: HE_CreateGameLogic returned null");
 		m_destroyFn = nullptr;
 		m_lib.unload();
 		return false;
 	}
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(GameLogic, "%s",
 		("GameLogicLoader: loaded " + dllPath.filename().string()).c_str());
 	return true;
 }

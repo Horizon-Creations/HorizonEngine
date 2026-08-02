@@ -1651,7 +1651,7 @@ struct D3D11RendererImpl
             if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
                                   entry, profile, flags, 0, &blob, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D11Renderer: GI shader compile failed (") + entry + "): "
                      + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
                 return false;
@@ -1699,14 +1699,14 @@ struct D3D11RendererImpl
 
         if (!ok)
         {
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                         "D3D11Renderer: GI pipeline build failed — GI disabled");
             giGBufVS.Reset(); giGBufPS.Reset(); giShadowCS.Reset(); giProbeCS.Reset();
             giTemporalPS.Reset(); giBlurPS.Reset();
             giSupported = false;
             return;
         }
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     "D3D11Renderer: GI pipelines built (compute ray tracing active)");
     }
 
@@ -1805,7 +1805,7 @@ struct D3D11RendererImpl
         giProbesPerRow = std::min(giProbeCount, 32);
         giProbeCursor  = 0;
         giProbeGridBuilt = true;
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     ("D3D11Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
                      + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
                      + " (" + std::to_string(giProbeCount) + " probes)").c_str());
@@ -2121,7 +2121,7 @@ struct D3D11RendererImpl
             if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D11 PostFX '") + entry + "' failed: "
                      + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
                 return false;
@@ -2310,14 +2310,14 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: VS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: PS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: PS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
@@ -2363,7 +2363,7 @@ struct D3D11RendererImpl
         }
         else
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D11Renderer: VSMainInstanced compile "
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VSMainInstanced compile "
                 "failed: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
         }
 
@@ -2613,7 +2613,7 @@ struct D3D11RendererImpl
         sd.MaxLOD   = D3D11_FLOAT32_MAX;
         const bool sampOk = SUCCEEDED(device->CreateSamplerState(&sd, &m_matSampler));
         m_matReady = cbLight && cbObj && cbParam && sampOk;
-        Logger::Log(m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+        Logger::LogTo(HE::Log::Cat::RHI, m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
             m_matReady ? "D3D11Renderer: A4 material resources created"
                        : "D3D11Renderer: A4 material resource allocation failed");
 #endif
@@ -2639,15 +2639,15 @@ struct D3D11RendererImpl
         const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
         if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
         {
-            Logger::Log(Logger::LogLevel::Warning, "D3D11Renderer: A4 material shader cross-compile failed");
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: A4 material shader cross-compile failed");
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
         if (!m_matHlslLogged)
         {
             m_matHlslLogged = true;
-            Logger::Log(Logger::LogLevel::Info, (std::string("D3D11 A4 material VS HLSL:\n") + vc.source).c_str());
-            Logger::Log(Logger::LogLevel::Info, (std::string("D3D11 A4 material PS HLSL:\n") + fc.source).c_str());
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material VS HLSL:\n") + vc.source).c_str());
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material PS HLSL:\n") + fc.source).c_str());
         }
 
         UINT cflags = 0;
@@ -2659,7 +2659,7 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
                               "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Warning, (std::string("D3D11Renderer: A4 material VS compile failed: ")
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material VS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
@@ -2667,7 +2667,7 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
                               "main", "ps_5_0", cflags, 0, &psb, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Warning, (std::string("D3D11Renderer: A4 material PS compile failed: ")
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material PS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
@@ -2677,7 +2677,7 @@ struct D3D11RendererImpl
         if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &sh.vs)) ||
             FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &sh.ps)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11Renderer: A4 material shader-object creation failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: A4 material shader-object creation failed");
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
@@ -2693,7 +2693,7 @@ struct D3D11RendererImpl
         };
         if (FAILED(device->CreateInputLayout(layout, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11Renderer: A4 material input layout creation failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: A4 material input layout creation failed");
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
@@ -2791,7 +2791,7 @@ struct D3D11RendererImpl
             if (FAILED(D3DCompile(src, srcLen, entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D11 sky '") + entry + "': " +
                      (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
                 return false;
@@ -2865,13 +2865,13 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "VSLine", "vs_5_0", flags, 0, &vsB, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11 DebugLine VS compile failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine VS compile failed");
             return false;
         }
         if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "PSLine", "ps_5_0", flags, 0, &psB, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11 DebugLine PS compile failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine PS compile failed");
             return false;
         }
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &debugVS);
@@ -3004,7 +3004,7 @@ struct D3D11RendererImpl
                               nullptr, nullptr, "VSMainSkinned", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             const char* msg = err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown";
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                         (std::string("D3D11: skinned VS compile: ") + msg).c_str());
             return false;
         }
@@ -3045,14 +3045,14 @@ struct D3D11RendererImpl
         if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIVSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11: UI VS compile failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11: UI VS compile failed");
             if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
             return;
         }
         if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIPSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D11: UI PS compile failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D11: UI PS compile failed");
             if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
             return;
         }
@@ -3236,7 +3236,7 @@ D3D11Renderer::~D3D11Renderer() { delete m_impl; }
 
 void D3D11Renderer::Initialize(HE::Window* window)
 {
-    Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: initializing");
+    HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initializing");
     SDL_PropertiesID props = SDL_GetWindowProperties(window->GetNativeWindow());
     HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
         props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -3271,14 +3271,14 @@ void D3D11Renderer::Initialize(HE::Window* window)
     m_impl->createRTV();
     m_impl->createDepth(m_impl->width, m_impl->height);
     if (!m_impl->createPipeline())
-        Logger::Log(Logger::LogLevel::Error, "D3D11Renderer: scene pipeline creation failed — only clear will work");
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
     m_impl->createCube();
-    Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: initialized successfully");
+    HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initialized successfully");
 }
 
 void D3D11Renderer::Shutdown()
 {
-    Logger::Log(Logger::LogLevel::Info, "D3D11Renderer: shutdown");
+    HE_LOG_INFO(RHI, "%s", "D3D11Renderer: shutdown");
     m_impl->meshCache.clear();
     m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
@@ -4138,7 +4138,7 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 
 void D3D11Renderer::SetVSync(bool enabled)
 {
-    Logger::Log(Logger::LogLevel::Info, enabled ? "D3D11Renderer: VSync enabled" : "D3D11Renderer: VSync disabled");
+    HE_LOG_INFO(RHI, "%s", enabled ? "D3D11Renderer: VSync enabled" : "D3D11Renderer: VSync disabled");
     m_impl->vsync = enabled;
 }
 

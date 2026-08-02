@@ -10,6 +10,7 @@
 #include <spirv_glsl.hpp>
 
 #include <mutex>
+#include <Diagnostics/Log.h>
 
 namespace he::shaderc
 {
@@ -126,6 +127,21 @@ bool spirvToSource(const std::vector<uint32_t>& spirv, Target target,
     }
     return false;
 }
+
+// A shader that fails to compile is a hard failure with a very specific cause,
+// and the caller only ever gets a bool + a log string it may or may not print.
+// Report it here so the reason always lands in the engine log.
+void reportShaderResult(const char* what, bool ok, const std::string& log, size_t glslBytes)
+{
+    if (ok)
+    {
+        if (!log.empty())
+            HE_LOG_DEBUG(Shader, "%s succeeded with diagnostics: %s", what, log.c_str());
+        return;
+    }
+    HE_LOG_ERROR(Shader, "%s failed (%zu bytes of GLSL): %s", what, glslBytes,
+                 log.empty() ? "no diagnostics from the compiler" : log.c_str());
+}
 } // namespace
 
 Result compile(const std::string& glsl, Stage stage, Target target)
@@ -136,6 +152,7 @@ Result compile(const std::string& glsl, Stage stage, Target target)
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
         r.ok = spirvToSource(r.spirv, target, r.source, r.log);
     glslang::FinalizeProcess();
+    reportShaderResult("Shader compile", r.ok, r.log, glsl.size());
     return r;
 }
 
@@ -182,6 +199,7 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
         }
     }
     glslang::FinalizeProcess();
+    reportShaderResult("Pinned-MSL shader compile", r.ok, r.log, glsl.size());
     return r;
 }
 
@@ -206,6 +224,7 @@ MultiResult compileMany(const std::string& glsl, Stage stage,
         }
     }
     glslang::FinalizeProcess();
+    reportShaderResult("Multi-target shader compile", mr.ok, mr.log, glsl.size());
     return mr;
 }
 } // namespace he::shaderc

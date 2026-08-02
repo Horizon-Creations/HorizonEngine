@@ -17,7 +17,7 @@ bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::s
 
     if (!m_lib.load(libPath))
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(HorizonCode, "%s",
             ("HorizonCode: could not load compiled classes from '" + libPath.string() +
              "' — running interpreted").c_str());
         return false;
@@ -25,7 +25,7 @@ bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::s
     const auto manifest = (ManifestFn)m_lib.getSymbol("HE_HorizonCodeGenClasses");
     if (!manifest)
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(HorizonCode, "%s",
             ("HorizonCode: '" + libPath.string() +
              "' has no HE_HorizonCodeGenClasses export — running interpreted").c_str());
         m_lib.unload();
@@ -38,7 +38,7 @@ bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::s
     // undefined behavior to call into — reject it cleanly instead.
     if (!baked || engineVersion != baked)
     {
-        Logger::Log(Logger::LogLevel::Error,
+        HE_LOG_ERROR(HorizonCode, "%s",
             ("HorizonCode: compiled classes were built for engine '" +
              std::string(baked ? baked : "?") + "' but this is '" + engineVersion +
              "' — running interpreted").c_str());
@@ -48,7 +48,7 @@ bool CompiledClassTable::load(const std::filesystem::path& libPath, const std::s
     for (int i = 0; i < count; ++i)
         if (entries[i].key && entries[i].create && entries[i].destroy)
             m_entries.emplace(entries[i].key, &entries[i]);
-    Logger::Log(Logger::LogLevel::Info,
+    HE_LOG_INFO(HorizonCode, "%s",
         ("HorizonCode: " + std::to_string(m_entries.size()) + " compiled classes").c_str());
     return true;
 }
