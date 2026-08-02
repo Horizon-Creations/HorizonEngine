@@ -186,6 +186,15 @@ static bool s_showProfiler = false;
 // Toggled by View > Environment; drives the Sky/Weather add-remove window.
 static bool s_showEnvironment = false;
 
+// Toggled by View > Collaboration; drives the live-session panel.
+static bool s_showCollab = false;
+// Editable fields for that panel (persist across frames, not across runs).
+static char s_collabDisplayName[64]  = "Horizon User";
+static int  s_collabHostPort         = 7777;
+static char s_collabJoinAddress[128] = "127.0.0.1";
+static int  s_collabJoinPort         = 7777;
+static char s_collabJoinCode[64]     = "";
+
 // (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
 // Build > Export Project modal state. Editable fields mirror the selected
@@ -1272,6 +1281,179 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
 // is selected in the Outliner; this window only manages their presence (and offers a
 // shortcut to select each). Sky = an EnvironmentComponent entity, Weather = a
 // WeatherComponent entity; removing the Sky leaves a flat background.
+// ─── Live collaboration ──────────────────────────────────────────────────────
+// Host a session or join one. The join code is the session's only credential —
+// it authenticates the encrypted peer link, so it is shown here to be shared out
+// of band (chat, voice, screen share) and never travels over the network itself.
+static void DrawCollabWindow(AppContext& ctx, bool& open)
+{
+#ifdef HE_IMGUI_ENABLED
+    if (!open) return;
+
+    ImGui::SetNextWindowSize(ImVec2(420, 380), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Collaboration", &open)) { ImGui::End(); return; }
+
+    CollabController* collab = ctx.collab;
+    if (!collab)
+    {
+        ImGui::TextDisabled("(collaboration unavailable in this build)");
+        ImGui::End();
+        return;
+    }
+
+    const bool active = collab->active();
+
+    if (!active)
+    {
+        ImGui::TextWrapped("Work on the same scene together. The host opens a session; "
+                           "everyone else joins with the address and join code.");
+        ImGui::Separator();
+
+        ImGui::InputText("Display name", s_collabDisplayName, sizeof(s_collabDisplayName));
+
+        // ── Host ──
+        ImGui::SeparatorText("Host a session");
+        ImGui::InputInt("Port##host", &s_collabHostPort);
+        s_collabHostPort = std::clamp(s_collabHostPort, 0, 65535);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("0 lets the system pick a free port.");
+
+        if (ImGui::Button("Open session", ImVec2(160, 0)))
+        {
+            collab->startHosting(static_cast<std::uint16_t>(s_collabHostPort),
+                                 s_collabDisplayName);
+        }
+
+        // ── Join ──
+        ImGui::SeparatorText("Join a session");
+        ImGui::InputText("Address", s_collabJoinAddress, sizeof(s_collabJoinAddress));
+        ImGui::InputInt("Port##join", &s_collabJoinPort);
+        s_collabJoinPort = std::clamp(s_collabJoinPort, 1, 65535);
+        ImGui::InputText("Join code", s_collabJoinCode, sizeof(s_collabJoinCode));
+
+        const bool canJoin = s_collabJoinCode[0] != '\0' && s_collabJoinAddress[0] != '\0';
+        ImGui::BeginDisabled(!canJoin);
+        if (ImGui::Button("Join", ImVec2(160, 0)))
+        {
+            collab->joinSession(s_collabJoinAddress,
+                                static_cast<std::uint16_t>(s_collabJoinPort),
+                                s_collabJoinCode, s_collabDisplayName);
+        }
+        ImGui::EndDisabled();
+        if (!canJoin)
+            ImGui::TextDisabled("Address and join code are required.");
+
+        // Joining REPLACES the local scene, which is not obvious from a button
+        // labelled "Join" — say so before it happens, not after.
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+        ImGui::TextWrapped("Joining replaces your open scene with the host's. "
+                           "Save anything you want to keep first.");
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        // ── Active session ──
+        if (collab->isHost())
+        {
+            ImGui::SeparatorText("Hosting");
+            ImGui::Text("Address: %s:%u", collab->localAddress().c_str(),
+                        static_cast<unsigned>(collab->port()));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##addr"))
+            {
+                const std::string addr = collab->localAddress() + ":" +
+                                         std::to_string(collab->port());
+                ImGui::SetClipboardText(addr.c_str());
+            }
+
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Join code");
+            ImGui::PushFont(nullptr);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.9f, 1.0f, 1.0f));
+            ImGui::TextUnformatted(collab->joinCode().c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy##code"))
+                ImGui::SetClipboardText(collab->joinCode().c_str());
+
+            ImGui::TextDisabled("Share both with the people you want to invite.");
+            ImGui::TextDisabled("Anyone on another network needs this port forwarded.");
+        }
+        else
+        {
+            ImGui::SeparatorText("Connected");
+            ImGui::Text("Host: %s:%u", collab->localAddress().c_str(),
+                        static_cast<unsigned>(collab->port()));
+
+            if (collab->status() == CollabController::Status::Connecting)
+            {
+                if (collab->snapshotInProgress())
+                {
+                    ImGui::Text("Receiving scene...");
+                    ImGui::ProgressBar(collab->snapshotProgress(), ImVec2(-1, 0));
+                }
+                else
+                {
+                    ImGui::TextUnformatted("Joining...");
+                }
+            }
+        }
+
+        // A matching fingerprint on both screens confirms the two really share a
+        // session key — a cheap out-of-band check against a wrong join code
+        // being typed into a different session.
+        if (const std::string fp = collab->sessionFingerprint(); !fp.empty())
+        {
+            ImGui::Spacing();
+            ImGui::Text("Session fingerprint: %s", fp.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Should read the same on every participant's screen.");
+        }
+
+        // ── Participants ──
+        ImGui::SeparatorText("Participants");
+        const auto people = collab->participants();
+        if (people.empty())
+        {
+            ImGui::TextDisabled("(none yet)");
+        }
+        else
+        {
+            const auto localId = collab->localParticipant();
+            for (const auto& p : people)
+            {
+                ImGui::BulletText("%s%s%s", p.name.c_str(),
+                                  p.isHost ? "  [host]" : "",
+                                  p.id == localId ? "  (you)" : "");
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (ImGui::Button("Leave session", ImVec2(160, 0)))
+            collab->leave();
+    }
+
+    if (collab->status() == CollabController::Status::Failed &&
+        !collab->lastError().empty())
+    {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+        ImGui::TextWrapped("%s", collab->lastError().c_str());
+        ImGui::PopStyleColor();
+        if (ImGui::Button("Dismiss")) collab->leave();
+    }
+
+    ImGui::End();
+#else
+    (void)ctx; (void)open;
+#endif
+}
+
 static void DrawEnvironmentWindow(AppContext& ctx, bool& open)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -2340,6 +2522,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
         if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment)) s_showEnvironment = !s_showEnvironment;
+        if (ImGui::MenuItem("Collaboration", nullptr, s_showCollab)) s_showCollab = !s_showCollab;
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -5171,6 +5354,7 @@ void EditorUI::RenderEditor(AppContext& ctx, float dt)
     DrawPreferencesWindow(ctx, s_showPreferences);
     DrawProfilerWindow(ctx, s_showProfiler);
     DrawEnvironmentWindow(ctx, s_showEnvironment);
+    DrawCollabWindow(ctx, s_showCollab);
     // Level Script + Game Instance now render as editor tabs (see the tab dispatch).
 
     //Content Browser

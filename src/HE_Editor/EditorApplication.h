@@ -6,6 +6,7 @@
 #include "ProjectManager.h"
 #include "EditorUndo.h"
 #include "EditorCamera.h"
+#include "CollabController.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -310,6 +311,10 @@ struct AppContext
 	bool&  pendingFileReady;
 	SDLDialogBridge* dialogBridge = nullptr;
 #endif
+
+	// Live collaboration session (see CollabController). Null until the editor
+	// has constructed it; the panel treats that as "not available".
+	CollabController* collab = nullptr;
 };
 
 class EditorApplication : public HE::Application
@@ -387,6 +392,9 @@ private:
 
 	// Editor scene-view camera
 	EditorCamera m_editorCamera;
+
+	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
+	CollabController m_collab;
 
 	// In-game UI pointer input during PIE. The viewport panel reports the
 	// mouse in render-target pixels each frame (reportPlayUIPointer); the

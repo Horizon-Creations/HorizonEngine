@@ -113,6 +113,7 @@ add_executable(HorizonEditor WIN32
 	AnimatorStateMachineEditorPanel.cpp
 	HcClassList.cpp
 	GraphEditor.cpp
+	CollabController.cpp
 	stb_image_impl.cpp
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcClassList.h" "SkeletalMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h")
 
@@ -139,6 +140,7 @@ endif()
 target_link_libraries(HorizonEditor PRIVATE
 	${HE_EDITOR_LINK_MATSHADER}
 	HorizonCore
+	HorizonNet
 	HorizonScene
 	HorizonRendering
 	HorizonTools
