@@ -45,6 +45,28 @@ void render(AppContext& ctx)
 		return;
 	}
 
+	// ── Collaboration: is someone else editing this? ─────────────────────────
+	// Shown before any field, because the useful moment is *before* the user
+	// starts typing into something their change would fight over.
+	if (ctx.collab && ctx.collab->inSession())
+	{
+		const auto subject = static_cast<std::uint64_t>(
+			entt::to_integral(ctx.selectedEntity));
+		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
+		    lock && lock->owner != ctx.collab->localParticipant())
+		{
+			float rgb[3];
+			CollabController::participantColor(lock->owner, rgb);
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+			ImGui::TextWrapped("%s is editing this entity — your changes would "
+			                   "collide with theirs.",
+			                   lock->ownerName.empty() ? "Someone else"
+			                                           : lock->ownerName.c_str());
+			ImGui::PopStyleColor();
+			ImGui::Separator();
+		}
+	}
+
 	auto&  registry = ctx.world->registry();
 	Entity entity   = ctx.selectedEntity;
 

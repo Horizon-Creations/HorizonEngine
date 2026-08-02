@@ -288,6 +288,27 @@ void EditorApplication::OnInit()
 	// A received collaboration snapshot replaces the whole world. Selection and
 	// undo history still hold entity handles from the world that just went away,
 	// so acting on them afterwards would touch freed storage.
+	// A remote peer moved something. Applying it here (rather than inside
+	// CollabController) keeps the network layer out of the ECS.
+	m_collab.onRemoteTransform([this](std::uint64_t subject, const float pos[3],
+	                                  const float rotEuler[3], const float scale[3]) {
+		if (!m_editorWorld) return;
+		auto& reg = m_editorWorld->registry();
+		const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(subject));
+		if (!reg.valid(e)) return;   // not in our world — ignore rather than guess
+
+		if (auto* tc = reg.try_get<TransformComponent>(e))
+		{
+			tc->position = glm::vec3(pos[0], pos[1], pos[2]);
+			tc->rotation = glm::vec3(rotEuler[0], rotEuler[1], rotEuler[2]);
+			tc->scale    = glm::vec3(scale[0], scale[1], scale[2]);
+			tc->dirty    = true;   // or the renderer keeps the stale matrix
+			// Deliberately NOT pushed through the undo system: this is someone
+			// else's edit, and putting it on our stack would let us "undo" their
+			// work — see the undo section in docs/networking-layer-design.md.
+		}
+	});
+
 	m_collab.onWorldReplaced([this] {
 		m_selectedEntity = entt::null;
 		// Every snapshot in the undo stack belongs to the replaced world, so
@@ -1650,6 +1671,33 @@ void EditorApplication::OnRender(float dt)
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count());
 		m_collab.update(nowMs);
+
+		// Claim the selected entity, so everyone else sees it is being worked on
+		// before they click it themselves.
+		if (m_collab.inSession())
+		{
+			const std::uint64_t subject =
+				m_selectedEntity == entt::null
+					? 0ull
+					: static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity));
+			m_collab.followSelection(subject);
+
+			// Publish its transform while we hold it. Sending unconditionally is
+			// fine — publishTransform drops unchanged values and rate-limits the
+			// rest, so a still object costs nothing.
+			if (subject != 0 && m_editorWorld &&
+			    m_editorWorld->registry().valid(m_selectedEntity))
+			{
+				if (auto* tc = m_editorWorld->registry()
+				                   .try_get<TransformComponent>(m_selectedEntity))
+				{
+					const float p[3] = { tc->position.x, tc->position.y, tc->position.z };
+					const float r[3] = { tc->rotation.x, tc->rotation.y, tc->rotation.z };
+					const float s[3] = { tc->scale.x, tc->scale.y, tc->scale.z };
+					m_collab.publishTransform(subject, p, r, s, nowMs);
+				}
+			}
+		}
 
 		// Feed the local camera + selection so remote peers can draw them.
 		if (m_collab.active())

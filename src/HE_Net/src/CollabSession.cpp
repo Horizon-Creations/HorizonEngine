@@ -28,6 +28,8 @@ constexpr MessageId kMsgLockRelease       = kFirstUserMessage + 11;  // client �
 constexpr MessageId kMsgLockUpdate        = kFirstUserMessage + 12;  // host → clients
 constexpr MessageId kMsgLockDenied        = kFirstUserMessage + 13;  // host → one client
 constexpr MessageId kMsgLockTable         = kFirstUserMessage + 14;  // host → joiner
+constexpr MessageId kMsgTransformUpdate   = kFirstUserMessage + 15;  // client → host
+constexpr MessageId kMsgTransformRelay    = kFirstUserMessage + 16;  // host → clients
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -67,6 +69,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgLockRelease, [this](ConnectionId conn, BitReader& r) {
             handleLockRelease(conn, r);
         });
+        m_net->on(kMsgTransformUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleTransformUpdate(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -77,6 +82,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgLockUpdate, [this](ConnectionId, BitReader& r) { handleLockUpdate(r); });
         m_net->on(kMsgLockDenied, [this](ConnectionId, BitReader& r) { handleLockDenied(r); });
         m_net->on(kMsgLockTable,  [this](ConnectionId, BitReader& r) { handleLockTable(r); });
+        m_net->on(kMsgTransformRelay, [this](ConnectionId, BitReader& r) {
+            handleTransformRelay(r);
+        });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
@@ -542,6 +550,82 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
+}
+
+// ─── Live transform deltas ───────────────────────────────────────────────────
+
+void CollabSession::writeTransformBody(BitWriter& w, const TransformDelta& d) {
+    w.writeUInt64(d.subject);
+    // Full float precision throughout. Unlike a presence gizmo this IS the
+    // authoritative value, a scene can span kilometres, and Euler angles are not
+    // bounded to a range that would quantize cleanly.
+    for (int i = 0; i < 3; ++i) w.writeFloat(d.position[i]);
+    for (int i = 0; i < 3; ++i) w.writeFloat(d.rotation[i]);
+    for (int i = 0; i < 3; ++i) w.writeFloat(d.scale[i]);
+}
+
+bool CollabSession::readTransformBody(BitReader& r, TransformDelta& out) {
+    if (!r.readUInt64(out.subject)) return false;
+    for (int i = 0; i < 3; ++i) { if (!r.readFloat(out.position[i])) return false; }
+    for (int i = 0; i < 3; ++i) { if (!r.readFloat(out.rotation[i])) return false; }
+    for (int i = 0; i < 3; ++i) { if (!r.readFloat(out.scale[i])) return false; }
+    return true;
+}
+
+bool CollabSession::sendTransform(const TransformDelta& delta) {
+    if (!m_net || !m_joined) return false;
+
+    // Holding the lock is what makes this safe: nobody else can be moving the
+    // same entity, so there is no conflict to resolve — which is exactly why
+    // locks come before live deltas rather than after.
+    if (!ownsLock(delta.subject)) return false;
+
+    if (m_role == NetRole::Host) {
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeTransformBody(w, delta);
+        m_net->broadcast(kMsgTransformRelay, w, SendMode::Unreliable);
+        return true;
+    }
+
+    if (m_net->connections().empty()) return false;
+    BitWriter w;
+    writeTransformBody(w, delta);   // no id: the host stamps it
+    m_net->send(m_net->connections().front(), kMsgTransformUpdate, w,
+                SendMode::Unreliable);
+    return true;
+}
+
+void CollabSession::handleTransformUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    TransformDelta d;
+    if (!readTransformBody(r, d)) return;
+
+    // Re-check authority here rather than trusting the sender: a client that
+    // lost its lock (or never had it) must not be able to move things anyway.
+    const LockInfo* lock = lockFor(d.subject);
+    if (!lock || lock->owner != sender) return;
+
+    if (m_onTransform) m_onTransform(sender, d);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeTransformBody(w, d);
+    for (const ConnectionId other : m_net->connections()) {
+        if (other != conn) m_net->send(other, kMsgTransformRelay, w, SendMode::Unreliable);
+    }
+}
+
+void CollabSession::handleTransformRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+    if (sender == m_localId) return;   // our own change echoed back
+
+    TransformDelta d;
+    if (!readTransformBody(r, d)) return;
+    if (m_onTransform) m_onTransform(sender, d);
 }
 
 // ─── Locks ───────────────────────────────────────────────────────────────────
