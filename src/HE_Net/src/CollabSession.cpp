@@ -30,6 +30,9 @@ constexpr MessageId kMsgLockDenied        = kFirstUserMessage + 13;  // host →
 constexpr MessageId kMsgLockTable         = kFirstUserMessage + 14;  // host → joiner
 constexpr MessageId kMsgTransformUpdate   = kFirstUserMessage + 15;  // client → host
 constexpr MessageId kMsgTransformRelay    = kFirstUserMessage + 16;  // host → clients
+constexpr MessageId kMsgAssetBegin        = kFirstUserMessage + 17;
+constexpr MessageId kMsgAssetChunk        = kFirstUserMessage + 18;
+constexpr MessageId kMsgAssetEnd          = kFirstUserMessage + 19;
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -72,6 +75,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgTransformUpdate, [this](ConnectionId conn, BitReader& r) {
             handleTransformUpdate(conn, r);
         });
+        m_net->on(kMsgAssetBegin, [this](ConnectionId conn, BitReader& r) {
+            handleAssetUpdate(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -85,6 +91,7 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgTransformRelay, [this](ConnectionId, BitReader& r) {
             handleTransformRelay(r);
         });
+        m_net->on(kMsgAssetBegin, [this](ConnectionId, BitReader& r) { handleAssetRelay(r); });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
@@ -107,6 +114,9 @@ void CollabSession::installHandlers() {
             if (m_participants.size() != before && m_onLeft) m_onLeft(id);
         });
     }
+
+    // Chunk/End are shaped the same for both roles, so they register once.
+    installAssetChunkHandlers();
 }
 
 void CollabSession::update() {
@@ -550,6 +560,194 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
+}
+
+// ─── Authored-asset sync ─────────────────────────────────────────────────────
+
+bool CollabSession::sendAsset(std::uint64_t subject, const std::string& path,
+                              const std::vector<std::uint8_t>& bytes) {
+    if (!m_net || !m_joined) return false;
+    // Same authority rule as transforms: you may only publish what you hold.
+    if (!ownsLock(subject)) return false;
+    if (bytes.size() > m_cfg.maxSnapshotBytes) return false;
+
+    AssetUpdate a;
+    a.subject = subject;
+    a.path    = path;
+    a.bytes   = bytes;
+
+    if (m_role == NetRole::Host) {
+        for (const ConnectionId c : m_net->connections()) sendAssetChunks(c, m_localId, a);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+    // Client → host: no participant id, the host stamps it.
+    sendAssetChunks(m_net->connections().front(), kInvalidParticipant, a);
+    return true;
+}
+
+void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
+                                    const AssetUpdate& a) {
+    const bool stamped = (from != kInvalidParticipant);
+    const auto total    = static_cast<std::uint32_t>(a.bytes.size());
+    const std::uint32_t chunkSize = std::max<std::uint32_t>(1, m_cfg.chunkBytes);
+    const std::uint32_t chunks    = (total + chunkSize - 1) / chunkSize;
+
+    BitWriter begin;
+    if (stamped) begin.writeUInt32(from);
+    begin.writeUInt64(a.subject);
+    begin.writeString(a.path);
+    begin.writeUInt32(total);
+    begin.writeUInt32(chunks);
+    m_net->send(conn, kMsgAssetBegin, begin);
+
+    for (std::uint32_t i = 0; i < chunks; ++i) {
+        const std::uint32_t offset = i * chunkSize;
+        const std::uint32_t len    = std::min(chunkSize, total - offset);
+        BitWriter chunk;
+        if (stamped) chunk.writeUInt32(from);
+        chunk.writeUInt32(len);
+        chunk.writeBytes(a.bytes.data() + offset, len);
+        m_net->send(conn, kMsgAssetChunk, chunk);
+    }
+
+    BitWriter end;
+    if (stamped) end.writeUInt32(from);
+    m_net->send(conn, kMsgAssetEnd, end);
+}
+
+void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
+    // Host side. Identity comes from the connection, never the payload.
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    AssetUpdate header;
+    std::uint32_t total = 0, chunks = 0;
+    if (!readAssetHeader(r, header, total, chunks)) return;
+
+    // Re-check authority on arrival rather than trusting the sender.
+    const LockInfo* lock = lockFor(header.subject);
+    if (!lock || lock->owner != sender) return;
+    if (total > m_cfg.maxSnapshotBytes) return;
+
+    AssetAssembly asm_;
+    asm_.from     = conn;
+    asm_.sender   = sender;
+    asm_.subject  = header.subject;
+    asm_.path     = header.path;
+    asm_.expected = total;
+    asm_.bytes.reserve(total);
+
+    // Replace any half-finished transfer from the same peer: a second Begin
+    // means the first one will never complete.
+    m_assetAssembly.erase(
+        std::remove_if(m_assetAssembly.begin(), m_assetAssembly.end(),
+                       [conn](const AssetAssembly& e) { return e.from == conn; }),
+        m_assetAssembly.end());
+    m_assetAssembly.push_back(std::move(asm_));
+}
+
+bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
+                                    std::uint32_t& outTotal,
+                                    std::uint32_t& outChunks) const {
+    return r.readUInt64(out.subject) && r.readString(out.path) &&
+           r.readUInt32(outTotal) && r.readUInt32(outChunks);
+}
+
+void CollabSession::handleAssetRelay(BitReader& r) {
+    // Client side: the host has already vouched for the sender.
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+    if (sender == m_localId) return;   // our own save echoed back
+
+    AssetUpdate header;
+    std::uint32_t total = 0, chunks = 0;
+    if (!readAssetHeader(r, header, total, chunks)) return;
+    if (total > m_cfg.maxSnapshotBytes) return;
+
+    AssetAssembly asm_;
+    asm_.from     = kInvalidConnection;
+    asm_.sender   = sender;
+    asm_.subject  = header.subject;
+    asm_.path     = header.path;
+    asm_.expected = total;
+    asm_.bytes.reserve(total);
+
+    m_assetAssembly.erase(
+        std::remove_if(m_assetAssembly.begin(), m_assetAssembly.end(),
+                       [sender](const AssetAssembly& e) { return e.sender == sender; }),
+        m_assetAssembly.end());
+    m_assetAssembly.push_back(std::move(asm_));
+}
+
+namespace {
+// Chunk/End bodies differ only in whether a participant id was stamped on the
+// front, so both roles share the tail handling.
+struct AssetFrameKey { ConnectionId conn; ParticipantId sender; };
+} // namespace
+
+void CollabSession::installAssetChunkHandlers() {
+    const bool host = (m_role == NetRole::Host);
+
+    m_net->on(kMsgAssetChunk, [this, host](ConnectionId conn, BitReader& r) {
+        ParticipantId sender = kInvalidParticipant;
+        if (!host) { std::uint32_t s = 0; if (!r.readUInt32(s)) return; sender = s; }
+        else       { sender = participantForConnection(conn); }
+        if (!host && sender == m_localId) return;   // our own echo
+
+        std::uint32_t len = 0;
+        if (!r.readUInt32(len) || len == 0) return;
+
+        for (auto& a : m_assetAssembly) {
+            const bool mine = host ? (a.from == conn) : (a.sender == sender);
+            if (!mine) continue;
+
+            // Never grow past what the sender announced.
+            if (a.bytes.size() + len > a.expected) { a.expected = 0; return; }
+            const std::size_t offset = a.bytes.size();
+            a.bytes.resize(offset + len);
+            if (!r.readBytes(a.bytes.data() + offset, len)) {
+                a.bytes.resize(offset);
+                a.expected = 0;   // mark broken; End will discard it
+            }
+            return;
+        }
+    });
+
+    m_net->on(kMsgAssetEnd, [this, host](ConnectionId conn, BitReader& r) {
+        ParticipantId sender = kInvalidParticipant;
+        if (!host) { std::uint32_t s = 0; if (!r.readUInt32(s)) return; sender = s; }
+        else       { sender = participantForConnection(conn); }
+        if (!host && sender == m_localId) return;
+
+        for (std::size_t i = 0; i < m_assetAssembly.size(); ++i) {
+            AssetAssembly& a = m_assetAssembly[i];
+            const bool mine = host ? (a.from == conn) : (a.sender == sender);
+            if (!mine) continue;
+
+            // An incomplete transfer must not be applied — a truncated asset
+            // file is worse than no update at all.
+            const bool complete = a.expected > 0 && a.bytes.size() == a.expected;
+            if (complete) {
+                AssetUpdate up;
+                up.subject = a.subject;
+                up.path    = a.path;
+                up.bytes   = a.bytes;
+
+                if (m_onAsset) m_onAsset(a.sender, up);
+
+                // Host also fans it out to everyone else.
+                if (host) {
+                    for (const ConnectionId other : m_net->connections()) {
+                        if (other != conn) sendAssetChunks(other, a.sender, up);
+                    }
+                }
+            }
+            m_assetAssembly.erase(m_assetAssembly.begin() +
+                                  static_cast<std::ptrdiff_t>(i));
+            return;
+        }
+    });
 }
 
 // ─── Live transform deltas ───────────────────────────────────────────────────

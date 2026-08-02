@@ -694,8 +694,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     }
     if (ImGui::BeginMenu("Edit"))
     {
-        if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
-        if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+        // In a session, undo/redo operate on YOUR OWN changes as inverse
+        // operations that get republished — the snapshot stack would restore a
+        // whole world and revert everyone else's work with it (CollabUndo.h).
+        const bool collabUndoActive = ctx.collab && ctx.collab->inSession() && ctx.collabUndo;
+        if (collabUndoActive)
+        {
+            const std::string uLabel = ctx.collabUndo->canUndo()
+                ? ctx.collabUndo->undoLabel() : std::string("Undo");
+            const std::string rLabel = ctx.collabUndo->canRedo()
+                ? ctx.collabUndo->redoLabel() : std::string("Redo");
+
+            if (ImGui::MenuItem(uLabel.c_str(), "Ctrl+Z", false,
+                                ctx.collabUndo->canUndo()))
+                ctx.collabUndo->undo();
+            if (ImGui::MenuItem(rLabel.c_str(), "Ctrl+Y", false,
+                                ctx.collabUndo->canRedo()))
+                ctx.collabUndo->redo();
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("While collaborating, undo applies only to your own changes.");
+        }
+        else
+        {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Cut",   "Ctrl+X")) {}
         if (ImGui::MenuItem("Copy",  "Ctrl+C")) {}

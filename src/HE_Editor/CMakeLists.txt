@@ -133,6 +133,7 @@ add_executable(HorizonEditor WIN32
 	GraphEditor.cpp
 	CollabController.cpp
 	CollabPanel.cpp
+	CollabUndo.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp
 	EditorPanelState.cpp

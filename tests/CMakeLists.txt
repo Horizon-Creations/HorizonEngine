@@ -67,6 +67,7 @@ add_executable(he_tests
     test_net_directory.cpp
     test_net_collab.cpp
     test_collab_controller.cpp
+    test_collab_undo.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
@@ -89,6 +90,7 @@ add_executable(he_tests
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
     # The tutorial curriculum + its completion predicates are deliberately
     # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
