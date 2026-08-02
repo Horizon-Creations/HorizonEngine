@@ -589,6 +589,190 @@ TEST_CASE("CollabSession: an oversized selection is clamped, not trusted")
     CHECK(local->selection.size() == 4);
 }
 
+// ─── Locks ───────────────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a client's lock request is granted by the host")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kSubject = 4242;
+
+    bool clientGotIt = false;
+    p->client->onLockChanged([&](const LockInfo& l, bool acquired) {
+        if (l.subject == kSubject && acquired) clientGotIt = true;
+    });
+
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+
+    CHECK(clientGotIt);
+    CHECK(p->client->ownsLock(kSubject));
+
+    // The host's table is authoritative, so it must agree.
+    const LockInfo* onHost = p->host->lockFor(kSubject);
+    REQUIRE(onHost != nullptr);
+    CHECK(onHost->owner == p->client->localId());
+    CHECK(onHost->ownerName == "Bob");
+}
+
+TEST_CASE("CollabSession: a second claim on the same subject is refused")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kSubject = 99;
+
+    // The host takes it first.
+    REQUIRE(p->host->requestLock(kSubject));
+    p->pump(4);
+    CHECK(p->host->ownsLock(kSubject));
+
+    LockDenyReason denied = LockDenyReason::None;
+    p->client->onLockDenied([&](std::uint64_t s, LockDenyReason why) {
+        if (s == kSubject) denied = why;
+    });
+
+    p->client->requestLock(kSubject);
+    p->pump(4);
+
+    // This is the whole point of the table: the second person is told no rather
+    // than both of them believing they may edit.
+    CHECK(denied == LockDenyReason::HeldByOther);
+    CHECK_FALSE(p->client->ownsLock(kSubject));
+    CHECK(p->host->lockFor(kSubject)->owner == p->host->localId());
+}
+
+TEST_CASE("CollabSession: everyone sees who holds a lock")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 7;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+
+    // The host must be able to name the holder in its UI even though it is not
+    // the owner.
+    const LockInfo* seenByHost = p->host->lockFor(kSubject);
+    REQUIRE(seenByHost != nullptr);
+    CHECK(seenByHost->ownerName == "Bob");
+    CHECK_FALSE(p->host->ownsLock(kSubject));
+}
+
+TEST_CASE("CollabSession: releasing frees the subject for someone else")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 55;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+    REQUIRE(p->client->ownsLock(kSubject));
+
+    p->client->releaseLock(kSubject);
+    p->pump(4);
+
+    CHECK(p->client->lockFor(kSubject) == nullptr);
+    CHECK(p->host->lockFor(kSubject) == nullptr);
+
+    // And now the other side can take it.
+    REQUIRE(p->host->requestLock(kSubject));
+    p->pump(4);
+    CHECK(p->host->ownsLock(kSubject));
+}
+
+TEST_CASE("CollabSession: a participant cannot release a lock it does not hold")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 1234;
+    REQUIRE(p->host->requestLock(kSubject));
+    p->pump(4);
+
+    // Otherwise anyone could free someone else's lock and edit underneath them.
+    p->client->releaseLock(kSubject);
+    p->pump(4);
+
+    const LockInfo* still = p->host->lockFor(kSubject);
+    REQUIRE(still != nullptr);
+    CHECK(still->owner == p->host->localId());
+}
+
+TEST_CASE("CollabSession: locks are freed when their holder leaves")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 31337;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+    REQUIRE(p->host->lockFor(kSubject) != nullptr);
+
+    p->clientT.reset();   // the holder disappears
+
+    for (int i = 0; i < 8; ++i) {
+        p->hostT->update();
+        p->hostNet->pump();
+        p->host->update(p->nowMs);
+        p->nowMs += 100;
+    }
+
+    // Otherwise their locks would block the session for everyone, forever.
+    CHECK(p->host->lockFor(kSubject) == nullptr);
+}
+
+TEST_CASE("CollabSession: a joiner receives the locks that already exist")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+
+    // The host takes a lock BEFORE anyone joins.
+    p->pump(2);
+    constexpr std::uint64_t kSubject = 808;
+    REQUIRE(p->host->requestLock(kSubject));
+
+    p->pump(8);
+    REQUIRE(p->client->isJoined());
+
+    // A late arrival that believed everything was free would immediately collide
+    // with whoever is already editing.
+    const LockInfo* seen = p->client->lockFor(kSubject);
+    REQUIRE(seen != nullptr);
+    CHECK(seen->owner == p->host->localId());
+    CHECK_FALSE(p->client->ownsLock(kSubject));
+}
+
+TEST_CASE("CollabSession: re-requesting a lock you already hold is not a denial")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 12;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+
+    LockDenyReason denied = LockDenyReason::None;
+    p->client->onLockDenied([&](std::uint64_t, LockDenyReason why) { denied = why; });
+
+    // Re-selecting the same object must not report a conflict with yourself.
+    p->client->requestLock(kSubject);
+    p->pump(4);
+
+    CHECK(denied == LockDenyReason::None);
+    CHECK(p->client->ownsLock(kSubject));
+}
+
 // ─── State sequence ──────────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: the joiner adopts the host's state sequence")

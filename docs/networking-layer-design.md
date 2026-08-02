@@ -146,7 +146,7 @@ any zero-pad in the payload's final byte.
 - **N2.5b** ✅ — session-directory *client* over HTTPS, with TLS delegated to the platform (`HttpsClient_Apple.mm` / `_Win.cpp` / `_Curl.cpp`) and `SessionDirectory` on top. Still pending: NAT-PMP/PCP as a second mapping path (needs a default-gateway lookup, unlike SSDP which self-discovers).
 - **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
-- **N5** — **authoritative lock table** on the host (`RealtimeLockProvider`), which removes the polling race window LFS locks have.
+- **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
 - **N6** — **live deltas**: dirty-entity replication via `serializeSubtree`, a quantized transform fast path, per-tick coalescing, and UUID-only asset references with a "missing asset" hint.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
 
@@ -309,6 +309,41 @@ what they refer to, which is what keeps this layer independent of the scene.
 
 Presence is dropped when a participant leaves, or their camera gizmo would linger
 in everyone's viewport forever.
+
+## Locks (N5)
+
+The host holds the only copy of the lock table and arbitrates every request.
+That is the whole difference from Git-LFS locks: there, each client *polls* a
+server, so two people can believe they hold the same lock for a few seconds.
+Here a request is answered by the one authority, in order, with no window at all.
+
+- The subject is an **opaque 64-bit id**, like presence selection — entity,
+  hashed asset UUID, whatever the editor decides. HorizonNet never interprets it.
+- The host answers its own requests locally, with no round trip.
+- A grant is broadcast to *everyone including the requester*: the broadcast **is**
+  the confirmation, so there is no second "you got it" message that could drift
+  out of sync with it.
+- **Only the holder may release.** Otherwise anyone could free someone else's
+  lock and start editing underneath them.
+- Re-requesting a lock you already hold is a no-op, not a denial — otherwise
+  re-selecting the same object would report a conflict with yourself.
+- **A joiner receives the current table**, or a late arrival would believe
+  everything is free and collide immediately with whoever is already editing.
+- **A departing participant's locks are freed** — before they leave the roster,
+  so the broadcast still reaches everyone — or their locks would block the
+  session forever.
+
+## Presence visualization (E2)
+
+Remote cameras are drawn as small frustums and remote selections as coloured
+boxes, both through `DebugDrawBuffer` — overlay lines only, never scene state,
+which is what keeps presence the low-risk half of collaboration.
+
+Colours come from `CollabController::participantColor`, stepping hue by the
+golden ratio so consecutive participant ids land far apart on the wheel: two
+people who joined one after another never get near-identical gizmos. It is
+derived from the id, so every peer picks the same colour for the same person
+without having to agree on one.
 
 ## Do private hosts need a TLS certificate? No — and here is why
 

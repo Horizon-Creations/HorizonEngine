@@ -1485,6 +1485,72 @@ void EditorApplication::OnRender(float dt)
 					}
 			}
 
+			// ── Collaboration presence ───────────────────────────────────────
+			// Where everyone else is looking, and what they have selected. Drawn
+			// as overlay lines only — presence never touches scene state, which
+			// is what makes it the low-risk half of collaboration.
+			if (m_collab.inSession())
+			{
+				const auto localId = m_collab.localParticipant();
+				for (const auto& p : m_collab.participants())
+				{
+					if (p.id == localId) continue;   // no gizmo for our own camera
+
+					const HE::Net::PresenceState* pres = m_collab.presenceOf(p.id);
+					if (!pres || !pres->valid) continue;
+
+					float rgb[3];
+					CollabController::participantColor(p.id, rgb);
+					const glm::vec3 color(rgb[0], rgb[1], rgb[2]);
+
+					const glm::vec3 eye(pres->cameraPos[0], pres->cameraPos[1],
+					                    pres->cameraPos[2]);
+					const glm::quat rot(pres->cameraRot[3], pres->cameraRot[0],
+					                    pres->cameraRot[1], pres->cameraRot[2]);
+
+					// A small frustum: four corner rays out to a fixed depth,
+					// closed by the far rectangle. Fixed size on purpose — this
+					// marks a viewpoint, it does not reproduce their FOV.
+					constexpr float kDepth = 1.6f;
+					constexpr float kHalfW = 0.55f;
+					constexpr float kHalfH = 0.32f;
+
+					const glm::vec3 fwd = rot * glm::vec3(0.0f, 0.0f, -1.0f);
+					const glm::vec3 rgt = rot * glm::vec3(1.0f, 0.0f,  0.0f);
+					const glm::vec3 up  = rot * glm::vec3(0.0f, 1.0f,  0.0f);
+					const glm::vec3 c   = eye + fwd * kDepth;
+
+					const glm::vec3 corners[4] = {
+						c + rgt * kHalfW + up * kHalfH,
+						c - rgt * kHalfW + up * kHalfH,
+						c - rgt * kHalfW - up * kHalfH,
+						c + rgt * kHalfW - up * kHalfH,
+					};
+					for (int i = 0; i < 4; ++i)
+					{
+						dbg.line(eye, corners[i], color);
+						dbg.line(corners[i], corners[(i + 1) % 4], color);
+					}
+					// Short stub marking "up", so the gizmo's roll is readable.
+					dbg.line(c, c + up * (kHalfH * 1.6f), color);
+
+					// Their selection, in the same colour — this is what makes
+					// "don't both grab that object" visible before it happens.
+					auto& reg = m_editorWorld->registry();
+					for (const std::uint64_t raw : pres->selection)
+					{
+						const auto e = static_cast<entt::entity>(
+							static_cast<entt::id_type>(raw));
+						if (!reg.valid(e)) continue;   // not present in our world
+						if (auto* tc = reg.try_get<TransformComponent>(e))
+						{
+							dbg.aabb(tc->position - glm::vec3(0.6f),
+							         tc->position + glm::vec3(0.6f), color);
+						}
+					}
+				}
+			}
+
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
 			// and stay frozen while paused/editing).
