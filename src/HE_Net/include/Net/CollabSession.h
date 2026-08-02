@@ -199,6 +199,30 @@ public:
         m_onTransform = std::move(fn);
     }
 
+    // ── Structural changes ──
+    // Creating, destroying and reparenting entities. The subject is a *network
+    // id*, not a raw ECS handle: peers assign handles independently, so a raw
+    // handle would name different entities on different machines. Entities that
+    // came from the shared snapshot use their handle as their id (identical
+    // everywhere, since everyone loaded the same bytes); newly created ones use
+    // an id scoped to the participant that made them, so two peers creating at
+    // the same moment cannot collide.
+    struct StructuralChange {
+        enum class Kind : std::uint8_t { Created, Destroyed, Reparented };
+
+        Kind          kind      = Kind::Created;
+        std::uint64_t netId     = 0;
+        std::uint64_t parentNet = 0;   // Created / Reparented
+        // Created: the serialized subtree, as SceneSerializer produces it.
+        std::vector<std::uint8_t> blob;
+    };
+
+    bool sendStructural(const StructuralChange& change);
+
+    void onStructural(std::function<void(ParticipantId, const StructuralChange&)> fn) {
+        m_onStructural = std::move(fn);
+    }
+
     // ── Authored-asset sync ──
     // Every authored asset — HorizonCode graphs, materials, UI widgets, particle
     // and animator graphs, scenes — is an HAsset file, so one blob transfer
@@ -307,6 +331,13 @@ private:
     void handleTransformUpdate(ConnectionId conn, BitReader& r);   // host
     void handleTransformRelay(BitReader& r);                       // client
 
+    // Structural
+    void handleStructuralUpdate(ConnectionId conn, BitReader& r);  // host
+    void handleStructuralRelay(BitReader& r);                      // client
+    static void writeStructuralBody(BitWriter& w, const StructuralChange& c);
+    static bool readStructuralBody(BitReader& r, StructuralChange& out,
+                                   std::uint32_t maxBlob);
+
     // Assets
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
     void handleAssetRelay(BitReader& r);                           // client
@@ -364,6 +395,7 @@ private:
     };
     std::vector<AssetAssembly> m_assetAssembly;
 
+    std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;
     std::function<void(const LockInfo&, bool)>         m_onLockChanged;

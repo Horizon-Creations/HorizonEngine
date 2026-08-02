@@ -7,6 +7,7 @@
 #include <Net/Socket.h>
 #include <Net/TcpTransport.h>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -333,6 +334,40 @@ void CollabController::wireCallbacks()
 		m_snapshotTotal = total;
 	});
 
+	m_collab->onStructural([this](HE::Net::ParticipantId,
+	                              const HE::Net::CollabSession::StructuralChange& c) {
+		using Kind = HE::Net::CollabSession::StructuralChange::Kind;
+		switch (c.kind)
+		{
+		case Kind::Created:
+		{
+			if (!m_onRemoteCreate) return;
+			// Already known? A duplicate Create would spawn a second copy.
+			if (entityForNetId(c.netId) != 0) return;
+			const std::uint32_t parent = c.parentNet ? entityForNetId(c.parentNet) : 0;
+			const std::uint32_t created = m_onRemoteCreate(parent, c.blob);
+			// instantiatePrefab mints a FRESH local handle — recording it here is
+			// exactly what makes handle-stable instantiation unnecessary.
+			if (created != 0) m_netIds.emplace_back(c.netId, created);
+			break;
+		}
+		case Kind::Destroyed:
+		{
+			const std::uint32_t local = entityForNetId(c.netId);
+			if (local != 0 && m_onRemoteDestroy) m_onRemoteDestroy(local);
+			forgetNetId(c.netId);
+			break;
+		}
+		case Kind::Reparented:
+		{
+			const std::uint32_t local  = entityForNetId(c.netId);
+			const std::uint32_t parent = c.parentNet ? entityForNetId(c.parentNet) : 0;
+			if (local != 0 && m_onRemoteReparent) m_onRemoteReparent(local, parent);
+			break;
+		}
+		}
+	});
+
 	m_collab->onAssetUpdated([this](HE::Net::ParticipantId,
 	                                const HE::Net::CollabSession::AssetUpdate& a) {
 		if (!m_onRemoteAsset) return;
@@ -406,6 +441,8 @@ void CollabController::teardown()
 	m_snapshotTotal = 0;
 	m_heldSubject   = 0;
 	m_lockNotice.clear();
+	m_netIds.clear();
+	m_netIdCounter  = 0;
 
 	// Drop any directory work still in flight. Destroying a std::async future
 	// blocks until its thread finishes, which is why the calls carry timeouts.
@@ -592,6 +629,102 @@ void CollabController::publishTransform(std::uint64_t subject,
 		m_hasLastTransform    = true;
 		m_lastTransformSendMs = nowMs;
 	}
+}
+
+// ─── Structural replication ──────────────────────────────────────────────────
+
+std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
+{
+	for (const auto& [net, handle] : m_netIds)
+	{
+		if (handle == entityHandle) return net;
+	}
+
+	// Unknown: this entity was created locally after the snapshot. Mint an id
+	// scoped to us. The participant id occupies the high word, so it can never
+	// collide with a snapshot handle (high word zero) nor with another peer's.
+	const std::uint64_t participant = m_collab ? m_collab->localId() : 1u;
+	const std::uint64_t net =
+		(participant << 32) | static_cast<std::uint64_t>(++m_netIdCounter);
+	m_netIds.emplace_back(net, entityHandle);
+	return net;
+}
+
+std::uint32_t CollabController::entityForNetId(std::uint64_t netId) const
+{
+	for (const auto& [net, handle] : m_netIds)
+	{
+		if (net == netId) return handle;
+	}
+	return 0;
+}
+
+void CollabController::forgetNetId(std::uint64_t netId)
+{
+	m_netIds.erase(std::remove_if(m_netIds.begin(), m_netIds.end(),
+	                              [netId](const auto& e) { return e.first == netId; }),
+	               m_netIds.end());
+}
+
+void CollabController::seedNetIds(const std::vector<std::uint32_t>& entityHandles)
+{
+	// After a snapshot both peers hold the same entities with the same handles,
+	// because they deserialized the same bytes into a cleared world — so the
+	// handle IS the network id here, with no negotiation needed.
+	m_netIds.clear();
+	m_netIds.reserve(entityHandles.size());
+	for (const std::uint32_t h : entityHandles)
+	{
+		m_netIds.emplace_back(static_cast<std::uint64_t>(h), h);
+	}
+	m_netIdCounter = 0;
+}
+
+bool CollabController::publishCreate(std::uint32_t entityHandle,
+                                     std::uint32_t parentHandle,
+                                     const std::vector<std::uint8_t>& blob)
+{
+	if (!m_collab || !inSession() || blob.empty()) return false;
+
+	HE::Net::CollabSession::StructuralChange c;
+	c.kind      = HE::Net::CollabSession::StructuralChange::Kind::Created;
+	c.netId     = netIdFor(entityHandle);
+	c.parentNet = parentHandle ? netIdFor(parentHandle) : 0;
+	c.blob      = blob;
+	return m_collab->sendStructural(c);
+}
+
+bool CollabController::publishDestroy(std::uint32_t entityHandle)
+{
+	if (!m_collab || !inSession()) return false;
+
+	// Look the id up WITHOUT minting one: an entity nobody ever knew about does
+	// not need a deletion broadcast.
+	std::uint64_t netId = 0;
+	for (const auto& [net, handle] : m_netIds)
+	{
+		if (handle == entityHandle) { netId = net; break; }
+	}
+	if (netId == 0) return false;
+
+	HE::Net::CollabSession::StructuralChange c;
+	c.kind  = HE::Net::CollabSession::StructuralChange::Kind::Destroyed;
+	c.netId = netId;
+	const bool ok = m_collab->sendStructural(c);
+	if (ok) forgetNetId(netId);
+	return ok;
+}
+
+bool CollabController::publishReparent(std::uint32_t entityHandle,
+                                       std::uint32_t newParentHandle)
+{
+	if (!m_collab || !inSession()) return false;
+
+	HE::Net::CollabSession::StructuralChange c;
+	c.kind      = HE::Net::CollabSession::StructuralChange::Kind::Reparented;
+	c.netId     = netIdFor(entityHandle);
+	c.parentNet = newParentHandle ? netIdFor(newParentHandle) : 0;
+	return m_collab->sendStructural(c);
 }
 
 // ─── Authored-asset sync ─────────────────────────────────────────────────────

@@ -997,6 +997,138 @@ TEST_CASE("CollabSession: the host's asset save reaches clients")
     CHECK(got.bytes == payload);
 }
 
+// ─── Structural changes ──────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a created entity reaches the other side with its subtree")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    CollabSession::StructuralChange got;
+    bool arrived = false;
+    p->host->onStructural([&](ParticipantId, const CollabSession::StructuralChange& c) {
+        got = c; arrived = true;
+    });
+
+    CollabSession::StructuralChange c;
+    c.kind      = CollabSession::StructuralChange::Kind::Created;
+    c.netId     = (2ull << 32) | 1ull;   // participant-scoped id
+    c.parentNet = 5;
+    c.blob      = makeBlob(512);
+    REQUIRE(p->client->sendStructural(c));
+
+    p->pump(4);
+    REQUIRE(arrived);
+    CHECK(got.kind == CollabSession::StructuralChange::Kind::Created);
+    CHECK(got.netId == c.netId);
+    CHECK(got.parentNet == 5);
+    CHECK(got.blob == c.blob);   // the subtree must survive byte-for-byte
+}
+
+TEST_CASE("CollabSession: creating needs no lock, but destroying does")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kEntity = 42;
+
+    // A brand new entity cannot be held by anyone, so creating is always allowed.
+    CollabSession::StructuralChange create;
+    create.kind  = CollabSession::StructuralChange::Kind::Created;
+    create.netId = (2ull << 32) | 7ull;
+    create.blob  = makeBlob(64);
+    CHECK(p->client->sendStructural(create));
+
+    // Destroying something the host is editing would yank it out from under them.
+    REQUIRE(p->host->requestLock(kEntity));
+    p->pump(4);
+
+    bool hostSaw = false;
+    p->host->onStructural([&](ParticipantId, const CollabSession::StructuralChange&) {
+        hostSaw = true;
+    });
+
+    CollabSession::StructuralChange destroy;
+    destroy.kind  = CollabSession::StructuralChange::Kind::Destroyed;
+    destroy.netId = kEntity;
+    CHECK_FALSE(p->client->sendStructural(destroy));
+
+    p->pump(4);
+    CHECK_FALSE(hostSaw);
+}
+
+TEST_CASE("CollabSession: destroying an entity frees its lock")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kEntity = 314;
+    REQUIRE(p->client->requestLock(kEntity));
+    p->pump(4);
+    REQUIRE(p->host->lockFor(kEntity) != nullptr);
+
+    CollabSession::StructuralChange destroy;
+    destroy.kind  = CollabSession::StructuralChange::Kind::Destroyed;
+    destroy.netId = kEntity;
+    REQUIRE(p->client->sendStructural(destroy));
+    p->pump(4);
+
+    // Otherwise the table would keep blocking a subject that no longer exists.
+    CHECK(p->host->lockFor(kEntity) == nullptr);
+}
+
+TEST_CASE("CollabSession: reparenting travels with its new parent")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    CollabSession::StructuralChange got;
+    bool arrived = false;
+    p->client->onStructural([&](ParticipantId, const CollabSession::StructuralChange& c) {
+        got = c; arrived = true;
+    });
+
+    CollabSession::StructuralChange c;
+    c.kind      = CollabSession::StructuralChange::Kind::Reparented;
+    c.netId     = 11;
+    c.parentNet = 22;
+    REQUIRE(p->host->sendStructural(c));
+
+    p->pump(4);
+    REQUIRE(arrived);
+    CHECK(got.kind == CollabSession::StructuralChange::Kind::Reparented);
+    CHECK(got.netId == 11);
+    CHECK(got.parentNet == 22);
+}
+
+TEST_CASE("CollabSession: a malformed structural frame is rejected")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    bool hostSaw = false;
+    p->host->onStructural([&](ParticipantId, const CollabSession::StructuralChange&) {
+        hostSaw = true;
+    });
+
+    // An out-of-range kind, and a blob length far past what we would accept.
+    BitWriter w;
+    w.writeByte(99);
+    w.writeUInt64(1);
+    w.writeUInt64(0);
+    w.writeUInt32(0xFFFFFFFFu);
+    p->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 20, w);
+
+    p->pump(4);
+    CHECK_FALSE(hostSaw);
+}
+
 // ─── State sequence ──────────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: the joiner adopts the host's state sequence")

@@ -142,6 +142,46 @@ public:
 		m_onRemoteTransform = std::move(fn);
 	}
 
+	// ── Structural replication ──
+	// Peers assign ECS handles independently, so a raw handle names different
+	// entities on different machines. Everything network-facing therefore uses a
+	// *network id*:
+	//   • entities from the shared snapshot use their handle (identical on every
+	//     peer, since everyone loaded the same bytes),
+	//   • newly created ones use (participantId << 32 | counter), which cannot
+	//     collide with a snapshot handle (those have a zero high word) nor with
+	//     another participant's ids.
+	std::uint64_t netIdFor(std::uint32_t entityHandle);
+	std::uint32_t entityForNetId(std::uint64_t netId) const;   // 0 = unknown
+	void          forgetNetId(std::uint64_t netId);
+
+	// Rebuild the mapping from the entities that exist right now. Called after a
+	// snapshot replaced the world, where handle == network id by construction.
+	void seedNetIds(const std::vector<std::uint32_t>& entityHandles);
+
+	// Publish a structural change. `blob` is the serialized subtree for a create.
+	bool publishCreate(std::uint32_t entityHandle, std::uint32_t parentHandle,
+	                   const std::vector<std::uint8_t>& blob);
+	bool publishDestroy(std::uint32_t entityHandle);
+	bool publishReparent(std::uint32_t entityHandle, std::uint32_t newParentHandle);
+
+	// Remote structural changes, translated back into local handles. The editor
+	// performs the actual ECS work — CollabController never touches the registry.
+	//   onRemoteCreate(netId, parentHandle, blob) → returns the new local handle
+	void onRemoteCreate(
+		std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)> fn)
+	{
+		m_onRemoteCreate = std::move(fn);
+	}
+	void onRemoteDestroy(std::function<void(std::uint32_t)> fn)
+	{
+		m_onRemoteDestroy = std::move(fn);
+	}
+	void onRemoteReparent(std::function<void(std::uint32_t, std::uint32_t)> fn)
+	{
+		m_onRemoteReparent = std::move(fn);
+	}
+
 	// ── Authored-asset sync ──
 	// A stable subject id for an asset path, so an asset and an entity are
 	// arbitrated by the same lock table.
@@ -258,6 +298,17 @@ private:
 		m_onRemoteTransform;
 	std::function<void(const std::string&, const std::vector<std::uint8_t>&)>
 		m_onRemoteAsset;
+
+	// Network id ↔ local ECS handle. The only source of truth about identity
+	// across peers; local-only entities (terrain chunks, environment lights) are
+	// simply absent from it.
+	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
+	std::uint32_t m_netIdCounter = 0;
+
+	std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)>
+		m_onRemoteCreate;
+	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
+	std::function<void(std::uint32_t, std::uint32_t)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce
 	// straight back out as our own change.
 	bool m_applyingRemoteAsset = false;
