@@ -140,7 +140,7 @@ any zero-pad in the payload's final byte.
 - **N1** ✅ — Layer 0–2 abstractions + LoopbackTransport + serialization + doctest coverage.
 - **N2** ✅ — real network transport: Layer 0 sockets (shared later with the source-control HTTPS stack) + `TcpTransport` + `SecureTransport` (challenge-response auth, AES-256-GCM frames).
 - **N2.5a** ✅ — discovery: UDP sockets, plaintext HTTP client, UPnP IGD port mapping, `session-api.php` (register/lookup/heartbeat/unregister with server-side reachability probe).
-- **N2.5b** — session-directory *client*: needs HTTPS, which the engine cannot do today (only `OpenSSL::Crypto` / `mbedcrypto` are linked — crypto primitives, no TLS). Options: link `OpenSSL::SSL` / `mbedtls`+`mbedx509`, or use the platform HTTP stacks (WinHTTP / NSURLSession / libcurl). The latter is preferable — certificate validation, proxies and redirects are exactly where hand-rolled TLS goes wrong. Also pending: NAT-PMP/PCP as a second mapping path (needs default-gateway lookup, unlike SSDP which self-discovers).
+- **N2.5b** ✅ — session-directory *client* over HTTPS, with TLS delegated to the platform (`HttpsClient_Apple.mm` / `_Win.cpp` / `_Curl.cpp`) and `SessionDirectory` on top. Still pending: NAT-PMP/PCP as a second mapping path (needs a default-gateway lookup, unlike SSDP which self-discovers).
 - **N3** — session protocol: join/leave, participant list, **late-join snapshot** via `SceneSerializer::saveToMemory`.
 - **N4** — **presence**: remote cameras as frustum gizmos, remote selection highlighting. First visible collab payoff, no correctness risk.
 - **N5** — **authoritative lock table** on the host (`RealtimeLockProvider`), which removes the polling race window LFS locks have.
@@ -156,7 +156,28 @@ How a peer finds a host it has no other way of addressing.
 | `Net/Socket.h` (UDP part) | `socketCreateUdp` / `SendTo` / `RecvFrom` / `socketLocalAddress()` |
 | `Net/HttpClient.{h,cpp}` | minimal HTTP/1.1 — **plaintext only**, for LAN router calls |
 | `Net/PortMapper.{h,cpp}` | SSDP discovery + UPnP IGD `AddPortMapping` / `GetExternalIPAddress` |
-| `Website/HorizonEngine/session-api.php` | session directory: register / lookup / heartbeat / unregister |
+| `Net/HttpsClient.h` + `_Apple.mm` / `_Win.cpp` / `_Curl.cpp` | TLS-capable HTTP, **delegated to the OS** |
+| `Net/SessionDirectory.{h,cpp}` | register / lookup / heartbeat / unregister client |
+| `Website/HorizonEngine/session-api.php` | the directory endpoint itself |
+
+### TLS comes from the operating system
+
+| Platform | Backend | TLS underneath |
+|---|---|---|
+| macOS | NSURLSession | Secure Transport / system trust store |
+| Windows | WinHTTP | Schannel |
+| Linux | libcurl | distro TLS + CA bundle |
+
+Nothing in the engine implements TLS. Hostname matching, chain building, expiry,
+revocation, the system trust store and corporate proxies are where hand-rolled
+TLS fails — and it fails *silently*, staying invisible until someone is actually
+attacked. The platform stacks already solve it and track OS policy updates.
+HorizonCore links only the crypto *primitives* (`OpenSSL::Crypto` / `mbedcrypto`);
+those are not a TLS implementation.
+
+On Linux without libcurl the build stays green but `httpsAvailable()` reports
+false and every directory call fails with an explicit message — the feature is
+unavailable rather than quietly broken, and the UI must say so.
 
 **Local address** is found by "connecting" a UDP socket to a public address —
 this transmits nothing, it only makes the kernel choose a route — then reading
@@ -197,12 +218,19 @@ therefore declares `NSLocalNetworkUsageDescription`
   control URL, not a neighbouring one), SOAP construction with XML escaping,
   CGNAT ranges, UDP round-trip over loopback, and a full HTTP GET against a real
   server socket.
+- **Tested live**: the macOS TLS path, against real endpoints — a valid
+  certificate returns 200, while expired, self-signed and wrong-hostname
+  certificates are all *rejected*. Certificate validation is therefore
+  demonstrated, not merely asserted. Parser-level tests alone would not have
+  shown this.
 - **Not verified**: SSDP/SOAP against an actual router, because macOS Local
   Network privacy blocks LAN sends from a bare CLI test binary. The pure logic is
   covered, but the live handshake with a real IGD remains unproven — treat it as
   unverified until someone runs it from a granted app bundle.
 - **Not verified**: `session-api.php` was never executed (no PHP runtime
-  available here). Reviewed only.
+  available here). Reviewed only — and never deployed.
+- **Not verified**: the Windows (WinHTTP) and Linux (libcurl) TLS backends have
+  never been compiled or run; only the Apple one has. They need CI.
 
 ## Connectivity over the internet
 
