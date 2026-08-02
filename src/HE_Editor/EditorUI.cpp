@@ -121,6 +121,17 @@ static bool s_resetLayoutRequested = false;
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
 
+// Menu toggle for a floating (non-docked) panel. On open it also pulls the window
+// to the front: it may still exist from an earlier session, sitting underneath
+// another floating window, in which case ticking the menu item would otherwise
+// look like it did nothing. Unknown title = no-op (the window is created this
+// frame and comes up on top anyway).
+static void toggleFloatingWindow(bool& open, const char* title)
+{
+    open = !open;
+    if (open) ImGui::SetWindowFocus(title);
+}
+
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
@@ -624,8 +635,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     s_showPreferences = true;                              break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
-			case MC::ToggleProfiler:  s_showProfiler = !s_showProfiler;                      break;
-			case MC::ToggleEnvironment: s_showEnvironment = !s_showEnvironment;              break;
+			case MC::ToggleProfiler:  toggleFloatingWindow(s_showProfiler, "Performance Profiler"); break;
+			case MC::ToggleEnvironment: toggleFloatingWindow(s_showEnvironment, "Environment"); break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -683,8 +694,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     {
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
-        if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler)) s_showProfiler = !s_showProfiler;
-        if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment)) s_showEnvironment = !s_showEnvironment;
+        if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler))
+            toggleFloatingWindow(s_showProfiler, "Performance Profiler");
+        if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment))
+            toggleFloatingWindow(s_showEnvironment, "Environment");
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1190,15 +1203,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(8.0f, 4.0f));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
 
+        // NoBringToFrontOnFocus: this is chrome pinned to the window edge. Clicking
+        // Undo down here must not lift the bar over a floating panel that overlaps it.
         ImGui::Begin("##EditorFooter", nullptr,
-            ImGuiWindowFlags_NoTitleBar         |
-            ImGuiWindowFlags_NoResize           |
-            ImGuiWindowFlags_NoMove             |
-            ImGuiWindowFlags_NoScrollbar        |
-            ImGuiWindowFlags_NoSavedSettings    |
-            ImGuiWindowFlags_NoDocking          |
-            ImGuiWindowFlags_NoFocusOnAppearing |
-            ImGuiWindowFlags_NoNav              |
+            ImGuiWindowFlags_NoTitleBar            |
+            ImGuiWindowFlags_NoResize              |
+            ImGuiWindowFlags_NoMove                |
+            ImGuiWindowFlags_NoScrollbar           |
+            ImGuiWindowFlags_NoSavedSettings       |
+            ImGuiWindowFlags_NoDocking             |
+            ImGuiWindowFlags_NoFocusOnAppearing    |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoNav                 |
             ImGuiWindowFlags_NoDecoration);
 
         ImGui::PopStyleVar(3);
@@ -1292,15 +1308,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.28f, 0.28f, 0.36f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_TabActive,  ImVec4(0.22f, 0.22f, 0.30f, 1.0f));
 
+        // NoBringToFrontOnFocus for the same reason as the footer: switching tabs
+        // must not lift this strip over a floating panel.
         ImGui::Begin("##EditorTabBar", nullptr,
-            ImGuiWindowFlags_NoTitleBar         |
-            ImGuiWindowFlags_NoResize           |
-            ImGuiWindowFlags_NoMove             |
-            ImGuiWindowFlags_NoScrollbar        |
-            ImGuiWindowFlags_NoSavedSettings    |
-            ImGuiWindowFlags_NoDocking          |
-            ImGuiWindowFlags_NoFocusOnAppearing |
-            ImGuiWindowFlags_NoNav              |
+            ImGuiWindowFlags_NoTitleBar            |
+            ImGuiWindowFlags_NoResize              |
+            ImGuiWindowFlags_NoMove                |
+            ImGuiWindowFlags_NoScrollbar           |
+            ImGuiWindowFlags_NoSavedSettings       |
+            ImGuiWindowFlags_NoDocking             |
+            ImGuiWindowFlags_NoFocusOnAppearing    |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoNav                 |
             ImGuiWindowFlags_NoDecoration);
 
         ImGui::PopStyleVar(4);
@@ -1469,13 +1488,23 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::PushStyleColor(ImGuiCol_WindowBg,        ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleColor(ImGuiCol_DockingEmptyBg,  ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 
+        // NoBringToFrontOnFocus is what keeps floating windows (Tutorial, Profiler,
+        // Environment, any undocked panel) usable. Every docked panel's root is
+        // THIS window, so focusing one of them made ImGui bring the whole dock tree
+        // to the display front — the full-screen layout then painted over every
+        // floating window. They stayed open but were completely covered, so they
+        // could not even be clicked back to the front: gone for good. With the flag
+        // the host stays at the back of the z-order, where a dockspace belongs.
+        // (ImGui's own DockSpaceOverViewport() sets exactly these two flags.)
         ImGui::Begin("##EditorDockSpace", nullptr,
-            ImGuiWindowFlags_NoTitleBar         |
-            ImGuiWindowFlags_NoResize           |
-            ImGuiWindowFlags_NoMove             |
-            ImGuiWindowFlags_NoScrollbar        |
-            ImGuiWindowFlags_NoSavedSettings    |
-            ImGuiWindowFlags_NoFocusOnAppearing |
+            ImGuiWindowFlags_NoTitleBar             |
+            ImGuiWindowFlags_NoResize               |
+            ImGuiWindowFlags_NoMove                 |
+            ImGuiWindowFlags_NoScrollbar            |
+            ImGuiWindowFlags_NoSavedSettings        |
+            ImGuiWindowFlags_NoFocusOnAppearing     |
+            ImGuiWindowFlags_NoBringToFrontOnFocus  |
+            ImGuiWindowFlags_NoNavFocus             |
             ImGuiWindowFlags_NoBackground);
 
         ImGui::PopStyleVar(3);

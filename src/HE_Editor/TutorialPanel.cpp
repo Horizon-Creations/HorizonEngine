@@ -235,6 +235,12 @@ void open()
 	s_baseValid = false;
 	s_stepDone  = false;
 	s_doneTimer = 0.0f;
+#ifdef HE_IMGUI_ENABLED
+	// Help ▸ Interactive Tutorial on an already-open tour means "show it to me":
+	// pull it in front of whatever floating window is covering it. No-op the first
+	// time, when the window does not exist yet (it then appears on top anyway).
+	ImGui::SetWindowFocus("Tutorial");
+#endif
 }
 
 bool isOpen() { return s_open; }
