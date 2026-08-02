@@ -131,6 +131,9 @@ add_executable(HorizonEditor WIN32
 	HcGraphHost.cpp
 	HcGraphShortcuts.cpp
 	GraphEditor.cpp
+	CollabController.cpp
+	CollabPanel.cpp
+	CollabUndo.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp
 	EditorPanelState.cpp
@@ -161,6 +164,7 @@ endif()
 target_link_libraries(HorizonEditor PRIVATE
 	${HE_EDITOR_LINK_MATSHADER}
 	HorizonCore
+	HorizonNet
 	HorizonScene
 	HorizonRendering
 	HorizonTools

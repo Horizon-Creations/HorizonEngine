@@ -59,6 +59,16 @@ add_executable(he_tests
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
+    test_crypto_x25519.cpp
+    test_net_bitstream.cpp
+    test_net_loopback.cpp
+    test_net_tcp.cpp
+    test_net_secure.cpp
+    test_net_discovery.cpp
+    test_net_directory.cpp
+    test_net_collab.cpp
+    test_collab_controller.cpp
+    test_collab_undo.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
@@ -78,6 +88,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+    # Compiled in so the editor's real network↔scene bridge is covered
+    # end-to-end; it pulls in no ImGui or GPU code.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
     # The tutorial curriculum + its completion predicates are deliberately
     # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
@@ -200,6 +214,7 @@ endif()
 
 target_link_libraries(he_tests PRIVATE
     HorizonCore
+    HorizonNet
     HorizonScene
     HorizonImporters
     HorizonTools
@@ -224,6 +239,8 @@ if(WIN32)
     add_custom_command(TARGET he_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

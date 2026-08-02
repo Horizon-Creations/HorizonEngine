@@ -37,6 +37,16 @@ public:
 	bool isLoaded(const std::string& relativePath) const;
 	bool saveAsset(RuntimeAsset& asset);
 
+	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
+	// A pure notification: ContentManager knows nothing about who listens or why.
+	// The editor uses it to publish authored-asset changes to a collaboration
+	// session — which works uniformly for every asset type precisely because they
+	// all funnel through this one write.
+	void setOnAssetSaved(std::function<void(const std::string&, const std::string&)> fn)
+	{
+		m_onAssetSaved = std::move(fn);
+	}
+
 	// Typed lookup of a loaded asset. Returns nullptr when the UUID is unknown
 	// or refers to an asset of a different type.
 	const StaticMeshAsset*     getStaticMesh(HE::UUID id) const;
@@ -326,6 +336,7 @@ public:
 	HE::AssetType assetType(HE::UUID id) const;
 
 private:
+	std::function<void(const std::string&, const std::string&)> m_onAssetSaved;
 
 	// Opens the file at `path` and reads the HAsset header out of it — this hits
 	// the disk, it is not an accessor for already-loaded state (that is

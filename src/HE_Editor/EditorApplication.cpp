@@ -285,6 +285,151 @@ std::unique_ptr<IRenderer> EditorApplication::CreateRenderer()
 
 void EditorApplication::OnInit()
 {
+	// A received collaboration snapshot replaces the whole world. Selection and
+	// undo history still hold entity handles from the world that just went away,
+	// so acting on them afterwards would touch freed storage.
+	// ── Structural replication ───────────────────────────────────────────────
+	// The editor creates and deletes entities from many places (outliner menus,
+	// drag & drop, prefab drops, terrain tools). Rather than hooking every one of
+	// them — and inevitably missing some — the change is detected by diffing the
+	// entity set, which is complete by construction.
+	m_collab.onRemoteCreate([this](std::uint32_t parentHandle,
+	                               const std::vector<std::uint8_t>& blob) -> std::uint32_t {
+		if (!m_editorWorld) return 0;
+		const Entity parent = parentHandle
+			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
+			: entt::null;
+		SceneSerializer serializer;
+		const Entity created = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+		if (created == entt::null) return 0;
+		// The fresh handle is recorded by CollabController against the sender's
+		// network id — which is what makes handle-stable instantiation
+		// unnecessary in the first place.
+		m_structureKnown.insert(created);
+		return static_cast<std::uint32_t>(entt::to_integral(created));
+	});
+
+	m_collab.onRemoteComponents([this](std::uint32_t handle,
+	                                   const std::vector<std::uint8_t>& blob) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		SceneSerializer serializer;
+		serializer.applyEntityComponents(*m_editorWorld, e, blob);
+		// Mark the transform dirty so the renderer rebuilds its matrix; other
+		// components are read fresh each frame.
+		if (auto* tc = m_editorWorld->registry().try_get<TransformComponent>(e))
+			tc->dirty = true;
+	});
+
+	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+		m_structureKnown.erase(e);
+		m_editorWorld->destroyEntity(e);
+	});
+
+	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		const Entity parent = parentHandle
+			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
+			: m_editorWorld->rootEntity();
+		m_editorWorld->reparentEntity(e, parent);
+	});
+
+	// ── Per-user undo/redo for the session ───────────────────────────────────
+	// Undo becomes an ordinary edit that is republished, not a snapshot
+	// restore — see CollabUndo.h.
+	m_collabUndo.setHandlers(
+		[this](std::uint64_t subject, const float v[9]) {
+			if (!m_editorWorld) return;
+			auto& reg = m_editorWorld->registry();
+			const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(subject));
+			if (!reg.valid(e)) return;
+			if (auto* tc = reg.try_get<TransformComponent>(e))
+			{
+				tc->position = glm::vec3(v[0], v[1], v[2]);
+				tc->rotation = glm::vec3(v[3], v[4], v[5]);
+				tc->scale    = glm::vec3(v[6], v[7], v[8]);
+				tc->dirty    = true;
+				// Publishing it is what makes the undo visible to everyone —
+				// it travels as a normal change, not as a rewind.
+				const float p[3] = { v[0], v[1], v[2] };
+				const float r[3] = { v[3], v[4], v[5] };
+				const float s[3] = { v[6], v[7], v[8] };
+				m_collab.publishTransform(subject, p, r, s, 0);
+			}
+		},
+		[this](const std::string& path, const std::vector<std::uint8_t>& bytes) {
+			applyAssetBytes(path, bytes);
+			m_collab.publishAsset(path, contentManager().resolveSavePath(path));
+		},
+		[this](std::uint64_t subject) { return m_collab.ownsLock(subject); });
+
+	// ── Authored-asset sync ──────────────────────────────────────────────────
+	// Every asset type funnels through ContentManager::saveAsset, so one hook
+	// covers HorizonCode graphs, materials, UI widgets, particle and animator
+	// graphs and scenes alike.
+	contentManager().setOnAssetSaved(
+		[this](const std::string& relPath, const std::string& fullPath) {
+			m_collab.publishAsset(relPath, fullPath);
+		});
+
+	m_collab.onRemoteAsset([this](const std::string& relPath,
+	                              const std::vector<std::uint8_t>& bytes) {
+		applyAssetBytes(relPath, bytes);
+		Logger::Log(Logger::LogLevel::Info,
+		            ("Collab: applied remote change to " + relPath).c_str());
+	});
+
+	// A remote peer moved something. Applying it here (rather than inside
+	// CollabController) keeps the network layer out of the ECS.
+	m_collab.onRemoteTransform([this](std::uint64_t subject, const float pos[3],
+	                                  const float rotEuler[3], const float scale[3]) {
+		if (!m_editorWorld) return;
+		auto& reg = m_editorWorld->registry();
+		const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(subject));
+		if (!reg.valid(e)) return;   // not in our world — ignore rather than guess
+
+		if (auto* tc = reg.try_get<TransformComponent>(e))
+		{
+			tc->position = glm::vec3(pos[0], pos[1], pos[2]);
+			tc->rotation = glm::vec3(rotEuler[0], rotEuler[1], rotEuler[2]);
+			tc->scale    = glm::vec3(scale[0], scale[1], scale[2]);
+			tc->dirty    = true;   // or the renderer keeps the stale matrix
+			// Deliberately NOT pushed through the undo system: this is someone
+			// else's edit, and putting it on our stack would let us "undo" their
+			// work — see the undo section in docs/networking-layer-design.md.
+		}
+	});
+
+	m_collab.onWorldReplaced([this] {
+		// Both peers just deserialized the same bytes, so handle == network id
+		// here — seed the map from the world before anything else runs.
+		std::vector<std::uint32_t> handles;
+		m_structureKnown.clear();
+		if (m_editorWorld)
+		{
+			m_editorWorld->registry().view<entt::entity>().each([&](auto e) {
+				handles.push_back(static_cast<std::uint32_t>(entt::to_integral(e)));
+				m_structureKnown.insert(e);
+			});
+		}
+		m_collab.seedNetIds(handles);
+
+		m_selectedEntity = entt::null;
+		// Every snapshot in the undo stack belongs to the replaced world, so
+		// undoing into one would restore a scene the session no longer shares.
+		m_undo.clearHistory();
+		// The received scene has never been saved locally: leave the dirty flag
+		// set by making the saved revision unreachable.
+		m_savedRevision = static_cast<std::uint64_t>(-1);
+	});
+
 	// ── Headless frame-dump hook (validation / CI screenshots) ──────────────
 	if (const char* p = std::getenv("HE_DUMP_PATH"); p && *p)
 	{
@@ -1472,6 +1617,72 @@ void EditorApplication::OnRender(float dt)
 					}
 			}
 
+			// ── Collaboration presence ───────────────────────────────────────
+			// Where everyone else is looking, and what they have selected. Drawn
+			// as overlay lines only — presence never touches scene state, which
+			// is what makes it the low-risk half of collaboration.
+			if (m_collab.inSession())
+			{
+				const auto localId = m_collab.localParticipant();
+				for (const auto& p : m_collab.participants())
+				{
+					if (p.id == localId) continue;   // no gizmo for our own camera
+
+					const HE::Net::PresenceState* pres = m_collab.presenceOf(p.id);
+					if (!pres || !pres->valid) continue;
+
+					float rgb[3];
+					CollabController::participantColor(p.id, rgb);
+					const glm::vec3 color(rgb[0], rgb[1], rgb[2]);
+
+					const glm::vec3 eye(pres->cameraPos[0], pres->cameraPos[1],
+					                    pres->cameraPos[2]);
+					const glm::quat rot(pres->cameraRot[3], pres->cameraRot[0],
+					                    pres->cameraRot[1], pres->cameraRot[2]);
+
+					// A small frustum: four corner rays out to a fixed depth,
+					// closed by the far rectangle. Fixed size on purpose — this
+					// marks a viewpoint, it does not reproduce their FOV.
+					constexpr float kDepth = 1.6f;
+					constexpr float kHalfW = 0.55f;
+					constexpr float kHalfH = 0.32f;
+
+					const glm::vec3 fwd = rot * glm::vec3(0.0f, 0.0f, -1.0f);
+					const glm::vec3 rgt = rot * glm::vec3(1.0f, 0.0f,  0.0f);
+					const glm::vec3 up  = rot * glm::vec3(0.0f, 1.0f,  0.0f);
+					const glm::vec3 c   = eye + fwd * kDepth;
+
+					const glm::vec3 corners[4] = {
+						c + rgt * kHalfW + up * kHalfH,
+						c - rgt * kHalfW + up * kHalfH,
+						c - rgt * kHalfW - up * kHalfH,
+						c + rgt * kHalfW - up * kHalfH,
+					};
+					for (int i = 0; i < 4; ++i)
+					{
+						dbg.line(eye, corners[i], color);
+						dbg.line(corners[i], corners[(i + 1) % 4], color);
+					}
+					// Short stub marking "up", so the gizmo's roll is readable.
+					dbg.line(c, c + up * (kHalfH * 1.6f), color);
+
+					// Their selection, in the same colour — this is what makes
+					// "don't both grab that object" visible before it happens.
+					auto& reg = m_editorWorld->registry();
+					for (const std::uint64_t raw : pres->selection)
+					{
+						const auto e = static_cast<entt::entity>(
+							static_cast<entt::id_type>(raw));
+						if (!reg.valid(e)) continue;   // not present in our world
+						if (auto* tc = reg.try_get<TransformComponent>(e))
+						{
+							dbg.aabb(tc->position - glm::vec3(0.6f),
+							         tc->position + glm::vec3(0.6f), color);
+						}
+					}
+				}
+			}
+
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
 			// and stay frozen while paused/editing).
@@ -1561,6 +1772,106 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 #endif
+
+	// ── Collaboration ─────────────────────────────────────────────────────
+	// CollabSession is entirely poll-driven, so without this call nothing at all
+	// happens — no joins, no snapshots, no presence.
+	{
+		m_collab.setWorld(m_editorWorld.get());
+		const auto nowMs = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		m_collab.update(nowMs);
+
+		if (m_collab.inSession()) syncStructuralChanges();
+
+		// Claim the selected entity, so everyone else sees it is being worked on
+		// before they click it themselves.
+		if (m_collab.inSession())
+		{
+			const std::uint64_t subject =
+				m_selectedEntity == entt::null
+					? 0ull
+					: static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity));
+			m_collab.followSelection(subject);
+
+			// Publish its transform while we hold it. Sending unconditionally is
+			// fine — publishTransform drops unchanged values and rate-limits the
+			// rest, so a still object costs nothing.
+			if (subject != 0 && m_editorWorld &&
+			    m_editorWorld->registry().valid(m_selectedEntity))
+			{
+				if (auto* tc = m_editorWorld->registry()
+				                   .try_get<TransformComponent>(m_selectedEntity))
+				{
+					const float p[3] = { tc->position.x, tc->position.y, tc->position.z };
+					const float r[3] = { tc->rotation.x, tc->rotation.y, tc->rotation.z };
+					const float s[3] = { tc->scale.x, tc->scale.y, tc->scale.z };
+
+					// Record the change for OUR undo stack before publishing it.
+					// The "before" is whatever we last saw for this subject; the
+					// first observation only establishes a baseline.
+					const float now9[9] = { p[0], p[1], p[2], r[0], r[1], r[2],
+					                        s[0], s[1], s[2] };
+					if (m_undoBaselineSubject == subject)
+					{
+						bool changed = false;
+						for (int i = 0; i < 9; ++i)
+						{
+							if (std::fabs(now9[i] - m_undoBaseline[i]) > 0.0005f)
+							{ changed = true; break; }
+						}
+						if (changed)
+						{
+							m_collabUndo.recordTransform(subject, m_undoBaseline, now9);
+							std::memcpy(m_undoBaseline, now9, sizeof(now9));
+						}
+					}
+					else
+					{
+						m_undoBaselineSubject = subject;
+						std::memcpy(m_undoBaseline, now9, sizeof(now9));
+					}
+
+					m_collab.publishTransform(subject, p, r, s, nowMs);
+				}
+
+				// Everything the transform delta does not cover — mesh, material,
+				// light, collider, script, name… Serializing one entity is cheap,
+				// and publishComponents hashes the result so an entity that is
+				// merely selected rather than edited sends nothing.
+				{
+					SceneSerializer serializer;
+					const std::vector<std::uint8_t> comps =
+						serializer.serializeEntityComponents(*m_editorWorld, m_selectedEntity);
+					if (!comps.empty())
+					{
+						m_collab.publishComponents(
+							static_cast<std::uint32_t>(entt::to_integral(m_selectedEntity)),
+							comps);
+					}
+				}
+			}
+		}
+
+		// Feed the local camera + selection so remote peers can draw them.
+		if (m_collab.active())
+		{
+			const glm::vec3 pos = m_editorCamera.position();
+			// The view matrix maps world → camera; a remote peer draws the
+			// frustum in world space, so send the inverse rotation.
+			const glm::quat rot =
+				glm::quat_cast(glm::transpose(glm::mat3(m_editorCamera.viewMatrix())));
+			const float p[3] = { pos.x, pos.y, pos.z };
+			const float r[4] = { rot.x, rot.y, rot.z, rot.w };
+
+			std::vector<std::uint64_t> selection;
+			if (m_selectedEntity != entt::null)
+				selection.push_back(static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity)));
+
+			m_collab.setLocalPresence(p, r, selection);
+		}
+	}
 
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
@@ -2676,6 +2987,83 @@ void EditorApplication::dumpFrameHeadless()
 	}
 }
 
+void EditorApplication::syncStructuralChanges()
+{
+	if (!m_editorWorld) return;
+	auto& reg = m_editorWorld->registry();
+
+	// Entities the engine generates per machine — terrain chunks regenerate from
+	// the TerrainComponent, environment lights belong to the Sky entity — must
+	// NOT replicate: every peer makes its own, and sending them would duplicate
+	// them on arrival. This is also precisely why network ids exist instead of
+	// raw handles: these local entities consume handles independently on each
+	// peer, so the allocators are never in lockstep.
+	const auto isLocalOnly = [&reg](Entity e) {
+		return reg.all_of<EnvironmentLightComponent>(e) ||
+		       reg.all_of<TerrainChunkComponent>(e);
+	};
+
+	std::unordered_set<Entity> current;
+	reg.view<entt::entity>().each([&](auto e) {
+		if (!isLocalOnly(e)) current.insert(e);
+	});
+
+	// ── Created ──
+	for (const Entity e : current)
+	{
+		if (m_structureKnown.count(e)) continue;
+
+		SceneSerializer serializer;
+		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
+		if (!blob.empty())
+		{
+			std::uint32_t parentHandle = 0;
+			if (auto* hier = reg.try_get<HierarchyComponent>(e);
+			    hier && reg.valid(hier->parent))
+			{
+				parentHandle = static_cast<std::uint32_t>(entt::to_integral(hier->parent));
+			}
+			m_collab.publishCreate(
+				static_cast<std::uint32_t>(entt::to_integral(e)), parentHandle, blob);
+		}
+		m_structureKnown.insert(e);
+	}
+
+	// ── Destroyed ──
+	// Collected first: erasing from the set while iterating it would invalidate
+	// the iterator.
+	std::vector<Entity> gone;
+	for (const Entity e : m_structureKnown)
+	{
+		if (!current.count(e)) gone.push_back(e);
+	}
+	for (const Entity e : gone)
+	{
+		m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e)));
+		m_structureKnown.erase(e);
+	}
+}
+
+void EditorApplication::applyAssetBytes(const std::string& relativePath,
+                                        const std::vector<std::uint8_t>& bytes)
+{
+	// Write the bytes exactly as they arrived, then reload so open panels pick
+	// the new content up. Writing the file rather than deserializing per asset
+	// type is what keeps this uniform across HorizonCode, materials, UI widgets,
+	// particle and animator graphs and scenes alike.
+	const std::string full = contentManager().resolveSavePath(relativePath);
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(full).parent_path(), ec);
+		std::ofstream out(full, std::ios::binary | std::ios::trunc);
+		if (!out) return;
+		out.write(reinterpret_cast<const char*>(bytes.data()),
+		          static_cast<std::streamsize>(bytes.size()));
+		if (!out) return;
+	}
+	contentManager().loadAsset(relativePath);
+}
+
 AppContext EditorApplication::makeContext()
 {
 	m_sdlDialogBridge.pendingDirResult  = &m_pendingDirResult;
@@ -2803,6 +3191,8 @@ AppContext EditorApplication::makeContext()
 		.pendingFileReady    = m_pendingFileReady,
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
+		.collab              = &m_collab,
+		.collabUndo          = &m_collabUndo,
 	};
 }
 

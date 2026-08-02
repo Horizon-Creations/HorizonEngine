@@ -108,10 +108,51 @@ void render(AppContext& ctx)
             if (node.entity == ctx.selectedEntity)
                 flags |= ImGuiTreeNodeFlags_Selected;
 
+            // ── Collaboration lock state ──────────────────────────────────
+            // Someone else editing this entity must be visible *before* the
+            // click, not after — that is the entire point of holding locks.
+            const HE::Net::LockInfo* lock = nullptr;
+            bool lockedByMe = false;
+            if (ctx.collab && ctx.collab->inSession())
+            {
+                lock = ctx.collab->lockFor(static_cast<std::uint64_t>(
+                    entt::to_integral(node.entity)));
+                lockedByMe = lock && lock->owner == ctx.collab->localParticipant();
+            }
+
+            if (lock && !lockedByMe)
+            {
+                // Dim the row: it is not yours to edit right now.
+                float rgb[3];
+                CollabController::participantColor(lock->owner, rgb);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+            }
+
             bool open = ImGui::TreeNodeEx(
                 reinterpret_cast<void*>(static_cast<uintptr_t>(
                     static_cast<uint32_t>(node.entity))),
                 flags, "%s", node.name.c_str());
+
+            if (lock && !lockedByMe) ImGui::PopStyleColor();
+
+            if (lock)
+            {
+                ImGui::SameLine();
+                if (lockedByMe)
+                {
+                    ImGui::TextDisabled("[you]");
+                }
+                else
+                {
+                    float rgb[3];
+                    CollabController::participantColor(lock->owner, rgb);
+                    ImGui::TextColored(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f),
+                                       "[%s]", lock->ownerName.c_str());
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(lockedByMe ? "You are editing this."
+                                                 : "Someone else is editing this.");
+            }
 
             // Click (not on the arrow) → select
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())

@@ -1215,6 +1215,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
 	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+
+	// Tell whoever is listening that this asset's bytes changed. Fired only on a
+	// successful write, so a collaboration session never publishes a save that
+	// did not happen. ContentManager itself stays unaware of who listens.
+	if (m_onAssetSaved) m_onAssetSaved(asset.path, fullPath);
 	return true;
 }
 
