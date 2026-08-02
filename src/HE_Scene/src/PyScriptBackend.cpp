@@ -1,5 +1,6 @@
 #include "HorizonScene/PyScriptBackend.h"
 #include <cstdint>
+#include <Diagnostics/Log.h>
 
 #ifdef HE_HAVE_PYTHON
 
@@ -475,10 +476,20 @@ PyScriptBackend::PyScriptBackend(HorizonWorld& world)
 		PyImport_AppendInittab("horizon", &PyInit_horizon);
 		Py_Initialize();
 		g_pyInited = true;
+		// The interpreter version and prefix are the first things to check when a
+		// packaged build fails to bootstrap Python (bundled stdlib mismatch).
+		HE_LOG_INFO(Python, "CPython initialised: %s", Py_GetVersion());
 	}
 
 	// Define horizon.Behavior (the required base class) once.
 	PyObject* mod = PyImport_ImportModule("horizon");
+	if (!mod)
+	{
+		// Without the module every Python script fails to load, one by one, with
+		// a confusing per-script error. Report the real cause once, here.
+		HE_LOG_ERROR(Python, "Failed to import the built-in 'horizon' module: %s — "
+		                     "no Python script will be able to run", takePyError().c_str());
+	}
 	if (mod)
 	{
 		if (!PyObject_HasAttrString(mod, "Behavior"))

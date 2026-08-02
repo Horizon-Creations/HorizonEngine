@@ -10,6 +10,7 @@
 #include <DetourNavMeshQuery.h>
 
 #include <DebugDraw/DebugDraw.h>
+#include <Diagnostics/Log.h>
 
 #include <algorithm>
 #include <cstring>
@@ -22,10 +23,24 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
     nmc.navQuery = nullptr;
     nmc.isDirty  = false;
 
+    // Every failure below used to be a bare `return false`, and the only symptom
+    // was "the agents don't move". Each stage now says which one gave up.
+    HE_LOG_SLOW_SCOPE(Nav, 250.0, "NavMesh bake");
+
     const auto& geo = nmc.geometry;
-    if (geo.verts.empty() || geo.tris.empty()) return false;
-    if (geo.verts.size() % 3 != 0) return false;
-    if (geo.tris.size()  % 3 != 0) return false;
+    if (geo.verts.empty() || geo.tris.empty())
+    {
+        HE_LOG_WARN(Nav, "NavMesh bake skipped: no input geometry "
+                         "(%zu vert floats, %zu tri indices)", geo.verts.size(), geo.tris.size());
+        return false;
+    }
+    if (geo.verts.size() % 3 != 0 || geo.tris.size() % 3 != 0)
+    {
+        HE_LOG_ERROR(Nav, "NavMesh bake failed: malformed geometry — %zu vert floats and "
+                          "%zu tri indices are not both multiples of 3",
+                     geo.verts.size(), geo.tris.size());
+        return false;
+    }
 
     const int nverts = static_cast<int>(geo.verts.size() / 3);
     const int ntris  = static_cast<int>(geo.tris.size()  / 3);
@@ -77,7 +92,13 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
     rcHeightfield* hf = rcAllocHeightfield();
     if (!hf || !rcCreateHeightfield(&ctx, *hf, rcCfg.width, rcCfg.height,
                                      rcCfg.bmin, rcCfg.bmax, rcCfg.cs, rcCfg.ch))
-    { rcFreeHeightField(hf); return false; }
+    {
+        HE_LOG_ERROR(Nav, "NavMesh bake failed: heightfield allocation (%dx%d cells at "
+                          "cellSize %.3f) — the bounds may be too large for the cell size",
+                     rcCfg.width, rcCfg.height, rcCfg.cs);
+        rcFreeHeightField(hf);
+        return false;
+    }
 
     std::vector<unsigned char> triAreas(ntris, 0);
     rcMarkWalkableTriangles(&ctx, rcCfg.walkableSlopeAngle,
@@ -95,7 +116,11 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
 
     rcCompactHeightfield* chf = rcAllocCompactHeightfield();
     if (!chf || !rcBuildCompactHeightfield(&ctx, rcCfg.walkableHeight, rcCfg.walkableClimb, *hf, *chf))
-    { rcFreeHeightField(hf); rcFreeCompactHeightfield(chf); return false; }
+    {
+        HE_LOG_ERROR(Nav, "%s", "NavMesh bake failed: rcBuildCompactHeightfield");
+        rcFreeHeightField(hf); rcFreeCompactHeightfield(chf);
+        return false;
+    }
     rcFreeHeightField(hf);
 
     rcErodeWalkableArea(&ctx, rcCfg.walkableRadius, *chf);
@@ -104,18 +129,36 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
 
     rcContourSet* cset = rcAllocContourSet();
     if (!cset || !rcBuildContours(&ctx, *chf, rcCfg.maxSimplificationError, rcCfg.maxEdgeLen, *cset))
-    { rcFreeCompactHeightfield(chf); rcFreeContourSet(cset); return false; }
+    {
+        HE_LOG_ERROR(Nav, "%s", "NavMesh bake failed: rcBuildContours");
+        rcFreeCompactHeightfield(chf); rcFreeContourSet(cset);
+        return false;
+    }
 
     rcPolyMesh* pmesh = rcAllocPolyMesh();
     if (!pmesh || !rcBuildPolyMesh(&ctx, *cset, rcCfg.maxVertsPerPoly, *pmesh))
-    { rcFreeCompactHeightfield(chf); rcFreeContourSet(cset); rcFreePolyMesh(pmesh); return false; }
+    {
+        HE_LOG_ERROR(Nav, "%s", "NavMesh bake failed: rcBuildPolyMesh");
+        rcFreeCompactHeightfield(chf); rcFreeContourSet(cset); rcFreePolyMesh(pmesh);
+        return false;
+    }
     if (pmesh->npolys == 0)
-    { rcFreeCompactHeightfield(chf); rcFreeContourSet(cset); rcFreePolyMesh(pmesh); return false; }
+    {
+        // Not a crash, just an empty result — usually walkableRadius/maxSlope
+        // eroding the whole surface away, or geometry that is all too steep.
+        HE_LOG_WARN(Nav, "NavMesh bake produced 0 polygons from %d triangle(s) — check "
+                         "maxSlope (%.1f deg), walkableRadius (%.2f) and walkableHeight (%.2f) "
+                         "against the geometry", ntris, cfg.maxSlope, cfg.walkableRadius,
+                    cfg.walkableHeight);
+        rcFreeCompactHeightfield(chf); rcFreeContourSet(cset); rcFreePolyMesh(pmesh);
+        return false;
+    }
 
     rcPolyMeshDetail* dmesh = rcAllocPolyMeshDetail();
     if (!dmesh || !rcBuildPolyMeshDetail(&ctx, *pmesh, *chf, rcCfg.detailSampleDist,
                                           rcCfg.detailSampleMaxError, *dmesh))
     {
+        HE_LOG_ERROR(Nav, "%s", "NavMesh bake failed: rcBuildPolyMeshDetail");
         rcFreeCompactHeightfield(chf); rcFreeContourSet(cset);
         rcFreePolyMesh(pmesh); rcFreePolyMeshDetail(dmesh);
         return false;
@@ -153,14 +196,23 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
     unsigned char* navData = nullptr;
     int navDataSize = 0;
     if (!dtCreateNavMeshData(&params, &navData, &navDataSize))
-    { rcFreePolyMesh(pmesh); rcFreePolyMeshDetail(dmesh); return false; }
+    {
+        HE_LOG_ERROR(Nav, "NavMesh bake failed: dtCreateNavMeshData (%d polys, %d verts) — "
+                          "the mesh most likely exceeds Detour's per-tile limits",
+                     pmesh->npolys, pmesh->nverts);
+        rcFreePolyMesh(pmesh); rcFreePolyMeshDetail(dmesh);
+        return false;
+    }
 
+    const int polyCount = pmesh->npolys;
     rcFreePolyMesh(pmesh);
     rcFreePolyMeshDetail(dmesh);
 
     dtNavMesh* rawMesh = dtAllocNavMesh();
     if (!rawMesh || rawMesh->init(navData, navDataSize, DT_TILE_FREE_DATA) != DT_SUCCESS)
     {
+        HE_LOG_ERROR(Nav, "NavMesh bake failed: dtNavMesh::init (%d bytes of nav data)",
+                     navDataSize);
         dtFree(navData);
         dtFreeNavMesh(rawMesh);
         return false;
@@ -171,11 +223,15 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
     dtNavMeshQuery* rawQuery = dtAllocNavMeshQuery();
     if (!rawQuery || rawQuery->init(rawMesh, 2048) != DT_SUCCESS)
     {
+        HE_LOG_ERROR(Nav, "%s", "NavMesh bake failed: dtNavMeshQuery::init");
         dtFreeNavMeshQuery(rawQuery);
         return false;
     }
     nmc.navQuery.reset(rawQuery, [](dtNavMeshQuery* q){ dtFreeNavMeshQuery(q); });
 
+    HE_LOG_INFO(Nav, "NavMesh baked: %d polygon(s) from %d input triangle(s), "
+                     "%d bytes of nav data, grid %dx%d",
+                polyCount, ntris, navDataSize, rcCfg.width, rcCfg.height);
     return true;
 }
 
@@ -189,7 +245,20 @@ void NavigationSystem::update(HorizonWorld& world, float dt)
     for (auto [e, c] : reg.view<NavMeshComponent>().each())
     { nmc = &c; break; }
 
-    if (!nmc || !nmc->navMesh || !nmc->navQuery) return;
+    if (!nmc || !nmc->navMesh || !nmc->navQuery)
+    {
+        // Agents standing still because there is no baked navmesh is the single
+        // most common navigation complaint — say so, once every few seconds, and
+        // only while something is actually trying to move.
+        bool wantsToMove = false;
+        for (auto [e, agent] : reg.view<NavAgentComponent>().each())
+            if (agent.moving) { wantsToMove = true; break; }
+        if (wantsToMove)
+            HE_LOG_THROTTLE(Nav, Warning, 5.0, "%s",
+                            nmc ? "Nav agents want to move but the NavMesh is not baked"
+                                : "Nav agents want to move but the scene has no NavMesh entity");
+        return;
+    }
 
     dtNavMeshQuery* query = nmc->navQuery.get();
     const dtQueryFilter filter;
@@ -210,12 +279,38 @@ void NavigationSystem::update(HorizonWorld& world, float dt)
             query->findNearestPoly(startPos, extents, &filter, &startRef, nearestStart);
             query->findNearestPoly(endPos,   extents, &filter, &endRef,   nearestEnd);
 
-            if (!startRef || !endRef) continue;
+            if (!startRef || !endRef)
+            {
+                // The agent or its target is off the navmesh (spawned in the air,
+                // target clicked outside the baked area). Silent until now.
+                HE_LOG_THROTTLE(Nav, Warning, 5.0,
+                                "Entity %u: no path — %s is not on the NavMesh "
+                                "(agent at %.1f/%.1f/%.1f, target %.1f/%.1f/%.1f)",
+                                static_cast<uint32_t>(e),
+                                !startRef ? (!endRef ? "neither the agent nor the target"
+                                                     : "the agent")
+                                          : "the target",
+                                tc.position.x, tc.position.y, tc.position.z,
+                                agent.targetPos.x, agent.targetPos.y, agent.targetPos.z);
+                continue;
+            }
 
             dtPolyRef pathBuf[256];
             int pathLen = 0;
             query->findPath(startRef, endRef, nearestStart, nearestEnd, &filter, pathBuf, &pathLen, 256);
-            if (pathLen == 0) continue;
+            if (pathLen == 0)
+            {
+                HE_LOG_THROTTLE(Nav, Warning, 5.0,
+                                "Entity %u: findPath returned an empty path — target is "
+                                "probably on a disconnected NavMesh island",
+                                static_cast<uint32_t>(e));
+                continue;
+            }
+            if (pathLen >= 256)
+                HE_LOG_THROTTLE(Nav, Warning, 10.0,
+                                "Entity %u: path hit the 256-polygon buffer limit and is "
+                                "truncated — the agent will stop short of its target",
+                                static_cast<uint32_t>(e));
 
             float straightPath[256 * 3];
             unsigned char flags[256];

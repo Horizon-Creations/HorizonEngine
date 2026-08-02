@@ -29,6 +29,7 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "ContentManager/ContentManager.h"
 #include "Renderer/IRenderer.h"
+#include "Diagnostics/Log.h"
 #include "Diagnostics/Profiler.h"
 #include <cmath>
 
@@ -85,6 +86,11 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
                         const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics,
                         bool gpuParticles)
 {
+    // The whole gameplay tick in one budget. The profiler breaks it down per
+    // system; this line is what makes a stall show up in the log of a run
+    // nobody was profiling.
+    HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tick");
+
     { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer); }
     { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
     { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
@@ -134,9 +140,28 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
 
 size_t SceneSystems::preloadAssetRefs(HorizonWorld& world, ContentManager& cm)
 {
+    HE_LOG_SLOW_SCOPE(Asset, 500.0, "SceneSystems::preloadAssetRefs");
+
+    const std::vector<HE::UUID> refs = collectAssetRefs(world);
     size_t resolved = 0;
-    for (HE::UUID id : collectAssetRefs(world))
+    for (HE::UUID id : refs)
+    {
         if (cm.ensureResident(id))
+        {
             ++resolved;
+            continue;
+        }
+        // In a packaged build this is the difference between "the level looks
+        // wrong" and knowing exactly which asset never made it into the .hpak.
+        HE_LOG_ERROR(Asset, "Scene references asset %016llx%016llx which cannot be resolved "
+                            "— it is missing from the content root or the package",
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo));
+    }
+    if (resolved == refs.size())
+        HE_LOG_INFO(Asset, "Preloaded %zu scene asset reference(s)", resolved);
+    else
+        HE_LOG_WARN(Asset, "Preloaded %zu of %zu scene asset reference(s) — %zu missing",
+                    resolved, refs.size(), refs.size() - resolved);
     return resolved;
 }

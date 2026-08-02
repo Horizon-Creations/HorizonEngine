@@ -68,7 +68,7 @@ bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot)
 	ContentManager cm(contentRoot.string());
 	if (!cm.saveAsset(asset))
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("Importer: failed to write " + target.string()).c_str());
 		return false;
 	}

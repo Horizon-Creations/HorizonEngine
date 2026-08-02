@@ -79,7 +79,7 @@ void EngineProfiler::doStart()
 	// m_recording so worker threads that observe recording also see this id.
 	m_captureThread  = std::this_thread::get_id();
 	m_recording.store(true, std::memory_order_release);
-	Logger::Log(Logger::LogLevel::Info, "Profiler: capture started");
+	HE_LOG_INFO(Profiler, "%s", "Profiler: capture started");
 }
 
 // ─── Frame lifecycle ─────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ void EngineProfiler::endFrame()
 		m_forceDetailed   = false;
 		m_recording.store(false, std::memory_order_release);
 		++m_frameCounter;
-		Logger::Log(Logger::LogLevel::Info, "Profiler: single-frame capture taken");
+		HE_LOG_INFO(Profiler, "%s", "Profiler: single-frame capture taken");
 		return;
 	}
 
@@ -233,7 +233,7 @@ struct Stat
 std::string EngineProfiler::doStopDump()
 {
 	std::string path = dumpNow();
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Profiler, "%s",
 	            ("Profiler: capture stopped — " + std::to_string(m_frames.size()) +
 	             " frames").c_str());
 	return path;
@@ -374,12 +374,12 @@ std::string EngineProfiler::dumpNow()
 	std::ofstream f(out.string());
 	if (!f.is_open())
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Profiler, "%s",
 		            ("Profiler: failed to open dump file " + out.string()).c_str());
 		return "";
 	}
 	f << j.dump(1, '\t');
 	f.close();
-	Logger::Log(Logger::LogLevel::Info, ("Profiler: wrote " + out.string()).c_str());
+	HE_LOG_INFO(Profiler, "%s", ("Profiler: wrote " + out.string()).c_str());
 	return out.string();
 }

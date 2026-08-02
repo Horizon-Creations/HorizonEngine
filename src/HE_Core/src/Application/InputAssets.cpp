@@ -1,5 +1,6 @@
 #include "Application/InputAssets.h"
 #include "Application/InputMapping.h"
+#include "Diagnostics/Log.h"
 #include <nlohmann/json.hpp>
 #include <SDL3/SDL.h>
 #include <filesystem>
@@ -27,7 +28,14 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 {
 	const auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
 	if (!j.is_object() || !j.contains("entries") || !j["entries"].is_array())
+	{
+		// Returning 0 here means "no controls at all" — worth an error, since the
+		// symptom is a game that ignores every key.
+		HE_LOG_ERROR(Input, "Input mapping context is unusable: %s",
+		             j.is_discarded() ? "the JSON is malformed"
+		                              : "no 'entries' array");
 		return 0;
+	}
 
 	size_t bound = 0;
 	for (const auto& e : j["entries"])
@@ -65,6 +73,8 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 			if (!binds.empty()) { mapping.mapAxis(name, std::move(binds)); ++bound; }
 		}
 	}
+	HE_LOG_INFO(Input, "Applied input mapping context: %zu binding group(s) from %zu entry/-ies",
+	            bound, j["entries"].size());
 	return bound;
 }
 

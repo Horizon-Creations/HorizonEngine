@@ -228,7 +228,7 @@ bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
 	// staleness poll would catch this within a second or two; dropping it here
 	// makes the grid update the moment the save lands.
 	AssetThumbnailCache::invalidate(assetPath);
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Editor, "%s",
 		("MaterialEditor: saved '" + st.name + "'").c_str());
 	return true;
 }

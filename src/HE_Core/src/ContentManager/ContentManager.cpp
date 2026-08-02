@@ -114,7 +114,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	if (id == HE::UUID{})
 	{
 		id = HE::UUID::generate();
-		Logger::Log(Logger::LogLevel::Warning,
+		HE_LOG_WARN(Asset, "%s",
 			("ContentManager: asset has no persisted UUID (pre-v2 file), generated transient id: " + relativePath).c_str());
 	}
 
@@ -498,7 +498,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 	// Instance chains (instance of an instance) are legal; a cycle would recurse
 	// forever through loadAsset → guard with a small depth cap.
 	static thread_local int s_depth = 0;
-	if (s_depth > 8) { Logger::Log(Logger::LogLevel::Warning,
+	if (s_depth > 8) { HE_LOG_WARN(Asset, "%s",
 		"ContentManager: material-instance chain too deep / cyclic — sync aborted"); return; }
 	s_depth++;
 
@@ -693,9 +693,21 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 
 	HAsset::Reader reader;
 	if (!reader.open(fullPath))
+	{
+		// The most-reported "why is my asset not there" path: the reference is
+		// fine, the file simply is not where the content root says it should be.
+		HE_LOG_ERROR(Asset, "Cannot load asset '%s': no readable .hasset at '%s'",
+		             relativePath.c_str(), fullPath.c_str());
 		return HE::UUID();
+	}
 
-	return parseAndRegisterAsset(relativePath, fullPath, reader);
+	const HE::UUID id = parseAndRegisterAsset(relativePath, fullPath, reader);
+	if (id == HE::UUID{})
+		HE_LOG_ERROR(Asset, "Asset '%s' opened but could not be parsed or registered",
+		             relativePath.c_str());
+	else
+		HE_LOG_DEBUG(Asset, "Loaded asset '%s'", relativePath.c_str());
+	return id;
 }
 
 // ─── loadAssetAsync ───────────────────────────────────────────────────────────
@@ -976,7 +988,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	const std::string fullPath = resolveSavePath(asset.path);
 	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
 	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Asset, "%s",
 			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
 
 	HAsset::Writer w;
@@ -1194,11 +1206,19 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path(), ec);
 	}
 
-	if (!w.write(fullPath, typeId)) return false;
+	if (!w.write(fullPath, typeId))
+	{
+		// Losing a save silently is the worst possible failure mode in an editor.
+		HE_LOG_ERROR(Asset, "Failed to write asset '%s' to '%s' — the change was NOT saved",
+		             asset.path.c_str(), fullPath.c_str());
+		return false;
+	}
+	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
+	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
 
-	// Tell whoever is listening that this asset's bytes changed. Used by the
-	// editor to publish the change to a collaboration session; ContentManager
-	// itself stays unaware of any of that.
+	// Tell whoever is listening that this asset's bytes changed. Fired only on a
+	// successful write, so a collaboration session never publishes a save that
+	// did not happen. ContentManager itself stays unaware of who listens.
 	if (m_onAssetSaved) m_onAssetSaved(asset.path, fullPath);
 	return true;
 }
@@ -1632,7 +1652,7 @@ size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
 	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
 
 	if (rewritten > 0)
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Asset, "%s",
 			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
 			 oldRel + "' to '" + newRel + "'").c_str());
 	return rewritten;

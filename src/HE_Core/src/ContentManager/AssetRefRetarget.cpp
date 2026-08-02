@@ -284,7 +284,7 @@ size_t retargetTree(const std::string& root, const std::vector<Rule>& rules)
 		        static_cast<std::streamsize>(blob.size()));
 		if (!o) continue;
 		++rewritten;
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Asset, "%s",
 			("AssetRefs: retargeted references in " + it->path().filename().string()).c_str());
 	}
 	return rewritten;

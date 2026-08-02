@@ -23,9 +23,10 @@ public:
 	GlobalState(const GlobalState&) = delete;
 	void operator=(const GlobalState&) = delete;
 
-	// Log file management
+	// Opens <exeDir>/HorizonEngine.log for HE::Log (rotating the previous runs)
+	// and applies the HE_LOG environment overrides. The stream itself lives in
+	// HE::Log — see Diagnostics/Log.h.
 	void setLogFile(const std::string& path);
-	std::ofstream& getLogFileStream();
 
 	// Deploy-adjacent "dumps/" directory (next to HorizonEngine.log), created on
 	// demand. Used by the profiler and crash handler for diagnostic output.
@@ -118,7 +119,4 @@ private:
 
 	//Custom config entries
 	json m_customConfig;
-
-	//logging
-	std::ofstream m_logFileStream;
 };

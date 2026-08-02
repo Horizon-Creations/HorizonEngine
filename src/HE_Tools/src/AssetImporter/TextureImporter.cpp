@@ -51,7 +51,7 @@ std::unique_ptr<TextureAsset> TextureImporter::import(
 	auto asset = fromPixels(pixels, w, h);
 	if (!asset)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Tool, "%s",
 			("TextureImporter: " + sourcePath.string() + ": " + stbi_failure_reason()).c_str());
 		return nullptr;
 	}
@@ -62,7 +62,7 @@ std::unique_ptr<TextureAsset> TextureImporter::import(
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;
 
-	Logger::Log(Logger::LogLevel::Info,
+	HE_LOG_INFO(Tool, "%s",
 		("TextureImporter: " + sourcePath.filename().string() + " -> " + asset->path
 		 + " (" + std::to_string(w) + "x" + std::to_string(h) + ")").c_str());
 	return asset;

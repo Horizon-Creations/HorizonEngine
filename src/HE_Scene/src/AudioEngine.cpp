@@ -6,9 +6,15 @@
 #include <cstdint>
 
 #include "HorizonScene/AudioEngine.h"
+#include <Diagnostics/Log.h>
 #include <unordered_map>
 #include <cstring>
 #include <string>
+
+// A scene that keeps starting sounds without ever stopping them (a looping clip
+// re-triggered every frame) leaks voices until the mixer chokes. Warn once the
+// count gets unreasonable rather than letting the audio quietly fall apart.
+static constexpr size_t kVoiceWarnThreshold = 128;
 
 // ─── PIMPL ────────────────────────────────────────────────────────────────────
 
@@ -53,17 +59,30 @@ bool AudioEngine::init(bool noDevice)
         cfg.sampleRate = 48000;
     }
 
-    if (ma_engine_init(&cfg, &m_impl->engine) != MA_SUCCESS)
+    const ma_result rc = ma_engine_init(&cfg, &m_impl->engine);
+    if (rc != MA_SUCCESS)
+    {
+        // Worth an error even in noDevice mode: without it the whole game is
+        // silent and nothing anywhere says why.
+        HE_LOG_ERROR(Audio, "miniaudio engine init failed (%s), result %d — audio disabled",
+                     noDevice ? "no-device mode" : "device mode", static_cast<int>(rc));
         return false;
+    }
 
     m_impl->engineOk = true;
     m_initialized    = true;
+    HE_LOG_INFO(Audio, "Audio engine ready: %u Hz, %u channel(s)%s",
+                ma_engine_get_sample_rate(&m_impl->engine),
+                ma_engine_get_channels(&m_impl->engine),
+                noDevice ? " (no output device — headless)" : "");
     return true;
 }
 
 void AudioEngine::shutdown()
 {
     if (!m_initialized) return;
+    HE_LOG_INFO(Audio, "Audio engine shutting down (%zu active voice(s), %zu bus(es))",
+                m_impl->sounds.size(), m_impl->buses.size());
     stopAll();
     // Uninit buses before engine teardown
     for (auto& [name, bus] : m_impl->buses)
@@ -82,10 +101,15 @@ bool AudioEngine::createBus(const std::string& name, float volume)
 
     auto bus = std::make_unique<BusData>();
     if (ma_sound_group_init(&m_impl->engine, 0, nullptr, &bus->group) != MA_SUCCESS)
+    {
+        HE_LOG_ERROR(Audio, "Failed to create audio bus '%s' — sounds routed to it "
+                            "will fall back to the master bus", name.c_str());
         return false;
+    }
     bus->groupOk = true;
     ma_sound_group_set_volume(&bus->group, volume);
     m_impl->buses.emplace(name, std::move(bus));
+    HE_LOG_DEBUG(Audio, "Created audio bus '%s' at volume %.2f", name.c_str(), volume);
     return true;
 }
 
@@ -119,8 +143,24 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
                                   const std::string& busName,
                                   const SpatialParams* spatial)
 {
-    if (!m_initialized || pcmData.empty()) return 0;
-    if (sampleRate <= 0 || channels <= 0)  return 0;
+    if (!m_initialized)
+    {
+        HE_LOG_THROTTLE(Audio, Warning, 5.0, "%s",
+                        "Sound requested but the audio engine is not initialised — ignored");
+        return 0;
+    }
+    if (pcmData.empty())
+    {
+        HE_LOG_WARN(Audio, "%s", "Sound requested with empty PCM data — ignored "
+                                 "(the clip asset probably failed to decode)");
+        return 0;
+    }
+    if (sampleRate <= 0 || channels <= 0)
+    {
+        HE_LOG_WARN(Audio, "Sound requested with invalid format (%d Hz, %d channel(s)) — ignored",
+                    sampleRate, channels);
+        return 0;
+    }
 
     auto snd = std::make_unique<ActiveSound>();
     snd->pcmCopy = pcmData;
@@ -141,7 +181,11 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
     bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
 
     if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
+    {
+        HE_LOG_ERROR(Audio, "Audio buffer init failed (%llu frames, %d Hz, %d channel(s))",
+                     static_cast<unsigned long long>(frameCount), sampleRate, channels);
         return 0;
+    }
     snd->bufferOk = true;
 
     // Route through bus if found, otherwise null (master)
@@ -150,6 +194,9 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
         auto it = m_impl->buses.find(busName);
         if (it != m_impl->buses.end() && it->second->groupOk)
             busGroup = &it->second->group;
+        else
+            HE_LOG_WARN(Audio, "Sound routed to unknown bus '%s' — playing on the master bus "
+                               "(bus volume/mute will not apply)", busName.c_str());
     }
 
     // Spatial sounds pass no flag — positioning enabled.
@@ -159,6 +206,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
                                         flags, busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
+        HE_LOG_ERROR(Audio, "%s", "Sound init from data source failed");
         ma_audio_buffer_uninit(&snd->buffer);
         return 0;
     }
@@ -178,6 +226,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
 
     if (ma_sound_start(&snd->sound) != MA_SUCCESS)
     {
+        HE_LOG_ERROR(Audio, "%s", "ma_sound_start failed — sound will not be audible");
         ma_sound_uninit(&snd->sound);
         ma_audio_buffer_uninit(&snd->buffer);
         return 0;
@@ -185,6 +234,19 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
 
     uint64_t handle = m_nextHandle++;
     m_impl->sounds.emplace(handle, std::move(snd));
+
+    HE_LOG_TRACE(Audio, "Started %s sound #%llu: %llu frames, %d Hz, %d ch, vol %.2f, "
+                        "pitch %.2f%s, bus '%s'",
+                 spatial ? "spatial" : "2D",
+                 static_cast<unsigned long long>(handle),
+                 static_cast<unsigned long long>(frameCount), sampleRate, channels,
+                 volume, pitch, loop ? ", looping" : "",
+                 busName.empty() ? "master" : busName.c_str());
+
+    if (m_impl->sounds.size() >= kVoiceWarnThreshold)
+        HE_LOG_THROTTLE(Audio, Warning, 10.0,
+                        "%zu simultaneous voices are alive — sounds are being started "
+                        "faster than they are stopped", m_impl->sounds.size());
     return handle;
 }
 

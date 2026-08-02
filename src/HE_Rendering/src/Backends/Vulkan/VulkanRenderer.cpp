@@ -81,33 +81,33 @@ VulkanRenderer::~VulkanRenderer() = default;
 
 void VulkanRenderer::Initialize(HE::Window* window)
 {
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: initializing");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: initializing");
     m_sdlWindow = window->GetNativeWindow();
-    createInstance();       Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: instance created");
-    createSurface();        Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: surface created");
-    pickPhysicalDevice();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: physical device selected");
-    createDevice();         Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: logical device created");
+    createInstance();       HE_LOG_INFO(RHI, "%s", "VulkanRenderer: instance created");
+    createSurface();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: surface created");
+    pickPhysicalDevice();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: physical device selected");
+    createDevice();         HE_LOG_INFO(RHI, "%s", "VulkanRenderer: logical device created");
     gpuTimerInit();
-    createSwapchain(window->GetWidth(), window->GetHeight()); Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: swapchain created");
-    createRenderPass();     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: render pass created");
-    createFramebuffers();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: framebuffers created");
-    createCommandBuffers(); Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: command buffers created");
-    createSyncObjects();    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: sync objects created");
-    createShadowResources();Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: shadow resources created");
-    createScenePipeline();  Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: scene pipeline created");
-    createCube();           Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: initialized successfully");
+    createSwapchain(window->GetWidth(), window->GetHeight()); HE_LOG_INFO(RHI, "%s", "VulkanRenderer: swapchain created");
+    createRenderPass();     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: render pass created");
+    createFramebuffers();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: framebuffers created");
+    createCommandBuffers(); HE_LOG_INFO(RHI, "%s", "VulkanRenderer: command buffers created");
+    createSyncObjects();    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: sync objects created");
+    createShadowResources();HE_LOG_INFO(RHI, "%s", "VulkanRenderer: shadow resources created");
+    createScenePipeline();  HE_LOG_INFO(RHI, "%s", "VulkanRenderer: scene pipeline created");
+    createCube();           HE_LOG_INFO(RHI, "%s", "VulkanRenderer: initialized successfully");
     createPostFXPipelines();
-    createSkyPipeline();         Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: sky pipeline created");
-    createDebugLinePipeline();   Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: debug line pipeline created");
-    createSSAOPipeline();        Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: SSAO pipeline created");
-    createSkinnedPipeline();     Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: skinned pipeline created");
-    createUIPipeline();          Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: UI pipeline created");
+    createSkyPipeline();         HE_LOG_INFO(RHI, "%s", "VulkanRenderer: sky pipeline created");
+    createDebugLinePipeline();   HE_LOG_INFO(RHI, "%s", "VulkanRenderer: debug line pipeline created");
+    createSSAOPipeline();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: SSAO pipeline created");
+    createSkinnedPipeline();     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: skinned pipeline created");
+    createUIPipeline();          HE_LOG_INFO(RHI, "%s", "VulkanRenderer: UI pipeline created");
 	m_shaderManager = VulkanShaderManager();
 }
 
 void VulkanRenderer::Shutdown()
 {
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: shutdown — waiting for GPU");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: shutdown — waiting for GPU");
     if (m_device) vkDeviceWaitIdle(m_device);
     // ImGui editor textures (logo + content-browser icons): destroy the GPU
     // resources we retained for them. The ImGui descriptor sets are freed by
@@ -273,7 +273,7 @@ void VulkanRenderer::Shutdown()
         if (destroy) destroy(m_instance, m_debugMessenger, nullptr);
     }
     if (m_instance) vkDestroyInstance  (m_instance,            nullptr);
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: all resources released");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: all resources released");
 }
 
 void VulkanRenderer::Render()
@@ -640,12 +640,12 @@ uint32_t VulkanRenderer::GetImageCount()     const { return static_cast<uint32_t
 void VulkanRenderer::SetVSync(bool enabled)
 {
     if (m_vsync == enabled) return;
-    Logger::Log(Logger::LogLevel::Info, enabled ? "VulkanRenderer: VSync enabled — recreating swapchain" : "VulkanRenderer: VSync disabled — recreating swapchain");
+    HE_LOG_INFO(RHI, "%s", enabled ? "VulkanRenderer: VSync enabled — recreating swapchain" : "VulkanRenderer: VSync disabled — recreating swapchain");
     m_vsync = enabled;
     if (!m_device || !m_swapchain) return;
 
     recreateSwapchain();   // picks up the new present mode via m_vsync
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: swapchain recreated");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: swapchain recreated");
 }
 
 // Validation messages → engine Logger so Vulkan API misuse is visible without a
@@ -663,7 +663,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vkDebugCallback(
                          : Logger::LogLevel::Info;
     // Only surface warnings/errors — info/verbose would flood the log.
     if (lvl != Logger::LogLevel::Info)
-        Logger::Log(lvl, (std::string("Vulkan validation: ") + data->pMessage).c_str());
+        Logger::LogTo(HE::Log::Cat::RHI, lvl, (std::string("Vulkan validation: ") + data->pMessage).c_str());
     return VK_FALSE;
 }
 
@@ -703,7 +703,7 @@ void VulkanRenderer::createInstance()
     }
     if (haveValidation) layers.push_back("VK_LAYER_KHRONOS_validation");
     if (haveDebugUtils) exts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    Logger::Log(Logger::LogLevel::Info,
+    HE_LOG_INFO(RHI, "%s",
         haveValidation ? "VulkanRenderer: validation layer ENABLED (HE_GPU_DEBUG)"
                        : "VulkanRenderer: validation layer requested but NOT available");
     }
@@ -802,7 +802,7 @@ void VulkanRenderer::createDevice()
     bool wantHwRt = false;
     if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
     {
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     "VulkanRenderer: HE_GI_FORCE_SW set — software GI path forced");
     }
     else if (m_instanceApiVersion >= VK_API_VERSION_1_2)
@@ -893,13 +893,13 @@ void VulkanRenderer::createDevice()
                 vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
         m_giHwRt = m_pfnCreateAS && m_pfnDestroyAS && m_pfnGetASBuildSizes &&
                    m_pfnCmdBuildAS && m_pfnGetASAddress && m_pfnGetBufferAddress;
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     m_giHwRt ? "VulkanRenderer: GI hardware ray tracing available (VK_KHR_ray_query)"
                              : "VulkanRenderer: HW-RT entry points missing — software GI path");
     }
     else
     {
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     "VulkanRenderer: GI uses software ray tracing (no VK_KHR_ray_query)");
     }
 }
@@ -1375,7 +1375,7 @@ void VulkanRenderer::AttachWindow(HE::Window* window)
     if (m_extraWindows.count(sdlWin)) return; // already attached
     WindowData& wd = m_extraWindows[sdlWin];
     createWindowData(sdlWin, window->GetWidth(), window->GetHeight(), wd);
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: secondary window attached");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: secondary window attached");
 }
 
 void VulkanRenderer::DetachWindow(HE::Window* window)
@@ -1384,7 +1384,7 @@ void VulkanRenderer::DetachWindow(HE::Window* window)
     if (it == m_extraWindows.end()) return;
     destroyWindowData(it->second);
     m_extraWindows.erase(it);
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: secondary window detached");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: secondary window detached");
 }
 
 void VulkanRenderer::RenderWindow(HE::Window* window)
@@ -1407,7 +1407,7 @@ VkShaderModule VulkanRenderer::loadShaderModule(const char* spvFileName)
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f)
     {
-        Logger::Log(Logger::LogLevel::Warning, ("VulkanRenderer: shader not found — " + path).c_str());
+        HE_LOG_WARN(RHI, "%s", ("VulkanRenderer: shader not found — " + path).c_str());
         return VK_NULL_HANDLE;
     }
     const size_t size = static_cast<size_t>(f.tellg());
@@ -1609,7 +1609,7 @@ void VulkanRenderer::createScenePipeline()
             }
         }
         if (!m_whiteAlbedoSet)
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                 "VulkanRenderer: white base-color default failed — untextured meshes will be skipped");
     }
 
@@ -1635,7 +1635,7 @@ void VulkanRenderer::createScenePipeline()
     VkShaderModule fs = loadShaderModule("scene.frag.spv");
     if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: scene shaders missing — scene will not draw");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: scene shaders missing — scene will not draw");
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
         return; // m_scenePipeline stays null; clear-only still works
@@ -1710,7 +1710,7 @@ void VulkanRenderer::createScenePipeline()
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_scenePipeline) != VK_SUCCESS)
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: graphics pipeline creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: graphics pipeline creation failed");
 
     // A3: instanced variant — same fragment shader + states, VS reads per-instance
     // mvp+model from binding 1 (VK_VERTEX_INPUT_RATE_INSTANCE). Created from `pci`
@@ -1745,7 +1745,7 @@ void VulkanRenderer::createScenePipeline()
         ipci.pStages           = istages;
         ipci.pVertexInputState = &ivi;
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr, &m_sceneInstancedPipeline) != VK_SUCCESS)
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: instanced scene pipeline creation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced scene pipeline creation failed");
         vkDestroyShaderModule(m_device, ivs, nullptr);
     }
 
@@ -1772,7 +1772,7 @@ void VulkanRenderer::createScenePipeline()
         tpci.pColorBlendState    = &tcb;
         tpci.pDepthStencilState  = &tds;
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci, nullptr, &m_sceneTransparentPipeline) != VK_SUCCESS)
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: transparent pipeline creation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: transparent pipeline creation failed");
     }
 
     vkDestroyShaderModule(m_device, vs, nullptr);
@@ -1795,7 +1795,7 @@ void VulkanRenderer::createScenePipeline()
             spci.pColorBlendState = nullptr;     // no color attachment
             spci.renderPass      = m_shadowPass;
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
-                Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: shadow pipeline creation failed");
+                HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
             vkDestroyShaderModule(m_device, svs, nullptr);
         }
     }
@@ -1861,7 +1861,7 @@ void VulkanRenderer::createMaterialResources()
     // to bind, so leave the path disabled rather than sample an unbound descriptor.
     if (!m_whiteAlbedoView || !m_albedoSampler)
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(RHI, "%s",
             "VulkanRenderer: A4 material path disabled — white base-color default unavailable");
         return;
     }
@@ -1876,7 +1876,7 @@ void VulkanRenderer::createMaterialResources()
         vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         if (vkCreateImageView(m_device, &vci, nullptr, &m_whiteArrayView) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                 "VulkanRenderer: A4 material path disabled — white array view failed");
             return;
         }
@@ -1908,7 +1908,7 @@ void VulkanRenderer::createMaterialResources()
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material descriptor-set layout failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material descriptor-set layout failed");
         return;
     }
 
@@ -1918,7 +1918,7 @@ void VulkanRenderer::createMaterialResources()
     plci.pSetLayouts    = &m_matSetLayout;
     if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_matPipelineLayout) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material pipeline layout failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material pipeline layout failed");
         return;
     }
 
@@ -1953,7 +1953,7 @@ void VulkanRenderer::createMaterialResources()
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material descriptor pool failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material descriptor pool failed");
             return;
         }
         // NOTE: sized to the FULL Lighting struct — this was 64 (the v1 sun-only
@@ -1962,13 +1962,13 @@ void VulkanRenderer::createMaterialResources()
         if (!makeBuf(sizeof(HE::MaterialShaderLibrary::Lighting), m_matLightBuf[f])
             || !makeBuf(ringSize, m_matObjBuf[f]) || !makeBuf(ringSize, m_matParBuf[f]))
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material UBO ring allocation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material UBO ring allocation failed");
             return;
         }
     }
 
     m_matReady = true;
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: A4 material resources created");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: A4 material resources created");
 #endif
 }
 
@@ -2020,7 +2020,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::SpirV);
     if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: A4 material shader cross-compile failed");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 material shader cross-compile failed");
         m_materialPipelines.emplace(key, VK_NULL_HANDLE); // cache the miss — don't retry every draw
         return VK_NULL_HANDLE;
     }
@@ -2039,7 +2039,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     {
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: A4 material shader module creation failed");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 material shader module creation failed");
         m_materialPipelines.emplace(key, VK_NULL_HANDLE);
         return VK_NULL_HANDLE;
     }
@@ -2120,7 +2120,7 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     VkPipeline pipe = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipe) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: A4 material pipeline creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: A4 material pipeline creation failed");
         pipe = VK_NULL_HANDLE;
     }
     vkDestroyShaderModule(m_device, vs, nullptr);
@@ -2402,7 +2402,7 @@ void VulkanRenderer::createPostFXPipelines()
 
     if (!vsM || !tmFS || !fxFS || !brFS || !blFS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: PostFX shaders missing — no HDR/bloom/FXAA");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: PostFX shaders missing — no HDR/bloom/FXAA");
         for (auto m : {vsM,tmFS,fxFS,brFS,blFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
         return;
     }
@@ -2488,7 +2488,7 @@ void VulkanRenderer::createPostFXPipelines()
             pci2.pDepthStencilState=&ds2; pci2.pColorBlendState=&cb2; pci2.pDynamicState=&dyn2;
             pci2.layout=m_scenePipelineLayout; pci2.renderPass=m_postFxSceneRP;
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci2, nullptr, &m_scenePipelineHDR) != VK_SUCCESS)
-                Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: HDR scene pipeline failed");
+                HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR scene pipeline failed");
             // A3: instanced HDR variant (per-instance mvp+model at binding 1).
             if (VkShaderModule ivs2 = loadShaderModule("scene_instanced.vert.spv"))
             {
@@ -2511,7 +2511,7 @@ void VulkanRenderer::createPostFXPipelines()
                 ivi2.vertexAttributeDescriptionCount=11; ivi2.pVertexAttributeDescriptions=iat;
                 VkGraphicsPipelineCreateInfo ipci2=pci2; ipci2.pStages=ist; ipci2.pVertexInputState=&ivi2;
                 if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci2, nullptr, &m_sceneInstancedPipelineHDR) != VK_SUCCESS)
-                    Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: instanced HDR scene pipeline failed");
+                    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced HDR scene pipeline failed");
                 vkDestroyShaderModule(m_device, ivs2, nullptr);
             }
             // Alpha-blend transparent variant
@@ -2525,14 +2525,14 @@ void VulkanRenderer::createPostFXPipelines()
                 VkPipelineDepthStencilStateCreateInfo tds2=ds2; tds2.depthWriteEnable=VK_FALSE;
                 VkGraphicsPipelineCreateInfo tpci2=pci2; tpci2.pColorBlendState=&tcb2; tpci2.pDepthStencilState=&tds2;
                 if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &tpci2, nullptr, &m_sceneTransparentPipelineHDR) != VK_SUCCESS)
-                    Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: HDR transparent pipeline failed");
+                    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: HDR transparent pipeline failed");
             }
             vkDestroyShaderModule(m_device, vs2, nullptr);
             vkDestroyShaderModule(m_device, fs2, nullptr);
         }
     }
 
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: PostFX pipelines created");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: PostFX pipelines created");
 }
 
 void VulkanRenderer::destroyPostFXPipelines()
@@ -4323,7 +4323,7 @@ void VulkanRenderer::createSkyPipeline()
     {
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: sky shaders not found — sky disabled");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: sky shaders not found — sky disabled");
         return;
     }
 
@@ -4389,7 +4389,7 @@ void VulkanRenderer::createSkyPipeline()
         pci.renderPass          = rp;
         pci.subpass             = 0;
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: sky pipeline creation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: sky pipeline creation failed");
     };
 
     makeSkyPipeline(m_renderPass, m_skyPipeline);
@@ -4567,7 +4567,7 @@ void VulkanRenderer::createDebugLinePipeline()
     {
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: debug line shaders not found — debug lines disabled");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: debug line shaders not found — debug lines disabled");
         return;
     }
 
@@ -4648,7 +4648,7 @@ void VulkanRenderer::createDebugLinePipeline()
         pci.renderPass          = rp;
         pci.subpass             = 0;
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: debug line pipeline creation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: debug line pipeline creation failed");
     };
 
     makeDebugPipeline(m_renderPass, m_debugPipeline);
@@ -5361,7 +5361,7 @@ VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: HW BLAS input buffer failed");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: HW BLAS input buffer failed");
         return out;
     }
     void* mapped = nullptr;
@@ -5444,7 +5444,7 @@ VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
     destroyGiHwBuffer(geo);
     if (!ok)
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(RHI, "%s",
                     "VulkanRenderer: HW BLAS build failed — SW GI kernels for affected frames");
         destroyGiHwBlas(out);
         return out;
@@ -5504,7 +5504,7 @@ bool VulkanRenderer::buildGiTlas(VkCommandBuffer cmd)
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                         "VulkanRenderer: GI TLAS buffer creation failed — SW kernels this frame");
             destroyGiHwBuffer(t.buffer);
             destroyGiHwBuffer(t.scratch);
@@ -5518,7 +5518,7 @@ bool VulkanRenderer::buildGiTlas(VkCommandBuffer cmd)
         aci.type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
         if (m_pfnCreateAS(m_device, &aci, nullptr, &t.as) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                         "VulkanRenderer: GI TLAS creation failed — SW kernels this frame");
             destroyGiHwBuffer(t.buffer);
             destroyGiHwBuffer(t.scratch);
@@ -5584,7 +5584,7 @@ void VulkanRenderer::createGiPipelines()
         sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         if (vkCreateSampler(m_device, &sci, nullptr, &m_giPointSampler) != VK_SUCCESS)
-        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI point sampler failed"); return; }
+        { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI point sampler failed"); return; }
     }
 
     // ── Descriptor set layouts ────────────────────────────────────────────────
@@ -5635,7 +5635,7 @@ void VulkanRenderer::createGiPipelines()
         bindOf(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT),
     }, m_giFsDSL);
     if (!ok)
-    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor layouts failed"); return; }
+    { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor layouts failed"); return; }
 
     // ── Pipeline layouts ──────────────────────────────────────────────────────
     auto makePL = [&](VkDescriptorSetLayout dsl, uint32_t pcSize, VkShaderStageFlags pcStage,
@@ -5654,7 +5654,7 @@ void VulkanRenderer::createGiPipelines()
       && makePL(m_giFsDSL,     0, 0, m_giFsPL)
       && makePL(VK_NULL_HANDLE, sizeof(PushConstants), VK_SHADER_STAGE_VERTEX_BIT, m_giGBufPL);
     if (!ok)
-    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI pipeline layouts failed"); return; }
+    { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI pipeline layouts failed"); return; }
 
     // ── Render passes ─────────────────────────────────────────────────────────
     // G-buffer: 2x RGBA16F (CLEAR → SHADER_READ_ONLY) + depth. The end
@@ -5711,7 +5711,7 @@ void VulkanRenderer::createGiPipelines()
         rpci.subpassCount    = 1; rpci.pSubpasses    = &sub;
         rpci.dependencyCount = 2; rpci.pDependencies = deps;
         if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_giGBufRP) != VK_SUCCESS)
-        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI gbuf render pass failed"); return; }
+        { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI gbuf render pass failed"); return; }
     }
     // Temporal (RGBA16F) + blur (R16F): single color, DONT_CARE → SHADER_READ_ONLY.
     auto makeFsRP = [&](VkFormat fmt, VkRenderPass& rp) -> bool
@@ -5751,7 +5751,7 @@ void VulkanRenderer::createGiPipelines()
     };
     if (!makeFsRP(VK_FORMAT_R16G16B16A16_SFLOAT, m_giTemporalRP) ||
         !makeFsRP(VK_FORMAT_R16_SFLOAT,          m_giBlurRP))
-    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI fs render passes failed"); return; }
+    { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI fs render passes failed"); return; }
 
     // ── Shader modules ────────────────────────────────────────────────────────
     VkShaderModule gbufVS   = loadShaderModule("gi_gbuf.vert.spv");
@@ -5768,7 +5768,7 @@ void VulkanRenderer::createGiPipelines()
     };
     if (!gbufVS || !gbufFS || !fsVS || !tempFS || !blurFS || !shadowCS || !probeCS)
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: GI shaders missing — GI disabled");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI shaders missing — GI disabled");
         destroyModules();
         return;
     }
@@ -5860,7 +5860,7 @@ void VulkanRenderer::createGiPipelines()
     pipesOk = pipesOk && makeCompute(probeCS,  m_giProbePL,  m_giProbePipe);
     destroyModules();
     if (!pipesOk)
-    { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI pipeline creation failed — GI disabled"); return; }
+    { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI pipeline creation failed — GI disabled"); return; }
 
     // ── Descriptor pool + per-in-flight-frame sets + params UBOs ─────────────
     {
@@ -5875,7 +5875,7 @@ void VulkanRenderer::createGiPipelines()
         dpci.poolSizeCount = 4;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_giDescPool) != VK_SUCCESS)
-        { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor pool failed"); return; }
+        { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor pool failed"); return; }
         for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
         {
             VkDescriptorSetLayout layouts[4] = { m_giShadowDSL, m_giProbeDSL, m_giFsDSL, m_giFsDSL };
@@ -5885,7 +5885,7 @@ void VulkanRenderer::createGiPipelines()
             dsai.descriptorSetCount = 4;
             dsai.pSetLayouts        = layouts;
             if (vkAllocateDescriptorSets(m_device, &dsai, sets) != VK_SUCCESS)
-            { Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI descriptor sets failed"); return; }
+            { HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI descriptor sets failed"); return; }
             m_giShadowSet[i]   = sets[0];
             m_giProbeSet[i]    = sets[1];
             m_giTemporalSet[i] = sets[2];
@@ -5893,7 +5893,7 @@ void VulkanRenderer::createGiPipelines()
         }
     }
     m_giReady = true;
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: GI pipelines built (software compute ray tracing)");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: GI pipelines built (software compute ray tracing)");
 
     // HW ray-query kernels on top (optional): failure logs + degrades to the
     // SW kernels just built — never blocks GI as a whole.
@@ -5908,7 +5908,7 @@ void VulkanRenderer::createGiHwPipelines()
 {
     auto fail = [&](const char* what)
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(RHI, "%s",
             (std::string("VulkanRenderer: ") + what + " — HW ray tracing off, software GI kernels").c_str());
         if (m_giShadowHwPipe) { vkDestroyPipeline(m_device, m_giShadowHwPipe, nullptr); m_giShadowHwPipe = VK_NULL_HANDLE; }
         if (m_giProbeHwPipe)  { vkDestroyPipeline(m_device, m_giProbeHwPipe, nullptr);  m_giProbeHwPipe  = VK_NULL_HANDLE; }
@@ -6026,7 +6026,7 @@ void VulkanRenderer::createGiHwPipelines()
         }
     }
     m_giHwPipesReady = true;
-    Logger::Log(Logger::LogLevel::Info,
+    HE_LOG_INFO(RHI, "%s",
                 "VulkanRenderer: GI HW ray-query kernels built (VK_KHR_ray_query)");
 }
 
@@ -6071,7 +6071,7 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
            && makeImg(VK_FORMAT_R16_SFLOAT, kRT, VK_IMAGE_ASPECT_COLOR_BIT, m_giResult);
     if (!ok)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI target creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI target creation failed");
         destroyGiTargets();
         return;
     }
@@ -6100,7 +6100,7 @@ void VulkanRenderer::createGiTargets(uint32_t w, uint32_t h)
     }
     if (!ok)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI framebuffer creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI framebuffer creation failed");
         destroyGiTargets();
         return;
     }
@@ -6217,7 +6217,7 @@ void VulkanRenderer::ensureGiProbeAtlas()
     if (!makeAtlas(VK_FORMAT_R16G16B16A16_SFLOAT, m_giIrrAtlas) ||
         !makeAtlas(VK_FORMAT_R16G16_SFLOAT,       m_giVisAtlas))
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: GI probe atlas creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: GI probe atlas creation failed");
         destroyGiProbeAtlas();
         return;
     }
@@ -7116,7 +7116,7 @@ void VulkanRenderer::createSSAOPipeline()
     VkShaderModule blurFS  = loadShaderModule("ssao_blur.frag.spv");
     if (!posVS || !posFS || !fsxVS || !ssaoFS || !blurFS)
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: SSAO shaders missing — SSAO disabled");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: SSAO shaders missing — SSAO disabled");
         for (auto m : {posVS, posFS, fsxVS, ssaoFS, blurFS})
             if (m) vkDestroyShaderModule(m_device, m, nullptr);
         return;
@@ -7240,7 +7240,7 @@ void VulkanRenderer::createSSAOPipeline()
         vkDestroyShaderModule(m_device, m, nullptr);
 
     m_ssaoReady = true;
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: SSAO pipeline ready");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: SSAO pipeline ready");
 }
 
 void VulkanRenderer::createSSAOTargets(uint32_t w, uint32_t h)
@@ -7471,7 +7471,7 @@ void VulkanRenderer::createSkinnedPipeline()
     bonesDslci.pBindings    = &bonesBind;
     if (vkCreateDescriptorSetLayout(m_device, &bonesDslci, nullptr, &m_skinnedBonesDSL) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned bones DSL creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned bones DSL creation failed");
         return;
     }
 
@@ -7489,7 +7489,7 @@ void VulkanRenderer::createSkinnedPipeline()
     plci.pPushConstantRanges    = &pcr;
     if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_skinnedPipeLayout) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned pipeline layout failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned pipeline layout failed");
         return;
     }
 
@@ -7501,7 +7501,7 @@ void VulkanRenderer::createSkinnedPipeline()
     bonesPoolci.pPoolSizes    = &bonePooSize;
     if (vkCreateDescriptorPool(m_device, &bonesPoolci, nullptr, &m_skinnedDescPool) != VK_SUCCESS)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned descriptor pool failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned descriptor pool failed");
         return;
     }
 
@@ -7518,7 +7518,7 @@ void VulkanRenderer::createSkinnedPipeline()
         bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         if (vkCreateBuffer(m_device, &bci, nullptr, &m_boneUBO[i]) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: bone UBO buffer failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: bone UBO buffer failed");
             return;
         }
         VkMemoryRequirements req{};
@@ -7529,7 +7529,7 @@ void VulkanRenderer::createSkinnedPipeline()
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (vkAllocateMemory(m_device, &mai, nullptr, &m_boneUBOMem[i]) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: bone UBO memory failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: bone UBO memory failed");
             return;
         }
         vkBindBufferMemory(m_device, m_boneUBO[i], m_boneUBOMem[i], 0);
@@ -7542,7 +7542,7 @@ void VulkanRenderer::createSkinnedPipeline()
         dsai.pSetLayouts        = &m_skinnedBonesDSL;
         if (vkAllocateDescriptorSets(m_device, &dsai, &m_boneDescSet[i]) != VK_SUCCESS)
         {
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned descriptor set alloc failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned descriptor set alloc failed");
             return;
         }
         // range = one slot; the dynamic offset selects which slot the shader reads.
@@ -7561,7 +7561,7 @@ void VulkanRenderer::createSkinnedPipeline()
     VkShaderModule fs = loadShaderModule("scene.frag.spv");
     if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE)
     {
-        Logger::Log(Logger::LogLevel::Warning,
+        HE_LOG_WARN(RHI, "%s",
             "VulkanRenderer: skinned.vert.spv or scene.frag.spv not found — skinned draws will be skipped");
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
@@ -7648,7 +7648,7 @@ void VulkanRenderer::createSkinnedPipeline()
     pci.renderPass          = m_renderPass;
     pci.subpass             = 0;
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_skinnedPipeline) != VK_SUCCESS)
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned pipeline creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned pipeline creation failed");
 
     // ── HDR variant (renderPass = m_postFxSceneRP, RGBA16F) ──────────────────
     if (m_postFxSceneRP != VK_NULL_HANDLE)
@@ -7656,7 +7656,7 @@ void VulkanRenderer::createSkinnedPipeline()
         VkGraphicsPipelineCreateInfo hdrPci = pci;
         hdrPci.renderPass = m_postFxSceneRP;
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &hdrPci, nullptr, &m_skinnedPipelineHDR) != VK_SUCCESS)
-            Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: skinned HDR pipeline creation failed");
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: skinned HDR pipeline creation failed");
     }
 
     vkDestroyShaderModule(m_device, vs, nullptr);
@@ -7743,7 +7743,7 @@ VulkanRenderer::resolveSkeletalMesh(const HE::UUID& id)
                            asset->indices.data(), sm.ib, sm.ibMem);
     if (!ok)
     {
-        Logger::Log(Logger::LogLevel::Error, "VulkanRenderer: resolveSkeletalMesh buffer creation failed");
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: resolveSkeletalMesh buffer creation failed");
         // Partial cleanup: destroy whatever was created before the failure.
         if (sm.vb)       { vkDestroyBuffer(m_device, sm.vb,       nullptr); vkFreeMemory(m_device, sm.vbMem,      nullptr); }
         if (sm.boneIdVb) { vkDestroyBuffer(m_device, sm.boneIdVb, nullptr); vkFreeMemory(m_device, sm.boneIdMem,  nullptr); }
@@ -7783,7 +7783,7 @@ void VulkanRenderer::createUIPipeline()
     VkShaderModule fs = loadShaderModule("ui.frag.spv");
     if (!vs || !fs)
     {
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: UI shaders missing — in-game UI disabled");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: UI shaders missing — in-game UI disabled");
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
         if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
         return;
@@ -7957,7 +7957,7 @@ void VulkanRenderer::createUIPipeline()
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
 
-    Logger::Log(Logger::LogLevel::Info, "VulkanRenderer: UI canvas pipelines created (swapchain + viewport)");
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: UI canvas pipelines created (swapchain + viewport)");
 }
 
 void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
@@ -8163,7 +8163,7 @@ VkDescriptorSet VulkanRenderer::uiFontAtlasSet(uint32_t key)
     if (vkAllocateDescriptorSets(m_device, &dsai, &atlas.set) != VK_SUCCESS)
     {
         // Pool exhausted (>32 fonts): keep the shared font working, drop this one.
-        Logger::Log(Logger::LogLevel::Warning, "VulkanRenderer: UI font atlas descriptor pool exhausted");
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: UI font atlas descriptor pool exhausted");
         vkDestroyImageView(m_device, atlas.view, nullptr);
         vkDestroyImage(m_device, atlas.image, nullptr);
         vkFreeMemory(m_device, atlas.memory, nullptr);
@@ -8213,7 +8213,7 @@ void VulkanRenderer::gpuTimerInit()
     // timestampPeriod == 0 would make the tick→ns conversion meaningless.
     if (validBits == 0 || props.limits.timestampPeriod <= 0.0f)
     {
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
             "VulkanRenderer: GPU timestamps unsupported on this queue — gpuFrameMs stays -1");
         return;
     }

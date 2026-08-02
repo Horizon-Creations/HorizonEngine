@@ -416,7 +416,8 @@ if(HE_ENABLE_SHADERC)
             ${CMAKE_SOURCE_DIR}/src/HE_Tools/ShaderCompiler)
         target_link_libraries(he_shadercompiler PRIVATE
             glslang SPIRV glslang-default-resource-limits
-            spirv-cross-core spirv-cross-glsl spirv-cross-msl spirv-cross-hlsl)
+            spirv-cross-core spirv-cross-glsl spirv-cross-msl spirv-cross-hlsl
+            HorizonCore)   # HE::Log — shader compile failures go to the engine log
         target_compile_features(he_shadercompiler PUBLIC cxx_std_20)
         target_compile_definitions(he_shadercompiler PUBLIC HE_HAVE_SHADERC=1)
 
