@@ -853,7 +853,7 @@ static void logD3D12DredOutput(ID3D12Device* device)
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
     if (!device || FAILED(device->QueryInterface(IID_PPV_ARGS(&dred))))
     {
-        Logger::Log(Logger::LogLevel::Error, "D3D12 DRED: not available (no breadcrumb data)");
+        HE_LOG_ERROR(RHI, "%s", "D3D12 DRED: not available (no breadcrumb data)");
         return;
     }
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
@@ -870,7 +870,7 @@ static void logD3D12DredOutput(ID3D12Device* device)
                 "D3D12 DRED node cmdList='%s' completed %u/%u ops (hang after op %u). Full op history:",
                 node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "(unnamed)",
                 done, total, done);
-            Logger::Log(Logger::LogLevel::Error, hdr);
+            HE_LOG_ERROR(RHI, "%s", hdr);
             // Print the WHOLE history (capped): the fullscreen passes (sky/SSAO/PostFX)
             // are DRAWINSTANCED while geometry is DRAWINDEXEDINSTANCED, so the sequence
             // structure reveals which pass the hung op belongs to. Collapse long runs of
@@ -884,7 +884,7 @@ static void logD3D12DredOutput(ID3D12Device* device)
                 {
                     std::snprintf(line, sizeof(line), "   op[%u]  <== HUNG HERE = %s",
                                   i, dredOpName(node->pCommandHistory[i]));
-                    Logger::Log(Logger::LogLevel::Error, line);
+                    HE_LOG_ERROR(RHI, "%s", line);
                     ++i; continue;
                 }
                 const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];
@@ -895,7 +895,7 @@ static void logD3D12DredOutput(ID3D12Device* device)
                                   i, j - 1, dredOpName(op), j - i);
                 else
                     std::snprintf(line, sizeof(line), "   op[%u] = %s", i, dredOpName(op));
-                Logger::Log(Logger::LogLevel::Error, line);
+                HE_LOG_ERROR(RHI, "%s", line);
                 i = j;
             }
         }
@@ -906,7 +906,7 @@ static void logD3D12DredOutput(ID3D12Device* device)
         char line[128];
         std::snprintf(line, sizeof(line), "D3D12 DRED: GPU page-fault at VA 0x%llX",
             static_cast<unsigned long long>(pf.PageFaultVA));
-        Logger::Log(Logger::LogLevel::Error, line);
+        HE_LOG_ERROR(RHI, "%s", line);
     }
 }
 
@@ -1258,7 +1258,7 @@ struct D3D12RendererImpl
             if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D12 PostFX '") + entry + "' failed: "
                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
                 return false;
@@ -1553,7 +1553,7 @@ struct D3D12RendererImpl
             if (FAILED(D3DCompile(src.c_str(), src.size(), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D12 sky '") + entry + "': " +
                      (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
                 return false;
@@ -1634,7 +1634,7 @@ struct D3D12RendererImpl
         //  createSkyPipeline is invoked from createPipeline, after Initialize has
         //  created the queue/allocators/closed cmdList/fence.) Non-fatal on failure.
         if (!uploadSkyNoise3D())
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                 "D3D12Renderer: sky 3D noise upload failed — volumetric clouds disabled");
 
         // Upload CBs for sky env (one per frame in flight).
@@ -1677,10 +1677,10 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> vsB, psB, err;
         if (FAILED(D3DCompile(kDebugLineHLSL, strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "VSLine", "vs_5_0", flags, 0, &vsB, &err)))
-        { Logger::Log(Logger::LogLevel::Error, "D3D12 DebugLine VS compile failed"); return false; }
+        { HE_LOG_ERROR(RHI, "%s", "D3D12 DebugLine VS compile failed"); return false; }
         if (FAILED(D3DCompile(kDebugLineHLSL, strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "PSLine", "ps_5_0", flags, 0, &psB, &err)))
-        { Logger::Log(Logger::LogLevel::Error, "D3D12 DebugLine PS compile failed"); return false; }
+        { HE_LOG_ERROR(RHI, "%s", "D3D12 DebugLine PS compile failed"); return false; }
 
         // Root sig: [0] CBV b0 (viewProj mat4), no SRVs.
         {
@@ -2468,7 +2468,7 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(kUIHLSL12, strlen(kUIHLSL12),
                               "ui", nullptr, nullptr, "UIVSMain", "vs_5_0", flags, 0, &vsB, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                 (std::string("D3D12 UI VS compile failed: ")
                  + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
             return false;
@@ -2476,7 +2476,7 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(kUIHLSL12, strlen(kUIHLSL12),
                               "ui", nullptr, nullptr, "UIPSMain", "ps_5_0", flags, 0, &psB, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                 (std::string("D3D12 UI PS compile failed: ")
                  + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
             return false;
@@ -2513,7 +2513,7 @@ struct D3D12RendererImpl
                 FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
                        IID_PPV_ARGS(&m_uiRootSig))))
             {
-                Logger::Log(Logger::LogLevel::Error, "D3D12 UI root signature failed");
+                HE_LOG_ERROR(RHI, "%s", "D3D12 UI root signature failed");
                 return false;
             }
         }
@@ -2544,7 +2544,7 @@ struct D3D12RendererImpl
             pd.SampleDesc.Count      = 1;
             if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_uiPSO))))
             {
-                Logger::Log(Logger::LogLevel::Error, "D3D12 UI PSO creation failed");
+                HE_LOG_ERROR(RHI, "%s", "D3D12 UI PSO creation failed");
                 return false;
             }
         }
@@ -2557,7 +2557,7 @@ struct D3D12RendererImpl
                 reinterpret_cast<void**>(&m_uiCBPtr[f]));
             if (!m_uiCB[f])
             {
-                Logger::Log(Logger::LogLevel::Error, "D3D12 UI CB allocation failed");
+                HE_LOG_ERROR(RHI, "%s", "D3D12 UI CB allocation failed");
                 return false;
             }
         }
@@ -2573,7 +2573,7 @@ struct D3D12RendererImpl
             hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_uiAtlasHeap))))
             {
-                Logger::Log(Logger::LogLevel::Error, "D3D12 UI atlas heap creation failed");
+                HE_LOG_ERROR(RHI, "%s", "D3D12 UI atlas heap creation failed");
                 return false;
             }
             D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
@@ -2737,7 +2737,7 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> sig, err;
         if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: root signature serialize failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: root signature serialize failed");
             return false;
         }
         if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
@@ -2811,14 +2811,14 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vs, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: VS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: VS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &ps, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: PS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: PS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
@@ -2853,7 +2853,7 @@ struct D3D12RendererImpl
 
         if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso))))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: PSO creation failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: PSO creation failed");
             return false;
         }
 
@@ -2880,7 +2880,7 @@ struct D3D12RendererImpl
             }
             else
             {
-                Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: VSMainInstanced "
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: VSMainInstanced "
                     "compile failed: ") + (ierr ? static_cast<const char*>(ierr->GetBufferPointer()) : "")).c_str());
             }
         }
@@ -2969,7 +2969,7 @@ struct D3D12RendererImpl
             if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &errBlob)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D12 SSAO '") + entry + "' compile failed: "
                     + (errBlob ? static_cast<const char*>(errBlob->GetBufferPointer()) : "?")).c_str());
                 return false;
@@ -2991,7 +2991,7 @@ struct D3D12RendererImpl
             if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)) ||
                 FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
                        IID_PPV_ARGS(&ssaoPosRS))))
-            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO pos root sig failed"); return false; }
+            { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO pos root sig failed"); return false; }
         }
 
         // ── Root signature for SSAO main pass and blur pass ──────────────────
@@ -3023,7 +3023,7 @@ struct D3D12RendererImpl
             if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)) ||
                 FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
                        IID_PPV_ARGS(&ssaoRS))))
-            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO root sig failed"); return false; }
+            { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO root sig failed"); return false; }
         }
 
         // ── Compile shaders ───────────────────────────────────────────────────
@@ -3060,7 +3060,7 @@ struct D3D12RendererImpl
             pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
             pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
             if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPosPSO))))
-            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO pos PSO failed"); return false; }
+            { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO pos PSO failed"); return false; }
         }
 
         // ── SSAO main pass PSO (fullscreen, R8, no depth) ────────────────────
@@ -3079,7 +3079,7 @@ struct D3D12RendererImpl
             pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.DepthStencilState.DepthEnable = FALSE;
             if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPSO))))
-            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO PSO failed"); return false; }
+            { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO PSO failed"); return false; }
         }
 
         // ── SSAO blur pass PSO (fullscreen, R8, no depth) ────────────────────
@@ -3098,7 +3098,7 @@ struct D3D12RendererImpl
             pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             pd.DepthStencilState.DepthEnable = FALSE;
             if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoBlurPSO))))
-            { Logger::Log(Logger::LogLevel::Error, "D3D12 SSAO blur PSO failed"); return false; }
+            { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO blur PSO failed"); return false; }
         }
 
         // ── Constant buffers (per-frame rings, persistently mapped) ──────────
@@ -3943,7 +3943,7 @@ struct D3D12RendererImpl
             if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
                                   entry, profile, flags, 0, &blob, &err)))
             {
-                Logger::Log(Logger::LogLevel::Error,
+                HE_LOG_ERROR(RHI, "%s",
                     (std::string("D3D12Renderer: GI shader compile failed (") + entry + "): "
                      + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
                 return false;
@@ -4203,7 +4203,7 @@ struct D3D12RendererImpl
 
         if (!ok)
         {
-            Logger::Log(Logger::LogLevel::Error,
+            HE_LOG_ERROR(RHI, "%s",
                         "D3D12Renderer: GI pipeline build failed — GI disabled");
             giGBufRS.Reset(); giComputeRS.Reset(); giFsRS.Reset();
             giGBufPSO.Reset(); giShadowPSO.Reset(); giProbePSO.Reset();
@@ -4212,7 +4212,7 @@ struct D3D12RendererImpl
             giSupported = false;
             return;
         }
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     "D3D12Renderer: GI pipelines built (compute ray tracing active)");
 #if HE_D3D12_DXR
         // Optional DXR 1.1 upgrade on top of the working SW pipelines — every
@@ -4392,7 +4392,7 @@ struct D3D12RendererImpl
         giProbesPerRow = std::min(giProbeCount, 32);
         giProbeCursor  = 0;
         giProbeGridBuilt = true;
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     ("D3D12Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
                      + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
                      + " (" + std::to_string(giProbeCount) + " probes)").c_str());
@@ -4810,7 +4810,7 @@ struct D3D12RendererImpl
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f)
         {
-            Logger::Log(Logger::LogLevel::Info,
+            HE_LOG_INFO(RHI, "%s",
                         ("D3D12Renderer: DXR kernel not found (" + path +
                          ") — software GI kernels stay active").c_str());
             return {};
@@ -4851,13 +4851,13 @@ struct D3D12RendererImpl
     {
         if (const char* force = std::getenv("HE_GI_FORCE_SW"); force && *force && *force != '0')
         {
-            Logger::Log(Logger::LogLevel::Info,
+            HE_LOG_INFO(RHI, "%s",
                         "D3D12Renderer: HE_GI_FORCE_SW set — software GI path forced");
             return;
         }
         if (FAILED(device.As(&giDevice5)) || !giDevice5)
         {
-            Logger::Log(Logger::LogLevel::Info,
+            HE_LOG_INFO(RHI, "%s",
                         "D3D12Renderer: GI uses software ray tracing (no ID3D12Device5)");
             return;
         }
@@ -4866,7 +4866,7 @@ struct D3D12RendererImpl
                                                   &opts5, sizeof(opts5))) ||
             opts5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
         {
-            Logger::Log(Logger::LogLevel::Info,
+            HE_LOG_INFO(RHI, "%s",
                         "D3D12Renderer: GI uses software ray tracing (DXR tier < 1.1)");
             giDevice5.Reset();
             return;
@@ -4882,7 +4882,7 @@ struct D3D12RendererImpl
         // Reset() between frames does not change identity).
         if (FAILED(cmdList.As(&giCmdList4)) || !giCmdList4)
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                         "D3D12Renderer: DXR command-list interface unavailable — software GI");
             giDevice5.Reset();
             return;
@@ -4908,7 +4908,7 @@ struct D3D12RendererImpl
         if (ok) giBuildCmdList->Close(); // created open; keep closed between builds
         if (!ok)
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                         "D3D12Renderer: DXR kernel PSO/allocator creation failed — software GI");
             giShadowHwPSO.Reset(); giProbeHwPSO.Reset();
             giBuildCmdList.Reset(); giBuildAllocator.Reset();
@@ -4916,7 +4916,7 @@ struct D3D12RendererImpl
             return;
         }
         giHwPipesReady = true;
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
                     "D3D12Renderer: GI hardware ray tracing available (DXR 1.1 inline RayQuery)");
     }
 
@@ -4961,7 +4961,7 @@ struct D3D12RendererImpl
         ComPtr<ID3D12Resource> geo = createUploadBuffer(iOfs + iBytes, &mapped);
         if (!geo || !mapped)
         {
-            Logger::Log(Logger::LogLevel::Warning, "D3D12Renderer: DXR BLAS input buffer failed");
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: DXR BLAS input buffer failed");
             return out;
         }
         std::memcpy(mapped, vdata, static_cast<size_t>(vBytes));
@@ -4995,7 +4995,7 @@ struct D3D12RendererImpl
             createGiHwBuffer(pre.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (!out.as || !scratch)
         {
-            Logger::Log(Logger::LogLevel::Warning,
+            HE_LOG_WARN(RHI, "%s",
                         "D3D12Renderer: DXR BLAS buffer creation failed — SW GI kernels for affected frames");
             out.as.Reset();
             return out;
@@ -5068,7 +5068,7 @@ struct D3D12RendererImpl
             giTlasScratchSize[fi] = giTlasScratch[fi] ? pre.ScratchDataSizeInBytes  : 0;
             if (!giTlasBuf[fi] || !giTlasScratch[fi])
             {
-                Logger::Log(Logger::LogLevel::Warning,
+                HE_LOG_WARN(RHI, "%s",
                             "D3D12Renderer: GI TLAS buffer creation failed — SW kernels this frame");
                 return false;
             }
@@ -5250,7 +5250,7 @@ struct D3D12RendererImpl
         ComPtr<ID3DBlob> sig, err;
         if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: skinned root signature serialize failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: skinned root signature serialize failed");
             return false;
         }
         if (FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
@@ -5267,7 +5267,7 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &ps, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: skinned PS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: skinned PS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
@@ -5276,7 +5276,7 @@ struct D3D12RendererImpl
         if (FAILED(D3DCompile(kSkinnedHLSL, strlen(kSkinnedHLSL), "skinned", nullptr, nullptr,
                               "VSMainSkinned", "vs_5_0", flags, 0, &vs, &cerr)))
         {
-            Logger::Log(Logger::LogLevel::Error, (std::string("D3D12Renderer: skinned VS compile failed: ")
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: skinned VS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
@@ -5311,7 +5311,7 @@ struct D3D12RendererImpl
 
         if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_skinnedPSO))))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: skinned PSO creation failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: skinned PSO creation failed");
             return false;
         }
 
@@ -5490,7 +5490,7 @@ void D3D12RendererImpl::createMaterialResources()
         FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
                IID_PPV_ARGS(&m_matRootSig))))
     {
-        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material root signature failed");
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material root signature failed");
         m_matRootSig.Reset();
         return;
     }
@@ -5507,7 +5507,7 @@ void D3D12RendererImpl::createMaterialResources()
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material SRV heap failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material SRV heap failed");
             m_matRootSig.Reset();
             return;
         }
@@ -5558,13 +5558,13 @@ void D3D12RendererImpl::createMaterialResources()
                                                reinterpret_cast<void**>(&m_matParamPtr[f]));
         if (!m_matLightCB[f] || !m_matObjRing[f] || !m_matParamRing[f])
         {
-            Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material ring allocation failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material ring allocation failed");
             return; // m_matReady stays false → draw path stays on the built-in PBR path
         }
     }
 
     m_matReady = true;
-    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: A4 material resources created");
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: A4 material resources created");
 #endif
 }
 
@@ -5587,7 +5587,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
     if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
     {
-        Logger::Log(Logger::LogLevel::Warning, "D3D12Renderer: A4 material shader cross-compile failed");
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 material shader cross-compile failed");
         m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
         return nullptr;
     }
@@ -5597,8 +5597,8 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (!m_matHlslLogged)
     {
         m_matHlslLogged = true;
-        Logger::Log(Logger::LogLevel::Info, (std::string("D3D12 A4 material VS HLSL:\n") + vc.source).c_str());
-        Logger::Log(Logger::LogLevel::Info, (std::string("D3D12 A4 material PS HLSL:\n") + fc.source).c_str());
+        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vc.source).c_str());
+        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + fc.source).c_str());
     }
 
     UINT cflags = 0;
@@ -5610,7 +5610,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
                           "main", "vs_5_0", cflags, 0, &vs, &cerr)))
     {
-        Logger::Log(Logger::LogLevel::Warning, (std::string("D3D12Renderer: A4 material VS compile failed: ")
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed: ")
             + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
         m_materialPSOs.emplace(key, nullptr);
         return nullptr;
@@ -5618,7 +5618,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
                           "main", "ps_5_0", cflags, 0, &ps, &cerr)))
     {
-        Logger::Log(Logger::LogLevel::Warning, (std::string("D3D12Renderer: A4 material PS compile failed: ")
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed: ")
             + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
         m_materialPSOs.emplace(key, nullptr);
         return nullptr;
@@ -5669,7 +5669,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     ComPtr<ID3D12PipelineState> pso12;
     if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso12))))
     {
-        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: A4 material PSO creation failed");
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material PSO creation failed");
         m_materialPSOs.emplace(key, nullptr); // cache the failure → no per-draw retry
         return nullptr;
     }
@@ -5685,7 +5685,7 @@ D3D12Renderer::~D3D12Renderer() { delete m_impl; }
 
 void D3D12Renderer::Initialize(HE::Window* window)
 {
-    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: initializing");
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: initializing");
     SDL_PropertiesID props = SDL_GetWindowProperties(window->GetNativeWindow());
     HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
         props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -5720,7 +5720,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
                 if (SUCCEEDED(debugController.As(&debugController1)))
                 {
                     debugController1->SetEnableGPUBasedValidation(TRUE);
-                    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: GPU-based validation ENABLED");
+                    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: GPU-based validation ENABLED");
                 }
             }
         }
@@ -5730,10 +5730,10 @@ void D3D12Renderer::Initialize(HE::Window* window)
         {
             dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-            Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: GPU debug layer + DRED ENABLED");
+            HE_LOG_INFO(RHI, "%s", "D3D12Renderer: GPU debug layer + DRED ENABLED");
         }
         else
-            Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: GPU debug layer ENABLED (DRED unavailable)");
+            HE_LOG_INFO(RHI, "%s", "D3D12Renderer: GPU debug layer ENABLED (DRED unavailable)");
     }
 
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
@@ -5771,7 +5771,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
                                                         &tearing, sizeof(tearing))))
                 m_impl->allowTearing = (tearing == TRUE);
         }
-        Logger::Log(Logger::LogLevel::Info,
+        HE_LOG_INFO(RHI, "%s",
             m_impl->allowTearing ? "D3D12Renderer: ALLOW_TEARING supported"
                                  : "D3D12Renderer: ALLOW_TEARING NOT supported — disabled");
     }
@@ -5825,16 +5825,16 @@ void D3D12Renderer::Initialize(HE::Window* window)
 
     m_impl->createDepth(m_impl->width, m_impl->height);
     if (!m_impl->createPipeline())
-        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: scene pipeline creation failed — only clear will work");
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: scene pipeline creation failed — only clear will work");
     if (!m_impl->createPostFXPipelines())
-        Logger::Log(Logger::LogLevel::Error, "D3D12Renderer: PostFX pipeline creation failed — no HDR/bloom/FXAA");
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: PostFX pipeline creation failed — no HDR/bloom/FXAA");
     m_impl->createCube();
-    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: initialized successfully");
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: initialized successfully");
 }
 
 void D3D12Renderer::Shutdown()
 {
-    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: shutdown — waiting for GPU");
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: shutdown — waiting for GPU");
     m_impl->waitForAllFrames();
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
@@ -5944,7 +5944,7 @@ void D3D12Renderer::Shutdown()
     m_impl->swapchain.Reset();
     m_impl->cmdQueue.Reset();
     m_impl->device.Reset();
-    Logger::Log(Logger::LogLevel::Info, "D3D12Renderer: all resources released");
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: all resources released");
 }
 
 void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
@@ -6192,7 +6192,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 "D3D12 draw counts: shadow=%zu ssaoPos=%zu opaque=%zu skinned=%zu transparent=%zu",
                 cmds.drawCalls().size(), opaqueDCs.size(), opaqueDCs.size(),
                 cmds.skinnedDrawCalls().size(), transparentDCs.size());
-            Logger::Log(Logger::LogLevel::Info, c);
+            HE_LOG_INFO(RHI, "%s", c);
         }
 
         // ── Ray-traced GI (software BVH): shadow mask + probe update, BEFORE
@@ -6842,7 +6842,7 @@ void D3D12Renderer::Render()
             "D3D12Renderer: Present failed hr=0x%08X, DeviceRemovedReason=0x%08X "
             "(0x887A0006=DEVICE_HUNG) — dumping DRED:",
             static_cast<unsigned>(prHr), static_cast<unsigned>(removed));
-        Logger::Log(Logger::LogLevel::Error, msg);
+        HE_LOG_ERROR(RHI, "%s", msg);
         logD3D12DredOutput(p.device.Get());
     }
 
@@ -6862,7 +6862,7 @@ void D3D12Renderer::Render()
                 const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
                                  dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
                 const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
-                Logger::Log(err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
+                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
                             line.c_str());
             }
         }
@@ -6904,7 +6904,7 @@ void* D3D12Renderer::GetCommandQueue() const { return m_impl->cmdQueue.Get(); }
 
 void D3D12Renderer::SetVSync(bool enabled)
 {
-    Logger::Log(Logger::LogLevel::Info, enabled ? "D3D12Renderer: VSync enabled" : "D3D12Renderer: VSync disabled");
+    HE_LOG_INFO(RHI, "%s", enabled ? "D3D12Renderer: VSync enabled" : "D3D12Renderer: VSync disabled");
     m_impl->vsync = enabled;
 }
 

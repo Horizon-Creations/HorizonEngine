@@ -28,26 +28,47 @@ namespace HE
 	Application::Application(std::string startupPath)
 	{
 		m_globalState = &GlobalState::getInstance();
+		// Named before the first record so every main-thread line is attributable;
+		// worker threads name themselves in JobSystem.
+		HE::Log::setThreadName("Main");
 		m_globalState->setLogFile(startupPath);
-		Logger::Log(Logger::LogLevel::Info, "Application starting up");
+		{
+			// The banner is the first thing in the file: without it a log is just a
+			// stream of messages with no idea which build, OS or machine produced it.
+			char* argv0[1] = { const_cast<char*>(startupPath.c_str()) };
+			HE::Log::logStartupBanner("HorizonEngine", 1, argv0);
+		}
 		m_globalState->readConfig();
 		auto contentPath = startupPath + "Content";
 		m_contentManager.setContentRoot(contentPath);
+		HE_LOG_INFO(Core, "Content root: %s", contentPath.c_str());
 	}
 	Application::~Application()
 	{
-		Logger::Log(Logger::LogLevel::Info, "Application destructor called");
+		HE_LOG_INFO(Core, "%s", "Application destructor called");
 		m_globalState->writeConfig();
-		Logger::Log(Logger::LogLevel::Info, "Application shutdown complete");
+		HE_LOG_INFO(Core, "%s", "Application shutdown complete");
+		HE::Log::logShutdownSummary();
+		HE::Log::closeLogFile();
 	}
 
 	int Application::Run(int argc, char** argv)
 	{
-		(void)argc;
-		(void)argv;
+		if (argc > 1 && argv)
+		{
+			std::string cmd;
+			for (int i = 1; i < argc; ++i) { if (!cmd.empty()) cmd += ' '; cmd += argv[i] ? argv[i] : ""; }
+			HE_LOG_INFO(Core, "Command line: %s", cmd.c_str());
+		}
 
 		const ApplicationConfig cfg = GetConfig();
-		Logger::Log(Logger::LogLevel::Info, "Configuration loaded");
+		HE_LOG_INFO(Core, "Configuration: backend=%s, window='%s' %ux%u mode=%d, vsync=%s, "
+		                  "fixedTimestep=%.4f s, maxFixedSteps=%u",
+		            rhiName(cfg.backend), cfg.windowprops.title.c_str(),
+		            cfg.windowprops.width, cfg.windowprops.height,
+		            static_cast<int>(cfg.windowprops.mode),
+		            cfg.windowprops.vsync ? "on" : "off",
+		            cfg.fixedTimestep, cfg.maxFixedSteps);
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
@@ -78,7 +99,7 @@ namespace HE
 			if (!OnEvent(e))
 				m_input.ProcessEvent(e);
 		});
-		Logger::Log(Logger::LogLevel::Info, "Window created");
+		HE_LOG_INFO(Core, "%s", "Window created");
 
 		// HiDPI diagnostic: logical points vs physical pixels. A ratio > 1 means
 		// the high-pixel-density drawable is active (no blurry OS upscaling).
@@ -87,7 +108,7 @@ namespace HE
 			int lw = 0, lh = 0, pw = 0, ph = 0;
 			SDL_GetWindowSize(sw, &lw, &lh);
 			SDL_GetWindowSizeInPixels(sw, &pw, &ph);
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Core, "%s",
 				("Window size: " + std::to_string(lw) + "x" + std::to_string(lh) +
 				 " logical, " + std::to_string(pw) + "x" + std::to_string(ph) +
 				 " pixels (HiDPI scale " +
@@ -112,22 +133,22 @@ namespace HE
 				// configured VSync to the renderer too so Metal/Vulkan/D3D start in
 				// the right present mode.
 				m_renderer->SetVSync(cfg.windowprops.vsync);
-				Logger::Log(Logger::LogLevel::Info, "Renderer initialized");
+				HE_LOG_INFO(Core, "%s", "Renderer initialized");
 			}
 			else
 			{
-				Logger::Log(Logger::LogLevel::Warning, "No renderer created — running without graphics");
+				HE_LOG_WARN(Core, "%s", "No renderer created — running without graphics");
 			}
 		}
 		catch (const std::exception& e)
 		{
-			Logger::Log(Logger::LogLevel::Critical, e.what());
+			HE_LOG_CRIT(Core, "%s", e.what());
 			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Renderer Init Failed", e.what(), nullptr);
 			return 1;
 		}
 
 		OnInit();
-		Logger::Log(Logger::LogLevel::Info, "OnInit complete — entering main loop");
+		HE_LOG_INFO(Core, "%s", "OnInit complete — entering main loop");
 
 		m_running = true;
 		m_vsyncEnabled = cfg.windowprops.vsync;
@@ -142,6 +163,19 @@ namespace HE
 			const float  dt      = delta > 0 ? static_cast<float>(delta) * 1e-9f
 											 : (1.0f / 60.0f);
 			lastTick = nowTick;
+
+			// Stamp every log record produced this frame with the frame index, so a
+			// message can be lined up against a profiler capture or a video.
+			HE::Log::setFrameNumber(++m_frameIndex);
+
+			// Hitch detector. A frame this long is always worth knowing about — it is
+			// usually a synchronous asset load, a shader compile or a GC-like stall in
+			// a script. Throttled so a systematically slow scene logs once a second
+			// instead of every frame.
+			if (dt > kHitchSeconds && m_frameIndex > kHitchWarmupFrames)
+				HE_LOG_THROTTLE(Core, Warning, 1.0,
+				                "Frame hitch: %.1f ms (frame %llu)", dt * 1000.0f,
+				                static_cast<unsigned long long>(m_frameIndex));
 
 			// Applies any pending start/stop (from F9) on the frame boundary so a
 			// frame is always recorded whole or not at all.
@@ -176,7 +210,7 @@ namespace HE
 				}
 			catch (const std::exception& e)
 			{
-				Logger::Log(Logger::LogLevel::Error, e.what());
+				HE_LOG_ERROR(Core, "%s", e.what());
 				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Render Error", e.what(), nullptr);
 				m_running = false;
 				break;
@@ -242,7 +276,7 @@ namespace HE
 			// If a capture just stopped, a dump was written — log its path.
 			std::string dumpPath;
 			if (profiler.consumeJustDumped(dumpPath) && !dumpPath.empty())
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Core, "%s",
 				            ("Profiler dump written: " + dumpPath).c_str());
 
 			HE_PROFILE_FRAME();
@@ -261,7 +295,7 @@ namespace HE
 			}
 		}
 
-		Logger::Log(Logger::LogLevel::Info, "Main loop exited — shutting down");
+		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
 		// Detach and destroy secondary windows first
 		for (auto& [id, win] : m_secondaryWindows)
@@ -271,7 +305,7 @@ namespace HE
 			m_renderer->Shutdown();
 		m_renderer.reset();
 		m_window.reset();
-		Logger::Log(Logger::LogLevel::Info, "Application shutdown complete");
+		HE_LOG_INFO(Core, "%s", "Application shutdown complete");
 		return 0;
 	}
 
@@ -285,14 +319,14 @@ namespace HE
     {
         if (!m_window)
         {
-            Logger::Log(Logger::LogLevel::Warning, "createSecondaryWindow called before Run() — ignoring");
+            HE_LOG_WARN(Core, "%s", "createSecondaryWindow called before Run() — ignoring");
             return {};
         }
         auto win = std::make_unique<Window>(props, /*isPrimary=*/false);
         uint32_t id = win->GetWindowId();
         if (m_renderer) m_renderer->AttachWindow(win.get());
         m_secondaryWindows[id] = std::move(win);
-        Logger::Log(Logger::LogLevel::Info, ("Secondary window created (id=" + std::to_string(id) + ")").c_str());
+        HE_LOG_INFO(Core, "%s", ("Secondary window created (id=" + std::to_string(id) + ")").c_str());
         return { id };
     }
 
@@ -302,7 +336,7 @@ namespace HE
         if (it == m_secondaryWindows.end()) return;
         if (m_renderer) m_renderer->DetachWindow(it->second.get());
         m_secondaryWindows.erase(it);
-        Logger::Log(Logger::LogLevel::Info, ("Secondary window destroyed (id=" + std::to_string(handle.id) + ")").c_str());
+        HE_LOG_INFO(Core, "%s", ("Secondary window destroyed (id=" + std::to_string(handle.id) + ")").c_str());
     }
 
     Window* Application::getWindow(WindowHandle handle) const
@@ -336,7 +370,7 @@ namespace HE
             // Stop + dump on the next frame boundary; restore the pre-capture vsync.
             profiler.requestStop();
             setVSync(m_savedVsync);
-            Logger::Log(Logger::LogLevel::Info, "Profiler: stop requested (F9)");
+            HE_LOG_INFO(Core, "%s", "Profiler: stop requested (F9)");
         }
         else
         {
@@ -366,7 +400,7 @@ namespace HE
             // dump) unbounded at 200+ fps — keep the newest N frames as a ring.
             constexpr size_t kMaxCaptureFrames = 20000; // ~100 s @ 200 fps
             profiler.requestStart(info, kMaxCaptureFrames);
-            Logger::Log(Logger::LogLevel::Info, "Profiler: start requested (F9, vsync off)");
+            HE_LOG_INFO(Core, "%s", "Profiler: start requested (F9, vsync off)");
         }
     }
 

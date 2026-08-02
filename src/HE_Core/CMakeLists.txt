@@ -6,6 +6,7 @@ add_library(HorizonCore SHARED
 	src/Application/InputMapping.cpp
 	src/Application/InputAssets.cpp
 	src/Diagnostics/GlobalState.cpp
+	src/Diagnostics/Log.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/EngineProfiler.cpp
 	src/Diagnostics/CrashHandler.cpp

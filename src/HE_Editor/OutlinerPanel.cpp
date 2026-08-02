@@ -72,7 +72,7 @@ void render(AppContext& ctx)
 
             char buf[96];
             std::snprintf(buf, sizeof(buf), "[Outliner] rebuilt: %zu nodes", s_outlinerCache.size());
-            Logger::Log(HE::LogLevel::Info, buf);
+            HE_LOG_INFO(Editor, "%s", buf);
 
             ctx.world->clearHierarchyDirty();
         }

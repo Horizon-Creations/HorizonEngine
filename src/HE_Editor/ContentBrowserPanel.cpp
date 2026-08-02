@@ -1028,10 +1028,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						if (s_selectedItem == s_ctxMenuItem) s_selectedItem.clear();
 						s_ctxMenuItem.clear();
 						ctx.contentRefreshPending = true;
-						Logger::Log(Logger::LogLevel::Info, ("Editor: reverted '" + relPath + "' to its engine default").c_str());
+						HE_LOG_INFO(Editor, "%s", ("Editor: reverted '" + relPath + "' to its engine default").c_str());
 					}
 					else
-						Logger::Log(Logger::LogLevel::Error, ("Editor: could not remove override for '" + relPath + "'").c_str());
+						HE_LOG_ERROR(Editor, "%s", ("Editor: could not remove override for '" + relPath + "'").c_str());
 				}
 				ImGui::CloseCurrentPopup();
 			}
@@ -1077,7 +1077,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					else if (isFontSrc)    ok = FontImporter::import(srcPath, root, relDir)     != nullptr;
 
 					if (!ok)
-						Logger::Log(Logger::LogLevel::Error,
+						HE_LOG_ERROR(Editor, "%s",
 							("Editor: import failed for " + srcPath.string()).c_str());
 					ctx.contentRefreshPending = true;
 					ImGui::CloseCurrentPopup();
@@ -1114,7 +1114,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						if (MaterialAsset* mi = ctx.contentManager->getMaterialMutable(iid))
 							ctx.contentManager->saveAsset(*mi);
 						ctx.contentRefreshPending = true;
-						Logger::Log(Logger::LogLevel::Info,
+						HE_LOG_INFO(Editor, "%s",
 							("Editor: created material instance of '" + parentRel + "'").c_str());
 					}
 					ImGui::CloseCurrentPopup();
@@ -1135,11 +1135,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							ctx.world->addComponent(e, TransformComponent{});
 							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
 							ctx.world->markHierarchyDirty();
-							Logger::Log(Logger::LogLevel::Info,
+							HE_LOG_INFO(Editor, "%s",
 								("Editor: added '" + mesh->name + "' to scene").c_str());
 						}
 						else
-							Logger::Log(Logger::LogLevel::Warning,
+							HE_LOG_WARN(Editor, "%s",
 								("Editor: " + rel + " is not a loadable static mesh").c_str());
 					}
 					ImGui::CloseCurrentPopup();
@@ -1310,7 +1310,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							const std::filesystem::path projRoot =
 								std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
 							if (writeCppLevelScript(projRoot.string(), newName))
-								Logger::Log(Logger::LogLevel::Info,
+								HE_LOG_INFO(Editor, "%s",
 									("Editor: generated C++ level script for scene '" + newName + "'").c_str());
 						}
 					}
@@ -1366,10 +1366,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
 				std::string created;
 				if (writeCppClass(projRoot.string(), s_cppClassName, &created))
-					Logger::Log(Logger::LogLevel::Info,
+					HE_LOG_INFO(Editor, "%s",
 						("Editor: created C++ class at " + created).c_str());
 				else
-					Logger::Log(Logger::LogLevel::Error, "Editor: failed to create C++ class");
+					HE_LOG_ERROR(Editor, "%s", "Editor: failed to create C++ class");
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();

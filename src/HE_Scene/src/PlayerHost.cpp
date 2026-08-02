@@ -83,7 +83,7 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm)
 	}
 
 	if (!m_players.empty())
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Input, "%s",
 			("PlayerHost: spawned " + std::to_string(m_players.size()) +
 			 " player instance(s), " + std::to_string(m_actions.size()) +
 			 " action(s), " + std::to_string(bound) + " binding entrie(s)").c_str());

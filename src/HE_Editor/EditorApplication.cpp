@@ -279,7 +279,7 @@ void ApplyHorizonDarkTheme()
 std::unique_ptr<IRenderer> EditorApplication::CreateRenderer()
 {
 	m_backend = GetConfig().backend;
-	Logger::Log(Logger::LogLevel::Info, "EditorApplication: creating renderer");
+	HE_LOG_INFO(Editor, "%s", "EditorApplication: creating renderer");
 	return RendererFactory::Create(m_backend);
 }
 
@@ -370,11 +370,11 @@ void EditorApplication::OnInit()
 		m_dumpPath = p;
 		if (const char* q = std::getenv("HE_DUMP_QUIT"); q && *q)
 			m_dumpQuit = (std::atoi(q) != 0);
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: frame dump armed → " + m_dumpPath).c_str());
 	}
 #ifdef HE_IMGUI_ENABLED
-	Logger::Log(Logger::LogLevel::Info, "EditorApplication::OnInit — initialising ImGui");
+	HE_LOG_INFO(Editor, "%s", "EditorApplication::OnInit — initialising ImGui");
 	m_vsync = GetConfig().windowprops.vsync;
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
@@ -418,11 +418,11 @@ void EditorApplication::OnInit()
 			m_fontBody       = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), sizeBody,       &cfg);
 			m_fontSubheading = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), sizeSubheading, &cfg);
 			m_fontHeading    = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), sizeHeading,    &cfg);
-			Logger::Log(Logger::LogLevel::Info, ("EditorApplication: fonts loaded from " + fontPath).c_str());
+			HE_LOG_INFO(Editor, "%s", ("EditorApplication: fonts loaded from " + fontPath).c_str());
 		}
 		else
 		{
-			Logger::Log(Logger::LogLevel::Warning, ("EditorApplication: font not found at " + fontPath + " — using ImGui default").c_str());
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: font not found at " + fontPath + " — using ImGui default").c_str());
 			m_fontBody       = io.Fonts->AddFontDefault();
 			m_fontSubheading = io.Fonts->AddFontDefault();
 			m_fontHeading    = io.Fonts->AddFontDefault();
@@ -467,7 +467,7 @@ void EditorApplication::OnInit()
 		ImGui_ImplOpenGL3_Init("#version 460");
 #endif
 		m_imguiReady = true;
-		Logger::Log(Logger::LogLevel::Info, "Initialized ImGui OpenGL backend");
+		HE_LOG_INFO(Editor, "%s", "Initialized ImGui OpenGL backend");
 		break;
 
 #ifdef HE_IMGUI_METAL_ENABLED
@@ -481,7 +481,7 @@ void EditorApplication::OnInit()
 			if (ImGuiMetalBridge::Init(mtl->GetDevice()))
 			{
 				m_imguiReady = true;
-				Logger::Log(Logger::LogLevel::Info, "Initialized ImGui Metal backend");
+				HE_LOG_INFO(Editor, "%s", "Initialized ImGui Metal backend");
 			}
 		}
 		break;
@@ -503,7 +503,7 @@ void EditorApplication::OnInit()
 				static_cast<ID3D11Device*>(dx11->GetDevice()),
 				static_cast<ID3D11DeviceContext*>(dx11->GetContext()));
 			m_imguiReady = true;
-			Logger::Log(Logger::LogLevel::Info, "Initialized ImGui D3D11 backend");
+			HE_LOG_INFO(Editor, "%s", "Initialized ImGui D3D11 backend");
 		}
 		break;
 	}
@@ -560,7 +560,7 @@ void EditorApplication::OnInit()
 
 			ImGui_ImplDX12_Init(&dx12Info);
 			m_imguiReady = true;
-			Logger::Log(Logger::LogLevel::Info, "Initialized ImGui D3D12 backend");
+			HE_LOG_INFO(Editor, "%s", "Initialized ImGui D3D12 backend");
 		}
 		break;
 	}
@@ -598,7 +598,7 @@ void EditorApplication::OnInit()
 			ImGui_ImplSDL3_InitForVulkan(window()->GetNativeWindow());
 			ImGui_ImplVulkan_Init(&vkInfo);
 			m_imguiReady = true;
-			Logger::Log(Logger::LogLevel::Info, "Initialized ImGui Vulkan backend");
+			HE_LOG_INFO(Editor, "%s", "Initialized ImGui Vulkan backend");
 		}
 		break;
 	}
@@ -615,7 +615,7 @@ void EditorApplication::OnInit()
 	// Register the per-frame overlay injection callback with the active renderer
 	if (m_imguiReady)
 	{
-		Logger::Log(Logger::LogLevel::Info, "EditorApplication::OnInit — ImGui backend ready");
+		HE_LOG_INFO(Editor, "%s", "EditorApplication::OnInit — ImGui backend ready");
 		renderer()->SetOverlayCallback([this](void* nativeContext)
 		{
 			ImDrawData* drawData = ImGui::GetDrawData();
@@ -819,11 +819,11 @@ void EditorApplication::OnInit()
 				m_logoH = h;
 			}
 			stbi_image_free(pixels);
-			Logger::Log(Logger::LogLevel::Info, ("EditorApplication: logo loaded from " + logoPath).c_str());
+			HE_LOG_INFO(Editor, "%s", ("EditorApplication: logo loaded from " + logoPath).c_str());
 		}
 		else
 		{
-			Logger::Log(Logger::LogLevel::Warning, ("EditorApplication: logo not found at " + logoPath).c_str());
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: logo not found at " + logoPath).c_str());
 		}
 	}
 
@@ -871,11 +871,11 @@ void EditorApplication::OnInit()
 				if (void* handle = renderer()->CreateImGuiTexture(pixels, w, h))
 					*entry.target = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(handle));
 				stbi_image_free(pixels);
-				Logger::Log(Logger::LogLevel::Info, ("EditorApplication: icon loaded — " + path).c_str());
+				HE_LOG_INFO(Editor, "%s", ("EditorApplication: icon loaded — " + path).c_str());
 			}
 			else
 			{
-				Logger::Log(Logger::LogLevel::Warning, ("EditorApplication: icon not found — " + path).c_str());
+				HE_LOG_WARN(Editor, "%s", ("EditorApplication: icon not found — " + path).c_str());
 			}
 		}
 	}
@@ -895,11 +895,11 @@ void EditorApplication::OnInit()
 		{
 			renderer()->SetMoonTexture(pixels, w, h);
 			stbi_image_free(pixels);
-			Logger::Log(Logger::LogLevel::Info, ("EditorApplication: moon texture loaded from " + moonPath).c_str());
+			HE_LOG_INFO(Editor, "%s", ("EditorApplication: moon texture loaded from " + moonPath).c_str());
 		}
 		else
 		{
-			Logger::Log(Logger::LogLevel::Warning, ("EditorApplication: moon texture not found at " + moonPath).c_str());
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: moon texture not found at " + moonPath).c_str());
 		}
 	}
 
@@ -954,9 +954,9 @@ void EditorApplication::OnInit()
 	m_undo.setWorld(m_editorWorld.get());
 
 	if (!m_audioEngine.init())
-		Logger::Log(Logger::LogLevel::Warning, "EditorApplication: audio engine init failed (no audio playback)");
+		HE_LOG_WARN(Editor, "%s", "EditorApplication: audio engine init failed (no audio playback)");
 
-	Logger::Log(Logger::LogLevel::Info, "EditorApplication: HorizonWorld created and registered");
+	HE_LOG_INFO(Editor, "%s", "EditorApplication: HorizonWorld created and registered");
 
 	// Register the project-loaded callback BEFORE the first loadProject call so
 	// the startup scene is already loaded when OnInit returns.
@@ -982,7 +982,7 @@ void EditorApplication::OnInit()
 			// Index every .hasset's (UUID → path) so scene component references
 			// (mesh/material UUIDs) resolve after a reload without a bulk preload.
 			const size_t indexed = contentManager().scanContentDirectory();
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: indexed " + std::to_string(indexed) + " content assets").c_str());
 		}
 
@@ -1003,16 +1003,16 @@ void EditorApplication::OnInit()
 				m_currentScenePath = sceneAbsPath;
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
 			}
 			else
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Editor, "%s",
 					("EditorApplication: failed to load startup scene from " + sceneAbsPath).c_str());
 		}
 		else
 		{
-			Logger::Log(Logger::LogLevel::Info, "EditorApplication: no startup scene defined for this project");
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: no startup scene defined for this project");
 		}
 
 		m_editorWorld->markHierarchyDirty();
@@ -1146,7 +1146,7 @@ void EditorApplication::OnRender(float dt)
 				if (!std::filesystem::exists(scenePath, ec) ||
 				    !ser.loadAdditive(*m_editorWorld, scenePath, SerializeFormat::JSON, &created))
 				{
-					Logger::Log(Logger::LogLevel::Warning,
+					HE_LOG_WARN(Editor, "%s",
 						("PIE: scene.loadAdditive failed — '" + r.path + "' not found in the project").c_str());
 					continue;
 				}
@@ -1164,7 +1164,7 @@ void EditorApplication::OnRender(float dt)
 				if (r.pos != glm::vec3(0.0f)) HE::api::scene::setZonePosition(c, r.zone, r.pos);
 				if (r.hidden)                 HE::api::scene::setZoneVisible(c, r.zone, false);
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					("PIE: zone " + std::to_string(r.zone) + " loaded ('" + r.path + "', "
 					 + std::to_string(created.size()) + " entities"
 					 + (r.hidden ? ", hidden" : "") + ")").c_str());
@@ -1183,7 +1183,7 @@ void EditorApplication::OnRender(float dt)
 			else if (r.kindOf() == Kind::ZoneVisible)  HE::api::scene::setZoneVisible(c, r.zone, r.flag);
 			else if (r.kindOf() == Kind::ZonePosition) HE::api::scene::setZonePosition(c, r.zone, r.pos);
 			else
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Editor, "%s",
 					("scene." + std::string(r.kindOf() == Kind::Switch ? "load" : "activate")
 					 + (r.path.empty() ? "" : " ('" + r.path + "')")
 					 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
@@ -1852,7 +1852,7 @@ void EditorApplication::dumpFrameHeadless()
 	IRenderer* r = renderer();
 	if (!r)
 	{
-		Logger::Log(Logger::LogLevel::Error, "EditorApplication: no renderer for frame dump");
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: no renderer for frame dump");
 		m_dumpDone = true;
 		return;
 	}
@@ -2152,7 +2152,7 @@ void EditorApplication::dumpFrameHeadless()
 				};
 				bake(HE::RendererBackend::OpenGL, LB::GLSL410);
 				bake(HE::RendererBackend::Metal,  LB::Metal);
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					"EditorApplication: HE_DUMP_MATPRECOMPILE baked precompiled shader variants");
 			}
 		}
@@ -2173,7 +2173,7 @@ void EditorApplication::dumpFrameHeadless()
 				std::sscanf(s.c_str() + c0 + 1, "%f,%f,%f", &rgb[0], &rgb[1], &rgb[2]);
 				const float v[4] = { rgb[0], rgb[1], rgb[2], 0.0f };
 				const bool ok = contentManager().setMaterialParam(matId, name, v, 4);
-				Logger::Log(Logger::LogLevel::Info, ok
+				HE_LOG_INFO(Editor, "%s", ok
 					? ("EditorApplication: HE_DUMP_SETPARAM set '" + name + "' at runtime").c_str()
 					: ("EditorApplication: HE_DUMP_SETPARAM param '" + name + "' not found").c_str());
 			}
@@ -2262,12 +2262,12 @@ void EditorApplication::dumpFrameHeadless()
 				MaterialParamOverride ov; ov.name = s.substr(0, c0);
 				std::sscanf(s.c_str() + c0 + 1, "%f,%f,%f", &ov.value[0], &ov.value[1], &ov.value[2]);
 				mc.paramOverrides.push_back(ov);
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: HE_DUMP_ENTITYPARAM override '" + ov.name + "' on entity").c_str());
 			}
 		}
 		reg.emplace<MaterialComponent>(e, mc);
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_MATERIALTEST sphere with custom-shader material added");
 
 		// Shadow-reception witness (HE_DUMP_MATOCCLUDER=1): park a flat default-cube
@@ -2292,7 +2292,7 @@ void EditorApplication::dumpFrameHeadless()
 			btc.position = tc.position + glm::vec3(6.0f, 0.0f, 0.0f);
 			reg.emplace<TransformComponent>(ctl, btc);
 			reg.emplace<MeshComponent>(ctl, MeshComponent{ meshId });
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Editor, "%s",
 				"EditorApplication: HE_DUMP_MATOCCLUDER slab + built-in control sphere added");
 		}
 
@@ -2341,7 +2341,7 @@ void EditorApplication::dumpFrameHeadless()
 				reg.emplace<TransformComponent>(rcv, rtc);
 				reg.emplace<MeshComponent>(rcv, MeshComponent{ meshId });
 			}
-			Logger::Log(Logger::LogLevel::Info, red
+			HE_LOG_INFO(Editor, "%s", red
 				? "EditorApplication: HE_DUMP_GIBLEED red wall added"
 				: "EditorApplication: HE_DUMP_GIBLEED grey control wall added");
 		}
@@ -2386,7 +2386,7 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<MeshComponent>(cubeE, MeshComponent{ HE::kDefaultCubeMeshId });
 		reg.emplace<MaterialComponent>(cubeE,
 			MaterialComponent{ contentManager().registerMaterial(std::move(red)) });
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
@@ -2412,7 +2412,7 @@ void EditorApplication::dumpFrameHeadless()
 		DecalComponent dc;
 		dc.color = glm::vec4(1.0f, 0.1f, 0.1f, 0.85f);
 		reg.emplace<DecalComponent>(decalE, dc);
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_DECALTEST witness scene added");
 	}
 
@@ -2488,7 +2488,7 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		reg.emplace<TransformComponent>(lightE, ltc);
 		reg.emplace<LightComponent>(lightE, lc);
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
 	}
 
@@ -2550,7 +2550,7 @@ void EditorApplication::dumpFrameHeadless()
 		// SceneSystems::tick — without this the terrain has no chunk entities yet
 		// and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
 	}
 
@@ -2591,7 +2591,7 @@ void EditorApplication::dumpFrameHeadless()
 				r->InvalidateMaterial(s_matTestId);
 				r->RenderMaterialPreview(contentManager(), s_matTestId, 200 + k * 16, 0.6f + k * 0.1f, 0.35f, 3.1f);
 			}
-			Logger::Log(Logger::LogLevel::Info, "EditorApplication: preview stress loop done");
+			HE_LOG_INFO(Editor, "%s", "EditorApplication: preview stress loop done");
 		}
 	}
 	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
@@ -2612,7 +2612,7 @@ void EditorApplication::dumpFrameHeadless()
 			std::vector<uint8_t> px;
 			if (!r->RenderAssetThumbnail(contentManager(), kind, id, 128, px))
 			{
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Editor, "%s",
 					(std::string("EditorApplication: thumbnail witness '") + name + "' produced nothing").c_str());
 				return;
 			}
@@ -2632,7 +2632,7 @@ void EditorApplication::dumpFrameHeadless()
 						f.write(reinterpret_cast<const char*>(&v), 1);
 					}
 				}
-			Logger::Log(Logger::LogLevel::Info,
+			HE_LOG_INFO(Editor, "%s",
 				(std::string("EditorApplication: thumbnail witness wrote ") + name + ".ppm").c_str());
 		};
 		dumpThumb("material", ThumbnailKind::Material,   s_matTestId);
@@ -2665,7 +2665,7 @@ void EditorApplication::dumpFrameHeadless()
 						for (int i = 0; i < TS * TS; ++i)
 							f.write(reinterpret_cast<const char*>(&tp[(size_t)i * 4]), 3);
 					}
-					Logger::Log(Logger::LogLevel::Info,
+					HE_LOG_INFO(Editor, "%s",
 						"EditorApplication: thumbnail witness wrote texture.ppm");
 				}
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
@@ -2718,11 +2718,11 @@ void EditorApplication::dumpFrameHeadless()
 							}
 						}
 					}
-					Logger::Log(Logger::LogLevel::Info,
+					HE_LOG_INFO(Editor, "%s",
 						"EditorApplication: thumbnail witness wrote widget.ppm");
 				}
 				else
-					Logger::Log(Logger::LogLevel::Warning,
+					HE_LOG_WARN(Editor, "%s",
 						"EditorApplication: thumbnail witness produced no widget tile");
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
 				std::error_code wrc;
@@ -2760,11 +2760,11 @@ void EditorApplication::dumpFrameHeadless()
 						}
 					}
 				}
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					"EditorApplication: thumbnail witness wrote particles.ppm");
 			}
 			else
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Editor, "%s",
 					"EditorApplication: thumbnail witness produced no particle tile");
 			AssetThumbnailCache::setContext(nullptr, nullptr, "");
 			std::error_code prc;
@@ -2801,7 +2801,7 @@ void EditorApplication::dumpFrameHeadless()
 							for (int c = 0; c < 3; ++c) f.write(reinterpret_cast<const char*>(&v), 1);
 						}
 					}
-					Logger::Log(Logger::LogLevel::Info,
+					HE_LOG_INFO(Editor, "%s",
 						"EditorApplication: thumbnail witness wrote font.ppm");
 				}
 				AssetThumbnailCache::setContext(nullptr, nullptr, "");
@@ -2842,7 +2842,7 @@ void EditorApplication::dumpFrameHeadless()
 					std::filesystem::path(contentManager().contentRoot()) / fn.path, rc);
 			}
 			else
-				Logger::Log(Logger::LogLevel::Warning,
+				HE_LOG_WARN(Editor, "%s",
 					"EditorApplication: thumbnail witness could not write the function asset");
 		}
 	}
@@ -2875,7 +2875,7 @@ void EditorApplication::dumpFrameHeadless()
 			r->SetEditorCamera(m_editorCamera.makeOverride());
 			r->Render();
 		}
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: GI rotate diagnostic swept yaw " + std::to_string(startDeg)
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
@@ -2886,11 +2886,11 @@ void EditorApplication::dumpFrameHeadless()
 	std::vector<uint8_t> rgba;
 	uint32_t w = 0, h = 0;
 	if (r->CaptureViewport(rgba, w, h) && w > 0 && h > 0 && writeBMP(m_dumpPath, rgba, w, h))
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: frame dumped (" + std::to_string(w) + "x" +
 			 std::to_string(h) + ") → " + m_dumpPath).c_str());
 	else
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
 
 	m_dumpDone = true;
@@ -3142,7 +3142,7 @@ void EditorApplication::updatePlayCameraController(float dt)
 	s_diagMotion += std::abs(frame.dx) + std::abs(frame.dy);
 	if (++s_diagFrames >= 60)
 	{
-		Logger::Log(Logger::LogLevel::Info,
+		HE_LOG_INFO(Editor, "%s",
 			(std::string("PIE camera controller: ")
 			+ (frame.camera == entt::null ? "NO camera to drive" : "driving a scene camera")
 			+ ", mouse motion (60 frames) = " + std::to_string(s_diagMotion)
@@ -3167,7 +3167,7 @@ void EditorApplication::setPlayMode(bool play)
 	{
 		if (!serializer.save(*m_editorWorld, snapshot, SerializeFormat::Binary))
 		{
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(Editor, "%s",
 				"EditorApplication: play-mode snapshot failed — staying in edit mode");
 			return;
 		}
@@ -3209,7 +3209,7 @@ void EditorApplication::setPlayMode(bool play)
 				reg.emplace<TransformComponent>(camE, tc);
 				CameraComponent cc; cc.isMain = true;
 				reg.emplace<CameraComponent>(camE, cc);
-				Logger::Log(Logger::LogLevel::Info,
+				HE_LOG_INFO(Editor, "%s",
 					"EditorApplication: PIE added a default main camera at the editor view (scene had none)");
 			}
 		}
@@ -3247,7 +3247,7 @@ void EditorApplication::setPlayMode(bool play)
 		// Capture the mouse so PIE plays like the packaged game (Esc toggles it).
 		setPlayMouseCaptured(true);
 
-		Logger::Log(Logger::LogLevel::Info, "EditorApplication: entering play mode");
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: entering play mode");
 	}
 	else
 	{
@@ -3261,7 +3261,7 @@ void EditorApplication::setPlayMode(bool play)
 		setPlayMouseCaptured(false); // release the mouse when leaving play mode
 		m_editorWorld->clear();
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
-			Logger::Log(Logger::LogLevel::Error,
+			HE_LOG_ERROR(Editor, "%s",
 				"EditorApplication: play-mode restore failed — world may be empty");
 		m_selectedEntity = entt::null;
 		m_editorWorld->markHierarchyDirty();
@@ -3296,7 +3296,7 @@ void EditorApplication::setPlayMode(bool play)
 		// Stop all audio when exiting play mode
 		m_audioEngine.stopAll();
 
-		Logger::Log(Logger::LogLevel::Info, "EditorApplication: returned to edit mode");
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: returned to edit mode");
 	}
 }
 
@@ -3399,11 +3399,11 @@ void EditorApplication::saveSceneToPath(const std::string& path)
 	{
 		m_currentScenePath = path;
 		m_savedRevision    = m_undo.revision(); // scene is now clean
-		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene saved to " + path).c_str());
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
 	}
 	else
 	{
-		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to save scene to " + path).c_str());
+		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	}
 }
 
@@ -3447,12 +3447,12 @@ void EditorApplication::openScene(const std::string& path)
 		m_currentScenePath = path;
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		warmupWorldMaterials(); // build custom-material pipelines before the first draw
-		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene opened from " + path).c_str());
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene opened from " + path).c_str());
 	}
 	else
 	{
 		m_currentScenePath.clear();
-		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to open scene from " + path).c_str());
+		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to open scene from " + path).c_str());
 	}
 
 	m_selectedEntity = entt::null;
@@ -3470,11 +3470,11 @@ void EditorApplication::openSceneAdditive(const std::string& path)
 	{
 		m_undo.snapshotNow();
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
-		Logger::Log(Logger::LogLevel::Info, ("EditorApplication: scene merged from " + path).c_str());
+		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene merged from " + path).c_str());
 	}
 	else
 	{
-		Logger::Log(Logger::LogLevel::Error, ("EditorApplication: failed to merge scene from " + path).c_str());
+		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to merge scene from " + path).c_str());
 	}
 	m_editorWorld->markHierarchyDirty();
 }
@@ -3491,7 +3491,7 @@ void EditorApplication::newScene()
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
-	Logger::Log(Logger::LogLevel::Info, "EditorApplication: new empty scene");
+	HE_LOG_INFO(Editor, "%s", "EditorApplication: new empty scene");
 }
 
 void EditorApplication::OnShutdown()
@@ -3509,7 +3509,7 @@ void EditorApplication::OnShutdown()
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;
-	Logger::Log(Logger::LogLevel::Info, "EditorApplication::OnShutdown — shutting down ImGui");
+	HE_LOG_INFO(Editor, "%s", "EditorApplication::OnShutdown — shutting down ImGui");
 
 	if (renderer()) renderer()->SetOverlayCallback(nullptr);
 

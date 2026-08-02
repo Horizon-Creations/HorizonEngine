@@ -7,6 +7,7 @@
 #ifdef HE_HAVE_ZSTD
 #  include <zstd.h>
 #endif
+#include <Diagnostics/Log.h>
 #include <algorithm>
 #include <cstring>
 
@@ -16,14 +17,35 @@ bool HpakReader::open(const std::string& path)
     m_entries.clear();
     if (m_file.is_open()) m_file.close();
 
+    // A packaged build that cannot mount its .hpak has no assets at all, so each
+    // rejection reason is spelled out — "the game starts up empty" is otherwise
+    // indistinguishable between a missing file, a foreign file and a bad version.
     m_file.open(path, std::ios::binary);
-    if (!m_file) return false;
+    if (!m_file)
+    {
+        HE_LOG_ERROR(Pak, "Cannot open package '%s'", path.c_str());
+        return false;
+    }
 
     Hpak::FileHeader hdr{};
     m_file.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!m_file) return false;
-    if (std::memcmp(hdr.magic, Hpak::k_magic, 4) != 0) return false;
-    if (hdr.version != Hpak::k_version) return false;
+    if (!m_file)
+    {
+        HE_LOG_ERROR(Pak, "Package '%s' is truncated: header could not be read", path.c_str());
+        return false;
+    }
+    if (std::memcmp(hdr.magic, Hpak::k_magic, 4) != 0)
+    {
+        HE_LOG_ERROR(Pak, "'%s' is not a HorizonEngine package (bad magic)", path.c_str());
+        return false;
+    }
+    if (hdr.version != Hpak::k_version)
+    {
+        HE_LOG_ERROR(Pak, "Package '%s' has version %u, this build reads version %u — "
+                          "re-export the project", path.c_str(),
+                     static_cast<unsigned>(hdr.version), static_cast<unsigned>(Hpak::k_version));
+        return false;
+    }
 
     // Read the whole TOC region so we can validate its hash before trusting it.
     const size_t tocBytes = static_cast<size_t>(hdr.entryCount) * sizeof(Hpak::EntryDesc);
@@ -32,10 +54,19 @@ bool HpakReader::open(const std::string& path)
     {
         m_file.read(reinterpret_cast<char*>(toc.data()),
                     static_cast<std::streamsize>(tocBytes));
-        if (!m_file) return false;
+        if (!m_file)
+        {
+            HE_LOG_ERROR(Pak, "Package '%s' is truncated: only part of the %u-entry "
+                              "table of contents is present", path.c_str(), hdr.entryCount);
+            return false;
+        }
     }
     if (Hpak::hash64(toc.data(), toc.size()) != hdr.tocHash)
+    {
+        HE_LOG_ERROR(Pak, "Package '%s' has a corrupt table of contents (hash mismatch) — "
+                          "the file is damaged or was modified", path.c_str());
         return false; // corrupt / truncated TOC
+    }
     m_tocHash = hdr.tocHash;
 
     m_entries.resize(hdr.entryCount);
@@ -53,6 +84,7 @@ bool HpakReader::open(const std::string& path)
         e.codec       = desc.codec;
         e.flags       = desc.entryFlags;
     }
+    HE_LOG_INFO(Pak, "Mounted package '%s': %u entry/-ies", path.c_str(), hdr.entryCount);
     return true;
 }
 
@@ -88,29 +120,64 @@ const HpakReader::EntryMeta* HpakReader::readStoredBytes(const HE::UUID& id,
     // Use is_open() (independent of stream state), NOT operator bool(): a prior
     // failed read leaves a sticky failbit on this persistent handle, and testing
     // it here — before clear() — would make one bad entry poison every later read.
-    if (!e || !m_file.is_open()) return nullptr;
+    if (!e || !m_file.is_open())
+    {
+        HE_LOG_ERROR(Pak, "Package read failed for %016llx%016llx: %s",
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo),
+                     e ? "the package file is not open" : "no such entry in this package");
+        return nullptr;
+    }
 
     // Reject implausibly large sizes up front: origSize/dataSize are uint32 (up to
     // ~4 GB) but the LZ4 and OpenSSL update APIs take int, so a crafted entry with
     // size > INT_MAX would overflow the cast. Also avoids a huge speculative alloc.
-    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu) return nullptr;
+    if (e->dataSize > 0x7FFFFFFFu || e->origSize > 0x7FFFFFFFu)
+    {
+        HE_LOG_ERROR(Pak, "Package entry %016llx%016llx declares an implausible size "
+                          "(stored %u, original %u) and was rejected",
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo), e->dataSize, e->origSize);
+        return nullptr;
+    }
 
     m_file.clear(); // drop any sticky fail/eof bits from a previous read
     m_file.seekg(static_cast<std::streamoff>(e->dataOffset));
-    if (!m_file) return nullptr;
+    if (!m_file)
+    {
+        HE_LOG_ERROR(Pak, "Package seek to offset %llu failed for entry %016llx%016llx",
+                     static_cast<unsigned long long>(e->dataOffset),
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo));
+        return nullptr;
+    }
 
     out.resize(e->dataSize);
     if (e->dataSize > 0)
     {
         m_file.read(reinterpret_cast<char*>(out.data()),
                     static_cast<std::streamsize>(e->dataSize));
-        if (!m_file) return nullptr;
+        if (!m_file)
+        {
+            HE_LOG_ERROR(Pak, "Package read of %u byte(s) failed for entry %016llx%016llx "
+                              "— the file is truncated", e->dataSize,
+                         static_cast<unsigned long long>(id.hi),
+                         static_cast<unsigned long long>(id.lo));
+            return nullptr;
+        }
     }
 
     // Content-hash check on the stored bytes (corruption detection). Verified here,
     // before either caller uses them — a corrupt entry must be repacked from source,
     // never carried verbatim into the next archive nor decoded into an asset.
-    if (Hpak::hash64(out.data(), out.size()) != e->contentHash) return nullptr;
+    if (Hpak::hash64(out.data(), out.size()) != e->contentHash)
+    {
+        HE_LOG_ERROR(Pak, "Package entry %016llx%016llx failed its content hash check — "
+                          "the data is corrupt",
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo));
+        return nullptr;
+    }
     return e;
 }
 
@@ -143,17 +210,38 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
     // flag that changes how the bytes must be read is how corrupt assets reach the
     // engine. (Supporting them means a real dictionary/framing section in the
     // format, not clearing this check.)
-    if (e->flags & (Hpak::kFlagUsesDict | Hpak::kFlagBlockFramed)) return {};
+    if (e->flags & (Hpak::kFlagUsesDict | Hpak::kFlagBlockFramed))
+    {
+        HE_LOG_ERROR(Pak, "Package entry %016llx%016llx uses features this build cannot "
+                          "decode (flags 0x%x: %s%s)",
+                     static_cast<unsigned long long>(id.hi),
+                     static_cast<unsigned long long>(id.lo), e->flags,
+                     (e->flags & Hpak::kFlagUsesDict)     ? "shared dictionary " : "",
+                     (e->flags & Hpak::kFlagBlockFramed)  ? "block framing"      : "");
+        return {};
+    }
 
     // Step 1: decrypt (AES-256-GCM; order matches write: compress → encrypt).
     // The auth tag makes a wrong key / tampered pak fail here rather than
     // silently yielding garbage.
     if (e->flags & Hpak::kFlagEncrypted)
     {
-        if (!key) return {};                 // encrypted entry needs a key
+        if (!key)
+        {
+            HE_LOG_ERROR(Pak, "Package entry %016llx%016llx is encrypted but no key was "
+                              "supplied", static_cast<unsigned long long>(id.hi),
+                         static_cast<unsigned long long>(id.lo));
+            return {};                       // encrypted entry needs a key
+        }
         std::vector<uint8_t> pt;
         if (!Hpak::aesGcmDecrypt(key, e->nonce, raw.data(), raw.size(), pt))
+        {
+            HE_LOG_ERROR(Pak, "Package entry %016llx%016llx failed to decrypt — wrong key, "
+                              "tampered data, or no crypto backend in this build",
+                         static_cast<unsigned long long>(id.hi),
+                         static_cast<unsigned long long>(id.lo));
             return {};                        // wrong key / tampered / no backend
+        }
         raw = std::move(pt);
     }
 
@@ -173,9 +261,16 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
             reinterpret_cast<char*>(out.data()),
             static_cast<int>(raw.size()),
             static_cast<int>(e->origSize));
-        if (result != static_cast<int>(e->origSize)) return {};
+        if (result != static_cast<int>(e->origSize))
+        {
+            HE_LOG_ERROR(Pak, "LZ4 decode of entry %016llx%016llx produced %d byte(s), "
+                              "expected %u", static_cast<unsigned long long>(id.hi),
+                         static_cast<unsigned long long>(id.lo), result, e->origSize);
+            return {};
+        }
         return out;
 #else
+        HE_LOG_ERROR(Pak, "%s", "Package entry is LZ4-compressed but this build has no LZ4");
         return {};
 #endif
     }
@@ -187,12 +282,24 @@ std::vector<uint8_t> HpakReader::readEntry(const HE::UUID& id, const uint8_t key
         std::vector<uint8_t> out(e->origSize);
         const size_t result = ZSTD_decompress(
             out.data(), out.size(), raw.data(), raw.size());
-        if (ZSTD_isError(result) || result != e->origSize) return {};
+        if (ZSTD_isError(result) || result != e->origSize)
+        {
+            HE_LOG_ERROR(Pak, "zstd decode of entry %016llx%016llx failed: %s",
+                         static_cast<unsigned long long>(id.hi),
+                         static_cast<unsigned long long>(id.lo),
+                         ZSTD_isError(result) ? ZSTD_getErrorName(result)
+                                              : "size mismatch");
+            return {};
+        }
         return out;
 #else
+        HE_LOG_ERROR(Pak, "%s", "Package entry is zstd-compressed but this build has no zstd");
         return {};
 #endif
     }
     }
+    HE_LOG_ERROR(Pak, "Package entry %016llx%016llx uses unknown codec %u",
+                 static_cast<unsigned long long>(id.hi),
+                 static_cast<unsigned long long>(id.lo), static_cast<unsigned>(e->codec));
     return {};
 }

@@ -226,7 +226,7 @@ bool saveState(State& st, AppContext& ctx)
 	UIWidgetAsset* a = ctx.contentManager->getWidgetMutable(st.assetId);
 	if (!a)
 	{
-		Logger::Log(Logger::LogLevel::Error,
+		HE_LOG_ERROR(Editor, "%s",
 			"UIEditorPanel: widget asset vanished — cannot save");
 		return false;
 	}
@@ -2070,7 +2070,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 				st.compileOk  = true;
 				st.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
 				for (const auto& w : res.warnings)
-					Logger::Log(Logger::LogLevel::Warning,
+					HE_LOG_WARN(Editor, "%s",
 						("HorizonCode compile check: " + w).c_str());
 			}
 		}

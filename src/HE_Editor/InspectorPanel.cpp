@@ -846,7 +846,7 @@ void render(AppContext& ctx)
 							ctx.contentRefreshPending = true;
 							if (ctx.renderer) ctx.renderer->InvalidateMaterial(newId);
 						}
-						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+						Logger::LogTo(HE::Log::Cat::Editor, ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
 							("Editor: " + std::string(ok ? "saved built-in material as project asset "
 							                             : "failed to save built-in material as ")
 							 + (saved ? saved->path : std::string())).c_str());
@@ -855,7 +855,7 @@ void render(AppContext& ctx)
 					{
 						const bool ok = ctx.contentManager->saveAsset(*mat);
 						if (ok && ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
-						Logger::Log(ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
+						Logger::LogTo(HE::Log::Cat::Editor, ok ? Logger::LogLevel::Info : Logger::LogLevel::Error,
 							("Editor: " + std::string(ok ? "saved" : "failed to save")
 							 + " material '" + mat->name + "'").c_str());
 					}
