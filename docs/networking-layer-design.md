@@ -147,7 +147,7 @@ any zero-pad in the payload's final byte.
 - **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
-- **N6** ◐ — **live deltas**: transform replication with lock-derived authority and rate limiting is done. Structural changes (create/delete/reparent) and other components still need handle-stable instantiation — see the section below.
+- **N6** ✅ — **live deltas**: transforms, authored assets, and structural changes (create/destroy/reparent) all replicate, with lock-derived authority. Components other than TransformComponent still need a per-component serializer.
 - **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
 
 ## Discovery (N2.5)
@@ -366,15 +366,42 @@ and confirms it is dropped.
 Sending is rate-limited (~30 Hz) and skipped entirely when nothing moved, for the
 same reason as presence: a gizmo drag produces a change every frame.
 
-### What v1 does not do — stated plainly
+### Structural changes — network ids, not handles
 
-Only **transforms** replicate. Structural changes — creating, deleting or
-reparenting entities, and edits to any other component — do **not**. The obstacle
-is concrete: `SceneSerializer::instantiatePrefab` mints *fresh* entity handles,
-and there is no API to apply a serialized subtree onto an existing handle. Since
-handles are the delta key, structural replication needs either handle-stable
-instantiation or a per-component serializer. Until then, structural edits are
-only shared when someone re-joins and gets a fresh snapshot.
+Creating, destroying and reparenting entities replicate too, keyed by a **network
+id** rather than a raw ECS handle:
+
+- entities from the shared snapshot use their handle — identical on every peer,
+  since everyone deserialized the same bytes into a cleared world,
+- newly created ones use `(participantId << 32 | counter)`, which cannot collide
+  with a snapshot handle (those have a zero high word) nor with another
+  participant's ids.
+
+**Why not handle-stable instantiation instead?** It was considered and rejected.
+`entt::create(hint)` only honours the hint when that identifier is free, and in
+this engine every peer independently creates *local-only* entities — terrain
+chunks regenerate from `TerrainComponent`, environment lights belong to the Sky
+entity. Their handle allocators are therefore never in lockstep, so "the same
+handle" would stop meaning "the same entity" the moment terrain exists. It would
+work *most* of the time, which is the worst kind of failure. The id map makes
+identity explicit and lets `instantiatePrefab` mint whatever handle it likes.
+
+Those same local-only entities are excluded from replication: each peer makes its
+own, and sending them would duplicate them on arrival.
+
+**Detection is by diffing the entity set**, not by hooking edit sites. The editor
+creates and deletes entities from many places — outliner menus, drag & drop,
+prefab drops, terrain tools — and hooking each one would inevitably miss some. A
+diff is complete by construction.
+
+Authority: creating needs no lock (a brand-new entity cannot be held by anyone),
+but destroying and reparenting do — otherwise an entity could be yanked out from
+under whoever is editing it. Destroying also frees the subject's lock, or the
+table would keep blocking something that no longer exists.
+
+Still not replicated: edits to components other than `TransformComponent`. Those
+need a per-component serializer; today they travel only when someone re-joins and
+receives a fresh snapshot.
 
 ## Undo in a shared session — the problem, and a proposal
 

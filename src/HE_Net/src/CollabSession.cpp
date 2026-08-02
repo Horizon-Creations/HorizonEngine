@@ -33,6 +33,8 @@ constexpr MessageId kMsgTransformRelay    = kFirstUserMessage + 16;  // host →
 constexpr MessageId kMsgAssetBegin        = kFirstUserMessage + 17;
 constexpr MessageId kMsgAssetChunk        = kFirstUserMessage + 18;
 constexpr MessageId kMsgAssetEnd          = kFirstUserMessage + 19;
+constexpr MessageId kMsgStructuralUpdate  = kFirstUserMessage + 20;  // client → host
+constexpr MessageId kMsgStructuralRelay   = kFirstUserMessage + 21;  // host → clients
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -78,6 +80,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgAssetBegin, [this](ConnectionId conn, BitReader& r) {
             handleAssetUpdate(conn, r);
         });
+        m_net->on(kMsgStructuralUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleStructuralUpdate(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -92,6 +97,9 @@ void CollabSession::installHandlers() {
             handleTransformRelay(r);
         });
         m_net->on(kMsgAssetBegin, [this](ConnectionId, BitReader& r) { handleAssetRelay(r); });
+        m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
+            handleStructuralRelay(r);
+        });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
@@ -560,6 +568,108 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
+}
+
+// ─── Structural changes ──────────────────────────────────────────────────────
+
+void CollabSession::writeStructuralBody(BitWriter& w, const StructuralChange& c) {
+    w.writeByte(static_cast<std::uint8_t>(c.kind));
+    w.writeUInt64(c.netId);
+    w.writeUInt64(c.parentNet);
+    w.writeUInt32(static_cast<std::uint32_t>(c.blob.size()));
+    if (!c.blob.empty()) w.writeBytes(c.blob.data(), c.blob.size());
+}
+
+bool CollabSession::readStructuralBody(BitReader& r, StructuralChange& out,
+                                       std::uint32_t maxBlob) {
+    std::uint8_t kind = 0;
+    if (!r.readByte(kind)) return false;
+    if (kind > static_cast<std::uint8_t>(StructuralChange::Kind::Reparented)) return false;
+    out.kind = static_cast<StructuralChange::Kind>(kind);
+
+    std::uint32_t len = 0;
+    if (!r.readUInt64(out.netId) || !r.readUInt64(out.parentNet) ||
+        !r.readUInt32(len)) {
+        return false;
+    }
+    // Never allocate what the peer claims beyond our own bound.
+    if (len > maxBlob) return false;
+
+    out.blob.clear();
+    if (len > 0) {
+        out.blob.resize(len);
+        if (!r.readBytes(out.blob.data(), len)) return false;
+    }
+    return true;
+}
+
+bool CollabSession::sendStructural(const StructuralChange& change) {
+    if (!m_net || !m_joined) return false;
+    if (change.blob.size() > m_cfg.maxSnapshotBytes) return false;
+
+    // Deleting or reparenting something someone else is editing would yank it
+    // out from under them, so those need the lock. Creating does not: a brand
+    // new entity cannot be held by anyone yet.
+    if (change.kind != StructuralChange::Kind::Created) {
+        const LockInfo* lock = lockFor(change.netId);
+        if (lock && lock->owner != m_localId) return false;
+    }
+
+    if (m_role == NetRole::Host) {
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeStructuralBody(w, change);
+        m_net->broadcast(kMsgStructuralRelay, w);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    writeStructuralBody(w, change);   // no id — the host stamps it
+    m_net->send(m_net->connections().front(), kMsgStructuralUpdate, w);
+    return true;
+}
+
+void CollabSession::handleStructuralUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    StructuralChange c;
+    if (!readStructuralBody(r, c, m_cfg.maxSnapshotBytes)) return;
+
+    // Re-check authority on arrival rather than trusting the sender.
+    if (c.kind != StructuralChange::Kind::Created) {
+        const LockInfo* lock = lockFor(c.netId);
+        if (lock && lock->owner != sender) return;
+    }
+
+    // A destroyed entity's lock has to go, or it would block a subject that no
+    // longer exists for the rest of the session.
+    if (c.kind == StructuralChange::Kind::Destroyed && lockFor(c.netId)) {
+        const LockInfo copy = *lockFor(c.netId);
+        dropLock(c.netId);
+        broadcastLock(c.netId, false, kInvalidConnection);
+        if (m_onLockChanged) m_onLockChanged(copy, false);
+    }
+
+    if (m_onStructural) m_onStructural(sender, c);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeStructuralBody(w, c);
+    for (const ConnectionId other : m_net->connections()) {
+        if (other != conn) m_net->send(other, kMsgStructuralRelay, w);
+    }
+}
+
+void CollabSession::handleStructuralRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+    if (sender == m_localId) return;   // our own change echoed back
+
+    StructuralChange c;
+    if (!readStructuralBody(r, c, m_cfg.maxSnapshotBytes)) return;
+    if (m_onStructural) m_onStructural(sender, c);
 }
 
 // ─── Authored-asset sync ─────────────────────────────────────────────────────

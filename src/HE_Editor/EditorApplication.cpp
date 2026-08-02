@@ -288,6 +288,46 @@ void EditorApplication::OnInit()
 	// A received collaboration snapshot replaces the whole world. Selection and
 	// undo history still hold entity handles from the world that just went away,
 	// so acting on them afterwards would touch freed storage.
+	// ── Structural replication ───────────────────────────────────────────────
+	// The editor creates and deletes entities from many places (outliner menus,
+	// drag & drop, prefab drops, terrain tools). Rather than hooking every one of
+	// them — and inevitably missing some — the change is detected by diffing the
+	// entity set, which is complete by construction.
+	m_collab.onRemoteCreate([this](std::uint32_t parentHandle,
+	                               const std::vector<std::uint8_t>& blob) -> std::uint32_t {
+		if (!m_editorWorld) return 0;
+		const Entity parent = parentHandle
+			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
+			: entt::null;
+		SceneSerializer serializer;
+		const Entity created = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+		if (created == entt::null) return 0;
+		// The fresh handle is recorded by CollabController against the sender's
+		// network id — which is what makes handle-stable instantiation
+		// unnecessary in the first place.
+		m_structureKnown.insert(created);
+		return static_cast<std::uint32_t>(entt::to_integral(created));
+	});
+
+	m_collab.onRemoteDestroy([this](std::uint32_t handle) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+		m_structureKnown.erase(e);
+		m_editorWorld->destroyEntity(e);
+	});
+
+	m_collab.onRemoteReparent([this](std::uint32_t handle, std::uint32_t parentHandle) {
+		if (!m_editorWorld) return;
+		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
+		if (!m_editorWorld->registry().valid(e)) return;
+		const Entity parent = parentHandle
+			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
+			: m_editorWorld->rootEntity();
+		m_editorWorld->reparentEntity(e, parent);
+	});
+
 	// ── Per-user undo/redo for the session ───────────────────────────────────
 	// Undo becomes an ordinary edit that is republished, not a snapshot
 	// restore — see CollabUndo.h.
@@ -355,6 +395,19 @@ void EditorApplication::OnInit()
 	});
 
 	m_collab.onWorldReplaced([this] {
+		// Both peers just deserialized the same bytes, so handle == network id
+		// here — seed the map from the world before anything else runs.
+		std::vector<std::uint32_t> handles;
+		m_structureKnown.clear();
+		if (m_editorWorld)
+		{
+			m_editorWorld->registry().view<entt::entity>().each([&](auto e) {
+				handles.push_back(static_cast<std::uint32_t>(entt::to_integral(e)));
+				m_structureKnown.insert(e);
+			});
+		}
+		m_collab.seedNetIds(handles);
+
 		m_selectedEntity = entt::null;
 		// Every snapshot in the undo stack belongs to the replaced world, so
 		// undoing into one would restore a scene the session no longer shares.
@@ -1717,6 +1770,8 @@ void EditorApplication::OnRender(float dt)
 				std::chrono::steady_clock::now().time_since_epoch()).count());
 		m_collab.update(nowMs);
 
+		if (m_collab.inSession()) syncStructuralChanges();
+
 		// Claim the selected entity, so everyone else sees it is being worked on
 		// before they click it themselves.
 		if (m_collab.inSession())
@@ -2900,6 +2955,63 @@ void EditorApplication::dumpFrameHeadless()
 		SDL_Event q;
 		q.type = SDL_EVENT_QUIT;
 		SDL_PushEvent(&q);
+	}
+}
+
+void EditorApplication::syncStructuralChanges()
+{
+	if (!m_editorWorld) return;
+	auto& reg = m_editorWorld->registry();
+
+	// Entities the engine generates per machine — terrain chunks regenerate from
+	// the TerrainComponent, environment lights belong to the Sky entity — must
+	// NOT replicate: every peer makes its own, and sending them would duplicate
+	// them on arrival. This is also precisely why network ids exist instead of
+	// raw handles: these local entities consume handles independently on each
+	// peer, so the allocators are never in lockstep.
+	const auto isLocalOnly = [&reg](Entity e) {
+		return reg.all_of<EnvironmentLightComponent>(e) ||
+		       reg.all_of<TerrainChunkComponent>(e);
+	};
+
+	std::unordered_set<Entity> current;
+	reg.view<entt::entity>().each([&](auto e) {
+		if (!isLocalOnly(e)) current.insert(e);
+	});
+
+	// ── Created ──
+	for (const Entity e : current)
+	{
+		if (m_structureKnown.count(e)) continue;
+
+		SceneSerializer serializer;
+		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
+		if (!blob.empty())
+		{
+			std::uint32_t parentHandle = 0;
+			if (auto* hier = reg.try_get<HierarchyComponent>(e);
+			    hier && reg.valid(hier->parent))
+			{
+				parentHandle = static_cast<std::uint32_t>(entt::to_integral(hier->parent));
+			}
+			m_collab.publishCreate(
+				static_cast<std::uint32_t>(entt::to_integral(e)), parentHandle, blob);
+		}
+		m_structureKnown.insert(e);
+	}
+
+	// ── Destroyed ──
+	// Collected first: erasing from the set while iterating it would invalidate
+	// the iterator.
+	std::vector<Entity> gone;
+	for (const Entity e : m_structureKnown)
+	{
+		if (!current.count(e)) gone.push_back(e);
+	}
+	for (const Entity e : gone)
+	{
+		m_collab.publishDestroy(static_cast<std::uint32_t>(entt::to_integral(e)));
+		m_structureKnown.erase(e);
 	}
 }
 

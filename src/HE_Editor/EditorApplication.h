@@ -26,6 +26,7 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -436,6 +437,10 @@ private:
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
 	CollabUndo       m_collabUndo;
+	// Entities the session already knows about. Diffed each frame so every
+	// creation and deletion path is covered without hooking any of them.
+	std::unordered_set<Entity> m_structureKnown;
+	void syncStructuralChanges();
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;
