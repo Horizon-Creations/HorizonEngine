@@ -1,6 +1,8 @@
 #include "Net/CollabSession.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <utility>
 
 namespace HE::Net {
@@ -16,6 +18,16 @@ constexpr MessageId kMsgParticipantLeft   = kFirstUserMessage + 4;
 constexpr MessageId kMsgSnapshotBegin     = kFirstUserMessage + 5;
 constexpr MessageId kMsgSnapshotChunk     = kFirstUserMessage + 6;
 constexpr MessageId kMsgSnapshotEnd       = kFirstUserMessage + 7;
+// Two ids rather than one shared message: the client→host form carries no
+// participant id at all, so a client cannot claim to be someone else. The host
+// stamps the id from the connection it arrived on.
+constexpr MessageId kMsgPresenceUpdate    = kFirstUserMessage + 8;   // client → host
+constexpr MessageId kMsgPresenceRelay     = kFirstUserMessage + 9;   // host → clients
+
+// Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
+// angular resolution — far finer than a camera gizmo can show, at a quarter the
+// size of raw floats.
+constexpr int kQuatBits = 16;
 
 } // namespace
 
@@ -41,12 +53,16 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgJoinRequest, [this](ConnectionId conn, BitReader& r) {
             handleJoinRequest(conn, r);
         });
+        m_net->on(kMsgPresenceUpdate, [this](ConnectionId conn, BitReader& r) {
+            handlePresenceUpdate(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
         m_net->on(kMsgSnapshotBegin, [this](ConnectionId, BitReader& r) { handleSnapshotBegin(r); });
         m_net->on(kMsgSnapshotChunk, [this](ConnectionId, BitReader& r) { handleSnapshotChunk(r); });
         m_net->on(kMsgSnapshotEnd,   [this](ConnectionId, BitReader&)   { handleSnapshotEnd(); });
+        m_net->on(kMsgPresenceRelay, [this](ConnectionId, BitReader& r) { handlePresenceRelay(r); });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
@@ -72,6 +88,12 @@ void CollabSession::installHandlers() {
 }
 
 void CollabSession::update() {
+    update(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()));
+}
+
+void CollabSession::update(std::uint64_t nowMs) {
     if (!m_net) return;
 
     // A client asks to join as soon as the authenticated link is up. Sending
@@ -84,6 +106,19 @@ void CollabSession::update() {
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
     }
+
+    // Presence: only once the participant actually exists in the session, at
+    // most every presenceIntervalMs, and only when something moved.
+    if (m_joined && m_localPresenceSet) {
+        const bool due = !m_everSentPresence ||
+                         (nowMs - m_lastPresenceSendMs) >= m_cfg.presenceIntervalMs;
+        if (due && presenceDiffersFromSent()) {
+            sendLocalPresence();
+            m_lastSentPresence   = m_localPresence;
+            m_everSentPresence   = true;
+            m_lastPresenceSendMs = nowMs;
+        }
+    }
 }
 
 Participant* CollabSession::findParticipant(ParticipantId id) {
@@ -91,6 +126,13 @@ Participant* CollabSession::findParticipant(ParticipantId id) {
         if (p.id == id) return &p;
     }
     return nullptr;
+}
+
+ParticipantId CollabSession::participantForConnection(ConnectionId conn) const {
+    for (const auto& [c, id] : m_connToParticipant) {
+        if (c == conn) return id;
+    }
+    return kInvalidParticipant;
 }
 
 // ─── Host side ───────────────────────────────────────────────────────────────
@@ -193,6 +235,8 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         m_joined   = false;
         m_joinSent = false;
         m_participants.clear();
+        m_presence.clear();
+        m_everSentPresence = false;
         return;
     }
 
@@ -206,6 +250,12 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         std::remove_if(m_participants.begin(), m_participants.end(),
                        [id](const Participant& p) { return p.id == id; }),
         m_participants.end());
+    // Drop their presence too, or their camera gizmo would linger in everyone's
+    // viewport after they left.
+    m_presence.erase(
+        std::remove_if(m_presence.begin(), m_presence.end(),
+                       [id](const auto& e) { return e.first == id; }),
+        m_presence.end());
 
     BitWriter w;
     w.writeUInt32(id);
@@ -320,6 +370,150 @@ void CollabSession::handleSnapshotEnd() {
 
     m_joined = true;
     if (m_onJoined) m_onJoined(m_localId);
+}
+
+// ─── Presence ────────────────────────────────────────────────────────────────
+
+void CollabSession::setLocalPresence(const float cameraPos[3], const float cameraRot[4],
+                                     const std::vector<std::uint64_t>& selection) {
+    for (int i = 0; i < 3; ++i) m_localPresence.cameraPos[i] = cameraPos[i];
+    for (int i = 0; i < 4; ++i) m_localPresence.cameraRot[i] = cameraRot[i];
+
+    m_localPresence.selection = selection;
+    if (m_localPresence.selection.size() > m_cfg.maxSelectionIds) {
+        m_localPresence.selection.resize(m_cfg.maxSelectionIds);
+    }
+    m_localPresence.valid = true;
+    m_localPresenceSet    = true;
+
+    // Reflect it locally too, so the UI can treat every participant uniformly.
+    applyPresence(m_localId, m_localPresence);
+}
+
+const PresenceState* CollabSession::presenceOf(ParticipantId id) const {
+    for (const auto& [pid, state] : m_presence) {
+        if (pid == id) return &state;
+    }
+    return nullptr;
+}
+
+void CollabSession::applyPresence(ParticipantId id, PresenceState state) {
+    for (auto& [pid, existing] : m_presence) {
+        if (pid == id) { existing = std::move(state); return; }
+    }
+    m_presence.emplace_back(id, std::move(state));
+}
+
+bool CollabSession::presenceDiffersFromSent() const {
+    if (!m_everSentPresence) return true;
+
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(m_localPresence.cameraPos[i] - m_lastSentPresence.cameraPos[i])
+            > m_cfg.presencePositionEpsilon) {
+            return true;
+        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(m_localPresence.cameraRot[i] - m_lastSentPresence.cameraRot[i])
+            > m_cfg.presenceRotationEpsilon) {
+            return true;
+        }
+    }
+    // Selection changes are discrete — any difference matters.
+    return m_localPresence.selection != m_lastSentPresence.selection;
+}
+
+void CollabSession::writePresenceBody(BitWriter& w, const PresenceState& p) const {
+    // Position stays full precision: a scene can span kilometres, so a fixed
+    // quantization range would either clip or lose centimetres.
+    for (int i = 0; i < 3; ++i) w.writeFloat(p.cameraPos[i]);
+    // Rotation is a unit quaternion, so every component is bounded by [-1, 1]
+    // and quantizes cleanly.
+    for (int i = 0; i < 4; ++i) w.writeFloatQuantized(p.cameraRot[i], -1.0f, 1.0f, kQuatBits);
+
+    const auto count = static_cast<std::uint16_t>(
+        std::min<std::size_t>(p.selection.size(), m_cfg.maxSelectionIds));
+    w.writeUInt16(count);
+    for (std::uint16_t i = 0; i < count; ++i) w.writeUInt64(p.selection[i]);
+}
+
+bool CollabSession::readPresenceBody(BitReader& r, PresenceState& out) const {
+    for (int i = 0; i < 3; ++i) {
+        if (!r.readFloat(out.cameraPos[i])) return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (!r.readFloatQuantized(out.cameraRot[i], -1.0f, 1.0f, kQuatBits)) return false;
+    }
+
+    std::uint16_t count = 0;
+    if (!r.readUInt16(count)) return false;
+    // Refuse to allocate what the peer claims beyond our own bound.
+    if (count > m_cfg.maxSelectionIds) return false;
+
+    out.selection.clear();
+    out.selection.reserve(count);
+    for (std::uint16_t i = 0; i < count; ++i) {
+        std::uint64_t id = 0;
+        if (!r.readUInt64(id)) return false;
+        out.selection.push_back(id);
+    }
+    out.valid = true;
+    return true;
+}
+
+void CollabSession::sendLocalPresence() {
+    if (!m_net) return;
+
+    if (m_role == NetRole::Host) {
+        // The host relays its own presence directly, stamped with its id.
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writePresenceBody(w, m_localPresence);
+        m_net->broadcast(kMsgPresenceRelay, w, SendMode::Unreliable);
+    } else {
+        // Deliberately no id: the host derives it from the connection, so a
+        // client cannot publish presence on someone else's behalf.
+        BitWriter w;
+        writePresenceBody(w, m_localPresence);
+        if (!m_net->connections().empty()) {
+            m_net->send(m_net->connections().front(), kMsgPresenceUpdate, w,
+                        SendMode::Unreliable);
+        }
+    }
+}
+
+void CollabSession::handlePresenceUpdate(ConnectionId conn, BitReader& r) {
+    // Host side. The sender's identity comes from the connection it arrived on,
+    // never from the payload.
+    const ParticipantId id = participantForConnection(conn);
+    if (id == kInvalidParticipant) return;   // not a joined participant
+
+    PresenceState state;
+    if (!readPresenceBody(r, state)) return;
+
+    applyPresence(id, state);
+    if (m_onPresence) m_onPresence(id, *presenceOf(id));
+
+    // Fan out to everyone else, now stamped with the authoritative id.
+    BitWriter w;
+    w.writeUInt32(id);
+    writePresenceBody(w, state);
+    for (const ConnectionId other : m_net->connections()) {
+        if (other != conn) m_net->send(other, kMsgPresenceRelay, w, SendMode::Unreliable);
+    }
+}
+
+void CollabSession::handlePresenceRelay(BitReader& r) {
+    // Client side: the host has already vouched for the id.
+    std::uint32_t id = 0;
+    if (!r.readUInt32(id)) return;
+    if (id == m_localId) return;   // our own presence echoed back
+
+    PresenceState state;
+    if (!readPresenceBody(r, state)) return;
+
+    applyPresence(id, state);
+    if (m_onPresence) m_onPresence(id, *presenceOf(id));
 }
 
 } // namespace HE::Net
