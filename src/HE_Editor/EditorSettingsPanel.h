@@ -21,4 +21,10 @@ namespace EditorSettingsPanel
 	// `open` is a one-shot request raised by the Edit menu / Ctrl+, shortcut;
 	// the window consumes it and turns it into a modal popup.
 	void DrawPreferencesWindow(AppContext& ctx, bool& open);
+
+	// Is the Preferences modal on screen? Tracked by the window itself rather than
+	// asked of ImGui::IsPopupOpen: that resolves the popup id against the CALLER's
+	// id stack, so the answer would depend on where it is asked from. Read by the
+	// guided tour's "open Edit > Preferences" step.
+	bool preferencesOpen();
 }

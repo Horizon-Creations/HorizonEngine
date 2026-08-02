@@ -50,8 +50,9 @@ namespace HE::tut
 	// enum for the same reason as Comp: this file must not depend on engine types.
 	enum class Asset : uint8_t
 	{
-		Material, ParticleSystem, Widget, AnimatorStateMachine, InputAction,
-		Scene, Texture, StaticMesh, SkeletalMesh, Script,
+		Material, MaterialFunction, ParticleSystem, Widget, AnimatorStateMachine,
+		InputAction, InputMappingContext, HorizonCodeClass, Scene, Texture,
+		StaticMesh, SkeletalMesh, Script, Audio, Font, Prefab, AnimationClip,
 		Count
 	};
 	const char* assetName(Asset a);              // "inputaction", "material", …
@@ -79,6 +80,8 @@ namespace HE::tut
 		AssetOfTypeAdded, // the Content tree gained an asset of `arg`'s type
 		MaterialAssigned, // one more Material component points at a material asset
 		TimeOfDayChanged, // the Sky entity's time of day was moved
+		HcNodeAdded,      // a node was added to the Level Script / Game Instance graph
+		HcVariableAdded,  // a graph variable was added to either of those graphs
 		TabOpen,          // an editor tab whose label or path contains `arg` appeared
 		TabOfTypeOpened,  // an editor tab holding an asset of `arg`'s type appeared
 		PlayCycled,       // a play session started AND stopped
@@ -161,6 +164,14 @@ namespace HE::tut
 		// Sky time of day, so "drag the time-of-day slider" is observable.
 		float timeOfDay = 0.0f;
 		bool  skyPresent = false;
+
+		// HorizonCode: nodes and variables across the two graphs every project has
+		// regardless of its scripting language — the Level Script and the Game
+		// Instance. Summed on purpose: the step names which graph to work in, and
+		// counting them together means a user who experiments in the other one is
+		// credited rather than told "no".
+		int hcNodes     = 0;
+		int hcVariables = 0;
 
 		// How many entities carry each component, so ComponentAdded can want one
 		// MORE rather than "at least one" (a furnished scene already has lights).

@@ -241,8 +241,15 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 }
 #endif // HE_IMGUI_ENABLED
 
+// Set while the modal is drawing (see preferencesOpen()).
+static bool s_preferencesVisible = false;
+
+bool preferencesOpen() { return s_preferencesVisible; }
+
 void DrawPreferencesWindow(AppContext& ctx, bool& open)
 {
+	s_preferencesVisible = false;   // set again below if the popup draws this frame
+
 	// `open` is a one-shot request raised by the Edit menu / Ctrl+, shortcut.
 	// We turn it into a *modal* popup rather than a plain window: a modal renders
 	// above everything and ignores clicks outside its bounds, so it can no longer
@@ -261,6 +268,7 @@ void DrawPreferencesWindow(AppContext& ctx, bool& open)
 	EditorWidgets::pinDialogToEditorWindow();
 	if (ImGui::BeginPopupModal("Preferences", nullptr, ImGuiWindowFlags_NoCollapse))
 	{
+		s_preferencesVisible = true;
 		EditorConfig& cfg = ctx.editorConfig;
 
 		ImGui::TextDisabled("Tick the pin on a setting to show it in Quick Settings.");

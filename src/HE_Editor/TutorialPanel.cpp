@@ -6,6 +6,7 @@
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonCode/HorizonCode.h>   // level-script / game-instance graph node counts
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
@@ -112,15 +113,22 @@ namespace
 		switch (t)
 		{
 		case HE::AssetType::Material:             return tut::Asset::Material;
+		case HE::AssetType::MaterialFunction:     return tut::Asset::MaterialFunction;
 		case HE::AssetType::ParticleSystem:       return tut::Asset::ParticleSystem;
 		case HE::AssetType::Widget:               return tut::Asset::Widget;
 		case HE::AssetType::AnimatorStateMachine: return tut::Asset::AnimatorStateMachine;
 		case HE::AssetType::InputAction:          return tut::Asset::InputAction;
+		case HE::AssetType::InputMappingContext:  return tut::Asset::InputMappingContext;
+		case HE::AssetType::HorizonCodeClass:     return tut::Asset::HorizonCodeClass;
 		case HE::AssetType::Scene:                return tut::Asset::Scene;
 		case HE::AssetType::Texture:              return tut::Asset::Texture;
 		case HE::AssetType::StaticMesh:           return tut::Asset::StaticMesh;
 		case HE::AssetType::SkeletalMesh:         return tut::Asset::SkeletalMesh;
 		case HE::AssetType::Script:               return tut::Asset::Script;
+		case HE::AssetType::Audio:                return tut::Asset::Audio;
+		case HE::AssetType::Font:                 return tut::Asset::Font;
+		case HE::AssetType::Prefab:               return tut::Asset::Prefab;
+		case HE::AssetType::AnimationClip:        return tut::Asset::AnimationClip;
 		default:                                  return tut::Asset::Count;
 		}
 	}
@@ -178,6 +186,14 @@ namespace
 			// Sky time of day. environmentEntity() is the one Sky in the scene; with
 			// no Sky the step cannot be satisfied at all (skyPresent gates it), which
 			// is right — there is no slider to drag.
+			// HorizonCode: the two graphs every project has, whatever its scripting
+			// language. Both are plain data on the world/app, so the tour reads them
+			// directly instead of asking the tab panels (which do not run while the
+			// user is on another tab).
+			const HorizonCode::Graph& ls = ctx.world->levelScript();
+			s.hcNodes     = static_cast<int>(ls.nodes.size());
+			s.hcVariables = static_cast<int>(ls.variables.size());
+
 			const entt::entity sky = ctx.world->environmentEntity();
 			if (sky != entt::null && reg.valid(sky) && reg.all_of<EnvironmentComponent>(sky))
 			{
@@ -201,6 +217,11 @@ namespace
 				for (const HE::File* file : f->files)
 				{
 					if (!file) continue;
+					// Scenes are identified by extension, as everywhere else in the
+					// editor. A scene SAVED by the serializer is JSON with no HAsset
+					// header, so the header sniff below reports Unknown for it — the
+					// "create a Scene" step would then never see one appear.
+					if (file->extension == ".hescene") { s.add(tut::Asset::Scene); continue; }
 					// Cached per path (EditorAssetTypeCache), so this is one header
 					// sniff per asset for the lifetime of the content tree, not one
 					// per frame.
@@ -239,6 +260,12 @@ namespace
 			s.camYaw   = ctx.editorCamera->yaw();
 			s.camPitch = ctx.editorCamera->pitch();
 			s.camPivot = ctx.editorCamera->pivotDistance();
+		}
+
+		if (ctx.gameInstanceGraph)
+		{
+			s.hcNodes     += static_cast<int>(ctx.gameInstanceGraph->nodes.size());
+			s.hcVariables += static_cast<int>(ctx.gameInstanceGraph->variables.size());
 		}
 
 		s.playing         = ctx.isPlaying;
