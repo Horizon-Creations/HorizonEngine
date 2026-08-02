@@ -17,6 +17,8 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace fs  = std::filesystem;
 namespace tut = HE::tut;
@@ -64,6 +66,35 @@ TEST_CASE("tutorial: every step is complete and uniquely identified")
 	CHECK(counted == tut::totalSteps());
 }
 
+namespace
+{
+// Every window name a step is allowed to point at. The highlight resolves these
+// with ImGui::FindWindowByName, which silently finds NOTHING on a typo — the step
+// would then quietly highlight the wrong thing or nothing at all, which is
+// exactly the failure this list exists to prevent. Keep it in sync with the
+// ImGui::Begin() calls in EditorUI.cpp and the panels it drives:
+//   EditorUI.cpp          "…###Quick Settings"  (id is the ### part)
+//   ViewportPanel.cpp     "Scene"
+//   OutlinerPanel.cpp     "World Outliner"
+//   InspectorPanel.cpp    "Details"
+//   ContentBrowserPanel   "Content Browser"
+//   EnvironmentPanel.cpp  "Environment"
+//   ProfilerPanel.cpp     "Performance Profiler"
+const std::set<std::string> kKnownPanels = {
+	"Scene", "World Outliner", "Details", "Content Browser", "Quick Settings",
+	"Environment", "Performance Profiler",
+};
+
+// Split a '|'-separated list the way TutorialSteps does.
+std::vector<std::string> splitBars(std::string_view list)
+{
+	std::vector<std::string> out;
+	for (int i = 0, n = tut::listEntryCount(list); i < n; ++i)
+		out.emplace_back(tut::listEntry(list, i));
+	return out;
+}
+} // namespace
+
 TEST_CASE("tutorial: parameterised checks name something that exists")
 {
 	for (int ci = 0; ci < tut::chapterCount(); ++ci)
@@ -73,26 +104,131 @@ TEST_CASE("tutorial: parameterised checks name something that exists")
 		{
 			const tut::Step& s = c.steps[si];
 			CAPTURE(s.id);
-			if (s.check == tut::Check::ComponentPresent)
+			if (s.check == tut::Check::ComponentAdded)
 			{
 				// An unknown component name would make the step impossible to finish.
 				// Compared as ints so doctest can stringify a mismatch.
 				CHECK(static_cast<int>(tut::compFromString(s.arg)) !=
 				      static_cast<int>(tut::Comp::Count));
 			}
+			if (s.check == tut::Check::AssetOfTypeAdded ||
+			    s.check == tut::Check::TabOfTypeOpened)
+			{
+				CHECK(static_cast<int>(tut::assetFromString(s.arg)) !=
+				      static_cast<int>(tut::Asset::Count));
+			}
 			if (s.check == tut::Check::TabOpen)
 				CHECK(std::string(s.arg).size() > 0);
-
-			// focusWindow is looked up with ImGui::FindWindowByName, which silently
-			// finds nothing on a typo — the step would just never highlight anything.
-			// These are the dockable panels EditorUI opens by these exact names
-			// (Quick Settings is "…###Quick Settings", and the id is the ### part).
-			if (s.focusWindow[0] != '\0')
+			if (s.check == tut::Check::ContentRootShown)
 			{
-				const std::string w = s.focusWindow;
-				CHECK((w == "Scene" || w == "World Outliner" || w == "Details" ||
-				       w == "Content Browser" || w == "Quick Settings"));
+				const std::string a = s.arg;
+				CHECK((a == "content" || a == "engine" || a == "source"));
 			}
+			// A PanelsVisited step's arg is what the user must click; naming a window
+			// that does not exist makes the step unfinishable.
+			if (s.check == tut::Check::PanelsVisited)
+			{
+				const auto names = splitBars(s.arg);
+				CHECK(names.size() > 0);
+				for (const std::string& n : names)
+				{
+					CAPTURE(n);
+					CHECK(kKnownPanels.count(n) == 1);
+				}
+			}
+
+			for (const std::string& w : splitBars(s.focusWindow))
+			{
+				CAPTURE(w);
+				CHECK(kKnownPanels.count(w) == 1);
+			}
+		}
+	}
+}
+
+// The whole point of the rework: the tour follows the user. A step that advances
+// on a button press alone would be a step the user can click past without ever
+// touching the thing it teaches.
+TEST_CASE("tutorial: every step is observed, none is a bare Next")
+{
+	int readCards = 0;
+	for (int ci = 0; ci < tut::chapterCount(); ++ci)
+	{
+		const tut::Chapter& c = tut::chapters()[ci];
+		for (int si = 0; si < c.stepCount; ++si)
+		{
+			const tut::Step& s = c.steps[si];
+			CAPTURE(s.id);
+
+			// A ReadAck card is the only kind with nothing to observe in the editor,
+			// so it must have nothing to DO either — an action line with no check
+			// behind it is precisely the "press Next to skip" this replaced.
+			if (s.check == tut::Check::ReadAck)
+			{
+				++readCards;
+				CHECK(std::string(s.action).empty());
+			}
+			else
+			{
+				// Everything else tells the user what to do, and is watched for it.
+				CHECK(std::string(s.action).size() > 0);
+			}
+		}
+	}
+	// Prose cards are the exception, not the tour. If this ever trips, a step that
+	// should be observable was quietly turned into a click-through.
+	CHECK(readCards * 4 < tut::totalSteps());
+}
+
+// A check that fires on a STATE rather than a transition ticks its step off the
+// moment the tour reaches it — the furnished sandbox scene already has meshes,
+// materials and lights, and the editor already has tabs open. Feeding every step
+// the same snapshot as base and now is the cheapest way to catch that.
+TEST_CASE("tutorial: no step is already satisfied when it opens")
+{
+	tut::Signals s;
+	// A world that looks lived-in, which is what the tutorial sandbox actually is.
+	s.entityCount = 12;
+	s.assetCount  = 40;
+	s.playSessions = 3;
+	s.undoCount   = 7;
+	s.importOpens = 2;
+	s.materialsAssigned = 4;
+	s.selectionSet = true;
+	s.selectedEntity = 99;
+	s.sceneUnsaved = false;
+	s.landscapeMode = true;
+	s.preferencesOpen = true;
+	s.profilerOpen = true;
+	s.environmentOpen = true;
+	s.exportOpen = true;
+	s.acknowledged = false;
+	s.skyPresent = true;
+	s.timeOfDay = 0.5f;
+	s.contentRootKind = 1;
+	s.camX = 3.0f; s.camY = 4.0f; s.camZ = 5.0f;
+	s.camYaw = 1.0f; s.camPitch = 0.3f; s.camPivot = 9.0f;
+	s.openTabs = "Scene\n\nMyMaterial\n/Content/MyMaterial.hasset\n::LevelScript::\n";
+	s.visitedPanels = "Scene\nWorld Outliner\nDetails\nContent Browser\n";
+	for (int i = 0; i < static_cast<int>(tut::Comp::Count); ++i)
+		s.add(static_cast<tut::Comp>(i), 3);
+	for (int i = 0; i < static_cast<int>(tut::Asset::Count); ++i)
+	{
+		s.add(static_cast<tut::Asset>(i), 3);
+		s.addTab(static_cast<tut::Asset>(i), 2);
+	}
+
+	for (int ci = 0; ci < tut::chapterCount(); ++ci)
+	{
+		const tut::Chapter& c = tut::chapters()[ci];
+		for (int si = 0; si < c.stepCount; ++si)
+		{
+			const tut::Step& step = c.steps[si];
+			CAPTURE(step.id);
+			// PanelsVisited is the one honest exception: its accumulator is cleared
+			// when the step opens, so an identical base/now pair cannot model it.
+			if (step.check == tut::Check::PanelsVisited) continue;
+			CHECK_FALSE(tut::satisfied(step, s, s));
 		}
 	}
 }
@@ -111,6 +247,16 @@ TEST_CASE("tutorial: component names round-trip")
 	      static_cast<int>(tut::Comp::Count));
 	CHECK(static_cast<int>(tut::compFromString("")) == static_cast<int>(tut::Comp::Count));
 	CHECK(std::string(tut::compName(tut::Comp::Count)).empty());
+
+	for (int i = 0; i < static_cast<int>(tut::Asset::Count); ++i)
+	{
+		const auto a = static_cast<tut::Asset>(i);
+		CAPTURE(tut::assetName(a));
+		CHECK(static_cast<int>(tut::assetFromString(tut::assetName(a))) == i);
+	}
+	CHECK(static_cast<int>(tut::assetFromString("nosuchasset")) ==
+	      static_cast<int>(tut::Asset::Count));
+	CHECK(std::string(tut::assetName(tut::Asset::Count)).empty());
 }
 
 // ─── Cursor arithmetic ────────────────────────────────────────────────────────
@@ -223,8 +369,11 @@ TEST_CASE("tutorial: checks fire on the transition they describe")
 		return tut::Step{ "t", "T", "B", "", "", check, arg };
 	};
 
-	// Manual never completes on its own.
-	CHECK_FALSE(tut::satisfied(step(tut::Check::Manual), base, now));
+	// A prose card waits for its acknowledgement and nothing else.
+	CHECK_FALSE(tut::satisfied(step(tut::Check::ReadAck), base, now));
+	now.acknowledged = true;
+	CHECK(tut::satisfied(step(tut::Check::ReadAck), base, now));
+	now.acknowledged = false;
 
 	// Counters need to GROW, not merely be non-zero.
 	base.entityCount = 4; now.entityCount = 4;
@@ -245,22 +394,126 @@ TEST_CASE("tutorial: checks fire on the transition they describe")
 
 	// A play session has to have ended, not just started.
 	base.playSessions = 0; now.playSessions = 0; now.playing = true;
-	CHECK(tut::satisfied(step(tut::Check::PlayEntered), base, now));
 	CHECK_FALSE(tut::satisfied(step(tut::Check::PlayCycled), base, now));
 	now.playing = false; now.playSessions = 1;
 	CHECK(tut::satisfied(step(tut::Check::PlayCycled), base, now));
 
-	// Simple state flags.
-	now.selectionSet = true;
-	CHECK(tut::satisfied(step(tut::Check::SelectionSet), base, now));
-	now.landscapeMode = true;
+	base.undoCount = 2; now.undoCount = 2;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::UndoUsed), base, now));
+	now.undoCount = 3;
+	CHECK(tut::satisfied(step(tut::Check::UndoUsed), base, now));
+
+	base.importOpens = 1; now.importOpens = 1;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::ImportOpened), base, now));
+	now.importOpens = 2;
+	CHECK(tut::satisfied(step(tut::Check::ImportOpened), base, now));
+
+	base.materialsAssigned = 1; now.materialsAssigned = 1;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::MaterialAssigned), base, now));
+	now.materialsAssigned = 2;
+	CHECK(tut::satisfied(step(tut::Check::MaterialAssigned), base, now));
+
+	// Selecting the entity that was already selected is not "click an entity".
+	base.selectionSet = true; base.selectedEntity = 7;
+	now.selectionSet  = true; now.selectedEntity  = 7;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::SelectionChanged), base, now));
+	now.selectedEntity = 8;
+	CHECK(tut::satisfied(step(tut::Check::SelectionChanged), base, now));
+
+	// Window toggles want the OPENING, so a window that was already up when the
+	// step began cannot tick it off.
+	base.landscapeMode = true; now.landscapeMode = true;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::LandscapeMode), base, now));
+	base.landscapeMode = false;
 	CHECK(tut::satisfied(step(tut::Check::LandscapeMode), base, now));
-	now.profilerOpen = true;
-	CHECK(tut::satisfied(step(tut::Check::ProfilerOpen), base, now));
-	now.environmentOpen = true;
-	CHECK(tut::satisfied(step(tut::Check::EnvironmentOpen), base, now));
-	now.exportOpen = true;
-	CHECK(tut::satisfied(step(tut::Check::ExportOpen), base, now));
+
+	for (const auto check : { tut::Check::PreferencesOpen, tut::Check::ProfilerOpen,
+	                          tut::Check::EnvironmentOpen, tut::Check::ExportOpen })
+	{
+		tut::Signals b, n;
+		CHECK_FALSE(tut::windowOpenIn(check, b));
+		CHECK(tut::wantsWindowOpened(check));
+		// Flip the one flag this check reads, in both snapshots then in only one.
+		for (bool inBase : { true, false })
+		{
+			b = tut::Signals{}; n = tut::Signals{};
+			switch (check)
+			{
+			case tut::Check::PreferencesOpen: b.preferencesOpen = inBase; n.preferencesOpen = true; break;
+			case tut::Check::ProfilerOpen:    b.profilerOpen    = inBase; n.profilerOpen    = true; break;
+			case tut::Check::EnvironmentOpen: b.environmentOpen = inBase; n.environmentOpen = true; break;
+			default:                          b.exportOpen      = inBase; n.exportOpen      = true; break;
+			}
+			CHECK(tut::windowOpenIn(check, n));
+			CHECK(tut::satisfied(step(check), b, n) == !inBase);
+		}
+	}
+}
+
+TEST_CASE("tutorial: camera checks separate flying from zooming")
+{
+	auto step = [](tut::Check check, const char* arg = "")
+	{
+		return tut::Step{ "t", "T", "B", "", "", check, arg };
+	};
+
+	tut::Signals base, now;
+	base.camPivot = now.camPivot = 8.0f;
+
+	// Turning on the spot is not flying, and neither is sliding without looking.
+	now.camYaw = 0.9f;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::CameraFlown), base, now));
+	now = base; now.camX = 12.0f;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::CameraFlown), base, now));
+	now.camYaw = 0.9f;
+	CHECK(tut::satisfied(step(tut::Check::CameraFlown), base, now));
+
+	// Flying all over the place must not satisfy the zoom step — only the pivot
+	// distance, which nothing but the wheel and the orbit dolly touch, does.
+	CHECK_FALSE(tut::satisfied(step(tut::Check::CameraZoomed), base, now));
+	now.camPivot = 3.0f;
+	CHECK(tut::satisfied(step(tut::Check::CameraZoomed), base, now));
+}
+
+TEST_CASE("tutorial: the sky step needs a sky to be there")
+{
+	auto step = [](tut::Check check) { return tut::Step{ "t", "T", "B", "", "", check, "" }; };
+
+	tut::Signals base, now;
+	base.timeOfDay = 0.5f; now.timeOfDay = 0.9f;
+	// No Sky entity in the scene — the slider the step asks for does not exist, so
+	// the step must stay open rather than pass on a stale value.
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TimeOfDayChanged), base, now));
+	base.skyPresent = now.skyPresent = true;
+	CHECK(tut::satisfied(step(tut::Check::TimeOfDayChanged), base, now));
+	now.timeOfDay = base.timeOfDay;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TimeOfDayChanged), base, now));
+}
+
+TEST_CASE("tutorial: PanelsVisited matches whole panel names")
+{
+	auto step = [](tut::Check check, const char* arg)
+	{
+		return tut::Step{ "t", "T", "B", "", "", check, arg };
+	};
+	const char* want = "Scene|World Outliner|Details";
+
+	tut::Signals base, now;
+	CHECK(tut::listEntryCount(want) == 3);
+	CHECK(tut::listEntry(want, 1) == "World Outliner");
+	CHECK(tut::listEntry(want, 9).empty());
+
+	now.visitedPanels = "Scene\nDetails\n";
+	CHECK_FALSE(tut::satisfied(step(tut::Check::PanelsVisited, want), base, now));
+	CHECK(tut::listEntryVisited(want, 0, now.visitedPanels));
+	CHECK_FALSE(tut::listEntryVisited(want, 1, now.visitedPanels));
+
+	// A prefix must not count: "Scene Settings" is not "Scene".
+	now.visitedPanels = "Scene Settings\nWorld Outliner\nDetails\n";
+	CHECK_FALSE(tut::listEntryVisited(want, 0, now.visitedPanels));
+
+	now.visitedPanels = "World Outliner\nScene\nDetails\n";
+	CHECK(tut::satisfied(step(tut::Check::PanelsVisited, want), base, now));
 }
 
 TEST_CASE("tutorial: component and tab checks match on content, not position")
@@ -272,16 +525,35 @@ TEST_CASE("tutorial: component and tab checks match on content, not position")
 		return tut::Step{ "t", "T", "B", "", "", check, arg };
 	};
 
-	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentPresent, "rigidbody"), base, now));
-	now.set(tut::Comp::RigidBody);
-	CHECK(tut::satisfied(step(tut::Check::ComponentPresent, "rigidbody"), base, now));
-	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentPresent, "collider"), base, now));
+	// One MORE than before, not "at least one": a furnished sandbox scene already
+	// carries a rigid body, and the step asks the user to add one.
+	base.add(tut::Comp::RigidBody, 2);
+	now.add(tut::Comp::RigidBody, 2);
+	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentAdded, "rigidbody"), base, now));
+	now.add(tut::Comp::RigidBody);
+	CHECK(tut::satisfied(step(tut::Check::ComponentAdded, "rigidbody"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentAdded, "collider"), base, now));
 	// An unknown component name is never satisfiable rather than always satisfied.
-	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentPresent, "nonsense"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::ComponentAdded, "nonsense"), base, now));
 
-	now.openTabs = "Scene\n\nNewMaterial\n/Content/NewMaterial.hasset\n";
-	CHECK(tut::satisfied(step(tut::Check::TabOpen, "Material"), base, now));
-	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOpen, "Particle"), base, now));
+	// Assets and tabs are matched by TYPE, so renaming the asset on create — which
+	// the create flow invites — cannot break the step.
+	now.add(tut::Asset::InputAction);
+	CHECK(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "inputaction"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "widget"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::AssetOfTypeAdded, "nonsense"), base, now));
+
+	now.addTab(tut::Asset::ParticleSystem);
+	CHECK(tut::satisfied(step(tut::Check::TabOfTypeOpened, "particlesystem"), base, now));
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOfTypeOpened, "material"), base, now));
+
+	// TabOpen (the synthetic Level Script tab) wants the tab to APPEAR: one that
+	// was already open when the step began does not count.
+	base.openTabs = "Scene\n\n";
+	now.openTabs  = "Scene\n\nMyThing\n::LevelScript::\n";
+	CHECK(tut::satisfied(step(tut::Check::TabOpen, "::LevelScript::"), base, now));
+	base.openTabs = now.openTabs;
+	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOpen, "::LevelScript::"), base, now));
 	CHECK_FALSE(tut::satisfied(step(tut::Check::TabOpen, ""), base, now));
 }
 

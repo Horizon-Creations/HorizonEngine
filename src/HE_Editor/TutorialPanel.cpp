@@ -2,6 +2,7 @@
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
 #include "EditorWidgets.h"       // dialog placement (stay inside the editor window)
+#include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -62,6 +63,11 @@ namespace
 	bool         s_baseValid   = false;
 	bool         s_stepDone    = false;   // the current step's check fired
 	float        s_doneTimer   = 0.0f;    // seconds since it fired (drives auto-advance)
+	bool         s_ackPressed  = false;   // ReadAck: the acknowledge button was pressed
+	bool         s_readToEnd   = false;   // ReadAck: the body has been scrolled through
+	// Panels focused since the current step opened, '\n'-delimited and
+	// '\n'-terminated (see Check::PanelsVisited). Cleared by gotoCursor.
+	std::string  s_visitedPanels;
 	int          s_playSessions = 0;      // play→stop transitions since the editor started
 	bool         s_wasPlaying  = false;
 
@@ -84,13 +90,39 @@ namespace
 		s_loaded = true;
 	}
 
+	// Every piece of per-step state is reset here — a step's baseline, whether its
+	// check has fired, and the two ReadAck flags. Missing one of these is how a
+	// step would arrive pre-completed, which is exactly what this tour must not do.
 	void gotoCursor(tut::Cursor c, GlobalState* gs)
 	{
 		s_cursor    = tut::clamp(c);
 		s_baseValid = false;
 		s_stepDone  = false;
 		s_doneTimer = 0.0f;
+		s_ackPressed = false;
+		s_readToEnd  = false;
+		s_visitedPanels.clear();
 		persist(gs);
+	}
+
+	// HE::AssetType → the tour's own Asset enum. Only the kinds a step asks for
+	// map; everything else is Asset::Count and is simply not counted.
+	tut::Asset tutAsset(HE::AssetType t)
+	{
+		switch (t)
+		{
+		case HE::AssetType::Material:             return tut::Asset::Material;
+		case HE::AssetType::ParticleSystem:       return tut::Asset::ParticleSystem;
+		case HE::AssetType::Widget:               return tut::Asset::Widget;
+		case HE::AssetType::AnimatorStateMachine: return tut::Asset::AnimatorStateMachine;
+		case HE::AssetType::InputAction:          return tut::Asset::InputAction;
+		case HE::AssetType::Scene:                return tut::Asset::Scene;
+		case HE::AssetType::Texture:              return tut::Asset::Texture;
+		case HE::AssetType::StaticMesh:           return tut::Asset::StaticMesh;
+		case HE::AssetType::SkeletalMesh:         return tut::Asset::SkeletalMesh;
+		case HE::AssetType::Script:               return tut::Asset::Script;
+		default:                                  return tut::Asset::Count;
+		}
 	}
 
 	// ── Sampling the live editor ──────────────────────────────────────────────
@@ -98,11 +130,11 @@ namespace
 	// one place so the checks stay pure functions over data (see TutorialSteps.h)
 	// and adding a check never means reaching into another panel.
 	//
-	// `withAssets` gates the one expensive part — walking the whole content tree
-	// under its shared lock — to the single step kind that needs it. Both the
-	// baseline snapshot and the live one are taken for the SAME step, so gating
-	// cannot produce a spurious "an asset appeared": either both counts are real
-	// or both are zero.
+	// `withAssets` gates the expensive part — walking the whole content tree under
+	// its shared lock, and sniffing each file's asset type — to the step kinds that
+	// need it. Both the baseline snapshot and the live one are taken for the SAME
+	// step, so gating cannot produce a spurious "an asset appeared": either both
+	// counts are real or both are zero.
 	tut::Signals sample(AppContext& ctx, const UiFlags& flags, bool withAssets)
 	{
 		tut::Signals s;
@@ -114,24 +146,44 @@ namespace
 			// scene loader both set one), so this view is the entity count.
 			s.entityCount = static_cast<int>(reg.view<NameComponent>().size());
 
-			auto mark = [&](tut::Comp c, bool present) { if (present) s.set(c); };
-			mark(tut::Comp::Mesh,           !reg.view<MeshComponent>().empty());
-			mark(tut::Comp::Material,       !reg.view<MaterialComponent>().empty());
-			mark(tut::Comp::Light,          !reg.view<LightComponent>().empty());
-			mark(tut::Comp::RigidBody,      !reg.view<RigidBodyComponent>().empty());
-			mark(tut::Comp::Collider,       !reg.view<ColliderComponent>().empty());
-			mark(tut::Comp::ParticleSystem, !reg.view<ParticleSystemComponent>().empty());
-			mark(tut::Comp::Script,         !reg.view<ScriptComponent>().empty());
-			mark(tut::Comp::Terrain,        !reg.view<TerrainComponent>().empty());
-			mark(tut::Comp::Foliage,        !reg.view<FoliageComponent>().empty());
-			mark(tut::Comp::NavMesh,        !reg.view<NavMeshComponent>().empty());
-			mark(tut::Comp::Camera,         !reg.view<CameraComponent>().empty());
-			mark(tut::Comp::AudioSource,    !reg.view<AudioSourceComponent>().empty());
-			mark(tut::Comp::Animator,       !reg.view<AnimatorComponent>().empty());
-			mark(tut::Comp::UICanvas,       !reg.view<UICanvasComponent>().empty());
+			// Counts, not "any": a furnished scene already has a light and a mesh, so
+			// "does one exist" would tick those steps off before the user acted. The
+			// checks want one MORE than when the step opened.
+			auto count = [&](tut::Comp c, size_t n) { s.add(c, static_cast<int>(n)); };
+			count(tut::Comp::Mesh,           reg.view<MeshComponent>().size());
+			count(tut::Comp::Material,       reg.view<MaterialComponent>().size());
+			count(tut::Comp::Light,          reg.view<LightComponent>().size());
+			count(tut::Comp::RigidBody,      reg.view<RigidBodyComponent>().size());
+			count(tut::Comp::Collider,       reg.view<ColliderComponent>().size());
+			count(tut::Comp::ParticleSystem, reg.view<ParticleSystemComponent>().size());
+			count(tut::Comp::Script,         reg.view<ScriptComponent>().size());
+			count(tut::Comp::Terrain,        reg.view<TerrainComponent>().size());
+			count(tut::Comp::Foliage,        reg.view<FoliageComponent>().size());
+			count(tut::Comp::NavMesh,        reg.view<NavMeshComponent>().size());
+			count(tut::Comp::Camera,         reg.view<CameraComponent>().size());
+			count(tut::Comp::AudioSource,    reg.view<AudioSourceComponent>().size());
+			count(tut::Comp::Animator,       reg.view<AnimatorComponent>().size());
+			count(tut::Comp::UICanvas,       reg.view<UICanvasComponent>().size());
+
+			// "The material slot was filled in", not "a Material component exists" —
+			// the component is added empty one step earlier.
+			for (auto [e, mat] : reg.view<MaterialComponent>().each())
+				if (mat.materialAssetId != HE::UUID{}) ++s.materialsAssigned;
 
 			s.selectionSet = ctx.selectedEntity != entt::null &&
 			                 reg.valid(ctx.selectedEntity);
+			if (s.selectionSet)
+				s.selectedEntity = static_cast<uint32_t>(entt::to_integral(ctx.selectedEntity));
+
+			// Sky time of day. environmentEntity() is the one Sky in the scene; with
+			// no Sky the step cannot be satisfied at all (skyPresent gates it), which
+			// is right — there is no slider to drag.
+			const entt::entity sky = ctx.world->environmentEntity();
+			if (sky != entt::null && reg.valid(sky) && reg.all_of<EnvironmentComponent>(sky))
+			{
+				s.skyPresent = true;
+				s.timeOfDay  = reg.get<EnvironmentComponent>(sky).timeOfDay;
+			}
 		}
 
 		if (withAssets && ctx.globalState)
@@ -146,6 +198,15 @@ namespace
 				stack.pop_back();
 				if (!f) continue;
 				s.assetCount += static_cast<int>(f->files.size());
+				for (const HE::File* file : f->files)
+				{
+					if (!file) continue;
+					// Cached per path (EditorAssetTypeCache), so this is one header
+					// sniff per asset for the lifetime of the content tree, not one
+					// per frame.
+					const tut::Asset a = tutAsset(EditorAssetTypeCache::assetTypeOf(file->fullPath));
+					if (a != tut::Asset::Count) s.add(a);
+				}
 				for (const HE::Folder* sub : f->subfolders) stack.push_back(sub);
 			}
 		}
@@ -157,35 +218,143 @@ namespace
 			s.openTabs += '\n';
 			s.openTabs += t.assetPath;
 			s.openTabs += '\n';
+			// By type, not by label: the tour tells the user to CREATE the asset and
+			// the create flow lets them name it, so matching "Material" against the
+			// tab title fails for everyone who typed their own name.
+			if (!t.assetPath.empty())
+			{
+				const tut::Asset a = tutAsset(EditorAssetTypeCache::assetTypeOf(t.assetPath));
+				if (a != tut::Asset::Count) s.addTab(a);
+			}
 		}
+		s.visitedPanels = s_visitedPanels;
 #endif
+
+		if (ctx.editorCamera)
+		{
+			const glm::vec3 p = ctx.editorCamera->position();
+			s.camX     = p.x;
+			s.camY     = p.y;
+			s.camZ     = p.z;
+			s.camYaw   = ctx.editorCamera->yaw();
+			s.camPitch = ctx.editorCamera->pitch();
+			s.camPivot = ctx.editorCamera->pivotDistance();
+		}
 
 		s.playing         = ctx.isPlaying;
 		s.playSessions    = s_playSessions;
+		s.undoCount       = ctx.undoSys ? static_cast<int>(ctx.undoSys->undoCount()) : 0;
 		s.sceneUnsaved    = ctx.sceneDirty || ctx.currentScenePath.empty();
 		s.landscapeMode   = ctx.editorConfig.mode == EditorMode::Landscape;
+		s.preferencesOpen = flags.preferencesOpen;
 		s.profilerOpen    = flags.profilerOpen;
 		s.environmentOpen = flags.environmentOpen;
 		s.exportOpen      = flags.exportOpen;
+		s.importOpens     = flags.importDialogOpens;
+		s.contentRootKind = flags.contentRootKind;
+		s.acknowledged    = s_ackPressed;
 		return s;
 	}
 
 #ifdef HE_IMGUI_ENABLED
-	// A soft pulsing outline around the panel a step is talking about. Drawn on the
-	// foreground list so it sits over docked windows, and skipped for a collapsed or
-	// hidden window rather than outlining a zero-size rect somewhere off-screen.
-	void outlineWindow(const char* name, float time)
+	// ── Panel highlight ───────────────────────────────────────────────────────
+	// The outline has to land on the panel the step is actually talking about, in
+	// every layout the user can produce. Three things make that non-obvious:
+	//
+	//  * A DOCKED window's Pos/Size is the node's *inner* rect — it excludes the
+	//    tab bar. Outlining that draws a box that does not line up with what the
+	//    user perceives as the panel, so the dock node's rect is used instead.
+	//  * A docked window whose tab is NOT selected is inactive and has a stale
+	//    rect. Outlining it would put the box on top of whatever tab IS showing —
+	//    the wrong panel entirely. The node is outlined in that case, so the box
+	//    frames the tab bar the user has to click.
+	//  * A window that does not exist yet (never opened, or opened into another
+	//    viewport) must not be outlined at all rather than at {0,0}.
+	//
+	// Drawn on the target viewport's foreground list, so it sits over docked
+	// windows and lands in the right OS window when a panel was dragged out.
+	//
+	// Returns false when there was nothing to outline, which is how the card knows
+	// to tell the user the panel is closed instead of silently pointing at nothing.
+	bool outlineWindow(const char* name, float time, bool dimmed)
 	{
-		if (!name || name[0] == '\0') return;
+		if (!name || name[0] == '\0') return false;
 		ImGuiWindow* w = ImGui::FindWindowByName(name);
-		if (!w || !w->WasActive || w->Hidden || w->Collapsed) return;
-		if (w->Size.x < 2.0f || w->Size.y < 2.0f) return;
+		if (!w) return false;
 
-		const float pulse = 0.45f + 0.35f * (0.5f + 0.5f * std::sin(time * 3.2f));
-		ImDrawList* dl = ImGui::GetForegroundDrawList();
-		dl->AddRect(w->Pos, ImVec2(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y),
-		            ImGui::GetColorU32(ImVec4(0.45f, 0.72f, 1.0f, pulse)),
-		            6.0f, 0, 3.0f);
+		ImVec2 pos, size;
+		if (ImGuiDockNode* node = w->DockNode; node && node->HostWindow)
+		{
+			// The whole docked slot, tab bar included — and valid even while another
+			// tab of the same node is the visible one. The host must be on screen,
+			// though: a node inside a hidden host has a stale rect that would put the
+			// outline somewhere the user is not looking.
+			if (!node->HostWindow->WasActive) return false;
+			pos  = node->Pos;
+			size = node->Size;
+		}
+		else
+		{
+			if (!w->WasActive || w->Hidden || w->Collapsed) return false;
+			pos  = w->Pos;
+			size = w->Size;
+		}
+		if (size.x < 8.0f || size.y < 8.0f) return false;
+
+		const float pulse = dimmed ? 0.22f
+		                           : 0.45f + 0.35f * (0.5f + 0.5f * std::sin(time * 3.2f));
+		const ImVec4 col = dimmed ? ImVec4(0.45f, 0.85f, 0.55f, pulse)   // already done
+		                          : ImVec4(0.45f, 0.72f, 1.00f, pulse);
+		ImDrawList* dl = ImGui::GetForegroundDrawList(w->Viewport);
+		// Inset by half the stroke so the rectangle sits ON the panel edge instead
+		// of half outside it (which reads as covering the neighbouring panel).
+		const float inset = 2.0f;
+		dl->AddRect(ImVec2(pos.x + inset, pos.y + inset),
+		            ImVec2(pos.x + size.x - inset, pos.y + size.y - inset),
+		            ImGui::GetColorU32(col), 6.0f, 0, 3.0f);
+		return true;
+	}
+
+	// Outline every '|'-separated entry of `list`. On a PanelsVisited step the ones
+	// already clicked are drawn dim and green, so the card's "2 of 4" and the
+	// highlights always agree on what is left. Matched by NAME rather than by list
+	// position — focusWindow and the check's argument are two separate lists and
+	// must not be assumed to be in the same order.
+	int outlineWindows(const char* list, bool dimVisited, float time,
+	                   std::string_view visited)
+	{
+		if (!list || list[0] == '\0') return 0;
+		int drawn = 0;
+		const int n = tut::listEntryCount(list);
+		for (int i = 0; i < n; ++i)
+		{
+			const std::string name(tut::listEntry(list, i));
+			if (name.empty()) continue;
+			const bool done = dimVisited && tut::panelVisited(name, visited);
+			if (outlineWindow(name.c_str(), time, done)) ++drawn;
+		}
+		return drawn;
+	}
+
+	// The window the user last clicked into, as the tour's "visited" signal.
+	// RootWindow deliberately does NOT cross dock nodes, so a docked panel reports
+	// itself while a child window inside it (the Content Browser's asset grid, the
+	// Details scroll region) reports the panel — which is what the user clicked.
+	//
+	// Everything from "###" on is stripped: the left panel is "Landscape###Quick
+	// Settings" in Landscape mode and "Quick Settings###Quick Settings" otherwise,
+	// and the step tables name panels by the stable id, not by the visible title.
+	std::string focusedPanelName()
+	{
+		ImGuiContext* g = ImGui::GetCurrentContext();
+		if (!g || !g->NavWindow) return {};
+		const ImGuiWindow* w = g->NavWindow->RootWindow ? g->NavWindow->RootWindow
+		                                                : g->NavWindow;
+		if (!w->Name) return {};
+		std::string name = w->Name;
+		if (const size_t hash = name.find("###"); hash != std::string::npos)
+			name = name.substr(hash + 3);
+		return name;
 	}
 
 	// TextWrapped over a body whose paragraphs are '\n'-separated, with a blank
@@ -387,8 +556,23 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	const tut::Step*    step = tut::stepAt(s_cursor);
 	const tut::Chapter* chap = tut::chapterAt(s_cursor);
 
-	const tut::Signals now =
-		sample(ctx, flags, step && step->check == tut::Check::AssetAdded);
+	// Which panel the user is in, accumulated for the current step. Recorded
+	// before sampling so a click this frame counts this frame, and skipped while
+	// the tutorial card itself has focus — clicking Next must not tick off a
+	// "visit the panels" step.
+	{
+		const std::string focused = focusedPanelName();
+		if (!focused.empty() && focused != "Tutorial" &&
+		    !tut::panelVisited(focused, s_visitedPanels))
+		{
+			s_visitedPanels += focused;
+			s_visitedPanels += '\n';
+		}
+	}
+
+	const bool needsAssetScan = step && (step->check == tut::Check::AssetAdded ||
+	                                     step->check == tut::Check::AssetOfTypeAdded);
+	const tut::Signals now = sample(ctx, flags, needsAssetScan);
 	if (!s_baseValid) { s_base = now; s_baseValid = true; }
 
 	// Completion is latched: a check that fired must not un-fire because the user
@@ -474,9 +658,15 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;   // separator + padding
 	ImGui::BeginChild("##tutBody", ImVec2(0.0f, -footerH), ImGuiChildFlags_None);
 	drawParagraphs(step->body);
+	// A prose card unlocks its button once the body has actually been read to the
+	// end. A body that fits without scrolling has MaxY == 0 and counts as read
+	// immediately — there is nothing to scroll past.
+	if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) s_readToEnd = true;
 	ImGui::EndChild();
 
 	// ── What to do ────────────────────────────────────────────────────────────
+	const bool isReadCard = step->check == tut::Check::ReadAck;
+
 	ImGui::Separator();
 	if (step->action[0] != '\0')
 	{
@@ -485,37 +675,88 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		ImGui::PopStyleColor();
 	}
 
-	if (step->check == tut::Check::Manual)
-	{
-		ImGui::TextDisabled("Read on when you are ready.");
-	}
-	else if (s_stepDone)
+	// The status line is the only place the tour explains itself, so it has to
+	// name the *reason* a step is still open — "waiting" on its own is what makes
+	// a gated tutorial feel broken.
+	if (s_stepDone)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.90f, 0.55f, 1.0f));
 		ImGui::TextUnformatted("Done.");
 		ImGui::PopStyleColor();
 	}
+	else if (isReadCard)
+	{
+		ImGui::TextDisabled(s_readToEnd ? "Ready when you are."
+		                                : "Scroll to the end of the card to continue.");
+	}
+	else if (step->check == tut::Check::TimeOfDayChanged && !now.skyPresent)
+	{
+		// The one step whose subject can be missing from the scene. Say so instead
+		// of leaving the user waiting on a slider that is not there.
+		ImGui::TextDisabled("This scene has no Sky entity - add one with View - Environment.");
+	}
+	else if (tut::wantsWindowOpened(step->check) && tut::windowOpenIn(step->check, s_base))
+	{
+		// It was already open when the step began, so "open it" cannot fire. Ask
+		// for the close-and-open rather than letting the step look stuck.
+		ImGui::TextDisabled("Already open - close it and open it again.");
+	}
+	else if (step->check == tut::Check::SceneSaved && !s_base.sceneUnsaved)
+	{
+		// Nothing to save when the step opened, so Ctrl+S is a no-op and the check
+		// cannot fire. Point at the way forward instead of at the keyboard shortcut.
+		ImGui::TextDisabled("Nothing to save yet - change something first.");
+	}
+	else if (step->check == tut::Check::ContentRootShown &&
+	         now.contentRootKind == s_base.contentRootKind)
+	{
+		ImGui::TextDisabled("Use the root buttons at the top of the Content Browser.");
+	}
+	else if (step->check == tut::Check::PanelsVisited)
+	{
+		const int n = tut::listEntryCount(step->arg);
+		int left = 0;
+		for (int i = 0; i < n; ++i)
+			if (!tut::listEntryVisited(step->arg, i, now.visitedPanels)) ++left;
+		ImGui::TextDisabled("%d of %d panels visited.", n - left, n);
+	}
 	else
 	{
-		ImGui::TextDisabled("Waiting for you - or press Next to skip it.");
+		ImGui::TextDisabled("Waiting for you to do it.");
 	}
 
 	// ── Navigation ────────────────────────────────────────────────────────────
-	const float w = ImGui::GetContentRegionAvail().x;
-	const float bw = (w - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+	// There is no skip. The tour advances when the editor has SEEN the step done
+	// (or, for a prose card, when it has been read and acknowledged), so "Next" is
+	// only ever the shortcut past the one-second confirmation pause. Back stays
+	// free — revisiting a step you already finished is not skipping one.
+	const float w  = ImGui::GetContentRegionAvail().x;
+	const float bw = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 
 	ImGui::BeginDisabled(s_cursor.chapter == 0 && s_cursor.step == 0);
 	if (ImGui::Button("Back", ImVec2(bw, 0.0f)))
 		gotoCursor(tut::retreat(s_cursor), ctx.globalState);
 	ImGui::EndDisabled();
 	ImGui::SameLine();
-	if (ImGui::Button("Skip chapter", ImVec2(bw, 0.0f)))
-		gotoCursor(tut::nextChapter(s_cursor), ctx.globalState);
-	ImGui::SameLine();
 	{
-		const bool last = tut::finished(tut::advance(s_cursor));
-		if (ImGui::Button(last ? "Finish" : "Next", ImVec2(bw, 0.0f)))
+		const bool last  = tut::finished(tut::advance(s_cursor));
+		const bool ready = isReadCard ? s_readToEnd : s_stepDone;
+		ImGui::BeginDisabled(!ready);
+		const char* label = isReadCard ? (last ? "Finish" : "Got it")
+		                              : (last ? "Finish" : "Next");
+		if (ImGui::Button(label, ImVec2(bw, 0.0f)))
+		{
+			// A prose card is finished BY this button, so it advances straight away
+			// — waiting out the confirmation delay for a card the user just
+			// dismissed would only feel unresponsive.
+			s_ackPressed = true;
 			gotoCursor(tut::advance(s_cursor), ctx.globalState);
+		}
+		ImGui::EndDisabled();
+		if (!ready && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip(isReadCard
+				? "Read the card to the end first."
+				: "Do the step above - the tour notices by itself.");
 	}
 
 	ImGui::End();
@@ -530,7 +771,9 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	}
 
 	if (!s_stepDone)
-		outlineWindow(step->focusWindow, static_cast<float>(ImGui::GetTime()));
+		outlineWindows(step->focusWindow,
+		               step->check == tut::Check::PanelsVisited,
+		               static_cast<float>(ImGui::GetTime()), now.visitedPanels);
 
 	if (!open)
 	{

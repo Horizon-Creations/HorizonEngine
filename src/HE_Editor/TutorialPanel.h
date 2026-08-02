@@ -20,6 +20,9 @@ namespace TutorialPanel
 		bool profilerOpen    = false;
 		bool environmentOpen = false;
 		bool exportOpen      = false;
+		bool preferencesOpen = false;
+		int  importDialogOpens = 0;  // monotonic: times the import dialog opened
+		int  contentRootKind   = 0;  // Content Browser root: 0 Content, 1 Engine, 2 Source
 	};
 
 	// Project Hub, first start only: the welcome card offering the guided tour and
