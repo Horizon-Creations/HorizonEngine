@@ -118,6 +118,9 @@ namespace fs = std::filesystem;
 static bool s_resetLayoutRequested = false;
 
 
+// Times Assets > Import Asset opened the file dialog this run (guided tour signal).
+static int s_importDialogOpens = 0;
+
 // Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
 static bool s_showPreferences = false;
 
@@ -498,6 +501,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	auto triggerImportAsset = [&]()
 	{
 		if (!ctx.projectLoaded || !ctx.contentManager) return;
+		// Counted for the guided tour's "open Assets > Import Asset" step: the file
+		// dialog is the OS's, so opening it is the only part the editor can observe
+		// (and cancelling it must still count — the step teaches where it lives).
+		++s_importDialogOpens;
 		s_pendingFileOp = PendingFileOp::ImportAsset;
 		SDL_DialogFileFilter filters[] = {
 			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat" },
@@ -1592,6 +1599,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         tutFlags.profilerOpen    = s_showProfiler;
         tutFlags.environmentOpen = s_showEnvironment;
         tutFlags.exportOpen      = ExportDialogPanel::isOpen();
+        // The Preferences modal owns its own lifetime once opened (see
+        // DrawPreferencesWindow), so ask ImGui whether it is up rather than
+        // reading the one-shot request flag.
+        tutFlags.preferencesOpen = ImGui::IsPopupOpen("Preferences");
+        tutFlags.importDialogOpens = s_importDialogOpens;
+        tutFlags.contentRootKind   = ContentBrowserPanel::browsedRootKind();
         TutorialPanel::render(ctx, dt, tutFlags);
     }
 #endif // HE_IMGUI_ENABLED

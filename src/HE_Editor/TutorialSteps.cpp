@@ -1,5 +1,6 @@
 #include "TutorialSteps.h"
 #include <array>
+#include <cmath>
 #include <iterator>   // std::size
 
 namespace HE::tut
@@ -13,6 +14,12 @@ namespace
 		"mesh", "material", "light", "rigidbody", "collider", "particlesystem",
 		"script", "terrain", "foliage", "navmesh", "camera", "audiosource",
 		"animator", "uicanvas",
+	};
+
+	// Index-parallel to Asset.
+	constexpr std::array<const char*, static_cast<size_t>(Asset::Count)> kAssetNames = {
+		"material", "particlesystem", "widget", "animatorstatemachine", "inputaction",
+		"scene", "texture", "staticmesh", "skeletalmesh", "script",
 	};
 }
 
@@ -28,16 +35,105 @@ Comp compFromString(std::string_view s)
 	return Comp::Count;
 }
 
+const char* assetName(Asset a)
+{
+	return a < Asset::Count ? kAssetNames[static_cast<size_t>(a)] : "";
+}
+
+Asset assetFromString(std::string_view s)
+{
+	for (size_t i = 0; i < kAssetNames.size(); ++i)
+		if (s == kAssetNames[i]) return static_cast<Asset>(i);
+	return Asset::Count;
+}
+
+bool wantsWindowOpened(Check c)
+{
+	switch (c)
+	{
+	case Check::PreferencesOpen:
+	case Check::ProfilerOpen:
+	case Check::EnvironmentOpen:
+	case Check::ExportOpen:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool windowOpenIn(Check c, const Signals& s)
+{
+	switch (c)
+	{
+	case Check::PreferencesOpen:  return s.preferencesOpen;
+	case Check::ProfilerOpen:     return s.profilerOpen;
+	case Check::EnvironmentOpen:  return s.environmentOpen;
+	case Check::ExportOpen:       return s.exportOpen;
+	default:                      return false;
+	}
+}
+
+// ─── '|'-separated lists (focusWindow, PanelsVisited's arg) ──────────────────
+int listEntryCount(std::string_view list)
+{
+	if (list.empty()) return 0;
+	int n = 1;
+	for (char c : list) if (c == '|') ++n;
+	return n;
+}
+
+std::string_view listEntry(std::string_view list, int index)
+{
+	if (index < 0) return {};
+	size_t start = 0;
+	for (int i = 0; ; ++i)
+	{
+		const size_t bar = list.find('|', start);
+		const size_t end = (bar == std::string_view::npos) ? list.size() : bar;
+		if (i == index) return list.substr(start, end - start);
+		if (bar == std::string_view::npos) return {};
+		start = bar + 1;
+	}
+}
+
+bool panelVisited(std::string_view name, std::string_view visited)
+{
+	if (name.empty()) return false;
+	// `visited` is '\n'-delimited AND '\n'-terminated, so searching for the name
+	// wrapped in newlines matches whole entries only ("Scene" must not be
+	// satisfied by "Scene Settings"). The haystack gets a leading newline so the
+	// first entry can match too.
+	std::string needle;
+	needle.reserve(name.size() + 2);
+	needle += '\n';
+	needle.append(name);
+	needle += '\n';
+	std::string hay;
+	hay.reserve(visited.size() + 1);
+	hay += '\n';
+	hay.append(visited);
+	return hay.find(needle) != std::string::npos;
+}
+
+bool listEntryVisited(std::string_view list, int index, std::string_view visited)
+{
+	return panelVisited(listEntry(list, index), visited);
+}
+
 // ─── The curriculum ──────────────────────────────────────────────────────────
 // One chapter per subsystem, in the order someone actually builds a level: look
 // around, place something, give it a surface, light it, make it move, make it
 // playable, ship it. Every step names the exact affordance it is talking about —
 // a tour that says "somewhere in the editor" is worse than no tour.
 //
-// Steps whose Check is Manual are reading steps or ones whose completion the
-// editor cannot observe cheaply; they advance on Next. Everything else lights up
-// on its own the moment the user does the thing, which is the whole point: the
-// tour follows the user, not the other way round.
+// Every step is observed (see the header): the card advances when the editor sees
+// the action, not when the user clicks past it. The few cards with nothing to do
+// in the editor use Check::ReadAck, which unlocks its button once the body has
+// been read to the end.
+//
+// `focusWindow` must name windows EditorUI actually opens — the highlight is a
+// FindWindowByName lookup and a typo silently highlights nothing. The set is
+// asserted in tests/test_tutorial.cpp; add a name there when you add one here.
 
 namespace
 {
@@ -48,10 +144,12 @@ constexpr Step kOrientation[] = {
 	  "Welcome to Horizon Engine",
 	  "This tour walks once through every part of the editor — scenes, assets, "
 	  "materials, terrain, physics, animation, UI, scripting, playing and shipping.\n"
-	  "It never touches your work: each step tells you what to do and notices when "
-	  "you did it. Skip anything that does not interest you, close the window and "
-	  "reopen it later from Help - Interactive Tutorial; your place is remembered.",
-	  "", "", Check::Manual, "" },
+	  "It never touches your work: each step tells you what to do and waits until "
+	  "you have actually done it. Nothing is skipped past, so when the tour says a "
+	  "chapter is done you really have used that part of the editor.\n"
+	  "Close the window whenever you like and reopen it from Help - Interactive "
+	  "Tutorial; your place is remembered.",
+	  "", "", Check::ReadAck, "" },
 
 	{ "layout",
 	  "The editor at a glance",
@@ -61,8 +159,9 @@ constexpr Step kOrientation[] = {
 	  "Content Browser (bottom) is your project's asset library.\n"
 	  "Quick Settings (left) holds the engine switches you pinned, and the tab bar "
 	  "above the viewport is where asset editors open next to the scene.",
-	  "Drag a panel by its tab to re-dock it. View - Reset Layout puts everything back.",
-	  "Content Browser", Check::Manual, "" },
+	  "Click into each of the four highlighted panels once.",
+	  "Scene|World Outliner|Details|Content Browser",
+	  Check::PanelsVisited, "Scene|World Outliner|Details|Content Browser" },
 };
 
 // ── 2. Viewport navigation ──
@@ -73,8 +172,8 @@ constexpr Step kViewport[] = {
 	  "While it is held, W/A/S/D move, Q/E drop and rise, and Shift moves faster.\n"
 	  "The mouse is captured while you look around, so the cursor will not run off "
 	  "the viewport.",
-	  "Right-drag in the Scene view and fly around a little.",
-	  "Scene", Check::Manual, "" },
+	  "Right-drag in the Scene view, then fly with W/A/S/D.",
+	  "Scene", Check::CameraFlown, "" },
 
 	{ "orbit",
 	  "Orbit, pan, zoom, focus",
@@ -83,8 +182,8 @@ constexpr Step kViewport[] = {
 	  "Select something and press F to frame it — the fastest way back when you have "
 	  "flown off into the sky.\n"
 	  "Camera speed lives in Edit - Preferences if the default feels wrong.",
-	  "Try Alt+drag and the mouse wheel in the Scene view.",
-	  "Scene", Check::Manual, "" },
+	  "Roll the mouse wheel in the Scene view to zoom in or out.",
+	  "Scene", Check::CameraZoomed, "" },
 };
 
 // ── 3. Entities ──
@@ -96,7 +195,7 @@ constexpr Step kEntities[] = {
 	  "Parenting matters — children inherit their parent's transform, so moving a "
 	  "parent moves the whole group.",
 	  "Click an entity in the World Outliner to select it.",
-	  "World Outliner", Check::SelectionSet, "" },
+	  "World Outliner", Check::SelectionChanged, "" },
 
 	{ "create-entity",
 	  "Create an entity",
@@ -112,10 +211,10 @@ constexpr Step kEntities[] = {
 	  "With an entity selected, the gizmo appears in the viewport. W switches to "
 	  "move, E to rotate, R to scale — the same three buttons sit in the Scene "
 	  "toolbar.\n"
-	  "Every drag is undoable with Ctrl/Cmd+Z, and the numbers underneath are "
-	  "editable in the Details panel if you need exact values.",
+	  "Every drag is undoable, and the numbers underneath are editable in the "
+	  "Details panel if you need exact values.",
 	  "Drag the gizmo, then press Ctrl/Cmd+Z to undo it.",
-	  "Scene", Check::Manual, "" },
+	  "Scene", Check::UndoUsed, "" },
 };
 
 // ── 4. Components ──
@@ -128,7 +227,7 @@ constexpr Step kComponents[] = {
 	  "Sphere, Plane, …) live under the Engine root of the Content Browser and can "
 	  "be picked straight from the component's asset field.",
 	  "Select your entity and add a Mesh component in Details.",
-	  "Details", Check::ComponentPresent, "mesh" },
+	  "Details", Check::ComponentAdded, "mesh" },
 
 	{ "add-material",
 	  "Give it a surface",
@@ -138,7 +237,7 @@ constexpr Step kComponents[] = {
 	  "go into the parameter overrides on this component, not into a copy of the "
 	  "material.",
 	  "Add a Material component to the same entity.",
-	  "Details", Check::ComponentPresent, "material" },
+	  "Details", Check::ComponentAdded, "material" },
 
 	{ "save-scene",
 	  "Save the scene",
@@ -160,18 +259,18 @@ constexpr Step kContent[] = {
 	  "override them) and — in C++ projects — Source.\n"
 	  "Every engine asset is a .hasset file: one container format with a type tag, "
 	  "which is why the browser groups by icon rather than by extension.",
-	  "Browse the Engine root and look at the built-in meshes.",
-	  "Content Browser", Check::Manual, "" },
+	  "Switch the Content Browser to the Engine root and look at the built-in meshes.",
+	  "Content Browser", Check::ContentRootShown, "engine" },
 
 	{ "import",
 	  "Import your own assets",
-	  "Assets - Import Asset (or drag files in) brings in glTF/GLB models, PNG/JPG/"
-	  "TGA/HDR textures, WAV audio and fonts. Importing converts them to .hasset "
-	  "once; the editor never re-reads the original at runtime.\n"
+	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB models, "
+	  "PNG/JPG/TGA/HDR textures, WAV audio and fonts. Importing converts them to "
+	  ".hasset once; the editor never re-reads the original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
 	  "everything else as a static mesh.",
-	  "Import a model or texture — or press Next if you have nothing handy.",
-	  "Content Browser", Check::Manual, "" },
+	  "Open Assets - Import Asset. Cancelling the file dialog is fine.",
+	  "Content Browser", Check::ImportOpened, "" },
 
 	{ "create-asset",
 	  "Create an asset",
@@ -196,7 +295,7 @@ constexpr Step kMaterials[] = {
 	  "are running (Metal, OpenGL, D3D, Vulkan), so one graph looks the same "
 	  "everywhere.",
 	  "Create a Material in the Content Browser and double-click it.",
-	  "Content Browser", Check::TabOpen, "Material" },
+	  "Content Browser", Check::TabOfTypeOpened, "material" },
 
 	{ "material-assign",
 	  "Assign it and see it",
@@ -204,8 +303,8 @@ constexpr Step kMaterials[] = {
 	  "the entity) and the viewport updates immediately.\n"
 	  "The preview sphere in the material tab renders with the same shader path as "
 	  "the scene, so what you see there is what you get.",
-	  "Assign your material to an entity and watch the viewport.",
-	  "Details", Check::Manual, "" },
+	  "Drag your material onto a Material component's asset slot in Details.",
+	  "Details", Check::MaterialAssigned, "" },
 };
 
 // ── 7. Environment ──
@@ -218,7 +317,7 @@ constexpr Step kEnvironment[] = {
 	  "View - Environment adds or removes either one; the Sun and Moon are children "
 	  "of the Sky entity and travel with it.",
 	  "Open View - Environment.",
-	  "", Check::EnvironmentOpen, "" },
+	  "Environment", Check::EnvironmentOpen, "" },
 
 	{ "sky-tuning",
 	  "Time of day, clouds, stars",
@@ -227,8 +326,8 @@ constexpr Step kEnvironment[] = {
 	  "contrails, fog, stars, nebula and aurora.\n"
 	  "The Weather entity drives cloud coverage, wind, and rain/snow particles on "
 	  "top of it. All of it is scene data, so it saves with the level.",
-	  "Select Sky and drag the time-of-day slider.",
-	  "Details", Check::Manual, "" },
+	  "Select the Sky entity and drag its Time of Day slider.",
+	  "World Outliner|Details", Check::TimeOfDayChanged, "" },
 
 	{ "lights",
 	  "Local lights",
@@ -238,7 +337,7 @@ constexpr Step kEnvironment[] = {
 	  "Ambient light comes from the sky itself — an image-based term the sky pass "
 	  "feeds into shading.",
 	  "Add a Light component to an entity.",
-	  "Details", Check::ComponentPresent, "light" },
+	  "Details", Check::ComponentAdded, "light" },
 };
 
 // ── 8. Landscape & foliage ──
@@ -255,44 +354,48 @@ constexpr Step kLandscape[] = {
 
 	{ "sculpt",
 	  "Sculpt and paint",
-	  "In Sculpt mode the brush raises, lowers, smooths and flattens the heightfield "
-	  "under the cursor. In Paint mode the same brush paints layer weights, which a "
-	  "Landscape Layer Blend node in the terrain material turns into different "
-	  "surfaces.\n"
-	  "Brush size, strength and falloff are on the same panel; Reset Sculpting "
-	  "returns to the generated shape.",
-	  "Create a landscape and drag the brush across it.",
-	  "", Check::ComponentPresent, "terrain" },
+	  "The Landscape panel on the left replaces Quick Settings while the mode is "
+	  "active: Create Landscape first, then the brush raises, lowers, smooths and "
+	  "flattens the heightfield under the cursor.\n"
+	  "Paint mode paints layer weights instead, which a Landscape Layer Blend node "
+	  "in the terrain material turns into different surfaces. Brush size, strength "
+	  "and falloff are on the same panel; Reset Sculpting returns to the generated "
+	  "shape.",
+	  "Press Create Landscape in the Landscape panel, then drag the brush over it.",
+	  "Quick Settings", Check::ComponentAdded, "terrain" },
 
 	{ "foliage",
 	  "Foliage",
 	  "A Foliage component scatters a mesh across a surface — grass, rocks, trees — "
 	  "as GPU instances rather than as thousands of entities, with density, scale "
 	  "jitter and cull distance as parameters.\n"
-	  "Switch back to View mode when you are done with the terrain.",
-	  "Add a Foliage component, or press Next.",
-	  "Details", Check::Manual, "" },
+	  "Switch the Scene toolbar back to View mode when you are done with the terrain.",
+	  "Add a Foliage component to an entity.",
+	  "Details", Check::ComponentAdded, "foliage" },
 };
 
 // ── 9. Physics ──
 constexpr Step kPhysics[] = {
 	{ "rigidbody",
-	  "Rigid bodies and colliders",
-	  "A Rigid Body makes an entity take part in the simulation; a Collider gives it "
-	  "a shape (box, sphere, capsule or mesh). Static geometry wants a collider "
-	  "without a rigid body.\n"
+	  "Rigid bodies",
+	  "A Rigid Body makes an entity take part in the simulation. Static geometry "
+	  "wants a collider without a rigid body; anything that should fall, roll or be "
+	  "pushed wants both.\n"
 	  "Physics only runs in play mode — in the editor nothing falls, which is what "
 	  "you want while you are placing things.",
-	  "Add a Rigid Body and a Collider to an entity above the ground.",
-	  "Details", Check::ComponentPresent, "rigidbody" },
+	  "Add a Rigid Body component to an entity above the ground.",
+	  "Details", Check::ComponentAdded, "rigidbody" },
 
 	{ "collisions",
-	  "Collision callbacks",
+	  "Colliders and collision callbacks",
+	  "A Collider gives the body its shape: box, sphere, capsule or mesh. Without "
+	  "one a rigid body has mass but nothing to hit.\n"
 	  "Collision and trigger events are delivered to your gameplay logic — a script, "
 	  "a HorizonCode graph or a native C++ class — so a trap, a pickup or a door is "
-	  "a handful of nodes rather than a polling loop.\n"
-	  "Raycasts against the physics world are available from the same place.",
-	  "", "", Check::Manual, "" },
+	  "a handful of nodes rather than a polling loop. Raycasts against the physics "
+	  "world come from the same place.",
+	  "Add a Collider component to the same entity.",
+	  "Details", Check::ComponentAdded, "collider" },
 };
 
 // ── 10. Particles ──
@@ -305,8 +408,8 @@ constexpr Step kParticles[] = {
 	  "An entity references it through a Particle System component. On export the "
 	  "graph is baked into real shader code, so a packaged build does not interpret "
 	  "anything at runtime.",
-	  "Create a Particle System asset and open it.",
-	  "Content Browser", Check::TabOpen, "Particle" },
+	  "Create a Particle System asset and double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "particlesystem" },
 
 	{ "particle-assign",
 	  "Put it in the scene",
@@ -315,7 +418,7 @@ constexpr Step kParticles[] = {
 	  "The rain and snow of the Weather entity use the same system, simulated on the "
 	  "GPU where the backend supports it.",
 	  "Add a Particle System component to an entity.",
-	  "Details", Check::ComponentPresent, "particlesystem" },
+	  "Details", Check::ComponentAdded, "particlesystem" },
 };
 
 // ── 11. Animation ──
@@ -325,9 +428,11 @@ constexpr Step kAnimation[] = {
 	  "An imported rigged model becomes a Skeletal Mesh asset plus its Animation "
 	  "Clips. Its editor tab shows the mesh with a bone overlay so you can check the "
 	  "rig came through intact.\n"
-	  "Skinning runs on the GPU on every backend.",
-	  "Open a skeletal mesh asset, or press Next.",
-	  "Content Browser", Check::Manual, "" },
+	  "Skinning runs on the GPU on every backend, so a crowd costs about what the "
+	  "same triangle count costs without a skeleton.\n"
+	  "This one is reading only — a rigged model is something you bring, not "
+	  "something the editor can hand you.",
+	  "", "Content Browser", Check::ReadAck, "" },
 
 	{ "state-machine",
 	  "Animator state machines",
@@ -336,8 +441,8 @@ constexpr Step kAnimation[] = {
 	  "and parameters are driven from gameplay.\n"
 	  "An entity's Animator component only references the asset and keeps the "
 	  "runtime state, so one machine can drive a whole crowd.",
-	  "Create an Animator State Machine asset and open it.",
-	  "Content Browser", Check::TabOpen, "StateMachine" },
+	  "Create an Animator State Machine asset and double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "animatorstatemachine" },
 };
 
 // ── 12. Navigation ──
@@ -350,7 +455,7 @@ constexpr Step kNavigation[] = {
 	  "Nav Agent components then path across it — agent radius, height and speed are "
 	  "per-agent.",
 	  "Add a Nav Mesh component and press Bake.",
-	  "Details", Check::ComponentPresent, "navmesh" },
+	  "Details", Check::ComponentAdded, "navmesh" },
 };
 
 // ── 13. UI ──
@@ -362,17 +467,18 @@ constexpr Step kUI[] = {
 	  "inputs and combo boxes, and a Graph where you wire up their behaviour.\n"
 	  "Widgets live outside the world — you show and hide them from gameplay code, "
 	  "so a menu does not need an entity.",
-	  "Create a UI Widget asset and open it.",
-	  "Content Browser", Check::TabOpen, "Widget" },
+	  "Create a UI Widget asset and double-click it to open it.",
+	  "Content Browser", Check::TabOfTypeOpened, "widget" },
 
 	{ "widget-logic",
 	  "Widget logic",
-	  "The Graph side is HorizonCode: event nodes for clicks and hovers, get/set "
-	  "nodes for the widget's own elements, typed graph variables that persist per "
-	  "widget, and functions with access modifiers.\n"
+	  "The Graph side of the widget tab is HorizonCode: event nodes for clicks and "
+	  "hovers, get/set nodes for the widget's own elements, typed graph variables "
+	  "that persist per widget, and functions with access modifiers.\n"
 	  "From a script or another graph you can call a widget's public functions by "
-	  "name, which is how a HUD stays decoupled from the gameplay that feeds it.",
-	  "", "", Check::Manual, "" },
+	  "name, which is how a HUD stays decoupled from the gameplay that feeds it.\n"
+	  "Switch your open widget tab to Graph and have a look before moving on.",
+	  "", "", Check::ReadAck, "" },
 };
 
 // ── 14. Scripting ──
@@ -383,8 +489,8 @@ constexpr Step kScripting[] = {
 	  "graphs), Lua, Python or C++ — chosen when it was created. The editor only "
 	  "offers the matching assets everywhere, so there is no way to end up with half "
 	  "a project in each.\n"
-	  "UI widgets and the two graphs below are shared by every language.",
-	  "", "", Check::Manual, "" },
+	  "UI widgets and the two graphs in the next step are shared by every language.",
+	  "", "", Check::ReadAck, "" },
 
 	{ "level-script",
 	  "Level Script and Game Instance",
@@ -402,8 +508,10 @@ constexpr Step kScripting[] = {
 	  "HorizonCode class, or a native C++ class in Source/ — depending on the "
 	  "project's language.\n"
 	  "Properties you declare on it show up in the Details panel, so designers can "
-	  "tune behaviour without opening the code.",
-	  "", "", Check::Manual, "" },
+	  "tune behaviour without opening the code.\n"
+	  "Which of those you get is fixed by the project you created, so this card is "
+	  "reading only.",
+	  "", "Details", Check::ReadAck, "" },
 
 	{ "input",
 	  "Input actions",
@@ -411,8 +519,8 @@ constexpr Step kScripting[] = {
 	  "player can do, and an Input Mapping Context binds keys, buttons and axes to "
 	  "those actions.\n"
 	  "Gameplay listens to the action, so rebinding never touches your logic.",
-	  "Create an Input Action asset, or press Next.",
-	  "Content Browser", Check::Manual, "" },
+	  "Create an Input Action asset in the Content Browser.",
+	  "Content Browser", Check::AssetOfTypeAdded, "inputaction" },
 };
 
 // ── 15. Play ──
@@ -431,8 +539,9 @@ constexpr Step kPlay[] = {
 	  "Every warning and error logged during a session is collected and shown after "
 	  "you stop, with the play-clock time it first appeared and repeats collapsed.\n"
 	  "It is the fastest way to notice a script that threw on frame 300 while you "
-	  "were looking somewhere else.",
-	  "", "", Check::Manual, "" },
+	  "were looking somewhere else. A clean session shows nothing at all, which is "
+	  "why this card does not wait for one.",
+	  "", "", Check::ReadAck, "" },
 };
 
 // ── 16. Performance ──
@@ -445,7 +554,9 @@ constexpr Step kPerformance[] = {
 	  "Anything you pin there also appears in Quick Settings next to the viewport, "
 	  "so the switches you A/B most are one click away.",
 	  "Open Edit - Preferences and look through the settings.",
-	  "Quick Settings", Check::Manual, "" },
+	  // No highlight: what the user has to hit is a menu, not a panel. Pointing at
+	  // Quick Settings here would be pointing at the wrong thing.
+	  "", Check::PreferencesOpen, "" },
 
 	{ "profiler",
 	  "The profiler",
@@ -455,7 +566,7 @@ constexpr Step kPerformance[] = {
 	  "Capture before and after a change — the per-pass breakdown tells you which "
 	  "pass actually paid for the effect you just turned on.",
 	  "Open View - Performance Profiler.",
-	  "", Check::ProfilerOpen, "" },
+	  "Performance Profiler", Check::ProfilerOpen, "" },
 };
 
 // ── 17. Packaging ──
@@ -478,20 +589,21 @@ constexpr Step kPackaging[] = {
 	  "graphs are compiled ahead of time for the backends you tick, so the shipped "
 	  "build has no first-frame compile hitch.\n"
 	  "The result is a folder you can hand to someone — no editor, no engine "
-	  "install.",
-	  "", "", Check::Manual, "" },
+	  "install. Have a look at the profile in the export dialog, then close it.",
+	  "", "", Check::ReadAck, "" },
 };
 
 // ── 18. Done ──
 constexpr Step kFinish[] = {
 	{ "finish",
 	  "That is the tour",
-	  "You have seen every major system the editor ships with. Nothing here was a "
-	  "special tutorial mode — it was the real editor the whole way.\n"
+	  "You have seen every major system the editor ships with, and used each one "
+	  "yourself — nothing here was a special tutorial mode, it was the real editor "
+	  "the whole way.\n"
 	  "Help - Interactive Tutorial reopens this window at any time, and the Tutorial "
 	  "project template in the Project Hub recreates the sample project whenever you "
 	  "want a clean sandbox.",
-	  "", "", Check::Manual, "" },
+	  "", "", Check::ReadAck, "" },
 };
 
 constexpr Chapter kChapters[] = {
@@ -546,31 +658,101 @@ int totalSteps()
 }
 
 // ─── Completion ──────────────────────────────────────────────────────────────
+// Read every case as "what CHANGED since this step opened". A check that merely
+// asks "is X true" would be pre-satisfied by whatever the scene happened to
+// contain, and the step would tick itself off before the user did anything.
 bool satisfied(const Step& step, const Signals& base, const Signals& now)
 {
 	switch (step.check)
 	{
-	case Check::Manual:           return false;
+	case Check::ReadAck:          return now.acknowledged;
 	case Check::EntityAdded:      return now.entityCount > base.entityCount;
 	case Check::AssetAdded:       return now.assetCount  > base.assetCount;
-	case Check::SelectionSet:     return now.selectionSet;
-	case Check::PlayEntered:      return now.playing;
+	case Check::UndoUsed:         return now.undoCount   > base.undoCount;
+	case Check::ImportOpened:     return now.importOpens > base.importOpens;
 	case Check::PlayCycled:       return now.playSessions > base.playSessions;
-	case Check::LandscapeMode:    return now.landscapeMode;
-	case Check::ProfilerOpen:     return now.profilerOpen;
-	case Check::EnvironmentOpen:  return now.environmentOpen;
-	case Check::ExportOpen:       return now.exportOpen;
-	// A save only counts when there was something to save. Opening this step on an
+	case Check::MaterialAssigned: return now.materialsAssigned > base.materialsAssigned;
+
+	// "Switched to" rather than "is on": a step that opens while the target is
+	// already showing must still ask the user to do it, not tick instantly.
+	case Check::LandscapeMode:    return now.landscapeMode && !base.landscapeMode;
+	case Check::PreferencesOpen:  return now.preferencesOpen && !base.preferencesOpen;
+	case Check::ProfilerOpen:     return now.profilerOpen && !base.profilerOpen;
+	case Check::EnvironmentOpen:  return now.environmentOpen && !base.environmentOpen;
+	case Check::ExportOpen:       return now.exportOpen && !base.exportOpen;
+
+	// A save only counts when there was something to save; opening this step on an
 	// already-clean scene would otherwise tick it off without the user touching
-	// anything, which reads as a bug; it falls through to the Next button instead.
+	// anything.
 	case Check::SceneSaved:       return base.sceneUnsaved && !now.sceneUnsaved;
-	case Check::ComponentPresent:
+
+	// Selecting the entity that was ALREADY selected is not "click an entity".
+	case Check::SelectionChanged:
+		return now.selectionSet && now.selectedEntity != base.selectedEntity;
+
+	case Check::ContentRootShown:
+	{
+		// arg names the root by word so the step table does not encode the
+		// Content-Browser's internal index.
+		const std::string_view a = step.arg;
+		const int want = (a == "engine") ? 1 : (a == "source") ? 2 : (a == "content") ? 0 : -1;
+		return want >= 0 && now.contentRootKind == want && base.contentRootKind != want;
+	}
+
+	case Check::CameraFlown:
+	{
+		// Both, and deliberately: turning on the spot is the RMB look, walking is
+		// WASD, and the step teaches the two together. The thresholds are well
+		// above the jitter a click without a drag produces.
+		const float dx = now.camX - base.camX;
+		const float dy = now.camY - base.camY;
+		const float dz = now.camZ - base.camZ;
+		const float moved  = std::sqrt(dx * dx + dy * dy + dz * dz);
+		const float turned = std::abs(now.camYaw - base.camYaw) +
+		                     std::abs(now.camPitch - base.camPitch);
+		return moved > 1.0f && turned > 0.15f;
+	}
+
+	case Check::CameraZoomed:
+		// The wheel (and an orbit dolly) is the only thing that changes the pivot
+		// distance, so this cannot be satisfied by flying around.
+		return std::abs(now.camPivot - base.camPivot) > 0.5f;
+
+	case Check::TimeOfDayChanged:
+		return now.skyPresent && base.skyPresent &&
+		       std::abs(now.timeOfDay - base.timeOfDay) > 0.005f;
+
+	case Check::ComponentAdded:
 	{
 		const Comp c = compFromString(step.arg);
-		return c != Comp::Count && now.has(c);
+		return c != Comp::Count && now.count(c) > base.count(c);
 	}
+
+	case Check::AssetOfTypeAdded:
+	{
+		const Asset a = assetFromString(step.arg);
+		return a != Asset::Count && now.count(a) > base.count(a);
+	}
+
+	case Check::TabOfTypeOpened:
+	{
+		const Asset a = assetFromString(step.arg);
+		return a != Asset::Count && now.tabCount(a) > base.tabCount(a);
+	}
+
 	case Check::TabOpen:
-		return step.arg[0] != '\0' && now.openTabs.find(step.arg) != std::string::npos;
+		return step.arg[0] != '\0' &&
+		       base.openTabs.find(step.arg) == std::string::npos &&
+		       now.openTabs.find(step.arg) != std::string::npos;
+
+	case Check::PanelsVisited:
+	{
+		const int n = listEntryCount(step.arg);
+		if (n == 0) return false;
+		for (int i = 0; i < n; ++i)
+			if (!listEntryVisited(step.arg, i, now.visitedPanels)) return false;
+		return true;
+	}
 	}
 	return false;
 }

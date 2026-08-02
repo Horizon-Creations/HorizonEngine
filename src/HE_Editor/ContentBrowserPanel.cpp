@@ -54,8 +54,14 @@ namespace ContentBrowserPanel
 
 static bool s_quietContentRefresh = false;
 
+// Which root the tree/grid is showing: 0=Content, 1=Engine, 2=Source. At
+// namespace scope rather than inside render() only so browsedRootKind() can read
+// it — everything that writes it still lives in render().
+static int s_selectedRootKind = 0;
+
 bool quietRefreshRequested()  { return s_quietContentRefresh; }
 void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
+int  browsedRootKind()          { return s_selectedRootKind; }
 
 // Starter template for a freshly created script, by language (0 = Lua, 1 = Python).
 static const char* scriptStarterTemplate(int lang)
@@ -123,11 +129,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		// ── Tree: single-click = expand/collapse, double-click = navigate ──
 		static const HE::Folder* s_selectedTreeFolder = nullptr;
-		// Which root s_selectedTreeFolder/s_gridFolder belongs to: 0=Content,
-		// 1=Engine, 2=Source. Needed because nullptr used to unambiguously mean
-		// "the Content root" — three roots now exist, so nullptr is ambiguous and
-		// every place that treats it as a root sentinel must also check this tag.
-		static int s_selectedRootKind = 0;
+		// s_selectedRootKind (namespace scope, above) says which root
+		// s_selectedTreeFolder/s_gridFolder belongs to. Needed because nullptr used
+		// to unambiguously mean "the Content root" — three roots now exist, so
+		// nullptr is ambiguous and every place that treats it as a root sentinel
+		// must also check this tag.
 		// The Folder backing each root kind (structured-binding refs captured above).
 		auto cbRootFolder = [&](int kind) -> const HE::Folder&
 		{ return kind == 1 ? engineFolder : kind == 2 ? sourceFolder : contentFolder; };

@@ -25,4 +25,9 @@ namespace ContentBrowserPanel
 	// Consumed at the top of EditorUI::render(), outside the content-folder shared lock.
 	bool quietRefreshRequested();
 	void clearQuietRefreshRequest();
+
+	// Which of the three roots the browser is currently showing: 0 Content,
+	// 1 Engine, 2 Source. Read by the guided tour's "look at the Engine root" step
+	// — the panel's own state is file-static, so this is the only way to see it.
+	int browsedRootKind();
 }
