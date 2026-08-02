@@ -144,7 +144,7 @@ any zero-pad in the payload's final byte.
 - **N2** ✅ — real network transport: Layer 0 sockets (shared later with the source-control HTTPS stack) + `TcpTransport` + `SecureTransport` (challenge-response auth, AES-256-GCM frames).
 - **N2.5a** ✅ — discovery: UDP sockets, plaintext HTTP client, UPnP IGD port mapping, `session-api.php` (register/lookup/heartbeat/unregister with server-side reachability probe).
 - **N2.5b** ✅ — session-directory *client* over HTTPS, with TLS delegated to the platform (`HttpsClient_Apple.mm` / `_Win.cpp` / `_Curl.cpp`) and `SessionDirectory` on top. Still pending: NAT-PMP/PCP as a second mapping path (needs a default-gateway lookup, unlike SSDP which self-discovers).
-- **N3** — session protocol: join/leave, participant list, **late-join snapshot** via `SceneSerializer::saveToMemory`.
+- **N3** ✅ — session protocol: join/leave, participant list, **chunked late-join snapshot** behind `ISessionStateProvider`.
 - **N4** — **presence**: remote cameras as frustum gizmos, remote selection highlighting. First visible collab payoff, no correctness risk.
 - **N5** — **authoritative lock table** on the host (`RealtimeLockProvider`), which removes the polling race window LFS locks have.
 - **N6** — **live deltas**: dirty-entity replication via `serializeSubtree`, a quantized transform fast path, per-tick coalescing, and UUID-only asset references with a "missing asset" hint.
@@ -234,6 +234,47 @@ therefore declares `NSLocalNetworkUsageDescription`
   available here). Reviewed only — and never deployed.
 - **Not verified**: the Windows (WinHTTP) and Linux (libcurl) TLS backends have
   never been compiled or run; only the Apple one has. They need CI.
+
+## Session protocol (N3)
+
+`Net/CollabSession.{h,cpp}` — the first real Layer-3b consumer.
+
+```
+client → host   JoinRequest      protocol version, display name
+host  → client  JoinAccepted     assigned id, state sequence, participant list
+                (or JoinRejected: VersionMismatch / SessionFull / SnapshotFailed)
+host  → client  SnapshotBegin / SnapshotChunk… / SnapshotEnd
+host  → others  ParticipantJoined
+…on disconnect  ParticipantLeft
+```
+
+**Layering.** `CollabSession` deliberately does *not* depend on HorizonScene.
+HorizonNet sits below the scene layer, so reaching up into it would invert the
+dependency and drag the ECS into every networking test. Snapshot capture/apply
+goes through `ISessionStateProvider`, which the editor wires to
+`SceneSerializer::saveToMemory` / `loadFromMemory`; the tests supply a trivial
+in-memory provider, so the whole protocol is exercised with no ECS in sight.
+
+**Chunked snapshots.** A scene can be many megabytes. Sending one blob would give
+no progress feedback and force the receiver to accept an arbitrary allocation up
+front, so the transfer is split (default 256 KB) with begin/chunk/end framing and
+a progress callback. The receiver refuses an announced size above its own limit,
+refuses a chunk that would exceed the announced total, and refuses to apply an
+incomplete transfer — a partially deserialized scene is worse than none.
+
+**Ordering decisions that matter:**
+
+- The host captures its state *before* admitting a joiner. If capture fails the
+  join is refused, rather than admitting a peer that believes it is in sync while
+  holding an empty scene.
+- A client is not `isJoined()` until the snapshot has been **applied**. Reporting
+  success at `JoinAccepted` would let the editor act on a scene it does not have.
+- The join request is sent once, not every `update()`; a repeat would allocate a
+  second participant slot for the same peer.
+
+**`stateSequence()`** is carried through the snapshot even though nothing
+increments it yet: live deltas (N6) continue from it, so defining it now avoids a
+protocol break later.
 
 ## Do private hosts need a TLS certificate? No — and here is why
 

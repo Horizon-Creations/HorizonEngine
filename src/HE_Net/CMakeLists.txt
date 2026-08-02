@@ -16,6 +16,7 @@ add_library(HorizonNet SHARED
 	src/HttpClient.cpp
 	src/PortMapper.cpp
 	src/SessionDirectory.cpp
+	src/CollabSession.cpp
 	src/NetSession.cpp
 )
 
