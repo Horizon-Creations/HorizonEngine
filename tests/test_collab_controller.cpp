@@ -302,3 +302,33 @@ TEST_CASE("SceneSerializer: applying to an invalid entity fails instead of creat
     CHECK_FALSE(serializer.applyEntityComponents(world, e, blob));
     CHECK_FALSE(serializer.applyEntityComponents(world, e, {}));
 }
+
+// ─── Which assets a live session carries ─────────────────────────────────────
+
+TEST_CASE("isSyncableAsset accepts the extensions the engine actually writes")
+{
+    // The scene entry read ".hscene" for a long time while ProjectManager writes
+    // ".hescene", so it could never match. It was harmless only because scenes
+    // reach peers through the snapshot/delta path rather than the asset path —
+    // a latent trap for whoever routes scene saves through ContentManager. This
+    // test pins the spelling against the file the engine really produces.
+    CHECK(CollabController::isSyncableAsset("Content/StartupScene.hescene"));
+    CHECK(CollabController::isSyncableAsset("Content/UI/Main.huiw"));
+    CHECK(CollabController::isSyncableAsset("Content/Materials/Rock.hmat"));
+    CHECK(CollabController::isSyncableAsset("Content/Scripts/Player.lua"));
+    CHECK(CollabController::isSyncableAsset("Content/Scripts/Ai.py"));
+
+    // Case-insensitive: the extension is lowercased before comparison, and
+    // Windows users do produce mixed-case names.
+    CHECK(CollabController::isSyncableAsset("Content/Scenes/Level.HEScene"));
+
+    // The big binaries stay out — not because they matter less, but because they
+    // are the largest files in a project and belong on the source-control path.
+    CHECK_FALSE(CollabController::isSyncableAsset("Content/Models/Hero.fbx"));
+    CHECK_FALSE(CollabController::isSyncableAsset("Content/Textures/Rock.png"));
+    CHECK_FALSE(CollabController::isSyncableAsset("Content/Audio/Music.wav"));
+
+    // Degenerate input must not be treated as a match.
+    CHECK_FALSE(CollabController::isSyncableAsset("Content/NoExtension"));
+    CHECK_FALSE(CollabController::isSyncableAsset(""));
+}
