@@ -710,3 +710,52 @@ TEST_CASE("An IPv6 address is only reported when it is globally routable")
         CHECK(v6.find(':') != std::string::npos);
     }
 }
+
+// ─── Whose address is the one the outside sees? ──────────────────────────────
+
+TEST_CASE("socketOwnsAddress tells this machine's addresses from everyone else's")
+{
+    // The question this answers: when the session directory reports the address
+    // it saw us arrive from, is that US or something in between? A match means
+    // no translation — with IPv6, that the machine is directly addressable and
+    // only a firewall stands in the way rather than a port forward. A mismatch
+    // means something is rewriting addresses, and claiming otherwise would tell
+    // the user no forwarding is needed in exactly the case where it is.
+    const std::vector<std::string> mine = HE::Net::socketLocalAddresses();
+    REQUIRE_FALSE(mine.empty());          // every machine has at least a loopback
+
+    for (const std::string& a : mine)
+    {
+        CAPTURE(a);
+        CHECK(HE::Net::socketOwnsAddress(a));
+    }
+
+    // Documentation ranges (RFC 5737 / RFC 3849) — reserved for examples, so no
+    // machine can legitimately hold one and this cannot pass by accident.
+    CHECK_FALSE(HE::Net::socketOwnsAddress("192.0.2.1"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("198.51.100.7"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("2001:db8::1"));
+
+    // Not an address at all.
+    CHECK_FALSE(HE::Net::socketOwnsAddress(""));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("not-an-address"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("999.999.999.999"));
+}
+
+TEST_CASE("An address written differently is still recognised as the same one")
+{
+    // Compared as bytes rather than as text, because one IPv6 address has many
+    // valid spellings: leading zeros may be dropped, a run of zero groups may be
+    // collapsed, and hex digits may be either case. A string comparison would
+    // call the machine's own address foreign purely because the server wrote it
+    // in a different form — and the whole point is to decide whether an address
+    // belongs to us.
+    CHECK(HE::Net::socketOwnsAddress("127.0.0.1"));
+    CHECK(HE::Net::socketOwnsAddress("::1"));
+    CHECK(HE::Net::socketOwnsAddress("0:0:0:0:0:0:0:1"));        // ::1 written out
+    CHECK(HE::Net::socketOwnsAddress("0000:0000:0000:0000:0000:0000:0000:0001"));
+
+    // Families are never conflated: the IPv4-mapped form of a v4 address this
+    // machine holds is a v6 address it does not.
+    CHECK_FALSE(HE::Net::socketOwnsAddress("2001:db8::7f00:1"));
+}

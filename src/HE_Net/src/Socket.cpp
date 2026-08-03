@@ -1001,6 +1001,100 @@ std::string stableIPv6Address() {
 
 } // namespace
 
+std::vector<std::string> socketLocalAddresses() {
+    std::vector<std::string> out;
+    if (!socketSystemInit()) return out;
+
+#if defined(_WIN32)
+    ULONG size = 16 * 1024;
+    std::vector<std::uint8_t> buffer(size);
+    ULONG rc = ::GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                                 GAA_FLAG_SKIP_DNS_SERVER,
+                                      nullptr,
+                                      reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+    if (rc == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size);
+        rc = ::GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                               GAA_FLAG_SKIP_DNS_SERVER,
+                                    nullptr,
+                                    reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+    }
+    if (rc != NO_ERROR) return out;
+
+    for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            const sockaddr* sa = u->Address.lpSockaddr;
+            if (!sa) continue;
+            char text[INET6_ADDRSTRLEN] = {};
+            if (sa->sa_family == AF_INET) {
+                if (::inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(sa)->sin_addr,
+                                text, sizeof(text))) out.emplace_back(text);
+            } else if (sa->sa_family == AF_INET6) {
+                if (::inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr,
+                                text, sizeof(text))) out.emplace_back(text);
+            }
+        }
+    }
+#else
+    ifaddrs* list = nullptr;
+    if (::getifaddrs(&list) != 0 || !list) return out;
+    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || !(ifa->ifa_flags & IFF_UP)) continue;
+        char text[INET6_ADDRSTRLEN] = {};
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            if (::inet_ntop(AF_INET,
+                            &reinterpret_cast<sockaddr_in*>(ifa->ifa_addr)->sin_addr,
+                            text, sizeof(text))) out.emplace_back(text);
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            if (::inet_ntop(AF_INET6,
+                            &reinterpret_cast<sockaddr_in6*>(ifa->ifa_addr)->sin6_addr,
+                            text, sizeof(text))) out.emplace_back(text);
+        }
+    }
+    ::freeifaddrs(list);
+#endif
+    return out;
+}
+
+bool socketOwnsAddress(const std::string& address) {
+    if (address.empty()) return false;
+
+    // Compared as bytes, not as text. One IPv6 address has many valid spellings
+    // — "2a02:3100:0:0::1" and "2a02:3100::1" are the same address — and a
+    // string comparison would call a machine's own address foreign purely
+    // because the server wrote it differently.
+    const auto parse = [](const std::string& text, int& family, std::uint8_t out[16]) {
+        in6_addr v6{};
+        if (::inet_pton(AF_INET6, text.c_str(), &v6) == 1) {
+            family = AF_INET6;
+            std::memcpy(out, &v6, 16);
+            return true;
+        }
+        in_addr v4{};
+        if (::inet_pton(AF_INET, text.c_str(), &v4) == 1) {
+            family = AF_INET;
+            std::memcpy(out, &v4, 4);
+            return true;
+        }
+        return false;
+    };
+
+    int wantedFamily = 0;
+    std::uint8_t wanted[16] = {};
+    if (!parse(address, wantedFamily, wanted)) return false;
+    const std::size_t width = (wantedFamily == AF_INET6) ? 16u : 4u;
+
+    for (const std::string& mine : socketLocalAddresses()) {
+        int family = 0;
+        std::uint8_t bytes[16] = {};
+        if (!parse(mine, family, bytes)) continue;
+        if (family != wantedFamily) continue;
+        if (std::memcmp(bytes, wanted, width) == 0) return true;
+    }
+    return false;
+}
+
 std::string socketGlobalIPv6Address() {
     // Stable first. Hosting publishes this address and may ask the router to
     // open a firewall pinhole for it, and both outlive a privacy address's

@@ -1,6 +1,8 @@
 #include "CollabPanel.h"
 
 #include "CollabController.h"
+
+#include <Net/Socket.h>
 #include "EditorApplication.h"
 
 #ifdef HE_IMGUI_ENABLED
@@ -153,18 +155,31 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		                    static_cast<unsigned>(collab->port()));
 		if (!collab->publicAddress().empty())
 		{
-			// "(your router)" is only true under IPv4, where NAT means the
-			// address the outside sees belongs to the router rather than to this
-			// machine. With IPv6 there is no translation: that address IS this
-			// machine, and calling it the router's would teach exactly the wrong
-			// mental model — that something still has to be forwarded to reach it.
-			const bool isIPv6 = collab->publicAddress().find(':') != std::string::npos;
-			if (isIPv6)
-				ImGui::TextDisabled("Reachable from outside as: %s (this machine — IPv6 "
-				                    "needs no forwarding)", collab->publicAddress().c_str());
+			// Whose address this is cannot be told from its family. "IPv6, so it
+			// must be the machine" holds only while nothing translates — and
+			// NAT66 / prefix translation, though rare on consumer routers, is
+			// real. Asserting otherwise would tell the user no forwarding is
+			// needed in exactly the case where it is.
+			//
+			// So it is decided by asking whether this machine actually holds the
+			// address, compared against ALL of its addresses: with privacy
+			// extensions a machine has a stable AND a temporary global address
+			// and reaches the outside under the temporary one, so checking only
+			// the address hosting prefers would call our own address foreign.
+			const std::string& seen = collab->publicAddress();
+			const bool ours   = HE::Net::socketOwnsAddress(seen);
+			const bool isIPv6 = seen.find(':') != std::string::npos;
+
+			if (ours)
+				ImGui::TextDisabled("Reachable from outside as: %s (this machine — no "
+				                    "forwarding needed)", seen.c_str());
+			else if (isIPv6)
+				// IPv6 and yet not ours: something between here and the internet
+				// is rewriting addresses, so this behaves like NAT after all.
+				ImGui::TextDisabled("Seen from outside as: %s (your router — it is "
+				                    "translating IPv6 addresses)", seen.c_str());
 			else
-				ImGui::TextDisabled("Seen from outside as: %s (your router)",
-				                    collab->publicAddress().c_str());
+				ImGui::TextDisabled("Seen from outside as: %s (your router)", seen.c_str());
 		}
 	}
 	else
