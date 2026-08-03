@@ -586,6 +586,7 @@ void render(AppContext& ctx)
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("One glob per line, matched against Content-relative paths.\n"
+                                  "Engine defaults are matched with their Engine/ prefix.\n"
                                   "*  matches any characters (including /)\n"
                                   "?  matches exactly one character\n"
                                   "Examples: Debug/*   *_test.hasset   Scenes/Playground*");
@@ -917,6 +918,12 @@ void render(AppContext& ctx)
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
                 es.gameRuntimeDir   = runtimeDir;
+                // Engine-wide default content (primitive meshes, default materials)
+                // ships INSIDE the pak under "Engine/…": it lives next to the editor,
+                // not in the project, so without this the shipped game resolves no
+                // built-in asset at all and every default primitive renders as the
+                // renderers' fallback cube.
+                es.engineContentDir = ctx.contentManager->engineContentRoot();
                 // Ship the bundled Python stdlib (pythonXY.zip + ._pth) only for
                 // Python-language projects — a non-Python game never inits Python, so
                 // the ~10 MB stdlib is wasted. The libpython dylib/.so still ships

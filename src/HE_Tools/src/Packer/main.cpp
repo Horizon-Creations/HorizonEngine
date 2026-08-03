@@ -27,7 +27,7 @@ int usage(const std::string& problem = {})
         std::cerr << "hpak_packer: " << problem << "\n";
     std::cerr << "Usage: hpak_packer <project_root> <output.hpak> "
                  "[--codec store|lz4|zstd] [--secret <passphrase>] "
-                 "[--exclude <glob>]...\n";
+                 "[--engine-content <dir>] [--exclude <glob>]...\n";
     return 1;
 }
 } // namespace
@@ -41,6 +41,7 @@ int main(int argc, char** argv)
     const std::string outputFile = argv[2];
 
     std::string   secret;
+    std::string   engineContent;  // EditorDeps/EngineContent → packed as "Engine/…"
     Hpak::Codec   codec = Hpak::Codec::Zstd; // sensible ship default
     std::vector<std::string> excludes;
     for (int i = 3; i < argc; ++i)
@@ -70,6 +71,17 @@ int main(int argc, char** argv)
             else if (c == "lz4")   codec = Hpak::Codec::LZ4;
             else if (c == "zstd")  codec = Hpak::Codec::Zstd;
             else return usage("unknown codec '" + c + "' (expected store|lz4|zstd)");
+        }
+        else if (arg == "--engine-content")
+        {
+            // The engine-wide default content root. Its assets are packed
+            // alongside the project's under the "Engine/" prefix the editor
+            // addresses them by — a game shipped without them falls back to the
+            // renderer's default cube for every built-in mesh.
+            if (!takeValue(engineContent))
+                return usage("--engine-content needs a directory");
+            if (!std::filesystem::is_directory(engineContent))
+                return usage("--engine-content is not a directory: " + engineContent);
         }
         else if (arg == "--exclude")
         {
@@ -101,9 +113,15 @@ int main(int argc, char** argv)
         KeyDerivation::derive(secret, salt, settings.key);
     }
 
+    std::vector<HpakWriter::SourceRoot> roots{ { inputPath, {} } };
+    if (!engineContent.empty())
+        roots.push_back({ engineContent, "Engine/" });
+
     HpakWriter packer;
-    const int added = packer.addDirectory(inputPath, settings);
-    std::cout << "Packed " << added << " asset(s) from: " << inputPath << "\n";
+    const int added = packer.addDirectories(roots, settings);
+    std::cout << "Packed " << added << " asset(s) from: " << inputPath;
+    if (!engineContent.empty()) std::cout << " (+ engine defaults from " << engineContent << ")";
+    std::cout << "\n";
 
     if (std::filesystem::exists(outputFile))
         std::filesystem::remove(outputFile);

@@ -624,9 +624,16 @@ static std::optional<ExportResult> packContent(
         }
     }
 
+    // The project's own Content first, then the engine defaults under "Engine/".
+    // Order matters: a project-local override (Content/Engine/…) carries the same
+    // UUID as the default it shadows and must be the one that ships.
+    std::vector<HpakWriter::SourceRoot> roots{ { contentDir, {} } };
+    if (!settings.engineContentDir.empty())
+        roots.push_back({ settings.engineContentDir, "Engine/" });
+
     HpakWriter packer;
-    ctx.assetsPacked = packer.addDirectory(contentDir, ctx.packSettings, settings.progress,
-                                           haveCache ? &cache : nullptr);
+    ctx.assetsPacked = packer.addDirectories(roots, ctx.packSettings, settings.progress,
+                                             haveCache ? &cache : nullptr);
     ctx.assetsReused = packer.reusedCount();
     prevPak.reset(); // release the read handle BEFORE write() replaces the file
 

@@ -11,8 +11,11 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 #include <cstring>
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -209,6 +212,137 @@ TEST_CASE("Lazy-mounted pak resolves loadAsset by content path via the asset ind
     CHECK(cm.loadAsset("UI/nope.hasset") == HE::UUID{});
 
     he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("ProjectExporter ships the engine default content under Engine/")
+{
+    // Regression: the engine's default primitives live next to the EDITOR
+    // (EditorDeps/EngineContent), never inside a project — and the exporter only
+    // ever packed the project's Content. Every scene reference to a built-in mesh
+    // therefore dangled in a shipped game, and the renderers' missing-mesh
+    // fallback drew the default cube: sphere, capsule, cone, plane — all cubes.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_engc_content";
+    auto engineDir  = std::filesystem::temp_directory_path() / "he_test_engc_engine";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_engc_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    // Two engine default meshes, written exactly the way mesh_gen writes them:
+    // the Meshes folder IS the content root there, so each META path is the bare
+    // "<Name>.hasset" — NOT the "Engine/Meshes/…" the editor addresses them by.
+    const HE::UUID cubeId  {0x0000000000000100ULL, 0x0000000000000001ULL};
+    const HE::UUID sphereId{0x0000000000000101ULL, 0x0000000000000001ULL};
+    {
+        ContentManager gen((engineDir / "Meshes").string());
+        for (const auto& [name, id] : std::vector<std::pair<std::string, HE::UUID>>{
+                 {"Cube", cubeId}, {"Sphere", sphereId} })
+        {
+            StaticMeshAsset m;
+            m.type     = HE::AssetType::StaticMesh;
+            m.id       = id;
+            m.name     = name;
+            m.path     = name + ".hasset";
+            m.vertices = { 0,0,0,  1,0,0,  0,1,0 };
+            m.normals  = { 0,0,1,  0,0,1,  0,0,1 };
+            m.uvs      = { 0,0,  1,0,  0,1 };
+            m.indices  = { 0,1,2 };
+            REQUIRE(gen.saveAsset(m));
+        }
+    }
+
+    // One ordinary project asset, so this isn't an engine-only pack.
+    const HE::UUID matId{0xAABB, 0xCCDD};
+    const auto matBlob = makeMinimalMaterialBlob(matId, "mat");
+    { std::ofstream f(contentDir / "mat.hasset", std::ios::binary);
+      f.write(reinterpret_cast<const char*>(matBlob.data()), matBlob.size()); }
+
+    ExportSettings settings;
+    settings.compress         = false;
+    settings.engineContentDir = engineDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "EngGame", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 3);   // project material + both engine meshes
+
+    const auto pakPath = outputDir / "EngGame.hpak";
+    REQUIRE(std::filesystem::exists(pakPath));
+    {
+        HpakReader reader;
+        REQUIRE(reader.open(pakPath.string()));
+        CHECK(reader.hasEntry(cubeId));
+        CHECK(reader.hasEntry(sphereId));   // ← the whole point: NOT just the cube
+    }
+
+    // The shipped game resolves them by UUID (what a MeshComponent stores) and by
+    // the "Engine/…" path the editor writes into references.
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pakPath.string()));
+    // Checked FIRST, while nothing is registered yet, so this can only be
+    // answered by the pak's path index: the bare META path an engine default
+    // carries must never enter it — it would hijack a project asset that happens
+    // to be called Cube.hasset.
+    CHECK(cm.loadAsset("Cube.hasset") == HE::UUID{});
+    REQUIRE(cm.ensureResident(sphereId));
+    const StaticMeshAsset* sphere = cm.getStaticMesh(sphereId);
+    REQUIRE(sphere != nullptr);
+    CHECK(sphere->name == "Sphere");
+    CHECK(cm.loadAsset("Engine/Meshes/Cube.hasset") == cubeId);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+TEST_CASE("A project override of an engine default is the one that ships")
+{
+    // Editing an engine default writes a project-local override under
+    // Content/Engine/… with the SAME UUID (see ContentManager::resolveSavePath).
+    // Packing both roots must therefore yield ONE entry — the project's.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_engovr_content";
+    auto engineDir  = std::filesystem::temp_directory_path() / "he_test_engovr_engine";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_engovr_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
+    he_test::removeAllQuiet(outputDir);
+
+    const HE::UUID cubeId{0x0000000000000100ULL, 0x0000000000000001ULL};
+    auto writeCube = [&](const std::filesystem::path& root, const std::string& relPath,
+                         const std::string& name)
+    {
+        ContentManager cm(root.string());
+        StaticMeshAsset m;
+        m.type     = HE::AssetType::StaticMesh;
+        m.id       = cubeId;
+        m.name     = name;
+        m.path     = relPath;
+        m.vertices = { 0,0,0,  1,0,0,  0,1,0 };
+        m.normals  = { 0,0,1,  0,0,1,  0,0,1 };
+        m.uvs      = { 0,0,  1,0,  0,1 };
+        m.indices  = { 0,1,2 };
+        REQUIRE(cm.saveAsset(m));
+    };
+    writeCube(engineDir,  "Meshes/Cube.hasset",        "EngineCube");
+    writeCube(contentDir, "Engine/Meshes/Cube.hasset", "ProjectCube");
+
+    ExportSettings settings;
+    settings.compress         = false;
+    settings.engineContentDir = engineDir;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "OvrGame", "", outputDir, settings);
+    REQUIRE(result.success);
+    CHECK(result.assetsPacked == 1);   // one UUID → one entry, not two
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak((outputDir / "OvrGame.hpak").string()));
+    const StaticMeshAsset* cube = cm.getStaticMesh(cubeId);
+    REQUIRE(cube != nullptr);
+    CHECK(cube->name == "ProjectCube");
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(engineDir);
     he_test::removeAllQuiet(outputDir);
 }
 

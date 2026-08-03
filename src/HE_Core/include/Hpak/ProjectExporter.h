@@ -26,8 +26,19 @@ struct HE_API ExportSettings {
     // every other language the stdlib is skipped (the libpython DLL/dylib/.so still
     // ships — it's a load-time dependency — but the ~10 MB stdlib does not).
     bool bundlePythonStdlib = false;
+    // The engine-wide default-content root (EditorDeps/EngineContent — what
+    // ContentManager::engineContentRoot() returns). Its assets are packed into the
+    // same .hpak addressed as "Engine/<rest>", exactly the paths the editor stores
+    // in references. WITHOUT it a shipped game cannot resolve a single built-in
+    // asset: the engine content lives beside the EDITOR, never inside the project,
+    // so every scene reference to a default primitive dangled and the renderers'
+    // missing-mesh fallback drew the default cube in its place. Empty → engine
+    // defaults are not packed (the pre-existing behaviour; tools that pack a bare
+    // directory keep it).
+    std::filesystem::path engineContentDir;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
-    // when packing — e.g. "Debug/*", "*_test.hasset". See Hpak::PackSettings.
+    // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
+    // with their "Engine/" prefix. See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
     // Incremental packing: reuse the stored (compressed + encrypted) bytes of
     // unchanged assets from the previous export at the same outputDir, keyed by
