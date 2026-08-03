@@ -99,6 +99,12 @@ if(WIN32)
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:hc_codegen>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:hc_codegen>
+        # HorizonScene links HorizonNet (GameReplication), so this exe loads it
+        # transitively even though it never calls into it. Windows has no rpath:
+        # a missing DLL makes the process fail to start with no message at all,
+        # which surfaces as a build step that "failed" without a compiler error.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:hc_codegen>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:hc_codegen>
         VERBATIM
