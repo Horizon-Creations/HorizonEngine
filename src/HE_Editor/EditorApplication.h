@@ -19,6 +19,7 @@
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/HcCodegen.h>
+#include <SourceControl/GitProbe.h>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -253,6 +254,19 @@ struct AppContext
 	bool toolchainInstalling  = false; // an install is currently running
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+
+	// Startup source-control probe (git, git-lfs, identity, credential helper),
+	// same shape as the toolchain one above: run once on a background thread,
+	// null until it finishes. That null is load-bearing — without it the "Source
+	// Control Not Ready" dialog would flash on every startup before the answer
+	// is known.
+	const HE::Sc::GitProbe* gitProbe = nullptr;
+	std::function<void()> recheckGit;
+	// Sets user.name / user.email globally and re-probes. Offered in the dialog
+	// because an unset identity is the most common reason a first commit fails
+	// and the fix is one git config call, not an install.
+	std::function<void(std::string name, std::string email)> setGitIdentity;
+	bool gitIdentityApplying = false;
 
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
@@ -509,6 +523,19 @@ private:
 	std::atomic<bool>        m_toolchainChecked{false};
 	HE::hccg::ToolchainProbe m_toolchainProbe;
 	void startToolchainProbe(); // (re)launches m_toolchainThread
+
+	// Source-control capability probe. Same lifecycle as the toolchain probe:
+	// worker thread, atomic flag, joined at shutdown.
+	std::thread        m_gitThread;
+	std::atomic<bool>  m_gitChecked{false};
+	HE::Sc::GitProbe   m_gitProbe;
+	void startGitProbe();
+	// Applying an identity runs git config off the frame thread — brief, but a
+	// misbehaving credential helper or a locked config file must not freeze the
+	// editor mid-frame.
+	std::thread       m_gitIdentityThread;
+	std::atomic<bool> m_gitIdentityApplying{false};
+	void applyGitIdentity(std::string name, std::string email);
 
 	// Auto-install worker (see startToolchainInstall / HcCodegen::installToolchain).
 	// Streams installer output into m_installLog under m_installLogMutex; the UI polls.
