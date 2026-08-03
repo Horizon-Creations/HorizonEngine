@@ -292,6 +292,10 @@ private:
 	struct LookupResult
 	{
 		bool          ok = false;
+		// Every address the directory offers, best first. A dual-stack host is
+		// listed under both families, and only the joiner can tell which of them
+		// it actually has a route for.
+		std::vector<std::string> hosts;
 		std::string   host;
 		std::uint16_t port = 0;
 		std::string   error;

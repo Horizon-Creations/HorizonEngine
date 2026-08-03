@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HE::Net {
 
@@ -46,9 +47,25 @@ struct SessionRegistration {
     // manual port forwarding, or tell the user a relay is required (CGNAT).
     bool          reachable = false;
     int           ttlSeconds = 0;     // heartbeat well before this elapses
+
+    // The second address family, when one was offered AND the server managed to
+    // connect back to it. Empty otherwise — a claim the server could not verify
+    // is discarded rather than published.
+    std::string   altAddress;
 };
 
 struct SessionLookup {
+    // Every address to try, best first. A dual-stack host appears under both
+    // families here.
+    //
+    // Why this is a list: the host reaches the directory over exactly ONE
+    // address family, so only that one used to be recorded — and a guest that
+    // had only the other family could not connect at all, with nothing in the
+    // UI to explain why. The joiner now walks these in order.
+    std::vector<std::string> hosts;
+
+    // hosts.front(), or empty. Kept because most callers want "the address" and
+    // should not have to handle an empty vector at every site.
     std::string   host;
     std::uint16_t port = 0;
     std::string   name;
@@ -72,6 +89,11 @@ public:
                                     const std::string& engineVersion,
                                     int protocolVersion,
                                     SessionRegistration& out,
+                                    // This machine's address on the OTHER family,
+                                    // typically its global IPv6. Offered, never
+                                    // trusted: the server publishes it only if it
+                                    // can open a connection back to it.
+                                    const std::string& altAddress = {},
                                     int timeoutMs = 10000);
 
     DirectoryStatus lookup(const std::string& sessionId, SessionLookup& out,
