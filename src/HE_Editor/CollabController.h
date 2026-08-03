@@ -285,6 +285,10 @@ private:
 		HE::Net::PortMapper::MappingHandle mapping;
 		bool        portMapped = false;
 		std::string mapStatus;
+		// IPv6 firewall pinhole, opened alongside the IPv4 mapping — the two
+		// serve different guests (v6-capable vs v4-only), so both are wanted.
+		HE::Net::PortMapper::PinholeHandle pinhole;
+		bool        pinholeOpen = false;
 		// Advice the worker already knows applies (CGNAT needs a narrower one
 		// than a plain mapping failure). Empty means "decide from reachability".
 		std::string advice;
@@ -323,6 +327,8 @@ private:
 	// leave. Leaving it behind would hold a hole open in the user's firewall
 	// long after the session ended.
 	HE::Net::PortMapper::MappingHandle m_mapping;
+	HE::Net::PortMapper::PinholeHandle m_pinhole;
+	bool m_pinholeOpen = false;
 	bool               m_portMapped = false;
 	std::string        m_portMapStatus;
 	std::string        m_advice;   // shown once, below both status lines

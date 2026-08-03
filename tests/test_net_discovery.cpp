@@ -164,6 +164,40 @@ TEST_CASE("PortMapper: the WAN service's own control URL is selected")
     CHECK(igd.controlUrl == "http://192.168.1.1:5000/ctl/IPConn");
 }
 
+TEST_CASE("PortMapper: the IPv6 firewall service is captured when offered")
+{
+    // A FRITZ!Box-shaped description: the v6 firewall service lives at a
+    // DIFFERENT base path (igd2upnp) than the WAN service, which is exactly the
+    // real layout — resolving it against the wrong controlURL would 404.
+    const char* xml = R"(<root><device><deviceList><device><serviceList>
+        <service>
+          <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>
+          <controlURL>/igdupnp/control/WANIPConn1</controlURL>
+        </service>
+        <service>
+          <serviceType>urn:schemas-upnp-org:service:WANIPv6FirewallControl:1</serviceType>
+          <controlURL>/igd2upnp/control/WANIPv6Firewall1</controlURL>
+        </service>
+      </serviceList></device></deviceList></device></root>)";
+
+    IgdDevice igd;
+    REQUIRE(PortMapper::parseDeviceDescription(
+        xml, "http://192.168.178.1:49000/igddesc.xml", igd));
+    CHECK(igd.controlUrl == "http://192.168.178.1:49000/igdupnp/control/WANIPConn1");
+    CHECK(igd.v6fwServiceType == "urn:schemas-upnp-org:service:WANIPv6FirewallControl:1");
+    CHECK(igd.v6fwControlUrl
+          == "http://192.168.178.1:49000/igd2upnp/control/WANIPv6Firewall1");
+}
+
+TEST_CASE("PortMapper: no IPv6 firewall service leaves the fields empty")
+{
+    IgdDevice igd;
+    REQUIRE(PortMapper::parseDeviceDescription(
+        kIgdXml, "http://192.168.1.1:5000/rootDesc.xml", igd));
+    CHECK(igd.v6fwControlUrl.empty());
+    CHECK(igd.v6fwServiceType.empty());
+}
+
 TEST_CASE("PortMapper: a description without a WAN service fails cleanly")
 {
     const char* xml = R"(<root><device><serviceList><service>

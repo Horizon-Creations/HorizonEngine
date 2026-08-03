@@ -259,6 +259,29 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 			r.advice    = remedyFor(port16);
 		}
 
+		// The pinhole is the other half of reachability: the IPv4 forward above
+		// serves v4-only guests, this serves the v6 address the directory also
+		// advertises. Done before registration so the reachability probe judges
+		// the finished state, not a half-open one.
+		const std::string pinholeV6 = HE::Net::socketGlobalIPv6Address();
+		if (!pinholeV6.empty())
+		{
+			// Reuse the gateway UPnP found for the mapping (if it did) — saves a
+			// second SSDP search on the common path.
+			const HE::Net::PortMapResult pr = HE::Net::PortMapper::openPinhole(
+				pinholeV6, port16, r.pinhole, r.mapping.igd);
+			r.pinholeOpen = pr == HE::Net::PortMapResult::Ok;
+			if (r.pinholeOpen && r.portMapped)
+				r.mapStatus += " The IPv6 firewall was opened as well.";
+			else if (r.pinholeOpen)
+				// The v4 ladder failed but the pinhole did not — reachability is
+				// partial, not absent, and the difference decides whether anyone
+				// can join at all.
+				r.mapStatus += " The IPv6 firewall was opened though, so guests "
+				               "whose networks have IPv6 can still reach you "
+				               "directly.";
+		}
+
 		if (!HE::Net::httpsAvailable())
 		{
 			r.error = "No HTTPS support in this build — share the address manually.";
@@ -559,6 +582,12 @@ void CollabController::leave()
 			HE::Net::PortMapper::unmapPort(handle);
 		}).detach();
 	}
+	if (m_pinholeOpen)
+	{
+		std::thread([handle = m_pinhole] {
+			HE::Net::PortMapper::closePinhole(handle);
+		}).detach();
+	}
 
 	// Remove the directory entry so peers stop being handed a dead endpoint.
 	// Detached because leaving must feel instant; if it fails the entry simply
@@ -601,6 +630,8 @@ void CollabController::teardown()
 	m_portMapStatus.clear();
 	m_advice.clear();
 	m_mapping = {};
+	m_pinhole = {};
+	m_pinholeOpen = false;
 	m_lastComponentHash   = 0;
 	m_lastComponentEntity = 0;
 
@@ -661,6 +692,8 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 		// directory itself succeeded.
 		m_mapping       = r.mapping;
 		m_portMapped    = r.portMapped;
+		m_pinhole       = r.pinhole;
+		m_pinholeOpen   = r.pinholeOpen;
 		m_portMapStatus = r.mapStatus;
 		m_advice        = r.advice;
 
