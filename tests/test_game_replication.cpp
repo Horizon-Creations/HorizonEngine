@@ -465,3 +465,33 @@ TEST_CASE("GameReplication: an absurd client timestep cannot teleport the charac
     // Clamped to a plausible frame, so the move is bounded rather than 1000 units.
     CHECK(posOf(rig->serverWorld, rig->serverEntity).x <= doctest::Approx(10.0f));
 }
+
+TEST_CASE("GameReplication: rotation takes the short way across the ±180° seam")
+{
+    GameReplication::Config cfg;
+    cfg.tickHz = 60.0f;
+    cfg.interpolationDelaySec = 0.2f;   // slow, so mid-flight is observable
+    auto rig = makeRig(cfg);
+
+    std::uint32_t netId = 0;
+    const Entity clientEntity = mirrorEntity(*rig, "Spinner", netId);
+    const Entity serverEntity =
+        rig->serverWorld.registry().view<NetworkComponent>().front();
+
+    auto& serverTc = rig->serverWorld.registry().get<TransformComponent>(serverEntity);
+
+    // Establish 179° as the previous sample...
+    serverTc.rotation = glm::vec3(0.0f, 179.0f, 0.0f);
+    for (int i = 0; i < 6; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // ...then cross the wrap to -179°. That is a 2° turn.
+    serverTc.rotation = glm::vec3(0.0f, -179.0f, 0.0f);
+    for (int i = 0; i < 3; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Sample mid-interpolation. A componentwise lerp of the Euler values would
+    // walk 179 → 0 → -179: the long way round, a visible 358° spin every time
+    // something crosses the wrap. Spherical interpolation stays near ±180.
+    const float y = rig->clientWorld.registry()
+                        .get<TransformComponent>(clientEntity).rotation.y;
+    CHECK(std::abs(y) > 170.0f);
+}

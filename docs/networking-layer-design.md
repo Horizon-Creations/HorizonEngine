@@ -685,7 +685,18 @@ Four things this got wrong first, each caught by a test:
 A client may only drive the entity it was **assigned** — otherwise anyone could
 move anyone else's character by sending input for their id.
 
-### Still open
+### Rotation across the ±180° seam
 
-**Euler interpolation is wrong across the ±180° seam.** A quaternion path fixes
-it; it affects remote entities' visual rotation only, not authority.
+Interpolated per component along the **shorter arc**: the delta is wrapped into
+[-180, 180] first. Going from 179° to -179° is a 2° turn, but a plain lerp walks
+the other 358° — a visible spin every time something crosses the wrap.
+
+Deliberately **not** a quaternion slerp, though that is the more correct
+rotational path. `glm::eulerAngles` returns an equivalent but *different*
+decomposition — a 180° yaw comes back as `x=180, y≈0, z=180` — so a round trip
+rewrites the stored triple. The orientation renders identically, but game code
+reading `rotation.y` off a replicated entity would see values it never set.
+Preserving the representation this engine actually stores is worth more than a
+perfect interpolation path, and for single-axis turns (what characters do) the
+two are identical anyway. This was measured, not assumed: a slerp version made
+the seam test report `y ≈ 1°` for an orientation that was in fact correct.

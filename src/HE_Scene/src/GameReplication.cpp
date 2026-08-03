@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 
+
+
 using namespace HE::Net;
 
 namespace
@@ -456,10 +458,29 @@ void GameReplication::advanceInterpolation(float dt)
 		const float t = st.hasPrevious ? std::min(1.0f, st.elapsed / span) : 1.0f;
 
 		tc->position = glm::mix(st.previous.position, st.current.position, t);
-		// Euler angles are interpolated componentwise, which is wrong across the
-		// ±180° seam. Acceptable for v1; a quaternion path is the fix, and is
-		// noted with prediction as the next step.
-		tc->rotation = glm::mix(st.previous.rotation, st.current.rotation, t);
+
+		// Rotation is interpolated per component along the SHORTER arc: the delta
+		// is wrapped into [-180, 180] first. Going from 179° to -179° is a 2°
+		// turn, but a plain lerp walks the other 358° — a visible spin every time
+		// something crosses the wrap.
+		//
+		// Deliberately NOT a quaternion slerp, even though that is the more
+		// correct rotational path. glm::eulerAngles returns an *equivalent* but
+		// different decomposition (a 180° yaw comes back as x=180, y≈0, z=180),
+		// so a round trip rewrites the stored triple. The orientation would
+		// render identically, but any game code reading rotation.y off a
+		// replicated entity would see values it never set. Preserving the
+		// representation this engine actually stores is worth more here than a
+		// perfect interpolation path, and for single-axis turns — which is what
+		// characters do — the two are identical anyway.
+		const auto shortestLerp = [](float a, float b, float f) {
+			float delta = std::fmod(b - a + 540.0f, 360.0f) - 180.0f;
+			return a + delta * f;
+		};
+		tc->rotation = glm::vec3(
+			shortestLerp(st.previous.rotation.x, st.current.rotation.x, t),
+			shortestLerp(st.previous.rotation.y, st.current.rotation.y, t),
+			shortestLerp(st.previous.rotation.z, st.current.rotation.z, t));
 		tc->dirty    = true;
 	}
 }
