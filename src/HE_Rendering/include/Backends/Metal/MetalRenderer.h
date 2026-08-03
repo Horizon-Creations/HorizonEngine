@@ -232,6 +232,25 @@ private:
 	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
 	void* m_ssrPingTex = nullptr; // id<MTLTexture> same format, ping target of the separable blur
 	void* m_ssrRoughTex = nullptr; // id<MTLTexture> wide second blur (High tier glossy lerp)
+	// ── FORWARD reflections (ssr-plan Option A / P3-Forward) ─────────────────
+	// The SSAO prepass runs as MRT (view-pos + oct-normal/rough + NDC depth)
+	// when the forward path wants reflections; the SSR trace then reads the
+	// prepass pair exactly like the deferred G-buffer, sampling LAST frame's
+	// HDR copy (1 frame of content lag, camera-motion reprojected). Results
+	// are consumed by heLitP/fragmentMain via the heSSR/heGIRefl samplers
+	// (Metal slots 9/10) instead of a dedicated composite pass.
+	void* m_reflPosPipeline = nullptr; // id<MTLRenderPipelineState> MRT prepass
+	void* m_reflNormTex  = nullptr;    // id<MTLTexture> RGBA16F: oct normal, rough 0
+	void* m_reflDepthTex = nullptr;    // id<MTLTexture> R32F: NDC depth (gbufferMain convention)
+	void* m_ssrColorHist = nullptr;    // id<MTLTexture> full-res RGBA16F, last frame's HDR
+	int   m_ssrColorHistW = 0, m_ssrColorHistH = 0;
+	bool  m_ssrColorHistValid = false;
+	void* m_fwdReflSsrTex = nullptr;   // this frame's forward SSR result (null → dummy + gate 0)
+	void* m_fwdReflGiTex  = nullptr;   // this frame's forward GI-refl result
+	bool  m_fwdReflPrepassWanted = false; // EncodeSSAO renders the MRT prepass
+	bool  m_fwdReflPrepassOnly   = false; // …and skips occlusion+blur (SSAO off/replaced)
+	void  EncodeForwardSSR(void* cmdBuf, int width, int height);
+
 	// Temporal accumulation (quality High): the trace renders MRT into
 	// histRad/histPos[cur] (blended radiance + receiver world pos), sampling
 	// [prev] — the blur chain then reads histRad[cur]. Same scheme as the

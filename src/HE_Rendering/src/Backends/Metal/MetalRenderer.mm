@@ -210,6 +210,10 @@ struct SceneUniforms {
 	float4   fog;            // x = density (0 = off), y = height falloff
 	float4   viewport;       // xy = output size (screen-space AO lookup), z = ssaoEnabled
 	float4   weather;        // x = wetness, y = snow cover (ground response)
+	// FORWARD reflection cascade (textures 9/10): x = SSR bound, y = SSR
+	// intensity, z = SSR max roughness, w = GI-refl bound.
+	float4   reflCfg;
+	float4   reflCfg2;       // x = GI-refl intensity, y = GI-refl max roughness
 	// Local-light (point/spot) shadow atlas: per-layer light view-proj (already
 	// Metal clip). Spot = 1 layer, point = 6 cube-face layers (+X −X +Y −Y +Z −Z);
 	// a light's first layer is in its LightGPU.params.y.
@@ -513,7 +517,14 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> giVisTex    [[texture(7)]],
                              sampler          giVisSmp    [[sampler(7)]],
                              texture2d<float> giLocalMask [[texture(8)]],
-                             sampler          giLocalSmp  [[sampler(8)]])
+                             sampler          giLocalSmp  [[sampler(8)]],
+                             // FORWARD reflection results (9/10, shared with the
+                             // material pipelines' heSSR/heGIRefl pins; dummies +
+                             // reflCfg gates 0 when the passes did not run).
+                             texture2d<float> ssrTex      [[texture(9)]],
+                             sampler          ssrSmp      [[sampler(9)]],
+                             texture2d<float> giReflTex   [[texture(10)]],
+                             sampler          giReflSmp   [[sampler(10)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -554,11 +565,27 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	// even at noon. A floor of 0.1 keeps the sample safely in the cool sky dome.
 	float3 Nup     = normalize(float3(N.x, max(N.y, 0.1), N.z));
 	float3 ambDiff = skyEnv.sample(skyEnvSmp, Nup).rgb    * diffuseColor;
+	// FORWARD reflection cascade (sky → ray-traced GI refl → SSR) — the
+	// built-in twin of heLitP's cascade; per-pixel roughness fade here because
+	// the half-res trace carries none. Gates 0 → dead code.
+	float3 envSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb;
+	if (scene.reflCfg.w > 0.5)
+	{
+		float4 rr = giReflTex.sample(giReflSmp, in.position.xy / max(scene.viewport.xy, float2(1.0)));
+		float fade = 1.0 - smoothstep(scene.reflCfg2.y * 0.7, scene.reflCfg2.y, wRough);
+		envSpec = mix(envSpec, rr.rgb, rr.a * scene.reflCfg2.x * fade);
+	}
+	if (scene.reflCfg.x > 0.5)
+	{
+		float4 r = ssrTex.sample(ssrSmp, in.position.xy / max(scene.viewport.xy, float2(1.0)));
+		float fade = 1.0 - smoothstep(scene.reflCfg.z * 0.7, scene.reflCfg.z, wRough);
+		envSpec = mix(envSpec, r.rgb, r.a * scene.reflCfg.y * fade);
+	}
 	// Fresnel (Schlick, roughness-aware — same term as heLitP, ssr-plan P4).
 	float  NdV = saturate(dot(N, V));
 	float3 fresnelSpec = specColor
 		+ (max(float3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
-	float3 ambSpec = skyEnv.sample(skyEnvSmp, Rrough).rgb * fresnelSpec;
+	float3 ambSpec = envSpec * fresnelSpec;
 	float3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
@@ -927,7 +954,7 @@ static const char* kSSAOMSL = R"MSL(
 using namespace metal;
 
 struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
-struct SSAOPosUniforms { float4x4 mvp; float4x4 modelView; };
+struct SSAOPosUniforms { float4x4 mvp; float4x4 modelView; float4x4 model; };
 struct SSAOPosOut { float4 position [[position]]; float3 viewPos; };
 
 // Pre-pass: rasterise the scene, write the per-pixel view-space position.
@@ -944,6 +971,46 @@ vertex SSAOPosOut ssaoPosVertex(uint vid [[vertex_id]],
 fragment float4 ssaoPosFragment(SSAOPosOut in [[stage_in]])
 {
 	return float4(in.viewPos, 1.0); // a = 1 → valid geometry
+}
+
+// FORWARD-reflections variant of the pre-pass (MRT): additionally writes the
+// G-buffer-compatible attribute pair the SSR trace / GI-reflection kernels
+// consume — oct-encoded WORLD normal (+ roughness 0: the prepass has no
+// material data; the shading pass applies the per-pixel roughness fade) and
+// the NDC depth exactly as gbufferMain stores it (in.position.z), so the
+// reconstruction maths (heWorldAt / invViewProj) is shared verbatim.
+struct ReflPosOut { float4 position [[position]]; float3 viewPos; float3 worldNormal; };
+struct ReflPosFrag {
+	float4 viewPos [[color(0)]];
+	float4 attr    [[color(1)]]; // rg oct normal *0.5+0.5, b roughness (0), a unused
+	float  ndc     [[color(2)]]; // NDC depth (same value gbufferMain writes)
+};
+static float2 octEncodePre(float3 n)
+{
+	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+vertex ReflPosOut reflPosVertex(uint vid [[vertex_id]],
+                                const device VertexIn*    verts [[buffer(0)]],
+                                constant SSAOPosUniforms& u     [[buffer(1)]])
+{
+	ReflPosOut o;
+	float4 p      = float4(float3(verts[vid].position), 1.0);
+	o.position    = u.mvp * p;
+	o.viewPos     = (u.modelView * p).xyz;
+	o.worldNormal = (u.model * float4(float3(verts[vid].normal), 0.0)).xyz;
+	return o;
+}
+fragment ReflPosFrag reflPosFragment(ReflPosOut in [[stage_in]])
+{
+	ReflPosFrag o;
+	o.viewPos = float4(in.viewPos, 1.0);
+	float3 n = in.worldNormal;
+	n = (dot(n, n) > 1e-12) ? normalize(n) : float3(0.0, 0.0, 1.0);
+	o.attr = float4(octEncodePre(n) * 0.5 + 0.5, 0.0, 0.0);
+	o.ndc  = in.position.z;
+	return o;
 }
 
 struct SSAOOut { float4 position [[position]]; float2 uv; };
@@ -4133,6 +4200,9 @@ struct SceneUniforms
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
 	glm::vec4 viewport = glm::vec4(0.0f); // xy = output size, z = ssaoEnabled
 	glm::vec4 weather = glm::vec4(0.0f); // x = wetness, y = snow cover
+	// Forward reflection cascade — see the MSL struct above.
+	glm::vec4 reflCfg  = glm::vec4(0.0f);
+	glm::vec4 reflCfg2 = glm::vec4(0.0f);
 	// Local (point/spot) shadow atlas view-projs (already Metal clip); a light's
 	// first layer index rides in its LightGPU params.y (-1 = casts no shadow).
 	glm::mat4 localShadowVP[16] = {};
@@ -4143,6 +4213,7 @@ struct SSAOPosUniforms
 {
 	glm::mat4 mvp;
 	glm::mat4 modelView;
+	glm::mat4 model; // world transform (reflPosVertex world-space normals)
 };
 struct SSAOParamsCPU
 {
@@ -4374,6 +4445,9 @@ void MetalRenderer::Shutdown()
 	if (m_ssrTracePipeline)     { CFBridgingRelease(m_ssrTracePipeline);     m_ssrTracePipeline = nullptr; }
 	if (m_ssrCompositePipeline) { CFBridgingRelease(m_ssrCompositePipeline); m_ssrCompositePipeline = nullptr; }
 	if (m_ssrBlurPipeline)      { CFBridgingRelease(m_ssrBlurPipeline);      m_ssrBlurPipeline = nullptr; }
+	if (m_ssrColorHist)         { CFBridgingRelease(m_ssrColorHist);         m_ssrColorHist = nullptr; }
+	m_ssrColorHistValid = false;
+	m_ssrColorHistW = m_ssrColorHistH = 0;
 	m_ssrPipelinesTried = false;
 	DestroySSRTarget();
 	if (m_giReflPipeline) { CFBridgingRelease(m_giReflPipeline); m_giReflPipeline = nullptr; }
@@ -4465,6 +4539,7 @@ void MetalRenderer::Shutdown()
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
 	if (m_ssaoPosPipeline)  { CFBridgingRelease(m_ssaoPosPipeline);  m_ssaoPosPipeline = nullptr; }
+	if (m_reflPosPipeline)  { CFBridgingRelease(m_reflPosPipeline);  m_reflPosPipeline = nullptr; }
 	if (m_ssaoDepthPosPipeline) { CFBridgingRelease(m_ssaoDepthPosPipeline); m_ssaoDepthPosPipeline = nullptr; }
 	if (m_ssaoPipeline)     { CFBridgingRelease(m_ssaoPipeline);     m_ssaoPipeline = nullptr; }
 	if (m_ssaoBlurPipeline) { CFBridgingRelease(m_ssaoBlurPipeline); m_ssaoBlurPipeline = nullptr; }
@@ -4863,6 +4938,22 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: SSAO pos pipeline failed: ")
 				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
 		m_ssaoPosPipeline = (void*)CFBridgingRetain(posPso);
+
+		// FORWARD-reflections MRT variant of the pre-pass (view-pos + oct
+		// normal/rough + NDC depth) — used instead of the plain pre-pass when
+		// the forward path runs SSR / GI reflections.
+		MTLRenderPipelineDescriptor* rpDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		rpDesc.vertexFunction   = [ssLib newFunctionWithName:@"reflPosVertex"];
+		rpDesc.fragmentFunction = [ssLib newFunctionWithName:@"reflPosFragment"];
+		rpDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // view position
+		rpDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // oct normal + rough
+		rpDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;    // NDC depth
+		rpDesc.depthAttachmentPixelFormat      = kDepthFormat;
+		id<MTLRenderPipelineState> rpPso = [device newRenderPipelineStateWithDescriptor:rpDesc error:&ssError];
+		if (!rpPso)
+			throw std::runtime_error(std::string("MetalRenderer: refl pos pipeline failed: ")
+				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
+		m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
 
 		// Deferred P5 variant: view-pos reconstructed from the G-buffer depth by a
 		// fullscreen draw — no depth attachment, no geometry.
@@ -8167,6 +8258,15 @@ void MetalRenderer::EnsureSSAOTargets(int width, int height)
 	m_ssaoTex     = (void*)CFBridgingRetain([device newTextureWithDescriptor:aoDesc]);
 	m_ssaoBlurTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:aoDesc]);
 
+	// Forward-reflections MRT pair (oct normal + NDC depth) — same size, so the
+	// SSR trace / GI-refl kernels sample it exactly like the deferred G-buffer.
+	m_reflNormTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:posDesc]);
+	MTLTextureDescriptor* rdDesc = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:width height:height mipmapped:NO];
+	rdDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	rdDesc.storageMode = MTLStorageModePrivate;
+	m_reflDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:rdDesc]);
+
 	m_ssaoW = width; m_ssaoH = height;
 }
 
@@ -8176,6 +8276,8 @@ void MetalRenderer::DestroySSAOTargets()
 	if (m_ssaoPosDepth) { CFBridgingRelease(m_ssaoPosDepth); m_ssaoPosDepth = nullptr; }
 	if (m_ssaoTex)      { CFBridgingRelease(m_ssaoTex);      m_ssaoTex = nullptr; }
 	if (m_ssaoBlurTex)  { CFBridgingRelease(m_ssaoBlurTex);  m_ssaoBlurTex = nullptr; }
+	if (m_reflNormTex)  { CFBridgingRelease(m_reflNormTex);  m_reflNormTex = nullptr; }
+	if (m_reflDepthTex) { CFBridgingRelease(m_reflDepthTex); m_reflDepthTex = nullptr; }
 	m_ssaoResult = nullptr;
 	m_ssaoW = m_ssaoH = 0;
 }
@@ -8246,18 +8348,34 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		}
 		else
 		{
+		// Forward reflections extend the pre-pass to MRT (oct normal + NDC
+		// depth alongside the view position) — see reflPosFragment.
+		const bool mrt = m_fwdReflPrepassWanted && m_reflPosPipeline
+		              && m_reflNormTex && m_reflDepthTex;
 		MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
 		pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
 		pp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 		pp.colorAttachments[0].storeAction = MTLStoreActionStore;
 		pp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0); // a = 0 → background
+		if (mrt)
+		{
+			pp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_reflNormTex;
+			pp.colorAttachments[1].loadAction  = MTLLoadActionClear;
+			pp.colorAttachments[1].storeAction = MTLStoreActionStore;
+			pp.colorAttachments[1].clearColor  = MTLClearColorMake(0.5, 0.5, 1.0, 0.0);
+			pp.colorAttachments[2].texture     = (__bridge id<MTLTexture>)m_reflDepthTex;
+			pp.colorAttachments[2].loadAction  = MTLLoadActionClear;
+			pp.colorAttachments[2].storeAction = MTLStoreActionStore;
+			pp.colorAttachments[2].clearColor  = MTLClearColorMake(1.0, 0.0, 0.0, 0.0); // depth 1 → background
+		}
 		pp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_ssaoPosDepth;
 		pp.depthAttachment.loadAction  = MTLLoadActionClear;
 		pp.depthAttachment.storeAction = MTLStoreActionDontCare;
 		pp.depthAttachment.clearDepth  = 1.0;
 		ftAttachStart((__bridge void*)pp, ssaoBase);
 		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
-		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssaoPosPipeline];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+			(mrt ? m_reflPosPipeline : m_ssaoPosPipeline)];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 		for (uint32_t idx : m_sortedIndices)
@@ -8267,6 +8385,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 			SSAOPosUniforms u;
 			u.mvp       = viewProj * obj.transform;
 			u.modelView = view * obj.transform;
+			u.model     = obj.transform;
 			if (!valid || obj.meshAssetId != lastId)
 			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
 			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
@@ -8281,6 +8400,11 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		}
 		[enc endEncoding];
 		}
+
+		// Reflections-only run: SSAO itself is off (or replaced by GI) — the
+		// MRT pre-pass outputs are all the forward reflection passes need,
+		// occlusion + blur are skipped entirely.
+		if (m_fwdReflPrepassOnly) return;
 
 		// ── 2. Occlusion (fullscreen) ──────────────────────────────────────
 		SSAOParamsCPU params;
@@ -8922,10 +9046,12 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// Same masks for CUSTOM-material pipelines (heLitP), pinned at 9/10.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:9];
+	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
+	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
+	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
 	// CSM array for the material preamble's GI-off fallback, pinned at 11
 	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
@@ -9124,10 +9250,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-	// Same masks for CUSTOM-material pipelines (heLitP), pinned at 9/10.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:9];
+	// FORWARD reflection results at 9/10 (heLitP pins; the GI masks moved onto
+	// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run;
+	// the ssr.x / giRefl.z gates are 0 then, the samples fold dead.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
 	// CSM array for the material preamble's GI-off fallback, pinned at 11
 	// (sampling gated by heLight.csmSplits.w — same convention as slot 1).
@@ -9196,6 +9324,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
 	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
 	scene.weather       = glm::vec4(GetEnvironment().wetness, GetEnvironment().snowAmount, 0.0f, 0.0f);
+	// Forward reflection cascade (textures 9/10) — gates 0 in the deferred
+	// path (its composite pass supplies the term) and when the passes didn't run.
+	scene.reflCfg  = glm::vec4(m_fwdReflSsrTex ? 1.0f : 0.0f, m_ssrIntensity,
+	                           m_ssrMaxRoughness, m_fwdReflGiTex ? 1.0f : 0.0f);
+	scene.reflCfg2 = glm::vec4(m_giReflIntensity, m_giReflMaxRoughness, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
@@ -9623,10 +9756,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:7];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:8];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:8];
-		// Same masks for CUSTOM-material pipelines (heLitP), pinned at 9/10.
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:9];
+		// FORWARD reflection results at 9/10 (heLitP pins; GI masks moved onto
+		// the shared 5/8 slots — ssr-plan P0). Dummies when the passes didn't run.
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture) atIndex:9];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:9];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giLocalMaskTex : m_dummyTexture) atIndex:10];
+		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_fwdReflGiTex ? m_fwdReflGiTex : m_dummyTexture) atIndex:10];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:10];
 		// CSM array for the material preamble's GI-off fallback, pinned at 11.
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:11];
@@ -9708,6 +9842,15 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
 	matLight.giParams[0] = static_cast<float>(width);
 	matLight.giParams[1] = static_cast<float>(height);
+	// FORWARD reflection cascade gates for heLitP (samplers 31/32 → slots 9/10).
+	// Null in the deferred path (its composite pass owns the term — the resolve
+	// callers additionally set ssr.w to skip ambSpec entirely).
+	matLight.ssr[0]    = m_fwdReflSsrTex ? 1.0f : 0.0f;
+	matLight.ssr[1]    = m_ssrIntensity;
+	matLight.ssr[2]    = m_ssrMaxRoughness;
+	matLight.giRefl[0] = m_giReflIntensity;
+	matLight.giRefl[1] = m_giReflMaxRoughness;
+	matLight.giRefl[2] = m_fwdReflGiTex ? 1.0f : 0.0f;
 	matLight.giParams[2] = giActive ? 1.0f : 0.0f;
 	// Full light window for heLitP() — same first-8 order as the built-in
 	// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also writes
@@ -10461,6 +10604,136 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 	}
 }
 
+// ─── Forward SSR (ssr-plan Option A / P3-Forward) ────────────────────────────
+// The SAME trace/blur/temporal chain as the deferred variant, fed from the MRT
+// pre-pass (oct normals + NDC depth, gbufferMain-compatible by construction)
+// and LAST frame's HDR copy — the hit reprojects into it via prevViewProj
+// (cfg2.z), one frame of content lag being the accepted forward trade. There
+// is no composite pass: heLitP/fragmentMain sample the result at slot 9.
+void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
+{
+	m_fwdReflSsrTex = nullptr;
+	if (!m_ssrFrameActive || m_deferredFrameActive) return;
+	if (!m_ssrTracePipeline || !m_ssrBlurPipeline)  return;
+	if (!m_reflNormTex || !m_reflDepthTex)          return;
+	if (!m_ssrColorHist || !m_ssrColorHistValid)    return; // frame 1 seeds the copy first
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		const int tw = std::max(1, width / 2), th = std::max(1, height / 2);
+		EnsureSSRTarget(tw, th);
+		const glm::mat4 viewProj =
+			m_renderWorld.camera.projection * m_renderWorld.camera.view;
+		const glm::vec3 camFwd =
+			-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
+
+		const int curIdx  = m_ssrHistIdx;
+		const int prevIdx = 1 - curIdx;
+		void* const traceOut = m_ssrHistRad[curIdx];
+		{
+			const bool temporal = m_ssrQuality >= 2;
+			float hist = 0.0f;
+			if (temporal && m_ssrHistValid)
+			{
+				float delta = 0.0f;
+				for (int c = 0; c < 4; ++c)
+					for (int r = 0; r < 4; ++r)
+						delta = std::max(delta,
+							std::abs(viewProj[c][r] - m_ssrPrevViewProj[c][r]));
+				hist = delta > 1e-5f ? 0.55f : 0.85f;
+			}
+			m_ssrFrameSeed += 1.0f;
+
+			HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+			const glm::mat4 ivp = glm::inverse(viewProj);
+			std::memcpy(tu.viewProj,     &viewProj[0][0],          16 * sizeof(float));
+			std::memcpy(tu.invViewProj,  &ivp[0][0],               16 * sizeof(float));
+			std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
+			tu.cfg2[0] = m_ssrFrameSeed;
+			tu.cfg2[1] = hist;
+			tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+			tu.camPos[0] = m_renderWorld.camera.position.x;
+			tu.camPos[1] = m_renderWorld.camera.position.y;
+			tu.camPos[2] = m_renderWorld.camera.position.z;
+			tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+			tu.cfg[0] = m_ssrMaxDistance;
+			tu.cfg[1] = m_ssrThickness;
+			tu.cfg[2] = m_ssrMaxRoughness;
+			tu.cfg[3] = static_cast<float>(m_ssrQuality <= 0 ? 16 : m_ssrQuality == 1 ? 32 : 64);
+			tu.conv[0] = -1.0f;
+			tu.conv[1] = 1.0f;
+			tu.conv[2] = 0.0f;
+			tu.conv[3] = 0.1f;
+			tu.vp[0] = static_cast<float>(tw);
+			tu.vp[1] = static_cast<float>(th);
+
+			MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+			tp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssrHistRad[curIdx];
+			tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+			tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			tp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_ssrHistPos[curIdx];
+			tp.colorAttachments[1].loadAction  = MTLLoadActionDontCare;
+			tp.colorAttachments[1].storeAction = MTLStoreActionStore;
+			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:tp];
+			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrTracePipeline];
+			[enc setFragmentBytes:&tu length:sizeof(tu) atIndex:0];
+			id<MTLSamplerState> pointSmp = (__bridge id<MTLSamplerState>)
+				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrColorHist atIndex:0];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_reflNormTex atIndex:1];
+			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_reflDepthTex atIndex:2];
+			[enc setFragmentSamplerState:pointSmp atIndex:2];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrHistRad[prevIdx] atIndex:3];
+			[enc setFragmentSamplerState:pointSmp atIndex:3];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrHistPos[prevIdx] atIndex:4];
+			[enc setFragmentSamplerState:pointSmp atIndex:4];
+			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+			[enc endEncoding];
+
+			m_ssrHistIdx      = prevIdx;
+			m_ssrHistValid    = true;
+			m_ssrPrevViewProj = viewProj;
+		}
+
+		// Blur chain — same tier policy as the deferred variant.
+		if (m_ssrQuality >= 1)
+		{
+			auto blurPass = [&](void* src, void* dst, float dx, float dy)
+			{
+				HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+				bu.dir[0] = dx;
+				bu.dir[1] = dy;
+				bu.dir[2] = 1.0f / static_cast<float>(tw);
+				bu.dir[3] = 1.0f / static_cast<float>(th);
+				MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+				bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)dst;
+				bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+				bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+				id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
+				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrBlurPipeline];
+				[enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)src atIndex:0];
+				[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+				[enc endEncoding];
+				++m_counters.draws;
+			};
+			blurPass(traceOut,     m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
+			if (m_ssrQuality == 1)
+			{
+				blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+				blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
+			}
+			// No glossy wide stage in the forward path: it would cost a THIRD
+			// material sampler slot and the budget is spent (9 SSR, 10 GI refl).
+		}
+		m_fwdReflSsrTex = m_ssrQuality >= 1 ? m_ssrReflTex : traceOut;
+	}
+}
+
 // ─── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────────
 bool MetalRenderer::EnsureGIReflPipeline()
 {
@@ -10546,7 +10819,14 @@ void MetalRenderer::DestroyGIReflTarget()
 // frames) and m_renderWorld.camera is current.
 void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 {
-	if (!m_giReflFrameActive || !m_giReflPipeline || !m_gbStored) return;
+	if (!m_giReflFrameActive || !m_giReflPipeline) return;
+	// Input pair: the stored G-buffer in the deferred tile mode, the MRT
+	// pre-pass in the forward path — identical formats/conventions, so the
+	// kernels are byte-shared between both.
+	const bool deferredIn = m_deferredFrameActive;
+	void* const attrTex  = deferredIn ? m_gbColor1   : m_reflNormTex;
+	void* const depthTex = deferredIn ? m_gbDepthLin : m_reflDepthTex;
+	if (deferredIn ? !m_gbStored : !(attrTex && depthTex)) return;
 	if (m_giHwRt ? !(m_giTlas && m_giInstanceColorBuffer)
 	             : !(m_giSwNodeBuf && m_giSwTriBuf && m_giSwInstanceBuf && m_giSwInstanceCount > 0))
 		return;
@@ -10611,8 +10891,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 
 		id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giReflPipeline];
-		[enc setTexture:(__bridge id<MTLTexture>)m_gbColor1   atIndex:0];
-		[enc setTexture:(__bridge id<MTLTexture>)m_gbDepthLin atIndex:1];
+		[enc setTexture:(__bridge id<MTLTexture>)attrTex  atIndex:0];
+		[enc setTexture:(__bridge id<MTLTexture>)depthTex atIndex:1];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflTex  atIndex:2];
 		[enc setTexture:(__bridge id<MTLTexture>)(fieldValid ? m_giIrradianceAtlas
 		                                                     : m_dummyTexture) atIndex:3];
@@ -11236,20 +11516,31 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 			m_deferredFrameActive = deferredActive;
 			const bool deferredTile = deferredActive && m_deferredTileMode;
-			// SSR (ssr-plan §4.5): v1 only in the deferred tile mode — the trace
-			// reads the stored G-buffer + the resolved HDR of THIS frame.
-			m_ssrFrameActive = deferredTile && m_ssrEnabled && EnsureSSRPipelines();
-			// Ray-traced GI reflections (gi-reflections-plan): same tile-mode
-			// requirement (stored G-buffer + composite onto the resolved HDR),
-			// plus the acceleration structures EncodeGIAccelBuild built earlier
-			// this frame (TLAS on HW RT, the CPU-BVH buffers on the SW path).
-			// Needs the SSR pipelines too — the composite is shared.
-			m_giReflFrameActive = deferredTile && m_giReflEnabled
+			// SSR: deferred TILE mode traces the stored G-buffer + this frame's
+			// resolved HDR (§4.5, lag-free); the FORWARD path traces the MRT
+			// pre-pass + last frame's HDR copy (Option A, 1 frame content lag).
+			// Only the two-pass deferred fallback has no SSR.
+			m_ssrFrameActive = m_ssrEnabled && EnsureSSRPipelines()
+			                && (deferredTile || !deferredActive);
+			// Ray-traced GI reflections: tile mode composites onto the resolved
+			// HDR; the forward path shades from the same MRT pre-pass and the
+			// scene shaders sample the result (slot 10). Both need the accel
+			// structures EncodeGIAccelBuild built earlier this frame.
+			m_giReflFrameActive = (deferredTile || !deferredActive) && m_giReflEnabled
 			                   && (m_giHwRt
 			                           ? m_giTlas != nullptr
 			                           : (m_giSwNodeBuf && m_giSwTriBuf && m_giSwInstanceBuf
 			                              && m_giSwInstanceCount > 0))
 			                   && EnsureSSRPipelines() && EnsureGIReflPipeline();
+			// Forward reflections want the MRT pre-pass (and EncodeSSAO runs
+			// even with SSAO off/replaced — occlusion+blur skipped then).
+			const bool giReplacesAOEarly = m_giEnabled && m_giSupported;
+			m_fwdReflPrepassWanted = !deferredActive
+			                      && (m_ssrFrameActive || m_giReflFrameActive);
+			m_fwdReflPrepassOnly   = m_fwdReflPrepassWanted
+			                      && !(m_ssaoEnabled && !giReplacesAOEarly);
+			m_fwdReflSsrTex = nullptr;
+			m_fwdReflGiTex  = nullptr;
 			{
 				// One-shot diagnostic: which scene-pass mode actually runs. Logged
 				// on every CHANGE (not per frame) so a mid-session flip is visible.
@@ -11278,10 +11569,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// memoryless G-buffer has no stored depth to reconstruct from.
 			const bool giReplacesAO = m_giEnabled && m_giSupported;
 			auto runSSAO = [&]{
-				if (m_ssaoEnabled && !giReplacesAO)
+				if ((m_ssaoEnabled && !giReplacesAO) || m_fwdReflPrepassWanted)
 					EncodeSSAO((__bridge void*)cmdBuf,
 					           std::max(1, sceneW / 2), std::max(1, sceneH / 2));
-				else m_ssaoResult = nullptr;
+				if (!(m_ssaoEnabled && !giReplacesAO)) m_ssaoResult = nullptr;
 			};
 			if (deferredTile) runSSAO();
 
@@ -11378,6 +11669,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				DestroyGBufferTargets(); // freed when the user switches back to forward
 
 			if (!deferredTile) runSSAO(); // forward, or two-pass deferred (P5 depth read)
+
+			// FORWARD reflections: the passes consume the MRT pre-pass the
+			// runSSAO call above just rendered; results are sampled by the
+			// scene shaders (slots 9/10) — no composite pass.
+			if (!deferredActive)
+			{
+				if (m_giReflFrameActive)
+				{
+					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+					m_fwdReflGiTex = m_giReflTex;
+				}
+				EncodeForwardSSR((__bridge void*)cmdBuf, sceneW, sceneH);
+			}
 			flushPass("Scene");   // detailed: commit the SSAO command buffer (empty if SSAO off)
 
 			// Scene → RGBA16Float HDR target. Tile mode already CONTAINS the
@@ -11448,6 +11752,38 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				SamplePoint((__bridge void*)sceneEncoder, "Debug");   // closes the Debug interval
 			}
 			[sceneEncoder endEncoding];
+
+			// Forward SSR: keep a full-res copy of this frame's HDR (incl. sky
+			// and transparency) — next frame's trace reprojects into it.
+			if (!deferredActive && m_ssrFrameActive)
+			{
+				if (!m_ssrColorHist || m_ssrColorHistW != sceneW || m_ssrColorHistH != sceneH)
+				{
+					if (m_ssrColorHist) { CFBridgingRelease(m_ssrColorHist); m_ssrColorHist = nullptr; }
+					m_ssrColorHistValid = false;
+					id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+					MTLTextureDescriptor* hd = [MTLTextureDescriptor
+						texture2DDescriptorWithPixelFormat:kSceneColorFormat
+						width:sceneW height:sceneH mipmapped:NO];
+					hd.usage       = MTLTextureUsageShaderRead;
+					hd.storageMode = MTLStorageModePrivate;
+					m_ssrColorHist = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
+					m_ssrColorHistW = sceneW; m_ssrColorHistH = sceneH;
+				}
+				if (m_ssrColorHist)
+				{
+					id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+					[blit copyFromTexture:(__bridge id<MTLTexture>)m_hdrColor
+					          sourceSlice:0 sourceLevel:0
+					         sourceOrigin:MTLOriginMake(0, 0, 0)
+					           sourceSize:MTLSizeMake(sceneW, sceneH, 1)
+					            toTexture:(__bridge id<MTLTexture>)m_ssrColorHist
+					     destinationSlice:0 destinationLevel:0
+					    destinationOrigin:MTLOriginMake(0, 0, 0)];
+					[blit endEncoding];
+					m_ssrColorHistValid = true;
+				}
+			}
 			flushPass("Bloom");   // detailed: commit the Scene command buffer
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;
@@ -12020,12 +12356,14 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// The deferred resolve shader is generated from the shared lighting preamble
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
-	// SSR v1 rides on the deferred tile mode (Apple Silicon): the reflection
-	// pass reads the stored G-buffer + the resolved HDR of the same frame.
-	c.supportsScreenSpaceReflections = m_deferredTileMode;
-	// Ray-traced GI reflections: same tile-mode requirement; the SW-BVH
-	// kernel (P5) covers devices without hardware ray tracing.
-	c.supportsGIReflections = m_deferredTileMode;
+	// SSR: deferred tile mode traces the stored G-buffer lag-free; every other
+	// Metal configuration (forward, or non-Apple GPUs' two-pass deferred falls
+	// back to forward SSR too once the path is forward) runs the Option-A
+	// forward variant off the MRT pre-pass + last frame's HDR copy.
+	c.supportsScreenSpaceReflections = true;
+	// Ray-traced GI reflections: tile-deferred AND forward (same kernels, fed
+	// from the pre-pass); the SW-BVH kernel covers devices without HW RT.
+	c.supportsGIReflections = true;
 #endif
 	return c;
 }

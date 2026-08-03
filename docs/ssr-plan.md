@@ -322,6 +322,21 @@ Boden (`metallic = 1`, `roughness = 0.05`) + farbige Objekte. A/B `SSR=0` vs `SS
 Dieselbe Zeile in der Preamble + Metal-Pin. Damit sieht ein Graph-Material identisch aus wie ein
 Built-in daneben.
 
+**Status: FORWARD-PFAD KOMPLETT (Metal), inkl. GI-Reflections.** Umsetzung weicht vom
+v1-Entwurf ab (besser): der SSAO-Prepass rendert als **MRT** (View-Pos + Oct-Normale/Rough-0 +
+NDC-Depth in `gbufferMain`-Konvention) — dadurch konsumieren der **unveränderte** SSR-Trace und
+die **unveränderten** GI-Refl-Kernel im Forward-Pfad dieselben Eingaben wie im Deferred-Pfad.
+Einziger Trace-Unterschied: `cfg2.z` = Farbe aus der **Vorframe-HDR-Kopie** (Blit nach dem
+Scene-Pass), Hit via `prevViewProj` reprojiziert → 1 Frame Content-Lag (Option A). Composite in
+`heLitP` (Kaskade Sky → `heGIReflFwd` → `heSSRFwd`, Bindings 31/32 → Metal-Slots 9/10) und
+byte-analog in `fragmentMain` (SceneUniforms `reflCfg/reflCfg2`); Roughness-Fade per-Pixel im
+Shader (der Prepass hat keine Materialdaten). Der P0-Slot-Umzug ist dabei umgesetzt: GI-Masken
+der Material-Pipelines von 9/10 auf die geteilten Built-in-Slots 5/8, 6 redundante Binds weg.
+Temporal (High) läuft auch forward (gleiches History-Paar); der Glossy-Wide-Lerp bleibt
+deferred-only (kostete den letzten Sampler-Slot). D3D12/Vulkan: Bindings 31/32 folgen dem
+Bestandsmuster von heSkyEnv/heAO (uniform-gated, Material-Layouts dort decken schon 13–18
+nicht ab — bekannte Blind-Backend-Lücke).
+
 **Verifikation:** `ShadowValidation` headless rendern — die metallische Kugel (`123Test.hasset`,
 Metallic 1.0) muss die weiße Ebene spiegeln. Genau der Ausgangsfall dieses Plans.
 
