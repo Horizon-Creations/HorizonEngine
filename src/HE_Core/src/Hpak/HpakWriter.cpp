@@ -26,6 +26,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 
 #ifdef HE_HAVE_ASTCENC
@@ -654,6 +655,14 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
                               const AddProgressFn& progress,
                               const Hpak::IncrementalCache* cache)
 {
+    return addDirectories({ SourceRoot{ rootDir, {} } }, settings, progress, cache);
+}
+
+int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
+                               const Hpak::PackSettings& settings,
+                               const AddProgressFn& progress,
+                               const Hpak::IncrementalCache* cache)
+{
     std::error_code ec;
 
     // Pass 1: read every .hasset, extract (UUID, embedded path), and build a
@@ -662,52 +671,73 @@ int HpakWriter::addDirectory(const std::filesystem::path& rootDir,
     struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; };
     std::vector<Pending> pending;
     std::unordered_map<std::string, HE::UUID> pathToUuid;
+    // One UUID = one pak entry. Roots are scanned in order, so the first claim
+    // wins: a project-local override under Content/Engine/… (same UUID as the
+    // engine default it shadows) keeps the shared default out of the archive,
+    // instead of writing two TOC entries the reader would pick between blindly.
+    std::unordered_set<HE::UUID> claimed;
     m_packedPaths.clear();
-    // Manual iteration with increment(ec): the range-for's operator++ THROWS on
-    // unreadable subdirectories (this runs on the editor's export worker thread,
-    // where an escaped exception is std::terminate). skip_permission_denied
-    // covers the common case; increment(ec) the rest.
-    std::filesystem::recursive_directory_iterator it(
-        rootDir, std::filesystem::directory_options::skip_permission_denied, ec);
-    const std::filesystem::recursive_directory_iterator end;
-    while (!ec && it != end)
+    for (const SourceRoot& root : roots)
     {
-        const auto& p = *it;
-        const bool regular = p.is_regular_file(ec);
-        if (ec) { ec.clear(); it.increment(ec); continue; }
-        if (!regular || p.path().extension() != ".hasset") { it.increment(ec); continue; }
+        if (root.dir.empty()) continue;
+        // Manual iteration with increment(ec): the range-for's operator++ THROWS on
+        // unreadable subdirectories (this runs on the editor's export worker thread,
+        // where an escaped exception is std::terminate). skip_permission_denied
+        // covers the common case; increment(ec) the rest. A root that cannot be
+        // opened at all leaves ec set — cleared below, so the NEXT root still runs.
+        std::filesystem::recursive_directory_iterator it(
+            root.dir, std::filesystem::directory_options::skip_permission_denied, ec);
+        const std::filesystem::recursive_directory_iterator end;
+        while (!ec && it != end)
+        {
+            const auto& p = *it;
+            const bool regular = p.is_regular_file(ec);
+            if (ec) { ec.clear(); it.increment(ec); continue; }
+            if (!regular || p.path().extension() != ".hasset") { it.increment(ec); continue; }
 
-        // Exclude filter: match against the rootDir-relative path with forward
-        // slashes (e.g. "Debug/Test.hasset") — the shape shown in the editor.
-        // lexically_relative is pure string math: no symlink resolution (which
-        // would match against the TARGET path) and no filesystem access.
-        std::string rel = p.path().lexically_relative(rootDir).generic_string();
-        if (rel.empty()) rel = p.path().filename().generic_string();
-        bool excluded = false;
-        for (const auto& pat : settings.excludePatterns)
-            if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
-        if (excluded) { it.increment(ec); continue; }
+            // Exclude filter: match against the ADDRESSED path (prefix + root-relative,
+            // forward slashes — e.g. "Debug/Test.hasset", "Engine/Meshes/Cube.hasset"),
+            // the shape shown in the editor. lexically_relative is pure string math: no
+            // symlink resolution (which would match against the TARGET path) and no
+            // filesystem access.
+            std::string rel = p.path().lexically_relative(root.dir).generic_string();
+            if (rel.empty()) rel = p.path().filename().generic_string();
+            rel = root.pathPrefix + rel;
+            bool excluded = false;
+            for (const auto& pat : settings.excludePatterns)
+                if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
+            if (excluded) { it.increment(ec); continue; }
 
-        do {
-            std::ifstream f(p.path(), std::ios::binary);
-            if (!f) break;
-            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
-                                        std::istreambuf_iterator<char>());
+            do {
+                std::ifstream f(p.path(), std::ios::binary);
+                if (!f) break;
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                            std::istreambuf_iterator<char>());
 
-            HE::UUID id; std::string path;
-            if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) break;
-            if (!path.empty()) pathToUuid[path] = id;
-            // Runtime path→UUID index: key by the content-relative path (what the
-            // editor + HorizonCode store and hand to loadAsset), and also by the
-            // asset's embedded META path when it differs, so either form resolves
-            // a mounted-pak asset that wasn't reached via the scene's UUID closure.
-            m_packedPaths[rel] = id;
-            if (!path.empty() && path != rel) m_packedPaths[path] = id;
-            pending.push_back({std::move(bytes), id, std::move(rel)});
-        } while (false);
-        it.increment(ec);
+                HE::UUID id; std::string path;
+                if (!metaFromHasset(bytes, id, path) || id == HE::UUID{}) break;
+                if (!claimed.insert(id).second) break;  // already packed from an earlier root
+                // The addressed path always resolves; the asset's own META path only
+                // when it agrees with this root's namespace. Engine defaults are
+                // generated with a bare META path relative to their own folder
+                // ("Cube.hasset"), which would otherwise hijack references meant for
+                // a project asset of the same name.
+                const bool metaInNamespace =
+                    !path.empty() && path.rfind(root.pathPrefix, 0) == 0;
+                pathToUuid[rel] = id;
+                if (metaInNamespace) pathToUuid[path] = id;
+                // Runtime path→UUID index: key by the content-relative path (what the
+                // editor + HorizonCode store and hand to loadAsset), and also by the
+                // asset's embedded META path when it differs, so either form resolves
+                // a mounted-pak asset that wasn't reached via the scene's UUID closure.
+                m_packedPaths[rel] = id;
+                if (metaInNamespace && path != rel) m_packedPaths[path] = id;
+                pending.push_back({std::move(bytes), id, std::move(rel)});
+            } while (false);
+            it.increment(ec);
+        }
+        ec.clear();
     }
-    ec.clear();
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
     // This is the expensive pass (compression + encryption) → progress reports here.

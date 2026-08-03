@@ -41,6 +41,16 @@ public:
     // the end. currentFile is the rootDir-relative path being packed.
     using AddProgressFn = std::function<void(int, int, const std::string&)>;
 
+    // One directory to scan, plus the path prefix its assets are ADDRESSED by
+    // (not where they live on disk): "" for the project's own Content root,
+    // "Engine/" for the engine-wide default content root — exactly the prefixes
+    // ContentManager::resolveAbsolutePath understands, so a reference stored as
+    // "Engine/Meshes/Cube.hasset" resolves against a pack built from both roots.
+    struct SourceRoot {
+        std::filesystem::path dir;
+        std::string           pathPrefix;
+    };
+
     // Scan rootDir recursively for *.hasset files. UUID is read from the
     // embedded META chunk; files where the UUID cannot be parsed are skipped,
     // as are files matching settings.excludePatterns (see PackSettings).
@@ -51,6 +61,18 @@ public:
                      const Hpak::PackSettings& settings = Hpak::PackSettings{},
                      const AddProgressFn& progress = {},
                      const Hpak::IncrementalCache* cache = nullptr);
+
+    // Same, over SEVERAL roots packed into one archive — the shipping case,
+    // where the engine's default content (primitive meshes, default materials)
+    // has to travel with the project's own Content or every scene reference to
+    // a built-in asset dangles at runtime. Roots are scanned in order and the
+    // FIRST one to claim a UUID wins, so a project-local override of an engine
+    // default (Content/Engine/…) shadows the shared default exactly like it does
+    // in the editor. The path→UUID map used to bake references spans all roots.
+    int addDirectories(const std::vector<SourceRoot>& roots,
+                       const Hpak::PackSettings& settings = Hpak::PackSettings{},
+                       const AddProgressFn& progress = {},
+                       const Hpak::IncrementalCache* cache = nullptr);
 
     // Write all added entries to outputPath. Returns false on I/O error.
     bool write(const std::string& outputPath) const;
