@@ -16,9 +16,11 @@
 #include <vector>
 
 #ifdef _WIN32
-  #include <fcntl.h>
-  #include <io.h>
-  #include <windows.h>
+  #include <fcntl.h>      // _O_BINARY
+  #include <io.h>         // _setmode, _fileno
+  #include <windows.h>    // GetCommandLineW, WideCharToMultiByte, CreateProcessA
+  #include <shellapi.h>   // CommandLineToArgvW — NOT in windows.h
+  #pragma comment(lib, "shell32.lib")
 #else
   #include <unistd.h>
 #endif
