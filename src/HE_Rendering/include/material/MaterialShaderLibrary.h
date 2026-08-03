@@ -193,13 +193,15 @@ public:
     // std140 layout of the trace shader's HeSSRTrace UBO (binding 23).
     struct SSRTraceUniforms
     {
-        float viewProj[16]    = {};
-        float invViewProj[16] = {};
-        float camPos[4]       = {}; // xyz camera world position
-        float camFwd[4]       = {}; // xyz camera forward (view-z axis)
-        float cfg[4]          = {}; // x maxDistance, y thickness, z maxRoughness, w stepCount
-        float conv[4]         = {}; // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
-        float vp[4]           = {}; // xy = trace-target size in pixels
+        float viewProj[16]     = {};
+        float invViewProj[16]  = {};
+        float prevViewProj[16] = {}; // LAST frame's view-proj (temporal reprojection)
+        float camPos[4]        = {}; // xyz camera world position
+        float camFwd[4]        = {}; // xyz camera forward (view-z axis)
+        float cfg[4]           = {}; // x maxDistance, y thickness, z maxRoughness, w stepCount
+        float conv[4]          = {}; // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
+        float vp[4]            = {}; // xy = trace-target size in pixels
+        float cfg2[4]          = {}; // x = frame seed, y = history blend (0 = temporal off)
     };
 
     // ── Deferred decals (P7 follow-up, Metal tile mode v1) ───────────────────
