@@ -12,7 +12,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-0.2.0}"
+VERSION="${1:-0.3.0}"
 
 # Sky-themed release codename — single source of truth is CMakeLists.txt. Shown in
 # the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.2.0 (Sunrise).
