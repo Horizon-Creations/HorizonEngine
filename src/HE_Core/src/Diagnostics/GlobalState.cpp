@@ -74,18 +74,67 @@ std::string GlobalState::getDumpsDir() const
 	return dumps.string();
 }
 
+// ─── Where the settings live ─────────────────────────────────────────────────
+std::filesystem::path GlobalState::configFilePath()
+{
+	// Resolved once: the answer cannot change during a run, and every caller
+	// would otherwise repeat the same filesystem probing.
+	static const fs::path resolved = [] {
+		std::error_code ec;
+
+		// 1. A config.json sitting next to the executable wins. That keeps a
+		//    portable checkout and every existing development setup behaving
+		//    exactly as before, and means this change never relocates settings
+		//    somebody already has.
+		if (const char* base = std::getenv("HE_CONFIG_DIR"))
+		{
+			fs::path forced = fs::path(base) / "config.json";
+			fs::create_directories(forced.parent_path(), ec);
+			return forced;
+		}
+		if (fs::exists("config.json", ec))
+			return fs::path("config.json");
+
+		// 2. Otherwise the per-user application-data directory. A .app launched
+		//    from Finder has a working directory of "/", so anything
+		//    CWD-relative is unwritable — which is exactly how settings silently
+		//    stopped persisting.
+		fs::path dir;
+#if defined(_WIN32)
+		if (const char* appdata = std::getenv("APPDATA")) dir = fs::path(appdata) / "HorizonEngine";
+#elif defined(__APPLE__)
+		if (const char* home = std::getenv("HOME"))
+			dir = fs::path(home) / "Library" / "Application Support" / "HorizonEngine";
+#else
+		if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) dir = fs::path(xdg) / "HorizonEngine";
+		else if (const char* home = std::getenv("HOME"))      dir = fs::path(home) / ".config" / "HorizonEngine";
+#endif
+		// 3. No home directory at all (a stripped service account, a sandbox):
+		//    fall back to the old behaviour rather than returning an empty path,
+		//    so the caller still has something to try.
+		if (dir.empty()) return fs::path("config.json");
+
+		fs::create_directories(dir, ec);
+		return dir / "config.json";
+	}();
+	return resolved;
+}
+
 void GlobalState::readConfig()
 {
-	if (!fs::exists("config.json"))
+	const fs::path cfgPath = configFilePath();
+	if (!fs::exists(cfgPath))
 	{
-		HE_LOG_WARN(Config, "%s", "No config file found — using defaults");
+		// Naming the path matters: with the location no longer tied to the working
+		// directory, "no config found" is only diagnosable if it says where it looked.
+		HE_LOG_WARN(Config, "No config file at %s — using defaults", cfgPath.string().c_str());
 		m_engineStatus.selectedRHI = defaultRHI();
 		m_engineStatus.lastProjectPath = "";
 		m_engineStatus.knownProjects.clear();
 		writeConfig();
 		return;
 	}
-	std::ifstream configFile("config.json");
+	std::ifstream configFile(cfgPath);
 	if (!configFile.is_open())
 	{
 		HE_LOG_ERROR(Config, "%s", "Failed to open config file.");
@@ -185,12 +234,14 @@ bool GlobalState::writeConfig()
 	// during shutdown) leaves a half-written config that then crash-loops the next
 	// startup. rename() swaps atomically on POSIX and the old config stays intact on
 	// any failure. (Same pattern as ProjectManager::saveProject.)
-	const std::string tmp = "config.json.tmp";
+	const fs::path cfgPath = configFilePath();
+	const fs::path tmp     = cfgPath.string() + ".tmp";
 	{
 		std::ofstream out(tmp, std::ios::trunc);
 		if (!out.is_open())
 		{
-			HE_LOG_ERROR(Config, "%s", "Failed to open config file for writing.");
+			HE_LOG_ERROR(Config, "Failed to open the config file for writing: %s",
+			             cfgPath.string().c_str());
 			return false;
 		}
 		// Serialize with the "replace" error handler: nlohmann's default dump()
@@ -212,7 +263,7 @@ bool GlobalState::writeConfig()
 		}
 	}
 	std::error_code ec;
-	fs::rename(tmp, "config.json", ec);
+	fs::rename(tmp, cfgPath, ec);
 	if (ec)
 	{
 		std::error_code ec2;

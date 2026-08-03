@@ -174,3 +174,79 @@ TEST_CASE("SessionDirectory: calls fail cleanly when there is no TLS backend")
     SessionLookup look;
     CHECK(dir.lookup("abcdefghijklmnop", look) == DirectoryStatus::NoTlsBackend);
 }
+
+// ─── Publishing both address families ────────────────────────────────────────
+// A host reaches the directory over exactly ONE address family, so only that one
+// used to be recorded — and a guest that had only the other family could not
+// connect at all, with nothing in the UI to explain why.
+
+TEST_CASE("A lookup reply with several addresses yields all of them, best first")
+{
+    HE::Net::SessionLookup out;
+    const std::string body = R"({
+        "ok": true,
+        "host": "203.0.113.7",
+        "hosts": ["203.0.113.7", "2a02:3100:82c3:ae00::1"],
+        "port": 7777,
+        "name": "Studio",
+        "engineVersion": "HorizonEngine",
+        "protocolVersion": 1,
+        "reachable": true
+    })";
+    REQUIRE(HE::Net::SessionDirectory::parseLookup(body, out) == HE::Net::DirectoryStatus::Ok);
+    REQUIRE(out.hosts.size() == 2);
+    CHECK(out.hosts[0] == "203.0.113.7");
+    CHECK(out.hosts[1] == "2a02:3100:82c3:ae00::1");
+    // host stays the first entry, so callers that want one address need not
+    // handle an empty vector everywhere.
+    CHECK(out.host == "203.0.113.7");
+    CHECK(out.port == 7777);
+}
+
+TEST_CASE("A reply that predates the address list still works")
+{
+    // The single-valued form must keep working: a client updated before the
+    // server would otherwise find no address at all and report the session as
+    // broken.
+    HE::Net::SessionLookup out;
+    const std::string body =
+        R"({"ok":true,"host":"198.51.100.9","port":7777,"name":"Old","reachable":true})";
+    REQUIRE(HE::Net::SessionDirectory::parseLookup(body, out) == HE::Net::DirectoryStatus::Ok);
+    REQUIRE(out.hosts.size() == 1);
+    CHECK(out.hosts[0] == "198.51.100.9");
+    CHECK(out.host == "198.51.100.9");
+}
+
+TEST_CASE("An entry with no usable address is refused rather than half-accepted")
+{
+    // Handing back a connect target of ""/0 would send the joiner into an
+    // unexplained timeout instead of a clear failure.
+    HE::Net::SessionLookup out;
+    CHECK(HE::Net::SessionDirectory::parseLookup(
+              R"({"ok":true,"hosts":[],"port":7777})", out) !=
+          HE::Net::DirectoryStatus::Ok);
+    CHECK(HE::Net::SessionDirectory::parseLookup(
+              R"({"ok":true,"host":"203.0.113.7","port":0})", out) !=
+          HE::Net::DirectoryStatus::Ok);
+}
+
+TEST_CASE("A verified second address comes back from registration, an unverified one does not")
+{
+    HE::Net::SessionRegistration out;
+    const std::string verified = R"({
+        "ok": true, "token": "abc", "publicIp": "203.0.113.7", "port": 7777,
+        "reachable": true, "ttl": 150, "altAddress": "2a02:3100:82c3:ae00::1"
+    })";
+    REQUIRE(HE::Net::SessionDirectory::parseRegistration(verified, out) ==
+            HE::Net::DirectoryStatus::Ok);
+    CHECK(out.altAddress == "2a02:3100:82c3:ae00::1");
+
+    // The server drops a claim it could not connect back to, so its absence is
+    // the signal — the client must not assume the address it offered was taken.
+    HE::Net::SessionRegistration plain;
+    const std::string unverified =
+        R"({"ok":true,"token":"abc","publicIp":"203.0.113.7","port":7777,"reachable":true,"ttl":150})";
+    REQUIRE(HE::Net::SessionDirectory::parseRegistration(unverified, plain) ==
+            HE::Net::DirectoryStatus::Ok);
+    CHECK(plain.altAddress.empty());
+}

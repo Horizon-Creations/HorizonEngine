@@ -5,6 +5,19 @@
 #include "Net/HttpClient.h"
 #include "Net/Socket.h"
 
+// PCP carries raw addresses on the wire, so this file needs the address
+// conversion functions directly rather than going through the socket wrapper.
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+#else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <sys/socket.h>
+#endif
+
+#include <Hpak/Aes256Gcm.h>   // Hpak::randomBytes for the PCP nonce
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -591,6 +604,186 @@ PortMapResult PortMapper::natPmpRemoveMapping(const std::string& gateway,
     return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
 }
 
+// ─── PCP (RFC 6887) ──────────────────────────────────────────────────────────
+
+namespace {
+
+constexpr std::uint8_t kPcpVersion   = 2;
+constexpr std::uint8_t kPcpOpMap     = 1;
+constexpr std::uint8_t kPcpResponse  = 0x80;   // top bit of the opcode byte
+constexpr std::uint8_t kPcpProtoTcp  = 6;      // IANA protocol number
+constexpr std::size_t  kPcpHeaderLen = 24;
+constexpr std::size_t  kPcpMapLen    = 36;
+
+// PCP carries every address as 16 bytes. An IPv4 address goes in as the
+// IPv4-mapped form ::ffff:a.b.c.d, which is what lets one message shape serve
+// both families.
+bool addressToPcpBytes(const std::string& text, std::uint8_t out[16])
+{
+    std::memset(out, 0, 16);
+    in6_addr v6{};
+    if (::inet_pton(AF_INET6, text.c_str(), &v6) == 1)
+    {
+        std::memcpy(out, &v6, 16);
+        return true;
+    }
+    in_addr v4{};
+    if (::inet_pton(AF_INET, text.c_str(), &v4) == 1)
+    {
+        out[10] = 0xFF;
+        out[11] = 0xFF;
+        std::memcpy(out + 12, &v4, 4);
+        return true;
+    }
+    return false;
+}
+
+std::string pcpBytesToAddress(const std::uint8_t in[16])
+{
+    // Recognise the IPv4-mapped prefix and render it as a v4 address, or callers
+    // would see "::ffff:1.2.3.4" where they expect "1.2.3.4".
+    static const std::uint8_t kV4Prefix[12] = { 0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF };
+    char buf[INET6_ADDRSTRLEN] = {};
+    if (std::memcmp(in, kV4Prefix, 12) == 0)
+    {
+        in_addr v4{};
+        std::memcpy(&v4, in + 12, 4);
+        if (::inet_ntop(AF_INET, &v4, buf, sizeof(buf))) return buf;
+        return {};
+    }
+    in6_addr v6{};
+    std::memcpy(&v6, in, 16);
+    if (::inet_ntop(AF_INET6, &v6, buf, sizeof(buf))) return buf;
+    return {};
+}
+
+} // namespace
+
+std::vector<std::uint8_t> PortMapper::buildPcpMapRequest(const std::string& clientAddress,
+                                                         const std::uint8_t nonce[12],
+                                                         std::uint16_t internalPort,
+                                                         std::uint16_t suggestedExternalPort,
+                                                         std::uint32_t lifetimeSeconds)
+{
+    std::vector<std::uint8_t> v;
+    v.reserve(kPcpHeaderLen + kPcpMapLen);
+
+    // Header: version, opcode (request → top bit clear), 2 reserved, lifetime,
+    // then the client's own address.
+    v.push_back(kPcpVersion);
+    v.push_back(kPcpOpMap);
+    v.push_back(0);
+    v.push_back(0);
+    putU32(v, lifetimeSeconds);
+    std::uint8_t client[16];
+    addressToPcpBytes(clientAddress, client);
+    v.insert(v.end(), client, client + 16);
+
+    // MAP payload: nonce, protocol, 3 reserved, internal port, suggested
+    // external port, suggested external address.
+    v.insert(v.end(), nonce, nonce + 12);
+    v.push_back(kPcpProtoTcp);
+    v.push_back(0);
+    v.push_back(0);
+    v.push_back(0);
+    putU16(v, internalPort);
+    putU16(v, suggestedExternalPort);
+    // All-zero means "you choose", which is the honest request: the router is
+    // free to hand back a different port, and using the one we asked for instead
+    // of the one granted would publish an endpoint nobody listens on.
+    v.insert(v.end(), 16, 0);
+    return v;
+}
+
+bool PortMapper::parsePcpMapResponse(const std::uint8_t* data, std::size_t len,
+                                     PcpMapping& out, std::uint8_t& outResultCode)
+{
+    if (!data || len < kPcpHeaderLen + kPcpMapLen) return false;
+    if (data[0] != kPcpVersion) return false;                     // not PCP
+    if ((data[1] & kPcpResponse) == 0) return false;              // a request echoed back
+    if ((data[1] & 0x7F) != kPcpOpMap) return false;              // answer to something else
+
+    outResultCode      = data[3];
+    out.lifetimeSeconds = getU32(data + 4);
+
+    const std::uint8_t* map = data + kPcpHeaderLen;
+    std::memcpy(out.nonce, map, 12);
+    out.externalPort    = getU16(map + 18);
+    out.externalAddress = pcpBytesToAddress(map + 20);
+    return true;
+}
+
+PortMapResult PortMapper::pcpMap(const std::string& gateway,
+                                 const std::string& clientAddress,
+                                 std::uint16_t internalPort,
+                                 std::uint16_t suggestedExternalPort,
+                                 std::uint32_t lifetimeSeconds,
+                                 PcpMapping& out, int timeoutMs)
+{
+    if (gateway.empty() || clientAddress.empty()) return PortMapResult::NotSupported;
+
+    // The nonce identifies this mapping for the rest of its life: the router
+    // matches a later delete against it, so a caller that loses it can no longer
+    // take its own mapping down.
+    std::uint8_t nonce[12];
+    if (!Hpak::randomBytes(nonce, sizeof(nonce)))
+    {
+        for (std::size_t i = 0; i < sizeof(nonce); ++i)
+            nonce[i] = static_cast<std::uint8_t>((internalPort * 31u + i * 7u) & 0xFF);
+    }
+
+    const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort,
+                                        suggestedExternalPort, lifetimeSeconds);
+    std::uint8_t reply[256];
+    std::size_t  replyLen = 0;
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs))
+        return PortMapResult::NoRouterFound;
+
+    std::uint8_t result = 0;
+    if (!parsePcpMapResponse(reply, replyLen, out, result))
+    {
+        HE_LOG_DEBUG(Net, "PCP: %s answered something that is not a MAP response", gateway.c_str());
+        return PortMapResult::RequestFailed;
+    }
+    if (result != 0)
+    {
+        // 1 = UNSUPP_VERSION, which is the expected answer from a NAT-PMP-only
+        // router and not worth alarming about; anything else is a real refusal.
+        if (result == 1)
+            HE_LOG_DEBUG(Net, "PCP: %s does not speak PCP (UNSUPP_VERSION)", gateway.c_str());
+        else
+            HE_LOG_WARN(Net, "PCP: %s refused the request (result code %u)",
+                        gateway.c_str(), static_cast<unsigned>(result));
+        return PortMapResult::RequestFailed;
+    }
+
+    std::memcpy(out.nonce, nonce, sizeof(nonce));
+    return PortMapResult::Ok;
+}
+
+PortMapResult PortMapper::pcpUnmap(const std::string& gateway,
+                                   const std::string& clientAddress,
+                                   const std::uint8_t nonce[12],
+                                   std::uint16_t internalPort,
+                                   int timeoutMs)
+{
+    // Lifetime 0 is the delete. The nonce is what tells the router which of its
+    // mappings this refers to.
+    const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort, 0, 0);
+    std::uint8_t reply[256];
+    std::size_t  replyLen = 0;
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs))
+        return PortMapResult::NoRouterFound;
+
+    PcpMapping ignored;
+    std::uint8_t result = 0;
+    if (!parsePcpMapResponse(reply, replyLen, ignored, result)) return PortMapResult::RequestFailed;
+    if (result == 0)
+        HE_LOG_INFO(Net, "PCP: removed the mapping for port %u",
+                    static_cast<unsigned>(internalPort));
+    return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
+}
+
 // ─── The fallback ladder ─────────────────────────────────────────────────────
 
 PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& description,
@@ -599,7 +792,44 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     HE_LOG_INFO(Net, "Port mapping: trying to open TCP %u automatically",
                 static_cast<unsigned>(port));
 
-    // UPnP first: broader support across consumer routers.
+    const std::string gatewayFirst = socketDefaultGateway();
+
+    // ── IPv6 first, when this machine has a global address ───────────────────
+    // Not a fallback but the preferred path, because IPv6 needs no translation
+    // at all: the machine is already addressable and only the router's firewall
+    // is in the way. That also sidesteps carrier-grade NAT entirely, which on
+    // many consumer connections (DS-Lite in particular) makes IPv4 forwarding
+    // impossible no matter what the router is willing to do.
+    //
+    // PCP is the only protocol here that can open it. UPnP AddPortMapping and
+    // NAT-PMP are both defined purely in terms of IPv4 translation and have
+    // nothing to say about a firewall pinhole.
+    const std::string globalV6 = socketGlobalIPv6Address();
+    if (!globalV6.empty() && !gatewayFirst.empty())
+    {
+        HE_LOG_DEBUG(Net, "Port mapping: this machine has a global IPv6 address, trying a "
+                          "PCP pinhole before any IPv4 mapping");
+        PcpMapping pcp;
+        if (pcpMap(gatewayFirst, globalV6, port, port, 7200, pcp) == PortMapResult::Ok)
+        {
+            outHandle.method        = MappingHandle::Method::Pcp;
+            outHandle.gateway       = gatewayFirst;
+            outHandle.port          = port;
+            outHandle.clientAddress = globalV6;
+            outHandle.isIPv6        = true;
+            std::memcpy(outHandle.pcpNonce, pcp.nonce, sizeof(outHandle.pcpNonce));
+
+            outInfo.externalPort = pcp.externalPort ? pcp.externalPort : port;
+            outInfo.internalPort = port;
+            outInfo.internalHost = globalV6;
+            outInfo.externalIp   = pcp.externalAddress.empty() ? globalV6 : pcp.externalAddress;
+            HE_LOG_INFO(Net, "Port mapping: opened an IPv6 pinhole via PCP for [%s]:%u",
+                        globalV6.c_str(), static_cast<unsigned>(outInfo.externalPort));
+            return PortMapResult::Ok;
+        }
+    }
+
+    // UPnP first among the IPv4 mechanisms: broader support across consumer routers.
     IgdDevice igd;
     if (discover(igd, 3000) == PortMapResult::Ok)
     {
@@ -638,6 +868,43 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
             HE_LOG_INFO(Net, "Port mapping: succeeded via NAT-PMP");
             return PortMapResult::Ok;
         }
+
+        // PCP for IPv4 too. A router can speak PCP without speaking NAT-PMP —
+        // the version byte is what distinguishes them — so this is a genuinely
+        // separate attempt rather than a retry of the same thing.
+        const std::string lan = socketLocalAddress();
+        if (!lan.empty())
+        {
+            PcpMapping pcp;
+            if (pcpMap(gateway, lan, port, port, 7200, pcp) == PortMapResult::Ok)
+            {
+                outHandle.method        = MappingHandle::Method::Pcp;
+                outHandle.gateway       = gateway;
+                outHandle.port          = port;
+                outHandle.clientAddress = lan;
+                outHandle.isIPv6        = false;
+                std::memcpy(outHandle.pcpNonce, pcp.nonce, sizeof(outHandle.pcpNonce));
+
+                outInfo.externalPort = pcp.externalPort ? pcp.externalPort : port;
+                outInfo.internalPort = port;
+                outInfo.internalHost = lan;
+                outInfo.externalIp   = pcp.externalAddress;
+                HE_LOG_INFO(Net, "Port mapping: succeeded via PCP (IPv4)");
+                return PortMapResult::Ok;
+            }
+        }
+    }
+
+    // Distinguish "the router said no" from "we never reached the router". Both
+    // arrive here as NoRouterFound, but they call for completely different
+    // action, and blaming the router for a permission problem sends people to
+    // change settings that were never consulted.
+    if (socketLocalNetworkBlocked())
+    {
+        HE_LOG_WARN(Net, "Port mapping: local network access is blocked for this process, so "
+                         "neither UPnP nor NAT-PMP could even reach the router. Nothing was "
+                         "wrong with the router or its settings.");
+        return PortMapResult::LocalNetworkBlocked;
     }
 
     HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened TCP %u — both are "
@@ -652,6 +919,9 @@ void PortMapper::unmapPort(const MappingHandle& handle)
     {
     case MappingHandle::Method::Upnp:   removeMapping(handle.igd, handle.port); break;
     case MappingHandle::Method::NatPmp: natPmpRemoveMapping(handle.gateway, handle.port); break;
+    case MappingHandle::Method::Pcp:
+        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port);
+        break;
     // Not an error — most sessions never got a mapping in the first place.
     case MappingHandle::Method::None:
         HE_LOG_DEBUG(Net, "Port mapping: nothing to take down");
