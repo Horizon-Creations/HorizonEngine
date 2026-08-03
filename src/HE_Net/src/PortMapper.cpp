@@ -1,5 +1,7 @@
 #include "Net/PortMapper.h"
 
+#include "NetLog.h"
+
 #include "Net/HttpClient.h"
 #include "Net/Socket.h"
 
@@ -178,9 +180,17 @@ bool PortMapper::isPrivateOrCgnat(const std::string& ip) {
 // ─── Discovery ───────────────────────────────────────────────────────────────
 
 PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
+    HE_LOG_DEBUG(Net, "UPnP: searching for an internet gateway (SSDP, %d ms budget)", timeoutMs);
     SocketHandle udp = socketCreateUdp();
-    if (udp == kInvalidSocket) return PortMapResult::NotSupported;
-    if (!socketBindUdp(udp, 0)) { socketClose(udp); return PortMapResult::NotSupported; }
+    if (udp == kInvalidSocket) {
+        HE_LOG_ERROR(Net, "UPnP: could not create a UDP socket for discovery");
+        return PortMapResult::NotSupported;
+    }
+    if (!socketBindUdp(udp, 0)) {
+        HE_LOG_ERROR(Net, "UPnP: could not bind the discovery socket");
+        socketClose(udp);
+        return PortMapResult::NotSupported;
+    }
     socketSetMulticastTtl(udp, 2);
 
     const std::string search = buildSsdpSearch();
@@ -188,7 +198,16 @@ PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
     const SocketResult sr = socketSendTo(
         udp, reinterpret_cast<const std::uint8_t*>(search.data()), search.size(),
         kSsdpAddr, kSsdpPort, sent);
-    if (sr != SocketResult::Ok) { socketClose(udp); return PortMapResult::NoRouterFound; }
+    if (sr != SocketResult::Ok) {
+        // On macOS this is the Local Network permission, not the network: the
+        // multicast send fails while internet traffic keeps working, which
+        // looks like a routing bug unless you know to look here.
+        HE_LOG_WARN(Net, "UPnP: multicast search could not be sent to %s:%u — on macOS this "
+                         "usually means the Local Network permission was denied",
+                    kSsdpAddr, static_cast<unsigned>(kSsdpPort));
+        socketClose(udp);
+        return PortMapResult::NoRouterFound;
+    }
 
     // Collect replies until something usable turns up or the budget expires;
     // several devices may answer and only some are gateways.
@@ -212,16 +231,29 @@ PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
         const std::string location = parseSsdpLocation(response);
         if (location.empty()) continue;
 
+        HE_LOG_DEBUG(Net, "UPnP: %s answered, fetching device description from %s",
+                     fromHost.c_str(), location.c_str());
         const HttpResponse desc = httpGet(location, 4000);
-        if (!desc.ok || desc.statusCode != 200) continue;
+        if (!desc.ok || desc.statusCode != 200) {
+            HE_LOG_DEBUG(Net, "UPnP: description fetch failed (HTTP %d) — trying other responders",
+                         desc.statusCode);
+            continue;
+        }
 
         if (parseDeviceDescription(desc.body, location, out)) {
+            HE_LOG_INFO(Net, "UPnP: gateway found at %s (service %s)",
+                        fromHost.c_str(), out.serviceType.c_str());
             socketClose(udp);
             return PortMapResult::Ok;
         }
+        // Plenty of non-gateway devices answer SSDP (printers, TVs); this is
+        // normal, not an error.
+        HE_LOG_DEBUG(Net, "UPnP: %s is not an internet gateway, ignoring", fromHost.c_str());
     }
 
     socketClose(udp);
+    HE_LOG_INFO(Net, "UPnP: no internet gateway answered within %d ms "
+                     "(UPnP is disabled by default on many routers)", timeoutMs);
     return PortMapResult::NoRouterFound;
 }
 
@@ -242,9 +274,21 @@ bool soapCall(const IgdDevice& igd, const std::string& action,
     };
 
     const HttpResponse resp = httpRequest(igd.controlUrl, "POST", headers, body, 5000);
-    if (!resp.ok) return false;
+    if (!resp.ok) {
+        HE_LOG_WARN(Net, "UPnP: SOAP %s could not reach the router", action.c_str());
+        return false;
+    }
     outBody = resp.body;
-    return resp.statusCode == 200;
+    if (resp.statusCode != 200) {
+        // Routers answer a refusal with a SOAP fault carrying a UPnP error
+        // code — far more informative than the HTTP status alone.
+        const std::string err = PortMapper::extractXmlValue(resp.body, "errorCode");
+        HE_LOG_WARN(Net, "UPnP: router refused %s (HTTP %d%s%s)", action.c_str(),
+                    resp.statusCode, err.empty() ? "" : ", UPnP error ", err.c_str());
+        return false;
+    }
+    HE_LOG_DEBUG(Net, "UPnP: %s accepted", action.c_str());
+    return true;
 }
 
 } // namespace
@@ -257,8 +301,17 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
                                      const std::string& internalHost,
                                      std::uint32_t leaseSeconds) {
     std::string host = internalHost.empty() ? socketLocalAddress() : internalHost;
-    if (host.empty()) return PortMapResult::NotSupported;
-    if (igd.controlUrl.empty()) return PortMapResult::NoServiceFound;
+    if (host.empty()) {
+        HE_LOG_ERROR(Net, "UPnP: no local address to point the mapping at");
+        return PortMapResult::NotSupported;
+    }
+    if (igd.controlUrl.empty()) {
+        HE_LOG_ERROR(Net, "UPnP: gateway exposes no WAN connection service");
+        return PortMapResult::NoServiceFound;
+    }
+    HE_LOG_DEBUG(Net, "UPnP: requesting TCP %u → %s:%u, lease %us",
+                 static_cast<unsigned>(externalPort), host.c_str(),
+                 static_cast<unsigned>(internalPort), leaseSeconds);
 
     std::string body;
     const bool ok = soapCall(igd, "AddPortMapping", {
@@ -284,6 +337,10 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
     std::string wan;
     if (externalIp(igd, wan) == PortMapResult::Ok) out.externalIp = wan;
 
+    HE_LOG_INFO(Net, "UPnP: mapped TCP %u → %s:%u (router WAN side: %s)",
+                static_cast<unsigned>(externalPort), host.c_str(),
+                static_cast<unsigned>(internalPort),
+                out.externalIp.empty() ? "not reported" : out.externalIp.c_str());
     return PortMapResult::Ok;
 }
 
@@ -294,6 +351,11 @@ PortMapResult PortMapper::removeMapping(const IgdDevice& igd, std::uint16_t exte
         { "NewExternalPort", std::to_string(externalPort) },
         { "NewProtocol",     "TCP" },
     }, body);
+    if (ok) HE_LOG_INFO(Net, "UPnP: removed the mapping for TCP %u",
+                        static_cast<unsigned>(externalPort));
+    else    HE_LOG_WARN(Net, "UPnP: could not remove the mapping for TCP %u — it may stay "
+                             "open until the router is restarted",
+                        static_cast<unsigned>(externalPort));
     return ok ? PortMapResult::Ok : PortMapResult::RequestFailed;
 }
 
@@ -353,7 +415,12 @@ bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>&
     }
 
     const bool ready = socketWaitReadable(udp, timeoutMs);
-    if (!ready) { socketClose(udp); return false; }
+    if (!ready) {
+        HE_LOG_DEBUG(Net, "NAT-PMP: gateway %s did not answer within %d ms",
+                     gateway.c_str(), timeoutMs);
+        socketClose(udp);
+        return false;
+    }
 
     std::string fromHost;
     std::uint16_t fromPort = 0;
@@ -362,6 +429,10 @@ bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>&
     socketClose(udp);
 
     // Only trust an answer that actually came from the gateway we asked.
+    if (rc == SocketResult::Ok && fromHost != gateway) {
+        HE_LOG_WARN(Net, "NAT-PMP: ignoring a reply from %s — we asked %s",
+                    fromHost.c_str(), gateway.c_str());
+    }
     return rc == SocketResult::Ok && fromHost == gateway;
 }
 
@@ -425,9 +496,18 @@ PortMapResult PortMapper::natPmpExternalIp(const std::string& gateway, std::stri
 
     std::uint16_t result = 0;
     if (!parseNatPmpAddressResponse(reply, replyLen, out, result)) {
+        HE_LOG_WARN(Net, "NAT-PMP: malformed address reply from %s (%zu bytes)",
+                    gateway.c_str(), replyLen);
         return PortMapResult::RequestFailed;
     }
-    return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
+    if (result != 0) {
+        HE_LOG_WARN(Net, "NAT-PMP: gateway %s refused the address request (result code %u)",
+                    gateway.c_str(), static_cast<unsigned>(result));
+        return PortMapResult::RequestFailed;
+    }
+    HE_LOG_DEBUG(Net, "NAT-PMP: gateway %s reports WAN address %s",
+                 gateway.c_str(), out.c_str());
+    return PortMapResult::Ok;
 }
 
 PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
@@ -437,6 +517,9 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
                                            PortMapping& out, int timeoutMs) {
     if (gateway.empty()) return PortMapResult::NotSupported;
 
+    HE_LOG_DEBUG(Net, "NAT-PMP: asking %s for TCP %u → %u, lifetime %us",
+                 gateway.c_str(), static_cast<unsigned>(externalPort),
+                 static_cast<unsigned>(internalPort), lifetimeSeconds);
     const auto req = buildNatPmpRequest(kOpMapTcp, internalPort, externalPort,
                                         lifetimeSeconds);
     std::uint8_t reply[64];
@@ -449,9 +532,23 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
     std::uint32_t gotLifetime = 0;
     if (!parseNatPmpMapResponse(reply, replyLen, gotInternal, gotExternal,
                                 gotLifetime, result)) {
+        HE_LOG_WARN(Net, "NAT-PMP: malformed mapping reply from %s (%zu bytes)",
+                    gateway.c_str(), replyLen);
         return PortMapResult::RequestFailed;
     }
-    if (result != 0) return PortMapResult::RequestFailed;
+    if (result != 0) {
+        HE_LOG_WARN(Net, "NAT-PMP: gateway %s refused the mapping (result code %u)",
+                    gateway.c_str(), static_cast<unsigned>(result));
+        return PortMapResult::RequestFailed;
+    }
+    // Worth calling out explicitly: publishing the requested port instead of
+    // the granted one would advertise an endpoint nobody listens on.
+    if (gotExternal != externalPort) {
+        HE_LOG_INFO(Net, "NAT-PMP: router granted external port %u instead of the "
+                         "requested %u — publishing the granted one",
+                    static_cast<unsigned>(gotExternal),
+                    static_cast<unsigned>(externalPort));
+    }
 
     out.internalPort = gotInternal;
     // The router may hand back a DIFFERENT external port than requested; using
@@ -461,6 +558,10 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
 
     std::string wan;
     if (natPmpExternalIp(gateway, wan, timeoutMs) == PortMapResult::Ok) out.externalIp = wan;
+    HE_LOG_INFO(Net, "NAT-PMP: mapped TCP %u → %s:%u for %us (router WAN side: %s)",
+                static_cast<unsigned>(out.externalPort), out.internalHost.c_str(),
+                static_cast<unsigned>(out.internalPort), gotLifetime,
+                out.externalIp.empty() ? "not reported" : out.externalIp.c_str());
     return PortMapResult::Ok;
 }
 
@@ -479,6 +580,14 @@ PortMapResult PortMapper::natPmpRemoveMapping(const std::string& gateway,
     if (!parseNatPmpMapResponse(reply, replyLen, a, b, c, result)) {
         return PortMapResult::RequestFailed;
     }
+    if (result == 0) {
+        HE_LOG_INFO(Net, "NAT-PMP: removed the mapping for internal port %u",
+                    static_cast<unsigned>(internalPort));
+    } else {
+        HE_LOG_WARN(Net, "NAT-PMP: gateway refused to remove the mapping for port %u "
+                         "(result code %u) — it will expire on its own",
+                    static_cast<unsigned>(internalPort), static_cast<unsigned>(result));
+    }
     return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
 }
 
@@ -487,6 +596,8 @@ PortMapResult PortMapper::natPmpRemoveMapping(const std::string& gateway,
 PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& description,
                                   MappingHandle& outHandle, PortMapping& outInfo) {
     outHandle = MappingHandle{};
+    HE_LOG_INFO(Net, "Port mapping: trying to open TCP %u automatically",
+                static_cast<unsigned>(port));
 
     // UPnP first: broader support across consumer routers.
     IgdDevice igd;
@@ -497,6 +608,7 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
             outHandle.method = MappingHandle::Method::Upnp;
             outHandle.igd    = igd;
             outHandle.port   = port;
+            HE_LOG_INFO(Net, "Port mapping: succeeded via UPnP");
             return PortMapResult::Ok;
         }
     }
@@ -504,9 +616,15 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     // NAT-PMP second. A router speaks one or the other, so a UPnP failure says
     // nothing about whether this will work — Apple base stations answer here
     // and stay silent to SSDP entirely.
+    HE_LOG_DEBUG(Net, "Port mapping: UPnP did not deliver, trying NAT-PMP");
     const std::string gateway = socketDefaultGateway();
+    if (gateway.empty()) {
+        HE_LOG_WARN(Net, "Port mapping: no default gateway in the routing table — NAT-PMP "
+                         "cannot be attempted");
+    }
     if (!gateway.empty())
     {
+        HE_LOG_DEBUG(Net, "Port mapping: default gateway is %s", gateway.c_str());
         // Two hours, and re-requested whenever the session re-registers; RFC 6886
         // recommends a finite lifetime so a crashed client's mapping expires
         // instead of lingering forever.
@@ -517,10 +635,14 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
             outHandle.method  = MappingHandle::Method::NatPmp;
             outHandle.gateway = gateway;
             outHandle.port    = port;
+            HE_LOG_INFO(Net, "Port mapping: succeeded via NAT-PMP");
             return PortMapResult::Ok;
         }
     }
 
+    HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened TCP %u — both are "
+                     "commonly disabled, and behind carrier-grade NAT neither can work",
+                static_cast<unsigned>(port));
     return PortMapResult::NoRouterFound;
 }
 
@@ -530,7 +652,10 @@ void PortMapper::unmapPort(const MappingHandle& handle)
     {
     case MappingHandle::Method::Upnp:   removeMapping(handle.igd, handle.port); break;
     case MappingHandle::Method::NatPmp: natPmpRemoveMapping(handle.gateway, handle.port); break;
-    case MappingHandle::Method::None:   break;
+    // Not an error — most sessions never got a mapping in the first place.
+    case MappingHandle::Method::None:
+        HE_LOG_DEBUG(Net, "Port mapping: nothing to take down");
+        break;
     }
 }
 

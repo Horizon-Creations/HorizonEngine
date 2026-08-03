@@ -1,5 +1,7 @@
 #include "Net/CollabSession.h"
 
+#include "NetLog.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -194,7 +196,14 @@ void CollabSession::onPeerConnected(ConnectionId) {
 void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     std::uint16_t version = 0;
     std::string   name;
-    if (!r.readUInt16(version) || !r.readString(name)) return;
+    if (!r.readUInt16(version) || !r.readString(name)) {
+        HE_LOG_WARN(Net, "Collab: malformed join request on conn %llu",
+                    static_cast<unsigned long long>(conn));
+        return;
+    }
+    HE_LOG_INFO(Net, "Collab: join request from \"%s\" (protocol v%u) on conn %llu",
+                name.c_str(), static_cast<unsigned>(version),
+                static_cast<unsigned long long>(conn));
 
     const auto reject = [&](JoinRejectReason reason) {
         BitWriter w;
@@ -203,10 +212,15 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     };
 
     if (version != kCollabProtocolVersion) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — collab protocol v%u, we speak v%u",
+                    name.c_str(), static_cast<unsigned>(version),
+                    static_cast<unsigned>(kCollabProtocolVersion));
         reject(JoinRejectReason::VersionMismatch);
         return;
     }
     if (m_participants.size() >= m_cfg.maxParticipants) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — session is full (%zu of %zu)",
+                    name.c_str(), m_participants.size(), m_cfg.maxParticipants);
         reject(JoinRejectReason::SessionFull);
         return;
     }
@@ -216,10 +230,15 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // in sync. Better to refuse the join outright.
     std::vector<std::uint8_t> snapshot;
     if (!m_state || !m_state->captureSnapshot(snapshot)) {
+        HE_LOG_ERROR(Net, "Collab: rejecting \"%s\" — could not capture a scene snapshot%s",
+                     name.c_str(), m_state ? "" : " (no state provider installed)");
         reject(JoinRejectReason::SnapshotFailed);
         return;
     }
     if (snapshot.size() > m_cfg.maxSnapshotBytes) {
+        HE_LOG_ERROR(Net, "Collab: rejecting \"%s\" — snapshot is %s, over the %s limit",
+                     name.c_str(), detail::logBytes(snapshot.size()).c_str(),
+                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
         reject(JoinRejectReason::SnapshotFailed);
         return;
     }
@@ -262,6 +281,9 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         m_net->send(conn, kMsgSnapshotChunk, chunk);
     }
     m_net->send(conn, kMsgSnapshotEnd);
+    HE_LOG_INFO(Net, "Collab: sent snapshot to \"%s\" — %s in %u chunk(s) at sequence %llu",
+                name.c_str(), detail::logBytes(total).c_str(), chunks,
+                static_cast<unsigned long long>(m_sequence));
 
     // Now register the joiner and tell everyone else.
     m_participants.push_back(joiner);
@@ -282,6 +304,8 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         if (other != conn) m_net->send(other, kMsgParticipantJoined, announce);
     }
 
+    HE_LOG_INFO(Net, "Collab: \"%s\" joined as participant %u (%zu in session)",
+                name.c_str(), static_cast<unsigned>(id), m_participants.size());
     if (m_onJoin) m_onJoin(joiner);
 }
 
@@ -294,12 +318,17 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         m_presence.clear();
         m_locks.clear();
         m_everSentPresence = false;
+        HE_LOG_WARN(Net, "Collab: lost the connection to the host — session over");
         return;
     }
 
     const auto it = std::find_if(m_connToParticipant.begin(), m_connToParticipant.end(),
                                  [conn](const auto& e) { return e.first == conn; });
-    if (it == m_connToParticipant.end()) return;   // never completed a join
+    if (it == m_connToParticipant.end()) {
+        HE_LOG_DEBUG(Net, "Collab: conn %llu dropped before completing a join",
+                     static_cast<unsigned long long>(conn));
+        return;   // never completed a join
+    }
 
     const ParticipantId id = it->second;
     m_connToParticipant.erase(it);
@@ -325,6 +354,8 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         if (other != conn) m_net->send(other, kMsgParticipantLeft, w);
     }
 
+    HE_LOG_INFO(Net, "Collab: participant %u left (%zu remain)",
+                static_cast<unsigned>(id), m_participants.size());
     if (m_onLeft) m_onLeft(id);
 }
 
@@ -352,6 +383,11 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
     // Our own entry is not in the host's list yet, so add it here.
     m_participants.push_back(Participant{ m_localId, m_cfg.displayName, false });
 
+    HE_LOG_INFO(Net, "Collab: accepted as participant %u at sequence %llu, %u other(s) "
+                     "already present — awaiting the scene snapshot",
+                static_cast<unsigned>(m_localId),
+                static_cast<unsigned long long>(sequence),
+                static_cast<unsigned>(count));
     // Note: not "joined" until the snapshot has been applied — reporting success
     // earlier would let the editor act on a scene it does not have yet.
 }
@@ -359,6 +395,16 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
 void CollabSession::handleJoinRejected(BitReader& r) {
     std::uint8_t reason = 0;
     r.readByte(reason);
+    // Spelled out rather than left as a number: these are the three things a
+    // user can actually be told when a join does not go through.
+    const char* text = "unknown reason";
+    switch (static_cast<JoinRejectReason>(reason)) {
+    case JoinRejectReason::VersionMismatch: text = "collab protocol mismatch (different engine build)"; break;
+    case JoinRejectReason::SessionFull:     text = "the session is full"; break;
+    case JoinRejectReason::SnapshotFailed:  text = "the host could not produce a scene snapshot"; break;
+    default: break;
+    }
+    HE_LOG_WARN(Net, "Collab: join rejected by the host — %s", text);
     m_joined = false;
     if (m_onRejected) m_onRejected(static_cast<JoinRejectReason>(reason));
 }
@@ -370,6 +416,9 @@ void CollabSession::handleSnapshotBegin(BitReader& r) {
 
     // Never reserve what the peer claims without a bound.
     if (total > m_cfg.maxSnapshotBytes) {
+        HE_LOG_ERROR(Net, "Collab: host announced a %s snapshot, over our %s limit — refusing",
+                     detail::logBytes(total).c_str(),
+                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
         m_snapshotActive = false;
         if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
         return;
@@ -382,6 +431,8 @@ void CollabSession::handleSnapshotBegin(BitReader& r) {
     m_snapshotActive   = true;
     m_sequence         = sequence;
 
+    HE_LOG_INFO(Net, "Collab: receiving snapshot — %s in %u chunk(s)",
+                detail::logBytes(total).c_str(), chunks);
     if (m_onProgress) m_onProgress(0, total);
 }
 
@@ -394,6 +445,9 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
     // Refuse a chunk that would push the payload past the announced size, rather
     // than growing the buffer to whatever arrives.
     if (len == 0 || m_snapshotReceived + len > m_snapshotExpected) {
+        HE_LOG_ERROR(Net, "Collab: snapshot chunk %u would overrun the announced size "
+                          "(%u + %u > %u) — aborting the transfer",
+                     index, m_snapshotReceived, len, m_snapshotExpected);
         m_snapshotActive = false;
         if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
         return;
@@ -402,6 +456,7 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
     const std::size_t offset = m_snapshotBuf.size();
     m_snapshotBuf.resize(offset + len);
     if (!r.readBytes(m_snapshotBuf.data() + offset, len)) {
+        HE_LOG_ERROR(Net, "Collab: snapshot chunk %u is truncated — aborting the transfer", index);
         m_snapshotBuf.resize(offset);   // truncated frame
         m_snapshotActive = false;
         if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
@@ -409,6 +464,10 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
     }
 
     m_snapshotReceived += len;
+    HE_LOG_TRACE(Net, "Collab: snapshot chunk %u (%s), %s of %s received",
+                 index, detail::logBytes(len).c_str(),
+                 detail::logBytes(m_snapshotReceived).c_str(),
+                 detail::logBytes(m_snapshotExpected).c_str());
     if (m_onProgress) m_onProgress(m_snapshotReceived, m_snapshotExpected);
 }
 
@@ -419,10 +478,16 @@ void CollabSession::handleSnapshotEnd() {
     // An incomplete transfer must not be applied — a partially deserialized
     // scene is worse than none.
     if (m_snapshotReceived != m_snapshotExpected) {
+        HE_LOG_ERROR(Net, "Collab: snapshot ended early — %s of %s arrived; not applying a "
+                          "partial scene",
+                     detail::logBytes(m_snapshotReceived).c_str(),
+                     detail::logBytes(m_snapshotExpected).c_str());
         if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
         return;
     }
     if (!m_state || !m_state->applySnapshot(m_snapshotBuf)) {
+        HE_LOG_ERROR(Net, "Collab: the snapshot arrived intact but could not be applied — "
+                          "the scene it describes may need assets this project lacks");
         if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
         return;
     }
@@ -431,6 +496,8 @@ void CollabSession::handleSnapshotEnd() {
     m_snapshotBuf.shrink_to_fit();
 
     m_joined = true;
+    HE_LOG_INFO(Net, "Collab: snapshot applied — in session as participant %u",
+                static_cast<unsigned>(m_localId));
     if (m_onJoined) m_onJoined(m_localId);
 }
 
@@ -548,10 +615,24 @@ void CollabSession::handlePresenceUpdate(ConnectionId conn, BitReader& r) {
     // Host side. The sender's identity comes from the connection it arrived on,
     // never from the payload.
     const ParticipantId id = participantForConnection(conn);
-    if (id == kInvalidParticipant) return;   // not a joined participant
+    if (id == kInvalidParticipant) {
+        // Someone is publishing presence over a connection that never joined —
+        // the exact shape a spoofing attempt would take, hence Warning.
+        HE_LOG_WARN(Net, "Presence from conn %llu, which is not a joined participant "
+                         "— ignored",
+                    static_cast<unsigned long long>(conn));
+        return;   // not a joined participant
+    }
 
     PresenceState state;
-    if (!readPresenceBody(r, state)) return;
+    if (!readPresenceBody(r, state)) {
+        HE_LOG_WARN(Net, "Malformed presence from participant %u",
+                    static_cast<unsigned>(id));
+        return;
+    }
+    // Trace only: this arrives at up to 10 Hz per participant.
+    HE_LOG_TRACE(Net, "Presence from participant %u (%zu selected)",
+                 static_cast<unsigned>(id), state.selection.size());
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
@@ -572,7 +653,13 @@ void CollabSession::handlePresenceRelay(BitReader& r) {
     if (id == m_localId) return;   // our own presence echoed back
 
     PresenceState state;
-    if (!readPresenceBody(r, state)) return;
+    if (!readPresenceBody(r, state)) {
+        HE_LOG_WARN(Net, "Malformed presence relayed for participant %u",
+                    static_cast<unsigned>(id));
+        return;
+    }
+    HE_LOG_TRACE(Net, "Presence relay for participant %u (%zu selected)",
+                 static_cast<unsigned>(id), state.selection.size());
 
     applyPresence(id, state);
     if (m_onPresence) m_onPresence(id, *presenceOf(id));
@@ -749,7 +836,14 @@ void CollabSession::handleStructuralRelay(BitReader& r) {
     if (sender == m_localId) return;   // our own change echoed back
 
     StructuralChange c;
-    if (!readStructuralBody(r, c, m_cfg.maxSnapshotBytes)) return;
+    if (!readStructuralBody(r, c, m_cfg.maxSnapshotBytes)) {
+        HE_LOG_WARN(Net, "Collab: malformed structural change relayed from participant %u",
+                    static_cast<unsigned>(sender));
+        return;
+    }
+    HE_LOG_DEBUG(Net, "Collab: structural change from participant %u (net id %llu, kind %d)",
+                 static_cast<unsigned>(sender),
+                 static_cast<unsigned long long>(c.netId), static_cast<int>(c.kind));
     if (m_onStructural) m_onStructural(sender, c);
 }
 
@@ -759,8 +853,21 @@ bool CollabSession::sendAsset(std::uint64_t subject, const std::string& path,
                               const std::vector<std::uint8_t>& bytes) {
     if (!m_net || !m_joined) return false;
     // Same authority rule as transforms: you may only publish what you hold.
-    if (!ownsLock(subject)) return false;
-    if (bytes.size() > m_cfg.maxSnapshotBytes) return false;
+    if (!ownsLock(subject)) {
+        // The everyday cause of "my change did not show up for the others":
+        // the asset was saved without holding its lock.
+        HE_LOG_WARN(Net, "Not sending asset \"%s\": we do not hold lock 0x%016llx",
+                    path.c_str(), static_cast<unsigned long long>(subject));
+        return false;
+    }
+    if (bytes.size() > m_cfg.maxSnapshotBytes) {
+        HE_LOG_ERROR(Net, "Not sending asset \"%s\": %s exceeds the %s limit",
+                     path.c_str(), detail::logBytes(bytes.size()).c_str(),
+                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
+        return false;
+    }
+    HE_LOG_INFO(Net, "Sending asset \"%s\" (%s)", path.c_str(),
+                detail::logBytes(bytes.size()).c_str());
 
     AssetUpdate a;
     a.subject = subject;
@@ -771,7 +878,10 @@ bool CollabSession::sendAsset(std::uint64_t subject, const std::string& path,
         for (const ConnectionId c : m_net->connections()) sendAssetChunks(c, m_localId, a);
         return true;
     }
-    if (m_net->connections().empty()) return false;
+    if (m_net->connections().empty()) {
+        HE_LOG_WARN(Net, "Cannot send asset \"%s\": no connection to the host", path.c_str());
+        return false;
+    }
     // Client → host: no participant id, the host stamps it.
     sendAssetChunks(m_net->connections().front(), kInvalidParticipant, a);
     return true;
@@ -818,8 +928,24 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
 
     // Re-check authority on arrival rather than trusting the sender.
     const LockInfo* lock = lockFor(header.subject);
-    if (!lock || lock->owner != sender) return;
-    if (total > m_cfg.maxSnapshotBytes) return;
+    if (!lock || lock->owner != sender) {
+        HE_LOG_WARN(Net, "Refusing asset \"%s\" from participant %u — it does not hold "
+                         "lock 0x%016llx",
+                    header.path.c_str(), static_cast<unsigned>(sender),
+                    static_cast<unsigned long long>(header.subject));
+        return;
+    }
+    if (total > m_cfg.maxSnapshotBytes) {
+        HE_LOG_ERROR(Net, "Refusing asset \"%s\" from participant %u — announced %s, over "
+                          "the %s limit",
+                     header.path.c_str(), static_cast<unsigned>(sender),
+                     detail::logBytes(total).c_str(),
+                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
+        return;
+    }
+    HE_LOG_INFO(Net, "Receiving asset \"%s\" from participant %u (%s in %u chunk(s))",
+                header.path.c_str(), static_cast<unsigned>(sender),
+                detail::logBytes(total).c_str(), chunks);
 
     AssetAssembly asm_;
     asm_.from     = conn;
@@ -1068,16 +1194,28 @@ bool CollabSession::requestLock(std::uint64_t subject) {
         // no window in which two peers both believe they hold it.
         const LockInfo* existing = lockFor(subject);
         if (existing && existing->owner != m_localId) {
+            HE_LOG_INFO(Net, "Lock 0x%016llx denied to ourselves — held by \"%s\" (%u)",
+                        static_cast<unsigned long long>(subject),
+                        existing->ownerName.c_str(),
+                        static_cast<unsigned>(existing->owner));
             if (m_onLockDenied) m_onLockDenied(subject, LockDenyReason::HeldByOther);
             return false;
         }
+        HE_LOG_DEBUG(Net, "Lock 0x%016llx taken (host, self-granted)",
+                     static_cast<unsigned long long>(subject));
         grantLock(subject, m_localId, m_cfg.displayName);
         broadcastLock(subject, true, kInvalidConnection);
         if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
         return true;
     }
 
-    if (m_net->connections().empty()) return false;
+    if (m_net->connections().empty()) {
+        HE_LOG_WARN(Net, "Cannot request lock 0x%016llx: no connection to the host",
+                    static_cast<unsigned long long>(subject));
+        return false;
+    }
+    HE_LOG_DEBUG(Net, "Requesting lock 0x%016llx from the host",
+                 static_cast<unsigned long long>(subject));
     BitWriter w;
     w.writeUInt64(subject);
     m_net->send(m_net->connections().front(), kMsgLockRequest, w);
@@ -1111,6 +1249,10 @@ void CollabSession::handleLockRequest(ConnectionId conn, BitReader& r) {
 
     const ParticipantId requester = participantForConnection(conn);
     if (requester == kInvalidParticipant) {
+        HE_LOG_WARN(Net, "Lock request for 0x%016llx from conn %llu, which is not in the "
+                         "session — denied",
+                    static_cast<unsigned long long>(subject),
+                    static_cast<unsigned long long>(conn));
         BitWriter w;
         w.writeUInt64(subject);
         w.writeByte(static_cast<std::uint8_t>(LockDenyReason::NotInSession));
@@ -1122,6 +1264,10 @@ void CollabSession::handleLockRequest(ConnectionId conn, BitReader& r) {
     if (existing && existing->owner != requester) {
         // Someone already has it. Refusing is the entire point — this is the
         // moment a second person would otherwise start editing the same thing.
+        HE_LOG_INFO(Net, "Lock 0x%016llx denied to participant %u — held by \"%s\" (%u)",
+                    static_cast<unsigned long long>(subject),
+                    static_cast<unsigned>(requester), existing->ownerName.c_str(),
+                    static_cast<unsigned>(existing->owner));
         BitWriter w;
         w.writeUInt64(subject);
         w.writeByte(static_cast<std::uint8_t>(LockDenyReason::HeldByOther));
@@ -1130,6 +1276,9 @@ void CollabSession::handleLockRequest(ConnectionId conn, BitReader& r) {
     }
 
     const Participant* p = findParticipant(requester);
+    HE_LOG_INFO(Net, "Lock 0x%016llx granted to \"%s\" (%u)",
+                static_cast<unsigned long long>(subject),
+                p ? p->name.c_str() : "?", static_cast<unsigned>(requester));
     grantLock(subject, requester, p ? p->name : std::string{});
     broadcastLock(subject, true, kInvalidConnection);
     if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
@@ -1143,9 +1292,19 @@ void CollabSession::handleLockRelease(ConnectionId conn, BitReader& r) {
     const LockInfo* existing = lockFor(subject);
     // Only the holder may release: otherwise anyone could free someone else's
     // lock and edit underneath them.
-    if (!existing || existing->owner != requester) return;
+    if (!existing || existing->owner != requester) {
+        // Not necessarily malicious — a stale client can ask twice — but it is
+        // exactly the shape an attempt to free someone else's lock would take.
+        HE_LOG_WARN(Net, "Participant %u tried to release lock 0x%016llx it does not hold",
+                    static_cast<unsigned>(requester),
+                    static_cast<unsigned long long>(subject));
+        return;
+    }
 
     const LockInfo copy = *existing;
+    HE_LOG_INFO(Net, "Lock 0x%016llx released by \"%s\" (%u)",
+                static_cast<unsigned long long>(subject), copy.ownerName.c_str(),
+                static_cast<unsigned>(requester));
     dropLock(subject);
     broadcastLock(subject, false, kInvalidConnection);
     if (m_onLockChanged) m_onLockChanged(copy, false);
@@ -1157,6 +1316,10 @@ void CollabSession::releaseLocksOf(ParticipantId owner) {
     std::vector<std::uint64_t> freed;
     for (const auto& l : m_locks) {
         if (l.owner == owner) freed.push_back(l.subject);
+    }
+    if (!freed.empty()) {
+        HE_LOG_INFO(Net, "Freeing %zu lock(s) held by departing participant %u",
+                    freed.size(), static_cast<unsigned>(owner));
     }
     for (const std::uint64_t subject : freed) {
         const LockInfo copy = *lockFor(subject);

@@ -144,7 +144,13 @@ private:
     // Computes the transcript mac and the session key from the exchanged nonces
     // and public keys. Returns false when the ECDH step fails.
     bool deriveSecrets(Peer& p, std::uint8_t outMac[32]);
-    void failPeer(ConnectionId conn, Peer& p);
+    // `reason` is for the local log only and is never sent to the peer — the
+    // wire rejection stays a bare code so a prober learns nothing about which
+    // check it tripped. Every failure path here previously looked identical
+    // from the outside AND from the log, which made "the client cannot join"
+    // undiagnosable; the reason string is what distinguishes a wrong join code
+    // from a version mismatch from a truncated frame.
+    void failPeer(ConnectionId conn, Peer& p, const char* reason);
 
     std::unique_ptr<ITransport>                 m_inner;
     Config                                      m_cfg;
