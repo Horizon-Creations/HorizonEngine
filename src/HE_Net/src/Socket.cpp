@@ -15,10 +15,22 @@
   #include <sys/types.h>
   #include <unistd.h>
   #include <cerrno>
+  #if defined(__APPLE__) || defined(__FreeBSD__)
+    #include <net/route.h>
+    #include <sys/sysctl.h>
+  #else
+    #include <cstdio>
+  #endif
+#endif
+
+#ifdef _WIN32
+  #include <iphlpapi.h>
+  #pragma comment(lib, "iphlpapi.lib")
 #endif
 
 #include <cstring>
 #include <mutex>
+#include <vector>
 #include <string>
 
 namespace HE::Net {
@@ -662,6 +674,93 @@ std::string socketLocalAddress() {
     }
     socketClose(h);
     return out;
+}
+
+// ─── Default gateway ─────────────────────────────────────────────────────────
+
+std::string socketDefaultGateway() {
+#if defined(_WIN32)
+    // GetBestRoute for 0.0.0.0 yields the default route; its next hop is the
+    // gateway (a zero next hop means the destination is on-link).
+    MIB_IPFORWARDROW row{};
+    if (::GetBestRoute(0, 0, &row) != NO_ERROR) return {};
+    if (row.dwForwardNextHop == 0) return {};
+
+    in_addr addr{};
+    addr.S_un.S_addr = row.dwForwardNextHop;
+    char buf[INET_ADDRSTRLEN] = {};
+    if (!::inet_ntop(AF_INET, &addr, buf, sizeof(buf))) return {};
+    return buf;
+
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    // BSD keeps no /proc, so the routing table comes from sysctl as a stream of
+    // variable-length rt_msghdr records that have to be walked by hand.
+    int mib[6] = { CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_GATEWAY };
+    std::size_t needed = 0;
+    if (::sysctl(mib, 6, nullptr, &needed, nullptr, 0) < 0 || needed == 0) return {};
+
+    std::vector<char> buf(needed);
+    if (::sysctl(mib, 6, buf.data(), &needed, nullptr, 0) < 0) return {};
+
+    for (char* p = buf.data(); p < buf.data() + needed; ) {
+        auto* rtm = reinterpret_cast<rt_msghdr*>(p);
+        if (rtm->rtm_msglen == 0) break;
+        p += rtm->rtm_msglen;
+
+        // Only the default route: destination 0.0.0.0 with a gateway.
+        if ((rtm->rtm_flags & (RTF_UP | RTF_GATEWAY)) != (RTF_UP | RTF_GATEWAY)) continue;
+        if ((rtm->rtm_addrs & (RTA_DST | RTA_GATEWAY)) != (RTA_DST | RTA_GATEWAY)) continue;
+
+        auto* sa = reinterpret_cast<sockaddr*>(rtm + 1);
+        // Addresses are packed in RTA_* bit order, each padded to a 4-byte
+        // boundary — stepping by sizeof(sockaddr) would desynchronise on the
+        // first AF_LINK entry.
+        const auto advance = [](sockaddr* a) {
+            const std::size_t len = a->sa_len ? ((a->sa_len + 3) & ~3u) : 4u;
+            return reinterpret_cast<sockaddr*>(reinterpret_cast<char*>(a) + len);
+        };
+
+        sockaddr* dst = sa;
+        if (dst->sa_family != AF_INET) continue;
+        if (reinterpret_cast<sockaddr_in*>(dst)->sin_addr.s_addr != 0) continue;  // not default
+
+        sockaddr* gw = advance(dst);
+        if (gw->sa_family != AF_INET) continue;
+
+        char out[INET_ADDRSTRLEN] = {};
+        if (!::inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(gw)->sin_addr,
+                         out, sizeof(out))) {
+            continue;
+        }
+        return out;
+    }
+    return {};
+
+#else
+    // Linux: /proc/net/route, whose Gateway column is little-endian hex.
+    std::FILE* f = std::fopen("/proc/net/route", "r");
+    if (!f) return {};
+
+    char line[512];
+    std::string result;
+    // Skip the header row.
+    if (std::fgets(line, sizeof(line), f)) {
+        while (std::fgets(line, sizeof(line), f)) {
+            char iface[64] = {};
+            unsigned long dest = 0, gateway = 0;
+            if (std::sscanf(line, "%63s %lx %lx", iface, &dest, &gateway) != 3) continue;
+            if (dest != 0 || gateway == 0) continue;   // only the default route
+
+            in_addr addr{};
+            addr.s_addr = static_cast<in_addr_t>(gateway);
+            char out[INET_ADDRSTRLEN] = {};
+            if (::inet_ntop(AF_INET, &addr, out, sizeof(out))) result = out;
+            break;
+        }
+    }
+    std::fclose(f);
+    return result;
+#endif
 }
 
 } // namespace HE::Net
