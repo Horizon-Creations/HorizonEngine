@@ -153,6 +153,7 @@ void install()
 		heAddItem(view, @"Performance Profiler",  C::ToggleProfiler, nil, 0, false);
 		heAddItem(view, @"Environment",           C::ToggleEnvironment, nil, 0, false);
 		heAddItem(view, @"Collaboration",         C::ToggleCollab,      nil, 0, false);
+		heAddItem(view, @"Source Control",        C::ToggleSourceControl, nil, 0, true);
 		[view addItem:[NSMenuItem separatorItem]];
 		heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true);
 		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);

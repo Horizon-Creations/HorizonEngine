@@ -86,25 +86,6 @@ const FileEntry* RepoStatus::find(const std::string& repoRelativePath) const
 	return nullptr;
 }
 
-bool RepoStatus::hasConflicts() const
-{
-	for (const auto& [path, e] : files) if (e.conflicted()) return true;
-	return false;
-}
-
-bool RepoStatus::hasStagedChanges() const
-{
-	for (const auto& [path, e] : files) if (e.staged()) return true;
-	return false;
-}
-
-std::size_t RepoStatus::dirtyCount() const
-{
-	std::size_t n = 0;
-	for (const auto& [path, e] : files) if (e.dirty()) ++n;
-	return n;
-}
-
 void buildDirtyFolders(RepoStatus& status)
 {
 	status.dirtyFolders.clear();

@@ -20,6 +20,7 @@
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <SourceControl/GitProbe.h>
+#include "GitController.h"
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -268,6 +269,10 @@ struct AppContext
 	std::function<void(std::string name, std::string email)> setGitIdentity;
 	bool gitIdentityApplying = false;
 
+	// Source-control state for the panel and the Content Browser badges. Null in
+	// builds without the module.
+	GitController* git = nullptr;
+
 	// Performance counters (mutable, updated each frame by UI)
 	float* frametimeHistory = nullptr;
 	int    fpsHistorySize   = 0;
@@ -450,6 +455,7 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	GitController    m_git;
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.
