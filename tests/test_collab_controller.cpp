@@ -241,6 +241,137 @@ TEST_CASE("CollabController: hosting without a world refuses joins instead of sh
 // cover — that arbitrary component state survives serialize → wire → apply on a
 // genuine HorizonWorld.
 
+TEST_CASE("CollabController: recycled host handles still address the right entity")
+{
+    // The field bug this pins down: the host edits its scene BEFORE hosting —
+    // deletions leave recycled, version-bearing entt handles — and the client's
+    // fresh deserialize numbers the same entities differently. Handle-keyed
+    // subjects then miss silently ("changes only partly sync"). Uuid-derived
+    // subjects must keep addressing the right entity regardless of either
+    // side's allocator history.
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+    const Entity doomed = hostWorld.createEntity("Doomed");
+    hostWorld.destroyEntity(doomed);
+    const Entity target = hostWorld.createEntity("Target");   // recycles the slot
+    // entt encodes a version in the handle, so this is now a handle a fresh
+    // deserialize can never produce for this entity.
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+
+    // Wire the client the way the editor does.
+    std::uint32_t gotTransformFor = 0;
+    float gotX = 0.0f;
+    client.onRemoteTransform([&](std::uint64_t handle, const float pos[3],
+                                 const float[3], const float[3]) {
+        gotTransformFor = static_cast<std::uint32_t>(handle);
+        gotX = pos[0];
+    });
+    std::uint32_t gotComponentsFor = 0;
+    client.onRemoteComponents([&](std::uint32_t handle, const std::vector<std::uint8_t>& blob) {
+        gotComponentsFor = handle;
+        SceneSerializer s;
+        s.applyEntityComponents(clientWorld, static_cast<Entity>(handle), blob);
+    });
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // The host edits "Target": take the lock (selection), move it, rename it.
+    const auto targetHandle = static_cast<std::uint32_t>(entt::to_integral(target));
+    const std::uint64_t subject = host.subjectFor(targetHandle);
+    host.followSelection(subject);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsLock(subject); }));
+
+    const float p[3] = { 42.0f, 0.0f, 0.0f };
+    const float r[3] = { 0.0f, 0.0f, 0.0f };
+    const float sc[3] = { 1.0f, 1.0f, 1.0f };
+    std::uint64_t now = 1;
+    REQUIRE(pumpUntil(host, client, [&] {
+        host.publishTransform(subject, p, r, sc, now); now += 200;
+        return gotTransformFor != 0;
+    }));
+    CHECK(gotX == doctest::Approx(42.0f));
+
+    // The client applied it to the entity that IS "Target" over there — found
+    // by identity, not by trusting the host's handle bits.
+    auto& creg = clientWorld.registry();
+    const auto clientEntity = static_cast<Entity>(static_cast<entt::id_type>(gotTransformFor));
+    REQUIRE(creg.valid(clientEntity));
+    REQUIRE(creg.all_of<NameComponent>(clientEntity));
+    CHECK(creg.get<NameComponent>(clientEntity).name == "Target");
+
+    // Components too — the path that previously required a structural
+    // announcement no pre-session entity ever got.
+    hostWorld.registry().get<NameComponent>(target).name = "Renamed";
+    SceneSerializer ser;
+    const auto blob = ser.serializeEntityComponents(hostWorld, target);
+    REQUIRE_FALSE(blob.empty());
+    REQUIRE(pumpUntil(host, client, [&] {
+        host.publishComponents(targetHandle, blob);
+        return gotComponentsFor != 0;
+    }));
+    CHECK(creg.get<NameComponent>(clientEntity).name == "Renamed");
+}
+
+TEST_CASE("CollabController: a replicated create keeps its identity on every peer")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Existing");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+    client.onRemoteCreate([&](std::uint32_t parentHandle,
+                              const std::vector<std::uint8_t>& blob) -> std::uint32_t {
+        SceneSerializer s;
+        const Entity parent = parentHandle
+            ? static_cast<Entity>(static_cast<entt::id_type>(parentHandle)) : entt::null;
+        const Entity created = s.instantiatePrefab(clientWorld, blob, parent,
+                                                   /*preserveIds=*/true);
+        return created == entt::null
+            ? 0u : static_cast<std::uint32_t>(entt::to_integral(created));
+    });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // Host creates a fresh entity mid-session and announces it.
+    const Entity fresh = hostWorld.createEntity("Fresh");
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(hostWorld, fresh);
+    REQUIRE_FALSE(blob.empty());
+    const auto freshHandle = static_cast<std::uint32_t>(entt::to_integral(fresh));
+
+    const std::size_t before = countEntities(clientWorld);
+    REQUIRE(pumpUntil(host, client, [&] {
+        host.publishCreate(freshHandle, 0, blob);
+        return countEntities(clientWorld) > before;
+    }));
+
+    // Same wire identity on both sides: the subject the HOST derives for the
+    // entity resolves on the CLIENT — which only holds if instantiation kept
+    // the uuid instead of minting a new one.
+    const std::uint64_t subject = host.subjectFor(freshHandle);
+    CHECK(client.entityForNetId(subject) != 0);
+}
+
 TEST_CASE("SceneSerializer: entity components round-trip onto an existing entity")
 {
     HorizonWorld world;

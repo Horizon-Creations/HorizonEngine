@@ -50,8 +50,8 @@ void render(AppContext& ctx)
 	// starts typing into something their change would fight over.
 	if (ctx.collab && ctx.collab->inSession())
 	{
-		const auto subject = static_cast<std::uint64_t>(
-			entt::to_integral(ctx.selectedEntity));
+		const auto subject = ctx.collab->subjectFor(
+			static_cast<std::uint32_t>(entt::to_integral(ctx.selectedEntity)));
 		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
 		    lock && lock->owner != ctx.collab->localParticipant())
 		{

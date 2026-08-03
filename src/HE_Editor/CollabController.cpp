@@ -18,6 +18,7 @@
 #include <iterator>
 #include <thread>
 
+#include <HorizonScene/Components/EntityIdComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 
@@ -560,7 +561,11 @@ void CollabController::wireCallbacks()
 
 	m_collab->onTransform([this](HE::Net::ParticipantId,
 	                             const HE::Net::CollabSession::TransformDelta& d) {
-		if (m_onRemoteTransform) m_onRemoteTransform(d.subject, d.position, d.rotation, d.scale);
+		// Subjects are uuid-derived, never raw handles — resolve here so the
+		// editor callback keeps receiving something it can hand to the registry.
+		const std::uint32_t local = entityForNetId(d.subject);
+		if (local != 0 && m_onRemoteTransform)
+			m_onRemoteTransform(local, d.position, d.rotation, d.scale);
 	});
 
 	m_collab->onLockChanged([this](const LockInfo& l, bool acquired) {
@@ -641,15 +646,13 @@ void CollabController::teardown()
 	m_heldSubject   = 0;
 	m_lockNotice.clear();
 	m_netIds.clear();
-	m_netIdCounter  = 0;
+	m_lastComponentHashes.clear();
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
 	m_mapping = {};
 	m_pinhole = {};
 	m_pinholeOpen = false;
-	m_lastComponentHash   = 0;
-	m_lastComponentEntity = 0;
 
 	// Drop any directory work still in flight. Destroying a std::async future
 	// blocks until its thread finishes, which is why the calls carry timeouts.
@@ -879,30 +882,28 @@ void CollabController::publishComponents(std::uint32_t entityHandle,
 {
 	if (!m_collab || !inSession() || blob.empty()) return;
 
-	std::uint64_t netId = 0;
-	for (const auto& [net, handle] : m_netIds)
-	{
-		if (handle == entityHandle) { netId = net; break; }
-	}
-	// Not mapped yet means the structural pass has not announced it — sending
-	// components for an entity peers do not know would arrive as an orphan.
+	// Derived from the entity's uuid, so it needs no prior announcement — a
+	// snapshot entity is exactly as addressable as one created mid-session.
+	const std::uint64_t netId = netIdFor(entityHandle);
 	if (netId == 0) return;
 	if (!m_collab->ownsLock(netId)) return;
 
 	// FNV-1a over the blob: the whole point is to send nothing while the user is
-	// merely looking at an entity rather than editing it.
+	// merely looking at an entity rather than editing it. Keyed per entity —
+	// with a single shared slot, alternating between two selected entities read
+	// as a change on every switch and re-sent both every time.
 	std::uint64_t hash = 1469598103934665603ull;
 	for (const std::uint8_t b : blob) { hash ^= b; hash *= 1099511628211ull; }
 
-	if (entityHandle == m_lastComponentEntity && hash == m_lastComponentHash) return;
+	const auto it = m_lastComponentHashes.find(entityHandle);
+	if (it != m_lastComponentHashes.end() && it->second == hash) return;
 
 	HE::Net::CollabSession::ComponentUpdate u;
 	u.netId = netId;
 	u.blob  = blob;
 	if (m_collab->sendComponents(u))
 	{
-		m_lastComponentEntity = entityHandle;
-		m_lastComponentHash   = hash;
+		m_lastComponentHashes[entityHandle] = hash;
 	}
 }
 
@@ -915,23 +916,56 @@ std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 		if (handle == entityHandle) return net;
 	}
 
-	// Unknown: this entity was created locally after the snapshot. Mint an id
-	// scoped to us. The participant id occupies the high word, so it can never
-	// collide with a snapshot handle (high word zero) nor with another peer's.
-	const std::uint64_t participant = m_collab ? m_collab->localId() : 1u;
-	const std::uint64_t net =
-		(participant << 32) | static_cast<std::uint64_t>(++m_netIdCounter);
+	// The wire identity is derived from the entity's stable UUID — the one the
+	// scene format already carries — so every peer computes the SAME id from its
+	// own copy of the world, with no announcement step and no assumption about
+	// entt handle numbering. The previous design keyed everything on raw handles
+	// ("both sides deserialized the same bytes"), which held only for a client's
+	// fresh load: the HOST keeps its live registry, where deletions have left
+	// recycled, version-bearing handles — and every delta for such an entity
+	// silently missed. That was the "changes only partly sync" bug.
+	if (!m_world) return 0;
+	auto& reg = m_world->registry();
+	const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(entityHandle));
+	if (!reg.valid(e)) return 0;
+
+	auto* idc = reg.try_get<EntityIdComponent>(e);
+	if (!idc)
+	{
+		// Every createEntity mints one; an entity without it came through some
+		// bypass. Minting here keeps it addressable — both sides will still
+		// agree, because the snapshot serializes whatever is minted before send.
+		idc = &reg.emplace<EntityIdComponent>(e,
+			EntityIdComponent{ HE::UUID::generate() });
+	}
+	// low64 of a v4 UUID is random except the variant bits; zero would collide
+	// with "no subject", so fold hi in as the escape hatch.
+	std::uint64_t net = idc->id.lo;
+	if (net == 0) net = idc->id.hi | 1ull;
+
 	m_netIds.emplace_back(net, entityHandle);
 	return net;
 }
 
-std::uint32_t CollabController::entityForNetId(std::uint64_t netId) const
+std::uint32_t CollabController::entityForNetId(std::uint64_t netId)
 {
 	for (const auto& [net, handle] : m_netIds)
 	{
 		if (net == netId) return handle;
 	}
-	return 0;
+
+	// Cache miss: resolve against the world. Linear over the id pool, but only
+	// on the first sighting of a subject — every later lookup hits the cache.
+	if (!m_world) return 0;
+	auto& reg = m_world->registry();
+	std::uint32_t found = 0;
+	reg.view<EntityIdComponent>().each([&](auto e, const EntityIdComponent& idc) {
+		std::uint64_t net = idc.id.lo;
+		if (net == 0) net = idc.id.hi | 1ull;
+		if (net == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
+	});
+	if (found != 0) m_netIds.emplace_back(netId, found);
+	return found;
 }
 
 void CollabController::forgetNetId(std::uint64_t netId)
@@ -941,18 +975,19 @@ void CollabController::forgetNetId(std::uint64_t netId)
 	               m_netIds.end());
 }
 
-void CollabController::seedNetIds(const std::vector<std::uint32_t>& entityHandles)
+void CollabController::seedNetIds()
 {
-	// After a snapshot both peers hold the same entities with the same handles,
-	// because they deserialized the same bytes into a cleared world — so the
-	// handle IS the network id here, with no negotiation needed.
+	// Warm the uuid↔handle cache for every entity in the world. Not for
+	// correctness of lookups — those fall back to a registry scan — but for
+	// DELETIONS: by the time a destroyed entity is diffed out of the world, its
+	// uuid can no longer be read from the registry, so the cache built here is
+	// the only place its wire identity survives. Runs on the client after the
+	// snapshot replaced its world, and on the host when it starts hosting.
 	m_netIds.clear();
-	m_netIds.reserve(entityHandles.size());
-	for (const std::uint32_t h : entityHandles)
-	{
-		m_netIds.emplace_back(static_cast<std::uint64_t>(h), h);
-	}
-	m_netIdCounter = 0;
+	if (!m_world) return;
+	m_world->registry().view<entt::entity>().each([&](auto e) {
+		netIdFor(static_cast<std::uint32_t>(entt::to_integral(e)));
+	});
 }
 
 bool CollabController::publishCreate(std::uint32_t entityHandle,

@@ -115,8 +115,8 @@ void render(AppContext& ctx)
             bool lockedByMe = false;
             if (ctx.collab && ctx.collab->inSession())
             {
-                lock = ctx.collab->lockFor(static_cast<std::uint64_t>(
-                    entt::to_integral(node.entity)));
+                lock = ctx.collab->lockFor(ctx.collab->subjectFor(
+                    static_cast<std::uint32_t>(entt::to_integral(node.entity))));
                 lockedByMe = lock && lock->owner == ctx.collab->localParticipant();
             }
 

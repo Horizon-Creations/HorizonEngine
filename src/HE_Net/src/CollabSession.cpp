@@ -162,7 +162,12 @@ void CollabSession::update(std::uint64_t nowMs) {
     if (m_joined && m_localPresenceSet) {
         const bool due = !m_everSentPresence ||
                          (nowMs - m_lastPresenceSendMs) >= m_cfg.presenceIntervalMs;
-        if (due && presenceDiffersFromSent()) {
+        // The keep-alive resend covers everything the change filter cannot see:
+        // a peer that joined after our last movement, or a relay that never
+        // arrived. Cheap — one small message every couple of seconds.
+        const bool keepAlive = m_everSentPresence &&
+                               (nowMs - m_lastPresenceSendMs) >= m_cfg.presenceKeepAliveMs;
+        if ((due && presenceDiffersFromSent()) || keepAlive) {
             sendLocalPresence();
             m_lastSentPresence   = m_localPresence;
             m_everSentPresence   = true;
@@ -295,6 +300,18 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         BitWriter table;
         writeLockTable(table);
         m_net->send(conn, kMsgLockTable, table);
+    }
+
+    // And everyone's last known presence. Presence is change-driven, so without
+    // this a late joiner sees no one until each of them happens to move their
+    // camera — the field report was a host and a guest each staring at an empty
+    // scene wondering where the other one was.
+    for (const auto& [pid, state] : m_presence) {
+        if (pid == id || !state.valid) continue;
+        BitWriter w;
+        w.writeUInt32(pid);
+        writePresenceBody(w, state);
+        m_net->send(conn, kMsgPresenceRelay, w);
     }
 
     BitWriter announce;

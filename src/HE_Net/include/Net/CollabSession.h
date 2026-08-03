@@ -43,7 +43,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 
 // Bumped whenever the collaboration protocol changes shape. Peers that disagree
 // are rejected rather than allowed to misinterpret each other's messages.
-inline constexpr std::uint16_t kCollabProtocolVersion = 1;
+// v2: every subject (locks, transforms, components, structure, selection) is
+// derived from the entity's stable uuid instead of its entt handle — the two
+// schemes resolve to different entities, so mixing them must be refused.
+inline constexpr std::uint16_t kCollabProtocolVersion = 2;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -126,6 +129,9 @@ public:
         // per frame; forwarding all of them would swamp the link for state that
         // is obsolete a frame later.
         std::uint64_t presenceIntervalMs = 100;   // 10 Hz
+        // Unchanged presence is still resent at this cadence, so late joiners
+        // and lost relays converge without anyone having to move.
+        std::uint64_t presenceKeepAliveMs = 2000;
         // Ignore sub-threshold camera jitter so a stationary editor emits nothing.
         float         presencePositionEpsilon = 0.001f;
         float         presenceRotationEpsilon = 0.001f;

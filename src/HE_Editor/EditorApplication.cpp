@@ -302,7 +302,10 @@ void EditorApplication::OnInit()
 			? static_cast<Entity>(static_cast<entt::id_type>(parentHandle))
 			: entt::null;
 		SceneSerializer serializer;
-		const Entity created = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+		// preserveIds: every peer must know this subtree under the SAME entity
+		// uuids, because all later edits arrive addressed by them.
+		const Entity created =
+			serializer.instantiatePrefab(*m_editorWorld, blob, parent, /*preserveIds=*/true);
 		if (created == entt::null) return 0;
 		// The fresh handle is recorded by CollabController against the sender's
 		// network id — which is what makes handle-stable instantiation
@@ -350,7 +353,10 @@ void EditorApplication::OnInit()
 		[this](std::uint64_t subject, const float v[9]) {
 			if (!m_editorWorld) return;
 			auto& reg = m_editorWorld->registry();
-			const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(subject));
+			// Subjects are uuid-derived; only the controller can map one back.
+			const std::uint32_t handle = m_collab.entityForNetId(subject);
+			if (handle == 0) return;
+			const auto e = static_cast<entt::entity>(static_cast<entt::id_type>(handle));
 			if (!reg.valid(e)) return;
 			if (auto* tc = reg.try_get<TransformComponent>(e))
 			{
@@ -410,18 +416,19 @@ void EditorApplication::OnInit()
 	});
 
 	m_collab.onWorldReplaced([this] {
-		// Both peers just deserialized the same bytes, so handle == network id
-		// here — seed the map from the world before anything else runs.
-		std::vector<std::uint32_t> handles;
+		// Wire identity is each entity's uuid, which the snapshot carried — so
+		// seeding just warms the uuid↔handle cache (deletions need it, see
+		// seedNetIds) and marks the current entity set as known to the
+		// structural diff, so nothing gets re-announced as freshly created.
 		m_structureKnown.clear();
 		if (m_editorWorld)
 		{
+			m_collab.setWorld(m_editorWorld.get());
 			m_editorWorld->registry().view<entt::entity>().each([&](auto e) {
-				handles.push_back(static_cast<std::uint32_t>(entt::to_integral(e)));
 				m_structureKnown.insert(e);
 			});
 		}
-		m_collab.seedNetIds(handles);
+		m_collab.seedNetIds();
 
 		m_selectedEntity = entt::null;
 		// Every snapshot in the undo stack belongs to the replaced world, so
@@ -1741,9 +1748,12 @@ void EditorApplication::OnRender(float dt)
 					auto& reg = m_editorWorld->registry();
 					for (const std::uint64_t raw : pres->selection)
 					{
+						// Selection travels as uuid-derived subjects now.
+						const std::uint32_t handle = m_collab.entityForNetId(raw);
+						if (handle == 0) continue;     // not present in our world
 						const auto e = static_cast<entt::entity>(
-							static_cast<entt::id_type>(raw));
-						if (!reg.valid(e)) continue;   // not present in our world
+							static_cast<entt::id_type>(handle));
+						if (!reg.valid(e)) continue;
 						if (auto* tc = reg.try_get<TransformComponent>(e))
 						{
 							dbg.aabb(tc->position - glm::vec3(0.6f),
@@ -1864,7 +1874,8 @@ void EditorApplication::OnRender(float dt)
 			const std::uint64_t subject =
 				m_selectedEntity == entt::null
 					? 0ull
-					: static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity));
+					: m_collab.subjectFor(static_cast<std::uint32_t>(
+						entt::to_integral(m_selectedEntity)));
 			m_collab.followSelection(subject);
 
 			// Publish its transform while we hold it. Sending unconditionally is
@@ -1939,7 +1950,8 @@ void EditorApplication::OnRender(float dt)
 
 			std::vector<std::uint64_t> selection;
 			if (m_selectedEntity != entt::null)
-				selection.push_back(static_cast<std::uint64_t>(entt::to_integral(m_selectedEntity)));
+				selection.push_back(m_collab.subjectFor(static_cast<std::uint32_t>(
+					entt::to_integral(m_selectedEntity))));
 
 			m_collab.setLocalPresence(p, r, selection);
 		}
