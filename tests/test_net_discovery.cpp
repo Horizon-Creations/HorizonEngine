@@ -388,3 +388,128 @@ TEST_CASE("httpRequest: a refused connection fails without hanging")
     CHECK(!r.error.empty());
     CHECK(elapsed < std::chrono::seconds(5));   // bounded by the timeout
 }
+
+// ─── NAT-PMP (RFC 6886) ──────────────────────────────────────────────────────
+// The protocol some routers speak instead of UPnP — Apple base stations
+// historically only this one. Twelve bytes of binary rather than SOAP over HTTP.
+
+TEST_CASE("NAT-PMP: a mapping request matches the RFC layout")
+{
+    const auto req = PortMapper::buildNatPmpRequest(2, 7777, 7777, 7200);
+
+    REQUIRE(req.size() == 12);
+    CHECK(req[0] == 0);      // version
+    CHECK(req[1] == 2);      // opcode 2 = map TCP
+
+    // Everything is big-endian on the wire.
+    CHECK(((req[4] << 8) | req[5]) == 7777);    // internal port
+    CHECK(((req[6] << 8) | req[7]) == 7777);    // suggested external port
+    const std::uint32_t lifetime =
+        (req[8] << 24) | (req[9] << 16) | (req[10] << 8) | req[11];
+    CHECK(lifetime == 7200);
+}
+
+TEST_CASE("NAT-PMP: an address request is only two bytes")
+{
+    // Opcode 0 carries no payload at all — the whole appeal of this protocol
+    // next to UPnP's XML.
+    const auto req = PortMapper::buildNatPmpRequest(0, 0, 0, 0);
+    REQUIRE(req.size() == 2);
+    CHECK(req[0] == 0);
+    CHECK(req[1] == 0);
+}
+
+TEST_CASE("NAT-PMP: a deletion is a zero lifetime, per the RFC")
+{
+    const auto req = PortMapper::buildNatPmpRequest(2, 7777, 0, 0);
+    CHECK(((req[6] << 8) | req[7]) == 0);   // external port 0
+    const std::uint32_t lifetime =
+        (req[8] << 24) | (req[9] << 16) | (req[10] << 8) | req[11];
+    CHECK(lifetime == 0);
+}
+
+TEST_CASE("NAT-PMP: a mapping response is parsed")
+{
+    // ver, opcode 2+128, result 0, epoch, internal 7777, external 40000, lifetime 3600
+    const std::uint8_t reply[16] = {
+        0, 130, 0, 0, 0, 0, 0x12, 0x34,
+        0x1E, 0x61, 0x9C, 0x40, 0, 0, 0x0E, 0x10
+    };
+
+    std::uint16_t internalPort = 0, externalPort = 0, result = 0xFFFF;
+    std::uint32_t lifetime = 0;
+    REQUIRE(PortMapper::parseNatPmpMapResponse(reply, sizeof(reply), internalPort,
+                                               externalPort, lifetime, result));
+    CHECK(result == 0);
+    CHECK(internalPort == 7777);
+    // The router may hand back a DIFFERENT external port than requested; using
+    // the requested one would publish an endpoint nobody listens on.
+    CHECK(externalPort == 40000);
+    CHECK(lifetime == 3600);
+}
+
+TEST_CASE("NAT-PMP: a refusal is reported rather than mistaken for success")
+{
+    // Result code 2 = "not authorised / refused", which is what a router with
+    // NAT-PMP switched off answers.
+    std::uint8_t reply[16] = { 0, 130, 0, 2 };
+    std::uint16_t a = 0, b = 0, result = 0;
+    std::uint32_t c = 0;
+    REQUIRE(PortMapper::parseNatPmpMapResponse(reply, sizeof(reply), a, b, c, result));
+    CHECK(result == 2);
+}
+
+TEST_CASE("NAT-PMP: malformed frames are rejected")
+{
+    std::uint16_t a = 0, b = 0, result = 0;
+    std::uint32_t c = 0;
+
+    const std::uint8_t tooShort[8] = { 0, 130 };
+    CHECK_FALSE(PortMapper::parseNatPmpMapResponse(tooShort, sizeof(tooShort), a, b, c, result));
+
+    // Version we do not speak.
+    const std::uint8_t badVersion[16] = { 9, 130 };
+    CHECK_FALSE(PortMapper::parseNatPmpMapResponse(badVersion, sizeof(badVersion), a, b, c, result));
+
+    // A REQUEST opcode where a response was expected — responses have the high
+    // bit set, so this is either a loop or a spoof.
+    const std::uint8_t notAResponse[16] = { 0, 2 };
+    CHECK_FALSE(PortMapper::parseNatPmpMapResponse(notAResponse, sizeof(notAResponse), a, b, c, result));
+
+    CHECK_FALSE(PortMapper::parseNatPmpMapResponse(nullptr, 16, a, b, c, result));
+}
+
+TEST_CASE("NAT-PMP: the external address is read out of the response")
+{
+    const std::uint8_t reply[12] = { 0, 128, 0, 0, 0, 0, 0, 0, 203, 0, 113, 42 };
+
+    std::string ip;
+    std::uint16_t result = 0xFFFF;
+    REQUIRE(PortMapper::parseNatPmpAddressResponse(reply, sizeof(reply), ip, result));
+    CHECK(result == 0);
+    CHECK(ip == "203.0.113.42");
+}
+
+TEST_CASE("NAT-PMP: a CGNAT external address is recognised as unreachable")
+{
+    // A router can happily map a port and still be behind carrier-grade NAT,
+    // in which case no forward at this level can ever be reached.
+    const std::uint8_t reply[12] = { 0, 128, 0, 0, 0, 0, 0, 0, 100, 90, 1, 5 };
+    std::string ip;
+    std::uint16_t result = 0;
+    REQUIRE(PortMapper::parseNatPmpAddressResponse(reply, sizeof(reply), ip, result));
+    CHECK(ip == "100.90.1.5");
+    CHECK(PortMapper::isPrivateOrCgnat(ip));
+}
+
+TEST_CASE("socketDefaultGateway: reports a usable router address")
+{
+    const std::string gw = socketDefaultGateway();
+    // A machine with no default route legitimately has none.
+    if (gw.empty()) return;
+
+    CHECK(gw.find('.') != std::string::npos);
+    CHECK(gw != "0.0.0.0");
+    // The gateway is by definition on a local network.
+    CHECK(PortMapper::isPrivateOrCgnat(gw));
+}
