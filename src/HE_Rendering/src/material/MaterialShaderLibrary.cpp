@@ -215,8 +215,8 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 giGridCounts;   // xyz = probes per axis, w = probes per atlas row
     vec4 giProbe;        // x = indirect intensity, y = probe atlases bound
     vec4 weather;        // x = wetness, y = snow amount
-    vec4 ssr;            // y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
-    vec4 giRefl;         // x = ray-traced GI-reflection intensity (composite pass only), y = max roughness
+    vec4 ssr;            // x = 1 → heSSR bound (FORWARD path), y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
+    vec4 giRefl;         // x = ray-traced GI-reflection intensity, y = max roughness, z = 1 → heGIRefl bound (FORWARD path)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -249,6 +249,13 @@ layout(set = 0, binding = 16) uniform sampler2D heAO;
 // built-in one beside it picked up the room.
 layout(set = 0, binding = 17) uniform sampler2D heGIIrradiance;
 layout(set = 0, binding = 18) uniform sampler2D heGIVisibility;
+// FORWARD-path reflection results (bindings 31/32, Metal material slots 9/10 —
+// the last two free sampler slots after the P0 slot consolidation). The
+// deferred path composites reflections in its own fullscreen pass instead and
+// never sets the gates (ssr.x / giRefl.z); every backend without the feature
+// binds a dummy and the branches fold dead. Sampled per gl_FragCoord like heAO.
+layout(set = 0, binding = 31) uniform sampler2D heSSRFwd;    // rgb radiance, a confidence
+layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a confidence
 // Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
 // the backends' octEncode; kept a copy here for the same reason they keep theirs:
 // each shader string is its own compilation unit.
@@ -481,12 +488,31 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
         ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
+        vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
+        // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
+        // heLitP twin of the deferred composite's cascade. The trace textures
+        // carry no per-pixel roughness in the forward path (the prepass has no
+        // material data), so the roughness fade lives HERE with the exact
+        // shading values. Gates are 0 in the deferred path and on backends
+        // without the passes — dead code after constant folding.
+        if (heLight.giRefl.z > 0.5)
+        {
+            vec4 rr = texture(heGIReflFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+            float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.7, heLight.giRefl.y, rough);
+            envSpec = mix(envSpec, rr.rgb, rr.a * heLight.giRefl.x * fade);
+        }
+        if (heLight.ssr.x > 0.5)
+        {
+            vec4 r = texture(heSSRFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+            float fade = 1.0 - smoothstep(heLight.ssr.z * 0.7, heLight.ssr.z, rough);
+            envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y * fade);
+        }
         // Fresnel (Schlick, roughness-aware, ssr-plan P4): grazing views boost
         // the specular IBL toward max(1-rough, F0) instead of the flat specColor.
         float NdV = clamp(dot(n, V), 0.0, 1.0);
         vec3 fresnelSpec = specColor
             + (max(vec3(1.0 - rough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
-        ambSpec = texture(heSkyEnv, Rrough).rgb * fresnelSpec * (1.0 - 0.6 * rough);
+        ambSpec = envSpec * fresnelSpec * (1.0 - 0.6 * rough);
     }
     // Deferred SSR (docs/ssr-plan.md §4.5): the specular-IBL term moves into a
     // dedicated reflection pass AFTER the resolve — it mixes SSR hits against
@@ -1104,7 +1130,7 @@ layout(std140, set = 0, binding = 23) uniform HeSSRTrace {
     vec4 cfg;     // x maxDistance, y thickness, z maxRoughness, w stepCount
     vec4 conv;    // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
     vec4 vp;      // xy = trace-target size in pixels
-    vec4 cfg2;    // x = frame seed (temporal jitter), y = history blend (0 = temporal off)
+    vec4 cfg2;    // x = frame seed (temporal jitter), y = history blend (0 = temporal off), z = 1 → forward path (colour from prev frame)
 } heSSR;
 vec3 heOctDecode(vec2 f) {
     vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
@@ -1228,8 +1254,28 @@ void main() {
         vec2 ef = min(hitUV, vec2(1.0) - hitUV);
         float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
         float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
-        sampleOut = vec4(texture(heSceneColor, hitUV).rgb,
-                         edge * facing * roughFade * distFade * thickConf);
+        // Colour source: DEFERRED samples this frame's resolved HDR at the hit
+        // UV. FORWARD (cfg2.z) has no current-frame colour at trace time — the
+        // hit reprojects into the PREVIOUS frame's HDR copy via prevViewProj
+        // (the plan's Option A; camera motion compensated, 1 frame of content
+        // lag remains). Off-history hits fade to the cubemap fallback.
+        float colorOk = 1.0;
+        vec2  uvColor = hitUV;
+        if (heSSR.cfg2.z > 0.5)
+        {
+            vec3 hw = P + R * tHit;
+            vec4 hc = heSSR.prevViewProj * vec4(hw, 1.0);
+            if (hc.w > 1e-4)
+            {
+                vec2 hn = hc.xy / hc.w;
+                uvColor = vec2(hn.x * 0.5 + 0.5, (hn.y * heSSR.conv.x) * 0.5 + 0.5);
+                if (any(lessThan(uvColor, vec2(0.0))) || any(greaterThan(uvColor, vec2(1.0))))
+                    colorOk = 0.0;
+            }
+            else colorOk = 0.0;
+        }
+        sampleOut = vec4(texture(heSceneColor, uvColor).rgb,
+                         edge * facing * roughFade * distFade * thickConf * colorOk);
     }
     // Temporal accumulation (quality High, cfg2.y > 0): reproject the RECEIVER
     // into last frame's history, EMA-blend when the stored world position
@@ -1611,11 +1657,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               { Stage::Fragment, 0, 6, 3 },
               { Stage::Fragment, 0, 7, 4 },
               // GI screen-space shadow masks (preamble bindings 10/11) → MSL
-              // texture/sampler 9/10 — clear of the material textures (0-4) AND
-              // the standard pipeline's GI slots (5-8), so both pipelines can
-              // share one encoder without rebinding.
-              { Stage::Fragment, 0, 10, 9 },
-              { Stage::Fragment, 0, 11, 10 },
+              // texture/sampler 5/8 — the SAME slots the built-in scene
+              // pipeline reads these exact masks at (shared encoder, per-frame
+              // binds serve both; ssr-plan P0: the old separate 9/10 pins were
+              // redundant copies and blocked the last two sampler slots).
+              { Stage::Fragment, 0, 10, 5 },
+              { Stage::Fragment, 0, 11, 8 },
               // CSM depth array for the GI-off fallback (preamble binding 12)
               // → MSL texture/sampler 11 (next free slot after the GI masks).
               { Stage::Fragment, 0, 12, 11 },
@@ -1642,7 +1689,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // atlases for the built-in shaders, and both pipelines share one
               // encoder, so the material pipeline just reads them in place.
               { Stage::Fragment, 0, 17, 6 },
-              { Stage::Fragment, 0, 18, 7 } }));
+              { Stage::Fragment, 0, 18, 7 },
+              // FORWARD reflection results (bindings 31/32) → MSL 9/10, the two
+              // slots freed by moving the GI masks onto the built-in pipeline's
+              // 5/8 above. Per-frame binds shared with the built-in shaders.
+              { Stage::Fragment, 0, 31, 9 },
+              { Stage::Fragment, 0, 32, 10 } }));
     }
     else
     {
