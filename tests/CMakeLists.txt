@@ -70,6 +70,7 @@ add_executable(he_tests
     test_net_collab.cpp
     test_collab_controller.cpp
     test_collab_undo.cpp
+    test_sourcecontrol_probe.cpp
     test_game_replication.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
@@ -118,6 +119,10 @@ add_executable(he_tests
 
 target_include_directories(he_tests PRIVATE
     vendor
+    # The source-control module's private src/, so the log-redaction helper can
+    # be covered directly — it is the last defence against a token reaching a
+    # log file, so it is worth testing rather than trusting.
+    ${CMAKE_SOURCE_DIR}/src/HE_SourceControl/src
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
@@ -233,6 +238,7 @@ endif()
 target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonNet
+    HorizonSourceControl
     HorizonScene
     HorizonImporters
     HorizonTools
@@ -259,6 +265,8 @@ if(WIN32)
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonSourceControl> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
