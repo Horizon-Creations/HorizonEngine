@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HE::Net {
 
@@ -170,6 +171,26 @@ HE_NET_API std::string socketDefaultGateway();
 // a different mechanism from IPv4 port mapping, and neither UPnP AddPortMapping
 // nor NAT-PMP can do it.
 HE_NET_API std::string socketGlobalIPv6Address();
+
+// Every address configured on this machine's active interfaces, both families.
+HE_NET_API std::vector<std::string> socketLocalAddresses();
+
+// Is `address` one this machine actually holds?
+//
+// The question that answers: when the session directory reports the address it
+// saw us arrive from, is that US or is it something in between?
+//   • Matches  → no translation. With IPv6 that means the machine is directly
+//     addressable and only a firewall stands in the way, not a port forward.
+//   • Does not → something is translating. Under IPv4 that is ordinary NAT and
+//     the address belongs to the router. Under IPv6 it means NAT66 or prefix
+//     translation is in use, which is rare on consumer routers but real — and
+//     assuming otherwise would tell the user no forwarding is needed when it is.
+//
+// Compares against ALL local addresses rather than the one hosting prefers: a
+// machine with privacy extensions holds a stable AND a temporary global address
+// and reaches the outside world under the temporary one, so checking only the
+// preferred address would call the machine's own address foreign.
+HE_NET_API bool socketOwnsAddress(const std::string& address);
 
 // True when this process can reach its own default gateway at all.
 //
