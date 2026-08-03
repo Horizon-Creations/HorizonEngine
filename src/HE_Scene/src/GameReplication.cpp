@@ -14,6 +14,13 @@ namespace
 	// collaboration protocol's — the two systems share a transport but never a
 	// message.
 	constexpr MessageId kMsgSnapshot = kFirstUserMessage + 200;
+	constexpr MessageId kMsgInput    = kFirstUserMessage + 201;   // client → server
+
+	// The longest timestep a single command may represent. The server enforces
+	// it so a modified client cannot claim a ten-second frame and teleport, and
+	// the CLIENT must apply exactly the same bound when predicting — otherwise
+	// the two run different simulations and every long frame mispredicts.
+	constexpr float kMaxInputDeltaTime = 0.1f;
 } // namespace
 
 GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
@@ -29,6 +36,112 @@ GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
 			applySnapshot(r);
 		});
 	}
+	else
+	{
+		m_net->on(kMsgInput, [this](ConnectionId conn, BitReader& r) {
+			handleInput(conn, r);
+		});
+	}
+}
+
+void GameReplication::assignControl(ConnectionId conn, std::uint32_t netId)
+{
+	m_controlledByConn[conn] = netId;
+}
+
+void GameReplication::setLocallyControlled(Entity entity, std::uint32_t netId)
+{
+	m_controlled      = entity;
+	m_controlledNetId = netId;
+	m_pendingInputs.clear();
+	m_positionError = glm::vec3(0.0f);
+	// The controlled entity is predicted, never interpolated — interpolation
+	// would fight the prediction and produce visible rubber-banding.
+	m_interp.erase(netId);
+}
+
+std::uint32_t GameReplication::pushInput(const glm::vec3& move, float yaw, float dt)
+{
+	if (!m_world || m_controlled == entt::null || !m_move) return 0;
+	auto& reg = m_world->registry();
+	if (!reg.valid(m_controlled)) return 0;
+	auto* tc = reg.try_get<TransformComponent>(m_controlled);
+	if (!tc) return 0;
+
+	InputCommand cmd;
+	cmd.sequence  = ++m_inputSequence;
+	// Same clamp the server applies. Predicting with the raw dt would diverge on
+	// any frame longer than the bound — a hitch, a breakpoint, a loading spike —
+	// and the player would feel a correction every time.
+	cmd.deltaTime = std::clamp(dt, 0.0f, kMaxInputDeltaTime);
+	cmd.move      = move;
+	cmd.yaw       = yaw;
+
+	// Apply it NOW. This is the whole point: the character responds on the frame
+	// the key was pressed, not a round trip later.
+	m_move(*tc, cmd);
+	tc->dirty = true;
+
+	// Keep it until the server confirms it, so it can be replayed on top of the
+	// authoritative state.
+	m_pendingInputs.push_back(cmd);
+	if (m_pendingInputs.size() > m_cfg.maxPendingInputs)
+	{
+		// The link is unusable at this point; dropping the oldest keeps memory
+		// bounded rather than pretending we can still reconcile them.
+		m_pendingInputs.erase(m_pendingInputs.begin());
+	}
+
+	if (m_net && !m_net->connections().empty())
+	{
+		BitWriter w;
+		w.writeUInt32(cmd.sequence);
+		w.writeFloat(cmd.deltaTime);
+		for (int i = 0; i < 3; ++i) w.writeFloat(cmd.move[i]);
+		w.writeFloat(cmd.yaw);
+		// Unreliable: a lost input is superseded by the next one, and the server
+		// acknowledges by sequence so gaps are self-healing.
+		m_net->send(m_net->connections().front(), kMsgInput, w, SendMode::Unreliable);
+		++m_stats.inputsSent;
+	}
+	return cmd.sequence;
+}
+
+void GameReplication::handleInput(ConnectionId conn, BitReader& r)
+{
+	InputCommand cmd;
+	if (!r.readUInt32(cmd.sequence) || !r.readFloat(cmd.deltaTime)) return;
+	for (int i = 0; i < 3; ++i)
+	{
+		if (!r.readFloat(cmd.move[i])) return;
+	}
+	if (!r.readFloat(cmd.yaw)) return;
+
+	// Out-of-order or duplicated input must not be applied twice — UDP-style
+	// delivery makes both normal.
+	auto& last = m_lastProcessedInput[conn];
+	if (cmd.sequence <= last) return;
+
+	// A client may only drive the entity it was assigned. Without this check a
+	// client could move anyone's character by sending input for their id.
+	const auto ctrlIt = m_controlledByConn.find(conn);
+	if (ctrlIt == m_controlledByConn.end()) return;
+	const auto entIt = m_byNetId.find(ctrlIt->second);
+	if (entIt == m_byNetId.end()) return;
+
+	auto& reg = m_world->registry();
+	if (!reg.valid(entIt->second)) return;
+	auto* tc = reg.try_get<TransformComponent>(entIt->second);
+	if (!tc || !m_move) return;
+
+	// Enforce the bound the client is also supposed to apply: a modified one
+	// could otherwise send dt = 10 and cross the level in a single command.
+	cmd.deltaTime = std::clamp(cmd.deltaTime, 0.0f, kMaxInputDeltaTime);
+
+	m_move(*tc, cmd);
+	tc->dirty = true;
+	last = cmd.sequence;
+	++m_stats.inputsProcessed;
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────
@@ -101,6 +214,7 @@ void GameReplication::update(float dt)
 	}
 
 	advanceInterpolation(dt);
+	applySmoothing(dt);
 }
 
 void GameReplication::writeSample(BitWriter& w, const Sample& s) const
@@ -169,6 +283,12 @@ void GameReplication::sendSnapshots()
 		if (relevant.empty()) continue;
 
 		BitWriter w;
+		// The last input we processed FROM THIS CLIENT rides along with the
+		// snapshot. Without it the client cannot know which of its predicted
+		// moves the authoritative state already includes, and would replay all
+		// of them — double-applying its own movement.
+		const auto ackIt = m_lastProcessedInput.find(conn);
+		w.writeUInt32(ackIt != m_lastProcessedInput.end() ? ackIt->second : 0u);
 		w.writeUInt16(static_cast<std::uint16_t>(
 			std::min<std::size_t>(relevant.size(), 0xFFFF)));
 		for (const auto& [netId, sample] : relevant)
@@ -189,8 +309,9 @@ void GameReplication::sendSnapshots()
 
 void GameReplication::applySnapshot(BitReader& r)
 {
+	std::uint32_t ack = 0;
 	std::uint16_t count = 0;
-	if (!r.readUInt16(count)) return;
+	if (!r.readUInt32(ack) || !r.readUInt16(count)) return;
 
 	++m_stats.snapshotsReceived;
 
@@ -199,6 +320,14 @@ void GameReplication::applySnapshot(BitReader& r)
 		std::uint32_t netId = 0;
 		Sample s;
 		if (!r.readUInt32(netId) || !readSample(r, s)) return;   // truncated
+
+		if (netId == m_controlledNetId && m_controlled != entt::null)
+		{
+			// Our own entity is predicted, not interpolated — hand it to
+			// reconciliation instead of the interpolation buffer.
+			reconcile(s, ack);
+			continue;
+		}
 
 		// Shift the buffer: what was current becomes the interpolation origin.
 		InterpState& st = m_interp[netId];
@@ -209,6 +338,101 @@ void GameReplication::applySnapshot(BitReader& r)
 	}
 }
 
+void GameReplication::reconcile(const Sample& authoritative, std::uint32_t ackedSequence)
+{
+	if (!m_world || !m_move) return;
+	auto& reg = m_world->registry();
+	if (!reg.valid(m_controlled)) return;
+	auto* tc = reg.try_get<TransformComponent>(m_controlled);
+	if (!tc) return;
+
+	// Everything the server has already accounted for is history.
+	m_pendingInputs.erase(
+		std::remove_if(m_pendingInputs.begin(), m_pendingInputs.end(),
+		               [ackedSequence](const InputCommand& c) {
+		                   return c.sequence <= ackedSequence;
+		               }),
+		m_pendingInputs.end());
+
+	// Undo any smoothing offset still in flight FIRST. tc->position is what the
+	// player sees, which is the logical position plus that offset; comparing
+	// against it directly would fold the offset into the next error and make the
+	// correction feed on itself, drifting a little further every snapshot.
+	tc->position -= m_positionError;
+	m_positionError = glm::vec3(0.0f);
+
+	// Where we believe we are, before adopting the server's answer.
+	const glm::vec3 predicted = tc->position;
+
+	// Adopt the authoritative state, then REPLAY every input the server has not
+	// seen yet. That is the whole trick: the result is the server's truth plus
+	// exactly the moves still in flight — not a rewind the player would feel.
+	tc->position = authoritative.position;
+	tc->rotation = authoritative.rotation;
+	for (const InputCommand& cmd : m_pendingInputs) m_move(*tc, cmd);
+
+	const glm::vec3 corrected = tc->position;
+	const glm::vec3 error     = predicted - corrected;
+	const float     dist      = glm::length(error);
+
+	// The dead zone has to be wider than what the wire can even represent.
+	// Positions arrive quantized, so a perfect prediction still differs by up to
+	// one step — treating that as an error would count every snapshot as a
+	// correction and leave a smoothing offset permanently active, which reads as
+	// constant micro-jitter.
+	const float quantStep =
+		(2.0f * m_cfg.worldExtent) /
+		static_cast<float>((1u << std::min(m_cfg.positionBits, 30)) - 1u);
+	if (dist <= quantStep * 3.0f)
+	{
+		// Prediction was right, which is the common case on a healthy link.
+		tc->dirty = true;
+		return;
+	}
+
+	++m_stats.reconciliations;
+
+	if (dist > m_cfg.reconcileSnapDistance)
+	{
+		// Too far to hide. Easing a large error looks like sliding on ice, and
+		// lasts long enough that the player acts on a position that is wrong.
+		m_positionError = glm::vec3(0.0f);
+		++m_stats.hardSnaps;
+	}
+	else
+	{
+		// Small error: stay visually where we were and ease toward the truth, so
+		// a minor misprediction is not a visible jolt. The offset is added back
+		// onto the corrected position right here — otherwise the entity would
+		// jump to the server's answer this frame and the smoothing would have
+		// nothing left to hide.
+		m_positionError = error;
+		tc->position += m_positionError;
+	}
+	tc->dirty = true;
+}
+
+void GameReplication::applySmoothing(float dt)
+{
+	if (m_controlled == entt::null) return;
+	if (glm::dot(m_positionError, m_positionError) < 1e-10f) return;
+	if (!m_world) return;
+
+	auto& reg = m_world->registry();
+	if (!reg.valid(m_controlled)) return;
+	auto* tc = reg.try_get<TransformComponent>(m_controlled);
+	if (!tc) return;
+
+	// Exponential decay, framerate-independent. Subtract exactly the amount the
+	// offset shrank by, so the entity converges on the authoritative position
+	// without the two ever fighting each other.
+	const float k = std::exp(-m_cfg.reconcileSmoothing * dt);
+	const glm::vec3 before = m_positionError;
+	m_positionError *= k;
+	tc->position -= (before - m_positionError);
+	tc->dirty = true;
+}
+
 void GameReplication::advanceInterpolation(float dt)
 {
 	auto& reg = m_world->registry();
@@ -216,6 +440,10 @@ void GameReplication::advanceInterpolation(float dt)
 
 	for (auto& [netId, st] : m_interp)
 	{
+		// The controlled entity is predicted; interpolating it too would fight
+		// the prediction and rubber-band visibly.
+		if (netId == m_controlledNetId) continue;
+
 		const auto it = m_byNetId.find(netId);
 		if (it == m_byNetId.end() || !reg.valid(it->second)) continue;
 

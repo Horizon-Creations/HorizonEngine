@@ -156,7 +156,7 @@ any zero-pad in the payload's final byte.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
 - **N6** ✅ — **live deltas**: transforms, all other components, authored assets, and structural changes (create/destroy/reparent) replicate, with lock-derived authority.
-- **N4a** ◐ — gameplay replication: `NetworkComponent`, server-authoritative snapshots at a fixed tick, quantized transforms, interest management and client-side interpolation. Prediction/reconciliation still missing — see below.
+- **N4a** ✅ — gameplay replication: `NetworkComponent`, server-authoritative snapshots, quantized transforms, interest management, interpolation for remote entities, and prediction + reconciliation for the controlled one.
 
 ## Discovery (N2.5)
 
@@ -650,11 +650,42 @@ reliable message; forcing collab through this one would silently drop an edit.
 - **Interpolation** between the last two snapshots keeps other entities from
   visibly stepping at the tick rate on a higher-refresh display.
 
-### What is missing, and why it matters
+### Prediction and reconciliation
 
-**Client-side prediction and server reconciliation.** Without them a player's own
-character responds only after a full round trip, which feels wrong at any ping
-above ~50 ms. This is the honest foundation, not finished netcode.
+Interpolation is about smoothness; prediction is about **latency**. Only the
+second makes your own character respond on the frame you pressed the key —
+without it, every movement waits a full round trip, which feels wrong above
+~50 ms of ping and no amount of smoothing hides it.
 
-**Euler interpolation is wrong across the ±180° seam** — a quaternion path fixes
-it, and belongs with the prediction work rather than before it.
+- `pushInput` applies the command locally **immediately**, buffers it, and sends
+  it. The server acknowledges the last sequence it ran **inside the snapshot**,
+  so the client knows which of its predictions the authoritative state already
+  contains.
+- On reconcile the client adopts the server's position and **replays every
+  unacknowledged input on top**. The result is the server's truth plus exactly
+  the moves still in flight — not a rewind the player would feel.
+- A large error **snaps**; easing one reads as sliding on ice and leaves the
+  player acting on a wrong position for a visible stretch. A small one is eased.
+
+Four things this got wrong first, each caught by a test:
+
+1. **The smoothing offset fed on itself.** Comparing against the visually
+   offset position folded the offset into the next error, drifting a little
+   further every snapshot. The offset is now removed before the comparison.
+2. **The client predicted with an unclamped timestep** while the server clamped
+   it for anti-cheat, so the two ran different simulations and any long frame —
+   a hitch, a breakpoint — mispredicted. Both now apply the same bound.
+3. **The correction dead zone was narrower than the wire's quantization step**,
+   so a *perfect* prediction still counted as an error and left a smoothing
+   offset permanently active. The threshold is now derived from `positionBits`.
+4. Duplicated and out-of-order input is normal on an unreliable channel; the
+   server tracks the last sequence per connection so a replayed datagram cannot
+   move the character twice.
+
+A client may only drive the entity it was **assigned** — otherwise anyone could
+move anyone else's character by sending input for their id.
+
+### Still open
+
+**Euler interpolation is wrong across the ±180° seam.** A quaternion path fixes
+it; it affects remote entities' visual rotation only, not authority.
