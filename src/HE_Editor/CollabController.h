@@ -267,7 +267,7 @@ private:
 		std::string error;
 		// Port-mapping outcome, carried back from the same worker so the UI
 		// learns about both in one step.
-		HE::Net::IgdDevice igd;
+		HE::Net::PortMapper::MappingHandle mapping;
 		bool        portMapped = false;
 		std::string mapStatus;
 	};
@@ -299,9 +299,8 @@ private:
 	// The router we mapped through, kept so the mapping can be removed again on
 	// leave. Leaving it behind would hold a hole open in the user's firewall
 	// long after the session ended.
-	HE::Net::IgdDevice m_igd;
+	HE::Net::PortMapper::MappingHandle m_mapping;
 	bool               m_portMapped = false;
-	std::uint16_t      m_mappedPort = 0;
 	std::string        m_portMapStatus;
 	std::future<LookupResult>   m_lookupFuture;
 	std::string   m_directoryToken;      // needed to heartbeat / unregister

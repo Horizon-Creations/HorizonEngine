@@ -95,7 +95,58 @@ public:
     // used to detect CGNAT / double-NAT before publishing an endpoint.
     static bool isPrivateOrCgnat(const std::string& ip);
 
+    // ── NAT-PMP (RFC 6886) ───────────────────────────────────────────────────
+    // The other protocol routers speak for this. Where UPnP is SSDP discovery
+    // plus SOAP over HTTP, NAT-PMP is a 12-byte datagram to the default gateway
+    // on port 5351 — no discovery step, no XML.
+    //
+    // Worth having as a fallback because routers speak one or the other, not
+    // both: Apple's AirPort and Time Capsule historically offered only NAT-PMP,
+    // so a UPnP-only client reports "no router found" at a router that would
+    // have obliged immediately.
+    static PortMapResult natPmpExternalIp(const std::string& gateway, std::string& out,
+                                          int timeoutMs = 1500);
+    static PortMapResult natPmpAddMapping(const std::string& gateway,
+                                          std::uint16_t externalPort,
+                                          std::uint16_t internalPort,
+                                          std::uint32_t lifetimeSeconds,
+                                          PortMapping& out,
+                                          int timeoutMs = 1500);
+    static PortMapResult natPmpRemoveMapping(const std::string& gateway,
+                                             std::uint16_t internalPort,
+                                             int timeoutMs = 1500);
+
+    // ── One call that tries everything ───────────────────────────────────────
+    // UPnP first (broadest support), NAT-PMP second. Records which method won so
+    // the mapping can be taken down the same way it was put up.
+    struct MappingHandle
+    {
+        enum class Method : std::uint8_t { None, Upnp, NatPmp };
+        Method        method = Method::None;
+        IgdDevice     igd;        // Upnp
+        std::string   gateway;    // NatPmp
+        std::uint16_t port = 0;
+    };
+
+    static PortMapResult mapPort(std::uint16_t port, const std::string& description,
+                                 MappingHandle& outHandle, PortMapping& outInfo);
+    static void          unmapPort(const MappingHandle& handle);
+
     // ── Pure helpers, exposed for testing without a live router ──
+    static std::vector<std::uint8_t> buildNatPmpRequest(std::uint8_t opcode,
+                                                        std::uint16_t internalPort,
+                                                        std::uint16_t externalPort,
+                                                        std::uint32_t lifetimeSeconds);
+    // Return false on a malformed frame; `outResultCode` carries the router's own
+    // verdict when the frame parsed but the request was refused.
+    static bool parseNatPmpMapResponse(const std::uint8_t* data, std::size_t len,
+                                       std::uint16_t& outInternalPort,
+                                       std::uint16_t& outExternalPort,
+                                       std::uint32_t& outLifetime,
+                                       std::uint16_t& outResultCode);
+    static bool parseNatPmpAddressResponse(const std::uint8_t* data, std::size_t len,
+                                           std::string& outIp,
+                                           std::uint16_t& outResultCode);
     static std::string  buildSsdpSearch();
     static std::string  parseSsdpLocation(const std::string& ssdpResponse);
     static bool         parseDeviceDescription(const std::string& xml,

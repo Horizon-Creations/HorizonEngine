@@ -140,39 +140,37 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		// directory's reachability probe tests the mapped state rather than the
 		// unmapped one. Doing it the other way round would warn the user about a
 		// problem that was fixed a moment later.
-		HE::Net::IgdDevice igd;
-		if (HE::Net::PortMapper::discover(igd, 3000) == HE::Net::PortMapResult::Ok)
+		//
+		// mapPort walks the ladder itself: UPnP first for its broader support,
+		// NAT-PMP second because routers speak one or the other — an Apple base
+		// station answers NAT-PMP and stays silent to SSDP entirely, so a UPnP
+		// failure says nothing about whether the second attempt will work.
+		HE::Net::PortMapping mapping;
+		if (HE::Net::PortMapper::mapPort(port16, "HorizonEngine collaboration",
+		                                 r.mapping, mapping) == HE::Net::PortMapResult::Ok)
 		{
-			HE::Net::PortMapping mapping;
-			const auto rc = HE::Net::PortMapper::addMapping(
-				igd, port16, port16, "HorizonEngine collaboration", mapping);
-			if (rc == HE::Net::PortMapResult::Ok)
-			{
-				r.igd        = igd;
-				r.portMapped = true;
-				r.mapStatus  = "Router forwarded the port automatically.";
+			r.portMapped = true;
+			const bool viaPmp =
+				r.mapping.method == HE::Net::PortMapper::MappingHandle::Method::NatPmp;
+			r.mapStatus = viaPmp ? "Router forwarded the port automatically (NAT-PMP)."
+			                     : "Router forwarded the port automatically (UPnP).";
 
-				// A router can report a private or carrier-grade address as its
-				// own WAN side, which means another NAT sits above it and no
-				// mapping at this level can ever be reached.
-				if (!mapping.externalIp.empty() &&
-				    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
-				{
-					r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
-					              "(" + mapping.externalIp + ") — no port forward can be "
-					              "reached from outside. A relay would be required.";
-				}
-			}
-			else
+			// A router can report a private or carrier-grade address as its own
+			// WAN side, which means another NAT sits above it and no mapping at
+			// this level can ever be reached.
+			if (!mapping.externalIp.empty() &&
+			    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
 			{
-				r.mapStatus = "The router refused the port forward (UPnP is often "
-				              "disabled). Forward the port manually to be reachable.";
+				r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
+				              "(" + mapping.externalIp + ") — no port forward can be "
+				              "reached from outside. A relay would be required.";
 			}
 		}
 		else
 		{
-			r.mapStatus = "No UPnP-capable router found. Forward the port manually "
-			              "to be reachable from other networks.";
+			r.mapStatus = "Neither UPnP nor NAT-PMP got a port forward from your "
+			              "router (both are often disabled). Forward the port "
+			              "manually to be reachable from other networks.";
 		}
 
 		if (!HE::Net::httpsAvailable())
@@ -458,10 +456,12 @@ void CollabController::leave()
 	// Take the forward back down. Leaving it in place would hold a hole open in
 	// the user's firewall long after the session ended — the "clear it again"
 	// half that makes automatic forwarding acceptable in the first place.
-	if (m_portMapped && m_mappedPort != 0)
+	if (m_portMapped)
 	{
-		std::thread([igd = m_igd, port = m_mappedPort] {
-			HE::Net::PortMapper::removeMapping(igd, port);
+		std::thread([handle = m_mapping] {
+			// Torn down the same way it was put up — the handle remembers which
+			// protocol won.
+			HE::Net::PortMapper::unmapPort(handle);
 		}).detach();
 	}
 
@@ -502,9 +502,8 @@ void CollabController::teardown()
 	m_netIds.clear();
 	m_netIdCounter  = 0;
 	m_portMapped    = false;
-	m_mappedPort    = 0;
 	m_portMapStatus.clear();
-	m_igd = {};
+	m_mapping = {};
 	m_lastComponentHash   = 0;
 	m_lastComponentEntity = 0;
 
@@ -563,9 +562,8 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 
 		// Port-mapping outcome arrives with the registration, whether or not the
 		// directory itself succeeded.
-		m_igd           = r.igd;
+		m_mapping       = r.mapping;
 		m_portMapped    = r.portMapped;
-		m_mappedPort    = r.portMapped ? m_port : 0;
 		m_portMapStatus = r.mapStatus;
 
 		if (r.ok)

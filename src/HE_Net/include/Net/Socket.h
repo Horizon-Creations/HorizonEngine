@@ -147,4 +147,12 @@ HE_NET_API SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf,
 // Returns an empty string on failure.
 HE_NET_API std::string socketLocalAddress();
 
+// The default gateway — i.e. the router. Needed by NAT-PMP, which talks to it
+// directly instead of discovering it the way UPnP's SSDP does.
+//
+// Read from the OS routing table rather than guessed from the subnet: assuming
+// x.y.z.1 is right often enough to look correct and wrong often enough to be a
+// support nightmare. Empty when there is no default route.
+HE_NET_API std::string socketDefaultGateway();
+
 } // namespace HE::Net
