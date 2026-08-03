@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/HAsset.h>
+#include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
 #  include <lz4.h>
@@ -217,10 +218,11 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // name — so we re-emit an empty texturePaths vec + the real param names.
             size_t tailStart = o;
             std::string customShaderGlsl;
-            { float f; std::string s; uint32_t n = 0;
+            std::string nodeGraphJson; // kept: the pack-time approx fold below needs it
+            { float f; uint32_t n = 0;
               for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c.data, o, f); // baseColor3+met+rough+opacity
               HAsset::Reader::readString(c.data, o, customShaderGlsl); // customShaderFragGlsl
-              HAsset::Reader::readString(c.data, o, s);   // nodeGraphJson
+              HAsset::Reader::readString(c.data, o, nodeGraphJson);
               if (HAsset::Reader::readPOD(c.data, o, n))  // param count + floats
                   for (uint32_t i = 0; i < n && o + 4 <= c.data.size(); ++i) HAsset::Reader::readPOD(c.data, o, f);
             }
@@ -238,6 +240,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // tooltips, parentPath, overriddenParams, switchNames, switchValues,
             // blendMode, customShaderVertGlsl.
             std::string customVertBody;
+            size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
+            bool   tailReachedGBuf = false;
             {
                 size_t o2 = afterTypes;
                 std::vector<float> mm; std::vector<std::string> sv; std::vector<uint8_t> bv;
@@ -251,6 +255,13 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 HAsset::Reader::readVec(c.data, o2, bv);   // switch values
                 HAsset::Reader::readPOD(c.data, o2, bm);   // blend mode
                 HAsset::Reader::readString(c.data, o2, customVertBody);
+                // Continue to the end of customShaderGBufGlsl — the GI-hit
+                // approximation (approxBaseColor/…) sits after it and is
+                // RE-COMPUTED at pack time below.
+                std::string gbuf;
+                tailReachedGBuf = HAsset::Reader::readVec(c.data, o2, sv)     // graphLayerNames
+                               && HAsset::Reader::readString(c.data, o2, gbuf); // customShaderGBufGlsl
+                afterGBuf = o2;
             }
 
             std::vector<uint8_t> mtrl;
@@ -260,9 +271,54 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Writer::appendVec(mtrl, std::vector<std::string>{}); // graphTexturePaths dropped (baked to MTLU)
             HAsset::Writer::appendVec(mtrl, graphParamNames);            // graphParamNames kept for runtime
             HAsset::Writer::appendVec(mtrl, graphParamTypes);            // graphParamTypes kept for runtime
-            // Post-v9 tail (metadata, instance info, blend mode, WPO vertex body): copy
-            // BYTE-VERBATIM so new fields ship without the packer learning each one.
-            mtrl.insert(mtrl.end(), c.data.begin() + afterTypes, c.data.end());
+            // Post-v9 tail (metadata, instance info, blend mode, WPO vertex body,
+            // layer names, G-buffer GLSL): copy BYTE-VERBATIM so new fields ship
+            // without the packer learning each one.
+            //
+            // EXCEPTION — the GI-hit approximation (the trailing approxBaseColor/
+            // approxEmissive/slots/metallic/roughness block): the editor bakes it
+            // only when a material is RE-SAVED, so files written before the
+            // feature carry none and their packed reflections fell back to white.
+            // The packer therefore RE-FOLDS it from the node graph right here
+            // (matGraphApproxSurface — same call the editor uses) and re-emits a
+            // fresh block; stale/missing source bytes are skipped. Graph-less
+            // materials (hand-written GLSL, instances) keep their tail verbatim.
+            bool refold = false;
+            HE::MatApproxSurface ap;
+            if (tailReachedGBuf && !nodeGraphJson.empty())
+            {
+                HE::MaterialGraph g;
+                if (HE::materialGraphFromJson(nodeGraphJson, g))
+                {
+                    ap = HE::matGraphApproxSurface(g);
+                    refold = true;
+                }
+            }
+            if (refold)
+            {
+                mtrl.insert(mtrl.end(), c.data.begin() + afterTypes, c.data.begin() + afterGBuf);
+                auto slotOf = [&](const std::string& nm) -> int32_t
+                {
+                    if (nm.empty()) return -1;
+                    for (size_t i = 0; i < graphParamNames.size(); ++i)
+                        if (graphParamNames[i] == nm) return static_cast<int32_t>(i);
+                    return -1;
+                };
+                for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(mtrl, ap.baseColor[k]);
+                for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(mtrl, ap.emissive[k]);
+                HAsset::Writer::appendPOD(mtrl, slotOf(ap.baseColorParam));
+                HAsset::Writer::appendPOD(mtrl, slotOf(ap.emissiveParam));
+                HAsset::Writer::appendPOD(mtrl, ap.metallic);
+                HAsset::Writer::appendPOD(mtrl, ap.roughness);
+                // Skip the source's own approx block (40 B current, 32 B the
+                // pre-metallic revision, 0 B pre-feature) and pass any FUTURE
+                // fields after it through verbatim.
+                const size_t rem  = c.data.size() - afterGBuf;
+                const size_t skip = rem >= 40 ? 40 : (rem >= 32 ? 32 : rem);
+                mtrl.insert(mtrl.end(), c.data.begin() + afterGBuf + skip, c.data.end());
+            }
+            else
+                mtrl.insert(mtrl.end(), c.data.begin() + afterTypes, c.data.end());
             w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
 
             const HE::UUID sid = shaderPath.empty() ? HE::UUID{} : resolve(shaderPath);

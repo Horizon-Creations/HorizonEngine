@@ -934,3 +934,135 @@ TEST_CASE("Game/Simulation templates seed Sky+Weather; Empty/Tool start bare")
     checkTemplateScene(ProjectPreset::Empty,      "he_tpl_empty", false);
     checkTemplateScene(ProjectPreset::Tool,       "he_tpl_tool",  false);
 }
+
+// ─── Pack-time GI-hit approx re-fold ──────────────────────────────────────────
+// Files saved BEFORE the approx feature carry no approxBaseColor/... tail; the
+// editor only bakes it on a re-save. The packer must re-fold the values from
+// the node graph so packaged reflections keep their colours (the bug: every
+// graph material reflected white in shipped games until manually re-saved).
+
+#include <MaterialGraph/MaterialGraph.h>
+
+// Graph material .hasset in the PRE-approx MTRL layout: every field through
+// customShaderGBufGlsl, then EOF (no approx block).
+static std::vector<uint8_t> preApproxGraphMaterial(HE::UUID id, const std::string& relPath,
+                                                   const std::string& graphJson)
+{
+    std::vector<uint8_t> meta;
+    HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Material));
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, fs::path(relPath).stem().string());
+    HAsset::Writer::appendString(meta, relPath);
+
+    std::vector<uint8_t> mtrl;
+    HAsset::Writer::appendString(mtrl, std::string{});               // shaderPath
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});     // texturePaths
+    const float pbr[6] = { 1.f, 1.f, 1.f, 0.f, 0.5f, 1.f };          // baseColor+met+rough+opacity
+    for (float f : pbr) HAsset::Writer::appendPOD(mtrl, f);
+    HAsset::Writer::appendString(mtrl, std::string("void main(){}")); // customShaderFragGlsl
+    HAsset::Writer::appendString(mtrl, graphJson);                    // nodeGraphJson
+    HAsset::Writer::appendPOD(mtrl, static_cast<uint32_t>(0));        // shaderParamData count (u32 + floats — NOT appendVec)
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // graphTexturePaths
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // graphParamNames
+    HAsset::Writer::appendVec(mtrl, std::vector<uint8_t>{});          // graphParamTypes
+    HAsset::Writer::appendVec(mtrl, std::vector<float>{});            // minmax
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // groups
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // tooltips
+    HAsset::Writer::appendString(mtrl, std::string{});                // parentMaterialPath
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // overridden params
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // switch names
+    HAsset::Writer::appendVec(mtrl, std::vector<uint8_t>{});          // switch values
+    HAsset::Writer::appendPOD(mtrl, static_cast<uint8_t>(0));         // blend mode
+    HAsset::Writer::appendString(mtrl, std::string{});                // customShaderVertGlsl
+    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // graphLayerNames
+    HAsset::Writer::appendString(mtrl, std::string{});                // customShaderGBufGlsl
+    // deliberately NO approx tail — the pre-feature on-disk layout
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
+    return w.toBytes(static_cast<uint16_t>(HE::AssetType::Material));
+}
+
+TEST_CASE("Pack-time approx re-fold: pre-approx graph material gains fresh GI-hit colours")
+{
+    // Graph: ConstColor(0.1, 0.8, 0.2) → BaseColor, ConstColor(2, 0, 0) → Emissive.
+    HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+    for (auto& n : g.nodes)
+        if (n.type == HE::MatNodeType::ConstColor)
+        { n.p[0] = 0.1f; n.p[1] = 0.8f; n.p[2] = 0.2f; }
+    int outId = 0;
+    for (auto& n : g.nodes)
+        if (n.type == HE::MatNodeType::Output) { outId = n.id; break; }
+    const int em = g.addNode(HE::MatNodeType::ConstColor);
+    HE::MatGraphNode* emn = g.findNode(em);
+    REQUIRE(emn != nullptr);
+    emn->p[0] = 2.0f; emn->p[1] = 0.0f; emn->p[2] = 0.0f;
+    REQUIRE(g.connect(em, 0, outId, HE::kMatOutputEmissivePin));
+
+    const auto dir = fs::temp_directory_path() / "he_approx_refold";
+    he_test::removeAllQuiet(dir);
+    const HE::UUID id{ 0xC0FFEE, 0xC0DE };
+    writeBlob(dir / "m.hasset",
+              preApproxGraphMaterial(id, "m.hasset", HE::materialGraphToJson(g)));
+
+    HpakWriter packer;
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Store;
+    REQUIRE(packer.addDirectory(dir, s, nullptr) == 1);
+    const auto pak = (dir / "out.hpak").string();
+    REQUIRE(packer.write(pak));
+
+    HpakReader reader;
+    REQUIRE(reader.open(pak));
+    const std::vector<uint8_t> blob = reader.readEntry(id);
+    REQUIRE(!blob.empty());
+
+    // Walk the packed MTRL to the approx tail (same field order the runtime reads).
+    HAsset::Reader r;
+    REQUIRE(r.openData(blob));
+    const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+    REQUIRE(c != nullptr);
+    size_t o = 0;
+    { std::string str; std::vector<std::string> vs; std::vector<float> vf;
+      std::vector<uint8_t> vb; float f; uint8_t b8;
+      HAsset::Reader::readString(c->data, o, str);   // shaderPath (dropped → empty)
+      HAsset::Reader::readVec(c->data, o, vs);       // texturePaths
+      for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c->data, o, f); // PBR
+      HAsset::Reader::readString(c->data, o, str);   // customShaderFragGlsl
+      HAsset::Reader::readString(c->data, o, str);   // nodeGraphJson
+      { uint32_t n = 0; HAsset::Reader::readPOD(c->data, o, n); // shaderParamData (u32 count)
+        for (uint32_t i = 0; i < n; ++i) HAsset::Reader::readPOD(c->data, o, f); }
+      HAsset::Reader::readVec(c->data, o, vs);       // graphTexturePaths
+      HAsset::Reader::readVec(c->data, o, vs);       // graphParamNames
+      HAsset::Reader::readVec(c->data, o, vb);       // graphParamTypes
+      HAsset::Reader::readVec(c->data, o, vf);       // minmax
+      HAsset::Reader::readVec(c->data, o, vs);       // groups
+      HAsset::Reader::readVec(c->data, o, vs);       // tooltips
+      HAsset::Reader::readString(c->data, o, str);   // parentMaterialPath
+      HAsset::Reader::readVec(c->data, o, vs);       // overridden
+      HAsset::Reader::readVec(c->data, o, vs);       // switch names
+      HAsset::Reader::readVec(c->data, o, vb);       // switch values
+      HAsset::Reader::readPOD(c->data, o, b8);       // blend mode
+      HAsset::Reader::readString(c->data, o, str);   // customShaderVertGlsl
+      HAsset::Reader::readVec(c->data, o, vs);       // graphLayerNames
+      HAsset::Reader::readString(c->data, o, str);   // customShaderGBufGlsl
+    }
+    float bc[3] = {}, emv[3] = {}; int32_t slotB = 0, slotE = 0; float met = -1.f, rgh = -1.f;
+    for (int k = 0; k < 3; ++k) REQUIRE(HAsset::Reader::readPOD(c->data, o, bc[k]));
+    for (int k = 0; k < 3; ++k) REQUIRE(HAsset::Reader::readPOD(c->data, o, emv[k]));
+    REQUIRE(HAsset::Reader::readPOD(c->data, o, slotB));
+    REQUIRE(HAsset::Reader::readPOD(c->data, o, slotE));
+    REQUIRE(HAsset::Reader::readPOD(c->data, o, met));
+    REQUIRE(HAsset::Reader::readPOD(c->data, o, rgh));
+    CHECK(bc[0]  == doctest::Approx(0.1f)); // the fold, not the white default
+    CHECK(bc[1]  == doctest::Approx(0.8f));
+    CHECK(bc[2]  == doctest::Approx(0.2f));
+    CHECK(emv[0] == doctest::Approx(2.0f));
+    CHECK(emv[1] == doctest::Approx(0.0f));
+    CHECK(slotB == -1);
+    CHECK(slotE == -1);
+
+    he_test::removeAllQuiet(dir);
+}
