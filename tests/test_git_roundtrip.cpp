@@ -47,6 +47,20 @@ fs::path uniqueDir(const char* stem)
 	return p;
 }
 
+// A path from UTF-8 BYTES, on every platform.
+//
+// Two Windows-only traps meet here. std::filesystem::path built from a narrow
+// std::string interprets it in the active ANSI code page, not UTF-8 — so a file
+// created that way lands under a mangled name and the later lookup, done with
+// the original UTF-8 string, finds nothing. And without /utf-8 MSVC reads the
+// source file itself in the system code page, so even the literal's bytes are
+// not dependable. Going through char8_t fixes the first; spelling the bytes out
+// as escapes below fixes the second.
+fs::path utf8Path(const std::string& utf8)
+{
+	return fs::path(std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
+}
+
 void writeFile(const fs::path& p, const std::string& text)
 {
 	std::error_code ec;
@@ -159,15 +173,20 @@ TEST_CASE("A path with a space, a quote and UTF-8 round-trips through real git")
 	// The paths porcelain v1 would have escaped and quoted. Done against real
 	// git rather than a hand-built stream, so the test also proves git emits what
 	// the parser expects.
+	//
+	// The non-ASCII name is spelled as explicit UTF-8 bytes rather than as source
+	// characters, so it does not depend on how the compiler read this file:
+	// "Grüße/日本語.txt".
 	const std::string spaced = "Content/My Meshes/Big Rock.txt";
-	const std::string utf8   = "Content/Grüße/日本語.txt";
-	writeFile(repo / spaced, "a");
-	writeFile(repo / utf8,   "b");
+	const std::string utf8   = "Content/Gr\xC3\xBC\xC3\x9F" "e/"
+	                           "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E" ".txt";
+	writeFile(repo / utf8Path(spaced), "a");
+	writeFile(repo / utf8Path(utf8),   "b");
 #ifndef _WIN32
 	// Windows filenames cannot contain a quote at all, so this half only runs
 	// where the filesystem permits it.
 	const std::string quoted = "Content/weird\"name.txt";
-	writeFile(repo / quoted, "c");
+	writeFile(repo / utf8Path(quoted), "c");
 #endif
 
 	RepoStatus st;
