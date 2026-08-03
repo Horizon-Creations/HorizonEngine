@@ -17,8 +17,12 @@
   #include <sys/types.h>
   #include <unistd.h>
   #include <cerrno>
+  #include <ifaddrs.h>
+  #include <net/if.h>
+  #include <sys/ioctl.h>
   #if defined(__APPLE__) || defined(__FreeBSD__)
     #include <net/route.h>
+    #include <netinet6/in6_var.h>
     #include <sys/sysctl.h>
   #else
     #include <cstdio>
@@ -30,6 +34,8 @@
   #pragma comment(lib, "iphlpapi.lib")
 #endif
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -827,7 +833,13 @@ static std::string defaultGatewayImpl() {
 #endif
 }
 
-std::string socketGlobalIPv6Address() {
+namespace {
+
+// The address chosen for OUTBOUND traffic. Kept as the fallback, not the answer:
+// with privacy extensions enabled — the default on macOS and Windows — this is
+// the TEMPORARY address, which is exactly right for not being trackable while
+// browsing and exactly wrong for hosting, because it rotates (typically daily).
+std::string outboundIPv6Address() {
     if (!socketSystemInit()) return {};
 
 #ifdef _WIN32
@@ -839,8 +851,6 @@ std::string socketGlobalIPv6Address() {
 #endif
     const auto h = static_cast<SocketHandle>(s);
 
-    // A public IPv6 resolver. No packet is sent — connect() on a datagram socket
-    // only fixes the peer and makes the kernel choose a source address.
     sockaddr_in6 probe{};
     probe.sin6_family = AF_INET6;
     probe.sin6_port   = htons(53);
@@ -853,7 +863,7 @@ std::string socketGlobalIPv6Address() {
     const int rc = ::connect(static_cast<int>(h),
                              reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
 #endif
-    if (rc != 0) { socketClose(h); return {}; }   // no IPv6 route at all
+    if (rc != 0) { socketClose(h); return {}; }
 
     sockaddr_in6 local{};
 #ifdef _WIN32
@@ -867,19 +877,156 @@ std::string socketGlobalIPv6Address() {
 #endif
     socketClose(h);
     if (!ok) return {};
-
-    // Only a global unicast address counts (2000::/3). A link-local (fe80::) or
-    // unique-local (fc00::/7) source cannot be reached from the internet, and
-    // reporting one would make the caller believe hosting is possible when it is
-    // not.
-    const std::uint8_t first = local.sin6_addr.s6_addr[0];
-    if ((first & 0xE0) != 0x20) return {};
+    if ((local.sin6_addr.s6_addr[0] & 0xE0) != 0x20) return {};
 
     char buf[INET6_ADDRSTRLEN] = {};
     if (!::inet_ntop(AF_INET6, &local.sin6_addr, buf, sizeof(buf))) return {};
-
-    HE_LOG_DEBUG(Net, "Global IPv6 address: %s", buf);
     return buf;
+}
+
+// A STABLE global address, or empty. Enumerates the interfaces rather than
+// asking which address would be used outbound, because those are different
+// questions with different answers.
+std::string stableIPv6Address() {
+#if defined(_WIN32)
+    ULONG size = 16 * 1024;
+    std::vector<std::uint8_t> buffer(size);
+    ULONG rc = ::GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                                GAA_FLAG_SKIP_DNS_SERVER,
+                                      nullptr,
+                                      reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+    if (rc == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size);
+        rc = ::GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                              GAA_FLAG_SKIP_DNS_SERVER,
+                                    nullptr,
+                                    reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()), &size);
+    }
+    if (rc != NO_ERROR) return {};
+
+    for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET6) continue;
+            // IpSuffixOriginRandom is the privacy/temporary address; skip it, and
+            // skip anything not fully usable yet.
+            if (u->SuffixOrigin == IpSuffixOriginRandom) continue;
+            if (u->DadState != IpDadStatePreferred) continue;
+
+            const auto* sa = reinterpret_cast<sockaddr_in6*>(u->Address.lpSockaddr);
+            if ((sa->sin6_addr.u.Byte[0] & 0xE0) != 0x20) continue;   // global unicast only
+            char text[INET6_ADDRSTRLEN] = {};
+            if (::inet_ntop(AF_INET6, &sa->sin6_addr, text, sizeof(text))) return text;
+        }
+    }
+    return {};
+
+#elif defined(__APPLE__) || defined(__linux__)
+    ifaddrs* list = nullptr;
+    if (::getifaddrs(&list) != 0 || !list) return {};
+
+    std::string found;
+  #if defined(__linux__)
+    // Linux does not expose the flags through getifaddrs, but /proc lists them.
+    // IFA_F_TEMPORARY shares its value with IFA_F_SECONDARY (0x01), and
+    // IFA_F_DEPRECATED is 0x20 — an address on its way out is no better than a
+    // temporary one for a published endpoint.
+    std::vector<std::string> skip;
+    if (std::FILE* f = std::fopen("/proc/net/if_inet6", "r")) {
+        char hex[64], name[64];
+        unsigned idx = 0, plen = 0, scope = 0, flags = 0;
+        while (std::fscanf(f, "%63s %x %x %x %x %63s", hex, &idx, &plen, &scope, &flags, name) == 6) {
+            if ((flags & 0x01) == 0 && (flags & 0x20) == 0) continue;
+            // Re-assemble the 32 hex digits into a printable address so it can be
+            // matched against what getifaddrs reports.
+            if (std::strlen(hex) != 32) continue;
+            std::uint8_t raw[16];
+            for (int b = 0; b < 16; ++b) {
+                const auto hexVal = [](char c) {
+                    return c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
+                };
+                raw[b] = static_cast<std::uint8_t>(hexVal(hex[b * 2]) * 16 + hexVal(hex[b * 2 + 1]));
+            }
+            char text[INET6_ADDRSTRLEN] = {};
+            if (::inet_ntop(AF_INET6, raw, text, sizeof(text))) skip.emplace_back(text);
+        }
+        std::fclose(f);
+    }
+  #endif
+
+    for (ifaddrs* ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET6) continue;
+        if (!(ifa->ifa_flags & IFF_UP) || (ifa->ifa_flags & IFF_LOOPBACK)) continue;
+
+        const auto* sa = reinterpret_cast<sockaddr_in6*>(ifa->ifa_addr);
+        if ((sa->sin6_addr.s6_addr[0] & 0xE0) != 0x20) continue;   // global unicast only
+
+        char text[INET6_ADDRSTRLEN] = {};
+        if (!::inet_ntop(AF_INET6, &sa->sin6_addr, text, sizeof(text))) continue;
+
+  #if defined(__APPLE__)
+        // macOS reports the per-address flags through an ioctl rather than in
+        // ifaddrs. IN6_IFF_TEMPORARY is the privacy address; IN6_IFF_DEPRECATED
+        // is one that still works but is being retired.
+        {
+            in6_ifreq req{};
+            std::snprintf(req.ifr_name, sizeof(req.ifr_name), "%s", ifa->ifa_name);
+            std::memcpy(&req.ifr_ifru.ifru_addr, sa, sizeof(sockaddr_in6));
+            const int probeSock = ::socket(AF_INET6, SOCK_DGRAM, 0);
+            if (probeSock >= 0) {
+                const bool got = ::ioctl(probeSock, SIOCGIFAFLAG_IN6, &req) == 0;
+                ::close(probeSock);
+                if (got) {
+                    const int flags = req.ifr_ifru.ifru_flags6;
+                    if (flags & (IN6_IFF_TEMPORARY | IN6_IFF_DEPRECATED |
+                                 IN6_IFF_TENTATIVE | IN6_IFF_DUPLICATED))
+                        continue;
+                }
+            }
+        }
+  #elif defined(__linux__)
+        if (std::find(skip.begin(), skip.end(), std::string(text)) != skip.end()) continue;
+  #endif
+
+        found = text;
+        break;
+    }
+
+    ::freeifaddrs(list);
+    return found;
+#else
+    return {};
+#endif
+}
+
+} // namespace
+
+std::string socketGlobalIPv6Address() {
+    // Stable first. Hosting publishes this address and may ask the router to
+    // open a firewall pinhole for it, and both outlive a privacy address's
+    // rotation — which is typically daily and would leave a published endpoint
+    // pointing at an address the machine no longer holds.
+    //
+    // Safe to advertise even though the machine prefers a temporary address for
+    // its own outbound traffic: source-address selection is an OUTBOUND rule.
+    // A listener bound to :: accepts on every configured address, and an
+    // accepted connection replies from whichever one the peer dialled. Verified
+    // by connecting to both addresses of a dual-address host — each was accepted
+    // and each reply came back from the address that was used.
+    if (const std::string stable = stableIPv6Address(); !stable.empty()) {
+        HE_LOG_DEBUG(Net, "Global IPv6 address (stable): %s", stable.c_str());
+        return stable;
+    }
+
+    // No stable address found — either the platform cannot report the flags or
+    // this machine genuinely has only a temporary one. Better a rotating address
+    // than none, since it works for the length of a session.
+    const std::string outbound = outboundIPv6Address();
+    if (!outbound.empty()) {
+        HE_LOG_DEBUG(Net, "Global IPv6 address (no stable one found, using %s)",
+                     outbound.c_str());
+    }
+    return outbound;
 }
 
 bool socketLocalNetworkBlocked() {

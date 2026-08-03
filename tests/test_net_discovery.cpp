@@ -655,6 +655,45 @@ TEST_CASE("A PCP response is read, and anything else is rejected")
     CHECK_FALSE(HE::Net::PortMapper::parsePcpMapResponse(notAResponse.data(), notAResponse.size(), out, code));
 }
 
+TEST_CASE("The reported IPv6 address is a stable one, not a rotating privacy address")
+{
+    // Hosting publishes this address and may have the router open a firewall
+    // pinhole for it. A privacy (temporary) address rotates — typically daily —
+    // which would leave a published endpoint pointing at an address the machine
+    // no longer holds.
+    //
+    // Advertising it is safe even though the machine prefers a temporary address
+    // for its own outbound traffic: source-address selection is an OUTBOUND
+    // rule. A listener bound to :: accepts on every configured address, and the
+    // reply goes back from whichever one the peer dialled.
+    const std::string v6 = HE::Net::socketGlobalIPv6Address();
+    if (v6.empty()) return;   // no IPv6 here — a valid answer
+    CAPTURE(v6);
+
+    // The address must be one this machine actually holds and accept a
+    // connection on. That is the property that matters, and it is checkable
+    // without knowing which of several addresses the platform picked.
+    HE::Net::SocketHandle listener = HE::Net::socketCreateListenerDualStack(0);
+    REQUIRE(listener != HE::Net::kInvalidSocket);
+    const std::uint16_t port = HE::Net::socketBoundPort(listener);
+    REQUIRE(port != 0);
+
+    HE::Net::SocketHandle client = HE::Net::kInvalidSocket;
+    const HE::Net::SocketResult rc = HE::Net::socketCreateTcpConnecting(v6, port, client);
+    CHECK(rc != HE::Net::SocketResult::Error);
+
+    if (client != HE::Net::kInvalidSocket)
+    {
+        // Give a pending connect a moment; on loopback it usually completes at once.
+        for (int i = 0; i < 100 && HE::Net::socketConnectPoll(client) ==
+                                       HE::Net::SocketResult::WouldBlock; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(HE::Net::socketConnectPoll(client) == HE::Net::SocketResult::Ok);
+        HE::Net::socketClose(client);
+    }
+    HE::Net::socketClose(listener);
+}
+
 TEST_CASE("An IPv6 address is only reported when it is globally routable")
 {
     // Empty is a valid answer (no IPv6 here). What must never happen is a
