@@ -255,6 +255,10 @@ public:
         float intensity    = 1.0f;   // 0…1 mix against the sky cubemap
         float maxRoughness = 0.6f;   // above this no traced reflections (smooth fade)
         float maxDistance  = 200.0f; // world-space ray length
+        // 0 = raw mirror trace; 1 = + confidence-weighted blur; 2 = + roughness-
+        // jittered cone rays with temporal accumulation and a wide second blur
+        // for the glossy roughness lerp (mirrors SSR's tier semantics).
+        int   quality      = 1;
     };
     virtual void SetGIReflectionSettings(const GIReflectionSettings& /*settings*/) {}
 

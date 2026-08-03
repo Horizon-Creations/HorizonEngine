@@ -1673,13 +1673,23 @@ using namespace raytracing;
 
 struct GIReflParams {
 	float4x4 invViewProj;   // scene inverse view-proj (world reconstruction, Metal conventions)
+	float4x4 prevViewProj;  // LAST frame's view-proj (temporal reprojection of the receiver)
 	float4 camPos;          // xyz = camera world pos, w = max ray distance
 	float4 texSize;         // xy = output size, z = max roughness, w = 1 when the probe field is valid this frame
 	float4 sunDirRadius;    // xyz = direction TOWARD the dominant light, w = indirect intensity
-	float4 sunColor;        // rgb = dominant light colour * intensity
-	float4 skyAmbient;      // rgb = flat ambient (hit-shading floor outside the probe grid)
+	float4 sunColor;        // rgb = dominant light colour * intensity, w = frame seed (glossy jitter)
+	float4 skyAmbient;      // rgb = flat ambient (hit-shading floor outside the probe grid), w = history blend (0 = temporal off)
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
+	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w unused
+};
+
+// P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
+// written CPU-side as raw gpuAddress values (macOS 13+). Vertex layout is the
+// engine's interleaved pos3+normal3+uv2 (stride 8 floats, normal at offset 3).
+struct GIMeshPtrs {
+	device const float* vtx;
+	device const uint*  idx;
 };
 
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
@@ -1701,6 +1711,24 @@ static float2 octEncodeR(float3 n)
 	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
 	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
 	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// Per-pixel/per-frame hash + cone sample for the quality-2 glossy jitter —
+// same constructions as the GI shadow kernel (giHash2/giConeSample copies).
+static float2 giHash2R(uint2 gid, float seed)
+{
+	float2 p = float2(gid) + seed * 13.37;
+	return float2(fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453),
+	              fract(sin(dot(p, float2(39.3468, 11.1352))) * 24634.6345));
+}
+static float3 giConeSampleR(float3 L, float angleRad, float2 xi)
+{
+	float3 up = (abs(L.y) < 0.99) ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+	float3 T  = normalize(cross(up, L));
+	float3 B  = cross(L, T);
+	float  r   = sin(angleRad) * sqrt(xi.x);
+	float  phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
 }
 
 // Irradiance field at the hit point — the same trilinear 8-probe lookup the
@@ -1744,13 +1772,19 @@ static float3 giReflField(texture2d<float, access::read> irradiance,
 }
 
 kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
-                      texture2d<float, access::sample> gbAttr  [[texture(0)]],
-                      texture2d<float, access::sample> gbDepth [[texture(1)]],
-                      texture2d<float, access::write>  outRefl [[texture(2)]],
-                      texture2d<float, access::read>   giIrr   [[texture(3)]],
-                      instance_acceleration_structure  accel   [[buffer(0)]],
-                      const device float4* instanceColors      [[buffer(1)]],
-                      constant GIReflParams& P                  [[buffer(2)]])
+                      texture2d<float, access::sample> gbAttr    [[texture(0)]],
+                      texture2d<float, access::sample> gbDepth   [[texture(1)]],
+                      texture2d<float, access::write>  outRefl   [[texture(2)]],
+                      texture2d<float, access::read>   giIrr     [[texture(3)]],
+                      texture2d<float, access::read>   histRad   [[texture(4)]],
+                      texture2d<float, access::read>   histPos   [[texture(5)]],
+                      texture2d<float, access::write>  outHistRad [[texture(6)]],
+                      texture2d<float, access::write>  outHistPos [[texture(7)]],
+                      instance_acceleration_structure  accel     [[buffer(0)]],
+                      const device float4* instanceColors        [[buffer(1)]],
+                      constant GIReflParams& P                    [[buffer(2)]],
+                      const device GIMeshPtrs* meshes             [[buffer(3)]],
+                      const device uint* instanceMesh             [[buffer(4)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -1758,13 +1792,18 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
 	const float2 uv = (float2(gid) + 0.5) / P.texSize.xy;
 	const float d = gbDepth.sample(smp, uv).r;
-	if (d >= 1.0) { outRefl.write(float4(0.0), gid); return; } // background
 	const float4 g1 = gbAttr.sample(smp, uv);
 	const float rough = clamp(g1.b, 0.0, 1.0);
 	// Same fade window as the SSR trace (cfg.z*0.7 → cfg.z), so both
 	// reflection sources agree on which surfaces reflect at all.
 	const float roughFade = 1.0 - smoothstep(P.texSize.z * 0.7, P.texSize.z, rough);
-	if (roughFade <= 0.0) { outRefl.write(float4(0.0), gid); return; }
+	if (d >= 1.0 || roughFade <= 0.0) // background / above the roughness cutoff
+	{
+		outRefl.write(float4(0.0), gid);
+		outHistRad.write(float4(0.0), gid);
+		outHistPos.write(float4(0.0), gid); // w = 0 → never accepted as history
+		return;
+	}
 	// World position: Metal conventions hardcoded (top-left uv origin → NDC y
 	// negated; stored NDC depth used as-is) — matches the resolve/SSR fills.
 	const float4 clip = float4(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0), d, 1.0);
@@ -1772,7 +1811,17 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	const float3 Pw = wp.xyz / max(wp.w, 1e-8);
 	const float3 N = octDecodeR(g1.rg * 2.0 - 1.0);
 	const float3 V = normalize(Pw - P.camPos.xyz);
-	const float3 R = reflect(V, N);
+	float3 R = reflect(V, N);
+	// Quality 2: jitter the ray inside a roughness-scaled cone (GGX-lobe-ish
+	// width) — the temporal accumulation below turns the per-frame samples
+	// into a real glossy reflection instead of the lower tiers' blur-only
+	// approximation. Kept deterministic (no jitter) below quality 2.
+	if (P.extra.x > 0.5 && rough > 0.03)
+	{
+		const float3 jit = giConeSampleR(R, min(0.30, rough * rough * 1.2),
+		                                 giHash2R(gid, P.sunColor.w));
+		if (dot(jit, N) > 0.0) R = jit; // keep the sample above the surface
+	}
 
 	ray r;
 	r.origin       = Pw + N * 0.05;
@@ -1783,54 +1832,110 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	intersection_query<triangle_data, instancing> q;
 	q.reset(r, accel, params);
 	q.next();
-	if (q.get_committed_intersection_type() == intersection_type::none)
+
+	// Miss → confidence 0: the composite keeps the sky cubemap, which is
+	// exactly the right reflection for a ray that leaves the scene.
+	float4 sampleOut = float4(0.0);
+	if (q.get_committed_intersection_type() != intersection_type::none)
 	{
-		// Miss → confidence 0: the composite keeps the sky cubemap, which is
-		// exactly the right reflection for a ray that leaves the scene.
-		outRefl.write(float4(0.0), gid);
-		return;
+		const uint   instId = q.get_committed_instance_id();
+		const float3 albedo = instanceColors[instId].rgb;
+		const float  dist   = q.get_committed_distance();
+		const float3 hitPos = r.origin + R * dist;
+
+		// Hit normal: true interpolated vertex normal through the mesh-pointer
+		// argument buffer when available (P4); -rayDir fallback otherwise
+		// (same approximation the probe kernel documents).
+		float3 hitN = -R;
+		if (P.extra.y > 0.5)
+		{
+			const GIMeshPtrs m = meshes[instanceMesh[instId]];
+			const uint prim = q.get_committed_primitive_id();
+			const float2 bc = q.get_committed_triangle_barycentric_coord();
+			const uint i0 = m.idx[prim * 3 + 0];
+			const uint i1 = m.idx[prim * 3 + 1];
+			const uint i2 = m.idx[prim * 3 + 2];
+			const float3 n0 = float3(m.vtx[i0 * 8 + 3], m.vtx[i0 * 8 + 4], m.vtx[i0 * 8 + 5]);
+			const float3 n1 = float3(m.vtx[i1 * 8 + 3], m.vtx[i1 * 8 + 4], m.vtx[i1 * 8 + 5]);
+			const float3 n2 = float3(m.vtx[i2 * 8 + 3], m.vtx[i2 * 8 + 4], m.vtx[i2 * 8 + 5]);
+			const float3 nObj = n0 * (1.0 - bc.x - bc.y) + n1 * bc.x + n2 * bc.y;
+			// Object → world with the committed instance transform's linear
+			// part (columns 0-2 of the float4x3). Plain multiply, not the
+			// inverse-transpose — fine for the engine's (near-)uniform scales.
+			const float4x3 o2w = q.get_committed_object_to_world_transform();
+			const float3x3 nm = float3x3(o2w[0], o2w[1], o2w[2]);
+			const float3 nW = nm * nObj;
+			if (dot(nW, nW) > 1e-12)
+			{
+				hitN = normalize(nW);
+				if (dot(hitN, R) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
+			}
+		}
+
+		// Direct sun at the hit: one hard occlusion ray.
+		float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+		if (ndl > 0.0)
+		{
+			ray sr;
+			sr.origin       = hitPos + hitN * 0.05;
+			sr.direction    = P.sunDirRadius.xyz;
+			sr.min_distance = 0.02;
+			sr.max_distance = 10000.0;
+			intersection_params sp2;
+			sp2.accept_any_intersection(true);
+			intersection_query<triangle_data, instancing> sq;
+			sq.reset(sr, accel, sp2);
+			sq.next();
+			if (sq.get_committed_intersection_type() != intersection_type::none)
+				ndl = 0.0;
+		}
+		float3 radiance = albedo * P.sunColor.rgb * ndl;
+		// Indirect at the hit from the DDGI field — scaled by the same indirect
+		// intensity heLitP applies, so the reflected image of a surface matches
+		// how that surface is actually shaded. Outside the grid (or with GI
+		// probes off) a flat ambient floor keeps reflections from going black.
+		float  fieldW = 0.0;
+		float3 field  = float3(0.0);
+		if (P.texSize.w > 0.5)
+			field = giReflField(giIrr, P, hitPos, hitN, fieldW);
+		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
+		else               radiance += albedo * P.skyAmbient.rgb;
+
+		// Confidence mirrors the SSR trace's fades: roughness cutoff + a mild
+		// distance falloff toward the cubemap so the ray-length cap has no seam.
+		const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
+		sampleOut = float4(radiance, conf);
 	}
 
-	const uint   instId = q.get_committed_instance_id();
-	const float3 albedo = instanceColors[instId].rgb;
-	const float  dist   = q.get_committed_distance();
-	const float3 hitPos = r.origin + R * dist;
-	const float3 hitN   = -R; // v1 approximation, same as the probe kernel
-
-	// Direct sun at the hit: one hard occlusion ray (no cone jitter — this
-	// output is deterministic per pixel, so it needs no temporal pass).
-	float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
-	if (ndl > 0.0)
+	// Temporal accumulation (quality 2, gated by skyAmbient.w): reproject the
+	// RECEIVER point into last frame's history and EMA-blend when the stored
+	// world position matches (disocclusion reject, same scheme as the GI
+	// shadow temporal). Reflected-object parallax is deliberately not
+	// reprojected — mild ghosting of the reflection CONTENT under camera
+	// motion is the accepted v1 trade (no motion vectors in the engine).
+	float4 resultOut = sampleOut;
+	const float h = P.skyAmbient.w;
+	if (h > 0.0)
 	{
-		ray sr;
-		sr.origin       = hitPos + hitN * 0.05;
-		sr.direction    = P.sunDirRadius.xyz;
-		sr.min_distance = 0.02;
-		sr.max_distance = 10000.0;
-		intersection_params sp2;
-		sp2.accept_any_intersection(true);
-		intersection_query<triangle_data, instancing> sq;
-		sq.reset(sr, accel, sp2);
-		sq.next();
-		if (sq.get_committed_intersection_type() != intersection_type::none)
-			ndl = 0.0;
+		const float4 pc = P.prevViewProj * float4(Pw, 1.0);
+		if (pc.w > 1e-4)
+		{
+			const float2 ndcP = pc.xy / pc.w;
+			const float2 puv  = float2(ndcP.x * 0.5 + 0.5, 0.5 - ndcP.y * 0.5);
+			if (all(puv >= 0.0) && all(puv <= 1.0))
+			{
+				const uint2 pcoord = uint2(clamp(puv * P.texSize.xy,
+				                                 0.0, P.texSize.xy - 1.0));
+				const float4 hp  = histPos.read(pcoord);
+				const float  tol = max(0.05 * length(Pw - P.camPos.xyz), 0.1);
+				if (hp.w > 0.5 && length(hp.xyz - Pw) < tol)
+					resultOut = mix(sampleOut, histRad.read(pcoord), h);
+			}
+		}
 	}
-	float3 radiance = albedo * P.sunColor.rgb * ndl;
-	// Indirect at the hit from the DDGI field — scaled by the same indirect
-	// intensity heLitP applies, so the reflected image of a surface matches
-	// how that surface is actually shaded. Outside the grid (or with GI
-	// probes off) a flat ambient floor keeps reflections from going black.
-	float  fieldW = 0.0;
-	float3 field  = float3(0.0);
-	if (P.texSize.w > 0.5)
-		field = giReflField(giIrr, P, hitPos, hitN, fieldW);
-	if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
-	else               radiance += albedo * P.skyAmbient.rgb;
-
-	// Confidence mirrors the SSR trace's fades: roughness cutoff + a mild
-	// distance falloff toward the cubemap so the ray-length cap has no seam.
-	const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
-	outRefl.write(float4(radiance, conf), gid);
+	outRefl.write(resultOut, gid);
+	outHistRad.write(resultOut, gid);
+	outHistPos.write(float4(Pw, 1.0), gid);
 }
 )MSL";
 
@@ -2192,6 +2297,242 @@ kernel void giProbeUpdateSw(uint2 texel   [[thread_position_in_threadgroup]],
 	const float visDelta = abs(dist - oldVis.x) / max(P.gridOrigin.w, 1.0);
 	const float hVis = mix(baseH, 0.3, clamp(visDelta, 0.0, 1.0));
 	visibility.write(float4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0), outCoord);
+}
+
+// ── Ray-traced GI reflections, SOFTWARE variant (gi-reflections-plan P5) ─────
+// Mirrors the HW giReflRay kernel (kGIReflMSL) against the CPU-built BVH; the
+// hit normal is the triangle's GEOMETRIC normal (the SW BVH stores full
+// vertices, so it is free) instead of the HW path's interpolated vertex
+// normal — flat-shaded reflections, still far better than -rayDir.
+struct GIReflParams {
+	float4x4 invViewProj;
+	float4x4 prevViewProj;
+	float4 camPos;          // xyz = camera world pos, w = max ray distance
+	float4 texSize;         // xy = output size, z = max roughness, w = field valid
+	float4 sunDirRadius;    // xyz = toward light, w = indirect intensity
+	float4 sunColor;        // rgb = colour * intensity, w = frame seed
+	float4 skyAmbient;      // rgb = ambient floor, w = history blend
+	float4 gridOrigin;
+	float4 gridCounts;
+	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count
+};
+
+// Closest hit that also reports WHICH triangle was hit (global index into the
+// concatenated tri buffer) — the reflection kernel needs it for the normal.
+static bool giBlasHitTri(const device GiNode* nodes, const device GiTri* tris,
+                         int nodeOfs, int triOfs, float3 o, float3 d,
+                         float tMin, float tMax, thread float& tOut, thread int& triOut)
+{
+	tOut = tMax;
+	triOut = -1;
+	const float3 invD = 1.0 / d;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = nodeOfs;
+	bool hit = false;
+	float best = tMax;
+	while (sp > 0)
+	{
+		GiNode n = nodes[stack[--sp]];
+		const float3 t0 = (n.d0.xyz - o) * invD;
+		const float3 t1 = (n.d1.xyz - o) * invD;
+		const float3 lo = min(t0, t1);
+		const float3 hi = max(t0, t1);
+		const float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+		const float tF = min(min(hi.x, hi.y), min(hi.z, best));
+		if (tN > tF) continue;
+		const int leftFirst = as_type<int>(n.d0.w);
+		const int triCount  = as_type<int>(n.d1.w);
+		if (triCount > 0)
+		{
+			for (int i = 0; i < triCount; ++i)
+			{
+				float t;
+				if (giTriHit(tris[triOfs + leftFirst + i], o, d, tMin, best, t))
+				{
+					hit = true; best = t; tOut = t;
+					triOut = triOfs + leftFirst + i;
+				}
+			}
+		}
+		else if (sp + 2 <= 64)
+		{
+			stack[sp++] = nodeOfs + leftFirst;
+			stack[sp++] = nodeOfs + leftFirst + 1;
+		}
+	}
+	return hit;
+}
+
+static int giSceneClosestHitTri(const device GiNode* nodes, const device GiTri* tris,
+                                const device GiInst* insts, int instCount,
+                                float3 o, float3 d, float tMin, float tMax,
+                                thread float& tOut, thread int& triOut)
+{
+	int   bestInst = -1;
+	float best     = tMax;
+	triOut = -1;
+	for (int i = 0; i < instCount; ++i)
+	{
+		const float3 oL = (insts[i].invTransform * float4(o, 1.0)).xyz;
+		const float3 dL = (insts[i].invTransform * float4(d, 0.0)).xyz;
+		float t;
+		int tri;
+		if (giBlasHitTri(nodes, tris, insts[i].offsets.x, insts[i].offsets.y,
+		                 oL, dL, tMin, best, t, tri))
+		{
+			best = t; bestInst = i; triOut = tri;
+		}
+	}
+	tOut = best;
+	return bestInst;
+}
+
+// Field lookup with the accumulated weight exposed (out-of-grid detection) —
+// the read-only twin of giSampleFieldIrradiance above.
+static float3 giReflFieldSw(texture2d<float, access::read> irradiance,
+                            constant GIReflParams& P, float3 pos, float3 n,
+                            thread float& outW)
+{
+	outW = 0.0;
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const float spacing = max(P.gridOrigin.w, 1e-4);
+	const float3 gridSpace = (pos - P.gridOrigin.xyz) / spacing;
+	const float3 base  = floor(gridSpace);
+	const float3 fracP = gridSpace - base;
+	const float2 oct = octEncodeP(n) * 0.5 + 0.5;
+	const uint2 octTexel = uint2(clamp(oct * float(kGIProbeOctSize),
+	                                   0.0, float(kGIProbeOctSize) - 1.0));
+	float3 sum = float3(0.0);
+	float  sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		const float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		const float3 cell = base + offs;
+		if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		const float3 tri = mix(1.0 - fracP, fracP, offs);
+		const float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		const int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		const uint2 tile = uint2(uint((probeIndex % probesPerRow) * kGIProbeOctSize),
+		                         uint((probeIndex / probesPerRow) * kGIProbeOctSize));
+		sum  += irradiance.read(tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	outW = sumW;
+	return sum / max(sumW, 1e-4);
+}
+
+kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
+                        texture2d<float, access::sample> gbAttr    [[texture(0)]],
+                        texture2d<float, access::sample> gbDepth   [[texture(1)]],
+                        texture2d<float, access::write>  outRefl   [[texture(2)]],
+                        texture2d<float, access::read>   giIrr     [[texture(3)]],
+                        texture2d<float, access::read>   histRad   [[texture(4)]],
+                        texture2d<float, access::read>   histPos   [[texture(5)]],
+                        texture2d<float, access::write>  outHistRad [[texture(6)]],
+                        texture2d<float, access::write>  outHistPos [[texture(7)]],
+                        const device GiNode* nodes [[buffer(0)]],
+                        const device GiTri*  tris  [[buffer(1)]],
+                        const device GiInst* insts [[buffer(2)]],
+                        constant GIReflParams& P    [[buffer(3)]])
+{
+	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
+	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+	const float2 uv = (float2(gid) + 0.5) / P.texSize.xy;
+	const float d = gbDepth.sample(smp, uv).r;
+	const float4 g1 = gbAttr.sample(smp, uv);
+	const float rough = clamp(g1.b, 0.0, 1.0);
+	const float roughFade = 1.0 - smoothstep(P.texSize.z * 0.7, P.texSize.z, rough);
+	if (d >= 1.0 || roughFade <= 0.0)
+	{
+		outRefl.write(float4(0.0), gid);
+		outHistRad.write(float4(0.0), gid);
+		outHistPos.write(float4(0.0), gid);
+		return;
+	}
+	const float4 clip = float4(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0), d, 1.0);
+	const float4 wp = P.invViewProj * clip;
+	const float3 Pw = wp.xyz / max(wp.w, 1e-8);
+	const float3 N = octDecode(g1.rg * 2.0 - 1.0);
+	const float3 V = normalize(Pw - P.camPos.xyz);
+	float3 R = reflect(V, N);
+	if (P.extra.x > 0.5 && rough > 0.03)
+	{
+		const float3 jit = giConeSample(R, min(0.30, rough * rough * 1.2),
+		                                giHash2(gid, P.sunColor.w));
+		if (dot(jit, N) > 0.0) R = jit;
+	}
+
+	const int instCount = int(P.extra.z);
+	const float3 origin = Pw + N * 0.05;
+	float dist;
+	int   triIdx;
+	const int hitInst = giSceneClosestHitTri(nodes, tris, insts, instCount,
+	                                         origin, R, 0.02, max(P.camPos.w, 1.0),
+	                                         dist, triIdx);
+
+	float4 sampleOut = float4(0.0);
+	if (hitInst >= 0)
+	{
+		const float3 albedo = insts[hitInst].baseColor.rgb;
+		const float3 hitPos = origin + R * dist;
+		// Geometric triangle normal, object → world via the row-vector product
+		// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
+		float3 hitN = -R;
+		if (triIdx >= 0)
+		{
+			const GiTri tri = tris[triIdx];
+			const float3 nObj = cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz);
+			const float3 nW = (float4(nObj, 0.0) * insts[hitInst].invTransform).xyz;
+			if (dot(nW, nW) > 1e-12)
+			{
+				hitN = normalize(nW);
+				if (dot(hitN, R) > 0.0) hitN = -hitN;
+			}
+		}
+		float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+		if (ndl > 0.0 && giSceneAnyHit(nodes, tris, insts, instCount,
+		                               hitPos + hitN * 0.05, P.sunDirRadius.xyz, 0.02, 10000.0))
+			ndl = 0.0;
+		float3 radiance = albedo * P.sunColor.rgb * ndl;
+		float  fieldW = 0.0;
+		float3 field  = float3(0.0);
+		if (P.texSize.w > 0.5)
+			field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
+		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
+		else               radiance += albedo * P.skyAmbient.rgb;
+		const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
+		sampleOut = float4(radiance, conf);
+	}
+
+	// Temporal accumulation — byte-identical logic to the HW kernel.
+	float4 resultOut = sampleOut;
+	const float h = P.skyAmbient.w;
+	if (h > 0.0)
+	{
+		const float4 pc = P.prevViewProj * float4(Pw, 1.0);
+		if (pc.w > 1e-4)
+		{
+			const float2 ndcP = pc.xy / pc.w;
+			const float2 puv  = float2(ndcP.x * 0.5 + 0.5, 0.5 - ndcP.y * 0.5);
+			if (all(puv >= 0.0) && all(puv <= 1.0))
+			{
+				const uint2 pcoord = uint2(clamp(puv * P.texSize.xy,
+				                                 0.0, P.texSize.xy - 1.0));
+				const float4 hp  = histPos.read(pcoord);
+				const float  tol = max(0.05 * length(Pw - P.camPos.xyz), 0.1);
+				if (hp.w > 0.5 && length(hp.xyz - Pw) < tol)
+					resultOut = mix(sampleOut, histRad.read(pcoord), h);
+			}
+		}
+	}
+	outRefl.write(resultOut, gid);
+	outHistRad.write(resultOut, gid);
+	outHistPos.write(float4(Pw, 1.0), gid);
 }
 )MSL";
 
@@ -3824,19 +4165,22 @@ struct GIShadowParamsCPU
 	glm::vec4 extra;            // x = local light count
 };
 static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
-// Matches the MSL GIReflParams struct (kGIReflMSL, used only by EncodeGIReflections).
+// Matches the MSL GIReflParams struct (kGIReflMSL + kGISWMSL's copy, used only
+// by EncodeGIReflections — keep all three in sync).
 struct GIReflParamsCPU
 {
 	glm::mat4 invViewProj;
+	glm::mat4 prevViewProj; // LAST frame's view-proj (temporal reprojection)
 	glm::vec4 camPos;       // xyz = camera world pos, w = max ray distance
 	glm::vec4 texSize;      // xy = output size, z = max roughness, w = probe field valid
 	glm::vec4 sunDirRadius; // xyz = direction TOWARD the dominant light, w = indirect intensity
-	glm::vec4 sunColor;     // rgb = dominant light colour * intensity
-	glm::vec4 skyAmbient;   // rgb = flat ambient floor
+	glm::vec4 sunColor;     // rgb = dominant light colour * intensity, w = frame seed
+	glm::vec4 skyAmbient;   // rgb = flat ambient floor, w = history blend (0 = temporal off)
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
+	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count
 };
-static_assert(sizeof(GIReflParamsCPU) == 64 + 7 * 16, "must match the MSL GIReflParams layout");
+static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 8 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -4882,11 +5226,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
-	// GI reflections reuse the TLAS without the probe/shadow passes, so the
-	// build also runs when ONLY they are enabled (HW-RT only — the reflection
-	// kernel has no SW-BVH variant in v1, so a SW-only frame never needs it).
-	const bool wantAccel = m_giSupported
-	                    && (m_giEnabled || (m_giReflEnabled && m_giHwRt));
+	// GI reflections reuse the acceleration structures without the probe/
+	// shadow passes, so the build also runs when ONLY they are enabled
+	// (either path — the reflection kernel has HW and SW-BVH variants).
+	const bool wantAccel = m_giSupported && (m_giEnabled || m_giReflEnabled);
 	if (!wantAccel || !m_world)
 	{
 		// GI just turned off (or was never on this run): release any TLAS/instance
@@ -4895,6 +5238,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		RetireGIObject(m_giTlas);              m_giTlas               = nullptr;
 		RetireGIObject(m_giInstanceBuffer);    m_giInstanceBuffer     = nullptr;
 		RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
+		RetireGIObject(m_giMeshPtrBuf);        m_giMeshPtrBuf         = nullptr;
+		RetireGIObject(m_giInstanceMeshBuf);   m_giInstanceMeshBuf    = nullptr;
+		m_giMeshResources.clear();
 		m_giUniqueBlas.clear();
 		RetireGIObject(m_giSwNodeBuf);     m_giSwNodeBuf     = nullptr;
 		RetireGIObject(m_giSwTriBuf);      m_giSwTriBuf      = nullptr;
@@ -4926,6 +5272,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 	RetireGIObject(m_giTlas);                m_giTlas                 = nullptr;
 	RetireGIObject(m_giInstanceBuffer);      m_giInstanceBuffer       = nullptr;
 	RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer  = nullptr;
+	RetireGIObject(m_giMeshPtrBuf);          m_giMeshPtrBuf           = nullptr;
+	RetireGIObject(m_giInstanceMeshBuf);     m_giInstanceMeshBuf      = nullptr;
+	m_giMeshResources.clear();
 	m_giUniqueBlas.clear();
 	if (m_renderWorld.objects.empty()) return;
 
@@ -4947,6 +5296,10 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		// excluded — matching the existing "skinned meshes are shaded but never
 		// cast shadows" behaviour).
 		std::vector<id<MTLAccelerationStructure>> uniqueBlas;
+		// Per-unique-BLAS vertex/index buffers, same order as uniqueBlas — the
+		// reflection kernel's true-hit-normal fetch (P4) reads them through a
+		// tier-2 argument buffer of raw GPU addresses.
+		std::vector<std::pair<id<MTLBuffer>, id<MTLBuffer>>> uniqueMeshBufs;
 		std::vector<uint32_t> instanceBlasIndex;
 		std::vector<glm::mat4> instanceTransform;
 		std::vector<glm::vec4> instanceBaseColor; // for EncodeGIProbeUpdate's one-bounce tint (Checkpoint C)
@@ -4972,7 +5325,13 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			int idx = -1;
 			for (size_t u = 0; u < uniqueBlas.size(); ++u)
 				if (uniqueBlas[u] == blas) { idx = (int)u; break; }
-			if (idx < 0) { idx = (int)uniqueBlas.size(); uniqueBlas.push_back(blas); }
+			if (idx < 0)
+			{
+				idx = (int)uniqueBlas.size();
+				uniqueBlas.push_back(blas);
+				uniqueMeshBufs.emplace_back((__bridge id<MTLBuffer>)mesh.vertexBuf,
+				                            (__bridge id<MTLBuffer>)mesh.indexBuf);
+			}
 
 			instanceBlasIndex.push_back((uint32_t)idx);
 			instanceTransform.push_back(obj.transform);
@@ -5044,6 +5403,44 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		m_giUniqueBlas.reserve(uniqueBlas.size());
 		for (id<MTLAccelerationStructure> b : uniqueBlas)
 			m_giUniqueBlas.push_back((__bridge void*)b);
+
+		// P4: mesh-pointer argument buffer for the reflection kernel's true
+		// hit normals — raw gpuAddress values (tier-2 argument buffers are
+		// plain GPU VAs; guaranteed on the Apple-Silicon devices m_giHwRt
+		// implies). gpuAddress needs macOS 13; older OSes simply keep the
+		// -rayDir fallback (m_giMeshPtrBuf stays null).
+		if (@available(macOS 13.0, *))
+		{
+			struct MeshPtrGPU { uint64_t vtx; uint64_t idx; };
+			std::vector<MeshPtrGPU> ptrs;
+			ptrs.reserve(uniqueMeshBufs.size());
+			bool complete = true;
+			for (const auto& [vb, ib] : uniqueMeshBufs)
+			{
+				if (!vb || !ib) { complete = false; break; }
+				ptrs.push_back({ vb.gpuAddress, ib.gpuAddress });
+			}
+			if (complete && !ptrs.empty())
+			{
+				id<MTLBuffer> pb = [device newBufferWithBytes:ptrs.data()
+				                                       length:ptrs.size() * sizeof(MeshPtrGPU)
+				                                      options:MTLResourceStorageModeShared];
+				id<MTLBuffer> imb = [device newBufferWithBytes:instanceBlasIndex.data()
+				                                        length:instanceBlasIndex.size() * sizeof(uint32_t)
+				                                       options:MTLResourceStorageModeShared];
+				if (pb && imb)
+				{
+					m_giMeshPtrBuf      = (void*)CFBridgingRetain(pb);
+					m_giInstanceMeshBuf = (void*)CFBridgingRetain(imb);
+					m_giMeshResources.reserve(uniqueMeshBufs.size() * 2);
+					for (const auto& [vb, ib] : uniqueMeshBufs)
+					{
+						m_giMeshResources.push_back((__bridge void*)vb);
+						m_giMeshResources.push_back((__bridge void*)ib);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -9917,6 +10314,8 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			bindTex(ssrOn ? (m_ssrQuality >= 2 ? m_ssrRoughTex : m_ssrReflTex)
 			              : m_dummyTexture, 5, m_linearSampler);
 			bindTex(giReflOn ? m_giReflTex : m_dummyTexture, 6, m_linearSampler);
+			bindTex(giReflOn ? (m_giReflQuality >= 2 ? m_giReflRoughTex : m_giReflTex)
+			                 : m_dummyTexture, 7, m_linearSampler);
 			bindTex(m_skyEnvCube, 14, m_linearSampler);
 			bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15, m_linearSampler);
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -9930,18 +10329,22 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 bool MetalRenderer::EnsureGIReflPipeline()
 {
 	if (m_giReflPipeline) return true;
-	if (m_giReflPipelineTried || !m_giHwRt) return false;
+	if (m_giReflPipelineTried) return false;
 	m_giReflPipelineTried = true;
 	@autoreleasepool
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		if (!device) return false;
 		NSError* error = nil;
+		// HW = intersection_query against the TLAS (kGIReflMSL); SW = the
+		// CPU-BVH traversal variant living in kGISWMSL (P5) — same selection
+		// the GI shadow/probe pipelines make.
+		const char* src = m_giHwRt ? kGIReflMSL : kGISWMSL;
 		id<MTLLibrary> lib = [device newLibraryWithSource:
-			[NSString stringWithUTF8String:kGIReflMSL] options:nil error:&error];
+			[NSString stringWithUTF8String:src] options:nil error:&error];
 		if (lib)
 		{
-			id<MTLFunction> fn = [lib newFunctionWithName:@"giReflRay"];
+			id<MTLFunction> fn = [lib newFunctionWithName:(m_giHwRt ? @"giReflRay" : @"giReflRaySw")];
 			id<MTLComputePipelineState> pso =
 				fn ? [device newComputePipelineStateWithFunction:fn error:&error] : nil;
 			if (pso) m_giReflPipeline = (void*)CFBridgingRetain(pso);
@@ -9959,30 +10362,58 @@ void MetalRenderer::EnsureGIReflTarget(int width, int height)
 	if (m_giReflTex && width == m_giReflW && height == m_giReflH) return;
 	DestroyGIReflTarget();
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	MTLTextureDescriptor* d = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
-		width:width height:height mipmapped:NO];
-	d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; // compute-written
-	d.storageMode = MTLStorageModePrivate;
-	m_giReflTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	// Display/ping/rough are blur render targets AND compute-written; the
+	// history pairs are compute-only (read previous, write current).
+	auto makeTex = [&](bool renderTarget) -> void*
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+			width:width height:height mipmapped:NO];
+		d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite
+		        | (renderTarget ? MTLTextureUsageRenderTarget : 0);
+		d.storageMode = MTLStorageModePrivate;
+		return (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	};
+	m_giReflTex      = makeTex(true);
+	m_giReflPingTex  = makeTex(true);
+	m_giReflRoughTex = makeTex(true);
+	m_giReflHistRad[0] = makeTex(false);
+	m_giReflHistRad[1] = makeTex(false);
+	m_giReflHistPos[0] = makeTex(false);
+	m_giReflHistPos[1] = makeTex(false);
+	m_giReflHistIdx   = 0;
+	m_giReflHistValid = false; // fresh (undefined-content) textures — first frame skips the blend
 	m_giReflW = width;
 	m_giReflH = height;
 }
 
 void MetalRenderer::DestroyGIReflTarget()
 {
-	if (m_giReflTex) { CFBridgingRelease(m_giReflTex); m_giReflTex = nullptr; }
+	auto rel = [](void*& t) { if (t) { CFBridgingRelease(t); t = nullptr; } };
+	rel(m_giReflTex);
+	rel(m_giReflPingTex);
+	rel(m_giReflRoughTex);
+	rel(m_giReflHistRad[0]);
+	rel(m_giReflHistRad[1]);
+	rel(m_giReflHistPos[0]);
+	rel(m_giReflHistPos[1]);
+	m_giReflHistValid = false;
 	m_giReflW = m_giReflH = 0;
 }
 
-// Half-res compute trace into m_giReflTex. Runs after the tile G-buffer pass
-// ended (stored attachments) and before EncodeSSRPasses' composite reads the
-// result. The TLAS was built earlier this frame by EncodeGIAccelBuild (which
-// also runs for reflections-only frames) and m_renderWorld.camera is current.
+// Half-res compute trace (+ in-kernel temporal at quality 2) into m_giReflTex
+// and the history pair, then the confidence-weighted blur chain (quality ≥ 1,
+// reusing the SSR blur pipeline — same RGBA16F fullscreen pass). Runs after
+// the tile G-buffer pass ended (stored attachments) and before EncodeSSRPasses'
+// composite reads the result. The acceleration structures were built earlier
+// this frame by EncodeGIAccelBuild (which also runs for reflections-only
+// frames) and m_renderWorld.camera is current.
 void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 {
 	if (!m_giReflFrameActive || !m_giReflPipeline || !m_gbStored) return;
-	if (!m_giTlas || !m_giInstanceColorBuffer) return;
+	if (m_giHwRt ? !(m_giTlas && m_giInstanceColorBuffer)
+	             : !(m_giSwNodeBuf && m_giSwTriBuf && m_giSwInstanceBuf && m_giSwInstanceCount > 0))
+		return;
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -9994,26 +10425,39 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// actually being updated (GI on) — otherwise the atlas is stale or
 		// blank and the kernel falls back to the flat ambient floor.
 		const bool fieldValid = m_giEnabled && m_giProbeGridBuilt && m_giIrradianceAtlas;
+		// Quality 2 jitters the ray per frame; only then is the temporal EMA
+		// worth anything (lower tiers are deterministic → blend 0, but the
+		// history is still written so a mid-session quality switch just works).
+		const bool jitter   = m_giReflQuality >= 2;
+		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
+		m_giReflFrameSeed += 1.0f;
 
 		GIReflParamsCPU rp{};
 		const glm::mat4 viewProj =
 			m_renderWorld.camera.projection * m_renderWorld.camera.view;
-		rp.invViewProj = glm::inverse(viewProj);
-		rp.camPos      = glm::vec4(m_renderWorld.camera.position, m_giReflMaxDistance);
-		rp.texSize     = glm::vec4(static_cast<float>(tw), static_cast<float>(th),
-		                           m_giReflMaxRoughness, fieldValid ? 1.0f : 0.0f);
+		rp.invViewProj  = glm::inverse(viewProj);
+		rp.prevViewProj = m_giReflPrevViewProj;
+		rp.camPos       = glm::vec4(m_renderWorld.camera.position, m_giReflMaxDistance);
+		rp.texSize      = glm::vec4(static_cast<float>(tw), static_cast<float>(th),
+		                            m_giReflMaxRoughness, fieldValid ? 1.0f : 0.0f);
 		// Same dominant-directional pick as the GI shadow/probe passes — the
 		// hit must be lit by the light the scene is actually lit by.
 		glm::vec3 towardLight, lightColorIntensity;
 		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 		rp.sunDirRadius = glm::vec4(towardLight, m_giIndirectIntensity);
-		rp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
-		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
+		rp.sunColor     = glm::vec4(lightColorIntensity, m_giReflFrameSeed);
+		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient,
+		                            (jitter && m_giReflHistValid) ? 0.85f : 0.0f);
 		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
 		                            static_cast<float>(m_giGridCounts.y),
 		                            static_cast<float>(m_giGridCounts.z),
 		                            static_cast<float>(m_giProbesPerRow));
+		rp.extra        = glm::vec4(jitter ? 1.0f : 0.0f, meshData ? 1.0f : 0.0f,
+		                            static_cast<float>(m_giSwInstanceCount), 0.0f);
+
+		const int curIdx  = m_giReflHistIdx;
+		const int prevIdx = 1 - curIdx;
 
 		id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giReflPipeline];
@@ -10022,20 +10466,89 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflTex  atIndex:2];
 		[enc setTexture:(__bridge id<MTLTexture>)(fieldValid ? m_giIrradianceAtlas
 		                                                     : m_dummyTexture) atIndex:3];
-		[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
-		                atBufferIndex:0];
-		[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
-		[enc setBytes:&rp length:sizeof(rp) atIndex:2];
-		// Every BLAS the TLAS references must be explicitly declared used — Metal
-		// does not auto-track residency through an acceleration structure.
-		[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
-		for (void* b : m_giUniqueBlas)
-			[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[prevIdx] atIndex:4];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[prevIdx] atIndex:5];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[curIdx]  atIndex:6];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[curIdx]  atIndex:7];
+		if (m_giHwRt)
+		{
+			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
+			                atBufferIndex:0];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
+			[enc setBytes:&rp length:sizeof(rp) atIndex:2];
+			// The mesh-pointer argument buffer must always be bound (the
+			// pipeline declares it); a null m_giMeshPtrBuf simply keeps
+			// extra.y = 0 so the kernel never dereferences it — bind the
+			// instance-colour buffer as a harmless placeholder then.
+			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giMeshPtrBuf ? m_giMeshPtrBuf
+			                                                       : m_giInstanceColorBuffer)
+			        offset:0 atIndex:3];
+			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceMeshBuf ? m_giInstanceMeshBuf
+			                                                            : m_giInstanceColorBuffer)
+			        offset:0 atIndex:4];
+			// Every BLAS the TLAS references must be explicitly declared used — Metal
+			// does not auto-track residency through an acceleration structure. The
+			// mesh vertex/index buffers reached through the argument buffer need
+			// the same declaration (indirect access is not auto-tracked either).
+			[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+			for (void* b : m_giUniqueBlas)
+				[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+			if (meshData)
+				for (void* b : m_giMeshResources)
+					[enc useResource:(__bridge id<MTLBuffer>)b usage:MTLResourceUsageRead];
+		}
+		else
+		{
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwNodeBuf     offset:0 atIndex:0];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwTriBuf      offset:0 atIndex:1];
+			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwInstanceBuf offset:0 atIndex:2];
+			[enc setBytes:&rp length:sizeof(rp) atIndex:3];
+		}
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
 		                                    static_cast<NSUInteger>((th + 7) / 8), 1);
 		[enc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
 		[enc endEncoding];
+
+		m_giReflHistIdx      = prevIdx;
+		m_giReflHistValid    = true;
+		m_giReflPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+		// ── Blur chain (quality ≥ 1): the SSR blur pipeline verbatim — same
+		// RGBA16F fullscreen pass, confidence-weighted 5-tap. H refl→ping,
+		// V ping→refl, so the composite reads m_giReflTex either way. Quality 2
+		// adds the wide (3-texel) pass into m_giReflRoughTex for the glossy
+		// roughness lerp, exactly like SSR's High tier.
+		if (m_giReflQuality >= 1 && m_ssrBlurPipeline)
+		{
+			auto blurPass = [&](void* src, void* dst, float dx, float dy)
+			{
+				HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+				bu.dir[0] = dx;
+				bu.dir[1] = dy;
+				bu.dir[2] = 1.0f / static_cast<float>(tw);
+				bu.dir[3] = 1.0f / static_cast<float>(th);
+				MTLRenderPassDescriptor* bp = [MTLRenderPassDescriptor renderPassDescriptor];
+				bp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)dst;
+				bp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+				bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+				id<MTLRenderCommandEncoder> benc = [cmdBuf renderCommandEncoderWithDescriptor:bp];
+				[benc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrBlurPipeline];
+				[benc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+				[benc setFragmentTexture:(__bridge id<MTLTexture>)src atIndex:0];
+				[benc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+				[benc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+				[benc endEncoding];
+				++m_counters.draws;
+			};
+			blurPass(m_giReflTex, m_giReflPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+			blurPass(m_giReflPingTex, m_giReflTex, 0.0f, 1.0f / static_cast<float>(th));
+			if (m_giReflQuality >= 2)
+			{
+				blurPass(m_giReflTex, m_giReflPingTex,  3.0f / static_cast<float>(tw), 0.0f);
+				blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, 3.0f / static_cast<float>(th));
+			}
+		}
 	}
 }
 
@@ -10578,10 +11091,15 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_ssrFrameActive = deferredTile && m_ssrEnabled && EnsureSSRPipelines();
 			// Ray-traced GI reflections (gi-reflections-plan): same tile-mode
 			// requirement (stored G-buffer + composite onto the resolved HDR),
-			// plus HW RT and the TLAS EncodeGIAccelBuild built earlier this
-			// frame. Needs the SSR pipelines too — the composite is shared.
-			m_giReflFrameActive = deferredTile && m_giReflEnabled && m_giHwRt
-			                   && m_giTlas && EnsureSSRPipelines() && EnsureGIReflPipeline();
+			// plus the acceleration structures EncodeGIAccelBuild built earlier
+			// this frame (TLAS on HW RT, the CPU-BVH buffers on the SW path).
+			// Needs the SSR pipelines too — the composite is shared.
+			m_giReflFrameActive = deferredTile && m_giReflEnabled
+			                   && (m_giHwRt
+			                           ? m_giTlas != nullptr
+			                           : (m_giSwNodeBuf && m_giSwTriBuf && m_giSwInstanceBuf
+			                              && m_giSwInstanceCount > 0))
+			                   && EnsureSSRPipelines() && EnsureGIReflPipeline();
 			{
 				// One-shot diagnostic: which scene-pass mode actually runs. Logged
 				// on every CHANGE (not per frame) so a mid-session flip is visible.
@@ -11355,9 +11873,9 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// SSR v1 rides on the deferred tile mode (Apple Silicon): the reflection
 	// pass reads the stored G-buffer + the resolved HDR of the same frame.
 	c.supportsScreenSpaceReflections = m_deferredTileMode;
-	// Ray-traced GI reflections v1: same tile-mode requirement, plus hardware
-	// ray tracing (the reflection kernel has no SW-BVH variant yet).
-	c.supportsGIReflections = m_deferredTileMode && m_giHwRt;
+	// Ray-traced GI reflections: same tile-mode requirement; the SW-BVH
+	// kernel (P5) covers devices without hardware ray tracing.
+	c.supportsGIReflections = m_deferredTileMode;
 #endif
 	return c;
 }
@@ -11383,6 +11901,7 @@ void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflIntensity    = s.intensity;
 	m_giReflMaxRoughness = s.maxRoughness;
 	m_giReflMaxDistance  = s.maxDistance;
+	m_giReflQuality      = s.quality;
 }
 
 void MetalRenderer::SetGISettings(const GISettings& s)

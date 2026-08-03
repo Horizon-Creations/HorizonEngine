@@ -11,7 +11,19 @@ Stand: 2026-08-03. Basis-Audit des Ist-Zustands auf Branch `claude/gi-reflektion
 > Editor/Game-Plumbing + `HE_DUMP_GIREFL`. Bonus-Fix: GI-Instanz-Albedo löst jetzt
 > die MaterialAsset-Farbe auf (`giInstanceAlbedo`) — vorher waren TLAS-Instanzfarben
 > für Material-Objekte weiß (betraf auch den DDGI-Probe-Bounce-Tint).
-> Offen: P3 (Glossy/Temporal/Quality-Tiers), P4 (echte Hit-Normalen), P5 (SW-Fallback).
+> **Update (gleicher Tag): P3 + P4 + P5 ebenfalls implementiert und visuell verifiziert.**
+> P3: Quality-Tiers 0/1/2 (raw / +Confidence-Blur / +Cone-Jitter mit In-Kernel-Temporal
+> — History trägt Empfänger-Weltposition für Disocclusion-Reject, kamerareprojektiv —
+> + Wide-Blur für den Glossy-Roughness-Lerp im Composite, `heGIReflRough` binding 30);
+> Blur-Kette reuset die SSR-Blur-Pipeline verbatim. P4: echte interpolierte
+> Vertex-Normalen am Hit via Tier-2-Argument-Buffer aus GPU-Adressen
+> (`m_giMeshPtrBuf`, macOS 13+, useResource-Pflicht für die indirekt erreichten
+> Buffer); Fallback -rayDir bleibt. P5: `giReflRaySw` in kGISWMSL (CPU-BVH,
+> Closest-Hit mit Dreiecks-Index → geometrische Normale), Capability ohne
+> HW-RT-Zwang, `HE_GI_FORCE_SW`-verifiziert. `HE_DUMP_GIREFLQUALITY` +
+> `HE_DUMP_FRAMES` (Settle-Frames für Temporal-Konvergenz im Headless-Dump).
+> Verify-Shots: Spiegelung farb-/shading-identisch zum Direktbild (P4), Q0-scharf
+> vs. Q2-glossy bei Roughness 0.35 (P3), SW-Pfad bildgleich (P5).
 
 ## 1. Ziel & Scope
 
