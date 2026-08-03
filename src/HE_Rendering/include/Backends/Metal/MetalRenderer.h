@@ -294,6 +294,7 @@ private:
 	float m_giReflIntensity    = 1.0f;
 	float m_giReflMaxRoughness = 0.6f;
 	float m_giReflMaxDistance  = 200.0f;
+	int   m_giReflBounces      = 1;   // 1-4 mirror bounces (extra.w in the kernels)
 	int   m_giReflQuality      = 1;      // 0 raw / 1 blur / 2 glossy+temporal
 	bool  m_giReflFrameActive  = false;  // this frame traces GI reflections (tile deferred + accel built)
 	void* m_giReflPipeline     = nullptr; // id<MTLComputePipelineState> (HW or SW kernel, per m_giHwRt)

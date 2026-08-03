@@ -109,6 +109,7 @@ struct EditorConfig
 	float GIReflIntensity      = 1.0f;
 	float GIReflMaxRoughness   = 0.6f;
 	int   GIReflQuality        = 1;   // 0 raw / 1 blur / 2 glossy+temporal (SSR-style tiers)
+	int   GIReflBounces        = 1;   // 1-4 mirror bounces (reflections seen in reflections)
 
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an

@@ -191,6 +191,17 @@ Bewusste v1-Vereinfachungen (dokumentieren wie beim GI-v1-Block in `MetalRendere
   Graph-Material grau (Asset-`baseColor` = weiß, Emissive existierte gar nicht).
   Metallic bleibt offen. Emissive-Bounce ins Probe-Feld bewusst NICHT (würde die
   globale Lichtbalance ändern, nicht nur Reflektionen).
+  → **Metallic/Roughness NACHGEZOGEN + Multi-Bounce:** die Instanz-Paare packen jetzt
+  (albedo.rgb, metallic) + (emissive.rgb, roughness) — Graph-Materialien über den
+  Skalar-Fold von matGraphApproxSurface (Konstanten, kein Live-Slot), MTRL-Tail-append.
+  Beide Kernel (HW+SW) laufen eine **Bounce-Schleife** (`GIReflectionSettings.bounces`
+  1–4, `extra.w`; Editor-Slider „GI Refl Bounces", Config-Key `GIReflBounces`,
+  `HE_DUMP_GIREFLBOUNCES`): mirror-artige Treffer (metallic × low-rough) reflektieren
+  weiter, `throughput` trägt die Metall-Tönung, der Mirror-Anteil des lokalen Shadings
+  wird einbehalten (das nächste Segment liefert ihn); Sekundär-Miss sampelt die
+  Sky-Cubemap (Textur 8), Primär-Miss bleibt Confidence 0 (Composite-Fallback exakt).
+  Witness: GIREFLTEST hat jetzt einen Spiegel-Slab — sein Bild im Spiegelboden ist der
+  zweite Bounce (1 Bounce = flache Basisfarbe, ≥2 = verschachtelte Spiegelung).
   Witness: `HE_DUMP_GIREFLTEST=1` (Spiegelboden + Graph-Grün-Würfel + Emissive-Würfel).
   **Temporal-Lag-Fix (Quality 2):** History-EMA 0.85 → adaptiv — CPU-seitig auf 0.55
   gedämpft, sobald sich die View-Matrix ändert (Reflected-Content wird mangels Motion

@@ -255,6 +255,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			for (int k = 0; k < 3; ++k) HAsset::Reader::readPOD(c->data,o,a.approxEmissive[k]);
 			HAsset::Reader::readPOD(c->data,o,a.approxBaseColorSlot);
 			HAsset::Reader::readPOD(c->data,o,a.approxEmissiveSlot);
+			HAsset::Reader::readPOD(c->data,o,a.approxMetallic);
+			HAsset::Reader::readPOD(c->data,o,a.approxRoughness);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -471,6 +473,8 @@ static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g)
 		m.approxBaseColor[k] = ap.baseColor[k];
 		m.approxEmissive[k]  = ap.emissive[k];
 	}
+	m.approxMetallic  = ap.metallic;
+	m.approxRoughness = ap.roughness;
 	auto slotOf = [&](const std::string& name) -> int32_t
 	{
 		if (name.empty()) return -1;
@@ -604,6 +608,8 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		}
 		inst->approxBaseColorSlot = parent->approxBaseColorSlot;
 		inst->approxEmissiveSlot  = parent->approxEmissiveSlot;
+		inst->approxMetallic      = parent->approxMetallic;
+		inst->approxRoughness     = parent->approxRoughness;
 	}
 	// Re-apply the instance's own values on overridden slots.
 	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
@@ -1139,6 +1145,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(b,a.approxEmissive[k]);
 		HAsset::Writer::appendPOD(b,a.approxBaseColorSlot);
 		HAsset::Writer::appendPOD(b,a.approxEmissiveSlot);
+		HAsset::Writer::appendPOD(b,a.approxMetallic);
+		HAsset::Writer::appendPOD(b,a.approxRoughness);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

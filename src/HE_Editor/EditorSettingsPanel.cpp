@@ -233,6 +233,11 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
 		if (ImGui::Combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
 			cfg.GIReflQuality = grQ;
+		ImGui::SetNextItemWidth(220.0f);
+		// Mirror-like surfaces seen IN a reflection reflect onward instead of
+		// flattening to their base colour; each bounce costs one more trace
+		// on the affected pixels only.
+		ImGui::SliderInt("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

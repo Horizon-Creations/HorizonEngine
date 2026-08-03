@@ -835,6 +835,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
+	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
@@ -1428,6 +1429,7 @@ void EditorApplication::OnRender(float dt)
 			gr.intensity    = m_editorConfig.GIReflIntensity;
 			gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
 			gr.quality      = m_editorConfig.GIReflQuality;
+			gr.bounces      = m_editorConfig.GIReflBounces;
 			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
@@ -2061,8 +2063,12 @@ void EditorApplication::dumpFrameHeadless()
 		gr.intensity    = m_editorConfig.GIReflIntensity;
 		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
 		gr.quality      = m_editorConfig.GIReflQuality;
+		gr.bounces      = m_editorConfig.GIReflBounces;
 		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
 			gr.quality = std::atoi(q);
+		// HE_DUMP_GIREFLBOUNCES: bounce-count A/B (mirror seen in a mirror).
+		if (const char* bc = std::getenv("HE_DUMP_GIREFLBOUNCES"); bc && *bc)
+			gr.bounces = std::atoi(bc);
 		r->SetGIReflectionSettings(gr);
 	}
 	{
@@ -2663,6 +2669,19 @@ void EditorApplication::dumpFrameHeadless()
 		contentManager().regenerateMaterialFromGraph(glowId);
 		addCube("GIReflEmissiveCube", glowId,
 		        glm::vec3(2.5f, 1.5f, -8.0f), glm::vec3(1.5f));
+
+		// Bounce witness: an upright MIRROR SLAB behind the cubes. Its image in
+		// the mirror FLOOR is the second bounce — with bounces ≥ 2 it must show
+		// the green/emissive cubes mirrored again, with 1 bounce it flattens to
+		// the slab's base colour.
+		MaterialAsset mirror2;
+		mirror2.type = HE::AssetType::Material;
+		mirror2.name = "GIReflMirrorSlab";
+		mirror2.baseColor[0] = 0.9f; mirror2.baseColor[1] = 0.9f; mirror2.baseColor[2] = 0.9f;
+		mirror2.metallic  = 1.0f;
+		mirror2.roughness = 0.05f;
+		addCube("GIReflMirrorSlab", contentManager().registerMaterial(std::move(mirror2)),
+		        glm::vec3(0.0f, 2.5f, -11.5f), glm::vec3(7.0f, 5.0f, 0.4f));
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_GIREFLTEST witness scene added");
 	}
@@ -3968,6 +3987,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
+	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);

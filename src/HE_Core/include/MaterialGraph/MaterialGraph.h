@@ -253,6 +253,8 @@ struct MatApproxSurface
 {
     float       baseColor[3] = { 1.0f, 1.0f, 1.0f };
     float       emissive[3]  = { 0.0f, 0.0f, 0.0f };
+    float       metallic     = 0.0f;  // scalar pins fold constants only (no live slot)
+    float       roughness    = 0.5f;
     std::string baseColorParam; // non-empty = read the pin live from this param slot
     std::string emissiveParam;
 };
