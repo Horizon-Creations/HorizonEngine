@@ -39,11 +39,18 @@ namespace {
 //     NAT, where no forward at any level can be reached and the free tiers of
 //     Tailscale/ZeroTier relay the traffic for you. Naming them beats a bare
 //     "not reachable", which leaves the user with nothing to try.
+// Note what this does NOT claim: that forwarding is yours to configure. On a
+// company or university network the router belongs to someone else, and inbound
+// connections are usually blocked on purpose — so the mesh VPN is named as a
+// peer option rather than a fallback, and the local network as the one route
+// that needs nobody's permission.
 constexpr const char* kUnreachableRemedy =
-	"What you can do: forward TCP port %u to this machine in your router, or "
-	"have everyone join a mesh VPN such as Tailscale or ZeroTier (free tiers "
-	"work and need no port forward at all). Guests on this same network can "
-	"always connect directly.";
+	"What you can do: forward TCP port %u to this machine, if the router is "
+	"yours to configure — on a company or campus network it usually is not, and "
+	"inbound connections are often blocked deliberately. Otherwise have everyone "
+	"join a mesh VPN such as Tailscale or ZeroTier (free tiers work and need no "
+	"port forward at all). Guests on this same network can always connect "
+	"directly.";
 
 // The CGNAT variant deliberately omits manual forwarding: with a second NAT
 // above the router, a hand-made forward is just as unreachable as the
@@ -534,6 +541,7 @@ void CollabController::teardown()
 	m_joinCode.clear();
 	m_sessionId.clear();
 	m_localAddress.clear();
+	m_publicAddress.clear();
 	m_port          = 0;
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
@@ -614,7 +622,7 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 			m_reachable          = r.reachable;
 			m_reachabilityKnown  = true;
 			m_lastHeartbeatMs    = nowMs;
-			if (!r.publicIp.empty()) m_localAddress = r.publicIp;
+			if (!r.publicIp.empty()) m_publicAddress = r.publicIp;
 			m_directoryStatus = r.reachable
 				? "Session published — peers can join with the ID."
 				// Not an error: the entry exists, but nobody outside this network

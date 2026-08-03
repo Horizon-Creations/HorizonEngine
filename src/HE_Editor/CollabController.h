@@ -102,7 +102,15 @@ public:
 	                                              m_status == Status::Joined; }
 	const std::string& joinCode() const { return m_joinCode; }
 	const std::string& sessionId() const { return m_sessionId; }
+	// The address of THIS machine on its own network (or, when joining, the
+	// address we connected to).
 	const std::string& localAddress() const { return m_localAddress; }
+	// The address the session directory saw the registration arrive from. On any
+	// NAT that is the *router's* public side, not this machine — which is why it
+	// is kept apart from localAddress() instead of overwriting it: labelling a
+	// WAN address "local" invites the reader to conclude this machine is
+	// directly on the internet. Empty until a registration succeeds.
+	const std::string& publicAddress() const { return m_publicAddress; }
 	std::uint16_t      port() const { return m_port; }
 	const std::string& lastError() const { return m_error; }
 
@@ -301,6 +309,7 @@ private:
 	std::string   m_joinCode;
 	std::string   m_sessionId;
 	std::string   m_localAddress;
+	std::string   m_publicAddress;   // as observed by the directory (router's WAN side)
 	std::uint16_t m_port = 0;
 	std::string   m_error;
 
