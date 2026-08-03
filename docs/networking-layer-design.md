@@ -592,9 +592,34 @@ Two editors behind NAT cannot find each other unaided. The fallback ladder,
 best-first:
 
 1. **IPv6 direct** — no NAT at all, only a firewall pinhole.
-2. **UPnP / NAT-PMP** automatic port mapping (`miniupnpc` / `libnatpmp`).
+2. **UPnP automatic port mapping** — wired into hosting: the router is asked to
+   forward the port when a session opens, and the mapping is **removed again on
+   leave**, so nothing is left open in the user's firewall afterwards.
 3. **Manual port forwarding**, with the editor naming the exact port.
-4. **Relay** — later, optional.
+4. **Relay** — later, optional. NAT-PMP as a second automatic path is still open.
+
+Ordering matters here: the mapping is attempted **before** the directory
+registers, so the reachability probe tests the mapped state. Doing it the other
+way round would warn the user about a problem that had just been fixed.
+
+Mapping success and reachability are reported **separately**, because they can
+disagree: behind CGNAT a router happily accepts a forward and the host is still
+unreachable, since another NAT sits above it. The panel says which step failed,
+because that is what determines what the user can do about it.
+
+### Why an outbound connection does not open the door
+
+A common and reasonable intuition: if the host can reach the internet, surely
+someone can reach back. It does not follow. An outbound connection creates a NAT
+mapping, but on most consumer routers only for *that destination* — an unrelated
+peer connecting to the same external port is dropped. And a listening TCP socket
+sends nothing at all, so it creates no mapping in the first place.
+
+The technique that does exploit this is **hole punching**: both peers send
+outbound simultaneously via a rendezvous server, and the mappings meet in the
+middle. It works well over UDP and poorly over TCP, where simultaneous-open is
+unreliable. That is a relay/UDP-transport decision, not something the current TCP
+listener can be talked into.
 
 Honest limitation: behind **CGNAT** (common on mobile and some ISPs) there is no
 forwardable port at all, automatic or manual — only a relay helps. The editor

@@ -15,6 +15,7 @@
 // happens at all.
 
 #include <Net/CollabSession.h>
+#include <Net/PortMapper.h>
 
 #include <cstdint>
 #include <functional>
@@ -114,6 +115,13 @@ public:
 	// other networks will not get through — port forwarding or a relay is needed.
 	bool               reachable() const { return m_reachable; }
 	bool               reachabilityKnown() const { return m_reachabilityKnown; }
+
+	// Whether the router accepted an automatic port forward for this session.
+	// Reported separately from reachability because the two can disagree: a
+	// mapping can succeed and the host still be unreachable behind CGNAT, where
+	// there is no forwardable port at any level.
+	bool               portMapped() const { return m_portMapped; }
+	const std::string& portMapStatus() const { return m_portMapStatus; }
 
 	// 0..1 while a snapshot is arriving; 1 when complete.
 	float snapshotProgress() const;
@@ -257,6 +265,11 @@ private:
 		bool        reachable = false;
 		std::string token;
 		std::string error;
+		// Port-mapping outcome, carried back from the same worker so the UI
+		// learns about both in one step.
+		HE::Net::IgdDevice igd;
+		bool        portMapped = false;
+		std::string mapStatus;
 	};
 	struct LookupResult
 	{
@@ -283,6 +296,13 @@ private:
 
 	// Directory state
 	std::future<RegisterResult> m_registerFuture;
+	// The router we mapped through, kept so the mapping can be removed again on
+	// leave. Leaving it behind would hold a hole open in the user's firewall
+	// long after the session ended.
+	HE::Net::IgdDevice m_igd;
+	bool               m_portMapped = false;
+	std::uint16_t      m_mappedPort = 0;
+	std::string        m_portMapStatus;
 	std::future<LookupResult>   m_lookupFuture;
 	std::string   m_directoryToken;      // needed to heartbeat / unregister
 	std::string   m_directoryStatus;

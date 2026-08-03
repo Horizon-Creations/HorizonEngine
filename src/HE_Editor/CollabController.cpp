@@ -1,6 +1,7 @@
 #include "CollabController.h"
 
 #include <Net/HttpsClient.h>
+#include <Net/PortMapper.h>
 #include <Net/NetSession.h>
 #include <Net/SecureTransport.h>
 #include <Net/SessionDirectory.h>
@@ -131,8 +132,49 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	const std::string endpoint = directoryEndpoint();
 	const std::string sid      = m_sessionId;
 	const std::uint16_t port16 = m_port;
+	m_portMapStatus = "Asking the router to forward the port...";
 	m_registerFuture = std::async(std::launch::async, [endpoint, sid, port16, displayName] {
 		RegisterResult r;
+
+		// Ask the router to forward the port BEFORE registering, so the
+		// directory's reachability probe tests the mapped state rather than the
+		// unmapped one. Doing it the other way round would warn the user about a
+		// problem that was fixed a moment later.
+		HE::Net::IgdDevice igd;
+		if (HE::Net::PortMapper::discover(igd, 3000) == HE::Net::PortMapResult::Ok)
+		{
+			HE::Net::PortMapping mapping;
+			const auto rc = HE::Net::PortMapper::addMapping(
+				igd, port16, port16, "HorizonEngine collaboration", mapping);
+			if (rc == HE::Net::PortMapResult::Ok)
+			{
+				r.igd        = igd;
+				r.portMapped = true;
+				r.mapStatus  = "Router forwarded the port automatically.";
+
+				// A router can report a private or carrier-grade address as its
+				// own WAN side, which means another NAT sits above it and no
+				// mapping at this level can ever be reached.
+				if (!mapping.externalIp.empty() &&
+				    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
+				{
+					r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
+					              "(" + mapping.externalIp + ") — no port forward can be "
+					              "reached from outside. A relay would be required.";
+				}
+			}
+			else
+			{
+				r.mapStatus = "The router refused the port forward (UPnP is often "
+				              "disabled). Forward the port manually to be reachable.";
+			}
+		}
+		else
+		{
+			r.mapStatus = "No UPnP-capable router found. Forward the port manually "
+			              "to be reachable from other networks.";
+		}
+
 		if (!HE::Net::httpsAvailable())
 		{
 			r.error = "No HTTPS support in this build — share the address manually.";
@@ -413,6 +455,16 @@ void CollabController::wireCallbacks()
 
 void CollabController::leave()
 {
+	// Take the forward back down. Leaving it in place would hold a hole open in
+	// the user's firewall long after the session ended — the "clear it again"
+	// half that makes automatic forwarding acceptable in the first place.
+	if (m_portMapped && m_mappedPort != 0)
+	{
+		std::thread([igd = m_igd, port = m_mappedPort] {
+			HE::Net::PortMapper::removeMapping(igd, port);
+		}).detach();
+	}
+
 	// Remove the directory entry so peers stop being handed a dead endpoint.
 	// Detached because leaving must feel instant; if it fails the entry simply
 	// expires on its TTL instead.
@@ -449,6 +501,10 @@ void CollabController::teardown()
 	m_lockNotice.clear();
 	m_netIds.clear();
 	m_netIdCounter  = 0;
+	m_portMapped    = false;
+	m_mappedPort    = 0;
+	m_portMapStatus.clear();
+	m_igd = {};
 	m_lastComponentHash   = 0;
 	m_lastComponentEntity = 0;
 
@@ -504,6 +560,14 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 	    m_registerFuture.wait_for(0s) == std::future_status::ready)
 	{
 		const RegisterResult r = m_registerFuture.get();
+
+		// Port-mapping outcome arrives with the registration, whether or not the
+		// directory itself succeeded.
+		m_igd           = r.igd;
+		m_portMapped    = r.portMapped;
+		m_mappedPort    = r.portMapped ? m_port : 0;
+		m_portMapStatus = r.mapStatus;
+
 		if (r.ok)
 		{
 			m_directoryToken     = r.token;
