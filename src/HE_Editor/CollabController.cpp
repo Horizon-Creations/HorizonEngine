@@ -913,12 +913,14 @@ bool CollabController::isSyncableAsset(const std::string& relativePath)
 	std::string ext = relativePath.substr(dot);
 	for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-	// Authored data only. Meshes, textures and audio are deliberately excluded:
-	// they are large, almost never edited during a session, and belong to source
-	// control — pushing them through the session would turn it into a poor file
-	// sync (see the scope boundary in docs/networking-layer-design.md).
+	// Authored data only. Meshes, textures and audio are excluded for one reason:
+	// they are by far the largest files a project holds, and pushing them through
+	// a live session would turn it into a poor file sync (see the scope boundary
+	// in docs/networking-layer-design.md). They are not less important — they are
+	// simply too big for this channel, which is why source control carries them
+	// instead.
 	static const char* kAuthored[] = {
-		".hscene",    // scenes
+		".hescene",   // scenes — note the 'e': ProjectManager writes .hescene
 		".hcode",     // HorizonCode graphs
 		".hmat",      // materials
 		".hmatfn",    // material functions

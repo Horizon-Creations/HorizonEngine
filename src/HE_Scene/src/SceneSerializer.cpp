@@ -130,6 +130,19 @@ namespace
 		return id;
 	}
 
+	// An entity's stable identity. Every entity gets one in
+	// HorizonWorld::createEntity, so the fallback only fires for an entity built
+	// by some path that bypassed it — minting one on the spot keeps the file
+	// valid rather than writing a zero id that would later collide with every
+	// other zero id.
+	HE::UUID entityUuid(entt::registry& registry, Entity entity)
+	{
+		if (auto* c = registry.try_get<EntityIdComponent>(entity)) return c->id;
+		const HE::UUID fresh = HE::UUID::generate();
+		registry.emplace<EntityIdComponent>(entity, EntityIdComponent{ fresh });
+		return fresh;
+	}
+
 	json propValueToJson(const ScriptPropValue& v)
 	{
 		switch (v.type)
@@ -564,17 +577,28 @@ namespace
 				continue;
 
 			json eJson;
-			eJson["id"]   = static_cast<uint32_t>(entity);
+			// Identity is the entity's UUID, not its entt handle, and the hierarchy
+			// links reference UUIDs too. Writing the handle would make the file
+			// merge-hostile: handles are dense allocator indices, so two people who
+			// each add an entity on their own branch both get the same number, the
+			// added JSON blocks do not overlap textually, and git merges them into
+			// one file with two entities claiming one identity — silently
+			// re-parenting anything that referenced it. See EntityIdComponent.h.
+			eJson["uuid"] = uuidToJson(entityUuid(registry, entity));
 			eJson["name"] = registry.get<NameComponent>(entity).name;
 
 			if (auto* hier = registry.try_get<HierarchyComponent>(entity))
 			{
-				eJson["parent"] = static_cast<uint32_t>(hier->parent);
+				// JSON null for "no parent" — that is how the loader finds the root,
+				// and it is unambiguous in a way a sentinel number is not.
+				eJson["parent"] = (hier->parent == entt::null)
+					? json(nullptr)
+					: uuidToJson(entityUuid(registry, hier->parent));
 				json children = json::array();
 				for (auto child : hier->children)
 					if (!registry.all_of<EnvironmentLightComponent>(child) &&    // omit built-ins
 					    !registry.all_of<TerrainChunkComponent>(child))          // + terrain chunks
-						children.push_back(static_cast<uint32_t>(child));
+						children.push_back(uuidToJson(entityUuid(registry, child)));
 				eJson["children"] = children;
 			}
 
@@ -1150,20 +1174,65 @@ namespace
 	}
 #undef HE_NAVCFG_FIELDS
 
+	// ── Entity addressing, old format and new ────────────────────────────────
+	// Scenes written before stable ids address entities by their uint32 entt
+	// handle; scenes written since address them by UUID, and prefab blobs still
+	// use handles (a prefab is a self-contained template whose ids are already
+	// normalised to 0..n-1 by buildSubtreeJson, and it is never git-merged).
+	//
+	// Rather than duplicating all three load paths once per format, both are
+	// folded into one key: a legacy handle becomes {hi = 0, lo = handle}.
+	// HE::UUID::generate() always sets the RFC 4122 version bit in `hi`, so a
+	// real UUID can never have hi == 0 and the two spaces cannot collide.
+	HE::UUID legacyKey(uint32_t handle) { return HE::UUID{ 0, handle }; }
+
+	// The key this record is addressed by, in whichever format the file uses.
+	HE::UUID entityKeyOf(const json& eJson)
+	{
+		if (auto it = eJson.find("uuid"); it != eJson.end())
+			return jsonToUuid(*it);
+		return legacyKey(eJson.value("id", 0u));
+	}
+
+	// A reference to another entity — the "parent" field or one "children" entry.
+	// False means "no reference": JSON null in the new format, or the 0xFFFFFFFF
+	// sentinel in the old one.
+	bool entityRefOf(const json& v, HE::UUID& out)
+	{
+		constexpr uint32_t kNullHandle = 0xFFFFFFFFu; // static_cast<uint32_t>(entt::null)
+		if (v.is_null()) return false;
+		if (v.is_array())
+		{
+			out = jsonToUuid(v);
+			return out != HE::UUID{};
+		}
+		if (v.is_number_unsigned())
+		{
+			const uint32_t h = v.get<uint32_t>();
+			if (h == kNullHandle) return false;
+			out = legacyKey(h);
+			return true;
+		}
+		return false;
+	}
+
+	// Only the new format carries an identity worth restoring. Legacy records
+	// have none, so those entities keep the id minted at creation.
+	bool hasStoredUuid(const json& eJson) { return eJson.contains("uuid"); }
+
 	// ── Pass 2 of every load path: rebuild parent/child links ────────────────
 	// Shared verbatim by the full-scene, additive and prefab loads — they differ
 	// only in how pass 1 created the entities, not in how the links are restored.
 	// Entities missing from idMap (or from the registry's hierarchy) are skipped,
 	// so a partial/hand-edited scene still loads.
 	void rebuildHierarchy(entt::registry& registry, const json& scene,
-	                      const std::unordered_map<uint32_t, Entity>& idMap)
+	                      const std::unordered_map<HE::UUID, Entity>& idMap)
 	{
 		for (const auto& eJson : scene["entities"])
 		{
 			if (!eJson.contains("children")) continue;
 
-			uint32_t serialId = eJson.value("id", 0u);
-			auto it = idMap.find(serialId);
+			auto it = idMap.find(entityKeyOf(eJson));
 			if (it == idMap.end()) continue;
 
 			Entity parent = it->second;
@@ -1173,9 +1242,10 @@ namespace
 			// Clear the children list rebuilt during createEntity — restore exact order
 			pHier->children.clear();
 
-			for (const auto& childId : eJson["children"])
+			for (const auto& childRef : eJson["children"])
 			{
-				uint32_t cid = childId.get<uint32_t>();
+				HE::UUID cid;
+				if (!entityRefOf(childRef, cid)) continue;
 				auto cit = idMap.find(cid);
 				if (cit == idMap.end()) continue;
 				Entity child = cit->second;
@@ -1196,27 +1266,42 @@ namespace
 
 		if (!scene.contains("entities")) return true; // empty scene — valid
 
-		// Map serialised uint32 IDs to newly created entt entities.
-		std::unordered_map<uint32_t, Entity> idMap;
+		// Serialised key (UUID, or a folded legacy handle) → newly created entity.
+		std::unordered_map<HE::UUID, Entity> idMap;
 		auto& registry = world.registry();
 
 		// ── Pass 1: create entities, set names, apply components ─────────────
-		// The root is the entity with no parent (parent == entt::null), NOT
-		// necessarily the first entry: entt's view iterates in reverse-creation
-		// order, so the root (created first) is usually serialised LAST. Map that
-		// one to the existing root instead of creating a duplicate; mapping by
-		// position renamed the root to whatever happened to be first and shredded
-		// the hierarchy on every save/load and undo. (#root-by-parent)
-		constexpr uint32_t kNullId = 0xFFFFFFFFu; // static_cast<uint32_t>(entt::null)
+		// The root is the entity with no parent, NOT necessarily the first entry:
+		// entt's view iterates in reverse-creation order, so the root (created
+		// first) is usually serialised LAST. Map that one to the existing root
+		// instead of creating a duplicate; mapping by position renamed the root to
+		// whatever happened to be first and shredded the hierarchy on every
+		// save/load and undo. (#root-by-parent)
 		bool rootMapped = false;
 		for (auto& eJson : scene["entities"])
 		{
-			uint32_t    serialId = eJson.value("id",   0u);
-			std::string name     = eJson.value("name", "Entity");
-			uint32_t    parent   = eJson.value("parent", kNullId);
+			const HE::UUID key  = entityKeyOf(eJson);
+			std::string    name = eJson.value("name", "Entity");
+			HE::UUID       parentKey;
+			const bool     hasParent =
+				eJson.contains("parent") && entityRefOf(eJson["parent"], parentKey);
+
+			// Two records claiming one identity is what a bad merge produces. It
+			// cannot be repaired here — we do not know which one the references
+			// meant — but it must not pass silently, because the symptom otherwise
+			// shows up much later as an object parented to the wrong thing.
+			if (idMap.find(key) != idMap.end())
+			{
+				HE_LOG_ERROR(Serialize,
+				             "Scene load: two entities share one id (near '%s') — the file is "
+				             "damaged, most likely by a merge. The later one is skipped; "
+				             "hierarchy around it may be wrong.",
+				             name.c_str());
+				continue;
+			}
 
 			Entity e;
-			if (!rootMapped && parent == kNullId)
+			if (!rootMapped && !hasParent)
 			{
 				e = world.rootEntity();
 				world.renameEntity(e, name);
@@ -1225,7 +1310,12 @@ namespace
 			else
 				e = world.createEntity(name);
 
-			idMap[serialId] = e;
+			// Restore the stored identity. Legacy records have none, so those
+			// entities keep the id minted at creation and gain a stable one from
+			// the next save onward.
+			if (hasStoredUuid(eJson)) world.setEntityId(e, key);
+
+			idMap[key] = e;
 
 			if (eJson.contains("components"))
 				applyComponents(registry, e, eJson["components"]);
@@ -1252,26 +1342,26 @@ namespace
 	{
 		if (!scene.contains("entities")) return true;
 
-		std::unordered_map<uint32_t, Entity> idMap;
+		std::unordered_map<HE::UUID, Entity> idMap;
 		auto& registry = world.registry();
-		constexpr uint32_t kNullId = 0xFFFFFFFFu;
 
-		// Pass 1: create all entities fresh (no root remapping)
+		// Pass 1: create all entities fresh (no root remapping).
+		//
+		// The stored UUIDs are deliberately NOT restored here, for the same reason
+		// prefab instantiation does not restore them: an additive load grafts a
+		// copy of the scene into a world that may already contain one, and
+		// restoring would give both copies the same identities. Each graft keeps
+		// the ids minted at creation, so it is a distinct instance.
 		for (auto& eJson : scene["entities"])
 		{
-			uint32_t    serialId = eJson.value("id",   0u);
-			std::string name     = eJson.value("name", "Entity");
-			uint32_t    parent   = eJson.value("parent", kNullId);
+			const HE::UUID key  = entityKeyOf(eJson);
+			std::string    name = eJson.value("name", "Entity");
 
-			Entity e;
-			if (parent == kNullId)
-				// This was the source scene's root; create a fresh sub-root.
-				// createEntity() parents it to world.rootEntity() automatically.
-				e = world.createEntity(name);
-			else
-				e = world.createEntity(name);
+			// createEntity() parents to world.rootEntity() automatically, which is
+			// exactly what the source scene's own root needs too.
+			Entity e = world.createEntity(name);
 
-			idMap[serialId] = e;
+			idMap[key] = e;
 			if (outCreated) outCreated->push_back(e);
 
 			if (eJson.contains("components"))
@@ -1355,21 +1445,26 @@ namespace
 	{
 		if (!scene.contains("entities")) return entt::null;
 
-		constexpr uint32_t kNullId = 0xFFFFFFFFu;
-		std::unordered_map<uint32_t, Entity> idMap;
+		std::unordered_map<HE::UUID, Entity> idMap;
 		auto& registry = world.registry();
 		Entity prefabRoot = entt::null;
 
+		// A prefab is a template, so the ids minted by createEntity are kept and
+		// nothing is restored from the blob. That is what makes the same prefab
+		// inserted twice produce two entities with two identities rather than one
+		// identity claimed twice.
 		for (auto& eJson : scene["entities"])
 		{
-			uint32_t    seqId  = eJson.value("id",   0u);
-			std::string name   = eJson.value("name", "Entity");
-			uint32_t    parent = eJson.value("parent", kNullId);
+			const HE::UUID key  = entityKeyOf(eJson);
+			std::string    name = eJson.value("name", "Entity");
+			HE::UUID       parentKey;
+			const bool     hasParent =
+				eJson.contains("parent") && entityRefOf(eJson["parent"], parentKey);
 
 			Entity e = world.createEntity(name);
-			idMap[seqId] = e;
+			idMap[key] = e;
 
-			if (parent == kNullId)
+			if (!hasParent)
 				prefabRoot = e;
 
 			if (eJson.contains("components"))
