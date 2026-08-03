@@ -655,6 +655,45 @@ TEST_CASE("A PCP response is read, and anything else is rejected")
     CHECK_FALSE(HE::Net::PortMapper::parsePcpMapResponse(notAResponse.data(), notAResponse.size(), out, code));
 }
 
+TEST_CASE("The reported IPv6 address is a stable one, not a rotating privacy address")
+{
+    // Hosting publishes this address and may have the router open a firewall
+    // pinhole for it. A privacy (temporary) address rotates — typically daily —
+    // which would leave a published endpoint pointing at an address the machine
+    // no longer holds.
+    //
+    // Advertising it is safe even though the machine prefers a temporary address
+    // for its own outbound traffic: source-address selection is an OUTBOUND
+    // rule. A listener bound to :: accepts on every configured address, and the
+    // reply goes back from whichever one the peer dialled.
+    const std::string v6 = HE::Net::socketGlobalIPv6Address();
+    if (v6.empty()) return;   // no IPv6 here — a valid answer
+    CAPTURE(v6);
+
+    // The address must be one this machine actually holds and accept a
+    // connection on. That is the property that matters, and it is checkable
+    // without knowing which of several addresses the platform picked.
+    HE::Net::SocketHandle listener = HE::Net::socketCreateListenerDualStack(0);
+    REQUIRE(listener != HE::Net::kInvalidSocket);
+    const std::uint16_t port = HE::Net::socketBoundPort(listener);
+    REQUIRE(port != 0);
+
+    HE::Net::SocketHandle client = HE::Net::kInvalidSocket;
+    const HE::Net::SocketResult rc = HE::Net::socketCreateTcpConnecting(v6, port, client);
+    CHECK(rc != HE::Net::SocketResult::Error);
+
+    if (client != HE::Net::kInvalidSocket)
+    {
+        // Give a pending connect a moment; on loopback it usually completes at once.
+        for (int i = 0; i < 100 && HE::Net::socketConnectPoll(client) ==
+                                       HE::Net::SocketResult::WouldBlock; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(HE::Net::socketConnectPoll(client) == HE::Net::SocketResult::Ok);
+        HE::Net::socketClose(client);
+    }
+    HE::Net::socketClose(listener);
+}
+
 TEST_CASE("An IPv6 address is only reported when it is globally routable")
 {
     // Empty is a valid answer (no IPv6 here). What must never happen is a
@@ -670,4 +709,53 @@ TEST_CASE("An IPv6 address is only reported when it is globally routable")
         CHECK(v6.rfind("fd", 0)   != 0);
         CHECK(v6.find(':') != std::string::npos);
     }
+}
+
+// ─── Whose address is the one the outside sees? ──────────────────────────────
+
+TEST_CASE("socketOwnsAddress tells this machine's addresses from everyone else's")
+{
+    // The question this answers: when the session directory reports the address
+    // it saw us arrive from, is that US or something in between? A match means
+    // no translation — with IPv6, that the machine is directly addressable and
+    // only a firewall stands in the way rather than a port forward. A mismatch
+    // means something is rewriting addresses, and claiming otherwise would tell
+    // the user no forwarding is needed in exactly the case where it is.
+    const std::vector<std::string> mine = HE::Net::socketLocalAddresses();
+    REQUIRE_FALSE(mine.empty());          // every machine has at least a loopback
+
+    for (const std::string& a : mine)
+    {
+        CAPTURE(a);
+        CHECK(HE::Net::socketOwnsAddress(a));
+    }
+
+    // Documentation ranges (RFC 5737 / RFC 3849) — reserved for examples, so no
+    // machine can legitimately hold one and this cannot pass by accident.
+    CHECK_FALSE(HE::Net::socketOwnsAddress("192.0.2.1"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("198.51.100.7"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("2001:db8::1"));
+
+    // Not an address at all.
+    CHECK_FALSE(HE::Net::socketOwnsAddress(""));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("not-an-address"));
+    CHECK_FALSE(HE::Net::socketOwnsAddress("999.999.999.999"));
+}
+
+TEST_CASE("An address written differently is still recognised as the same one")
+{
+    // Compared as bytes rather than as text, because one IPv6 address has many
+    // valid spellings: leading zeros may be dropped, a run of zero groups may be
+    // collapsed, and hex digits may be either case. A string comparison would
+    // call the machine's own address foreign purely because the server wrote it
+    // in a different form — and the whole point is to decide whether an address
+    // belongs to us.
+    CHECK(HE::Net::socketOwnsAddress("127.0.0.1"));
+    CHECK(HE::Net::socketOwnsAddress("::1"));
+    CHECK(HE::Net::socketOwnsAddress("0:0:0:0:0:0:0:1"));        // ::1 written out
+    CHECK(HE::Net::socketOwnsAddress("0000:0000:0000:0000:0000:0000:0000:0001"));
+
+    // Families are never conflated: the IPv4-mapped form of a v4 address this
+    // machine holds is a v6 address it does not.
+    CHECK_FALSE(HE::Net::socketOwnsAddress("2001:db8::7f00:1"));
 }

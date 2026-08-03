@@ -214,6 +214,26 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 				r.advice    = kCgnatRemedy;
 			}
 		}
+		else if (mapResult == HE::Net::PortMapResult::LocalNetworkBlocked)
+		{
+			// Distinct on purpose. The request never left this machine, so the
+			// router — and everything the user might change about it — is
+			// irrelevant. Reporting the usual "your router refused" here sends
+			// people to spend an evening in router settings that were never even
+			// consulted.
+			r.mapStatus = "This app is not allowed to reach your local network, so the "
+			              "router was never contacted. Nothing is wrong with your router.";
+#if defined(__APPLE__)
+			r.advice = "What you can do: allow HorizonEngine under System Settings > "
+			           "Privacy & Security > Local Network. If it is not listed there, "
+			           "the editor is running as a plain executable rather than the "
+			           "packaged app — macOS only offers the permission to a proper "
+			           "app bundle.";
+#else
+			r.advice = "What you can do: allow this application through your firewall, "
+			           "then try again.";
+#endif
+		}
 		else
 		{
 			r.mapStatus = "Neither UPnP nor NAT-PMP got a port forward from your "
