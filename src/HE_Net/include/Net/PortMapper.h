@@ -128,16 +128,61 @@ public:
                                              std::uint16_t internalPort,
                                              int timeoutMs = 1500);
 
+    // ── PCP (RFC 6887) ───────────────────────────────────────────────────────
+    // The successor to NAT-PMP, on the same port 5351 and deliberately
+    // distinguishable by its version byte (2, where NAT-PMP is 0) so a router
+    // that only speaks the older one answers UNSUPP_VERSION rather than
+    // misreading the request.
+    //
+    // ⚠ This is the ONLY mechanism here that can help an IPv6 host, which makes
+    // it the important rung rather than a third fallback. With IPv6 there is no
+    // NAT: a machine holding a global address is already addressable, and the
+    // only obstacle is the router's firewall. UPnP AddPortMapping and NAT-PMP
+    // are both defined purely in terms of IPv4 address translation and have
+    // nothing to say about a firewall pinhole — so on a native-IPv6 connection
+    // they can fail forever without that meaning anything about reachability.
+    //
+    // PCP also carries the client's own address in the request, which is what
+    // lets one message ask for either an IPv4 mapping or an IPv6 pinhole.
+    struct PcpMapping
+    {
+        std::uint8_t  nonce[12] = {};   // must be replayed to delete the mapping
+        std::uint16_t externalPort = 0;
+        std::string   externalAddress;
+        std::uint32_t lifetimeSeconds = 0;
+    };
+
+    // `clientAddress` is this machine's own address on the interface facing the
+    // router — the LAN IPv4 for a mapping, the global IPv6 for a pinhole.
+    static PortMapResult pcpMap(const std::string& gateway,
+                                const std::string& clientAddress,
+                                std::uint16_t internalPort,
+                                std::uint16_t suggestedExternalPort,
+                                std::uint32_t lifetimeSeconds,
+                                PcpMapping& out,
+                                int timeoutMs = 1500);
+    // Lifetime 0 removes it. The nonce from the original grant identifies which.
+    static PortMapResult pcpUnmap(const std::string& gateway,
+                                  const std::string& clientAddress,
+                                  const std::uint8_t nonce[12],
+                                  std::uint16_t internalPort,
+                                  int timeoutMs = 1500);
+
     // ── One call that tries everything ───────────────────────────────────────
     // UPnP first (broadest support), NAT-PMP second. Records which method won so
     // the mapping can be taken down the same way it was put up.
     struct MappingHandle
     {
-        enum class Method : std::uint8_t { None, Upnp, NatPmp };
+        enum class Method : std::uint8_t { None, Upnp, NatPmp, Pcp };
         Method        method = Method::None;
         IgdDevice     igd;        // Upnp
-        std::string   gateway;    // NatPmp
+        std::string   gateway;    // NatPmp / Pcp
         std::uint16_t port = 0;
+        // Pcp — needed to take the mapping down again, and the address family
+        // that was opened.
+        std::uint8_t  pcpNonce[12] = {};
+        std::string   clientAddress;
+        bool          isIPv6 = false;
     };
 
     static PortMapResult mapPort(std::uint16_t port, const std::string& description,
@@ -145,6 +190,15 @@ public:
     static void          unmapPort(const MappingHandle& handle);
 
     // ── Pure helpers, exposed for testing without a live router ──
+    // PCP wire format, exposed for testing without a router.
+    static std::vector<std::uint8_t> buildPcpMapRequest(const std::string& clientAddress,
+                                                        const std::uint8_t nonce[12],
+                                                        std::uint16_t internalPort,
+                                                        std::uint16_t suggestedExternalPort,
+                                                        std::uint32_t lifetimeSeconds);
+    static bool parsePcpMapResponse(const std::uint8_t* data, std::size_t len,
+                                    PcpMapping& out, std::uint8_t& outResultCode);
+
     static std::vector<std::uint8_t> buildNatPmpRequest(std::uint8_t opcode,
                                                         std::uint16_t internalPort,
                                                         std::uint16_t externalPort,

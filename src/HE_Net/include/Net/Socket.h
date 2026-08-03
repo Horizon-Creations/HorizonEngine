@@ -155,6 +155,22 @@ HE_NET_API std::string socketLocalAddress();
 // support nightmare. Empty when there is no default route.
 HE_NET_API std::string socketDefaultGateway();
 
+// This machine's globally routable IPv6 address, or empty when it has none.
+//
+// Determined the same way socketLocalAddress() finds the IPv4 one: "connect" a
+// UDP socket to a public IPv6 address, which sends nothing and only makes the
+// kernel pick a route, then read back the local end. That yields the address the
+// machine would actually be seen as, rather than whichever of several
+// (link-local, temporary, deprecated) an interface enumeration happens to return
+// first.
+//
+// Why this matters for hosting: with IPv6 there is no NAT. A machine holding a
+// global address is directly addressable from the internet, so nothing needs
+// forwarding — only the router's firewall has to let the connection in. That is
+// a different mechanism from IPv4 port mapping, and neither UPnP AddPortMapping
+// nor NAT-PMP can do it.
+HE_NET_API std::string socketGlobalIPv6Address();
+
 // True when this process can reach its own default gateway at all.
 //
 // Exists because macOS (Sequoia and later) refuses LAN traffic from an app that

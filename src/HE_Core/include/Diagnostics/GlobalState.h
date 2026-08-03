@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "DiagnosticsStructs.h"
 #include "../Types/Defines.h"
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -46,6 +47,20 @@ public:
 	//Config management
 	void readConfig();
 	bool writeConfig();
+
+	// Where config.json actually lives.
+	//
+	// It used to be the bare relative name, i.e. resolved against the working
+	// directory. That is fine when the editor is started from its build folder
+	// and silently broken everywhere else: a macOS .app launched from Finder has
+	// a working directory of "/", so every write failed and no setting survived a
+	// restart. The path is now a per-user application-data location, which is
+	// both writable and the same one across launches however the app was started.
+	//
+	// A config.json next to the executable still wins if one is there, so a
+	// portable/dev checkout keeps behaving as before and nobody's existing
+	// settings move out from under them.
+	static std::filesystem::path configFilePath();
 	void setCustomConfigEntry(const std::string& key, const json& value);
 
 	int getCustomConfigInt(const std::string& key, int defaultValue = 0) const;
