@@ -1039,6 +1039,11 @@ void EditorApplication::OnInit()
 			if (std::filesystem::is_regular_file(projectPath))
 				projectPath = projectPath.parent_path();
 			contentManager().setContentRoot((projectPath / "Content").string());
+			// Source control follows the project. Repository discovery runs on the
+			// worker, so this returns immediately and the panel shows "checking"
+			// until the first answer lands.
+			m_git.setCollab(&m_collab);
+			m_git.openProject(projectPath);
 			// Re-merge the Engine tree against THIS project's overrides (a
 			// different project may have different Content/Engine/... files).
 			if (m_globalState)
@@ -1833,6 +1838,8 @@ void EditorApplication::OnRender(float dt)
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count());
 		m_collab.update(nowMs);
+	// Not gated on a project being loaded: a close still has to be drained.
+	m_git.update(nowMs);
 
 		if (m_collab.inSession()) syncStructuralChanges();
 
@@ -3187,6 +3194,7 @@ AppContext EditorApplication::makeContext()
 		.setGitIdentity      = [this](std::string n, std::string e)
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
+		.git                 = &m_git,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,

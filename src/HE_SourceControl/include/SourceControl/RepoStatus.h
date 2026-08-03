@@ -105,10 +105,27 @@ struct RepoStatus
 	// but-ignored. Handles the case difference described above.
 	HE_SC_API const FileEntry* find(const std::string& repoRelativePath) const;
 
-	bool hasConflicts() const;
+	// Inline rather than exported: these are one-line scans, and a trivial
+	// predicate is not worth a cross-DLL call or a place in the module's ABI.
+	// (They were declared-but-not-exported at first, which links fine everywhere
+	// except Windows — the failure mode the repo's export discipline exists for.)
+	bool hasConflicts() const
+	{
+		for (const auto& [path, e] : files) if (e.conflicted()) return true;
+		return false;
+	}
 	// Files a commit would include, i.e. something is staged.
-	bool hasStagedChanges() const;
-	std::size_t dirtyCount() const;
+	bool hasStagedChanges() const
+	{
+		for (const auto& [path, e] : files) if (e.staged()) return true;
+		return false;
+	}
+	std::size_t dirtyCount() const
+	{
+		std::size_t n = 0;
+		for (const auto& [path, e] : files) if (e.dirty()) ++n;
+		return n;
+	}
 };
 
 // ── The parser, exposed so it can be tested without a repository ─────────────

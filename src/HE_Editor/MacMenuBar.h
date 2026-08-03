@@ -15,7 +15,7 @@ namespace MacMenuBar
 		NewProject, OpenProject, CloseProject,
 		NewScene, OpenScene, AddSceneAdditive, SaveScene, SaveSceneAs,
 		Quit, Preferences,
-		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab,
+		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, ExportProject,
 		OpenTutorial,
