@@ -1653,6 +1653,187 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 }
 )MSL";
 
+// ─── Global Illumination: ray-traced reflections (docs/gi-reflections-plan.md) ─
+// One mirror ray per half-res output pixel, reconstructed from the STORED scene
+// G-buffer (GB1 normals/roughness + the R32F NDC-depth attachment), traced
+// against the same TLAS the GI shadow/probe kernels use. The hit is shaded the
+// way the probe kernel shades its bounce: flat instance albedo × (one sun
+// occlusion ray + the DDGI probe field's irradiance at the hit) — so what a
+// mirror shows agrees with how the diffuse GI lights the same surface, and
+// multi-bounce arrives through the field for free. v1 shortcuts (mirrors of
+// the probe kernel's documented ones): hit normal ≈ -rayDir, no per-hit UV/
+// texture sample, hard sun ray (no cone jitter — the output is deterministic,
+// so no temporal pass is needed either). Misses write confidence 0 — the
+// composite then keeps the sky cubemap, which IS the correct sky reflection.
+static const char* kGIReflMSL = R"MSL(
+#include <metal_stdlib>
+#include <metal_raytracing>
+using namespace metal;
+using namespace raytracing;
+
+struct GIReflParams {
+	float4x4 invViewProj;   // scene inverse view-proj (world reconstruction, Metal conventions)
+	float4 camPos;          // xyz = camera world pos, w = max ray distance
+	float4 texSize;         // xy = output size, z = max roughness, w = 1 when the probe field is valid this frame
+	float4 sunDirRadius;    // xyz = direction TOWARD the dominant light, w = indirect intensity
+	float4 sunColor;        // rgb = dominant light colour * intensity
+	float4 skyAmbient;      // rgb = flat ambient (hit-shading floor outside the probe grid)
+	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
+	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
+};
+
+constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// Same signed-octahedral mapping as kGIProbeMSL/kUnlitMSL (each MSL string is
+// its own compilation unit — copies are the established pattern here).
+static float3 octDecodeR(float2 e)
+{
+	float3 n = float3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0)
+	{
+		float2 signN = float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+		n.xy = (1.0 - abs(n.yx)) * signN;
+	}
+	return normalize(n);
+}
+static float2 octEncodeR(float3 n)
+{
+	float2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	float2 signP = float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+// Irradiance field at the hit point — the same trilinear 8-probe lookup the
+// probe kernel's multi-bounce term uses (giSampleFieldIrradiance), with the
+// accumulated weight exposed so hits OUTSIDE the probe grid can fall back to
+// the flat ambient floor instead of silently reading zero.
+static float3 giReflField(texture2d<float, access::read> irradiance,
+                          constant GIReflParams& P, float3 pos, float3 n,
+                          thread float& outW)
+{
+	outW = 0.0;
+	const int gx = int(P.gridCounts.x), gy = int(P.gridCounts.y), gz = int(P.gridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return float3(0.0);
+	const int probesPerRow = max(1, int(P.gridCounts.w));
+	const float spacing = max(P.gridOrigin.w, 1e-4);
+	const float3 gridSpace = (pos - P.gridOrigin.xyz) / spacing;
+	const float3 base  = floor(gridSpace);
+	const float3 fracP = gridSpace - base;
+	const float2 oct = octEncodeR(n) * 0.5 + 0.5;
+	const uint2 octTexel = uint2(clamp(oct * float(kGIProbeOctSize),
+	                                   0.0, float(kGIProbeOctSize) - 1.0));
+	float3 sum = float3(0.0);
+	float  sumW = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		const float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		const float3 cell = base + offs;
+		if (any(cell < 0.0) || cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		const float3 tri = mix(1.0 - fracP, fracP, offs);
+		const float w = tri.x * tri.y * tri.z;
+		if (w <= 1e-5) continue;
+		const int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+		const uint2 tile = uint2(uint((probeIndex % probesPerRow) * kGIProbeOctSize),
+		                         uint((probeIndex / probesPerRow) * kGIProbeOctSize));
+		sum  += irradiance.read(tile + octTexel).rgb * w;
+		sumW += w;
+	}
+	outW = sumW;
+	return sum / max(sumW, 1e-4);
+}
+
+kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
+                      texture2d<float, access::sample> gbAttr  [[texture(0)]],
+                      texture2d<float, access::sample> gbDepth [[texture(1)]],
+                      texture2d<float, access::write>  outRefl [[texture(2)]],
+                      texture2d<float, access::read>   giIrr   [[texture(3)]],
+                      instance_acceleration_structure  accel   [[buffer(0)]],
+                      const device float4* instanceColors      [[buffer(1)]],
+                      constant GIReflParams& P                  [[buffer(2)]])
+{
+	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
+	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
+	// edges decode to garbage directions, so pick one real texel instead.
+	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+	const float2 uv = (float2(gid) + 0.5) / P.texSize.xy;
+	const float d = gbDepth.sample(smp, uv).r;
+	if (d >= 1.0) { outRefl.write(float4(0.0), gid); return; } // background
+	const float4 g1 = gbAttr.sample(smp, uv);
+	const float rough = clamp(g1.b, 0.0, 1.0);
+	// Same fade window as the SSR trace (cfg.z*0.7 → cfg.z), so both
+	// reflection sources agree on which surfaces reflect at all.
+	const float roughFade = 1.0 - smoothstep(P.texSize.z * 0.7, P.texSize.z, rough);
+	if (roughFade <= 0.0) { outRefl.write(float4(0.0), gid); return; }
+	// World position: Metal conventions hardcoded (top-left uv origin → NDC y
+	// negated; stored NDC depth used as-is) — matches the resolve/SSR fills.
+	const float4 clip = float4(uv.x * 2.0 - 1.0, -(uv.y * 2.0 - 1.0), d, 1.0);
+	const float4 wp = P.invViewProj * clip;
+	const float3 Pw = wp.xyz / max(wp.w, 1e-8);
+	const float3 N = octDecodeR(g1.rg * 2.0 - 1.0);
+	const float3 V = normalize(Pw - P.camPos.xyz);
+	const float3 R = reflect(V, N);
+
+	ray r;
+	r.origin       = Pw + N * 0.05;
+	r.direction    = R;
+	r.min_distance = 0.02;
+	r.max_distance = max(P.camPos.w, 1.0);
+	intersection_params params; // committed closest hit (no accept_any)
+	intersection_query<triangle_data, instancing> q;
+	q.reset(r, accel, params);
+	q.next();
+	if (q.get_committed_intersection_type() == intersection_type::none)
+	{
+		// Miss → confidence 0: the composite keeps the sky cubemap, which is
+		// exactly the right reflection for a ray that leaves the scene.
+		outRefl.write(float4(0.0), gid);
+		return;
+	}
+
+	const uint   instId = q.get_committed_instance_id();
+	const float3 albedo = instanceColors[instId].rgb;
+	const float  dist   = q.get_committed_distance();
+	const float3 hitPos = r.origin + R * dist;
+	const float3 hitN   = -R; // v1 approximation, same as the probe kernel
+
+	// Direct sun at the hit: one hard occlusion ray (no cone jitter — this
+	// output is deterministic per pixel, so it needs no temporal pass).
+	float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+	if (ndl > 0.0)
+	{
+		ray sr;
+		sr.origin       = hitPos + hitN * 0.05;
+		sr.direction    = P.sunDirRadius.xyz;
+		sr.min_distance = 0.02;
+		sr.max_distance = 10000.0;
+		intersection_params sp2;
+		sp2.accept_any_intersection(true);
+		intersection_query<triangle_data, instancing> sq;
+		sq.reset(sr, accel, sp2);
+		sq.next();
+		if (sq.get_committed_intersection_type() != intersection_type::none)
+			ndl = 0.0;
+	}
+	float3 radiance = albedo * P.sunColor.rgb * ndl;
+	// Indirect at the hit from the DDGI field — scaled by the same indirect
+	// intensity heLitP applies, so the reflected image of a surface matches
+	// how that surface is actually shaded. Outside the grid (or with GI
+	// probes off) a flat ambient floor keeps reflections from going black.
+	float  fieldW = 0.0;
+	float3 field  = float3(0.0);
+	if (P.texSize.w > 0.5)
+		field = giReflField(giIrr, P, hitPos, hitN, fieldW);
+	if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
+	else               radiance += albedo * P.skyAmbient.rgb;
+
+	// Confidence mirrors the SSR trace's fades: roughness cutoff + a mild
+	// distance falloff toward the cubemap so the ray-length cap has no seam.
+	const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
+	outRefl.write(float4(radiance, conf), gid);
+}
+)MSL";
+
 // ─── Global Illumination: SOFTWARE ray tracing (no-HW-RT fallback) ───────────
 // Base-Metal compute kernels for devices/OSes without intersection_query
 // support (pre-macOS-12 or !device.supportsRaytracing; HE_GI_FORCE_SW forces
@@ -3643,6 +3824,19 @@ struct GIShadowParamsCPU
 	glm::vec4 extra;            // x = local light count
 };
 static_assert(sizeof(GIShadowParamsCPU) == 7 * 16, "must match the MSL GIShadowParams layout");
+// Matches the MSL GIReflParams struct (kGIReflMSL, used only by EncodeGIReflections).
+struct GIReflParamsCPU
+{
+	glm::mat4 invViewProj;
+	glm::vec4 camPos;       // xyz = camera world pos, w = max ray distance
+	glm::vec4 texSize;      // xy = output size, z = max roughness, w = probe field valid
+	glm::vec4 sunDirRadius; // xyz = direction TOWARD the dominant light, w = indirect intensity
+	glm::vec4 sunColor;     // rgb = dominant light colour * intensity
+	glm::vec4 skyAmbient;   // rgb = flat ambient floor
+	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
+	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
+};
+static_assert(sizeof(GIReflParamsCPU) == 64 + 7 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -3811,6 +4005,9 @@ void MetalRenderer::Shutdown()
 	if (m_ssrBlurPipeline)      { CFBridgingRelease(m_ssrBlurPipeline);      m_ssrBlurPipeline = nullptr; }
 	m_ssrPipelinesTried = false;
 	DestroySSRTarget();
+	if (m_giReflPipeline) { CFBridgingRelease(m_giReflPipeline); m_giReflPipeline = nullptr; }
+	m_giReflPipelineTried = false;
+	DestroyGIReflTarget();
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
@@ -4586,6 +4783,20 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 // MTLBuffers; instances are a flat per-frame buffer. Mirrors the GL 4.3 port's
 // BuildGiBlas/UpdateGiAccel structure.
 
+// Effective flat albedo for a GI instance (probe bounce tint + reflection hit
+// shading). The extractor leaves RenderObject::baseColor at its white default —
+// material colour is resolved at DRAW time from the MaterialComponent's asset —
+// so resolve it here the same way, or every ray hit reads white and the GI
+// bounce/reflections lose the object's colour entirely.
+static glm::vec3 giInstanceAlbedo(const RenderObject& obj, const ContentManager* cm)
+{
+	glm::vec3 albedo = obj.baseColor * glm::vec3(obj.instanceTint);
+	if (cm && obj.materialAssetId != HE::UUID{})
+		if (const MaterialAsset* ma = cm->getMaterial(obj.materialAssetId))
+			albedo *= glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]);
+	return albedo;
+}
+
 MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)
 {
 	GISwBlasRange range;
@@ -4634,7 +4845,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		if (!range.valid) continue;
 		GISwInstanceCPU inst;
 		inst.invTransform = glm::inverse(obj.transform);
-		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+		inst.baseColor    = glm::vec4(giInstanceAlbedo(obj, m_contentManager), 1.0f);
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		instances.push_back(inst);
@@ -4671,7 +4882,12 @@ void MetalRenderer::EncodeGISwAccelBuild()
 
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
-	if (!m_giEnabled || !m_giSupported || !m_world)
+	// GI reflections reuse the TLAS without the probe/shadow passes, so the
+	// build also runs when ONLY they are enabled (HW-RT only — the reflection
+	// kernel has no SW-BVH variant in v1, so a SW-only frame never needs it).
+	const bool wantAccel = m_giSupported
+	                    && (m_giEnabled || (m_giReflEnabled && m_giHwRt));
+	if (!wantAccel || !m_world)
 	{
 		// GI just turned off (or was never on this run): release any TLAS/instance
 		// buffer left over from the last GI-active frame instead of holding them
@@ -4760,7 +4976,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 			instanceBlasIndex.push_back((uint32_t)idx);
 			instanceTransform.push_back(obj.transform);
-			instanceBaseColor.push_back(glm::vec4(obj.baseColor, 1.0f));
+			instanceBaseColor.push_back(glm::vec4(giInstanceAlbedo(obj, m_contentManager), 1.0f));
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -7129,10 +7345,11 @@ void MetalRenderer::DestroyHDRTarget()
 
 void MetalRenderer::EnsureGBufferTargets(int width, int height)
 {
-	// Tile mode keeps the G-buffer memoryless — EXCEPT when SSR runs this
-	// frame: its trace/composite passes sample the stored attachments after the
-	// pass, so they must exist in DRAM (inherent to screen-space reflections).
-	const bool stored = !m_deferredTileMode || m_ssrFrameActive;
+	// Tile mode keeps the G-buffer memoryless — EXCEPT when SSR or the
+	// ray-traced GI reflections run this frame: their trace/composite passes
+	// sample the stored attachments after the pass, so they must exist in DRAM
+	// (inherent to any technique that reads the G-buffer post-pass).
+	const bool stored = !m_deferredTileMode || m_ssrFrameActive || m_giReflFrameActive;
 	if (m_gbColor0 && width == m_gbW && height == m_gbH && stored == m_gbStored)
 		return;
 	DestroyGBufferTargets();
@@ -9311,9 +9528,10 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
-	// SSR (ssr-plan §4.5): the resolve SKIPS its specular-IBL term — the
-	// dedicated reflection pass after this one supplies it (mixed with SSR).
-	if (m_ssrFrameActive)
+	// SSR / GI reflections: the resolve SKIPS its specular-IBL term — the
+	// dedicated reflection composite after this pass supplies it (sky cubemap
+	// mixed with the SSR hit and/or the ray-traced GI result).
+	if (m_ssrFrameActive || m_giReflFrameActive)
 	{
 		matLight.ssr[1] = m_ssrIntensity;
 		matLight.ssr[2] = m_ssrMaxRoughness;
@@ -9552,14 +9770,20 @@ void MetalRenderer::DestroySSRTarget()
 
 // Trace (half-res) + additive composite, own passes after the tile G-buffer
 // pass. m_renderWorld.camera is current (EncodeGBuffer extracted this frame).
+// Shared env-specular composite: also runs for GI-reflections-only frames (the
+// SSR trace/blur are then skipped and the SSR samplers get a dummy with mix
+// weight 0 — see the m_giReflFrameActive wiring in EncodeFrame).
 void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 {
-	if (!m_ssrTracePipeline || !m_ssrCompositePipeline || !m_gbStored) return;
+	if (!m_ssrCompositePipeline || !m_gbStored) return;
+	const bool ssrOn    = m_ssrFrameActive && m_ssrTracePipeline;
+	const bool giReflOn = m_giReflFrameActive && m_giReflTex;
+	if (!ssrOn && !giReflOn) return;
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 		const int tw = std::max(1, width / 2), th = std::max(1, height / 2);
-		EnsureSSRTarget(tw, th);
+		if (ssrOn) EnsureSSRTarget(tw, th);
 
 		const glm::mat4 viewProj =
 			m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -9567,6 +9791,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
 
 		// ── 1. Trace ───────────────────────────────────────────────────────
+		if (ssrOn)
 		{
 			HE::MaterialShaderLibrary::SSRTraceUniforms tu;
 			const glm::mat4 ivp = glm::inverse(viewProj);
@@ -9609,7 +9834,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 		// skips it, matching the plan's quality tiers; the composite then
 		// samples the raw trace. H pass refl→ping, V pass ping→refl, so the
 		// composite below reads m_ssrReflTex either way.
-		if (m_ssrQuality >= 1)
+		if (ssrOn && m_ssrQuality >= 1)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)
 			{
@@ -9662,9 +9887,13 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 #if defined(HE_HAVE_SHADERC)
 			HE::MaterialShaderLibrary::Lighting matLight;
 			FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
-			matLight.ssr[1] = m_ssrIntensity;
-			matLight.ssr[2] = m_ssrMaxRoughness;
-			matLight.ssr[3] = 1.0f;
+			// Inactive sources keep mix weight 0 — the bound dummy (1×1 white,
+			// a = 1) then contributes nothing regardless of its content.
+			matLight.ssr[1]    = ssrOn ? m_ssrIntensity : 0.0f;
+			matLight.ssr[2]    = m_ssrMaxRoughness;
+			matLight.ssr[3]    = 1.0f;
+			matLight.giRefl[0] = giReflOn ? m_giReflIntensity : 0.0f;
+			matLight.giRefl[1] = m_giReflMaxRoughness;
 			[enc setFragmentBytes:&matLight length:sizeof(matLight)
 			              atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif
@@ -9684,14 +9913,129 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			bindTex(m_gbColor1,   1, m_linearSampler);
 			bindTex(m_gbColor2,   2, m_linearSampler);
 			bindTex(m_gbDepthLin, 3, m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
-			bindTex(m_ssrReflTex, 4, m_linearSampler);
-			bindTex(m_ssrQuality >= 2 ? m_ssrRoughTex : m_ssrReflTex, 5, m_linearSampler);
+			bindTex(ssrOn ? m_ssrReflTex : m_dummyTexture, 4, m_linearSampler);
+			bindTex(ssrOn ? (m_ssrQuality >= 2 ? m_ssrRoughTex : m_ssrReflTex)
+			              : m_dummyTexture, 5, m_linearSampler);
+			bindTex(giReflOn ? m_giReflTex : m_dummyTexture, 6, m_linearSampler);
 			bindTex(m_skyEnvCube, 14, m_linearSampler);
 			bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15, m_linearSampler);
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			[enc endEncoding];
 			m_counters.draws += 2;
 		}
+	}
+}
+
+// ─── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────────
+bool MetalRenderer::EnsureGIReflPipeline()
+{
+	if (m_giReflPipeline) return true;
+	if (m_giReflPipelineTried || !m_giHwRt) return false;
+	m_giReflPipelineTried = true;
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device) return false;
+		NSError* error = nil;
+		id<MTLLibrary> lib = [device newLibraryWithSource:
+			[NSString stringWithUTF8String:kGIReflMSL] options:nil error:&error];
+		if (lib)
+		{
+			id<MTLFunction> fn = [lib newFunctionWithName:@"giReflRay"];
+			id<MTLComputePipelineState> pso =
+				fn ? [device newComputePipelineStateWithFunction:fn error:&error] : nil;
+			if (pso) m_giReflPipeline = (void*)CFBridgingRetain(pso);
+		}
+		if (!m_giReflPipeline)
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("MetalRenderer: GI reflection pipeline creation failed: ")
+				 + (error ? [[error localizedDescription] UTF8String] : "unknown")).c_str());
+		return m_giReflPipeline != nullptr;
+	}
+}
+
+void MetalRenderer::EnsureGIReflTarget(int width, int height)
+{
+	if (m_giReflTex && width == m_giReflW && height == m_giReflH) return;
+	DestroyGIReflTarget();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+		width:width height:height mipmapped:NO];
+	d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite; // compute-written
+	d.storageMode = MTLStorageModePrivate;
+	m_giReflTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	m_giReflW = width;
+	m_giReflH = height;
+}
+
+void MetalRenderer::DestroyGIReflTarget()
+{
+	if (m_giReflTex) { CFBridgingRelease(m_giReflTex); m_giReflTex = nullptr; }
+	m_giReflW = m_giReflH = 0;
+}
+
+// Half-res compute trace into m_giReflTex. Runs after the tile G-buffer pass
+// ended (stored attachments) and before EncodeSSRPasses' composite reads the
+// result. The TLAS was built earlier this frame by EncodeGIAccelBuild (which
+// also runs for reflections-only frames) and m_renderWorld.camera is current.
+void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
+{
+	if (!m_giReflFrameActive || !m_giReflPipeline || !m_gbStored) return;
+	if (!m_giTlas || !m_giInstanceColorBuffer) return;
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		const int tw = std::max(1, width / 2), th = std::max(1, height / 2);
+		EnsureGIReflTarget(tw, th);
+		if (!m_giReflTex) return;
+
+		// The probe field feeds the hit shading only while the probes are
+		// actually being updated (GI on) — otherwise the atlas is stale or
+		// blank and the kernel falls back to the flat ambient floor.
+		const bool fieldValid = m_giEnabled && m_giProbeGridBuilt && m_giIrradianceAtlas;
+
+		GIReflParamsCPU rp{};
+		const glm::mat4 viewProj =
+			m_renderWorld.camera.projection * m_renderWorld.camera.view;
+		rp.invViewProj = glm::inverse(viewProj);
+		rp.camPos      = glm::vec4(m_renderWorld.camera.position, m_giReflMaxDistance);
+		rp.texSize     = glm::vec4(static_cast<float>(tw), static_cast<float>(th),
+		                           m_giReflMaxRoughness, fieldValid ? 1.0f : 0.0f);
+		// Same dominant-directional pick as the GI shadow/probe passes — the
+		// hit must be lit by the light the scene is actually lit by.
+		glm::vec3 towardLight, lightColorIntensity;
+		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
+		rp.sunDirRadius = glm::vec4(towardLight, m_giIndirectIntensity);
+		rp.sunColor     = glm::vec4(lightColorIntensity, 0.0f);
+		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, 0.0f);
+		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
+		                            static_cast<float>(m_giGridCounts.y),
+		                            static_cast<float>(m_giGridCounts.z),
+		                            static_cast<float>(m_giProbesPerRow));
+
+		id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_giReflPipeline];
+		[enc setTexture:(__bridge id<MTLTexture>)m_gbColor1   atIndex:0];
+		[enc setTexture:(__bridge id<MTLTexture>)m_gbDepthLin atIndex:1];
+		[enc setTexture:(__bridge id<MTLTexture>)m_giReflTex  atIndex:2];
+		[enc setTexture:(__bridge id<MTLTexture>)(fieldValid ? m_giIrradianceAtlas
+		                                                     : m_dummyTexture) atIndex:3];
+		[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
+		                atBufferIndex:0];
+		[enc setBuffer:(__bridge id<MTLBuffer>)m_giInstanceColorBuffer offset:0 atIndex:1];
+		[enc setBytes:&rp length:sizeof(rp) atIndex:2];
+		// Every BLAS the TLAS references must be explicitly declared used — Metal
+		// does not auto-track residency through an acceleration structure.
+		[enc useResource:(__bridge id<MTLAccelerationStructure>)m_giTlas usage:MTLResourceUsageRead];
+		for (void* b : m_giUniqueBlas)
+			[enc useResource:(__bridge id<MTLAccelerationStructure>)b usage:MTLResourceUsageRead];
+		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
+		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
+		                                    static_cast<NSUInteger>((th + 7) / 8), 1);
+		[enc dispatchThreadgroups:tgCount threadsPerThreadgroup:tgSize];
+		[enc endEncoding];
 	}
 }
 
@@ -10232,6 +10576,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// SSR (ssr-plan §4.5): v1 only in the deferred tile mode — the trace
 			// reads the stored G-buffer + the resolved HDR of THIS frame.
 			m_ssrFrameActive = deferredTile && m_ssrEnabled && EnsureSSRPipelines();
+			// Ray-traced GI reflections (gi-reflections-plan): same tile-mode
+			// requirement (stored G-buffer + composite onto the resolved HDR),
+			// plus HW RT and the TLAS EncodeGIAccelBuild built earlier this
+			// frame. Needs the SSR pipelines too — the composite is shared.
+			m_giReflFrameActive = deferredTile && m_giReflEnabled && m_giHwRt
+			                   && m_giTlas && EnsureSSRPipelines() && EnsureGIReflPipeline();
 			{
 				// One-shot diagnostic: which scene-pass mode actually runs. Logged
 				// on every CHANGE (not per frame) so a mid-session flip is visible.
@@ -10280,12 +10630,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					gbPass.colorAttachments[a].texture     = gbTex[a];
 					gbPass.colorAttachments[a].loadAction  = MTLLoadActionClear;
 					// Memoryless attachments (tile mode) must not store; the
-					// two-pass fallback — and the tile mode with SSR, whose
-					// trace/composite sample the G-buffer after the pass —
-					// store them.
+					// two-pass fallback — and the tile mode with SSR or GI
+					// reflections, whose trace/composite sample the G-buffer
+					// after the pass — store them.
 					gbPass.colorAttachments[a].storeAction =
-						(deferredTile && !m_ssrFrameActive) ? MTLStoreActionDontCare
-						                                    : MTLStoreActionStore;
+						(deferredTile && !m_ssrFrameActive && !m_giReflFrameActive)
+							? MTLStoreActionDontCare
+							: MTLStoreActionStore;
 					gbPass.colorAttachments[a].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
 				}
 				// Clear GB1's normal channels to the encoded +Z so untouched pixels
@@ -10328,11 +10679,15 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				}
 				[gbEncoder endEncoding];
 
-				// SSR: trace against the stored G-buffer + the resolved HDR,
-				// then add the (skipped) specular-IBL term back — before the
+				// Reflections: the GI compute trace fills m_giReflTex first,
+				// then the shared composite (SSR trace + additive env-specular
+				// pass) adds the skipped specular-IBL term back — before the
 				// forward tail so transparency draws over the reflections.
-				if (deferredTile && m_ssrFrameActive)
+				if (deferredTile && (m_ssrFrameActive || m_giReflFrameActive))
+				{
+					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+				}
 
 				if (!deferredTile)
 				{
@@ -11000,6 +11355,9 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// SSR v1 rides on the deferred tile mode (Apple Silicon): the reflection
 	// pass reads the stored G-buffer + the resolved HDR of the same frame.
 	c.supportsScreenSpaceReflections = m_deferredTileMode;
+	// Ray-traced GI reflections v1: same tile-mode requirement, plus hardware
+	// ray tracing (the reflection kernel has no SW-BVH variant yet).
+	c.supportsGIReflections = m_deferredTileMode && m_giHwRt;
 #endif
 	return c;
 }
@@ -11017,6 +11375,14 @@ void MetalRenderer::SetSSRSettings(const SSRSettings& s)
 	m_ssrMaxDistance  = s.maxDistance;
 	m_ssrThickness    = s.thickness;
 	m_ssrQuality      = s.quality;
+}
+
+void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
+{
+	m_giReflEnabled      = s.enabled && m_giSupported;
+	m_giReflIntensity    = s.intensity;
+	m_giReflMaxRoughness = s.maxRoughness;
+	m_giReflMaxDistance  = s.maxDistance;
 }
 
 void MetalRenderer::SetGISettings(const GISettings& s)

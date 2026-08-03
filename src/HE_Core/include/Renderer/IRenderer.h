@@ -90,6 +90,11 @@ public:
         // stored G-buffer + the resolved HDR colour — lag-free, no history).
         // The editor greys out the SSR toggle when false.
         bool supportsScreenSpaceReflections = false;
+        // Ray-traced GI reflections (docs/gi-reflections-plan.md): specular rays
+        // against the GI acceleration structure, hit-shaded from the DDGI probe
+        // field, composited UNDER SSR (fills its off-screen gaps). v1: Metal
+        // only, deferred tile mode + hardware ray tracing.
+        bool supportsGIReflections = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -234,6 +239,24 @@ public:
         int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
     };
     virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
+
+    // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
+    // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI
+    // acceleration structure; hits are shaded from the sun + the DDGI probe
+    // field, so reflections stay consistent with the diffuse GI. Composited
+    // UNDER SSR: where the screen-space trace has a confident hit, SSR wins;
+    // where it misses (off-screen geometry), the traced result fills in.
+    // v1 Metal-only, deferred tile mode + hardware RT (Capabilities::
+    // supportsGIReflections gates the UI). Disabled = image byte-identical to
+    // the feature never having existed.
+    struct GIReflectionSettings
+    {
+        bool  enabled      = false;
+        float intensity    = 1.0f;   // 0…1 mix against the sky cubemap
+        float maxRoughness = 0.6f;   // above this no traced reflections (smooth fade)
+        float maxDistance  = 200.0f; // world-space ray length
+    };
+    virtual void SetGIReflectionSettings(const GIReflectionSettings& /*settings*/) {}
 
     // ── Render path (Forward | Deferred) ────────────────────────────────────
     // Pushed by the editor's preferences / the packaged game's GlobalState read,

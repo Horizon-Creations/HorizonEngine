@@ -100,6 +100,13 @@ struct EditorConfig
 	float GIIndirectIntensity       = 1.0f;
 	float GILightRadius             = 0.5f;   // degrees — sun angular radius (shadow penumbra softness)
 
+	// Ray-traced GI reflections (pushed each frame via SetGIReflectionSettings).
+	// Fills SSR's off-screen gaps with real scene rays against the GI TLAS;
+	// supportsGIReflections gates the toggle (Metal tile deferred + HW RT).
+	bool  GIReflectionsEnabled = false;
+	float GIReflIntensity      = 1.0f;
+	float GIReflMaxRoughness   = 0.6f;
+
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an
 	// EnvironmentComponent, are edited in its Details panel and persist with the

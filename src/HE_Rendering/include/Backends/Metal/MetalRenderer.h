@@ -111,6 +111,7 @@ public:
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -237,7 +238,37 @@ private:
 	void  EnsureSSRTarget(int width, int height);
 	void  DestroySSRTarget();
 	// Trace + composite, own passes on cmdBuf (after the tile G-buffer pass).
+	// Despite the name this is the shared ENV-SPECULAR composite: it also mixes
+	// the ray-traced GI reflection result (m_giReflTex) under the SSR hit, and
+	// runs whenever EITHER source is active this frame (the inactive one binds
+	// a dummy with its mix weight forced to 0).
 	void  EncodeSSRPasses(void* cmdBuf, int width, int height);
+
+	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md, v1) ──────────
+	// One mirror ray per half-res pixel from the stored G-buffer against the GI
+	// TLAS (reused as-is — EncodeGIAccelBuild runs earlier in the frame); hits
+	// are shaded flat-albedo × (sun visibility + DDGI field irradiance), so
+	// reflections agree with the diffuse GI about lighting. Output RGBA16F:
+	// rgb = radiance, a = confidence (roughness/distance fade; 0 = miss → the
+	// composite keeps the sky cubemap). v1 simplifications (documented like the
+	// GI v1 block above): hit normal ≈ -rayDir (no vertex fetch), no glossy
+	// blur/temporal (the ray is deterministic — noise-free, aliasing accepted),
+	// HW RT only (no SW-BVH kernel yet), deferred tile mode only.
+	bool  m_giReflEnabled      = false;
+	float m_giReflIntensity    = 1.0f;
+	float m_giReflMaxRoughness = 0.6f;
+	float m_giReflMaxDistance  = 200.0f;
+	bool  m_giReflFrameActive  = false;  // this frame traces GI reflections (tile deferred + HW RT + TLAS)
+	void* m_giReflPipeline     = nullptr; // id<MTLComputePipelineState>
+	bool  m_giReflPipelineTried = false;
+	void* m_giReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
+	int   m_giReflW = 0, m_giReflH = 0;
+	bool  EnsureGIReflPipeline();
+	void  EnsureGIReflTarget(int width, int height);
+	void  DestroyGIReflTarget();
+	// Compute trace into m_giReflTex, own encoder on cmdBuf (after the tile
+	// G-buffer pass, before the composite inside EncodeSSRPasses).
+	void  EncodeGIReflections(void* cmdBuf, int width, int height);
 
 	// ── Deferred decals (P7 follow-up, tile mode v1) ─────────────────────────
 	// Unit-cube projectors (DecalComponent) rasterized INSIDE the G-buffer pass
