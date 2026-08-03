@@ -865,6 +865,7 @@ void GameApplication::OnRender(float deltaTime)
 			gr.enabled      = giReflEnabled;
 			gr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflIntensity", 1.0f));
 			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
+			gr.quality      = GlobalState::getInstance().getCustomConfigInt("GIReflQuality", 1);
 			r->SetGIReflectionSettings(gr);
 
 			// Render path — same config.json key the editor's Preferences combo

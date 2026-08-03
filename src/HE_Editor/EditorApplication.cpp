@@ -832,6 +832,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
+	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
@@ -1370,6 +1371,7 @@ void EditorApplication::OnRender(float dt)
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
 			gr.intensity    = m_editorConfig.GIReflIntensity;
 			gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+			gr.quality      = m_editorConfig.GIReflQuality;
 			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
@@ -1991,6 +1993,7 @@ void EditorApplication::dumpFrameHeadless()
 	{
 		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
 		// capture only (ray-traced-reflections A/B without touching config.json).
+		// HE_DUMP_GIREFLQUALITY: override the tier (0 raw / 1 blur / 2 glossy).
 		const bool dumpGR = [&]{
 			const char* v = std::getenv("HE_DUMP_GIREFL");
 			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
@@ -1999,6 +2002,9 @@ void EditorApplication::dumpFrameHeadless()
 		gr.enabled      = dumpGR;
 		gr.intensity    = m_editorConfig.GIReflIntensity;
 		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		gr.quality      = m_editorConfig.GIReflQuality;
+		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
+			gr.quality = std::atoi(q);
 		r->SetGIReflectionSettings(gr);
 	}
 	{
@@ -2987,7 +2993,13 @@ void EditorApplication::dumpFrameHeadless()
 			 + "° -> " + std::to_string(endDeg) + "°").c_str());
 	}
 
-	for (int i = 0; i < 3; ++i)
+	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
+	// features (GI-reflection glossy accumulation, probe convergence) need more
+	// frames to settle than the default — headless A/Bs raise this.
+	int settleFrames = 3;
+	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
+		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	for (int i = 0; i < settleFrames; ++i)
 		r->Render();
 
 	std::vector<uint8_t> rgba;
@@ -3781,6 +3793,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);
+	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
