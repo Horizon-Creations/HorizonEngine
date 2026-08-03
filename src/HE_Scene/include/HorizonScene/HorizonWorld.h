@@ -6,6 +6,7 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include "Components/NameComponent.h"
 #include "Components/HierarchyComponent.h"
+#include "Components/EntityIdComponent.h"
 #include "WidgetManager.h"
 
 using Entity = entt::entity;
@@ -18,6 +19,22 @@ public:
 	Entity rootEntity() const { return m_rootEntity; }
 
 	Entity createEntity(const std::string& name = "Entity");
+
+	// ── Stable entity identity ───────────────────────────────────────────────
+	// Every entity carries an EntityIdComponent minted at creation. These are the
+	// accessors for it; see the component header for why handles are not enough.
+	//
+	// A default-constructed UUID (both halves zero) means "no id", which only
+	// happens for an invalid handle — generate() never produces it, since it
+	// always sets the RFC 4122 version and variant bits.
+	HE::UUID entityId(Entity entity) const;
+	// The entity carrying `id`, or entt::null. Linear over the id pool: fine for
+	// load-time resolution and tests, not for a per-frame lookup.
+	Entity   findByEntityId(const HE::UUID& id) const;
+	// Replace an entity's identity. Used by scene loading to restore the value
+	// from the file — deliberately NOT used by prefab instantiation, which keeps
+	// the freshly minted id so one prefab inserted twice yields two identities.
+	void     setEntityId(Entity entity, const HE::UUID& id);
 	// Destroys the entity and its entire subtree.
 	void   destroyEntity(Entity entity);
 	void   renameEntity(Entity entity, const std::string& newName);

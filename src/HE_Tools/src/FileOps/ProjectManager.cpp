@@ -253,7 +253,7 @@ bool scaffoldCppProject(const std::string& projectRoot,
 
 // ─── Startup scene ────────────────────────────────────────────────────────────
 // The Content/StartupScene.hescene every new project gets. Root entity "World"
-// (id 0, no parent); Game/Simulation/Tutorial additionally get the dedicated
+// (no parent); Game/Simulation/Tutorial additionally get the dedicated
 // "Sky" (EnvironmentComponent) and "Weather" (WeatherComponent) entities, and
 // Tutorial gets a furnished sandbox on top of that — the guided tour's first
 // chapters are about selecting, moving and re-materialling something, which needs
@@ -266,8 +266,6 @@ bool scaffoldCppProject(const std::string& projectRoot,
 // Environment window).
 static json startupSceneJson(ProjectPreset preset)
 {
-	constexpr uint32_t kNull = std::numeric_limits<uint32_t>::max();
-
 	const bool seedEnvironment = (preset == ProjectPreset::Game ||
 	                              preset == ProjectPreset::Simulation ||
 	                              preset == ProjectPreset::Tutorial);
@@ -286,21 +284,29 @@ static json startupSceneJson(ProjectPreset preset)
 	json entities = json::array();
 	json rootChildren = json::array();
 
+	// Entities are addressed by stable UUID, matching what SceneSerializer writes —
+	// see EntityIdComponent.h for why a handle would make the file merge-hostile.
+	// Minting them here (rather than emitting the old uint32 handles and letting
+	// the loader's legacy path pick them up) means a new project's scene is in the
+	// current format from the first commit instead of the first save.
+	const HE::UUID rootId = HE::UUID::generate();
+
 	json rootEntity;
-	rootEntity["id"]     = 0;
+	rootEntity["uuid"]   = uuid(rootId);
 	rootEntity["name"]   = "World";
-	rootEntity["parent"] = kNull;
+	rootEntity["parent"] = nullptr;   // null parent is how the loader finds the root
 	// Filled in below once the children are known — pushed last so the array is
 	// complete, but kept at index 0 of `entities` for readability of the file.
 	entities.push_back(rootEntity);
 
-	auto addChild = [&](uint32_t id, const char* name, json components)
+	auto addChild = [&](const char* name, json components)
 	{
-		rootChildren.push_back(id);
+		const HE::UUID id = HE::UUID::generate();
+		rootChildren.push_back(uuid(id));
 		json e;
-		e["id"]         = id;
+		e["uuid"]       = uuid(id);
 		e["name"]       = name;
-		e["parent"]     = 0;
+		e["parent"]     = uuid(rootId);
 		e["children"]   = json::array();
 		e["components"] = std::move(components);
 		entities.push_back(std::move(e));
@@ -316,13 +322,13 @@ static json startupSceneJson(ProjectPreset preset)
 		// tour's "drag the time-of-day slider" step actually move the sun.
 		// Keys are EnvironmentComponent member names (HE_ENV_FIELDS_* /
 		// SceneSerializer); anything left out falls back to the struct default.
-		addChild(1, "Sky", json{ { "environment", furnish
+		addChild("Sky", json{ { "environment", furnish
 			? json{ { "dayNightCycle", true  },   // without this timeOfDay is inert
 			        { "timeOfDay",     0.32f },   // mid-morning: raking light, long shadows
 			        { "cloudMode",     1     },   // volumetric clouds rather than the dome
 			        { "cloudCoverage", 0.4f  } }
 			: json::object() } });
-		addChild(2, "Weather", json{ { "weather", json::object() } });
+		addChild("Weather", json{ { "weather", json::object() } });
 	}
 
 	if (furnish)
@@ -332,17 +338,17 @@ static json startupSceneJson(ProjectPreset preset)
 		// the tutorial's falling cube lands on something instead of through it.
 		// The neutral-grey terrain material, not the white default one — on the
 		// default material the cube would be white geometry on a white floor.
-		addChild(3, "Ground", json{
+		addChild("Ground", json{
 			{ "transform", transform(vec3(0.0f, -0.25f, 0.0f), vec3(24.0f, 0.5f, 24.0f)) },
 			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
 			{ "material",  json{ { "asset", uuid(HE::kDefaultTerrainMaterialId) } } },
 		});
-		addChild(4, "Cube", json{
+		addChild("Cube", json{
 			{ "transform", transform(vec3(0.0f, 1.0f, 0.0f), vec3(1.0f, 1.0f, 1.0f)) },
 			{ "mesh",      json{ { "asset", uuid(HE::kDefaultCubeMeshId) } } },
 			{ "material",  json{ { "asset", uuid(HE::kDefaultMaterialId) } } },
 		});
-		addChild(5, "Point Light", json{
+		addChild("Point Light", json{
 			{ "transform", transform(vec3(2.5f, 3.0f, 2.5f), vec3(1.0f, 1.0f, 1.0f)) },
 			{ "light",     json{ { "type",      static_cast<uint8_t>(HE::LightType::Point) },
 			                     { "color",     vec3(1.0f, 0.85f, 0.7f) },
