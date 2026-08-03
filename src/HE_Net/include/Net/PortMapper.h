@@ -91,8 +91,14 @@ public:
     // which is a strong hint that no port mapping can ever work.
     static PortMapResult externalIp(const IgdDevice& igd, std::string& out);
 
-    // True when `ip` is in a range that cannot be reached from the internet —
-    // used to detect CGNAT / double-NAT before publishing an endpoint.
+    // True when `ip` is in a range that cannot be reached from the internet.
+    //
+    // ⚠ One-way test: true is conclusive, false proves nothing. It compares
+    // address ranges, so it catches ISP-level CGNAT and RFC1918 WAN sides — but
+    // a corporate or campus network whose gateway holds a genuine public address
+    // and drops inbound connections looks exactly like a directly reachable
+    // home router here. Never read a false as "this host is reachable"; only the
+    // directory's connect-back probe answers that.
     static bool isPrivateOrCgnat(const std::string& ip);
 
     // ── NAT-PMP (RFC 6886) ───────────────────────────────────────────────────
