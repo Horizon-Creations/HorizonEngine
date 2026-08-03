@@ -232,6 +232,16 @@ private:
 	void* m_ssrReflTex = nullptr; // id<MTLTexture> RGBA16F half-res: rgb radiance, a confidence
 	void* m_ssrPingTex = nullptr; // id<MTLTexture> same format, ping target of the separable blur
 	void* m_ssrRoughTex = nullptr; // id<MTLTexture> wide second blur (High tier glossy lerp)
+	// Temporal accumulation (quality High): the trace renders MRT into
+	// histRad/histPos[cur] (blended radiance + receiver world pos), sampling
+	// [prev] — the blur chain then reads histRad[cur]. Same scheme as the
+	// GI-reflection kernel, only as a fragment pass instead of compute.
+	void* m_ssrHistRad[2] = { nullptr, nullptr }; // id<MTLTexture> RGBA16F
+	void* m_ssrHistPos[2] = { nullptr, nullptr }; // id<MTLTexture> RGBA16F (world pos + valid)
+	int   m_ssrHistIdx    = 0;
+	bool  m_ssrHistValid  = false;    // fresh targets → first frame skips the blend
+	float m_ssrFrameSeed  = 0.0f;
+	glm::mat4 m_ssrPrevViewProj{1.0f};
 	int   m_ssrReflW = 0, m_ssrReflH = 0;
 	bool  m_gbStored = false;     // current G-buffer allocation: stored vs memoryless
 	bool  EnsureSSRPipelines();

@@ -347,9 +347,14 @@ Spiegelfläche (Wand spiegelt Nachbarobjekt nie); jetzt faden nur Fast-Rückwär
 ab Med (4 Half-Res-Draws); Witness `HE_DUMP_SSRTESTWALL=1`; Fresnel ✅ (roughness-aware Schlick
 `F0 + (max(1-rough, F0) - F0)·(1-NdV)^5` in heLitP + SSR-Composite + Metal/GL/D3D11/D3D12-
 Built-ins; `scene.frag` = dokumentierter Drift; Drift-Guard in `test_culling.cpp` prüft
-heLitP↔Composite byte-identisch). Temporale Akkumulation **bewusst zurückgestellt**: im
-Deferred-Pfad ist sie nur noch Rauschglättung (kein Lag zu kompensieren), und die
-Blur-Stufen erledigen das Dithering bereits; Feedback-Clamp entfällt (keine History).
+heLitP↔Composite byte-identisch). **Temporale Akkumulation ✅ (Quality High):** der Trace
+rendert MRT in ein History-Paar (geblendete Radiance + Empfänger-WorldPos), der Start-Jitter
+rotiert per Frame (Golden Ratio) und ein adaptives EMA (0.85 statisch / 0.55 bei
+Kamerabewegung, Kollaps bei Luminanz-Brüchen — GI-Refl-Schema) konvergiert die Samples gegen
+den exakten Schnittpunkt. Blur-Politik pro Stufe: Low roh, Med 2× 5-Tap (Blur = Denoiser,
+weich), High 1× 5-Tap + Temporal — spiegelglatte Flächen bleiben SCHARF statt verwaschen —
++ Wide-Stufe für den Glossy-Lerp. Feedback-Clamp entfällt: die History speist sich aus der
+aktuellen Frame-Farbe (kein Selbst-Feedback wie im Forward-Entwurf).
 
 **Verifikation:** Kamerafahrt (`HE_DUMP_GIROTATE`-Muster) → kein sichtbares Ghosting/Schweifen;
 Profiler-Capture: SSR-Pass unter Budget (7.).

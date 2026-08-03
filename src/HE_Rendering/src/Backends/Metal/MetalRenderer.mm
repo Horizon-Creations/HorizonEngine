@@ -10171,7 +10171,8 @@ bool MetalRenderer::EnsureSSRPipelines()
 			MTLRenderPipelineDescriptor* td = [[MTLRenderPipelineDescriptor alloc] init];
 			td.vertexFunction   = [vLib newFunctionWithName:@"main0"];
 			td.fragmentFunction = [tLib newFunctionWithName:@"main0"];
-			td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+			td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // radiance+conf (history)
+			td.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // receiver world pos
 			id<MTLRenderPipelineState> tp = [device newRenderPipelineStateWithDescriptor:td error:&err];
 			if (tp) m_ssrTracePipeline = (void*)CFBridgingRetain(tp);
 
@@ -10219,6 +10220,13 @@ void MetalRenderer::EnsureSSRTarget(int width, int height)
 	m_ssrReflTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	m_ssrPingTex  = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
 	m_ssrRoughTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	for (int i = 0; i < 2; ++i)
+	{
+		m_ssrHistRad[i] = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		m_ssrHistPos[i] = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	}
+	m_ssrHistIdx   = 0;
+	m_ssrHistValid = false; // fresh (undefined-content) textures — first frame skips the blend
 	m_ssrReflW = width;
 	m_ssrReflH = height;
 }
@@ -10228,6 +10236,12 @@ void MetalRenderer::DestroySSRTarget()
 	if (m_ssrReflTex)  { CFBridgingRelease(m_ssrReflTex);  m_ssrReflTex = nullptr; }
 	if (m_ssrPingTex)  { CFBridgingRelease(m_ssrPingTex);  m_ssrPingTex = nullptr; }
 	if (m_ssrRoughTex) { CFBridgingRelease(m_ssrRoughTex); m_ssrRoughTex = nullptr; }
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_ssrHistRad[i]) { CFBridgingRelease(m_ssrHistRad[i]); m_ssrHistRad[i] = nullptr; }
+		if (m_ssrHistPos[i]) { CFBridgingRelease(m_ssrHistPos[i]); m_ssrHistPos[i] = nullptr; }
+	}
+	m_ssrHistValid = false;
 	m_ssrReflW = m_ssrReflH = 0;
 }
 
@@ -10253,13 +10267,37 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 		const glm::vec3 camFwd =
 			-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
 
-		// ── 1. Trace ───────────────────────────────────────────────────────
+		// ── 1. Trace (MRT into the history pair: blended radiance + receiver
+		// world pos; quality High rotates the start jitter per frame and
+		// EMA-blends against last frame's pair — see kSSRTraceFS) ──────────
+		const int curIdx  = m_ssrHistIdx;
+		const int prevIdx = 1 - curIdx;
+		void* const traceOut = ssrOn ? m_ssrHistRad[curIdx] : nullptr;
 		if (ssrOn)
 		{
+			const bool temporal = m_ssrQuality >= 2;
+			// Same damping scheme as the GI reflections: full 0.85 EMA while
+			// the camera is still, 0.55 the moment the view matrix changes
+			// (the reflected content is not reprojected — no motion vectors).
+			float hist = 0.0f;
+			if (temporal && m_ssrHistValid)
+			{
+				float delta = 0.0f;
+				for (int c = 0; c < 4; ++c)
+					for (int r = 0; r < 4; ++r)
+						delta = std::max(delta,
+							std::abs(viewProj[c][r] - m_ssrPrevViewProj[c][r]));
+				hist = delta > 1e-5f ? 0.55f : 0.85f;
+			}
+			m_ssrFrameSeed += 1.0f;
+
 			HE::MaterialShaderLibrary::SSRTraceUniforms tu;
 			const glm::mat4 ivp = glm::inverse(viewProj);
-			std::memcpy(tu.viewProj,    &viewProj[0][0], 16 * sizeof(float));
-			std::memcpy(tu.invViewProj, &ivp[0][0],      16 * sizeof(float));
+			std::memcpy(tu.viewProj,     &viewProj[0][0],          16 * sizeof(float));
+			std::memcpy(tu.invViewProj,  &ivp[0][0],               16 * sizeof(float));
+			std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
+			tu.cfg2[0] = m_ssrFrameSeed;
+			tu.cfg2[1] = hist;
 			tu.camPos[0] = m_renderWorld.camera.position.x;
 			tu.camPos[1] = m_renderWorld.camera.position.y;
 			tu.camPos[2] = m_renderWorld.camera.position.z;
@@ -10276,20 +10314,35 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			tu.vp[1] = static_cast<float>(th);
 
 			MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
-			tp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssrReflTex;
+			tp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssrHistRad[curIdx];
 			tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 			tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+			tp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_ssrHistPos[curIdx];
+			tp.colorAttachments[1].loadAction  = MTLLoadActionDontCare;
+			tp.colorAttachments[1].storeAction = MTLStoreActionStore;
 			id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:tp];
 			[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrTracePipeline];
 			[enc setFragmentBytes:&tu length:sizeof(tu) atIndex:0];
+			id<MTLSamplerState> pointSmp = (__bridge id<MTLSamplerState>)
+				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbColor1 atIndex:1];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbDepthLin atIndex:2];
-			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler) atIndex:2];
+			[enc setFragmentSamplerState:pointSmp atIndex:2];
+			// History (prev pair) — point-sampled: the disocclusion test needs
+			// exact stored positions, not positions blended across depth edges.
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrHistRad[prevIdx] atIndex:3];
+			[enc setFragmentSamplerState:pointSmp atIndex:3];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrHistPos[prevIdx] atIndex:4];
+			[enc setFragmentSamplerState:pointSmp atIndex:4];
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 			[enc endEncoding];
+
+			m_ssrHistIdx      = prevIdx;   // next frame reads what we just wrote
+			m_ssrHistValid    = true;
+			m_ssrPrevViewProj = viewProj;
 		}
 
 		// ── 1b. Separable 5-tap blur (ssr-plan §4.3 / P4) ──────────────────
@@ -10318,16 +10371,22 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 				[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 				[enc endEncoding];
 			};
-			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+			// Tier policy: the blur is the DENOISER at Med (static jitter →
+			// two 5-tap iterations, smooth but soft), while High denoises via
+			// the temporal accumulation and keeps only ONE mild iteration —
+			// mirror-sharp surfaces stay sharp instead of being washed out.
+			blurPass(traceOut,     m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
 			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
-			// Second 5-tap iteration: the jittered march's static hit/miss
-			// speckle at thin or grazing features survives one pass (an
-			// isolated confident pixel keeps its colour under the confidence
-			// weighting) — the repeat flattens it. Still four cheap half-res
-			// fullscreen draws in total.
-			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
-			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
-			m_counters.draws += 4;
+			m_counters.draws += 2;
+			if (m_ssrQuality == 1)
+			{
+				// Second iteration (Med only): an isolated confident speckle
+				// pixel keeps its colour under the confidence weighting — the
+				// repeat flattens it.
+				blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+				blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
+				m_counters.draws += 2;
+			}
 			// High tier: a second, wide pass (3-texel spacing) into m_ssrRoughTex
 			// — the mip-chain substitute. The composite lerps between the two by
 			// G-buffer roughness (glossy instead of mirror-only, plan §4.3 v2).
@@ -10383,8 +10442,12 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			bindTex(m_gbColor1,   1, m_linearSampler);
 			bindTex(m_gbColor2,   2, m_linearSampler);
 			bindTex(m_gbDepthLin, 3, m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
-			bindTex(ssrOn ? m_ssrReflTex : m_dummyTexture, 4, m_linearSampler);
-			bindTex(ssrOn ? (m_ssrQuality >= 2 ? m_ssrRoughTex : m_ssrReflTex)
+			// Quality Low has no blur chain — the composite reads the raw
+			// trace (history) target directly then.
+			void* const ssrSharp = ssrOn
+				? (m_ssrQuality >= 1 ? m_ssrReflTex : traceOut) : m_dummyTexture;
+			bindTex(ssrSharp, 4, m_linearSampler);
+			bindTex(ssrOn ? (m_ssrQuality >= 2 ? m_ssrRoughTex : ssrSharp)
 			              : m_dummyTexture, 5, m_linearSampler);
 			bindTex(giReflOn ? m_giReflTex : m_dummyTexture, 6, m_linearSampler);
 			bindTex(giReflOn ? (m_giReflQuality >= 2 ? m_giReflRoughTex : m_giReflTex)

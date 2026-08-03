@@ -1088,18 +1088,23 @@ namespace
 // × soft thickness (hit depth inside the assumed surface thickness).
 // Standalone canonical GLSL (no lighting preamble — nothing here shades).
 constexpr const char* kSSRTraceFS = R"(#version 450
-layout(location = 0) out vec4 oSSR;
+layout(location = 0) out vec4 oSSR;     // blended radiance + confidence (= this frame's history)
+layout(location = 1) out vec4 oHistPos; // receiver world pos, w = 1 valid (temporal reprojection)
 layout(set = 0, binding = 19) uniform sampler2D heSceneColor; // resolved HDR (opaque, pre-sky)
 layout(set = 0, binding = 20) uniform sampler2D heGB1;        // rg oct normal, b roughness
 layout(set = 0, binding = 22) uniform sampler2D heGBDepth;    // NDC depth (R32F G-buffer target)
+layout(set = 0, binding = 24) uniform sampler2D heSSRHistRad; // last frame's blended radiance
+layout(set = 0, binding = 25) uniform sampler2D heSSRHistPos; // last frame's receiver positions
 layout(std140, set = 0, binding = 23) uniform HeSSRTrace {
     mat4 viewProj;
     mat4 invViewProj;
+    mat4 prevViewProj; // LAST frame's view-proj (receiver reprojection, quality High)
     vec4 camPos;  // xyz camera world position
     vec4 camFwd;  // xyz camera forward
     vec4 cfg;     // x maxDistance, y thickness, z maxRoughness, w stepCount
     vec4 conv;    // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
     vec4 vp;      // xy = trace-target size in pixels
+    vec4 cfg2;    // x = frame seed (temporal jitter), y = history blend (0 = temporal off)
 } heSSR;
 vec3 heOctDecode(vec2 f) {
     vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
@@ -1118,6 +1123,7 @@ vec3 heWorldAt(vec2 uv, float d) {
 float heViewZ(vec3 p) { return dot(p - heSSR.camPos.xyz, heSSR.camFwd.xyz); }
 void main() {
     vec2 uv = gl_FragCoord.xy / max(heSSR.vp.xy, vec2(1.0));
+    oHistPos = vec4(0.0); // every early-out marks the receiver invalid
     float d = texture(heGBDepth, uv).r;
     if (d >= 1.0) { oSSR = vec4(0.0); return; }             // background
     vec4 g1 = texture(heGB1, uv);
@@ -1138,7 +1144,13 @@ void main() {
     int   steps   = int(heSSR.cfg.w);
     float maxDist = heSSR.cfg.x;
     float dt      = maxDist / float(steps);
-    float t       = dt * (0.5 + heIgn(gl_FragCoord.xy));    // jittered start
+    // Start jitter: static IGN dithering; with temporal on (quality High) it
+    // rotates per frame by the golden ratio, so the EMA below integrates
+    // DIFFERENT march offsets — the accumulation converges toward the exact
+    // intersection instead of a fixed dither pattern that only blur can hide.
+    float jit = heIgn(gl_FragCoord.xy);
+    if (heSSR.cfg2.y > 0.0) jit = fract(jit + heSSR.cfg2.x * 0.61803398875);
+    float t       = dt * (0.5 + jit);
     float prevT   = 0.0;
     vec2  hitUV   = vec2(-1.0);
     bool  hit     = false;
@@ -1189,12 +1201,52 @@ void main() {
         prevT = t;
         t += dt;
     }
-    if (!hit) { oSSR = vec4(0.0); return; }
-    vec2 ef = min(hitUV, vec2(1.0) - hitUV);
-    float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
-    float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
-    oSSR = vec4(texture(heSceneColor, hitUV).rgb,
-                edge * facing * roughFade * distFade * thickConf);
+    // A miss is a REAL sample too (conf 0): with temporal on it must enter the
+    // EMA so a pixel whose jittered rays sometimes hit converges to its true
+    // hit ratio instead of flickering between full hit and hard zero.
+    vec4 sampleOut = vec4(0.0);
+    if (hit)
+    {
+        vec2 ef = min(hitUV, vec2(1.0) - hitUV);
+        float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
+        float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
+        sampleOut = vec4(texture(heSceneColor, hitUV).rgb,
+                         edge * facing * roughFade * distFade * thickConf);
+    }
+    // Temporal accumulation (quality High, cfg2.y > 0): reproject the RECEIVER
+    // into last frame's history, EMA-blend when the stored world position
+    // matches (disocclusion reject). Adaptive weight: a luminance break means
+    // the reflection CONTENT changed (moving object) — the history collapses;
+    // jitter noise keeps the full blend. Same scheme as the GI-reflection
+    // kernel; the reflected content itself is not reprojected (no motion
+    // vectors), which the camera-motion damping on the CPU side covers.
+    vec4 resultOut = sampleOut;
+    float h = heSSR.cfg2.y;
+    if (h > 0.0)
+    {
+        vec4 pc = heSSR.prevViewProj * vec4(P, 1.0);
+        if (pc.w > 1e-4)
+        {
+            vec2 ndcP = pc.xy / pc.w;
+            vec2 puv  = vec2(ndcP.x * 0.5 + 0.5, (ndcP.y * heSSR.conv.x) * 0.5 + 0.5);
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0))))
+            {
+                vec4 hp  = texture(heSSRHistPos, puv);
+                float tol = max(0.05 * length(P - heSSR.camPos.xyz), 0.1);
+                if (hp.w > 0.5 && length(hp.xyz - P) < tol)
+                {
+                    vec4 hist = texture(heSSRHistRad, puv);
+                    float lc  = dot(resultOut.rgb, vec3(0.299, 0.587, 0.114));
+                    float lh  = dot(hist.rgb,      vec3(0.299, 0.587, 0.114));
+                    float rel = abs(lh - lc) / (max(lh, lc) + 0.05);
+                    float hEff = h * (1.0 - 0.75 * smoothstep(0.2, 0.8, rel));
+                    resultOut = mix(resultOut, hist, hEff);
+                }
+            }
+        }
+    }
+    oSSR     = resultOut;
+    oHistPos = vec4(P, 1.0);
 }
 )";
 
@@ -1342,7 +1394,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend b
             { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
               { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
               { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
-              { Stage::Fragment, 0, 22, 2 } }));// depth → 2
+              { Stage::Fragment, 0, 22, 2 },    // depth → 2
+              { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
+              { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
     else
         out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
