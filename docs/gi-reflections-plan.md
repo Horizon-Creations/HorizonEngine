@@ -2,6 +2,17 @@
 
 Stand: 2026-08-03. Basis-Audit des Ist-Zustands auf Branch `claude/gi-reflektionen-plan-0bf44e`.
 
+> **Umsetzungsstand (2026-08-03): P0 + P1 + P2 implementiert und visuell verifiziert**
+> (he_shot-A/B mit der `HE_DUMP_SSRTEST`-Spiegelszene: off = nur SkyEnv, GIRefl-on =
+> rote Würfel-Spiegelung aus dem Trace, SSR+GIRefl = SSR gewinnt on-screen mit
+> GIRefl-Backing an den Confidence-Rändern). Kernel `giReflRay` (kGIReflMSL),
+> geteilter Composite in `EncodeSSRPasses`/`kSSRCompositeFS` (Kaskade SkyEnv →
+> GIRefl → SSR), `GIReflectionSettings` + `supportsGIReflections` + komplettes
+> Editor/Game-Plumbing + `HE_DUMP_GIREFL`. Bonus-Fix: GI-Instanz-Albedo löst jetzt
+> die MaterialAsset-Farbe auf (`giInstanceAlbedo`) — vorher waren TLAS-Instanzfarben
+> für Material-Objekte weiß (betraf auch den DDGI-Probe-Bounce-Tint).
+> Offen: P3 (Glossy/Temporal/Quality-Tiers), P4 (echte Hit-Normalen), P5 (SW-Fallback).
+
 ## 1. Ziel & Scope
 
 Indirekte **spekulare** Beleuchtung aus der bestehenden GI-Infrastruktur: Reflektionen, die

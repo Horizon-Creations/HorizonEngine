@@ -829,6 +829,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
 	m_editorConfig.GILightRadius               = globalstate.getCustomConfigFloat("GILightRadius",            m_editorConfig.GILightRadius);
+	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
+	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
+	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
@@ -1361,6 +1364,13 @@ void EditorApplication::OnRender(float dt)
 			ssr.maxRoughness = m_editorConfig.SSRMaxRoughness;
 			ssr.quality      = m_editorConfig.SSRQuality;
 			renderer()->SetSSRSettings(ssr);
+		}
+		{
+			IRenderer::GIReflectionSettings gr;
+			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
+			gr.intensity    = m_editorConfig.GIReflIntensity;
+			gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
 		// unsupported backend simply stays forward. HE_DUMP_RENDERPATH must win
@@ -1977,6 +1987,19 @@ void EditorApplication::dumpFrameHeadless()
 		if (const char* q = std::getenv("HE_DUMP_SSRQUALITY"); q && *q)
 			ssr.quality = std::atoi(q);
 		r->SetSSRSettings(ssr);
+	}
+	{
+		// HE_DUMP_GIREFL: override the persisted GI-reflections toggle for this
+		// capture only (ray-traced-reflections A/B without touching config.json).
+		const bool dumpGR = [&]{
+			const char* v = std::getenv("HE_DUMP_GIREFL");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.GIReflectionsEnabled;
+		}();
+		IRenderer::GIReflectionSettings gr;
+		gr.enabled      = dumpGR;
+		gr.intensity    = m_editorConfig.GIReflIntensity;
+		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		r->SetGIReflectionSettings(gr);
 	}
 	{
 		// HE_DUMP_RENDERPATH: override the persisted render path for this capture
@@ -3755,6 +3778,9 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);
 	globalstate.setCustomConfigEntry("GILightRadius",             m_editorConfig.GILightRadius);
+	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
+	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
+	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);

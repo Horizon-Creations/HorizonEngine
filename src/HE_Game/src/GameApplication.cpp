@@ -856,6 +856,17 @@ void GameApplication::OnRender(float deltaTime)
 			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
 			r->SetSSRSettings(ssr);
 
+			// Ray-traced GI reflections — same config.json keys the editor
+			// writes, capability-gated (Metal tile deferred + HW RT in v1).
+			const bool giReflEnabled =
+				GlobalState::getInstance().getCustomConfigBool("GIReflectionsEnabled", false) &&
+				r->GetCapabilities().supportsGIReflections;
+			IRenderer::GIReflectionSettings gr;
+			gr.enabled      = giReflEnabled;
+			gr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflIntensity", 1.0f));
+			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
+			r->SetGIReflectionSettings(gr);
+
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
 			const bool deferredPath =

@@ -217,6 +217,22 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode)
 		else if (supported)
 			ImGui::TextDisabled("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
 	});
+	row("girefl", "Renderer", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGIReflections;
+		ImGui::BeginDisabled(!supported);
+		ImGui::Checkbox("GI Reflections (ray-traced)", &cfg.GIReflectionsEnabled);
+		ImGui::BeginDisabled(!cfg.GIReflectionsEnabled);
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::SliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Metal only; needs hardware ray tracing + Render Path = Deferred.");
+		else if (supported)
+			ImGui::TextDisabled("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
+	});
 
 	row("camspeed", "Viewport", [&]{
 		ImGui::SetNextItemWidth(220.0f);
