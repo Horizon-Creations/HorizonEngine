@@ -372,6 +372,105 @@ TEST_CASE("CollabController: a replicated create keeps its identity on every pee
     CHECK(client.entityForNetId(subject) != 0);
 }
 
+TEST_CASE("CollabController: asset locks are lazy, visible to peers, and releasable")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    // Nothing is locked by merely being open — locks come from edits.
+    CHECK_FALSE(host.assetLockedByOther(asset));
+    CHECK_FALSE(client.assetLockedByOther(asset));
+
+    // The host starts editing: lock requested, granted, and REPLICATED — the
+    // client's editor must know before its user tries to type into the same
+    // graph, that is the entire point of the table.
+    host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(asset); }));
+    REQUIRE(pumpUntil(host, client, [&] { return client.assetLockedByOther(asset); }));
+
+    const HE::Net::LockInfo* info = client.assetLockInfo(asset);
+    REQUIRE(info != nullptr);
+    CHECK(info->ownerName == "Anna");
+
+    // While the table already SHOWS the other holder, a request is not even
+    // sent — the short-circuit is the synchronous common case.
+    client.requestAssetLock(asset);
+    CHECK_FALSE(client.ownsAssetLock(asset));
+
+    // Tab closed on the host: released, and the client may edit.
+    host.releaseAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return !client.assetLockedByOther(asset); }));
+    client.requestAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return client.ownsAssetLock(asset); }));
+    client.releaseAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return !host.assetLockedByOther(asset); }));
+}
+
+TEST_CASE("CollabController: losing the asset-lock race fires the deny handler")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    bool denied = false;
+    client.onAssetLockDenied([&](const std::string& p) { denied = p == asset; });
+
+    // Both sides start editing within one round trip of each other — neither
+    // lock table shows anything yet, so both requests go out. The host is the
+    // authority and wins; the client's optimistic edits must be rolled back,
+    // which is exactly what the deny handler is for.
+    host.requestAssetLock(asset);
+    client.requestAssetLock(asset);
+
+    REQUIRE(pumpUntil(host, client, [&] { return denied; }));
+    CHECK(host.ownsAssetLock(asset));
+    CHECK_FALSE(client.ownsAssetLock(asset));
+    // The denied path is no longer tracked as held-or-pending.
+    CHECK(client.heldAssetLocks().empty());
+}
+
+TEST_CASE("projectRelativeAssetPath: normalises separators and rejects outsiders")
+{
+    CHECK(CollabController::projectRelativeAssetPath(
+              "/proj/Content/Graphs/A.hcode", "/proj") == "Content/Graphs/A.hcode");
+    CHECK(CollabController::projectRelativeAssetPath(
+              "C:\\proj\\Content\\A.hmat", "C:/proj") == "Content/A.hmat");
+    CHECK(CollabController::projectRelativeAssetPath(
+              "/elsewhere/Content/A.hmat", "/proj").empty());
+    CHECK(CollabController::projectRelativeAssetPath("/proj", "/proj").empty());
+}
+
 TEST_CASE("SceneSerializer: entity components round-trip onto an existing entity")
 {
     HorizonWorld world;

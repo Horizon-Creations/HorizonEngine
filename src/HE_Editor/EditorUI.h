@@ -32,6 +32,13 @@ public:
 	// nothing is left unsaved for that path.
 	static bool saveAsset(AppContext& ctx, const std::string& assetPath);
 
+	// Drop the in-memory content of whichever panel holds this tab and reload it
+	// from disk on its next frame, keeping the panel's view state (pan/zoom,
+	// camera). Used when a collaboration peer's change just landed in the file —
+	// the open tab must show it, not the state from before. Returns true if some
+	// panel was actually holding the path.
+	static bool reloadAssetTabFromDisk(const std::string& assetPath);
+
 private:
 	static void renderEditor(AppContext& ctx, float dt);
 	// Floating tool windows (Preferences, Profiler, Environment) and the guided

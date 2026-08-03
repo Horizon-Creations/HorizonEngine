@@ -84,6 +84,20 @@ static bool saveToDisk(State& st, AppContext& ctx)
 	return true;
 }
 
+bool reloadFromDisk(const std::string& assetPath)
+{
+	// A collaboration peer's change just landed in the file. Dropping `loaded`
+	// makes the next frame re-read it while the rest of the State survives.
+	// Dirty is cleared deliberately: while a peer holds the asset's lock this
+	// panel is read-only anyway, so anything "unsaved" here is stale.
+	auto* st = s_states.find(assetPath);
+	if (!st) return false;
+	st->loaded = false;
+	st->dirty = false;
+	return true;
+}
+
+
 bool save(AppContext& ctx, const std::string& assetPath)
 {
 	State* st = s_states.find(assetPath);

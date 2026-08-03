@@ -427,6 +427,23 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	return ok && !tabHasUnsavedEdits(assetPath);
 }
 
+// The read half of saveAsset's dispatch: ask every panel; whichever holds the
+// path refreshes. Same "no path→panel map" argument as over there.
+bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
+{
+	if (assetPath.empty()) return false;
+	bool any = false;
+	any = ScriptEditorPanel::reloadFromDisk(assetPath)                    || any;
+	any = CppClassEditorPanel::reloadFromDisk(assetPath)                  || any;
+	any = MaterialEditorPanel::reloadFromDisk(assetPath)                  || any;
+	any = UIEditorPanel::reloadFromDisk(assetPath)                        || any;
+	any = HorizonCodeClassPanel::reloadFromDisk(assetPath)                || any;
+	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
+	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
+	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
+	return any;
+}
+
 // ─── Full Editor UI ───────────────────────────────────────────────────────────
 void EditorUI::renderEditor(AppContext& ctx, float dt)
 {
@@ -1242,6 +1259,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     static constexpr float kFooterH  = 24.0f;
     static constexpr float kTabBarH  = 28.0f;
+constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a locked asset tab
 
     // ── Footer bar ────────────────────────────────────────────────────────────
     // Must be rendered BEFORE the DockSpace window so ImGui processes it first
@@ -1494,8 +1512,51 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
         const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
-        const ImVec2 tabPos(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH);
-        const ImVec2 tabSize(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH);
+        ImVec2 tabPos(vpTab->WorkPos.x, vpTab->WorkPos.y + kTabBarH);
+        ImVec2 tabSize(vpTab->WorkSize.x, vpTab->WorkSize.y - kFooterH - kTabBarH);
+
+        // ── Collaboration: someone else is editing this asset ────────────────
+        // The whole tab renders disabled while a peer holds the asset's lock —
+        // "read-only for real", enforced at the one place every asset panel
+        // passes through rather than audited into each of them. The banner says
+        // WHO, so the user knows to coordinate instead of wondering why the
+        // canvas ignores them.
+        bool tabReadOnly = false;
+        if (ctx.collab && ctx.collab->inSession() && ctx.contentManager)
+        {
+            const std::string rel = CollabController::projectRelativeAssetPath(
+                tabPath, ctx.contentManager->contentRoot());
+            if (!rel.empty() && ctx.collab->assetLockedByOther(rel))
+            {
+                tabReadOnly = true;
+                const HE::Net::LockInfo* lock = ctx.collab->assetLockInfo(rel);
+                float rgb[3] = { 1.0f, 0.75f, 0.3f };
+                if (lock) CollabController::participantColor(lock->owner, rgb);
+
+                ImGui::SetNextWindowPos(tabPos);
+                ImGui::SetNextWindowSize(ImVec2(tabSize.x, kAssetLockBannerH));
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.11f, 0.08f, 1.0f));
+                if (ImGui::Begin("##asset_lock_banner", nullptr,
+                        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar))
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+                    ImGui::TextUnformatted(lock && !lock->ownerName.empty()
+                        ? (lock->ownerName + " is editing this asset — it is read-only "
+                           "for you until they are done. Their changes appear here live.").c_str()
+                        : "Someone else is editing this asset — it is read-only for you.");
+                    ImGui::PopStyleColor();
+                }
+                ImGui::End();
+                ImGui::PopStyleColor();
+
+                // The panel keeps its remaining space and renders disabled.
+                tabPos.y  += kAssetLockBannerH;
+                tabSize.y -= kAssetLockBannerH;
+                ImGui::BeginDisabled(true);
+            }
+        }
         // Dispatch by asset type: material assets get the node-graph editor, script
         // assets the code editor. (Cheap header sniff; both panels cache their state.)
         // The Level Script + Game Instance are virtual tabs (no backing .hasset).
@@ -1526,6 +1587,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             CppClassEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else
             ScriptEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+
+        if (tabReadOnly) ImGui::EndDisabled();
         return;
     }
 

@@ -219,6 +219,20 @@ bool InputAssetPanel::isInputAsset(const std::string& path)
 
 bool InputAssetPanel::isDirty(const std::string& path) { return s_states.dirty(path); }
 
+bool InputAssetPanel::reloadFromDisk(const std::string& assetPath)
+{
+	// A collaboration peer's change just landed in the file. Dropping `loaded`
+	// makes the next frame re-read it while the rest of the State survives.
+	// Dirty is cleared deliberately: while a peer holds the asset's lock this
+	// panel is read-only anyway, so anything "unsaved" here is stale.
+	auto* st = s_states.find(assetPath);
+	if (!st) return false;
+	st->loaded = false;
+	st->dirty = false;
+	return true;
+}
+
+
 void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 
 bool InputAssetPanel::save(AppContext& ctx, const std::string& path)

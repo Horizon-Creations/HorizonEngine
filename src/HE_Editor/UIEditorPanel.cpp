@@ -1843,6 +1843,21 @@ bool isWidgetAsset(const std::string& path)
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
+bool reloadFromDisk(const std::string& assetPath)
+{
+	// A collaboration peer's change just landed in the file. Dropping `loaded`
+	// makes the next frame re-read it while the rest of the State — view, camera,
+	// undo — survives. The dirty flag is cleared deliberately: while a peer holds
+	// the asset's lock this panel is read-only anyway, so anything "unsaved" here
+	// is stale, not precious.
+	auto* st = s_states.find(assetPath);
+	if (!st) return false;
+	st->loaded = false;
+	st->dirty = false;
+	return true;
+}
+
+
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 

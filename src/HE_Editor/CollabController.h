@@ -259,6 +259,38 @@ public:
 	// one only when it actually changed, so this stays free to call.
 	void followSelection(std::uint64_t subject);
 
+	// ── Asset-level locking (lazy) ───────────────────────────────────────────
+	// Assets lock on FIRST EDIT, not on open: reading a graph together is fine,
+	// only writing needs an owner. The lock table is the same one entities use
+	// (assetSubject() sets the top bit, so the two spaces stay disjoint).
+	//
+	// The grant is asynchronous — host round trip — so the flow is optimistic:
+	// the editor keeps editing while the request is in flight, and the deny
+	// callback (someone else won the race) flips the tab read-only. The race
+	// window is one RTT; the replicated lock table makes the common case (held
+	// long before you click) synchronous via assetLockedByOther().
+	bool assetLockedByOther(const std::string& relativePath);
+	bool ownsAssetLock(const std::string& relativePath);
+	void requestAssetLock(const std::string& relativePath);
+	void releaseAssetLock(const std::string& relativePath);
+	// Who holds it (nullptr = nobody) — for the read-only banner.
+	const HE::Net::LockInfo* assetLockInfo(const std::string& relativePath);
+	// Every asset path we hold or have requested a lock for — the caller
+	// releases the ones whose editor tab has gone away.
+	const std::vector<std::string>& heldAssetLocks() const { return m_heldAssetLocks; }
+
+	// Fired when an optimistic asset-lock request lost the race — the editor
+	// reloads that tab from disk, discarding the one-RTT sliver of local edits.
+	void onAssetLockDenied(std::function<void(const std::string&)> fn)
+	{
+		m_onAssetLockDenied = std::move(fn);
+	}
+
+	// abs → project-relative, with forward slashes: the form assetSubject()
+	// and the sync pipeline key on. Empty when the path is outside the project.
+	static std::string projectRelativeAssetPath(const std::string& absolutePath,
+	                                            const std::string& contentRoot);
+
 	// Set when a lock request was refused, for a transient UI notice.
 	const std::string& lockNotice() const { return m_lockNotice; }
 	void clearLockNotice() { m_lockNotice.clear(); }
@@ -372,6 +404,8 @@ private:
 	// across peers; local-only entities (terrain chunks, environment lights) are
 	// simply absent from it.
 	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
+	std::vector<std::string> m_heldAssetLocks;
+	std::function<void(const std::string&)> m_onAssetLockDenied;
 
 	std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)>
 		m_onRemoteCreate;

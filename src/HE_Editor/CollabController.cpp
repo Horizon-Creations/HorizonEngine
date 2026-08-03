@@ -587,6 +587,18 @@ void CollabController::wireCallbacks()
 		}
 		// We do not hold it, so do not pretend we do.
 		if (subject == m_heldSubject) m_heldSubject = 0;
+
+		// An ASSET lock we asked for optimistically: the race-window edits are
+		// not ours to keep — hand the path to the editor so it reloads the tab
+		// from disk (the last agreed state) instead of sitting on a fork.
+		for (auto it = m_heldAssetLocks.begin(); it != m_heldAssetLocks.end(); ++it)
+		{
+			if (assetSubject(*it) != subject) continue;
+			const std::string path = *it;
+			m_heldAssetLocks.erase(it);
+			if (m_onAssetLockDenied) m_onAssetLockDenied(path);
+			break;
+		}
 	});
 }
 
@@ -647,6 +659,7 @@ void CollabController::teardown()
 	m_lockNotice.clear();
 	m_netIds.clear();
 	m_lastComponentHashes.clear();
+	m_heldAssetLocks.clear();
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
@@ -938,10 +951,12 @@ std::uint64_t CollabController::netIdFor(std::uint32_t entityHandle)
 		idc = &reg.emplace<EntityIdComponent>(e,
 			EntityIdComponent{ HE::UUID::generate() });
 	}
-	// low64 of a v4 UUID is random except the variant bits; zero would collide
-	// with "no subject", so fold hi in as the escape hatch.
-	std::uint64_t net = idc->id.lo;
-	if (net == 0) net = idc->id.hi | 1ull;
+	// low64 of the uuid, top bit cleared: a v4 uuid's variant bits force lo's
+	// top bit to 1, which would land every entity in the asset-subject space
+	// (assetSubject sets the top bit precisely to keep the two apart). Zero
+	// would collide with "no subject", so fold hi in as the escape hatch.
+	std::uint64_t net = idc->id.lo & ~(1ull << 63);
+	if (net == 0) net = (idc->id.hi | 1ull) & ~(1ull << 63);
 
 	m_netIds.emplace_back(net, entityHandle);
 	return net;
@@ -960,8 +975,8 @@ std::uint32_t CollabController::entityForNetId(std::uint64_t netId)
 	auto& reg = m_world->registry();
 	std::uint32_t found = 0;
 	reg.view<EntityIdComponent>().each([&](auto e, const EntityIdComponent& idc) {
-		std::uint64_t net = idc.id.lo;
-		if (net == 0) net = idc.id.hi | 1ull;
+		std::uint64_t net = idc.id.lo & ~(1ull << 63);
+		if (net == 0) net = (idc.id.hi | 1ull) & ~(1ull << 63);
 		if (net == netId) found = static_cast<std::uint32_t>(entt::to_integral(e));
 	});
 	if (found != 0) m_netIds.emplace_back(netId, found);
@@ -1052,6 +1067,74 @@ std::uint64_t CollabController::assetSubject(const std::string& relativePath)
 		hash *= 1099511628211ull;
 	}
 	return hash | (1ull << 63);
+}
+
+// ─── Asset-level locking ─────────────────────────────────────────────────────
+
+bool CollabController::assetLockedByOther(const std::string& relativePath)
+{
+	if (!m_collab || !inSession()) return false;
+	const HE::Net::LockInfo* l = m_collab->lockFor(assetSubject(relativePath));
+	return l && l->owner != m_collab->localId();
+}
+
+bool CollabController::ownsAssetLock(const std::string& relativePath)
+{
+	if (!m_collab || !inSession()) return false;
+	return m_collab->ownsLock(assetSubject(relativePath));
+}
+
+void CollabController::requestAssetLock(const std::string& relativePath)
+{
+	if (!m_collab || !inSession()) return;
+	const std::uint64_t subject = assetSubject(relativePath);
+	if (m_collab->ownsLock(subject)) return;
+	if (const HE::Net::LockInfo* l = m_collab->lockFor(subject);
+	    l && l->owner != m_collab->localId())
+		return;   // visibly taken — no point asking
+	m_collab->requestLock(subject);
+	if (std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), relativePath)
+	    == m_heldAssetLocks.end())
+	{
+		m_heldAssetLocks.push_back(relativePath);
+	}
+}
+
+void CollabController::releaseAssetLock(const std::string& relativePath)
+{
+	if (m_collab && inSession())
+	{
+		const std::uint64_t subject = assetSubject(relativePath);
+		if (m_collab->ownsLock(subject)) m_collab->releaseLock(subject);
+	}
+	m_heldAssetLocks.erase(
+		std::remove(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), relativePath),
+		m_heldAssetLocks.end());
+}
+
+const HE::Net::LockInfo* CollabController::assetLockInfo(const std::string& relativePath)
+{
+	if (!m_collab || !inSession()) return nullptr;
+	return m_collab->lockFor(assetSubject(relativePath));
+}
+
+std::string CollabController::projectRelativeAssetPath(const std::string& absolutePath,
+                                                       const std::string& contentRoot)
+{
+	if (contentRoot.empty() || absolutePath.size() <= contentRoot.size()) return {};
+
+	// Normalise both sides to forward slashes before comparing: the tab path
+	// comes from the OS file dialog / browser and mixes separators on Windows.
+	auto norm = [](std::string p) {
+		for (char& ch : p) if (ch == '\\') ch = '/';
+		return p;
+	};
+	const std::string abs  = norm(absolutePath);
+	const std::string root = norm(contentRoot);
+	if (abs.rfind(root, 0) != 0) return {};
+	std::size_t cut = root.size();
+	if (cut < abs.size() && abs[cut] == '/') ++cut;
+	return abs.substr(cut);
 }
 
 bool CollabController::isSyncableAsset(const std::string& relativePath)

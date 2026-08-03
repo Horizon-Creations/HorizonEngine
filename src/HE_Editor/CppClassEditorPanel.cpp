@@ -249,4 +249,21 @@ namespace CppClassEditorPanel
 
 		ImGui::End();
 	}
+
+	bool reloadFromDisk(const std::string& assetPath)
+	{
+		// A collaboration peer's change just landed in the file. Dropping `loaded`
+		// makes the next frame re-read it while the rest of the State survives.
+		// Dirty is cleared deliberately: while a peer holds the asset's lock this
+		// panel is read-only anyway, so anything "unsaved" here is stale.
+		auto* st = s_states.find(assetPath);
+		if (!st) return false;
+		// The pair of buffers each carry their own loaded flag.
+		st->header.loaded = false;
+		st->source.loaded = false;
+		// dirty derives from undo indices; the reload resets them with the buffers.
+		return true;
+	}
+
 }
+

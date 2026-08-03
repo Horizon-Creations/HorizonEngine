@@ -470,6 +470,11 @@ private:
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
 	void syncStructuralChanges();
+	// Asset-level collaboration: lazy locks on first edit, debounced in-session
+	// autosave (which doubles as the live-follow broadcast and the peers' file
+	// persistence), and lock release when the tab goes away.
+	void updateAssetCollabSync(std::uint64_t nowMs);
+	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;
