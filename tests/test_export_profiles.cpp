@@ -947,7 +947,9 @@ TEST_CASE("Game/Simulation templates seed Sky+Weather; Empty/Tool start bare")
 // customShaderGBufGlsl, then EOF (no approx block).
 static std::vector<uint8_t> preApproxGraphMaterial(HE::UUID id, const std::string& relPath,
                                                    const std::string& graphJson,
-                                                   const std::string& parentPath = {})
+                                                   const std::string& parentPath = {},
+                                                   const std::vector<std::string>& switchNames = {},
+                                                   const std::vector<uint8_t>& switchValues = {})
 {
     std::vector<uint8_t> meta;
     HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Material));
@@ -972,8 +974,8 @@ static std::vector<uint8_t> preApproxGraphMaterial(HE::UUID id, const std::strin
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // tooltips
     HAsset::Writer::appendString(mtrl, parentPath);                   // parentMaterialPath
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // overridden params
-    HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // switch names
-    HAsset::Writer::appendVec(mtrl, std::vector<uint8_t>{});          // switch values
+    HAsset::Writer::appendVec(mtrl, switchNames);                     // switch names
+    HAsset::Writer::appendVec(mtrl, switchValues);                    // switch values
     HAsset::Writer::appendPOD(mtrl, static_cast<uint8_t>(0));         // blend mode
     HAsset::Writer::appendString(mtrl, std::string{});                // customShaderVertGlsl
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // graphLayerNames
@@ -1136,6 +1138,103 @@ TEST_CASE("Pack-time approx re-fold: graph-less INSTANCE folds from its parent c
     CHECK(bc[0] == doctest::Approx(0.9f)); // parent's fold reached through the chain
     CHECK(bc[1] == doctest::Approx(0.1f));
     CHECK(bc[2] == doctest::Approx(0.7f));
+
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("Pack-time approx re-fold: switch-override instance folds its own permutation")
+{
+    // Parent: StaticSwitch "ColorSwitch" (default OFF) — True = blue, False = red.
+    HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+    int outId = 0, redId = 0;
+    for (auto& n : g.nodes)
+    {
+        if (n.type == HE::MatNodeType::Output)     outId = n.id;
+        if (n.type == HE::MatNodeType::ConstColor) redId = n.id;
+    }
+    HE::MatGraphNode* red = g.findNode(redId);
+    REQUIRE(red != nullptr);
+    red->p[0] = 1.0f; red->p[1] = 0.0f; red->p[2] = 0.0f;
+    g.disconnectInput(outId, HE::kMatOutputBaseColorPin);
+    const int swId = g.addNode(HE::MatNodeType::StaticSwitch);
+    HE::MatGraphNode* sw = g.findNode(swId);
+    REQUIRE(sw != nullptr);
+    sw->s = "ColorSwitch"; sw->p[0] = 0.0f;
+    const int blueId = g.addNode(HE::MatNodeType::ConstColor);
+    HE::MatGraphNode* blue = g.findNode(blueId);
+    REQUIRE(blue != nullptr);
+    blue->p[0] = 0.0f; blue->p[1] = 0.0f; blue->p[2] = 1.0f;
+    REQUIRE(g.connect(blueId, 0, swId, 0));
+    REQUIRE(g.connect(redId,  0, swId, 1));
+    REQUIRE(g.connect(swId, 0, outId, HE::kMatOutputBaseColorPin));
+
+    const auto dir = fs::temp_directory_path() / "he_approx_switch";
+    he_test::removeAllQuiet(dir);
+    const HE::UUID parentId{ 0x5117, 0x1 };
+    const HE::UUID onId    { 0x5117, 0x2 };
+    const HE::UUID defId   { 0x5117, 0x3 };
+    writeBlob(dir / "swparent.hasset",
+              preApproxGraphMaterial(parentId, "swparent.hasset", HE::materialGraphToJson(g)));
+    // Instance with the switch flipped ON, and a control instance without overrides.
+    writeBlob(dir / "on.hasset",
+              preApproxGraphMaterial(onId, "on.hasset", "", "swparent.hasset",
+                                     { "ColorSwitch" }, { 1 }));
+    writeBlob(dir / "def.hasset",
+              preApproxGraphMaterial(defId, "def.hasset", "", "swparent.hasset"));
+
+    HpakWriter packer;
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Store;
+    REQUIRE(packer.addDirectory(dir, s, nullptr) == 3);
+    const auto pak = (dir / "out.hpak").string();
+    REQUIRE(packer.write(pak));
+
+    HpakReader reader;
+    REQUIRE(reader.open(pak));
+
+    // Skim a packed MTRL to its approx baseColor (shared field walk).
+    auto approxBaseColor = [&](HE::UUID id, float rgb[3])
+    {
+        const std::vector<uint8_t> blob = reader.readEntry(id);
+        REQUIRE(!blob.empty());
+        HAsset::Reader r;
+        REQUIRE(r.openData(blob));
+        const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+        REQUIRE(c != nullptr);
+        size_t o = 0;
+        std::string str; std::vector<std::string> vs; std::vector<float> vf;
+        std::vector<uint8_t> vb; float f; uint8_t b8;
+        HAsset::Reader::readString(c->data, o, str);   // shaderPath
+        HAsset::Reader::readVec(c->data, o, vs);       // texturePaths
+        for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c->data, o, f); // PBR
+        HAsset::Reader::readString(c->data, o, str);   // customShaderFragGlsl
+        HAsset::Reader::readString(c->data, o, str);   // nodeGraphJson
+        { uint32_t n = 0; HAsset::Reader::readPOD(c->data, o, n);
+          for (uint32_t i = 0; i < n; ++i) HAsset::Reader::readPOD(c->data, o, f); }
+        HAsset::Reader::readVec(c->data, o, vs);       // graphTexturePaths
+        HAsset::Reader::readVec(c->data, o, vs);       // graphParamNames
+        HAsset::Reader::readVec(c->data, o, vb);       // graphParamTypes
+        HAsset::Reader::readVec(c->data, o, vf);       // minmax
+        HAsset::Reader::readVec(c->data, o, vs);       // groups
+        HAsset::Reader::readVec(c->data, o, vs);       // tooltips
+        HAsset::Reader::readString(c->data, o, str);   // parentMaterialPath
+        HAsset::Reader::readVec(c->data, o, vs);       // overridden
+        HAsset::Reader::readVec(c->data, o, vs);       // switch names
+        HAsset::Reader::readVec(c->data, o, vb);       // switch values
+        HAsset::Reader::readPOD(c->data, o, b8);       // blend mode
+        HAsset::Reader::readString(c->data, o, str);   // customShaderVertGlsl
+        HAsset::Reader::readVec(c->data, o, vs);       // graphLayerNames
+        HAsset::Reader::readString(c->data, o, str);   // customShaderGBufGlsl
+        for (int k = 0; k < 3; ++k) REQUIRE(HAsset::Reader::readPOD(c->data, o, rgb[k]));
+    };
+
+    float onRgb[3] = {}, defRgb[3] = {};
+    approxBaseColor(onId, onRgb);
+    approxBaseColor(defId, defRgb);
+    CHECK(onRgb[0]  == doctest::Approx(0.0f)); // ON permutation → blue branch
+    CHECK(onRgb[2]  == doctest::Approx(1.0f));
+    CHECK(defRgb[0] == doctest::Approx(1.0f)); // no override → parent default (red)
+    CHECK(defRgb[2] == doctest::Approx(0.0f));
 
     he_test::removeAllQuiet(dir);
 }
