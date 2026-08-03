@@ -136,9 +136,24 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			ImGui::PopStyleColor();
 		}
 
+		// The two lines above state different facts, but share one remedy — so it
+		// is printed once here rather than appended to each, which had the panel
+		// repeating the same paragraph back to back.
+		if (!collab->connectivityAdvice().empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextWrapped("%s", collab->connectivityAdvice().c_str());
+		}
+
 		ImGui::Spacing();
-		ImGui::TextDisabled("Local address: %s:%u", collab->localAddress().c_str(),
+		// Two different machines' addresses, so they are labelled as such. Showing
+		// the directory-observed address as "local" implied this machine sits on
+		// the internet, when on any NAT it is the router that does.
+		ImGui::TextDisabled("This machine: %s:%u", collab->localAddress().c_str(),
 		                    static_cast<unsigned>(collab->port()));
+		if (!collab->publicAddress().empty())
+			ImGui::TextDisabled("Seen from outside as: %s (your router)",
+			                    collab->publicAddress().c_str());
 	}
 	else
 	{
