@@ -123,6 +123,17 @@ HE_NET_API bool socketWaitReadable(SocketHandle h, int timeoutMs);
 // is a small binary UDP protocol.
 
 HE_NET_API SocketHandle socketCreateUdp();
+
+// The IPv6 twin. Kept as a separate constructor rather than a family parameter
+// because a PCP pinhole request MUST leave from the exact address it names —
+// RFC 6887 makes the router reject anything else (ADDRESS_MISMATCH) — so the
+// caller always knows the family before creating the socket.
+HE_NET_API SocketHandle socketCreateUdp6();
+
+// Bind an IPv6 UDP socket to one specific source address ("fe80::1%en0" scope
+// suffixes understood). Port 0 lets the system pick.
+HE_NET_API bool         socketBindUdp6To(SocketHandle h, const std::string& localAddress,
+                                         std::uint16_t port);
 // Bind to a local port (0 = any). Required before receiving.
 HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
 // Allow sending to multicast groups (SSDP's 239.255.255.250).
@@ -170,6 +181,11 @@ HE_NET_API std::string socketLocalAddress();
 // x.y.z.1 is right often enough to look correct and wrong often enough to be a
 // support nightmare. Empty when there is no default route.
 HE_NET_API std::string socketDefaultGateway();
+
+// The default IPv6 router, usually a link-local address, rendered with its
+// scope ("fe80::1%en0") because a link-local address without one is unusable.
+// Empty when there is no IPv6 default route.
+HE_NET_API std::string socketDefaultGatewayIPv6();
 
 // This machine's globally routable IPv6 address, or empty when it has none.
 //

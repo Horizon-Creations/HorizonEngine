@@ -131,6 +131,14 @@ bool PortMapper::parseDeviceDescription(const std::string& xml,
     // in the priority order above. Scanning per block (rather than searching the
     // whole document for a controlURL) is what keeps the control URL paired with
     // the service type it actually belongs to.
+    // The IPv6 firewall service rides along in the same walk: it lives in the
+    // same description document, and finding it now saves a re-fetch when a
+    // pinhole is wanted later.
+    static const char* const kV6Fw = "urn:schemas-upnp-org:service:WANIPv6FirewallControl:1";
+    out.v6fwControlUrl.clear();
+    out.v6fwServiceType.clear();
+
+    bool found = false;
     for (const char* wanted : kWanServices) {
         std::size_t pos = 0;
         while (true) {
@@ -141,19 +149,22 @@ bool PortMapper::parseDeviceDescription(const std::string& xml,
 
             const std::string block = xml.substr(sBegin, sEnd - sBegin);
             const std::string type  = extractXmlValue(block, "serviceType");
-            if (type == wanted) {
-                const std::string ctrl = extractXmlValue(block, "controlURL");
-                if (!ctrl.empty()) {
-                    out.location    = baseUrl;
-                    out.serviceType = type;
-                    out.controlUrl  = resolveUrl(baseUrl, ctrl);
-                    return !out.controlUrl.empty();
-                }
+            const std::string ctrl  = extractXmlValue(block, "controlURL");
+            if (!found && type == wanted && !ctrl.empty()) {
+                out.location    = baseUrl;
+                out.serviceType = type;
+                out.controlUrl  = resolveUrl(baseUrl, ctrl);
+                found = !out.controlUrl.empty();
+            }
+            if (type == kV6Fw && !ctrl.empty() && out.v6fwControlUrl.empty()) {
+                out.v6fwServiceType = type;
+                out.v6fwControlUrl  = resolveUrl(baseUrl, ctrl);
             }
             pos = sEnd + 10;
         }
+        if (found) break;
     }
-    return false;
+    return found;
 }
 
 std::string PortMapper::buildSoapBody(
@@ -352,18 +363,19 @@ PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
 namespace {
 
 // Issue a SOAP action and hand back the raw response body.
-bool soapCall(const IgdDevice& igd, const std::string& action,
-              const std::vector<std::pair<std::string, std::string>>& args,
-              std::string& outBody) {
-    if (igd.controlUrl.empty() || igd.serviceType.empty()) return false;
+bool soapCallTo(const std::string& controlUrl, const std::string& serviceType,
+                const std::string& action,
+                const std::vector<std::pair<std::string, std::string>>& args,
+                std::string& outBody) {
+    if (controlUrl.empty() || serviceType.empty()) return false;
 
-    const std::string body = PortMapper::buildSoapBody(igd.serviceType, action, args);
+    const std::string body = PortMapper::buildSoapBody(serviceType, action, args);
     const std::vector<std::string> headers = {
         "Content-Type: text/xml; charset=\"utf-8\"",
-        "SOAPAction: \"" + igd.serviceType + "#" + action + "\"",
+        "SOAPAction: \"" + serviceType + "#" + action + "\"",
     };
 
-    const HttpResponse resp = httpRequest(igd.controlUrl, "POST", headers, body, 5000);
+    const HttpResponse resp = httpRequest(controlUrl, "POST", headers, body, 5000);
     if (!resp.ok) {
         HE_LOG_WARN(Net, "UPnP: SOAP %s could not reach the router", action.c_str());
         return false;
@@ -379,6 +391,12 @@ bool soapCall(const IgdDevice& igd, const std::string& action,
     }
     HE_LOG_DEBUG(Net, "UPnP: %s accepted", action.c_str());
     return true;
+}
+
+bool soapCall(const IgdDevice& igd, const std::string& action,
+              const std::vector<std::pair<std::string, std::string>>& args,
+              std::string& outBody) {
+    return soapCallTo(igd.controlUrl, igd.serviceType, action, args, outBody);
 }
 
 } // namespace
@@ -501,11 +519,28 @@ std::uint32_t getU32(const std::uint8_t* p) {
 // forever, since the caller has a fallback ladder anyway.
 bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>& request,
                     std::uint8_t* reply, std::size_t replyCapacity,
-                    std::size_t& replyLen, int timeoutMs) {
+                    std::size_t& replyLen, int timeoutMs,
+                    const std::string& bindAddress = {}) {
     replyLen = 0;
-    SocketHandle udp = socketCreateUdp();
+    const bool v6 = gateway.find(':') != std::string::npos;
+    SocketHandle udp = v6 ? socketCreateUdp6() : socketCreateUdp();
     if (udp == kInvalidSocket) return false;
-    if (!socketBindUdp(udp, 0)) { socketClose(udp); return false; }
+
+    // PCP requires the datagram's source address to equal the client address
+    // named inside it — the router rejects anything else as ADDRESS_MISMATCH.
+    // An unbound socket leaves that choice to the OS, which on macOS prefers
+    // the temporary privacy address and so never matches the stable one the
+    // request names. Binding is what makes the two agree.
+    const bool bound = bindAddress.empty()
+        ? (v6 ? socketBindUdp6To(udp, "::", 0) : socketBindUdp(udp, 0))
+        : (v6 ? socketBindUdp6To(udp, bindAddress, 0)
+              : socketBindUdpTo(udp, bindAddress, 0));
+    if (!bound) {
+        HE_LOG_DEBUG(Net, "PCP: could not bind to %s",
+                     bindAddress.empty() ? "(any)" : bindAddress.c_str());
+        socketClose(udp);
+        return false;
+    }
 
     std::size_t sent = 0;
     if (socketSendTo(udp, request.data(), request.size(), gateway, kNatPmpPort, sent)
@@ -528,12 +563,15 @@ bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>&
         socketRecvFrom(udp, reply, replyCapacity, replyLen, fromHost, fromPort);
     socketClose(udp);
 
-    // Only trust an answer that actually came from the gateway we asked.
-    if (rc == SocketResult::Ok && fromHost != gateway) {
+    // Only trust an answer that actually came from the gateway we asked. The
+    // scope suffix is ours, not part of the wire address, so it is stripped
+    // before comparing — recvfrom reports the bare address.
+    const std::string bare = gateway.substr(0, gateway.find('%'));
+    if (rc == SocketResult::Ok && fromHost != bare) {
         HE_LOG_WARN(Net, "NAT-PMP: ignoring a reply from %s — we asked %s",
-                    fromHost.c_str(), gateway.c_str());
+                    fromHost.c_str(), bare.c_str());
     }
-    return rc == SocketResult::Ok && fromHost == gateway;
+    return rc == SocketResult::Ok && fromHost == bare;
 }
 
 } // namespace
@@ -839,7 +877,8 @@ PortMapResult PortMapper::pcpMap(const std::string& gateway,
                                         suggestedExternalPort, lifetimeSeconds);
     std::uint8_t reply[256];
     std::size_t  replyLen = 0;
-    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs))
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs,
+                        clientAddress))
         return PortMapResult::NoRouterFound;
 
     std::uint8_t result = 0;
@@ -882,7 +921,8 @@ PortMapResult PortMapper::pcpUnmap(const std::string& gateway,
     const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort, 0, 0);
     std::uint8_t reply[256];
     std::size_t  replyLen = 0;
-    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs))
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs,
+                        clientAddress))
         return PortMapResult::NoRouterFound;
 
     PcpMapping ignored;
@@ -896,54 +936,133 @@ PortMapResult PortMapper::pcpUnmap(const std::string& gateway,
 
 // ─── The fallback ladder ─────────────────────────────────────────────────────
 
+// ─── IPv6 firewall pinholes ──────────────────────────────────────────────────
+
+PortMapResult PortMapper::addPinhole(const IgdDevice& igd, const std::string& internalClient,
+                                     std::uint16_t port, std::uint32_t leaseSeconds,
+                                     std::string& outUniqueId) {
+    outUniqueId.clear();
+    if (igd.v6fwControlUrl.empty()) return PortMapResult::NoServiceFound;
+
+    std::string body;
+    const bool ok = soapCallTo(igd.v6fwControlUrl, igd.v6fwServiceType, "AddPinhole", {
+        // RemoteHost/RemotePort empty+0 = any peer, which is what a session
+        // host wants: the guests' addresses are unknown until they connect.
+        { "RemoteHost",     "" },
+        { "RemotePort",     "0" },
+        { "InternalClient", internalClient },
+        { "InternalPort",   std::to_string(port) },
+        { "Protocol",       "6" },                            // TCP, by IANA number
+        { "LeaseTime",      std::to_string(leaseSeconds) },
+    }, body);
+    if (!ok) {
+        // 606 again means "understood, declined" — same verdict as everywhere
+        // else, and the same per-device permission behind it.
+        if (extractXmlValue(body, "errorCode") == "606") return PortMapResult::Refused;
+        return PortMapResult::RequestFailed;
+    }
+
+    outUniqueId = extractXmlValue(body, "UniqueID");
+    if (outUniqueId.empty()) {
+        HE_LOG_WARN(Net, "UPnP: AddPinhole succeeded but returned no UniqueID — the "
+                         "pinhole exists and cannot be deleted by us");
+        return PortMapResult::RequestFailed;
+    }
+    return PortMapResult::Ok;
+}
+
+PortMapResult PortMapper::deletePinhole(const IgdDevice& igd, const std::string& uniqueId) {
+    if (igd.v6fwControlUrl.empty() || uniqueId.empty()) return PortMapResult::NoServiceFound;
+    std::string body;
+    const bool ok = soapCallTo(igd.v6fwControlUrl, igd.v6fwServiceType, "DeletePinhole",
+                               { { "UniqueID", uniqueId } }, body);
+    return ok ? PortMapResult::Ok : PortMapResult::RequestFailed;
+}
+
+PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t port,
+                                      PinholeHandle& out, const IgdDevice& igd) {
+    out = PinholeHandle{};
+    if (globalV6.empty()) return PortMapResult::NotSupported;
+
+    bool refused = false;
+
+    // PCP first: the standards path, a single datagram, and the only one of the
+    // two that works on routers with no UPnP at all.
+    const std::string gateway6 = socketDefaultGatewayIPv6();
+    if (!gateway6.empty()) {
+        PcpMapping pcp;
+        const PortMapResult r = pcpMap(gateway6, globalV6, port, port, 7200, pcp);
+        if (r == PortMapResult::Ok) {
+            out.method        = PinholeHandle::Method::Pcp;
+            out.gateway       = gateway6;
+            out.clientAddress = globalV6;
+            out.port          = port;
+            std::memcpy(out.pcpNonce, pcp.nonce, sizeof(out.pcpNonce));
+            HE_LOG_INFO(Net, "Pinhole: opened TCP [%s]:%u via PCP",
+                        globalV6.c_str(), static_cast<unsigned>(port));
+            return PortMapResult::Ok;
+        }
+        refused = refused || r == PortMapResult::Refused;
+    }
+
+    // UPnP WANIPv6FirewallControl second. Not an exotic fallback: a FRITZ!Box —
+    // the most common home router in this codebase's user base — refuses PCP
+    // pinholes even with its per-device permission set, and grants exactly the
+    // same request through this service.
+    IgdDevice dev = igd;
+    if (dev.v6fwControlUrl.empty()) {
+        if (discover(dev, 3000) != PortMapResult::Ok || dev.v6fwControlUrl.empty()) {
+            HE_LOG_INFO(Net, "Pinhole: no PCP pinhole and no IPv6 firewall service — the "
+                             "IPv6 address stays firewalled");
+            return refused ? PortMapResult::Refused : PortMapResult::NoServiceFound;
+        }
+    }
+
+    std::string uniqueId;
+    // 86400 s is the ceiling the spec allows for a pinhole lease; a session that
+    // outlives a day re-registers long before then anyway.
+    const PortMapResult r = addPinhole(dev, globalV6, port, 86400, uniqueId);
+    if (r == PortMapResult::Ok) {
+        out.method   = PinholeHandle::Method::Upnp6fc;
+        out.igd      = dev;
+        out.uniqueId = uniqueId;
+        out.port     = port;
+        HE_LOG_INFO(Net, "Pinhole: opened TCP [%s]:%u via UPnP IPv6 firewall control "
+                         "(id %s)", globalV6.c_str(), static_cast<unsigned>(port),
+                    uniqueId.c_str());
+        return PortMapResult::Ok;
+    }
+    if (refused || r == PortMapResult::Refused) {
+        HE_LOG_WARN(Net, "Pinhole: the router refuses to open its IPv6 firewall for this "
+                         "device");
+        return PortMapResult::Refused;
+    }
+    return r;
+}
+
+void PortMapper::closePinhole(const PinholeHandle& handle) {
+    switch (handle.method) {
+    case PinholeHandle::Method::Pcp:
+        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port);
+        break;
+    case PinholeHandle::Method::Upnp6fc:
+        deletePinhole(handle.igd, handle.uniqueId);
+        break;
+    case PinholeHandle::Method::None:
+        break;
+    }
+}
+
 PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& description,
                                   MappingHandle& outHandle, PortMapping& outInfo) {
     outHandle = MappingHandle{};
     HE_LOG_INFO(Net, "Port mapping: trying to open TCP %u automatically",
                 static_cast<unsigned>(port));
 
-    const std::string gatewayFirst = socketDefaultGateway();
-
     // Sticky across every rung below: any one of them hearing an explicit "no"
     // changes the verdict, even if a later rung merely stays silent.
     bool refused = false;
 
-    // ── IPv6 first, when this machine has a global address ───────────────────
-    // Not a fallback but the preferred path, because IPv6 needs no translation
-    // at all: the machine is already addressable and only the router's firewall
-    // is in the way. That also sidesteps carrier-grade NAT entirely, which on
-    // many consumer connections (DS-Lite in particular) makes IPv4 forwarding
-    // impossible no matter what the router is willing to do.
-    //
-    // PCP is the only protocol here that can open it. UPnP AddPortMapping and
-    // NAT-PMP are both defined purely in terms of IPv4 translation and have
-    // nothing to say about a firewall pinhole.
-    const std::string globalV6 = socketGlobalIPv6Address();
-    if (!globalV6.empty() && !gatewayFirst.empty())
-    {
-        HE_LOG_DEBUG(Net, "Port mapping: this machine has a global IPv6 address, trying a "
-                          "PCP pinhole before any IPv4 mapping");
-        PcpMapping pcp;
-        const PortMapResult r = pcpMap(gatewayFirst, globalV6, port, port, 7200, pcp);
-        refused = refused || r == PortMapResult::Refused;
-        if (r == PortMapResult::Ok)
-        {
-            outHandle.method        = MappingHandle::Method::Pcp;
-            outHandle.gateway       = gatewayFirst;
-            outHandle.port          = port;
-            outHandle.clientAddress = globalV6;
-            outHandle.isIPv6        = true;
-            std::memcpy(outHandle.pcpNonce, pcp.nonce, sizeof(outHandle.pcpNonce));
-
-            outInfo.externalPort = pcp.externalPort ? pcp.externalPort : port;
-            outInfo.internalPort = port;
-            outInfo.internalHost = globalV6;
-            outInfo.externalIp   = pcp.externalAddress.empty() ? globalV6 : pcp.externalAddress;
-            HE_LOG_INFO(Net, "Port mapping: opened an IPv6 pinhole via PCP for [%s]:%u",
-                        globalV6.c_str(), static_cast<unsigned>(outInfo.externalPort));
-            return PortMapResult::Ok;
-        }
-    }
 
     // UPnP first among the IPv4 mechanisms: broader support across consumer routers.
     IgdDevice igd;

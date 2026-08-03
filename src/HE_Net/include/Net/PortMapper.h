@@ -81,6 +81,13 @@ struct IgdDevice {
     std::string location;      // device description URL (from SSDP LOCATION)
     std::string controlUrl;    // absolute control endpoint
     std::string serviceType;   // WANIPConnection:1 / WANPPPConnection:1 / …
+
+    // IPv6 firewall control (IGDv2), when the gateway offers it. This is how a
+    // FRITZ!Box opens IPv6 — its PCP responder refuses pinholes even with the
+    // device permission set, but AddPinhole on this service works. Empty when
+    // the device description lists no such service.
+    std::string v6fwControlUrl;
+    std::string v6fwServiceType;
 };
 
 class HE_NET_API PortMapper {
@@ -197,6 +204,41 @@ public:
     static PortMapResult mapPort(std::uint16_t port, const std::string& description,
                                  MappingHandle& outHandle, PortMapping& outInfo);
     static void          unmapPort(const MappingHandle& handle);
+
+    // ── IPv6 firewall pinhole ────────────────────────────────────────────────
+    // Deliberately separate from mapPort: a pinhole and an IPv4 mapping are not
+    // alternatives but complements. The pinhole makes the advertised IPv6
+    // address actually accept connections; the IPv4 mapping is what guests
+    // without IPv6 use. A host wants BOTH, so conflating them into one ladder
+    // would leave one class of guest stranded whichever way it resolved.
+    struct PinholeHandle
+    {
+        enum class Method : std::uint8_t { None, Pcp, Upnp6fc };
+        Method        method = Method::None;
+        // Pcp
+        std::string   gateway;          // IPv6, scope included
+        std::string   clientAddress;
+        std::uint8_t  pcpNonce[12] = {};
+        std::uint16_t port = 0;
+        // Upnp6fc
+        IgdDevice     igd;
+        std::string   uniqueId;         // the router's name for the pinhole
+    };
+
+    // Open TCP `port` on the router's IPv6 firewall for `globalV6` (this
+    // machine's address). Tries PCP first (the standards path), then UPnP
+    // WANIPv6FirewallControl (the FRITZ!Box path). `igd` may carry a device
+    // found by an earlier discover() to skip a second SSDP round; pass an empty
+    // one to let this discover on its own.
+    static PortMapResult openPinhole(const std::string& globalV6, std::uint16_t port,
+                                     PinholeHandle& out, const IgdDevice& igd = {});
+    static void          closePinhole(const PinholeHandle& handle);
+
+    // UPnP WANIPv6FirewallControl primitives (IGDv2).
+    static PortMapResult addPinhole(const IgdDevice& igd, const std::string& internalClient,
+                                    std::uint16_t port, std::uint32_t leaseSeconds,
+                                    std::string& outUniqueId);
+    static PortMapResult deletePinhole(const IgdDevice& igd, const std::string& uniqueId);
 
     // ── Pure helpers, exposed for testing without a live router ──
     // PCP wire format, exposed for testing without a router.

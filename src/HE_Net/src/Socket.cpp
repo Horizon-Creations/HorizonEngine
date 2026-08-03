@@ -597,6 +597,60 @@ SocketHandle socketCreateUdp() {
     return h;
 }
 
+SocketHandle socketCreateUdp6() {
+    if (!socketSystemInit()) return kInvalidSocket;
+
+#ifdef _WIN32
+    SOCKET s = ::socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return kInvalidSocket;
+#else
+    int s = ::socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) return kInvalidSocket;
+#endif
+    const auto h = static_cast<SocketHandle>(s);
+    if (!socketSetNonBlocking(h, true)) {
+        socketClose(h);
+        return kInvalidSocket;
+    }
+    return h;
+}
+
+namespace {
+
+// Parse a numeric address of either family, scope suffix included ("%en0" on
+// POSIX, "%14" on Windows). getaddrinfo is used instead of inet_pton precisely
+// because inet_pton cannot parse the scope, and a link-local address without
+// its scope cannot be sent to at all.
+bool parseNumericAddress(const std::string& host, std::uint16_t port,
+                         sockaddr_storage& out, socklen_t& outLen) {
+    addrinfo hints{};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags    = AI_NUMERICHOST;
+    addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res)
+        return false;
+    std::memcpy(&out, res->ai_addr, res->ai_addrlen);
+    outLen = static_cast<socklen_t>(res->ai_addrlen);
+    ::freeaddrinfo(res);
+    return true;
+}
+
+} // namespace
+
+bool socketBindUdp6To(SocketHandle h, const std::string& localAddress, std::uint16_t port) {
+    if (h == kInvalidSocket) return false;
+    sockaddr_storage ss{};
+    socklen_t len = 0;
+    if (!parseNumericAddress(localAddress, port, ss, len)) return false;
+    if (ss.ss_family != AF_INET6) return false;
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(h), reinterpret_cast<sockaddr*>(&ss), len) == 0;
+#else
+    return ::bind(static_cast<int>(h), reinterpret_cast<sockaddr*>(&ss), len) == 0;
+#endif
+}
+
 bool socketBindUdp(SocketHandle h, std::uint16_t port) {
     if (h == kInvalidSocket) return false;
     socketSetReuseAddr(h, true);
@@ -664,10 +718,11 @@ SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t 
     outSent = 0;
     if (h == kInvalidSocket) return SocketResult::Error;
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+    // Either family: the address decides, so an IPv6 socket can be used through
+    // the same call. Scope suffixes on link-local addresses are understood.
+    sockaddr_storage addr{};
+    socklen_t addrLen = 0;
+    if (!parseNumericAddress(host, port, addr, addrLen)) {
         return SocketResult::Error;
     }
 
@@ -675,10 +730,10 @@ SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t 
     const int n = ::sendto(static_cast<SOCKET>(h),
                            reinterpret_cast<const char*>(data),
                            static_cast<int>(len), 0,
-                           reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+                           reinterpret_cast<sockaddr*>(&addr), addrLen);
 #else
     const ssize_t n = ::sendto(static_cast<int>(h), data, len, 0,
-                               reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+                               reinterpret_cast<sockaddr*>(&addr), addrLen);
 #endif
     if (n > 0) {
         outSent = static_cast<std::size_t>(n);
@@ -697,7 +752,7 @@ SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
     outFromPort = 0;
     if (h == kInvalidSocket) return SocketResult::Error;
 
-    sockaddr_in from{};
+    sockaddr_storage from{};
 #ifdef _WIN32
     int fromLen = static_cast<int>(sizeof(from));
     const int n = ::recvfrom(static_cast<SOCKET>(h), reinterpret_cast<char*>(buf),
@@ -710,9 +765,16 @@ SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
 #endif
     if (n > 0) {
         outReceived = static_cast<std::size_t>(n);
-        char ip[INET_ADDRSTRLEN] = {};
-        if (::inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip))) outFromHost = ip;
-        outFromPort = ntohs(from.sin_port);
+        char ip[INET6_ADDRSTRLEN] = {};
+        if (from.ss_family == AF_INET6) {
+            auto* v6 = reinterpret_cast<sockaddr_in6*>(&from);
+            if (::inet_ntop(AF_INET6, &v6->sin6_addr, ip, sizeof(ip))) outFromHost = ip;
+            outFromPort = ntohs(v6->sin6_port);
+        } else {
+            auto* v4 = reinterpret_cast<sockaddr_in*>(&from);
+            if (::inet_ntop(AF_INET, &v4->sin_addr, ip, sizeof(ip))) outFromHost = ip;
+            outFromPort = ntohs(v4->sin_port);
+        }
         return SocketResult::Ok;
     }
     const int e = lastError();
@@ -1172,6 +1234,130 @@ bool socketLocalNetworkBlocked() {
                          "not by the network", gw.c_str());
     }
     return blocked;
+}
+
+std::string socketDefaultGatewayIPv6() {
+    // The result is usually link-local, so it is rendered WITH its scope —
+    // "fe80::1%en0" — because without one the address names every network at
+    // once and can be sent to on none of them.
+#if defined(_WIN32)
+    SOCKADDR_INET dst{};
+    dst.si_family = AF_INET6;                       // :: — the default route
+    MIB_IPFORWARD_ROW2 row{};
+    SOCKADDR_INET bestSrc{};
+    if (::GetBestRoute2(nullptr, 0, nullptr, &dst, 0, &row, &bestSrc) != NO_ERROR)
+        return {};
+    const in6_addr& hop = row.NextHop.Ipv6.sin6_addr;
+    static const in6_addr kZero{};
+    if (std::memcmp(&hop, &kZero, sizeof(hop)) == 0) return {};   // on-link, no router
+
+    char buf[INET6_ADDRSTRLEN] = {};
+    if (!::inet_ntop(AF_INET6, &hop, buf, sizeof(buf))) return {};
+    std::string out = buf;
+    // Windows scopes are numeric interface indices.
+    if (IN6_IS_ADDR_LINKLOCAL(&hop) && row.InterfaceIndex != 0)
+        out += "%" + std::to_string(row.InterfaceIndex);
+    return out;
+
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    int mib[6] = { CTL_NET, PF_ROUTE, 0, AF_INET6, NET_RT_FLAGS, RTF_GATEWAY };
+    std::size_t needed = 0;
+    if (::sysctl(mib, 6, nullptr, &needed, nullptr, 0) < 0 || needed == 0) return {};
+    std::vector<char> buf(needed);
+    if (::sysctl(mib, 6, buf.data(), &needed, nullptr, 0) < 0) return {};
+
+    for (char* p = buf.data(); p < buf.data() + needed; ) {
+        auto* rtm = reinterpret_cast<rt_msghdr*>(p);
+        if (rtm->rtm_msglen == 0) break;
+        p += rtm->rtm_msglen;
+
+        if ((rtm->rtm_flags & (RTF_UP | RTF_GATEWAY)) != (RTF_UP | RTF_GATEWAY)) continue;
+        if ((rtm->rtm_addrs & (RTA_DST | RTA_GATEWAY)) != (RTA_DST | RTA_GATEWAY)) continue;
+
+        auto* sa = reinterpret_cast<sockaddr*>(rtm + 1);
+        const auto advance = [](sockaddr* a) {
+            const std::size_t len = a->sa_len ? ((a->sa_len + 3) & ~3u) : 4u;
+            return reinterpret_cast<sockaddr*>(reinterpret_cast<char*>(a) + len);
+        };
+
+        sockaddr* dst = sa;
+        if (dst->sa_family != AF_INET6) continue;
+        auto* dst6 = reinterpret_cast<sockaddr_in6*>(dst);
+        static const in6_addr kAny{};
+        if (std::memcmp(&dst6->sin6_addr, &kAny, sizeof(kAny)) != 0) continue;   // not ::
+
+        sockaddr* gw = advance(dst);
+        if (gw->sa_family != AF_INET6) continue;
+        sockaddr_in6 gw6;
+        std::memcpy(&gw6, gw, sizeof(gw6));
+
+        // KAME embeds the interface index of a link-local address in bytes 2-3
+        // of the address itself when it crosses the sysctl boundary. Rendered
+        // as-is that becomes "fe80:4::..." — a different, nonexistent address —
+        // so it is pulled out and zeroed before formatting.
+        unsigned scope = gw6.sin6_scope_id;
+        if (IN6_IS_ADDR_LINKLOCAL(&gw6.sin6_addr)) {
+            std::uint16_t embedded = 0;
+            std::memcpy(&embedded, &gw6.sin6_addr.s6_addr[2], 2);
+            embedded = ntohs(embedded);
+            if (embedded != 0) scope = embedded;
+            gw6.sin6_addr.s6_addr[2] = 0;
+            gw6.sin6_addr.s6_addr[3] = 0;
+        }
+
+        char out[INET6_ADDRSTRLEN] = {};
+        if (!::inet_ntop(AF_INET6, &gw6.sin6_addr, out, sizeof(out))) continue;
+        std::string result = out;
+        if (scope != 0) {
+            char name[IF_NAMESIZE] = {};
+            if (::if_indextoname(scope, name) && name[0])
+                result += std::string("%") + name;
+            else
+                result += "%" + std::to_string(scope);
+        }
+        return result;
+    }
+    return {};
+
+#else
+    // Linux: /proc/net/ipv6_route — dest(32 hex) plen src plen nexthop(32 hex)
+    // metric refcnt use flags ifname. The default route is the all-zero
+    // destination with prefix length 0 and the RTF_GATEWAY flag (0x2).
+    std::FILE* f = std::fopen("/proc/net/ipv6_route", "r");
+    if (!f) return {};
+
+    char line[512];
+    std::string result;
+    while (std::fgets(line, sizeof(line), f)) {
+        char dst[40] = {}, gw[40] = {}, ifname[64] = {};
+        unsigned dstPlen = 0, flags = 0;
+        // src+plen, metric, refcnt and use are skipped with %*.
+        if (std::sscanf(line, "%39s %x %*s %*x %39s %*x %*x %*x %x %63s",
+                        dst, &dstPlen, gw, &flags, ifname) != 5) continue;
+        if (dstPlen != 0) continue;
+        if ((flags & 0x2u) == 0) continue;                        // RTF_GATEWAY
+        if (std::strspn(dst, "0") != 32) continue;                // dest must be ::
+
+        in6_addr addr{};
+        bool ok = std::strlen(gw) == 32;
+        for (int i = 0; ok && i < 16; ++i) {
+            unsigned byte = 0;
+            ok = std::sscanf(gw + i * 2, "%2x", &byte) == 1;
+            addr.s6_addr[i] = static_cast<std::uint8_t>(byte);
+        }
+        static const in6_addr kZero{};
+        if (!ok || std::memcmp(&addr, &kZero, sizeof(kZero)) == 0) continue;
+
+        char out[INET6_ADDRSTRLEN] = {};
+        if (!::inet_ntop(AF_INET6, &addr, out, sizeof(out))) continue;
+        result = out;
+        if (IN6_IS_ADDR_LINKLOCAL(&addr) && ifname[0])
+            result += std::string("%") + ifname;
+        break;
+    }
+    std::fclose(f);
+    return result;
+#endif
 }
 
 std::string socketDefaultGateway() {
