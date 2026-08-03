@@ -161,6 +161,20 @@ struct MaterialAsset : public RuntimeAsset
 	// forward extra pass.
 	std::string customShaderGBufGlsl;
 
+	// CPU approximation of the graph's BaseColor/Emissive outputs (HE::
+	// matGraphApproxSurface), for consumers that shade per INSTANCE with no
+	// material evaluation — the GI ray kernels colour TLAS/BVH hits with these.
+	// approx*Slot ≥ 0 = the pin is driven directly by that HeParams vec4 slot:
+	// read the CURRENT slot value (live under param edits and per-entity
+	// overrides); the float[3] is then only the fallback. Refreshed with the
+	// codegen (regenerate/sync) and serialized in the MTRL tail so packaged
+	// materials (graph stripped) keep their reflected colour. Older files load
+	// with the neutral defaults below = the pre-approx behaviour.
+	float   approxBaseColor[3] = { 1.0f, 1.0f, 1.0f };
+	float   approxEmissive[3]  = { 0.0f, 0.0f, 0.0f };
+	int32_t approxBaseColorSlot = -1;
+	int32_t approxEmissiveSlot  = -1;
+
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per
 	// material — editing a parameter VALUE never recompiles the shader.

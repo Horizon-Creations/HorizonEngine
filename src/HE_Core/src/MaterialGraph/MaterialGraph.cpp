@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
@@ -1239,5 +1240,138 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
     }
     out = std::move(g);
     return true;
+}
+
+// ─── matGraphApproxSurface (see the header for the contract) ─────────────────
+namespace
+{
+const MatGraphLink* approxFindLink(const MaterialGraph& g, int dstNode, int dstPin)
+{
+    for (const MatGraphLink& l : g.links)
+        if (l.dstNode == dstNode && l.dstPin == dstPin) return &l;
+    return nullptr;
+}
+
+bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4]);
+
+// Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
+// registry default (splat — the same coercion codegen applies to scalars).
+bool approxFoldInput(const MaterialGraph& g, const MatGraphNode& node, int pin,
+                     int depth, float out[4])
+{
+    if (const MatGraphLink* l = approxFindLink(g, node.id, pin))
+        return approxFoldNode(g, l->srcNode, depth, out);
+    const MatNodeDesc& d = matNodeDesc(node.type);
+    const float def = (pin >= 0 && pin < (int)d.inputs.size()) ? d.inputs[pin].def : 0.0f;
+    out[0] = out[1] = out[2] = out[3] = def;
+    return true;
+}
+
+bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4])
+{
+    if (depth > 32) return false; // cycle/degenerate guard
+    const MatGraphNode* n = g.findNode(nodeId);
+    if (!n) return false;
+    float a[4], b[4], t[4];
+    switch (n->type)
+    {
+    case MatNodeType::ConstFloat:
+    case MatNodeType::ConstBool:
+    case MatNodeType::ParamFloat:  // Param values fold from the node DEFAULT —
+    case MatNodeType::ParamBool:   // live values go through MatApproxSurface::*Param
+        out[0] = out[1] = out[2] = out[3] = n->p[0];
+        return true;
+    case MatNodeType::ConstColor:
+    case MatNodeType::ParamColor:
+        out[0] = n->p[0]; out[1] = n->p[1]; out[2] = n->p[2]; out[3] = 1.0f;
+        return true;
+    case MatNodeType::ConstVec2:
+    case MatNodeType::ParamVec2:
+        out[0] = n->p[0]; out[1] = n->p[1]; out[2] = 0.0f; out[3] = 0.0f;
+        return true;
+    case MatNodeType::ConstVec4:
+    case MatNodeType::ParamVec4:
+        for (int k = 0; k < 4; ++k) out[k] = n->p[k];
+        return true;
+    case MatNodeType::Reroute:
+        return approxFoldInput(g, *n, 0, depth + 1, out);
+    case MatNodeType::OneMinus:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a)) return false;
+        for (int k = 0; k < 4; ++k) out[k] = 1.0f - a[k];
+        return true;
+    case MatNodeType::Saturate:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a)) return false;
+        for (int k = 0; k < 4; ++k) out[k] = std::clamp(a[k], 0.0f, 1.0f);
+        return true;
+    case MatNodeType::Add:
+    case MatNodeType::Subtract:
+    case MatNodeType::Multiply:
+    case MatNodeType::Divide:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b)) return false;
+        for (int k = 0; k < 4; ++k)
+            out[k] = n->type == MatNodeType::Add      ? a[k] + b[k]
+                   : n->type == MatNodeType::Subtract ? a[k] - b[k]
+                   : n->type == MatNodeType::Multiply ? a[k] * b[k]
+                   : (std::abs(b[k]) > 1e-8f ? a[k] / b[k] : 0.0f);
+        return true;
+    case MatNodeType::Lerp:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b) ||
+            !approxFoldInput(g, *n, 2, depth + 1, t)) return false;
+        for (int k = 0; k < 4; ++k) out[k] = a[k] + (b[k] - a[k]) * t[0];
+        return true;
+    default:
+        return false; // textures, noise, per-fragment inputs … cannot fold
+    }
+}
+
+// Real source of an Output input pin, Reroutes skipped (nullptr = unconnected).
+const MatGraphNode* approxSource(const MaterialGraph& g, int dstNode, int dstPin)
+{
+    for (int guard = 0; guard < 32; ++guard)
+    {
+        const MatGraphLink* l = approxFindLink(g, dstNode, dstPin);
+        if (!l) return nullptr;
+        const MatGraphNode* n = g.findNode(l->srcNode);
+        if (!n || n->type != MatNodeType::Reroute) return n;
+        dstNode = n->id; dstPin = 0;
+    }
+    return nullptr;
+}
+} // namespace
+
+MatApproxSurface matGraphApproxSurface(const MaterialGraph& g)
+{
+    MatApproxSurface out;
+    const MatGraphNode* output = nullptr;
+    for (const MatGraphNode& n : g.nodes)
+        if (n.type == MatNodeType::Output) { output = &n; break; }
+    if (!output) return out;
+
+    auto foldPin = [&](int pin, float rgb[3], std::string& param)
+    {
+        // Directly Param-driven (rgb-carrying kinds only — a Float param splat
+        // cannot be reconstructed from a slot's raw .rgb) → live lookup.
+        if (const MatGraphNode* src = approxSource(g, output->id, pin);
+            src && (src->type == MatNodeType::ParamColor ||
+                    src->type == MatNodeType::ParamVec4))
+            param = src->s;
+        const MatGraphLink* l = approxFindLink(g, output->id, pin);
+        float v[4];
+        if (l && approxFoldNode(g, l->srcNode, 0, v))
+        {
+            rgb[0] = v[0]; rgb[1] = v[1]; rgb[2] = v[2];
+        }
+        else if (!l)
+        {
+            const float def = matNodeDesc(MatNodeType::Output).inputs[pin].def;
+            rgb[0] = rgb[1] = rgb[2] = def;
+        }
+        // linked but unfoldable → keep the caller-visible defaults (white/black)
+    };
+    foldPin(kMatOutputBaseColorPin, out.baseColor, out.baseColorParam);
+    foldPin(kMatOutputEmissivePin,  out.emissive,  out.emissiveParam);
+    return out;
 }
 } // namespace HE
