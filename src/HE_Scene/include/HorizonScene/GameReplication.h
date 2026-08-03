@@ -28,7 +28,12 @@
 #include <unordered_map>
 #include <vector>
 
-class HE_API GameReplication
+// No HE_API here. HorizonScene is built with WINDOWS_EXPORT_ALL_SYMBOLS, so the
+// macro would expand to __declspec(dllimport) inside its own translation units
+// and every definition would clash with its declaration (MSVC C4273,
+// "inconsistent dll linkage"). HE_API belongs to HorizonCore, which exports
+// explicitly; the scene layer never uses it.
+class GameReplication
 {
 public:
 	struct Config
