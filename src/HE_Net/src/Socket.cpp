@@ -615,6 +615,34 @@ bool socketBindUdp(SocketHandle h, std::uint16_t port) {
 #endif
 }
 
+bool socketBindUdpTo(SocketHandle h, const std::string& localAddress, std::uint16_t port) {
+    if (h == kInvalidSocket) return false;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    if (::inet_pton(AF_INET, localAddress.c_str(), &addr.sin_addr) != 1) return false;
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#else
+    return ::bind(static_cast<int>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#endif
+}
+
+bool socketSetMulticastInterface(SocketHandle h, const std::string& localAddress) {
+    if (h == kInvalidSocket) return false;
+    in_addr iface{};
+    if (::inet_pton(AF_INET, localAddress.c_str(), &iface) != 1) return false;
+#ifdef _WIN32
+    return ::setsockopt(static_cast<SOCKET>(h), IPPROTO_IP, IP_MULTICAST_IF,
+                        reinterpret_cast<const char*>(&iface), sizeof(iface)) == 0;
+#else
+    return ::setsockopt(static_cast<int>(h), IPPROTO_IP, IP_MULTICAST_IF,
+                        &iface, sizeof(iface)) == 0;
+#endif
+}
+
 bool socketSetMulticastTtl(SocketHandle h, int ttl) {
     if (h == kInvalidSocket) return false;
 #ifdef _WIN32

@@ -56,6 +56,15 @@ enum class PortMapResult : std::uint8_t {
     // On macOS this is the Local Network privacy control, which reports itself as
     // EHOSTUNREACH for the very gateway all internet traffic flows through.
     LocalNetworkBlocked,
+    // The router received the request and said no. Distinct from every failure
+    // above, all of which mean the request did not get a considered answer.
+    //
+    // Worth its own value because the remedy is the opposite one: nothing is
+    // broken and nothing needs installing — a setting has to be turned on. A
+    // FritzBox is the common case and refuses with UPnP 606 / PCP NOT_AUTHORIZED
+    // until "selbstandige Portfreigaben" is enabled FOR THAT DEVICE, which is a
+    // separate per-device checkbox from the global one people usually find.
+    Refused,
 };
 
 struct PortMapping {
