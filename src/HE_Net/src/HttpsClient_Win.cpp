@@ -1,5 +1,7 @@
 #include "Net/HttpsClient.h"
 
+#include "NetLog.h"
+
 #include <windows.h>
 #include <winhttp.h>
 
@@ -57,6 +59,7 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
     uc.dwUrlPathLength   = static_cast<DWORD>(-1);
     uc.dwExtraInfoLength = static_cast<DWORD>(-1);
     if (!::WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &uc)) {
+        HE_LOG_ERROR(Net, "HTTPS: invalid url \"%s\"", url.c_str());
         out.error = "invalid url";
         return out;
     }
@@ -70,19 +73,31 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
                                         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                         WINHTTP_NO_PROXY_NAME,
                                         WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session) { out.error = "WinHttpOpen failed"; return out; }
+    if (!session) {
+        HE_LOG_ERROR(Net, "HTTPS: WinHttpOpen failed (error %lu)", ::GetLastError());
+        out.error = "WinHttpOpen failed";
+        return out;
+    }
 
     ::WinHttpSetTimeouts(session.h, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
 
     WinHttpHandle connect(::WinHttpConnect(session.h, host.c_str(), uc.nPort, 0));
-    if (!connect) { out.error = "WinHttpConnect failed"; return out; }
+    if (!connect) {
+        HE_LOG_ERROR(Net, "HTTPS: WinHttpConnect failed (error %lu)", ::GetLastError());
+        out.error = "WinHttpConnect failed";
+        return out;
+    }
 
     const bool secure = (uc.nScheme == INTERNET_SCHEME_HTTPS);
     WinHttpHandle request(::WinHttpOpenRequest(
         connect.h, widen(method).c_str(), path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         secure ? WINHTTP_FLAG_SECURE : 0));
-    if (!request) { out.error = "WinHttpOpenRequest failed"; return out; }
+    if (!request) {
+        HE_LOG_ERROR(Net, "HTTPS: WinHttpOpenRequest failed (error %lu)", ::GetLastError());
+        out.error = "WinHttpOpenRequest failed";
+        return out;
+    }
 
     std::wstring headerBlock;
     for (const auto& h : extraHeaders) headerBlock += widen(h) + L"\r\n";
@@ -97,6 +112,11 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
         // A failed certificate check lands here (ERROR_WINHTTP_SECURE_FAILURE)
         // and must stay a failure — never fall through to an empty success.
         const DWORD err = ::GetLastError();
+        // A secure failure is a rejected certificate — worth naming, because it
+        // means TLS did its job rather than that the network is broken.
+        HE_LOG_ERROR(Net, "HTTPS: WinHttpSendRequest failed (error %lu)%s", err,
+                     err == ERROR_WINHTTP_SECURE_FAILURE
+                         ? " — the server certificate was rejected" : "");
         out.error = (err == ERROR_WINHTTP_SECURE_FAILURE)
                         ? "TLS certificate validation failed"
                         : "WinHttpSendRequest failed";
@@ -104,6 +124,7 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
     }
 
     if (!::WinHttpReceiveResponse(request.h, nullptr)) {
+        HE_LOG_ERROR(Net, "HTTPS: WinHttpReceiveResponse failed (error %lu)", ::GetLastError());
         out.error = "WinHttpReceiveResponse failed";
         return out;
     }

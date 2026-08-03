@@ -743,3 +743,61 @@ Preserving the representation this engine actually stores is worth more than a
 perfect interpolation path, and for single-axis turns (what characters do) the
 two are identical anyway. This was measured, not assumed: a slerp version made
 the seam test report `y ≈ 1°` for an orientation that was in fact correct.
+
+## Diagnostics: reading a session's log
+
+Everything in HorizonNet logs to the engine-wide log under the **`Net`**
+category, so one run produces a single ordered account of a session: sockets,
+framing, handshake, session protocol, directory calls and router mapping, on one
+timeline with the rest of the engine.
+
+Nothing below `Info` is emitted by default. Turn the detail up per run:
+
+```bash
+HE_LOG=Net=Trace ./HorizonEditor
+```
+
+or persist it in `config.json` via `logVerbosity` (`"Net=Debug"`). The levels are
+chosen so each one answers a different question:
+
+| Level | Answers |
+|---|---|
+| `Info` | Did the session come up? Listener bound, peer authenticated, snapshot sent, port mapped, directory verdict, who joined and left, which locks moved. |
+| `Debug` | Why did it go that way? Handshake step by step, SSDP/SOAP and NAT-PMP exchanges, heartbeat outcomes, chunk-level snapshot progress. |
+| `Trace` | Per-frame traffic: every frame in and out with its size, message ids, send backpressure. |
+
+`Warning` and `Error` are never silent about a failure that has no other visible
+symptom — the recurring theme in this module is that a rejected peer, a dropped
+frame or a refused mapping is *correct* behaviour with no user-facing signal, so
+the log is the only place it exists.
+
+### What the log deliberately does not contain
+
+A network log is where a debugging aid turns into a credential leak, because
+logs are pasted into bug reports and attached to crash dumps. Four things never
+appear at any verbosity:
+
+- **The join secret / join code.** Not even a digest — the code is short enough
+  to type, so a digest narrows an offline search far more than it would for a
+  full-length key. Only its *length* is recorded (`join secret <26 chars>`),
+  which is what actually diagnoses "the two sides disagree about the code".
+- **Key material** — X25519 private scalars, the ECDH shared secret, the derived
+  session key. The one key-derived value that *is* logged is
+  `sessionFingerprint()`, a one-way digest built for out-of-band comparison:
+  both peers print the same string, so two logs can be matched up, and a
+  mismatch is evidence of a man in the middle.
+- **The directory management token**, which authorises heartbeat and unregister
+  for someone else's session.
+- **Payload bytes.** Frames carry scene data and asset blobs; logging contents
+  would quietly turn the log into a copy of the user's project. Only sizes and
+  message ids are recorded.
+
+Session ids sit one step below that: they are meant to be shared, but they
+resolve to the host's address in the directory, so they are logged abbreviated
+(`a3f9c1…`) rather than in full.
+
+Two tests in `tests/test_net_secure.cpp` hold this in place by running a
+handshake with the Net category at `Trace`, capturing every record through a log
+sink, and asserting the secret does not appear in any of them — including a
+check that the run logged *something*, so the test cannot pass merely because
+logging was off.

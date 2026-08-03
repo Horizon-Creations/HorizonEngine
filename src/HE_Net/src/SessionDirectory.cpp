@@ -2,6 +2,8 @@
 
 #include "Net/HttpsClient.h"
 
+#include "NetLog.h"
+
 #include <Hpak/Aes256Gcm.h>
 
 #include <nlohmann/json.hpp>
@@ -120,7 +122,16 @@ DirectoryStatus SessionDirectory::registerSession(
     const std::string& engineVersion, int protocolVersion,
     SessionRegistration& out, int timeoutMs) {
 
-    if (!httpsAvailable()) return DirectoryStatus::NoTlsBackend;
+    if (!httpsAvailable()) {
+        HE_LOG_ERROR(Net, "Directory register skipped: this build has no TLS backend");
+        return DirectoryStatus::NoTlsBackend;
+    }
+
+    // Session id abbreviated: it is shared deliberately, but it resolves to
+    // the host address in the directory, and logs end up in bug reports.
+    HE_LOG_INFO(Net, "Directory: registering session %s on port %u as \"%s\"",
+                detail::logSessionId(sessionId).c_str(),
+                static_cast<unsigned>(port), name.c_str());
 
     json payload{
         { "sessionId",       sessionId },
@@ -132,37 +143,104 @@ DirectoryStatus SessionDirectory::registerSession(
 
     const HttpsResponse resp = httpsPostJson(buildUrl(m_endpoint, "register"),
                                              payload.dump(), timeoutMs);
-    if (!resp.ok) return DirectoryStatus::NetworkError;
+    if (!resp.ok) {
+        HE_LOG_ERROR(Net, "Directory register failed to reach the endpoint: %s",
+                     resp.error.empty() ? "no detail" : resp.error.c_str());
+        return DirectoryStatus::NetworkError;
+    }
 
     const DirectoryStatus http = statusFromHttp(resp.statusCode);
-    if (http != DirectoryStatus::Ok) return http;
+    if (http != DirectoryStatus::Ok) {
+        // The body is NOT logged: it carries the management token on success
+        // and can echo request data on failure.
+        HE_LOG_ERROR(Net, "Directory register rejected with HTTP %d", resp.statusCode);
+        return http;
+    }
 
-    return parseRegistration(resp.body, out);
+    const DirectoryStatus parsed = parseRegistration(resp.body, out);
+    if (parsed != DirectoryStatus::Ok) {
+        HE_LOG_ERROR(Net, "Directory register returned HTTP 200 but an unusable body");
+        return parsed;
+    }
+    // reachable is the single most consequential field the directory returns:
+    // it is the only outside-in verdict anywhere in the stack.
+    HE_LOG_INFO(Net, "Directory: registered — seen from %s, reachable=%s, ttl %ds",
+                out.publicIp.empty() ? "<unknown>" : out.publicIp.c_str(),
+                out.reachable ? "yes" : "NO", out.ttlSeconds);
+    if (!out.reachable) {
+        HE_LOG_WARN(Net, "The directory could not connect back to this host — peers on "
+                         "other networks will not get through");
+    }
+    return parsed;
 }
 
 DirectoryStatus SessionDirectory::lookup(const std::string& sessionId,
                                          SessionLookup& out, int timeoutMs) {
-    if (!httpsAvailable()) return DirectoryStatus::NoTlsBackend;
+    if (!httpsAvailable()) {
+        HE_LOG_ERROR(Net, "Directory lookup skipped: this build has no TLS backend");
+        return DirectoryStatus::NoTlsBackend;
+    }
+
+    HE_LOG_INFO(Net, "Directory: looking up session %s",
+                detail::logSessionId(sessionId).c_str());
 
     const std::string url = buildUrl(m_endpoint, "lookup") + "&sessionId=" + sessionId;
     const HttpsResponse resp = httpsGet(url, timeoutMs);
-    if (!resp.ok) return DirectoryStatus::NetworkError;
+    if (!resp.ok) {
+        HE_LOG_ERROR(Net, "Directory lookup failed to reach the endpoint: %s",
+                     resp.error.empty() ? "no detail" : resp.error.c_str());
+        return DirectoryStatus::NetworkError;
+    }
 
     const DirectoryStatus http = statusFromHttp(resp.statusCode);
-    if (http != DirectoryStatus::Ok) return http;
+    if (http != DirectoryStatus::Ok) {
+        // 404 is the everyday case — a typo, or a session that already ended.
+        if (http == DirectoryStatus::NotFound)
+            HE_LOG_WARN(Net, "Directory: session %s not found (mistyped, or already over)",
+                        detail::logSessionId(sessionId).c_str());
+        else
+            HE_LOG_ERROR(Net, "Directory lookup rejected with HTTP %d", resp.statusCode);
+        return http;
+    }
 
-    return parseLookup(resp.body, out);
+    const DirectoryStatus parsed = parseLookup(resp.body, out);
+    if (parsed != DirectoryStatus::Ok) {
+        HE_LOG_ERROR(Net, "Directory lookup returned an entry without a usable address");
+        return parsed;
+    }
+    HE_LOG_INFO(Net, "Directory: session %s is at %s:%u (\"%s\", engine %s, protocol %d)",
+                detail::logSessionId(sessionId).c_str(), out.host.c_str(),
+                static_cast<unsigned>(out.port), out.name.c_str(),
+                out.engineVersion.c_str(), out.protocolVersion);
+    return parsed;
 }
 
 DirectoryStatus SessionDirectory::heartbeat(const std::string& sessionId,
                                             const std::string& token, int timeoutMs) {
     if (!httpsAvailable()) return DirectoryStatus::NoTlsBackend;
 
+    // The token authorises heartbeat and unregister for this session, so it
+    // is never logged — not even truncated.
     const json payload{ { "sessionId", sessionId }, { "token", token } };
     const HttpsResponse resp = httpsPostJson(buildUrl(m_endpoint, "heartbeat"),
                                              payload.dump(), timeoutMs);
-    if (!resp.ok) return DirectoryStatus::NetworkError;
-    return statusFromHttp(resp.statusCode);
+    if (!resp.ok) {
+        HE_LOG_WARN(Net, "Directory heartbeat for %s could not reach the endpoint",
+                    detail::logSessionId(sessionId).c_str());
+        return DirectoryStatus::NetworkError;
+    }
+    const DirectoryStatus st = statusFromHttp(resp.statusCode);
+    if (st != DirectoryStatus::Ok) {
+        // Left unfixed this ends with the entry expiring and new guests being
+        // unable to find a session that is still running.
+        HE_LOG_WARN(Net, "Directory heartbeat for %s rejected with HTTP %d — the entry "
+                         "will expire if this keeps failing",
+                    detail::logSessionId(sessionId).c_str(), resp.statusCode);
+    } else {
+        HE_LOG_DEBUG(Net, "Directory heartbeat for %s acknowledged",
+                     detail::logSessionId(sessionId).c_str());
+    }
+    return st;
 }
 
 DirectoryStatus SessionDirectory::unregisterSession(const std::string& sessionId,
@@ -173,8 +251,16 @@ DirectoryStatus SessionDirectory::unregisterSession(const std::string& sessionId
     const json payload{ { "sessionId", sessionId }, { "token", token } };
     const HttpsResponse resp = httpsPostJson(buildUrl(m_endpoint, "unregister"),
                                              payload.dump(), timeoutMs);
-    if (!resp.ok) return DirectoryStatus::NetworkError;
-    return statusFromHttp(resp.statusCode);
+    if (!resp.ok) {
+        HE_LOG_WARN(Net, "Directory unregister for %s could not reach the endpoint — the "
+                         "entry will linger until its TTL expires",
+                    detail::logSessionId(sessionId).c_str());
+        return DirectoryStatus::NetworkError;
+    }
+    const DirectoryStatus st = statusFromHttp(resp.statusCode);
+    HE_LOG_INFO(Net, "Directory: unregistered session %s (HTTP %d)",
+                detail::logSessionId(sessionId).c_str(), resp.statusCode);
+    return st;
 }
 
 } // namespace HE::Net
