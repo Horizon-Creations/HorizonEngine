@@ -1,5 +1,7 @@
 #include "Net/SecureTransport.h"
 
+#include "NetLog.h"
+
 #include <Crypto/X25519.h>
 #include <Hpak/Aes256Gcm.h>
 #include <Hpak/KeyDerivation.h>
@@ -110,22 +112,50 @@ std::string SecureTransport::generateJoinSecret() {
 
 std::unique_ptr<SecureTransport> SecureTransport::wrap(
     std::unique_ptr<ITransport> inner, Config cfg) {
-    if (!inner) return nullptr;
-    if (cfg.joinSecret.empty()) return nullptr;
-    if (cfg.role != NetRole::Host && cfg.role != NetRole::Client) return nullptr;
+    if (!inner) {
+        HE_LOG_ERROR(Net, "SecureTransport::wrap called without an inner transport");
+        return nullptr;
+    }
+    if (cfg.joinSecret.empty()) {
+        HE_LOG_ERROR(Net, "SecureTransport::wrap refused: no join secret");
+        return nullptr;
+    }
+    if (cfg.role != NetRole::Host && cfg.role != NetRole::Client) {
+        HE_LOG_ERROR(Net, "SecureTransport::wrap refused: role is neither Host nor Client");
+        return nullptr;
+    }
 
     const bool crypto = Hpak::cryptoAvailable();
     // Refuse rather than silently downgrade to plaintext on a public network.
-    if (cfg.requireEncryption && !crypto) return nullptr;
+    if (cfg.requireEncryption && !crypto) {
+        HE_LOG_ERROR(Net, "SecureTransport::wrap refused: encryption required but no crypto "
+                          "backend is available in this build");
+        return nullptr;
+    }
     // The handshake needs an ephemeral key exchange even in plaintext mode —
     // without X25519 there is no key agreement at all, so nothing can be
     // established rather than something weaker being negotiated silently.
-    if (!HE::Crypto::x25519Available()) return nullptr;
+    if (!HE::Crypto::x25519Available()) {
+        HE_LOG_ERROR(Net, "SecureTransport::wrap refused: X25519 unavailable, so no key "
+                          "agreement is possible");
+        return nullptr;
+    }
 
     std::unique_ptr<SecureTransport> t(new SecureTransport());
     t->m_inner           = std::move(inner);
     t->m_cfg             = std::move(cfg);
     t->m_cryptoAvailable = crypto;
+    // The join secret itself never appears — only its shape, which is what
+    // you need to tell "both sides typed a 26-char code" from "one side got
+    // an empty string from the UI".
+    HE_LOG_INFO(Net, "Secure channel armed as %s, join secret %s, payload encryption %s",
+                t->m_cfg.role == NetRole::Host ? "host" : "client",
+                detail::logSecretShape(t->m_cfg.joinSecret).c_str(),
+                crypto ? "on (AES-256-GCM)" : "OFF (no crypto backend)");
+    if (!crypto) {
+        HE_LOG_WARN(Net, "Payloads will travel in plaintext — this is only allowed because "
+                         "requireEncryption is false");
+    }
     return t;
 }
 
@@ -156,7 +186,15 @@ void SecureTransport::drainInner() {
                 (it != m_peers.end() && it->second.state == HandshakeState::Established);
             if (it != m_peers.end()) m_peers.erase(it);
             if (wasVisible) {
+                HE_LOG_INFO(Net, "Authenticated peer disconnected (conn %llu)",
+                            static_cast<unsigned long long>(ev.conn));
                 m_events.push_back(NetEvent{ NetEventType::Disconnected, ev.conn, {} });
+            } else {
+                // Deliberately invisible upstairs, which is exactly why it is
+                // worth a line: from the application's side nothing happened at
+                // all, yet someone tried to connect and did not get in.
+                HE_LOG_DEBUG(Net, "Link dropped mid-handshake (conn %llu) — never surfaced upward",
+                             static_cast<unsigned long long>(ev.conn));
             }
             break;
         }
@@ -177,6 +215,9 @@ void SecureTransport::onInnerConnected(ConnectionId conn) {
         if (!HE::Crypto::x25519GenerateKeypair(p.ephemeralPriv, p.hostPub)) {
             // Without an ephemeral key there is no forward secrecy, so refuse
             // rather than fall back to a weaker session.
+            HE_LOG_ERROR(Net, "Could not generate an ephemeral keypair for conn %llu — "
+                              "dropping rather than continuing without forward secrecy",
+                         static_cast<unsigned long long>(conn));
             m_inner->disconnect(conn);
             return;
         }
@@ -190,10 +231,15 @@ void SecureTransport::onInnerConnected(ConnectionId conn) {
         msg.insert(msg.end(), p.hostPub, p.hostPub + kPubKeyLen);
 
         m_peers[conn] = p;
+        HE_LOG_DEBUG(Net, "Handshake → sent challenge on conn %llu (v%u)",
+                     static_cast<unsigned long long>(conn),
+                     static_cast<unsigned>(kProtocolVersion));
         m_inner->send(conn, msg.data(), msg.size(), SendMode::ReliableOrdered);
     } else {
         p.state = HandshakeState::AwaitingChallenge;
         m_peers[conn] = p;
+        HE_LOG_DEBUG(Net, "Handshake ← awaiting challenge on conn %llu",
+                     static_cast<unsigned long long>(conn));
     }
     // Note: nothing is surfaced upward yet — the peer is not authenticated.
 }
@@ -262,28 +308,39 @@ bool SecureTransport::deriveSecrets(Peer& p, std::uint8_t outMac[32]) {
 
 void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
                                       const std::vector<std::uint8_t>& frame) {
-    if (frame.empty()) { failPeer(conn, p); return; }
+    if (frame.empty()) { failPeer(conn, p, "empty handshake frame"); return; }
     const std::uint8_t msg = frame[0];
 
     // ── Client: challenge received → answer with the mac ──
     if (msg == kMsgChallenge && m_cfg.role == NetRole::Client &&
         p.state == HandshakeState::AwaitingChallenge) {
-        if (frame.size() != 2 + kNonceLen + kPubKeyLen) { failPeer(conn, p); return; }
+        if (frame.size() != 2 + kNonceLen + kPubKeyLen) {
+            failPeer(conn, p, "challenge frame has the wrong length");
+            return;
+        }
         // A mismatched version means the peer speaks a different handshake;
         // reject rather than negotiate down to a weaker one.
-        if (frame[1] != kProtocolVersion)               { failPeer(conn, p); return; }
+        if (frame[1] != kProtocolVersion) {
+            HE_LOG_ERROR(Net, "Handshake version mismatch on conn %llu: peer speaks v%u, we speak v%u "
+                              "— one side is running a different engine build",
+                         static_cast<unsigned long long>(conn),
+                         static_cast<unsigned>(frame[1]),
+                         static_cast<unsigned>(kProtocolVersion));
+            failPeer(conn, p, "protocol version mismatch");
+            return;
+        }
 
         std::memcpy(p.hostNonce, frame.data() + 2, kNonceLen);
         std::memcpy(p.hostPub,   frame.data() + 2 + kNonceLen, kPubKeyLen);
 
         fillRandom(p.clientNonce, kNonceLen);
         if (!HE::Crypto::x25519GenerateKeypair(p.ephemeralPriv, p.clientPub)) {
-            failPeer(conn, p);
+            failPeer(conn, p, "could not generate an ephemeral keypair");
             return;
         }
 
         std::uint8_t mac[kMacLen];
-        if (!deriveSecrets(p, mac)) { failPeer(conn, p); return; }
+        if (!deriveSecrets(p, mac)) { failPeer(conn, p, "key derivation failed"); return; }
 
         std::vector<std::uint8_t> out;
         out.reserve(1 + kNonceLen + kPubKeyLen + kMacLen);
@@ -293,6 +350,8 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
         out.insert(out.end(), mac, mac + kMacLen);
 
         p.state = HandshakeState::AwaitingAccept;
+        HE_LOG_DEBUG(Net, "Handshake → sent response on conn %llu, awaiting verdict",
+                     static_cast<unsigned long long>(conn));
         m_inner->send(conn, out.data(), out.size(), SendMode::ReliableOrdered);
         return;
     }
@@ -301,7 +360,7 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
     if (msg == kMsgResponse && m_cfg.role == NetRole::Host &&
         p.state == HandshakeState::AwaitingResponse) {
         if (frame.size() != 1 + kNonceLen + kPubKeyLen + kMacLen) {
-            failPeer(conn, p);
+            failPeer(conn, p, "response frame has the wrong length");
             return;
         }
 
@@ -309,13 +368,18 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
         std::memcpy(p.clientPub,   frame.data() + 1 + kNonceLen, kPubKeyLen);
 
         std::uint8_t expected[kMacLen];
-        if (!deriveSecrets(p, expected)) { failPeer(conn, p); return; }
+        if (!deriveSecrets(p, expected)) { failPeer(conn, p, "key derivation failed"); return; }
 
         const std::uint8_t* got = frame.data() + 1 + kNonceLen + kPubKeyLen;
         if (!constantTimeEqual(expected, got, kMacLen)) {
+            // By far the most common real failure, and the one users can act
+            // on: it means the join code did not match. Said plainly, because
+            // "MAC mismatch" would send someone hunting a crypto bug.
+            HE_LOG_WARN(Net, "Rejecting conn %llu: wrong join code",
+                        static_cast<unsigned long long>(conn));
             const std::uint8_t reject[2] = { kMsgReject, 0x01 };
             m_inner->send(conn, reject, sizeof(reject), SendMode::ReliableOrdered);
-            failPeer(conn, p);
+            failPeer(conn, p, "join code did not match");
             return;
         }
 
@@ -323,6 +387,13 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
         m_inner->send(conn, accept, sizeof(accept), SendMode::ReliableOrdered);
 
         p.state = HandshakeState::Established;
+        // The fingerprint is the ONLY key-derived value that may be logged:
+        // it is a one-way digest built for out-of-band comparison. Both peers
+        // print the same string, so two logs can be matched up — and a
+        // mismatch is proof of a man in the middle.
+        HE_LOG_INFO(Net, "Peer authenticated on conn %llu — session %s",
+                    static_cast<unsigned long long>(conn),
+                    sessionFingerprint(conn).c_str());
         m_events.push_back(NetEvent{ NetEventType::Connected, conn, {} });
         return;
     }
@@ -331,16 +402,31 @@ void SecureTransport::handleHandshake(ConnectionId conn, Peer& p,
     if (msg == kMsgAccept && m_cfg.role == NetRole::Client &&
         p.state == HandshakeState::AwaitingAccept) {
         p.state = HandshakeState::Established;
+        HE_LOG_INFO(Net, "Accepted by host on conn %llu — session %s",
+                    static_cast<unsigned long long>(conn),
+                    sessionFingerprint(conn).c_str());
         m_events.push_back(NetEvent{ NetEventType::Connected, conn, {} });
         return;
     }
-    if (msg == kMsgReject) { failPeer(conn, p); return; }
+    if (msg == kMsgReject) {
+        HE_LOG_WARN(Net, "Host rejected us on conn %llu — the join code is most likely wrong",
+                    static_cast<unsigned long long>(conn));
+        failPeer(conn, p, "rejected by host");
+        return;
+    }
 
     // Anything else is out-of-order or malformed for this state.
-    failPeer(conn, p);
+    failPeer(conn, p, "unexpected handshake message for the current state");
 }
 
-void SecureTransport::failPeer(ConnectionId conn, Peer& p) {
+void SecureTransport::failPeer(ConnectionId conn, Peer& p, const char* reason) {
+    // Logged at Warning even though several causes are benign-ish, because the
+    // observable effect upstairs is always the same and always confusing: the
+    // link silently never becomes usable. Nothing is emitted as an event, so
+    // without this line there is no trace of it anywhere.
+    HE_LOG_WARN(Net, "Handshake failed on conn %llu in state %d: %s",
+                static_cast<unsigned long long>(conn),
+                static_cast<int>(p.state), reason ? reason : "unspecified");
     p.state = HandshakeState::Failed;
     if (m_inner) m_inner->disconnect(conn);
     m_peers.erase(conn);
@@ -358,11 +444,21 @@ void SecureTransport::handleData(ConnectionId conn, Peer& p,
         return;
     }
 
-    if (frame.size() < kCounterLen + kGcmTagLen) { failPeer(conn, p); return; }
+    if (frame.size() < kCounterLen + kGcmTagLen) {
+        failPeer(conn, p, "encrypted frame too short to hold counter + tag");
+        return;
+    }
 
     const std::uint64_t counter = readU64BE(frame.data());
     // Strictly increasing: rejects replayed and reordered frames.
-    if (counter <= p.lastRecvCounter) { failPeer(conn, p); return; }
+    if (counter <= p.lastRecvCounter) {
+        HE_LOG_WARN(Net, "Replay or reorder on conn %llu: counter %llu after %llu",
+                    static_cast<unsigned long long>(conn),
+                    static_cast<unsigned long long>(counter),
+                    static_cast<unsigned long long>(p.lastRecvCounter));
+        failPeer(conn, p, "frame counter did not increase (replay or reorder)");
+        return;
+    }
 
     // The peer's direction tag is the opposite of ours.
     const std::uint32_t dir = (m_cfg.role == NetRole::Host) ? kDirClientToHost
@@ -377,11 +473,19 @@ void SecureTransport::handleData(ConnectionId conn, Peer& p,
     if (!ok) {
         // Auth-tag mismatch — tampered, corrupt, or wrong key. Drop the link
         // rather than handing unverified bytes to the application.
-        failPeer(conn, p);
+        HE_LOG_ERROR(Net, "Authentication tag mismatch on conn %llu at counter %llu — "
+                          "frame was tampered with or corrupted in transit",
+                     static_cast<unsigned long long>(conn),
+                     static_cast<unsigned long long>(counter));
+        failPeer(conn, p, "AEAD authentication failed");
         return;
     }
 
     p.lastRecvCounter = counter;
+    HE_LOG_TRACE(Net, "Secure frame in: %s plain, counter %llu (conn %llu)",
+                 detail::logBytes(plain.size()).c_str(),
+                 static_cast<unsigned long long>(counter),
+                 static_cast<unsigned long long>(conn));
     m_events.push_back(NetEvent{ NetEventType::Data, conn, std::move(plain) });
 }
 
@@ -391,7 +495,14 @@ void SecureTransport::send(ConnectionId conn, const std::uint8_t* data,
                            std::size_t len, SendMode mode) {
     const auto it = m_peers.find(conn);
     // Refuse to emit anything before the peer is authenticated.
-    if (it == m_peers.end() || it->second.state != HandshakeState::Established) return;
+    if (it == m_peers.end() || it->second.state != HandshakeState::Established) {
+        // Upstairs this looks like a message that vanished, so it is recorded
+        // rather than dropped in silence.
+        HE_LOG_DEBUG(Net, "Secure send dropped on conn %llu: peer not authenticated yet (%s)",
+                     static_cast<unsigned long long>(conn),
+                     detail::logBytes(len).c_str());
+        return;
+    }
     Peer& p = it->second;
 
     if (!m_cryptoAvailable) {
@@ -406,7 +517,16 @@ void SecureTransport::send(ConnectionId conn, const std::uint8_t* data,
     makeGcmNonce(nonce, dir, counter);
 
     std::vector<std::uint8_t> cipher;
-    if (!Hpak::aesGcmEncrypt(p.sessionKey, nonce, data, len, cipher)) return;
+    if (!Hpak::aesGcmEncrypt(p.sessionKey, nonce, data, len, cipher)) {
+        HE_LOG_ERROR(Net, "Encryption failed for %s on conn %llu — message not sent",
+                     detail::logBytes(len).c_str(),
+                     static_cast<unsigned long long>(conn));
+        return;
+    }
+    HE_LOG_TRACE(Net, "Secure frame out: %s plain, counter %llu (conn %llu)",
+                 detail::logBytes(len).c_str(),
+                 static_cast<unsigned long long>(counter),
+                 static_cast<unsigned long long>(conn));
 
     std::vector<std::uint8_t> out;
     out.reserve(kCounterLen + cipher.size());

@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include <Diagnostics/Log.h>
 #include <Net/NetSession.h>
 #include <Net/SecureTransport.h>
 #include <Net/TcpTransport.h>
@@ -7,6 +8,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -104,6 +106,50 @@ std::vector<NetEvent> drainSecure(SecureTransport& t) {
     while (t.poll(ev)) out.push_back(std::move(ev));
     return out;
 }
+
+// Captures every log record emitted while it is alive, and turns the Net
+// category all the way up so nothing is filtered out before it is seen. Both
+// halves matter: at the default Info verbosity a Trace-level leak would slip
+// past the test unnoticed.
+class LogSpy {
+public:
+    LogSpy() : m_previous(HE::Log::verbosity(HE::Log::Cat::Net)) {
+        HE::Log::setVerbosity(HE::Log::Cat::Net, HE::LogLevel::Trace);
+        m_handle = HE::Log::addSink(&LogSpy::onRecord, this);
+    }
+    ~LogSpy() {
+        HE::Log::removeSink(m_handle);
+        HE::Log::setVerbosity(HE::Log::Cat::Net, m_previous);
+    }
+    LogSpy(const LogSpy&)            = delete;
+    LogSpy& operator=(const LogSpy&) = delete;
+
+    bool mentions(const std::string& needle) const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        for (const std::string& line : m_lines) {
+            if (line.find(needle) != std::string::npos) return true;
+        }
+        return false;
+    }
+    std::size_t count() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_lines.size();
+    }
+
+private:
+    // Sinks run on the logging thread with the log mutex held, so this only
+    // copies the text and never logs itself.
+    static void onRecord(const HE::Log::Record& rec, void* user) {
+        auto* self = static_cast<LogSpy*>(user);
+        std::lock_guard<std::mutex> lk(self->m_mutex);
+        self->m_lines.emplace_back(rec.message ? rec.message : "");
+    }
+
+    mutable std::mutex       m_mutex;
+    std::vector<std::string> m_lines;
+    int                      m_handle = 0;
+    HE::LogLevel             m_previous;
+};
 
 } // namespace
 
@@ -444,4 +490,50 @@ TEST_CASE("SecureTransport: a client with the wrong secret cannot join over TCP"
 
     CHECK(host->connectionCount() == 0);
     CHECK(client->connectionCount() == 0);
+}
+
+// ─── Logging must never leak the material it handles ─────────────────────────
+
+TEST_CASE("SecureTransport: the join secret never appears in the log")
+{
+    // Deliberately distinctive so a substring search cannot match by accident,
+    // and long enough that no formatting would ever produce it incidentally.
+    const std::string secret = "ZZTOPSECRET7NEVERLOGME9XYZQ";
+
+    LogSpy spy;
+    SpyPair p = makeSecurePair(secret, secret);
+    REQUIRE(p.host);
+    REQUIRE(p.client);
+    pumpRounds(*p.host, *p.client);
+
+    // Sanity: the run has to have logged *something*, or this test would pass
+    // simply because logging is switched off.
+    CHECK(spy.count() > 0);
+    CHECK_FALSE(spy.mentions(secret));
+
+    // The shape may be reported — that is the deliberate redaction — but only
+    // as a length, never as any part of the value itself.
+    CHECK(spy.mentions("<27 chars>"));
+}
+
+TEST_CASE("SecureTransport: a failed handshake logs the reason without the secret")
+{
+    const std::string hostSecret   = "AAAHOSTSECRET1234567890XYZ";
+    const std::string clientSecret = "BBBCLIENTSECRET098765432ZY";
+
+    LogSpy spy;
+    SpyPair p = makeSecurePair(hostSecret, clientSecret);
+    REQUIRE(p.host);
+    REQUIRE(p.client);
+    pumpRounds(*p.host, *p.client);
+
+    // Neither side may end up authenticated…
+    CHECK(p.host->stateOf(1) != HandshakeState::Established);
+    // …and the log must say *why* in words a user can act on. Before the reason
+    // was threaded through failPeer, every rejection produced an identical
+    // message and a wrong join code was indistinguishable from a version skew.
+    CHECK(spy.mentions("join code"));
+
+    CHECK_FALSE(spy.mentions(hostSecret));
+    CHECK_FALSE(spy.mentions(clientSecret));
 }

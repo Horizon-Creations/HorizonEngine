@@ -1,5 +1,7 @@
 #include "Net/HttpsClient.h"
 
+#include "NetLog.h"
+
 #include <string>
 #include <vector>
 
@@ -40,7 +42,11 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
     HttpsResponse out;
 
     CURL* curl = ::curl_easy_init();
-    if (!curl) { out.error = "curl_easy_init failed"; return out; }
+    if (!curl) {
+        HE_LOG_ERROR(Net, "HTTPS: curl_easy_init failed");
+        out.error = "curl_easy_init failed";
+        return out;
+    }
 
     struct curl_slist* headers = nullptr;
     for (const auto& h : extraHeaders) headers = ::curl_slist_append(headers, h.c_str());
@@ -69,6 +75,9 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
         out.statusCode = static_cast<int>(status);
         out.ok = true;
     } else {
+        // libcurl reports certificate problems here too — the whole reason TLS
+        // is delegated to the system rather than hand-rolled.
+        HE_LOG_ERROR(Net, "HTTPS: libcurl request failed — %s", ::curl_easy_strerror(rc));
         out.error = ::curl_easy_strerror(rc);
         out.body.clear();
     }
@@ -87,6 +96,8 @@ const char* httpsBackendName() { return "none"; }
 HttpsResponse httpsRequest(const std::string&, const std::string&,
                            const std::vector<std::string>&, const std::string&, int) {
     HttpsResponse out;
+    HE_LOG_ERROR(Net, "HTTPS: this build has no TLS backend (libcurl was missing when it "
+                      "was configured) — the session directory is unavailable");
     out.error = "no TLS backend: libcurl was not found at build time "
                 "(install libcurl development headers and reconfigure)";
     return out;

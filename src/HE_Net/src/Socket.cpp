@@ -1,5 +1,7 @@
 #include "Net/Socket.h"
 
+#include "NetLog.h"
+
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
@@ -43,6 +45,28 @@ int lastError() {
     return WSAGetLastError();
 #else
     return errno;
+#endif
+}
+
+// The OS error as text. Layer 0 is where the truth about a failure lives —
+// everything above only sees SocketResult::Error, which is the difference
+// between "connection refused" (nothing is listening) and "no route to host"
+// (macOS Local Network permission) collapsing into one indistinguishable
+// symptom. strerror is not thread-safe in principle, but every caller here
+// formats immediately into a log record under the log mutex.
+std::string errText(int e) {
+#ifdef _WIN32
+    char* msg = nullptr;
+    const DWORD n = ::FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, static_cast<DWORD>(e), 0, reinterpret_cast<LPSTR>(&msg), 0, nullptr);
+    std::string out = (n && msg) ? std::string(msg, n) : std::string("unknown error");
+    if (msg) ::LocalFree(msg);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out + " (" + std::to_string(e) + ")";
+#else
+    return std::string(std::strerror(e)) + " (" + std::to_string(e) + ")";
 #endif
 }
 
@@ -261,7 +285,10 @@ SocketResult socketConnect(SocketHandle h, const std::string& host,
 
     const std::string portStr = std::to_string(port);
     addrinfo* res = nullptr;
-    if (::getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+    const int gai = ::getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res);
+    if (gai != 0 || !res) {
+        HE_LOG_ERROR(Net, "Cannot resolve %s:%u — %s", host.c_str(),
+                     static_cast<unsigned>(port), ::gai_strerror(gai));
         return SocketResult::Error;
     }
 
@@ -328,11 +355,19 @@ SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t po
             result = SocketResult::WouldBlock;
             break;
         }
-        // This candidate failed outright — try the next family/address.
+        // This candidate failed outright — try the next family/address. A
+        // dual-stack host commonly has a v6 address that fails and a v4 one
+        // that works, so this is Debug, not a warning.
+        HE_LOG_DEBUG(Net, "Connect candidate for %s (family %d) failed: %s",
+                     host.c_str(), ai->ai_family, errText(e).c_str());
         socketClose(h);
     }
 
     ::freeaddrinfo(res);
+    if (result == SocketResult::Error) {
+        HE_LOG_ERROR(Net, "No address for %s:%u could be connected to",
+                     host.c_str(), static_cast<unsigned>(port));
+    }
     return result;
 }
 
@@ -380,15 +415,30 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
                                   reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0
                         && ::listen(static_cast<int>(h), backlog) == 0;
 #endif
-        if (bound) return h;
+        if (bound) {
+            HE_LOG_DEBUG(Net, "Listener is dual-stack (IPv6 socket serving both families)");
+            return h;
+        }
+        // Worth a line: after this the host is reachable over IPv4 only, and
+        // the directory may well have recorded an IPv6 address for it.
+        HE_LOG_WARN(Net, "IPv6 listener on port %u failed (%s) — falling back to IPv4 only",
+                    static_cast<unsigned>(port), errText(lastError()).c_str());
         socketClose(h);
+    } else {
+        HE_LOG_WARN(Net, "No IPv6 stack available — listening on IPv4 only");
     }
 
     // No usable IPv6 stack (or the bind failed) — fall back to IPv4 rather than
     // failing outright, so a host on a v4-only network still works.
     SocketHandle h4 = socketCreateTcp();
-    if (h4 == kInvalidSocket) return kInvalidSocket;
+    if (h4 == kInvalidSocket) {
+        HE_LOG_ERROR(Net, "Could not create an IPv4 listening socket");
+        return kInvalidSocket;
+    }
     if (!socketBindListen(h4, port, backlog)) {
+        // The everyday cause is another process already holding the port.
+        HE_LOG_ERROR(Net, "Could not bind/listen on port %u — %s",
+                     static_cast<unsigned>(port), errText(lastError()).c_str());
         socketClose(h4);
         return kInvalidSocket;
     }
@@ -437,7 +487,10 @@ SocketResult socketConnectPoll(SocketHandle h) {
         return SocketResult::Error;
     }
 #endif
-    if (soErr != 0 && !errIsAlreadyConnected(soErr)) return SocketResult::Error;
+    if (soErr != 0 && !errIsAlreadyConnected(soErr)) {
+        HE_LOG_WARN(Net, "Pending connect failed: %s", errText(soErr).c_str());
+        return SocketResult::Error;
+    }
     return SocketResult::Ok;
 }
 
@@ -655,7 +708,14 @@ std::string socketLocalAddress() {
     const int rc = ::connect(static_cast<int>(h),
                              reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
 #endif
-    if (rc != 0) { socketClose(h); return {}; }
+    if (rc != 0) {
+        // No packet is sent by this "connect"; it only asks the kernel to pick
+        // a route. Failing here means there is no route to the internet at all.
+        HE_LOG_WARN(Net, "Cannot determine the local address: no route to the internet (%s)",
+                    errText(lastError()).c_str());
+        socketClose(h);
+        return {};
+    }
 
     sockaddr_in local{};
 #ifdef _WIN32
@@ -673,12 +733,16 @@ std::string socketLocalAddress() {
         if (::inet_ntop(AF_INET, &local.sin_addr, ip, sizeof(ip))) out = ip;
     }
     socketClose(h);
+    HE_LOG_DEBUG(Net, "Local address on the internet-facing interface: %s",
+                 out.empty() ? "<unknown>" : out.c_str());
     return out;
 }
 
 // ─── Default gateway ─────────────────────────────────────────────────────────
 
-std::string socketDefaultGateway() {
+// Implementation per platform; socketDefaultGateway() below wraps it so the
+// outcome is logged once instead of at each of the three separate returns.
+static std::string defaultGatewayImpl() {
 #if defined(_WIN32)
     // GetBestRoute for 0.0.0.0 yields the default route; its next hop is the
     // gateway (a zero next hop means the destination is on-link).
@@ -761,6 +825,18 @@ std::string socketDefaultGateway() {
     std::fclose(f);
     return result;
 #endif
+}
+
+std::string socketDefaultGateway() {
+    const std::string gw = defaultGatewayImpl();
+    if (gw.empty()) {
+        // NAT-PMP has no discovery of its own, so without this there is
+        // nothing to ask and the second rung of the ladder is skipped.
+        HE_LOG_WARN(Net, "No default gateway in the routing table");
+    } else {
+        HE_LOG_DEBUG(Net, "Default gateway: %s", gw.c_str());
+    }
+    return gw;
 }
 
 } // namespace HE::Net

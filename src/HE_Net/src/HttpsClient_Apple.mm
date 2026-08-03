@@ -1,5 +1,7 @@
 #include "Net/HttpsClient.h"
 
+#include "NetLog.h"
+
 #import <Foundation/Foundation.h>
 
 #include <string>
@@ -24,9 +26,13 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
         NSString* urlStr = [NSString stringWithUTF8String:url.c_str()];
         NSURL*    nsUrl  = [NSURL URLWithString:urlStr];
         if (!nsUrl || !nsUrl.host) {
+            HE_LOG_ERROR(Net, "HTTPS: invalid url \"%s\"", url.c_str());
             out.error = "invalid url";
             return out;
         }
+        // Host and method only — the path can carry a session id and the body
+        // can carry the management token.
+        HE_LOG_DEBUG(Net, "HTTPS: %s %s", method.c_str(), nsUrl.host.UTF8String);
 
         NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:nsUrl];
         req.HTTPMethod = [NSString stringWithUTF8String:method.c_str()];
@@ -88,6 +94,8 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
             dispatch_time(DISPATCH_TIME_NOW,
                           static_cast<int64_t>(timeoutMs + 2000) * NSEC_PER_MSEC);
         if (dispatch_semaphore_wait(done, deadline) != 0) {
+            HE_LOG_ERROR(Net, "HTTPS: request to %s wedged past %d ms — cancelled",
+                         nsUrl.host.UTF8String, timeoutMs + 2000);
             [task cancel];
             [session invalidateAndCancel];
             out.error = "timeout";
@@ -99,10 +107,14 @@ HttpsResponse httpsRequest(const std::string& url, const std::string& method,
             // TLS failures (bad certificate, hostname mismatch, untrusted chain)
             // arrive here as NSError — they must surface as a failure, never as
             // an empty-but-successful response.
+            HE_LOG_ERROR(Net, "HTTPS: request to %s failed — %s",
+                         nsUrl.host.UTF8String, errOut.c_str());
             out.error = errOut;
             return out;
         }
 
+        HE_LOG_DEBUG(Net, "HTTPS: %s answered HTTP %d (%s)", nsUrl.host.UTF8String,
+                     status, HE::Net::detail::logBytes(bodyOut.size()).c_str());
         out.ok         = true;
         out.statusCode = status;
         out.body       = std::move(bodyOut);
