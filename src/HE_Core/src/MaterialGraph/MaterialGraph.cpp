@@ -1252,22 +1252,24 @@ const MatGraphLink* approxFindLink(const MaterialGraph& g, int dstNode, int dstP
     return nullptr;
 }
 
-bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4]);
+bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
+                    const std::map<std::string, bool>* sw);
 
 // Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
 // registry default (splat — the same coercion codegen applies to scalars).
 bool approxFoldInput(const MaterialGraph& g, const MatGraphNode& node, int pin,
-                     int depth, float out[4])
+                     int depth, float out[4], const std::map<std::string, bool>* sw)
 {
     if (const MatGraphLink* l = approxFindLink(g, node.id, pin))
-        return approxFoldNode(g, l->srcNode, depth, out);
+        return approxFoldNode(g, l->srcNode, depth, out, sw);
     const MatNodeDesc& d = matNodeDesc(node.type);
     const float def = (pin >= 0 && pin < (int)d.inputs.size()) ? d.inputs[pin].def : 0.0f;
     out[0] = out[1] = out[2] = out[3] = def;
     return true;
 }
 
-bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4])
+bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
+                    const std::map<std::string, bool>* sw)
 {
     if (depth > 32) return false; // cycle/degenerate guard
     const MatGraphNode* n = g.findNode(nodeId);
@@ -1294,21 +1296,33 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4])
         for (int k = 0; k < 4; ++k) out[k] = n->p[k];
         return true;
     case MatNodeType::Reroute:
-        return approxFoldInput(g, *n, 0, depth + 1, out);
+        return approxFoldInput(g, *n, 0, depth + 1, out, sw);
+    case MatNodeType::StaticSwitch:
+    {
+        // Same resolution as codegen: the override map beats the node default,
+        // and only the TAKEN input folds (pin 0 = True, 1 = False) — a switch
+        // instance's reflected colour follows its permutation.
+        const std::string swName = n->s.empty()
+            ? ("switch_" + std::to_string(n->id)) : n->s;
+        bool on = n->p[0] > 0.5f;
+        if (sw)
+            if (auto it = sw->find(swName); it != sw->end()) on = it->second;
+        return approxFoldInput(g, *n, on ? 0 : 1, depth + 1, out, sw);
+    }
     case MatNodeType::OneMinus:
-        if (!approxFoldInput(g, *n, 0, depth + 1, a)) return false;
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw)) return false;
         for (int k = 0; k < 4; ++k) out[k] = 1.0f - a[k];
         return true;
     case MatNodeType::Saturate:
-        if (!approxFoldInput(g, *n, 0, depth + 1, a)) return false;
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw)) return false;
         for (int k = 0; k < 4; ++k) out[k] = std::clamp(a[k], 0.0f, 1.0f);
         return true;
     case MatNodeType::Add:
     case MatNodeType::Subtract:
     case MatNodeType::Multiply:
     case MatNodeType::Divide:
-        if (!approxFoldInput(g, *n, 0, depth + 1, a) ||
-            !approxFoldInput(g, *n, 1, depth + 1, b)) return false;
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw)) return false;
         for (int k = 0; k < 4; ++k)
             out[k] = n->type == MatNodeType::Add      ? a[k] + b[k]
                    : n->type == MatNodeType::Subtract ? a[k] - b[k]
@@ -1316,9 +1330,9 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4])
                    : (std::abs(b[k]) > 1e-8f ? a[k] / b[k] : 0.0f);
         return true;
     case MatNodeType::Lerp:
-        if (!approxFoldInput(g, *n, 0, depth + 1, a) ||
-            !approxFoldInput(g, *n, 1, depth + 1, b) ||
-            !approxFoldInput(g, *n, 2, depth + 1, t)) return false;
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw) ||
+            !approxFoldInput(g, *n, 2, depth + 1, t, sw)) return false;
         for (int k = 0; k < 4; ++k) out[k] = a[k] + (b[k] - a[k]) * t[0];
         return true;
     default:
@@ -1326,22 +1340,37 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4])
     }
 }
 
-// Real source of an Output input pin, Reroutes skipped (nullptr = unconnected).
-const MatGraphNode* approxSource(const MaterialGraph& g, int dstNode, int dstPin)
+// Real source of an Output input pin (nullptr = unconnected): Reroutes are
+// skipped, StaticSwitches follow their TAKEN input — so a Param behind a
+// switch still resolves to a live slot for the winning permutation.
+const MatGraphNode* approxSource(const MaterialGraph& g, int dstNode, int dstPin,
+                                 const std::map<std::string, bool>* sw)
 {
     for (int guard = 0; guard < 32; ++guard)
     {
         const MatGraphLink* l = approxFindLink(g, dstNode, dstPin);
         if (!l) return nullptr;
         const MatGraphNode* n = g.findNode(l->srcNode);
-        if (!n || n->type != MatNodeType::Reroute) return n;
-        dstNode = n->id; dstPin = 0;
+        if (!n) return nullptr;
+        if (n->type == MatNodeType::Reroute) { dstNode = n->id; dstPin = 0; continue; }
+        if (n->type == MatNodeType::StaticSwitch)
+        {
+            const std::string swName = n->s.empty()
+                ? ("switch_" + std::to_string(n->id)) : n->s;
+            bool on = n->p[0] > 0.5f;
+            if (sw)
+                if (auto it = sw->find(swName); it != sw->end()) on = it->second;
+            dstNode = n->id; dstPin = on ? 0 : 1;
+            continue;
+        }
+        return n;
     }
     return nullptr;
 }
 } // namespace
 
-MatApproxSurface matGraphApproxSurface(const MaterialGraph& g)
+MatApproxSurface matGraphApproxSurface(const MaterialGraph& g,
+                                       const std::map<std::string, bool>* switchOverrides)
 {
     MatApproxSurface out;
     const MatGraphNode* output = nullptr;
@@ -1353,13 +1382,13 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g)
     {
         // Directly Param-driven (rgb-carrying kinds only — a Float param splat
         // cannot be reconstructed from a slot's raw .rgb) → live lookup.
-        if (const MatGraphNode* src = approxSource(g, output->id, pin);
+        if (const MatGraphNode* src = approxSource(g, output->id, pin, switchOverrides);
             src && (src->type == MatNodeType::ParamColor ||
                     src->type == MatNodeType::ParamVec4))
             param = src->s;
         const MatGraphLink* l = approxFindLink(g, output->id, pin);
         float v[4];
-        if (l && approxFoldNode(g, l->srcNode, 0, v))
+        if (l && approxFoldNode(g, l->srcNode, 0, v, switchOverrides))
         {
             rgb[0] = v[0]; rgb[1] = v[1]; rgb[2] = v[2];
         }
@@ -1378,7 +1407,7 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g)
     {
         const MatGraphLink* l = approxFindLink(g, output->id, pin);
         float f[4];
-        if (l && approxFoldNode(g, l->srcNode, 0, f)) v = f[0];
+        if (l && approxFoldNode(g, l->srcNode, 0, f, switchOverrides)) v = f[0];
         else if (!l) v = matNodeDesc(MatNodeType::Output).inputs[pin].def;
         // linked but unfoldable → keep the caller-visible defaults (0 / 0.5)
     };

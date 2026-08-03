@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <fstream>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
@@ -277,6 +278,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // blendMode, customShaderVertGlsl.
             std::string customVertBody;
             std::string parentPath;    // instance parent — approx re-fold walks it
+            std::vector<std::string> switchNames;  // instance switch permutation —
+            std::vector<uint8_t>     switchValues; // the fold takes the same branches
             size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
             bool   tailReachedGBuf = false;
             {
@@ -288,8 +291,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 HAsset::Reader::readVec(c.data, o2, sv);   // tooltips
                 HAsset::Reader::readString(c.data, o2, parentPath);
                 HAsset::Reader::readVec(c.data, o2, sv);   // overridden params
-                HAsset::Reader::readVec(c.data, o2, sv);   // switch names
-                HAsset::Reader::readVec(c.data, o2, bv);   // switch values
+                HAsset::Reader::readVec(c.data, o2, switchNames);
+                HAsset::Reader::readVec(c.data, o2, switchValues);
                 HAsset::Reader::readPOD(c.data, o2, bm);   // blend mode
                 HAsset::Reader::readString(c.data, o2, customVertBody);
                 // Continue to the end of customShaderGBufGlsl — the GI-hit
@@ -349,7 +352,14 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 HE::MaterialGraph g;
                 if (HE::materialGraphFromJson(foldGraphJson, g))
                 {
-                    ap = HE::matGraphApproxSurface(g);
+                    // Switch-override instances: the fold takes the SAME
+                    // branches codegen takes for this permutation, so a switch
+                    // that swaps the BaseColor path reflects its own colour.
+                    std::map<std::string, bool> swOv;
+                    for (size_t i = 0; i < switchNames.size()
+                                    && i < switchValues.size(); ++i)
+                        swOv[switchNames[i]] = switchValues[i] != 0;
+                    ap = HE::matGraphApproxSurface(g, swOv.empty() ? nullptr : &swOv);
                     refold = true;
                 }
             }

@@ -465,9 +465,10 @@ static void applyGraphParams(MaterialAsset& m, const HE::MatShaderGen& gen,
 // MaterialAsset::approxBaseColor): constants as folded, Param-driven pins as the
 // slot index into shaderParamData so consumers read the LIVE value. Runs with
 // the codegen (regenerate/sync) — graphParamNames must already be final.
-static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g)
+static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g,
+                               const std::map<std::string, bool>* switchOverrides = nullptr)
 {
-	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g);
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g, switchOverrides);
 	for (int k = 0; k < 3; ++k)
 	{
 		m.approxBaseColor[k] = ap.baseColor[k];
@@ -577,7 +578,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			inst->graphTexturePaths = gen.textures;
 			inst->blendMode            = gen.blendMode;
 			inst->customShaderVertGlsl = gen.vertexBody;
-			applyApproxSurface(*inst, g); // GI-hit colours for the permutation
+			applyApproxSurface(*inst, g, &ov); // GI-hit colours FOR THE PERMUTATION (switches taken)
 			// A regenerated permutation invalidates any parent-baked shaders.
 			inst->precompiledShaders.clear();
 		}

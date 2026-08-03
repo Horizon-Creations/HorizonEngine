@@ -258,7 +258,10 @@ struct MatApproxSurface
     std::string baseColorParam; // non-empty = read the pin live from this param slot
     std::string emissiveParam;
 };
-HE_API MatApproxSurface matGraphApproxSurface(const MaterialGraph& g);
+// switchOverrides: a material INSTANCE's StaticSwitch permutation (name → on);
+// the fold follows the TAKEN branch exactly like codegen. Null = node defaults.
+HE_API MatApproxSurface matGraphApproxSurface(
+    const MaterialGraph& g, const std::map<std::string, bool>* switchOverrides = nullptr);
 
 // Widget kind of an exposed parameter — drives typed editors OUTSIDE the node
 // canvas (central param panel, entity Details). Serialized per slot (1 byte) in

@@ -1288,3 +1288,54 @@ TEST_CASE("materialGraphFromJson repairs nextId when a saved id is >= it")
 	CHECK(g.nextId == 10);
 	CHECK(g.addNode(MatNodeType::ConstFloat) == 10);
 }
+
+// ─── matGraphApproxSurface: StaticSwitch permutations ────────────────────────
+// The GI-hit approx fold must take the SAME branch codegen takes: the override
+// map beats the node default, and only the taken input contributes. A switch
+// instance whose permutation swaps the BaseColor path must reflect its own
+// colour, not the parent default's.
+TEST_CASE("matGraphApproxSurface folds the taken StaticSwitch branch")
+{
+	HE::MaterialGraph g = HE::MaterialGraph::makeDefault(); // Output + ConstColor→BaseColor
+	int outId = 0, redId = 0;
+	for (auto& n : g.nodes)
+	{
+		if (n.type == HE::MatNodeType::Output)     outId = n.id;
+		if (n.type == HE::MatNodeType::ConstColor) redId = n.id;
+	}
+	// Default ConstColor becomes the FALSE branch (red).
+	HE::MatGraphNode* red = g.findNode(redId);
+	REQUIRE(red != nullptr);
+	red->p[0] = 1.0f; red->p[1] = 0.0f; red->p[2] = 0.0f;
+	g.disconnectInput(outId, HE::kMatOutputBaseColorPin);
+
+	const int swId = g.addNode(HE::MatNodeType::StaticSwitch);
+	HE::MatGraphNode* sw = g.findNode(swId);
+	REQUIRE(sw != nullptr);
+	sw->s    = "ColorSwitch";
+	sw->p[0] = 0.0f; // default OFF → False branch
+	const int blueId = g.addNode(HE::MatNodeType::ConstColor);
+	HE::MatGraphNode* blue = g.findNode(blueId);
+	REQUIRE(blue != nullptr);
+	blue->p[0] = 0.0f; blue->p[1] = 0.0f; blue->p[2] = 1.0f;
+
+	REQUIRE(g.connect(blueId, 0, swId, 0)); // True  → blue
+	REQUIRE(g.connect(redId,  0, swId, 1)); // False → red
+	REQUIRE(g.connect(swId, 0, outId, HE::kMatOutputBaseColorPin));
+
+	// Node default (OFF) → red.
+	const HE::MatApproxSurface def = HE::matGraphApproxSurface(g);
+	CHECK(def.baseColor[0] == doctest::Approx(1.0f));
+	CHECK(def.baseColor[2] == doctest::Approx(0.0f));
+
+	// Instance permutation ON → blue.
+	std::map<std::string, bool> ov{ { "ColorSwitch", true } };
+	const HE::MatApproxSurface on = HE::matGraphApproxSurface(g, &ov);
+	CHECK(on.baseColor[0] == doctest::Approx(0.0f));
+	CHECK(on.baseColor[2] == doctest::Approx(1.0f));
+
+	// Explicit OFF override behaves like the default.
+	ov["ColorSwitch"] = false;
+	const HE::MatApproxSurface off = HE::matGraphApproxSurface(g, &ov);
+	CHECK(off.baseColor[0] == doctest::Approx(1.0f));
+}
