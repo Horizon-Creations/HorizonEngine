@@ -111,6 +111,7 @@ public:
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -237,7 +238,65 @@ private:
 	void  EnsureSSRTarget(int width, int height);
 	void  DestroySSRTarget();
 	// Trace + composite, own passes on cmdBuf (after the tile G-buffer pass).
+	// Despite the name this is the shared ENV-SPECULAR composite: it also mixes
+	// the ray-traced GI reflection result (m_giReflTex) under the SSR hit, and
+	// runs whenever EITHER source is active this frame (the inactive one binds
+	// a dummy with its mix weight forced to 0).
 	void  EncodeSSRPasses(void* cmdBuf, int width, int height);
+
+	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md, P0-P5) ───────
+	// One reflection ray per half-res pixel from the stored G-buffer against
+	// the GI acceleration structure (TLAS on HW RT, the CPU-built GiBvh buffers
+	// on the SW path — EncodeGIAccelBuild runs earlier in the frame for both);
+	// hits are shaded flat-albedo × (sun visibility + DDGI field irradiance),
+	// so reflections agree with the diffuse GI about lighting. Output RGBA16F:
+	// rgb = radiance, a = confidence (roughness/distance fade; 0 = miss → the
+	// composite keeps the sky cubemap). Quality tiers mirror SSR's: 0 = raw
+	// mirror trace; 1 = + confidence-weighted separable blur; 2 = + roughness-
+	// jittered cone rays with camera-reprojected temporal accumulation (history
+	// carries the receiver world pos for disocclusion reject — reflected-object
+	// parallax is NOT reprojected, mild ghosting under motion accepted) and a
+	// wide second blur for the composite's glossy roughness lerp. Hit normals:
+	// HW path fetches true interpolated vertex normals through a tier-2
+	// argument buffer of mesh pointers (macOS 13+, m_giMeshPtrBuf); SW path
+	// uses the hit triangle's geometric normal; both fall back to -rayDir.
+	// Deferred tile mode only (stored G-buffer + composite onto resolved HDR).
+	bool  m_giReflEnabled      = false;
+	float m_giReflIntensity    = 1.0f;
+	float m_giReflMaxRoughness = 0.6f;
+	float m_giReflMaxDistance  = 200.0f;
+	int   m_giReflQuality      = 1;      // 0 raw / 1 blur / 2 glossy+temporal
+	bool  m_giReflFrameActive  = false;  // this frame traces GI reflections (tile deferred + accel built)
+	void* m_giReflPipeline     = nullptr; // id<MTLComputePipelineState> (HW or SW kernel, per m_giHwRt)
+	bool  m_giReflPipelineTried = false;
+	void* m_giReflTex     = nullptr; // id<MTLTexture> RGBA16F half-res display: rgb radiance, a confidence
+	void* m_giReflPingTex = nullptr; // id<MTLTexture> blur ping target
+	void* m_giReflRoughTex = nullptr; // id<MTLTexture> wide second blur (quality 2 glossy lerp)
+	// Temporal history ping-pong (quality 2): radiance+confidence, and the
+	// receiver world position the value was written for (disocclusion reject —
+	// same scheme as m_giShadowHistory).
+	void* m_giReflHistRad[2] = { nullptr, nullptr };
+	void* m_giReflHistPos[2] = { nullptr, nullptr };
+	int   m_giReflHistIdx    = 0;
+	bool  m_giReflHistValid  = false;
+	glm::mat4 m_giReflPrevViewProj = glm::mat4(1.0f);
+	float m_giReflFrameSeed  = 0.0f;
+	int   m_giReflW = 0, m_giReflH = 0;
+	// P4 (HW only): per-unique-BLAS vertex/index buffer GPU addresses (tier-2
+	// argument buffer, macOS 13+) + per-TLAS-instance BLAS index, rebuilt with
+	// the TLAS each frame; m_giMeshResources lists the raw MTLBuffers for the
+	// mandatory useResource: declarations (argument-buffer indirection is not
+	// residency-tracked). Null when unavailable → kernel falls back to -rayDir.
+	void* m_giMeshPtrBuf      = nullptr; // id<MTLBuffer> (retained)
+	void* m_giInstanceMeshBuf = nullptr; // id<MTLBuffer> (retained), uint per instance
+	std::vector<void*> m_giMeshResources; // __bridge id<MTLBuffer>, not retained
+	bool  EnsureGIReflPipeline();
+	void  EnsureGIReflTarget(int width, int height);
+	void  DestroyGIReflTarget();
+	// Compute trace (+ temporal) into m_giReflTex + history, then the blur
+	// chain, own encoders on cmdBuf (after the tile G-buffer pass, before the
+	// composite inside EncodeSSRPasses).
+	void  EncodeGIReflections(void* cmdBuf, int width, int height);
 
 	// ── Deferred decals (P7 follow-up, tile mode v1) ─────────────────────────
 	// Unit-cube projectors (DecalComponent) rasterized INSIDE the G-buffer pass

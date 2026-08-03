@@ -216,6 +216,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 giProbe;        // x = indirect intensity, y = probe atlases bound
     vec4 weather;        // x = wetness, y = snow amount
     vec4 ssr;            // y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
+    vec4 giRefl;         // x = ray-traced GI-reflection intensity (composite pass only), y = max roughness
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -1196,6 +1197,8 @@ layout(set = 0, binding = 21) uniform sampler2D heGB2;
 layout(set = 0, binding = 22) uniform sampler2D heGBDepth;
 layout(set = 0, binding = 27) uniform sampler2D heSSRTex;      // near-sharp (one 5-tap pass)
 layout(set = 0, binding = 28) uniform sampler2D heSSRTexRough; // wide second blur (High tier); below High the renderer binds heSSRTex here → lerp is a no-op
+layout(set = 0, binding = 29) uniform sampler2D heGIRefl;      // ray-traced GI reflections (rgb radiance, a confidence); dummy + giRefl.x = 0 when inactive
+layout(set = 0, binding = 30) uniform sampler2D heGIReflRough; // wide second blur (quality High); below High the renderer binds heGIRefl here → lerp is a no-op
 layout(std140, set = 0, binding = 23) uniform HeResolve {
     mat4 invViewProj;
     vec4 depthParams;
@@ -1243,6 +1246,16 @@ void main() {
     {
         vec3 Rrough  = normalize(mix(reflect(-V, n), n, rough));
         vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
+        // Ray-traced GI reflections UNDER the SSR mix (gi-reflections-plan §6):
+        // the traced result replaces the cubemap wherever a scene ray hit, and
+        // a confident screen-space hit still wins below — so SSR supplies the
+        // sharp on-screen detail and the traced pass fills its off-screen gaps.
+        // Glossy roughness lerp mirrors the SSR pair right below (below
+        // quality High both samplers hold the same texture → no-op).
+        vec4 gg0 = texture(heGIRefl, uv);
+        vec4 gg1 = texture(heGIReflRough, uv);
+        vec4 gg  = mix(gg0, gg1, smoothstep(0.0, max(heLight.giRefl.y, 1e-3), rough));
+        envSpec = mix(envSpec, gg.rgb, gg.a * heLight.giRefl.x);
         // Glossy lerp (ssr-plan §4.3 v2): mirror-like surfaces read the
         // near-sharp result, rough ones the wide second blur — the mip-chain
         // substitute. Below quality High both samplers hold the same texture.
@@ -1338,6 +1351,8 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
               { Stage::Fragment, 0, 22, 3 },    // depth → 3
               { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
               { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
+              { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
+              { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
               { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
               { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
     else
