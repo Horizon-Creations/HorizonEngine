@@ -298,10 +298,23 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		// address only — and a guest on the other family cannot connect at all,
 		// with nothing in the UI to explain it. The server verifies the claim by
 		// connecting back before publishing it.
-		const std::string altAddress = HE::Net::socketGlobalIPv6Address();
+		// Every address this host might be reachable under, for the directory
+		// to verify. The stable IPv6 first — the pinhole above was opened for
+		// it, while the register request itself leaves from the TEMPORARY
+		// privacy address, so without this claim the one v6 address that
+		// actually works would never be probed. Then the router's WAN IPv4
+		// from the mapping, because the request usually travels over IPv6 and
+		// the v4 forward is otherwise invisible to the directory too.
+		std::vector<std::string> altAddresses;
+		if (!pinholeV6.empty()) altAddresses.push_back(pinholeV6);
+		if (r.portMapped && !mapping.externalIp.empty() &&
+		    !HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
+		{
+			altAddresses.push_back(mapping.externalIp);
+		}
 		const DirectoryStatus st = dir.registerSession(sid, port16, displayName,
 		                                               "HorizonEngine", 1, reg,
-		                                               altAddress);
+		                                               altAddresses);
 		if (st != DirectoryStatus::Ok)
 		{
 			r.error = "Session directory unreachable — share the address manually.";

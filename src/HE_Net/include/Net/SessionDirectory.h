@@ -89,11 +89,15 @@ public:
                                     const std::string& engineVersion,
                                     int protocolVersion,
                                     SessionRegistration& out,
-                                    // This machine's address on the OTHER family,
-                                    // typically its global IPv6. Offered, never
-                                    // trusted: the server publishes it only if it
-                                    // can open a connection back to it.
-                                    const std::string& altAddress = {},
+                                    // Further addresses this machine is (or may
+                                    // be) reachable under: its stable global
+                                    // IPv6 — the pinhole target, while the
+                                    // request itself leaves from the temporary
+                                    // privacy address — and the router's WAN
+                                    // IPv4 from the port mapping. Offered, never
+                                    // trusted: the server publishes each only if
+                                    // it can open a connection back to it.
+                                    const std::vector<std::string>& altAddresses = {},
                                     int timeoutMs = 10000);
 
     DirectoryStatus lookup(const std::string& sessionId, SessionLookup& out,
