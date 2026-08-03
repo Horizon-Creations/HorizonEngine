@@ -192,8 +192,9 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		// station answers NAT-PMP and stays silent to SSDP entirely, so a UPnP
 		// failure says nothing about whether the second attempt will work.
 		HE::Net::PortMapping mapping;
-		if (HE::Net::PortMapper::mapPort(port16, "HorizonEngine collaboration",
-		                                 r.mapping, mapping) == HE::Net::PortMapResult::Ok)
+		const HE::Net::PortMapResult mapResult = HE::Net::PortMapper::mapPort(
+			port16, "HorizonEngine collaboration", r.mapping, mapping);
+		if (mapResult == HE::Net::PortMapResult::Ok)
 		{
 			r.portMapped = true;
 			const bool viaPmp =

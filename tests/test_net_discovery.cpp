@@ -513,3 +513,39 @@ TEST_CASE("socketDefaultGateway: reports a usable router address")
     // The gateway is by definition on a local network.
     CHECK(PortMapper::isPrivateOrCgnat(gw));
 }
+
+// ─── Telling "the router said no" from "we never reached the router" ─────────
+
+TEST_CASE("A blocked local network is a distinct outcome from an absent router")
+{
+    // These two arrive at the same place — no mapping — but call for completely
+    // different action, so they must not share a result code. Blaming the router
+    // for a permission problem sends people to change settings that were never
+    // consulted.
+    //
+    // Found in the field: on macOS every LAN destination fails with EHOSTUNREACH
+    // ("no route to host") for the very gateway that IS the default route and
+    // through which all internet traffic is flowing, unless the app holds the
+    // Local Network permission. Nothing leaves the machine, and the old message
+    // said the router had refused.
+    CHECK(HE::Net::PortMapResult::LocalNetworkBlocked !=
+          HE::Net::PortMapResult::NoRouterFound);
+
+    // socketLocalNetworkBlocked() must never claim "blocked" when it simply has
+    // nothing to test against — "cannot tell" reported as a fault would be worse
+    // than saying nothing, because it names a cause that may not exist.
+    const std::string gw = HE::Net::socketDefaultGateway();
+    if (gw.empty())
+    {
+        CHECK_FALSE(HE::Net::socketLocalNetworkBlocked());
+    }
+    else
+    {
+        // With a gateway present the answer is environment-dependent — a machine
+        // with the permission granted reports false, one without reports true —
+        // so only its consistency is asserted here, not its value.
+        const bool first  = HE::Net::socketLocalNetworkBlocked();
+        const bool second = HE::Net::socketLocalNetworkBlocked();
+        CHECK(first == second);
+    }
+}

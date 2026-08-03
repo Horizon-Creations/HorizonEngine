@@ -827,6 +827,29 @@ static std::string defaultGatewayImpl() {
 #endif
 }
 
+bool socketLocalNetworkBlocked() {
+    const std::string gw = defaultGatewayImpl();
+    if (gw.empty()) return false;   // nothing to test against — not the same as blocked
+
+    SocketHandle h = socketCreateUdp();
+    if (h == kInvalidSocket) return false;
+
+    // Port 9 is discard: nothing listens, nothing answers, and no router treats
+    // it specially. Only whether the datagram can leave matters.
+    const std::uint8_t byte = 0;
+    std::size_t sent = 0;
+    const SocketResult rc = socketSendTo(h, &byte, 1, gw, 9, sent);
+    socketClose(h);
+
+    const bool blocked = (rc != SocketResult::Ok);
+    if (blocked) {
+        HE_LOG_WARN(Net, "Cannot send to the default gateway %s although it is the default "
+                         "route — local network access is being blocked for this process, "
+                         "not by the network", gw.c_str());
+    }
+    return blocked;
+}
+
 std::string socketDefaultGateway() {
     const std::string gw = defaultGatewayImpl();
     if (gw.empty()) {
