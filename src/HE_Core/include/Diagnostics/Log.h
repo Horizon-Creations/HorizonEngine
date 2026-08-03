@@ -81,6 +81,7 @@ namespace HE::Log
 		Editor,        // editor application & panels
 		Tool,          // offline tools (importers, packers, codegen)
 		Profiler,      // profiler captures
+		SourceControl, // git / LFS: probes, commands, provider calls
 		Count
 	};
 

@@ -204,6 +204,10 @@ target_compile_definitions(he_tests PRIVATE
 # a kill. The test binary learns its path the same way the hcgen fixture above
 # does, so nothing depends on the working directory.
 add_executable(he_proc_child proc_child_main.cpp)
+# Needs the project standard explicitly: without it MSVC compiled this at an
+# older level where std::string::data() still returns const char*, which
+# CreateProcessA rejects.
+target_compile_features(he_proc_child PRIVATE cxx_std_20)
 add_dependencies(he_tests he_proc_child)
 target_sources(he_tests PRIVATE test_process_runner.cpp)
 target_compile_definitions(he_tests PRIVATE
