@@ -2557,6 +2557,41 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<MeshComponent>(cubeE, MeshComponent{ HE::kDefaultCubeMeshId });
 		reg.emplace<MaterialComponent>(cubeE,
 			MaterialComponent{ contentManager().registerMaterial(std::move(red)) });
+		// HE_DUMP_SSRTESTWALL=1: additionally a camera-FACING mirror wall with a
+		// bright cube standing beside it. Its reflection rays run lateral /
+		// mildly back toward the camera — the case the old forward-only facing
+		// gate silently killed (mirror walls never reflected their neighbours).
+		if (const char* ww = std::getenv("HE_DUMP_SSRTESTWALL"); ww && *ww)
+		{
+			MaterialAsset wall;
+			wall.type = HE::AssetType::Material;
+			wall.name = "SSRMirrorWall";
+			wall.baseColor[0] = 0.9f; wall.baseColor[1] = 0.9f; wall.baseColor[2] = 0.9f;
+			wall.metallic  = 1.0f;
+			wall.roughness = 0.05f;
+			auto wallE = m_editorWorld->createEntity("SSRWall");
+			TransformComponent wtc;
+			wtc.position = glm::vec3(-1.5f, 3.0f, -12.0f);
+			wtc.scale    = glm::vec3(8.0f, 6.0f, 0.4f);
+			reg.emplace<TransformComponent>(wallE, wtc);
+			reg.emplace<MeshComponent>(wallE, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(wallE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(wall)) });
+
+			MaterialAsset side;
+			side.type = HE::AssetType::Material;
+			side.name = "SSRWallSideCube";
+			side.baseColor[0] = 1.0f; side.baseColor[1] = 0.15f; side.baseColor[2] = 0.1f;
+			side.roughness = 0.5f;
+			auto sideE = m_editorWorld->createEntity("SSRWallSideCube");
+			TransformComponent stc;
+			stc.position = glm::vec3(4.5f, 1.5f, -7.0f); // beside + in front of the wall
+			stc.scale    = glm::vec3(2.0f);
+			reg.emplace<TransformComponent>(sideE, stc);
+			reg.emplace<MeshComponent>(sideE, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(sideE,
+				MaterialComponent{ contentManager().registerMaterial(std::move(side)) });
+		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
