@@ -197,6 +197,18 @@ target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
 
+# ─── Process-runner fixture ────────────────────────────────────────────────────
+# A real child process, because every bug HE::Proc exists to avoid is invisible
+# to a mock: exit codes mangled into wait statuses, streams merged, pipes
+# deadlocking on volume, arguments corrupted by quoting, grandchildren surviving
+# a kill. The test binary learns its path the same way the hcgen fixture above
+# does, so nothing depends on the working directory.
+add_executable(he_proc_child proc_child_main.cpp)
+add_dependencies(he_tests he_proc_child)
+target_sources(he_tests PRIVATE test_process_runner.cpp)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_PROC_CHILD="$<TARGET_FILE:he_proc_child>")
+
 # ─── Native game-logic fixture ─────────────────────────────────────────────────
 # A real shared library implementing IGameLogic, loaded at runtime by
 # test_gamelogic_loader.cpp to exercise GameLogicLoader end to end.

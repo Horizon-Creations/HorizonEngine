@@ -12,6 +12,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/CrashHandler.cpp
 	src/JobSystem/JobSystem.cpp
 	src/Platform/DynLib.cpp
+	src/Platform/Process.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
