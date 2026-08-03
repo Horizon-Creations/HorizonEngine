@@ -152,8 +152,20 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::TextDisabled("This machine: %s:%u", collab->localAddress().c_str(),
 		                    static_cast<unsigned>(collab->port()));
 		if (!collab->publicAddress().empty())
-			ImGui::TextDisabled("Seen from outside as: %s (your router)",
-			                    collab->publicAddress().c_str());
+		{
+			// "(your router)" is only true under IPv4, where NAT means the
+			// address the outside sees belongs to the router rather than to this
+			// machine. With IPv6 there is no translation: that address IS this
+			// machine, and calling it the router's would teach exactly the wrong
+			// mental model — that something still has to be forwarded to reach it.
+			const bool isIPv6 = collab->publicAddress().find(':') != std::string::npos;
+			if (isIPv6)
+				ImGui::TextDisabled("Reachable from outside as: %s (this machine — IPv6 "
+				                    "needs no forwarding)", collab->publicAddress().c_str());
+			else
+				ImGui::TextDisabled("Seen from outside as: %s (your router)",
+				                    collab->publicAddress().c_str());
+		}
 	}
 	else
 	{
