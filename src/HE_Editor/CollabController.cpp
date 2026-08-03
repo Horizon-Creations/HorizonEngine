@@ -197,10 +197,11 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		if (mapResult == HE::Net::PortMapResult::Ok)
 		{
 			r.portMapped = true;
-			const bool viaPmp =
-				r.mapping.method == HE::Net::PortMapper::MappingHandle::Method::NatPmp;
-			r.mapStatus = viaPmp ? "Router forwarded the port automatically (NAT-PMP)."
-			                     : "Router forwarded the port automatically (UPnP).";
+			using Method = HE::Net::PortMapper::MappingHandle::Method;
+			const char* how = r.mapping.method == Method::NatPmp ? "NAT-PMP"
+			                : r.mapping.method == Method::Pcp    ? "PCP"
+			                                                     : "UPnP";
+			r.mapStatus = std::string("Router forwarded the port automatically (") + how + ").";
 
 			// A router can report a private or carrier-grade address as its own
 			// WAN side, which means another NAT sits above it and no mapping at
@@ -233,6 +234,23 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 			r.advice = "What you can do: allow this application through your firewall, "
 			           "then try again.";
 #endif
+		}
+		else if (mapResult == HE::Net::PortMapResult::Refused)
+		{
+			// The router understood the request and declined it — a different
+			// fact from "nothing answered", and the only one of the two the user
+			// can actually fix. Saying the protocols are unsupported here would
+			// be wrong: they worked, and were used to deliver the refusal.
+			r.mapStatus = "Your router was reached and refused to forward the port — "
+			              "automatic port forwarding is switched off for this device.";
+			r.advice    = "What you can do: your router accepts forwarding requests, but "
+			              "not from this machine. On a FRITZ!Box this is a per-device "
+			              "permission and separate from the global UPnP setting: Home "
+			              "Network > Network > Network Connections, edit this device, and "
+			              "tick \"Allow independent port sharing for this device\". Other "
+			              "routers word it similarly. If the router is not yours to "
+			              "configure, have everyone join a mesh VPN such as Tailscale or "
+			              "ZeroTier instead.";
 		}
 		else
 		{

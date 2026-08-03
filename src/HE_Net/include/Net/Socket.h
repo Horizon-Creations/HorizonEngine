@@ -128,6 +128,21 @@ HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
 // Allow sending to multicast groups (SSDP's 239.255.255.250).
 HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
 
+// Bind to one specific local address rather than to every interface.
+HE_NET_API bool         socketBindUdpTo(SocketHandle h, const std::string& localAddress,
+                                        std::uint16_t port);
+
+// Choose which interface multicast leaves by.
+//
+// Without this the kernel picks the route for the multicast group, which is a
+// coin toss on any machine with more than one interface — and Windows machines
+// almost always have several (Hyper-V, WSL, VPN, VirtualBox all add adapters).
+// A discovery packet that leaves through a virtual adapter never reaches the
+// router, and the failure is indistinguishable from "there is no router": the
+// send SUCCEEDS, nothing answers, and the search times out.
+HE_NET_API bool         socketSetMulticastInterface(SocketHandle h,
+                                                    const std::string& localAddress);
+
 HE_NET_API SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data,
                                      std::size_t len, const std::string& host,
                                      std::uint16_t port, std::size_t& outSent);

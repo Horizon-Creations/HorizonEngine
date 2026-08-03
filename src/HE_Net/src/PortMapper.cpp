@@ -192,33 +192,96 @@ bool PortMapper::isPrivateOrCgnat(const std::string& ip) {
 
 // ─── Discovery ───────────────────────────────────────────────────────────────
 
-PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
-    HE_LOG_DEBUG(Net, "UPnP: searching for an internet gateway (SSDP, %d ms budget)", timeoutMs);
-    SocketHandle udp = socketCreateUdp();
-    if (udp == kInvalidSocket) {
-        HE_LOG_ERROR(Net, "UPnP: could not create a UDP socket for discovery");
-        return PortMapResult::NotSupported;
-    }
-    if (!socketBindUdp(udp, 0)) {
-        HE_LOG_ERROR(Net, "UPnP: could not bind the discovery socket");
-        socketClose(udp);
-        return PortMapResult::NotSupported;
-    }
-    socketSetMulticastTtl(udp, 2);
+namespace {
 
-    const std::string search = buildSsdpSearch();
-    std::size_t sent = 0;
-    const SocketResult sr = socketSendTo(
-        udp, reinterpret_cast<const std::uint8_t*>(search.data()), search.size(),
-        kSsdpAddr, kSsdpPort, sent);
-    if (sr != SocketResult::Ok) {
+// Interfaces worth searching on: a router can only be behind a routable IPv4
+// address. Loopback has no router, and 169.254.x is what an adapter falls back
+// to when it never got a lease — both are pure noise here, and on Windows there
+// are usually several of them (Hyper-V, WSL, VPN, VirtualBox all add adapters).
+bool isSearchableIPv4(const std::string& a) {
+    if (a.find(':') != std::string::npos) return false;   // IPv6
+    if (a.rfind("127.", 0) == 0)          return false;   // loopback
+    if (a.rfind("169.254.", 0) == 0)      return false;   // link-local
+    return !a.empty();
+}
+
+} // namespace
+
+PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
+    const std::string search  = buildSsdpSearch();
+    const std::string gateway = socketDefaultGateway();
+
+    // Search from EVERY interface rather than from whichever one the routing
+    // table happens to pick for the multicast group.
+    //
+    // This is the difference between working and silently not working on
+    // Windows. A machine there almost always has virtual adapters, and one of
+    // them regularly wins the route to 239.255.255.250 — at which point the
+    // search leaves into a virtual switch, the router never sees it, and the
+    // failure is indistinguishable from "this router has no UPnP": the send
+    // reports success, nothing answers, the search times out.
+    std::vector<std::string> ifaces;
+    for (const auto& a : socketLocalAddresses())
+        if (isSearchableIPv4(a)) ifaces.push_back(a);
+    if (ifaces.empty()) ifaces.emplace_back();   // fall back to the default route
+
+    HE_LOG_DEBUG(Net, "UPnP: searching for an internet gateway on %zu interface(s), %d ms budget",
+                 ifaces.size(), timeoutMs);
+
+    struct Probe { SocketHandle sock; std::string iface; };
+    std::vector<Probe> probes;
+
+    for (const auto& iface : ifaces) {
+        const char* ifname = iface.empty() ? "(default route)" : iface.c_str();
+        SocketHandle udp = socketCreateUdp();
+        if (udp == kInvalidSocket) {
+            HE_LOG_WARN(Net, "UPnP: no socket for %s", ifname);
+            continue;
+        }
+        // Binding to the interface pins BOTH the multicast source and the port
+        // the router's unicast reply comes back to.
+        if (!(iface.empty() ? socketBindUdp(udp, 0) : socketBindUdpTo(udp, iface, 0))) {
+            HE_LOG_DEBUG(Net, "UPnP: could not bind the search socket to %s", ifname);
+            socketClose(udp);
+            continue;
+        }
+        socketSetMulticastTtl(udp, 2);
+        if (!iface.empty()) socketSetMulticastInterface(udp, iface);
+
+        const auto send = [&](const char* host, const char* what) {
+            std::size_t sent = 0;
+            const SocketResult r = socketSendTo(
+                udp, reinterpret_cast<const std::uint8_t*>(search.data()), search.size(),
+                host, kSsdpPort, sent);
+            if (r != SocketResult::Ok)
+                HE_LOG_TRACE(Net, "UPnP: %s search from %s failed", what, ifname);
+            return r == SocketResult::Ok;
+        };
+
+        // Twice, because SSDP rides on UDP multicast and a dropped search looks
+        // exactly like a router that does not speak UPnP.
+        bool anySent = false;
+        for (int attempt = 0; attempt < 2; ++attempt)
+            anySent |= send(kSsdpAddr, "multicast");
+
+        // And once straight at the router. A unicast M-SEARCH is legal SSDP and
+        // involves no multicast routing whatsoever, so it still arrives on the
+        // machines where the multicast above left through the wrong adapter.
+        if (!gateway.empty()) anySent |= send(gateway.c_str(), "unicast");
+
+        if (!anySent) { socketClose(udp); continue; }
+        HE_LOG_DEBUG(Net, "UPnP: search sent from %s", ifname);
+        probes.push_back({udp, iface});
+    }
+
+    const auto closeAll = [&] { for (auto& p : probes) socketClose(p.sock); };
+
+    if (probes.empty()) {
         // On macOS this is the Local Network permission, not the network: the
         // multicast send fails while internet traffic keeps working, which
         // looks like a routing bug unless you know to look here.
-        HE_LOG_WARN(Net, "UPnP: multicast search could not be sent to %s:%u — on macOS this "
-                         "usually means the Local Network permission was denied",
-                    kSsdpAddr, static_cast<unsigned>(kSsdpPort));
-        socketClose(udp);
+        HE_LOG_WARN(Net, "UPnP: the search could not be sent on any interface — on macOS "
+                         "this usually means the Local Network permission was denied");
         return PortMapResult::NoRouterFound;
     }
 
@@ -227,46 +290,60 @@ PortMapResult PortMapper::discover(IgdDevice& out, int timeoutMs) {
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(timeoutMs);
     std::uint8_t buf[4096];
+    int responders = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        const auto remaining = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count());
-        if (!socketWaitReadable(udp, std::min(remaining, 250))) continue;
+        for (auto& probe : probes) {
+            if (std::chrono::steady_clock::now() >= deadline) break;
+            if (!socketWaitReadable(probe.sock, 50)) continue;
 
-        std::size_t got = 0;
-        std::string fromHost;
-        std::uint16_t fromPort = 0;
-        if (socketRecvFrom(udp, buf, sizeof(buf), got, fromHost, fromPort) != SocketResult::Ok) {
-            continue;
+            std::size_t got = 0;
+            std::string fromHost;
+            std::uint16_t fromPort = 0;
+            if (socketRecvFrom(probe.sock, buf, sizeof(buf), got, fromHost, fromPort)
+                != SocketResult::Ok) {
+                continue;
+            }
+            ++responders;
+
+            const std::string response(reinterpret_cast<char*>(buf), got);
+            const std::string location = parseSsdpLocation(response);
+            if (location.empty()) continue;
+
+            HE_LOG_DEBUG(Net, "UPnP: %s answered, fetching device description from %s",
+                         fromHost.c_str(), location.c_str());
+            const HttpResponse desc = httpGet(location, 4000);
+            if (!desc.ok || desc.statusCode != 200) {
+                HE_LOG_DEBUG(Net, "UPnP: description fetch failed (HTTP %d) — trying other responders",
+                             desc.statusCode);
+                continue;
+            }
+
+            if (parseDeviceDescription(desc.body, location, out)) {
+                HE_LOG_INFO(Net, "UPnP: gateway found at %s via %s (service %s)",
+                            fromHost.c_str(),
+                            probe.iface.empty() ? "(default route)" : probe.iface.c_str(),
+                            out.serviceType.c_str());
+                closeAll();
+                return PortMapResult::Ok;
+            }
+            // Plenty of non-gateway devices answer SSDP (printers, TVs); this is
+            // normal, not an error.
+            HE_LOG_DEBUG(Net, "UPnP: %s is not an internet gateway, ignoring", fromHost.c_str());
         }
-
-        const std::string response(reinterpret_cast<char*>(buf), got);
-        const std::string location = parseSsdpLocation(response);
-        if (location.empty()) continue;
-
-        HE_LOG_DEBUG(Net, "UPnP: %s answered, fetching device description from %s",
-                     fromHost.c_str(), location.c_str());
-        const HttpResponse desc = httpGet(location, 4000);
-        if (!desc.ok || desc.statusCode != 200) {
-            HE_LOG_DEBUG(Net, "UPnP: description fetch failed (HTTP %d) — trying other responders",
-                         desc.statusCode);
-            continue;
-        }
-
-        if (parseDeviceDescription(desc.body, location, out)) {
-            HE_LOG_INFO(Net, "UPnP: gateway found at %s (service %s)",
-                        fromHost.c_str(), out.serviceType.c_str());
-            socketClose(udp);
-            return PortMapResult::Ok;
-        }
-        // Plenty of non-gateway devices answer SSDP (printers, TVs); this is
-        // normal, not an error.
-        HE_LOG_DEBUG(Net, "UPnP: %s is not an internet gateway, ignoring", fromHost.c_str());
     }
 
-    socketClose(udp);
-    HE_LOG_INFO(Net, "UPnP: no internet gateway answered within %d ms "
-                     "(UPnP is disabled by default on many routers)", timeoutMs);
+    closeAll();
+    // Which of the two happened decides what the user should do, so they are
+    // reported apart: nothing at all points at the search never arriving,
+    // whereas answers without a gateway among them means UPnP is genuinely off.
+    if (responders == 0) {
+        HE_LOG_INFO(Net, "UPnP: nothing answered on any of %zu interface(s) within %d ms "
+                         "(UPnP is disabled by default on many routers)",
+                    probes.size(), timeoutMs);
+    } else {
+        HE_LOG_INFO(Net, "UPnP: %d device(s) answered but none is an internet gateway",
+                    responders);
+    }
     return PortMapResult::NoRouterFound;
 }
 
@@ -338,7 +415,17 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
         { "NewLeaseDuration",          std::to_string(leaseSeconds) },
     }, body);
 
-    if (!ok) return PortMapResult::RequestFailed;
+    if (!ok) {
+        // 606 is "Action not authorized": the router understood the request and
+        // declined it. Reported apart from a generic failure so the user is sent
+        // to the setting instead of being told their router lacks the feature.
+        if (extractXmlValue(body, "errorCode") == "606") {
+            HE_LOG_WARN(Net, "UPnP: the router refuses port forwarding for this device "
+                             "(error 606, not authorized)");
+            return PortMapResult::Refused;
+        }
+        return PortMapResult::RequestFailed;
+    }
 
     out.externalPort = externalPort;
     out.internalPort = internalPort;
@@ -509,6 +596,14 @@ PortMapResult PortMapper::natPmpExternalIp(const std::string& gateway, std::stri
 
     std::uint16_t result = 0;
     if (!parseNatPmpAddressResponse(reply, replyLen, out, result)) {
+        if (replyLen >= 1 && reply[0] >= 2) {
+            // Port 5351 carries both protocols. A PCP-only router answers a
+            // NAT-PMP request in PCP's own format, which is not corruption —
+            // the PCP attempt is the one that counts, so this stays quiet.
+            HE_LOG_DEBUG(Net, "NAT-PMP: %s speaks PCP (version %u), not NAT-PMP", 
+                         gateway.c_str(), static_cast<unsigned>(reply[0]));
+            return PortMapResult::NotSupported;
+        }
         HE_LOG_WARN(Net, "NAT-PMP: malformed address reply from %s (%zu bytes)",
                     gateway.c_str(), replyLen);
         return PortMapResult::RequestFailed;
@@ -545,6 +640,14 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
     std::uint32_t gotLifetime = 0;
     if (!parseNatPmpMapResponse(reply, replyLen, gotInternal, gotExternal,
                                 gotLifetime, result)) {
+        if (replyLen >= 1 && reply[0] >= 2) {
+            // Port 5351 carries both protocols. A PCP-only router answers a
+            // NAT-PMP request in PCP's own format, which is not corruption —
+            // the PCP attempt is the one that counts, so this stays quiet.
+            HE_LOG_DEBUG(Net, "NAT-PMP: %s speaks PCP (version %u), not NAT-PMP", 
+                         gateway.c_str(), static_cast<unsigned>(reply[0]));
+            return PortMapResult::NotSupported;
+        }
         HE_LOG_WARN(Net, "NAT-PMP: malformed mapping reply from %s (%zu bytes)",
                     gateway.c_str(), replyLen);
         return PortMapResult::RequestFailed;
@@ -751,7 +854,14 @@ PortMapResult PortMapper::pcpMap(const std::string& gateway,
         // router and not worth alarming about; anything else is a real refusal.
         if (result == 1)
             HE_LOG_DEBUG(Net, "PCP: %s does not speak PCP (UNSUPP_VERSION)", gateway.c_str());
-        else
+        // 2 = NOT_AUTHORIZED: the router understood us and declined. Same
+        // meaning as UPnP 606, and routers that refuse one refuse both.
+        if (result == 2) {
+            HE_LOG_WARN(Net, "PCP: %s refuses port forwarding for this device "
+                             "(NOT_AUTHORIZED)", gateway.c_str());
+            return PortMapResult::Refused;
+        }
+        if (result != 1)
             HE_LOG_WARN(Net, "PCP: %s refused the request (result code %u)",
                         gateway.c_str(), static_cast<unsigned>(result));
         return PortMapResult::RequestFailed;
@@ -794,6 +904,10 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
 
     const std::string gatewayFirst = socketDefaultGateway();
 
+    // Sticky across every rung below: any one of them hearing an explicit "no"
+    // changes the verdict, even if a later rung merely stays silent.
+    bool refused = false;
+
     // ── IPv6 first, when this machine has a global address ───────────────────
     // Not a fallback but the preferred path, because IPv6 needs no translation
     // at all: the machine is already addressable and only the router's firewall
@@ -810,7 +924,9 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         HE_LOG_DEBUG(Net, "Port mapping: this machine has a global IPv6 address, trying a "
                           "PCP pinhole before any IPv4 mapping");
         PcpMapping pcp;
-        if (pcpMap(gatewayFirst, globalV6, port, port, 7200, pcp) == PortMapResult::Ok)
+        const PortMapResult r = pcpMap(gatewayFirst, globalV6, port, port, 7200, pcp);
+        refused = refused || r == PortMapResult::Refused;
+        if (r == PortMapResult::Ok)
         {
             outHandle.method        = MappingHandle::Method::Pcp;
             outHandle.gateway       = gatewayFirst;
@@ -833,7 +949,9 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     IgdDevice igd;
     if (discover(igd, 3000) == PortMapResult::Ok)
     {
-        if (addMapping(igd, port, port, description, outInfo) == PortMapResult::Ok)
+        const PortMapResult r = addMapping(igd, port, port, description, outInfo);
+        refused = refused || r == PortMapResult::Refused;
+        if (r == PortMapResult::Ok)
         {
             outHandle.method = MappingHandle::Method::Upnp;
             outHandle.igd    = igd;
@@ -876,7 +994,9 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         if (!lan.empty())
         {
             PcpMapping pcp;
-            if (pcpMap(gateway, lan, port, port, 7200, pcp) == PortMapResult::Ok)
+            const PortMapResult r = pcpMap(gateway, lan, port, port, 7200, pcp);
+            refused = refused || r == PortMapResult::Refused;
+            if (r == PortMapResult::Ok)
             {
                 outHandle.method        = MappingHandle::Method::Pcp;
                 outHandle.gateway       = gateway;
@@ -905,6 +1025,18 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
                          "neither UPnP nor NAT-PMP could even reach the router. Nothing was "
                          "wrong with the router or its settings.");
         return PortMapResult::LocalNetworkBlocked;
+    }
+
+    // A refusal outranks everything else here. The router was reached, it
+    // understood the request and it declined — saying "nothing answered" would
+    // send the user looking for a problem that does not exist.
+    if (refused)
+    {
+        HE_LOG_WARN(Net, "Port mapping: the router was reached but refuses to forward TCP %u "
+                         "for this device. It has automatic port forwarding switched off — "
+                         "on a FRITZ!Box that is a per-device permission, separate from the "
+                         "global one.", static_cast<unsigned>(port));
+        return PortMapResult::Refused;
     }
 
     HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened TCP %u — both are "
