@@ -58,6 +58,11 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		$<TARGET_FILE:HorizonScene>
 		"${DEPLOY_GAME}"
+	# HorizonScene links HorizonNet (GameReplication), so a shipped game needs
+	# it beside the exe or it will not start at all.
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		$<TARGET_FILE:HorizonNet>
+		"${DEPLOY_GAME}"
 	COMMENT "Deploying HorizonGame.exe to ${DEPLOY_GAME}"
 	VERBATIM
 )

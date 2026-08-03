@@ -6,9 +6,13 @@ protocol with chunked late-join snapshots, presence, an authoritative lock table
 and live replication of transforms, authored assets and structural changes — all
 reachable from the editor (View ▸ Collaboration) with per-user undo/redo.
 
-Not done: NAT-PMP as a second port-mapping path, and gameplay replication (N4a).
-Not verified: two real editor instances in one session, which needs two GUI
-processes.
+Gameplay replication (N4a) has its foundation: `NetworkComponent`,
+server-authoritative snapshots, interest management, interpolation. Client-side
+prediction and reconciliation are not implemented, so a locally controlled
+character lags by the round trip.
+
+Not done: NAT-PMP as a second port-mapping path. Not verified: two real editor
+instances in one session, which needs two GUI processes.
 
 ## Why one layer serves two very different consumers
 
@@ -152,7 +156,7 @@ any zero-pad in the payload's final byte.
 - **N4** ✅ — **presence**: camera pose + selection per participant, throttled and relayed by the host.
 - **N5** ✅ — **authoritative lock table** on the host, which removes the polling race window LFS locks have.
 - **N6** ✅ — **live deltas**: transforms, all other components, authored assets, and structural changes (create/destroy/reparent) replicate, with lock-derived authority.
-- **N4a** *(later)* — gameplay replication: `NetworkComponent` on entt, authority model, snapshot + delta, client prediction / server reconciliation, interest management.
+- **N4a** ✅ — gameplay replication: `NetworkComponent`, server-authoritative snapshots, quantized transforms, interest management, interpolation for remote entities, and prediction + reconciliation for the controlled one.
 
 ## Discovery (N2.5)
 
@@ -617,3 +621,82 @@ including the platform differences in non-blocking mode, error codes, and
 layers verify identically on all three OSes. As with the D3D/Vulkan work,
 Windows/Linux behaviour is CI + real-HW verified rather than blind-merged —
 macOS is the only platform the sockets have actually been exercised on so far.
+
+
+## Gameplay replication (N4a)
+
+`HorizonScene/GameReplication` + `NetworkComponent`. Deliberately a *separate*
+consumer from editor collaboration despite sharing the transport, because the two
+want opposite things: collab replicates authored edits — rare, reliable, must
+never be lost — while gameplay replicates simulation state at ~30 Hz and tolerates
+loss, since a dropped snapshot is corrected by the next one milliseconds later.
+Forcing gameplay through the collab path would make every position update a
+reliable message; forcing collab through this one would silently drop an edit.
+
+- **Registration is opt-in.** An entity without a `netId` is not replicated,
+  which is how purely local effects (muzzle flashes, debris) stay off the wire.
+- **Clients never mint ids.** `adoptEntity` takes the id the server assigned —
+  otherwise the two peers would disagree about which entity a snapshot names.
+  (This API was added because a test exposed its absence.)
+- **Interest management** is the single largest bandwidth lever, far more than
+  per-field compression: entities beyond a client's relevance radius are never
+  sent to it at all.
+- **Quantization**: 24 bits per position axis over ±4096 (sub-millimetre), 16
+  bits per Euler angle (~0.005°) — about 19 bytes per entity per snapshot.
+- **Unreliable by intent.** Waiting for a retransmit would deliver state that is
+  already wrong.
+- **A stalled server sends one snapshot, not a backlog** — catching up would
+  burst updates that are all stale on arrival.
+- **Interpolation** between the last two snapshots keeps other entities from
+  visibly stepping at the tick rate on a higher-refresh display.
+
+### Prediction and reconciliation
+
+Interpolation is about smoothness; prediction is about **latency**. Only the
+second makes your own character respond on the frame you pressed the key —
+without it, every movement waits a full round trip, which feels wrong above
+~50 ms of ping and no amount of smoothing hides it.
+
+- `pushInput` applies the command locally **immediately**, buffers it, and sends
+  it. The server acknowledges the last sequence it ran **inside the snapshot**,
+  so the client knows which of its predictions the authoritative state already
+  contains.
+- On reconcile the client adopts the server's position and **replays every
+  unacknowledged input on top**. The result is the server's truth plus exactly
+  the moves still in flight — not a rewind the player would feel.
+- A large error **snaps**; easing one reads as sliding on ice and leaves the
+  player acting on a wrong position for a visible stretch. A small one is eased.
+
+Four things this got wrong first, each caught by a test:
+
+1. **The smoothing offset fed on itself.** Comparing against the visually
+   offset position folded the offset into the next error, drifting a little
+   further every snapshot. The offset is now removed before the comparison.
+2. **The client predicted with an unclamped timestep** while the server clamped
+   it for anti-cheat, so the two ran different simulations and any long frame —
+   a hitch, a breakpoint — mispredicted. Both now apply the same bound.
+3. **The correction dead zone was narrower than the wire's quantization step**,
+   so a *perfect* prediction still counted as an error and left a smoothing
+   offset permanently active. The threshold is now derived from `positionBits`.
+4. Duplicated and out-of-order input is normal on an unreliable channel; the
+   server tracks the last sequence per connection so a replayed datagram cannot
+   move the character twice.
+
+A client may only drive the entity it was **assigned** — otherwise anyone could
+move anyone else's character by sending input for their id.
+
+### Rotation across the ±180° seam
+
+Interpolated per component along the **shorter arc**: the delta is wrapped into
+[-180, 180] first. Going from 179° to -179° is a 2° turn, but a plain lerp walks
+the other 358° — a visible spin every time something crosses the wrap.
+
+Deliberately **not** a quaternion slerp, though that is the more correct
+rotational path. `glm::eulerAngles` returns an equivalent but *different*
+decomposition — a 180° yaw comes back as `x=180, y≈0, z=180` — so a round trip
+rewrites the stored triple. The orientation renders identically, but game code
+reading `rotation.y` off a replicated entity would see values it never set.
+Preserving the representation this engine actually stores is worth more than a
+perfect interpolation path, and for single-axis turns (what characters do) the
+two are identical anyway. This was measured, not assumed: a slerp version made
+the seam test report `y ≈ 1°` for an orientation that was in fact correct.
