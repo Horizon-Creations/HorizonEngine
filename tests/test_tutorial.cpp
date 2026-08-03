@@ -611,12 +611,16 @@ TEST_CASE("tutorial: the Tutorial preset scaffolds a furnished sandbox")
 	CHECK(root0.value("name", std::string{}) == "World");
 	CHECK(root0["children"].size() == 5);   // Sky, Weather, Ground, Cube, Point Light
 
+	// Entities are addressed by stable UUID, so "is a child of the root" is a
+	// comparison against the root's own id rather than against the handle 0.
+	REQUIRE(root0.contains("uuid"));
+	const json rootId = root0["uuid"];
 	for (const char* name : { "Sky", "Weather", "Ground", "Cube", "Point Light" })
 	{
 		CAPTURE(name);
 		const json e = entityNamed(scene, name);
 		REQUIRE_FALSE(e.is_null());
-		CHECK(e.value("parent", -1) == 0);
+		CHECK(e["parent"] == rootId);
 	}
 
 	// The visible furniture references the engine's built-in cube + default
