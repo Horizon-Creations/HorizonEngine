@@ -12,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -23,6 +24,35 @@
 #include <Diagnostics/Logger.h>
 
 using namespace HE::Net;
+
+namespace {
+
+// What to actually DO about an unreachable host. Kept in one place because the
+// same advice belongs on three different failures (no port mapping, CGNAT,
+// directory probe came back negative) and it would drift if written out thrice.
+//
+// The two remedies are deliberately ordered by how much work they cost the
+// user, not by how elegant they are:
+//   • Forwarding the port by hand always works when the ISP gives out a real
+//     public address — it is only automation that failed, not connectivity.
+//   • A mesh VPN is the answer when it does not, notably behind carrier-grade
+//     NAT, where no forward at any level can be reached and the free tiers of
+//     Tailscale/ZeroTier relay the traffic for you. Naming them beats a bare
+//     "not reachable", which leaves the user with nothing to try.
+constexpr const char* kUnreachableRemedy =
+	" Either forward TCP port %u to this machine in your router, or have "
+	"everyone join a mesh VPN such as Tailscale or ZeroTier (free tiers work "
+	"and need no port forward at all). Guests can always connect directly if "
+	"they are on this same network.";
+
+std::string remedyFor(std::uint16_t port)
+{
+	char buf[512];
+	std::snprintf(buf, sizeof(buf), kUnreachableRemedy, static_cast<unsigned>(port));
+	return buf;
+}
+
+} // namespace
 
 // ─── Scene ↔ session state ───────────────────────────────────────────────────
 // The concrete half of ISessionStateProvider. It lives here rather than in
@@ -161,16 +191,23 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 			if (!mapping.externalIp.empty() &&
 			    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
 			{
+				// Note this case gets a *narrower* remedy than the others: with a
+				// second NAT above the router, forwarding the port by hand is
+				// futile too, so offering it would send the user off to spend an
+				// afternoon on something that cannot work.
 				r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
 				              "(" + mapping.externalIp + ") — no port forward can be "
-				              "reached from outside. A relay would be required.";
+				              "reached from outside, not even one set up by hand. "
+				              "Have everyone join a mesh VPN such as Tailscale or "
+				              "ZeroTier (free tiers relay the traffic for you), or "
+				              "collaborate on the same local network.";
 			}
 		}
 		else
 		{
 			r.mapStatus = "Neither UPnP nor NAT-PMP got a port forward from your "
-			              "router (both are often disabled). Forward the port "
-			              "manually to be reachable from other networks.";
+			              "router — both are often switched off by default." +
+			              remedyFor(port16);
 		}
 
 		if (!HE::Net::httpsAvailable())
@@ -578,8 +615,8 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 				// Not an error: the entry exists, but nobody outside this network
 				// will get through it. Saying so now beats an unexplained timeout
 				// on the guest's side later.
-				: "Published, but this machine is not reachable from outside. "
-				  "Peers on other networks need the port forwarded.";
+				: "Published, but this machine is not reachable from outside." +
+				  remedyFor(m_port);
 		}
 		else
 		{
