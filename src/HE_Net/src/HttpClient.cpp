@@ -1,4 +1,6 @@
 #include "Net/HttpClient.h"
+
+#include "NetLog.h"
 #include "Net/Socket.h"
 
 #include <algorithm>
@@ -136,9 +138,15 @@ HttpResponse httpRequest(const std::string& url, const std::string& method,
 
     HttpUrl parsed;
     if (!httpParseUrl(url, parsed)) {
+        // Includes the deliberate https:// refusal — this client has no TLS and
+        // must never quietly send plaintext to a TLS port.
+        HE_LOG_ERROR(Net, "HTTP: refusing url \"%s\" (not a plain http:// address)",
+                     url.c_str());
         resp.error = "invalid or non-http url";
         return resp;
     }
+    HE_LOG_TRACE(Net, "HTTP: %s %s%s", method.c_str(), parsed.host.c_str(),
+                 parsed.path.c_str());
 
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(timeoutMs);
@@ -148,12 +156,16 @@ HttpResponse httpRequest(const std::string& url, const std::string& method,
     SocketHandle sock = kInvalidSocket;
     SocketResult rc = socketCreateTcpConnecting(parsed.host, parsed.port, sock);
     if (rc == SocketResult::Error || sock == kInvalidSocket) {
+        HE_LOG_WARN(Net, "HTTP: cannot connect to %s:%u", parsed.host.c_str(),
+                    static_cast<unsigned>(parsed.port));
         if (sock != kInvalidSocket) socketClose(sock);
         resp.error = "connect failed";
         return resp;
     }
     while (rc == SocketResult::WouldBlock) {
         if (std::chrono::steady_clock::now() >= deadline) {
+            HE_LOG_WARN(Net, "HTTP: connect to %s:%u timed out after %d ms",
+                        parsed.host.c_str(), static_cast<unsigned>(parsed.port), timeoutMs);
             socketClose(sock);
             resp.error = "connect timeout";
             return resp;
@@ -219,6 +231,8 @@ HttpResponse httpRequest(const std::string& url, const std::string& method,
     socketClose(sock);
 
     if (raw.empty()) {
+        HE_LOG_WARN(Net, "HTTP: %s:%u closed without sending anything",
+                    parsed.host.c_str(), static_cast<unsigned>(parsed.port));
         resp.error = "empty response";
         return resp;
     }

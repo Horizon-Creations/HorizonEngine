@@ -1,5 +1,7 @@
 #include "Net/LoopbackTransport.h"
 
+#include "NetLog.h"
+
 namespace HE::Net {
 
 std::pair<std::unique_ptr<LoopbackTransport>, std::unique_ptr<LoopbackTransport>>
@@ -17,6 +19,10 @@ LoopbackTransport::createPair() {
     // Each side observes the link coming up on its first poll().
     a->m_inbound.push_back(NetEvent{ NetEventType::Connected, kPeer, {} });
     b->m_inbound.push_back(NetEvent{ NetEventType::Connected, kPeer, {} });
+
+    // Debug rather than Info: this transport is in-process (tests and
+    // play-in-editor), so it is not evidence of anything about the network.
+    HE_LOG_DEBUG(Net, "Loopback transport pair created");
 
     return { std::move(a), std::move(b) };
 }
