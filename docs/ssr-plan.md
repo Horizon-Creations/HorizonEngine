@@ -339,7 +339,12 @@ Verwerfen bei Tiefenbruch, Fresnel-Gewichtung (`F_Schlick(NdV, specColor)`) stat
 `specColor`, Feedback-Clamp.
 
 **Status:** Blur (4.3 v1) ✅; Glossy-Lerp ✅ (zweite breite Blur-Stufe statt Mips, Quality
-High, Composite lerpt per G-Buffer-Roughness); Fresnel ✅ (roughness-aware Schlick
+High, Composite lerpt per G-Buffer-Roughness); **Trace-Qualität v2 ✅** — der alte
+Forward-only-Facing-Gate (`smoothstep(0, 0.2, R·camFwd)`) tötete JEDE kamerazugewandte
+Spiegelfläche (Wand spiegelt Nachbarobjekt nie); jetzt faden nur Fast-Rückwärts-Strahlen
+(`smoothstep(-0.9, -0.4, ·)`), dazu weiche Thickness-Confidence statt binärem Treffer
+(Speckle an dünnen/streifenden Features → Rampe), 6 Binärschritte, zweite 5-Tap-Iteration
+ab Med (4 Half-Res-Draws); Witness `HE_DUMP_SSRTESTWALL=1`; Fresnel ✅ (roughness-aware Schlick
 `F0 + (max(1-rough, F0) - F0)·(1-NdV)^5` in heLitP + SSR-Composite + Metal/GL/D3D11/D3D12-
 Built-ins; `scene.frag` = dokumentierter Drift; Drift-Guard in `test_culling.cpp` prüft
 heLitP↔Composite byte-identisch). Temporale Akkumulation **bewusst zurückgestellt**: im

@@ -10320,7 +10320,14 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			};
 			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
 			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
-			m_counters.draws += 2;
+			// Second 5-tap iteration: the jittered march's static hit/miss
+			// speckle at thin or grazing features survives one pass (an
+			// isolated confident pixel keeps its colour under the confidence
+			// weighting) — the repeat flattens it. Still four cheap half-res
+			// fullscreen draws in total.
+			blurPass(m_ssrReflTex, m_ssrPingTex, 1.0f / static_cast<float>(tw), 0.0f);
+			blurPass(m_ssrPingTex, m_ssrReflTex, 0.0f, 1.0f / static_cast<float>(th));
+			m_counters.draws += 4;
 			// High tier: a second, wide pass (3-texel spacing) into m_ssrRoughTex
 			// — the mip-chain substitute. The composite lerps between the two by
 			// G-buffer roughness (glossy instead of mirror-only, plan §4.3 v2).

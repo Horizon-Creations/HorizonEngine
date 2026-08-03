@@ -1084,7 +1084,8 @@ namespace
 // ─── SSR trace (docs/ssr-plan.md §4.2, deferred variant of §4.5) ─────────────
 // World-space linear march + binary refine against the G-buffer depth; the hit
 // samples the CURRENT frame's resolved HDR colour — no history, no reprojection,
-// no ghosting. Confidence folds edge fade × facing × roughness fade × distance.
+// no ghosting. Confidence folds edge fade × facing × roughness fade × distance
+// × soft thickness (hit depth inside the assumed surface thickness).
 // Standalone canonical GLSL (no lighting preamble — nothing here shades).
 constexpr const char* kSSRTraceFS = R"(#version 450
 layout(location = 0) out vec4 oSSR;
@@ -1127,8 +1128,12 @@ void main() {
     vec3 N = heOctDecode(g1.rg * 2.0 - 1.0);
     vec3 V = normalize(P - heSSR.camPos.xyz);
     vec3 R = reflect(V, N);
-    // Rays back toward the camera cannot be resolved in screen space.
-    float facing = smoothstep(0.0, 0.2, dot(R, heSSR.camFwd.xyz));
+    // Only rays running almost exactly BACK at the camera are unresolvable in
+    // screen space (their hit is behind the viewer / self-occluded). Lateral
+    // and mildly backward rays trace fine — a camera-facing mirror WALL
+    // reflecting the object beside it is exactly this case, and the old
+    // forward-only gate (smoothstep(0, 0.2, ·)) silently disabled it.
+    float facing = smoothstep(-0.9, -0.4, dot(R, heSSR.camFwd.xyz));
     if (facing <= 0.0) { oSSR = vec4(0.0); return; }
     int   steps   = int(heSSR.cfg.w);
     float maxDist = heSSR.cfg.x;
@@ -1137,6 +1142,7 @@ void main() {
     float prevT   = 0.0;
     vec2  hitUV   = vec2(-1.0);
     bool  hit     = false;
+    float thickConf = 1.0;
     for (int i = 0; i < steps; ++i)
     {
         vec3 q = P + R * t;
@@ -1155,8 +1161,15 @@ void main() {
                 // Fell behind geometry — thickness test, then binary refine.
                 if (rayZ - sceneZ < heSSR.cfg.y + dt)
                 {
+                    // Soft thickness: a ray that BARELY clears the stored
+                    // surface is a confident hit, one buried deep behind it is
+                    // probably marching past a silhouette — fading (instead of
+                    // the old binary accept) turns the jittered march's
+                    // hit/miss speckle at thin features into a smooth ramp.
+                    thickConf = 1.0 - 0.75 * clamp((rayZ - sceneZ)
+                                / max(heSSR.cfg.y + dt, 1e-4), 0.0, 1.0);
                     float t0 = prevT, t1 = t;
-                    for (int b = 0; b < 5; ++b)
+                    for (int b = 0; b < 6; ++b)
                     {
                         float tm = 0.5 * (t0 + t1);
                         vec3 qm = P + R * tm;
@@ -1180,7 +1193,8 @@ void main() {
     vec2 ef = min(hitUV, vec2(1.0) - hitUV);
     float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
     float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
-    oSSR = vec4(texture(heSceneColor, hitUV).rgb, edge * facing * roughFade * distFade);
+    oSSR = vec4(texture(heSceneColor, hitUV).rgb,
+                edge * facing * roughFade * distFade * thickConf);
 }
 )";
 
