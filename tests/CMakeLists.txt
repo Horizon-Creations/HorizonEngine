@@ -71,6 +71,8 @@ add_executable(he_tests
     test_collab_controller.cpp
     test_collab_undo.cpp
     test_sourcecontrol_probe.cpp
+    test_git_status_parse.cpp
+    test_git_roundtrip.cpp
     test_game_replication.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
