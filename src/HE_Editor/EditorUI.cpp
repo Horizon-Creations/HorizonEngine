@@ -25,6 +25,7 @@
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
+#include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences window
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
@@ -145,6 +146,8 @@ static bool s_showEnvironment = false;
 
 // Toggled by View > Collaboration; drives the live-session panel.
 static bool s_showCollab = false;
+// Toggled by View > Source Control; drives the repository status panel.
+static bool s_showSourceControl = false;
 
 // (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
@@ -658,6 +661,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleProfiler:  toggleFloatingWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: toggleFloatingWindow(s_showEnvironment, "Environment"); break;
 			case MC::ToggleCollab:      toggleFloatingWindow(s_showCollab, "Collaboration");    break;
+			case MC::ToggleSourceControl:
+				toggleFloatingWindow(s_showSourceControl, "Source Control"); break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -745,6 +750,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             toggleFloatingWindow(s_showEnvironment, "Environment");
         if (ImGui::MenuItem("Collaboration", nullptr, s_showCollab))
             toggleFloatingWindow(s_showCollab, "Collaboration");
+        if (ImGui::MenuItem("Source Control", nullptr, s_showSourceControl))
+            toggleFloatingWindow(s_showSourceControl, "Source Control");
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1651,6 +1658,7 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
+	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

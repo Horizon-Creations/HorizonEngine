@@ -126,6 +126,8 @@ add_executable(HorizonEditor WIN32
 	EditorSettingsPanel.cpp
 	ToolchainDialog.cpp
 	GitMissingDialog.cpp
+	GitController.cpp
+	SourceControlPanel.cpp
 	PlayReportPanel.cpp
 	HcEditorUtil.cpp
 	HcGraphClipboard.cpp
