@@ -135,7 +135,8 @@ DirectoryStatus SessionDirectory::parseLookup(const std::string& body,
 DirectoryStatus SessionDirectory::registerSession(
     const std::string& sessionId, std::uint16_t port, const std::string& name,
     const std::string& engineVersion, int protocolVersion,
-    SessionRegistration& out, const std::string& altAddress, int timeoutMs) {
+    SessionRegistration& out, const std::vector<std::string>& altAddresses,
+    int timeoutMs) {
 
     if (!httpsAvailable()) {
         HE_LOG_ERROR(Net, "Directory register skipped: this build has no TLS backend");
@@ -156,9 +157,13 @@ DirectoryStatus SessionDirectory::registerSession(
         { "protocolVersion", protocolVersion },
     };
     // Offered, not asserted. The server refuses anything that is not globally
-    // routable or not a different family, and then only publishes it if it can
-    // connect back — so this cannot be used to point peers somewhere else.
-    if (!altAddress.empty()) payload["altAddress"] = altAddress;
+    // routable, and then only publishes an address if it can connect back — so
+    // this cannot be used to point peers somewhere else. `altAddress` is kept
+    // beside the list so a server that predates it still sees the first one.
+    if (!altAddresses.empty()) {
+        payload["altAddress"]   = altAddresses.front();
+        payload["altAddresses"] = altAddresses;
+    }
 
     const HttpsResponse resp = httpsPostJson(buildUrl(m_endpoint, "register"),
                                              payload.dump(), timeoutMs);
