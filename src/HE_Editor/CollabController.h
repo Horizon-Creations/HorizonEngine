@@ -123,6 +123,13 @@ public:
 	bool               portMapped() const { return m_portMapped; }
 	const std::string& portMapStatus() const { return m_portMapStatus; }
 
+	// What the user can DO about being unreachable, empty when there is nothing
+	// to do. Deliberately separate from the two status strings above: those
+	// report different *facts* (the router refused / the directory could not
+	// reach back), but the advice for them is the same, and printing it under
+	// each one made the panel say the same paragraph twice.
+	const std::string& connectivityAdvice() const { return m_advice; }
+
 	// 0..1 while a snapshot is arriving; 1 when complete.
 	float snapshotProgress() const;
 	bool  snapshotInProgress() const { return m_snapshotTotal > 0 &&
@@ -270,6 +277,9 @@ private:
 		HE::Net::PortMapper::MappingHandle mapping;
 		bool        portMapped = false;
 		std::string mapStatus;
+		// Advice the worker already knows applies (CGNAT needs a narrower one
+		// than a plain mapping failure). Empty means "decide from reachability".
+		std::string advice;
 	};
 	struct LookupResult
 	{
@@ -302,6 +312,7 @@ private:
 	HE::Net::PortMapper::MappingHandle m_mapping;
 	bool               m_portMapped = false;
 	std::string        m_portMapStatus;
+	std::string        m_advice;   // shown once, below both status lines
 	std::future<LookupResult>   m_lookupFuture;
 	std::string   m_directoryToken;      // needed to heartbeat / unregister
 	std::string   m_directoryStatus;

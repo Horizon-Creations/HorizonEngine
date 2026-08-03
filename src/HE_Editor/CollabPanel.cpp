@@ -136,6 +136,15 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			ImGui::PopStyleColor();
 		}
 
+		// The two lines above state different facts, but share one remedy — so it
+		// is printed once here rather than appended to each, which had the panel
+		// repeating the same paragraph back to back.
+		if (!collab->connectivityAdvice().empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextWrapped("%s", collab->connectivityAdvice().c_str());
+		}
+
 		ImGui::Spacing();
 		ImGui::TextDisabled("Local address: %s:%u", collab->localAddress().c_str(),
 		                    static_cast<unsigned>(collab->port()));
