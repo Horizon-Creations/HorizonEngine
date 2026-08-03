@@ -50,6 +50,12 @@ enum class PortMapResult : std::uint8_t {
     NoServiceFound,     // router replied but exposes no WAN connection service
     RequestFailed,      // SOAP call failed or was refused (UPnP often disabled)
     NotSupported,       // could not determine a local address to map to
+    // The request never left this machine: the OS refused local-network traffic.
+    // Kept distinct from NoRouterFound because the remedy is entirely different —
+    // a permission has to be granted, and changing router settings does nothing.
+    // On macOS this is the Local Network privacy control, which reports itself as
+    // EHOSTUNREACH for the very gateway all internet traffic flows through.
+    LocalNetworkBlocked,
 };
 
 struct PortMapping {

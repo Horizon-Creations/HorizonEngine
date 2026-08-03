@@ -640,6 +640,18 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         }
     }
 
+    // Distinguish "the router said no" from "we never reached the router". Both
+    // arrive here as NoRouterFound, but they call for completely different
+    // action, and blaming the router for a permission problem sends people to
+    // change settings that were never consulted.
+    if (socketLocalNetworkBlocked())
+    {
+        HE_LOG_WARN(Net, "Port mapping: local network access is blocked for this process, so "
+                         "neither UPnP nor NAT-PMP could even reach the router. Nothing was "
+                         "wrong with the router or its settings.");
+        return PortMapResult::LocalNetworkBlocked;
+    }
+
     HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened TCP %u — both are "
                      "commonly disabled, and behind carrier-grade NAT neither can work",
                 static_cast<unsigned>(port));
