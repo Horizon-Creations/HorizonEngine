@@ -1372,6 +1372,18 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g)
     };
     foldPin(kMatOutputBaseColorPin, out.baseColor, out.baseColorParam);
     foldPin(kMatOutputEmissivePin,  out.emissive,  out.emissiveParam);
+    // Scalar pins (metallic/roughness) — constants only: the GI bounce loop
+    // needs a per-instance mirror-ness, a fold-time snapshot is good enough.
+    auto foldScalar = [&](int pin, float& v)
+    {
+        const MatGraphLink* l = approxFindLink(g, output->id, pin);
+        float f[4];
+        if (l && approxFoldNode(g, l->srcNode, 0, f)) v = f[0];
+        else if (!l) v = matNodeDesc(MatNodeType::Output).inputs[pin].def;
+        // linked but unfoldable → keep the caller-visible defaults (0 / 0.5)
+    };
+    foldScalar(kMatOutputMetallicPin,  out.metallic);
+    foldScalar(kMatOutputRoughnessPin, out.roughness);
     return out;
 }
 } // namespace HE

@@ -174,6 +174,10 @@ struct MaterialAsset : public RuntimeAsset
 	float   approxEmissive[3]  = { 0.0f, 0.0f, 0.0f };
 	int32_t approxBaseColorSlot = -1;
 	int32_t approxEmissiveSlot  = -1;
+	// Scalar folds (constants only) — the GI bounce loop's per-instance
+	// mirror-ness. Plain materials use the asset metallic/roughness instead.
+	float   approxMetallic  = 0.0f;
+	float   approxRoughness = 0.5f;
 
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per

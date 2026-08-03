@@ -1751,7 +1751,7 @@ struct GIReflParams {
 	float4 skyAmbient;      // rgb = flat ambient (hit-shading floor outside the probe grid), w = history blend (0 = temporal off)
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
-	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w unused
+	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -1850,6 +1850,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       texture2d<float, access::read>   histPos   [[texture(5)]],
                       texture2d<float, access::write>  outHistRad [[texture(6)]],
                       texture2d<float, access::write>  outHistPos [[texture(7)]],
+                      texturecube<float>               skyEnv     [[texture(8)]],
                       instance_acceleration_structure  accel     [[buffer(0)]],
                       const device float4* instanceColors        [[buffer(1)]],
                       constant GIReflParams& P                    [[buffer(2)]],
@@ -1860,6 +1861,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
 	// edges decode to garbage directions, so pick one real texel instead.
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+	constexpr sampler skySmp(coord::normalized, address::clamp_to_edge, filter::linear);
 	const float2 uv = (float2(gid) + 0.5) / P.texSize.xy;
 	const float d = gbDepth.sample(smp, uv).r;
 	const float4 g1 = gbAttr.sample(smp, uv);
@@ -1893,92 +1895,122 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 		if (dot(jit, N) > 0.0) R = jit; // keep the sample above the surface
 	}
 
-	ray r;
-	r.origin       = Pw + N * 0.05;
-	r.direction    = R;
-	r.min_distance = 0.02;
-	r.max_distance = max(P.camPos.w, 1.0);
-	intersection_params params; // committed closest hit (no accept_any)
-	intersection_query<triangle_data, instancing> q;
-	q.reset(r, accel, params);
-	q.next();
-
-	// Miss → confidence 0: the composite keeps the sky cubemap, which is
-	// exactly the right reflection for a ray that leaves the scene.
+	// Bounce loop (P.extra.w = max bounces, 1-4): a mirror-like hit (metallic,
+	// low roughness — packed in the instance-shading pair) reflects ONWARD
+	// instead of flattening to its base colour; `throughput` carries the metal
+	// tint. A primary miss keeps confidence 0 (the composite's cubemap is the
+	// exact fallback); a SECONDARY miss samples the sky cube directly — that
+	// ray genuinely reflects the sky.
 	float4 sampleOut = float4(0.0);
-	if (q.get_committed_intersection_type() != intersection_type::none)
 	{
-		const uint   instId   = q.get_committed_instance_id();
-		const float3 albedo   = instanceColors[instId * 2].rgb;     // 2 float4/instance
-		const float3 emissive = instanceColors[instId * 2 + 1].rgb; // (albedo, emissive)
-		const float  dist   = q.get_committed_distance();
-		const float3 hitPos = r.origin + R * dist;
-
-		// Hit normal: true interpolated vertex normal through the mesh-pointer
-		// argument buffer when available (P4); -rayDir fallback otherwise
-		// (same approximation the probe kernel documents).
-		float3 hitN = -R;
-		if (P.extra.y > 0.5)
+		float3 accum      = float3(0.0);
+		float3 throughput = float3(1.0);
+		float  conf       = 0.0;
+		float3 ro = Pw + N * 0.05;
+		float3 rd = R;
+		const int maxBounce = clamp(int(P.extra.w), 1, 4);
+		for (int b = 0; b < maxBounce; ++b)
 		{
-			const GIMeshPtrs m = meshes[instanceMesh[instId]];
-			const uint prim = q.get_committed_primitive_id();
-			const float2 bc = q.get_committed_triangle_barycentric_coord();
-			const uint i0 = m.idx[prim * 3 + 0];
-			const uint i1 = m.idx[prim * 3 + 1];
-			const uint i2 = m.idx[prim * 3 + 2];
-			const float3 n0 = float3(m.vtx[i0 * 8 + 3], m.vtx[i0 * 8 + 4], m.vtx[i0 * 8 + 5]);
-			const float3 n1 = float3(m.vtx[i1 * 8 + 3], m.vtx[i1 * 8 + 4], m.vtx[i1 * 8 + 5]);
-			const float3 n2 = float3(m.vtx[i2 * 8 + 3], m.vtx[i2 * 8 + 4], m.vtx[i2 * 8 + 5]);
-			const float3 nObj = n0 * (1.0 - bc.x - bc.y) + n1 * bc.x + n2 * bc.y;
-			// Object → world with the committed instance transform's linear
-			// part (columns 0-2 of the float4x3). Plain multiply, not the
-			// inverse-transpose — fine for the engine's (near-)uniform scales.
-			const float4x3 o2w = q.get_committed_object_to_world_transform();
-			const float3x3 nm = float3x3(o2w[0], o2w[1], o2w[2]);
-			const float3 nW = nm * nObj;
-			if (dot(nW, nW) > 1e-12)
+			ray r;
+			r.origin       = ro;
+			r.direction    = rd;
+			r.min_distance = 0.02;
+			r.max_distance = max(P.camPos.w, 1.0);
+			intersection_params params; // committed closest hit (no accept_any)
+			intersection_query<triangle_data, instancing> q;
+			q.reset(r, accel, params);
+			q.next();
+			if (q.get_committed_intersection_type() == intersection_type::none)
 			{
-				hitN = normalize(nW);
-				if (dot(hitN, R) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
+				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				break;
 			}
-		}
+			const uint   instId   = q.get_committed_instance_id();
+			const float4 alb4     = instanceColors[instId * 2];     // rgb albedo, a metallic
+			const float4 emi4     = instanceColors[instId * 2 + 1]; // rgb emissive, a roughness
+			const float3 albedo   = alb4.rgb;
+			const float3 emissive = emi4.rgb;
+			const float  dist   = q.get_committed_distance();
+			const float3 hitPos = ro + rd * dist;
 
-		// Direct sun at the hit: one hard occlusion ray.
-		float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
-		if (ndl > 0.0)
-		{
-			ray sr;
-			sr.origin       = hitPos + hitN * 0.05;
-			sr.direction    = P.sunDirRadius.xyz;
-			sr.min_distance = 0.02;
-			sr.max_distance = 10000.0;
-			intersection_params sp2;
-			sp2.accept_any_intersection(true);
-			intersection_query<triangle_data, instancing> sq;
-			sq.reset(sr, accel, sp2);
-			sq.next();
-			if (sq.get_committed_intersection_type() != intersection_type::none)
-				ndl = 0.0;
-		}
-		float3 radiance = albedo * P.sunColor.rgb * ndl;
-		// Indirect at the hit from the DDGI field — scaled by the same indirect
-		// intensity heLitP applies, so the reflected image of a surface matches
-		// how that surface is actually shaded. Outside the grid (or with GI
-		// probes off) a flat ambient floor keeps reflections from going black.
-		float  fieldW = 0.0;
-		float3 field  = float3(0.0);
-		if (P.texSize.w > 0.5)
-			field = giReflField(giIrr, P, hitPos, hitN, fieldW);
-		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
-		else               radiance += albedo * P.skyAmbient.rgb;
-		// Emissive surfaces keep their glow in reflections — unlit and unshadowed,
-		// exactly as the surface itself renders (G-buffer emissive is additive).
-		radiance += emissive;
+			// Hit normal: true interpolated vertex normal through the mesh-pointer
+			// argument buffer when available (P4); -rayDir fallback otherwise
+			// (same approximation the probe kernel documents).
+			float3 hitN = -rd;
+			if (P.extra.y > 0.5)
+			{
+				const GIMeshPtrs m = meshes[instanceMesh[instId]];
+				const uint prim = q.get_committed_primitive_id();
+				const float2 bc = q.get_committed_triangle_barycentric_coord();
+				const uint i0 = m.idx[prim * 3 + 0];
+				const uint i1 = m.idx[prim * 3 + 1];
+				const uint i2 = m.idx[prim * 3 + 2];
+				const float3 n0 = float3(m.vtx[i0 * 8 + 3], m.vtx[i0 * 8 + 4], m.vtx[i0 * 8 + 5]);
+				const float3 n1 = float3(m.vtx[i1 * 8 + 3], m.vtx[i1 * 8 + 4], m.vtx[i1 * 8 + 5]);
+				const float3 n2 = float3(m.vtx[i2 * 8 + 3], m.vtx[i2 * 8 + 4], m.vtx[i2 * 8 + 5]);
+				const float3 nObj = n0 * (1.0 - bc.x - bc.y) + n1 * bc.x + n2 * bc.y;
+				// Object → world with the committed instance transform's linear
+				// part (columns 0-2 of the float4x3). Plain multiply, not the
+				// inverse-transpose — fine for the engine's (near-)uniform scales.
+				const float4x3 o2w = q.get_committed_object_to_world_transform();
+				const float3x3 nm = float3x3(o2w[0], o2w[1], o2w[2]);
+				const float3 nW = nm * nObj;
+				if (dot(nW, nW) > 1e-12)
+				{
+					hitN = normalize(nW);
+					if (dot(hitN, rd) > 0.0) hitN = -hitN; // face the incoming ray (two-sided)
+				}
+			}
 
-		// Confidence mirrors the SSR trace's fades: roughness cutoff + a mild
-		// distance falloff toward the cubemap so the ray-length cap has no seam.
-		const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
-		sampleOut = float4(radiance, conf);
+			// Direct sun at the hit: one hard occlusion ray.
+			float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+			if (ndl > 0.0)
+			{
+				ray sr;
+				sr.origin       = hitPos + hitN * 0.05;
+				sr.direction    = P.sunDirRadius.xyz;
+				sr.min_distance = 0.02;
+				sr.max_distance = 10000.0;
+				intersection_params sp2;
+				sp2.accept_any_intersection(true);
+				intersection_query<triangle_data, instancing> sq;
+				sq.reset(sr, accel, sp2);
+				sq.next();
+				if (sq.get_committed_intersection_type() != intersection_type::none)
+					ndl = 0.0;
+			}
+			float3 Lsurf = albedo * P.sunColor.rgb * ndl;
+			// Indirect at the hit from the DDGI field — scaled by the same indirect
+			// intensity heLitP applies, so the reflected image of a surface matches
+			// how that surface is actually shaded. Outside the grid (or with GI
+			// probes off) a flat ambient floor keeps reflections from going black.
+			float  fieldW = 0.0;
+			float3 field  = float3(0.0);
+			if (P.texSize.w > 0.5)
+				field = giReflField(giIrr, P, hitPos, hitN, fieldW);
+			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
+			else               Lsurf += albedo * P.skyAmbient.rgb;
+
+			if (b == 0)
+			{
+				// Confidence mirrors the SSR trace's fades: roughness cutoff +
+				// a mild distance falloff toward the cubemap (first hit only —
+				// deeper bounces ride on the primary hit's confidence).
+				conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
+			}
+			// Mirror-ness of the HIT surface: metals with low roughness bounce
+			// on, everything else terminates. The mirror fraction of the local
+			// shading is withheld — the NEXT segment supplies it.
+			const float mirror = (b + 1 < maxBounce)
+				? alb4.a * (1.0 - smoothstep(0.2, 0.6, emi4.a)) : 0.0;
+			accum      += throughput * (Lsurf * (1.0 - mirror) + emissive);
+			throughput *= albedo * mirror;
+			if (mirror <= 0.05 ||
+			    (throughput.r + throughput.g + throughput.b) < 0.01) break;
+			ro = hitPos + hitN * 0.05;
+			rd = reflect(rd, hitN);
+		}
+		sampleOut = float4(accum, conf);
 	}
 
 	// Temporal accumulation (quality 2, gated by skyAmbient.w): reproject the
@@ -2398,7 +2430,7 @@ struct GIReflParams {
 	float4 skyAmbient;      // rgb = ambient floor, w = history blend
 	float4 gridOrigin;
 	float4 gridCounts;
-	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count
+	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -2519,6 +2551,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         texture2d<float, access::read>   histPos   [[texture(5)]],
                         texture2d<float, access::write>  outHistRad [[texture(6)]],
                         texture2d<float, access::write>  outHistPos [[texture(7)]],
+                        texturecube<float>               skyEnv     [[texture(8)]],
                         const device GiNode* nodes [[buffer(0)]],
                         const device GiTri*  tris  [[buffer(1)]],
                         const device GiInst* insts [[buffer(2)]],
@@ -2526,6 +2559,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+	constexpr sampler skySmp(coord::normalized, address::clamp_to_edge, filter::linear);
 	const float2 uv = (float2(gid) + 0.5) / P.texSize.xy;
 	const float d = gbDepth.sample(smp, uv).r;
 	const float4 g1 = gbAttr.sample(smp, uv);
@@ -2551,48 +2585,70 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 		if (dot(jit, N) > 0.0) R = jit;
 	}
 
+	// Bounce loop — mirrors the HW kernel (see its comment); geometric triangle
+	// normals instead of interpolated vertex normals.
 	const int instCount = int(P.extra.z);
-	const float3 origin = Pw + N * 0.05;
-	float dist;
-	int   triIdx;
-	const int hitInst = giSceneClosestHitTri(nodes, tris, insts, instCount,
-	                                         origin, R, 0.02, max(P.camPos.w, 1.0),
-	                                         dist, triIdx);
-
 	float4 sampleOut = float4(0.0);
-	if (hitInst >= 0)
 	{
-		const float3 albedo = insts[hitInst].baseColor.rgb;
-		const float3 hitPos = origin + R * dist;
-		// Geometric triangle normal, object → world via the row-vector product
-		// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
-		float3 hitN = -R;
-		if (triIdx >= 0)
+		float3 accum      = float3(0.0);
+		float3 throughput = float3(1.0);
+		float  conf       = 0.0;
+		float3 ro = Pw + N * 0.05;
+		float3 rd = R;
+		const int maxBounce = clamp(int(P.extra.w), 1, 4);
+		for (int b = 0; b < maxBounce; ++b)
 		{
-			const GiTri tri = tris[triIdx];
-			const float3 nObj = cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz);
-			const float3 nW = (float4(nObj, 0.0) * insts[hitInst].invTransform).xyz;
-			if (dot(nW, nW) > 1e-12)
+			float dist;
+			int   triIdx;
+			const int hitInst = giSceneClosestHitTri(nodes, tris, insts, instCount,
+			                                         ro, rd, 0.02, max(P.camPos.w, 1.0),
+			                                         dist, triIdx);
+			if (hitInst < 0)
 			{
-				hitN = normalize(nW);
-				if (dot(hitN, R) > 0.0) hitN = -hitN;
+				if (b > 0) accum += throughput * skyEnv.sample(skySmp, rd).rgb;
+				break;
 			}
+			const float4 alb4     = insts[hitInst].baseColor; // rgb albedo, a metallic
+			const float4 emi4     = insts[hitInst].emissive;  // rgb emissive, a roughness
+			const float3 albedo   = alb4.rgb;
+			const float3 hitPos = ro + rd * dist;
+			// Geometric triangle normal, object → world via the row-vector product
+			// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
+			float3 hitN = -rd;
+			if (triIdx >= 0)
+			{
+				const GiTri tri = tris[triIdx];
+				const float3 nObj = cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz);
+				const float3 nW = (float4(nObj, 0.0) * insts[hitInst].invTransform).xyz;
+				if (dot(nW, nW) > 1e-12)
+				{
+					hitN = normalize(nW);
+					if (dot(hitN, rd) > 0.0) hitN = -hitN;
+				}
+			}
+			float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+			if (ndl > 0.0 && giSceneAnyHit(nodes, tris, insts, instCount,
+			                               hitPos + hitN * 0.05, P.sunDirRadius.xyz, 0.02, 10000.0))
+				ndl = 0.0;
+			float3 Lsurf = albedo * P.sunColor.rgb * ndl;
+			float  fieldW = 0.0;
+			float3 field  = float3(0.0);
+			if (P.texSize.w > 0.5)
+				field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
+			if (fieldW > 1e-4) Lsurf += albedo * field * P.sunDirRadius.w;
+			else               Lsurf += albedo * P.skyAmbient.rgb;
+			if (b == 0)
+				conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
+			const float mirror = (b + 1 < maxBounce)
+				? alb4.a * (1.0 - smoothstep(0.2, 0.6, emi4.a)) : 0.0;
+			accum      += throughput * (Lsurf * (1.0 - mirror) + emi4.rgb);
+			throughput *= albedo * mirror;
+			if (mirror <= 0.05 ||
+			    (throughput.r + throughput.g + throughput.b) < 0.01) break;
+			ro = hitPos + hitN * 0.05;
+			rd = reflect(rd, hitN);
 		}
-		float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
-		if (ndl > 0.0 && giSceneAnyHit(nodes, tris, insts, instCount,
-		                               hitPos + hitN * 0.05, P.sunDirRadius.xyz, 0.02, 10000.0))
-			ndl = 0.0;
-		float3 radiance = albedo * P.sunColor.rgb * ndl;
-		float  fieldW = 0.0;
-		float3 field  = float3(0.0);
-		if (P.texSize.w > 0.5)
-			field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
-		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
-		else               radiance += albedo * P.skyAmbient.rgb;
-		// Emissive surfaces keep their glow in reflections (see the HW kernel).
-		radiance += insts[hitInst].emissive.rgb;
-		const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
-		sampleOut = float4(radiance, conf);
+		sampleOut = float4(accum, conf);
 	}
 
 	// Temporal accumulation — byte-identical logic to the HW kernel (adaptive
@@ -5258,18 +5314,25 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 // so editor slider drags and per-entity colours reflect live. Plain materials
 // keep the asset baseColor; they have no emissive.
 static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
-                              glm::vec3& albedoOut, glm::vec3& emissiveOut)
+                              glm::vec3& albedoOut, glm::vec3& emissiveOut,
+                              float& metallicOut, float& roughnessOut)
 {
-	albedoOut   = obj.baseColor * glm::vec3(obj.instanceTint);
-	emissiveOut = glm::vec3(0.0f);
+	albedoOut    = obj.baseColor * glm::vec3(obj.instanceTint);
+	emissiveOut  = glm::vec3(0.0f);
+	metallicOut  = 0.0f;
+	roughnessOut = 0.5f;
 	if (!cm || obj.materialAssetId == HE::UUID{}) return;
 	const MaterialAsset* ma = cm->getMaterial(obj.materialAssetId);
 	if (!ma) return;
 	if (ma->customShaderFragGlsl.empty())
 	{
 		albedoOut *= glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]);
+		metallicOut  = ma->metallic;
+		roughnessOut = ma->roughness;
 		return;
 	}
+	metallicOut  = ma->approxMetallic;
+	roughnessOut = ma->approxRoughness;
 	auto slotValue = [&](int32_t slot, const float fallback[3]) -> glm::vec3
 	{
 		if (slot >= 0)
@@ -5337,9 +5400,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		GISwInstanceCPU inst;
 		inst.invTransform = glm::inverse(obj.transform);
 		glm::vec3 albedo, emissive;
-		giInstanceShading(obj, m_contentManager, albedo, emissive);
-		inst.baseColor    = glm::vec4(albedo, 1.0f);
-		inst.emissive     = glm::vec4(emissive, 0.0f);
+		float metallic, roughness;
+		giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
+		inst.baseColor    = glm::vec4(albedo, metallic);   // w = metallic (bounce loop)
+		inst.emissive     = glm::vec4(emissive, roughness); // w = roughness
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		instances.push_back(inst);
@@ -5487,12 +5551,14 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 			instanceBlasIndex.push_back((uint32_t)idx);
 			instanceTransform.push_back(obj.transform);
-			// TWO float4 per instance (albedo, emissive) — the kernels index
-			// instanceColors[instId * 2 (+ 1)].
+			// TWO float4 per instance — the kernels index instanceColors
+			// [instId * 2 (+ 1)]: (albedo.rgb, metallic) + (emissive.rgb,
+			// roughness). Metallic/roughness drive the bounce loop's mirror-ness.
 			glm::vec3 albedo, emissive;
-			giInstanceShading(obj, m_contentManager, albedo, emissive);
-			instanceBaseColor.push_back(glm::vec4(albedo, 1.0f));
-			instanceBaseColor.push_back(glm::vec4(emissive, 0.0f));
+			float metallic, roughness;
+			giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
+			instanceBaseColor.push_back(glm::vec4(albedo, metallic));
+			instanceBaseColor.push_back(glm::vec4(emissive, roughness));
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -10884,7 +10950,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		                            static_cast<float>(m_giGridCounts.z),
 		                            static_cast<float>(m_giProbesPerRow));
 		rp.extra        = glm::vec4(jitter ? 1.0f : 0.0f, meshData ? 1.0f : 0.0f,
-		                            static_cast<float>(m_giSwInstanceCount), 0.0f);
+		                            static_cast<float>(m_giSwInstanceCount),
+		                            static_cast<float>(m_giReflBounces));
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -10900,6 +10967,9 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[prevIdx] atIndex:5];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistRad[curIdx]  atIndex:6];
 		[enc setTexture:(__bridge id<MTLTexture>)m_giReflHistPos[curIdx]  atIndex:7];
+		// Sky cubemap for SECONDARY-bounce misses (a mirror seen in a mirror
+		// reflecting the sky) — the primary miss keeps the composite's fallback.
+		[enc setTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:8];
 		if (m_giHwRt)
 		{
 			[enc setAccelerationStructure:(__bridge id<MTLAccelerationStructure>)m_giTlas
@@ -12390,6 +12460,7 @@ void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflMaxRoughness = s.maxRoughness;
 	m_giReflMaxDistance  = s.maxDistance;
 	m_giReflQuality      = s.quality;
+	m_giReflBounces      = std::clamp(s.bounces, 1, 4);
 }
 
 void MetalRenderer::SetGISettings(const GISettings& s)
