@@ -5,6 +5,7 @@
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Components/EntityIdComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -13,6 +14,11 @@ HorizonWorld::HorizonWorld()
     m_rootEntity = m_registry.create();
     m_registry.emplace<NameComponent>(m_rootEntity, NameComponent{ "World" });
     m_registry.emplace<HierarchyComponent>(m_rootEntity);
+    // The root gets an identity like everything else. It is the one entity a
+    // scene load maps onto an EXISTING entity rather than creating (see
+    // applySceneJson), so without this its id would differ between the world
+    // that saved a scene and the world that loaded it.
+    m_registry.emplace<EntityIdComponent>(m_rootEntity, EntityIdComponent{ HE::UUID::generate() });
     // Sky (EnvironmentComponent) and Weather (WeatherComponent) are NOT created here:
     // a bare world starts empty. The Game/Simulation project templates seed a "Sky"
     // and "Weather" entity into their StartupScene; other projects (and a plain New
@@ -40,6 +46,10 @@ void HorizonWorld::reserveComponentStorage()
     (void)m_registry.storage<EnvironmentLightComponent>();
     (void)m_registry.storage<EnvironmentComponent>();
     (void)m_registry.storage<WeatherComponent>();
+    // Every entity carries one of these, so it is guaranteed to be touched — and
+    // therefore guaranteed to be the kind of pool a hot-loaded game-logic dylib
+    // must never create first.
+    (void)m_registry.storage<EntityIdComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const
@@ -197,11 +207,39 @@ Entity HorizonWorld::createEntity(const std::string& name)
     Entity e = m_registry.create();
     m_registry.emplace<NameComponent>(e, NameComponent{ name });
     m_registry.emplace<HierarchyComponent>(e);
+    // Minted here rather than by callers, so no creation path can forget it.
+    // Scene loading overwrites this with the stored value; prefab instantiation
+    // deliberately keeps it, which is what makes one prefab inserted twice
+    // produce two distinct identities.
+    m_registry.emplace<EntityIdComponent>(e, EntityIdComponent{ HE::UUID::generate() });
     auto& rootHierarchy = m_registry.get<HierarchyComponent>(m_rootEntity);
     rootHierarchy.children.push_back(e);
     m_registry.get<HierarchyComponent>(e).parent = m_rootEntity;
     m_hierarchyDirty = true;
     return e;
+}
+
+HE::UUID HorizonWorld::entityId(Entity entity) const
+{
+    if (!m_registry.valid(entity)) return {};
+    if (const auto* c = m_registry.try_get<EntityIdComponent>(entity)) return c->id;
+    return {};
+}
+
+Entity HorizonWorld::findByEntityId(const HE::UUID& id) const
+{
+    // A zero id is the "no identity" sentinel, never a real one — matching it
+    // would return an arbitrary entity that merely lacks the component.
+    if (id == HE::UUID{}) return entt::null;
+    for (auto [e, c] : m_registry.view<const EntityIdComponent>().each())
+        if (c.id == id) return e;
+    return entt::null;
+}
+
+void HorizonWorld::setEntityId(Entity entity, const HE::UUID& id)
+{
+    if (!m_registry.valid(entity)) return;
+    m_registry.emplace_or_replace<EntityIdComponent>(entity, EntityIdComponent{ id });
 }
 
 void HorizonWorld::destroyRecursive(Entity entity)
