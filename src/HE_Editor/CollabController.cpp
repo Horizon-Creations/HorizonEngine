@@ -40,10 +40,19 @@ namespace {
 //     Tailscale/ZeroTier relay the traffic for you. Naming them beats a bare
 //     "not reachable", which leaves the user with nothing to try.
 constexpr const char* kUnreachableRemedy =
-	" Either forward TCP port %u to this machine in your router, or have "
-	"everyone join a mesh VPN such as Tailscale or ZeroTier (free tiers work "
-	"and need no port forward at all). Guests can always connect directly if "
-	"they are on this same network.";
+	"What you can do: forward TCP port %u to this machine in your router, or "
+	"have everyone join a mesh VPN such as Tailscale or ZeroTier (free tiers "
+	"work and need no port forward at all). Guests on this same network can "
+	"always connect directly.";
+
+// The CGNAT variant deliberately omits manual forwarding: with a second NAT
+// above the router, a hand-made forward is just as unreachable as the
+// automatic one, so suggesting it would send the user off to spend an
+// afternoon on something that cannot work.
+constexpr const char* kCgnatRemedy =
+	"What you can do: have everyone join a mesh VPN such as Tailscale or "
+	"ZeroTier (free tiers relay the traffic for you), or collaborate on the "
+	"same local network. Forwarding the port by hand will not help here.";
 
 std::string remedyFor(std::uint16_t port)
 {
@@ -191,23 +200,17 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 			if (!mapping.externalIp.empty() &&
 			    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
 			{
-				// Note this case gets a *narrower* remedy than the others: with a
-				// second NAT above the router, forwarding the port by hand is
-				// futile too, so offering it would send the user off to spend an
-				// afternoon on something that cannot work.
 				r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
 				              "(" + mapping.externalIp + ") — no port forward can be "
-				              "reached from outside, not even one set up by hand. "
-				              "Have everyone join a mesh VPN such as Tailscale or "
-				              "ZeroTier (free tiers relay the traffic for you), or "
-				              "collaborate on the same local network.";
+				              "reached from outside, not even one set up by hand.";
+				r.advice    = kCgnatRemedy;
 			}
 		}
 		else
 		{
 			r.mapStatus = "Neither UPnP nor NAT-PMP got a port forward from your "
-			              "router — both are often switched off by default." +
-			              remedyFor(port16);
+			              "router — both are often switched off by default.";
+			r.advice    = remedyFor(port16);
 		}
 
 		if (!HE::Net::httpsAvailable())
@@ -540,6 +543,7 @@ void CollabController::teardown()
 	m_netIdCounter  = 0;
 	m_portMapped    = false;
 	m_portMapStatus.clear();
+	m_advice.clear();
 	m_mapping = {};
 	m_lastComponentHash   = 0;
 	m_lastComponentEntity = 0;
@@ -602,6 +606,7 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 		m_mapping       = r.mapping;
 		m_portMapped    = r.portMapped;
 		m_portMapStatus = r.mapStatus;
+		m_advice        = r.advice;
 
 		if (r.ok)
 		{
@@ -615,8 +620,15 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 				// Not an error: the entry exists, but nobody outside this network
 				// will get through it. Saying so now beats an unexplained timeout
 				// on the guest's side later.
-				: "Published, but this machine is not reachable from outside." +
-				  remedyFor(m_port);
+				: "Published, but this machine is not reachable from outside.";
+
+			// The probe outranks everything the mapping step concluded, because it
+			// is the only check that actually came in from the outside. It can
+			// overturn the guess in both directions: a router that reported
+			// success can still be unreachable, and one that refused the mapping
+			// may already have a forward configured by hand.
+			if (r.reachable)      m_advice.clear();
+			else if (m_advice.empty()) m_advice = remedyFor(m_port);
 		}
 		else
 		{
