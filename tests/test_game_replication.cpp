@@ -235,8 +235,9 @@ TEST_CASE("GameReplication: a truncated snapshot is ignored rather than half-app
 {
     auto rig = makeRig();
 
-    // Claim three entities, supply none.
+    // A valid header (ack + count) claiming three entities, but no entity data.
     BitWriter w;
+    w.writeUInt32(0);    // last input we acknowledged
     w.writeUInt16(3);
     rig->serverNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 200, w,
                          SendMode::Unreliable);
@@ -246,4 +247,221 @@ TEST_CASE("GameReplication: a truncated snapshot is ignored rather than half-app
     // It counts as received, but nothing was written into the world from it.
     CHECK(rig->client->stats().snapshotsReceived >= 1);
     CHECK(rig->clientWorld.registry().view<TransformComponent>().size() == 0);
+}
+
+// ─── Prediction & reconciliation ─────────────────────────────────────────────
+// Interpolation is about smoothness; prediction is about latency. Only the
+// second makes your OWN character respond on the frame you pressed the key.
+
+namespace {
+
+// The shared simulation step. Both sides run exactly this — anything else and
+// they diverge by construction, which the player feels as constant correction.
+GameReplication::MoveFn simpleMover() {
+    return [](TransformComponent& tc, const GameReplication::InputCommand& c) {
+        tc.position += c.move * c.deltaTime;
+        tc.rotation.y = c.yaw;
+    };
+}
+
+// Server + client that both control the same entity, wired for prediction.
+struct PredRig : Rig {
+    Entity serverEntity = entt::null;
+    Entity clientEntity = entt::null;
+    std::uint32_t netId = 0;
+};
+
+std::unique_ptr<PredRig> makePredRig(GameReplication::Config cfg = {}) {
+    auto r = std::make_unique<PredRig>();
+    auto [a, b] = LoopbackTransport::createPair();
+    r->serverT = std::move(a);
+    r->clientT = std::move(b);
+    r->serverNet = std::make_unique<NetSession>(r->serverT.get(), NetRole::Server);
+    r->clientNet = std::make_unique<NetSession>(r->clientT.get(), NetRole::Client);
+    r->server = std::make_unique<GameReplication>(r->serverNet.get(), NetRole::Server, cfg);
+    r->client = std::make_unique<GameReplication>(r->clientNet.get(), NetRole::Client, cfg);
+    r->server->setWorld(&r->serverWorld);
+    r->client->setWorld(&r->clientWorld);
+    r->server->setMoveFunction(simpleMover());
+    r->client->setMoveFunction(simpleMover());
+
+    r->serverT->update(); r->clientT->update();
+    r->serverNet->pump(); r->clientNet->pump();
+
+    r->serverEntity = r->serverWorld.createEntity("Player");
+    r->serverWorld.registry().emplace_or_replace<TransformComponent>(r->serverEntity);
+    r->netId = r->server->registerEntity(r->serverEntity);
+    r->server->assignControl(LoopbackTransport::kPeer, r->netId);
+
+    r->clientEntity = r->clientWorld.createEntity("Player");
+    r->clientWorld.registry().emplace_or_replace<TransformComponent>(r->clientEntity);
+    r->client->adoptEntity(r->clientEntity, r->netId);
+    r->client->setLocallyControlled(r->clientEntity, r->netId);
+    return r;
+}
+
+glm::vec3 posOf(HorizonWorld& w, Entity e) {
+    return w.registry().get<TransformComponent>(e).position;
+}
+
+} // namespace
+
+TEST_CASE("GameReplication: input moves the client immediately, before any round trip")
+{
+    auto rig = makePredRig();
+
+    // Not a single byte has been pumped yet.
+    rig->client->pushInput(glm::vec3(10.0f, 0.0f, 0.0f), 0.0f, 0.1f);
+
+    // This is the entire point of prediction: waiting for the server would cost
+    // a full round trip on every key press.
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(1.0f));
+    CHECK(posOf(rig->serverWorld, rig->serverEntity).x == doctest::Approx(0.0f));
+    CHECK(rig->client->pendingInputCount() == 1);
+}
+
+TEST_CASE("GameReplication: the server runs the same input and acknowledges it")
+{
+    auto rig = makePredRig();
+
+    rig->client->pushInput(glm::vec3(10.0f, 0.0f, 0.0f), 0.0f, 0.1f);
+    for (int i = 0; i < 8; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Server applied it...
+    CHECK(posOf(rig->serverWorld, rig->serverEntity).x == doctest::Approx(1.0f));
+    CHECK(rig->server->stats().inputsProcessed == 1);
+
+    // ...and the acknowledgement retired the pending command on the client.
+    CHECK(rig->client->pendingInputCount() == 0);
+}
+
+TEST_CASE("GameReplication: a correct prediction survives the server's answer unchanged")
+{
+    auto rig = makePredRig();
+
+    rig->client->pushInput(glm::vec3(10.0f, 0.0f, 0.0f), 0.0f, 0.1f);
+    for (int i = 0; i < 8; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Both ran the same deterministic step, so reconciliation must be a no-op —
+    // a correction here would be felt as a jitter on every single move.
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(1.0f).epsilon(0.001));
+    CHECK(rig->client->stats().reconciliations == 0);
+}
+
+TEST_CASE("GameReplication: inputs still in flight are replayed on top of the server state")
+{
+    auto rig = makePredRig();
+
+    // Three moves of +1 each (10 units/s for 0.1 s — the largest step a single
+    // command may carry, so the arithmetic stays exact).
+    rig->client->pushInput(glm::vec3(10.0f, 0, 0), 0.0f, 0.1f);
+    for (int i = 0; i < 6; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    rig->client->pushInput(glm::vec3(10.0f, 0, 0), 0.0f, 0.1f);
+    rig->client->pushInput(glm::vec3(10.0f, 0, 0), 0.0f, 0.1f);
+
+    // The client is at 3; the server only knows about the first move.
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(3.0f));
+
+    for (int i = 0; i < 8; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Everything reconciles to 3, not back to 1 — replaying the unacknowledged
+    // moves is what stops the character snapping backwards mid-run.
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(3.0f).epsilon(0.01));
+}
+
+TEST_CASE("GameReplication: a large misprediction snaps instead of sliding")
+{
+    GameReplication::Config cfg;
+    cfg.reconcileSnapDistance = 1.0f;
+    auto rig = makePredRig(cfg);
+
+    // Teleport the server's copy — as a hit, a trigger or an anti-cheat
+    // correction would.
+    rig->serverWorld.registry().get<TransformComponent>(rig->serverEntity).position =
+        glm::vec3(100.0f, 0.0f, 0.0f);
+
+    for (int i = 0; i < 10; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Easing a 100-unit error would leave the player acting on a position that
+    // is wrong for a visible stretch of time.
+    CHECK(rig->client->stats().hardSnaps > 0);
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(100.0f).epsilon(0.01));
+}
+
+TEST_CASE("GameReplication: a small misprediction is eased, not jumped")
+{
+    GameReplication::Config cfg;
+    cfg.reconcileSnapDistance = 5.0f;
+    cfg.reconcileSmoothing    = 4.0f;   // slow enough to observe mid-flight
+    auto rig = makePredRig(cfg);
+
+    rig->serverWorld.registry().get<TransformComponent>(rig->serverEntity).position =
+        glm::vec3(1.0f, 0.0f, 0.0f);
+
+    // One exchange: the correction has landed but smoothing has barely started.
+    for (int i = 0; i < 4; ++i) rig->pump(1.0f / 240.0f, 1);
+
+    const float justAfter = posOf(rig->clientWorld, rig->clientEntity).x;
+    CHECK(rig->client->stats().hardSnaps == 0);
+    CHECK(justAfter < 0.9f);   // not teleported to the server's value
+
+    // Given time, it converges.
+    for (int i = 0; i < 120; ++i) rig->pump(1.0f / 60.0f, 1);
+    CHECK(posOf(rig->clientWorld, rig->clientEntity).x == doctest::Approx(1.0f).epsilon(0.05));
+}
+
+TEST_CASE("GameReplication: a client cannot move an entity it was not assigned")
+{
+    auto rig = makePredRig();
+
+    // Revoke the assignment, then try to drive it anyway.
+    rig->server->assignControl(LoopbackTransport::kPeer, 99999);
+    rig->client->pushInput(glm::vec3(50.0f, 0, 0), 0.0f, 0.1f);
+    for (int i = 0; i < 8; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Otherwise anyone could drive anyone else's character.
+    CHECK(posOf(rig->serverWorld, rig->serverEntity).x == doctest::Approx(0.0f));
+    CHECK(rig->server->stats().inputsProcessed == 0);
+}
+
+TEST_CASE("GameReplication: replayed input is not applied twice by the server")
+{
+    auto rig = makePredRig();
+
+    rig->client->pushInput(glm::vec3(10.0f, 0, 0), 0.0f, 0.1f);
+    for (int i = 0; i < 6; ++i) rig->pump(1.0f / 60.0f, 1);
+    const float afterFirst = posOf(rig->serverWorld, rig->serverEntity).x;
+
+    // Hand-send the SAME sequence number again, as a duplicated datagram would.
+    BitWriter w;
+    w.writeUInt32(1);
+    w.writeFloat(0.1f);
+    for (int i = 0; i < 3; ++i) w.writeFloat(i == 0 ? 10.0f : 0.0f);
+    w.writeFloat(0.0f);
+    rig->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 201, w,
+                         SendMode::Unreliable);
+    for (int i = 0; i < 6; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Duplicates and reordering are normal on an unreliable channel; applying
+    // one twice would move the character further than the player asked.
+    CHECK(posOf(rig->serverWorld, rig->serverEntity).x == doctest::Approx(afterFirst));
+}
+
+TEST_CASE("GameReplication: an absurd client timestep cannot teleport the character")
+{
+    auto rig = makePredRig();
+
+    // A modified client claiming a 10-second frame.
+    BitWriter w;
+    w.writeUInt32(1);
+    w.writeFloat(10.0f);
+    w.writeFloat(100.0f); w.writeFloat(0.0f); w.writeFloat(0.0f);
+    w.writeFloat(0.0f);
+    rig->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 201, w,
+                         SendMode::Unreliable);
+    for (int i = 0; i < 6; ++i) rig->pump(1.0f / 60.0f, 1);
+
+    // Clamped to a plausible frame, so the move is bounded rather than 1000 units.
+    CHECK(posOf(rig->serverWorld, rig->serverEntity).x <= doctest::Approx(10.0f));
 }
