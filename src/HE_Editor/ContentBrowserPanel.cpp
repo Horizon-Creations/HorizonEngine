@@ -13,7 +13,8 @@
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
-#include "EditorAssetTypeCache.h"        // shared path → AssetType sniff
+#include "EditorAssetTypeCache.h"
+#include "GitController.h"        // per-file source-control status for the tile badge
 #include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
@@ -543,6 +544,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				ImGui::Button("##icon", ImVec2(k_cellSize, k_cellSize));
 			}
+			// A folder with changes somewhere beneath it gets a small dot, so a
+			// user can find modified assets without opening every folder. One hash
+			// lookup: the rollup is precomputed on the worker rather than walked
+			// per tile per frame.
+			if (ctx.git && ctx.git->isRepo() && ctx.git->folderHasChanges(sub->fullPath))
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				const float r = 4.5f;
+				const ImVec2 c(mn.x + r + 4.0f, mx.y - r - 4.0f);
+				dl->AddCircleFilled(c, r, IM_COL32(255, 200, 90, 235));
+				dl->AddCircle(c, r, IM_COL32(20, 20, 22, 220), 0, 1.0f);
+			}
+
 			folderDropTarget(sub->fullPath); // move dragged assets into this folder
 
 			// Left click → select
@@ -676,6 +691,50 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
 				            IM_COL32(180, 240, 210, 255), "f");
 			}
+
+			// Source-control status, drawn in the BOTTOM-left so it cannot collide
+			// with the material-function badge in the top-right. Same technique:
+			// over the tile via the item rect, so the cached thumbnail stays a
+			// plain picture.
+			//
+			// Looked up by absolute path rather than by caching a pointer into the
+			// status map — the Content Browser rebuilds its File* nodes wholesale
+			// on every refresh, so anything held across a frame dangles.
+			if (ctx.git && ctx.git->isRepo())
+			{
+				if (const HE::Sc::FileEntry* e = ctx.git->entryForAbsolutePath(file->fullPath))
+				{
+					if (e->dirty())
+					{
+						// The worktree state is what the user is looking at; the
+						// staged state matters in the panel, not on a tile.
+						const HE::Sc::FileState st =
+							(e->worktree != HE::Sc::FileState::Unmodified) ? e->worktree : e->index;
+						const char* glyph = "?";
+						ImU32 colour = IM_COL32(170, 170, 170, 255);
+						switch (st)
+						{
+						case HE::Sc::FileState::Added:      glyph = "+"; colour = IM_COL32(140, 215, 140, 255); break;
+						case HE::Sc::FileState::Modified:   glyph = "M"; colour = IM_COL32(255, 200, 90,  255); break;
+						case HE::Sc::FileState::Deleted:    glyph = "-"; colour = IM_COL32(240, 130, 115, 255); break;
+						case HE::Sc::FileState::Renamed:
+						case HE::Sc::FileState::Copied:     glyph = "R"; colour = IM_COL32(150, 190, 255, 255); break;
+						case HE::Sc::FileState::Conflicted: glyph = "!"; colour = IM_COL32(255, 100, 100, 255); break;
+						case HE::Sc::FileState::Untracked:  glyph = "?"; colour = IM_COL32(170, 170, 170, 255); break;
+						default: break;
+						}
+						const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+						ImDrawList* dl = ImGui::GetWindowDrawList();
+						const float r = 8.0f;
+						const ImVec2 c(mn.x + r + 3.0f, mx.y - r - 3.0f);
+						dl->AddCircleFilled(c, r, IM_COL32(20, 20, 22, 230));
+						dl->AddCircle(c, r, colour, 0, 1.5f);
+						const ImVec2 ts = ImGui::CalcTextSize(glyph);
+						dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), colour, glyph);
+					}
+				}
+			}
+
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
