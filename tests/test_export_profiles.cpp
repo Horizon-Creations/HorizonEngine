@@ -946,7 +946,8 @@ TEST_CASE("Game/Simulation templates seed Sky+Weather; Empty/Tool start bare")
 // Graph material .hasset in the PRE-approx MTRL layout: every field through
 // customShaderGBufGlsl, then EOF (no approx block).
 static std::vector<uint8_t> preApproxGraphMaterial(HE::UUID id, const std::string& relPath,
-                                                   const std::string& graphJson)
+                                                   const std::string& graphJson,
+                                                   const std::string& parentPath = {})
 {
     std::vector<uint8_t> meta;
     HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Material));
@@ -969,7 +970,7 @@ static std::vector<uint8_t> preApproxGraphMaterial(HE::UUID id, const std::strin
     HAsset::Writer::appendVec(mtrl, std::vector<float>{});            // minmax
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // groups
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // tooltips
-    HAsset::Writer::appendString(mtrl, std::string{});                // parentMaterialPath
+    HAsset::Writer::appendString(mtrl, parentPath);                   // parentMaterialPath
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // overridden params
     HAsset::Writer::appendVec(mtrl, std::vector<std::string>{});      // switch names
     HAsset::Writer::appendVec(mtrl, std::vector<uint8_t>{});          // switch values
@@ -1063,6 +1064,78 @@ TEST_CASE("Pack-time approx re-fold: pre-approx graph material gains fresh GI-hi
     CHECK(emv[1] == doctest::Approx(0.0f));
     CHECK(slotB == -1);
     CHECK(slotE == -1);
+
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("Pack-time approx re-fold: graph-less INSTANCE folds from its parent chain")
+{
+    // Parent graph: ConstColor(0.9, 0.1, 0.7) → BaseColor.
+    HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+    for (auto& n : g.nodes)
+        if (n.type == HE::MatNodeType::ConstColor)
+        { n.p[0] = 0.9f; n.p[1] = 0.1f; n.p[2] = 0.7f; }
+
+    const auto dir = fs::temp_directory_path() / "he_approx_inst";
+    he_test::removeAllQuiet(dir);
+    const HE::UUID parentId{ 0xFA11, 0x1 };
+    const HE::UUID midId   { 0xFA11, 0x2 };
+    const HE::UUID instId  { 0xFA11, 0x3 };
+    writeBlob(dir / "parent.hasset",
+              preApproxGraphMaterial(parentId, "parent.hasset", HE::materialGraphToJson(g)));
+    // Instance CHAIN: inst → mid (graph-less) → parent (graph). Both instance
+    // files are pre-approx and carry no graph of their own.
+    writeBlob(dir / "mid.hasset",
+              preApproxGraphMaterial(midId, "mid.hasset", "", "parent.hasset"));
+    writeBlob(dir / "inst.hasset",
+              preApproxGraphMaterial(instId, "inst.hasset", "", "mid.hasset"));
+
+    HpakWriter packer;
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Store;
+    REQUIRE(packer.addDirectory(dir, s, nullptr) == 3);
+    const auto pak = (dir / "out.hpak").string();
+    REQUIRE(packer.write(pak));
+
+    HpakReader reader;
+    REQUIRE(reader.open(pak));
+    const std::vector<uint8_t> blob = reader.readEntry(instId);
+    REQUIRE(!blob.empty());
+
+    HAsset::Reader r;
+    REQUIRE(r.openData(blob));
+    const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+    REQUIRE(c != nullptr);
+    size_t o = 0;
+    { std::string str; std::vector<std::string> vs; std::vector<float> vf;
+      std::vector<uint8_t> vb; float f; uint8_t b8;
+      HAsset::Reader::readString(c->data, o, str);   // shaderPath
+      HAsset::Reader::readVec(c->data, o, vs);       // texturePaths
+      for (int i = 0; i < 6; ++i) HAsset::Reader::readPOD(c->data, o, f); // PBR
+      HAsset::Reader::readString(c->data, o, str);   // customShaderFragGlsl
+      HAsset::Reader::readString(c->data, o, str);   // nodeGraphJson
+      { uint32_t n = 0; HAsset::Reader::readPOD(c->data, o, n);
+        for (uint32_t i = 0; i < n; ++i) HAsset::Reader::readPOD(c->data, o, f); }
+      HAsset::Reader::readVec(c->data, o, vs);       // graphTexturePaths
+      HAsset::Reader::readVec(c->data, o, vs);       // graphParamNames
+      HAsset::Reader::readVec(c->data, o, vb);       // graphParamTypes
+      HAsset::Reader::readVec(c->data, o, vf);       // minmax
+      HAsset::Reader::readVec(c->data, o, vs);       // groups
+      HAsset::Reader::readVec(c->data, o, vs);       // tooltips
+      HAsset::Reader::readString(c->data, o, str);   // parentMaterialPath
+      HAsset::Reader::readVec(c->data, o, vs);       // overridden
+      HAsset::Reader::readVec(c->data, o, vs);       // switch names
+      HAsset::Reader::readVec(c->data, o, vb);       // switch values
+      HAsset::Reader::readPOD(c->data, o, b8);       // blend mode
+      HAsset::Reader::readString(c->data, o, str);   // customShaderVertGlsl
+      HAsset::Reader::readVec(c->data, o, vs);       // graphLayerNames
+      HAsset::Reader::readString(c->data, o, str);   // customShaderGBufGlsl
+    }
+    float bc[3] = {};
+    for (int k = 0; k < 3; ++k) REQUIRE(HAsset::Reader::readPOD(c->data, o, bc[k]));
+    CHECK(bc[0] == doctest::Approx(0.9f)); // parent's fold reached through the chain
+    CHECK(bc[1] == doctest::Approx(0.1f));
+    CHECK(bc[2] == doctest::Approx(0.7f));
 
     he_test::removeAllQuiet(dir);
 }

@@ -149,6 +149,39 @@ static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::
     return true;
 }
 
+// Skim a raw material .hasset just far enough for the pack-time approx re-fold
+// to resolve INSTANCE parents: its nodeGraphJson + parentMaterialPath. Field
+// order mirrors ContentManager's MTRL writer; a short (older) tail simply
+// leaves parentOut empty.
+static bool mtrlGraphAndParent(const std::vector<uint8_t>& blob,
+                               std::string& graphJsonOut, std::string& parentOut)
+{
+    HAsset::Reader r;
+    if (!r.openData(blob)) return false;
+    const auto* c = r.findChunk(HAsset::CHUNK_MTRL);
+    if (!c) return false;
+    size_t o = 0;
+    std::string str; std::vector<std::string> vs; std::vector<uint8_t> vb; std::vector<float> vf;
+    float f; uint32_t n = 0;
+    if (!HAsset::Reader::readString(c->data, o, str)) return false; // shaderPath
+    if (!HAsset::Reader::readVec(c->data, o, vs))     return false; // texturePaths
+    for (int i = 0; i < 6; ++i)
+        if (!HAsset::Reader::readPOD(c->data, o, f))  return false; // PBR scalars
+    if (!HAsset::Reader::readString(c->data, o, str)) return false; // customShaderFragGlsl
+    if (!HAsset::Reader::readString(c->data, o, graphJsonOut)) return false;
+    if (!HAsset::Reader::readPOD(c->data, o, n)) return true;       // pre-params tail ends here
+    for (uint32_t i = 0; i < n && o + 4 <= c->data.size(); ++i)
+        HAsset::Reader::readPOD(c->data, o, f);                     // shaderParamData (u32 count)
+    HAsset::Reader::readVec(c->data, o, vs);   // graphTexturePaths
+    HAsset::Reader::readVec(c->data, o, vs);   // graphParamNames
+    HAsset::Reader::readVec(c->data, o, vb);   // graphParamTypes
+    HAsset::Reader::readVec(c->data, o, vf);   // minmax
+    HAsset::Reader::readVec(c->data, o, vs);   // groups
+    HAsset::Reader::readVec(c->data, o, vs);   // tooltips
+    HAsset::Reader::readString(c->data, o, parentOut);
+    return true;
+}
+
 // Pack-time reference rewrite: resolve an asset's path-based refs to UUIDs and
 // RE-serialize the asset with the path strings dropped — packed assets carry
 // UUID refs only (loose editor .hasset files keep paths for debugging):
@@ -163,7 +196,10 @@ static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::
 static std::vector<uint8_t> rewriteRefsForPack(
     const std::vector<uint8_t>& blob,
     const std::unordered_map<std::string, HE::UUID>& pathToUuid,
-    const Hpak::PackSettings& settings)
+    const Hpak::PackSettings& settings,
+    // Raw source blobs by addressed/META path — lets the approx re-fold walk a
+    // material INSTANCE's parent chain to the nearest graph. Null = no lookup.
+    const std::unordered_map<std::string, const std::vector<uint8_t>*>* blobByPath = nullptr)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
@@ -240,16 +276,17 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // tooltips, parentPath, overriddenParams, switchNames, switchValues,
             // blendMode, customShaderVertGlsl.
             std::string customVertBody;
+            std::string parentPath;    // instance parent — approx re-fold walks it
             size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
             bool   tailReachedGBuf = false;
             {
                 size_t o2 = afterTypes;
                 std::vector<float> mm; std::vector<std::string> sv; std::vector<uint8_t> bv;
-                std::string sp; uint8_t bm = 0;
+                uint8_t bm = 0;
                 HAsset::Reader::readVec(c.data, o2, mm);   // minmax
                 HAsset::Reader::readVec(c.data, o2, sv);   // groups
                 HAsset::Reader::readVec(c.data, o2, sv);   // tooltips
-                HAsset::Reader::readString(c.data, o2, sp);// parentMaterialPath
+                HAsset::Reader::readString(c.data, o2, parentPath);
                 HAsset::Reader::readVec(c.data, o2, sv);   // overridden params
                 HAsset::Reader::readVec(c.data, o2, sv);   // switch names
                 HAsset::Reader::readVec(c.data, o2, bv);   // switch values
@@ -281,14 +318,36 @@ static std::vector<uint8_t> rewriteRefsForPack(
             // feature carry none and their packed reflections fell back to white.
             // The packer therefore RE-FOLDS it from the node graph right here
             // (matGraphApproxSurface — same call the editor uses) and re-emits a
-            // fresh block; stale/missing source bytes are skipped. Graph-less
-            // materials (hand-written GLSL, instances) keep their tail verbatim.
+            // fresh block; stale/missing source bytes are skipped. Material
+            // INSTANCES carry no graph of their own — their fold walks the
+            // parent chain (parentMaterialPath, capped) to the nearest ancestor
+            // WITH a graph; the slot mapping still uses the INSTANCE's own
+            // param-name table (copied from the parent at sync, so a Param-
+            // driven colour resolves against the instance's overridden values
+            // at runtime — exactly syncMaterialInstance's semantics). Only
+            // hand-written-GLSL materials keep their tail verbatim.
+            std::string foldGraphJson = nodeGraphJson;
+            if (tailReachedGBuf && foldGraphJson.empty()
+                && !parentPath.empty() && blobByPath)
+            {
+                std::string walk = parentPath;
+                for (int depth = 0; depth < 8 && !walk.empty(); ++depth)
+                {
+                    const auto itp = blobByPath->find(walk);
+                    if (itp == blobByPath->end() || !itp->second) break;
+                    std::string pj, pnext;
+                    if (!mtrlGraphAndParent(*itp->second, pj, pnext)) break;
+                    if (!pj.empty()) { foldGraphJson = pj; break; }
+                    if (pnext == walk) break; // self-referential chain guard
+                    walk = pnext;
+                }
+            }
             bool refold = false;
             HE::MatApproxSurface ap;
-            if (tailReachedGBuf && !nodeGraphJson.empty())
+            if (tailReachedGBuf && !foldGraphJson.empty())
             {
                 HE::MaterialGraph g;
-                if (HE::materialGraphFromJson(nodeGraphJson, g))
+                if (HE::materialGraphFromJson(foldGraphJson, g))
                 {
                     ap = HE::matGraphApproxSurface(g);
                     refold = true;
@@ -724,7 +783,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     // Pass 1: read every .hasset, extract (UUID, embedded path), and build a
     // path→UUID map. Each asset's own META (path,uuid) pair IS the manifest — no
     // separate manifest file is needed to resolve intra-asset path references.
-    struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; };
+    struct Pending { std::vector<uint8_t> bytes; HE::UUID id; std::string relPath; std::string metaPath; };
     std::vector<Pending> pending;
     std::unordered_map<std::string, HE::UUID> pathToUuid;
     // One UUID = one pak entry. Roots are scanned in order, so the first claim
@@ -788,7 +847,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 // a mounted-pak asset that wasn't reached via the scene's UUID closure.
                 m_packedPaths[rel] = id;
                 if (metaInNamespace && path != rel) m_packedPaths[path] = id;
-                pending.push_back({std::move(bytes), id, std::move(rel)});
+                pending.push_back({std::move(bytes), id, std::move(rel), std::move(path)});
             } while (false);
             it.increment(ec);
         }
@@ -805,10 +864,20 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     m_srcHashes.clear();
     const int  total         = static_cast<int>(pending.size());
     const bool wantEncrypted = settings.encrypt && Hpak::cryptoAvailable();
+    // Source blobs by addressed AND embedded META path (`pending` is stable
+    // from here on) — the material approx re-fold resolves instance parents
+    // through this, using the same keying rules as pathToUuid above.
+    std::unordered_map<std::string, const std::vector<uint8_t>*> blobByPath;
+    blobByPath.reserve(pending.size() * 2);
+    for (const auto& pe : pending)
+    {
+        blobByPath.emplace(pe.relPath, &pe.bytes);
+        if (!pe.metaPath.empty()) blobByPath.emplace(pe.metaPath, &pe.bytes);
+    }
     for (auto& pe : pending)
     {
         if (progress) progress(count, total, pe.relPath);
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings);
+        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath);
         if (settings.cook) blob = cookForPack(blob, settings.textureCompression);
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.
