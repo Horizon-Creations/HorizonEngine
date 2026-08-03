@@ -1154,7 +1154,15 @@ void main() {
     float prevT   = 0.0;
     vec2  hitUV   = vec2(-1.0);
     bool  hit     = false;
+    float tHit    = 0.0;
     float thickConf = 1.0;
+    // The acceptance window must scale with the ray's DEPTH advance per step,
+    // not the world-space step: a ray running almost parallel to the image
+    // plane (mirror wall reflecting a lateral neighbour) advances metres in
+    // the world but millimetres in depth — inflating the window by the full
+    // dt there accepted everything passing up to a step BEHIND the object and
+    // smeared its silhouette into a long streak across the mirror.
+    float dz = abs(dot(R, heSSR.camFwd.xyz)) * dt + 0.02;
     for (int i = 0; i < steps; ++i)
     {
         vec3 q = P + R * t;
@@ -1171,15 +1179,8 @@ void main() {
             if (rayZ > sceneZ + 0.01)
             {
                 // Fell behind geometry — thickness test, then binary refine.
-                if (rayZ - sceneZ < heSSR.cfg.y + dt)
+                if (rayZ - sceneZ < heSSR.cfg.y + dz)
                 {
-                    // Soft thickness: a ray that BARELY clears the stored
-                    // surface is a confident hit, one buried deep behind it is
-                    // probably marching past a silhouette — fading (instead of
-                    // the old binary accept) turns the jittered march's
-                    // hit/miss speckle at thin features into a smooth ramp.
-                    thickConf = 1.0 - 0.75 * clamp((rayZ - sceneZ)
-                                / max(heSSR.cfg.y + dt, 1e-4), 0.0, 1.0);
                     float t0 = prevT, t1 = t;
                     for (int b = 0; b < 6; ++b)
                     {
@@ -1193,13 +1194,30 @@ void main() {
                         else t0 = tm;
                     }
                     if (hitUV.x < 0.0) hitUV = quv;
-                    hit = true;
+                    tHit = 0.5 * (t0 + t1);
+                    hit  = true;
                 }
                 break;
             }
         }
         prevT = t;
         t += dt;
+    }
+    if (hit)
+    {
+        // Re-test at the REFINED point against the pure surface thickness (the
+        // march window's dz slack no longer applies) — soft: barely inside the
+        // surface = confident, buried deep = fade toward the fallback.
+        vec3  qh   = P + R * tHit;
+        float gapR = heViewZ(qh) - heViewZ(heWorldAt(hitUV, texture(heGBDepth, hitUV).r));
+        thickConf  = 1.0 - clamp(gapR / max(heSSR.cfg.y, 1e-4), 0.0, 1.0);
+        // Backface rejection: if the stored surface at the hit faces AWAY from
+        // the ray, the visible colour belongs to its camera-facing side — a
+        // wrong sample for this reflection. Fade it out; the composite's
+        // cascade (GI reflections, sky cubemap) supplies the honest fallback.
+        vec3 hitN = heOctDecode(texture(heGB1, hitUV).rg * 2.0 - 1.0);
+        thickConf *= 1.0 - smoothstep(0.0, 0.25, dot(hitN, R));
+        if (thickConf <= 0.001) hit = false;
     }
     // A miss is a REAL sample too (conf 0): with temporal on it must enter the
     // EMA so a pixel whose jittered rays sometimes hit converges to its true
