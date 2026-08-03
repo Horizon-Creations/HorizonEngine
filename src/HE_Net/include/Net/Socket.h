@@ -155,4 +155,38 @@ HE_NET_API std::string socketLocalAddress();
 // support nightmare. Empty when there is no default route.
 HE_NET_API std::string socketDefaultGateway();
 
+// This machine's globally routable IPv6 address, or empty when it has none.
+//
+// Determined the same way socketLocalAddress() finds the IPv4 one: "connect" a
+// UDP socket to a public IPv6 address, which sends nothing and only makes the
+// kernel pick a route, then read back the local end. That yields the address the
+// machine would actually be seen as, rather than whichever of several
+// (link-local, temporary, deprecated) an interface enumeration happens to return
+// first.
+//
+// Why this matters for hosting: with IPv6 there is no NAT. A machine holding a
+// global address is directly addressable from the internet, so nothing needs
+// forwarding — only the router's firewall has to let the connection in. That is
+// a different mechanism from IPv4 port mapping, and neither UPnP AddPortMapping
+// nor NAT-PMP can do it.
+HE_NET_API std::string socketGlobalIPv6Address();
+
+// True when this process can reach its own default gateway at all.
+//
+// Exists because macOS (Sequoia and later) refuses LAN traffic from an app that
+// lacks the Local Network permission, and reports it as EHOSTUNREACH — "no route
+// to host" — for the gateway that IS the default route and through which all
+// internet traffic is flowing. Read literally the error is nonsense, which is
+// exactly why it misleads: every router-discovery mechanism fails instantly and
+// the natural conclusion is that the router is at fault, when in truth nothing
+// ever left the machine.
+//
+// The test is deliberately narrow: if a default gateway exists (so there IS a
+// route) and yet a datagram to it cannot be sent, the only remaining explanation
+// is that something is blocking local traffic. Returns false when there is no
+// gateway to test against, since "cannot tell" must not be reported as "blocked".
+//
+// Sends one datagram to the discard port; no reply is expected or awaited.
+HE_NET_API bool socketLocalNetworkBlocked();
+
 } // namespace HE::Net

@@ -89,6 +89,9 @@ DirectoryStatus SessionDirectory::parseRegistration(const std::string& body,
     out.port       = static_cast<std::uint16_t>(intField(j, "port"));
     out.reachable  = boolField(j, "reachable");
     out.ttlSeconds = intField(j, "ttl");
+    // Only present when the server verified it; an unverified claim never comes
+    // back, so this being non-empty already means "reachable on that family".
+    out.altAddress = stringField(j, "altAddress");
 
     // Without a token the caller could never heartbeat or clean up, so an
     // entry it cannot manage is worse than a clear failure.
@@ -102,7 +105,19 @@ DirectoryStatus SessionDirectory::parseLookup(const std::string& body,
     if (j.is_discarded() || !j.is_object()) return DirectoryStatus::MalformedResponse;
     if (!boolField(j, "ok"))                return DirectoryStatus::NotFound;
 
-    out.host            = stringField(j, "host");
+    // Prefer the list. A server that predates it still sends "host", so the
+    // single value is the fallback rather than the other way round.
+    out.hosts.clear();
+    if (const auto it = j.find("hosts"); it != j.end() && it->is_array())
+    {
+        for (const auto& h : *it)
+            if (h.is_string() && !h.get<std::string>().empty())
+                out.hosts.push_back(h.get<std::string>());
+    }
+    out.host = stringField(j, "host");
+    if (out.hosts.empty() && !out.host.empty()) out.hosts.push_back(out.host);
+    if (out.host.empty() && !out.hosts.empty()) out.host = out.hosts.front();
+
     out.port            = static_cast<std::uint16_t>(intField(j, "port"));
     out.name            = stringField(j, "name");
     out.engineVersion   = stringField(j, "engineVersion");
@@ -120,7 +135,7 @@ DirectoryStatus SessionDirectory::parseLookup(const std::string& body,
 DirectoryStatus SessionDirectory::registerSession(
     const std::string& sessionId, std::uint16_t port, const std::string& name,
     const std::string& engineVersion, int protocolVersion,
-    SessionRegistration& out, int timeoutMs) {
+    SessionRegistration& out, const std::string& altAddress, int timeoutMs) {
 
     if (!httpsAvailable()) {
         HE_LOG_ERROR(Net, "Directory register skipped: this build has no TLS backend");
@@ -140,6 +155,10 @@ DirectoryStatus SessionDirectory::registerSession(
         { "engineVersion",   engineVersion },
         { "protocolVersion", protocolVersion },
     };
+    // Offered, not asserted. The server refuses anything that is not globally
+    // routable or not a different family, and then only publishes it if it can
+    // connect back — so this cannot be used to point peers somewhere else.
+    if (!altAddress.empty()) payload["altAddress"] = altAddress;
 
     const HttpsResponse resp = httpsPostJson(buildUrl(m_endpoint, "register"),
                                              payload.dump(), timeoutMs);
@@ -164,9 +183,11 @@ DirectoryStatus SessionDirectory::registerSession(
     }
     // reachable is the single most consequential field the directory returns:
     // it is the only outside-in verdict anywhere in the stack.
-    HE_LOG_INFO(Net, "Directory: registered — seen from %s, reachable=%s, ttl %ds",
+    HE_LOG_INFO(Net, "Directory: registered — seen from %s, reachable=%s, ttl %ds%s%s",
                 out.publicIp.empty() ? "<unknown>" : out.publicIp.c_str(),
-                out.reachable ? "yes" : "NO", out.ttlSeconds);
+                out.reachable ? "yes" : "NO", out.ttlSeconds,
+                out.altAddress.empty() ? "" : ", also reachable at ",
+                out.altAddress.c_str());
     if (!out.reachable) {
         HE_LOG_WARN(Net, "The directory could not connect back to this host — peers on "
                          "other networks will not get through");
@@ -208,9 +229,10 @@ DirectoryStatus SessionDirectory::lookup(const std::string& sessionId,
         HE_LOG_ERROR(Net, "Directory lookup returned an entry without a usable address");
         return parsed;
     }
-    HE_LOG_INFO(Net, "Directory: session %s is at %s:%u (\"%s\", engine %s, protocol %d)",
-                detail::logSessionId(sessionId).c_str(), out.host.c_str(),
-                static_cast<unsigned>(out.port), out.name.c_str(),
+    HE_LOG_INFO(Net, "Directory: session %s has %zu address(es), first %s:%u "
+                     "(\"%s\", engine %s, protocol %d)",
+                detail::logSessionId(sessionId).c_str(), out.hosts.size(),
+                out.host.c_str(), static_cast<unsigned>(out.port), out.name.c_str(),
                 out.engineVersion.c_str(), out.protocolVersion);
     return parsed;
 }

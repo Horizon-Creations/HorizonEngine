@@ -192,8 +192,9 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		// station answers NAT-PMP and stays silent to SSDP entirely, so a UPnP
 		// failure says nothing about whether the second attempt will work.
 		HE::Net::PortMapping mapping;
-		if (HE::Net::PortMapper::mapPort(port16, "HorizonEngine collaboration",
-		                                 r.mapping, mapping) == HE::Net::PortMapResult::Ok)
+		const HE::Net::PortMapResult mapResult = HE::Net::PortMapper::mapPort(
+			port16, "HorizonEngine collaboration", r.mapping, mapping);
+		if (mapResult == HE::Net::PortMapResult::Ok)
 		{
 			r.portMapped = true;
 			const bool viaPmp =
@@ -227,8 +228,16 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 		}
 		SessionDirectory dir(endpoint);
 		SessionRegistration reg;
+		// Offer this machine's global IPv6 alongside whatever address the
+		// registration itself arrives from. The HTTPS call uses exactly one
+		// family, so without this a dual-stack host is published under one
+		// address only — and a guest on the other family cannot connect at all,
+		// with nothing in the UI to explain it. The server verifies the claim by
+		// connecting back before publishing it.
+		const std::string altAddress = HE::Net::socketGlobalIPv6Address();
 		const DirectoryStatus st = dir.registerSession(sid, port16, displayName,
-		                                               "HorizonEngine", 1, reg);
+		                                               "HorizonEngine", 1, reg,
+		                                               altAddress);
 		if (st != DirectoryStatus::Ok)
 		{
 			r.error = "Session directory unreachable — share the address manually.";
@@ -311,7 +320,8 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 		{
 		case DirectoryStatus::Ok:
 			r.ok   = true;
-			r.host = look.host;
+			r.host  = look.host;
+			r.hosts = look.hosts;
 			r.port = look.port;
 			break;
 		case DirectoryStatus::NotFound:
@@ -674,8 +684,25 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 			m_status          = Status::Failed;
 			return;
 		}
-		m_directoryStatus = "Connecting to " + r.host + "...";
-		if (!beginLink(r.host, r.port, m_pendingJoinCode, m_pendingDisplayName))
+		// Walk the candidates rather than trusting one. A host may be listed under
+		// both families; this machine can only use the ones it has a route for,
+		// and which those are is not knowable in advance.
+		std::vector<std::string> candidates = r.hosts;
+		if (candidates.empty() && !r.host.empty()) candidates.push_back(r.host);
+
+		bool        linked = false;
+		std::string chosen;
+		for (const std::string& candidate : candidates)
+		{
+			m_directoryStatus = "Connecting to " + candidate + "...";
+			if (beginLink(candidate, r.port, m_pendingJoinCode, m_pendingDisplayName))
+			{
+				chosen = candidate;
+				linked = true;
+				break;
+			}
+		}
+		if (!linked)
 		{
 			// beginLink already set the error and status.
 			return;

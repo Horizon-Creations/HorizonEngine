@@ -513,3 +513,161 @@ TEST_CASE("socketDefaultGateway: reports a usable router address")
     // The gateway is by definition on a local network.
     CHECK(PortMapper::isPrivateOrCgnat(gw));
 }
+
+// ─── Telling "the router said no" from "we never reached the router" ─────────
+
+TEST_CASE("A blocked local network is a distinct outcome from an absent router")
+{
+    // These two arrive at the same place — no mapping — but call for completely
+    // different action, so they must not share a result code. Blaming the router
+    // for a permission problem sends people to change settings that were never
+    // consulted.
+    //
+    // Found in the field: on macOS every LAN destination fails with EHOSTUNREACH
+    // ("no route to host") for the very gateway that IS the default route and
+    // through which all internet traffic is flowing, unless the app holds the
+    // Local Network permission. Nothing leaves the machine, and the old message
+    // said the router had refused.
+    CHECK(HE::Net::PortMapResult::LocalNetworkBlocked !=
+          HE::Net::PortMapResult::NoRouterFound);
+
+    // socketLocalNetworkBlocked() must never claim "blocked" when it simply has
+    // nothing to test against — "cannot tell" reported as a fault would be worse
+    // than saying nothing, because it names a cause that may not exist.
+    const std::string gw = HE::Net::socketDefaultGateway();
+    if (gw.empty())
+    {
+        CHECK_FALSE(HE::Net::socketLocalNetworkBlocked());
+    }
+    else
+    {
+        // With a gateway present the answer is environment-dependent — a machine
+        // with the permission granted reports false, one without reports true —
+        // so only its consistency is asserted here, not its value.
+        const bool first  = HE::Net::socketLocalNetworkBlocked();
+        const bool second = HE::Net::socketLocalNetworkBlocked();
+        CHECK(first == second);
+    }
+}
+
+// ─── PCP (RFC 6887) ──────────────────────────────────────────────────────────
+// The only mechanism here that can help an IPv6 host. With IPv6 there is no NAT:
+// the machine is already addressable and only the router's firewall is in the
+// way, which is a pinhole rather than a translation — something neither UPnP
+// AddPortMapping nor NAT-PMP can express.
+
+TEST_CASE("A PCP MAP request has the layout RFC 6887 specifies")
+{
+    std::uint8_t nonce[12];
+    for (int i = 0; i < 12; ++i) nonce[i] = static_cast<std::uint8_t>(0xA0 + i);
+
+    const auto req = HE::Net::PortMapper::buildPcpMapRequest("192.168.1.50", nonce,
+                                                             7777, 7777, 7200);
+    REQUIRE(req.size() == 24 + 36);   // header + MAP payload
+
+    CHECK(req[0] == 2);   // version 2 — this is what distinguishes it from NAT-PMP,
+    CHECK(req[1] == 1);   // whose version byte is 0, so an old router can answer
+                          // UNSUPP_VERSION instead of misreading the request
+    CHECK(req[2] == 0);
+    CHECK(req[3] == 0);
+
+    // Lifetime, big-endian.
+    CHECK(req[4] == 0x00);
+    CHECK(req[5] == 0x00);
+    CHECK(req[6] == 0x1C);
+    CHECK(req[7] == 0x20);   // 7200
+
+    // The client address occupies 16 bytes whatever the family; IPv4 goes in as
+    // the IPv4-mapped form ::ffff:a.b.c.d, which is what lets one message shape
+    // serve both.
+    for (int i = 8; i < 8 + 10; ++i) { CAPTURE(i); CHECK(req[i] == 0); }
+    CHECK(req[18] == 0xFF);
+    CHECK(req[19] == 0xFF);
+    CHECK(req[20] == 192);
+    CHECK(req[21] == 168);
+    CHECK(req[22] == 1);
+    CHECK(req[23] == 50);
+
+    // MAP payload: the nonce comes back in the response and identifies this
+    // mapping for the rest of its life — losing it means the mapping can no
+    // longer be taken down.
+    for (int i = 0; i < 12; ++i) { CAPTURE(i); CHECK(req[24 + i] == nonce[i]); }
+    CHECK(req[36] == 6);   // TCP
+    CHECK(req[40] == 0x1E); CHECK(req[41] == 0x61);   // internal port 7777
+    CHECK(req[42] == 0x1E); CHECK(req[43] == 0x61);   // suggested external 7777
+    // Suggested external address all-zero: "you choose". Asking for a specific
+    // one and then publishing it regardless of what was granted is how an
+    // endpoint nobody listens on gets advertised.
+    for (int i = 44; i < 60; ++i) { CAPTURE(i); CHECK(req[i] == 0); }
+}
+
+TEST_CASE("A PCP request for an IPv6 pinhole carries the address verbatim")
+{
+    std::uint8_t nonce[12] = {};
+    const auto req = HE::Net::PortMapper::buildPcpMapRequest(
+        "2a02:3100:82c3:ae00::1", nonce, 7777, 7777, 600);
+    REQUIRE(req.size() == 24 + 36);
+
+    // No IPv4-mapped prefix — a real IPv6 address goes in as its own 16 bytes.
+    CHECK(req[8]  == 0x2a);
+    CHECK(req[9]  == 0x02);
+    CHECK(req[10] == 0x31);
+    CHECK(req[11] == 0x00);
+    CHECK(req[23] == 0x01);
+    CHECK_FALSE((req[18] == 0xFF && req[19] == 0xFF));
+}
+
+TEST_CASE("A PCP response is read, and anything else is rejected")
+{
+    HE::Net::PortMapper::PcpMapping out;
+    std::uint8_t code = 0xFF;
+
+    std::vector<std::uint8_t> resp(24 + 36, 0);
+    resp[0] = 2;
+    resp[1] = 0x80 | 1;        // response bit + MAP
+    resp[3] = 0;               // SUCCESS
+    resp[4] = 0; resp[5] = 0; resp[6] = 0x0E; resp[7] = 0x10;   // lifetime 3600
+    for (int i = 0; i < 12; ++i) resp[24 + i] = static_cast<std::uint8_t>(i);
+    resp[24 + 18] = 0x1E; resp[24 + 19] = 0x61;                 // external port 7777
+    resp[24 + 20 + 10] = 0xFF; resp[24 + 20 + 11] = 0xFF;       // IPv4-mapped…
+    resp[24 + 20 + 12] = 203; resp[24 + 20 + 13] = 0;
+    resp[24 + 20 + 14] = 113; resp[24 + 20 + 15] = 7;           // …203.0.113.7
+
+    REQUIRE(HE::Net::PortMapper::parsePcpMapResponse(resp.data(), resp.size(), out, code));
+    CHECK(code == 0);
+    CHECK(out.externalPort == 7777);
+    CHECK(out.lifetimeSeconds == 3600);
+    // Rendered as IPv4, not as "::ffff:203.0.113.7" — callers expect the family
+    // they asked about.
+    CHECK(out.externalAddress == "203.0.113.7");
+
+    // A refusal parses fine and reports its code; the caller decides.
+    resp[3] = 2;   // NOT_AUTHORIZED
+    REQUIRE(HE::Net::PortMapper::parsePcpMapResponse(resp.data(), resp.size(), out, code));
+    CHECK(code == 2);
+
+    // Malformed frames must not be mistaken for answers.
+    CHECK_FALSE(HE::Net::PortMapper::parsePcpMapResponse(resp.data(), 20, out, code));
+    std::vector<std::uint8_t> wrongVersion = resp; wrongVersion[0] = 0;
+    CHECK_FALSE(HE::Net::PortMapper::parsePcpMapResponse(wrongVersion.data(), wrongVersion.size(), out, code));
+    // A request echoed back — the response bit is what tells them apart.
+    std::vector<std::uint8_t> notAResponse = resp; notAResponse[1] = 1;
+    CHECK_FALSE(HE::Net::PortMapper::parsePcpMapResponse(notAResponse.data(), notAResponse.size(), out, code));
+}
+
+TEST_CASE("An IPv6 address is only reported when it is globally routable")
+{
+    // Empty is a valid answer (no IPv6 here). What must never happen is a
+    // link-local or unique-local address being reported, since that would make
+    // the caller believe hosting is possible when nothing outside the LAN could
+    // ever reach it.
+    const std::string v6 = HE::Net::socketGlobalIPv6Address();
+    if (!v6.empty())
+    {
+        CAPTURE(v6);
+        CHECK(v6.rfind("fe80", 0) != 0);   // link-local
+        CHECK(v6.rfind("fc", 0)   != 0);   // unique-local
+        CHECK(v6.rfind("fd", 0)   != 0);
+        CHECK(v6.find(':') != std::string::npos);
+    }
+}

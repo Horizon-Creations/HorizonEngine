@@ -827,6 +827,84 @@ static std::string defaultGatewayImpl() {
 #endif
 }
 
+std::string socketGlobalIPv6Address() {
+    if (!socketSystemInit()) return {};
+
+#ifdef _WIN32
+    SOCKET s = ::socket(AF_INET6, SOCK_DGRAM, 0);
+    if (s == INVALID_SOCKET) return {};
+#else
+    int s = ::socket(AF_INET6, SOCK_DGRAM, 0);
+    if (s < 0) return {};
+#endif
+    const auto h = static_cast<SocketHandle>(s);
+
+    // A public IPv6 resolver. No packet is sent — connect() on a datagram socket
+    // only fixes the peer and makes the kernel choose a source address.
+    sockaddr_in6 probe{};
+    probe.sin6_family = AF_INET6;
+    probe.sin6_port   = htons(53);
+    ::inet_pton(AF_INET6, "2001:4860:4860::8888", &probe.sin6_addr);
+
+#ifdef _WIN32
+    const int rc = ::connect(static_cast<SOCKET>(h),
+                             reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
+#else
+    const int rc = ::connect(static_cast<int>(h),
+                             reinterpret_cast<sockaddr*>(&probe), sizeof(probe));
+#endif
+    if (rc != 0) { socketClose(h); return {}; }   // no IPv6 route at all
+
+    sockaddr_in6 local{};
+#ifdef _WIN32
+    int len = static_cast<int>(sizeof(local));
+    const bool ok = ::getsockname(static_cast<SOCKET>(h),
+                                  reinterpret_cast<sockaddr*>(&local), &len) == 0;
+#else
+    socklen_t len = sizeof(local);
+    const bool ok = ::getsockname(static_cast<int>(h),
+                                  reinterpret_cast<sockaddr*>(&local), &len) == 0;
+#endif
+    socketClose(h);
+    if (!ok) return {};
+
+    // Only a global unicast address counts (2000::/3). A link-local (fe80::) or
+    // unique-local (fc00::/7) source cannot be reached from the internet, and
+    // reporting one would make the caller believe hosting is possible when it is
+    // not.
+    const std::uint8_t first = local.sin6_addr.s6_addr[0];
+    if ((first & 0xE0) != 0x20) return {};
+
+    char buf[INET6_ADDRSTRLEN] = {};
+    if (!::inet_ntop(AF_INET6, &local.sin6_addr, buf, sizeof(buf))) return {};
+
+    HE_LOG_DEBUG(Net, "Global IPv6 address: %s", buf);
+    return buf;
+}
+
+bool socketLocalNetworkBlocked() {
+    const std::string gw = defaultGatewayImpl();
+    if (gw.empty()) return false;   // nothing to test against — not the same as blocked
+
+    SocketHandle h = socketCreateUdp();
+    if (h == kInvalidSocket) return false;
+
+    // Port 9 is discard: nothing listens, nothing answers, and no router treats
+    // it specially. Only whether the datagram can leave matters.
+    const std::uint8_t byte = 0;
+    std::size_t sent = 0;
+    const SocketResult rc = socketSendTo(h, &byte, 1, gw, 9, sent);
+    socketClose(h);
+
+    const bool blocked = (rc != SocketResult::Ok);
+    if (blocked) {
+        HE_LOG_WARN(Net, "Cannot send to the default gateway %s although it is the default "
+                         "route — local network access is being blocked for this process, "
+                         "not by the network", gw.c_str());
+    }
+    return blocked;
+}
+
 std::string socketDefaultGateway() {
     const std::string gw = defaultGatewayImpl();
     if (gw.empty()) {
