@@ -95,6 +95,13 @@ public:
         // it (deferred path only — forward never sets this). x reserved for the
         // forward heSSR sampler gate (not wired in v1).
         float ssr[4]          = {};
+        // Ray-traced GI reflections (append-only, v2.8, docs/gi-reflections-
+        // plan.md): x = intensity (mix of the traced result against the sky
+        // cubemap, UNDER the SSR mix — SSR wins where it has a hit), y = max
+        // roughness. Only the reflection composite pass reads these; every
+        // other fill site leaves them 0 (the heGIRefl sample then contributes
+        // nothing regardless of what texture is bound).
+        float giRefl[4]       = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 
