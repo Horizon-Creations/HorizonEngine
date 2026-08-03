@@ -13,6 +13,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
   #include <fcntl.h>
@@ -126,7 +127,11 @@ int main(int argc, char** argv)
 		const std::string marker = argc > 2 ? argv[2] : "";
 		const std::string self   = argv[0];
 #ifdef _WIN32
-		std::string cmd = "\"" + self + "\" delayed-write \"" + marker + "\"";
+		const std::string cmdText = "\"" + self + "\" delayed-write \"" + marker + "\"";
+		// CreateProcessA may write to its command-line argument, so it needs a
+		// genuinely mutable buffer rather than a string's storage.
+		std::vector<char> cmd(cmdText.begin(), cmdText.end());
+		cmd.push_back('\0');
 		STARTUPINFOA si{}; si.cb = sizeof(si);
 		PROCESS_INFORMATION pi{};
 		::CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE,
