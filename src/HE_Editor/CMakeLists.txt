@@ -125,6 +125,7 @@ add_executable(HorizonEditor WIN32
 	EnvironmentPanel.cpp
 	EditorSettingsPanel.cpp
 	ToolchainDialog.cpp
+	GitMissingDialog.cpp
 	PlayReportPanel.cpp
 	HcEditorUtil.cpp
 	HcGraphClipboard.cpp
@@ -165,6 +166,7 @@ target_link_libraries(HorizonEditor PRIVATE
 	${HE_EDITOR_LINK_MATSHADER}
 	HorizonCore
 	HorizonNet
+	HorizonSourceControl
 	HorizonScene
 	HorizonRendering
 	HorizonTools

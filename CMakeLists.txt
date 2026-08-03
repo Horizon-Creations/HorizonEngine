@@ -545,6 +545,8 @@ include_directories("${CMAKE_BINARY_DIR}/generated")
 
 add_subdirectory(src/HE_Core)
 add_subdirectory(src/HE_Net)
+# Editor-only; deliberately absent from HE_Game's and hc_codegen's deploy lists.
+add_subdirectory(src/HE_SourceControl)
 add_subdirectory(src/HE_Scene)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)

@@ -70,6 +70,7 @@ add_executable(he_tests
     test_net_collab.cpp
     test_collab_controller.cpp
     test_collab_undo.cpp
+    test_sourcecontrol_probe.cpp
     test_game_replication.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
@@ -118,6 +119,10 @@ add_executable(he_tests
 
 target_include_directories(he_tests PRIVATE
     vendor
+    # The source-control module's private src/, so the log-redaction helper can
+    # be covered directly — it is the last defence against a token reaching a
+    # log file, so it is worth testing rather than trusting.
+    ${CMAKE_SOURCE_DIR}/src/HE_SourceControl/src
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
@@ -197,6 +202,22 @@ target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
 
+# ─── Process-runner fixture ────────────────────────────────────────────────────
+# A real child process, because every bug HE::Proc exists to avoid is invisible
+# to a mock: exit codes mangled into wait statuses, streams merged, pipes
+# deadlocking on volume, arguments corrupted by quoting, grandchildren surviving
+# a kill. The test binary learns its path the same way the hcgen fixture above
+# does, so nothing depends on the working directory.
+add_executable(he_proc_child proc_child_main.cpp)
+# Needs the project standard explicitly: without it MSVC compiled this at an
+# older level where std::string::data() still returns const char*, which
+# CreateProcessA rejects.
+target_compile_features(he_proc_child PRIVATE cxx_std_20)
+add_dependencies(he_tests he_proc_child)
+target_sources(he_tests PRIVATE test_process_runner.cpp)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_PROC_CHILD="$<TARGET_FILE:he_proc_child>")
+
 # ─── Native game-logic fixture ─────────────────────────────────────────────────
 # A real shared library implementing IGameLogic, loaded at runtime by
 # test_gamelogic_loader.cpp to exercise GameLogicLoader end to end.
@@ -217,6 +238,7 @@ endif()
 target_link_libraries(he_tests PRIVATE
     HorizonCore
     HorizonNet
+    HorizonSourceControl
     HorizonScene
     HorizonImporters
     HorizonTools
@@ -243,6 +265,8 @@ if(WIN32)
             $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:he_tests>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:HorizonSourceControl> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:he_tests>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

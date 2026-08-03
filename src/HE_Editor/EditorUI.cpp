@@ -26,7 +26,8 @@
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences window
-#include "ToolchainDialog.h"             // startup cmake/compiler check
+#include "ToolchainDialog.h"
+#include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
@@ -311,6 +312,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Startup toolchain check — overlays either screen below ───────────────
     ToolchainDialog::DrawToolchainDialog(ctx);
+
+    // ── Startup source-control check ─────────────────────────────────────────
+    // Same placement, and for the same reason: it must overlay the Project Hub
+    // as well as the editor, since a user can clone a project before opening one.
+    GitMissingDialog::DrawGitMissingDialog(ctx);
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)

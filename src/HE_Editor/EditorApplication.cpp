@@ -4,6 +4,8 @@
 #include "EditorUI.h"
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
+#include <Platform/Process.h>       // git config for the identity fix
+#include <Diagnostics/Log.h>
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
@@ -1106,6 +1108,7 @@ void EditorApplication::OnInit()
 	// the headless dump path, which never reaches the UI that shows it.
 	if (m_dumpPath.empty())
 		startToolchainProbe();
+		startGitProbe();
 }
 
 void EditorApplication::startToolchainProbe()
@@ -1122,6 +1125,54 @@ void EditorApplication::startToolchainProbe()
 		HE::hccg::ToolchainProbe probe = HE::hccg::probeToolchain();
 		m_toolchainProbe = std::move(probe);
 		m_toolchainChecked.store(true, std::memory_order_release);
+	});
+}
+
+void EditorApplication::startGitProbe()
+{
+	if (m_gitThread.joinable()) m_gitThread.join();
+	m_gitChecked.store(false, std::memory_order_release);
+	m_gitThread = std::thread([this]
+	{
+		HE::Sc::GitProbe probe = HE::Sc::probeGit();
+		m_gitProbe = std::move(probe);
+		m_gitChecked.store(true, std::memory_order_release);
+	});
+}
+
+// Writes the identity to the user's global git config, then re-probes so the
+// dialog closes itself on success rather than making the user press Recheck.
+void EditorApplication::applyGitIdentity(std::string name, std::string email)
+{
+	if (m_gitIdentityApplying.load(std::memory_order_acquire)) return;
+	if (m_gitIdentityThread.joinable()) m_gitIdentityThread.join();
+	m_gitIdentityApplying.store(true, std::memory_order_release);
+
+	m_gitIdentityThread = std::thread([this, name = std::move(name), email = std::move(email)]
+	{
+		auto config = [](const char* key, const std::string& value)
+		{
+			HE::Proc::Options o;
+			o.exe       = "git";
+			o.args      = { "config", "--global", key, value };
+			o.timeoutMs = 5000;
+			// A probe must never stop to ask something it cannot display.
+			o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");
+			return HE::Proc::run(o).ok();
+		};
+		const bool okName  = config("user.name",  name);
+		const bool okEmail = config("user.email", email);
+		if (!okName || !okEmail)
+		{
+			HE_LOG_WARN(SourceControl, "Could not write the git identity to the global config");
+		}
+
+		// Re-probe inline on this thread rather than calling startGitProbe(),
+		// which would try to join the thread it is called from.
+		HE::Sc::GitProbe probe = HE::Sc::probeGit();
+		m_gitProbe = std::move(probe);
+		m_gitChecked.store(true, std::memory_order_release);
+		m_gitIdentityApplying.store(false, std::memory_order_release);
 	});
 }
 
@@ -3130,6 +3181,12 @@ AppContext EditorApplication::makeContext()
 		.toolchainInstallOk  = m_installFinished.load(std::memory_order_acquire)
 		                           && m_installAttempted.load(std::memory_order_acquire)
 		                           && m_installExit.load(std::memory_order_acquire) == 0,
+		.gitProbe            = m_gitChecked.load(std::memory_order_acquire)
+		                           ? &m_gitProbe : nullptr,
+		.recheckGit          = [this]{ startGitProbe(); },
+		.setGitIdentity      = [this](std::string n, std::string e)
+		                           { applyGitIdentity(std::move(n), std::move(e)); },
+		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
 		.fpsHistoryOffset    = m_fpsHistoryOffset,
@@ -3644,6 +3701,9 @@ void EditorApplication::OnShutdown()
 	// Same rule for the toolchain probe (destroying a joinable std::thread
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
+	if (m_gitThread.joinable()) m_gitThread.join();
+	// Bounded by the probe's own per-call timeouts, so this cannot hang shutdown.
+	if (m_gitIdentityThread.joinable()) m_gitIdentityThread.join();
 	// The auto-install worker can outlive the dialog (installs take minutes); join
 	// it too so we never destroy it joinable.
 	if (m_installThread.joinable()) m_installThread.join();
