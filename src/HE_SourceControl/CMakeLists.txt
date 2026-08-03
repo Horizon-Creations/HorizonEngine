@@ -11,6 +11,9 @@
 # LFS is the entire reason this module exists (see docs/source-control-design.md).
 add_library(HorizonSourceControl SHARED
 	src/GitProbe.cpp
+	src/StatusParser.cpp
+	src/GitCli.cpp
+	src/GitService.cpp
 )
 
 # HorizonCore for HE::Proc (the subprocess runner) and the engine log.
