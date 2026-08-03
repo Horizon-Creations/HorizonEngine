@@ -227,9 +227,12 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 #if defined(__APPLE__)
 			r.advice = "What you can do: allow HorizonEngine under System Settings > "
 			           "Privacy & Security > Local Network. If it is not listed there, "
-			           "the editor is running as a plain executable rather than the "
-			           "packaged app — macOS only offers the permission to a proper "
-			           "app bundle.";
+			           "macOS is holding a stale decision for an earlier build of the "
+			           "editor and will neither ask again nor list it — restart your "
+			           "Mac, launch the editor and host again; the permission prompt "
+			           "then appears and the entry with it. (Running the editor as a "
+			           "bare executable rather than the packaged app also causes this — "
+			           "macOS only offers the permission to a proper app bundle.)";
 #else
 			r.advice = "What you can do: allow this application through your firewall, "
 			           "then try again.";

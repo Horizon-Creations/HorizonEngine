@@ -267,16 +267,53 @@ fi
 
 # ─── 11. Code sign (ad-hoc) ───────────────────────────────────────────────────
 # Ad-hoc signing lets the app run locally. For notarized public distribution,
-# replace '-' with your Developer ID: "Developer ID Application: Name (TEAMID)"
-# then run: xcrun notarytool submit out/HorizonEditor-*.dmg --wait
-echo "--> Code-signing (ad-hoc)..."
+# Signing identity: a STABLE one whenever the keychain offers it, ad-hoc only
+# as the last resort. This is not about Gatekeeper — it is about the Local
+# Network permission (macOS 15+): the system keys its allow/deny decision to
+# the app's code identity, and an ad-hoc signature is a NEW identity on every
+# build. The recorded answer then matches no current app: macOS neither asks
+# again nor lists the app under Privacy & Security > Local Network, and every
+# LAN packet fails silently. A certificate-backed signature keeps the identity
+# constant, so the user answers the prompt once and the answer sticks.
+#
+# Override with HE_SIGN_IDENTITY (e.g. "Developer ID Application: Name (TEAM)");
+# for notarised distribution: xcrun notarytool submit out/HorizonEditor-*.dmg --wait
+pick_sign_identity() {
+    if [ -n "${HE_SIGN_IDENTITY:-}" ]; then echo "$HE_SIGN_IDENTITY"; return; fi
+    local ids
+    ids=$(security find-identity -v -p codesigning 2>/dev/null) || true
+    # Preference order: distribution-grade first, then a development cert —
+    # either is stable, which is the property that matters here.
+    local wanted
+    for wanted in "Developer ID Application" "Apple Development" "Apple Distribution"; do
+        local match
+        match=$(printf '%s\n' "$ids" | grep -m1 "\"$wanted" | sed -E 's/.*"(.*)"/\1/') || true
+        if [ -n "$match" ]; then echo "$match"; return; fi
+    done
+    echo "-"
+}
+
+SIGN_ID=$(pick_sign_identity)
+if [ "$SIGN_ID" = "-" ]; then
+    echo "--> Code-signing (ad-hoc — no signing certificate in the keychain)..."
+    echo "    NOTE: the Local Network permission will NOT survive rebuilds this way."
+else
+    echo "--> Code-signing with \"$SIGN_ID\"..."
+fi
 if command -v codesign &>/dev/null; then
     for fw_lib in "$FW_PATH/"*.dylib; do
         [ -f "$fw_lib" ] || continue
-        codesign --force --sign - "$fw_lib" 2>/dev/null || true
+        codesign --force --sign "$SIGN_ID" "$fw_lib" 2>/dev/null || true
     done
-    codesign --force --deep --sign - "$APP_PATH" 2>/dev/null && \
-        echo "    Signed." || echo "    codesign failed (non-fatal for local use)."
+    if codesign --force --deep --sign "$SIGN_ID" "$APP_PATH" 2>/dev/null; then
+        echo "    Signed."
+    elif [ "$SIGN_ID" != "-" ] && codesign --force --deep --sign - "$APP_PATH" 2>/dev/null; then
+        # The certificate path can fail without the keychain unlocked; ad-hoc
+        # keeps the build usable rather than shipping an unsigned bundle.
+        echo "    Certificate signing failed — fell back to ad-hoc."
+    else
+        echo "    codesign failed (non-fatal for local use)."
+    fi
 else
     echo "    codesign not found, skipping."
 fi
