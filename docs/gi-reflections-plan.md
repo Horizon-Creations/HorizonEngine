@@ -182,6 +182,21 @@ Bewusste v1-Vereinfachungen (dokumentieren wie beim GI-v1-Block in `MetalRendere
   gemeinsame Infrastruktur bauen, beide Kernel profitieren).
 - Optional: `m_giInstanceColorBuffer` → `GIInstanceShading` erweitern (albedo + emissive +
   metallic), damit emissive Objekte in Reflektionen leuchten.
+  → **UMGESETZT (albedo + emissive):** 2×float4 pro Instanz (HW-Buffer + SW-`GiInst`).
+  Die Instanzfarben kommen jetzt aus `giInstanceShading`: Graph-Materialien über den
+  CPU-Konstanten-Fold `HE::matGraphApproxSurface` (BaseColor-/Emissive-Pin; Const-Ketten
+  gefaltet, Param-getriebene Pins als Slot-Index → liest den LIVE-Wert inkl. per-Entity-
+  paramOverride), gebacken in `MaterialAsset::approxBaseColor/approxEmissive(+Slots)`,
+  MTRL-Tail-serialisiert (Packer kopiert byte-verbatim). Vorher spiegelte JEDES
+  Graph-Material grau (Asset-`baseColor` = weiß, Emissive existierte gar nicht).
+  Metallic bleibt offen. Emissive-Bounce ins Probe-Feld bewusst NICHT (würde die
+  globale Lichtbalance ändern, nicht nur Reflektionen).
+  Witness: `HE_DUMP_GIREFLTEST=1` (Spiegelboden + Graph-Grün-Würfel + Emissive-Würfel).
+  **Temporal-Lag-Fix (Quality 2):** History-EMA 0.85 → adaptiv — CPU-seitig auf 0.55
+  gedämpft, sobald sich die View-Matrix ändert (Reflected-Content wird mangels Motion
+  Vectors nicht reprojiziert → starres EMA = „Spiegelung zieht nach"), und im Kernel
+  kollabiert das Gewicht bei Luminanz-Brüchen (bewegtes Objekt bei stehender Kamera),
+  während Glossy-Jitter-Rauschen weiter voll akkumuliert.
 
 ### P5 — SW-Fallback + Forward-Anbindung
 - `kernel giReflRaySw` in `kGISWMSL` (BVH-Scan-Vorlage `giShadowRaySw`/`giProbeUpdateSw`);

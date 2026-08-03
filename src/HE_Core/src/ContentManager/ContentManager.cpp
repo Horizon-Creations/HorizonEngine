@@ -248,6 +248,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// the load-time regeneration overwrites it anyway; the serialized copy
 			// is what lets PACKAGED materials (graph stripped) render deferred.
 			HAsset::Reader::readString(c->data,o,a.customShaderGBufGlsl);
+			// GI-hit approximation (absent in older files → the neutral in-struct
+			// defaults, i.e. white/black = the pre-approx look). readPOD leaves
+			// `out` untouched at EOF, so the partial-tail case is safe too.
+			for (int k = 0; k < 3; ++k) HAsset::Reader::readPOD(c->data,o,a.approxBaseColor[k]);
+			for (int k = 0; k < 3; ++k) HAsset::Reader::readPOD(c->data,o,a.approxEmissive[k]);
+			HAsset::Reader::readPOD(c->data,o,a.approxBaseColorSlot);
+			HAsset::Reader::readPOD(c->data,o,a.approxEmissiveSlot);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -452,6 +459,29 @@ static void applyGraphParams(MaterialAsset& m, const HE::MatShaderGen& gen,
 	}
 }
 
+// Bake the graph's CPU-approximated BaseColor/Emissive into the asset (see
+// MaterialAsset::approxBaseColor): constants as folded, Param-driven pins as the
+// slot index into shaderParamData so consumers read the LIVE value. Runs with
+// the codegen (regenerate/sync) — graphParamNames must already be final.
+static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g)
+{
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g);
+	for (int k = 0; k < 3; ++k)
+	{
+		m.approxBaseColor[k] = ap.baseColor[k];
+		m.approxEmissive[k]  = ap.emissive[k];
+	}
+	auto slotOf = [&](const std::string& name) -> int32_t
+	{
+		if (name.empty()) return -1;
+		for (size_t i = 0; i < m.graphParamNames.size(); ++i)
+			if (m.graphParamNames[i] == name) return static_cast<int32_t>(i);
+		return -1;
+	};
+	m.approxBaseColorSlot = slotOf(ap.baseColorParam);
+	m.approxEmissiveSlot  = slotOf(ap.emissiveParam);
+}
+
 // Snapshot a material's current param values by name (slot i ↔ floats [i*4, i*4+4)).
 static std::map<std::string, std::array<float, 4>> snapshotGraphParams(const MaterialAsset& m)
 {
@@ -490,6 +520,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->graphTexturePaths    = gen.textures;
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
+	applyApproxSurface(*mat, g);                  // GI-hit colours (needs final param slots)
 }
 
 // ─── Material instances ───────────────────────────────────────────────────────
@@ -542,6 +573,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			inst->graphTexturePaths = gen.textures;
 			inst->blendMode            = gen.blendMode;
 			inst->customShaderVertGlsl = gen.vertexBody;
+			applyApproxSurface(*inst, g); // GI-hit colours for the permutation
 			// A regenerated permutation invalidates any parent-baked shaders.
 			inst->precompiledShaders.clear();
 		}
@@ -562,6 +594,16 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
 		inst->customShaderVertGlsl = parent->customShaderVertGlsl;
+		// Same shader = same fold; the slots stay valid because the param layout
+		// is copied verbatim above — an overridden colour slot then reads the
+		// INSTANCE's value live (exactly the point of the slot indirection).
+		for (int k = 0; k < 3; ++k)
+		{
+			inst->approxBaseColor[k] = parent->approxBaseColor[k];
+			inst->approxEmissive[k]  = parent->approxEmissive[k];
+		}
+		inst->approxBaseColorSlot = parent->approxBaseColorSlot;
+		inst->approxEmissiveSlot  = parent->approxEmissiveSlot;
 	}
 	// Re-apply the instance's own values on overridden slots.
 	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
@@ -1091,6 +1133,12 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		// (HpakWriter's MTRL branch) copies byte-verbatim into shipped paks, so
 		// packaged games can build the G-buffer pipeline without the node graph.
 		HAsset::Writer::appendString(b,a.customShaderGBufGlsl);
+		// GI-hit approximation (matGraphApproxSurface) — packaged materials
+		// (graph stripped) keep their reflected colour through this tail.
+		for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(b,a.approxBaseColor[k]);
+		for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(b,a.approxEmissive[k]);
+		HAsset::Writer::appendPOD(b,a.approxBaseColorSlot);
+		HAsset::Writer::appendPOD(b,a.approxEmissiveSlot);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

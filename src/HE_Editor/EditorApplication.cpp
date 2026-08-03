@@ -2561,6 +2561,77 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
+	// GRAPH-material cube (ConstColor → BaseColor) and an emissive graph cube
+	// (ConstColor → Emissive) standing on it. The ray-traced reflection must
+	// show the green cube GREEN and the emissive cube glowing red — exactly the
+	// two hit-shading terms giInstanceShading approximates via
+	// matGraphApproxSurface. The SSR witness's PLAIN materials never exercised
+	// them (their colour lives in MaterialAsset::baseColor, not in a graph).
+	if (const char* gw = std::getenv("HE_DUMP_GIREFLTEST"); gw && *gw && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto addCube = [&](const char* name, HE::UUID matId,
+		                   glm::vec3 pos, glm::vec3 scale)
+		{
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e, MaterialComponent{ matId });
+		};
+
+		MaterialAsset mirror;
+		mirror.type = HE::AssetType::Material;
+		mirror.name = "GIReflMirrorFloor";
+		mirror.baseColor[0] = 0.9f; mirror.baseColor[1] = 0.9f; mirror.baseColor[2] = 0.9f;
+		mirror.metallic  = 1.0f;
+		mirror.roughness = 0.05f;
+		addCube("GIReflFloor", contentManager().registerMaterial(std::move(mirror)),
+		        glm::vec3(0.0f, -0.1f, -8.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+
+		MaterialAsset green;
+		green.type = HE::AssetType::Material;
+		green.name = "GIReflGraphGreen";
+		{
+			HE::MaterialGraph g = HE::MaterialGraph::makeDefault(); // Output + ConstColor→BaseColor
+			for (auto& n : g.nodes)
+				if (n.type == HE::MatNodeType::ConstColor)
+				{ n.p[0] = 0.05f; n.p[1] = 0.85f; n.p[2] = 0.1f; }
+			green.nodeGraphJson = HE::materialGraphToJson(g);
+		}
+		const HE::UUID greenId = contentManager().registerMaterial(std::move(green));
+		contentManager().regenerateMaterialFromGraph(greenId); // codegen + approx fold
+		addCube("GIReflGraphCube", greenId,
+		        glm::vec3(-2.5f, 1.5f, -8.0f), glm::vec3(1.5f));
+
+		MaterialAsset glow;
+		glow.type = HE::AssetType::Material;
+		glow.name = "GIReflEmissive";
+		{
+			HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+			for (auto& n : g.nodes)               // near-black base: the glow must
+				if (n.type == HE::MatNodeType::ConstColor) // come from the emissive term
+				{ n.p[0] = 0.02f; n.p[1] = 0.02f; n.p[2] = 0.02f; }
+			int outId = 0;
+			for (auto& n : g.nodes)
+				if (n.type == HE::MatNodeType::Output) { outId = n.id; break; }
+			const int em = g.addNode(HE::MatNodeType::ConstColor, 0.0f, 200.0f);
+			if (HE::MatGraphNode* n = g.findNode(em))
+			{ n->p[0] = 3.0f; n->p[1] = 0.25f; n->p[2] = 0.25f; } // HDR red
+			g.connect(em, 0, outId, HE::kMatOutputEmissivePin);
+			glow.nodeGraphJson = HE::materialGraphToJson(g);
+		}
+		const HE::UUID glowId = contentManager().registerMaterial(std::move(glow));
+		contentManager().regenerateMaterialFromGraph(glowId);
+		addCube("GIReflEmissiveCube", glowId,
+		        glm::vec3(2.5f, 1.5f, -8.0f), glm::vec3(1.5f));
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_GIREFLTEST witness scene added");
+	}
+
 	// ── Decal witness (HE_DUMP_DECALTEST=1): a grey floor slab with a red decal
 	// projector box over its centre. In the deferred (tile) path the floor must
 	// show a red patch exactly under the box; forward ignores decals (v1) — the

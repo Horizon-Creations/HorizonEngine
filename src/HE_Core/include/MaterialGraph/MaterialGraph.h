@@ -235,6 +235,29 @@ HE_API void matFunctionPins(const MaterialGraph& fnGraph,
 // with a lambda. Returned pointer must stay valid for the duration of the generate call.
 using MatFunctionLoader = std::function<const MaterialGraph*(const std::string& path)>;
 
+// Best-effort CPU approximation of the Output node's BaseColor and Emissive pins,
+// for consumers that need a per-instance CONSTANT (the GI ray kernels shade TLAS
+// hits with per-instance colours — no material evaluation on the GPU hit).
+//
+// Two result forms per pin:
+//   *Param non-empty — the pin connects (through Reroutes) directly to a Param
+//     node: the caller resolves the CURRENT value from the material's param block
+//     (live under editor slider drags, setMaterialParam and per-entity overrides;
+//     the float[3] holds the node default as fallback).
+//   *Param empty — the folded constant (Const*/Param nodes and pure component-wise
+//     math: Add/Subtract/Multiply/Divide/Lerp/OneMinus/Saturate folded recursively;
+//     Param values fold from the node defaults, i.e. fold-time snapshots).
+// Anything computed (textures, noise, UV/time/view inputs …) does not fold:
+// BaseColor falls back to white, Emissive to black — exactly the pre-approx look.
+struct MatApproxSurface
+{
+    float       baseColor[3] = { 1.0f, 1.0f, 1.0f };
+    float       emissive[3]  = { 0.0f, 0.0f, 0.0f };
+    std::string baseColorParam; // non-empty = read the pin live from this param slot
+    std::string emissiveParam;
+};
+HE_API MatApproxSurface matGraphApproxSurface(const MaterialGraph& g);
+
 // Widget kind of an exposed parameter — drives typed editors OUTSIDE the node
 // canvas (central param panel, entity Details). Serialized per slot (1 byte) in
 // MaterialAsset::graphParamTypes, parallel to graphParamNames.

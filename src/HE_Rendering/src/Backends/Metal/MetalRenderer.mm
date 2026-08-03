@@ -1552,7 +1552,10 @@ kernel void giProbeUpdate(uint2 texel   [[thread_position_in_threadgroup]],
 	else
 	{
 		const uint instId  = q.get_committed_instance_id();
-		const float3 albedo = instanceColors[instId].rgb;
+		// 2 float4 per instance (albedo, emissive) — this bounce uses the albedo
+		// only; emissive bounce into the probe field is a deliberate non-goal
+		// (it would change the scene's global lighting balance, not reflections).
+		const float3 albedo = instanceColors[instId * 2].rgb;
 		// One-bounce direct-light estimate: the hit normal is approximated as
 		// facing back along the ray (no per-triangle normal fetch — that needs
 		// binding each mesh's vertex buffer to this kernel too, a follow-up), and
@@ -1838,8 +1841,9 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	float4 sampleOut = float4(0.0);
 	if (q.get_committed_intersection_type() != intersection_type::none)
 	{
-		const uint   instId = q.get_committed_instance_id();
-		const float3 albedo = instanceColors[instId].rgb;
+		const uint   instId   = q.get_committed_instance_id();
+		const float3 albedo   = instanceColors[instId * 2].rgb;     // 2 float4/instance
+		const float3 emissive = instanceColors[instId * 2 + 1].rgb; // (albedo, emissive)
 		const float  dist   = q.get_committed_distance();
 		const float3 hitPos = r.origin + R * dist;
 
@@ -1900,6 +1904,9 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			field = giReflField(giIrr, P, hitPos, hitN, fieldW);
 		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
 		else               radiance += albedo * P.skyAmbient.rgb;
+		// Emissive surfaces keep their glow in reflections — unlit and unshadowed,
+		// exactly as the surface itself renders (G-buffer emissive is additive).
+		radiance += emissive;
 
 		// Confidence mirrors the SSR trace's fades: roughness cutoff + a mild
 		// distance falloff toward the cubemap so the ray-length cap has no seam.
@@ -1910,9 +1917,12 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// Temporal accumulation (quality 2, gated by skyAmbient.w): reproject the
 	// RECEIVER point into last frame's history and EMA-blend when the stored
 	// world position matches (disocclusion reject, same scheme as the GI
-	// shadow temporal). Reflected-object parallax is deliberately not
-	// reprojected — mild ghosting of the reflection CONTENT under camera
-	// motion is the accepted v1 trade (no motion vectors in the engine).
+	// shadow temporal). Reflected-object parallax is not reprojected (no
+	// motion vectors in the engine) — instead the blend is ADAPTIVE: a large
+	// luminance difference between history and the fresh sample means the
+	// reflection CONTENT changed (a moving object, a light flip), so the
+	// history weight collapses and the trail dies in a couple of frames,
+	// while small differences (glossy jitter noise) keep the full EMA.
 	float4 resultOut = sampleOut;
 	const float h = P.skyAmbient.w;
 	if (h > 0.0)
@@ -1929,7 +1939,14 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 				const float4 hp  = histPos.read(pcoord);
 				const float  tol = max(0.05 * length(Pw - P.camPos.xyz), 0.1);
 				if (hp.w > 0.5 && length(hp.xyz - Pw) < tol)
-					resultOut = mix(sampleOut, histRad.read(pcoord), h);
+				{
+					const float4 hist = histRad.read(pcoord);
+					const float lc  = dot(sampleOut.rgb, float3(0.299, 0.587, 0.114));
+					const float lh  = dot(hist.rgb,      float3(0.299, 0.587, 0.114));
+					const float rel = abs(lh - lc) / (max(lh, lc) + 0.05);
+					const float hEff = h * (1.0 - 0.75 * smoothstep(0.2, 0.8, rel));
+					resultOut = mix(sampleOut, hist, hEff);
+				}
 			}
 		}
 	}
@@ -1955,7 +1972,7 @@ using namespace metal;
 
 struct GiNode { float4 d0; float4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
 struct GiTri  { float4 v0; float4 v1; float4 v2; };
-struct GiInst { float4x4 invTransform; float4 baseColor; int4 offsets; }; // offsets.x nodeOffset, .y triOffset
+struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 offsets; }; // offsets.x nodeOffset, .y triOffset — must match GISwInstanceCPU
 
 static bool giTriHit(GiTri tri, float3 o, float3 d, float tMin, float tMax, thread float& tOut)
 {
@@ -2505,11 +2522,14 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			field = giReflFieldSw(giIrr, P, hitPos, hitN, fieldW);
 		if (fieldW > 1e-4) radiance += albedo * field * P.sunDirRadius.w;
 		else               radiance += albedo * P.skyAmbient.rgb;
+		// Emissive surfaces keep their glow in reflections (see the HW kernel).
+		radiance += insts[hitInst].emissive.rgb;
 		const float conf = roughFade * (1.0 - 0.25 * clamp(dist / max(P.camPos.w, 1.0), 0.0, 1.0));
 		sampleOut = float4(radiance, conf);
 	}
 
-	// Temporal accumulation — byte-identical logic to the HW kernel.
+	// Temporal accumulation — byte-identical logic to the HW kernel (adaptive
+	// blend: luminance change collapses the history weight, jitter noise keeps it).
 	float4 resultOut = sampleOut;
 	const float h = P.skyAmbient.w;
 	if (h > 0.0)
@@ -2526,7 +2546,14 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 				const float4 hp  = histPos.read(pcoord);
 				const float  tol = max(0.05 * length(Pw - P.camPos.xyz), 0.1);
 				if (hp.w > 0.5 && length(hp.xyz - Pw) < tol)
-					resultOut = mix(sampleOut, histRad.read(pcoord), h);
+				{
+					const float4 hist = histRad.read(pcoord);
+					const float lc  = dot(sampleOut.rgb, float3(0.299, 0.587, 0.114));
+					const float lh  = dot(hist.rgb,      float3(0.299, 0.587, 0.114));
+					const float rel = abs(lh - lc) / (max(lh, lc) + 0.05);
+					const float hEff = h * (1.0 - 0.75 * smoothstep(0.2, 0.8, rel));
+					resultOut = mix(sampleOut, hist, hEff);
+				}
 			}
 		}
 	}
@@ -5132,13 +5159,42 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 // material colour is resolved at DRAW time from the MaterialComponent's asset —
 // so resolve it here the same way, or every ray hit reads white and the GI
 // bounce/reflections lose the object's colour entirely.
-static glm::vec3 giInstanceAlbedo(const RenderObject& obj, const ContentManager* cm)
+// Per-instance shading constants for the GI ray kernels (TLAS/BVH hits carry no
+// material evaluation): albedo + emissive. Graph materials use the CPU fold
+// (MaterialAsset::approxBaseColor/approxEmissive, see matGraphApproxSurface); a
+// Param-driven pin reads the CURRENT slot value — per-entity paramOverride block
+// first (it is the merged HeParams block), else the material's shaderParamData —
+// so editor slider drags and per-entity colours reflect live. Plain materials
+// keep the asset baseColor; they have no emissive.
+static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
+                              glm::vec3& albedoOut, glm::vec3& emissiveOut)
 {
-	glm::vec3 albedo = obj.baseColor * glm::vec3(obj.instanceTint);
-	if (cm && obj.materialAssetId != HE::UUID{})
-		if (const MaterialAsset* ma = cm->getMaterial(obj.materialAssetId))
-			albedo *= glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]);
-	return albedo;
+	albedoOut   = obj.baseColor * glm::vec3(obj.instanceTint);
+	emissiveOut = glm::vec3(0.0f);
+	if (!cm || obj.materialAssetId == HE::UUID{}) return;
+	const MaterialAsset* ma = cm->getMaterial(obj.materialAssetId);
+	if (!ma) return;
+	if (ma->customShaderFragGlsl.empty())
+	{
+		albedoOut *= glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]);
+		return;
+	}
+	auto slotValue = [&](int32_t slot, const float fallback[3]) -> glm::vec3
+	{
+		if (slot >= 0)
+		{
+			const size_t base = static_cast<size_t>(slot) * 4;
+			if (obj.paramOverride.size() >= base + 3)
+				return { obj.paramOverride[base], obj.paramOverride[base + 1],
+				         obj.paramOverride[base + 2] };
+			if (ma->shaderParamData.size() >= base + 3)
+				return { ma->shaderParamData[base], ma->shaderParamData[base + 1],
+				         ma->shaderParamData[base + 2] };
+		}
+		return { fallback[0], fallback[1], fallback[2] };
+	};
+	albedoOut   *= slotValue(ma->approxBaseColorSlot, ma->approxBaseColor);
+	emissiveOut  = slotValue(ma->approxEmissiveSlot,  ma->approxEmissive);
 }
 
 MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)
@@ -5189,7 +5245,10 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		if (!range.valid) continue;
 		GISwInstanceCPU inst;
 		inst.invTransform = glm::inverse(obj.transform);
-		inst.baseColor    = glm::vec4(giInstanceAlbedo(obj, m_contentManager), 1.0f);
+		glm::vec3 albedo, emissive;
+		giInstanceShading(obj, m_contentManager, albedo, emissive);
+		inst.baseColor    = glm::vec4(albedo, 1.0f);
+		inst.emissive     = glm::vec4(emissive, 0.0f);
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		instances.push_back(inst);
@@ -5302,10 +5361,12 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		std::vector<std::pair<id<MTLBuffer>, id<MTLBuffer>>> uniqueMeshBufs;
 		std::vector<uint32_t> instanceBlasIndex;
 		std::vector<glm::mat4> instanceTransform;
-		std::vector<glm::vec4> instanceBaseColor; // for EncodeGIProbeUpdate's one-bounce tint (Checkpoint C)
+		// Bounce tint + reflection shading: TWO float4 per instance
+		// (albedo, emissive) — see giInstanceShading.
+		std::vector<glm::vec4> instanceBaseColor;
 		instanceBlasIndex.reserve(m_renderWorld.objects.size());
 		instanceTransform.reserve(m_renderWorld.objects.size());
-		instanceBaseColor.reserve(m_renderWorld.objects.size());
+		instanceBaseColor.reserve(m_renderWorld.objects.size() * 2);
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
@@ -5335,7 +5396,12 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 
 			instanceBlasIndex.push_back((uint32_t)idx);
 			instanceTransform.push_back(obj.transform);
-			instanceBaseColor.push_back(glm::vec4(giInstanceAlbedo(obj, m_contentManager), 1.0f));
+			// TWO float4 per instance (albedo, emissive) — the kernels index
+			// instanceColors[instId * 2 (+ 1)].
+			glm::vec3 albedo, emissive;
+			giInstanceShading(obj, m_contentManager, albedo, emissive);
+			instanceBaseColor.push_back(glm::vec4(albedo, 1.0f));
+			instanceBaseColor.push_back(glm::vec4(emissive, 0.0f));
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -5344,11 +5410,11 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			newBufferWithLength:sizeof(MTLAccelerationStructureInstanceDescriptor) * count
 			            options:MTLResourceStorageModeShared];
 		auto* instances = (MTLAccelerationStructureInstanceDescriptor*)instanceBuf.contents;
-		// Parallel per-instance colour buffer, SAME index order — see the header
-		// comment on m_giInstanceColorBuffer for why get_committed_instance_id()
-		// reliably matches this array's position.
+		// Parallel per-instance shading buffer (2 float4 each), SAME index order —
+		// see the header comment on m_giInstanceColorBuffer for why
+		// get_committed_instance_id() reliably matches this array's position.
 		id<MTLBuffer> colorBuf = [device newBufferWithBytes:instanceBaseColor.data()
-		                                              length:sizeof(glm::vec4) * count
+		                                              length:sizeof(glm::vec4) * count * 2
 		                                             options:MTLResourceStorageModeShared];
 		for (NSUInteger i = 0; i < count; ++i)
 		{
@@ -10446,8 +10512,22 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
 		rp.sunDirRadius = glm::vec4(towardLight, m_giIndirectIntensity);
 		rp.sunColor     = glm::vec4(lightColorIntensity, m_giReflFrameSeed);
-		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient,
-		                            (jitter && m_giReflHistValid) ? 0.85f : 0.0f);
+		// History blend: 0.85 EMA while the camera is still (glossy jitter
+		// converges), damped to 0.55 the moment the view matrix changes —
+		// reflected-object parallax is not reprojected (no motion vectors), so
+		// a strong EMA under camera motion is exactly the "reflection drags
+		// behind" artefact. The kernel additionally collapses the weight on
+		// luminance breaks (moving CONTENT with a still camera).
+		float hist = 0.0f;
+		if (jitter && m_giReflHistValid)
+		{
+			float delta = 0.0f;
+			for (int c = 0; c < 4; ++c)
+				for (int r = 0; r < 4; ++r)
+					delta = std::max(delta, std::abs(viewProj[c][r] - m_giReflPrevViewProj[c][r]));
+			hist = delta > 1e-5f ? 0.55f : 0.85f;
+		}
+		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
 		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
 		                            static_cast<float>(m_giGridCounts.y),

@@ -740,6 +740,10 @@ private:
 	// separate user-ID field, so the id IS the array position), letting the DDGI
 	// probe-update kernel (Checkpoint C) look up which object it hit and tint the
 	// one-bounce estimate by that object's own colour instead of a flat grey.
+	// Layout: TWO float4 per instance — [instId*2] = albedo, [instId*2+1] =
+	// emissive (giInstanceShading: graph materials via matGraphApproxSurface,
+	// Param-driven pins resolved live). The probe bounce reads the albedo, the
+	// reflection kernel both.
 	void* m_giInstanceColorBuffer = nullptr; // id<MTLBuffer> (retained), this frame's build
 
 	// ── Software ray tracing (no-HW-RT fallback, or HE_GI_FORCE_SW) ──────────
@@ -756,10 +760,11 @@ private:
 		int32_t nodeOffset = 0, triOffset = 0;
 		bool    valid      = false;
 	};
-	struct GISwInstanceCPU // must match kGISWMSL's GiInst (96 bytes)
+	struct GISwInstanceCPU // must match kGISWMSL's GiInst (112 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
+		glm::vec4 emissive{0.0f}; // rgb — reflected emissive surfaces keep their glow
 		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
 	};
 	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
