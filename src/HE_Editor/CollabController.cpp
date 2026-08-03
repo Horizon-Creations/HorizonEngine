@@ -1,6 +1,7 @@
 #include "CollabController.h"
 
 #include <Net/HttpsClient.h>
+#include <Net/PortMapper.h>
 #include <Net/NetSession.h>
 #include <Net/SecureTransport.h>
 #include <Net/SessionDirectory.h>
@@ -11,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -22,6 +24,35 @@
 #include <Diagnostics/Logger.h>
 
 using namespace HE::Net;
+
+namespace {
+
+// What to actually DO about an unreachable host. Kept in one place because the
+// same advice belongs on three different failures (no port mapping, CGNAT,
+// directory probe came back negative) and it would drift if written out thrice.
+//
+// The two remedies are deliberately ordered by how much work they cost the
+// user, not by how elegant they are:
+//   • Forwarding the port by hand always works when the ISP gives out a real
+//     public address — it is only automation that failed, not connectivity.
+//   • A mesh VPN is the answer when it does not, notably behind carrier-grade
+//     NAT, where no forward at any level can be reached and the free tiers of
+//     Tailscale/ZeroTier relay the traffic for you. Naming them beats a bare
+//     "not reachable", which leaves the user with nothing to try.
+constexpr const char* kUnreachableRemedy =
+	" Either forward TCP port %u to this machine in your router, or have "
+	"everyone join a mesh VPN such as Tailscale or ZeroTier (free tiers work "
+	"and need no port forward at all). Guests can always connect directly if "
+	"they are on this same network.";
+
+std::string remedyFor(std::uint16_t port)
+{
+	char buf[512];
+	std::snprintf(buf, sizeof(buf), kUnreachableRemedy, static_cast<unsigned>(port));
+	return buf;
+}
+
+} // namespace
 
 // ─── Scene ↔ session state ───────────────────────────────────────────────────
 // The concrete half of ISessionStateProvider. It lives here rather than in
@@ -131,8 +162,54 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	const std::string endpoint = directoryEndpoint();
 	const std::string sid      = m_sessionId;
 	const std::uint16_t port16 = m_port;
+	m_portMapStatus = "Asking the router to forward the port...";
 	m_registerFuture = std::async(std::launch::async, [endpoint, sid, port16, displayName] {
 		RegisterResult r;
+
+		// Ask the router to forward the port BEFORE registering, so the
+		// directory's reachability probe tests the mapped state rather than the
+		// unmapped one. Doing it the other way round would warn the user about a
+		// problem that was fixed a moment later.
+		//
+		// mapPort walks the ladder itself: UPnP first for its broader support,
+		// NAT-PMP second because routers speak one or the other — an Apple base
+		// station answers NAT-PMP and stays silent to SSDP entirely, so a UPnP
+		// failure says nothing about whether the second attempt will work.
+		HE::Net::PortMapping mapping;
+		if (HE::Net::PortMapper::mapPort(port16, "HorizonEngine collaboration",
+		                                 r.mapping, mapping) == HE::Net::PortMapResult::Ok)
+		{
+			r.portMapped = true;
+			const bool viaPmp =
+				r.mapping.method == HE::Net::PortMapper::MappingHandle::Method::NatPmp;
+			r.mapStatus = viaPmp ? "Router forwarded the port automatically (NAT-PMP)."
+			                     : "Router forwarded the port automatically (UPnP).";
+
+			// A router can report a private or carrier-grade address as its own
+			// WAN side, which means another NAT sits above it and no mapping at
+			// this level can ever be reached.
+			if (!mapping.externalIp.empty() &&
+			    HE::Net::PortMapper::isPrivateOrCgnat(mapping.externalIp))
+			{
+				// Note this case gets a *narrower* remedy than the others: with a
+				// second NAT above the router, forwarding the port by hand is
+				// futile too, so offering it would send the user off to spend an
+				// afternoon on something that cannot work.
+				r.mapStatus = "Port forwarded, but your ISP uses carrier-grade NAT "
+				              "(" + mapping.externalIp + ") — no port forward can be "
+				              "reached from outside, not even one set up by hand. "
+				              "Have everyone join a mesh VPN such as Tailscale or "
+				              "ZeroTier (free tiers relay the traffic for you), or "
+				              "collaborate on the same local network.";
+			}
+		}
+		else
+		{
+			r.mapStatus = "Neither UPnP nor NAT-PMP got a port forward from your "
+			              "router — both are often switched off by default." +
+			              remedyFor(port16);
+		}
+
 		if (!HE::Net::httpsAvailable())
 		{
 			r.error = "No HTTPS support in this build — share the address manually.";
@@ -413,6 +490,18 @@ void CollabController::wireCallbacks()
 
 void CollabController::leave()
 {
+	// Take the forward back down. Leaving it in place would hold a hole open in
+	// the user's firewall long after the session ended — the "clear it again"
+	// half that makes automatic forwarding acceptable in the first place.
+	if (m_portMapped)
+	{
+		std::thread([handle = m_mapping] {
+			// Torn down the same way it was put up — the handle remembers which
+			// protocol won.
+			HE::Net::PortMapper::unmapPort(handle);
+		}).detach();
+	}
+
 	// Remove the directory entry so peers stop being handed a dead endpoint.
 	// Detached because leaving must feel instant; if it fails the entry simply
 	// expires on its TTL instead.
@@ -449,6 +538,9 @@ void CollabController::teardown()
 	m_lockNotice.clear();
 	m_netIds.clear();
 	m_netIdCounter  = 0;
+	m_portMapped    = false;
+	m_portMapStatus.clear();
+	m_mapping = {};
 	m_lastComponentHash   = 0;
 	m_lastComponentEntity = 0;
 
@@ -504,6 +596,13 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 	    m_registerFuture.wait_for(0s) == std::future_status::ready)
 	{
 		const RegisterResult r = m_registerFuture.get();
+
+		// Port-mapping outcome arrives with the registration, whether or not the
+		// directory itself succeeded.
+		m_mapping       = r.mapping;
+		m_portMapped    = r.portMapped;
+		m_portMapStatus = r.mapStatus;
+
 		if (r.ok)
 		{
 			m_directoryToken     = r.token;
@@ -516,8 +615,8 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 				// Not an error: the entry exists, but nobody outside this network
 				// will get through it. Saying so now beats an unexplained timeout
 				// on the guest's side later.
-				: "Published, but this machine is not reachable from outside. "
-				  "Peers on other networks need the port forwarded.";
+				: "Published, but this machine is not reachable from outside." +
+				  remedyFor(m_port);
 		}
 		else
 		{

@@ -306,4 +306,232 @@ PortMapResult PortMapper::externalIp(const IgdDevice& igd, std::string& out) {
     return out.empty() ? PortMapResult::RequestFailed : PortMapResult::Ok;
 }
 
+// ─── NAT-PMP (RFC 6886) ──────────────────────────────────────────────────────
+// Wire format, all big-endian:
+//   request  [ver=0][opcode][reserved:2][internalPort:2][externalPort:2][lifetime:4]
+//   response [ver=0][opcode+128][result:2][epoch:4][internalPort:2][externalPort:2][lifetime:4]
+// Opcode 1 maps UDP, 2 maps TCP; an address request is just [0][0].
+
+namespace {
+
+constexpr std::uint16_t kNatPmpPort   = 5351;
+constexpr std::uint8_t  kOpAddress    = 0;
+constexpr std::uint8_t  kOpMapTcp     = 2;
+constexpr std::uint8_t  kResponseFlag = 128;
+
+void putU16(std::vector<std::uint8_t>& v, std::uint16_t x) {
+    v.push_back(static_cast<std::uint8_t>(x >> 8));
+    v.push_back(static_cast<std::uint8_t>(x & 0xFF));
+}
+void putU32(std::vector<std::uint8_t>& v, std::uint32_t x) {
+    for (int i = 3; i >= 0; --i) v.push_back(static_cast<std::uint8_t>((x >> (i * 8)) & 0xFF));
+}
+std::uint16_t getU16(const std::uint8_t* p) {
+    return static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+}
+std::uint32_t getU32(const std::uint8_t* p) {
+    return (static_cast<std::uint32_t>(p[0]) << 24) | (static_cast<std::uint32_t>(p[1]) << 16) |
+           (static_cast<std::uint32_t>(p[2]) << 8)  |  static_cast<std::uint32_t>(p[3]);
+}
+
+// One request, one reply, bounded wait. NAT-PMP is UDP, so a lost datagram just
+// means no answer — treated as "router does not speak it" rather than retried
+// forever, since the caller has a fallback ladder anyway.
+bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>& request,
+                    std::uint8_t* reply, std::size_t replyCapacity,
+                    std::size_t& replyLen, int timeoutMs) {
+    replyLen = 0;
+    SocketHandle udp = socketCreateUdp();
+    if (udp == kInvalidSocket) return false;
+    if (!socketBindUdp(udp, 0)) { socketClose(udp); return false; }
+
+    std::size_t sent = 0;
+    if (socketSendTo(udp, request.data(), request.size(), gateway, kNatPmpPort, sent)
+        != SocketResult::Ok) {
+        socketClose(udp);
+        return false;
+    }
+
+    const bool ready = socketWaitReadable(udp, timeoutMs);
+    if (!ready) { socketClose(udp); return false; }
+
+    std::string fromHost;
+    std::uint16_t fromPort = 0;
+    const SocketResult rc =
+        socketRecvFrom(udp, reply, replyCapacity, replyLen, fromHost, fromPort);
+    socketClose(udp);
+
+    // Only trust an answer that actually came from the gateway we asked.
+    return rc == SocketResult::Ok && fromHost == gateway;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> PortMapper::buildNatPmpRequest(std::uint8_t opcode,
+                                                         std::uint16_t internalPort,
+                                                         std::uint16_t externalPort,
+                                                         std::uint32_t lifetimeSeconds) {
+    std::vector<std::uint8_t> v;
+    v.push_back(0);        // version
+    v.push_back(opcode);
+    if (opcode == kOpAddress) return v;   // address requests are just two bytes
+
+    putU16(v, 0);          // reserved
+    putU16(v, internalPort);
+    putU16(v, externalPort);
+    putU32(v, lifetimeSeconds);
+    return v;
+}
+
+bool PortMapper::parseNatPmpMapResponse(const std::uint8_t* data, std::size_t len,
+                                        std::uint16_t& outInternalPort,
+                                        std::uint16_t& outExternalPort,
+                                        std::uint32_t& outLifetime,
+                                        std::uint16_t& outResultCode) {
+    if (!data || len < 16) return false;
+    if (data[0] != 0) return false;                       // unknown version
+    if (data[1] < kResponseFlag) return false;            // not a response
+
+    outResultCode   = getU16(data + 2);
+    outInternalPort = getU16(data + 8);
+    outExternalPort = getU16(data + 10);
+    outLifetime     = getU32(data + 12);
+    return true;
+}
+
+bool PortMapper::parseNatPmpAddressResponse(const std::uint8_t* data, std::size_t len,
+                                            std::string& outIp,
+                                            std::uint16_t& outResultCode) {
+    if (!data || len < 12) return false;
+    if (data[0] != 0) return false;
+    if (data[1] != (kOpAddress + kResponseFlag)) return false;
+
+    outResultCode = getU16(data + 2);
+    outIp = std::to_string(data[8]) + "." + std::to_string(data[9]) + "." +
+            std::to_string(data[10]) + "." + std::to_string(data[11]);
+    return true;
+}
+
+PortMapResult PortMapper::natPmpExternalIp(const std::string& gateway, std::string& out,
+                                           int timeoutMs) {
+    if (gateway.empty()) return PortMapResult::NotSupported;
+
+    const auto req = buildNatPmpRequest(kOpAddress, 0, 0, 0);
+    std::uint8_t reply[64];
+    std::size_t  replyLen = 0;
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs)) {
+        return PortMapResult::NoRouterFound;
+    }
+
+    std::uint16_t result = 0;
+    if (!parseNatPmpAddressResponse(reply, replyLen, out, result)) {
+        return PortMapResult::RequestFailed;
+    }
+    return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
+}
+
+PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
+                                           std::uint16_t externalPort,
+                                           std::uint16_t internalPort,
+                                           std::uint32_t lifetimeSeconds,
+                                           PortMapping& out, int timeoutMs) {
+    if (gateway.empty()) return PortMapResult::NotSupported;
+
+    const auto req = buildNatPmpRequest(kOpMapTcp, internalPort, externalPort,
+                                        lifetimeSeconds);
+    std::uint8_t reply[64];
+    std::size_t  replyLen = 0;
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs)) {
+        return PortMapResult::NoRouterFound;
+    }
+
+    std::uint16_t result = 0, gotInternal = 0, gotExternal = 0;
+    std::uint32_t gotLifetime = 0;
+    if (!parseNatPmpMapResponse(reply, replyLen, gotInternal, gotExternal,
+                                gotLifetime, result)) {
+        return PortMapResult::RequestFailed;
+    }
+    if (result != 0) return PortMapResult::RequestFailed;
+
+    out.internalPort = gotInternal;
+    // The router may hand back a DIFFERENT external port than requested; using
+    // the one we asked for would publish an endpoint nobody is listening on.
+    out.externalPort = gotExternal;
+    out.internalHost = socketLocalAddress();
+
+    std::string wan;
+    if (natPmpExternalIp(gateway, wan, timeoutMs) == PortMapResult::Ok) out.externalIp = wan;
+    return PortMapResult::Ok;
+}
+
+PortMapResult PortMapper::natPmpRemoveMapping(const std::string& gateway,
+                                              std::uint16_t internalPort,
+                                              int timeoutMs) {
+    // RFC 6886: lifetime 0 with external port 0 deletes the mapping.
+    const auto req = buildNatPmpRequest(kOpMapTcp, internalPort, 0, 0);
+    std::uint8_t reply[64];
+    std::size_t  replyLen = 0;
+    if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs)) {
+        return PortMapResult::NoRouterFound;
+    }
+    std::uint16_t result = 0, a = 0, b = 0;
+    std::uint32_t c = 0;
+    if (!parseNatPmpMapResponse(reply, replyLen, a, b, c, result)) {
+        return PortMapResult::RequestFailed;
+    }
+    return result == 0 ? PortMapResult::Ok : PortMapResult::RequestFailed;
+}
+
+// ─── The fallback ladder ─────────────────────────────────────────────────────
+
+PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& description,
+                                  MappingHandle& outHandle, PortMapping& outInfo) {
+    outHandle = MappingHandle{};
+
+    // UPnP first: broader support across consumer routers.
+    IgdDevice igd;
+    if (discover(igd, 3000) == PortMapResult::Ok)
+    {
+        if (addMapping(igd, port, port, description, outInfo) == PortMapResult::Ok)
+        {
+            outHandle.method = MappingHandle::Method::Upnp;
+            outHandle.igd    = igd;
+            outHandle.port   = port;
+            return PortMapResult::Ok;
+        }
+    }
+
+    // NAT-PMP second. A router speaks one or the other, so a UPnP failure says
+    // nothing about whether this will work — Apple base stations answer here
+    // and stay silent to SSDP entirely.
+    const std::string gateway = socketDefaultGateway();
+    if (!gateway.empty())
+    {
+        // Two hours, and re-requested whenever the session re-registers; RFC 6886
+        // recommends a finite lifetime so a crashed client's mapping expires
+        // instead of lingering forever.
+        constexpr std::uint32_t kLifetimeSeconds = 7200;
+        if (natPmpAddMapping(gateway, port, port, kLifetimeSeconds, outInfo)
+            == PortMapResult::Ok)
+        {
+            outHandle.method  = MappingHandle::Method::NatPmp;
+            outHandle.gateway = gateway;
+            outHandle.port    = port;
+            return PortMapResult::Ok;
+        }
+    }
+
+    return PortMapResult::NoRouterFound;
+}
+
+void PortMapper::unmapPort(const MappingHandle& handle)
+{
+    switch (handle.method)
+    {
+    case MappingHandle::Method::Upnp:   removeMapping(handle.igd, handle.port); break;
+    case MappingHandle::Method::NatPmp: natPmpRemoveMapping(handle.gateway, handle.port); break;
+    case MappingHandle::Method::None:   break;
+    }
+}
+
 } // namespace HE::Net

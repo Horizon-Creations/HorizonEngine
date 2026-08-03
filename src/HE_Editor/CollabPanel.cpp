@@ -108,6 +108,21 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			ImGui::TextDisabled("Share both with the people you want to invite.");
 		}
 
+		// Port forwarding is reported separately from reachability: the two can
+		// disagree, and the user needs to know WHICH step failed to know what to
+		// do about it.
+		if (!collab->portMapStatus().empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text,
+			                      collab->portMapped() ? ImVec4(0.6f, 0.85f, 0.6f, 1.0f)
+			                                           : ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+			ImGui::TextWrapped("%s", collab->portMapStatus().c_str());
+			ImGui::PopStyleColor();
+			if (collab->portMapped())
+				ImGui::TextDisabled("The forward is removed again when you leave.");
+		}
+
 		if (!collab->directoryStatus().empty())
 		{
 			ImGui::Spacing();
