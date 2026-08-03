@@ -63,9 +63,15 @@ public:
     // every entry in the prefab and re-wires their hierarchy. The new subtree
     // root is reparented to `parent` (world root if entt::null). Returns the
     // new root entity, or entt::null on parse failure.
+    //
+    // preserveIds keeps the entity UUIDs stored in the blob instead of minting
+    // fresh ones. Only for collaboration's structural replication, where both
+    // peers must know the new subtree under the SAME identities; a prefab drop
+    // must keep the default, or two drops would claim one identity twice.
     Entity instantiatePrefab(HorizonWorld& world,
                              const std::vector<uint8_t>& data,
-                             Entity parent = entt::null);
+                             Entity parent = entt::null,
+                             bool preserveIds = false);
 
 private:
     bool saveJSON  (const HorizonWorld& world, const std::filesystem::path& path);

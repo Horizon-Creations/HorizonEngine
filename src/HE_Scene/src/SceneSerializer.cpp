@@ -1441,7 +1441,8 @@ namespace
 		return scene;
 	}
 
-	Entity applyPrefabJson(HorizonWorld& world, const json& scene, Entity prefabParent)
+	Entity applyPrefabJson(HorizonWorld& world, const json& scene, Entity prefabParent,
+	                       bool preserveIds = false)
 	{
 		if (!scene.contains("entities")) return entt::null;
 
@@ -1453,6 +1454,12 @@ namespace
 		// nothing is restored from the blob. That is what makes the same prefab
 		// inserted twice produce two entities with two identities rather than one
 		// identity claimed twice.
+		//
+		// `preserveIds` is the one sanctioned exception, for collaboration: a
+		// peer instantiating another peer's newly created subtree must end up
+		// with the SAME identities, because every later edit to those entities
+		// travels addressed by them. It cannot collide the way a double prefab
+		// drop would — the subtree exists on the wire exactly once.
 		for (auto& eJson : scene["entities"])
 		{
 			const HE::UUID key  = entityKeyOf(eJson);
@@ -1462,6 +1469,8 @@ namespace
 				eJson.contains("parent") && entityRefOf(eJson["parent"], parentKey);
 
 			Entity e = world.createEntity(name);
+			if (preserveIds && (key.hi != 0 || key.lo != 0))
+				registry.emplace_or_replace<EntityIdComponent>(e, EntityIdComponent{ key });
 			idMap[key] = e;
 
 			if (!hasParent)
@@ -1709,7 +1718,13 @@ std::vector<uint8_t> SceneSerializer::serializeEntityComponents(const HorizonWor
 {
     auto& registry = const_cast<HorizonWorld&>(world).registry();
     if (!registry.valid(entity)) return {};
-    return json::to_cbor(serializeComponents(registry, entity));
+    json comps = serializeComponents(registry, entity);
+    // The display name lives OUTSIDE the components block in the scene format
+    // (it sits at entity level), so without carrying it here a rename would be
+    // the one edit the component-sync path silently drops.
+    if (auto* name = registry.try_get<NameComponent>(entity))
+        comps["__name"] = name->name;
+    return json::to_cbor(comps);
 }
 
 bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
@@ -1725,12 +1740,15 @@ bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
     // covered by construction — a new component that loads from a scene file
     // replicates without any extra work here.
     applyComponents(registry, entity, comps);
+    if (auto it = comps.find("__name"); it != comps.end() && it->is_string())
+        registry.emplace_or_replace<NameComponent>(entity, NameComponent{ *it });
     return true;
 }
 
 Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           const std::vector<uint8_t>& data,
-                                          Entity parent)
+                                          Entity parent,
+                                          bool preserveIds)
 {
     json scene = json::from_cbor(data, true, false);
     if (scene.is_discarded())
@@ -1739,5 +1757,5 @@ Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                 "(%zu bytes)", data.size());
         return entt::null;
     }
-    return applyPrefabJson(world, scene, parent);
+    return applyPrefabJson(world, scene, parent, preserveIds);
 }

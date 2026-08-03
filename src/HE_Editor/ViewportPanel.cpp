@@ -422,6 +422,38 @@ void render(AppContext& ctx, float dt)
 					cam.update(cin);
 					// Push to the backend so this frame's render uses it.
 					ctx.renderer->SetEditorCamera(cam.makeOverride());
+
+					// ── Self-diagnostic (throttled ~once/sec, only while it matters) ──
+					// The field report is "WASD stopped working after joining a session
+					// on Windows", and every link in the chain fails silently: hover,
+					// the nav latch, relative-mouse capture, key delivery. Logging the
+					// state of each while the user is actually trying makes the next
+					// report name the broken link instead of the symptom.
+					{
+						const bool tryingToNavigate =
+							ImGui::IsMouseDown(ImGuiMouseButton_Right) ||
+							ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_S);
+						static int s_navDiagFrames = 0;
+						if (tryingToNavigate && ++s_navDiagFrames >= 60)
+						{
+							s_navDiagFrames = 0;
+							HE_LOG_INFO(Editor,
+								"Edit-nav diagnostic: hovered=%d navigating=%d look=%d "
+								"captured=%d relMode=%d W=%d rmb=%d wantKbd=%d wantTxt=%d "
+								"focusWin=%s",
+								static_cast<int>(imageHovered),
+								static_cast<int>(navigating),
+								static_cast<int>(cin.look),
+								static_cast<int>(s_rmbCaptured),
+								static_cast<int>(sdlWin && SDL_GetWindowRelativeMouseMode(sdlWin)),
+								static_cast<int>(ImGui::IsKeyDown(ImGuiKey_W)),
+								static_cast<int>(ImGui::IsMouseDown(ImGuiMouseButton_Right)),
+								static_cast<int>(io.WantCaptureKeyboard),
+								static_cast<int>(io.WantTextInput),
+								SDL_GetKeyboardFocus() == sdlWin ? "main" : "OTHER");
+						}
+						if (!tryingToNavigate) s_navDiagFrames = 0;
+					}
 				}
 
 				// Camera + object snapshot, identical to what the backend

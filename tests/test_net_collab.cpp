@@ -451,7 +451,7 @@ TEST_CASE("CollabSession: presence is throttled rather than sent every frame")
     CHECK(updates >= 1);
 }
 
-TEST_CASE("CollabSession: an idle editor stops sending presence")
+TEST_CASE("CollabSession: an idle editor drops to keep-alive cadence")
 {
     auto p = makePair();
     p->hostState.data = makeBlob(64);
@@ -463,10 +463,36 @@ TEST_CASE("CollabSession: an idle editor stops sending presence")
     int updates = 0;
     p->host->onPresenceChanged([&](ParticipantId, const PresenceState&) { ++updates; });
 
-    // Plenty of time passes, but nothing moves.
+    // Plenty of time passes, but nothing moves. Not silence — a rare keep-alive
+    // still goes out (late joiners and lost relays need it) — but nothing like
+    // the 10 Hz live rate: 10 s of idling at the 2 s keep-alive is ~5 sends,
+    // where 10 Hz would be 100.
     p->pump(20, 500);
 
-    CHECK(updates == 0);
+    CHECK(updates >= 3);
+    CHECK(updates <= 8);
+}
+
+TEST_CASE("CollabSession: a late joiner receives existing presence without waiting")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+
+    // The host's camera is somewhere BEFORE the client finishes joining, and
+    // never moves again afterwards. Presence is change-driven, so without the
+    // join-time push the client would stare at an empty scene until the host
+    // happened to touch the mouse — the two-instance field test did exactly
+    // that: each side wondering where the other one was.
+    const float hostPos[3] = { 7.0f, 8.0f, 9.0f };
+    p->host->setLocalPresence(hostPos, kRot, {});
+
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    const PresenceState* seen = p->client->presenceOf(p->host->localId());
+    REQUIRE(seen != nullptr);
+    CHECK(seen->valid);
+    CHECK(seen->cameraPos[0] == doctest::Approx(7.0f));
 }
 
 TEST_CASE("CollabSession: a moved camera resumes sending after the idle period")

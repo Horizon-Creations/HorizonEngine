@@ -22,6 +22,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class HorizonWorld;
@@ -188,12 +189,18 @@ public:
 	//     collide with a snapshot handle (those have a zero high word) nor with
 	//     another participant's ids.
 	std::uint64_t netIdFor(std::uint32_t entityHandle);
-	std::uint32_t entityForNetId(std::uint64_t netId) const;   // 0 = unknown
+	std::uint32_t entityForNetId(std::uint64_t netId);   // 0 = unknown
+
+	// The wire identity of an entity: derived from its EntityIdComponent uuid,
+	// so every peer computes the same value from its own world. Mints the uuid
+	// if the entity somehow lacks one. Public because lock lookups in the panels
+	// must key on the SAME subject the lock was taken under.
+	std::uint64_t subjectFor(std::uint32_t entityHandle) { return netIdFor(entityHandle); }
 	void          forgetNetId(std::uint64_t netId);
 
 	// Rebuild the mapping from the entities that exist right now. Called after a
 	// snapshot replaced the world, where handle == network id by construction.
-	void seedNetIds(const std::vector<std::uint32_t>& entityHandles);
+	void seedNetIds();
 
 	// Publish a structural change. `blob` is the serialized subtree for a create.
 	bool publishCreate(std::uint32_t entityHandle, std::uint32_t parentHandle,
@@ -365,7 +372,6 @@ private:
 	// across peers; local-only entities (terrain chunks, environment lights) are
 	// simply absent from it.
 	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
-	std::uint32_t m_netIdCounter = 0;
 
 	std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)>
 		m_onRemoteCreate;
@@ -373,8 +379,9 @@ private:
 		m_onRemoteComponents;
 	// Hash of the last component blob we published, so an untouched entity costs
 	// nothing per frame.
-	std::uint64_t m_lastComponentHash    = 0;
-	std::uint32_t m_lastComponentEntity  = 0;
+	// Last blob hash sent per entity, so switching selection back and forth
+	// does not read as an edit.
+	std::unordered_map<std::uint32_t, std::uint64_t> m_lastComponentHashes;
 	std::function<void(std::uint32_t)>                m_onRemoteDestroy;
 	std::function<void(std::uint32_t, std::uint32_t)> m_onRemoteReparent;
 	// Set while applying a received asset, so writing it to disk does not bounce
