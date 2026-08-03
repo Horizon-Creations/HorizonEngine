@@ -19,6 +19,9 @@ namespace ScriptEditorPanel
 
 	// True if the editor for `assetPath` has unsaved edits (drives the tab's dirty mark).
 	bool isDirty(const std::string& assetPath);
+
+	// Re-read the file on the next frame (collab: a peer's change landed).
+	bool reloadFromDisk(const std::string& assetPath);
 	// Paths of every unsaved tab this panel holds, open or already closed.
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.

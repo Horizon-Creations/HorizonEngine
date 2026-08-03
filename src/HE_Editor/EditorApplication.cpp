@@ -387,9 +387,20 @@ void EditorApplication::OnInit()
 			m_collab.publishAsset(relPath, fullPath);
 		});
 
+	m_collab.onAssetLockDenied([this](const std::string& relPath) {
+		// Someone else won the lock race by a round trip. Their state is the
+		// agreed one; ours is a fork a few hundred milliseconds deep — reload
+		// the tab from disk and let the read-only banner explain the rest.
+		EditorUI::reloadAssetTabFromDisk(contentManager().resolveSavePath(relPath));
+	});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
 		applyAssetBytes(relPath, bytes);
+		// An open editor tab keeps showing its in-memory state — tell whichever
+		// panel holds this asset to re-read the file, so the peer's edit is
+		// visible live, not only after a reopen.
+		EditorUI::reloadAssetTabFromDisk(contentManager().resolveSavePath(relPath));
 		Logger::Log(Logger::LogLevel::Info,
 		            ("Collab: applied remote change to " + relPath).c_str());
 	});
@@ -1866,6 +1877,7 @@ void EditorApplication::OnRender(float dt)
 	m_git.update(nowMs);
 
 		if (m_collab.inSession()) syncStructuralChanges();
+		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Claim the selected entity, so everyone else sees it is being worked on
 		// before they click it themselves.
@@ -3214,6 +3226,55 @@ void EditorApplication::dumpFrameHeadless()
 		SDL_Event q;
 		q.type = SDL_EVENT_QUIT;
 		SDL_PushEvent(&q);
+	}
+}
+
+void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
+{
+	// Assets lock LAZILY: opening a tab is reading, and reading together is the
+	// point of a session — only a tab with unsaved edits claims its asset. The
+	// same pass then turns those edits into a debounced in-session autosave:
+	// ContentManager::saveAsset fires the publish hook, so one mechanism gives
+	// peers the live view (open tabs re-read the file on arrival), writes their
+	// local project files (edits survive the session), and needs no second
+	// serialization path per panel.
+	constexpr std::uint64_t kAutosaveIntervalMs = 1000;
+
+	const std::string& root = contentManager().contentRoot();
+	AppContext ctx = makeContext();
+
+	std::unordered_set<std::string> openRel;
+	for (const auto& tab : m_tabs)
+	{
+		if (tab.assetPath.empty()) continue;
+		const std::string rel =
+			CollabController::projectRelativeAssetPath(tab.assetPath, root);
+		if (rel.empty() || !CollabController::isSyncableAsset(rel)) continue;
+		openRel.insert(rel);
+
+		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
+		if (m_collab.assetLockedByOther(rel)) continue;   // read-only, gate draws the banner
+
+		if (!m_collab.ownsAssetLock(rel))
+		{
+			// First edit: claim it. Optimistic — the edit already applied
+			// locally; the deny path (lost the race by one RTT) reloads the tab
+			// from disk, discarding that sliver.
+			m_collab.requestAssetLock(rel);
+			continue;   // wait for the grant before broadcasting anything
+		}
+
+		auto& last = m_assetLastAutosaveMs[tab.assetPath];
+		if (nowMs - last < kAutosaveIntervalMs) continue;
+		if (EditorUI::saveAsset(ctx, tab.assetPath)) last = nowMs;
+	}
+
+	// Locks whose tab is gone are released — holding an asset nobody here is
+	// even looking at anymore would block everyone else for no reason.
+	const std::vector<std::string> held = m_collab.heldAssetLocks();
+	for (const std::string& rel : held)
+	{
+		if (!openRel.count(rel)) m_collab.releaseAssetLock(rel);
 	}
 }
 
