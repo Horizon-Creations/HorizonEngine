@@ -97,7 +97,9 @@ void install()
 		about.target = s_target;
 		[app addItem:about];
 		[app addItem:[NSMenuItem separatorItem]];
-		heAddItem(app, @"Preferences…", C::Preferences, @",", NSEventModifierFlagCommand, false);
+		// Needs a project: Preferences opens as an editor tab, and the tab strip
+		// only exists once a project is loaded (the hub has no tabs).
+		heAddItem(app, @"Preferences…", C::Preferences, @",", NSEventModifierFlagCommand, true);
 		[app addItem:[NSMenuItem separatorItem]];
 		NSMenuItem* hide = [[NSMenuItem alloc]
 			initWithTitle:@"Hide HorizonEditor" action:@selector(hide:) keyEquivalent:@"h"];
