@@ -48,6 +48,11 @@ public:
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
+	// Store an access token for an EXISTING remote (pasted URL, clone, expired
+	// token) — no repository is created. Goes to git's credential helper, same
+	// as the GitHub setup flow.
+	void requestStoreCredential(const std::string& host, const std::string& username,
+	                            std::string token);
 	// Auto-push toggle: the panel binds a checkbox to this; requestCommitAll
 	// reads it. Persisted by the panel, not here.
 	bool autoPushAfterCommit = false;

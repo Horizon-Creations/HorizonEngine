@@ -6,9 +6,11 @@
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
+#include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -76,6 +78,67 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 }
 
 #ifdef HE_IMGUI_ENABLED
+
+// ─── Setting-row widgets: label ABOVE, control full width ───────────────────
+// ImGui's default puts a widget's label to its RIGHT, which is fine in a wide
+// dialog and useless in the narrow Quick Settings dock: the text ran past the
+// panel's right edge and was simply cut off. Every control below therefore
+// prints its label on its own line and then stretches to the available width,
+// so nothing depends on how wide the panel happens to be. PushID(label) keeps
+// the ids unique even though every control is spelled "##v".
+namespace {
+
+bool sliderFloatRow(const char* label, float* v, float lo, float hi, const char* fmt)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::SliderFloat("##v", v, lo, hi, fmt);
+	ImGui::PopID();
+	return changed;
+}
+
+bool sliderIntRow(const char* label, int* v, int lo, int hi, const char* fmt = "%d")
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::SliderInt("##v", v, lo, hi, fmt);
+	ImGui::PopID();
+	return changed;
+}
+
+bool comboRow(const char* label, int* v, const char* const items[], int count)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::Combo("##v", v, items, count);
+	ImGui::PopID();
+	return changed;
+}
+
+bool inputIntRow(const char* label, int* v)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::InputInt("##v", v, 0, 0);
+	ImGui::PopID();
+	return changed;
+}
+
+// Sub-controls of an enabled/disabled group read better indented under their
+// checkbox, and the indent is what keeps "AO Radius" visibly subordinate to
+// "AO" now that both start at the left margin.
+struct SubGroup
+{
+	SubGroup(bool enabled) { ImGui::BeginDisabled(!enabled); ImGui::Indent(12.0f); }
+	~SubGroup()            { ImGui::Unindent(12.0f); ImGui::EndDisabled(); }
+};
+
+} // namespace
+
 // Renders the engine-settings catalog. Each `row(key, category, widget)` is a
 // logical setting group; `widget` draws its control(s).
 void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* categoryFilter)
@@ -103,12 +166,15 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			ImGui::SameLine();
 		}
 		widget();
+		// Rows are multi-line now (label above control, indented sub-controls), so
+		// without a gap two neighbouring settings read as one block.
+		ImGui::Spacing();
 		++shown;
 	};
 
 	row("backend", "Display", [&]{
 		ImGui::TextUnformatted("Backend");
-		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-FLT_MIN);
 		if (ImGui::BeginCombo("##backend", ctx.backendName.c_str()))
 		{
 			auto pick = [&](const char* label, HE::RendererBackend api){
@@ -130,11 +196,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 	row("renderpath", "Display", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;
-		ImGui::TextUnformatted("Render Path");
-		ImGui::SetNextItemWidth(-1.0f);
 		ImGui::BeginDisabled(!supported);
 		const char* kPaths[] = { "Forward", "Deferred" };
-		ImGui::Combo("##renderpath", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
+		comboRow("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
@@ -147,9 +211,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// the high-FPS mouse-look stays smooth and idle GPU load drops; ignored with VSync on.
 		ImGui::BeginDisabled(ctx.vsync);
 		int capped = static_cast<int>(cfg.MaxFps);
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::SliderInt("Max FPS (VSync off)", &capped, 0, 1000,
-		                     capped <= 0 ? "Unlimited" : "%d FPS"))
+		if (sliderIntRow("Max FPS (VSync off)", &capped, 0, 1000,
+		                 capped <= 0 ? "Unlimited" : "%d FPS"))
 		{
 			cfg.MaxFps = static_cast<float>(capped < 0 ? 0 : capped);
 			if (ctx.setMaxFps) ctx.setMaxFps(cfg.MaxFps);
@@ -159,45 +222,37 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 
 	row("bloom", "Post-Processing", [&]{
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
-		ImGui::BeginDisabled(!cfg.BloomEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
+		SubGroup sub(cfg.BloomEnabled);
+		sliderFloatRow("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
+		sliderFloatRow("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssao", "Post-Processing", [&]{
 		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
-		ImGui::BeginDisabled(!cfg.SSAOEnabled);
-		ImGui::SetNextItemWidth(220.0f);
+		SubGroup sub(cfg.SSAOEnabled);
 		// AO method: SSAO (kernel), HBAO (horizon bitmask), or GTAO (analytic arc).
 		const char* kAOMethods[] = { "SSAO", "HBAO", "GTAO" };
-		ImGui::Combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
+		comboRow("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
+		sliderFloatRow("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		sliderFloatRow("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("Screen-Space Reflections", &cfg.SSREnabled);
-		ImGui::BeginDisabled(!cfg.SSREnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
-		// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
-		const char* kSSRQuality[] = { "Low", "Medium", "High" };
-		int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
-		if (ImGui::Combo("SSR Quality", &ssrQ, kSSRQuality, 3))
-			cfg.SSRQuality = ssrQ;
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.SSREnabled);
+			sliderFloatRow("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
+			sliderFloatRow("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
+			// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
+			// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
+			const char* kSSRQuality[] = { "Low", "Medium", "High" };
+			int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
+			if (comboRow("SSR Quality", &ssrQ, kSSRQuality, 3))
+				cfg.SSRQuality = ssrQ;
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
 		else if (supported)
 			ImGui::TextDisabled("Metallic surfaces reflect the actual scene (deferred path).");
@@ -207,14 +262,14 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGlobalIllumination;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("Global Illumination (ray-traced, Metal)", &cfg.GlobalIlluminationEnabled);
-		ImGui::BeginDisabled(!cfg.GlobalIlluminationEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.GlobalIlluminationEnabled);
+			sliderFloatRow("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
+			sliderFloatRow("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal-only; needs a ray-tracing-capable GPU + macOS 12+.");
 		else if (supported)
 			ImGui::TextDisabled("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
@@ -223,26 +278,24 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGIReflections;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("GI Reflections (ray-traced)", &cfg.GIReflectionsEnabled);
-		ImGui::BeginDisabled(!cfg.GIReflectionsEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		// Low = raw mirror trace; Med = + confidence-weighted blur; High =
-		// + roughness-jittered cone rays with temporal accumulation (glossy).
-		const char* kGIReflQuality[] = { "Low", "Medium", "High" };
-		int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
-		if (ImGui::Combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
-			cfg.GIReflQuality = grQ;
-		ImGui::SetNextItemWidth(220.0f);
-		// Mirror-like surfaces seen IN a reflection reflect onward instead of
-		// flattening to their base colour; each bounce costs one more trace
-		// on the affected pixels only.
-		ImGui::SliderInt("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.GIReflectionsEnabled);
+			sliderFloatRow("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
+			sliderFloatRow("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
+			// Low = raw mirror trace; Med = + confidence-weighted blur; High =
+			// + roughness-jittered cone rays with temporal accumulation (glossy).
+			const char* kGIReflQuality[] = { "Low", "Medium", "High" };
+			int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
+			if (comboRow("GI Refl Quality", &grQ, kGIReflQuality, 3))
+				cfg.GIReflQuality = grQ;
+			// Mirror-like surfaces seen IN a reflection reflect onward instead of
+			// flattening to their base colour; each bounce costs one more trace
+			// on the affected pixels only.
+			sliderIntRow("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, with Render Path = Deferred.");
 		else if (supported)
 			ImGui::TextDisabled("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
@@ -260,20 +313,18 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	row("camspeed", "Viewport", [&]{
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s") && ctx.editorCamera)
+		if (sliderFloatRow("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
+		    && ctx.editorCamera)
 			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 	});
 
 	row("fontscale", "Appearance", [&]{
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		sliderFloatRow("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
 	});
 
 	row("cpucache", "Content Browser", [&]{ ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets); });
 	row("cbrefresh", "Content Browser", [&]{
-		ImGui::SetNextItemWidth(120.0f);
-		ImGui::InputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate, 0, 0);
+		inputIntRow("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
 	});
 
@@ -309,6 +360,51 @@ char s_ghRepoName[128] = "";
 char s_ghToken[256]    = "";
 bool s_ghPrivate       = true;
 bool s_autoPushLoaded  = false;
+
+// Standalone "store a token for this remote" form (separate buffers from the
+// GitHub-create form above — the two are different flows and clearing one must
+// not disturb the other).
+char s_credHost[128]  = "";
+char s_credUser[128]  = "";
+char s_credToken[256] = "";
+// The remote URL the host/user fields were seeded from, so a changed remote
+// re-seeds them but the user's own edits survive a redraw.
+std::string s_credSeededFrom;
+
+// Host of a git remote URL: https://host/…, ssh://git@host/…, git@host:path.
+std::string hostFromRemote(const std::string& url)
+{
+	std::string s = url;
+	if (const auto scheme = s.find("://"); scheme != std::string::npos)
+		s = s.substr(scheme + 3);
+	if (const auto at = s.find('@'); at != std::string::npos)
+		s = s.substr(at + 1);
+	if (const auto cut = s.find_first_of("/:"); cut != std::string::npos)
+		s = s.substr(0, cut);
+	return s;
+}
+
+// An SSH remote authenticates with a key, not a token — storing one would do
+// nothing at all, so the form says so instead of pretending to work.
+bool isSshRemote(const std::string& url)
+{
+	if (url.rfind("ssh://", 0) == 0) return true;
+	// scp-style (git@host:path) — an '@' before any '/' and no scheme.
+	const auto at    = url.find('@');
+	const auto slash = url.find('/');
+	return url.find("://") == std::string::npos && at != std::string::npos &&
+	       (slash == std::string::npos || at < slash);
+}
+
+// The username the host expects next to a personal access token. GitHub wants
+// x-access-token, GitLab oauth2; everything else (Azure DevOps, Gitea, self-
+// hosted) accepts any non-empty name, so the account name is the safe default.
+const char* tokenUserFor(const std::string& host)
+{
+	if (host.find("github") != std::string::npos) return "x-access-token";
+	if (host.find("gitlab") != std::string::npos) return "oauth2";
+	return "";
+}
 
 // git identity form, pre-filled from whatever git already has so a user with
 // only one of the two set does not have to retype the other.
@@ -486,6 +582,66 @@ void drawRepositoryPage(AppContext& ctx)
 		ImGui::TextDisabled("Commit, push and pull live in View \xe2\x96\xb8 Source Control.");
 	}
 
+	// ── Access token ─────────────────────────────────────────────────────────
+	// Available whatever route the remote took: the GitHub-create flow above
+	// stores its token on the way through, but a pasted URL, a cloned project
+	// or an expired token all end up here, with no repository being created.
+	ImGui::Spacing();
+	ImGui::SeparatorText("Access token");
+
+	const std::string& remote = git->remoteUrl();
+	if (remote.empty())
+	{
+		ImGui::TextDisabled("Configure a remote first — a token is stored per host.");
+	}
+	else if (isSshRemote(remote))
+	{
+		ImGui::TextWrapped("origin uses SSH, which authenticates with your SSH key. "
+		                   "Access tokens apply to https:// remotes only.");
+	}
+	else
+	{
+		if (s_credSeededFrom != remote)
+		{
+			s_credSeededFrom = remote;
+			const std::string host = hostFromRemote(remote);
+			std::snprintf(s_credHost, sizeof(s_credHost), "%s", host.c_str());
+			std::snprintf(s_credUser, sizeof(s_credUser), "%s", tokenUserFor(host));
+		}
+
+		ImGui::TextWrapped("Store an access token for pushing and pulling. It goes "
+		                   "straight to git's credential helper (the system keychain) "
+		                   "and is never written to a project or engine file.");
+		ImGui::Spacing();
+
+		ImGui::TextUnformatted("Host");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputText("##credhost", s_credHost, sizeof(s_credHost));
+
+		ImGui::TextUnformatted("Username");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##creduser", "your account name",
+		                         s_credUser, sizeof(s_credUser));
+
+		ImGui::TextUnformatted("Token");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##credtoken", "Personal access token",
+		                         s_credToken, sizeof(s_credToken),
+		                         ImGuiInputTextFlags_Password);
+
+		ImGui::Spacing();
+		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
+		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
+		if (ImGui::Button("Save token", ImVec2(140.0f, 0.0f)))
+		{
+			git->requestStoreCredential(s_credHost, s_credUser, std::string(s_credToken));
+			// Wipe, not clear: the bytes must go, not just the length.
+			std::fill(std::begin(s_credToken), std::end(s_credToken), '\0');
+		}
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("GitHub: github.com/settings/tokens — classic, 'repo' scope.");
+	}
+
 	drawGitMessages(git);
 }
 
@@ -593,6 +749,238 @@ void drawGitSetupPage(AppContext& ctx)
 	if (ImGui::Button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
 }
 
+// ─── Status page (Tools) ─────────────────────────────────────────────────────
+// Every external thing the editor depends on, in one table, from the three
+// background probes that already run at startup. Read-only by construction:
+// nothing here installs, configures or changes anything, so it is safe to open
+// at any time — the per-item remedies live on the pages that own them.
+
+enum class StatusLevel { Ok, Warn, Missing, Checking };
+
+ImVec4 statusColor(StatusLevel s)
+{
+	switch (s)
+	{
+	case StatusLevel::Ok:       return ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
+	case StatusLevel::Warn:     return ImVec4(1.00f, 0.78f, 0.35f, 1.0f);
+	case StatusLevel::Missing:  return ImVec4(1.00f, 0.50f, 0.45f, 1.0f);
+	case StatusLevel::Checking: break;
+	}
+	return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+}
+
+const char* statusMark(StatusLevel s)
+{
+	switch (s)
+	{
+	case StatusLevel::Ok:       return "OK";
+	case StatusLevel::Warn:     return "!";
+	case StatusLevel::Missing:  return "X";
+	case StatusLevel::Checking: break;
+	}
+	return "...";
+}
+
+// One table row: name, coloured verdict, and the detail that makes the verdict
+// actionable ("git 2.39.5 at /usr/bin/git" beats a green tick with no facts).
+void statusRow(const char* name, StatusLevel level, const std::string& detail,
+               Page jumpTo, bool canJump)
+{
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGui::TextUnformatted(name);
+
+	ImGui::TableSetColumnIndex(1);
+	ImGui::TextColored(statusColor(level), "%s", statusMark(level));
+
+	ImGui::TableSetColumnIndex(2);
+	if (detail.empty()) ImGui::TextDisabled("—");
+	else                ImGui::TextWrapped("%s", detail.c_str());
+
+	ImGui::TableSetColumnIndex(3);
+	// A jump only where there is somewhere useful to go — otherwise the column
+	// fills with buttons that all lead to the same page saying the same thing.
+	if (canJump && level != StatusLevel::Ok && level != StatusLevel::Checking)
+	{
+		ImGui::PushID(name);
+		if (ImGui::SmallButton("Fix")) s_page = jumpTo;
+		ImGui::PopID();
+	}
+}
+
+void drawStatusPage(AppContext& ctx)
+{
+	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
+	                   "the background at startup; nothing here changes any setting.");
+	ImGui::Spacing();
+
+	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+	                                   ImGuiTableFlags_SizingStretchProp;
+	if (ImGui::BeginTable("##statustable", 4, kFlags))
+	{
+		ImGui::TableSetupColumn("Tool",   ImGuiTableColumnFlags_WidthFixed, 150.0f);
+		ImGui::TableSetupColumn("State",  ImGuiTableColumnFlags_WidthFixed, 34.0f);
+		ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("##fix",  ImGuiTableColumnFlags_WidthFixed, 44.0f);
+
+		// ── Source control ───────────────────────────────────────────────────
+		if (!ctx.gitProbe)
+		{
+			statusRow("git",              StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("Git LFS",          StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("git identity",     StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("Credential helper",StatusLevel::Checking, "", Page::GitSetup, false);
+		}
+		else
+		{
+			const HE::Sc::GitProbe& g = *ctx.gitProbe;
+			statusRow("git", g.gitFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          g.gitFound
+			              ? (g.gitVersion.empty() ? std::string("found") : g.gitVersion) +
+			                (g.gitPath.empty() ? "" : " at " + g.gitPath.string())
+			              : std::string("not found — source control is unavailable"),
+			          Page::GitSetup, true);
+
+			// A warning, not an error: the repository works without LFS, it just
+			// commits big binaries the wrong way.
+			statusRow("Git LFS", g.lfsFound ? StatusLevel::Ok : StatusLevel::Warn,
+			          g.lfsFound ? g.lfsVersion
+			                     : std::string("not found — large assets would be committed "
+			                                   "directly into the repository"),
+			          Page::GitSetup, true);
+
+			statusRow("git identity",
+			          g.identityConfigured ? StatusLevel::Ok : StatusLevel::Warn,
+			          g.identityConfigured ? g.userName + " <" + g.userEmail + ">"
+			                               : std::string("user.name / user.email are not set — "
+			                                             "commits will fail"),
+			          Page::GitSetup, true);
+
+			statusRow("Credential helper",
+			          g.credentialHelper.empty() ? StatusLevel::Warn : StatusLevel::Ok,
+			          g.credentialHelper.empty()
+			              ? std::string("none configured — needed to push without retyping a token")
+			              : g.credentialHelper,
+			          Page::Repository, true);
+		}
+
+		// ── C++ toolchain ────────────────────────────────────────────────────
+		if (!ctx.toolchainProbe)
+		{
+			statusRow("cmake",        StatusLevel::Checking, "", Page::Toolchain, false);
+			statusRow("C++ compiler", StatusLevel::Checking, "", Page::Toolchain, false);
+		}
+		else
+		{
+			const HE::hccg::ToolchainProbe& t = *ctx.toolchainProbe;
+			statusRow("cmake", t.cmakeFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          t.cmakeFound ? t.cmakeVersion
+			                       : std::string("not found — needed for C++ export codegen "
+			                                     "and C++ projects"),
+			          Page::Toolchain, true);
+			statusRow("C++ compiler", t.compilerFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          t.compilerFound ? t.compilerId : std::string("not found"),
+			          Page::Toolchain, true);
+		}
+
+		// ── Collaboration ────────────────────────────────────────────────────
+		if (!ctx.routerProbe)
+		{
+			statusRow("Local network",     StatusLevel::Checking, "", Page::Status, false);
+			statusRow("Router / UPnP",     StatusLevel::Checking, "", Page::Status, false);
+			statusRow("IPv6",              StatusLevel::Checking, "", Page::Status, false);
+			statusRow("Session directory", StatusLevel::Checking, "", Page::Status, false);
+		}
+		else
+		{
+			const HE::Net::RouterProbe& r = *ctx.routerProbe;
+
+			statusRow("Local network",
+			          r.localNetworkBlocked ? StatusLevel::Missing : StatusLevel::Ok,
+			          r.localNetworkBlocked
+			              ? std::string("this application may not talk to the local network — "
+			                            "on macOS, allow it under Privacy & Security > Local Network")
+			              : (r.gatewayV4.empty() ? std::string("no default gateway")
+			                                     : "gateway " + r.gatewayV4),
+			          Page::Status, false);
+
+			// Amber rather than red: without forwarding you can still JOIN a
+			// session, and a global IPv6 address makes hosting work anyway.
+			const bool forward = r.portForwardingAvailable();
+			std::string routerDetail;
+			if (forward)
+			{
+				routerDetail = r.upnpFound ? ("UPnP: " + r.upnpService) : std::string("NAT-PMP");
+				if (r.upnpFound && r.natPmpFound) routerDetail += " + NAT-PMP";
+				if (!r.externalIp.empty())        routerDetail += ", WAN " + r.externalIp;
+			}
+			else
+			{
+				routerDetail = "the router did not answer UPnP or NAT-PMP — hosting needs a "
+				               "port forwarded by hand, or the feature enabled on the router";
+			}
+			statusRow("Router / UPnP", forward ? StatusLevel::Ok : StatusLevel::Warn,
+			          routerDetail, Page::Status, false);
+
+			if (r.carrierNat)
+			{
+				statusRow("Carrier NAT", StatusLevel::Warn,
+				          "the router's own WAN address is private (CGNAT) — a port forward "
+				          "on it cannot be reached from the internet",
+				          Page::Status, false);
+			}
+
+			statusRow("IPv6", r.globalIPv6.empty() ? StatusLevel::Warn : StatusLevel::Ok,
+			          r.globalIPv6.empty()
+			              ? std::string("no global address — hosting depends on IPv4 forwarding")
+			              : r.globalIPv6 + (r.upnpV6Firewall ? " (router offers pinholes)" : ""),
+			          Page::Status, false);
+
+			statusRow("Session directory",
+			          r.httpsAvailable ? StatusLevel::Ok : StatusLevel::Missing,
+			          r.httpsAvailable
+			              ? std::string("HTTPS available — joining by session ID works")
+			              : std::string("this build has no HTTPS backend — sessions can only be "
+			                            "joined by address"),
+			          Page::Status, false);
+		}
+
+		ImGui::EndTable();
+	}
+
+	// ── Footer: recheck + the collaboration caveat ───────────────────────────
+	ImGui::Spacing();
+	ImGui::Separator();
+	const bool checking = !ctx.gitProbe || !ctx.toolchainProbe || !ctx.routerProbe;
+	ImGui::BeginDisabled(checking);
+	if (ImGui::Button("Recheck all"))
+	{
+		if (ctx.recheckGit)       ctx.recheckGit();
+		if (ctx.recheckToolchain) ctx.recheckToolchain();
+		if (ctx.recheckRouter)    ctx.recheckRouter();
+	}
+	ImGui::EndDisabled();
+	if (checking) { ImGui::SameLine(); ImGui::TextDisabled("Checking…"); }
+
+	// Said plainly so a green row is not over-read: the only proof that an
+	// inbound connection arrives is one arriving, which needs a live session.
+	ImGui::Spacing();
+	ImGui::TextWrapped("The router check is read-only — it asks what the router supports "
+	                   "and never creates a port mapping. Whether an incoming connection "
+	                   "really arrives is confirmed only once a session is open "
+	                   "(View \xe2\x96\xb8 Collaboration).");
+
+	if (ctx.routerProbe && !ctx.routerProbe->detail.empty())
+	{
+		ImGui::Spacing();
+		if (ImGui::TreeNode("Router probe log"))
+		{
+			ImGui::TextUnformatted(ctx.routerProbe->detail.c_str());
+			ImGui::TreePop();
+		}
+	}
+}
+
 // ─── Toolchain page (Tools) ──────────────────────────────────────────────────
 
 void drawToolchainPage(AppContext& ctx)
@@ -642,6 +1030,7 @@ constexpr NavItem kSourceControlItems[] = {
 	{ Page::GitSetup,   "Git Setup" },
 };
 constexpr NavItem kToolsItems[] = {
+	{ Page::Status,    "Status" },
 	{ Page::Toolchain, "C++ Toolchain" },
 };
 constexpr NavGroup kNavGroups[] = {
@@ -733,6 +1122,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::Repository) drawRepositoryPage(ctx);
 	else if (s_page == Page::GitSetup)   drawGitSetupPage(ctx);
+	else if (s_page == Page::Status)     drawStatusPage(ctx);
 	else if (s_page == Page::Toolchain)  drawToolchainPage(ctx);
 	ImGui::EndChild();
 

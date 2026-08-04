@@ -29,7 +29,7 @@ namespace EditorSettingsPanel
 		// Source Control
 		Repository, GitSetup,
 		// Tools
-		Toolchain,
+		Status, Toolchain,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).

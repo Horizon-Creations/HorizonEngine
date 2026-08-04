@@ -2,6 +2,7 @@
 
 #include <Net/HttpClient.h>
 #include <Net/PortMapper.h>
+#include <Net/RouterProbe.h>
 #include <Net/Socket.h>
 
 #include <atomic>
@@ -792,4 +793,69 @@ TEST_CASE("An address written differently is still recognised as the same one")
     // Families are never conflated: the IPv4-mapped form of a v4 address this
     // machine holds is a v6 address it does not.
     CHECK_FALSE(HE::Net::socketOwnsAddress("2001:db8::7f00:1"));
+}
+
+// ─── Router probe (collaboration readiness) ──────────────────────────────────
+
+TEST_CASE("RouterProbe verdicts follow from the individual findings")
+{
+    // The rollups are the part a UI reads, so they are worth pinning down
+    // independently of any live network.
+    RouterProbe p;
+    CHECK_FALSE(p.portForwardingAvailable());   // a default-constructed probe found nothing
+    CHECK_FALSE(p.ready());
+
+    // Either protocol answering is enough — routers speak one or the other.
+    p.upnpFound = true;
+    CHECK(p.portForwardingAvailable());
+    p.upnpFound = false;
+    p.natPmpFound = true;
+    CHECK(p.portForwardingAvailable());
+
+    // Forwarding alone is not readiness: without an HTTPS backend the session
+    // directory is unreachable, so nobody can join by session ID.
+    CHECK_FALSE(p.ready());
+    p.httpsAvailable = true;
+    CHECK(p.ready());
+
+    // A global IPv6 address substitutes for forwarding entirely (no NAT to
+    // traverse), but a blocked local network overrides everything — nothing the
+    // probe learned afterwards can be trusted.
+    p.natPmpFound = false;
+    CHECK_FALSE(p.ready());
+    p.globalIPv6 = "2001:db8::1";
+    CHECK(p.ready());
+    p.localNetworkBlocked = true;
+    CHECK_FALSE(p.ready());
+    p.localNetworkBlocked = false;
+
+    // CGNAT means a forward on the local router cannot be reached however well
+    // the router cooperates, so it disqualifies on its own.
+    p.carrierNat = true;
+    CHECK_FALSE(p.ready());
+}
+
+TEST_CASE("probeRouter: an already-cancelled probe returns promptly and says so")
+{
+    // The shutdown path raises the flag and then joins, so a probe that ignored
+    // it would hold the editor's quit for the length of a router timeout. The
+    // first stage is local-only (no waiting), so this must come back fast.
+    std::atomic<bool> cancel{true};
+
+    const auto start = std::chrono::steady_clock::now();
+    const RouterProbe p = probeRouter(&cancel);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Generous, because the OS calls in the first stage still run; the point is
+    // that no network timeout was waited out (those are >= 1s each).
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 900);
+
+    // A cancelled probe reports itself as such: its fields are whatever had been
+    // determined by then, which must never be shown as a finished verdict.
+    // (Unless the local network is blocked — that stage returns before the first
+    // cancel check, because it is already a conclusive answer on its own.)
+    CHECK((p.cancelled || p.localNetworkBlocked));
+    CHECK_FALSE(p.upnpFound);      // discovery never ran
+    CHECK_FALSE(p.natPmpFound);
+    CHECK_FALSE(p.detail.empty()); // the local findings were still recorded
 }

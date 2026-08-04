@@ -75,6 +75,14 @@ public:
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate,
 	                        std::string token);
 
+	// Store an access token for `host` without creating anything: make sure a
+	// credential helper exists, then hand the token to it. This is the path for
+	// a repository whose remote already exists (a pasted URL, a clone, a token
+	// that expired) — the same credential machinery requestSetupGitHub uses, and
+	// the token is likewise wiped once the helper has it.
+	void requestStoreCredential(const std::string& host, const std::string& username,
+	                            std::string token);
+
 	void requestPush(bool upstreamConfigured);
 	void requestPull();
 	void requestSetRemote(const std::string& url);
@@ -104,15 +112,17 @@ public:
 
 private:
 	enum class Kind : std::uint8_t {
-		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub, Quit
+		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub,
+		StoreCredential, Quit
 	};
 
 	struct Command
 	{
 		Kind                  kind = Kind::Status;
 		std::filesystem::path path;
-		std::string           text;   // commit message / remote url / repo name
-		std::string           secret; // PAT for SetupGitHub — wiped after use
+		std::string           text;   // commit message / remote url / repo name / host
+		std::string           user;   // credential username (StoreCredential)
+		std::string           secret; // PAT — wiped after use
 		bool                  flag = false;
 	};
 

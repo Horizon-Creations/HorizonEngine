@@ -20,6 +20,7 @@
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <SourceControl/GitProbe.h>
+#include <Net/RouterProbe.h>
 #include "GitController.h"
 #include <atomic>
 #include <functional>
@@ -277,6 +278,13 @@ struct AppContext
 	// and the fix is one git config call, not an install.
 	std::function<void(std::string name, std::string email)> setGitIdentity;
 	bool gitIdentityApplying = false;
+
+	// Startup collaboration-reachability probe (router / port forwarding / IPv6),
+	// same null-means-still-running convention as the two above. Read-only: it
+	// discovers the router but never creates a mapping. Shown in
+	// Preferences ▸ Tools ▸ Status and in the Collaboration window.
+	const HE::Net::RouterProbe* routerProbe = nullptr;
+	std::function<void()> recheckRouter;
 
 	// Source-control state for the panel and the Content Browser badges. Null in
 	// builds without the module.
@@ -556,6 +564,16 @@ private:
 	std::thread       m_gitIdentityThread;
 	std::atomic<bool> m_gitIdentityApplying{false};
 	void applyGitIdentity(std::string name, std::string email);
+
+	// Collaboration reachability probe (router / port forwarding / IPv6). Same
+	// lifecycle again, with one addition: it is the only probe that waits on the
+	// NETWORK, so it carries a cancel flag the shutdown join raises first —
+	// otherwise quitting during a router timeout would stall for seconds.
+	std::thread        m_routerThread;
+	std::atomic<bool>  m_routerChecked{false};
+	std::atomic<bool>  m_routerCancel{false};
+	HE::Net::RouterProbe m_routerProbe;
+	void startRouterProbe();
 
 	// Auto-install worker (see startToolchainInstall / HcCodegen::installToolchain).
 	// Streams installer output into m_installLog under m_installLogMutex; the UI polls.
