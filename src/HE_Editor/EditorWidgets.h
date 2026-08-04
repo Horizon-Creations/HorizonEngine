@@ -2,6 +2,7 @@
 #include <Types/Enums.h>
 #include <Types/UUID.h>
 #include <imgui.h>
+#include <cstddef>
 #include <string>
 
 struct AppContext;
@@ -55,6 +56,59 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
                          const char* rejectNoun = nullptr,
                          bool        showClear  = false,
                          bool        undo       = true);
+
+// ── Labelled setting rows ────────────────────────────────────────────────────
+// ImGui puts a widget's label to the RIGHT of the control, which works in a wide
+// dialog and fails in the narrow panels the editor actually docks: the text runs
+// past the panel's edge and is simply cut off. The escape used across the
+// Details panel was to hide the label and bake the name into the value format
+// ("Coverage: %.2f") — which reads oddly, cannot be styled, and disappears
+// entirely on controls that have no format string.
+//
+// These draw the label on its own line ABOVE a control stretched to the
+// available width, so nothing depends on how wide the panel happens to be. Each
+// returns what its ImGui counterpart returns, and the CONTROL is the last item
+// submitted — so IsItemActivated / IsItemDeactivatedAfterEdit (the Details
+// panel's undo tracking) still refer to the right thing.
+// `label` takes ImGui's usual "Display##id" form: everything before "##" is
+// what the user reads, the whole string is what ImGui hashes. That matters here
+// because CollapsingHeader — unlike TreeNode — does NOT open an id scope, so the
+// four different "Speed##an/ab/sm/pa" rows in the Details panel would collide
+// the moment their visible text matched.
+namespace Row
+{
+	bool sliderFloat(const char* label, float* v, float min, float max,
+	                 const char* fmt = "%.2f", ImGuiSliderFlags flags = 0);
+	bool sliderInt(const char* label, int* v, int min, int max, const char* fmt = "%d");
+	bool dragFloat(const char* label, float* v, float speed, float min = 0.0f,
+	               float max = 0.0f, const char* fmt = "%.2f");
+	bool dragFloat2(const char* label, float* v, float speed, float min = 0.0f,
+	                float max = 0.0f, const char* fmt = "%.2f");
+	bool dragFloat3(const char* label, float* v, float speed, float min = 0.0f,
+	                float max = 0.0f, const char* fmt = "%.2f");
+	bool dragFloat4(const char* label, float* v, float speed, float min = 0.0f,
+	                float max = 0.0f, const char* fmt = "%.2f");
+	bool dragInt(const char* label, int* v, float speed = 1.0f, int min = 0, int max = 0);
+	bool inputInt(const char* label, int* v);
+	bool combo(const char* label, int* v, const char* const items[], int count);
+	// Zero-separated item list ("A\0B\0C\0"), matching ImGui's other Combo overload.
+	bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros);
+	bool colorEdit3(const char* label, float* rgb, ImGuiColorEditFlags flags = 0);
+	bool colorEdit4(const char* label, float* rgba, ImGuiColorEditFlags flags = 0);
+	bool inputText(const char* label, char* buf, size_t bufSize, ImGuiInputTextFlags flags = 0);
+	// Read-only value line, laid out like the editable rows above it.
+	void labelText(const char* label, const char* fmt, ...) IM_FMTARGS(2);
+}
+
+// An explanatory line under a control. Dimmed, and wrapped to the panel width
+// rather than clipped — these are full sentences, and a hint the user can only
+// read half of is worse than no hint at all.
+void hint(const char* fmt, ...) IM_FMTARGS(1);
+
+// A section caption inside a component (Details panel) — "Surface",
+// "Precipitation". Same role as ImGui::SeparatorText, but styled as a heading
+// so the eye can find the group boundaries in a long component.
+void subHeading(const char* text);
 
 // ── Dialog placement ─────────────────────────────────────────────────────────
 // Multi-viewport is on (ImGuiConfigFlags_ViewportsEnable), so ImGui hands any

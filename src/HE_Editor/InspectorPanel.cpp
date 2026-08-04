@@ -29,6 +29,15 @@
 namespace InspectorPanel
 {
 
+#ifdef HE_IMGUI_ENABLED
+// Every option in this panel is a labelled row (caption above a full-width
+// control) and every explanatory line wraps to the panel — the Details dock is
+// narrow and resizable, so a layout that depends on its width does not survive
+// contact with it. Both live in EditorWidgets; these are the local spellings.
+namespace Row = EditorWidgets::Row;
+using EditorWidgets::hint;
+#endif
+
 // ─── Inspector (Details panel) ────────────────────────────────────────────────
 void render(AppContext& ctx)
 {
@@ -118,12 +127,11 @@ void render(AppContext& ctx)
 			if (minutes < 0) minutes += 1440;
 			char clock[8];
 			std::snprintf(clock, sizeof(clock), "%02d:%02d", minutes / 60, minutes % 60);
-			ImGui::SetNextItemWidth(-1.0f);
-			if (ImGui::SliderFloat("##timeofday", &env->timeOfDay, 0.0f, 1.0f, clock,
-			                       ImGuiSliderFlags_NoRoundToFormat))
+			if (Row::sliderFloat("Time of Day", &env->timeOfDay, 0.0f, 1.0f, clock,
+			                     ImGuiSliderFlags_NoRoundToFormat))
 				env->dayNightCycle = true;
 			trackEdit();
-			ImGui::TextDisabled(env->dayNightCycle
+			hint(env->dayNightCycle
 				? "Drives the sun, sky & shadows."
 				: "Move the slider to start a day-night cycle.");
 
@@ -134,19 +142,18 @@ void render(AppContext& ctx)
 			// runs), not of the switch that starts it — so it stays editable with
 			// Auto-Advance off. Greying it out forced the user to enable the cycle
 			// just to dial the length in, then switch it back off.
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##cyclelen", &env->cycleSeconds, 5.0f, 600.0f,
-			                   "Full day: %.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
+			Row::sliderFloat("Day Length", &env->cycleSeconds, 5.0f, 600.0f,
+			                 "%.0f s", ImGuiSliderFlags_Logarithmic); trackEdit();
 			if (!env->autoAdvance)
-				ImGui::TextDisabled("Takes effect once Auto-Advance is on.");
+				hint("Takes effect once Auto-Advance is on.");
 
 			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::ColorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::SliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f, "%.2f"); trackEdit();
-			ImGui::ColorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::SliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f, "%.2f"); trackEdit();
+			Row::colorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::sliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f); trackEdit();
+			Row::colorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::sliderFloat("Moon Brightness", &env->moonIntensity, 0.0f, 10.0f); trackEdit();
 
-			ImGui::SeparatorText("Moon Phase");
+			EditorWidgets::subHeading("Moon Phase");
 			{
 				float mp = env->moonPhase;
 				const char* nm = (mp < 0.03f || mp > 0.97f) ? "New Moon" :
@@ -156,14 +163,12 @@ void render(AppContext& ctx)
 				                 mp < 0.53f ? "Full Moon" :
 				                 mp < 0.72f ? "Waning Gibbous" :
 				                 mp < 0.78f ? "Last Quarter" : "Waning Crescent";
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::SliderFloat("##moonphase", &env->moonPhase, 0.0f, 1.0f, "Phase: %.3f")) trackEdit();
-				ImGui::TextDisabled("%s", nm);
+				if (Row::sliderFloat("Phase", &env->moonPhase, 0.0f, 1.0f, "%.3f")) trackEdit();
+				hint("%s", nm);
 				if (ImGui::Checkbox("Auto Lunar Cycle", &env->moonPhaseAuto)) trackEdit();
-				ImGui::SameLine(); ImGui::TextDisabled("(needs Auto-Advance)");
+				hint("Advances the phase on its own — needs Auto-Advance above.");
 				ImGui::BeginDisabled(!env->moonPhaseAuto);
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::SliderFloat("##mooncycledays", &env->moonCycleDays, 1.0f, 60.0f, "Lunar cycle: %.1f days")) trackEdit();
+				if (Row::sliderFloat("Lunar Cycle Length", &env->moonCycleDays, 1.0f, 60.0f, "%.1f days")) trackEdit();
 				ImGui::EndDisabled();
 			}
 
@@ -172,23 +177,20 @@ void render(AppContext& ctx)
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
 			if (ImGui::TreeNodeEx("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##cloudcoverage", &env->cloudCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
-			ImGui::TextDisabled("Full overcast dims the sun & fills with ambient light.");
+			Row::sliderFloat("Coverage", &env->cloudCoverage, 0.0f, 1.0f); trackEdit();
+			hint("Full overcast dims the sun & fills with ambient light.");
 			// Cloud render mode (OpenGL backend): sky-dome (cheap, infinite — no parallax)
 			// vs 3D volumetric (world-anchored — clouds parallax as you move through the
 			// scene). 3D exposes a height slider to match the world's unit scale.
 			{
 				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
 				int cmode = (env->cloudMode == 1) ? 1 : 0;
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##cloudmode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
+				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
 				if (env->cloudMode == 1)
 				{
-					ImGui::SetNextItemWidth(-1.0f);
-					ImGui::SliderFloat("##cloudheight", &env->cloudHeight, 20.0f, 2000.0f,
-					                   "3D height: %.0f"); trackEdit();
-					ImGui::TextDisabled("Lifts the cloud band higher in the sky (clear sky opens toward the\nhorizon); the clouds keep the same size & shape (OpenGL only).");
+					Row::sliderFloat("Cloud Height", &env->cloudHeight, 20.0f, 2000.0f, "%.0f"); trackEdit();
+					hint("Lifts the cloud band higher in the sky (clear sky opens toward the "
+					     "horizon); the clouds keep the same size & shape (OpenGL only).");
 				}
 			}
 			// Cloud quality (performance): scales the raymarch step counts + sun
@@ -197,131 +199,105 @@ void render(AppContext& ctx)
 			{
 				const char* cloudQ[] = { "Low (fastest)", "Medium", "High (best)" };
 				int q = (env->cloudQuality < 0) ? 0 : (env->cloudQuality > 2 ? 2 : env->cloudQuality);
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##cloudquality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
-				ImGui::TextDisabled("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
+				if (Row::combo("Quality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
+				hint("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
 				if (ImGui::Checkbox("Low-res clouds (quarter-res pass)", &env->lowResClouds)) trackEdit();
-				ImGui::TextDisabled("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views.\nToggle + F9 to A/B the cost. (Metal first.)");
+				hint("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views. "
+				     "Toggle + F9 to A/B the cost. (Metal first.)");
 			}
 			// Cloud appearance: tweak the look without re-rolling the pattern.
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##clouddensity", &env->cloudDensity, 0.2f, 2.5f, "Density: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##cloudfluffy", &env->cloudFluffiness, 0.0f, 1.0f, "Fluffiness: %.2f"); trackEdit();
-			ImGui::ColorEdit3("Cloud Tint", &env->cloudTint.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::TextDisabled("Density thickens, fluffiness breaks the bodies into puffy cauliflower lumps.");
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##winddir", &env->windDirection, 0.0f, 360.0f, "Wind direction: %.0f\xc2\xb0"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##windspeed", &env->windSpeed, 0.0f, 4.0f, "Wind speed: %.2f"); trackEdit();
+			Row::sliderFloat("Density", &env->cloudDensity, 0.2f, 2.5f); trackEdit();
+			Row::sliderFloat("Fluffiness", &env->cloudFluffiness, 0.0f, 1.0f); trackEdit();
+			Row::colorEdit3("Cloud Tint", &env->cloudTint.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			hint("Density thickens, fluffiness breaks the bodies into puffy cauliflower lumps.");
+			Row::sliderFloat("Wind Direction", &env->windDirection, 0.0f, 360.0f, "%.0f\xc2\xb0"); trackEdit();
+			Row::sliderFloat("Wind Speed", &env->windSpeed, 0.0f, 4.0f); trackEdit();
 
 			ImGui::TreePop(); } // end Clouds
 
 			if (ImGui::TreeNodeEx("Contrails & Cirrus")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##contrails", &env->contrailAmount, 0.0f, 1.0f, "Contrails: %.2f"); trackEdit();
-			ImGui::TextDisabled("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##cirrus", &env->cirrusAmount, 0.0f, 1.0f, "Cirrus: %.2f"); trackEdit();
+			Row::sliderFloat("Contrails", &env->contrailAmount, 0.0f, 1.0f); trackEdit();
+			hint("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
+			Row::sliderFloat("Cirrus", &env->cirrusAmount, 0.0f, 1.0f); trackEdit();
 			ImGui::BeginDisabled(env->cirrusAmount <= 0.0f);
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##cirrusseed", &env->cirrusSeed, 0.0f, 50.0f, "Cirrus seed: %.1f"); trackEdit();
+			Row::sliderFloat("Cirrus Seed", &env->cirrusSeed, 0.0f, 50.0f, "%.1f"); trackEdit();
 			ImGui::EndDisabled();
-			ImGui::TextDisabled("Thin high wispy clouds. Intensity = cover, seed re-rolls the pattern (OpenGL).");
+			hint("Thin high wispy clouds. Intensity = cover, seed re-rolls the pattern (OpenGL).");
 
 			ImGui::TreePop(); } // end Contrails & Cirrus
 
 			if (ImGui::TreeNodeEx("Sun Effects")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##godrays", &env->godRays, 0.0f, 1.0f, "God rays: %.2f"); trackEdit();
-			ImGui::TextDisabled("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##lensflare", &env->lensFlare, 0.0f, 1.0f, "Lens flare: %.2f"); trackEdit();
-			ImGui::TextDisabled("Camera lens flare for the sun: core, ghost discs and a halo along the sun\xe2\x86\x92screen-centre axis. Fades when the sun is off-screen, below the horizon, or occluded. A camera artifact.");
+			Row::sliderFloat("God Rays", &env->godRays, 0.0f, 1.0f); trackEdit();
+			hint("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. "
+			     "Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
+			Row::sliderFloat("Lens Flare", &env->lensFlare, 0.0f, 1.0f); trackEdit();
+			hint("Camera lens flare for the sun: core, ghost discs and a halo along the "
+			     "sun\xe2\x86\x92screen-centre axis. Fades when the sun is off-screen, below the "
+			     "horizon, or occluded. A camera artifact.");
 
 			ImGui::TreePop(); } // end Sun Effects
 
 			if (ImGui::TreeNodeEx("Atmospheric Fog")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##fogdensity", &env->fogDensity, 0.0f, 0.15f, "Density: %.3f"); trackEdit();
+			Row::sliderFloat("Density##fog", &env->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
 			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##fogheight", &env->fogHeightFalloff, 0.0f, 1.0f, "Ground hugging: %.2f"); trackEdit();
+			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
 			ImGui::EndDisabled();
-			ImGui::TextDisabled("Distant objects blend into the horizon (warm at sunset).");
+			hint("Distant objects blend into the horizon (warm at sunset).");
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
 			if (ImGui::TreeNodeEx("Precipitation & Ground")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##rain", &env->rainAmount, 0.0f, 1.0f, "Rain: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##snow", &env->snowAmount, 0.0f, 1.0f, "Snow: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##wetness", &env->wetness, 0.0f, 1.0f, "Wetness: %.2f"); trackEdit();
-			ImGui::TextDisabled("Rain/snow spawn particles; wetness darkens & snow whitens the ground.");
+			Row::sliderFloat("Rain", &env->rainAmount, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Snow", &env->snowAmount, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Wetness", &env->wetness, 0.0f, 1.0f); trackEdit();
+			hint("Rain/snow spawn particles; wetness darkens & snow whitens the ground.");
 
 			ImGui::TreePop(); } // end Precipitation & Ground
 
 			if (ImGui::TreeNodeEx("Stars & Milky Way")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##starbright", &env->starBrightness, 0.0f, 3.0f, "Star Brightness: %.2f"); trackEdit();
-			ImGui::ColorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##stardensity", &env->starDensity, 0.0f, 1.0f, "Star Amount: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##starsize", &env->starSize, 0.3f, 2.5f, "Star Size: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##starsizevar", &env->starSizeVariation, 0.0f, 1.0f, "Size Variation: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##starglow", &env->starGlow, 0.0f, 3.0f, "Star Glow: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##startwinkle", &env->starTwinkle, 0.0f, 1.0f, "Twinkle: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##milkyway", &env->milkyWayIntensity, 0.0f, 1.0f, "Milky Way: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##shootingstars", &env->shootingStars, 0.0f, 1.0f, "Shooting Stars: %.2f"); trackEdit();
-			ImGui::TextDisabled("Occasional meteors streak across the night sky; higher = more frequent. Night only.");
-			ImGui::TextDisabled("Stars, Milky Way & nebula turn with the day-night cycle.");
+			Row::sliderFloat("Star Brightness", &env->starBrightness, 0.0f, 3.0f); trackEdit();
+			Row::colorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::sliderFloat("Star Amount", &env->starDensity, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Star Size", &env->starSize, 0.3f, 2.5f); trackEdit();
+			Row::sliderFloat("Size Variation", &env->starSizeVariation, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Star Glow", &env->starGlow, 0.0f, 3.0f); trackEdit();
+			Row::sliderFloat("Twinkle", &env->starTwinkle, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Milky Way", &env->milkyWayIntensity, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Shooting Stars", &env->shootingStars, 0.0f, 1.0f); trackEdit();
+			hint("Occasional meteors streak across the night sky; higher = more frequent. "
+			     "Night only. Stars, Milky Way & nebula turn with the day-night cycle.");
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
 			if (ImGui::TreeNodeEx("Nebula")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##nebula", &env->nebulaIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##nebulacover", &env->nebulaCoverage, 0.0f, 1.0f, "Coverage: %.2f"); trackEdit();
+			Row::sliderFloat("Intensity", &env->nebulaIntensity, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Coverage", &env->nebulaCoverage, 0.0f, 1.0f); trackEdit();
 			{
 				// Combo index == nebulaQuality (0 Performance, 1 High, 2 Max).
 				int nebQ = env->nebulaQuality < 0 ? 0 : (env->nebulaQuality > 2 ? 2 : env->nebulaQuality);
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##nebulafidelity", &nebQ,
+				if (Row::comboZ("Fidelity", &nebQ,
 				    "High Performance (lighter)\0High Fidelity (detailed)\0Max Quality (most detail)\0"))
 				{ env->nebulaQuality = nebQ; trackEdit(); }
 				if (nebQ == 2)
-					ImGui::TextDisabled("Extra filament octaves + crisper lines (night sky; pricier). Metal/OpenGL.");
+					hint("Extra filament octaves + crisper lines (night sky; pricier). Metal/OpenGL.");
 			}
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##nebulaseed", &env->nebulaSeed, 0.0f, 50.0f, "Seed: %.1f"); trackEdit();
-			ImGui::ColorEdit3("Nebula Color 1", &env->nebulaColor.x,  ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::ColorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::ColorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::sliderFloat("Seed", &env->nebulaSeed, 0.0f, 50.0f, "%.1f"); trackEdit();
+			Row::colorEdit3("Nebula Color 1", &env->nebulaColor.x,  ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 
 			ImGui::TreePop(); } // end Nebula
 
 			if (ImGui::TreeNodeEx("Aurora")) {
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##aurora", &env->auroraIntensity, 0.0f, 1.0f, "Intensity: %.2f"); trackEdit();
-			ImGui::ColorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
-			ImGui::ColorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::sliderFloat("Intensity", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
+			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::BeginDisabled(env->auroraIntensity <= 0.0f);
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##auroraheight", &env->auroraHeight, 0.0f, 1.0f, "Height: %.2f"); trackEdit();
-			ImGui::SetNextItemWidth(-1.0f);
-			ImGui::SliderFloat("##aurorafrag", &env->auroraFragmentation, 0.0f, 1.0f, "Fragmentation: %.2f"); trackEdit();
+			Row::sliderFloat("Height", &env->auroraHeight, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Fragmentation", &env->auroraFragmentation, 0.0f, 1.0f); trackEdit();
 			ImGui::EndDisabled();
-			ImGui::TextDisabled("Night only — fades out as the sun rises. Height sets the band's");
-			ImGui::TextDisabled("altitude, Fragmentation how much the curtain breaks up.");
+			hint("Night only — fades out as the sun rises. Height sets the band's altitude, "
+			     "Fragmentation how much the curtain breaks up.");
 			ImGui::TreePop(); } // end Aurora
 		}
 		ImGui::Separator();
@@ -336,37 +312,39 @@ void render(AppContext& ctx)
 			{
 				const char* kinds[] = { "Clear","Cloudy","Overcast","Foggy","Rain","Storm","Snow" };
 				int target = static_cast<int>(w->targetKind);
-				ImGui::SetNextItemWidth(-1.0f);
-				if (ImGui::Combo("##weatherkind", &target, kinds, IM_ARRAYSIZE(kinds)))
+				if (Row::combo("Preset", &target, kinds, IM_ARRAYSIZE(kinds)))
 				{
 					w->targetKind = static_cast<WeatherKind>(target);
 					trackEdit();
 				}
-				ImGui::SliderFloat("Intensity",  &w->intensity, 0.0f, 1.0f, "%.2f"); trackEdit();
-				ImGui::SliderFloat("Transition", &w->transitionDuration, 0.0f, 30.0f, "%.1f s"); trackEdit();
+				Row::sliderFloat("Intensity",  &w->intensity, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Transition", &w->transitionDuration, 0.0f, 30.0f, "%.1f s"); trackEdit();
 				ImGui::Checkbox("Auto-Cycle", &w->autoCycle); trackEdit();
 				ImGui::BeginDisabled(!w->autoCycle);
-				ImGui::SliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
-				                   ImGuiSliderFlags_Logarithmic); trackEdit();
+				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
+				                 ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-				ImGui::TextDisabled("Picking a preset sets clouds/fog/wind/precip; the sliders above\nstay editable, so you can nudge any value afterwards.");
+				hint("Picking a preset sets clouds/fog/wind/precip; the sliders above stay "
+				     "editable, so you can nudge any value afterwards.");
 
+				EditorWidgets::subHeading("Current State");
 				if (w->currentKind != w->targetKind)
 					ImGui::Text("Transitioning %s -> %s",
 					            kinds[static_cast<int>(w->currentKind)],
 					            kinds[static_cast<int>(w->targetKind)]);
 				else
 					ImGui::Text("Current: %s", kinds[static_cast<int>(w->currentKind)]);
-				ImGui::TextDisabled("Cloud %.2f  Fog %.3f  Wind %.2f  Precip %.2f",
-				                    w->curCloudCoverage, w->curFogDensity,
-				                    w->curWindSpeed, w->curPrecip);
+				hint("Cloud %.2f  Fog %.3f  Wind %.2f  Precip %.2f",
+				     w->curCloudCoverage, w->curFogDensity,
+				     w->curWindSpeed, w->curPrecip);
 
-				ImGui::SeparatorText("Precipitation");
-				ImGui::DragInt("Max Rain", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
-				ImGui::DragInt("Max Snow", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
-				ImGui::DragFloat("Ground Y", &w->groundLevel, 0.1f, -1000.0f, 1000.0f,
-				                 "%.1f (fallback floor)"); trackEdit();
-				ImGui::TextDisabled("Drops collide via physics in Play; else die at Ground Y.");
+				EditorWidgets::subHeading("Precipitation");
+				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
+				Row::dragInt("Max Snow Particles", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
+				Row::dragFloat("Ground Y", &w->groundLevel, 0.1f, -1000.0f, 1000.0f,
+				               "%.1f"); trackEdit();
+				hint("Drops collide via physics in Play; else they die at Ground Y (the "
+				     "fallback floor).");
 
 				// Thunder sound — drop an audio .hasset here (played on each strike).
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
@@ -400,9 +378,9 @@ void render(AppContext& ctx)
 		if (componentHeader("Transform", true, removed))
 		{
 			bool changed = false;
-			changed |= ImGui::DragFloat3("Position", &t->position.x, 0.05f); trackEdit();
-			changed |= ImGui::DragFloat3("Rotation", &t->rotation.x, 0.5f);  trackEdit();
-			changed |= ImGui::DragFloat3("Scale",    &t->scale.x,    0.05f); trackEdit();
+			changed |= Row::dragFloat3("Position", &t->position.x, 0.05f); trackEdit();
+			changed |= Row::dragFloat3("Rotation", &t->rotation.x, 0.5f);  trackEdit();
+			changed |= Row::dragFloat3("Scale",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TransformComponent>(entity); }
@@ -414,9 +392,9 @@ void render(AppContext& ctx)
 		if (componentHeader("Transform 2D", true, removed))
 		{
 			bool changed = false;
-			changed |= ImGui::DragFloat2("Position##2d", &t->position.x, 0.05f); trackEdit();
-			changed |= ImGui::DragFloat("Rotation##2d",  &t->rotation,   0.5f);  trackEdit();
-			changed |= ImGui::DragFloat2("Scale##2d",    &t->scale.x,    0.05f); trackEdit();
+			changed |= Row::dragFloat2("Position##2d", &t->position.x, 0.05f); trackEdit();
+			changed |= Row::dragFloat("Rotation##2d",  &t->rotation,   0.5f);  trackEdit();
+			changed |= Row::dragFloat2("Scale##2d",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<Transform2DComponent>(entity); }
@@ -438,7 +416,7 @@ void render(AppContext& ctx)
 				"(none — drop a mesh here; renders fallback cube)", "static mesh",
 				/*showClear=*/true);
 			int lod = m->lodBias;
-			if (ImGui::InputInt("LOD Bias", &lod))
+			if (Row::inputInt("LOD Bias", &lod))
 				m->lodBias = static_cast<uint8_t>(std::clamp(lod, 0, 255));
 			ImGui::Checkbox("Visible",         &m->visible); trackEdit();
 			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
@@ -487,8 +465,8 @@ void render(AppContext& ctx)
 				? ctx.contentManager->getAnimationClip(an->clipAssetId) : nullptr;
 
 			// Playback controls
-			ImGui::DragFloat("Speed##an",    &an->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
-			ImGui::DragFloat("Time##an",     &an->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+			Row::dragFloat("Speed##an",    &an->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			Row::dragFloat("Time##an",     &an->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
 			ImGui::Checkbox("Looping##an",   &an->looping); trackEdit();
 			ImGui::SameLine();
 			ImGui::Checkbox("Playing##an",   &an->playing); trackEdit();
@@ -513,9 +491,9 @@ void render(AppContext& ctx)
 
 			clipSlot("Clip A", ab->clipAId);
 			clipSlot("Clip B", ab->clipBId);
-			ImGui::SliderFloat("Blend##ab",  &ab->blendAlpha,    0.0f, 1.0f, "%.2f"); trackEdit();
-			ImGui::DragFloat("Speed##ab",    &ab->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
-			ImGui::DragFloat("Time##ab",     &ab->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+			Row::sliderFloat("Blend##ab",  &ab->blendAlpha,    0.0f, 1.0f, "%.2f"); trackEdit();
+			Row::dragFloat("Speed##ab",    &ab->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			Row::dragFloat("Time##ab",     &ab->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
 			ImGui::Checkbox("Looping##ab",   &ab->looping); trackEdit();
 			ImGui::SameLine();
 			ImGui::Checkbox("Playing##ab",   &ab->playing); trackEdit();
@@ -543,12 +521,12 @@ void render(AppContext& ctx)
 					/*showClear=*/true) != EditorWidgets::SlotAction::None)
 				AnimationStateMachineSystem::markConfigDirty(*asm_);
 
-			ImGui::LabelText("Current##sm", "%s",
+			Row::labelText("Current##sm", "%s",
 				asm_->currentStateName.empty() ? "(none)" : asm_->currentStateName.c_str());
-			ImGui::DragFloat("Speed##sm", &asm_->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			Row::dragFloat("Speed##sm", &asm_->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 			if (asm_->inTransition)
 			{
-				ImGui::LabelText("-> ##sm", "%s", asm_->transitionTarget.c_str());
+				Row::labelText("Transitioning To##sm", "%s", asm_->transitionTarget.c_str());
 				const float pct = asm_->transitionDuration > 0.0f
 					? asm_->transitionElapsed / asm_->transitionDuration : 0.0f;
 				ImGui::ProgressBar(std::min(pct, 1.0f), ImVec2(-1, 0), "crossfade");
@@ -568,8 +546,8 @@ void render(AppContext& ctx)
 			const PropertyAnimClipAsset* cur = (pa->clipId != HE::UUID{} && ctx.contentManager)
 				? ctx.contentManager->getPropertyAnimClip(pa->clipId) : nullptr;
 
-			ImGui::DragFloat("Speed##pa",  &pa->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
-			ImGui::DragFloat("Time##pa",   &pa->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
+			Row::dragFloat("Speed##pa",  &pa->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+			Row::dragFloat("Time##pa",   &pa->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
 			ImGui::Checkbox("Looping##pa", &pa->looping); trackEdit();
 			ImGui::SameLine();
 			ImGui::Checkbox("Playing##pa", &pa->playing); trackEdit();
@@ -588,12 +566,12 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Nav Mesh", true, removed))
 		{
-			ImGui::DragFloat("Cell Size##nm",       &nmc->config.cellSize,      0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
-			ImGui::DragFloat("Cell Height##nm",     &nmc->config.cellHeight,    0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
-			ImGui::DragFloat("Walk Height##nm",     &nmc->config.walkableHeight,0.1f,  0.5f,  5.0f,   "%.2f"); trackEdit();
-			ImGui::DragFloat("Walk Climb##nm",      &nmc->config.walkableClimb, 0.1f,  0.0f,  2.0f,   "%.2f"); trackEdit();
-			ImGui::DragFloat("Walk Radius##nm",     &nmc->config.walkableRadius,0.05f, 0.0f,  2.0f,   "%.2f"); trackEdit();
-			ImGui::DragFloat("Max Slope##nm",       &nmc->config.maxSlope,      1.0f,  0.0f,  90.0f,  "%.1f°"); trackEdit();
+			Row::dragFloat("Cell Size##nm",       &nmc->config.cellSize,      0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
+			Row::dragFloat("Cell Height##nm",     &nmc->config.cellHeight,    0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
+			Row::dragFloat("Walk Height##nm",     &nmc->config.walkableHeight,0.1f,  0.5f,  5.0f,   "%.2f"); trackEdit();
+			Row::dragFloat("Walk Climb##nm",      &nmc->config.walkableClimb, 0.1f,  0.0f,  2.0f,   "%.2f"); trackEdit();
+			Row::dragFloat("Walk Radius##nm",     &nmc->config.walkableRadius,0.05f, 0.0f,  2.0f,   "%.2f"); trackEdit();
+			Row::dragFloat("Max Slope##nm",       &nmc->config.maxSlope,      1.0f,  0.0f,  90.0f,  "%.1f°"); trackEdit();
 			ImGui::Separator();
 			ImGui::Text("Geometry: %zu verts  %zu tris",
 				nmc->geometry.verts.size() / 3,
@@ -616,9 +594,9 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Nav Agent", true, removed))
 		{
-			ImGui::DragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
-			ImGui::DragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
-			ImGui::DragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
+			Row::dragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
+			Row::dragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
+			Row::dragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
 			ImGui::Separator();
 			ImGui::Text("Path: %zu pts  idx=%zu  %s",
 				na->path.size(), na->pathIdx,
@@ -662,18 +640,18 @@ void render(AppContext& ctx)
 				char sbuf[260];
 				std::strncpy(sbuf, mat->shaderPath.c_str(), sizeof(sbuf) - 1);
 				sbuf[sizeof(sbuf) - 1] = '\0';
-				if (ImGui::InputText("Shader", sbuf, sizeof(sbuf)))
+				if (Row::inputText("Shader", sbuf, sizeof(sbuf)))
 					mat->shaderPath = sbuf;
 
 				// Surface (PBR scalars) — applied live (the renderer reads them
 				// from the shared MaterialAsset each frame); "Save Material" persists.
 				ImGui::SeparatorText("Surface");
-				ImGui::ColorEdit3("Base Color", mat->baseColor);
-				ImGui::SliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
-				ImGui::SliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
+				Row::colorEdit3("Base Color", mat->baseColor);
+				Row::sliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
+				Row::sliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
 				// Opacity < 1 routes the object into the sorted, alpha-blended
 				// transparency pass.
-				ImGui::SliderFloat("Opacity",   &mat->opacity,   0.0f, 1.0f, "%.2f");
+				Row::sliderFloat("Opacity",   &mat->opacity,   0.0f, 1.0f, "%.2f");
 
 				// Texture slots — editable text + per-slot drop target + remove.
 				ImGui::TextUnformatted("Textures");
@@ -743,16 +721,15 @@ void render(AppContext& ctx)
 
 						ImGui::PushID(static_cast<int>(i));
 						bool edited = false;
-						ImGui::SetNextItemWidth(-60.0f);
 						const char* label = nm.empty() ? "param" : nm.c_str();
 						switch (kind)
 						{
 							case HE::MatParamKind::Color:
-								edited = ImGui::ColorEdit3(label, val, ImGuiColorEditFlags_Float); break;
+								edited = Row::colorEdit3(label, val, ImGuiColorEditFlags_Float); break;
 							case HE::MatParamKind::Vec2:
-								edited = ImGui::DragFloat2(label, val, 0.01f); break;
+								edited = Row::dragFloat2(label, val, 0.01f); break;
 							case HE::MatParamKind::Vec4:
-								edited = ImGui::DragFloat4(label, val, 0.01f); break;
+								edited = Row::dragFloat4(label, val, 0.01f); break;
 							case HE::MatParamKind::Bool:
 							{
 								bool b = val[0] > 0.5f;
@@ -760,7 +737,7 @@ void render(AppContext& ctx)
 								break;
 							}
 							default: // Float
-								edited = ImGui::DragFloat(label, val, 0.01f); break;
+								edited = Row::dragFloat(label, val, 0.01f); break;
 						}
 						if (edited)
 						{
@@ -769,11 +746,10 @@ void render(AppContext& ctx)
 							for (int k = 0; k < 4; ++k) m->paramOverrides[w].value[k] = val[k];
 							m->dirty = true;
 						}
-						if (ovi >= 0)
-						{
-							ImGui::SameLine();
-							if (ImGui::SmallButton("Reset")) resetIndex = ovi;
-						}
+						// Below the control, not beside it: the control now spans the
+						// panel, so a SameLine button would sit off the right edge.
+						if (ovi >= 0 && ImGui::SmallButton("Reset to material default"))
+							resetIndex = ovi;
 						ImGui::PopID();
 					}
 					if (resetIndex >= 0 && resetIndex < (int)m->paramOverrides.size())
@@ -782,7 +758,7 @@ void render(AppContext& ctx)
 						m->dirty = true;
 					}
 					if (!m->paramOverrides.empty())
-						ImGui::TextDisabled("%zu override(s) on this entity", m->paramOverrides.size());
+						hint("%zu override(s) on this entity.", m->paramOverrides.size());
 				}
 
 				// Custom shader (fragment GLSL). Empty → built-in PBR. When set, the
@@ -791,7 +767,7 @@ void render(AppContext& ctx)
 				// isn't recompiled on every keystroke — applied on focus-loss / Apply, then
 				// picked up live (the renderer re-resolves the shader each frame).
 				ImGui::SeparatorText("Custom Shader (Fragment GLSL)");
-				ImGui::TextDisabled("in vec3 vNormal (loc0), vColor (loc1)  ->  out vec4 oColor (loc0)");
+				hint("in vec3 vNormal (loc0), vColor (loc1)  ->  out vec4 oColor (loc0)");
 				static std::string s_shaderEdit;
 				static HE::UUID    s_shaderEditFor{};
 				if (!(s_shaderEditFor == m->materialAssetId))
@@ -860,10 +836,9 @@ void render(AppContext& ctx)
 							 + " material '" + mat->name + "'").c_str());
 					}
 				}
-				ImGui::SameLine();
-				ImGui::TextDisabled(isBuiltIn
-					? "(engine default — Save makes a project copy)"
-					: "(edits apply live; Save writes to disk)");
+				hint(isBuiltIn
+					? "Engine default — Save makes a project copy."
+					: "Edits apply live; Save writes them to disk.");
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }
@@ -874,9 +849,9 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Camera", true, removed))
 		{
-			ImGui::DragFloat("FOV",        &c->fovDegrees, 0.5f, 1.0f, 179.0f); trackEdit();
-			ImGui::DragFloat("Near Plane", &c->nearPlane,  0.01f, 0.001f, 100.0f); trackEdit();
-			ImGui::DragFloat("Far Plane",  &c->farPlane,   1.0f,  0.1f, 100000.0f); trackEdit();
+			Row::dragFloat("FOV",        &c->fovDegrees, 0.5f, 1.0f, 179.0f); trackEdit();
+			Row::dragFloat("Near Plane", &c->nearPlane,  0.01f, 0.001f, 100.0f); trackEdit();
+			Row::dragFloat("Far Plane",  &c->farPlane,   1.0f,  0.1f, 100000.0f); trackEdit();
 			ImGui::Checkbox("Main Camera", &c->isMain); trackEdit();
 			ImGui::Checkbox("Orthographic", &c->orthographic); trackEdit();
 		}
@@ -890,22 +865,21 @@ void render(AppContext& ctx)
 		{
 			static const char* kLightTypes[] = { "Directional", "Point", "Spot" };
 			int type = static_cast<int>(l->type);
-			if (ImGui::Combo("Type", &type, kLightTypes, 3))
+			if (Row::combo("Type", &type, kLightTypes, 3))
 			{
 				if (ctx.undoSys) ctx.undoSys->snapshotNow();
 				l->type = static_cast<LightType>(type);
 			}
-			ImGui::ColorEdit3("Color",    &l->color.x); trackEdit();
-			ImGui::DragFloat("Intensity", &l->intensity, 0.05f, 0.0f, 1000.0f); trackEdit();
+			Row::colorEdit3("Color",    &l->color.x); trackEdit();
+			Row::dragFloat("Intensity", &l->intensity, 0.05f, 0.0f, 1000.0f); trackEdit();
 			if (l->type != LightType::Directional)
-				ImGui::DragFloat("Range", &l->range, 0.1f, 0.0f, 10000.0f); trackEdit();
+				Row::dragFloat("Range", &l->range, 0.1f, 0.0f, 10000.0f); trackEdit();
 			if (l->type == LightType::Spot)
-				ImGui::DragFloat("Spot Angle", &l->spotAngle, 0.5f, 1.0f, 179.0f); trackEdit();
+				Row::dragFloat("Spot Angle", &l->spotAngle, 0.5f, 1.0f, 179.0f); trackEdit();
 			if (l->type != LightType::Directional)
 			{
-				ImGui::DragFloat("Cull Distance", &l->cullDistance, 0.5f, 0.0f, 100000.0f); trackEdit();
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Deactivate this light beyond this camera distance (0 = never)");
+				Row::dragFloat("Cull Distance", &l->cullDistance, 0.5f, 0.0f, 100000.0f); trackEdit();
+				hint("Deactivate this light beyond this camera distance (0 = never).");
 			}
 			ImGui::Checkbox("Visible##light",      &l->visible);     trackEdit();
 			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
@@ -918,11 +892,11 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Decal", true, removed))
 		{
-			ImGui::ColorEdit4("Color##decal", &d->color.x); trackEdit();
+			Row::colorEdit4("Color##decal", &d->color.x); trackEdit();
 			EditorWidgets::assetDropSlot(ctx, "Texture", d->textureId, HE::AssetType::Texture,
 			                             "decaltex", "(none — drop a texture here)", "texture", true);
-			ImGui::TextDisabled("Projects along the entity's local Y through its scaled box.\n"
-			                    "Renders in the Deferred path (Metal).");
+				hint("Projects along the entity's local Y through its scaled box. "
+				     "Renders in the Deferred path (Metal).");
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<DecalComponent>(entity); }
 	}
@@ -934,14 +908,14 @@ void render(AppContext& ctx)
 		{
 			static const char* kBodyTypes[] = { "Static", "Dynamic", "Kinematic" };
 			int type = static_cast<int>(r->type);
-			if (ImGui::Combo("Body Type", &type, kBodyTypes, 3))
+			if (Row::combo("Body Type", &type, kBodyTypes, 3))
 			{
 				if (ctx.undoSys) ctx.undoSys->snapshotNow();
 				r->type = static_cast<RigidBodyType>(type);
 			}
-			ImGui::DragFloat("Mass",        &r->mass,        0.1f, 0.0f, 100000.0f); trackEdit();
-			ImGui::DragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
-			ImGui::DragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
+			Row::dragFloat("Mass",        &r->mass,        0.1f, 0.0f, 100000.0f); trackEdit();
+			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
+			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			ImGui::Checkbox("2D Physics",   &r->is2D); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
@@ -954,7 +928,7 @@ void render(AppContext& ctx)
 		{
 			static const char* kShapes[] = { "Box", "Sphere", "Capsule" };
 			int shape = static_cast<int>(col->shape);
-			if (ImGui::Combo("Shape", &shape, kShapes, 3))
+			if (Row::combo("Shape", &shape, kShapes, 3))
 			{
 				if (ctx.undoSys) ctx.undoSys->snapshotNow();
 				col->shape = static_cast<ColliderShape>(shape);
@@ -962,14 +936,14 @@ void render(AppContext& ctx)
 			switch (col->shape)
 			{
 			case ColliderShape::Box:
-				ImGui::DragFloat3("Half Extents", &col->halfExtents.x, 0.01f, 0.001f, 100.0f); trackEdit();
+				Row::dragFloat3("Half Extents", &col->halfExtents.x, 0.01f, 0.001f, 100.0f); trackEdit();
 				break;
 			case ColliderShape::Sphere:
-				ImGui::DragFloat("Radius", &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
+				Row::dragFloat("Radius", &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
 				break;
 			case ColliderShape::Capsule:
-				ImGui::DragFloat("Radius",       &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
-				ImGui::DragFloat("Total Height", &col->height, 0.01f, 0.001f, 100.0f); trackEdit();
+				Row::dragFloat("Radius",       &col->radius, 0.01f, 0.001f, 100.0f); trackEdit();
+				Row::dragFloat("Total Height", &col->height, 0.01f, 0.001f, 100.0f); trackEdit();
 				break;
 			}
 			ImGui::Checkbox("Is Trigger", &col->isTrigger); trackEdit();
@@ -982,16 +956,16 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Character Controller", true, removed))
 		{
-			ImGui::DragFloat("Slope Limit (deg)", &cc->slopeLimit, 0.5f, 1.0f, 90.0f); trackEdit();
-			ImGui::DragFloat("Step Height (m)",   &cc->stepHeight, 0.01f, 0.0f, 2.0f); trackEdit();
-			ImGui::DragFloat("Skin Width (m)",    &cc->skinWidth,  0.001f, 0.001f, 0.5f); trackEdit();
-			ImGui::DragFloat("Mass (kg)",          &cc->mass,       0.5f, 1.0f, 500.0f); trackEdit();
-			ImGui::DragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
+			Row::dragFloat("Slope Limit (deg)", &cc->slopeLimit, 0.5f, 1.0f, 90.0f); trackEdit();
+			Row::dragFloat("Step Height (m)",   &cc->stepHeight, 0.01f, 0.0f, 2.0f); trackEdit();
+			Row::dragFloat("Skin Width (m)",    &cc->skinWidth,  0.001f, 0.001f, 0.5f); trackEdit();
+			Row::dragFloat("Mass (kg)",          &cc->mass,       0.5f, 1.0f, 500.0f); trackEdit();
+			Row::dragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			ImGui::Checkbox("Is Grounded", &cc->isGrounded);
 			float v[3] = { cc->velocity.x, cc->velocity.y, cc->velocity.z };
-			ImGui::DragFloat3("Velocity", v);
+			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
@@ -1005,16 +979,13 @@ void render(AppContext& ctx)
 			char buf[256];
 			std::strncpy(buf, s->moduleName.c_str(), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = '\0';
-			if (ImGui::InputText("Script Name", buf, sizeof(buf)))
+			if (Row::inputText("Script Name", buf, sizeof(buf)))
 			{
 				s->moduleName = buf;
 				trackEdit();
 			}
-			ImGui::SameLine();
-			ImGui::TextDisabled("(?)");
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Logical name matching ScriptEngine::loadScript(name, source).\n"
-				                  "Script must export onStart(self) and/or onUpdate(self, dt).");
+			hint("Logical name matching ScriptEngine::loadScript(name, source). The script "
+			     "must export onStart(self) and/or onUpdate(self, dt).");
 			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
 
 			// ── Declared properties (M.properties table) ──────────────────
@@ -1030,8 +1001,7 @@ void render(AppContext& ctx)
 					auto defs = ctx.propScriptEngine->getScriptProperties(s->moduleName);
 					if (!defs.empty())
 					{
-						ImGui::Separator();
-						ImGui::TextDisabled("Properties");
+						EditorWidgets::subHeading("Script Properties");
 						for (const auto& def : defs)
 						{
 							auto it = s->properties.find(def.name);
@@ -1044,10 +1014,10 @@ void render(AppContext& ctx)
 							switch (val.type)
 							{
 							case ScriptPropType::Float:
-								if (ImGui::DragFloat(def.name.c_str(), &val.f, 0.1f)) trackEdit();
+								if (Row::dragFloat(def.name.c_str(), &val.f, 0.1f)) trackEdit();
 								break;
 							case ScriptPropType::Int:
-								if (ImGui::DragInt(def.name.c_str(), &val.i)) trackEdit();
+								if (Row::dragInt(def.name.c_str(), &val.i)) trackEdit();
 								break;
 							case ScriptPropType::Bool:
 								if (ImGui::Checkbox(def.name.c_str(), &val.b)) trackEdit();
@@ -1057,7 +1027,7 @@ void render(AppContext& ctx)
 								char sbuf[256];
 								std::strncpy(sbuf, val.s.c_str(), sizeof(sbuf) - 1);
 								sbuf[sizeof(sbuf) - 1] = '\0';
-								if (ImGui::InputText(def.name.c_str(), sbuf, sizeof(sbuf)))
+								if (Row::inputText(def.name.c_str(), sbuf, sizeof(sbuf)))
 								{
 									val.s = sbuf;
 									trackEdit();
@@ -1079,39 +1049,36 @@ void render(AppContext& ctx)
 		if (componentHeader("Terrain", true, removed))
 		{
 			bool changed = false;
-			changed |= ImGui::DragFloat("Width (X)##tc",    &t->sizeX,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
-			changed |= ImGui::DragFloat("Depth (Z)##tc",    &t->sizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
+			changed |= Row::dragFloat("Width (X)##tc",    &t->sizeX,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
+			changed |= Row::dragFloat("Depth (Z)##tc",    &t->sizeZ,      1.0f,  1.0f, 10000.0f, "%.1f m"); trackEdit();
 			int res = static_cast<int>(t->resolution);
-			if (ImGui::SliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
+			if (Row::sliderInt("Resolution##tc", &res, 2, 512)) { t->resolution = static_cast<uint32_t>(res); changed = true; }
 			trackEdit();
-			changed |= ImGui::DragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
+			changed |= Row::dragFloat("Height Scale##tc", &t->heightScale, 0.5f,  0.0f, 1000.0f,  "%.1f m"); trackEdit();
 
 			// The generated UVs run 0..uvTiling over the WHOLE landscape, so at 1
 			// a texture is stretched across every metre of it. This is the knob
 			// that makes a terrain texture tile instead of smear.
-			changed |= ImGui::DragFloat("Texture Tiling##tc", &t->uvTiling, 0.25f, 0.01f, 4096.0f, "%.2f x"); trackEdit();
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("How often the material's texture repeats across the whole terrain.\n"
-				                  "For a texture that should cover N metres, use Width / N.");
-			ImGui::SameLine();
-			if (ImGui::SmallButton("4 m##tcuv"))
+			changed |= Row::dragFloat("Texture Tiling##tc", &t->uvTiling, 0.25f, 0.01f, 4096.0f, "%.2f x"); trackEdit();
+			hint("How often the material's texture repeats across the whole terrain. "
+			     "For a texture that should cover N metres, use Width / N.");
+			if (ImGui::SmallButton("Set for 4 m tiles##tcuv"))
 				{ t->uvTiling = std::max(0.01f, t->sizeX / 4.0f); changed = true; trackEdit(); }
 			// Authored LOD aggressiveness — now persisted with the scene.
-			changed |= ImGui::DragFloat("LOD Distance##tc", &t->lodDistanceScale, 0.05f, 0.1f, 20.0f, "%.2f x"); trackEdit();
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Higher = keep full detail farther from the camera.");
+			changed |= Row::dragFloat("LOD Distance##tc", &t->lodDistanceScale, 0.05f, 0.1f, 20.0f, "%.2f x"); trackEdit();
+			hint("Higher = keep full detail farther from the camera.");
 
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.
 			ImGui::SeparatorText("Noise (set at creation)");
 			ImGui::BeginDisabled();
-			ImGui::InputInt  ("Seed##tc",       &t->seed);
+			Row::inputInt("Seed##tc",       &t->seed);
 			int oct = t->octaves;
-			ImGui::SliderInt ("Octaves##tc",    &oct, 1, 8);
-			ImGui::DragFloat ("Frequency##tc",  &t->frequency,  0.01f, 0.01f, 16.0f, "%.2f");
-			ImGui::DragFloat ("Lacunarity##tc", &t->lacunarity, 0.01f, 1.0f,  8.0f,  "%.2f");
-			ImGui::DragFloat ("Gain##tc",       &t->gain,       0.01f, 0.0f,  1.0f,  "%.2f");
+			Row::sliderInt("Octaves##tc", &oct, 1, 8);
+			Row::dragFloat("Frequency##tc",  &t->frequency,  0.01f, 0.01f, 16.0f);
+			Row::dragFloat("Lacunarity##tc", &t->lacunarity, 0.01f, 1.0f,  8.0f);
+			Row::dragFloat("Gain##tc",       &t->gain,       0.01f, 0.0f,  1.0f);
 			ImGui::EndDisabled();
 
 			if (changed) t->dirty = true;
@@ -1127,21 +1094,21 @@ void render(AppContext& ctx)
 			char buf[64];
 			snprintf(buf, sizeof(buf), "%llu:%llu", (unsigned long long)a->assetId.hi,
 			         (unsigned long long)a->assetId.lo);
-			ImGui::LabelText("Asset ID", "%s", buf);
+			Row::labelText("Asset ID", "%s", buf);
 			char busBuf[64];
 			std::strncpy(busBuf, a->busName.c_str(), sizeof(busBuf) - 1);
 			busBuf[sizeof(busBuf) - 1] = '\0';
-			if (ImGui::InputText("Bus##as", busBuf, sizeof(busBuf))) { a->busName = busBuf; trackEdit(); }
-			ImGui::DragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
-			ImGui::DragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
+			if (Row::inputText("Bus##as", busBuf, sizeof(busBuf))) { a->busName = busBuf; trackEdit(); }
+			Row::dragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
+			Row::dragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
 			ImGui::Checkbox("Loop##as",        &a->loop);        trackEdit();
 			ImGui::Checkbox("Play on Start##as",&a->playOnStart); trackEdit();
 			ImGui::Checkbox("Spatial##as",     &a->spatial);     trackEdit();
 			if (a->spatial)
 			{
-				ImGui::DragFloat("Inner Range##as",   &a->innerRange,    0.1f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
-				ImGui::DragFloat("Range##as",         &a->range,         0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
-				ImGui::DragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f,  "%.2f");   trackEdit();
+				Row::dragFloat("Inner Range##as",   &a->innerRange,    0.1f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+				Row::dragFloat("Range##as",         &a->range,         0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
+				Row::dragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f,  "%.2f");   trackEdit();
 			}
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }
@@ -1152,7 +1119,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Audio Listener", true, removed))
 		{
-			ImGui::DragFloat("Master Volume##al", &l->masterVolume, 0.01f, 0.0f, 2.0f); trackEdit();
+			Row::dragFloat("Master Volume##al", &l->masterVolume, 0.01f, 0.0f, 2.0f); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
 	}
@@ -1183,11 +1150,11 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
-			ImGui::DragFloat("Density##fol",       &fol->density,      0.01f, 0.001f, 10.f); if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
-			ImGui::DragFloat("Draw Distance##fol", &fol->drawDistance, 1.0f,  1.0f,  500.f); trackEdit();
-			ImGui::DragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
-			ImGui::DragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
-			ImGui::DragInt  ("Seed##fol",          &fol->seed,         1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Density##fol",       &fol->density,      0.01f, 0.001f, 10.f); if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Draw Distance##fol", &fol->drawDistance, 1.0f,  1.0f,  500.f); trackEdit();
+			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
 			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
 		}
@@ -1231,10 +1198,10 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("UI Canvas", true, removed))
 		{
-			ImGui::DragFloat("Width##cv",  &cv->width,  1.0f, 1.0f, 7680.0f); trackEdit();
-			ImGui::DragFloat("Height##cv", &cv->height, 1.0f, 1.0f, 4320.0f); trackEdit();
+			Row::dragFloat("Width##cv",  &cv->width,  1.0f, 1.0f, 7680.0f); trackEdit();
+			Row::dragFloat("Height##cv", &cv->height, 1.0f, 1.0f, 4320.0f); trackEdit();
 			int rm = static_cast<int>(cv->renderMode);
-			if (ImGui::Combo("Render Mode##cv", &rm, "Screen Space\0World Space\0")) {
+			if (Row::comboZ("Render Mode##cv", &rm, "Screen Space\0World Space\0")) {
 				cv->renderMode = static_cast<UIRenderMode>(rm); trackEdit();
 			}
 			ImGui::Checkbox("Active##cv", &cv->active); trackEdit();
@@ -1247,18 +1214,18 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("UI Element", true, removed))
 		{
-			ImGui::DragFloat2("Position##el", glm::value_ptr(el->position), 1.0f); trackEdit();
-			ImGui::DragFloat2("Size##el",     glm::value_ptr(el->size),     1.0f, 0.0f, 10000.0f); trackEdit();
-			ImGui::DragFloat2("Pivot##el",    glm::value_ptr(el->pivot),    0.01f, 0.0f, 1.0f); trackEdit();
-			ImGui::DragFloat("Rotation##el",  &el->rotation, 0.5f); trackEdit();
+			Row::dragFloat2("Position##el", glm::value_ptr(el->position), 1.0f); trackEdit();
+			Row::dragFloat2("Size##el",     glm::value_ptr(el->size),     1.0f, 0.0f, 10000.0f); trackEdit();
+			Row::dragFloat2("Pivot##el",    glm::value_ptr(el->pivot),    0.01f, 0.0f, 1.0f); trackEdit();
+			Row::dragFloat("Rotation##el",  &el->rotation, 0.5f); trackEdit();
 			int anch = static_cast<int>(el->anchor);
 			const char* anchNames = "Top Left\0Top Center\0Top Right\0"
 			                        "Mid Left\0Mid Center\0Mid Right\0"
 			                        "Bot Left\0Bot Center\0Bot Right\0";
-			if (ImGui::Combo("Anchor##el", &anch, anchNames)) {
+			if (Row::comboZ("Anchor##el", &anch, anchNames)) {
 				el->anchor = static_cast<UIAnchor>(anch); trackEdit();
 			}
-			ImGui::DragInt("Layer##el",  &el->layer, 1); trackEdit();
+			Row::dragInt("Layer##el",  &el->layer, 1); trackEdit();
 			ImGui::Checkbox("Active##el", &el->active); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIElementComponent>(entity); }
@@ -1271,9 +1238,9 @@ void render(AppContext& ctx)
 		{
 			char buf[256];
 			strncpy(buf, txt->text.c_str(), sizeof(buf) - 1); buf[sizeof(buf)-1] = '\0';
-			if (ImGui::InputText("Text##txt", buf, sizeof(buf))) { txt->text = buf; trackEdit(); }
-			ImGui::DragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
-			ImGui::ColorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
+			if (Row::inputText("Text##txt", buf, sizeof(buf))) { txt->text = buf; trackEdit(); }
+			Row::dragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
+			Row::colorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UITextComponent>(entity); }
 	}
@@ -1283,7 +1250,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("UI Image", true, removed))
 		{
-			ImGui::ColorEdit4("Tint##img", glm::value_ptr(img->tint)); trackEdit();
+			Row::colorEdit4("Tint##img", glm::value_ptr(img->tint)); trackEdit();
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIImageComponent>(entity); }
 	}
@@ -1293,12 +1260,12 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("UI Button", true, removed))
 		{
-			ImGui::ColorEdit4("Normal##btn",  glm::value_ptr(btn->normalColor)); trackEdit();
-			ImGui::ColorEdit4("Hovered##btn", glm::value_ptr(btn->hoveredColor)); trackEdit();
-			ImGui::ColorEdit4("Pressed##btn", glm::value_ptr(btn->pressedColor)); trackEdit();
+			Row::colorEdit4("Normal##btn",  glm::value_ptr(btn->normalColor)); trackEdit();
+			Row::colorEdit4("Hovered##btn", glm::value_ptr(btn->hoveredColor)); trackEdit();
+			Row::colorEdit4("Pressed##btn", glm::value_ptr(btn->pressedColor)); trackEdit();
 			char buf[128];
 			strncpy(buf, btn->onClickFunction.c_str(), sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
-			if (ImGui::InputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
+			if (Row::inputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
 		}
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
 	}

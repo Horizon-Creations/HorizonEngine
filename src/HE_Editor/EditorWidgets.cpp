@@ -7,6 +7,9 @@
 #include <imgui_internal.h>          // OpenPopupStack — which windows are modal
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <cfloat>
+#include <cstdarg>
+#include <cstring>
 #include <string>
 
 namespace EditorWidgets

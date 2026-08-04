@@ -3,6 +3,7 @@
 #include "ToolchainDialog.h"             // Tools > C++ Toolchain > Recheck forces the dialog open
 #include "GitController.h"               // Source Control pages
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
+#include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
@@ -79,54 +80,12 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 
 #ifdef HE_IMGUI_ENABLED
 
-// ─── Setting-row widgets: label ABOVE, control full width ───────────────────
-// ImGui's default puts a widget's label to its RIGHT, which is fine in a wide
-// dialog and useless in the narrow Quick Settings dock: the text ran past the
-// panel's right edge and was simply cut off. Every control below therefore
-// prints its label on its own line and then stretches to the available width,
-// so nothing depends on how wide the panel happens to be. PushID(label) keeps
-// the ids unique even though every control is spelled "##v".
+// Label-above-control rows live in EditorWidgets (the Details panel needs the
+// same thing); these are the local spellings the catalog below reads with.
 namespace {
 
-bool sliderFloatRow(const char* label, float* v, float lo, float hi, const char* fmt)
-{
-	ImGui::PushID(label);
-	ImGui::TextUnformatted(label);
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool changed = ImGui::SliderFloat("##v", v, lo, hi, fmt);
-	ImGui::PopID();
-	return changed;
-}
-
-bool sliderIntRow(const char* label, int* v, int lo, int hi, const char* fmt = "%d")
-{
-	ImGui::PushID(label);
-	ImGui::TextUnformatted(label);
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool changed = ImGui::SliderInt("##v", v, lo, hi, fmt);
-	ImGui::PopID();
-	return changed;
-}
-
-bool comboRow(const char* label, int* v, const char* const items[], int count)
-{
-	ImGui::PushID(label);
-	ImGui::TextUnformatted(label);
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool changed = ImGui::Combo("##v", v, items, count);
-	ImGui::PopID();
-	return changed;
-}
-
-bool inputIntRow(const char* label, int* v)
-{
-	ImGui::PushID(label);
-	ImGui::TextUnformatted(label);
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const bool changed = ImGui::InputInt("##v", v, 0, 0);
-	ImGui::PopID();
-	return changed;
-}
+using EditorWidgets::hint;
+namespace Row = EditorWidgets::Row;
 
 // Sub-controls of an enabled/disabled group read better indented under their
 // checkbox, and the indent is what keeps "AO Radius" visibly subordinate to
@@ -155,17 +114,43 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// the per-category separator is only drawn for the unfiltered catalog.
 		if (!categoryFilter && (!lastCat || std::strcmp(lastCat, cat) != 0))
 		{ ImGui::SeparatorText(cat); lastCat = cat; }
-		if (mode == SettingsMode::Preferences)
+
+		if (mode == SettingsMode::QuickSettings)
 		{
-			ImGui::PushID(key);
-			bool f = fav;
-			if (ImGui::Checkbox("##pin", &f)) toggleFavorite(cfg, key);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip(fav ? "Unpin from Quick Settings" : "Pin to Quick Settings");
-			ImGui::PopID();
-			ImGui::SameLine();
+			widget();
 		}
-		widget();
+		else
+		{
+			// A two-column row: the setting on the left, its pin toggle in a fixed
+			// column on the right. The pin used to be a bare checkbox squeezed in
+			// front of the widget, which put two unlabelled checkboxes side by side
+			// on every boolean setting — indistinguishable, and neither said what it
+			// did. A table also handles a multi-line setting properly: the pin stays
+			// at the row's top right instead of drifting down after the last slider.
+			ImGui::PushID(key);
+			if (ImGui::BeginTable("##row", 2, ImGuiTableFlags_SizingFixedFit))
+			{
+				ImGui::TableSetupColumn("##setting", ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("##pin",     ImGuiTableColumnFlags_WidthFixed, 72.0f);
+				ImGui::TableNextRow();
+
+				ImGui::TableSetColumnIndex(0);
+				widget();
+
+				ImGui::TableSetColumnIndex(1);
+				// Labelled, so it is obvious what the control is for, and coloured
+				// when active so a pinned setting is visible at a glance.
+				if (fav) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				if (ImGui::SmallButton(fav ? "\xe2\x98\x85 Pinned" : "\xe2\x98\x86 Pin"))
+					toggleFavorite(cfg, key);
+				if (fav) ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(fav ? "Remove from the Quick Settings panel"
+					                      : "Show this setting in the Quick Settings panel");
+				ImGui::EndTable();
+			}
+			ImGui::PopID();
+		}
 		// Rows are multi-line now (label above control, indented sub-controls), so
 		// without a gap two neighbouring settings read as one block.
 		ImGui::Spacing();
@@ -198,12 +183,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;
 		ImGui::BeginDisabled(!supported);
 		const char* kPaths[] = { "Forward", "Deferred" };
-		comboRow("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
+		Row::combo("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
 		else if (supported)
-			ImGui::TextDisabled("Deferred: G-buffer + one lighting resolve per visible pixel.");
+			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
 	row("vsync", "Display", [&]{ if (ImGui::Checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
@@ -211,7 +196,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// the high-FPS mouse-look stays smooth and idle GPU load drops; ignored with VSync on.
 		ImGui::BeginDisabled(ctx.vsync);
 		int capped = static_cast<int>(cfg.MaxFps);
-		if (sliderIntRow("Max FPS (VSync off)", &capped, 0, 1000,
+		if (Row::sliderInt("Max FPS (VSync off)", &capped, 0, 1000,
 		                 capped <= 0 ? "Unlimited" : "%d FPS"))
 		{
 			cfg.MaxFps = static_cast<float>(capped < 0 ? 0 : capped);
@@ -223,17 +208,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("bloom", "Post-Processing", [&]{
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
 		SubGroup sub(cfg.BloomEnabled);
-		sliderFloatRow("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
-		sliderFloatRow("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
+		Row::sliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
+		Row::sliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssao", "Post-Processing", [&]{
 		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
 		SubGroup sub(cfg.SSAOEnabled);
 		// AO method: SSAO (kernel), HBAO (horizon bitmask), or GTAO (analytic arc).
 		const char* kAOMethods[] = { "SSAO", "HBAO", "GTAO" };
-		comboRow("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
-		sliderFloatRow("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
-		sliderFloatRow("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+		Row::combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
+		Row::sliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		Row::sliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
@@ -242,20 +227,20 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.SSREnabled);
-			sliderFloatRow("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
-			sliderFloatRow("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
+			Row::sliderFloat("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
+			Row::sliderFloat("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
 			// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
 			// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
 			const char* kSSRQuality[] = { "Low", "Medium", "High" };
 			int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
-			if (comboRow("SSR Quality", &ssrQ, kSSRQuality, 3))
+			if (Row::combo("SSR Quality", &ssrQ, kSSRQuality, 3))
 				cfg.SSRQuality = ssrQ;
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
 		else if (supported)
-			ImGui::TextDisabled("Metallic surfaces reflect the actual scene (deferred path).");
+			hint("Metallic surfaces reflect the actual scene (deferred path).");
 	});
 
 	row("gi", "Global Illumination", [&]{
@@ -265,14 +250,14 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.GlobalIlluminationEnabled);
-			sliderFloatRow("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
-			sliderFloatRow("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+			Row::sliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
+			Row::sliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
 			ImGui::SetTooltip("Metal-only; needs a ray-tracing-capable GPU + macOS 12+.");
 		else if (supported)
-			ImGui::TextDisabled("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
+			hint("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
 	});
 	row("girefl", "Global Illumination", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGIReflections;
@@ -281,24 +266,24 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.GIReflectionsEnabled);
-			sliderFloatRow("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
-			sliderFloatRow("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
+			Row::sliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
+			Row::sliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
 			// Low = raw mirror trace; Med = + confidence-weighted blur; High =
 			// + roughness-jittered cone rays with temporal accumulation (glossy).
 			const char* kGIReflQuality[] = { "Low", "Medium", "High" };
 			int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
-			if (comboRow("GI Refl Quality", &grQ, kGIReflQuality, 3))
+			if (Row::combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
 				cfg.GIReflQuality = grQ;
 			// Mirror-like surfaces seen IN a reflection reflect onward instead of
 			// flattening to their base colour; each bounce costs one more trace
 			// on the affected pixels only.
-			sliderIntRow("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+			Row::sliderInt("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, with Render Path = Deferred.");
 		else if (supported)
-			ImGui::TextDisabled("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
+			hint("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
 	});
 
 	row("gpuparticles", "Effects", [&]{
@@ -309,27 +294,28 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Not available on this backend (needs OpenGL / transform feedback).");
 		else if (supported)
-			ImGui::TextDisabled("Simulate rain/snow on the GPU (transform feedback).");
+			hint("Simulate rain/snow on the GPU (transform feedback).");
 	});
 
 	row("camspeed", "Viewport", [&]{
-		if (sliderFloatRow("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
+		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
 			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 	});
 
 	row("fontscale", "Appearance", [&]{
-		sliderFloatRow("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
 	});
 
 	row("cpucache", "Content Browser", [&]{ ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets); });
 	row("cbrefresh", "Content Browser", [&]{
-		inputIntRow("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
+		Row::inputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
-		ImGui::TextDisabled("Pin engine settings in Preferences\n(Edit \xe2\x96\xb8 Preferences) to show them here.");
+		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press \xe2\x98\x86 Pin "
+		     "on the settings you want here.");
 }
 
 // ─── Preferences tab state ───────────────────────────────────────────────────
@@ -1116,7 +1102,8 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::BeginChild("##prefbody", ImVec2(0.0f, -footerH));
 	if (category)
 	{
-		ImGui::TextDisabled("Tick the pin on a setting to show it in Quick Settings.");
+		EditorWidgets::hint("Press \xe2\x98\x86 Pin on a setting to keep it in the Quick Settings "
+		                    "panel next to the viewport.");
 		ImGui::Spacing();
 		DrawEngineSettings(ctx, SettingsMode::Preferences, category);
 	}
