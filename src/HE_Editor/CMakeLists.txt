@@ -141,6 +141,7 @@ add_executable(HorizonEditor WIN32
 	AssetThumbnailCache.cpp
 	EditorPanelState.cpp
 	EditorWidgets.cpp
+	EditorRowWidgets.cpp
 	stb_image_impl.cpp
  "EditorUI.h" "EditorUI.cpp" "ScriptEditorPanel.h" "MaterialEditorPanel.h" "LevelScriptPanel.h" "GameInstancePanel.h" "HorizonCodeClassPanel.h" "HcEditorUtil.h" "HcGraphClipboard.h" "HcGraphHost.h" "SkeletalMeshEditorPanel.h" "StaticMeshEditorPanel.h" "ParticleGraphEditorPanel.h" "AnimatorStateMachineEditorPanel.h" "ExportDialogPanel.h" "ContentBrowserPanel.h" "InspectorPanel.h" "TerrainTools.h" "ViewportPanel.h" "OutlinerPanel.h" "ProjectHubPanel.h" "TutorialPanel.h" "TutorialSteps.h" "ProfilerPanel.h" "EnvironmentPanel.h" "EditorSettingsPanel.h" "ToolchainDialog.h" "PlayReportPanel.h" "EditorAssetTypeCache.h" "AssetThumbnailCache.h" "EditorPanelState.h" "EditorWidgets.h")
 
