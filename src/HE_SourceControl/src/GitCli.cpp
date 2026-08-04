@@ -217,6 +217,73 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
 }
 
+bool GitCli::log(const std::filesystem::path& root, std::size_t maxCount,
+                 std::vector<CommitInfo>& out, std::string* err)
+{
+	out.clear();
+
+	const GitResult r = run(root, {
+		"log", "-n", std::to_string(maxCount),
+		// 0x1F between fields, 0x1E after each record: the one framing a commit
+		// message can never contain, unlike newlines or any printable character.
+		"--pretty=format:%h%x1f%s%x1f%an%x1f%ar%x1e",
+	}, 15000);
+	if (!r.ok)
+	{
+		// A repository with no commits yet answers non-zero; that is an empty
+		// history, not an error.
+		if (r.err.find("does not have any commits") != std::string::npos ||
+		    r.err.find("bad default revision") != std::string::npos)
+			return true;
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t end = r.out.find('\x1e', pos);
+		const std::string rec = r.out.substr(pos, end == std::string::npos
+		                                          ? std::string::npos : end - pos);
+		pos = end == std::string::npos ? r.out.size() : end + 1;
+		// git separates records with \n after our 0x1E; strip it.
+		std::size_t begin = 0;
+		while (begin < rec.size() && (rec[begin] == '\n' || rec[begin] == '\r')) ++begin;
+
+		std::vector<std::string> fields;
+		std::size_t f = begin;
+		while (f <= rec.size())
+		{
+			const std::size_t sep = rec.find('\x1f', f);
+			fields.push_back(rec.substr(f, sep == std::string::npos
+			                                  ? std::string::npos : sep - f));
+			if (sep == std::string::npos) break;
+			f = sep + 1;
+		}
+		if (fields.size() < 4 || fields[0].empty()) continue;
+
+		CommitInfo c;
+		c.shortOid = fields[0];
+		c.subject  = fields[1];
+		c.author   = fields[2];
+		c.relTime  = fields[3];
+		out.push_back(std::move(c));
+	}
+
+	// Which of these the upstream does not have yet. Only meaningful (and only
+	// answerable) when an upstream exists — absence is not an error.
+	const GitResult ahead = run(root, { "rev-list", "--abbrev-commit", "@{upstream}..HEAD" },
+	                            10000);
+	if (ahead.ok)
+	{
+		for (CommitInfo& c : out)
+		{
+			if (ahead.out.find(c.shortOid) != std::string::npos) c.unpushed = true;
+		}
+	}
+	return true;
+}
+
 bool GitCli::lfsAvailable(const std::filesystem::path& root)
 {
 	return run(root, { "lfs", "version" }, 10000).ok;

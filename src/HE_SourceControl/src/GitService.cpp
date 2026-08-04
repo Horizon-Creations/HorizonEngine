@@ -381,6 +381,9 @@ void GitService::workerMain()
 					// panel always knows whether push/pull have anywhere to go.
 					ev.remoteUrl      = GitCli::remoteUrl(m_root);
 					ev.remoteUrlValid = true;
+					// Recent history rides along too — it only changes when a
+					// refresh was warranted anyway (commit, pull, poll).
+					GitCli::log(m_root, 20, ev.commits);
 				}
 				else
 				{
@@ -423,7 +426,11 @@ void GitService::pump(std::size_t maxEvents)
 
 		m_lastError.clear();
 		if (!ev.info.empty())      m_lastInfo  = ev.info;
-		if (ev.remoteUrlValid)     m_remoteUrl = ev.remoteUrl;
+		if (ev.remoteUrlValid)
+		{
+			m_remoteUrl = ev.remoteUrl;
+			m_commits   = std::move(ev.commits);
+		}
 		if (!ev.statusValid)       continue;
 		// Swapped in whole. A partially updated snapshot is the bug class this
 		// design exists to remove.

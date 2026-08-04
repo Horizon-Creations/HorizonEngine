@@ -516,6 +516,47 @@ TEST_CASE("ensureCredentialHelper leaves a repo with a usable helper")
 	he_test::removeQuiet(repo);
 }
 
+TEST_CASE("History reads back newest first and knows what is unpushed")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("hist");
+	const fs::path bare = uniqueDir("histbare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+
+	writeFile(repo / "a.txt", "one");
+	// A subject with the characters that break naive framing: quotes, an
+	// umlaut, and a pipe. The 0x1F/0x1E separators must not care.
+	commitAll(repo, "erster Commit | \"quoted\" & Umlaut ae");
+	REQUIRE(GitCli::run(repo, { "remote", "add", "origin", bare.string() }).ok);
+	REQUIRE(GitCli::run(repo, { "push", "-u", "origin", "main" }).ok);
+
+	writeFile(repo / "b.txt", "two");
+	commitAll(repo, "zweiter, noch nicht gepusht");
+
+	std::vector<GitCli::CommitInfo> log;
+	REQUIRE(GitCli::log(repo, 10, log));
+	REQUIRE(log.size() == 2);
+
+	// Newest first, like every git log.
+	CHECK(log[0].subject == "zweiter, noch nicht gepusht");
+	CHECK(log[0].unpushed);
+	CHECK(log[1].subject.find("erster Commit") == 0);
+	CHECK_FALSE(log[1].unpushed);
+	CHECK(log[0].author == "HorizonEngine Test");
+	CHECK_FALSE(log[0].shortOid.empty());
+	CHECK_FALSE(log[0].relTime.empty());
+
+	// An empty repository answers an empty history, not an error.
+	const fs::path fresh = makeRepo("histempty");
+	REQUIRE(GitCli::log(fresh, 10, log));
+	CHECK(log.empty());
+
+	he_test::removeQuiet(repo);
+	he_test::removeQuiet(bare);
+	he_test::removeQuiet(fresh);
+}
+
 TEST_CASE("The generated repo config pins its load-bearing lines")
 {
 	// Golden substrings rather than a byte-exact file: wording may evolve, but

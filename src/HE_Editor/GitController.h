@@ -68,6 +68,10 @@ public:
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }
 	bool                     busy()   const { return m_service.busy(); }
 	const std::string&       lastError() const { return m_service.lastError(); }
+	const std::vector<HE::Sc::GitCli::CommitInfo>& recentCommits() const
+	{
+		return m_service.recentCommits();
+	}
 	const std::filesystem::path& projectRoot() const { return m_projectRoot; }
 
 	// Status for a file given its ABSOLUTE path, which is what the Content

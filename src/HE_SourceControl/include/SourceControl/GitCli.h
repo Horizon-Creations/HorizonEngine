@@ -78,6 +78,22 @@ public:
 	static bool setRemote(const std::filesystem::path& root, const std::string& url,
 	                      std::string* err = nullptr);
 
+	// ── History ──────────────────────────────────────────────────────────────
+	struct CommitInfo
+	{
+		std::string shortOid;
+		std::string subject;
+		std::string author;
+		std::string relTime;    // "2 hours ago" — git's own phrasing
+		bool        unpushed = false;   // not yet on the upstream branch
+	};
+
+	// The most recent commits, newest first. `unpushed` is filled only when an
+	// upstream exists. Field/record separators are the ASCII control characters
+	// (0x1F/0x1E), so commit messages cannot break the framing.
+	static bool log(const std::filesystem::path& root, std::size_t maxCount,
+	                std::vector<CommitInfo>& out, std::string* err = nullptr);
+
 	// ── LFS ──────────────────────────────────────────────────────────────────
 	// Whether `git lfs` answers at all in this environment.
 	static bool lfsAvailable(const std::filesystem::path& root);

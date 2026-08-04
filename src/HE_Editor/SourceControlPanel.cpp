@@ -25,6 +25,10 @@ namespace {
 // init and remote/GitHub setup live in Preferences ▸ Source Control now.)
 char s_commitMessage[512] = "";
 bool s_autoPushLoaded     = false;
+// Changes as a folder tree (VS Code's tree mode) or a flat list. Persisted.
+bool s_treeView       = true;
+bool s_treeViewLoaded = false;
+bool s_historyOpen    = true;
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -75,6 +79,85 @@ struct Row
 	const HE::Sc::FileEntry* entry = nullptr;
 };
 
+// One line for one file: coloured state letter + name, full path on hover.
+void drawFileRow(const Row& r, bool useIndexState, const char* label)
+{
+	const HE::Sc::FileState s = useIndexState ? r.entry->index : r.entry->worktree;
+	ImGui::TextColored(colourFor(s), "%s", letterFor(s));
+	ImGui::SameLine();
+	ImGui::TextUnformatted(label);
+	if (ImGui::IsItemHovered())
+	{
+		if (!r.entry->origPath.empty())
+			ImGui::SetTooltip("%s\nrenamed from %s", r.path->c_str(),
+			                  r.entry->origPath.c_str());
+		else
+			ImGui::SetTooltip("%s", r.path->c_str());
+	}
+}
+
+// The folder hierarchy of one section's rows, built per frame from the sorted
+// row list. Cheap: dirty sets are small (tens, rarely hundreds), and building
+// on the fly means no cache to invalidate against status generations.
+struct DirNode
+{
+	std::map<std::string, DirNode> dirs;
+	std::vector<std::pair<std::string, Row>> files;   // leaf name → row
+};
+
+void insertRow(DirNode& root, const Row& r)
+{
+	DirNode* node = &root;
+	const std::string& p = *r.path;
+	std::size_t start = 0;
+	while (true)
+	{
+		const std::size_t slash = p.find('/', start);
+		if (slash == std::string::npos)
+		{
+			node->files.emplace_back(p.substr(start), r);
+			return;
+		}
+		node = &node->dirs[p.substr(start, slash - start)];
+		start = slash + 1;
+	}
+}
+
+void drawDirNode(const std::string& name, const DirNode& node, bool useIndexState)
+{
+	// Compact single-child chains the way VS Code does: "Content/Meshes/Props"
+	// as one node instead of three nested ones with one child each.
+	const DirNode* n = &node;
+	std::string label = name;
+	while (n->files.empty() && n->dirs.size() == 1)
+	{
+		label += "/" + n->dirs.begin()->first;
+		n = &n->dirs.begin()->second;
+	}
+
+	ImGui::PushID(label.c_str());
+	if (ImGui::TreeNodeEx(label.c_str(),
+	                      ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth))
+	{
+		for (const auto& [subName, sub] : n->dirs)
+			drawDirNode(subName, sub, useIndexState);
+		for (const auto& [leaf, row] : n->files)
+			drawFileRow(row, useIndexState, leaf.c_str());
+		ImGui::TreePop();
+	}
+	ImGui::PopID();
+}
+
+void drawRowsAsTree(const std::vector<Row>& rows, bool useIndexState)
+{
+	DirNode root;
+	for (const Row& r : rows) insertRow(root, r);
+	for (const auto& [name, sub] : root.dirs)
+		drawDirNode(name, sub, useIndexState);
+	for (const auto& [leaf, row] : root.files)
+		drawFileRow(row, useIndexState, leaf.c_str());
+}
+
 void drawChangeList(const HE::Sc::RepoStatus& st)
 {
 	std::vector<Row> conflicts, staged, unstaged, untracked;
@@ -103,14 +186,13 @@ void drawChangeList(const HE::Sc::RepoStatus& st)
 		if (rows.empty()) return;
 		ImGui::Spacing();
 		ImGui::SeparatorText(title);
-		for (const Row& r : rows)
+		if (s_treeView)
 		{
-			const HE::Sc::FileState s = useIndexState ? r.entry->index : r.entry->worktree;
-			ImGui::TextColored(colourFor(s), "%s", letterFor(s));
-			ImGui::SameLine();
-			ImGui::TextUnformatted(r.path->c_str());
-			if (!r.entry->origPath.empty() && ImGui::IsItemHovered())
-				ImGui::SetTooltip("renamed from %s", r.entry->origPath.c_str());
+			drawRowsAsTree(rows, useIndexState);
+		}
+		else
+		{
+			for (const Row& r : rows) drawFileRow(r, useIndexState, r.path->c_str());
 		}
 	};
 
@@ -338,9 +420,28 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	if (git->busy()) ImGui::TextDisabled("Working…");
 	else             ImGui::TextDisabled("%zu change(s)", st.dirtyCount());
 
+	// Tree ⇄ flat, the same toggle VS Code's source-control view has. Sticky
+	// across sessions — a layout choice, not a per-repo fact.
+	if (!s_treeViewLoaded)
+	{
+		s_treeViewLoaded = true;
+		s_treeView = GlobalState::getInstance().getCustomConfigBool("GitChangesTreeView", true);
+	}
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 74.0f);
+	if (ImGui::SmallButton(s_treeView ? "List view" : "Tree view"))
+	{
+		s_treeView = !s_treeView;
+		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", s_treeView);
+	}
+
 	// ── Changes ──────────────────────────────────────────────────────────────
+	// The history section below claims a fixed slice while it is open; the
+	// changes list takes whatever remains.
 	ImGui::Separator();
-	if (ImGui::BeginChild("##changes", ImVec2(0.0f, 0.0f), false))
+	const float historyH = s_historyOpen
+		? 190.0f
+		: ImGui::GetFrameHeightWithSpacing();
+	if (ImGui::BeginChild("##changes", ImVec2(0.0f, -historyH), false))
 	{
 		if (st.dirtyCount() == 0)
 			ImGui::TextDisabled("Nothing has changed.");
@@ -348,6 +449,43 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			drawChangeList(st);
 	}
 	ImGui::EndChild();
+
+	// ── History ──────────────────────────────────────────────────────────────
+	// The recent commits, newest first — the "where is this repository" view.
+	// An ↑ marks commits the upstream does not have yet, which is the honest
+	// answer to "did my push go through".
+	s_historyOpen = ImGui::CollapsingHeader("History", ImGuiTreeNodeFlags_DefaultOpen);
+	if (s_historyOpen)
+	{
+		if (ImGui::BeginChild("##history", ImVec2(0.0f, 0.0f), false))
+		{
+			const auto& commits = git->recentCommits();
+			if (commits.empty())
+			{
+				ImGui::TextDisabled("No commits yet.");
+			}
+			for (const auto& c : commits)
+			{
+				if (c.unpushed)
+				{
+					ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "%s", "\xE2\x86\x91");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Not pushed yet");
+				}
+				else
+				{
+					ImGui::TextDisabled(" ");
+				}
+				ImGui::SameLine();
+				ImGui::TextDisabled("%s", c.shortOid.c_str());
+				ImGui::SameLine();
+				ImGui::TextUnformatted(c.subject.c_str());
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s — %s", c.author.c_str(), c.relTime.c_str());
+			}
+		}
+		ImGui::EndChild();
+	}
 
 	ImGui::End();
 #else

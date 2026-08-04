@@ -17,6 +17,7 @@
 // filesystem. Everything it produces is plain data, applied on the main thread
 // in pump(). It never reaches into ContentManager, GlobalState or ImGui.
 
+#include "SourceControl/GitCli.h"
 #include "SourceControl/RepoStatus.h"
 #include "SourceControl/ScCommon.h"
 
@@ -94,6 +95,9 @@ public:
 	// origin's URL as of the last status refresh; empty = none configured.
 	const std::string& remoteUrl() const { return m_remoteUrl; }
 
+	// Recent commits, newest first, as of the last status refresh.
+	const std::vector<GitCli::CommitInfo>& recentCommits() const { return m_commits; }
+
 	// Drain finished work on the MAIN thread. `maxEvents` bounds how much is
 	// applied per frame — a clone that produced twenty thousand entries should
 	// not be absorbed in one frame.
@@ -132,6 +136,7 @@ private:
 		std::string info;                    // completed-operation feedback
 		std::string remoteUrl;
 		bool        remoteUrlValid = false;
+		std::vector<GitCli::CommitInfo> commits;
 		RepoStatus  status;
 		std::string error;
 	};
@@ -160,6 +165,7 @@ private:
 	std::string                            m_lastError;
 	std::string                            m_lastInfo;
 	std::string                            m_remoteUrl;
+	std::vector<GitCli::CommitInfo>        m_commits;
 	std::uint64_t                          m_generation = 0;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };
