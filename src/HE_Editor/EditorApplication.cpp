@@ -3335,36 +3335,44 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	for (const std::string& rel : openRel) m_docMirrorPaths.insert(rel);
 }
 
-// One tab's outgoing deltas. Runs every frame for every tab we hold the lock on:
-// the diff is over a few hundred items and returns nothing at all when nothing
-// moved, which is the overwhelmingly common case.
+// One tab's outgoing deltas.
+//
+// A diff serializes every item in the document, so this must NOT run for every
+// open tab every frame — a few hundred-node graphs would cost milliseconds of
+// pure JSON. Two gates keep it to what is actually needed:
+//
+//   * we only diff a tab we HOLD and that has unsaved edits. A clean tab has
+//     nothing to send by definition, and a tab we do not hold may not send.
+//   * a tab we are only watching seeds its mirror ONCE (and again whenever the
+//     panel reloads, which resets `seeded`). Without a seeded mirror the moment
+//     we took the lock the first diff would announce everything the peer did
+//     while we watched as if it were ours.
 void EditorApplication::publishDocDeltas(const std::string& absPath,
                                          const std::string& rel)
 {
 	if (!m_collab.inSession()) return;
 
+	const bool owned = m_collab.ownsAssetLock(rel);
+	const bool dirty = EditorUI::tabHasUnsavedEdits(absPath);
+	if (owned && !dirty) return;   // nothing of ours to send
+
 	CollabDocSync::DocBindings docs = EditorUI::collabDocsFor(absPath);
 	if (docs.empty()) return;
-
-	// A tab we do NOT hold still has to keep its mirror current, or the moment we
-	// take the lock the first diff would announce every change the peer made
-	// while we watched as if it were ours.
-	const bool owned = m_collab.ownsAssetLock(rel);
 
 	std::vector<HE::Net::CollabSession::DocDelta> batch;
 	for (CollabDocSync::DocBinding& d : docs)
 	{
 		if (!d.adapter || !d.mirror) continue;
-		if (owned) CollabDocSync::diffInto(*d.adapter, *d.mirror, d.scope, batch);
-		else       CollabDocSync::seed(*d.adapter, *d.mirror, d.scope);
+		if (owned)                    CollabDocSync::diffInto(*d.adapter, *d.mirror, d.scope, batch);
+		else if (!d.mirror->seeded)   CollabDocSync::seed(*d.adapter, *d.mirror, d.scope);
 	}
 	if (batch.empty()) return;
 
 	if (!m_collab.publishDocDeltas(rel, batch))
 	{
 		// Too large for the wire (or the lock slipped). The whole-file autosave
-		// below is the fallback — force it on the next pass rather than dropping
-		// the edit, because a delta that was not sent is a silent fork.
+		// is the fallback — force it on the next pass rather than dropping the
+		// edit, because a delta that was not sent is a silent fork.
 		m_assetLastAutosaveMs[absPath] = 0;
 	}
 }

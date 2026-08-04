@@ -120,6 +120,10 @@ bool reloadFromDisk(const std::string& assetPath)
 	if (!st) return false;
 	st->loaded = false;
 	st->dirty = false;
+	// The mirror describes the document that is about to be replaced. Leaving
+	// it would make the first diff after the reload report the difference
+	// between the peer's file and our old graph as OUR edit.
+	st->collabMirror = {};
 	return true;
 }
 
