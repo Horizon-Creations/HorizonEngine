@@ -2,6 +2,7 @@
 #include "EditorApplication.h"    // AppContext
 #include "GitController.h"
 
+#include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
 
 #include <algorithm>
@@ -17,6 +18,11 @@ namespace SourceControlPanel
 
 #ifdef HE_IMGUI_ENABLED
 namespace {
+
+// Panel-local input state. A commit message is short-lived by design; the
+// remote URL survives only until it is applied.
+char s_commitMessage[512] = "";
+char s_remoteUrl[512]     = "";
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -154,10 +160,42 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	{
 		ImGui::TextWrapped("This project is not in a git repository yet.");
 		ImGui::Spacing();
-		// Creating one arrives with the repository-lifecycle checkpoint. Saying so
-		// beats a disabled button that looks broken.
-		ImGui::TextDisabled("Setting one up from here is not available yet.");
-		if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Checking…"); }
+
+		if (git->blockedByCollabSession())
+		{
+			ImGui::TextDisabled("The session host manages source control for this "
+			                    "project.");
+		}
+		else
+		{
+			const bool lfs = ctx.gitProbe && ctx.gitProbe->lfsFound;
+			ImGui::TextWrapped("Initializing creates the repository with a generated "
+			                   ".gitignore (engine output stays out) and .gitattributes "
+			                   "(large binaries go through Git LFS).");
+			if (!lfs)
+			{
+				ImGui::Spacing();
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+				ImGui::TextWrapped("git-lfs was not found — the repository will work, "
+				                   "but large assets will not be tracked through LFS "
+				                   "until it is installed.");
+				ImGui::PopStyleColor();
+			}
+			ImGui::Spacing();
+			if (git->busy()) ImGui::BeginDisabled();
+			if (ImGui::Button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
+				git->requestInit(lfs);
+			if (git->busy()) ImGui::EndDisabled();
+		}
+
+		if (!git->lastError().empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+			ImGui::TextWrapped("%s", git->lastError().c_str());
+			ImGui::PopStyleColor();
+		}
+		if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 		ImGui::End();
 		return;
 	}
@@ -214,12 +252,94 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::PopStyleColor();
 	}
 
+	if (!git->lastInfo().empty() && git->lastError().empty())
+	{
+		ImGui::Spacing();
+		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
+	}
+
+	// ── Commit / sync ────────────────────────────────────────────────────────
+	// Hidden — not greyed out — for a session guest: reading status is always
+	// allowed, it is writing and moving HEAD that would desync the session.
+	if (!git->blockedByCollabSession())
+	{
+		ImGui::Spacing();
+		ImGui::SeparatorText("Commit");
+
+		const bool identityOk = !ctx.gitProbe || ctx.gitProbe->identityConfigured;
+		if (!identityOk)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::TextWrapped("git has no user.name / user.email configured — commits "
+			                   "will fail until they are set.");
+			ImGui::PopStyleColor();
+		}
+
+		ImGui::InputTextMultiline("##commitmsg", s_commitMessage, sizeof(s_commitMessage),
+		                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
+
+		const bool hasConflicts = st.hasConflicts();
+		const bool canCommit = !git->busy() && s_commitMessage[0] != '\0' &&
+		                       st.dirtyCount() > 0 && !hasConflicts;
+		if (hasConflicts)
+		{
+			// A commit with unresolved conflict markers preserves the mess
+			// forever; refusing is the only correct behaviour.
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+			ImGui::TextWrapped("Conflicts must be resolved before committing.");
+			ImGui::PopStyleColor();
+		}
+		ImGui::BeginDisabled(!canCommit);
+		if (ImGui::Button("Commit all changes", ImVec2(180.0f, 0.0f)))
+		{
+			git->requestCommitAll(s_commitMessage);
+			s_commitMessage[0] = '\0';
+		}
+		ImGui::EndDisabled();
+
+		// ── Remote ───────────────────────────────────────────────────────────
+		ImGui::Spacing();
+		ImGui::SeparatorText("Remote");
+		if (git->remoteUrl().empty())
+		{
+			ImGui::TextWrapped("No remote yet. Paste the repository URL from GitHub, "
+			                   "GitLab or Azure DevOps:");
+			ImGui::SetNextItemWidth(-90.0f);
+			ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
+			                         s_remoteUrl, sizeof(s_remoteUrl));
+			ImGui::SameLine();
+			ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
+			if (ImGui::Button("Set##remote"))
+			{
+				git->requestSetRemote(s_remoteUrl);
+				s_remoteUrl[0] = '\0';
+			}
+			ImGui::EndDisabled();
+		}
+		else
+		{
+			ImGui::TextDisabled("origin: %s", git->remoteUrl().c_str());
+
+			ImGui::BeginDisabled(git->busy() || st.initialCommit);
+			if (ImGui::Button("Push", ImVec2(86.0f, 0.0f))) git->requestPush();
+			ImGui::SameLine();
+			if (ImGui::Button("Pull", ImVec2(86.0f, 0.0f))) git->requestPull();
+			ImGui::EndDisabled();
+			if (st.initialCommit)
+				ImGui::TextDisabled("Make the first commit before pushing.");
+			else if (st.behind > 0)
+				ImGui::TextDisabled("Pulling fast-forwards only — a diverged branch is "
+				                    "reported, never auto-merged.");
+		}
+	}
+
 	ImGui::Spacing();
+	ImGui::Separator();
 	if (git->busy()) ImGui::BeginDisabled();
 	if (ImGui::Button("Refresh")) git->requestRefresh();
 	if (git->busy()) ImGui::EndDisabled();
 	ImGui::SameLine();
-	if (git->busy()) ImGui::TextDisabled("Reading…");
+	if (git->busy()) ImGui::TextDisabled("Working…");
 	else             ImGui::TextDisabled("%zu change(s)", st.dirtyCount());
 
 	// ── Changes ──────────────────────────────────────────────────────────────

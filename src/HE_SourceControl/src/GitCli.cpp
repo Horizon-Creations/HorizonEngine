@@ -142,4 +142,79 @@ bool GitCli::status(const std::filesystem::path& root, RepoStatus& out, std::str
 	return true;
 }
 
+namespace {
+
+// Local commands answer in well under this; only a wedged filesystem exceeds it.
+constexpr std::uint32_t kLocalTimeoutMs   = 60'000;
+// Push/pull move real data — multi-GB LFS objects at residential upload speed.
+constexpr std::uint32_t kNetworkTimeoutMs = 15 * 60'000;
+
+bool runChecked(const std::filesystem::path& cwd, const std::vector<std::string>& args,
+                std::uint32_t timeoutMs, std::string* err)
+{
+	const GitResult r = GitCli::run(cwd, args, timeoutMs);
+	if (r.ok) return true;
+	if (err)
+	{
+		// git writes its useful text to stderr; stdout as the fallback covers the
+		// odd command that reports there instead.
+		*err = !r.err.empty() ? trimTrailing(r.err)
+		     : !r.out.empty() ? trimTrailing(r.out)
+		                      : "git failed with exit code " + std::to_string(r.exitCode);
+	}
+	return false;
+}
+
+} // namespace
+
+bool GitCli::init(const std::filesystem::path& dir, std::string* err)
+{
+	// -b main: the default branch name is a config lottery across machines, and
+	// a project that starts on "master" here and "main" there guarantees the
+	// first push goes somewhere surprising.
+	return runChecked(dir, { "init", "-b", "main" }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::addAll(const std::filesystem::path& root, std::string* err)
+{
+	return runChecked(root, { "add", "-A" }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::commit(const std::filesystem::path& root, const std::string& message,
+                    std::string* err)
+{
+	return runChecked(root, { "commit", "-m", message }, kLocalTimeoutMs, err);
+}
+
+bool GitCli::push(const std::filesystem::path& root, bool upstreamConfigured, std::string* err)
+{
+	if (upstreamConfigured)
+		return runChecked(root, { "push" }, kNetworkTimeoutMs, err);
+	// First push: bind the branch to its remote counterpart while we are at it,
+	// so ahead/behind starts meaning something.
+	return runChecked(root, { "push", "-u", "origin", "HEAD" }, kNetworkTimeoutMs, err);
+}
+
+bool GitCli::pull(const std::filesystem::path& root, std::string* err)
+{
+	// --ff-only on purpose: an editor button must never quietly create a merge
+	// commit. If the branch diverged, the error says so and the user decides —
+	// with a working tree full of binary assets that is the only honest option.
+	return runChecked(root, { "pull", "--ff-only" }, kNetworkTimeoutMs, err);
+}
+
+std::string GitCli::remoteUrl(const std::filesystem::path& root)
+{
+	const GitResult r = run(root, { "remote", "get-url", "origin" }, 5000);
+	return r.ok ? trimTrailing(r.out) : std::string{};
+}
+
+bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url,
+                       std::string* err)
+{
+	if (remoteUrl(root).empty())
+		return runChecked(root, { "remote", "add", "origin", url }, kLocalTimeoutMs, err);
+	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
+}
+
 } // namespace HE::Sc
