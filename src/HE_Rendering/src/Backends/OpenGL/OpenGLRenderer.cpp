@@ -1773,34 +1773,72 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	return max(C, vec3(0.0)) * (horizon * night);
 }
 
-// Meander offset of an aurora band as a function of world X (the band RUNS along world-X;
-// this returns its slowly-varying Z offset so the band gently snakes/arcs as it crosses the
-// sky). PURE SINES (no fbm) — cheap, since this is called per-band per-march-step. Three
-// detuned sines give a quasi-organic, non-repeating snake; the time terms waft it sideways.
-float auroraMeander(float x, float k, float t)
+// Per-curtain pseudo-random parameter: curtain index k, slot s → [0,1). EVERY property of a
+// curtain (placement, heading, length, thickness, meander, height in the slab, brightness) is
+// drawn from this, so no two curtains repeat. The previous version shared one meander function
+// and gave every band the SAME heading (all along world-X) — which is exactly why they read as
+// a stack of parallel stripes instead of a display.
+float auroraRnd(float k, float s)
 {
-	return  370.0 * sin(x * 0.00090 + 0.20 * t + k * 1.7)
-	     +  170.0 * sin(x * 0.00300 - 0.14 * t + k * 3.3)
-	     +   85.0 * sin(x * 0.00760 + 0.28 * t + k * 5.1);
+	return starHash(vec3(k * 0.7331 + 1.13, s * 1.9137 + 7.71, 19.37));
 }
 
-// Aurora borealis — WORLD-ANCHORED volumetric curtains, built like the 3D cloud slab so the
-// bands are PLACED IN THE WORLD (real parallax as the camera moves) and have NO azimuth seam
-// (sampled at world XZ, not atan-azimuth). A slab raymarch accumulates thin Gaussian SHEETS
-// standing along meandering world-XZ centrelines (auroraCx) — true vertical curtains at any
-// view angle, converging into a corona overhead. Sharp bright lower edge fading up; base→top
-// colour gradient by altitude. PURELY EMISSIVE: additive, no Beer's law, no light-march. The
-// soft rolloff keeps overlapping sheets from clipping to white (FragColor is LDR). Returns the
-// emission to ADD to the sky BEFORE the clouds (so the nearer cloud layer occludes it).
+// Ridged "vein" field. The zero-set of the DIFFERENCE of two decorrelated noise fields is a
+// network of thin branching filaments that close on themselves — the classic marble/vein
+// pattern. Threading it through a curtain breaks the sheet into a braided web instead of one
+// smooth wall, which is what gives an active display its net-like filigree up close.
+float auroraWeb(vec2 p)
+{
+	float a = cloudNoise(p);
+	float b = cloudNoise(p * 1.43 + vec2(37.2, 11.9));
+	return smoothstep(0.30, 0.0, abs(a - b));       // 1 on a vein, 0 in between
+}
+
+// Clip the ray interval [t0,t1] against the slab |x0 + dx*t| <= w (x is any linear coordinate
+// along the ray). Returns false when the ray misses it entirely. Two of these — one across the
+// curtain, one along it — cut the march down to the ribbon's own oriented box.
+bool auroraSlab(float x0, float dx, float w, inout float t0, inout float t1)
+{
+	if (abs(dx) < 1e-7) return abs(x0) <= w;
+	float ta = (-w - x0) / dx, tb = (w - x0) / dx;
+	t0 = max(t0, min(ta, tb));
+	t1 = min(t1, max(ta, tb));
+	return t1 > t0;
+}
+
+// Aurora borealis — WORLD-ANCHORED volumetric curtains, built like the 3D cloud slab so they
+// are PLACED IN THE WORLD (real parallax as the camera moves) and have NO azimuth seam
+// (sampled at world XZ, not atan-azimuth).
+//
+// Each curtain is an INDEPENDENT FINITE RIBBON with its own centre, heading, length, thickness,
+// meander and height inside the slab — all from auroraRnd(). Headings are biased tangential to
+// the ring the curtain sits on (real arcs align with the auroral oval) but spread by ±74°, so
+// curtains genuinely CROSS one another. That crossing, plus the auroraWeb() vein filigree
+// inside each ribbon, is what makes the net: a quiet aurora is a single E-W arc, but near
+// magnetic midnight the oval breaks into folds (~20 km), curls (<10 km) and spirals, with N-S
+// structures running across the E-W arcs — see earthsky.org "Forms of aurora" and Springer,
+// "Physical Processes of Meso-Scale, Dynamic Auroral Forms". The three meander sines are that
+// same scale hierarchy (arc sweep → folds → curls) with per-curtain amplitude/frequency/phase.
+//
+// The march is clipped PER CURTAIN to that ribbon's own oriented box (two auroraSlab calls)
+// instead of marching the whole altitude slab once for all bands — far fewer steps and a much
+// tighter fit, which is what pays for the extra curtains and the vein noise. The Gaussian sheet
+// is pre-filtered against the step size (widen σ, renormalise to keep the line integral) so an
+// under-sampled distant curtain BLURS instead of beating into moiré.
+//
+// PURELY EMISSIVE: additive, no Beer's law, no light-march — so curtain order is irrelevant and
+// each one can be marched on its own. The soft rolloff keeps overlapping curtains from clipping
+// to white (FragColor is LDR). Returns the emission to ADD to the sky BEFORE the clouds (so the
+// nearer cloud layer occludes it).
 vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colBase, vec3 colTop)
 {
 	if (intensity <= 0.0) return vec3(0.0);
 	dir = normalize(dir);
-	if (dir.y < 0.02) return vec3(0.0);                         // horizon → ray never reaches the band
+	if (dir.y < 0.02) return vec3(0.0);                         // horizon → ray never reaches the curtains
 	float night = 1.0 - smoothstep(-0.20, -0.02, clamp(normalize(uSunDir).y, -0.3, 1.0));
 	if (night <= 0.0) return vec3(0.0);
 
-	// World-space altitude slab. Height control drives the band ELEVATION (kept high so the
+	// World-space altitude slab. Height control drives the curtain ELEVATION (kept high so the
 	// parallax stays subtle — aurora is near-infinite; lower = more exaggerated parallax).
 	float altitude = mix(1500.0, 7000.0, clamp(uAuroraHeight, 0.0, 1.0));
 	float baseY = camPos.y + altitude;
@@ -1808,66 +1846,139 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 	float invY  = 1.0 / dir.y;
 	float tNear = max((baseY - camPos.y) * invY, 0.0);
 	float tFar  = (baseY + thick - camPos.y) * invY;
-	float maxDist = altitude * 80.0;
-	tFar = min(tFar, maxDist);
+	// The layout reaches out to ~13.5 × altitude, so rays that leave the slab beyond that can
+	// never hit a curtain — clamp there rather than at some arbitrary huge distance.
+	float layoutR = altitude * 13.5;
+	tFar = min(tFar, layoutR * 2.2);
 	if (tFar <= tNear) return vec3(0.0);
 
 	float frag = clamp(uAuroraFragment, 0.0, 1.0);
-	// Step count — coarser than the cloud march (sheets are anti-aliased by the σ-widening +
-	// IGN jitter, so fewer steps suffice). Capped low for performance (night-only raymarch).
-	int   N  = int(clamp((tFar - tNear) / 72.0, 20.0, 46.0));
-	float ds = (tFar - tNear) / float(N);
-	float jit = skyIgn(gl_FragCoord.xy);
+	float jit  = skyIgn(gl_FragCoord.xy);
+	vec2  o    = camPos.xz;                                     // ray origin in world XZ
+	vec2  dxz  = dir.xz;                                        // ray XZ velocity (NOT unit — |dxz| = cos(elev))
 
 	vec3 acc = vec3(0.0);
-	for (int i = 0; i < N; ++i)
+	for (int k = 0; k < 22; ++k)
 	{
-		float t   = tNear + (float(i) + jit) * ds;
-		vec3  pos = camPos + dir * t;                          // WORLD position
-		vec2  pw  = pos.xz;                                    // ABSOLUTE world XZ → real parallax
-		                                                       // (position-dependent, exactly like the cloud slab)
-		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);  // 0 base … 1 top
-		// Vertical emission: sharp bright lower edge, long exponential fade up (fall-streaks).
-		float Evert = smoothstep(0.0, 0.05, hf) * exp(-hf * 2.4);
-		if (Evert <= 0.0015) continue;
-		float distLOD  = smoothstep(maxDist * 0.05, maxDist * 0.5, t); // 0 near → 1 far (widen σ far → AA)
-		float distFade = 1.0 - smoothstep(maxDist * 0.45, maxDist, t);
-		vec3  cCol = mix(colBase, colTop, smoothstep(0.0, 0.55, hf));  // green base → purple top
-		vec3  emitCol = vec3(0.0);
-		// Bands run along world-X and are placed on BOTH sides of the camera (alternating ±Z)
-		// at GEOMETRICALLY growing, IRREGULARLY-spaced distances → they cover the whole sky
-		// dome (near-zenith for the close ones, down to the horizon for the far ones, in front
-		// AND behind), with asymmetric gaps. Absolute world XZ → parallax. The early-out keeps
-		// it cheap (only the 1-2 bands near this sample's Z run the sine meander).
-		for (int k = 0; k < 14; ++k)
+		float fk = float(k);
+		// ── Layout: stratified ring radius (near-zenith … horizon, one curtain per stratum,
+		//    jittered inside it) and a golden-angle azimuth so they never clump on one side.
+		float rr     = (fk + auroraRnd(fk, 0.0)) / 22.0;
+		float radius = altitude * (0.18 + 13.3 * rr * rr);
+		float phi    = fk * 2.39996323 + auroraRnd(fk, 1.0) * 1.9;
+		vec2  cen    = vec2(cos(phi), sin(phi)) * radius;
+		// ── Heading: tangential to the ring (the oval runs E-W) ± 74°, so neighbouring curtains
+		//    run at genuinely different angles and overlap into a mesh instead of stacking up.
+		float head = phi + 1.5707963 + (auroraRnd(fk, 2.0) - 0.5) * 2.6;
+		vec2  tang = vec2(cos(head), sin(head));
+		vec2  nrm  = vec2(-tang.y, tang.x);
+		// ── Everything scales with the ring radius: a curtain twice as far away must be twice
+		//    as long, thick and snaky to keep the same apparent size on the dome.
+		float scl     = 0.16 * radius + 420.0;
+		float halfLen = scl * (2.6 + 3.8 * auroraRnd(fk, 3.0));
+		float sigma0  = scl * (0.05 + 0.08 * auroraRnd(fk, 4.0)); // curtains are THIN ribbons
+		float a1 = scl * (0.55 + 0.85 * auroraRnd(fk,  5.0));   // broad arc sweep
+		float a2 = scl * (0.18 + 0.34 * auroraRnd(fk,  6.0));   // folds
+		float a3 = scl * (0.05 + 0.11 * auroraRnd(fk,  7.0));   // curls
+		float f1 = (0.55 / scl) * (0.6 + 0.8 * auroraRnd(fk,  8.0));
+		float f2 = (1.70 / scl) * (0.6 + 0.9 * auroraRnd(fk,  9.0));
+		float f3 = (5.20 / scl) * (0.7 + 0.9 * auroraRnd(fk, 10.0));
+		float p1 = auroraRnd(fk, 11.0) * 6.2831853;
+		float p2 = auroraRnd(fk, 12.0) * 6.2831853;
+		float p3 = auroraRnd(fk, 13.0) * 6.2831853;
+		float hBot   = 0.34 * auroraRnd(fk, 14.0);              // where this curtain's foot sits
+		float hDec   = 4.6 - 2.4 * auroraRnd(fk, 15.0);         // how fast it fades upward
+		float bright = 0.55 + 0.70 * auroraRnd(fk, 16.0);
+
+		// ── Clip the ray to this ribbon's oriented box: |across| <= meander + 3σ, |along| <= len.
+		float u0 = dot(o - cen, tang), du = dot(dxz, tang);
+		float v0 = dot(o - cen, nrm ), dv = dot(dxz, nrm );
+		float halfW = a1 + a2 + a3 + sigma0 * 3.0;
+		float t0 = tNear, t1 = tFar;
+		if (!auroraSlab(v0, dv, halfW,          t0, t1)) continue;
+		if (!auroraSlab(u0, du, halfLen * 1.4, t0, t1)) continue;
+
+		// Step so we get a few samples ACROSS the sheet. What matters is how fast the distance
+		// to the centreline changes, and that has TWO parts: how fast the ray crosses the
+		// curtain (dv) AND how fast the centreline itself slides away under it as the ray
+		// travels along the curtain (the meander slope × du). Ignoring the second term leaves
+		// near-edge-on rays badly undersampled — that is what rings distant curtains with moiré,
+		// because those are exactly the rays with dv ≈ 0 but a large du. The slope is the RMS of
+		// the three meander derivatives; scl cancels, so it is a pure number around 1.
+		float mndSlope = sqrt(0.5 * (a1 * f1 * a1 * f1 + a2 * f2 * a2 * f2 + a3 * f3 * a3 * f3));
+		float dRate = max(abs(dv) + mndSlope * abs(du), 0.02);  // |d| change per unit t
+		int   Nk = int(clamp((t1 - t0) / (sigma0 * 1.1 / dRate), 6.0, 64.0));
+		float ds = (t1 - t0) / float(Nk);
+		float dAcross = ds * dRate;                             // how far d moves per step
+
+		for (int i = 0; i < Nk; ++i)
 		{
-			float fk   = float(k);
-			float side = mod(fk, 2.0) < 0.5 ? 1.0 : -1.0;
-			float rank = floor(fk * 0.5);
-			float z0   = side * (380.0 + rank * rank * 430.0 + 480.0 * sin(fk * 2.3 + 1.0)); // irregular
-			if (abs(pw.y - z0) > 1400.0) continue;            // can't reach this sample → skip BEFORE meander
-			float bandZ = z0 + auroraMeander(pw.x, fk, time);  // band centre Z (snakes/winds in X)
-			float d = pw.y - bandZ;                            // signed distance to the band (in Z)
-			// Organic WIDTH variation → billowy, non-uniform bands (not a clean uniform bar).
-			float widthVar = 0.55 + 0.80 * cloudNoise(vec2(pw.x * 0.0011 + fk * 7.0, fk * 1.3 + time * 0.04));
-			float sigma = mix(55.0, 175.0, distLOD) * widthVar; // thin near, widened far, varied
-			float sheet = exp(-(d * d) / (2.0 * sigma * sigma));
+			float t   = t0 + (float(i) + jit) * ds;
+			vec3  pos = camPos + dir * t;                       // WORLD position → real parallax
+			float u   = dot(pos.xz - cen, tang);
+			float e   = abs(u) / halfLen;
+			if (e > 1.4) continue;
+			// Density envelope toward the tips. This MUST decay smoothly to zero rather than
+			// stop at a boundary: viewed near edge-on, the ray's chord through the ribbon jumps
+			// from nothing to a long bright path across a hard |u| = halfLen plane, and that
+			// plane projects to a straight line — the ribbon visibly tears off mid-sky. A flat
+			// top with a steep-but-finite shoulder keeps the middle at full strength and reaches
+			// ~0 by e = 1.2, so there is no plane to see.
+			float e2 = e * e;
+			float ends = exp(-3.0 * e2 * e2 * e2);
+			float hf   = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+			// Vertical emission: sharp bright lower edge at this curtain's own foot height, long
+			// exponential fade upward (fall-streaks), and a soft top so the ribbon dissolves
+			// instead of ending on the flat lid of the altitude slab. The fade also steepens
+			// toward the tips, so an arc thins out to a point rather than staying full height
+			// and then vanishing.
+			float hDecE = hDec * (1.0 + 2.2 * (1.0 - ends));
+			float Ev = smoothstep(hBot, hBot + 0.06, hf)
+			         * exp(-max(hf - hBot, 0.0) * hDecE)
+			         * (1.0 - smoothstep(0.55, 0.98, hf));
+			if (Ev <= 0.002) continue;
+			float v = dot(pos.xz - cen, nrm);
+			// Centreline meander in this curtain's OWN frame: arc sweep + folds + curls, each
+			// with its own amplitude, frequency, phase and drift speed.
+			float mnd = a1 * sin(u * f1 + p1 + time * 0.21)
+			          + a2 * sin(u * f2 + p2 - time * 0.33)
+			          + a3 * sin(u * f3 + p3 + time * 0.52);
+			float d = v - mnd;
+			float distLOD = smoothstep(altitude * 1.5, layoutR, t);
+			float sigmaG  = sigma0 * (1.0 + 0.8 * distLOD);
+			// Pre-filter: never let the sheet be thinner than ~1.25 steps across, or the Gaussian
+			// falls between samples and beats into moiré (and the per-pixel IGN jitter turns that
+			// into visible dither). Widen it and renormalise so the line integral through the
+			// sheet is unchanged — blur, not aliasing.
+			float sigmaE = max(sigmaG, dAcross * 1.55);
+			float sheet  = exp(-(d * d) / (2.0 * sigmaE * sigmaE)) * (sigmaG / sigmaE);
 			if (sheet < 0.004) continue;
-			// Fine vertical RAY texture inside the curtain + irregular brightness PATCHES so the
-			// band has natural varied form, not a smooth bar. Cheap 1-octave noise (not fbm).
-			float rays   = 0.68 + 0.32 * cloudNoise(vec2(pw.x * 0.016 + fk, hf * 3.5 + fk * 5.0));
-			float patchN = 0.58 + 0.42 * cloudNoise(vec2(pw.x * 0.0040 - fk * 3.0, fk + 9.0 + time * 0.05));
-			// Fragmentation: extra gaps along the band when the user raises the slider.
-			float g = sin(pw.x * 0.00075 + fk * 4.0 + time * 0.1)
-			        * sin(pw.x * 0.00210 - fk * 2.0);
-			float broken = mix(1.0, smoothstep(-0.15, 0.55, g), frag);
-			emitCol += cCol * (sheet * rays * patchN * broken);
+			// Fine vertical RAY striation inside the curtain, faded out with distance so it
+			// does not alias into the far field. All detail frequencies are expressed in units
+			// of scl, so a near and a far curtain carry the SAME amount of structure — using
+			// absolute world frequencies would leave near ribbons smooth and alias far ones.
+			float rays = 0.62 + 0.38 * cloudNoise(vec2(u / scl * 30.0 + fk * 17.0, hf * 2.2 + fk));
+			rays = mix(rays, 1.0, distLOD);
+			// The braided vein web ON the curtain surface (along × height). This is what turns a
+			// single ribbon into a net rather than a smooth wall; the fragmentation slider drives
+			// how hard the gaps between the veins are punched out.
+			float web = auroraWeb(vec2(u / scl * 6.0 + fk * 9.0, hf * 1.3 + fk * 3.0 + time * 0.02));
+			float weave = mix(1.0, 0.10 + 1.45 * web, 0.35 + 0.65 * frag);
+			vec3 cCol = mix(colBase, colTop, smoothstep(0.02, 0.70, hf)); // green base → purple top
+			float distFade = 1.0 - smoothstep(layoutR * 0.85, layoutR * 2.1, t);
+			// Normalise by the curtain's OWN thickness, not the slab: the line integral through a
+			// Gaussian sheet is ∝ σ, so dividing by the slab height would make a fat distant
+			// curtain many times brighter than a thin near one instead of just wider.
+			acc += cCol * (sheet * Ev * rays * weave * ends * bright
+			               * (ds / (sigma0 * 6.0)) * distFade); // pure ADD (emissive, no extinction)
 		}
-		acc += emitCol * Evert * (ds / thick) * distFade;      // pure ADD (emissive, no extinction)
 	}
-	acc = acc / (1.0 + acc * 0.6);                             // soft rolloff → no clip-to-white (LDR)
+	// Soft rolloff → no clip-to-white (FragColor is LDR). Overexposure here does not just clip,
+	// it DESATURATES: the green base colour pushed past 1.0 in every channel reads as white and
+	// the aurora loses its colour, so this curve is kept well inside the headroom.
+	acc = acc / (1.0 + acc * 0.55);
 	float horizonFade = clamp(dir.y * 8.0, 0.0, 1.0);          // mask the 1/dir.y blow-up
-	return acc * (intensity * night * horizonFade * 3.5);
+	return acc * (intensity * night * horizonFade * 1.35);
 }
 
 // Contrails (Kondensstreifen) — vapour-trail lines that fill an empty daytime sky.

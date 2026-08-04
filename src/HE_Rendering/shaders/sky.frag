@@ -21,7 +21,8 @@
 //     raymarch (cloudMode 1). Only the 2D dome `applyClouds()` exists here.
 //     NOTE: `hgPhase()` IS present — it is used by the 2D cloud path. What is
 //     missing is its SECOND use inside applyClouds3D, not the function.
-//   * applyAurora3D + auroraMeander — the 3D aurora curtain. The flat 2D
+//   * applyAurora3D + auroraRnd / auroraWeb / auroraSlab — the 3D aurora
+//     curtains (independent finite ribbons crossing into a net). The flat 2D
 //     `aurora()` below is the older version, so this file is not aurora-less.
 //   * cirrus / cirrusFbm (high cirrus layer) and contrails
 //   * sunDisk, sunGlare, moonCorona, and the procedural moon surface

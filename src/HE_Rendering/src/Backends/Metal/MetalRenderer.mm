@@ -3625,15 +3625,31 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 	return max(C, float3(0.0)) * (horizon * night);
 }
 
-// Aurora borealis — world-anchored volumetric curtains (night only). A slab raymarch
-// like the 3D cloud volume: meandering vertical sheets stand along world-XZ centrelines
-// so they parallax as the camera moves. Height/fragmentation/top-colour user-controlled.
-// Mirrors the GL applyAurora3D() exactly.
-float auroraMeander(float x, float k, float t)
+// Aurora borealis — world-anchored volumetric curtains (night only). Each curtain is an
+// independent finite ribbon with its own placement, heading, length, thickness, meander
+// and height in the slab, so they cross into a net instead of stacking as parallel bars;
+// auroraWeb() braids each ribbon internally. Mirrors the GL applyAurora3D() exactly —
+// see the long comment there for the morphology research and the sampling scheme.
+float auroraRnd(float k, float s)
 {
-	return  370.0 * sin(x * 0.00090 + 0.20 * t + k * 1.7)
-	     +  170.0 * sin(x * 0.00300 - 0.14 * t + k * 3.3)
-	     +   85.0 * sin(x * 0.00760 + 0.28 * t + k * 5.1);
+	return starHash(float3(k * 0.7331 + 1.13, s * 1.9137 + 7.71, 19.37));
+}
+// Ridged "vein" field: the zero-set of the difference of two decorrelated noise fields is a
+// network of thin branching filaments — the marble/vein pattern that gives the net filigree.
+float auroraWeb(float2 p)
+{
+	float a = cloudNoise(p);
+	float b = cloudNoise(p * 1.43 + float2(37.2, 11.9));
+	return smoothstep(0.30, 0.0, abs(a - b));       // 1 on a vein, 0 in between
+}
+// Clip the ray interval [t0,t1] against the slab |x0 + dx*t| <= w; false when it misses.
+bool auroraSlab(float x0, float dx, float w, thread float &t0, thread float &t1)
+{
+	if (abs(dx) < 1e-7) return abs(x0) <= w;
+	float ta = (-w - x0) / dx, tb = (w - x0) / dx;
+	t0 = max(t0, min(ta, tb));
+	t1 = min(t1, max(ta, tb));
+	return t1 > t0;
 }
 float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
                      float3 colBase, float3 colTop, float3 sunDir,
@@ -3641,65 +3657,129 @@ float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
 {
 	if (intensity <= 0.0) return float3(0.0);
 	dir = normalize(dir);
-	if (dir.y < 0.02) return float3(0.0);                       // horizon → ray never reaches the band
+	if (dir.y < 0.02) return float3(0.0);                       // horizon → ray never reaches the curtains
 	float night = 1.0 - smoothstep(-0.20, -0.02, clamp(normalize(sunDir).y, -0.3, 1.0));
 	if (night <= 0.0) return float3(0.0);
 
-	// World-space altitude slab. Height control drives the band ELEVATION.
+	// World-space altitude slab. Height control drives the curtain ELEVATION.
 	float altitude = mix(1500.0, 7000.0, clamp(auroraHeight, 0.0, 1.0));
 	float baseY = camPos.y + altitude;
 	float thick = altitude * 1.4;
 	float invY  = 1.0 / dir.y;
 	float tNear = max((baseY - camPos.y) * invY, 0.0);
 	float tFar  = (baseY + thick - camPos.y) * invY;
-	float maxDist = altitude * 80.0;
-	tFar = min(tFar, maxDist);
+	float layoutR = altitude * 13.5;                            // the layout reaches this far out
+	tFar = min(tFar, layoutR * 2.2);
 	if (tFar <= tNear) return float3(0.0);
 
 	float frag = clamp(auroraFragment, 0.0, 1.0);
-	int   N  = int(clamp((tFar - tNear) / 72.0, 20.0, 46.0));
-	float ds = (tFar - tNear) / float(N);
-	float jit = skyIgn(fragCoord);
+	float jit  = skyIgn(fragCoord);
+	float2 o   = camPos.xz;                                     // ray origin in world XZ
+	float2 dxz = dir.xz;                                        // ray XZ velocity (|dxz| = cos(elev))
 
 	float3 acc = float3(0.0);
-	for (int i = 0; i < N; ++i)
+	for (int k = 0; k < 22; ++k)
 	{
-		float t   = tNear + (float(i) + jit) * ds;
-		float3 pos = camPos + dir * t;                          // WORLD position
-		float2 pw  = pos.xz;                                    // ABSOLUTE world XZ → real parallax
-		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);   // 0 base … 1 top
-		float Evert = smoothstep(0.0, 0.05, hf) * exp(-hf * 2.4); // sharp lower edge, fade up
-		if (Evert <= 0.0015) continue;
-		float distLOD  = smoothstep(maxDist * 0.05, maxDist * 0.5, t); // widen σ far → AA
-		float distFade = 1.0 - smoothstep(maxDist * 0.45, maxDist, t);
-		float3 cCol = mix(colBase, colTop, smoothstep(0.0, 0.55, hf)); // base → top colour
-		float3 emitCol = float3(0.0);
-		// Bands run along world-X, alternating ±Z at geometrically growing irregular distances.
-		for (int k = 0; k < 14; ++k)
+		float fk = float(k);
+		// Layout: stratified ring radius (near-zenith … horizon) + golden-angle azimuth.
+		float rr     = (fk + auroraRnd(fk, 0.0)) / 22.0;
+		float radius = altitude * (0.18 + 13.3 * rr * rr);
+		float phi    = fk * 2.39996323 + auroraRnd(fk, 1.0) * 1.9;
+		float2 cen   = float2(cos(phi), sin(phi)) * radius;
+		// Heading: tangential to the ring (the oval runs E-W) ± 74° → curtains cross.
+		float head = phi + 1.5707963 + (auroraRnd(fk, 2.0) - 0.5) * 2.6;
+		float2 tang = float2(cos(head), sin(head));
+		float2 nrm  = float2(-tang.y, tang.x);
+		// Everything scales with the ring radius → constant apparent size on the dome.
+		float scl     = 0.16 * radius + 420.0;
+		float halfLen = scl * (2.6 + 3.8 * auroraRnd(fk, 3.0));
+		float sigma0  = scl * (0.05 + 0.08 * auroraRnd(fk, 4.0)); // curtains are THIN ribbons
+		float a1 = scl * (0.55 + 0.85 * auroraRnd(fk,  5.0));   // broad arc sweep
+		float a2 = scl * (0.18 + 0.34 * auroraRnd(fk,  6.0));   // folds
+		float a3 = scl * (0.05 + 0.11 * auroraRnd(fk,  7.0));   // curls
+		float f1 = (0.55 / scl) * (0.6 + 0.8 * auroraRnd(fk,  8.0));
+		float f2 = (1.70 / scl) * (0.6 + 0.9 * auroraRnd(fk,  9.0));
+		float f3 = (5.20 / scl) * (0.7 + 0.9 * auroraRnd(fk, 10.0));
+		float p1 = auroraRnd(fk, 11.0) * 6.2831853;
+		float p2 = auroraRnd(fk, 12.0) * 6.2831853;
+		float p3 = auroraRnd(fk, 13.0) * 6.2831853;
+		float hBot   = 0.34 * auroraRnd(fk, 14.0);              // where this curtain's foot sits
+		float hDec   = 4.6 - 2.4 * auroraRnd(fk, 15.0);         // how fast it fades upward
+		float bright = 0.55 + 0.70 * auroraRnd(fk, 16.0);
+
+		// Clip the ray to this ribbon's oriented box: |across| <= meander + 3σ, |along| <= len.
+		float u0 = dot(o - cen, tang), du = dot(dxz, tang);
+		float v0 = dot(o - cen, nrm ), dv = dot(dxz, nrm );
+		float halfW = a1 + a2 + a3 + sigma0 * 3.0;
+		float t0 = tNear, t1 = tFar;
+		if (!auroraSlab(v0, dv, halfW,          t0, t1)) continue;
+		if (!auroraSlab(u0, du, halfLen * 1.4, t0, t1)) continue;
+
+		// What matters is how fast the distance to the centreline changes, and that has TWO
+		// parts: the ray crossing the curtain (dv) AND the centreline sliding away under it as
+		// the ray travels along the curtain (meander slope × du). Ignoring the second term
+		// leaves near-edge-on rays undersampled — that is what rings distant curtains with
+		// moiré. The slope is the RMS of the three meander derivatives; scl cancels out.
+		float mndSlope = sqrt(0.5 * (a1 * f1 * a1 * f1 + a2 * f2 * a2 * f2 + a3 * f3 * a3 * f3));
+		float dRate = max(abs(dv) + mndSlope * abs(du), 0.02);  // |d| change per unit t
+		int   Nk = int(clamp((t1 - t0) / (sigma0 * 1.1 / dRate), 6.0, 64.0));
+		float ds = (t1 - t0) / float(Nk);
+		float dAcross = ds * dRate;                             // how far d moves per step
+
+		for (int i = 0; i < Nk; ++i)
 		{
-			float fk   = float(k);
-			float side = fmod(fk, 2.0) < 0.5 ? 1.0 : -1.0;
-			float rank = floor(fk * 0.5);
-			float z0   = side * (380.0 + rank * rank * 430.0 + 480.0 * sin(fk * 2.3 + 1.0)); // irregular
-			if (abs(pw.y - z0) > 1400.0) continue;             // can't reach this sample → skip before meander
-			float bandZ = z0 + auroraMeander(pw.x, fk, time);  // band centre Z (snakes in X)
-			float d = pw.y - bandZ;
-			float widthVar = 0.55 + 0.80 * cloudNoise(float2(pw.x * 0.0011 + fk * 7.0, fk * 1.3 + time * 0.04));
-			float sigma = mix(55.0, 175.0, distLOD) * widthVar; // thin near, widened far, varied
-			float sheet = exp(-(d * d) / (2.0 * sigma * sigma));
+			float t = t0 + (float(i) + jit) * ds;
+			float3 pos = camPos + dir * t;                      // WORLD position → real parallax
+			float u = dot(pos.xz - cen, tang);
+			float e = abs(u) / halfLen;
+			if (e > 1.4) continue;
+			// Density envelope toward the tips — MUST decay smoothly to zero, not stop at a
+			// boundary: viewed near edge-on the ray's chord jumps from nothing to a long bright
+			// path across a hard |u| = halfLen plane, and that plane projects to a straight line
+			// (the ribbon tears off mid-sky). Flat middle, steep shoulder, ~0 by e = 1.2.
+			float e2 = e * e;
+			float ends = exp(-3.0 * e2 * e2 * e2);
+			float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+			// Sharp bright lower edge at this curtain's own foot, exponential fade upward, and a
+			// soft top so the ribbon dissolves instead of ending on the flat lid of the slab. The
+			// fade steepens toward the tips, so an arc thins to a point rather than vanishing.
+			float hDecE = hDec * (1.0 + 2.2 * (1.0 - ends));
+			float Ev = smoothstep(hBot, hBot + 0.06, hf)
+			         * exp(-max(hf - hBot, 0.0) * hDecE)
+			         * (1.0 - smoothstep(0.55, 0.98, hf));
+			if (Ev <= 0.002) continue;
+			float v = dot(pos.xz - cen, nrm);
+			float mnd = a1 * sin(u * f1 + p1 + time * 0.21)     // arc sweep + folds + curls
+			          + a2 * sin(u * f2 + p2 - time * 0.33)
+			          + a3 * sin(u * f3 + p3 + time * 0.52);
+			float d = v - mnd;
+			float distLOD = smoothstep(altitude * 1.5, layoutR, t);
+			float sigmaG  = sigma0 * (1.0 + 0.8 * distLOD);
+			// Pre-filter against the step size: widen σ, renormalise → blur, not moiré (and no
+			// IGN dither from the per-pixel jitter).
+			float sigmaE = max(sigmaG, dAcross * 1.55);
+			float sheet  = exp(-(d * d) / (2.0 * sigmaE * sigmaE)) * (sigmaG / sigmaE);
 			if (sheet < 0.004) continue;
-			float rays   = 0.68 + 0.32 * cloudNoise(float2(pw.x * 0.016 + fk, hf * 3.5 + fk * 5.0));
-			float patchN = 0.58 + 0.42 * cloudNoise(float2(pw.x * 0.0040 - fk * 3.0, fk + 9.0 + time * 0.05));
-			float g = sin(pw.x * 0.00075 + fk * 4.0 + time * 0.1)
-			        * sin(pw.x * 0.00210 - fk * 2.0);
-			float broken = mix(1.0, smoothstep(-0.15, 0.55, g), frag); // user fragmentation
-			emitCol += cCol * (sheet * rays * patchN * broken);
+			// Detail frequencies are in units of scl so near and far curtains carry the same
+			// amount of structure (absolute world frequencies alias the far ones).
+			float rays = 0.62 + 0.38 * cloudNoise(float2(u / scl * 30.0 + fk * 17.0, hf * 2.2 + fk));
+			rays = mix(rays, 1.0, distLOD);
+			float web = auroraWeb(float2(u / scl * 6.0 + fk * 9.0, hf * 1.3 + fk * 3.0 + time * 0.02));
+			float weave = mix(1.0, 0.10 + 1.45 * web, 0.35 + 0.65 * frag);
+			float3 cCol = mix(colBase, colTop, smoothstep(0.02, 0.70, hf)); // base → top colour
+			float distFade = 1.0 - smoothstep(layoutR * 0.85, layoutR * 2.1, t);
+			// Normalise by the curtain's OWN thickness, not the slab: the sheet's line integral
+			// is ∝ σ, so dividing by the slab height would make a fat distant curtain far
+			// brighter than a thin near one instead of merely wider.
+			acc += cCol * (sheet * Ev * rays * weave * ends * bright
+			               * (ds / (sigma0 * 6.0)) * distFade); // pure ADD (emissive, no extinction)
 		}
-		acc += emitCol * Evert * (ds / thick) * distFade;      // pure ADD (emissive, no extinction)
 	}
-	acc = acc / (1.0 + acc * 0.6);                             // soft rolloff → no clip-to-white
+	// Soft rolloff → no clip-to-white. Overexposure DESATURATES (green past 1.0 in every channel
+	// reads white), so this curve stays well inside the headroom.
+	acc = acc / (1.0 + acc * 0.55);
 	float horizonFade = clamp(dir.y * 8.0, 0.0, 1.0);
-	return acc * (intensity * night * horizonFade * 3.5);
+	return acc * (intensity * night * horizonFade * 1.35);
 }
 
 // Contrails (Kondensstreifen) — scattered finite vapour-trail segments at hashed
