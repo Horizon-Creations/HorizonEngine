@@ -9,6 +9,7 @@
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -76,6 +77,67 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 }
 
 #ifdef HE_IMGUI_ENABLED
+
+// ─── Setting-row widgets: label ABOVE, control full width ───────────────────
+// ImGui's default puts a widget's label to its RIGHT, which is fine in a wide
+// dialog and useless in the narrow Quick Settings dock: the text ran past the
+// panel's right edge and was simply cut off. Every control below therefore
+// prints its label on its own line and then stretches to the available width,
+// so nothing depends on how wide the panel happens to be. PushID(label) keeps
+// the ids unique even though every control is spelled "##v".
+namespace {
+
+bool sliderFloatRow(const char* label, float* v, float lo, float hi, const char* fmt)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::SliderFloat("##v", v, lo, hi, fmt);
+	ImGui::PopID();
+	return changed;
+}
+
+bool sliderIntRow(const char* label, int* v, int lo, int hi, const char* fmt = "%d")
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::SliderInt("##v", v, lo, hi, fmt);
+	ImGui::PopID();
+	return changed;
+}
+
+bool comboRow(const char* label, int* v, const char* const items[], int count)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::Combo("##v", v, items, count);
+	ImGui::PopID();
+	return changed;
+}
+
+bool inputIntRow(const char* label, int* v)
+{
+	ImGui::PushID(label);
+	ImGui::TextUnformatted(label);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool changed = ImGui::InputInt("##v", v, 0, 0);
+	ImGui::PopID();
+	return changed;
+}
+
+// Sub-controls of an enabled/disabled group read better indented under their
+// checkbox, and the indent is what keeps "AO Radius" visibly subordinate to
+// "AO" now that both start at the left margin.
+struct SubGroup
+{
+	SubGroup(bool enabled) { ImGui::BeginDisabled(!enabled); ImGui::Indent(12.0f); }
+	~SubGroup()            { ImGui::Unindent(12.0f); ImGui::EndDisabled(); }
+};
+
+} // namespace
+
 // Renders the engine-settings catalog. Each `row(key, category, widget)` is a
 // logical setting group; `widget` draws its control(s).
 void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* categoryFilter)
@@ -103,12 +165,15 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			ImGui::SameLine();
 		}
 		widget();
+		// Rows are multi-line now (label above control, indented sub-controls), so
+		// without a gap two neighbouring settings read as one block.
+		ImGui::Spacing();
 		++shown;
 	};
 
 	row("backend", "Display", [&]{
 		ImGui::TextUnformatted("Backend");
-		ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-FLT_MIN);
 		if (ImGui::BeginCombo("##backend", ctx.backendName.c_str()))
 		{
 			auto pick = [&](const char* label, HE::RendererBackend api){
@@ -130,11 +195,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 	row("renderpath", "Display", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsDeferredRendering;
-		ImGui::TextUnformatted("Render Path");
-		ImGui::SetNextItemWidth(-1.0f);
 		ImGui::BeginDisabled(!supported);
 		const char* kPaths[] = { "Forward", "Deferred" };
-		ImGui::Combo("##renderpath", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
+		comboRow("Render Path", &cfg.RenderPath, kPaths, IM_ARRAYSIZE(kPaths));
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Deferred is available on Metal and OpenGL only.");
@@ -147,9 +210,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// the high-FPS mouse-look stays smooth and idle GPU load drops; ignored with VSync on.
 		ImGui::BeginDisabled(ctx.vsync);
 		int capped = static_cast<int>(cfg.MaxFps);
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::SliderInt("Max FPS (VSync off)", &capped, 0, 1000,
-		                     capped <= 0 ? "Unlimited" : "%d FPS"))
+		if (sliderIntRow("Max FPS (VSync off)", &capped, 0, 1000,
+		                 capped <= 0 ? "Unlimited" : "%d FPS"))
 		{
 			cfg.MaxFps = static_cast<float>(capped < 0 ? 0 : capped);
 			if (ctx.setMaxFps) ctx.setMaxFps(cfg.MaxFps);
@@ -159,45 +221,37 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 
 	row("bloom", "Post-Processing", [&]{
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
-		ImGui::BeginDisabled(!cfg.BloomEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
+		SubGroup sub(cfg.BloomEnabled);
+		sliderFloatRow("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
+		sliderFloatRow("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssao", "Post-Processing", [&]{
 		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
-		ImGui::BeginDisabled(!cfg.SSAOEnabled);
-		ImGui::SetNextItemWidth(220.0f);
+		SubGroup sub(cfg.SSAOEnabled);
 		// AO method: SSAO (kernel), HBAO (horizon bitmask), or GTAO (analytic arc).
 		const char* kAOMethods[] = { "SSAO", "HBAO", "GTAO" };
-		ImGui::Combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
-		ImGui::EndDisabled();
+		comboRow("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
+		sliderFloatRow("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
+		sliderFloatRow("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("Screen-Space Reflections", &cfg.SSREnabled);
-		ImGui::BeginDisabled(!cfg.SSREnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
-		// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
-		const char* kSSRQuality[] = { "Low", "Medium", "High" };
-		int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
-		if (ImGui::Combo("SSR Quality", &ssrQ, kSSRQuality, 3))
-			cfg.SSRQuality = ssrQ;
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.SSREnabled);
+			sliderFloatRow("SSR Intensity", &cfg.SSRIntensity, 0.0f, 1.0f, "%.2f");
+			sliderFloatRow("SSR Max Roughness", &cfg.SSRMaxRoughness, 0.05f, 1.0f, "%.2f");
+			// Low = 16 steps, raw trace; Med = 32 + blur; High = 64 + glossy
+			// roughness lerp (wide second blur) — matches ssr-plan §7's tiers.
+			const char* kSSRQuality[] = { "Low", "Medium", "High" };
+			int ssrQ = std::clamp(cfg.SSRQuality, 0, 2);
+			if (comboRow("SSR Quality", &ssrQ, kSSRQuality, 3))
+				cfg.SSRQuality = ssrQ;
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, and only with Render Path = Deferred.");
 		else if (supported)
 			ImGui::TextDisabled("Metallic surfaces reflect the actual scene (deferred path).");
@@ -207,14 +261,14 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGlobalIllumination;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("Global Illumination (ray-traced, Metal)", &cfg.GlobalIlluminationEnabled);
-		ImGui::BeginDisabled(!cfg.GlobalIlluminationEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.GlobalIlluminationEnabled);
+			sliderFloatRow("GI Indirect Intensity", &cfg.GIIndirectIntensity, 0.0f, 3.0f, "%.2f");
+			sliderFloatRow("GI Light Radius (deg)", &cfg.GILightRadius, 0.05f, 3.0f, "%.2f");
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal-only; needs a ray-tracing-capable GPU + macOS 12+.");
 		else if (supported)
 			ImGui::TextDisabled("Replaces CSM shadows + AO/ambient with ray-traced DDGI.");
@@ -223,26 +277,24 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGIReflections;
 		ImGui::BeginDisabled(!supported);
 		ImGui::Checkbox("GI Reflections (ray-traced)", &cfg.GIReflectionsEnabled);
-		ImGui::BeginDisabled(!cfg.GIReflectionsEnabled);
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
-		ImGui::SetNextItemWidth(220.0f);
-		// Low = raw mirror trace; Med = + confidence-weighted blur; High =
-		// + roughness-jittered cone rays with temporal accumulation (glossy).
-		const char* kGIReflQuality[] = { "Low", "Medium", "High" };
-		int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
-		if (ImGui::Combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
-			cfg.GIReflQuality = grQ;
-		ImGui::SetNextItemWidth(220.0f);
-		// Mirror-like surfaces seen IN a reflection reflect onward instead of
-		// flattening to their base colour; each bounce costs one more trace
-		// on the affected pixels only.
-		ImGui::SliderInt("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.GIReflectionsEnabled);
+			sliderFloatRow("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
+			sliderFloatRow("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
+			// Low = raw mirror trace; Med = + confidence-weighted blur; High =
+			// + roughness-jittered cone rays with temporal accumulation (glossy).
+			const char* kGIReflQuality[] = { "Low", "Medium", "High" };
+			int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
+			if (comboRow("GI Refl Quality", &grQ, kGIReflQuality, 3))
+				cfg.GIReflQuality = grQ;
+			// Mirror-like surfaces seen IN a reflection reflect onward instead of
+			// flattening to their base colour; each bounce costs one more trace
+			// on the affected pixels only.
+			sliderIntRow("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+		}
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		if (!supported && hovered)
 			ImGui::SetTooltip("Metal only, with Render Path = Deferred.");
 		else if (supported)
 			ImGui::TextDisabled("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
@@ -260,20 +312,18 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	row("camspeed", "Viewport", [&]{
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::SliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s") && ctx.editorCamera)
+		if (sliderFloatRow("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
+		    && ctx.editorCamera)
 			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 	});
 
 	row("fontscale", "Appearance", [&]{
-		ImGui::SetNextItemWidth(220.0f);
-		ImGui::SliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
+		sliderFloatRow("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
 	});
 
 	row("cpucache", "Content Browser", [&]{ ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets); });
 	row("cbrefresh", "Content Browser", [&]{
-		ImGui::SetNextItemWidth(120.0f);
-		ImGui::InputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate, 0, 0);
+		inputIntRow("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
 	});
 
@@ -309,6 +359,51 @@ char s_ghRepoName[128] = "";
 char s_ghToken[256]    = "";
 bool s_ghPrivate       = true;
 bool s_autoPushLoaded  = false;
+
+// Standalone "store a token for this remote" form (separate buffers from the
+// GitHub-create form above — the two are different flows and clearing one must
+// not disturb the other).
+char s_credHost[128]  = "";
+char s_credUser[128]  = "";
+char s_credToken[256] = "";
+// The remote URL the host/user fields were seeded from, so a changed remote
+// re-seeds them but the user's own edits survive a redraw.
+std::string s_credSeededFrom;
+
+// Host of a git remote URL: https://host/…, ssh://git@host/…, git@host:path.
+std::string hostFromRemote(const std::string& url)
+{
+	std::string s = url;
+	if (const auto scheme = s.find("://"); scheme != std::string::npos)
+		s = s.substr(scheme + 3);
+	if (const auto at = s.find('@'); at != std::string::npos)
+		s = s.substr(at + 1);
+	if (const auto cut = s.find_first_of("/:"); cut != std::string::npos)
+		s = s.substr(0, cut);
+	return s;
+}
+
+// An SSH remote authenticates with a key, not a token — storing one would do
+// nothing at all, so the form says so instead of pretending to work.
+bool isSshRemote(const std::string& url)
+{
+	if (url.rfind("ssh://", 0) == 0) return true;
+	// scp-style (git@host:path) — an '@' before any '/' and no scheme.
+	const auto at    = url.find('@');
+	const auto slash = url.find('/');
+	return url.find("://") == std::string::npos && at != std::string::npos &&
+	       (slash == std::string::npos || at < slash);
+}
+
+// The username the host expects next to a personal access token. GitHub wants
+// x-access-token, GitLab oauth2; everything else (Azure DevOps, Gitea, self-
+// hosted) accepts any non-empty name, so the account name is the safe default.
+const char* tokenUserFor(const std::string& host)
+{
+	if (host.find("github") != std::string::npos) return "x-access-token";
+	if (host.find("gitlab") != std::string::npos) return "oauth2";
+	return "";
+}
 
 // git identity form, pre-filled from whatever git already has so a user with
 // only one of the two set does not have to retype the other.
@@ -484,6 +579,66 @@ void drawRepositoryPage(AppContext& ctx)
 				"GitAutoPushAfterCommit", git->autoPushAfterCommit);
 		}
 		ImGui::TextDisabled("Commit, push and pull live in View \xe2\x96\xb8 Source Control.");
+	}
+
+	// ── Access token ─────────────────────────────────────────────────────────
+	// Available whatever route the remote took: the GitHub-create flow above
+	// stores its token on the way through, but a pasted URL, a cloned project
+	// or an expired token all end up here, with no repository being created.
+	ImGui::Spacing();
+	ImGui::SeparatorText("Access token");
+
+	const std::string& remote = git->remoteUrl();
+	if (remote.empty())
+	{
+		ImGui::TextDisabled("Configure a remote first — a token is stored per host.");
+	}
+	else if (isSshRemote(remote))
+	{
+		ImGui::TextWrapped("origin uses SSH, which authenticates with your SSH key. "
+		                   "Access tokens apply to https:// remotes only.");
+	}
+	else
+	{
+		if (s_credSeededFrom != remote)
+		{
+			s_credSeededFrom = remote;
+			const std::string host = hostFromRemote(remote);
+			std::snprintf(s_credHost, sizeof(s_credHost), "%s", host.c_str());
+			std::snprintf(s_credUser, sizeof(s_credUser), "%s", tokenUserFor(host));
+		}
+
+		ImGui::TextWrapped("Store an access token for pushing and pulling. It goes "
+		                   "straight to git's credential helper (the system keychain) "
+		                   "and is never written to a project or engine file.");
+		ImGui::Spacing();
+
+		ImGui::TextUnformatted("Host");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputText("##credhost", s_credHost, sizeof(s_credHost));
+
+		ImGui::TextUnformatted("Username");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##creduser", "your account name",
+		                         s_credUser, sizeof(s_credUser));
+
+		ImGui::TextUnformatted("Token");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##credtoken", "Personal access token",
+		                         s_credToken, sizeof(s_credToken),
+		                         ImGuiInputTextFlags_Password);
+
+		ImGui::Spacing();
+		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
+		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
+		if (ImGui::Button("Save token", ImVec2(140.0f, 0.0f)))
+		{
+			git->requestStoreCredential(s_credHost, s_credUser, std::string(s_credToken));
+			// Wipe, not clear: the bytes must go, not just the length.
+			std::fill(std::begin(s_credToken), std::end(s_credToken), '\0');
+		}
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("GitHub: github.com/settings/tokens — classic, 'repo' scope.");
 	}
 
 	drawGitMessages(git);

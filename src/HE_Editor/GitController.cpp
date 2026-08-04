@@ -67,6 +67,14 @@ void GitController::requestSetupGitHub(const std::string& repoName, bool isPriva
 	m_service.requestSetupGitHub(repoName, isPrivate, std::move(token));
 }
 
+void GitController::requestStoreCredential(const std::string& host,
+                                           const std::string& username,
+                                           std::string token)
+{
+	if (!mayModify() || host.empty() || username.empty() || token.empty()) return;
+	m_service.requestStoreCredential(host, username, std::move(token));
+}
+
 void GitController::requestPush()
 {
 	if (!mayModify()) return;
