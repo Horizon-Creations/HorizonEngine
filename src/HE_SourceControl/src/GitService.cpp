@@ -91,6 +91,17 @@ void GitService::requestRestoreTo(const std::string& commit, const std::string& 
 	push(std::move(c));
 }
 
+void GitService::requestCreateBranch(const std::string& name,
+                                    const std::string& startCommit, bool checkout)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::CreateBranch, {} };
+	c.text   = name;
+	c.secret = startCommit;   // second string slot; nothing secret here
+	c.flag   = checkout;
+	push(std::move(c));
+}
+
 void GitService::requestSetupGitHub(const std::string& repoName, bool isPrivate,
                                     std::string token)
 {
@@ -403,6 +414,41 @@ void GitService::workerMain()
 			wantStatus = true;
 			break;
 		}
+		case Kind::CreateBranch:
+		{
+			std::string err;
+
+			// Only the checkout half is destructive: it swaps the working tree
+			// for the branch's contents. Writing a ref changes nothing on disk,
+			// so a dirty tree is perfectly fine there — and refusing it would
+			// block the most useful moment, "park what I have on a branch".
+			if (cmd.flag)
+			{
+				RepoStatus pre;
+				if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
+				if (pre.dirtyCount() != 0)
+				{
+					ev.error = "Cannot switch to the new branch — there are " +
+					           std::to_string(pre.dirtyCount()) +
+					           " uncommitted change(s) that switching would carry "
+					           "over or overwrite. Commit them first, or create the "
+					           "branch without switching to it.";
+					break;
+				}
+			}
+
+			if (!GitCli::createBranch(m_root, cmd.text, cmd.secret, cmd.flag, &err))
+			{
+				ev.error = err;
+				break;
+			}
+			ev.info = cmd.flag
+				? "Created branch \"" + cmd.text + "\" and switched to it."
+				: "Created branch \"" + cmd.text + "\".";
+			if (!cmd.secret.empty()) ev.info += " (from " + cmd.secret + ")";
+			wantStatus = true;
+			break;
+		}
 		case Kind::SetRemote:
 		{
 			std::string err;
@@ -437,6 +483,8 @@ void GitService::workerMain()
 					// Recent history rides along too — it only changes when a
 					// refresh was warranted anyway (commit, pull, poll).
 					GitCli::log(m_root, 20, ev.commits);
+					std::string ignoredCurrent;
+					GitCli::listBranches(m_root, ev.branches, ignoredCurrent);
 				}
 				else
 				{
@@ -483,6 +531,7 @@ void GitService::pump(std::size_t maxEvents)
 		{
 			m_remoteUrl = ev.remoteUrl;
 			m_commits   = std::move(ev.commits);
+			m_branches  = std::move(ev.branches);
 		}
 		if (!ev.statusValid)       continue;
 		// Swapped in whole. A partially updated snapshot is the bug class this

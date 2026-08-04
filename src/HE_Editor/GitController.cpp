@@ -66,6 +66,13 @@ void GitController::requestRestoreTo(const std::string& commit, const std::strin
 	m_service.requestRestoreTo(commit, shortOid);
 }
 
+void GitController::requestCreateBranch(const std::string& name,
+                                       const std::string& startCommit, bool checkout)
+{
+	if (!mayModify() || name.empty()) return;
+	m_service.requestCreateBranch(name, startCommit, checkout);
+}
+
 void GitController::requestSetupGitHub(const std::string& repoName, bool isPrivate,
                                        std::string token)
 {

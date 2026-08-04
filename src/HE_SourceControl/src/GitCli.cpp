@@ -217,6 +217,80 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
 }
 
+bool GitCli::isValidBranchName(const std::filesystem::path& root, const std::string& name)
+{
+	if (name.empty()) return false;
+	// git's own rules, asked of git — reimplementing them here would drift.
+	return run(root, { "check-ref-format", "--branch", name }, 10000).ok;
+}
+
+bool GitCli::branchExists(const std::filesystem::path& root, const std::string& name)
+{
+	if (name.empty()) return false;
+	return run(root, { "rev-parse", "--verify", "--quiet",
+	                   "refs/heads/" + name }, 10000).ok;
+}
+
+bool GitCli::createBranch(const std::filesystem::path& root, const std::string& name,
+                          const std::string& startCommit, bool checkout, std::string* err)
+{
+	if (!isValidBranchName(root, name))
+	{
+		if (err) *err = "\"" + name + "\" is not a valid branch name — no spaces, no "
+		                "\"..\", and it cannot start or end with a slash or a dot.";
+		return false;
+	}
+	if (branchExists(root, name))
+	{
+		if (err) *err = "a branch named \"" + name + "\" already exists";
+		return false;
+	}
+	if (!startCommit.empty() && !commitExists(root, startCommit))
+	{
+		if (err) *err = "no commit named \"" + startCommit + "\" in this repository";
+		return false;
+	}
+
+	std::vector<std::string> args;
+	if (checkout) args = { "switch", "-c", name };   // create AND move onto it
+	else          args = { "branch", name };        // write the ref only
+	if (!startCommit.empty()) args.push_back(startCommit);
+
+	return runChecked(root, args, kLocalTimeoutMs, err);
+}
+
+bool GitCli::listBranches(const std::filesystem::path& root,
+                          std::vector<std::string>& out, std::string& outCurrent,
+                          std::string* err)
+{
+	out.clear();
+	outCurrent.clear();
+
+	// --format keeps this parseable without the decoration `git branch` adds;
+	// refname:short is the plain name.
+	const GitResult r = run(root, { "for-each-ref", "--sort=refname",
+	                                "--format=%(refname:short)", "refs/heads" }, 10000);
+	if (!r.ok)
+	{
+		if (err) *err = trimTrailing(r.err);
+		return false;
+	}
+	std::size_t pos = 0;
+	while (pos < r.out.size())
+	{
+		const std::size_t nl = r.out.find('\n', pos);
+		std::string line = r.out.substr(pos, nl == std::string::npos
+		                                     ? std::string::npos : nl - pos);
+		pos = nl == std::string::npos ? r.out.size() : nl + 1;
+		line = trimTrailing(line);
+		if (!line.empty()) out.push_back(std::move(line));
+	}
+
+	const GitResult cur = run(root, { "branch", "--show-current" }, 10000);
+	if (cur.ok) outCurrent = trimTrailing(cur.out);
+	return true;
+}
+
 bool GitCli::commitExists(const std::filesystem::path& root, const std::string& commit)
 {
 	if (commit.empty()) return false;

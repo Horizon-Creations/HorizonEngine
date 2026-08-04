@@ -112,6 +112,30 @@ public:
 	static bool restoreWorktreeTo(const std::filesystem::path& root,
 	                              const std::string& commit, std::string* err = nullptr);
 
+	// ── Branches ─────────────────────────────────────────────────────────────
+	// Does git consider this a legal branch name? Checked separately from
+	// creating one so the panel can say "that name will not work" while the
+	// user is still typing, rather than after a failed command.
+	static bool isValidBranchName(const std::filesystem::path& root,
+	                              const std::string& name);
+
+	// Already taken? A create would fail anyway; asking first turns that into a
+	// clear message instead of git's.
+	static bool branchExists(const std::filesystem::path& root, const std::string& name);
+
+	// Create `name` pointing at `startCommit` (empty = HEAD). With `checkout`
+	// the new branch also becomes the current one — which REPLACES the working
+	// tree, so callers must have verified it is clean first. Without it, only a
+	// ref is written and nothing on disk changes.
+	static bool createBranch(const std::filesystem::path& root, const std::string& name,
+	                         const std::string& startCommit, bool checkout,
+	                         std::string* err = nullptr);
+
+	// Every local branch, sorted, plus which one is checked out.
+	static bool listBranches(const std::filesystem::path& root,
+	                         std::vector<std::string>& out, std::string& outCurrent,
+	                         std::string* err = nullptr);
+
 	// True when `commit` names something this repository actually has.
 	static bool commitExists(const std::filesystem::path& root, const std::string& commit);
 

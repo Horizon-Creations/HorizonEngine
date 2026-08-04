@@ -73,6 +73,13 @@ void writeFile(const fs::path& p, const std::string& text)
 	out << text;
 }
 
+std::string trimmed(std::string v)
+{
+	while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' '))
+		v.pop_back();
+	return v;
+}
+
 std::string readFile(const fs::path& p)
 {
 	std::ifstream in(p, std::ios::binary);
@@ -520,6 +527,102 @@ TEST_CASE("ensureCredentialHelper leaves a repo with a usable helper")
 	// just configured — the repo must end up with one.
 	CHECK_FALSE(GitCli::credentialHelper(repo).empty());
 
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("Branches can be created from any commit, with or without switching")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("branch");
+	writeFile(repo / "a.txt", "v1");
+	commitAll(repo, "first");
+	const std::string firstOid =
+		trimmed(GitCli::run(repo, { "rev-parse", "--short", "HEAD" }).out);
+	writeFile(repo / "a.txt", "v2");
+	commitAll(repo, "second");
+
+	std::string err;
+
+	// Off an OLD commit, without switching: the ref exists, the working tree is
+	// untouched, and we are still where we were.
+	REQUIRE(GitCli::createBranch(repo, "from-first", firstOid, /*checkout=*/false, &err));
+	CHECK(GitCli::branchExists(repo, "from-first"));
+	CHECK(readFile(repo / "a.txt") == "v2");
+
+	std::vector<std::string> names;
+	std::string current;
+	REQUIRE(GitCli::listBranches(repo, names, current));
+	CHECK(std::find(names.begin(), names.end(), "from-first") != names.end());
+	CHECK(current == "main");
+
+	// The branch really starts at that commit — one commit of history, not two.
+	std::vector<GitCli::CommitInfo> log;
+	REQUIRE(GitCli::log(repo, 10, log));
+	CHECK(log.size() == 2);   // still on main
+
+	// Now WITH switching: the working tree becomes that commit's.
+	REQUIRE(GitCli::createBranch(repo, "work-here", firstOid, /*checkout=*/true, &err));
+	REQUIRE(GitCli::listBranches(repo, names, current));
+	CHECK(current == "work-here");
+	CHECK(readFile(repo / "a.txt") == "v1");
+
+	// Rejections that would otherwise surface as raw git errors.
+	CHECK_FALSE(GitCli::createBranch(repo, "work-here", "", false, &err));
+	CHECK(err.find("already exists") != std::string::npos);
+	CHECK_FALSE(GitCli::createBranch(repo, "bad name with spaces", "", false, &err));
+	CHECK_FALSE(err.empty());
+	CHECK_FALSE(GitCli::createBranch(repo, "ok-name", "nosuchcommit", false, &err));
+	CHECK(err.find("no commit") != std::string::npos);
+
+	CHECK_FALSE(GitCli::isValidBranchName(repo, "has space"));
+	CHECK_FALSE(GitCli::isValidBranchName(repo, ""));
+	CHECK(GitCli::isValidBranchName(repo, "feature/new-lighting"));
+
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("Creating a branch works on a dirty tree; switching to it does not")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("branchdirty");
+	writeFile(repo / "a.txt", "v1");
+	commitAll(repo, "first");
+
+	// Work in progress — the exact moment "park this on a branch" is wanted.
+	writeFile(repo / "a.txt", "UNCOMMITTED");
+
+	GitService svc;
+	svc.open(repo);
+	auto settle = [&] {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while ((svc.busy() || svc.status().generation == 0) &&
+		       std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		svc.pump();
+	};
+	settle();
+	REQUIRE(svc.isRepo());
+
+	// Writing a ref touches nothing on disk, so this must be allowed.
+	svc.requestCreateBranch("parked", "", /*checkout=*/false);
+	settle();
+	CHECK(svc.lastError().empty());
+	CHECK(GitCli::branchExists(repo, "parked"));
+	CHECK(readFile(repo / "a.txt") == "UNCOMMITTED");
+
+	// Switching would carry the changes over or overwrite them — refused.
+	svc.requestCreateBranch("switch-me", "", /*checkout=*/true);
+	settle();
+	CHECK_FALSE(svc.lastError().empty());
+	CHECK(svc.lastError().find("uncommitted") != std::string::npos);
+	CHECK(readFile(repo / "a.txt") == "UNCOMMITTED");
+
+	svc.close();
 	he_test::removeQuiet(repo);
 }
 

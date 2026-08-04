@@ -51,6 +51,9 @@ public:
 	// Put the project folder back to how a commit had it, recorded as a new
 	// commit so the restore is itself undoable. Refused on a dirty tree.
 	void requestRestoreTo(const std::string& commit, const std::string& shortOid);
+	// Create a branch at `startCommit` (empty = HEAD), optionally switching to it.
+	void requestCreateBranch(const std::string& name, const std::string& startCommit,
+	                         bool checkout);
 	// Store an access token for an EXISTING remote (pasted URL, clone, expired
 	// token) — no repository is created. Goes to git's credential helper, same
 	// as the GitHub setup flow.
@@ -75,6 +78,7 @@ public:
 	{
 		return m_service.recentCommits();
 	}
+	const std::vector<std::string>& branches() const { return m_service.branches(); }
 	const std::filesystem::path& projectRoot() const { return m_projectRoot; }
 
 	// Status for a file given its ABSOLUTE path, which is what the Content

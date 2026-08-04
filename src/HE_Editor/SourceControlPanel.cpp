@@ -4,6 +4,7 @@
 #include "GitController.h"
 
 #include <Diagnostics/GlobalState.h>
+#include <SourceControl/GitCli.h>
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
 
@@ -34,6 +35,13 @@ bool s_historyOpen    = true;
 // will happen in full before it happens.
 std::string s_restoreOid;
 std::string s_restoreSubject;
+// Branch creation. The start commit is empty when branching off the current
+// state rather than off a specific commit in the history.
+std::string s_branchFromOid;
+std::string s_branchFromSubject;
+char        s_branchName[128] = "";
+bool        s_branchCheckout  = true;
+bool        s_branchDialog    = false;
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -287,6 +295,30 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	else
 	{
 		ImGui::Text("Branch: %s", st.branch.empty() ? "(unknown)" : st.branch.c_str());
+		if (!git->branches().empty() && ImGui::IsItemHovered())
+		{
+			// The other branches, on hover — enough to know what exists without
+			// spending a permanent row on it.
+			std::string all;
+			for (const std::string& b : git->branches())
+			{
+				all += (b == st.branch ? "\xe2\x97\x8f " : "  ") + b + "\n";
+			}
+			ImGui::SetTooltip("Local branches:\n%s", all.c_str());
+		}
+		// Branching off the current state, as opposed to off a commit in the
+		// history (that entry lives in the History context menu).
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 84.0f);
+		ImGui::BeginDisabled(git->busy() || st.initialCommit);
+		if (ImGui::SmallButton("New branch…"))
+		{
+			s_branchFromOid.clear();          // empty start = branch off HEAD
+			s_branchFromSubject.clear();
+			s_branchName[0]  = '\0';
+			s_branchCheckout = st.dirtyCount() == 0;
+			s_branchDialog   = true;
+		}
+		ImGui::EndDisabled();
 	}
 
 	if (st.initialCommit)
@@ -494,6 +526,20 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 				if (ImGui::BeginPopupContextItem("##commitctx"))
 				{
+					// Branching is non-destructive as long as it only writes a
+					// ref, so it stays available with a dirty tree — the
+					// dialog's "switch to it" is what the guard applies to.
+					ImGui::BeginDisabled(git->busy());
+					if (ImGui::MenuItem("Create branch from this commit…"))
+					{
+						s_branchFromOid     = c.shortOid;
+						s_branchFromSubject = c.subject;
+						s_branchName[0]     = '\0';
+						s_branchCheckout    = st.dirtyCount() == 0;
+						s_branchDialog      = true;
+					}
+					ImGui::EndDisabled();
+
 					ImGui::BeginDisabled(git->busy() || st.dirtyCount() != 0);
 					if (ImGui::MenuItem("Restore project to this commit…"))
 					{
@@ -502,13 +548,88 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 					}
 					ImGui::EndDisabled();
 					if (st.dirtyCount() != 0)
-						ImGui::TextDisabled("Commit or discard your changes first.");
+						ImGui::TextDisabled("Restoring needs a clean project — commit or "
+						                    "discard your changes first.");
 					ImGui::EndPopup();
 				}
 				ImGui::PopID();
 			}
 		}
 		ImGui::EndChild();
+	}
+
+	// ── Create branch ────────────────────────────────────────────────────────
+	if (s_branchDialog) ImGui::OpenPopup("Create branch");
+	if (ImGui::BeginPopupModal("Create branch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		if (s_branchFromOid.empty())
+		{
+			ImGui::TextWrapped("New branch from the current state (%s).",
+			                   st.branch.empty() ? "no branch" : st.branch.c_str());
+		}
+		else
+		{
+			ImGui::TextWrapped("New branch starting at:");
+			ImGui::TextDisabled("%s", s_branchFromOid.c_str());
+			ImGui::SameLine();
+			ImGui::TextWrapped("%s", s_branchFromSubject.c_str());
+		}
+		ImGui::Spacing();
+
+		ImGui::SetNextItemWidth(260.0f);
+		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+		ImGui::InputTextWithHint("##branchname", "feature/new-lighting",
+		                         s_branchName, sizeof(s_branchName));
+
+		// Validate while typing: git's own rules, asked of git, so the answer
+		// cannot drift from what the command will accept.
+		const bool empty = s_branchName[0] == '\0';
+		bool nameOk = false, taken = false;
+		if (!empty && !git->projectRoot().empty())
+		{
+			nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
+			taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
+		}
+		if (!empty && !nameOk)
+			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
+			                   "Not a usable branch name.");
+		else if (taken)
+			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
+			                   "A branch with this name already exists.");
+
+		const bool dirty = st.dirtyCount() != 0;
+		ImGui::BeginDisabled(dirty);
+		ImGui::Checkbox("Switch to it right away", &s_branchCheckout);
+		ImGui::EndDisabled();
+		if (dirty)
+		{
+			// Creating the ref is still fine — it touches nothing on disk — so
+			// the useful half stays available and only the switch is blocked.
+			s_branchCheckout = false;
+			ImGui::TextDisabled("Switching needs a clean project; the branch is created\n"
+			                    "anyway and you can switch to it once you have committed.");
+		}
+
+		ImGui::Spacing();
+		ImGui::BeginDisabled(empty || !nameOk || taken || git->busy());
+		if (ImGui::Button("Create", ImVec2(120.0f, 0.0f)))
+		{
+			git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
+			s_branchDialog = false;
+			s_branchFromOid.clear();
+			s_branchFromSubject.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+		{
+			s_branchDialog = false;
+			s_branchFromOid.clear();
+			s_branchFromSubject.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
 	}
 
 	// ── Restore confirmation ─────────────────────────────────────────────────

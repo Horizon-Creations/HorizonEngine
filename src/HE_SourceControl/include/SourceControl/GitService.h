@@ -82,6 +82,13 @@ public:
 	// overwriting work in progress. `shortOid` is what the commit message says.
 	void requestRestoreTo(const std::string& commit, const std::string& shortOid);
 
+	// Create `name` at `startCommit` (empty = HEAD). `checkout` also moves onto
+	// it, which replaces the working tree — refused on a dirty tree, exactly
+	// like a restore. Without checkout only a ref is written, so a dirty tree
+	// is no obstacle: nothing on disk changes.
+	void requestCreateBranch(const std::string& name, const std::string& startCommit,
+	                         bool checkout);
+
 	// Store an access token for `host` without creating anything: make sure a
 	// credential helper exists, then hand the token to it. This is the path for
 	// a repository whose remote already exists (a pasted URL, a clone, a token
@@ -104,6 +111,10 @@ public:
 	// Recent commits, newest first, as of the last status refresh.
 	const std::vector<GitCli::CommitInfo>& recentCommits() const { return m_commits; }
 
+	// Local branches as of the last status refresh (RepoStatus::branch already
+	// names the current one).
+	const std::vector<std::string>& branches() const { return m_branches; }
+
 	// Drain finished work on the MAIN thread. `maxEvents` bounds how much is
 	// applied per frame — a clone that produced twenty thousand entries should
 	// not be absorbed in one frame.
@@ -123,7 +134,7 @@ public:
 private:
 	enum class Kind : std::uint8_t {
 		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub,
-		StoreCredential, RestoreTo, Quit
+		StoreCredential, RestoreTo, CreateBranch, Quit
 	};
 
 	struct Command
@@ -143,6 +154,7 @@ private:
 		std::string remoteUrl;
 		bool        remoteUrlValid = false;
 		std::vector<GitCli::CommitInfo> commits;
+		std::vector<std::string>        branches;
 		RepoStatus  status;
 		std::string error;
 	};
@@ -172,6 +184,7 @@ private:
 	std::string                            m_lastInfo;
 	std::string                            m_remoteUrl;
 	std::vector<GitCli::CommitInfo>        m_commits;
+	std::vector<std::string>               m_branches;
 	std::uint64_t                          m_generation = 0;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };
