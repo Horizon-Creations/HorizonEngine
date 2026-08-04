@@ -7,6 +7,7 @@
 #include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
 #include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
 #include <HorizonRendering/LightPacking.h>   // shared GPU light packing
+#include <HorizonRendering/GiInstanceSurface.h> // shared flat surface for a GI/reflection hit
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -119,6 +120,12 @@ uniform sampler2D uGILocal;       // half-res local-light visibility mask (1 cha
 uniform vec4      uGIGridOrigin;  // xyz = grid origin, w = spacing
 uniform vec4      uGIGridCounts;  // xyz = probe counts, w = probesPerRow
 uniform float     uGIIntensity;
+
+// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────────
+// Half-res trace result, sampled per gl_FragCoord like uAO/uGIShadow. Its own
+// toggle, independent of uGIEnabled: the pass needs the BVH, not the probes.
+uniform sampler2D uGIRefl;        // rgb = radiance along the mirror ray, a = confidence
+uniform vec4      uGIReflParams;  // x = intensity, y = max roughness, z = 1 → bound and active
 
 // shared skyColor() is injected at the marker below (CreateUnlitPipeline)
 //#SKYFUNC#
@@ -370,7 +377,20 @@ void main()
 	float NdV = clamp(dot(N, V), 0.0, 1.0);
 	vec3 fresnelSpec = specColor
 		+ (max(vec3(1.0 - wRough), specColor) - specColor) * pow(1.0 - NdV, 5.0);
-	vec3 ambSpec = texture(uSkyEnv, Rrough).rgb * fresnelSpec;
+	vec3 envSpec = texture(uSkyEnv, Rrough).rgb;
+	// FORWARD reflection cascade (sky → ray-traced GI reflections). SYNC: this
+	// is the heLitP twin in MaterialShaderLibrary.cpp — a graph material next to
+	// a built-in one must mix the two sources identically, or the same mirror
+	// changes appearance with the material type. The trace carries no per-pixel
+	// roughness (the half-res pre-pass is flat per draw), so the roughness fade
+	// lives here, with the exact shading value.
+	if (uGIReflParams.z > 0.5)
+	{
+		vec4  rr   = texture(uGIRefl, gl_FragCoord.xy / uViewport);
+		float fade = 1.0 - smoothstep(uGIReflParams.y * 0.7, uGIReflParams.y, wRough);
+		envSpec = mix(envSpec, rr.rgb, rr.a * uGIReflParams.x * fade);
+	}
+	vec3 ambSpec = envSpec * fresnelSpec;
 	vec3 ambient = ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * wRough);
 	// Screen-space ambient occlusion darkens only the IBL indirect term in
 	// crevices; the direct lighting added below is left untouched. 1.0 = fully lit.
@@ -2766,12 +2786,20 @@ static const char* kGiGBufFS = R"GLSL(
 #version 410 core
 in vec3 vWorldPos;
 in vec3 vNormal;
+uniform vec2 uRoughMetal;                    // per draw: x = roughness, y = metallic
 layout(location = 0) out vec4 oPos;
 layout(location = 1) out vec4 oNorm;
+layout(location = 2) out vec4 oMat;
 void main()
 {
 	oPos  = vec4(vWorldPos, 1.0);            // a = 1 → valid geometry
 	oNorm = vec4(normalize(vNormal), 0.0);
+	// Surface response for the reflection kernel (attachment 2). The shadow
+	// kernel ignores it — it only needs pos/normal. Flat per DRAW, so a graph
+	// material's per-pixel roughness is not represented here; the composite
+	// applies the roughness fade again with the shader's exact value, this only
+	// decides whether a ray is traced at all.
+	oMat  = vec4(clamp(uRoughMetal.x, 0.0, 1.0), clamp(uRoughMetal.y, 0.0, 1.0), 0.0, 1.0);
 }
 )GLSL";
 
@@ -2782,7 +2810,9 @@ void main()
 static const char* kGiTraversalGLSL = R"GLSL(
 struct GiNode { vec4 d0; vec4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
 struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
-struct GiInst { mat4 invTransform; vec4 baseColor; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+// baseColor.a = metallic, emissive.a = roughness (HE::giInstanceSurface —
+// mirrors OpenGLRenderer::GIInstanceGpu; 112 bytes, std430 stride 112).
+struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
 layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
 layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
@@ -2887,6 +2917,95 @@ int giSceneClosestHit(vec3 o, vec3 d, float tMin, float tMax, out float tOut)
 	}
 	tOut = best;
 	return bestInst;
+}
+
+// ── Closest hit WITH the triangle index ──────────────────────────────────────
+// Same traversal as giBlasHit/giSceneClosestHit, but it also reports which
+// triangle of giTris[] was hit, so the caller can build a real geometric normal
+// instead of the `-rayDir` stand-in the probe kernel uses. Reflections need it:
+// with `-rayDir` a reflected surface is lit as if it always faced the ray, and a
+// mirror shows a flat-shaded ghost of the scene rather than the scene.
+// The probe/shadow kernels deliberately keep calling the cheaper pair above —
+// their hit shading is low-frequency and the extra register pressure is not
+// worth it (docs/gi-reflections-plan.md P4/P5).
+bool giBlasHitTri(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tMax,
+                  out float tOut, out int triOut)
+{
+	tOut   = tMax;
+	triOut = -1;
+	vec3 invD = 1.0 / d;
+	int stack[64];
+	int sp = 0;
+	stack[sp++] = nodeOfs;
+	bool hit = false;
+	float best = tMax;
+	while (sp > 0)
+	{
+		GiNode n = giNodes[stack[--sp]];
+		vec3 t0 = (n.d0.xyz - o) * invD;
+		vec3 t1 = (n.d1.xyz - o) * invD;
+		vec3 lo = min(t0, t1);
+		vec3 hi = max(t0, t1);
+		float tN = max(max(lo.x, lo.y), max(lo.z, tMin));
+		float tF = min(min(hi.x, hi.y), min(hi.z, best));
+		if (tN > tF) continue;
+		int leftFirst = floatBitsToInt(n.d0.w);
+		int triCount  = floatBitsToInt(n.d1.w);
+		if (triCount > 0)
+		{
+			for (int i = 0; i < triCount; ++i)
+			{
+				int   ti = triOfs + leftFirst + i;
+				float t;
+				if (giTriHit(giTris[ti], o, d, tMin, best, t))
+				{
+					hit = true; best = t; tOut = t; triOut = ti;
+				}
+			}
+		}
+		else if (sp + 2 <= 64)
+		{
+			stack[sp++] = nodeOfs + leftFirst;
+			stack[sp++] = nodeOfs + leftFirst + 1;
+		}
+	}
+	return hit;
+}
+
+// Closest hit across all instances with the triangle index; -1 = miss.
+int giSceneClosestHitTri(vec3 o, vec3 d, float tMin, float tMax, out float tOut, out int triOut)
+{
+	int   bestInst = -1;
+	float best     = tMax;
+	triOut = -1;
+	for (int i = 0; i < uGiInstanceCount; ++i)
+	{
+		vec3 oL = (giInsts[i].invTransform * vec4(o, 1.0)).xyz;
+		vec3 dL = mat3(giInsts[i].invTransform) * d;
+		float t; int tri;
+		if (giBlasHitTri(giInsts[i].offsets.x, giInsts[i].offsets.y, oL, dL, tMin, best, t, tri))
+		{
+			best = t; bestInst = i; triOut = tri;
+		}
+	}
+	tOut = best;
+	return bestInst;
+}
+
+// World-space geometric normal of triangle `tri` on instance `inst`, facing
+// AGAINST the incoming ray. The BVH triangles are OBJECT space, so the normal
+// transforms with the inverse-transpose of object→world — and invTransform IS
+// world→object, so transpose(invTransform) is exactly that matrix. (Möller-
+// Trumbore is two-sided here, so back faces have to be flipped explicitly.)
+vec3 giHitNormal(int inst, int tri, vec3 rayDir)
+{
+	GiTri t = giTris[tri];
+	vec3 nL = cross(t.v1.xyz - t.v0.xyz, t.v2.xyz - t.v0.xyz);
+	vec3 nW = transpose(mat3(giInsts[inst].invTransform)) * nL;
+	float len = length(nW);
+	if (len < 1e-12) return -rayDir;         // degenerate triangle → v1 stand-in
+	nW /= len;
+	return (dot(nW, rayDir) > 0.0) ? -nW : nW;
 }
 )GLSL";
 
@@ -3196,6 +3315,302 @@ void main()
 	vec2 newVisSample = vec2(dist, dist * dist);
 	float hVis = mix(baseH, 0.3, clamp(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0), 0.0, 1.0));
 	imageStore(uVis, outCoord, vec4(mix(newVisSample, oldVis.rg, hVis), 0.0, 0.0));
+}
+)GLSL";
+
+// ─── Ray-traced GI reflections (docs/gi-reflections-plan.md §7 GL port) ───────
+// One specular ray per half-res pixel against the SAME CPU BVH the shadow/probe
+// kernels use, shaded from the sun + the DDGI probe field, so a reflection agrees
+// with the diffuse GI around it. The result is composited UNDER the sky cubemap
+// term in the shading pass (kUnlitFS and heLitP both), never inside the material
+// preamble's sampler budget.
+//
+// Differences from the Metal original, all forced by the platform (there is no
+// hardware ray query in GL): the trace is the software BVH walk, and there is no
+// bounce loop — a mirror seen IN a mirror shows its flat base colour. What GL
+// gets for free instead is a REAL hit normal (giSceneClosestHitTri returns the
+// triangle, so no `-rayDir` stand-in) and an exact temporal reprojection (the
+// pre-pass stores world positions, so no depth-based reconstruction).
+static const char* kGiReflCS = R"GLSL(
+uniform sampler2D uGPos;      // half-res world position, a = 1 valid geometry
+uniform sampler2D uGNorm;     // half-res world normal
+uniform sampler2D uGMat;      // r = roughness, g = metallic (receiver)
+uniform sampler2D uGIIrr;     // DDGI irradiance atlas (dummy when GI diffuse is off)
+uniform sampler2D uGIVis;     // DDGI visibility atlas
+layout(rgba16f, binding = 0) uniform writeonly image2D uOut; // rgb radiance, a confidence
+uniform vec4 uCamPos;      // xyz = camera world position
+uniform vec4 uSunDir;      // xyz = direction TOWARD the sun, w = local light count
+uniform vec4 uSunColor;    // rgb = sun radiance * intensity
+uniform vec4 uAmbient;     // rgb = never-black floor applied at a hit
+uniform vec4 uGridOrigin;  // xyz = probe-grid origin, w = spacing
+uniform vec4 uGridCounts;  // xyz = probes per axis, w = probes per atlas row
+uniform vec4 uReflParams;  // x = max ray distance, y = max roughness, z = indirect intensity, w = probe atlases valid
+uniform vec4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 → glossy cone jitter
+uniform vec4 uLightPosRange[8];  // xyz pos, w range
+uniform vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
+uniform vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
+
+const int kOctSize = 8; // must match OpenGLRenderer::kGIProbeOctSize
+
+// SYNC: byte-for-byte the scene shader's giOctEncode / sampleDDGIIrradiance
+// (kUnlitFS above) — the sampled variant WITH the Chebyshev visibility test, not
+// the probe kernel's imageLoad twin. A drift here shows up as a reflected
+// surface disagreeing with the same surface seen directly.
+vec2 giOctEncode(vec3 n)
+{
+	vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+
+vec3 sampleDDGIIrradiance(vec3 P, vec3 N)
+{
+	int gx = int(uGridCounts.x), gy = int(uGridCounts.y), gz = int(uGridCounts.z);
+	if (gx <= 0 || gy <= 0 || gz <= 0) return vec3(0.0);
+	int probesPerRow = max(1, int(uGridCounts.w));
+	int probeRows    = int(ceil(float(gx * gy * gz) / float(probesPerRow)));
+	vec2 atlasSizeTexels = vec2(float(probesPerRow), float(probeRows)) * float(kOctSize);
+	float spacing = max(uGridOrigin.w, 1e-4);
+
+	vec3 gridSpace = (P - uGridOrigin.xyz) / spacing;
+	vec3 base      = floor(gridSpace);
+	vec3 fracP     = gridSpace - base;
+
+	vec3  sumColor  = vec3(0.0);
+	float sumWeight = 0.0;
+	for (int i = 0; i < 8; ++i)
+	{
+		vec3 offs = vec3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+		vec3 cell = base + offs;
+		if (any(lessThan(cell, vec3(0.0))) ||
+		    cell.x >= float(gx) || cell.y >= float(gy) || cell.z >= float(gz))
+			continue;
+		int probeIndex = int(cell.x) + int(cell.y) * gx + int(cell.z) * gx * gy;
+
+		vec3 trilinear = mix(1.0 - fracP, fracP, offs);
+		float weight = trilinear.x * trilinear.y * trilinear.z;
+		if (weight <= 1e-5) continue;
+
+		vec3 probePos   = uGridOrigin.xyz + cell * spacing;
+		vec3 toProbe    = probePos - P;
+		float dist      = max(length(toProbe), 1e-4);
+		vec3 dirToProbe = toProbe / dist;
+
+		weight *= max(0.05, dot(N, dirToProbe) * 0.5 + 0.5);
+
+		vec2 tileOrigin = vec2(float(probeIndex % probesPerRow),
+		                       float(probeIndex / probesPerRow)) * float(kOctSize);
+
+		vec2 visUV = (tileOrigin + (giOctEncode(-dirToProbe) * 0.5 + 0.5) * float(kOctSize)) / atlasSizeTexels;
+		vec2 visSample = texture(uGIVis, visUV).rg;
+		float mean = visSample.x, mean2 = visSample.y;
+		float variance = abs(mean2 - mean * mean);
+		float chebyshev = 1.0;
+		if (dist > mean)
+		{
+			float d = dist - mean;
+			chebyshev = variance / (variance + d * d);
+			chebyshev = chebyshev * chebyshev * chebyshev;
+		}
+		weight *= max(chebyshev, 0.05);
+
+		vec2 irrUV = (tileOrigin + (giOctEncode(N) * 0.5 + 0.5) * float(kOctSize)) / atlasSizeTexels;
+		sumColor  += texture(uGIIrr, irrUV).rgb * weight;
+		sumWeight += weight;
+	}
+	return sumColor / max(sumWeight, 1e-4);
+}
+
+// SYNC: the same hash/cone pair as kGiShadowCS (separate compilation unit —
+// GLSL has no #include, and the traversal prefix is shared but these are not).
+vec2 giHash2(uvec2 gid, float seed)
+{
+	vec2 p = vec2(gid) + seed * 13.37;
+	return vec2(fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453),
+	            fract(sin(dot(p, vec2(39.3468, 11.1352))) * 24634.6345));
+}
+vec3 giConeSample(vec3 L, float angleRad, vec2 xi)
+{
+	vec3 up = (abs(L.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	vec3 T  = normalize(cross(up, L));
+	vec3 B  = cross(L, T);
+	float r   = sin(angleRad) * sqrt(xi.x);
+	float phi = 6.28318530718 * xi.y;
+	return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+	uvec2 gid = gl_GlobalInvocationID.xy;
+	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
+	ivec2 px = ivec2(gid);
+
+	vec4 pv = texelFetch(uGPos, px, 0);
+	// Background, or a receiver too rough to show a traced reflection: confidence
+	// 0 means the composite keeps the sky cubemap term unchanged, which is the
+	// correct answer for both.
+	if (pv.a < 0.5) { imageStore(uOut, px, vec4(0.0)); return; }
+	vec2 rm = texelFetch(uGMat, px, 0).rg;
+	if (rm.x > uReflParams.y) { imageStore(uOut, px, vec4(0.0)); return; }
+
+	vec3 N = normalize(texelFetch(uGNorm, px, 0).xyz);
+	vec3 V = normalize(uCamPos.xyz - pv.xyz);
+	vec3 R = reflect(-V, N);
+	// Glossy cone jitter (quality High): spread the mirror ray inside a cone
+	// that widens with roughness. Pure noise on its own — the temporal pass
+	// below is what turns it into a glossy lobe, so the two are one tier.
+	// NOT applied to near-mirrors: their specular lobe is essentially a delta,
+	// and even a 1° cone walks the hit point far enough at distance to flip
+	// across a silhouette, which reads as a dithered band exactly where the
+	// reflection should be sharpest. 0.08 is below any surface a viewer would
+	// call glossy rather than mirrored.
+	if (uFrame.w > 0.5 && rm.x > 0.08)
+		R = giConeSample(R, rm.x * 0.5, giHash2(gid, uFrame.x));
+	// Normal-offset origin + a min-t, the same self-intersection guards the
+	// shadow kernel uses.
+	vec3 origin = pv.xyz + N * 0.05;
+
+	float dist; int tri;
+	int hitInst = giSceneClosestHitTri(origin, R, 0.02, max(uReflParams.x, 1.0), dist, tri);
+	if (hitInst < 0) { imageStore(uOut, px, vec4(0.0)); return; } // miss → sky
+
+	vec3 hitPos = origin + R * dist;
+	vec3 hitN   = giHitNormal(hitInst, tri, R);
+	vec3 albedo = giInsts[hitInst].baseColor.rgb;
+
+	// ── Hit shading: one bounce, then the probe field ────────────────────────
+	// Emissive first (a glowing object is visible in a mirror even unlit); the
+	// probe field deliberately does NOT carry emissive, so this is the only
+	// place it enters.
+	vec3 radiance = giInsts[hitInst].emissive.rgb;
+	float ndl = max(dot(hitN, uSunDir.xyz), 0.0);
+	// Skip the occlusion ray when the sun term is black anyway (night) — the
+	// visibility result would be multiplied by zero.
+	if (ndl > 0.0 && dot(uSunColor.rgb, vec3(1.0)) > 1e-5)
+	{
+		if (giSceneAnyHit(hitPos + hitN * 0.05, uSunDir.xyz, 0.02, 10000.0)) ndl = 0.0;
+		radiance += albedo * uSunColor.rgb * ndl;
+	}
+	// Local (point/spot) lights — the same loop, attenuation and occlusion ray
+	// as the probe kernel, so a lamp lights a reflected wall like a real one.
+	int lightCount = int(uSunDir.w);
+	for (int i = 0; i < lightCount; ++i)
+	{
+		vec3 toL = uLightPosRange[i].xyz - hitPos;
+		float d  = max(length(toL), 1e-4);
+		float range = max(uLightPosRange[i].w, 1e-4);
+		if (d >= range) continue;
+		vec3 L = toL / d;
+		float ndl2 = max(dot(hitN, L), 0.0);
+		if (ndl2 <= 0.0) continue;
+		float atten = 1.0 - d / range;
+		atten *= atten;
+		if (uLightColorType[i].w > 1.5)
+		{
+			float c       = dot(-L, normalize(uLightDirCos[i].xyz));
+			float cosCone = uLightDirCos[i].w;
+			atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+		}
+		if (atten <= 0.0) continue;
+		if (giSceneAnyHit(hitPos + hitN * 0.05, L, 0.02, max(d - 0.1, 0.02))) continue;
+		radiance += albedo * uLightColorType[i].rgb * ndl2 * atten;
+	}
+	// Indirect: the probe field at the hit — this is what makes the reflection
+	// "GI-based" rather than a second, differently-lit scene. Only when the
+	// atlases are actually filled (GI diffuse on); the flat floor is added
+	// either way, exactly like the scene shader's never-black guarantee.
+	if (uReflParams.w > 0.5)
+		radiance += albedo * sampleDDGIIrradiance(hitPos, hitN) * uReflParams.z;
+	radiance += albedo * uAmbient.rgb;
+
+	// Confidence fades out toward the ray's far end: a hit at the very edge of
+	// the traced range is as likely to be wrong (probe grid ends, geometry
+	// outside the BVH) as right, and fading into the sky term is the graceful
+	// failure. The composite multiplies this by the intensity setting.
+	float conf = 1.0 - smoothstep(uReflParams.x * 0.75, uReflParams.x, dist);
+	imageStore(uOut, px, vec4(radiance, conf));
+}
+)GLSL";
+
+// Temporal accumulation for the reflection trace (quality High). Same shape as
+// kGiTemporalFS, but the history is RGB radiance + confidence, so the receiver
+// world position it rejects against needs its own attachment instead of riding
+// in the unused channels.
+static const char* kGiReflTemporalFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uGPos;
+uniform sampler2D uRaw;
+uniform sampler2D uHistory;
+uniform sampler2D uHistPos;
+uniform mat4  uPrevViewProj;
+uniform float uBlend;  // history weight (0 = no usable history / camera cut)
+layout(location = 0) out vec4 oColor;
+layout(location = 1) out vec4 oPos;
+void main()
+{
+	vec4 pv  = texture(uGPos, vUV);
+	vec4 raw = texture(uRaw,  vUV);
+	oPos = vec4(pv.xyz, pv.a);            // this frame's receiver, for the NEXT frame
+	if (pv.a < 0.5) { oColor = vec4(0.0); return; }
+
+	vec4 clip = uPrevViewProj * vec4(pv.xyz, 1.0);
+	if (clip.w <= 0.0) { oColor = raw; return; }
+	vec2 prevUV = (clip.xy / clip.w) * 0.5 + 0.5;
+	if (any(lessThan(prevUV, vec2(0.0))) || any(greaterThan(prevUV, vec2(1.0))))
+	{ oColor = raw; return; }
+
+	vec4  hist = texture(uHistory, prevUV);
+	vec4  hp   = texture(uHistPos, prevUV);
+	float posError  = length(pv.xyz - hp.xyz);
+	float tolerance = clamp(0.02 * clip.w, 0.01, 0.06);
+	float w = (hp.a > 0.5 && posError < tolerance) ? clamp(uBlend, 0.0, 0.98) : 0.0;
+	// Neighbourhood clamp — the SAME guard kGiTemporalFS uses, and the reason it
+	// is needed here is stronger: the position test above only validates the
+	// RECEIVER, and reflected content is never reprojected (the engine has no
+	// motion vectors). Rejecting outright on a radiance break would also throw
+	// away the accumulation at every hit/miss boundary of the jittered glossy
+	// rays — which is exactly where it is needed, and shows up as a band of
+	// bright speckles. Clamping instead keeps jitter noise (inside the local
+	// range) accumulating in full while a genuinely changed reflection is pulled
+	// onto its new value within a frame or two.
+	vec2 texel = 1.0 / vec2(textureSize(uRaw, 0));
+	vec4 nMin = raw, nMax = raw;
+	for (int x = -1; x <= 1; ++x)
+		for (int y = -1; y <= 1; ++y)
+		{
+			vec4 s = texture(uRaw, vUV + vec2(float(x), float(y)) * texel);
+			nMin = min(nMin, s);
+			nMax = max(nMax, s);
+		}
+	oColor = mix(raw, clamp(hist, nMin, nMax), w);
+}
+)GLSL";
+
+// Separable 5-tap Gaussian over the half-res reflection result (quality Medium
+// and up). CONFIDENCE-WEIGHTED: a miss (a = 0) contributes no colour, so the
+// edges of a hit region do not bleed toward black — the blurred confidence
+// feathers them instead. Same reasoning as the SSR blur in the shared library.
+static const char* kGiReflBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uSrc;
+uniform vec2 uDir; // one-texel UV step along the blur axis
+out vec4 FragColor;
+void main()
+{
+	float w[5] = float[5](0.0625, 0.25, 0.375, 0.25, 0.0625);
+	vec3  sumC = vec3(0.0);
+	float sumA = 0.0;
+	for (int i = -2; i <= 2; ++i)
+	{
+		vec4  s  = texture(uSrc, vUV + uDir * float(i));
+		float wi = w[i + 2];
+		sumC += s.rgb * s.a * wi;
+		sumA += s.a * wi;
+	}
+	FragColor = vec4(sumC / max(sumA, 1e-4), sumA);
 }
 )GLSL";
 
@@ -3849,6 +4264,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// DDGI probe atlases = units 16/17 (irradiance / visibility).
 		if (GLint l = glGetUniformLocation(prog, "heGIIrradiance"); l >= 0) glUniform1i(l, 16);
 		if (GLint l = glGetUniformLocation(prog, "heGIVisibility"); l >= 0) glUniform1i(l, 17);
+		// Forward reflection cascade: heGIReflFwd = unit 18, the SAME unit the
+		// built-in shaders read as uGIRefl, so the scene pass binds the trace
+		// result once for both. heSSRFwd stays unbound — GL has no SSR pass, and
+		// heLight.ssr.x = 0 keeps that branch dead. (An old PRECOMPILED material
+		// baked before the cascade existed simply has no such uniform; l < 0 then
+		// skips it and heLight.giRefl.z never reaches a sampler.)
+		if (GLint l = glGetUniformLocation(prog, "heGIReflFwd"); l >= 0) glUniform1i(l, 18);
 		glUseProgram(0);
 	};
 
@@ -4694,6 +5116,19 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
+	// 1×1 transparent black — the neutral element for anything sampled as
+	// "radiance + confidence" (the reflection result) or as an additive light
+	// source: alpha 0 means "no data", so a bound dummy contributes nothing.
+	// White would be a full-strength WRONG contribution in exactly those spots.
+	{
+		const uint8_t black[4] = { 0, 0, 0, 0 };
+		glGenTextures(1, &m_blackTex);
+		glBindTexture(GL_TEXTURE_2D, m_blackTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
 }
 
 void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
@@ -4711,6 +5146,19 @@ void OpenGLRenderer::SetGISettings(const GISettings& s)
 	m_giLightRadius        = std::clamp(s.lightRadius, 0.0f, 10.0f);
 	m_giRaysPerProbe       = std::clamp(s.raysPerProbe, 8, 1024);
 	m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
+
+void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
+{
+	m_giReflEnabled      = s.enabled && m_giSupported;
+	m_giReflIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+	m_giReflMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+	m_giReflMaxDistance  = std::max(1.0f, s.maxDistance);
+	m_giReflQuality      = std::clamp(s.quality, 0, 2);
+	// GIReflectionSettings::bounces is deliberately ignored here: the GL kernel
+	// traces a single segment (no bounce loop — see docs/gi-reflections-plan.md
+	// §10), so honouring the slider would promise something the image does not
+	// deliver. Metal is the backend that implements it.
 }
 
 // ─── Global Illumination: CPU BVH acceleration structures (GL-A) ─────────────
@@ -4753,7 +5201,9 @@ OpenGLRenderer::GIBlasRange OpenGLRenderer::BuildGIBlas(const HE::UUID& meshId)
 void OpenGLRenderer::UpdateGIAccel()
 {
 	m_giInstanceCount = 0;
-	if (!m_giEnabled || !m_giSupported) return;
+	// Reflections reuse the acceleration structures without the probe/shadow
+	// passes, so the build also runs when ONLY they are enabled.
+	if (!(m_giEnabled || m_giReflEnabled) || !m_giSupported) return;
 
 	// Same caster filter as the shadow pass / Metal's TLAS: castsShadow only,
 	// skinned meshes are never in m_renderWorld.objects. Unculled — rays go in
@@ -4775,9 +5225,14 @@ void OpenGLRenderer::UpdateGIAccel()
 		GIBlasRange range = resolveRange(obj.meshAssetId);
 		if (!range.valid) range = resolveRange(HE::kDefaultCubeMeshId);
 		if (!range.valid) continue;
+		// Flat per-instance surface (albedo/emissive/metallic/roughness): the
+		// shared resolution, so a graph material's folded BaseColor reaches the
+		// kernels instead of plain white — see HE::giInstanceSurface.
+		const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, m_contentManager);
 		GIInstanceGpu inst;
 		inst.invTransform = glm::inverse(obj.transform);
-		inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
+		inst.baseColor    = glm::vec4(surf.albedo,   surf.metallic);
+		inst.emissive     = glm::vec4(surf.emissive, surf.roughness);
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		m_giInstancesCpu.push_back(inst);
@@ -4834,14 +5289,24 @@ OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int progra
 	l.gridOrigin = glGetUniformLocation(program, "uGIGridOrigin");
 	l.gridCounts = glGetUniformLocation(program, "uGIGridCounts");
 	l.intensity  = glGetUniformLocation(program, "uGIIntensity");
+	l.reflTex    = glGetUniformLocation(program, "uGIRefl");
+	l.reflParams = glGetUniformLocation(program, "uGIReflParams");
 	return l;
 }
 
 // Pushes the GI scene uniforms onto the CURRENTLY BOUND program (texture
 // units are shared; only location integers differ between the three programs
 // sharing kUnlitFS). Inactive → just flips uGIEnabled off.
-void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active)
+//
+// `reflActive` is a SEPARATE gate: ray-traced reflections have their own toggle
+// and run with the diffuse GI switched off, so they are pushed before the
+// early-out below.
+void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active, bool reflActive)
 {
+	if (L.reflTex >= 0) glUniform1i(L.reflTex, 18);
+	if (L.reflParams >= 0)
+		glUniform4f(L.reflParams, m_giReflIntensity, m_giReflMaxRoughness,
+		            reflActive ? 1.0f : 0.0f, 0.0f);
 	if (L.enabled >= 0) glUniform1i(L.enabled, active ? 1 : 0);
 	if (!active) return;
 	glUniform1i(L.shadowTex, 5);
@@ -4904,9 +5369,14 @@ void OpenGLRenderer::CreateGIPipelines()
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiTemporalFS));
 		m_giBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                       CompileStage(GL_FRAGMENT_SHADER, kGiBlurFS));
+		m_giReflTemporalProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                               CompileStage(GL_FRAGMENT_SHADER, kGiReflTemporalFS));
+		m_giReflBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                           CompileStage(GL_FRAGMENT_SHADER, kGiReflBlurFS));
 		const std::string header = "#version 430 core\n";
 		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
+		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiReflCS);
 		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
 	}
 	catch (const std::exception& e)
@@ -4918,6 +5388,9 @@ void OpenGLRenderer::CreateGIPipelines()
 		if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
 		if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
 		if (m_giProbeCSProgram)  { glDeleteProgram(m_giProbeCSProgram);  m_giProbeCSProgram = 0; }
+		if (m_giReflCSProgram)   { glDeleteProgram(m_giReflCSProgram);   m_giReflCSProgram = 0; }
+		if (m_giReflTemporalProgram) { glDeleteProgram(m_giReflTemporalProgram); m_giReflTemporalProgram = 0; }
+		if (m_giReflBlurProgram)     { glDeleteProgram(m_giReflBlurProgram);     m_giReflBlurProgram = 0; }
 		m_giSupported = false;
 	}
 }
@@ -4943,9 +5416,10 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 		return t;
 	};
 
-	// World-space G-buffer: pos + normal MRT + depth.
+	// World-space G-buffer: pos + normal + surface response MRT + depth.
 	m_giGBufPosTex  = makeTex(GL_RGBA16F, GL_NEAREST);
 	m_giGBufNormTex = makeTex(GL_RGBA16F, GL_NEAREST);
+	m_giGBufMatTex  = makeTex(GL_RGBA16F, GL_NEAREST); // r = roughness, g = metallic
 	glGenTextures(1, &m_giGBufDepth);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufDepth);
 	glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT24, width, height);
@@ -4953,9 +5427,10 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giGBufPosTex, 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_giGBufNormTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, m_giGBufMatTex, 0);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,  GL_TEXTURE_2D, m_giGBufDepth, 0);
-	const GLenum bufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
-	glDrawBuffers(2, bufs);
+	const GLenum bufs[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+	glDrawBuffers(3, bufs);
 
 	// Raw mask (compute image store) + ping-pong temporal history + blurred result.
 	m_giRawTex = makeTex(GL_R16F, GL_NEAREST);
@@ -4976,7 +5451,40 @@ void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
 	glGenFramebuffers(1, &m_giResultFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giResultFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giResultTex, 0);
+
+	// Ray-traced reflections: the compute kernel image-stores the raw trace, the
+	// (optional) temporal pass ping-pongs radiance + receiver position through an
+	// MRT pair, and the (optional) blur ends in m_giReflTex. Everything the
+	// shading pass samples is LINEAR — it upsamples half-res to full-res.
+	m_giReflRawTex  = makeTex(GL_RGBA16F, GL_LINEAR);
+	m_giReflTex     = makeTex(GL_RGBA16F, GL_LINEAR);
+	m_giReflBlurTex = makeTex(GL_RGBA16F, GL_LINEAR);
+	glGenFramebuffers(1, &m_giReflFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giReflFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giReflTex, 0);
+	glGenFramebuffers(1, &m_giReflBlurFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giReflBlurTex, 0);
+	for (int i = 0; i < 2; ++i)
+	{
+		m_giReflHistTex[i]    = makeTex(GL_RGBA16F, GL_LINEAR);
+		m_giReflHistPosTex[i] = makeTex(GL_RGBA16F, GL_NEAREST); // exact positions, never interpolated across an edge
+		glGenFramebuffers(1, &m_giReflHistFBO[i]);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflHistFBO[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_giReflHistTex[i], 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_giReflHistPosTex[i], 0);
+		const GLenum histBufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+		glDrawBuffers(2, histBufs);
+		// glTexStorage2D contents are undefined and the FIRST temporal frame
+		// samples both of these. m_giReflHistValid = false already forces the
+		// blend weight to 0 that frame, but a zeroed history costs one clear and
+		// removes the reliance (same reasoning as EnsureGIProbeAtlas above).
+		glDisable(GL_SCISSOR_TEST);
+		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	m_giReflHistValid = false;
 	glBindTexture(GL_TEXTURE_2D, 0);
 	m_giHistValid = false; // fresh targets → no usable history
 }
@@ -4986,6 +5494,7 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	if (m_giGBufFBO)     { glDeleteFramebuffers(1, &m_giGBufFBO);   m_giGBufFBO = 0; }
 	if (m_giGBufPosTex)  { glDeleteTextures(1, &m_giGBufPosTex);    m_giGBufPosTex = 0; }
 	if (m_giGBufNormTex) { glDeleteTextures(1, &m_giGBufNormTex);   m_giGBufNormTex = 0; }
+	if (m_giGBufMatTex)  { glDeleteTextures(1, &m_giGBufMatTex);    m_giGBufMatTex = 0; }
 	if (m_giGBufDepth)   { glDeleteTextures(1, &m_giGBufDepth);     m_giGBufDepth = 0; }
 	if (m_giRawTex)      { glDeleteTextures(1, &m_giRawTex);        m_giRawTex = 0; }
 	if (m_giLocalMaskTex) { glDeleteTextures(1, &m_giLocalMaskTex); m_giLocalMaskTex = 0; }
@@ -4996,8 +5505,20 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	}
 	if (m_giResultFBO) { glDeleteFramebuffers(1, &m_giResultFBO); m_giResultFBO = 0; }
 	if (m_giResultTex) { glDeleteTextures(1, &m_giResultTex);     m_giResultTex = 0; }
+	if (m_giReflFBO)     { glDeleteFramebuffers(1, &m_giReflFBO);     m_giReflFBO = 0; }
+	if (m_giReflTex)     { glDeleteTextures(1, &m_giReflTex);         m_giReflTex = 0; }
+	if (m_giReflRawTex)  { glDeleteTextures(1, &m_giReflRawTex);      m_giReflRawTex = 0; }
+	if (m_giReflBlurFBO) { glDeleteFramebuffers(1, &m_giReflBlurFBO); m_giReflBlurFBO = 0; }
+	if (m_giReflBlurTex) { glDeleteTextures(1, &m_giReflBlurTex);     m_giReflBlurTex = 0; }
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_giReflHistFBO[i])    { glDeleteFramebuffers(1, &m_giReflHistFBO[i]); m_giReflHistFBO[i] = 0; }
+		if (m_giReflHistTex[i])    { glDeleteTextures(1, &m_giReflHistTex[i]);     m_giReflHistTex[i] = 0; }
+		if (m_giReflHistPosTex[i]) { glDeleteTextures(1, &m_giReflHistPosTex[i]);  m_giReflHistPosTex[i] = 0; }
+	}
 	m_giShadowW = m_giShadowH = 0;
 	m_giHistValid = false;
+	m_giReflHistValid = false;
 }
 
 // One-shot probe-grid fit over the scene AABB (Metal lesson: refresh
@@ -5083,17 +5604,20 @@ void OpenGLRenderer::DestroyGIProbeAtlas()
 	m_giProbeCursor = 0;
 }
 
-unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width, int height,
-                                            const glm::mat4& viewProj)
+// Half-res world-space G-buffer (position + normal + roughness/metallic MRT).
+// Shared by the shadow-ray kernel and the reflection kernel, which is why it is
+// its own function: GI reflections can run with the DIFFUSE GI switched off, and
+// then this is the only GI raster pass in the frame. Same draw set as the scene
+// pass — every shaded pixel needs a value. Returns false when the pipelines or
+// targets are unavailable (GI then stays off for the frame).
+bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int height,
+                                     const glm::mat4& viewProj)
 {
 	CreateGIPipelines();
-	if (!m_giGBufProgram || !m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram)
-		return 0;
+	if (!m_giGBufProgram) return false;
 	EnsureGIShadowTargets(width, height);
-	if (!m_giGBufFBO) return 0;
+	if (!m_giGBufFBO) return false;
 
-	// ── 1. World-space G-buffer (position + normal, half-res MRT). Same draw
-	// set as the scene pass — every shaded pixel needs a mask value.
 	glBindFramebuffer(GL_FRAMEBUFFER, m_giGBufFBO);
 	glViewport(0, 0, width, height);
 	glEnable(GL_DEPTH_TEST);
@@ -5102,8 +5626,9 @@ unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width
 	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // a = 0 → background
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glUseProgram(m_giGBufProgram);
-	const GLint uMVP   = glGetUniformLocation(m_giGBufProgram, "uMVP");
-	const GLint uModel = glGetUniformLocation(m_giGBufProgram, "uModel");
+	const GLint uMVP        = glGetUniformLocation(m_giGBufProgram, "uMVP");
+	const GLint uModel      = glGetUniformLocation(m_giGBufProgram, "uModel");
+	const GLint uRoughMetal = glGetUniformLocation(m_giGBufProgram, "uRoughMetal");
 	{
 		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 		for (const DrawCall& dc : cmds.drawCalls())
@@ -5113,6 +5638,13 @@ unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width
 			{ cMesh = ResolveMesh(dc.meshAssetId); lastId = dc.meshAssetId; valid = true; }
 			const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!mesh) continue;
+			// Surface response for the reflection kernel — the same override
+			// resolution the scene pass does, so a mirror material reads as a
+			// mirror here too (unused by the shadow kernel).
+			glm::vec3 dcBase = dc.baseColor;
+			float     dcMetal = dc.metallic, dcRough = dc.roughness, dcOpacity = dc.opacity;
+			ResolveMaterialParams(dc.materialAssetId, dcBase, dcMetal, dcRough, dcOpacity);
+			if (uRoughMetal >= 0) glUniform2f(uRoughMetal, dcRough, dcMetal);
 			glBindVertexArray(mesh->vao);
 			auto drawOne = [&](const glm::mat4& t)
 			{
@@ -5126,6 +5658,18 @@ unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width
 				drawOne(dc.transform);
 		}
 	}
+	return true;
+}
+
+// Shadow-ray kernel → temporal → blur, on the pre-pass targets RenderGIPrepass
+// filled this frame. Returns the blurred mask texture (0 if unavailable).
+unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::mat4& viewProj)
+{
+	if (!m_giShadowCSProgram || !m_giTemporalProgram || !m_giBlurProgram) return 0;
+	if (!m_giGBufFBO) return 0;
+	// Explicit: the temporal/blur fullscreen draws below are half-res, and the
+	// reflection pass may have run between the pre-pass and here.
+	glViewport(0, 0, width, height);
 
 	// ── 2. Shadow rays (compute, 1 ray/pixel against the BVH SSBOs) ──────────
 	glUseProgram(m_giShadowCSProgram);
@@ -5196,6 +5740,130 @@ unsigned int OpenGLRenderer::RenderGIShadow(const CommandBuffer& cmds, int width
 	glActiveTexture(GL_TEXTURE0);
 	glEnable(GL_DEPTH_TEST);
 	return m_giResultTex;
+}
+
+// ─── Ray-traced GI reflections (docs/gi-reflections-plan.md §10, GL port) ─────
+// Trace → (temporal) → (blur), all half-res on the pre-pass targets. Returns the
+// texture the shading pass should sample (rgb radiance, a confidence), or 0 when
+// the pass could not run — the caller then binds a black dummy and leaves the
+// gate off, so the image is exactly as if the feature did not exist.
+//
+// `probesValid` = the DDGI atlases hold real data this frame. Reflections run
+// WITHOUT them (sun + local lights + the flat ambient floor at each hit), which
+// is why the whole pass is independent of the diffuse GI toggle.
+unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
+                                                 const glm::mat4& viewProj, bool probesValid)
+{
+	if (!m_giReflCSProgram || !m_giGBufFBO || !m_giReflRawTex) return 0;
+
+	// ── 1. Trace: one specular ray per pixel against the BVH SSBOs ───────────
+	glUseProgram(m_giReflCSProgram);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	auto loc = [&](const char* n) { return glGetUniformLocation(m_giReflCSProgram, n); };
+	auto bindTex = [&](GLenum unit, const char* name, unsigned int tex, int slot)
+	{
+		glActiveTexture(unit);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glUniform1i(loc(name), slot);
+	};
+	bindTex(GL_TEXTURE0, "uGPos",  m_giGBufPosTex,  0);
+	bindTex(GL_TEXTURE1, "uGNorm", m_giGBufNormTex, 1);
+	bindTex(GL_TEXTURE2, "uGMat",  m_giGBufMatTex,  2);
+	// Black (not white) when the atlases are absent: the kernel gates on
+	// uReflParams.w anyway, but a white dummy would be a bright indirect term if
+	// that gate ever regressed.
+	bindTex(GL_TEXTURE3, "uGIIrr", (probesValid && m_giIrrAtlas) ? m_giIrrAtlas : m_blackTex, 3);
+	bindTex(GL_TEXTURE4, "uGIVis", (probesValid && m_giVisAtlas) ? m_giVisAtlas : m_blackTex, 4);
+	glBindImageTexture(0, m_giReflRawTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+
+	glm::vec3 towardLight, lightColorIntensity;
+	m_renderWorld.dominantDirectionalLight(towardLight, lightColorIntensity);
+	const HE::PackedLightArray lights = HE::BuildPackedLightArray(m_renderWorld);
+	const glm::vec3 camPos = m_renderWorld.camera.position;
+	m_giReflFrameSeed += 1.0f;
+	glUniform4f(loc("uCamPos"), camPos.x, camPos.y, camPos.z, 0.0f);
+	glUniform4f(loc("uSunDir"), towardLight.x, towardLight.y, towardLight.z,
+	            static_cast<float>(lights.count));
+	glUniform4f(loc("uSunColor"), lightColorIntensity.r, lightColorIntensity.g, lightColorIntensity.b, 0.0f);
+	glUniform4f(loc("uAmbient"), m_renderWorld.ambient.r, m_renderWorld.ambient.g, m_renderWorld.ambient.b, 0.0f);
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
+	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
+	glUniform4f(loc("uReflParams"), m_giReflMaxDistance, m_giReflMaxRoughness,
+	            m_giIndirectIntensity, probesValid ? 1.0f : 0.0f);
+	glUniform4f(loc("uFrame"), m_giReflFrameSeed, static_cast<float>(width),
+	            static_cast<float>(height), (m_giReflQuality >= 2) ? 1.0f : 0.0f);
+	if (lights.count > 0)
+	{
+		glUniform4fv(loc("uLightPosRange"),  lights.count, glm::value_ptr(lights.posRange[0]));
+		glUniform4fv(loc("uLightColorType"), lights.count, glm::value_ptr(lights.colorType[0]));
+		glUniform4fv(loc("uLightDirCos"),    lights.count, glm::value_ptr(lights.dirCos[0]));
+	}
+	glUniform1i(loc("uGiInstanceCount"), m_giInstanceCount);
+	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
+	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+	unsigned int src = m_giReflRawTex;
+	glDisable(GL_DEPTH_TEST);
+	glViewport(0, 0, width, height);
+	glBindVertexArray(m_fsVAO);
+
+	// ── 2. Temporal accumulation (quality High) ──────────────────────────────
+	if (m_giReflQuality >= 2 && m_giReflTemporalProgram && m_giReflHistFBO[0])
+	{
+		const int curIdx = m_giReflHistIdx, prevIdx = 1 - curIdx;
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflHistFBO[curIdx]);
+		glUseProgram(m_giReflTemporalProgram);
+		auto tloc = [&](const char* n) { return glGetUniformLocation(m_giReflTemporalProgram, n); };
+		glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
+		glUniform1i(tloc("uGPos"), 0);
+		glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, src);
+		glUniform1i(tloc("uRaw"), 1);
+		glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_giReflHistTex[prevIdx]);
+		glUniform1i(tloc("uHistory"), 2);
+		glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_giReflHistPosTex[prevIdx]);
+		glUniform1i(tloc("uHistPos"), 3);
+		glUniformMatrix4fv(tloc("uPrevViewProj"), 1, GL_FALSE, glm::value_ptr(m_giReflPrevViewProj));
+		// Adaptive EMA (Metal lesson, gi-reflections-plan P4): with a moving
+		// camera a stiff history makes the reflection visibly lag behind the
+		// surface carrying it — reflected content is never reprojected, only the
+		// receiver is. Damp on any view change, hold the long history when still.
+		const bool camMoved = (viewProj != m_giReflPrevViewProj);
+		const float blend = m_giReflHistValid ? (camMoved ? 0.55f : 0.85f) : 0.0f;
+		glUniform1f(tloc("uBlend"), blend);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		src = m_giReflHistTex[curIdx];
+		m_giReflHistIdx   = prevIdx;
+		m_giReflHistValid = true;
+	}
+	m_giReflPrevViewProj = viewProj; // for NEXT frame's reprojection
+
+	// ── 3. Separable confidence-weighted blur (quality Medium and up) ────────
+	if (m_giReflQuality >= 1 && m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
+	{
+		glUseProgram(m_giReflBlurProgram);
+		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
+		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
+		const float tx = 1.0f / static_cast<float>(std::max(1, width));
+		const float ty = 1.0f / static_cast<float>(std::max(1, height));
+		glActiveTexture(GL_TEXTURE0);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
+		glBindTexture(GL_TEXTURE_2D, src);
+		glUniform1i(uSrc, 0);
+		glUniform2f(uDir, tx, 0.0f);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflFBO);
+		glBindTexture(GL_TEXTURE_2D, m_giReflBlurTex);
+		glUniform2f(uDir, 0.0f, ty);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		src = m_giReflTex;
+	}
+
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_DEPTH_TEST);
+	return src;
 }
 
 void OpenGLRenderer::DispatchGIProbeUpdate()
@@ -5784,6 +6452,10 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 				smp("heCsm", 11);      smp("heLocalShadow", 12);
 				smp("heSkyEnv", 14);   smp("heAO", 15);
 				smp("heGIIrradiance", 16); smp("heGIVisibility", 17);
+				// The resolve shades through the SAME heLitP, so the forward
+				// reflection cascade covers the deferred path too — the pre-pass
+				// and trace run before the G-buffer either way.
+				smp("heGIReflFwd", 18);
 				glUseProgram(0);
 			}
 		}
@@ -7249,6 +7921,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyEnvCube)     { glDeleteTextures(1, &m_skyEnvCube);      m_skyEnvCube = 0; }
 	if (m_ssaoNoiseTex)   { glDeleteTextures(1, &m_ssaoNoiseTex);    m_ssaoNoiseTex = 0; }
 	if (m_whiteTex)       { glDeleteTextures(1, &m_whiteTex);        m_whiteTex = 0; }
+	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
@@ -7716,18 +8389,43 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			return;
 		}
 
-		// ── Ray-traced GI (compute): shadow mask + probe update ─────────────
+		// ── Ray-traced GI (compute): shadow mask + probe update + reflections ─
 		// Replaces CSM sampling AND SSAO/IBL-ambient in the scene shader when
 		// active. Uses THIS extraction's camera/draw set (Metal aspect lesson:
 		// mask and scene pass must share one camera). Half-res like Metal.
+		// The shared half-res pre-pass runs when EITHER consumer wants it: GI
+		// reflections are their own toggle and work with the diffuse GI off.
 		unsigned int giShadowTex = 0u;
-		if (m_giEnabled && m_giSupported && m_giInstanceCount > 0)
+		unsigned int giReflTex   = 0u;
+		const int  giW = std::max(1, pw / 2), giH = std::max(1, ph / 2);
+		const bool giAnyActive =
+			(m_giEnabled || m_giReflEnabled) && m_giSupported && m_giInstanceCount > 0;
+		bool giPrepassOk = false;
+		// Sibling (not nested) profiler scopes — GL_TIME_ELAPSED cannot nest, see
+		// GpuTimerBeginPass. The pre-pass is its own row because it is the shared
+		// cost: it runs for the shadow mask, the reflections, or both.
+		if (giAnyActive)
+		{
+			GpuPassScope _giPrepassTimer(this, "GIPrepass");
+			giPrepassOk = RenderGIPrepass(cmds, giW, giH, viewProj);
+		}
+		if (giPrepassOk && m_giEnabled)
 		{
 			GpuPassScope _giTimer(this, "GIShadow");
-			giShadowTex = RenderGIShadow(cmds, std::max(1, pw / 2), std::max(1, ph / 2), viewProj);
+			giShadowTex = RenderGIShadow(giW, giH, viewProj);
 			DispatchGIProbeUpdate();
 		}
 		const bool giShadingActive = giShadowTex != 0 && m_giIrrAtlas != 0 && m_giVisAtlas != 0;
+		if (giPrepassOk && m_giReflEnabled)
+		{
+			GpuPassScope _giReflTimer(this, "GIRefl");
+			giReflTex = RenderGIReflections(giW, giH, viewProj, giShadingActive);
+		}
+		// Gate for both shading paths: a valid trace result AND a non-zero
+		// intensity. Off → a 1×1 transparent-black dummy is bound and the gate
+		// uniform stays 0, so the cascade folds away and the image is identical
+		// to the feature never having existed.
+		const bool giReflActive = giReflTex != 0 && m_giReflIntensity > 0.0f;
 
 		// ── SSAO: view-space position pre-pass → occlusion → blur ───────────
 		// Computed before shading (using these same geometry draw calls) so the
@@ -7840,8 +8538,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glBindTexture(GL_TEXTURE_2D, giShadingActive ? giShadowTex : m_whiteTex);
 		glActiveTexture(GL_TEXTURE10);
 		glBindTexture(GL_TEXTURE_2D, (giShadingActive && m_giLocalMaskTex) ? m_giLocalMaskTex : m_whiteTex);
+		// Ray-traced reflection result on unit 18 — ONE bind for every program in
+		// this pass: the built-in shaders read it as uGIRefl and the graph
+		// materials as heGIReflFwd (setupProgram assigns both to 18). Transparent
+		// black when inactive, so a sample would contribute nothing even if a
+		// gate uniform were ever wrong.
+		glActiveTexture(GL_TEXTURE18);
+		glBindTexture(GL_TEXTURE_2D, giReflActive ? giReflTex : m_blackTex);
 		glActiveTexture(GL_TEXTURE0);
-		PushGISceneUniforms(m_giLocsUnlit, giShadingActive);
+		PushGISceneUniforms(m_giLocsUnlit, giShadingActive, giReflActive);
 
 		// Lights + CSM/local-shadow uniforms (clamped to the shader's MAX_LIGHTS).
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
@@ -7880,7 +8585,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
-			PushGISceneUniforms(m_giLocsInstanced, giShadingActive);
+			PushGISceneUniforms(m_giLocsInstanced, giShadingActive, giReflActive);
 			// Same lights + CSM block as the unlit program; the shadow ATLASES are
 			// already bound on units 1/11 above (texture units are shared).
 			BindSceneLighting({ m_uInstLightCount, m_uInstLightPos, m_uInstLightDir,
@@ -7967,6 +8672,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
 			lit.giProbe[0] = m_giIndirectIntensity;
 			lit.giProbe[1] = (giShadingActive && m_giIrrAtlas && m_giVisAtlas) ? 1.0f : 0.0f;
+			// Ray-traced reflections for heLitP's forward cascade (heGIReflFwd,
+			// unit 18). x = intensity, y = max roughness, z = the gate. ssr[*]
+			// stays zero — GL has no screen-space trace, so that branch of the
+			// same cascade folds away.
+			lit.giRefl[0] = m_giReflIntensity;
+			lit.giRefl[1] = m_giReflMaxRoughness;
+			lit.giRefl[2] = giReflActive ? 1.0f : 0.0f;
 			// Full light window for heLitP() — same first-8 order as the built-in
 			// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also
 			// writes the per-light atlas layer into lightParams[i].y when
@@ -8694,7 +9406,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE0);
 			glUniform2f(m_uSkinnedViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uSkinnedSSAOEnabled, aoActive ? 1 : 0);
-			PushGISceneUniforms(m_giLocsSkinned, giShadingActive);
+			PushGISceneUniforms(m_giLocsSkinned, giShadingActive, giReflActive);
 
 			constexpr int kMaxBones = 128;
 			// Scratch buffer for the full bone matrix upload per draw call.
@@ -9388,6 +10100,10 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Ray-traced GI via compute + CPU BVH: needs a GL 4.3 context (Windows/
 	// Linux). macOS GL is 4.1 → false there (Metal covers GI on Apple).
 	c.supportsGlobalIllumination = m_giSupported;
+	// Ray-traced GI reflections ride the same compute + BVH infrastructure and
+	// composite in the shading pass, so they need neither a deferred G-buffer
+	// nor hardware ray tracing — same 4.3 gate, both render paths.
+	c.supportsGIReflections      = m_giSupported;
 #if defined(HE_HAVE_SHADERC)
 	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
 	// enough, but the shader cross-compiler must be built in.

@@ -1246,15 +1246,39 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		                                                 : lib.find(")\";", open + 3);
 		REQUIRE(close != std::string::npos); // the preamble literal moved or was renamed
 
-		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag" };
+		// The OpenGL backend keeps two MORE copies, as embedded string literals
+		// rather than files: its built-in scene shader, and the GI-reflection
+		// kernel, which shades a traced hit from the same probe field (a
+		// reflected surface disagreeing with the same surface seen directly is
+		// exactly the drift this catches). docs/gi-reflections-plan.md §7 asked
+		// for them to be pinned here the moment a second copy appeared.
+		const std::string gl = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                "Backends" / "OpenGL" / "OpenGLRenderer.cpp");
+		auto glslLiteral = [&](const char* literal) -> std::string
+		{
+			const std::string decl = std::string("static const char* ") + literal + " = R\"GLSL(";
+			const size_t body = gl.find(decl);
+			REQUIRE(body != std::string::npos); // literal renamed/moved
+			const size_t from = body + decl.size();
+			const size_t to   = gl.find(")GLSL\";", from);
+			REQUIRE(to != std::string::npos);
+			return stripLineComments(gl.substr(from, to - from));
+		};
+
+		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
+		                                         "kUnlitFS (GL)", "kGiReflCS (GL)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
+			glslLiteral("kUnlitFS"),
+			glslLiteral("kGiReflCS"),
 		};
 		checkGroup(names, src, {
 			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
-			                              R"(const int GI_PROBE_OCT = (\d+);)" } },
+			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
 			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
 			{ "backface weight floor",  { R"(weight \*= max\(([0-9.]+), dot\(N, dirToProbe\))" } },

@@ -104,13 +104,14 @@ struct EditorConfig
 	float GILightRadius             = 0.5f;   // degrees — sun angular radius (shadow penumbra softness)
 
 	// Ray-traced GI reflections (pushed each frame via SetGIReflectionSettings).
-	// Fills SSR's off-screen gaps with real scene rays against the GI TLAS;
-	// supportsGIReflections gates the toggle (Metal tile deferred + HW RT).
+	// Real scene rays against the GI acceleration structure instead of the sky
+	// cubemap; supportsGIReflections gates the toggle (Metal tile deferred +
+	// HW RT, or an OpenGL 4.3 context on Windows/Linux).
 	bool  GIReflectionsEnabled = false;
 	float GIReflIntensity      = 1.0f;
 	float GIReflMaxRoughness   = 0.6f;
 	int   GIReflQuality        = 1;   // 0 raw / 1 blur / 2 glossy+temporal (SSR-style tiers)
-	int   GIReflBounces        = 1;   // 1-4 mirror bounces (reflections seen in reflections)
+	int   GIReflBounces        = 1;   // 1-4 mirror bounces (Metal only — the GL kernel traces one segment)
 
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an
