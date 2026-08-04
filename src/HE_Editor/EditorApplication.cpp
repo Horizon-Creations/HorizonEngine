@@ -3893,6 +3893,9 @@ void EditorApplication::pushEnvironment(float dt)
 	// why this function is called exactly once per frame (dt = 0 from the headless
 	// dump path, where nothing may advance).
 	renderer()->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, dt));
+	// Keep the built-in sun/moon LightComponents in step with what was just pushed,
+	// so the component data never contradicts the Sky panel.
+	m_editorWorld->syncEnvironmentLights();
 }
 
 void EditorApplication::warmupWorldMaterials()

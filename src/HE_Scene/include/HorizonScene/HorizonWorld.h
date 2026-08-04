@@ -58,8 +58,24 @@ public:
 	// Ensures the hidden, built-in sun + moon directional lights exist as children
 	// of the Sky entity (creating them if missing) — or, when the scene has no Sky
 	// entity, destroys any stray lights. Idempotent; called from addSky() and after
-	// scene load (the lights are never serialised, so they are recreated).
+	// scene load (the lights are never serialised, so they are recreated). Also
+	// repairs scenes that accumulated ORDINARY "Sun"/"Moon" copies under the Sky
+	// (see the .cpp) by adopting one per role and deleting the rest.
 	void ensureEnvironmentLights();
+	// Copies the Sky's authored sun/moon colour + brightness onto the built-in
+	// lights' LightComponent so the component data matches the Sky panel instead of
+	// showing a stale default. Cheap; call it once per frame alongside the
+	// environment push (the renderer reads the environment directly either way).
+	void syncEnvironmentLights();
+	// Logs a warning when the scene carries more than one Sky or Weather entity.
+	// The extras are inert (every consumer takes the first), but they are authored
+	// data — the user removes them in the Outliner, the engine does not guess.
+	void warnOnDuplicateEnvironmentEntities() const;
+	// Deletes engine-generated entities that a scene file should never have
+	// contained: terrain chunks (TerrainSystem regenerates them from the
+	// TerrainComponent) that came back from disk WITHOUT their TerrainChunkComponent
+	// and are therefore invisible to that regeneration. Called by the scene loader.
+	void purgeOrphanedGeneratedEntities();
 
 	// ── Sky & Weather scene entities ───────────────────────────────────────────
 	// Sky (EnvironmentComponent) and Weather (WeatherComponent) are ordinary,

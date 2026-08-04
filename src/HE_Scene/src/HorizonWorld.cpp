@@ -2,6 +2,8 @@
 #include <HorizonCode/HcCompiledLoader.h>
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/WeatherComponent.h"
+#include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/TerrainChunkComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -90,13 +92,77 @@ void HorizonWorld::ensureEnvironmentLights()
             sh.children.push_back(e);
     };
 
+    // ── Pass 1: exactly one tagged light per role ────────────────────────────
+    // More than one is corruption (see the adoption pass below for how a scene
+    // ends up with copies); keep the first, destroy the rest.
+    Entity tagged[2] = { entt::null, entt::null };
+    {
+        std::vector<Entity> extra;
+        for (auto [e, elc] : m_registry.view<EnvironmentLightComponent>().each())
+        {
+            Entity& slot = tagged[static_cast<size_t>(elc.role)];
+            if (slot == entt::null) slot = e;
+            else                    extra.push_back(e);
+        }
+        for (Entity e : extra)
+            if (m_registry.valid(e)) destroyRecursive(e);
+    }
+
+    // ── Pass 2: adopt orphaned copies, then create what is still missing ─────
+    // A copy is an untagged directional light named "Sun"/"Moon" sitting directly
+    // under a Sky entity. These exist because subtree serialisation (Save as
+    // Prefab, collaboration's create-replication) used to walk the Sky's children
+    // without skipping the built-ins: the copy came back as an ORDINARY light —
+    // full intensity, invisible to the day-night pass, visible in the Outliner,
+    // and written into the scene file, where it multiplied on every round-trip.
+    // Adopting rather than deleting is what heals those scenes in place: the copy
+    // becomes the role's one built-in light instead of a second one.
+    //
+    // Every EnvironmentComponent entity is searched, not just the one
+    // environmentEntity() picked: a scene damaged this way often carries a second
+    // Sky as well, and that is exactly where the copies hang.
+    auto candidates = [&]()
+    {
+        std::vector<Entity> out;
+        for (auto [se, ec] : m_registry.view<EnvironmentComponent>().each())
+        {
+            (void)ec;
+            const auto* h = m_registry.try_get<HierarchyComponent>(se);
+            if (!h) continue;
+            for (Entity child : h->children)
+            {
+                if (!m_registry.valid(child)) continue;
+                if (m_registry.all_of<EnvironmentLightComponent>(child)) continue;
+                const auto* lc = m_registry.try_get<LightComponent>(child);
+                const auto* n  = m_registry.try_get<NameComponent>(child);
+                if (lc && lc->type == HE::LightType::Directional && n &&
+                    (n->name == "Sun" || n->name == "Moon"))
+                    out.push_back(child);
+            }
+        }
+        return out;
+    };
+
+    auto adopt = [&](EnvironmentLightComponent::Role role, const char* name) -> Entity
+    {
+        for (Entity child : candidates())
+        {
+            const auto* n = m_registry.try_get<NameComponent>(child);
+            if (!n || n->name != name) continue;
+            m_registry.emplace<EnvironmentLightComponent>(child, EnvironmentLightComponent{ role });
+            if (!m_registry.all_of<TransformComponent>(child))
+                m_registry.emplace<TransformComponent>(child, TransformComponent{});
+            HE_LOG_WARN(Scene, "Scene repair: adopted a stray '%s' light as the built-in "
+                               "environment light (scene file carried a duplicate).", name);
+            return child;
+        }
+        return entt::null;
+    };
+
     auto ensure = [&](EnvironmentLightComponent::Role role, const char* name)
     {
-        // Find an existing light with this role (e.g. recreated after scene load).
-        Entity e = entt::null;
-        for (auto [ent, elc] : m_registry.view<EnvironmentLightComponent>().each())
-            if (elc.role == role) { e = ent; break; }
-
+        Entity e = tagged[static_cast<size_t>(role)];
+        if (e == entt::null) e = adopt(role, name);
         if (e == entt::null)
         {
             e = createEntity(name); // Name + Hierarchy, parented to the root for now
@@ -113,6 +179,90 @@ void HorizonWorld::ensureEnvironmentLights()
     };
     ensure(EnvironmentLightComponent::Role::Sun,  "Sun");
     ensure(EnvironmentLightComponent::Role::Moon, "Moon");
+
+    // ── Pass 3: any REMAINING untagged Sun/Moon under a Sky is a leftover ────
+    // (adoption only takes one per role, so a scene that accumulated several
+    // copies still has the others hanging around lighting the scene).
+    for (Entity e : candidates())
+    {
+        if (!m_registry.valid(e)) continue;
+        HE_LOG_WARN(Scene, "Scene repair: removed a leftover duplicate environment light.");
+        destroyRecursive(e);
+    }
+
+    // A second Sky/Weather does nothing at all — every consumer takes the first
+    // one — but it is authored data, so say so loudly instead of deleting it and
+    // let the user remove the one they don't want in the Outliner.
+    warnOnDuplicateEnvironmentEntities();
+
+    syncEnvironmentLights();
+    m_hierarchyDirty = true;
+}
+
+void HorizonWorld::warnOnDuplicateEnvironmentEntities() const
+{
+    size_t skies = 0, weathers = 0;
+    for (auto e : m_registry.view<EnvironmentComponent>()) { (void)e; ++skies; }
+    for (auto e : m_registry.view<WeatherComponent>())     { (void)e; ++weathers; }
+    if (skies > 1)
+        HE_LOG_WARN(Scene, "Scene has %zu Sky entities — only one is used (the others are "
+                           "inert). Delete the extras in the Outliner.", skies);
+    if (weathers > 1)
+        HE_LOG_WARN(Scene, "Scene has %zu Weather entities — only one is used (the others "
+                           "are inert). Delete the extras in the Outliner.", weathers);
+}
+
+void HorizonWorld::syncEnvironmentLights()
+{
+    // Mirror the Sky's authored sun/moon colour + brightness onto the built-in
+    // lights' LightComponent. The RenderExtractor overrides both at render time
+    // anyway (it also folds in the day-night arc and cloud cover), but without
+    // this the ECS data reads a flat default 1.0 that has nothing to do with the
+    // Sky panel — a lie for anything that inspects the component (Details panel,
+    // scripts, tools).
+    const Entity sky = environmentEntity();
+    if (sky == entt::null) return;
+    const auto* env = m_registry.try_get<EnvironmentComponent>(sky);
+    if (!env) return;
+
+    for (auto [e, elc, lc] : m_registry.view<EnvironmentLightComponent, LightComponent>().each())
+    {
+        const bool isSun = (elc.role == EnvironmentLightComponent::Role::Sun);
+        lc.color     = isSun ? env->sunColor     : env->moonColor;
+        lc.intensity = isSun ? env->sunIntensity : env->moonIntensity;
+    }
+}
+
+void HorizonWorld::purgeOrphanedGeneratedEntities()
+{
+    // Terrain chunks are runtime output: the TerrainSystem finds them through
+    // TerrainChunkComponent, which is never serialised. A chunk that came back from
+    // a scene file has lost that component, so the system neither updates nor
+    // deletes it — it just sits there as a frozen second copy of the landscape
+    // (stale mesh, stale heights) on top of the real, regenerated one. They only
+    // ever got into a file via subtree serialisation walking a terrain's children;
+    // delete them so the terrain rebuilds clean.
+    std::vector<Entity> ghosts;
+    for (auto [te, tc] : m_registry.view<TerrainComponent>().each())
+    {
+        (void)tc;
+        const auto* hier = m_registry.try_get<HierarchyComponent>(te);
+        if (!hier) continue;
+        for (Entity child : hier->children)
+        {
+            if (!m_registry.valid(child)) continue;
+            if (m_registry.all_of<TerrainChunkComponent>(child)) continue; // live chunk
+            const auto* n = m_registry.try_get<NameComponent>(child);
+            if (n && n->name == "TerrainChunk")
+                ghosts.push_back(child);
+        }
+    }
+    if (ghosts.empty()) return;
+    HE_LOG_WARN(Scene, "Scene repair: removed %zu orphaned terrain chunk(s) from the "
+                       "scene file (they are regenerated from the TerrainComponent).",
+                ghosts.size());
+    for (Entity e : ghosts)
+        if (m_registry.valid(e)) destroyRecursive(e);
     m_hierarchyDirty = true;
 }
 

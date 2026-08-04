@@ -1327,8 +1327,13 @@ namespace
 		// Legacy scenes stored Environment/Weather on the World root; move them onto
 		// dedicated Sky/Weather entities so the whole engine sees one uniform model.
 		world.migrateLegacyRootEnvironment();
+		// Scenes written before collectSubtree skipped engine-generated entities can
+		// carry frozen terrain chunks that nothing owns any more — drop them so the
+		// TerrainSystem rebuilds the landscape from scratch.
+		world.purgeOrphanedGeneratedEntities();
 		// Built-in sun/moon lights aren't serialised — recreate / re-attach them under
-		// the Sky entity (or tear down strays when the scene has no sky).
+		// the Sky entity (or tear down strays when the scene has no sky). Also adopts
+		// the ordinary "Sun"/"Moon" copies such a scene file carries.
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
 		return true;
@@ -1371,15 +1376,32 @@ namespace
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)
 		rebuildHierarchy(registry, scene, idMap);
 
+		world.purgeOrphanedGeneratedEntities();
 		world.ensureEnvironmentLights();
 		world.markHierarchyDirty();
 		return true;
 	}
 
 	// ── Prefab helpers (placed after applyComponents so they can call it) ────
+	// Engine-generated children are skipped for the same reason buildSceneJson
+	// skips them: they are recreated from their owner (ensureEnvironmentLights /
+	// TerrainSystem) on every machine and every load. Writing them into a blob is
+	// actively destructive — neither marker component is serialised, so the copy
+	// comes back as an ORDINARY entity that its owner no longer manages: a full-
+	// intensity "Sun" the day-night pass never dims (which then outshines the real
+	// one and steals the shadow-casting slot), or a frozen duplicate of the
+	// landscape. And since that copy IS serialisable, it lands in the scene file
+	// and multiplies on every further round-trip.
+	bool isEngineGenerated(entt::registry& registry, Entity e)
+	{
+		return registry.all_of<EnvironmentLightComponent>(e) ||
+		       registry.all_of<TerrainChunkComponent>(e);
+	}
+
 	void collectSubtree(entt::registry& registry, Entity root,
 	                    std::vector<Entity>& out)
 	{
+		if (isEngineGenerated(registry, root)) return;
 		out.push_back(root);
 		if (auto* hier = registry.try_get<HierarchyComponent>(root))
 			for (Entity child : hier->children)

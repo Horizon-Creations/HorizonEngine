@@ -888,7 +888,12 @@ void GameApplication::OnRender(float deltaTime)
 			if (!env)
 				r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
 			else
+			{
 				r->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, deltaTime));
+				// Mirror onto the built-in sun/moon LightComponents, so gameplay code
+				// reading them sees the Sky's values and not a stale default.
+				m_world->syncEnvironmentLights();
+			}
 		}
 	}
 }

@@ -739,6 +739,144 @@ TEST_CASE("EnvironmentComponent round-trips on a dedicated Sky entity")
 
 namespace
 {
+	// Entities named `name` carrying a directional LightComponent, split by whether
+	// they are the engine's built-in environment lights or ordinary scene lights.
+	struct LightCensus { int builtin = 0; int ordinary = 0; };
+
+	LightCensus censusOf(HorizonWorld& world, const char* name)
+	{
+		LightCensus c;
+		auto& reg = world.registry();
+		for (auto [e, n, l] : reg.view<NameComponent, LightComponent>().each())
+		{
+			if (n.name != name || l.type != LightType::Directional) continue;
+			if (reg.all_of<EnvironmentLightComponent>(e)) ++c.builtin;
+			else                                          ++c.ordinary;
+		}
+		return c;
+	}
+}
+
+// A "Save as Prefab" or a collaboration create-publish on the Sky (or a Landscape)
+// used to walk its children unfiltered. Neither marker component is serialised, so
+// the copy came back as an ORDINARY entity nothing owns: a "Sun" at full intensity
+// that the day-night pass never dims — the night-time white-out — and frozen
+// duplicates of the terrain. Worse, that copy IS serialisable, so it multiplied on
+// every further save/load round-trip.
+TEST_CASE("Subtree serialisation skips the engine's own generated entities")
+{
+	HorizonWorld world;
+	const Entity sky = world.addSky(); // creates the built-in Sun + Moon children
+	REQUIRE(censusOf(world, "Sun").builtin == 1);
+
+	SceneSerializer ser;
+	const std::vector<uint8_t> blob = ser.serializeSubtree(world, sky);
+
+	// Instantiating the blob must not smuggle a second sun/moon into the world.
+	HorizonWorld target;
+	target.addSky();
+	ser.instantiatePrefab(target, blob);
+	CHECK(censusOf(target, "Sun").ordinary  == 0);
+	CHECK(censusOf(target, "Moon").ordinary == 0);
+	CHECK(censusOf(target, "Sun").builtin   == 1);
+	CHECK(censusOf(target, "Moon").builtin  == 1);
+}
+
+// Scenes damaged before that fix are on disk already. Loading one adopts the copy
+// as the role's single built-in light instead of leaving it as a second, undimmed
+// directional light.
+TEST_CASE("Loading a scene with duplicated Sun/Moon copies heals it")
+{
+	const fs::path file = fs::temp_directory_path() / "he_test_dup_sun.hescene";
+
+	// Build the damaged shape by hand: a Sky whose children are ORDINARY lights
+	// named Sun/Moon (exactly what such a scene file deserialises into).
+	{
+		HorizonWorld world;
+		const Entity sky = world.addSky();
+		for (const char* name : { "Sun", "Moon", "Sun" })
+		{
+			Entity ghost = world.createEntity(name);
+			world.addComponent(ghost, TransformComponent{});
+			LightComponent l; l.type = LightType::Directional; l.intensity = 1.0f;
+			world.addComponent(ghost, l);
+			world.reparentEntity(ghost, sky);
+		}
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+
+	CHECK(censusOf(loaded, "Sun").ordinary  == 0); // no undimmed leftovers
+	CHECK(censusOf(loaded, "Moon").ordinary == 0);
+	CHECK(censusOf(loaded, "Sun").builtin   == 1); // exactly one of each, tagged
+	CHECK(censusOf(loaded, "Moon").builtin  == 1);
+
+	he_test::removeQuiet(file);
+}
+
+// The built-in lights' LightComponent must read what the Sky panel authored, not
+// the flat 1.0 default it was constructed with.
+TEST_CASE("Built-in sun/moon lights mirror the Sky's authored colour and brightness")
+{
+	HorizonWorld world;
+	const Entity sky = world.addSky();
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
+	env.sunIntensity  = 4.25f;
+	env.sunColor      = glm::vec3(1.0f, 0.5f, 0.25f);
+	env.moonIntensity = 0.33f;
+	env.moonColor     = glm::vec3(0.2f, 0.3f, 0.9f);
+	world.syncEnvironmentLights();
+
+	auto& reg = world.registry();
+	for (auto [e, elc, lc] : reg.view<EnvironmentLightComponent, LightComponent>().each())
+	{
+		const bool isSun = (elc.role == EnvironmentLightComponent::Role::Sun);
+		CHECK(lc.intensity == doctest::Approx(isSun ? 4.25f : 0.33f));
+		CHECK(lc.color     == (isSun ? env.sunColor : env.moonColor));
+	}
+}
+
+// Terrain chunks are regenerated from the TerrainComponent and are invisible to
+// the TerrainSystem without their marker component — a serialised one is a frozen
+// second landscape nothing will ever update or delete.
+TEST_CASE("Loading a scene with serialised terrain chunks drops them")
+{
+	const fs::path file = fs::temp_directory_path() / "he_test_ghost_chunks.hescene";
+
+	{
+		HorizonWorld world;
+		Entity terrain = world.createEntity("Terrain");
+		world.addComponent(terrain, TransformComponent{});
+		world.addComponent(terrain, TerrainComponent{});
+		for (int i = 0; i < 3; ++i)
+		{
+			Entity chunk = world.createEntity("TerrainChunk");
+			world.addComponent(chunk, TransformComponent{});
+			world.addComponent(chunk, MeshComponent{});
+			world.reparentEntity(chunk, terrain);
+		}
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+
+	int chunks = 0;
+	for (auto [e, n] : loaded.registry().view<NameComponent>().each())
+		if (n.name == "TerrainChunk") ++chunks;
+	CHECK(chunks == 0);
+
+	he_test::removeQuiet(file);
+}
+
+namespace
+{
 	// Every field HE::makeEnvironmentSettings maps, compared one by one. Used to assert
 	// that what a saved scene pushes to the renderer is what the reloaded scene pushes:
 	// a sky knob added to the component + the push but forgotten in the SceneSerializer
