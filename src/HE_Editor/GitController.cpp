@@ -86,6 +86,26 @@ void GitController::update(std::uint64_t nowMs)
 	// CollabController::pumpDirectory documents.
 	m_service.pump();
 
+	// One filesystem probe per status refresh, never per tile: when the repo
+	// root and the project root are the same directory under two spellings
+	// (symlinks), remember the project's spelling for toRepoRelative.
+	if (m_service.status().generation != m_aliasGeneration)
+	{
+		m_aliasGeneration = m_service.status().generation;
+		m_rootAlias.clear();
+		const std::string& root = m_service.status().root;
+		if (!root.empty() && !m_projectRoot.empty())
+		{
+			const std::string proj = normaliseSlashes(m_projectRoot.string());
+			std::error_code ec;
+			if (proj != normaliseSlashes(root) &&
+			    std::filesystem::equivalent(root, m_projectRoot, ec) && !ec)
+			{
+				m_rootAlias = proj;
+			}
+		}
+	}
+
 	if (m_projectRoot.empty()) return;
 
 	// Never overlap requests: a poll while one is running would just queue work
@@ -104,15 +124,31 @@ std::string GitController::toRepoRelative(const std::string& absolutePath) const
 	const HE::Sc::RepoStatus& s = m_service.status();
 	if (!s.isRepo || s.root.empty() || absolutePath.empty()) return {};
 
-	const std::string abs  = normaliseSlashes(absolutePath);
-	const std::string root = normaliseSlashes(s.root);
+	const std::string abs = normaliseSlashes(absolutePath);
 
 	// Plain prefix comparison rather than std::filesystem::relative: this runs
 	// per visible tile, and relative() touches the filesystem.
-	if (abs.size() <= root.size() || abs.compare(0, root.size(), root) != 0) return {};
-	std::size_t start = root.size();
-	if (abs[start] != '/') return {};   // "/repo-other" must not match "/repo"
-	return abs.substr(start + 1);
+	const auto stripPrefix = [&abs](const std::string& root) -> std::string {
+		if (root.empty()) return {};
+		if (abs.size() <= root.size() || abs.compare(0, root.size(), root) != 0) return {};
+		const std::size_t start = root.size();
+		if (abs[start] != '/') return {};   // "/repo-other" must not match "/repo"
+		return abs.substr(start + 1);
+	};
+
+	// Two spellings of the same directory: git resolves symlinks when it
+	// reports the toplevel ("/var/…" comes back "/private/var/…" on macOS),
+	// while the Content Browser builds its paths from the project path AS
+	// CONFIGURED. A project living behind any symlink then never prefix-matches
+	// the git root — every badge silently vanishes. m_rootAlias holds the
+	// project-path spelling, but ONLY when it is verified to be the same
+	// directory as the repo root (update() checks once per status refresh) —
+	// a repo that starts one level above the project must not have its keys
+	// rebased onto the project by accident.
+	std::string rel = stripPrefix(normaliseSlashes(s.root));
+	if (rel.empty() && !m_rootAlias.empty())
+		rel = stripPrefix(m_rootAlias);
+	return rel;
 }
 
 const HE::Sc::FileEntry* GitController::entryForAbsolutePath(const std::string& absolutePath) const

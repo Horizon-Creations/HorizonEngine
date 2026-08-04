@@ -3,6 +3,8 @@
 
 #include <SourceControl/GitCli.h>
 #include <SourceControl/RepoConfig.h>
+
+#include "../src/HE_Editor/GitController.h"
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 #include <Platform/Process.h>
@@ -307,6 +309,58 @@ TEST_CASE("Ahead and behind are read from a real local remote")
 	he_test::removeAllQuiet(repo);
 	he_test::removeAllQuiet(other);
 	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("Content Browser badge lookups resolve through the controller")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// The exact seam the tiles use: absolute paths in the same spelling the
+	// browser builds (entry.path().string(), from the PROJECT path) against a
+	// repo root git reports with symlinks RESOLVED. On macOS the temp dir sits
+	// behind /var → /private/var, so this fixture naturally exercises the
+	// two-spellings case that silently blanked every badge; elsewhere the
+	// spellings coincide and the direct prefix match covers it.
+	const fs::path repo = makeRepo("badges");
+	writeFile(repo / "Content" / "Props" / "crate.hmat", "{}");
+	commitAll(repo, "first");
+	writeFile(repo / "Content" / "Props" / "crate.hmat", "{changed}");
+	writeFile(repo / "Content" / "new.hcode", "{}");
+
+	GitController git;
+	git.openProject(repo);
+
+	std::uint64_t now = 1;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (git.status().generation == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		git.update(now);
+		now += 100;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	REQUIRE(git.isRepo());
+
+	const std::string modified  = (repo / "Content" / "Props" / "crate.hmat").string();
+	const std::string untracked = (repo / "Content" / "new.hcode").string();
+	const std::string clean     = (repo / "Content" / "nothing.here").string();
+
+	const HE::Sc::FileEntry* e = git.entryForAbsolutePath(modified);
+	REQUIRE(e != nullptr);
+	CHECK(e->dirty());
+
+	e = git.entryForAbsolutePath(untracked);
+	REQUIRE(e != nullptr);
+	CHECK(e->worktree == FileState::Untracked);
+
+	CHECK(git.entryForAbsolutePath(clean) == nullptr);
+
+	// The folder rollup answers for every ancestor, which is what puts the dot
+	// on "Content" without walking its subtree.
+	CHECK(git.folderHasChanges((repo / "Content").string()));
+	CHECK(git.folderHasChanges((repo / "Content" / "Props").string()));
+
+	git.closeProject();
+	he_test::removeQuiet(repo);
 }
 
 TEST_CASE("The panel operations round-trip: init, commit, remote, push, pull")
