@@ -15,6 +15,7 @@ add_executable(he_tests
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
     test_graph_editor_keys.cpp
+    test_editor_row_widgets.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_gi_bvh.cpp
@@ -114,6 +115,9 @@ add_executable(he_tests
     # target stays out of this — it is the backends that drag the GPU in, not
     # ImGui itself.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GraphEditor.cpp
+    # Labelled rows + wrapped hints: ImGui-only by construction (see the file's
+    # header), so the panel-width layout invariant can be asserted headless.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRowWidgets.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
