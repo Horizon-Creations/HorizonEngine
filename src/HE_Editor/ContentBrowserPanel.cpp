@@ -171,6 +171,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// drop target below must land on THIS node, not a same-named twin.
 			ImGui::PushID(folder->fullPath.c_str());
 			bool open = ImGui::TreeNodeEx(folder->name.c_str(), flags);
+			// Same rollup the grid tiles use: one hash lookup against the
+			// precomputed dirty-folder set, so the tree costs nothing extra.
+			if (ctx.git && ctx.git->isRepo() && ctx.git->folderHasChanges(folder->fullPath))
+			{
+				ImGui::SameLine();
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 0.95f), "•");
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Contains uncommitted changes");
+			}
 			folderDropTarget(folder->fullPath); // move dragged assets into this folder
 
 			// Double-click anywhere on the item → navigate grid to this folder
@@ -556,6 +565,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const ImVec2 c(mn.x + r + 4.0f, mx.y - r - 4.0f);
 				dl->AddCircleFilled(c, r, IM_COL32(255, 200, 90, 235));
 				dl->AddCircle(c, r, IM_COL32(20, 20, 22, 220), 0, 1.0f);
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					ImGui::SetTooltip("Contains uncommitted changes");
 			}
 
 			folderDropTarget(sub->fullPath); // move dragged assets into this folder
@@ -731,6 +742,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						dl->AddCircle(c, r, colour, 0, 1.5f);
 						const ImVec2 ts = ImGui::CalcTextSize(glyph);
 						dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), colour, glyph);
+
+						// Words on hover, not just a letter: the glyph alphabet
+						// is git's, and not everyone reads it.
+						if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+						{
+							const char* what = "Changed";
+							switch (st)
+							{
+							case HE::Sc::FileState::Added:      what = "Added — staged for the next commit"; break;
+							case HE::Sc::FileState::Modified:   what = "Modified since the last commit"; break;
+							case HE::Sc::FileState::Deleted:    what = "Deleted"; break;
+							case HE::Sc::FileState::Renamed:
+							case HE::Sc::FileState::Copied:     what = "Renamed"; break;
+							case HE::Sc::FileState::Conflicted: what = "Merge conflict — resolve before committing"; break;
+							case HE::Sc::FileState::Untracked:  what = "Not in source control yet"; break;
+							default: break;
+							}
+							ImGui::SetTooltip("%s", what);
+						}
 					}
 				}
 			}

@@ -94,6 +94,10 @@ private:
 	std::filesystem::path m_projectRoot;
 
 	const CollabController* m_collab = nullptr;
+	// Project-path spelling of the repo root when the two are the same directory
+	// through a symlink; empty otherwise. See toRepoRelative.
+	std::string   m_rootAlias;
+	std::uint64_t m_aliasGeneration = 0;
 
 	bool          m_panelVisible = false;
 	std::uint64_t m_lastPollMs   = 0;
