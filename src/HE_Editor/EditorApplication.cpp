@@ -1131,12 +1131,18 @@ void EditorApplication::OnInit()
 	if (!m_dumpPath.empty())
 		dumpFrameHeadless();
 
-	// Startup toolchain check (cmake + a working C++ compiler) — needed for
-	// HorizonCode C++ export codegen and C++-language projects. Skipped for
-	// the headless dump path, which never reaches the UI that shows it.
+	// Startup capability checks: the C++ toolchain (cmake + compiler, needed for
+	// HorizonCode C++ export codegen and C++-language projects), source control,
+	// and the router (whether hosting a collaboration session could work here).
+	// All three are skipped for the headless dump path, which never reaches the
+	// UI that shows them — and which quits immediately, so a network probe there
+	// would only be something to wait for on the way out.
 	if (m_dumpPath.empty())
+	{
 		startToolchainProbe();
 		startGitProbe();
+		startRouterProbe();
+	}
 }
 
 void EditorApplication::startToolchainProbe()
@@ -1165,6 +1171,25 @@ void EditorApplication::startGitProbe()
 		HE::Sc::GitProbe probe = HE::Sc::probeGit();
 		m_gitProbe = std::move(probe);
 		m_gitChecked.store(true, std::memory_order_release);
+	});
+}
+
+void EditorApplication::startRouterProbe()
+{
+	if (m_routerThread.joinable())
+	{
+		// Cancel first: a recheck must not wait out the previous probe's router
+		// timeouts before it can even start.
+		m_routerCancel.store(true, std::memory_order_release);
+		m_routerThread.join();
+	}
+	m_routerCancel.store(false, std::memory_order_release);
+	m_routerChecked.store(false, std::memory_order_release);
+	m_routerThread = std::thread([this]
+	{
+		HE::Net::RouterProbe probe = HE::Net::probeRouter(&m_routerCancel);
+		m_routerProbe = std::move(probe);
+		m_routerChecked.store(true, std::memory_order_release);
 	});
 }
 
@@ -3427,6 +3452,9 @@ AppContext EditorApplication::makeContext()
 		.setGitIdentity      = [this](std::string n, std::string e)
 		                           { applyGitIdentity(std::move(n), std::move(e)); },
 		.gitIdentityApplying = m_gitIdentityApplying.load(std::memory_order_acquire),
+		.routerProbe         = m_routerChecked.load(std::memory_order_acquire)
+		                           ? &m_routerProbe : nullptr,
+		.recheckRouter       = [this]{ startRouterProbe(); },
 		.git                 = &m_git,
 		.frametimeHistory    = m_frametimeHistory,
 		.fpsHistorySize      = k_fpsHistorySize,
@@ -3943,6 +3971,14 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+	// The router probe waits on the network, so tell it to stop before waiting on
+	// it: it skips its remaining stages and returns whatever it already knows,
+	// instead of holding the quit for the rest of an SSDP or NAT-PMP timeout.
+	if (m_routerThread.joinable())
+	{
+		m_routerCancel.store(true, std::memory_order_release);
+		m_routerThread.join();
+	}
 	// Bounded by the probe's own per-call timeouts, so this cannot hang shutdown.
 	if (m_gitIdentityThread.joinable()) m_gitIdentityThread.join();
 	// The auto-install worker can outlive the dialog (installs take minutes); join

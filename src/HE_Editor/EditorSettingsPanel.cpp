@@ -6,6 +6,7 @@
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
+#include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
 #include <Types/Enums.h>
 #include <algorithm>
@@ -748,6 +749,238 @@ void drawGitSetupPage(AppContext& ctx)
 	if (ImGui::Button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
 }
 
+// ─── Status page (Tools) ─────────────────────────────────────────────────────
+// Every external thing the editor depends on, in one table, from the three
+// background probes that already run at startup. Read-only by construction:
+// nothing here installs, configures or changes anything, so it is safe to open
+// at any time — the per-item remedies live on the pages that own them.
+
+enum class StatusLevel { Ok, Warn, Missing, Checking };
+
+ImVec4 statusColor(StatusLevel s)
+{
+	switch (s)
+	{
+	case StatusLevel::Ok:       return ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
+	case StatusLevel::Warn:     return ImVec4(1.00f, 0.78f, 0.35f, 1.0f);
+	case StatusLevel::Missing:  return ImVec4(1.00f, 0.50f, 0.45f, 1.0f);
+	case StatusLevel::Checking: break;
+	}
+	return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+}
+
+const char* statusMark(StatusLevel s)
+{
+	switch (s)
+	{
+	case StatusLevel::Ok:       return "OK";
+	case StatusLevel::Warn:     return "!";
+	case StatusLevel::Missing:  return "X";
+	case StatusLevel::Checking: break;
+	}
+	return "...";
+}
+
+// One table row: name, coloured verdict, and the detail that makes the verdict
+// actionable ("git 2.39.5 at /usr/bin/git" beats a green tick with no facts).
+void statusRow(const char* name, StatusLevel level, const std::string& detail,
+               Page jumpTo, bool canJump)
+{
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGui::TextUnformatted(name);
+
+	ImGui::TableSetColumnIndex(1);
+	ImGui::TextColored(statusColor(level), "%s", statusMark(level));
+
+	ImGui::TableSetColumnIndex(2);
+	if (detail.empty()) ImGui::TextDisabled("—");
+	else                ImGui::TextWrapped("%s", detail.c_str());
+
+	ImGui::TableSetColumnIndex(3);
+	// A jump only where there is somewhere useful to go — otherwise the column
+	// fills with buttons that all lead to the same page saying the same thing.
+	if (canJump && level != StatusLevel::Ok && level != StatusLevel::Checking)
+	{
+		ImGui::PushID(name);
+		if (ImGui::SmallButton("Fix")) s_page = jumpTo;
+		ImGui::PopID();
+	}
+}
+
+void drawStatusPage(AppContext& ctx)
+{
+	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
+	                   "the background at startup; nothing here changes any setting.");
+	ImGui::Spacing();
+
+	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+	                                   ImGuiTableFlags_SizingStretchProp;
+	if (ImGui::BeginTable("##statustable", 4, kFlags))
+	{
+		ImGui::TableSetupColumn("Tool",   ImGuiTableColumnFlags_WidthFixed, 150.0f);
+		ImGui::TableSetupColumn("State",  ImGuiTableColumnFlags_WidthFixed, 34.0f);
+		ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("##fix",  ImGuiTableColumnFlags_WidthFixed, 44.0f);
+
+		// ── Source control ───────────────────────────────────────────────────
+		if (!ctx.gitProbe)
+		{
+			statusRow("git",              StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("Git LFS",          StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("git identity",     StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("Credential helper",StatusLevel::Checking, "", Page::GitSetup, false);
+		}
+		else
+		{
+			const HE::Sc::GitProbe& g = *ctx.gitProbe;
+			statusRow("git", g.gitFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          g.gitFound
+			              ? (g.gitVersion.empty() ? std::string("found") : g.gitVersion) +
+			                (g.gitPath.empty() ? "" : " at " + g.gitPath.string())
+			              : std::string("not found — source control is unavailable"),
+			          Page::GitSetup, true);
+
+			// A warning, not an error: the repository works without LFS, it just
+			// commits big binaries the wrong way.
+			statusRow("Git LFS", g.lfsFound ? StatusLevel::Ok : StatusLevel::Warn,
+			          g.lfsFound ? g.lfsVersion
+			                     : std::string("not found — large assets would be committed "
+			                                   "directly into the repository"),
+			          Page::GitSetup, true);
+
+			statusRow("git identity",
+			          g.identityConfigured ? StatusLevel::Ok : StatusLevel::Warn,
+			          g.identityConfigured ? g.userName + " <" + g.userEmail + ">"
+			                               : std::string("user.name / user.email are not set — "
+			                                             "commits will fail"),
+			          Page::GitSetup, true);
+
+			statusRow("Credential helper",
+			          g.credentialHelper.empty() ? StatusLevel::Warn : StatusLevel::Ok,
+			          g.credentialHelper.empty()
+			              ? std::string("none configured — needed to push without retyping a token")
+			              : g.credentialHelper,
+			          Page::Repository, true);
+		}
+
+		// ── C++ toolchain ────────────────────────────────────────────────────
+		if (!ctx.toolchainProbe)
+		{
+			statusRow("cmake",        StatusLevel::Checking, "", Page::Toolchain, false);
+			statusRow("C++ compiler", StatusLevel::Checking, "", Page::Toolchain, false);
+		}
+		else
+		{
+			const HE::hccg::ToolchainProbe& t = *ctx.toolchainProbe;
+			statusRow("cmake", t.cmakeFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          t.cmakeFound ? t.cmakeVersion
+			                       : std::string("not found — needed for C++ export codegen "
+			                                     "and C++ projects"),
+			          Page::Toolchain, true);
+			statusRow("C++ compiler", t.compilerFound ? StatusLevel::Ok : StatusLevel::Missing,
+			          t.compilerFound ? t.compilerId : std::string("not found"),
+			          Page::Toolchain, true);
+		}
+
+		// ── Collaboration ────────────────────────────────────────────────────
+		if (!ctx.routerProbe)
+		{
+			statusRow("Local network",     StatusLevel::Checking, "", Page::Status, false);
+			statusRow("Router / UPnP",     StatusLevel::Checking, "", Page::Status, false);
+			statusRow("IPv6",              StatusLevel::Checking, "", Page::Status, false);
+			statusRow("Session directory", StatusLevel::Checking, "", Page::Status, false);
+		}
+		else
+		{
+			const HE::Net::RouterProbe& r = *ctx.routerProbe;
+
+			statusRow("Local network",
+			          r.localNetworkBlocked ? StatusLevel::Missing : StatusLevel::Ok,
+			          r.localNetworkBlocked
+			              ? std::string("this application may not talk to the local network — "
+			                            "on macOS, allow it under Privacy & Security > Local Network")
+			              : (r.gatewayV4.empty() ? std::string("no default gateway")
+			                                     : "gateway " + r.gatewayV4),
+			          Page::Status, false);
+
+			// Amber rather than red: without forwarding you can still JOIN a
+			// session, and a global IPv6 address makes hosting work anyway.
+			const bool forward = r.portForwardingAvailable();
+			std::string routerDetail;
+			if (forward)
+			{
+				routerDetail = r.upnpFound ? ("UPnP: " + r.upnpService) : std::string("NAT-PMP");
+				if (r.upnpFound && r.natPmpFound) routerDetail += " + NAT-PMP";
+				if (!r.externalIp.empty())        routerDetail += ", WAN " + r.externalIp;
+			}
+			else
+			{
+				routerDetail = "the router did not answer UPnP or NAT-PMP — hosting needs a "
+				               "port forwarded by hand, or the feature enabled on the router";
+			}
+			statusRow("Router / UPnP", forward ? StatusLevel::Ok : StatusLevel::Warn,
+			          routerDetail, Page::Status, false);
+
+			if (r.carrierNat)
+			{
+				statusRow("Carrier NAT", StatusLevel::Warn,
+				          "the router's own WAN address is private (CGNAT) — a port forward "
+				          "on it cannot be reached from the internet",
+				          Page::Status, false);
+			}
+
+			statusRow("IPv6", r.globalIPv6.empty() ? StatusLevel::Warn : StatusLevel::Ok,
+			          r.globalIPv6.empty()
+			              ? std::string("no global address — hosting depends on IPv4 forwarding")
+			              : r.globalIPv6 + (r.upnpV6Firewall ? " (router offers pinholes)" : ""),
+			          Page::Status, false);
+
+			statusRow("Session directory",
+			          r.httpsAvailable ? StatusLevel::Ok : StatusLevel::Missing,
+			          r.httpsAvailable
+			              ? std::string("HTTPS available — joining by session ID works")
+			              : std::string("this build has no HTTPS backend — sessions can only be "
+			                            "joined by address"),
+			          Page::Status, false);
+		}
+
+		ImGui::EndTable();
+	}
+
+	// ── Footer: recheck + the collaboration caveat ───────────────────────────
+	ImGui::Spacing();
+	ImGui::Separator();
+	const bool checking = !ctx.gitProbe || !ctx.toolchainProbe || !ctx.routerProbe;
+	ImGui::BeginDisabled(checking);
+	if (ImGui::Button("Recheck all"))
+	{
+		if (ctx.recheckGit)       ctx.recheckGit();
+		if (ctx.recheckToolchain) ctx.recheckToolchain();
+		if (ctx.recheckRouter)    ctx.recheckRouter();
+	}
+	ImGui::EndDisabled();
+	if (checking) { ImGui::SameLine(); ImGui::TextDisabled("Checking…"); }
+
+	// Said plainly so a green row is not over-read: the only proof that an
+	// inbound connection arrives is one arriving, which needs a live session.
+	ImGui::Spacing();
+	ImGui::TextWrapped("The router check is read-only — it asks what the router supports "
+	                   "and never creates a port mapping. Whether an incoming connection "
+	                   "really arrives is confirmed only once a session is open "
+	                   "(View \xe2\x96\xb8 Collaboration).");
+
+	if (ctx.routerProbe && !ctx.routerProbe->detail.empty())
+	{
+		ImGui::Spacing();
+		if (ImGui::TreeNode("Router probe log"))
+		{
+			ImGui::TextUnformatted(ctx.routerProbe->detail.c_str());
+			ImGui::TreePop();
+		}
+	}
+}
+
 // ─── Toolchain page (Tools) ──────────────────────────────────────────────────
 
 void drawToolchainPage(AppContext& ctx)
@@ -797,6 +1030,7 @@ constexpr NavItem kSourceControlItems[] = {
 	{ Page::GitSetup,   "Git Setup" },
 };
 constexpr NavItem kToolsItems[] = {
+	{ Page::Status,    "Status" },
 	{ Page::Toolchain, "C++ Toolchain" },
 };
 constexpr NavGroup kNavGroups[] = {
@@ -888,6 +1122,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::Repository) drawRepositoryPage(ctx);
 	else if (s_page == Page::GitSetup)   drawGitSetupPage(ctx);
+	else if (s_page == Page::Status)     drawStatusPage(ctx);
 	else if (s_page == Page::Toolchain)  drawToolchainPage(ctx);
 	ImGui::EndChild();
 

@@ -72,6 +72,52 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		if (ImGui::Button("Open session", ImVec2(170, 0)))
 			collab->startHosting(static_cast<std::uint16_t>(s_hostPort), s_displayName);
 
+		// What the startup probe already found out about this network, said BEFORE
+		// the session is opened. Hosting used to be the only way to learn that the
+		// router does not forward ports — by which point the user had a live
+		// session nobody could reach and no idea why.
+		if (!ctx.routerProbe)
+		{
+			ImGui::TextDisabled("Checking this network…");
+		}
+		else
+		{
+			const HE::Net::RouterProbe& r = *ctx.routerProbe;
+			if (r.localNetworkBlocked)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.45f, 1.0f));
+				ImGui::TextWrapped("This application may not talk to the local network, so the "
+				                   "router cannot be reached at all. On macOS, allow it under "
+				                   "Privacy & Security > Local Network.");
+				ImGui::PopStyleColor();
+			}
+			else if (r.portForwardingAvailable())
+			{
+				ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+					"Router forwards ports (%s).",
+					r.upnpFound ? "UPnP" : "NAT-PMP");
+			}
+			else if (!r.globalIPv6.empty())
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+					"The router does not offer port forwarding, but this machine has a "
+					"global IPv6 address — guests on IPv6 can still reach it.");
+			}
+			else
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+				ImGui::TextWrapped("The router answered neither UPnP nor NAT-PMP — guests will "
+				                   "probably not reach this machine without a hand-made port "
+				                   "forward. Opening a session still works; see "
+				                   "Preferences > Tools > Status.");
+				ImGui::PopStyleColor();
+			}
+			if (r.carrierNat)
+				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+					"Your connection is behind carrier-grade NAT — port forwarding cannot "
+					"help here.");
+		}
+
 		// ── Join ──
 		ImGui::SeparatorText("Join a session");
 		ImGui::InputText("Session ID", s_joinSessionId, sizeof(s_joinSessionId));
