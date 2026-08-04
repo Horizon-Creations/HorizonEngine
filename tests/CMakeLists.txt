@@ -9,6 +9,7 @@ add_executable(he_tests
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
     test_scene_serializer.cpp
+    test_collab_docsync.cpp
     test_scene_entity_ids.cpp
     test_level_script.cpp
     test_horizoncode_runtime.cpp
@@ -99,6 +100,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
     # The tutorial curriculum + its completion predicates are deliberately
     # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
