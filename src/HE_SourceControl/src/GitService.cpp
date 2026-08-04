@@ -90,6 +90,18 @@ void GitService::requestSetupGitHub(const std::string& repoName, bool isPrivate,
 	push(std::move(c));
 }
 
+void GitService::requestStoreCredential(const std::string& host,
+                                        const std::string& username,
+                                        std::string token)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::StoreCredential, {} };
+	c.text   = host;
+	c.user   = username;
+	c.secret = std::move(token);
+	push(std::move(c));
+}
+
 void GitService::requestPush(bool upstreamConfigured)
 {
 	if (!m_worker.joinable()) return;
@@ -253,6 +265,27 @@ void GitService::workerMain()
 				ev.info += " (Credential helper \"" + helperChosen + "\" was configured "
 				           "for this repository; the token is stored there.)";
 			wantStatus = true;
+			break;
+		}
+		case Kind::StoreCredential:
+		{
+			std::string err;
+			std::string helperChosen;
+			bool ok = GitCli::ensureCredentialHelper(m_root, &helperChosen, &err);
+			if (ok)
+			{
+				ok = GitCli::approveCredential(m_root, cmd.text, cmd.user,
+				                               cmd.secret, &err);
+			}
+			// Gone either way — a rejected token must not linger in the queue.
+			std::fill(cmd.secret.begin(), cmd.secret.end(), '\0');
+			cmd.secret.clear();
+
+			if (!ok) { ev.error = err; break; }
+			ev.info = "Token stored for " + cmd.text + ".";
+			if (!helperChosen.empty())
+				ev.info += " (Credential helper \"" + helperChosen + "\" was configured "
+				           "for this repository.)";
 			break;
 		}
 		case Kind::SetRemote:
