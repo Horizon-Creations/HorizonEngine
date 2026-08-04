@@ -15,6 +15,7 @@ add_library(HorizonNet SHARED
 	src/SecureTransport.cpp
 	src/HttpClient.cpp
 	src/PortMapper.cpp
+	src/RouterProbe.cpp
 	src/SessionDirectory.cpp
 	src/CollabSession.cpp
 	src/NetSession.cpp
