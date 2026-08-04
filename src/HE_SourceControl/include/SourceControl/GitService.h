@@ -76,6 +76,12 @@ public:
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate,
 	                        std::string token);
 
+	// Put the project back to how `commit` had it and record that as a NEW
+	// commit — history is preserved, so the restore itself can be undone. Runs
+	// only on a clean tree; the worker refuses otherwise rather than silently
+	// overwriting work in progress. `shortOid` is what the commit message says.
+	void requestRestoreTo(const std::string& commit, const std::string& shortOid);
+
 	// Store an access token for `host` without creating anything: make sure a
 	// credential helper exists, then hand the token to it. This is the path for
 	// a repository whose remote already exists (a pasted URL, a clone, a token
@@ -117,7 +123,7 @@ public:
 private:
 	enum class Kind : std::uint8_t {
 		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub,
-		StoreCredential, Quit
+		StoreCredential, RestoreTo, Quit
 	};
 
 	struct Command

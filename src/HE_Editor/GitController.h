@@ -48,6 +48,9 @@ public:
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
 	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
+	// Put the project folder back to how a commit had it, recorded as a new
+	// commit so the restore is itself undoable. Refused on a dirty tree.
+	void requestRestoreTo(const std::string& commit, const std::string& shortOid);
 	// Store an access token for an EXISTING remote (pasted URL, clone, expired
 	// token) — no repository is created. Goes to git's credential helper, same
 	// as the GitHub setup flow.

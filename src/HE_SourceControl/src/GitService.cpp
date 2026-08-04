@@ -80,6 +80,17 @@ void GitService::requestCommitAll(const std::string& message, bool pushAfter)
 	push(std::move(c));
 }
 
+void GitService::requestRestoreTo(const std::string& commit, const std::string& shortOid)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::RestoreTo, {} };
+	c.text = commit;
+	// Reuses the secret field purely as a second string slot; nothing secret
+	// here — it is what the generated commit message names.
+	c.secret = shortOid;
+	push(std::move(c));
+}
+
 void GitService::requestSetupGitHub(const std::string& repoName, bool isPrivate,
                                     std::string token)
 {
@@ -348,6 +359,48 @@ void GitService::workerMain()
 			if (!helperChosen.empty())
 				ev.info += " (Credential helper \"" + helperChosen + "\" was configured "
 				           "for this repository.)";
+			break;
+		}
+		case Kind::RestoreTo:
+		{
+			std::string err;
+
+			// Clean tree required. Restoring overwrites the working tree the
+			// way git does — silently — and uncommitted work has no commit to
+			// come back from. Committing first is the user's decision, not
+			// something to do on their behalf behind a destructive action.
+			RepoStatus pre;
+			if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
+			if (pre.dirtyCount() != 0)
+			{
+				ev.error = "Restore refused — there are " +
+				           std::to_string(pre.dirtyCount()) +
+				           " uncommitted change(s). Commit or discard them first, "
+				           "or they would be overwritten with no way back.";
+				break;
+			}
+
+			if (!GitCli::restoreWorktreeTo(m_root, cmd.text, &err)) { ev.error = err; break; }
+
+			// The difference is staged now; recording it keeps the restore in
+			// the history like any other change — which is exactly what makes
+			// it undoable rather than a one-way door.
+			if (!GitCli::commit(m_root, "Restore project to " + cmd.secret, &err))
+			{
+				// Nothing to commit means the tree was already in that state.
+				// Not a failure, and saying so beats git's raw wording.
+				RepoStatus after;
+				if (GitCli::status(m_root, after, &err) && after.dirtyCount() == 0)
+				{
+					ev.info    = "Already at that state — nothing to restore.";
+					wantStatus = true;
+					break;
+				}
+				ev.error = err;
+				break;
+			}
+			ev.info    = "Project restored to " + cmd.secret + ".";
+			wantStatus = true;
 			break;
 		}
 		case Kind::SetRemote:

@@ -94,6 +94,27 @@ public:
 	static bool log(const std::filesystem::path& root, std::size_t maxCount,
 	                std::vector<CommitInfo>& out, std::string* err = nullptr);
 
+	// ── Restoring an old state ───────────────────────────────────────────────
+	// Put the working tree and index back to exactly how `commit` had them —
+	// files added since are removed, files changed are reverted, files deleted
+	// come back — WITHOUT moving the branch or discarding any history. The
+	// difference lands as staged changes, which the caller then commits; that
+	// commit is itself undoable, and nothing that was ever committed is lost.
+	//
+	// Deliberately not `reset --hard`: that erases commits, and a mis-click
+	// would destroy work no backup elsewhere covers. `read-tree -u --reset` is
+	// the plumbing that expresses "make the tree look like this" exactly,
+	// including deletions, which `restore --source` cannot do (it never removes
+	// files that the source commit does not know about).
+	//
+	// The caller MUST have verified the tree is clean first: this overwrites
+	// uncommitted work silently, exactly as git does.
+	static bool restoreWorktreeTo(const std::filesystem::path& root,
+	                              const std::string& commit, std::string* err = nullptr);
+
+	// True when `commit` names something this repository actually has.
+	static bool commitExists(const std::filesystem::path& root, const std::string& commit);
+
 	// ── LFS ──────────────────────────────────────────────────────────────────
 	// Whether `git lfs` answers at all in this environment.
 	static bool lfsAvailable(const std::filesystem::path& root);

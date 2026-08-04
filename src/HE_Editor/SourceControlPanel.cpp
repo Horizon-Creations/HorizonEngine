@@ -8,6 +8,7 @@
 #include <SourceControl/RepoStatus.h>
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,10 @@ bool s_autoPushLoaded     = false;
 bool s_treeView       = true;
 bool s_treeViewLoaded = false;
 bool s_historyOpen    = true;
+// Restore confirmation. Destructive enough to deserve a modal that states what
+// will happen in full before it happens.
+std::string s_restoreOid;
+std::string s_restoreSubject;
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -464,8 +469,11 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			{
 				ImGui::TextDisabled("No commits yet.");
 			}
+			// Reloading the scene after a restore is the caller's business; the
+			// panel says so rather than silently leaving a stale world open.
 			for (const auto& c : commits)
 			{
+				ImGui::PushID(c.shortOid.c_str());
 				if (c.unpushed)
 				{
 					ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "%s", "\xE2\x86\x91");
@@ -479,12 +487,75 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 				ImGui::SameLine();
 				ImGui::TextDisabled("%s", c.shortOid.c_str());
 				ImGui::SameLine();
-				ImGui::TextUnformatted(c.subject.c_str());
+				ImGui::Selectable(c.subject.c_str());
 				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("%s — %s", c.author.c_str(), c.relTime.c_str());
+					ImGui::SetTooltip("%s — %s\n(right-click to restore the project to "
+					                  "this state)", c.author.c_str(), c.relTime.c_str());
+
+				if (ImGui::BeginPopupContextItem("##commitctx"))
+				{
+					ImGui::BeginDisabled(git->busy() || st.dirtyCount() != 0);
+					if (ImGui::MenuItem("Restore project to this commit…"))
+					{
+						s_restoreOid     = c.shortOid;
+						s_restoreSubject = c.subject;
+					}
+					ImGui::EndDisabled();
+					if (st.dirtyCount() != 0)
+						ImGui::TextDisabled("Commit or discard your changes first.");
+					ImGui::EndPopup();
+				}
+				ImGui::PopID();
 			}
 		}
 		ImGui::EndChild();
+	}
+
+	// ── Restore confirmation ─────────────────────────────────────────────────
+	// Every file in the project changes at once, so the modal spells out the
+	// full consequence AND the reassurance: the restore is recorded as a new
+	// commit, so nothing in the history is lost and this itself is undoable.
+	if (!s_restoreOid.empty()) ImGui::OpenPopup("Restore project?");
+	if (ImGui::BeginPopupModal("Restore project?", nullptr,
+	                           ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::TextWrapped("Every file in the project folder will be put back to how "
+		                   "it was at this commit:");
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", s_restoreOid.c_str());
+		ImGui::SameLine();
+		ImGui::TextWrapped("%s", s_restoreSubject.c_str());
+		ImGui::Spacing();
+		ImGui::TextWrapped("Files added since are removed, changed files are reverted, "
+		                   "deleted files come back.");
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
+		ImGui::TextWrapped("Your history is kept: this is recorded as a new commit, so "
+		                   "you can undo it by restoring to a later one.");
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::TextWrapped("Save and close what you are working on first — open scenes "
+		                   "and assets in the editor still hold the old contents and "
+		                   "would write them back.");
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+
+		if (ImGui::Button("Restore", ImVec2(120.0f, 0.0f)))
+		{
+			git->requestRestoreTo(s_restoreOid, s_restoreOid);
+			s_restoreOid.clear();
+			s_restoreSubject.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+		{
+			s_restoreOid.clear();
+			s_restoreSubject.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
 	}
 
 	ImGui::End();

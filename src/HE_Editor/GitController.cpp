@@ -60,6 +60,12 @@ void GitController::requestCommitAll(const std::string& message)
 	m_service.requestCommitAll(message, autoPushAfterCommit);
 }
 
+void GitController::requestRestoreTo(const std::string& commit, const std::string& shortOid)
+{
+	if (!mayModify() || commit.empty()) return;
+	m_service.requestRestoreTo(commit, shortOid);
+}
+
 void GitController::requestSetupGitHub(const std::string& repoName, bool isPrivate,
                                        std::string token)
 {

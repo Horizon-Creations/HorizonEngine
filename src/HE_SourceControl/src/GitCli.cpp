@@ -217,6 +217,28 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
 }
 
+bool GitCli::commitExists(const std::filesystem::path& root, const std::string& commit)
+{
+	if (commit.empty()) return false;
+	// ^{commit} makes this fail for a tag or tree that merely resolves — the
+	// caller means a commit.
+	return run(root, { "rev-parse", "--verify", "--quiet", commit + "^{commit}" }, 10000).ok;
+}
+
+bool GitCli::restoreWorktreeTo(const std::filesystem::path& root,
+                               const std::string& commit, std::string* err)
+{
+	if (!commitExists(root, commit))
+	{
+		if (err) *err = "no commit named \"" + commit + "\" in this repository";
+		return false;
+	}
+	// -u writes the result to the working tree, --reset lets it overwrite the
+	// files that differ. HEAD is untouched, so the branch and every commit on
+	// it survive; the difference simply shows up staged.
+	return runChecked(root, { "read-tree", "-u", "--reset", commit }, kLocalTimeoutMs, err);
+}
+
 bool GitCli::log(const std::filesystem::path& root, std::size_t maxCount,
                  std::vector<CommitInfo>& out, std::string* err)
 {

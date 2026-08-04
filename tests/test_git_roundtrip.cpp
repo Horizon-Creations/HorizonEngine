@@ -73,6 +73,13 @@ void writeFile(const fs::path& p, const std::string& text)
 	out << text;
 }
 
+std::string readFile(const fs::path& p)
+{
+	std::ifstream in(p, std::ios::binary);
+	return std::string((std::istreambuf_iterator<char>(in)),
+	                   std::istreambuf_iterator<char>());
+}
+
 // A repository with an identity configured LOCALLY, so the test never depends on
 // (or disturbs) the machine's global git config.
 fs::path makeRepo(const char* stem)
@@ -513,6 +520,93 @@ TEST_CASE("ensureCredentialHelper leaves a repo with a usable helper")
 	// just configured — the repo must end up with one.
 	CHECK_FALSE(GitCli::credentialHelper(repo).empty());
 
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("Restoring to a commit rewinds the folder without losing history")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("restore");
+
+	writeFile(repo / "keep.txt", "v1");
+	writeFile(repo / "Content" / "nested" / "asset.txt", "old");
+	commitAll(repo, "first");
+	const std::string first = GitCli::run(repo, { "rev-parse", "--short", "HEAD" }).out;
+	const std::string firstOid = first.substr(0, first.find_first_of("\r\n"));
+
+	// Move on: change one file, add another, delete a third.
+	writeFile(repo / "keep.txt", "v2");
+	writeFile(repo / "added-later.txt", "new");
+	fs::remove(repo / "Content" / "nested" / "asset.txt");
+	commitAll(repo, "second");
+
+	std::string err;
+	REQUIRE(GitCli::restoreWorktreeTo(repo, firstOid, &err));
+
+	// All three kinds of difference are undone — the one `restore --source`
+	// cannot do on its own is the deletion of a file added afterwards.
+	CHECK(readFile(repo / "keep.txt") == "v1");
+	CHECK_FALSE(fs::exists(repo / "added-later.txt"));
+	CHECK(fs::exists(repo / "Content" / "nested" / "asset.txt"));
+
+	// And the history is intact: both commits still there, HEAD still on the
+	// branch tip. That is the whole difference from reset --hard.
+	std::vector<GitCli::CommitInfo> log;
+	REQUIRE(GitCli::log(repo, 10, log));
+	CHECK(log.size() == 2);
+	CHECK(GitCli::commitExists(repo, "HEAD"));
+
+	// The difference is staged, ready to be recorded as an ordinary commit.
+	RepoStatus st;
+	REQUIRE(GitCli::status(repo, st));
+	CHECK(st.dirtyCount() > 0);
+
+	CHECK_FALSE(GitCli::restoreWorktreeTo(repo, "nosuchcommit", &err));
+	CHECK_FALSE(err.empty());
+
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("A restore refuses to run over uncommitted work")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("restoreguard");
+	writeFile(repo / "a.txt", "v1");
+	commitAll(repo, "first");
+	const std::string oid =
+		GitCli::run(repo, { "rev-parse", "--short", "HEAD" }).out.substr(0, 7);
+	writeFile(repo / "a.txt", "v2");
+	commitAll(repo, "second");
+
+	// Work in progress that exists nowhere else.
+	writeFile(repo / "a.txt", "PRECIOUS UNSAVED WORK");
+
+	GitService svc;
+	svc.open(repo);
+	auto settle = [&] {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while ((svc.busy() || svc.status().generation == 0) &&
+		       std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		svc.pump();
+	};
+	settle();
+	REQUIRE(svc.isRepo());
+
+	svc.requestRestoreTo(oid, oid);
+	settle();
+
+	// Refused, said why, and the uncommitted file is untouched.
+	CHECK_FALSE(svc.lastError().empty());
+	CHECK(svc.lastError().find("uncommitted") != std::string::npos);
+	CHECK(readFile(repo / "a.txt") == "PRECIOUS UNSAVED WORK");
+
+	svc.close();
 	he_test::removeQuiet(repo);
 }
 
