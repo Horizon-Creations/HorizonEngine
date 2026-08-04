@@ -471,3 +471,44 @@ TEST_CASE("DocSync: appending an item is not mistaken for a reorder")
     REQUIRE(ds.size() == 1);
     CHECK(ds[0].op == 0);
 }
+
+TEST_CASE("DocSync: hostile item payloads are refused, not accumulated into UB")
+{
+    // These strings come off the wire. A digit run that overflows a signed int is
+    // undefined behaviour, not a large number, so the hand-written parsers cap
+    // rather than accumulate — and a capped value matches no real item.
+    HC::Graph g;
+    HC::Node a; a.id = 1; a.type = HC::NodeType::Event;  g.nodes.push_back(a);
+    HC::Node b; b.id = 2; b.type = HC::NodeType::Print;  g.nodes.push_back(b);
+    auto doc = DS::forHorizonCodeGraph(g);
+    DS::DocMirror mirror;
+    DS::seed(*doc, mirror, DS::Scope::Primary);
+
+    const char* hostile[] = {
+        "[99999999999999999999,0,2,0]",
+        "[1,0,-99999999999999999999,0]",
+        "[]", "[1,2]", "[1,2,3,4,5,6]", "not json at all", "",
+    };
+    for (const char* json : hostile)
+    {
+        std::vector<Delta> ds;
+        Delta d;
+        d.kind = static_cast<std::uint8_t>(DS::Kind::Link);
+        d.op = kUpsert; d.itemId = 0; d.json = json;
+        ds.push_back(d);
+        DS::applyDeltas(*doc, mirror, DS::Scope::Primary, ds);
+    }
+    CHECK(g.links.empty());     // nothing was accepted
+    CHECK(g.nodes.size() == 2); // and nothing else was disturbed
+
+    // An absurd node id must not be narrowed into the allocator either.
+    std::vector<Delta> ds;
+    Delta d;
+    d.kind = static_cast<std::uint8_t>(DS::Kind::Node);
+    d.op = kUpsert; d.itemId = 1;
+    HC::Node huge; huge.id = 3; huge.type = HC::NodeType::Add;
+    d.json = HC::nodeToJson(huge);
+    ds.push_back(d);
+    CHECK(DS::applyDeltas(*doc, mirror, DS::Scope::Primary, ds));
+    CHECK(g.nextId > 3);
+}

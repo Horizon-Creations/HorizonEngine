@@ -31,6 +31,13 @@ std::string joinIds(const std::vector<std::int64_t>& ids)
     return s;
 }
 
+// Digits are capped rather than accumulated without bound: these strings arrive
+// from a PEER, and `acc = acc * 10 + d` on a long run of digits is signed
+// overflow — undefined behaviour, not a large number. Past the cap the value is
+// pinned; it cannot match a real item id either way, so the item is simply not
+// found.
+constexpr std::int64_t kIdCap = (std::int64_t{1} << 62);
+
 std::vector<std::int64_t> splitIds(const std::string& s)
 {
     std::vector<std::int64_t> out;
@@ -41,7 +48,11 @@ std::vector<std::int64_t> splitIds(const std::string& s)
         if (s[i] == '-') { neg = true; ++i; }
         if (i >= s.size() || s[i] < '0' || s[i] > '9') break;
         std::int64_t acc = 0;
-        while (i < s.size() && s[i] >= '0' && s[i] <= '9') acc = acc * 10 + (s[i++] - '0');
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+        {
+            if (acc < kIdCap) acc = acc * 10 + (s[i] - '0');
+            ++i;
+        }
         out.push_back(neg ? -acc : acc);
         if (i < s.size() && s[i] == ',') ++i;
     }
@@ -259,8 +270,12 @@ namespace HC = HorizonCode;
 
 // Keep a document's id allocator ahead of anything a peer introduced, or the
 // next locally created item reuses an id that is already taken over there.
+// Bounded: `id` came off the wire, and narrowing an arbitrary 64-bit value to
+// the allocator's int is not defined for anything outside its range.
 void bumpNextId(int& nextId, std::int64_t id)
 {
+    constexpr std::int64_t kMax = 1 << 24;   // far past any real document
+    if (id < 0 || id > kMax) return;
     if (id >= nextId) nextId = static_cast<int>(id) + 1;
 }
 
@@ -421,8 +436,14 @@ public:
     // "[a,b,c,d]" — the array link form both HorizonCode and this layer use.
     // Hand-parsed rather than pulled through nlohmann so the adapters stay free
     // of a JSON dependency for the one shape that is four integers.
+    //
+    // The string comes from a PEER, so a digit run is capped instead of
+    // accumulated: `acc = acc * 10 + d` overflowing a signed int is undefined
+    // behaviour, not a big number. A capped value is refused below, because no
+    // node id or pin index is anywhere near it.
     static bool parseFourInts(const std::string& s, int& a, int& b, int& c, int& d)
     {
+        constexpr int kMaxField = 1 << 20;   // far past any real node id / pin
         int v[4] = {}; int n = 0; std::size_t i = 0;
         while (i < s.size() && n < 4)
         {
@@ -432,7 +453,13 @@ public:
             if (s[i] == '-') { neg = true; ++i; }
             if (i >= s.size() || s[i] < '0' || s[i] > '9') return false;
             int acc = 0;
-            while (i < s.size() && s[i] >= '0' && s[i] <= '9') acc = acc * 10 + (s[i++] - '0');
+            while (i < s.size() && s[i] >= '0' && s[i] <= '9')
+            {
+                if (acc > kMaxField) return false;
+                acc = acc * 10 + (s[i] - '0');
+                ++i;
+            }
+            if (acc > kMaxField) return false;
             v[n++] = neg ? -acc : acc;
         }
         if (n != 4) return false;
