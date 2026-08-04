@@ -78,6 +78,16 @@ public:
 	static bool setRemote(const std::filesystem::path& root, const std::string& url,
 	                      std::string* err = nullptr);
 
+	// ── LFS ──────────────────────────────────────────────────────────────────
+	// Whether `git lfs` answers at all in this environment.
+	static bool lfsAvailable(const std::filesystem::path& root);
+
+	// Track ONE exact path through LFS (appends to .gitattributes). --filename
+	// treats the argument literally, so a path containing glob characters or
+	// spaces cannot become a pattern by accident.
+	static bool lfsTrack(const std::filesystem::path& root, const std::string& repoRelativePath,
+	                     std::string* err = nullptr);
+
 	// ── Credentials ──────────────────────────────────────────────────────────
 	// The token is handed to git's OWN credential machinery and stored nowhere
 	// else: `git credential approve` routes it into whichever helper is

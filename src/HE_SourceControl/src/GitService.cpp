@@ -5,6 +5,7 @@
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
+#include <filesystem>
 #include <utility>
 
 namespace HE::Sc {
@@ -192,6 +193,67 @@ void GitService::workerMain()
 		case Kind::CommitAll:
 		{
 			std::string err;
+
+			// ── Size pass, BEFORE anything is staged ─────────────────────────
+			// Two verdicts, both cheaper now than later: big media gets routed
+			// into LFS per file (a blanket `*.png` glob would drag every icon
+			// along — and LFS bandwidth is the resource that runs out on
+			// GitHub), and an oversized NON-media file refuses the commit with
+			// its name while the fix is still trivial. At push time the same
+			// file is a rejected push and a history rewrite.
+			{
+				RepoStatus pre;
+				if (!GitCli::status(m_root, pre, &err)) { ev.error = err; break; }
+
+				std::vector<std::string> toTrack;
+				std::string blocked;
+				for (const auto& [rel, entry] : pre.files)
+				{
+					if (!entry.dirty()) continue;
+					std::error_code ec;
+					const auto size = std::filesystem::file_size(m_root / rel, ec);
+					if (ec) continue;   // deleted or unreadable — nothing to route
+
+					if (RepoConfig::isAutoLfsCandidate(rel))
+					{
+						if (size >= RepoConfig::kAutoLfsThresholdBytes)
+							toTrack.push_back(rel);
+					}
+					else if (size >= RepoConfig::kHardLimitBytes)
+					{
+						blocked += "\n  " + rel + " (" +
+						           std::to_string(size / (1024 * 1024)) + " MB)";
+					}
+				}
+
+				if (!blocked.empty())
+				{
+					ev.error = "Commit refused — these files exceed 100 MB and are "
+					           "not media assets, so the push would be rejected:" +
+					           blocked + "\nMove them out, or track them through "
+					           "LFS by hand if they truly belong in the repository.";
+					break;
+				}
+
+				if (!toTrack.empty())
+				{
+					if (!GitCli::lfsAvailable(m_root))
+					{
+						ev.error = "Commit refused — " + std::to_string(toTrack.size()) +
+						           " large media file(s) need Git LFS, and git-lfs is "
+						           "not installed. Install it and commit again.";
+						break;
+					}
+					bool ok = true;
+					for (const std::string& rel : toTrack)
+					{
+						if (!GitCli::lfsTrack(m_root, rel, &err)) { ok = false; break; }
+						HE_SC_INFO("LFS: tracking %s (over the size threshold)", rel.c_str());
+					}
+					if (!ok) { ev.error = err; break; }
+				}
+			}
+
 			if (!GitCli::addAll(m_root, &err))            { ev.error = err; break; }
 			if (!GitCli::commit(m_root, cmd.text, &err))  { ev.error = err; break; }
 			ev.info = "Committed.";

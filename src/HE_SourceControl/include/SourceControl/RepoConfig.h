@@ -36,6 +36,26 @@ public:
 	// the contract above. Returns false when a write failed (err says which).
 	static bool writeInitialFiles(const std::filesystem::path& root,
 	                              std::string* err = nullptr);
+
+	// ── Size-based LFS routing ───────────────────────────────────────────────
+	// LFS is decided PER FILE at commit time, not by blanket extension globs: a
+	// 40 KB icon does not belong in LFS just because it is a .png, and neither
+	// does every .hasset just because some hold meshes. Only the big-media
+	// categories — meshes, textures, audio (and the .hasset containers they are
+	// imported into) — are auto-routed, and only once a file is actually near
+	// the provider limit.
+
+	// GitHub warns from 50 MB and hard-rejects at 100 MB; "near the limit"
+	// starts where the provider starts complaining.
+	static constexpr std::uint64_t kAutoLfsThresholdBytes = 50ull * 1024 * 1024;
+	// Anything not in the media set is refused outright at this size — the push
+	// would be rejected anyway, and at commit time the file still has a name
+	// and a fix; at push time it has a rewritten-history problem.
+	static constexpr std::uint64_t kHardLimitBytes = 100ull * 1024 * 1024;
+
+	// True when the extension marks a mesh, texture or audio file — raw source
+	// formats plus .hasset, the container those imports live in.
+	static bool isAutoLfsCandidate(const std::string& repoRelativePath);
 };
 
 } // namespace HE::Sc

@@ -528,12 +528,87 @@ TEST_CASE("The generated repo config pins its load-bearing lines")
 
 	const std::string att = RepoConfig::gitattributesText();
 	CHECK(att.find("* text=auto eol=lf") != std::string::npos);
-	CHECK(att.find("*.hpak filter=lfs") != std::string::npos);
-	CHECK(att.find("*.hasset filter=lfs") != std::string::npos);
+	// NO blanket LFS globs, by explicit decision: routing is per file, by size,
+	// at commit time — a 40 KB icon does not belong in LFS for being a .png,
+	// nor every .hasset for some holding meshes.
+	CHECK(att.find("filter=lfs") == std::string::npos);
 	// Scenes are deliberately NOT merge=binary (stable entity ids since CP-A) —
 	// the graph formats still are.
 	CHECK(att.find(".hescene merge=binary") == std::string::npos);
 	CHECK(att.find("*.hcode  merge=binary") != std::string::npos);
+}
+
+TEST_CASE("Auto-LFS candidacy is by media category, never by container alone")
+{
+	using RC = RepoConfig;
+	// The three categories the routing covers…
+	CHECK(RC::isAutoLfsCandidate("Content/Meshes/rock.fbx"));
+	CHECK(RC::isAutoLfsCandidate("Content/Textures/sky.EXR"));   // case-insensitive
+	CHECK(RC::isAutoLfsCandidate("Content/Audio/theme.wav"));
+	CHECK(RC::isAutoLfsCandidate("Content/Meshes/Rock.hasset"));
+	// …and nothing else, whatever its size story turns out to be.
+	CHECK_FALSE(RC::isAutoLfsCandidate("Content/Scenes/main.hescene"));
+	CHECK_FALSE(RC::isAutoLfsCandidate("Content/Graphs/door.hcode"));
+	CHECK_FALSE(RC::isAutoLfsCandidate("Export/game.hpak"));
+	CHECK_FALSE(RC::isAutoLfsCandidate("README"));
+}
+
+TEST_CASE("A commit routes big media into LFS per file and leaves small media alone")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	const fs::path probe = uniqueDir("lfsprobe");
+	const bool lfs = GitCli::lfsAvailable(probe);
+	he_test::removeQuiet(probe);
+	if (!lfs) { MESSAGE("git-lfs not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("lfssize");
+	REQUIRE(GitCli::run(repo, { "lfs", "install", "--local" }).ok);
+	REQUIRE(RepoConfig::writeInitialFiles(repo));
+
+	// One texture over the threshold, one under it.
+	{
+		std::ofstream big(repo / "big.png", std::ios::binary);
+		std::vector<char> chunk(1024 * 1024, 'x');
+		for (int i = 0; i < 51; ++i) big.write(chunk.data(), chunk.size());
+	}
+	writeFile(repo / "small.png", "tiny");
+
+	// Drive the same worker the panel uses.
+	GitService svc;
+	svc.open(repo);
+	auto waitIdle = [&] {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while ((svc.busy() || svc.status().generation == 0) &&
+		       std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		svc.pump();
+	};
+	waitIdle();
+	REQUIRE(svc.isRepo());
+
+	svc.requestCommitAll("big media");
+	waitIdle();
+	CHECK(svc.lastError().empty());
+
+	// The big file went through LFS, the small one stayed plain git.
+	const GitResult ls = GitCli::run(repo, { "lfs", "ls-files", "--name-only" });
+	REQUIRE(ls.ok);
+	CHECK(ls.out.find("big.png") != std::string::npos);
+	CHECK(ls.out.find("small.png") == std::string::npos);
+
+	// And .gitattributes gained exactly the per-file entry.
+	{
+		std::ifstream in(repo / ".gitattributes");
+		std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		CHECK(all.find("big.png") != std::string::npos);
+		CHECK(all.find("*.png") == std::string::npos);
+	}
+
+	svc.close();
+	he_test::removeQuiet(repo);
 }
 
 TEST_CASE("GitService keeps git off the calling thread and delivers on pump")

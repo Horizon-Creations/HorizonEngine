@@ -217,6 +217,18 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
 }
 
+bool GitCli::lfsAvailable(const std::filesystem::path& root)
+{
+	return run(root, { "lfs", "version" }, 10000).ok;
+}
+
+bool GitCli::lfsTrack(const std::filesystem::path& root,
+                      const std::string& repoRelativePath, std::string* err)
+{
+	return runChecked(root, { "lfs", "track", "--filename", repoRelativePath },
+	                  kLocalTimeoutMs, err);
+}
+
 std::string GitCli::credentialHelper(const std::filesystem::path& root)
 {
 	const GitResult r = run(root, { "config", "--get", "credential.helper" }, 5000);
