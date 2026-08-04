@@ -1130,7 +1130,7 @@ layout(std140, set = 0, binding = 23) uniform HeSSRTrace {
     vec4 cfg;     // x maxDistance, y thickness, z maxRoughness, w stepCount
     vec4 conv;    // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
     vec4 vp;      // xy = trace-target size in pixels
-    vec4 cfg2;    // x = frame seed (temporal jitter), y = history blend (0 = temporal off), z = 1 → forward path (colour from prev frame)
+    vec4 cfg2;    // x = frame seed (temporal jitter), y = history blend (0 = temporal off), z = 1 → forward path (colour from prev frame), w = 1 → glossy cone jitter (quality High)
 } heSSR;
 vec3 heOctDecode(vec2 f) {
     vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
@@ -1146,7 +1146,15 @@ vec3 heWorldAt(vec2 uv, float d) {
     vec4 w = heSSR.invViewProj * c;
     return w.xyz / max(w.w, 1e-8);
 }
-float heViewZ(vec3 p) { return dot(p - heSSR.camPos.xyz, heSSR.camFwd.xyz); }
+// View-space depth of the stored surface at (uv, d) WITHOUT the full world
+// reconstruction: only the camera-forward projection of invViewProj survives,
+// so two dot products replace a mat4 multiply. rowZ/rowW are built once in
+// main() from invViewProj's rows; camDot = dot(camPos, camFwd).
+float heSceneZ(vec4 rowZ, vec4 rowW, float camDot, vec2 uv, float d) {
+    vec4 c = vec4(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0) * heSSR.conv.x,
+                  d * heSSR.conv.y + heSSR.conv.z, 1.0);
+    return dot(rowZ, c) / dot(rowW, c) - camDot;
+}
 void main() {
     vec2 uv = gl_FragCoord.xy / max(heSSR.vp.xy, vec2(1.0));
     oHistPos = vec4(0.0); // every early-out marks the receiver invalid
@@ -1160,6 +1168,21 @@ void main() {
     vec3 N = heOctDecode(g1.rg * 2.0 - 1.0);
     vec3 V = normalize(P - heSSR.camPos.xyz);
     vec3 R = reflect(V, N);
+    // Glossy cone jitter (quality High, cfg2.w): perturb the mirror ray inside
+    // a roughness-scaled cone, rotating per frame — the temporal EMA below
+    // integrates the samples into a real glossy lobe (the GI-reflection
+    // kernel's scheme) instead of leaning on the wide-blur lerp alone.
+    if (heSSR.cfg2.w > 0.5 && rough > 0.03) {
+        vec2 xi = vec2(fract(heIgn(gl_FragCoord.xy) + heSSR.cfg2.x * 0.61803398875),
+                       fract(heIgn(gl_FragCoord.yx + vec2(53.0, 91.0)) + heSSR.cfg2.x * 0.7548776662));
+        vec3 up = (abs(R.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 T  = normalize(cross(up, R));
+        vec3 B  = cross(R, T);
+        float cr  = sin(min(0.30, rough * rough * 1.2)) * sqrt(xi.x);
+        float phi = 6.28318530718 * xi.y;
+        vec3 Rj = normalize(R + T * (cr * cos(phi)) + B * (cr * sin(phi)));
+        if (dot(Rj, N) > 0.0) R = Rj; // keep the sample above the surface
+    }
     // Only rays running almost exactly BACK at the camera are unresolvable in
     // screen space (their hit is behind the viewer / self-occluded). Lateral
     // and mildly backward rays trace fine — a camera-facing mirror WALL
@@ -1169,30 +1192,47 @@ void main() {
     if (facing <= 0.0) { oSSR = vec4(0.0); return; }
     int   steps   = int(heSSR.cfg.w);
     float maxDist = heSSR.cfg.x;
-    float dt      = maxDist / float(steps);
     // Start jitter: static IGN dithering; with temporal on (quality High) it
     // rotates per frame by the golden ratio, so the EMA below integrates
     // DIFFERENT march offsets — the accumulation converges toward the exact
     // intersection instead of a fixed dither pattern that only blur can hide.
     float jit = heIgn(gl_FragCoord.xy);
     if (heSSR.cfg2.y > 0.0) jit = fract(jit + heSSR.cfg2.x * 0.61803398875);
-    float t       = dt * (0.5 + jit);
-    float prevT   = 0.0;
-    vec2  hitUV   = vec2(-1.0);
-    bool  hit     = false;
-    float tHit    = 0.0;
+    // The march is LINEAR in t — hoist both projections out of the loop:
+    // clip(t) = clipP + clipR·t and viewZ(t) = zP + zR·t replace the two
+    // per-step mat4 multiplies, and heSceneZ needs two dot products instead
+    // of a full inverse-view-proj world reconstruction. Same math, ~6× less
+    // ALU per step. The trace origin is nudged along N so the fine near
+    // steps below never re-detect the receiver's own surface.
+    vec3  Po    = P + N * 0.02;
+    vec4  clipP = heSSR.viewProj * vec4(Po, 1.0);
+    vec4  clipR = heSSR.viewProj * vec4(R, 0.0);
+    float camDot = dot(heSSR.camPos.xyz, heSSR.camFwd.xyz);
+    float zP = dot(Po, heSSR.camFwd.xyz) - camDot;
+    float zR = dot(R,  heSSR.camFwd.xyz);
+    vec4 rowZ = vec4(dot(heSSR.invViewProj[0].xyz, heSSR.camFwd.xyz),
+                     dot(heSSR.invViewProj[1].xyz, heSSR.camFwd.xyz),
+                     dot(heSSR.invViewProj[2].xyz, heSSR.camFwd.xyz),
+                     dot(heSSR.invViewProj[3].xyz, heSSR.camFwd.xyz));
+    vec4 rowW = vec4(heSSR.invViewProj[0].w, heSSR.invViewProj[1].w,
+                     heSSR.invViewProj[2].w, heSSR.invViewProj[3].w);
+    // Quadratic distance warp (t = maxDist·s²): sample density follows what
+    // SSR can actually resolve. Contact reflections — the region right under
+    // an object, the one SSR is FOR — get sub-metre steps instead of the old
+    // uniform maxDist/steps (≈1 m) stride that stepped clean over them, while
+    // the far end coarsens; the binary refine still lands the exact hit there
+    // and blur/temporal cover the residual far-field banding.
+    float ds     = 1.0 / float(steps);
+    float s      = ds * (0.5 + jit);
+    float prevT  = 0.0;
+    vec2  hitUV  = vec2(-1.0);
+    bool  hit    = false;
+    float tHit   = 0.0;
     float thickConf = 1.0;
-    // The acceptance window must scale with the ray's DEPTH advance per step,
-    // not the world-space step: a ray running almost parallel to the image
-    // plane (mirror wall reflecting a lateral neighbour) advances metres in
-    // the world but millimetres in depth — inflating the window by the full
-    // dt there accepted everything passing up to a step BEHIND the object and
-    // smeared its silhouette into a long streak across the mirror.
-    float dz = abs(dot(R, heSSR.camFwd.xyz)) * dt + 0.02;
     for (int i = 0; i < steps; ++i)
     {
-        vec3 q = P + R * t;
-        vec4 clip = heSSR.viewProj * vec4(q, 1.0);
+        float t = maxDist * s * s;
+        vec4 clip = clipP + clipR * t;
         if (clip.w <= 0.0) break;
         vec3 ndc = clip.xyz / clip.w;
         vec2 quv = vec2(ndc.x * 0.5 + 0.5, (ndc.y * heSSR.conv.x) * 0.5 + 0.5);
@@ -1200,23 +1240,30 @@ void main() {
         float sceneD = texture(heGBDepth, quv).r;
         if (sceneD < 1.0)
         {
-            float rayZ   = heViewZ(q);
-            float sceneZ = heViewZ(heWorldAt(quv, sceneD));
+            float rayZ   = zP + zR * t;
+            float sceneZ = heSceneZ(rowZ, rowW, camDot, quv, sceneD);
             if (rayZ > sceneZ + 0.01)
             {
                 // Fell behind geometry — thickness test, then binary refine.
+                // The acceptance window must scale with the ray's DEPTH
+                // advance of THIS step (the warp makes it vary), not the
+                // world-space stride: a ray running almost parallel to the
+                // image plane advances metres in the world but millimetres in
+                // depth — inflating the window by the full stride there
+                // accepted everything up to a step BEHIND the object and
+                // smeared its silhouette into a long streak across the mirror.
+                float dz = abs(zR) * (t - prevT) + 0.02;
                 if (rayZ - sceneZ < heSSR.cfg.y + dz)
                 {
                     float t0 = prevT, t1 = t;
                     for (int b = 0; b < 6; ++b)
                     {
                         float tm = 0.5 * (t0 + t1);
-                        vec3 qm = P + R * tm;
-                        vec4 cm = heSSR.viewProj * vec4(qm, 1.0);
+                        vec4 cm = clipP + clipR * tm;
                         vec3 nm = cm.xyz / max(cm.w, 1e-6);
                         vec2 um = vec2(nm.x * 0.5 + 0.5, (nm.y * heSSR.conv.x) * 0.5 + 0.5);
                         float dm = texture(heGBDepth, um).r;
-                        if (heViewZ(qm) > heViewZ(heWorldAt(um, dm))) { t1 = tm; hitUV = um; }
+                        if (zP + zR * tm > heSceneZ(rowZ, rowW, camDot, um, dm)) { t1 = tm; hitUV = um; }
                         else t0 = tm;
                     }
                     if (hitUV.x < 0.0) hitUV = quv;
@@ -1227,15 +1274,15 @@ void main() {
             }
         }
         prevT = t;
-        t += dt;
+        s += ds;
     }
     if (hit)
     {
         // Re-test at the REFINED point against the pure surface thickness (the
         // march window's dz slack no longer applies) — soft: barely inside the
         // surface = confident, buried deep = fade toward the fallback.
-        vec3  qh   = P + R * tHit;
-        float gapR = heViewZ(qh) - heViewZ(heWorldAt(hitUV, texture(heGBDepth, hitUV).r));
+        float gapR = (zP + zR * tHit)
+                   - heSceneZ(rowZ, rowW, camDot, hitUV, texture(heGBDepth, hitUV).r);
         thickConf  = 1.0 - clamp(gapR / max(heSSR.cfg.y, 1e-4), 0.0, 1.0);
         // Backface rejection: if the stored surface at the hit faces AWAY from
         // the ray, the visible colour belongs to its camera-facing side — a
@@ -1253,7 +1300,7 @@ void main() {
     {
         vec2 ef = min(hitUV, vec2(1.0) - hitUV);
         float edge     = smoothstep(0.0, max(heSSR.conv.w, 1e-3), min(ef.x, ef.y));
-        float distFade = 1.0 - 0.5 * clamp(t / maxDist, 0.0, 1.0);
+        float distFade = 1.0 - 0.5 * clamp(tHit / maxDist, 0.0, 1.0);
         // Colour source: DEFERRED samples this frame's resolved HDR at the hit
         // UV. FORWARD (cfg2.z) has no current-frame colour at trace time — the
         // hit reprojects into the PREVIOUS frame's HDR copy via prevViewProj
@@ -1263,7 +1310,7 @@ void main() {
         vec2  uvColor = hitUV;
         if (heSSR.cfg2.z > 0.5)
         {
-            vec3 hw = P + R * tHit;
+            vec3 hw = Po + R * tHit;
             vec4 hc = heSSR.prevViewProj * vec4(hw, 1.0);
             if (hc.w > 1e-4)
             {

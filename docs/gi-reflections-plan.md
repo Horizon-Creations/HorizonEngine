@@ -264,3 +264,12 @@ genau so — Verhalten beibehalten).
 6. TLAS-Rebuild pro Frame ist heute schon der GI-Kostenblock; GIRefl fügt keinen zweiten
    Build hinzu (Reuse), aber der Trace selbst ist Full-/Half-Screen statt 64 Rays/Probe —
    Profiler-Scope von Anfang an, Budget im Auge behalten (Detailed-Capture F9).
+
+## 9. Nachträge
+
+- **2026-08-04:** Sonnen-Occlusion-Ray im Bounce-Loop wird übersprungen, wenn der
+  Sonnenterm schwarz ist (Nacht) — das Sichtbarkeitsergebnis würde mit 0
+  multipliziert (HW- + SW-Kernel identisch). SSR-seitig kam der Glossy-Cone-Jitter
+  des Q2-Kernels auch im SSR-Trace an (High tier) — beide Reflexionsquellen
+  bauen Glossy jetzt gleich auf (Cone-Jitter + Temporal + Wide-Blur-Lerp);
+  Details in docs/ssr-plan.md („Trace v3").
