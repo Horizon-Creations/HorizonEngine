@@ -26,7 +26,7 @@
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
-#include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences window
+#include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "PlayReportPanel.h"             // post-PIE warning/error report
@@ -124,8 +124,7 @@ static bool s_resetLayoutRequested = false;
 // Times Assets > Import Asset opened the file dialog this run (guided tour signal).
 static int s_importDialogOpens = 0;
 
-// Toggled by Edit > Preferences (Ctrl+,); drives the Preferences window.
-static bool s_showPreferences = false;
+// (Preferences opens as an editor tab — see EditorSettingsPanel::kTabPath.)
 
 // Menu toggle for a floating (non-docked) panel. On open it also pulls the window
 // to the front: it may still exist from an earlier session, sitting underneath
@@ -639,6 +638,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
 		s_tabSelectRequest = ctx.activeTab;
 	};
+	// Open request raised outside this function (e.g. the Source Control window's
+	// "set up the remote in Preferences" pointer) — consumed here where the tab
+	// list lives.
+	if (EditorSettingsPanel::takeOpenRequest())
+		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
 	auto openExportDialog = [&]() { ExportDialogPanel::open(ctx); };
 	auto beginNewProject = [&]()
 	{
@@ -673,7 +677,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveScene:       doSaveScene();                                         break;
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
-			case MC::Preferences:     s_showPreferences = true;                              break;
+			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
 			case MC::ToggleProfiler:  toggleFloatingWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: toggleFloatingWindow(s_showEnvironment, "Environment"); break;
@@ -754,7 +758,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Copy",  "Ctrl+C")) {}
         if (ImGui::MenuItem("Paste", "Ctrl+V")) {}
         ImGui::Separator();
-		if (ImGui::MenuItem("Preferences", "Ctrl+,")) s_showPreferences = true;
+		if (ImGui::MenuItem("Preferences", "Ctrl+,"))
+			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View"))
@@ -1059,9 +1064,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (kio.KeyShift) triggerSaveSceneAs();
             else              doSaveScene();
         }
-        // Ctrl/Cmd+, opens Preferences (matches the Edit menu shortcut label).
+        // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
         if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
-            s_showPreferences = true;
+            openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
     }
 
     if (!ctx.hubOpenError.empty())
@@ -1560,7 +1565,9 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         // Dispatch by asset type: material assets get the node-graph editor, script
         // assets the code editor. (Cheap header sniff; both panels cache their state.)
         // The Level Script + Game Instance are virtual tabs (no backing .hasset).
-        if (tabPath == LevelScriptPanel::kTabPath)
+        if (tabPath == EditorSettingsPanel::kTabPath)
+            EditorSettingsPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == LevelScriptPanel::kTabPath)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
             GameInstancePanel::render(ctx, tabPos, tabSize);
@@ -1717,7 +1724,6 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 // explicit hand-over into UiFlags.
 void EditorUI::renderOverlays(AppContext& ctx, float dt)
 {
-    EditorSettingsPanel::DrawPreferencesWindow(ctx, s_showPreferences);
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
@@ -1727,7 +1733,10 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     tutFlags.profilerOpen      = s_showProfiler;
     tutFlags.environmentOpen   = s_showEnvironment;
     tutFlags.exportOpen        = ExportDialogPanel::isOpen();
-    tutFlags.preferencesOpen   = EditorSettingsPanel::preferencesOpen();
+    // Preferences is an editor tab now; "open" for the tour = it is the active tab.
+    tutFlags.preferencesOpen   =
+        ctx.activeTab >= 0 && ctx.activeTab < static_cast<int>(ctx.tabs.size()) &&
+        ctx.tabs[ctx.activeTab].assetPath == EditorSettingsPanel::kTabPath;
     tutFlags.importDialogOpens = s_importDialogOpens;
     tutFlags.contentRootKind   = ContentBrowserPanel::browsedRootKind();
     TutorialPanel::render(ctx, dt, tutFlags);
