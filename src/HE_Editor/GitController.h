@@ -47,6 +47,10 @@ public:
 	// additionally hides the buttons and explains why.
 	void requestInit(bool lfsAvailable);
 	void requestCommitAll(const std::string& message);
+	void requestSetupGitHub(const std::string& repoName, bool isPrivate, std::string token);
+	// Auto-push toggle: the panel binds a checkbox to this; requestCommitAll
+	// reads it. Persisted by the panel, not here.
+	bool autoPushAfterCommit = false;
 	void requestPush();
 	void requestPull();
 	void requestSetRemote(const std::string& url);

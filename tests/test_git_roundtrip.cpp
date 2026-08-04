@@ -2,6 +2,7 @@
 #include "TestFsUtil.h"
 
 #include <SourceControl/GitCli.h>
+#include <SourceControl/GitHubApi.h>
 #include <SourceControl/RepoConfig.h>
 
 #include "../src/HE_Editor/GitController.h"
@@ -443,6 +444,76 @@ TEST_CASE("The panel operations round-trip: init, commit, remote, push, pull")
 	he_test::removeQuiet(dir);
 	he_test::removeQuiet(bare);
 	he_test::removeQuiet(other);
+}
+
+TEST_CASE("GitHub create-repo responses map to actionable messages")
+{
+	// Pure response interpretation — no network, no token. The status codes are
+	// the ones GitHub actually answers, including the deliberately misleading
+	// 404 for a fine-grained token without permission.
+	CreatedRepo repo;
+	std::string err;
+
+	CHECK(GitHubApi::parseCreateRepoResponse(201,
+		R"({"clone_url":"https://github.com/anna/proj.git","full_name":"anna/proj"})",
+		repo, &err));
+	CHECK(repo.cloneUrl == "https://github.com/anna/proj.git");
+	CHECK(repo.fullName == "anna/proj");
+
+	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(401, R"({"message":"Bad credentials"})",
+	                                               repo, &err));
+	CHECK(err.find("token") != std::string::npos);
+
+	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(422,
+		R"({"message":"name already exists on this account"})", repo, &err));
+	CHECK(err.find("already exists") != std::string::npos);
+
+	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(404, "{}", repo, &err));
+	CHECK(err.find("permission") != std::string::npos);
+
+	// Success status with a broken body must not report success.
+	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(201, "not json", repo, &err));
+}
+
+TEST_CASE("A credential reaches git's helper via stdin, never argv")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("cred");
+
+	// A shim helper that records what git hands it. The `!shell` helper form
+	// runs through sh, which Git for Windows bundles, so this is portable.
+	const fs::path sink = repo / "cred_sink.txt";
+	const std::string helper =
+		"!f() { test \"$1\" = store && cat >> '" + sink.generic_string() + "'; }; f";
+	REQUIRE(GitCli::run(repo, { "config", "--local", "credential.helper", helper }).ok);
+
+	std::string err;
+	REQUIRE(GitCli::approveCredential(repo, "github.com", "x-access-token",
+	                                  "tok_TESTVALUE_123", &err));
+
+	std::ifstream in(sink);
+	REQUIRE(in.good());
+	std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	CHECK(all.find("host=github.com") != std::string::npos);
+	CHECK(all.find("username=x-access-token") != std::string::npos);
+	CHECK(all.find("password=tok_TESTVALUE_123") != std::string::npos);
+
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("ensureCredentialHelper leaves a repo with a usable helper")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("helper");
+	std::string chosen, err;
+	REQUIRE(GitCli::ensureCredentialHelper(repo, &chosen, &err));
+	// Whichever branch ran — pre-existing global helper, or the platform default
+	// just configured — the repo must end up with one.
+	CHECK_FALSE(GitCli::credentialHelper(repo).empty());
+
+	he_test::removeQuiet(repo);
 }
 
 TEST_CASE("The generated repo config pins its load-bearing lines")

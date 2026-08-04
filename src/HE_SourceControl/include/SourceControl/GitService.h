@@ -64,8 +64,16 @@ public:
 	// `git lfs install --local` when git-lfs is available.
 	void requestInit(const std::filesystem::path& projectRoot, bool lfsAvailable);
 
-	// Stage everything and commit it with `message`.
-	void requestCommitAll(const std::string& message);
+	// Stage everything and commit it with `message`; optionally push right
+	// after a successful commit (the panel's auto-push toggle).
+	void requestCommitAll(const std::string& message, bool pushAfter = false);
+
+	// The whole GitHub setup in one worker pass: create the repository via the
+	// API, point origin at it, make sure a credential helper exists, hand the
+	// token to that helper, and push. The token lives in the command for the
+	// duration of the flow and is wiped when it completes.
+	void requestSetupGitHub(const std::string& repoName, bool isPrivate,
+	                        std::string token);
 
 	void requestPush(bool upstreamConfigured);
 	void requestPull();
@@ -96,14 +104,15 @@ public:
 
 private:
 	enum class Kind : std::uint8_t {
-		Open, Status, Init, CommitAll, Push, Pull, SetRemote, Quit
+		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub, Quit
 	};
 
 	struct Command
 	{
 		Kind                  kind = Kind::Status;
 		std::filesystem::path path;
-		std::string           text;   // commit message / remote url
+		std::string           text;   // commit message / remote url / repo name
+		std::string           secret; // PAT for SetupGitHub — wiped after use
 		bool                  flag = false;
 	};
 
