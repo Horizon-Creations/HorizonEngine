@@ -36,6 +36,21 @@ namespace InspectorPanel
 // contact with it. Both live in EditorWidgets; these are the local spellings.
 namespace Row = EditorWidgets::Row;
 using EditorWidgets::hint;
+
+// A scene is meant to hold at most one Sky and one Weather entity; everything in
+// the engine reads the FIRST one it finds. A duplicate is therefore completely
+// inert, and silently so — its sliders move and nothing in the viewport changes.
+// Say it, right above the settings the user is about to waste time on.
+void inertEnvironmentNote(bool isActive, const char* kind)
+{
+	if (isActive) return;
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.70f, 0.25f, 1.0f));
+	ImGui::TextWrapped("This scene has more than one %s entity. Only one of them is "
+	                   "used and it is not this one — these settings have no effect. "
+	                   "Delete this entity in the Outliner.", kind);
+	ImGui::PopStyleColor();
+	ImGui::Separator();
+}
 #endif
 
 // ─── Inspector (Details panel) ────────────────────────────────────────────────
@@ -118,6 +133,11 @@ void render(AppContext& ctx)
 	// from the View ▸ Environment window.
 	if (auto* env = registry.try_get<EnvironmentComponent>(entity))
 	{
+		// A scene can end up with more than one Sky (an old bug, or a stray paste).
+		// Only the first is used — every consumer calls environmentEntity() — so
+		// say which one you are looking at, otherwise editing the inert copy looks
+		// like the settings simply do nothing.
+		inertEnvironmentNote(entity == ctx.world->environmentEntity(), "Sky");
 		if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::Checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
@@ -308,6 +328,7 @@ void render(AppContext& ctx)
 	{
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
 		{
+			inertEnvironmentNote(entity == ctx.world->weatherEntity(), "Weather");
 			if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				const char* kinds[] = { "Clear","Cloudy","Overcast","Foggy","Rain","Storm","Snow" };
