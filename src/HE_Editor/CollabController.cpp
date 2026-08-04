@@ -1,4 +1,5 @@
 #include "CollabController.h"
+#include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 
 #include <Net/HttpsClient.h>
 #include <Net/PortMapper.h>
@@ -1255,20 +1256,63 @@ bool CollabController::isSyncableAsset(const std::string& relativePath)
 	// in docs/networking-layer-design.md). They are not less important — they are
 	// simply too big for this channel, which is why source control carries them
 	// instead.
+	//
+	// EXTENSION IS NOT THE TYPE. The engine writes EVERY authored asset as a
+	// `.hasset` container — materials, UI widgets, HorizonCode graphs, particle
+	// and animator graphs, input assets — with the real type in the header. This
+	// list used to spell out `.hmat`, `.huiw`, `.hcode`, `.hpart`, `.hasm`,
+	// `.hinput`; the engine writes none of those, so it matched NOTHING in a real
+	// project and asset collaboration was silently dead for every type except
+	// scenes and loose scripts. (The `.hscene`/`.hescene` note below is the same
+	// mistake caught once before, in one entry, and it went uncorrected in the
+	// other six.)
+	//
+	// `.hasset` therefore passes here, and the ASSET TYPE inside decides — see
+	// isSyncableAssetType, which the caller applies once it has the file.
 	static const char* kAuthored[] = {
+		".hasset",    // every authored asset the ContentManager writes
 		".hescene",   // scenes — note the 'e': ProjectManager writes .hescene
-		".hcode",     // HorizonCode graphs
-		".hmat",      // materials
-		".hmatfn",    // material functions
-		".huiw",      // UI widgets
-		".hpart",     // particle graphs
-		".hasm",      // animator state machines
-		".hinput",    // input assets
 		".lua", ".py",// scripts
 	};
 	for (const char* a : kAuthored)
 	{
 		if (ext == a) return true;
+	}
+	return false;
+}
+
+bool CollabController::isSyncableAssetType(HE::AssetType type)
+{
+	switch (type)
+	{
+		// Authored in an editor, small, and edited during a session — the whole
+		// point of collaborating.
+		case HE::AssetType::Material:
+		case HE::AssetType::MaterialFunction:
+		case HE::AssetType::Widget:
+		case HE::AssetType::HorizonCodeClass:
+		case HE::AssetType::ParticleSystem:
+		case HE::AssetType::AnimatorStateMachine:
+		case HE::AssetType::InputAction:
+		case HE::AssetType::InputMappingContext:
+		case HE::AssetType::Script:
+		case HE::AssetType::Scene:
+		case HE::AssetType::Prefab:
+			return true;
+
+		// Imported binaries. Excluded by size, not by importance — source control
+		// carries these. Font and the animation clips are here for the same
+		// reason: they are baked data, not something two people edit live.
+		case HE::AssetType::StaticMesh:
+		case HE::AssetType::SkeletalMesh:
+		case HE::AssetType::Texture:
+		case HE::AssetType::Audio:
+		case HE::AssetType::Font:
+		case HE::AssetType::Shader:
+		case HE::AssetType::AnimationClip:
+		case HE::AssetType::PropertyAnimClip:
+		case HE::AssetType::Unknown:
+			return false;
 	}
 	return false;
 }
@@ -1285,6 +1329,11 @@ void CollabController::publishAsset(const std::string& relativePath,
 	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(f)),
 	                                 std::istreambuf_iterator<char>());
 	if (bytes.empty()) return;
+	// `.hasset` is equally the container around an imported mesh or texture, and
+	// those are exactly what must not travel this channel. This hook fires for
+	// EVERY ContentManager save, including an import, so the type gate belongs
+	// here and not only where the editor walks its open tabs.
+	if (!isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	const std::uint64_t subject = assetSubject(relativePath);
 

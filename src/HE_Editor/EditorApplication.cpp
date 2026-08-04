@@ -2,6 +2,7 @@
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "EditorUI.h"
+#include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/Process.h>       // git config for the identity fix
@@ -3296,6 +3297,11 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		const std::string rel =
 			CollabController::projectRelativeAssetPath(tab.assetPath, root);
 		if (rel.empty() || !CollabController::isSyncableAsset(rel)) continue;
+		// The extension only says "authored container"; the type inside decides.
+		// A `.hasset` is equally the wrapper around a 40 MB mesh.
+		if (!CollabController::isSyncableAssetType(
+		        EditorAssetTypeCache::assetTypeOf(tab.assetPath)))
+			continue;
 		openRel.insert(rel);
 
 		// Ask the host about this asset the first time we see its tab. Idempotent,

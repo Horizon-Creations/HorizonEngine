@@ -16,6 +16,7 @@
 
 #include <Net/CollabSession.h>
 #include <Net/PortMapper.h>
+#include <Types/Enums.h>   // HE::AssetType — the .hasset header's real type
 
 #include <cstdint>
 #include <functional>
@@ -233,7 +234,16 @@ public:
 	// True when this asset kind should travel over the session at all. Authored
 	// data (graphs, materials, UI, scenes) yes; binary media (meshes, textures,
 	// audio) no — those are large, rarely edited live, and source control's job.
+	//
+	// TWO gates, because the extension does not name the type: the engine writes
+	// every authored asset as a `.hasset` container. isSyncableAsset() is the
+	// path-only filter (it can run without opening the file, and is what keeps
+	// source art like .fbx/.png out); isSyncableAssetType() is the real decision,
+	// applied by the caller once it has sniffed the header. Deciding on the
+	// extension alone is what silently disabled asset collaboration entirely —
+	// see the comment on the list in the .cpp.
 	static bool isSyncableAsset(const std::string& relativePath);
+	static bool isSyncableAssetType(HE::AssetType type);
 
 	// Publish a saved asset. Claims the lock first when nobody holds it, so
 	// saving does not silently do nothing just because the user never selected

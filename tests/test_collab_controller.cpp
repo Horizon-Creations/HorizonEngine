@@ -906,25 +906,58 @@ TEST_CASE("SceneSerializer: applying to an invalid entity fails instead of creat
 
 TEST_CASE("isSyncableAsset accepts the extensions the engine actually writes")
 {
-    // The scene entry read ".hscene" for a long time while ProjectManager writes
-    // ".hescene", so it could never match. It was harmless only because scenes
-    // reach peers through the snapshot/delta path rather than the asset path —
-    // a latent trap for whoever routes scene saves through ContentManager. This
-    // test pins the spelling against the file the engine really produces.
+    // THE ENGINE WRITES ONE EXTENSION. Every authored asset — material, UI
+    // widget, HorizonCode graph, particle graph, animator state machine, input
+    // asset — is a `.hasset` container with the type in its header; the
+    // ContentManager's own registry scan keys on exactly that. This list used to
+    // name .hmat/.huiw/.hcode/.hpart/.hasm/.hinput, none of which the engine
+    // produces, so it matched NOTHING in a real project and asset collaboration
+    // was dead for every type but scenes and loose scripts.
+    //
+    // The test that was here asserted on those invented extensions, so it passed
+    // while the feature did not work. It now asserts against the files the engine
+    // really writes.
+    CHECK(CollabController::isSyncableAsset("Content/Materials/Rock.hasset"));
+    CHECK(CollabController::isSyncableAsset("Content/UI/Main.hasset"));
+    CHECK(CollabController::isSyncableAsset("Content/Scripts/Door.hasset"));
     CHECK(CollabController::isSyncableAsset("Content/StartupScene.hescene"));
-    CHECK(CollabController::isSyncableAsset("Content/UI/Main.huiw"));
-    CHECK(CollabController::isSyncableAsset("Content/Materials/Rock.hmat"));
     CHECK(CollabController::isSyncableAsset("Content/Scripts/Player.lua"));
     CHECK(CollabController::isSyncableAsset("Content/Scripts/Ai.py"));
 
     // Case-insensitive: the extension is lowercased before comparison, and
     // Windows users do produce mixed-case names.
     CHECK(CollabController::isSyncableAsset("Content/Scenes/Level.HEScene"));
+    CHECK(CollabController::isSyncableAsset("Content/UI/Main.HAsset"));
 
     // The big binaries stay out — not because they matter less, but because they
     // are the largest files in a project and belong on the source-control path.
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Models/Hero.fbx"));
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Textures/Rock.png"));
+}
+
+TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")
+{
+    // Since every authored asset shares the `.hasset` extension, so does an
+    // IMPORTED one — a 40 MB mesh and a material are the same container. The
+    // extension filter cannot tell them apart, so this is the gate that matters,
+    // and it is applied wherever the caller has the file to sniff.
+    using T = HE::AssetType;
+    CHECK(CollabController::isSyncableAssetType(T::Material));
+    CHECK(CollabController::isSyncableAssetType(T::MaterialFunction));
+    CHECK(CollabController::isSyncableAssetType(T::Widget));
+    CHECK(CollabController::isSyncableAssetType(T::HorizonCodeClass));
+    CHECK(CollabController::isSyncableAssetType(T::ParticleSystem));
+    CHECK(CollabController::isSyncableAssetType(T::AnimatorStateMachine));
+    CHECK(CollabController::isSyncableAssetType(T::InputAction));
+    CHECK(CollabController::isSyncableAssetType(T::InputMappingContext));
+    CHECK(CollabController::isSyncableAssetType(T::Script));
+
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::StaticMesh));
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::SkeletalMesh));
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::Texture));
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::Audio));
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::Font));
+    CHECK_FALSE(CollabController::isSyncableAssetType(T::Unknown));
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Audio/Music.wav"));
 
     // Degenerate input must not be treated as a match.
