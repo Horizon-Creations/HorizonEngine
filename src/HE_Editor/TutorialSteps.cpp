@@ -701,12 +701,13 @@ constexpr Step kPlay[] = {
 constexpr Step kPerformance[] = {
 	{ "settings",
 	  "Engine settings",
-	  "Edit - Preferences holds the engine switches: render path (forward or "
-	  "deferred), ambient occlusion method, bloom, screen-space reflections, "
-	  "ray-traced global illumination, GPU particles, VSync and frame cap.\n"
+	  "Edit - Preferences opens the Preferences tab. Its Rendering pages hold the "
+	  "engine switches: render path (forward or deferred), ambient occlusion "
+	  "method, bloom, screen-space reflections, ray-traced global illumination, "
+	  "GPU particles, VSync and frame cap.\n"
 	  "Anything you pin there also appears in Quick Settings next to the viewport, "
 	  "so the switches you A/B most are one click away.",
-	  "Open Edit - Preferences and look through the settings.",
+	  "Open Edit - Preferences and look through the Rendering settings.",
 	  // No highlight: what the user has to hit is a menu, not a panel. Pointing at
 	  // Quick Settings here would be pointing at the wrong thing.
 	  "", Check::PreferencesOpen, "" },

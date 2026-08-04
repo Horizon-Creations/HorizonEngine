@@ -1,5 +1,6 @@
 #include "SourceControlPanel.h"
 #include "EditorApplication.h"    // AppContext
+#include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
 #include "GitController.h"
 
 #include <Diagnostics/GlobalState.h>
@@ -20,16 +21,10 @@ namespace SourceControlPanel
 #ifdef HE_IMGUI_ENABLED
 namespace {
 
-// Panel-local input state. A commit message is short-lived by design; the
-// remote URL survives only until it is applied.
+// Panel-local input state. A commit message is short-lived by design. (Repo
+// init and remote/GitHub setup live in Preferences ▸ Source Control now.)
 char s_commitMessage[512] = "";
-char s_remoteUrl[512]     = "";
-// GitHub setup inputs. The token buffer is wiped the moment it is handed off —
-// it must not sit in static memory for the rest of the session.
-char s_ghRepoName[128] = "";
-char s_ghToken[256]    = "";
-bool s_ghPrivate       = true;
-bool s_autoPushLoaded  = false;
+bool s_autoPushLoaded     = false;
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -135,8 +130,9 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 #ifdef HE_IMGUI_ENABLED
 	GitController* git = ctx.git;
 	// The controller only polls often while the panel is on screen, so it has to
-	// be told even on the frame where the window is closed.
-	if (git) git->setPanelVisible(open);
+	// be told even on the frame where the window is closed. The Preferences tab's
+	// Source Control pages count as "on screen" too — they show the same status.
+	if (git) git->setPanelVisible(open || EditorSettingsPanel::sourceControlPageActive());
 	if (!open) return;
 
 	ImGui::SetNextWindowSize(ImVec2(420.0f, 460.0f), ImGuiCond_FirstUseEver);
@@ -175,24 +171,11 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		}
 		else
 		{
-			const bool lfs = ctx.gitProbe && ctx.gitProbe->lfsFound;
-			ImGui::TextWrapped("Initializing creates the repository with a generated "
-			                   ".gitignore (engine output stays out) and .gitattributes "
-			                   "(large binaries go through Git LFS).");
-			if (!lfs)
-			{
-				ImGui::Spacing();
-				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-				ImGui::TextWrapped("git-lfs was not found — the repository will work, "
-				                   "but large assets will not be tracked through LFS "
-				                   "until it is installed.");
-				ImGui::PopStyleColor();
-			}
+			ImGui::TextWrapped("Repository setup (init, remote, GitHub token) lives "
+			                   "in Preferences \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
-			if (git->busy()) ImGui::BeginDisabled();
-			if (ImGui::Button("Initialize Git repository", ImVec2(240.0f, 0.0f)))
-				git->requestInit(lfs);
-			if (git->busy()) ImGui::EndDisabled();
+			if (ImGui::Button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 		}
 
 		if (!git->lastError().empty())
@@ -309,55 +292,13 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::SeparatorText("Remote");
 		if (git->remoteUrl().empty())
 		{
-			// Two ways in: let the editor create the repository on GitHub, or
-			// paste the URL of one that already exists (any provider).
-			ImGui::TextWrapped("Create the repository on GitHub directly:");
-
-			if (s_ghRepoName[0] == '\0' && !git->projectRoot().empty())
-			{
-				// Default to the project folder's name — right nearly always,
-				// editable when not.
-				const std::string def = git->projectRoot().filename().string();
-				std::snprintf(s_ghRepoName, sizeof(s_ghRepoName), "%s", def.c_str());
-			}
-			ImGui::SetNextItemWidth(180.0f);
-			ImGui::InputText("Name##gh", s_ghRepoName, sizeof(s_ghRepoName));
-			ImGui::SameLine();
-			ImGui::Checkbox("Private", &s_ghPrivate);
-
-			ImGui::SetNextItemWidth(-140.0f);
-			ImGui::InputTextWithHint("##ghtoken", "Personal access token",
-			                         s_ghToken, sizeof(s_ghToken),
-			                         ImGuiInputTextFlags_Password);
-			ImGui::SameLine();
-			ImGui::BeginDisabled(git->busy() || s_ghToken[0] == '\0' ||
-			                     s_ghRepoName[0] == '\0' || st.initialCommit);
-			if (ImGui::Button("Create & push", ImVec2(130.0f, 0.0f)))
-			{
-				git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, std::string(s_ghToken));
-				// Wipe, not clear: the bytes must go, not just the length.
-				std::fill(std::begin(s_ghToken), std::end(s_ghToken), '\0');
-			}
-			ImGui::EndDisabled();
-			ImGui::TextDisabled("Token: github.com/settings/tokens — classic, 'repo' scope. "
-			                    "It is handed to git's credential helper, stored nowhere else.");
-			if (st.initialCommit)
-				ImGui::TextDisabled("Make the first commit before setting up the remote.");
-
-			ImGui::Spacing();
-			ImGui::TextWrapped("Or paste an existing repository URL (GitHub, GitLab, "
-			                   "Azure DevOps):");
-			ImGui::SetNextItemWidth(-90.0f);
-			ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
-			                         s_remoteUrl, sizeof(s_remoteUrl));
-			ImGui::SameLine();
-			ImGui::BeginDisabled(git->busy() || s_remoteUrl[0] == '\0');
-			if (ImGui::Button("Set##remote"))
-			{
-				git->requestSetRemote(s_remoteUrl);
-				s_remoteUrl[0] = '\0';
-			}
-			ImGui::EndDisabled();
+			// Setup (GitHub create + token, or pasting an existing URL) lives in
+			// the Preferences tab — this window is the daily driver, not the
+			// one-time configuration.
+			ImGui::TextWrapped("No remote configured — set one up in "
+			                   "Preferences \xe2\x96\xb8 Source Control.");
+			if (ImGui::Button("Set up remote…"))
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 		}
 		else
 		{
@@ -369,20 +310,15 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			if (ImGui::Button("Pull", ImVec2(86.0f, 0.0f))) git->requestPull();
 			ImGui::EndDisabled();
 
-			// Auto-push: commit lands on the remote in the same action. The
-			// preference survives restarts — per user, not per project file, so
-			// nothing project-visible changes for collaborators.
+			// Auto-push is toggled in Preferences ▸ Source Control ▸ Repository,
+			// but requestCommitAll reads the flag — so the persisted value must be
+			// loaded here too, before the first commit, even if the Preferences
+			// page was never opened this session.
 			if (!s_autoPushLoaded)
 			{
 				s_autoPushLoaded = true;
 				git->autoPushAfterCommit = GlobalState::getInstance()
 					.getCustomConfigBool("GitAutoPushAfterCommit", false);
-			}
-			if (ImGui::Checkbox("Push automatically after each commit",
-			                    &git->autoPushAfterCommit))
-			{
-				GlobalState::getInstance().setCustomConfigEntry(
-					"GitAutoPushAfterCommit", git->autoPushAfterCommit);
 			}
 
 			if (st.initialCommit)

@@ -1,30 +1,60 @@
 #pragma once
+#include <imgui.h>
 
 struct AppContext;
 
-// ── Engine settings catalog + Preferences window (Edit ▸ Preferences) ────────
-// One catalog of pinnable engine settings, rendered in two modes: Preferences
-// shows every setting with a "pin" toggle; Quick Settings shows only the pinned
-// ones. Favourites are a comma-separated list of stable keys in
-// EditorConfig::QuickSettingsFavorites (persisted to config.json). (Scene
-// environment settings are NOT here — those live on the World entity.)
-// Split out of EditorUI.cpp; the Quick-Settings dock panel calls
-// DrawEngineSettings directly, which is why both entry points are public.
+// ── Preferences tab + engine-settings catalog ────────────────────────────────
+// The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
+// category navigation on the left (General / Rendering / Source Control /
+// Tools, each with sub-pages) and the selected page's settings on the right.
+// It replaced the old modal popup.
+//
+// The engine-settings catalog is shared with the Quick Settings dock panel:
+// every setting row carries a "pin" toggle in the Preferences tab, and Quick
+// Settings shows only the pinned rows. Favourites are a comma-separated list
+// of stable keys in EditorConfig::QuickSettingsFavorites (persisted to
+// config.json). (Scene environment settings are NOT here — those live on the
+// World entity.)
 namespace EditorSettingsPanel
 {
 	enum class SettingsMode { Preferences, QuickSettings };
 
+	// Sub-pages of the Preferences tab (the left-hand navigation buttons).
+	enum class Page
+	{
+		// General
+		Appearance, Viewport, ContentBrowser,
+		// Rendering
+		Display, PostProcessing, GlobalIllumination, Effects,
+		// Source Control
+		Repository, GitSetup,
+		// Tools
+		Toolchain,
+	};
+
+	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
+	constexpr const char* kTabPath = "::Preferences::";
+
 	// Renders the engine-settings catalog. Each `row(key, category, widget)` is a
-	// logical setting group; `widget` draws its control(s).
-	void DrawEngineSettings(AppContext& ctx, SettingsMode mode);
+	// logical setting group; `widget` draws its control(s). `categoryFilter`
+	// limits the output to one category (used by the Preferences pages); null
+	// draws everything (Quick Settings).
+	void DrawEngineSettings(AppContext& ctx, SettingsMode mode,
+	                        const char* categoryFilter = nullptr);
 
-	// `open` is a one-shot request raised by the Edit menu / Ctrl+, shortcut;
-	// the window consumes it and turns it into a modal popup.
-	void DrawPreferencesWindow(AppContext& ctx, bool& open);
+	// Fill the given tab rect with the Preferences tab (nav + content).
+	void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size);
 
-	// Is the Preferences modal on screen? Tracked by the window itself rather than
-	// asked of ImGui::IsPopupOpen: that resolves the popup id against the CALLER's
-	// id stack, so the answer would depend on where it is asked from. Read by the
-	// guided tour's "open Edit > Preferences" step.
-	bool preferencesOpen();
+	// Ask EditorUI to open (or focus) the Preferences tab — usable from panels
+	// drawn outside renderEditor (e.g. the Source Control window's "set up the
+	// remote in Preferences" pointer). The overload with a Page also switches to
+	// that page. Consumed once per frame by the tab strip.
+	void requestOpen();
+	void requestOpen(Page page);
+	bool takeOpenRequest();
+
+	// True while a Source Control page was drawn this frame — the Source Control
+	// window ORs this into GitController::setPanelVisible so the fast status
+	// poll also runs while the user is looking at the Preferences pages.
+	bool sourceControlPageActive();
 }

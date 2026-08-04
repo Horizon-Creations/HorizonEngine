@@ -21,7 +21,12 @@ namespace GitMissingDialog
 {
 	void DrawGitMissingDialog(AppContext& ctx);
 
-	// Preferences ▸ Source Control ▸ Recheck: force the dialog open on the next
-	// completed probe even when the user permanently suppressed it.
+	// Force the dialog open on the next completed probe even when the user
+	// permanently dismissed it (an explicit request should always show the result).
 	void requestShow();
+
+	// Platform-specific install instructions (copy-a-command + open-a-page pair),
+	// shared with the Preferences ▸ Source Control ▸ Git Setup page.
+	void drawGitInstallRemedy();
+	void drawLfsInstallRemedy();
 }

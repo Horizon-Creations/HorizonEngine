@@ -15,8 +15,8 @@
 namespace GitMissingDialog
 {
 
-// Set by Preferences ▸ Source Control ▸ Recheck, so an explicit request always
-// shows the result even when the warning was permanently dismissed.
+// Forces the dialog open on the next completed probe, so an explicit request
+// always shows the result even when the warning was permanently dismissed.
 static bool s_forceShow = false;
 
 void requestShow() { s_forceShow = true; }
@@ -38,7 +38,10 @@ void remedyButtons(const char* buttonLabel, const char* command,
 	}
 }
 
-void gitInstallRemedy()
+} // namespace
+
+// Public (shared with the Preferences ▸ Source Control ▸ Git Setup page).
+void drawGitInstallRemedy()
 {
 #if defined(__APPLE__)
 	ImGui::TextWrapped("On macOS, git comes with the Xcode Command Line Tools.");
@@ -56,7 +59,7 @@ void gitInstallRemedy()
 #endif
 }
 
-void lfsInstallRemedy()
+void drawLfsInstallRemedy()
 {
 #if defined(__APPLE__)
 	remedyButtons("Copy 'brew install git-lfs'", "brew install git-lfs",
@@ -73,8 +76,6 @@ void lfsInstallRemedy()
 	              "git-lfs.com", "https://git-lfs.com/");
 #endif
 }
-
-} // namespace
 #endif  // HE_IMGUI_ENABLED
 
 void DrawGitMissingDialog(AppContext& ctx)
@@ -164,7 +165,7 @@ void DrawGitMissingDialog(AppContext& ctx)
 	{
 		ImGui::BulletText("git was not found.");
 		ImGui::Indent();
-		gitInstallRemedy();
+		drawGitInstallRemedy();
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}
@@ -188,7 +189,7 @@ void DrawGitMissingDialog(AppContext& ctx)
 			"it those would be committed straight into the repository, which most "
 			"hosts reject above 100 MB per file and which makes every clone "
 			"download the entire history of every asset.");
-		lfsInstallRemedy();
+		drawLfsInstallRemedy();
 		ImGui::Unindent();
 		ImGui::Spacing();
 	}
