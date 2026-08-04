@@ -1838,9 +1838,18 @@ bool auroraSlab(float x0, float dx, float w, inout float t0, inout float t1)
 // "Physical Processes of Meso-Scale, Dynamic Auroral Forms". The three meander sines are that
 // same scale hierarchy (arc sweep → folds → curls) with per-curtain amplitude/frequency/phase.
 //
-// The march is clipped PER CURTAIN to that ribbon's own oriented box (two auroraSlab calls)
-// instead of marching the whole altitude slab once for all bands — far fewer steps and a much
-// tighter fit, which is what pays for the extra curtains and the vein noise. The Gaussian sheet
+// Depth comes from three things beyond the plain perspective: curtains sit at DIFFERENT
+// altitudes with different vertical extents, aerial perspective dims and cools them with
+// distance, and the ray striation is sheared along the geomagnetic field line so all rays are
+// parallel in 3D and converge perspectively on the magnetic zenith (the corona). Colour follows
+// the real emission altitudes — magenta N2+ fringe on the bottom edge, green 557.7 nm oxygen
+// body, diffuse red/violet 630 nm top. Motion is layered: the arc drifts, surges race along it,
+// the fine rays stream sideways, and each curtain pulses on its own clock.
+//
+// The march is clipped PER CURTAIN to that ribbon's own oriented box (three auroraSlab calls —
+// altitude band, across, along) instead of marching the whole envelope once for all bands: far
+// fewer steps and a much tighter fit, which is what pays for the extra curtains, the vein noise
+// and the per-curtain altitudes. The Gaussian sheet
 // is pre-filtered against the step size (widen σ, renormalise to keep the line integral) so an
 // under-sampled distant curtain BLURS instead of beating into moiré.
 //
@@ -1856,16 +1865,17 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 	float night = 1.0 - smoothstep(-0.20, -0.02, clamp(normalize(uSunDir).y, -0.3, 1.0));
 	if (night <= 0.0) return vec3(0.0);
 
-	// World-space altitude slab. Height control drives the curtain ELEVATION (kept high so the
-	// parallax stays subtle — aurora is near-infinite; lower = more exaggerated parallax).
+	// World-space altitude envelope. Height control drives the curtain ELEVATION (kept high so
+	// the parallax stays subtle — aurora is near-infinite; lower = more exaggerated parallax).
+	// Each curtain picks its OWN altitude and vertical extent inside this envelope: real
+	// curtains are not all parked on one shelf, and that spread is a large part of the depth
+	// read, so the global bracket only has to contain the union of them.
 	float altitude = mix(1500.0, 7000.0, clamp(uAuroraHeight, 0.0, 1.0));
-	float baseY = camPos.y + altitude;
-	float thick = altitude * 1.4;
 	float invY  = 1.0 / dir.y;
-	float tNear = max((baseY - camPos.y) * invY, 0.0);
-	float tFar  = (baseY + thick - camPos.y) * invY;
-	// The layout reaches out to ~13.5 × altitude, so rays that leave the slab beyond that can
-	// never hit a curtain — clamp there rather than at some arbitrary huge distance.
+	float tNear = max(altitude * 0.72 * invY, 0.0);
+	float tFar  = altitude * 3.75 * invY;
+	// The layout reaches out to ~13.5 × altitude, so rays that leave the envelope beyond that
+	// can never hit a curtain — clamp there rather than at some arbitrary huge distance.
 	float layoutR = altitude * 13.5;
 	tFar = min(tFar, layoutR * 2.2);
 	if (tFar <= tNear) return vec3(0.0);
@@ -1904,17 +1914,38 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 		float p1 = auroraRnd(fk, 11.0) * 6.2831853;
 		float p2 = auroraRnd(fk, 12.0) * 6.2831853;
 		float p3 = auroraRnd(fk, 13.0) * 6.2831853;
-		float hBot   = 0.34 * auroraRnd(fk, 14.0);              // where this curtain's foot sits
+		// ── This curtain's own altitude and vertical extent (see the envelope note above).
+		float altK   = altitude * (0.72 + 0.62 * auroraRnd(fk, 14.0));
+		float thickK = altK * (1.00 + 0.80 * auroraRnd(fk, 18.0));
 		float hDec   = 4.6 - 2.4 * auroraRnd(fk, 15.0);         // how fast it fades upward
 		float bright = 0.55 + 0.70 * auroraRnd(fk, 16.0);
+		// ── Motion. A real display does three things at once: the whole arc drifts (the meander
+		//    time terms), surges of brightness race ALONG the arc every few seconds, and the fine
+		//    rays stream sideways. Speeds and directions are per-curtain, so the sky never pulses
+		//    in unison. Pulsation is per-curtain, so it hoists out of the march entirely.
+		float tph    = auroraRnd(fk, 19.0) * 6.2831853;
+		float puls   = 0.80 + 0.20 * sin(time * (0.30 + 0.55 * auroraRnd(fk, 20.0)) + tph);
+		float surgeF = (1.5 + 1.1 * auroraRnd(fk, 21.0)) / scl;             // surges per unit length
+		float surgeV = (0.7 + 1.3 * auroraRnd(fk, 22.0)) * (auroraRnd(fk, 23.0) < 0.5 ? -1.0 : 1.0);
+		float rayDrift = (0.5 + 1.1 * auroraRnd(fk, 24.0)) * (auroraRnd(fk, 25.0) < 0.5 ? -1.0 : 1.0);
+		float fringeAmt = (0.35 + 0.55 * frag) * (0.45 + 0.55 * auroraRnd(fk, 26.0));
+		// Per-curtain hue jitter, so a display is not one flat colour end to end.
+		vec3 hueK = mix(vec3(0.92, 1.02, 0.94), vec3(1.07, 0.97, 1.06), auroraRnd(fk, 17.0));
+		// Auroral rays follow the geomagnetic FIELD LINE, not local vertical. Every ray in the
+		// sky is therefore parallel in 3D, and perspective makes them converge on the magnetic
+		// zenith — that convergence IS the corona, and it is the strongest depth cue available
+		// here. shearU is how far the field line slides along this curtain per unit of height.
+		float shearU = dot(vec2(0.22, 0.13), tang);
 
-		// ── Clip the ray to this ribbon's oriented box: |across| <= meander + 3σ, |along| <= len.
+		// ── Clip the ray to this ribbon's oriented box: its own altitude band, then
+		//    |across| <= meander + 3σ, then |along| <= len.
 		float u0 = dot(o - cen, tang), du = dot(dxz, tang);
 		float v0 = dot(o - cen, nrm ), dv = dot(dxz, nrm );
 		float halfW = a1 + a2 + a3 + sigma0 * 3.0;
 		float t0 = tNear, t1 = tFar;
-		if (!auroraSlab(v0, dv, halfW,          t0, t1)) continue;
-		if (!auroraSlab(u0, du, halfLen * 1.4, t0, t1)) continue;
+		if (!auroraSlab(-(altK + thickK * 0.5), dir.y, thickK * 0.5, t0, t1)) continue;
+		if (!auroraSlab(v0, dv, halfW,                                t0, t1)) continue;
+		if (!auroraSlab(u0, du, halfLen * 1.4,                        t0, t1)) continue;
 
 		// Step so we get a few samples ACROSS the sheet. What matters is how fast the distance
 		// to the centreline changes, and that has TWO parts: how fast the ray crosses the
@@ -1944,16 +1975,15 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 			// ~0 by e = 1.2, so there is no plane to see.
 			float e2 = e * e;
 			float ends = exp(-3.0 * e2 * e2 * e2);
-			float hf   = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-			// Vertical emission: sharp bright lower edge at this curtain's own foot height, long
+			float hf   = clamp((pos.y - camPos.y - altK) / thickK, 0.0, 1.0); // 0 = this curtain's foot
+			// Vertical emission: sharp bright lower edge at this curtain's own foot, long
 			// exponential fade upward (fall-streaks), and a soft top so the ribbon dissolves
-			// instead of ending on the flat lid of the altitude slab. The fade also steepens
-			// toward the tips, so an arc thins out to a point rather than staying full height
-			// and then vanishing.
+			// instead of ending on a flat lid. The fade also steepens toward the tips, so an arc
+			// thins out to a point rather than staying full height and then vanishing.
 			float hDecE = hDec * (1.0 + 2.2 * (1.0 - ends));
-			float Ev = smoothstep(hBot, hBot + 0.06, hf)
-			         * exp(-max(hf - hBot, 0.0) * hDecE)
-			         * (1.0 - smoothstep(0.55, 0.98, hf));
+			float Ev = smoothstep(0.0, 0.05, hf)
+			         * exp(-hf * hDecE)
+			         * (1.0 - smoothstep(0.62, 1.00, hf));
 			if (Ev <= 0.002) continue;
 			float v = dot(pos.xz - cen, nrm);
 			// Centreline meander in this curtain's OWN frame: arc sweep + folds + curls, each
@@ -1971,32 +2001,64 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 			float sigmaE = max(sigmaG, dAcross * 1.55);
 			float sheet  = exp(-(d * d) / (2.0 * sigmaE * sigmaE)) * (sigmaG / sigmaE);
 			if (sheet < 0.004) continue;
-			// Fine vertical RAY striation inside the curtain, faded out with distance so it
-			// does not alias into the far field. All detail frequencies are expressed in units
-			// of scl, so a near and a far curtain carry the SAME amount of structure — using
+			// Ray/web structures are indexed by the FOOT of the field line through this sample,
+			// not by the sample itself — that is what leans the whole striation along the field
+			// and makes it converge toward the magnetic zenith instead of standing dead vertical.
+			float uRay = u - hf * thickK * shearU;
+			// Fine vertical RAY striation, streaming sideways along the curtain, and faded out
+			// with distance so it does not alias into the far field. All detail frequencies are
+			// in units of scl, so near and far curtains carry the SAME amount of structure —
 			// absolute world frequencies would leave near ribbons smooth and alias far ones.
-			float rays = 0.62 + 0.38 * cloudNoise(vec2(u / scl * 30.0 + fk * 17.0, hf * 2.2 + fk));
-			rays = mix(rays, 1.0, distLOD);
+			// It also smooths out toward the top: the red 630 nm oxygen line up there has a ~110 s
+			// radiative lifetime, so the high part of a curtain is genuinely diffuse, never rayed.
+			float rays = 0.62 + 0.38 * cloudNoise(vec2(uRay / scl * 30.0 + fk * 17.0 - time * rayDrift,
+			                                           hf * 2.2 + fk));
+			rays = mix(rays, 1.0, max(distLOD, smoothstep(0.30, 0.80, hf)));
 			// The braided vein web ON the curtain surface (along × height). This is what turns a
 			// single ribbon into a net rather than a smooth wall; the fragmentation slider drives
 			// how hard the gaps between the veins are punched out.
-			float web = auroraWeb(vec2(u / scl * 6.0 + fk * 9.0, hf * 1.3 + fk * 3.0 + time * 0.02));
+			float web = auroraWeb(vec2(uRay / scl * 6.0 + fk * 9.0 - time * 0.06 * rayDrift,
+			                           hf * 1.3 + fk * 3.0 + time * 0.04));
 			float weave = mix(1.0, 0.10 + 1.45 * web, 0.35 + 0.65 * frag);
-			vec3 cCol = mix(colBase, colTop, smoothstep(0.02, 0.70, hf)); // green base → purple top
-			float distFade = 1.0 - smoothstep(layoutR * 0.85, layoutR * 2.1, t);
-			// Normalise by the curtain's OWN thickness, not the slab: the line integral through a
-			// Gaussian sheet is ∝ σ, so dividing by the slab height would make a fat distant
-			// curtain many times brighter than a thin near one instead of just wider.
-			acc += cCol * (sheet * Ev * rays * weave * ends * bright
-			               * (ds / (sigma0 * 6.0)) * distFade); // pure ADD (emissive, no extinction)
+			// Surges of brightness racing along the arc — the part that reads as "dancing".
+			float surge = 0.70 + 0.55 * sin(u * surgeF - time * surgeV + tph);
+			// Colour by altitude, following the real auroral spectrum: a magenta N2+ fringe on the
+			// very bottom edge of an active curtain (427.8 nm plus N2 red, below ~100 km), the
+			// green 557.7 nm oxygen body above it, and the diffuse red/violet 630 nm oxygen top
+			// (>200 km). The fringe is derived from the user's top colour rather than hard-coded,
+			// so it still tracks whatever palette the scene picked.
+			vec3 cCol = mix(colBase, colTop, smoothstep(0.22, 0.70, hf));
+			vec3 fringeCol = colTop * vec3(1.55, 0.62, 1.05) + vec3(0.10, 0.0, 0.06);
+			cCol = mix(cCol, fringeCol, (1.0 - smoothstep(0.02, 0.19, hf)) * fringeAmt);
+			cCol *= hueK;
+			// Aerial perspective. The air between the viewer and a curtain tens of km away both
+			// dims it and shifts it cool; without that every curtain reads as if it sat at the
+			// same distance and the whole display goes flat. The trailing smoothstep takes the
+			// contribution cleanly to zero before the tFar clamp so there is no cut.
+			float aer  = exp(-t / (layoutR * 0.95));
+			cCol = mix(cCol * vec3(0.58, 0.72, 1.02), cCol, aer);
+			float fade = mix(0.35, 1.0, aer) * (1.0 - smoothstep(layoutR * 1.5, layoutR * 2.1, t));
+			// Normalise by the curtain's OWN thickness, not the envelope: the line integral
+			// through a Gaussian sheet is ∝ σ, so dividing by a shared height would make a fat
+			// distant curtain many times brighter than a thin near one instead of just wider.
+			acc += cCol * (sheet * Ev * rays * weave * ends * bright * puls * surge
+			               * (ds / (sigma0 * 6.0)) * fade); // pure ADD (emissive, no extinction)
 		}
 	}
-	// Soft rolloff → no clip-to-white (FragColor is LDR). Overexposure here does not just clip,
-	// it DESATURATES: the green base colour pushed past 1.0 in every channel reads as white and
-	// the aurora loses its colour, so this curve is kept well inside the headroom.
-	acc = acc / (1.0 + acc * 0.55);
+	// LUMINANCE-preserving rolloff (FragColor is LDR). A per-channel rolloff drives the
+	// strongest channel into clipping first, so a saturated green curtain washes out to pale
+	// mint long before it is actually bright — compressing on luminance instead holds the hue
+	// all the way up, and only the genuinely hottest cores desaturate (which real bright aurora
+	// does too). Same trick the nebula uses.
+	// Each ray integrates through the WHOLE vertical colour ramp, so green and violet average
+	// toward grey along it and the display reads as pale mint rather than the deep green/violet
+	// the palette actually asks for. Push saturation back up about luminance (which the step
+	// below then preserves) before compressing.
+	float lum = dot(acc, vec3(0.30, 0.59, 0.11));
+	acc = max(mix(vec3(lum), acc, 1.35), vec3(0.0));
+	if (lum > 1e-5) acc *= (lum / (1.0 + lum * 0.80)) / lum;
 	float horizonFade = clamp(dir.y * 8.0, 0.0, 1.0);          // mask the 1/dir.y blow-up
-	return acc * (intensity * night * horizonFade * 1.35);
+	return acc * (intensity * night * horizonFade * 1.50);
 }
 
 // Contrails (Kondensstreifen) — vapour-trail lines that fill an empty daytime sky.

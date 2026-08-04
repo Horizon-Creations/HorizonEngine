@@ -3645,10 +3645,12 @@ float3 nebula(float3 dir, float3 cdir, float3 sunDir, float intensity, float3 ne
 }
 
 // Aurora borealis — world-anchored volumetric curtains (night only). Each curtain is an
-// independent finite ribbon with its own placement, heading, length, thickness, meander
-// and height in the slab, so they cross into a net instead of stacking as parallel bars;
-// auroraWeb() braids each ribbon internally. Mirrors the GL applyAurora3D() exactly —
-// see the long comment there for the morphology research and the sampling scheme.
+// independent finite ribbon with its own placement, heading, length, thickness, meander,
+// ALTITUDE and motion, so they cross into a net instead of stacking as parallel bars;
+// auroraWeb() braids each ribbon internally, the ray striation is sheared along the
+// geomagnetic field line (corona convergence) and aerial perspective separates the depths.
+// Mirrors the GL applyAurora3D() exactly — see the long comment there for the morphology
+// research, the colour/altitude spectrum and the sampling scheme.
 float auroraRnd(float k, float s)
 {
 	return starHash(float3(k * 0.7331 + 1.13, s * 1.9137 + 7.71, 19.37));
@@ -3680,13 +3682,12 @@ float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
 	float night = 1.0 - smoothstep(-0.20, -0.02, clamp(normalize(sunDir).y, -0.3, 1.0));
 	if (night <= 0.0) return float3(0.0);
 
-	// World-space altitude slab. Height control drives the curtain ELEVATION.
+	// World-space altitude envelope. Height control drives the curtain ELEVATION; each curtain
+	// picks its OWN altitude and extent inside this bracket (they are not all on one shelf).
 	float altitude = mix(1500.0, 7000.0, clamp(auroraHeight, 0.0, 1.0));
-	float baseY = camPos.y + altitude;
-	float thick = altitude * 1.4;
 	float invY  = 1.0 / dir.y;
-	float tNear = max((baseY - camPos.y) * invY, 0.0);
-	float tFar  = (baseY + thick - camPos.y) * invY;
+	float tNear = max(altitude * 0.72 * invY, 0.0);
+	float tFar  = altitude * 3.75 * invY;
 	float layoutR = altitude * 13.5;                            // the layout reaches this far out
 	tFar = min(tFar, layoutR * 2.2);
 	if (tFar <= tNear) return float3(0.0);
@@ -3722,17 +3723,33 @@ float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
 		float p1 = auroraRnd(fk, 11.0) * 6.2831853;
 		float p2 = auroraRnd(fk, 12.0) * 6.2831853;
 		float p3 = auroraRnd(fk, 13.0) * 6.2831853;
-		float hBot   = 0.34 * auroraRnd(fk, 14.0);              // where this curtain's foot sits
+		// This curtain's own altitude and vertical extent.
+		float altK   = altitude * (0.72 + 0.62 * auroraRnd(fk, 14.0));
+		float thickK = altK * (1.00 + 0.80 * auroraRnd(fk, 18.0));
 		float hDec   = 4.6 - 2.4 * auroraRnd(fk, 15.0);         // how fast it fades upward
 		float bright = 0.55 + 0.70 * auroraRnd(fk, 16.0);
+		// Motion: the arc drifts (meander time terms), surges race ALONG it, the fine rays
+		// stream sideways, and each curtain pulses on its own clock — never in unison.
+		float tph    = auroraRnd(fk, 19.0) * 6.2831853;
+		float puls   = 0.80 + 0.20 * sin(time * (0.30 + 0.55 * auroraRnd(fk, 20.0)) + tph);
+		float surgeF = (1.5 + 1.1 * auroraRnd(fk, 21.0)) / scl;
+		float surgeV = (0.7 + 1.3 * auroraRnd(fk, 22.0)) * (auroraRnd(fk, 23.0) < 0.5 ? -1.0 : 1.0);
+		float rayDrift = (0.5 + 1.1 * auroraRnd(fk, 24.0)) * (auroraRnd(fk, 25.0) < 0.5 ? -1.0 : 1.0);
+		float fringeAmt = (0.35 + 0.55 * frag) * (0.45 + 0.55 * auroraRnd(fk, 26.0));
+		float3 hueK = mix(float3(0.92, 1.02, 0.94), float3(1.07, 0.97, 1.06), auroraRnd(fk, 17.0));
+		// Rays follow the geomagnetic FIELD LINE, not local vertical → all parallel in 3D, so
+		// perspective converges them on the magnetic zenith (the corona).
+		float shearU = dot(float2(0.22, 0.13), tang);
 
-		// Clip the ray to this ribbon's oriented box: |across| <= meander + 3σ, |along| <= len.
+		// Clip the ray to this ribbon's box: own altitude band, |across| <= meander + 3σ,
+		// |along| <= len.
 		float u0 = dot(o - cen, tang), du = dot(dxz, tang);
 		float v0 = dot(o - cen, nrm ), dv = dot(dxz, nrm );
 		float halfW = a1 + a2 + a3 + sigma0 * 3.0;
 		float t0 = tNear, t1 = tFar;
-		if (!auroraSlab(v0, dv, halfW,          t0, t1)) continue;
-		if (!auroraSlab(u0, du, halfLen * 1.4, t0, t1)) continue;
+		if (!auroraSlab(-(altK + thickK * 0.5), dir.y, thickK * 0.5, t0, t1)) continue;
+		if (!auroraSlab(v0, dv, halfW,                                t0, t1)) continue;
+		if (!auroraSlab(u0, du, halfLen * 1.4,                        t0, t1)) continue;
 
 		// What matters is how fast the distance to the centreline changes, and that has TWO
 		// parts: the ray crossing the curtain (dv) AND the centreline sliding away under it as
@@ -3758,14 +3775,14 @@ float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
 			// (the ribbon tears off mid-sky). Flat middle, steep shoulder, ~0 by e = 1.2.
 			float e2 = e * e;
 			float ends = exp(-3.0 * e2 * e2 * e2);
-			float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+			float hf = clamp((pos.y - camPos.y - altK) / thickK, 0.0, 1.0); // 0 = this curtain's foot
 			// Sharp bright lower edge at this curtain's own foot, exponential fade upward, and a
-			// soft top so the ribbon dissolves instead of ending on the flat lid of the slab. The
-			// fade steepens toward the tips, so an arc thins to a point rather than vanishing.
+			// soft top so the ribbon dissolves instead of ending on a flat lid. The fade steepens
+			// toward the tips, so an arc thins to a point rather than vanishing.
 			float hDecE = hDec * (1.0 + 2.2 * (1.0 - ends));
-			float Ev = smoothstep(hBot, hBot + 0.06, hf)
-			         * exp(-max(hf - hBot, 0.0) * hDecE)
-			         * (1.0 - smoothstep(0.55, 0.98, hf));
+			float Ev = smoothstep(0.0, 0.05, hf)
+			         * exp(-hf * hDecE)
+			         * (1.0 - smoothstep(0.62, 1.00, hf));
 			if (Ev <= 0.002) continue;
 			float v = dot(pos.xz - cen, nrm);
 			float mnd = a1 * sin(u * f1 + p1 + time * 0.21)     // arc sweep + folds + curls
@@ -3779,26 +3796,51 @@ float3 applyAurora3D(float3 dir, float3 camPos, float time, float intensity,
 			float sigmaE = max(sigmaG, dAcross * 1.55);
 			float sheet  = exp(-(d * d) / (2.0 * sigmaE * sigmaE)) * (sigmaG / sigmaE);
 			if (sheet < 0.004) continue;
+			// Structures are indexed by the FOOT of the field line through this sample, which
+			// leans the whole striation along the field instead of standing dead vertical.
+			float uRay = u - hf * thickK * shearU;
 			// Detail frequencies are in units of scl so near and far curtains carry the same
-			// amount of structure (absolute world frequencies alias the far ones).
-			float rays = 0.62 + 0.38 * cloudNoise(float2(u / scl * 30.0 + fk * 17.0, hf * 2.2 + fk));
-			rays = mix(rays, 1.0, distLOD);
-			float web = auroraWeb(float2(u / scl * 6.0 + fk * 9.0, hf * 1.3 + fk * 3.0 + time * 0.02));
+			// amount of structure (absolute world frequencies alias the far ones). The striation
+			// also smooths out toward the top: 630 nm oxygen has a ~110 s lifetime, so the high
+			// part of a curtain is genuinely diffuse and never rayed.
+			float rays = 0.62 + 0.38 * cloudNoise(float2(uRay / scl * 30.0 + fk * 17.0 - time * rayDrift,
+			                                             hf * 2.2 + fk));
+			rays = mix(rays, 1.0, max(distLOD, smoothstep(0.30, 0.80, hf)));
+			float web = auroraWeb(float2(uRay / scl * 6.0 + fk * 9.0 - time * 0.06 * rayDrift,
+			                             hf * 1.3 + fk * 3.0 + time * 0.04));
 			float weave = mix(1.0, 0.10 + 1.45 * web, 0.35 + 0.65 * frag);
-			float3 cCol = mix(colBase, colTop, smoothstep(0.02, 0.70, hf)); // base → top colour
-			float distFade = 1.0 - smoothstep(layoutR * 0.85, layoutR * 2.1, t);
-			// Normalise by the curtain's OWN thickness, not the slab: the sheet's line integral
-			// is ∝ σ, so dividing by the slab height would make a fat distant curtain far
-			// brighter than a thin near one instead of merely wider.
-			acc += cCol * (sheet * Ev * rays * weave * ends * bright
-			               * (ds / (sigma0 * 6.0)) * distFade); // pure ADD (emissive, no extinction)
+			// Surges of brightness racing along the arc — the part that reads as "dancing".
+			float surge = 0.70 + 0.55 * sin(u * surgeF - time * surgeV + tph);
+			// Colour by altitude, following the real auroral spectrum: magenta N2+ fringe on the
+			// bottom edge (<100 km), green 557.7 nm oxygen body, diffuse red/violet 630 nm top
+			// (>200 km). The fringe is derived from the user's top colour, not hard-coded.
+			float3 cCol = mix(colBase, colTop, smoothstep(0.22, 0.70, hf));
+			float3 fringeCol = colTop * float3(1.55, 0.62, 1.05) + float3(0.10, 0.0, 0.06);
+			cCol = mix(cCol, fringeCol, (1.0 - smoothstep(0.02, 0.19, hf)) * fringeAmt);
+			cCol *= hueK;
+			// Aerial perspective — dims and cools with distance, so the curtains separate in
+			// depth instead of all reading as if they sat at the same range.
+			float aer = exp(-t / (layoutR * 0.95));
+			cCol = mix(cCol * float3(0.58, 0.72, 1.02), cCol, aer);
+			float fade = mix(0.35, 1.0, aer) * (1.0 - smoothstep(layoutR * 1.5, layoutR * 2.1, t));
+			// Normalise by the curtain's OWN thickness: the sheet's line integral is ∝ σ, so a
+			// shared divisor would make a fat distant curtain far brighter, not merely wider.
+			acc += cCol * (sheet * Ev * rays * weave * ends * bright * puls * surge
+			               * (ds / (sigma0 * 6.0)) * fade); // pure ADD (emissive, no extinction)
 		}
 	}
-	// Soft rolloff → no clip-to-white. Overexposure DESATURATES (green past 1.0 in every channel
-	// reads white), so this curve stays well inside the headroom.
-	acc = acc / (1.0 + acc * 0.55);
+	// LUMINANCE-preserving rolloff (FragColor is LDR). A per-channel rolloff clips the strongest
+	// channel first, washing a saturated green curtain out to pale mint; compressing on
+	// luminance holds the hue and only the hottest cores desaturate. Same trick as the nebula.
+	// Each ray integrates through the WHOLE vertical colour ramp, so green and violet average
+	// toward grey along it and the display reads as pale mint rather than the deep green/violet
+	// the palette actually asks for. Push saturation back up about luminance (which the step
+	// below then preserves) before compressing.
+	float lum = dot(acc, float3(0.30, 0.59, 0.11));
+	acc = max(mix(float3(lum), acc, 1.35), float3(0.0));
+	if (lum > 1e-5) acc *= (lum / (1.0 + lum * 0.80)) / lum;
 	float horizonFade = clamp(dir.y * 8.0, 0.0, 1.0);
-	return acc * (intensity * night * horizonFade * 1.35);
+	return acc * (intensity * night * horizonFade * 1.50);
 }
 
 // Contrails (Kondensstreifen) — scattered finite vapour-trail segments at hashed
