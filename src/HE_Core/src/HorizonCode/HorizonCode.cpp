@@ -810,83 +810,168 @@ bool nodeTypeFromStoredName(const std::string& stored, NodeType& out)
         if (stored == a.stored) { out = a.type; return true; }
     return false;
 }
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One node / variable as the object that goes into the document's array. The
+// document serializers below are written on top of these, so the per-item form
+// collaboration sends over the wire and the on-disk form are the SAME bytes by
+// construction — a second, parallel serializer would drift the first time a
+// field was added to only one of them.
+nlohmann::json nodeToJsonObj(const Node& n)
+{
+    nlohmann::json e = {
+        { "id",   n.id },
+        { "type", nodeDisplayName(n.type) }, // by name → schema-evolution safe
+        { "pos",  { n.x, n.y } },
+    };
+    if (n.elem)              e["elem"]     = n.elem;
+    if (!n.s.empty())        e["s"]        = n.s;
+    if (n.propType != P::Float) e["propType"] = (int)n.propType;
+    if (n.hasArg)            e["hasArg"]   = n.hasArg;
+    if (n.access)            e["access"]   = n.access;
+    if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
+        e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
+    if (n.type == NodeType::ConstTransform)
+        e["xform"] = { n.tpos.x, n.tpos.y, n.tpos.z, n.trot.x, n.trot.y, n.trot.z,
+                       n.tscl.x, n.tscl.y, n.tscl.z };
+    auto dumpParams = [](const std::vector<FuncParam>& ps)
+    {
+        nlohmann::json a = nlohmann::json::array();
+        for (const auto& p : ps)
+        {
+            nlohmann::json pe = { { "name", p.name }, { "type", (int)p.type } };
+            if (p.isArray) pe["arr"] = true;
+            a.push_back(std::move(pe));
+        }
+        return a;
+    };
+    if (!n.params.empty())  e["params"]  = dumpParams(n.params);
+    if (!n.results.empty()) e["results"] = dumpParams(n.results);
+    if (n.subgraph)         e["subgraph"] = n.subgraph;
+    if (n.isArray)          e["arr"]     = true;
+    if (!n.pinDefaults.empty())
+    {
+        nlohmann::json pd = nlohmann::json::array();
+        for (const auto& [idx, val] : n.pinDefaults)
+            pd.push_back({ { "i", idx }, { "t", (int)val.type },
+                           { "v", scalarValueToJson(val, val.type) } });
+        e["pinDefaults"] = std::move(pd);
+    }
+return e;
+}
+
+nlohmann::json variableToJsonObj(const Variable& v)
+{
+    nlohmann::json e = { { "name", v.name }, { "type", (int)v.type } };
+    if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
+    if (!v.s.empty()) e["s"] = v.s;
+    if (v.access)     e["access"] = v.access;
+    if (v.scope)      e["scope"] = v.scope;   // function-local (FunctionEntry id)
+    if (v.isArray)    e["arr"] = true;
+    if (v.isArray && !v.defaultItems.empty())
+    {
+        nlohmann::json items = nlohmann::json::array();
+        for (const Value& it : v.defaultItems) items.push_back(scalarValueToJson(it, v.type));
+        e["items"] = std::move(items);
+    }
+    if (v.type == PinType::Transform)
+        e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
+                       v.tscl.x, v.tscl.y, v.tscl.z };
+    if (!v.className.empty()) e["className"] = v.className;
+return e;
+}
+
+// False = the object does not describe a node we know (unknown/removed type),
+// which the document loader skips and the delta layer treats as "ignore".
+bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
+{
+    n.id = e.value("id", 0);
+    if (!nodeTypeFromStoredName(e.value("type", std::string()), n.type)) return false;
+    if (const auto& p = e.value("pos", nlohmann::json::array()); p.size() >= 2)
+    { n.x = p[0].get<float>(); n.y = p[1].get<float>(); }
+    n.elem     = e.value("elem", 0);
+    n.s        = e.value("s", std::string());
+    n.propType = (PinType)e.value("propType", (int)P::Float);
+    n.hasArg   = e.value("hasArg", false);
+    n.access   = e.value("access", 0);
+    if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
+        for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
+    if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
+    {
+        n.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
+        n.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
+        n.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
+    }
+    auto loadParams = [](const nlohmann::json& a, std::vector<FuncParam>& ps)
+    {
+        for (const auto& pe : a)
+        {
+            FuncParam p;
+            p.name = pe.value("name", std::string());
+            p.type = (PinType)pe.value("type", (int)P::Float);
+            p.isArray = pe.value("arr", false);
+            ps.push_back(std::move(p));
+        }
+    };
+    loadParams(e.value("params",  nlohmann::json::array()), n.params);
+    loadParams(e.value("results", nlohmann::json::array()), n.results);
+    n.subgraph = e.value("subgraph", 0);
+    n.isArray  = e.value("arr", false);
+    if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
+        for (const auto& entry : pd)
+        {
+            if (!entry.is_object()) continue;
+            const int idx = entry.value("i", -1);
+            if (idx < 0) continue;
+            const PinType t = (PinType)entry.value("t", (int)P::Float);
+            n.pinDefaults[idx] = scalarValueFromJson(entry.value("v", nlohmann::json()), t);
+        }
+return true;
+}
+
+// False = no usable variable in this object (a variable is keyed by its name,
+// so a nameless one has no identity).
+bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
+{
+    v.name = e.value("name", std::string());
+    if (v.name.empty()) return false;
+    v.type = (PinType)e.value("type", (int)P::Float);
+    v.s    = e.value("s", std::string());
+    v.access = e.value("access", 0);
+    v.scope  = e.value("scope", 0);
+    v.isArray = e.value("arr", false);
+    if (v.isArray)
+        if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
+            for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
+    v.className = e.value("className", std::string());
+    if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
+        for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
+    if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
+    {
+        v.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
+        v.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
+        v.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
+    }
+return true;
+}
 } // namespace
 
+// ── Document JSON — assembled from the item writers above ───────────────────
 std::string toJson(const Graph& g)
 {
     nlohmann::json j;
     j["nextId"] = g.nextId;
+
     nlohmann::json jn = nlohmann::json::array();
-    for (const auto& n : g.nodes)
-    {
-        nlohmann::json e = {
-            { "id",   n.id },
-            { "type", nodeDisplayName(n.type) }, // by name → schema-evolution safe
-            { "pos",  { n.x, n.y } },
-        };
-        if (n.elem)              e["elem"]     = n.elem;
-        if (!n.s.empty())        e["s"]        = n.s;
-        if (n.propType != P::Float) e["propType"] = (int)n.propType;
-        if (n.hasArg)            e["hasArg"]   = n.hasArg;
-        if (n.access)            e["access"]   = n.access;
-        if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
-            e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
-        if (n.type == NodeType::ConstTransform)
-            e["xform"] = { n.tpos.x, n.tpos.y, n.tpos.z, n.trot.x, n.trot.y, n.trot.z,
-                           n.tscl.x, n.tscl.y, n.tscl.z };
-        auto dumpParams = [](const std::vector<FuncParam>& ps)
-        {
-            nlohmann::json a = nlohmann::json::array();
-            for (const auto& p : ps)
-            {
-                nlohmann::json pe = { { "name", p.name }, { "type", (int)p.type } };
-                if (p.isArray) pe["arr"] = true;
-                a.push_back(std::move(pe));
-            }
-            return a;
-        };
-        if (!n.params.empty())  e["params"]  = dumpParams(n.params);
-        if (!n.results.empty()) e["results"] = dumpParams(n.results);
-        if (n.subgraph)         e["subgraph"] = n.subgraph;
-        if (n.isArray)          e["arr"]     = true;
-        if (!n.pinDefaults.empty())
-        {
-            nlohmann::json pd = nlohmann::json::array();
-            for (const auto& [idx, val] : n.pinDefaults)
-                pd.push_back({ { "i", idx }, { "t", (int)val.type },
-                               { "v", scalarValueToJson(val, val.type) } });
-            e["pinDefaults"] = std::move(pd);
-        }
-        jn.push_back(std::move(e));
-    }
+    for (const Node& n : g.nodes) jn.push_back(nodeToJsonObj(n));
     j["nodes"] = std::move(jn);
 
     nlohmann::json jl = nlohmann::json::array();
-    for (const auto& l : g.links) // ARRAY link form — see GraphJson.h
+    for (const Link& l : g.links) // ARRAY link form — see GraphJson.h
         jl.push_back(HE::graph::linkToArray(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     j["links"] = std::move(jl);
 
     nlohmann::json jv = nlohmann::json::array();
-    for (const auto& v : g.variables)
-    {
-        nlohmann::json e = { { "name", v.name }, { "type", (int)v.type } };
-        if (v.f[0] || v.f[1] || v.f[2] || v.f[3]) e["f"] = { v.f[0], v.f[1], v.f[2], v.f[3] };
-        if (!v.s.empty()) e["s"] = v.s;
-        if (v.access)     e["access"] = v.access;
-        if (v.scope)      e["scope"] = v.scope;   // function-local (FunctionEntry id)
-        if (v.isArray)    e["arr"] = true;
-        if (v.isArray && !v.defaultItems.empty())
-        {
-            nlohmann::json items = nlohmann::json::array();
-            for (const Value& it : v.defaultItems) items.push_back(scalarValueToJson(it, v.type));
-            e["items"] = std::move(items);
-        }
-        if (v.type == PinType::Transform)
-            e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
-                           v.tscl.x, v.tscl.y, v.tscl.z };
-        if (!v.className.empty()) e["className"] = v.className;
-        jv.push_back(std::move(e));
-    }
+    for (const Variable& v : g.variables) jv.push_back(variableToJsonObj(v));
     j["variables"] = std::move(jv);
     return j.dump(2);
 }
@@ -901,47 +986,7 @@ bool fromJson(const std::string& json, Graph& out)
     for (const auto& e : j.value("nodes", nlohmann::json::array()))
     {
         Node n;
-        n.id = e.value("id", 0);
-        if (!nodeTypeFromStoredName(e.value("type", std::string()), n.type)) continue;
-        if (const auto& p = e.value("pos", nlohmann::json::array()); p.size() >= 2)
-        { n.x = p[0].get<float>(); n.y = p[1].get<float>(); }
-        n.elem     = e.value("elem", 0);
-        n.s        = e.value("s", std::string());
-        n.propType = (PinType)e.value("propType", (int)P::Float);
-        n.hasArg   = e.value("hasArg", false);
-        n.access   = e.value("access", 0);
-        if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
-            for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
-        if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
-        {
-            n.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
-            n.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
-            n.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
-        }
-        auto loadParams = [](const nlohmann::json& a, std::vector<FuncParam>& ps)
-        {
-            for (const auto& pe : a)
-            {
-                FuncParam p;
-                p.name = pe.value("name", std::string());
-                p.type = (PinType)pe.value("type", (int)P::Float);
-                p.isArray = pe.value("arr", false);
-                ps.push_back(std::move(p));
-            }
-        };
-        loadParams(e.value("params",  nlohmann::json::array()), n.params);
-        loadParams(e.value("results", nlohmann::json::array()), n.results);
-        n.subgraph = e.value("subgraph", 0);
-        n.isArray  = e.value("arr", false);
-        if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
-            for (const auto& entry : pd)
-            {
-                if (!entry.is_object()) continue;
-                const int idx = entry.value("i", -1);
-                if (idx < 0) continue;
-                const PinType t = (PinType)entry.value("t", (int)P::Float);
-                n.pinDefaults[idx] = scalarValueFromJson(entry.value("v", nlohmann::json()), t);
-            }
+        if (!nodeFromJsonObj(e, n)) continue;   // unknown/removed node type
         HE::graph::bumpNextId(g.nextId, n.id);
         g.nodes.push_back(std::move(n));
     }
@@ -958,30 +1003,36 @@ bool fromJson(const std::string& json, Graph& out)
     for (const auto& e : j.value("variables", nlohmann::json::array()))
     {
         Variable v;
-        v.name = e.value("name", std::string());
-        if (v.name.empty()) continue;
-        v.type = (PinType)e.value("type", (int)P::Float);
-        v.s    = e.value("s", std::string());
-        v.access = e.value("access", 0);
-        v.scope  = e.value("scope", 0);
-        v.isArray = e.value("arr", false);
-        if (v.isArray)
-            if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
-                for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
-        v.className = e.value("className", std::string());
-        if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
-            for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
-        if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
-        {
-            v.tpos = { x[0].get<float>(), x[1].get<float>(), x[2].get<float>() };
-            v.trot = { x[3].get<float>(), x[4].get<float>(), x[5].get<float>() };
-            v.tscl = { x[6].get<float>(), x[7].get<float>(), x[8].get<float>() };
-        }
+        if (!variableFromJsonObj(e, v)) continue;
         g.variables.push_back(std::move(v));
     }
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
+    return true;
+}
+
+// ── Item-level JSON, public (collaboration addresses single items) ──────────
+std::string nodeToJson(const Node& n)     { return nodeToJsonObj(n).dump(); }
+std::string variableToJson(const Variable& v) { return variableToJsonObj(v).dump(); }
+
+bool nodeFromJson(const std::string& json, Node& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    Node n;
+    if (!nodeFromJsonObj(j, n)) return false;
+    out = std::move(n);
+    return true;
+}
+
+bool variableFromJson(const std::string& json, Variable& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    Variable v;
+    if (!variableFromJsonObj(j, v)) return false;
+    out = std::move(v);
     return true;
 }
 

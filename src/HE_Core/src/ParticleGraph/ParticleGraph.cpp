@@ -140,22 +140,48 @@ ParticleGraph ParticleGraph::makeDefault()
 
 // ── JSON round-trip ──────────────────────────────────────────────────────────
 
+// The item writer/reader comes first; the document serializers are assembled
+// from them, so the per-node form collaboration sends (CollabDocSync) and the
+// on-disk form cannot drift apart.
+namespace
+{
+nlohmann::json particleNodeToJsonObj(const ParticleGraphNode& n)
+{
+    nlohmann::json jn = { { "id", n.id }, { "type", particleNodeDesc(n.type).name },
+                          { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
+                          { "x", n.x }, { "y", n.y } };
+    if (n.meshAssetId != HE::UUID{})
+        jn["meshId"] = HE::graph::uuidToJson(n.meshAssetId);
+    if (n.materialAssetId != HE::UUID{})
+        jn["matId"] = HE::graph::uuidToJson(n.materialAssetId);
+    return jn;
+}
+
+// False = unknown node type, which the document loader skips and the delta
+// layer ignores.
+bool particleNodeFromJsonObj(const nlohmann::json& jn, ParticleGraphNode& n)
+{
+    const ParticleNodeDesc* d = particleNodeDescByName(jn.value("type", ""));
+    if (!d) return false;
+    n.id   = jn.value("id", 0);
+    n.type = d->type;
+    if (auto p = jn.find("p"); p != jn.end() && p->is_array())
+        for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
+    if (auto m = jn.find("meshId"); m != jn.end()) n.meshAssetId     = HE::graph::uuidFromJson(*m);
+    if (auto m = jn.find("matId");  m != jn.end()) n.materialAssetId = HE::graph::uuidFromJson(*m);
+    n.x = jn.value("x", 0.0f);
+    n.y = jn.value("y", 0.0f);
+    return true;
+}
+} // namespace
+
 std::string particleGraphToJson(const ParticleGraph& graph)
 {
     nlohmann::json j;
     j["version"] = 1;
     j["nextId"]  = graph.nextId;
     for (const auto& n : graph.nodes)
-    {
-        nlohmann::json jn = { { "id", n.id }, { "type", particleNodeDesc(n.type).name },
-                              { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
-                              { "x", n.x }, { "y", n.y } };
-        if (n.meshAssetId != HE::UUID{})
-            jn["meshId"] = HE::graph::uuidToJson(n.meshAssetId);
-        if (n.materialAssetId != HE::UUID{})
-            jn["matId"] = HE::graph::uuidToJson(n.materialAssetId);
-        j["nodes"].push_back(std::move(jn));
-    }
+        j["nodes"].push_back(particleNodeToJsonObj(n));
     for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
         j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     return j.dump();
@@ -170,17 +196,8 @@ bool particleGraphFromJson(const std::string& json, ParticleGraph& out)
     g.nextId = j.value("nextId", 1);
     for (const auto& jn : j.value("nodes", nlohmann::json::array()))
     {
-        const ParticleNodeDesc* d = particleNodeDescByName(jn.value("type", ""));
-        if (!d) continue;
         ParticleGraphNode n;
-        n.id   = jn.value("id", 0);
-        n.type = d->type;
-        if (auto p = jn.find("p"); p != jn.end() && p->is_array())
-            for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
-        if (auto m = jn.find("meshId"); m != jn.end()) n.meshAssetId     = HE::graph::uuidFromJson(*m);
-        if (auto m = jn.find("matId");  m != jn.end()) n.materialAssetId = HE::graph::uuidFromJson(*m);
-        n.x = jn.value("x", 0.0f);
-        n.y = jn.value("y", 0.0f);
+        if (!particleNodeFromJsonObj(jn, n)) continue;   // unknown node type
         g.nodes.push_back(n);
         HE::graph::bumpNextId(g.nextId, n.id);
     }
@@ -192,6 +209,22 @@ bool particleGraphFromJson(const std::string& json, ParticleGraph& out)
     }
 
     out = std::move(g);
+    return true;
+}
+
+// ── Item-level JSON, public (collaboration addresses single nodes) ──────────
+std::string particleNodeToJson(const ParticleGraphNode& n)
+{
+    return particleNodeToJsonObj(n).dump();
+}
+
+bool particleNodeFromJson(const std::string& json, ParticleGraphNode& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    ParticleGraphNode n;
+    if (!particleNodeFromJsonObj(j, n)) return false;
+    out = n;
     return true;
 }
 

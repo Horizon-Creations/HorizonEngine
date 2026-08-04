@@ -52,6 +52,18 @@ struct HE_API UIWidgetTree
 HE_API std::string uiWidgetTreeToJson(const UIWidgetTree& tree);
 HE_API bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out);
 
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One element, in EXACTLY the form uiWidgetTreeToJson() puts into the tree's
+// array — the tree serializers are implemented on top of this. Collaboration
+// addresses a single element at a time (CollabDocSync); a separate serializer
+// for it would drift from the on-disk one.
+//
+// Reading yields a NEW element rather than filling an existing one: the widget
+// type is part of an element's identity, so a Button cannot become a Slider in
+// place. nullptr = the JSON did not parse.
+HE_API std::string                 uiElementToJson(const UIElement& e);
+HE_API std::unique_ptr<UIElement>  uiElementFromJson(const std::string& json);
+
 // ── Layout (shared by the editor and the runtime) ───────────────────────────
 // Element rect in CANVAS units, resolved through the parent chain: the anchor
 // point lies inside the parent rect (roots anchor to the canvas), position is

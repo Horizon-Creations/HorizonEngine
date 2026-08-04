@@ -348,4 +348,18 @@ HE_API std::string generateFragmentGlsl(const MaterialGraph& graph);
 // MaterialFunctionAsset::nodeGraphJson. Node types serialized by NAME.
 HE_API std::string materialGraphToJson(const MaterialGraph& graph);
 HE_API bool        materialGraphFromJson(const std::string& json, MaterialGraph& out);
+
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One node / one comment, in EXACTLY the form materialGraphToJson() puts into
+// the document's arrays — the document serializers are implemented on top of
+// these. Collaboration addresses a single item at a time (CollabDocSync); a
+// separate serializer for it would drift from the on-disk one. false = the JSON
+// does not describe a usable item (an unknown node type), which callers skip.
+//
+// Links have no item form: they are already a 4-int object (GraphJson.h) and are
+// identified by their endpoints, not by an id.
+HE_API std::string matNodeToJson(const MatGraphNode& n);
+HE_API bool        matNodeFromJson(const std::string& json, MatGraphNode& out);
+HE_API std::string matCommentToJson(const MatGraphComment& c);
+HE_API bool        matCommentFromJson(const std::string& json, MatGraphComment& out);
 } // namespace HE

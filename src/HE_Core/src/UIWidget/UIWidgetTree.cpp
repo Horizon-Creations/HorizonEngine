@@ -108,6 +108,63 @@ bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
+// The element writer/reader comes first; the tree serializers are assembled from
+// it, so the per-element form collaboration sends (CollabDocSync) and the on-disk
+// form cannot drift apart.
+
+namespace
+{
+nlohmann::json uiElementToJsonObj(const UIElement& e)
+{
+    nlohmann::json o = {
+        { "id",      e.id },
+        { "parent",  e.parentId },
+        { "type",    e.typeName() },  // by name → schema-evolution safe
+        { "name",    e.name },
+        { "pos",     { e.posX, e.posY } },
+        { "size",    { e.sizeX, e.sizeY } },
+        { "pivot",   { e.pivotX, e.pivotY } },
+        { "anchor",  e.anchor },
+        { "layer",   e.layer },
+        { "visible", e.visible },
+    };
+    if (!e.material.empty()) o["material"] = e.material;
+    if (!e.font.empty())     o["font"]     = e.font;
+    if (!e.hitTestable)      o["hitTestable"] = false;
+    if (e.hoverCursor != HE::UICursor::Default)
+        o["hoverCursor"] = static_cast<int>(e.hoverCursor);
+    e.writeJson(o); // type-specific fields
+    return o;
+}
+
+// The element type is part of its identity: a Button cannot be turned into a
+// Slider in place, so the caller gets a freshly constructed element of the
+// stored type rather than a mutation of an existing one.
+std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
+{
+    const UIWidgetType type = uiWidgetTypeFromName(o.value("type", std::string("Panel")));
+    std::unique_ptr<UIElement> e = makeUIElement(type);
+    e->id       = o.value("id", 0);
+    e->parentId = o.value("parent", 0);
+    e->name     = o.value("name", std::string());
+    if (const auto& p = o.value("pos",   nlohmann::json::array()); p.size() >= 2)
+    { e->posX = p[0].get<float>(); e->posY = p[1].get<float>(); }
+    if (const auto& s = o.value("size",  nlohmann::json::array()); s.size() >= 2)
+    { e->sizeX = s[0].get<float>(); e->sizeY = s[1].get<float>(); }
+    if (const auto& p = o.value("pivot", nlohmann::json::array()); p.size() >= 2)
+    { e->pivotX = p[0].get<float>(); e->pivotY = p[1].get<float>(); }
+    e->anchor   = static_cast<uint8_t>(o.value("anchor", 0));
+    e->layer    = o.value("layer", 0);
+    e->visible  = o.value("visible", true);
+    e->material = o.value("material", std::string());
+    e->font     = o.value("font", std::string());
+    e->hitTestable = o.value("hitTestable", true);
+    e->hoverCursor = static_cast<HE::UICursor>(
+        o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
+    e->readJson(o); // type-specific fields
+    return e;
+}
+} // namespace
 
 std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
 {
@@ -117,28 +174,7 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
     j["nextId"]       = tree.nextId;
 
     nlohmann::json je = nlohmann::json::array();
-    for (const auto& e : tree.elements)
-    {
-        nlohmann::json o = {
-            { "id",      e->id },
-            { "parent",  e->parentId },
-            { "type",    e->typeName() },  // by name → schema-evolution safe
-            { "name",    e->name },
-            { "pos",     { e->posX, e->posY } },
-            { "size",    { e->sizeX, e->sizeY } },
-            { "pivot",   { e->pivotX, e->pivotY } },
-            { "anchor",  e->anchor },
-            { "layer",   e->layer },
-            { "visible", e->visible },
-        };
-        if (!e->material.empty()) o["material"] = e->material;
-        if (!e->font.empty())     o["font"]     = e->font;
-        if (!e->hitTestable)      o["hitTestable"] = false;
-        if (e->hoverCursor != HE::UICursor::Default)
-            o["hoverCursor"] = static_cast<int>(e->hoverCursor);
-        e->writeJson(o); // type-specific fields
-        je.push_back(std::move(o));
-    }
+    for (const auto& e : tree.elements) je.push_back(uiElementToJsonObj(*e));
     j["elements"] = std::move(je);
     return j.dump(2);
 }
@@ -155,33 +191,23 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
 
     for (const auto& o : j.value("elements", nlohmann::json::array()))
     {
-        const UIWidgetType type = uiWidgetTypeFromName(o.value("type", std::string("Panel")));
-        std::unique_ptr<UIElement> e = makeUIElement(type);
-        e->id       = o.value("id", 0);
-        e->parentId = o.value("parent", 0);
-        e->name     = o.value("name", std::string());
-        if (const auto& p = o.value("pos",   nlohmann::json::array()); p.size() >= 2)
-        { e->posX = p[0].get<float>(); e->posY = p[1].get<float>(); }
-        if (const auto& s = o.value("size",  nlohmann::json::array()); s.size() >= 2)
-        { e->sizeX = s[0].get<float>(); e->sizeY = s[1].get<float>(); }
-        if (const auto& p = o.value("pivot", nlohmann::json::array()); p.size() >= 2)
-        { e->pivotX = p[0].get<float>(); e->pivotY = p[1].get<float>(); }
-        e->anchor   = static_cast<uint8_t>(o.value("anchor", 0));
-        e->layer    = o.value("layer", 0);
-        e->visible  = o.value("visible", true);
-        e->material = o.value("material", std::string());
-        e->font     = o.value("font", std::string());
-        e->hitTestable = o.value("hitTestable", true);
-        e->hoverCursor = static_cast<HE::UICursor>(
-            o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
-        e->readJson(o); // type-specific fields
-
+        std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
         HE::graph::bumpNextId(t.nextId, e->id);
         t.elements.push_back(std::move(e));
     }
 
     out = std::move(t);
     return true;
+}
+
+// ── Item-level JSON, public (collaboration addresses single elements) ───────
+std::string uiElementToJson(const UIElement& e) { return uiElementToJsonObj(e).dump(); }
+
+std::unique_ptr<UIElement> uiElementFromJson(const std::string& json)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return nullptr;
+    return uiElementFromJsonObj(j);
 }
 
 } // namespace HE

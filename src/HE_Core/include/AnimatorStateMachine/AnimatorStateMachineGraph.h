@@ -90,4 +90,18 @@ HE_API std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g
 // reports whatever it finds, id 0 included).
 HE_API bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineGraph& out);
 
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One state / one transition, in EXACTLY the form animatorStateMachineToJson()
+// puts into the document's arrays — the document serializers are implemented on
+// top of these. Collaboration addresses a single item at a time (CollabDocSync);
+// a separate serializer would drift from the on-disk one.
+//
+// A transition has no id of its own (see the wart note above: it names its
+// endpoints by state NAME), so the delta layer keys it by a hash of
+// from/to/param rather than by an integer field.
+HE_API std::string animationStateToJson(const AnimationState& s);
+HE_API bool        animationStateFromJson(const std::string& json, AnimationState& out);
+HE_API std::string animationTransitionToJson(const AnimationTransition& t);
+HE_API bool        animationTransitionFromJson(const std::string& json, AnimationTransition& out);
+
 } // namespace HE

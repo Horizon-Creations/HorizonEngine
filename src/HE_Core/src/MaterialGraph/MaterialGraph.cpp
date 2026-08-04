@@ -1146,30 +1146,96 @@ std::string generateFragmentGlsl(const MaterialGraph& graph)
 }
 
 // ── JSON ───────────────────────────────────────────────────────────────────────
+// The item writers/readers come first; the document ones are assembled from
+// them, so the per-item form collaboration sends (CollabDocSync) and the on-disk
+// form cannot drift apart.
+namespace
+{
+nlohmann::json matNodeToJsonObj(const MatGraphNode& n)
+{
+    nlohmann::json jn = { { "id", n.id }, { "type", matNodeDesc(n.type).name },
+                          { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
+                          { "x", n.x }, { "y", n.y } };
+    if (!n.s.empty())       jn["s"]  = n.s;
+    if (!n.group.empty())   jn["g"]  = n.group;   // param metadata (optional keys)
+    if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
+    return jn;
+}
+
+// False = unknown node type (removed from the standard library), which the
+// document loader skips and the delta layer ignores.
+bool matNodeFromJsonObj(const nlohmann::json& jn, MatGraphNode& n)
+{
+    const MatNodeDesc* d = matNodeDescByName(jn.value("type", ""));
+    if (!d) return false;
+    n.id   = jn.value("id", 0);
+    n.type = d->type;
+    if (auto p = jn.find("p"); p != jn.end() && p->is_array())
+        for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
+    n.s       = jn.value("s", std::string());
+    n.group   = jn.value("g", std::string());
+    n.tooltip = jn.value("tt", std::string());
+    n.x = jn.value("x", 0.0f);
+    n.y = jn.value("y", 0.0f);
+    // Migration: UV gained tiling params (p[0..1]) after these graphs were
+    // authored, where p was all-zero. Zero tiling would collapse every UV to
+    // the offset — read a legacy node as the identity it used to be.
+    if (n.type == MatNodeType::UV && n.p[0] == 0.0f && n.p[1] == 0.0f)
+    { n.p[0] = 1.0f; n.p[1] = 1.0f; }
+    return true;
+}
+
+nlohmann::json matCommentToJsonObj(const MatGraphComment& cm)
+{
+    return { { "id", cm.id }, { "t", cm.text }, { "x", cm.x }, { "y", cm.y },
+             { "w", cm.w }, { "h", cm.h } };
+}
+
+void matCommentFromJsonObj(const nlohmann::json& jc, MatGraphComment& cm)
+{
+    cm.id   = jc.value("id", 0);
+    cm.text = jc.value("t", std::string());
+    cm.x = jc.value("x", 0.0f); cm.y = jc.value("y", 0.0f);
+    cm.w = jc.value("w", 260.0f); cm.h = jc.value("h", 180.0f);
+}
+} // namespace
+
 std::string materialGraphToJson(const MaterialGraph& graph)
 {
     nlohmann::json j;
     j["version"] = kMatGraphVersion;
     j["nextId"]  = graph.nextId;
     for (const auto& n : graph.nodes)
-    {
-        nlohmann::json jn = { { "id", n.id }, { "type", matNodeDesc(n.type).name },
-                              { "p", { n.p[0], n.p[1], n.p[2], n.p[3] } },
-                              { "x", n.x }, { "y", n.y } };
-        if (!n.s.empty())       jn["s"]  = n.s;
-        if (!n.group.empty())   jn["g"]  = n.group;   // param metadata (optional keys)
-        if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
-        j["nodes"].push_back(std::move(jn));
-    }
+        j["nodes"].push_back(matNodeToJsonObj(n));
     for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
         j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
     // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
     // absent key → no comments (backward-compatible).
     for (const auto& cm : graph.comments)
-        j["comments"].push_back({ { "id", cm.id }, { "t", cm.text },
-                                  { "x", cm.x }, { "y", cm.y },
-                                  { "w", cm.w }, { "h", cm.h } });
+        j["comments"].push_back(matCommentToJsonObj(cm));
     return j.dump();
+}
+
+// ── Item-level JSON, public (collaboration addresses single items) ──────────
+std::string matNodeToJson(const MatGraphNode& n)       { return matNodeToJsonObj(n).dump(); }
+std::string matCommentToJson(const MatGraphComment& c) { return matCommentToJsonObj(c).dump(); }
+
+bool matNodeFromJson(const std::string& json, MatGraphNode& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    MatGraphNode n;
+    if (!matNodeFromJsonObj(j, n)) return false;
+    out = n;
+    return true;
+}
+
+bool matCommentFromJson(const std::string& json, MatGraphComment& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    matCommentFromJsonObj(j, out);
+    return true;
 }
 
 bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
@@ -1180,23 +1246,8 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
     g.nextId = j.value("nextId", 1);
     for (const auto& jn : j.value("nodes", nlohmann::json::array()))
     {
-        const MatNodeDesc* d = matNodeDescByName(jn.value("type", ""));
-        if (!d) continue;
         MatGraphNode n;
-        n.id   = jn.value("id", 0);
-        n.type = d->type;
-        if (auto p = jn.find("p"); p != jn.end() && p->is_array())
-            for (size_t i = 0; i < 4 && i < p->size(); ++i) n.p[i] = (*p)[i].get<float>();
-        n.s       = jn.value("s", std::string());
-        n.group   = jn.value("g", std::string());
-        n.tooltip = jn.value("tt", std::string());
-        n.x = jn.value("x", 0.0f);
-        n.y = jn.value("y", 0.0f);
-        // Migration: UV gained tiling params (p[0..1]) after these graphs were
-        // authored, where p was all-zero. Zero tiling would collapse every UV to
-        // the offset — read a legacy node as the identity it used to be.
-        if (n.type == MatNodeType::UV && n.p[0] == 0.0f && n.p[1] == 0.0f)
-        { n.p[0] = 1.0f; n.p[1] = 1.0f; }
+        if (!matNodeFromJsonObj(jn, n)) continue;   // unknown node type
         g.nodes.push_back(n);
         HE::graph::bumpNextId(g.nextId, n.id);
     }
@@ -1231,10 +1282,7 @@ bool materialGraphFromJson(const std::string& json, MaterialGraph& out)
     for (const auto& jc : j.value("comments", nlohmann::json::array()))
     {
         MatGraphComment cm;
-        cm.id   = jc.value("id", 0);
-        cm.text = jc.value("t", std::string());
-        cm.x = jc.value("x", 0.0f); cm.y = jc.value("y", 0.0f);
-        cm.w = jc.value("w", 260.0f); cm.h = jc.value("h", 180.0f);
+        matCommentFromJsonObj(jc, cm);
         HE::graph::bumpNextId(g.nextId, cm.id);
         g.comments.push_back(std::move(cm));
     }

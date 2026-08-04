@@ -11,22 +11,57 @@ namespace HE
 // AnimatorStateMachineGraph.h next to the enum — SceneSerializer's legacy
 // migration path reads the same field and needs the same guard.
 
+// The item writers/readers come first; the document serializers are assembled
+// from them, so the per-item form collaboration sends (CollabDocSync) and the
+// on-disk form cannot drift apart.
+namespace
+{
+nlohmann::json stateToJsonObj(const AnimationState& s)
+{
+    return { { "id", s.id }, { "name", s.name },
+             { "clipId", HE::graph::uuidToJson(s.clipId) },
+             { "looping", s.looping }, { "x", s.x }, { "y", s.y } };
+}
+
+void stateFromJsonObj(const nlohmann::json& sj, AnimationState& s)
+{
+    s.id   = sj.value("id", 0);
+    s.name = sj.value("name", std::string());
+    if (auto c = sj.find("clipId"); c != sj.end()) s.clipId = HE::graph::uuidFromJson(*c);
+    s.looping = sj.value("looping", true);
+    s.x = sj.value("x", 0.0f);
+    s.y = sj.value("y", 0.0f);
+}
+
+nlohmann::json transitionToJsonObj(const AnimationTransition& t)
+{
+    return { { "fromState", t.fromState }, { "toState", t.toState },
+             { "paramName", t.paramName }, { "op", static_cast<int>(t.op) },
+             { "threshold", t.threshold }, { "duration", t.duration } };
+}
+
+void transitionFromJsonObj(const nlohmann::json& tj, AnimationTransition& t)
+{
+    t.fromState = tj.value("fromState", std::string());
+    t.toState   = tj.value("toState",   std::string());
+    t.paramName = tj.value("paramName", std::string());
+    // Guarded, not a blind cast — see transitionOpFromInt's note in the header.
+    t.op        = transitionOpFromInt(tj.value("op", 0));
+    t.threshold = tj.value("threshold", 0.5f);
+    t.duration  = tj.value("duration",  0.2f);
+}
+} // namespace
+
 std::string animatorStateMachineToJson(const AnimatorStateMachineGraph& g)
 {
     nlohmann::json j;
     j["version"]    = 1;
     j["startState"] = g.startState;
 
-    for (const auto& s : g.states)
-        j["states"].push_back({ { "id", s.id }, { "name", s.name },
-                                 { "clipId", HE::graph::uuidToJson(s.clipId) },
-                                 { "looping", s.looping }, { "x", s.x }, { "y", s.y } });
+    for (const auto& s : g.states) j["states"].push_back(stateToJsonObj(s));
     if (g.states.empty()) j["states"] = nlohmann::json::array();
 
-    for (const auto& t : g.transitions)
-        j["transitions"].push_back({ { "fromState", t.fromState }, { "toState", t.toState },
-                                      { "paramName", t.paramName }, { "op", static_cast<int>(t.op) },
-                                      { "threshold", t.threshold }, { "duration", t.duration } });
+    for (const auto& t : g.transitions) j["transitions"].push_back(transitionToJsonObj(t));
     if (g.transitions.empty()) j["transitions"] = nlohmann::json::array();
 
     nlohmann::json params = nlohmann::json::object();
@@ -47,24 +82,14 @@ bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineG
     for (const auto& sj : j.value("states", nlohmann::json::array()))
     {
         AnimationState s;
-        s.id = sj.value("id", 0);
-        s.name = sj.value("name", std::string());
-        if (auto c = sj.find("clipId"); c != sj.end()) s.clipId = HE::graph::uuidFromJson(*c);
-        s.looping = sj.value("looping", true);
-        s.x = sj.value("x", 0.0f);
-        s.y = sj.value("y", 0.0f);
+        stateFromJsonObj(sj, s);
         g.states.push_back(std::move(s));
     }
 
     for (const auto& tj : j.value("transitions", nlohmann::json::array()))
     {
         AnimationTransition t;
-        t.fromState = tj.value("fromState", std::string());
-        t.toState   = tj.value("toState",   std::string());
-        t.paramName = tj.value("paramName", std::string());
-        t.op        = transitionOpFromInt(tj.value("op", 0));
-        t.threshold = tj.value("threshold", 0.5f);
-        t.duration  = tj.value("duration",  0.2f);
+        transitionFromJsonObj(tj, t);
         g.transitions.push_back(std::move(t));
     }
 
@@ -73,6 +98,29 @@ bool animatorStateMachineFromJson(const std::string& json, AnimatorStateMachineG
             g.defaultParams[it.key()] = it.value().get<float>();
 
     out = std::move(g);
+    return true;
+}
+
+// ── Item-level JSON, public (collaboration addresses single items) ──────────
+std::string animationStateToJson(const AnimationState& s) { return stateToJsonObj(s).dump(); }
+std::string animationTransitionToJson(const AnimationTransition& t)
+{
+    return transitionToJsonObj(t).dump();
+}
+
+bool animationStateFromJson(const std::string& json, AnimationState& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    stateFromJsonObj(j, out);
+    return true;
+}
+
+bool animationTransitionFromJson(const std::string& json, AnimationTransition& out)
+{
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return false;
+    transitionFromJsonObj(j, out);
     return true;
 }
 

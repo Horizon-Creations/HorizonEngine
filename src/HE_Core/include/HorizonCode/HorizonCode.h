@@ -258,6 +258,21 @@ struct HE_API Graph
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);
 
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One node / one variable, in EXACTLY the form toJson() puts into the document's
+// arrays — toJson/fromJson are implemented on top of these. Collaboration
+// addresses a single item at a time (see CollabDocSync), and giving it its own
+// serializer would guarantee the two drift the first time a field is added to
+// only one of them. false = the JSON does not describe a usable item (an unknown
+// node type, a nameless variable), which callers skip.
+//
+// Links have no item form: they are already a 4-int array (GraphJson.h) and are
+// identified by their endpoints, not by an id.
+HE_API std::string nodeToJson(const Node& n);
+HE_API bool        nodeFromJson(const std::string& json, Node& out);
+HE_API std::string variableToJson(const Variable& v);
+HE_API bool        variableFromJson(const std::string& json, Variable& out);
+
 // Propagate every function's interface (params + results, owned by its
 // FunctionEntry) onto the matching FunctionCall / FunctionReturn nodes by name,
 // so their pins resolve correctly. Call after editing an interface or loading a

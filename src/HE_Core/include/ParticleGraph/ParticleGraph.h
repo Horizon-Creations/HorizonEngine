@@ -126,6 +126,16 @@ HE_API const ParticleNodeDesc*              particleNodeDescByName(const std::st
 HE_API std::string particleGraphToJson(const ParticleGraph& graph);
 HE_API bool         particleGraphFromJson(const std::string& json, ParticleGraph& out);
 
+// ── Item-level JSON ─────────────────────────────────────────────────────────
+// One node, in EXACTLY the form particleGraphToJson() puts into the document's
+// array — the document serializers are implemented on top of it. Collaboration
+// addresses a single node at a time (CollabDocSync); a separate serializer would
+// drift from the on-disk one. false = unknown node type, which callers skip.
+// Links have no item form: they are already a 4-int object and are identified by
+// their endpoints, not by an id.
+HE_API std::string particleNodeToJson(const ParticleGraphNode& n);
+HE_API bool        particleNodeFromJson(const std::string& json, ParticleGraphNode& out);
+
 // ── Evaluation ──────────────────────────────────────────────────────────────
 // Mirrors ParticleSystemComponent's old inline config fields 1:1 — evaluate()
 // replaces "read the component's fields directly" with "read the graph's
