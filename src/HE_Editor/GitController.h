@@ -41,6 +41,19 @@ public:
 
 	void requestRefresh();
 
+	// ── Mutating operations ──────────────────────────────────────────────────
+	// Every one of these is a no-op for a guest in a collaboration session —
+	// mayModify() is enforced HERE, once, so no caller can forget it. The panel
+	// additionally hides the buttons and explains why.
+	void requestInit(bool lfsAvailable);
+	void requestCommitAll(const std::string& message);
+	void requestPush();
+	void requestPull();
+	void requestSetRemote(const std::string& url);
+
+	const std::string& lastInfo()  const { return m_service.lastInfo(); }
+	const std::string& remoteUrl() const { return m_service.remoteUrl(); }
+
 	// ── State for the UI ─────────────────────────────────────────────────────
 	bool                     isRepo() const { return m_service.isRepo(); }
 	const HE::Sc::RepoStatus& status() const { return m_service.status(); }

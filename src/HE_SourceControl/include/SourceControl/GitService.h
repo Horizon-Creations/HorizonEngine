@@ -53,6 +53,31 @@ public:
 	// in a row would just produce the same answer four times.
 	void requestStatus();
 
+	// ── Mutating operations ──────────────────────────────────────────────────
+	// Serialized by construction on the worker (index.lock needs that anyway);
+	// each runs the git command, then refreshes status so the UI reflects the
+	// result without a second request. Outcome text lands in lastError() /
+	// lastInfo() via pump(). The CALLER enforces the host-only collaboration
+	// rule — this class knows git, not sessions.
+
+	// git init in `projectRoot` + the generated .gitignore/.gitattributes +
+	// `git lfs install --local` when git-lfs is available.
+	void requestInit(const std::filesystem::path& projectRoot, bool lfsAvailable);
+
+	// Stage everything and commit it with `message`.
+	void requestCommitAll(const std::string& message);
+
+	void requestPush(bool upstreamConfigured);
+	void requestPull();
+	void requestSetRemote(const std::string& url);
+
+	// Human-readable outcome of the last completed operation ("Pushed.",
+	// "Committed 12 file(s)."), cleared by the next one.
+	const std::string& lastInfo() const { return m_lastInfo; }
+
+	// origin's URL as of the last status refresh; empty = none configured.
+	const std::string& remoteUrl() const { return m_remoteUrl; }
+
 	// Drain finished work on the MAIN thread. `maxEvents` bounds how much is
 	// applied per frame — a clone that produced twenty thousand entries should
 	// not be absorbed in one frame.
@@ -70,17 +95,24 @@ public:
 	void setOnStatusChanged(std::function<void(const RepoStatus&)> fn) { m_onStatus = std::move(fn); }
 
 private:
-	enum class Kind : std::uint8_t { Open, Status, Quit };
+	enum class Kind : std::uint8_t {
+		Open, Status, Init, CommitAll, Push, Pull, SetRemote, Quit
+	};
 
 	struct Command
 	{
 		Kind                  kind = Kind::Status;
 		std::filesystem::path path;
+		std::string           text;   // commit message / remote url
+		bool                  flag = false;
 	};
 
 	struct Event
 	{
 		bool        statusValid = false;
+		std::string info;                    // completed-operation feedback
+		std::string remoteUrl;
+		bool        remoteUrlValid = false;
 		RepoStatus  status;
 		std::string error;
 	};
@@ -107,6 +139,8 @@ private:
 	// Main-thread-only.
 	RepoStatus                             m_status;
 	std::string                            m_lastError;
+	std::string                            m_lastInfo;
+	std::string                            m_remoteUrl;
 	std::uint64_t                          m_generation = 0;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };

@@ -1,6 +1,7 @@
 #include "SourceControl/GitService.h"
 
 #include "SourceControl/GitCli.h"
+#include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
 #include <utility>
@@ -60,6 +61,44 @@ void GitService::close()
 	m_status = RepoStatus{};
 }
 
+void GitService::requestInit(const std::filesystem::path& projectRoot, bool lfsAvailable)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::Init, projectRoot };
+	c.flag = lfsAvailable;
+	push(std::move(c));
+}
+
+void GitService::requestCommitAll(const std::string& message)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::CommitAll, {} };
+	c.text = message;
+	push(std::move(c));
+}
+
+void GitService::requestPush(bool upstreamConfigured)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::Push, {} };
+	c.flag = upstreamConfigured;
+	push(std::move(c));
+}
+
+void GitService::requestPull()
+{
+	if (!m_worker.joinable()) return;
+	push(Command{ Kind::Pull, {} });
+}
+
+void GitService::requestSetRemote(const std::string& url)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::SetRemote, {} };
+	c.text = url;
+	push(std::move(c));
+}
+
 void GitService::requestStatus()
 {
 	if (!m_worker.joinable()) return;
@@ -91,6 +130,7 @@ void GitService::workerMain()
 		if (cmd.kind == Kind::Quit) return;
 
 		Event ev;
+		bool wantStatus = false;   // mutating ops refresh afterwards
 		switch (cmd.kind)
 		{
 		case Kind::Open:
@@ -105,30 +145,99 @@ void GitService::workerMain()
 				break;
 			}
 			HE_SC_INFO("Repository: %s", m_root.string().c_str());
-			// Fall through to an immediate first status, so opening a project
-			// shows its state without a second round trip.
-			[[fallthrough]];
+			wantStatus = true;
+			break;
 		}
 		case Kind::Status:
-		{
-			m_statusPending.store(false, std::memory_order_release);
-			if (m_root.empty()) { ev.statusValid = true; break; }
+			wantStatus = true;
+			break;
 
+		case Kind::Init:
+		{
 			std::string err;
-			RepoStatus  s;
-			if (GitCli::status(m_root, s, &err))
+			if (!GitCli::init(cmd.path, &err)) { ev.error = err; break; }
+			m_root = cmd.path;
+			// The generated files exist BEFORE the first status, so the fresh
+			// repo immediately shows a sensible change list instead of the whole
+			// Saved/ directory as untracked noise.
+			if (!RepoConfig::writeInitialFiles(m_root, &err)) { ev.error = err; break; }
+			if (cmd.flag)
 			{
-				ev.statusValid = true;
-				ev.status      = std::move(s);
+				// --local keeps the hooks in this repo instead of touching the
+				// user's global git config.
+				if (!GitCli::run(m_root, { "lfs", "install", "--local" }, 30000).ok)
+				{
+					// The repo still works; large files just will not be tracked
+					// until LFS is sorted. Said out loud rather than swallowed.
+					HE_SC_WARN("git lfs install failed — large-file tracking is not active");
+				}
 			}
-			else
-			{
-				ev.error = err;
-			}
+			ev.info    = "Repository created.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::CommitAll:
+		{
+			std::string err;
+			if (!GitCli::addAll(m_root, &err))            { ev.error = err; break; }
+			if (!GitCli::commit(m_root, cmd.text, &err))  { ev.error = err; break; }
+			ev.info    = "Committed.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::Push:
+		{
+			std::string err;
+			if (!GitCli::push(m_root, cmd.flag, &err)) { ev.error = err; break; }
+			ev.info    = "Pushed.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::Pull:
+		{
+			std::string err;
+			if (!GitCli::pull(m_root, &err)) { ev.error = err; break; }
+			ev.info    = "Pulled.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::SetRemote:
+		{
+			std::string err;
+			if (!GitCli::setRemote(m_root, cmd.text, &err)) { ev.error = err; break; }
+			ev.info    = "Remote configured.";
+			wantStatus = true;
 			break;
 		}
 		case Kind::Quit:
 			return;
+		}
+
+		if (wantStatus)
+		{
+			m_statusPending.store(false, std::memory_order_release);
+			if (m_root.empty())
+			{
+				ev.statusValid = true;
+			}
+			else
+			{
+				std::string err;
+				RepoStatus  s;
+				if (GitCli::status(m_root, s, &err))
+				{
+					ev.statusValid = true;
+					ev.status      = std::move(s);
+					// Piggybacked on every refresh: one cheap invocation, and the
+					// panel always knows whether push/pull have anywhere to go.
+					ev.remoteUrl      = GitCli::remoteUrl(m_root);
+					ev.remoteUrlValid = true;
+				}
+				else
+				{
+					ev.error = err;
+				}
+			}
 		}
 
 		{
@@ -158,11 +267,15 @@ void GitService::pump(std::size_t maxEvents)
 		if (!ev.error.empty())
 		{
 			m_lastError = ev.error;
-			HE_SC_WARN("Status refresh failed: %s", ev.error.c_str());
+			m_lastInfo.clear();
+			HE_SC_WARN("Operation failed: %s", ev.error.c_str());
 			continue;
 		}
 
 		m_lastError.clear();
+		if (!ev.info.empty())      m_lastInfo  = ev.info;
+		if (ev.remoteUrlValid)     m_remoteUrl = ev.remoteUrl;
+		if (!ev.statusValid)       continue;
 		// Swapped in whole. A partially updated snapshot is the bug class this
 		// design exists to remove.
 		ev.status.generation = ++m_generation;

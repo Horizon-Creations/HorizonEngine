@@ -13,6 +13,7 @@ add_library(HorizonSourceControl SHARED
 	src/GitProbe.cpp
 	src/StatusParser.cpp
 	src/GitCli.cpp
+	src/RepoConfig.cpp
 	src/GitService.cpp
 )
 

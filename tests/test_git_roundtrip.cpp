@@ -2,6 +2,7 @@
 #include "TestFsUtil.h"
 
 #include <SourceControl/GitCli.h>
+#include <SourceControl/RepoConfig.h>
 #include <SourceControl/GitService.h>
 #include <SourceControl/RepoStatus.h>
 #include <Platform/Process.h>
@@ -306,6 +307,108 @@ TEST_CASE("Ahead and behind are read from a real local remote")
 	he_test::removeAllQuiet(repo);
 	he_test::removeAllQuiet(other);
 	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("The panel operations round-trip: init, commit, remote, push, pull")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// Exactly what the Source Control panel drives, minus the ImGui: init with
+	// generated config, commit-all, set remote, first push with -u, and a pull
+	// that fast-forwards a change made by "someone else" (a second clone).
+	const fs::path dir = uniqueDir("panelops");
+	std::string err;
+
+	REQUIRE(GitCli::init(dir, &err));
+	REQUIRE(RepoConfig::writeInitialFiles(dir, &err));
+	CHECK(fs::exists(dir / ".gitignore"));
+	CHECK(fs::exists(dir / ".gitattributes"));
+
+	// The generator must never clobber a user's file.
+	writeFile(dir / ".gitignore", "# mine\n");
+	REQUIRE(RepoConfig::writeInitialFiles(dir, &err));
+	{
+		std::ifstream in(dir / ".gitignore");
+		std::string first;
+		std::getline(in, first);
+		CHECK(first == "# mine");
+	}
+
+	REQUIRE(GitCli::run(dir, { "config", "user.name",  "HorizonEngine Test" }).ok);
+	REQUIRE(GitCli::run(dir, { "config", "user.email", "test@example.invalid" }).ok);
+	REQUIRE(GitCli::run(dir, { "config", "commit.gpgsign", "false" }).ok);
+
+	writeFile(dir / "Content" / "scene.hescene", "{}");
+	REQUIRE(GitCli::addAll(dir, &err));
+	REQUIRE(GitCli::commit(dir, "first", &err));
+
+	RepoStatus st;
+	REQUIRE(GitCli::status(dir, st));
+	CHECK(st.dirtyCount() == 0);
+	CHECK_FALSE(st.initialCommit);
+
+	// Remote: absent, then set, then read back.
+	CHECK(GitCli::remoteUrl(dir).empty());
+	const fs::path bare = uniqueDir("panelbare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	REQUIRE(GitCli::setRemote(dir, bare.string(), &err));
+	CHECK(GitCli::remoteUrl(dir) == bare.string());
+	// setRemote on an existing origin updates rather than fails.
+	REQUIRE(GitCli::setRemote(dir, bare.string(), &err));
+
+	// First push: no upstream yet → -u origin HEAD.
+	REQUIRE(GitCli::push(dir, /*upstreamConfigured=*/false, &err));
+	REQUIRE(GitCli::status(dir, st));
+	CHECK(st.upstream == "origin/main");
+	CHECK(st.ahead == 0);
+
+	// Someone else pushes; our pull fast-forwards it in.
+	const fs::path other = uniqueDir("panelother");
+	REQUIRE(GitCli::run(fs::temp_directory_path(),
+	                    { "clone", bare.string(), other.string() }).ok);
+	REQUIRE(GitCli::run(other, { "config", "user.name",  "Other" }).ok);
+	REQUIRE(GitCli::run(other, { "config", "user.email", "other@example.invalid" }).ok);
+	REQUIRE(GitCli::run(other, { "config", "commit.gpgsign", "false" }).ok);
+	writeFile(other / "theirs.txt", "hello");
+	commitAll(other, "theirs");
+	REQUIRE(GitCli::run(other, { "push" }).ok);
+
+	REQUIRE(GitCli::pull(dir, &err));
+	CHECK(fs::exists(dir / "theirs.txt"));
+
+	// A DIVERGED branch must refuse rather than invent a merge.
+	writeFile(other / "theirs2.txt", "more");
+	commitAll(other, "theirs 2");
+	REQUIRE(GitCli::run(other, { "push" }).ok);
+	writeFile(dir / "mine.txt", "mine");
+	REQUIRE(GitCli::addAll(dir, &err));
+	REQUIRE(GitCli::commit(dir, "mine", &err));
+	CHECK_FALSE(GitCli::pull(dir, &err));
+	CHECK_FALSE(err.empty());
+
+	he_test::removeQuiet(dir);
+	he_test::removeQuiet(bare);
+	he_test::removeQuiet(other);
+}
+
+TEST_CASE("The generated repo config pins its load-bearing lines")
+{
+	// Golden substrings rather than a byte-exact file: wording may evolve, but
+	// losing one of THESE lines silently re-breaks a specific known failure.
+	const std::string ign = RepoConfig::gitignoreText();
+	CHECK(ign.find("Saved/") != std::string::npos);
+	CHECK(ign.find("Export/") != std::string::npos);
+	CHECK(ign.find("GameLogic.hot-*.*") != std::string::npos);   // hot-reload copies accumulate
+	CHECK(ign.find("Source/build/") != std::string::npos);
+
+	const std::string att = RepoConfig::gitattributesText();
+	CHECK(att.find("* text=auto eol=lf") != std::string::npos);
+	CHECK(att.find("*.hpak filter=lfs") != std::string::npos);
+	CHECK(att.find("*.hasset filter=lfs") != std::string::npos);
+	// Scenes are deliberately NOT merge=binary (stable entity ids since CP-A) —
+	// the graph formats still are.
+	CHECK(att.find(".hescene merge=binary") == std::string::npos);
+	CHECK(att.find("*.hcode  merge=binary") != std::string::npos);
 }
 
 TEST_CASE("GitService keeps git off the calling thread and delivers on pump")

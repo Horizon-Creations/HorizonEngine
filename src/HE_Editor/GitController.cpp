@@ -48,6 +48,36 @@ void GitController::requestRefresh()
 	m_service.requestStatus();
 }
 
+void GitController::requestInit(bool lfsAvailable)
+{
+	if (!mayModify() || m_projectRoot.empty()) return;
+	m_service.requestInit(m_projectRoot, lfsAvailable);
+}
+
+void GitController::requestCommitAll(const std::string& message)
+{
+	if (!mayModify() || message.empty()) return;
+	m_service.requestCommitAll(message);
+}
+
+void GitController::requestPush()
+{
+	if (!mayModify()) return;
+	m_service.requestPush(!m_service.status().upstream.empty());
+}
+
+void GitController::requestPull()
+{
+	if (!mayModify()) return;
+	m_service.requestPull();
+}
+
+void GitController::requestSetRemote(const std::string& url)
+{
+	if (!mayModify() || url.empty()) return;
+	m_service.requestSetRemote(url);
+}
+
 void GitController::update(std::uint64_t nowMs)
 {
 	// Drain first, unconditionally. The result of a discovery is what makes
