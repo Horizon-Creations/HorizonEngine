@@ -1962,8 +1962,11 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 				}
 			}
 
-			// Direct sun at the hit: one hard occlusion ray.
+			// Direct sun at the hit: one hard occlusion ray. Skipped when the
+			// sun term is black anyway (night) — the visibility result would
+			// be multiplied by zero, so the query is pure waste then.
 			float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+			if (dot(P.sunColor.rgb, float3(1.0)) <= 1e-4) ndl = 0.0;
 			if (ndl > 0.0)
 			{
 				ray sr;
@@ -2626,7 +2629,10 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					if (dot(hitN, rd) > 0.0) hitN = -hitN;
 				}
 			}
+			// Occlusion ray skipped when the sun term is black anyway (night) —
+			// same shortcut as the HW kernel.
 			float ndl = max(dot(hitN, P.sunDirRadius.xyz), 0.0);
+			if (dot(P.sunColor.rgb, float3(1.0)) <= 1e-4) ndl = 0.0;
 			if (ndl > 0.0 && giSceneAnyHit(nodes, tris, insts, instCount,
 			                               hitPos + hitN * 0.05, P.sunDirRadius.xyz, 0.02, 10000.0))
 				ndl = 0.0;
@@ -10507,6 +10513,8 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
 			tu.cfg2[0] = m_ssrFrameSeed;
 			tu.cfg2[1] = hist;
+			// Glossy cone jitter rides the temporal EMA — High tier only.
+			tu.cfg2[3] = temporal ? 1.0f : 0.0f;
 			tu.camPos[0] = m_renderWorld.camera.position.x;
 			tu.camPos[1] = m_renderWorld.camera.position.y;
 			tu.camPos[2] = m_renderWorld.camera.position.z;
@@ -10536,8 +10544,10 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			// Attributes point-sampled: linearly interpolated oct normals decode
+			// to garbage directions at geometry edges (the GI kernel's rule).
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbColor1 atIndex:1];
-			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+			[enc setFragmentSamplerState:pointSmp atIndex:1];
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_gbDepthLin atIndex:2];
 			[enc setFragmentSamplerState:pointSmp atIndex:2];
 			// History (prev pair) — point-sampled: the disocclusion test needs
@@ -10718,6 +10728,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 			tu.cfg2[0] = m_ssrFrameSeed;
 			tu.cfg2[1] = hist;
 			tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+			tu.cfg2[3] = temporal ? 1.0f : 0.0f; // glossy cone jitter (High)
 			tu.camPos[0] = m_renderWorld.camera.position.x;
 			tu.camPos[1] = m_renderWorld.camera.position.y;
 			tu.camPos[2] = m_renderWorld.camera.position.z;
@@ -10747,8 +10758,10 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrColorHist atIndex:0];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+			// Point-sampled for the same reason as the deferred variant: lerped
+			// oct normals decode to garbage at geometry edges.
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_reflNormTex atIndex:1];
-			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+			[enc setFragmentSamplerState:pointSmp atIndex:1];
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_reflDepthTex atIndex:2];
 			[enc setFragmentSamplerState:pointSmp atIndex:2];
 			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrHistRad[prevIdx] atIndex:3];

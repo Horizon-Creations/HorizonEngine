@@ -201,7 +201,7 @@ public:
         float cfg[4]           = {}; // x maxDistance, y thickness, z maxRoughness, w stepCount
         float conv[4]          = {}; // x ndc-y sign, y depth scale, z depth bias, w edge-fade width
         float vp[4]            = {}; // xy = trace-target size in pixels
-        float cfg2[4]          = {}; // x = frame seed, y = history blend (0 = temporal off)
+        float cfg2[4]          = {}; // x = frame seed, y = history blend (0 = temporal off), z = forward path, w = glossy cone jitter
     };
 
     // ── Deferred decals (P7 follow-up, Metal tile mode v1) ───────────────────

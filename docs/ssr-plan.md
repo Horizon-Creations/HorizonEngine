@@ -374,6 +374,25 @@ aktuellen Frame-Farbe (kein Selbst-Feedback wie im Forward-Entwurf).
 **Verifikation:** Kamerafahrt (`HE_DUMP_GIROTATE`-Muster) → kein sichtbares Ghosting/Schweifen;
 Profiler-Capture: SSR-Pass unter Budget (7.).
 
+**Trace v3 (2026-08-04, Perf + Glossy):** Der March ist linear in t — beide
+per-Step-mat4-Multiplikationen sind aus der Schleife gehoben (`clip(t) =
+clipP + clipR·t`, `viewZ(t) = zP + zR·t`), und die Szenen-Tiefe am Sample
+kommt aus zwei Dot-Products (`heSceneZ`, camFwd-Projektion von invViewProj)
+statt einer vollen Weltrekonstruktion — gleiche Mathematik, ~6× weniger ALU
+pro Schritt (High: 64 Schritte + 6 Binärschritte pro Pixel). Dazu
+**quadratisches Distanz-Warping** (t = maxDist·s²): Kontakt-Reflexionen
+bekommen Sub-Meter-Schritte statt der uniformen ~1-m-Stride, das Fernfeld
+vergröbert (Binary-Refine + Blur/Temporal decken das); das Akzeptanzfenster
+skaliert mit dem Tiefen-Vorschub des JEWEILIGEN Schritts. Trace-Ursprung um
+2 cm entlang N genudged (feine Nah-Schritte dürfen den Empfänger nicht
+re-detektieren). **Glossy-Cone-Jitter (Quality High):** der Mirror-Ray wird
+pro Frame in einem roughness-skalierten Kegel verkippt (Schema des
+GI-Refl-Kernels, `cfg2.w`) — die temporale EMA integriert die Samples zu
+einer echten Glossy-Lobe statt nur des Wide-Blur-Lerps. Kleinkram: GB1 wird
+im Trace point-gesampelt (gelerpte Oct-Normalen dekodieren an Kanten zu
+Müll — Regel des GI-Kernels), Distanz-Fade nutzt den verfeinerten `tHit`.
+A/B headless verifiziert (Witness-Szenen unverändert, keine Regression).
+
 ### P5 — Integration
 `EditorConfig` (`SSREnabled/SSRIntensity/SSRMaxRoughness/SSRQuality`) lesen/schreiben/pushen
 (`EditorApplication.cpp:669/1175/2945`), Settings-Panel-Block (`EditorSettingsPanel.cpp:145`
