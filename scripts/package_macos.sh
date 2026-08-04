@@ -12,10 +12,13 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="${1:-0.3.0}"
+# Version and sky-themed codename — single source of truth is CMakeLists.txt, so a
+# release bump is one edit there and never drifts from what the binary reports.
+# Shown in the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g.
+# 0.3.0 (Aurora).
+CMAKE_VERSION="$(grep -oE 'project\(HorizonEngine VERSION [0-9]+\.[0-9]+\.[0-9]+' "$SOURCE_DIR/CMakeLists.txt" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+VERSION="${1:-${CMAKE_VERSION:-0.0.0}}"
 
-# Sky-themed release codename — single source of truth is CMakeLists.txt. Shown in
-# the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g. 0.2.0 (Sunrise).
 CODENAME="${DMG_CODENAME:-$(grep -oE 'HE_VERSION_CODENAME "[^"]+"' "$SOURCE_DIR/CMakeLists.txt" 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)".*/\1/')}"
 [ -n "$CODENAME" ] || CODENAME="$VERSION"
 
@@ -52,9 +55,16 @@ fi
 # FANCY=0 and we fall back to a plain DMG with no icon/background.
 ASSETS_DIR="$SCRIPT_DIR/dmg_assets"
 ICON_SRC="$SOURCE_DIR/EditorDeps/Images/HC_Logo.png"
-# Procedural backdrop theme — keep this tracking the release codename in
-# docs/version-codenames.md (0.2.0 "Sunrise" → sunrise).
-DMG_THEME="${DMG_THEME:-sunrise}"           # twilight | midnight | sunrise
+# Procedural backdrop theme — derived from the codename ("Solar Eclipse" →
+# solar-eclipse), so a new release picks up its own look automatically. A codename
+# without a matching THEMES entry in gen_assets.py falls back to twilight rather
+# than failing the packaging run; add the theme there to give it its own backdrop.
+THEME_FROM_CODENAME="$(printf '%s' "$CODENAME" | tr '[:upper:] ' '[:lower:]-')"
+if ! grep -qE "^\s*\"${THEME_FROM_CODENAME}\":" "$ASSETS_DIR/gen_assets.py" 2>/dev/null; then
+    echo "    NOTE: no DMG theme '${THEME_FROM_CODENAME}' in gen_assets.py — using twilight."
+    THEME_FROM_CODENAME="twilight"
+fi
+DMG_THEME="${DMG_THEME:-$THEME_FROM_CODENAME}"   # twilight | midnight | sunrise | aurora
 DMG_PHOTO="${DMG_PHOTO:-}"                   # optional: a screenshot backdrop (overrides DMG_THEME)
 DMG_VENV="$SOURCE_DIR/out/.dmgvenv"
 FANCY=1

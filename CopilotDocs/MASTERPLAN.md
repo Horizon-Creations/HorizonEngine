@@ -39,7 +39,7 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 | Linux-Window/Input-Pfad | 🔴 kein Engine-Code |
 | Tests (810), CI (macOS+Windows-Matrix), Profiling (Tracy) | ✅ |
 | Crypto: hpak AES-256-GCM — System-OpenSSL primär, mbedTLS-Fetch-Fallback ohne OpenSSL (Encryption nie mehr still deaktiviert) | ✅ |
-| Version 0.2.0 „Sunrise" (Fenstertitel/Hub/About/Export/Info.plist via `HorizonVersion.h`) | ✅ |
+| Version 0.3.0 „Aurora" (Fenstertitel/Hub/About/Export/Info.plist via `HorizonVersion.h`; Version + Codename + DMG-Theme werden aus `CMakeLists.txt` abgeleitet — siehe `docs/version-codenames.md`) | ✅ |
 | Dokumentation (dieses Dokument, Website-Docs) | 🟡 dieses Dokument bis 14.07.2026 nachgezogen (Forts. 72–78); Website-Script-API-Referenz (`horizon.*`) weiterhin unvollständig (Umsetzungsplan: Forts. 78 B4) |
 
 ---

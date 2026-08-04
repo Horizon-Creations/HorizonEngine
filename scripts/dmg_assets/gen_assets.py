@@ -130,7 +130,85 @@ THEMES = {
     "sunrise":  ([(0.0, (38, 30, 58)), (0.42, (96, 70, 86)),
                   (0.66, (214, 150, 92)), (1.0, (244, 224, 188))],
                  (255, 214, 150), 200, 30, (255, 226, 170)),
+    # 0.3.0 "Aurora" — deep night with a cold teal horizon; the light comes from
+    # the curtains below, so the logo bloom stays dim and cool (not a sun).
+    "aurora":   ([(0.0, (6, 9, 26)), (0.50, (10, 18, 44)),
+                  (0.80, (13, 30, 54)), (1.0, (8, 15, 32))],
+                 (90, 200, 190), 85, 150, (120, 230, 190)),
 }
+
+# Themes listed here also get northern-lights curtains over the sky. The base
+# line stays above the icon row (y = 256/400) so the two slots keep a clean sky.
+# name: (band colours, base line as a fraction of the window height)
+CURTAINS = {
+    "aurora": ([(86, 240, 170), (120, 200, 255), (168, 120, 235)], 0.46),
+}
+
+
+def aurora_curtains(W, H, colors, base_t, blur):
+    """Northern-lights curtains: wavy vertical light bands that brighten toward
+    their lower edge and fade out at both ends.
+
+    Rendered at quarter resolution — the shape is entirely low-frequency, and a
+    per-pixel falloff there costs ~25k iterations instead of ~400k — then
+    upsampled. Bands accumulate additively, so crossings brighten and mix their
+    colours. Deterministic seed → the same curtain on every rebuild.
+    """
+    w, h = max(8, W // 4), max(8, H // 4)
+    n = w * h
+    acc = [0.0] * n                                  # intensity, 0..1+
+    accr, accg, accb = [0.0] * n, [0.0] * n, [0.0] * n
+
+    rnd = random.Random(11)
+    base = base_t * h
+
+    for i in range(7):
+        cx = rnd.uniform(0.02, 0.98) * w
+        height = rnd.uniform(0.30, 0.52) * h
+        half_w = rnd.uniform(0.018, 0.042) * w
+        phase = rnd.uniform(0.0, math.tau)
+        wave = rnd.uniform(0.10, 0.22) * h           # wobble wavelength
+        amp = rnd.uniform(0.012, 0.040) * w         # wobble amplitude
+        gain = rnd.uniform(0.45, 1.0)
+        cr, cg, cb = colors[i % len(colors)]
+        bottom = base - rnd.uniform(0.0, 0.12) * h
+        top = bottom - height
+
+        for y in range(max(0, int(top)), min(h, int(bottom) + 1)):
+            t = min(1.0, max(0.0, (y - top) / height))   # 0 top … 1 lower edge
+            # rises toward the lower edge, then cuts off over the last 12%
+            v = (t ** 1.6) * min(1.0, (1.0 - t) / 0.12)
+            if v <= 0.004:
+                continue
+            xc = cx + math.sin(phase + y / wave) * amp
+            hw = half_w * (1.0 + 0.6 * t)                # curtains splay downward
+            span = hw * 2.4                              # gaussian tail cutoff
+            row = y * w
+            for x in range(max(0, int(xc - span)), min(w, int(xc + span) + 1)):
+                dx = (x - xc) / hw
+                a = v * gain * math.exp(-dx * dx * 1.6)
+                if a <= 0.004:
+                    continue
+                k = row + x
+                acc[k] += a
+                accr[k] += cr * a
+                accg[k] += cg * a
+                accb[k] += cb * a
+
+    small = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    px = small.load()
+    for y in range(h):
+        row = y * w
+        for x in range(w):
+            k = row + x
+            a = acc[k]
+            if a <= 0.004:
+                continue
+            px[x, y] = (min(255, int(accr[k] / a)), min(255, int(accg[k] / a)),
+                        min(255, int(accb[k] / a)), int(min(1.0, a) * 185))
+
+    layer = small.resize((W, H), Image.LANCZOS)
+    return layer.filter(ImageFilter.GaussianBlur(blur))
 
 
 def build_photo_base(path, W, H):
@@ -181,6 +259,12 @@ def render_background(logo_path, theme, scale, photo=None):
             a = rnd.randint(40, 170)
             sd.ellipse([x - r, y - r, x + r, y + r], fill=(255, 250, 240, a))
         img = Image.alpha_composite(img, stars)
+
+        # northern-lights curtains (aurora-style themes only), under the bloom
+        if theme in CURTAINS:
+            colors, base_t = CURTAINS[theme]
+            img = Image.alpha_composite(
+                img, aurora_curtains(W, H, colors, base_t, blur=4.0 * s))
 
         # sun-glow bloom behind the logo (top third)
         glow = radial_glow(W, H, W * 0.5, H * 0.22, W * 0.46, glow_rgb, glow_a)

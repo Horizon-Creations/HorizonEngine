@@ -27,13 +27,13 @@ namespace
 }
 // About panel driven by the compile-time version macros so it shows the right
 // release regardless of whether the editor runs as a bare exe (no Info.plist) or
-// the packaged .app. Renders as: "Horizon Editor  /  Version 0.2.0 (Sunrise)".
+// the packaged .app. Renders as: "Horizon Editor  /  Version 0.3.0 (Aurora)".
 - (void)showAbout:(id)sender
 {
 	NSMutableDictionary* opts = [@{
 		NSAboutPanelOptionApplicationName    : @"Horizon Editor",
-		NSAboutPanelOptionApplicationVersion : @HE_VERSION_STRING,   // → "Version 0.2.0"
-		NSAboutPanelOptionVersion            : @HE_VERSION_CODENAME, // → "(Sunrise)"
+		NSAboutPanelOptionApplicationVersion : @HE_VERSION_STRING,   // → "Version 0.3.0"
+		NSAboutPanelOptionVersion            : @HE_VERSION_CODENAME, // → "(Aurora)"
 	} mutableCopy];
 
 	// Run as a bare exe (no .app bundle) the panel would fall back to the generic

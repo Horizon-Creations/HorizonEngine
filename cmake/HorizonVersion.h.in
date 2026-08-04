@@ -9,8 +9,8 @@
 #define HE_VERSION_PATCH    @PROJECT_VERSION_PATCH@
 #define HE_VERSION_STRING   "@PROJECT_VERSION@"
 
-// Sky-themed release codename, e.g. "First Light", "Sunrise", "Midnight".
+// Sky-themed release codename, e.g. "Sunrise", "Aurora", "Midnight".
 #define HE_VERSION_CODENAME "@HE_VERSION_CODENAME@"
 
-// Convenience: e.g.  0.2.0 "Sunrise"
+// Convenience: e.g.  0.3.0 "Aurora"
 #define HE_VERSION_FULL     HE_VERSION_STRING " \"" HE_VERSION_CODENAME "\""

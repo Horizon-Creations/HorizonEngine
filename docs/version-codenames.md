@@ -1,13 +1,45 @@
-# Horizon Engine — Versions-Codenamen (Brainstorm)
+# Horizon Engine — Versions-Codenamen
 
-Idee: Jede Engine-Version bekommt einen **Himmels-Codenamen** (Tag-Nacht-Zyklus,
+Jede Engine-Version bekommt einen **Himmels-Codenamen** (Tag-Nacht-Zyklus,
 Atmosphäre, Himmelsereignisse) — passend zur Marke *Horizon*. Der Name lebt an
 zwei Stellen sichtbar:
 
-- **App-Titel / About**: z. B. `Horizon Editor 1.0 „Sunrise"`
+- **App-Titel / About**: z. B. `Horizon Engine 0.3.0 „Aurora"`
 - **DMG-Installer-Look**: jeder Codename hat ein passendes Hintergrund-Theme
   (`scripts/dmg_assets/gen_assets.py`). Vorhanden: `twilight`, `midnight`,
-  `sunrise`. Geplant: `sunset`, `solar-eclipse`.
+  `sunrise`, `aurora`. Geplant: `sunset`, `solar-eclipse`.
+
+---
+
+## Vergeben (Release-Historie)
+
+| Version   | Codename    | Headline                                                                 | DMG-Theme |
+|-----------|-------------|--------------------------------------------------------------------------|-----------|
+| 0.2.0     | **Sunrise** | erste gebrandete Builds, DMG-Installer, Codename-System                   | `sunrise` |
+| **0.3.0** | **Aurora**  | Licht-Release: Deferred Renderer, Ray-Traced DDGI, Point-/Spot-Shadow-Maps, HBAO/GTAO | `aurora` |
+
+**So bumpst du ein Release** — eine einzige Stelle, alles andere zieht nach:
+
+1. `CMakeLists.txt` → `project(HorizonEngine VERSION x.y.z)` und
+   `set(HE_VERSION_CODENAME "...")`.
+2. Optional: passendes Theme in `THEMES` (und ggf. `CURTAINS`) in
+   `scripts/dmg_assets/gen_assets.py` anlegen.
+
+`scripts/package_macos.sh` liest Version *und* Codename aus `CMakeLists.txt` und
+leitet das DMG-Theme aus dem Codename ab („Solar Eclipse" → `solar-eclipse`);
+fehlt das Theme, fällt es auf `twilight` zurück statt zu scheitern. Editor-Titel,
+Project Hub, About-Panel und der Export-Stempel hängen am generierten
+`HorizonVersion.h` — ebenfalls automatisch.
+
+> Achtung: `HE_VERSION_STRING` ist zugleich der Handshake für kompilierte
+> HorizonCode-Klassen (`GameApplication.cpp`). Ein Bump lässt eine mit der
+> Vorversion exportierte `HorizonCodeGen`-Bibliothek bewusst durchfallen — das
+> Spiel läuft dann interpretiert weiter und loggt eine Warnung. Gewollt: neu
+> exportieren.
+
+**Wann 1.0?** Nicht am Namen festmachen, sondern an Plattform-Vollständigkeit:
+Linux-Packaging (6.6), D3D12/Vulkan-Basecolor-Texturen + MaterialComponent-
+Override, BCn-Kompression. Bis dahin bleibt die 0.x-Reihe im Morgen-Pool.
 
 Legende: ★ = es gibt bereits ein passendes Engine-Feature (Nachthimmel-Overhaul:
 Nebula, Aurora, Sterne, Mond mit Phasen, Wolken/Cirrus, Twilight-Basishimmel),
@@ -23,9 +55,10 @@ Abend/Nacht über; **dramatische Himmelsereignisse** sind den großen Meilenstei
 
 | Phase            | Version (Vorschlag) | Codename            | Stimmung / Anlass                          | DMG-Theme        |
 |------------------|---------------------|---------------------|--------------------------------------------|------------------|
-| Pre-Release      | 0.x                 | **First Light**     | erstes Licht — Alpha/erste Builds          | sunrise (hell)   |
-| Erstes Stable    | **1.0**             | **Sunrise** ✅      | der „Aufgang" der stabilen Engine          | `sunrise` ✅     |
-| Feature-Welle    | 1.x                 | **Golden Hour**     | warmes, reifes Licht                       | sunset (geplant) |
+| Erste Builds     | 0.2.0 *(vergeben)*  | **Sunrise** ✅      | der „Aufgang" — erstes gebrandetes Release | `sunrise` ✅     |
+| Licht-Release    | 0.3.0 *(vergeben)*  | **Aurora** ✅ ★     | Deferred + DDGI = die Engine lernt Licht   | `aurora` ✅      |
+| Rest der 0.x     | 0.4+                | **Alpenglow**, **Daybreak**, **Morning Star** | Morgen-Pool weiterzählen | (neu anlegen)    |
+| Erstes Stable    | **1.0**             | **Golden Hour**     | warmes, reifes Licht — alle Plattformen da | sunset (geplant) |
 | Reifer Höhepunkt | 2.0                 | **Zenith**          | Sonne am höchsten — Leistungs-/Feature-Peak| (neu: „day")     |
 | Übergang         | 2.x                 | **Sunset**          | Abendlicht                                  | `sunset` (geplant)|
 | Abenddämmerung   | 2.x/3.0             | **Twilight** ✅     | das Zwischenlicht                           | `twilight` ✅    |
@@ -106,26 +139,29 @@ Abend/Nacht über; **dramatische Himmelsereignisse** sind den großen Meilenstei
 
 ---
 
-## Meine Top-Picks (subjektiv)
+## Nächste Kandidaten (subjektiv)
 
-1. **First Light** (0.x / Pre-Release) — perfekter Name für die allerersten Builds.
-2. **Sunrise** (1.0) — dein Vorschlag, sitzt; Theme ist schon da.
-3. **Zenith** (Peak-Major) — kraftvoll, „Höhepunkt".
-4. **Aurora** — ★ matcht ein vorzeigbares Feature; klingt premium.
-5. **Solar Eclipse** — für den ganz großen Sprung; sehr dramatisches DMG-Theme möglich.
-6. **Nebula** / **Twilight** / **Midnight** — ★ alle durch existierende Sky-Features gedeckt.
+1. **Alpenglow** — praktisch unbesetzt als Produktname, poetisch nah an *Horizon*.
+2. **Zenith** (Peak-Major) — kraftvoll, „Höhepunkt".
+3. **Solar Eclipse** — für den ganz großen Sprung; sehr dramatisches DMG-Theme möglich.
+4. **Nebula** / **Twilight** / **Midnight** — ★ alle durch existierende Sky-Features gedeckt.
+
+> Namens-Kollisionen mitdenken: **Aurora** (AWS, Chromium-Channel), **Corona**,
+> **Zephyr** und **Polaris** sind anderweitig stark belegt — für 0.3.0 in Kauf
+> genommen, weil der Feature-Match zählt; für ein 1.0 lieber etwas Eigenes.
 
 ---
 
-## Anbindung an die Technik (wenn wir es verdrahten)
+## Anbindung an die Technik
 
-- **Codename in CMake** → `set(HE_VERSION_CODENAME "Sunrise")`, per `configure_file`
-  in ein `version.h` → Anzeige in Fenstertitel + About.
-- **DMG-Theme = Codename**: Packager wählt automatisch `DMG_THEME` passend zum
-  Codename (z. B. „Sunrise" → `sunrise`). Neue Codenamen brauchen ggf. ein neues
-  Theme im `THEMES`-Dict von `gen_assets.py` (Verlauf-Farben, Glow, Sterne).
+- **Codename in CMake** → `set(HE_VERSION_CODENAME "Aurora")`, per `configure_file`
+  in `HorizonVersion.h` → Fenstertitel, Project Hub, About-Panel, Tutorial.
+- **DMG-Theme = Codename**: `package_macos.sh` leitet `DMG_THEME` automatisch ab
+  („Solar Eclipse" → `solar-eclipse`), mit Fallback auf `twilight`. Neue Codenamen
+  brauchen einen Eintrag im `THEMES`-Dict von `gen_assets.py` (Verlauf-Farben,
+  Glow, Sterne) — optional zusätzlich `CURTAINS` für Polarlicht-Bänder.
 - **Feature-Match als Bonus**: ★-Namen (Aurora, Nebula, Moonrise, Cirrus,
   Starlight, Twilight) lassen sich beim Release mit genau dem gezeigten
   Sky-Feature bewerben.
 
-_Stand: 2026-06-28 — reines Brainstorm, noch nichts verdrahtet._
+_Stand: 2026-08-04 — verdrahtet; aktuell 0.3.0 „Aurora"._
