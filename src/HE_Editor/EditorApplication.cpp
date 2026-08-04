@@ -2,6 +2,9 @@
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "EditorUI.h"
+#include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
+#include "GameInstancePanel.h"     // kTabPath — same, for the project graph
+#include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
@@ -409,8 +412,9 @@ void EditorApplication::OnInit()
 		applyAssetBytes(relPath, bytes);
 		// An open editor tab keeps showing its in-memory state — tell whichever
 		// panel holds this asset to re-read the file, so the peer's edit is
-		// visible live, not only after a reopen.
-		EditorUI::reloadAssetTabFromDisk(contentManager().resolveSavePath(relPath));
+		// visible live, not only after a reopen. collabLocalPath, not
+		// resolveSavePath: a C++ class is not under the content root.
+		EditorUI::reloadAssetTabFromDisk(collabLocalPath(relPath));
 		Logger::Log(Logger::LogLevel::Info,
 		            ("Collab: applied remote change to " + relPath).c_str());
 	});
@@ -442,6 +446,10 @@ void EditorApplication::OnInit()
 		// seedNetIds) and marks the current entity set as known to the
 		// structural diff, so nothing gets re-announced as freshly created.
 		m_structureKnown.clear();
+		// The level script came with the new scene, so the mirror describes a
+		// graph that no longer exists. Left alone, the next diff would report
+		// the difference between the two scenes' scripts as a local edit.
+		m_levelScriptMirror = {};
 		if (m_editorWorld)
 		{
 			m_collab.setWorld(m_editorWorld.get());
@@ -3264,6 +3272,89 @@ void EditorApplication::dumpFrameHeadless()
 	}
 }
 
+std::string EditorApplication::projectRoot()
+{
+	std::filesystem::path p = m_projectManager.currentProject().path;
+	if (p.empty()) return {};
+	std::error_code ec;
+	if (std::filesystem::is_regular_file(p, ec)) p = p.parent_path();
+	return p.string();
+}
+
+std::string EditorApplication::collabSyncKey(const std::string& tabPath)
+{
+	if (tabPath.empty()) return {};
+
+	// The two documents the editor owns rather than a file: their reserved tab
+	// path IS the key. There is exactly one of each per session — every peer is
+	// in the same scene and the same project — so a fixed string is a complete
+	// identity, which is why they need no path mapping at all.
+	if (tabPath == LevelScriptPanel::kTabPath ||
+	    tabPath == GameInstancePanel::kTabPath)
+		return tabPath;
+
+	// C++ classes live under <project>/Source, a sibling of Content, so the
+	// content-relative form cannot name them. The prefix also keeps them out of
+	// the content key space, where "Source/..." could otherwise be a real folder.
+	if (CppClassEditorPanel::isCppSourceAsset(tabPath))
+	{
+		const std::string root = projectRoot();
+		if (root.empty()) return {};
+		const std::string rel =
+			CollabController::projectRelativeAssetPath(tabPath, root + "/Source");
+		return rel.empty() ? std::string() : (kSourceKeyPrefix + rel);
+	}
+
+	const std::string rel = CollabController::projectRelativeAssetPath(
+		tabPath, contentManager().contentRoot());
+	if (rel.empty() || !CollabController::isSyncableAsset(rel)) return {};
+	// The extension only says "authored container"; the type inside decides. A
+	// `.hasset` is equally the wrapper around a 40 MB mesh.
+	if (!CollabController::isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(tabPath)))
+		return {};
+	return rel;
+}
+
+std::string EditorApplication::collabLocalPath(const std::string& key)
+{
+	if (key.empty()) return {};
+	if (key == LevelScriptPanel::kTabPath) return {};   // lives in the world
+	if (key == GameInstancePanel::kTabPath) return gameInstancePath();
+
+	const std::string prefix = kSourceKeyPrefix;
+	if (key.rfind(prefix, 0) == 0)
+	{
+		const std::string root = projectRoot();
+		if (root.empty()) return {};
+		return root + "/Source/" + key.substr(prefix.size());
+	}
+	return contentManager().resolveSavePath(key);
+}
+
+CollabDocSync::DocBindings EditorApplication::collabDocsForTab(const std::string& tabPath)
+{
+	// The level script belongs to the scene and the GameInstance graph to the
+	// project, so neither is held by an asset panel — the editor owns both and
+	// answers for them here. Everything else is a panel's.
+	if (tabPath == LevelScriptPanel::kTabPath && m_editorWorld)
+	{
+		CollabDocSync::DocBindings out;
+		out.push_back({ CollabDocSync::Scope::Primary,
+		                CollabDocSync::forHorizonCodeGraph(m_editorWorld->levelScript()),
+		                &m_levelScriptMirror });
+		return out;
+	}
+	if (tabPath == GameInstancePanel::kTabPath)
+	{
+		CollabDocSync::DocBindings out;
+		out.push_back({ CollabDocSync::Scope::Primary,
+		                CollabDocSync::forHorizonCodeGraph(m_gameInstanceGraph),
+		                &m_gameInstanceMirror });
+		return out;
+	}
+	return EditorUI::collabDocsFor(tabPath);
+}
+
 void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 {
 	// Two layers, and they do different jobs:
@@ -3290,35 +3381,36 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	const std::string& root = contentManager().contentRoot();
 	AppContext ctx = makeContext();
 
+	(void)root;
 	std::unordered_set<std::string> openRel;
 	for (const auto& tab : m_tabs)
 	{
-		if (tab.assetPath.empty()) continue;
-		const std::string rel =
-			CollabController::projectRelativeAssetPath(tab.assetPath, root);
-		if (rel.empty() || !CollabController::isSyncableAsset(rel)) continue;
-		// The extension only says "authored container"; the type inside decides.
-		// A `.hasset` is equally the wrapper around a 40 MB mesh.
-		if (!CollabController::isSyncableAssetType(
-		        EditorAssetTypeCache::assetTypeOf(tab.assetPath)))
-			continue;
-		openRel.insert(rel);
+		const std::string key = collabSyncKey(tab.assetPath);
+		if (key.empty()) continue;
+		openRel.insert(key);
 
-		// Ask the host about this asset the first time we see its tab. Idempotent,
-		// so this is just "have we asked yet".
-		m_collab.beginAssetEditSession(rel);
+		// Ask the host about this the first time we see its tab. Idempotent, so
+		// this is just "have we asked yet".
+		m_collab.beginAssetEditSession(key);
 
-		publishDocDeltas(tab.assetPath, rel);
+		publishDocDeltas(tab.assetPath, key);
 
 		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
-		if (!m_collab.beginAssetEdit(rel))
+		if (!m_collab.beginAssetEdit(key))
 			continue;   // held by someone else, or the host has not answered yet
-		if (!m_collab.ownsAssetLock(rel))
+		if (!m_collab.ownsAssetLock(key))
 			continue;   // claim in flight — the grant is one round trip away
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
-		if (EditorUI::saveAsset(ctx, tab.assetPath)) last = nowMs;
+		if (!EditorUI::saveAsset(ctx, tab.assetPath)) continue;
+		last = nowMs;
+		// Content assets publish themselves through ContentManager::saveAsset's
+		// hook. A C++ class does not go anywhere near the ContentManager — it is
+		// raw text I/O — so its whole-file push has to happen here. (It has no
+		// item structure to send deltas for either: it is a text buffer.)
+		if (key.rfind(kSourceKeyPrefix, 0) == 0)
+			m_collab.publishAsset(key, tab.assetPath);
 	}
 
 	// Locks whose tab is gone are released — holding an asset nobody here is
@@ -3354,15 +3446,21 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 //     we took the lock the first diff would announce everything the peer did
 //     while we watched as if it were ours.
 void EditorApplication::publishDocDeltas(const std::string& absPath,
-                                         const std::string& rel)
+                                         const std::string& key)
 {
 	if (!m_collab.inSession()) return;
 
-	const bool owned = m_collab.ownsAssetLock(rel);
-	const bool dirty = EditorUI::tabHasUnsavedEdits(absPath);
+	const bool owned = m_collab.ownsAssetLock(key);
+	// The two editor-owned graphs have no panel dirty flag — the level script is
+	// saved with the scene and the GameInstance graph writes itself on every edit
+	// — so they are diffed whenever we hold them. The diff is what decides whether
+	// anything actually changed, and it returns nothing when nothing did.
+	const bool alwaysDiff = (key == LevelScriptPanel::kTabPath ||
+	                         key == GameInstancePanel::kTabPath);
+	const bool dirty = alwaysDiff || EditorUI::tabHasUnsavedEdits(absPath);
 	if (owned && !dirty) return;   // nothing of ours to send
 
-	CollabDocSync::DocBindings docs = EditorUI::collabDocsFor(absPath);
+	CollabDocSync::DocBindings docs = collabDocsForTab(absPath);
 	if (docs.empty()) return;
 
 	std::vector<HE::Net::CollabSession::DocDelta> batch;
@@ -3374,7 +3472,7 @@ void EditorApplication::publishDocDeltas(const std::string& absPath,
 	}
 	if (batch.empty()) return;
 
-	if (!m_collab.publishDocDeltas(rel, batch))
+	if (!m_collab.publishDocDeltas(key, batch))
 	{
 		// Too large for the wire (or the lock slipped). The whole-file autosave
 		// is the fallback — force it on the next pass rather than dropping the
@@ -3386,17 +3484,33 @@ void EditorApplication::publishDocDeltas(const std::string& absPath,
 // A peer's item-level edit. Applied to the LIVE document rather than the file,
 // so the tab keeps its canvas, selection and undo history.
 void EditorApplication::applyRemoteDocDeltas(
-	const std::string& rel,
+	const std::string& key,
 	const std::vector<HE::Net::CollabSession::DocDelta>& batch)
 {
-	const std::string abs = contentManager().resolveSavePath(rel);
-	CollabDocSync::DocBindings docs = EditorUI::collabDocsFor(abs);
+	// The editor-owned documents are addressed by their key directly; a content
+	// asset's tab is its absolute path.
+	const bool editorOwned = (key == LevelScriptPanel::kTabPath ||
+	                          key == GameInstancePanel::kTabPath);
+	const std::string tabPath = editorOwned ? key : collabLocalPath(key);
+	if (tabPath.empty()) return;
+
+	CollabDocSync::DocBindings docs = collabDocsForTab(tabPath);
 	if (docs.empty()) return;   // nobody has that tab open — the file sync covers it
 
+	bool any = false;
 	for (CollabDocSync::DocBinding& d : docs)
 	{
 		if (!d.adapter || !d.mirror) continue;
-		CollabDocSync::applyDeltas(*d.adapter, *d.mirror, d.scope, batch);
+		if (CollabDocSync::applyDeltas(*d.adapter, *d.mirror, d.scope, batch)) any = true;
+	}
+
+	// The GameInstance graph is a project file that nothing else in the session
+	// carries, and the app runtime holds a compiled copy — both have to follow, or
+	// the peer's edit exists only in this editor's memory until it is touched.
+	if (any && key == GameInstancePanel::kTabPath)
+	{
+		m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
+		saveGameInstanceGraph();
 	}
 	// Deliberately NOT marked dirty. The holder's whole-file autosave is what
 	// writes this into our project a moment later; flagging the tab here would
@@ -3467,7 +3581,12 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 	// the new content up. Writing the file rather than deserializing per asset
 	// type is what keeps this uniform across HorizonCode, materials, UI widgets,
 	// particle and animator graphs and scenes alike.
-	const std::string full = contentManager().resolveSavePath(relativePath);
+	//
+	// collabLocalPath, not resolveSavePath: a C++ class lives under
+	// <project>/Source, not under Content, and resolving it against the content
+	// root would drop the peer's file into the wrong tree.
+	const std::string full = collabLocalPath(relativePath);
+	if (full.empty()) return;
 	{
 		std::error_code ec;
 		std::filesystem::create_directories(std::filesystem::path(full).parent_path(), ec);
@@ -3477,7 +3596,10 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 		          static_cast<std::streamsize>(bytes.size()));
 		if (!out) return;
 	}
-	contentManager().loadAsset(relativePath);
+	// Only content assets are registered with the ContentManager; a raw source
+	// file has nothing to reload there. The open tab is refreshed by the caller.
+	if (relativePath.rfind(kSourceKeyPrefix, 0) != 0)
+		contentManager().loadAsset(relativePath);
 }
 
 AppContext EditorApplication::makeContext()
@@ -4012,6 +4134,8 @@ void EditorApplication::openScene(const std::string& path)
 
 	SceneSerializer serializer;
 	m_editorWorld->clear();
+	// A different scene brings a different level script — see onWorldReplaced.
+	m_levelScriptMirror = {};
 	if (serializer.load(*m_editorWorld, path, SerializeFormat::JSON))
 	{
 		m_currentScenePath = path;

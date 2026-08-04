@@ -10,7 +10,11 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/HorizonScene.h>
 
+#include "TestFsUtil.h"
+
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -21,6 +25,8 @@
 // between them. That is the seam a fake can never cover — a scene that
 // serializes but fails to reload, or a snapshot merged into the joiner's world
 // instead of replacing it, would pass every protocol test and still be broken.
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -748,6 +754,151 @@ TEST_CASE("Live sync: a HorizonCode graph edit reaches the peer node by node")
     CHECK(client.beginAssetEdit(asset));
 }
 
+TEST_CASE("Live sync: the level script and the GameInstance graph travel like any document")
+{
+    // Neither is a file under Content: the level script lives in the world (it
+    // reached peers only in the JOIN SNAPSHOT before), and the GameInstance graph
+    // sits at <project>/GameInstance.hcode, outside the content root, so the
+    // content-relative key could never name it. Both now sync under their
+    // reserved tab path — one string per session, because every peer is in the
+    // same scene and the same project.
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // The two reserved keys, exactly as EditorApplication::collabSyncKey produces
+    // them (the panels' kTabPath constants).
+    const std::string kLevelScript  = "::LevelScript::";
+    const std::string kGameInstance = "::GameInstance::";
+
+    // Distinct subjects, or one lock would arbitrate both documents.
+    CHECK(CollabController::assetSubject(kLevelScript) !=
+          CollabController::assetSubject(kGameInstance));
+
+    HorizonCode::Graph hostLevel, clientLevel, hostGI, clientGI;
+    CollabDocSync::DocMirror hLevelM, cLevelM, hGiM, cGiM;
+    for (auto* pair : { &hLevelM, &cLevelM }) (void)pair;
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(hostLevel),   hLevelM,
+                        CollabDocSync::Scope::Primary);
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(clientLevel), cLevelM,
+                        CollabDocSync::Scope::Primary);
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(hostGI),      hGiM,
+                        CollabDocSync::Scope::Primary);
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(clientGI),    cGiM,
+                        CollabDocSync::Scope::Primary);
+
+    client.onRemoteDocDeltas([&](const std::string& key,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        // The key is what routes a batch to the right document — the two graphs
+        // are otherwise indistinguishable.
+        if (key == kLevelScript)
+            CollabDocSync::applyDeltas(*CollabDocSync::forHorizonCodeGraph(clientLevel),
+                                       cLevelM, CollabDocSync::Scope::Primary, b);
+        else if (key == kGameInstance)
+            CollabDocSync::applyDeltas(*CollabDocSync::forHorizonCodeGraph(clientGI),
+                                       cGiM, CollabDocSync::Scope::Primary, b);
+    });
+
+    for (const std::string& key : { kLevelScript, kGameInstance })
+    {
+        host.beginAssetEditSession(key);
+        REQUIRE(pumpUntil(host, client, [&] {
+            return host.assetEditState(key) ==
+                   CollabController::AssetEditState::Editable;
+        }));
+        REQUIRE(host.beginAssetEdit(key));
+        REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(key); }));
+    }
+
+    HorizonCode::Node onLoaded;
+    onLoaded.type = HorizonCode::NodeType::Event;
+    onLoaded.s    = "OnLevelLoaded";
+    hostLevel.addNode(onLoaded);
+
+    HorizonCode::Node onInit;
+    onInit.type = HorizonCode::NodeType::Event;
+    onInit.s    = "OnInit";
+    hostGI.addNode(onInit);
+
+    std::vector<HE::Net::CollabSession::DocDelta> lvl, gi;
+    CollabDocSync::diffInto(*CollabDocSync::forHorizonCodeGraph(hostLevel), hLevelM,
+                            CollabDocSync::Scope::Primary, lvl);
+    CollabDocSync::diffInto(*CollabDocSync::forHorizonCodeGraph(hostGI), hGiM,
+                            CollabDocSync::Scope::Primary, gi);
+    REQUIRE(host.publishDocDeltas(kLevelScript,  lvl));
+    REQUIRE(host.publishDocDeltas(kGameInstance, gi));
+
+    REQUIRE(pumpUntil(host, client, [&] {
+        return clientLevel.nodes.size() == 1 && clientGI.nodes.size() == 1;
+    }));
+    CHECK(HorizonCode::toJson(clientLevel) == HorizonCode::toJson(hostLevel));
+    CHECK(HorizonCode::toJson(clientGI)    == HorizonCode::toJson(hostGI));
+    // Each landed in its OWN document — the routing key is doing real work.
+    CHECK(clientLevel.nodes[0].s == "OnLevelLoaded");
+    CHECK(clientGI.nodes[0].s    == "OnInit");
+}
+
+TEST_CASE("Live sync: a C++ class reaches the peer as a whole file")
+{
+    // Raw .h/.cpp text has no item structure to diff, so it takes the whole-file
+    // path — but under the reserved Source key, because it lives outside Content
+    // and resolving it against the content root would drop the peer's file into
+    // the wrong tree.
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string key = "::Source::PlayerPawn.h";
+
+    std::string gotPath;
+    std::vector<std::uint8_t> gotBytes;
+    client.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>& b) {
+        gotPath = p; gotBytes = b;
+    });
+
+    // Write a real file for publishAsset to read.
+    const fs::path tmp = fs::temp_directory_path() / "he_collab_src.h";
+    const std::string contents = "#pragma once\nclass PlayerPawn { int hp = 100; };\n";
+    { std::ofstream f(tmp); f << contents; }
+
+    host.requestAssetLock(key);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(key); }));
+
+    host.publishAsset(key, tmp.string());
+    REQUIRE(pumpUntil(host, client, [&] { return !gotBytes.empty(); }));
+
+    CHECK(gotPath == key);
+    CHECK(std::string(gotBytes.begin(), gotBytes.end()) == contents);
+
+    he_test::removeQuiet(tmp);
+}
+
 TEST_CASE("Live sync: the designer and the logic graph of one widget travel separately")
 {
     HorizonWorld hostWorld;
@@ -933,6 +1084,21 @@ TEST_CASE("isSyncableAsset accepts the extensions the engine actually writes")
     // are the largest files in a project and belong on the source-control path.
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Models/Hero.fbx"));
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Textures/Rock.png"));
+}
+
+TEST_CASE("isSyncableAsset admits the C++ tree under its reserved key prefix")
+{
+    // C++ classes are raw .h/.cpp under <project>/Source — no HAsset header to
+    // sniff, and outside the content root, so they travel under a reserved key
+    // (EditorApplication::collabSyncKey). The extension gate has to let those
+    // through, and the TYPE gate must not be applied to them: it would read a
+    // header-less text file as Unknown and drop it.
+    CHECK(CollabController::isSyncableAsset("::Source::GameLogicRuntime.h"));
+    CHECK(CollabController::isSyncableAsset("::Source::Player/PlayerPawn.cpp"));
+
+    // A bare Source-looking path is NOT the same thing — the prefix is what
+    // keeps the two key spaces from colliding with a Content/Source folder.
+    CHECK_FALSE(CollabController::isSyncableAsset("Source/Player.h"));
 }
 
 TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")

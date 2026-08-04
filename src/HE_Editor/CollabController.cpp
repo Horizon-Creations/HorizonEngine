@@ -1244,6 +1244,12 @@ std::string CollabController::projectRelativeAssetPath(const std::string& absolu
 
 bool CollabController::isSyncableAsset(const std::string& relativePath)
 {
+	// The C++ tree travels under its own reserved key prefix (see
+	// EditorApplication::collabSyncKey). Those are raw .h/.cpp text files with no
+	// HAsset header at all, so they are admitted here and skip the type sniff —
+	// which would read them as Unknown and drop them.
+	if (relativePath.rfind("::Source::", 0) == 0) return true;
+
 	const std::size_t dot = relativePath.find_last_of('.');
 	if (dot == std::string::npos) return false;
 
@@ -1332,8 +1338,10 @@ void CollabController::publishAsset(const std::string& relativePath,
 	// `.hasset` is equally the container around an imported mesh or texture, and
 	// those are exactly what must not travel this channel. This hook fires for
 	// EVERY ContentManager save, including an import, so the type gate belongs
-	// here and not only where the editor walks its open tabs.
-	if (!isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
+	// here and not only where the editor walks its open tabs. C++ sources are
+	// exempt: they have no HAsset header to sniff.
+	if (relativePath.rfind("::Source::", 0) != 0 &&
+	    !isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	const std::uint64_t subject = assetSubject(relativePath);
 

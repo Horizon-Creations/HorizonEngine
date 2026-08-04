@@ -7,6 +7,7 @@
 #include "EditorUndo.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
+#include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
@@ -486,9 +487,35 @@ private:
 	// item structure. Locks stay lazy — but "may I edit this" is answered by the
 	// HOST when the tab opens, not guessed from the replicated table.
 	void updateAssetCollabSync(std::uint64_t nowMs);
-	void publishDocDeltas(const std::string& absPath, const std::string& rel);
-	void applyRemoteDocDeltas(const std::string& rel,
+	void publishDocDeltas(const std::string& absPath, const std::string& key);
+	void applyRemoteDocDeltas(const std::string& key,
 	                          const std::vector<HE::Net::CollabSession::DocDelta>& batch);
+
+	// ── Sync keys ────────────────────────────────────────────────────────────
+	// The string a syncable thing is addressed by across peers. Three shapes,
+	// because not everything a session shares is a file under Content:
+	//
+	//   "Materials/Rock.hasset"   a content asset, relative to the Content root
+	//   "::Source::Player.h"      a C++ source file, relative to <project>/Source
+	//   "::LevelScript::"         the scene's HorizonCode graph — no file at all
+	//   "::GameInstance::"        the project's GameInstance graph (<project>/…)
+	//
+	// The reserved prefixes are the existing virtual TAB paths, so a tab is its
+	// own key and nothing has to be mapped. A bare content-relative path stays the
+	// wire format it already was.
+	std::string collabSyncKey(const std::string& tabPath);
+	// Where a key lives locally; empty for a document that has no file of its own.
+	std::string collabLocalPath(const std::string& key);
+	// The project directory (currentProject().path may name the .heproj itself).
+	std::string projectRoot();
+	// Bindings for a tab, including the two documents the editor owns rather than
+	// a panel (the level script lives in the world, the GameInstance graph here).
+	CollabDocSync::DocBindings collabDocsForTab(const std::string& tabPath);
+	// Reserved key prefix for the C++ tree.
+	static constexpr const char* kSourceKeyPrefix = "::Source::";
+	// Mirrors for the two editor-owned documents (panels keep their own).
+	CollabDocSync::DocMirror m_levelScriptMirror;
+	CollabDocSync::DocMirror m_gameInstanceMirror;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
