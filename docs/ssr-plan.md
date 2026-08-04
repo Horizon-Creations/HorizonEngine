@@ -374,7 +374,7 @@ aktuellen Frame-Farbe (kein Selbst-Feedback wie im Forward-Entwurf).
 **Verifikation:** Kamerafahrt (`HE_DUMP_GIROTATE`-Muster) → kein sichtbares Ghosting/Schweifen;
 Profiler-Capture: SSR-Pass unter Budget (7.).
 
-**Trace v3 (2026-08-04, Perf + Glossy):** Der March ist linear in t — beide
+**Trace v4 (2026-08-04, Perf + Glossy — v3 war der Lateral-Streak-Fix):** Der March ist linear in t — beide
 per-Step-mat4-Multiplikationen sind aus der Schleife gehoben (`clip(t) =
 clipP + clipR·t`, `viewZ(t) = zP + zR·t`), und die Szenen-Tiefe am Sample
 kommt aus zwei Dot-Products (`heSceneZ`, camFwd-Projektion von invViewProj)
