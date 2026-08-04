@@ -77,6 +77,30 @@ public:
 	// Point `origin` at `url`, creating or updating it.
 	static bool setRemote(const std::filesystem::path& root, const std::string& url,
 	                      std::string* err = nullptr);
+
+	// ── Credentials ──────────────────────────────────────────────────────────
+	// The token is handed to git's OWN credential machinery and stored nowhere
+	// else: `git credential approve` routes it into whichever helper is
+	// configured (the platform keychain), and git-lfs authenticates through the
+	// same chain — which is exactly why a custom store would be wrong.
+
+	// The configured credential.helper, or empty when none is set anywhere.
+	static std::string credentialHelper(const std::filesystem::path& root);
+
+	// Configure the platform-default helper FOR THIS REPO when none is set:
+	// osxkeychain on macOS, manager on Windows, cache on Linux. Fills
+	// `outConfigured` with what was chosen (empty when one already existed).
+	static bool ensureCredentialHelper(const std::filesystem::path& root,
+	                                   std::string* outConfigured,
+	                                   std::string* err = nullptr);
+
+	// Feed one credential to the configured helper. `secret` travels via stdin,
+	// never argv (argv is world-readable in a process list).
+	static bool approveCredential(const std::filesystem::path& root,
+	                              const std::string& host,
+	                              const std::string& username,
+	                              const std::string& secret,
+	                              std::string* err = nullptr);
 };
 
 } // namespace HE::Sc

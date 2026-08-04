@@ -1,6 +1,7 @@
 #include "SourceControl/GitService.h"
 
 #include "SourceControl/GitCli.h"
+#include "SourceControl/GitHubApi.h"
 #include "SourceControl/RepoConfig.h"
 #include "ScLog.h"
 
@@ -69,11 +70,23 @@ void GitService::requestInit(const std::filesystem::path& projectRoot, bool lfsA
 	push(std::move(c));
 }
 
-void GitService::requestCommitAll(const std::string& message)
+void GitService::requestCommitAll(const std::string& message, bool pushAfter)
 {
 	if (!m_worker.joinable()) return;
 	Command c{ Kind::CommitAll, {} };
 	c.text = message;
+	c.flag = pushAfter;
+	push(std::move(c));
+}
+
+void GitService::requestSetupGitHub(const std::string& repoName, bool isPrivate,
+                                    std::string token)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::SetupGitHub, {} };
+	c.text   = repoName;
+	c.flag   = isPrivate;
+	c.secret = std::move(token);
 	push(std::move(c));
 }
 
@@ -181,7 +194,16 @@ void GitService::workerMain()
 			std::string err;
 			if (!GitCli::addAll(m_root, &err))            { ev.error = err; break; }
 			if (!GitCli::commit(m_root, cmd.text, &err))  { ev.error = err; break; }
-			ev.info    = "Committed.";
+			ev.info = "Committed.";
+			// Auto-push, only where a push can even go. A failed push after a
+			// successful commit is reported as exactly that — the commit stands.
+			if (cmd.flag && !GitCli::remoteUrl(m_root).empty())
+			{
+				RepoStatus probe;
+				const bool upstream = GitCli::status(m_root, probe) && !probe.upstream.empty();
+				if (GitCli::push(m_root, upstream, &err)) ev.info = "Committed and pushed.";
+				else ev.error = "Committed, but the push failed: " + err;
+			}
 			wantStatus = true;
 			break;
 		}
@@ -198,6 +220,38 @@ void GitService::workerMain()
 			std::string err;
 			if (!GitCli::pull(m_root, &err)) { ev.error = err; break; }
 			ev.info    = "Pulled.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::SetupGitHub:
+		{
+			std::string err;
+			CreatedRepo repo;
+			const bool created = GitHubApi::createRepo(cmd.secret, cmd.text, cmd.flag,
+			                                           repo, &err);
+			// The steps after creation reuse the token once (credential approve)
+			// and then it is gone — wiped whether the flow succeeded or not.
+			bool ok = created;
+			if (ok) ok = GitCli::setRemote(m_root, repo.cloneUrl, &err);
+			std::string helperChosen;
+			if (ok) ok = GitCli::ensureCredentialHelper(m_root, &helperChosen, &err);
+			if (ok)
+			{
+				// x-access-token is the username GitHub expects when the password
+				// field carries a PAT.
+				ok = GitCli::approveCredential(m_root, "github.com", "x-access-token",
+				                               cmd.secret, &err);
+			}
+			std::fill(cmd.secret.begin(), cmd.secret.end(), '\0');
+			cmd.secret.clear();
+
+			if (ok) ok = GitCli::push(m_root, /*upstreamConfigured=*/false, &err);
+
+			if (!ok) { ev.error = err; wantStatus = true; break; }
+			ev.info = "Created " + repo.fullName + " on GitHub and pushed.";
+			if (!helperChosen.empty())
+				ev.info += " (Credential helper \"" + helperChosen + "\" was configured "
+				           "for this repository; the token is stored there.)";
 			wantStatus = true;
 			break;
 		}

@@ -57,7 +57,14 @@ void GitController::requestInit(bool lfsAvailable)
 void GitController::requestCommitAll(const std::string& message)
 {
 	if (!mayModify() || message.empty()) return;
-	m_service.requestCommitAll(message);
+	m_service.requestCommitAll(message, autoPushAfterCommit);
+}
+
+void GitController::requestSetupGitHub(const std::string& repoName, bool isPrivate,
+                                       std::string token)
+{
+	if (!mayModify() || repoName.empty() || token.empty()) return;
+	m_service.requestSetupGitHub(repoName, isPrivate, std::move(token));
 }
 
 void GitController::requestPush()

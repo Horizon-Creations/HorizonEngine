@@ -2,6 +2,7 @@
 #include "EditorApplication.h"    // AppContext
 #include "GitController.h"
 
+#include <Diagnostics/GlobalState.h>
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
 
@@ -23,6 +24,12 @@ namespace {
 // remote URL survives only until it is applied.
 char s_commitMessage[512] = "";
 char s_remoteUrl[512]     = "";
+// GitHub setup inputs. The token buffer is wiped the moment it is handed off —
+// it must not sit in static memory for the rest of the session.
+char s_ghRepoName[128] = "";
+char s_ghToken[256]    = "";
+bool s_ghPrivate       = true;
+bool s_autoPushLoaded  = false;
 
 // Colours chosen so the meaning survives a glance: green for "will be
 // committed", amber for "changed but not staged", grey for "git does not know
@@ -302,8 +309,44 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::SeparatorText("Remote");
 		if (git->remoteUrl().empty())
 		{
-			ImGui::TextWrapped("No remote yet. Paste the repository URL from GitHub, "
-			                   "GitLab or Azure DevOps:");
+			// Two ways in: let the editor create the repository on GitHub, or
+			// paste the URL of one that already exists (any provider).
+			ImGui::TextWrapped("Create the repository on GitHub directly:");
+
+			if (s_ghRepoName[0] == '\0' && !git->projectRoot().empty())
+			{
+				// Default to the project folder's name — right nearly always,
+				// editable when not.
+				const std::string def = git->projectRoot().filename().string();
+				std::snprintf(s_ghRepoName, sizeof(s_ghRepoName), "%s", def.c_str());
+			}
+			ImGui::SetNextItemWidth(180.0f);
+			ImGui::InputText("Name##gh", s_ghRepoName, sizeof(s_ghRepoName));
+			ImGui::SameLine();
+			ImGui::Checkbox("Private", &s_ghPrivate);
+
+			ImGui::SetNextItemWidth(-140.0f);
+			ImGui::InputTextWithHint("##ghtoken", "Personal access token",
+			                         s_ghToken, sizeof(s_ghToken),
+			                         ImGuiInputTextFlags_Password);
+			ImGui::SameLine();
+			ImGui::BeginDisabled(git->busy() || s_ghToken[0] == '\0' ||
+			                     s_ghRepoName[0] == '\0' || st.initialCommit);
+			if (ImGui::Button("Create & push", ImVec2(130.0f, 0.0f)))
+			{
+				git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, std::string(s_ghToken));
+				// Wipe, not clear: the bytes must go, not just the length.
+				std::fill(std::begin(s_ghToken), std::end(s_ghToken), '\0');
+			}
+			ImGui::EndDisabled();
+			ImGui::TextDisabled("Token: github.com/settings/tokens — classic, 'repo' scope. "
+			                    "It is handed to git's credential helper, stored nowhere else.");
+			if (st.initialCommit)
+				ImGui::TextDisabled("Make the first commit before setting up the remote.");
+
+			ImGui::Spacing();
+			ImGui::TextWrapped("Or paste an existing repository URL (GitHub, GitLab, "
+			                   "Azure DevOps):");
 			ImGui::SetNextItemWidth(-90.0f);
 			ImGui::InputTextWithHint("##remoteurl", "https://github.com/you/project.git",
 			                         s_remoteUrl, sizeof(s_remoteUrl));
@@ -325,6 +368,23 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::SameLine();
 			if (ImGui::Button("Pull", ImVec2(86.0f, 0.0f))) git->requestPull();
 			ImGui::EndDisabled();
+
+			// Auto-push: commit lands on the remote in the same action. The
+			// preference survives restarts — per user, not per project file, so
+			// nothing project-visible changes for collaborators.
+			if (!s_autoPushLoaded)
+			{
+				s_autoPushLoaded = true;
+				git->autoPushAfterCommit = GlobalState::getInstance()
+					.getCustomConfigBool("GitAutoPushAfterCommit", false);
+			}
+			if (ImGui::Checkbox("Push automatically after each commit",
+			                    &git->autoPushAfterCommit))
+			{
+				GlobalState::getInstance().setCustomConfigEntry(
+					"GitAutoPushAfterCommit", git->autoPushAfterCommit);
+			}
+
 			if (st.initialCommit)
 				ImGui::TextDisabled("Make the first commit before pushing.");
 			else if (st.behind > 0)

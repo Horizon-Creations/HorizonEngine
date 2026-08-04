@@ -217,4 +217,66 @@ bool GitCli::setRemote(const std::filesystem::path& root, const std::string& url
 	return runChecked(root, { "remote", "set-url", "origin", url }, kLocalTimeoutMs, err);
 }
 
+std::string GitCli::credentialHelper(const std::filesystem::path& root)
+{
+	const GitResult r = run(root, { "config", "--get", "credential.helper" }, 5000);
+	return r.ok ? trimTrailing(r.out) : std::string{};
+}
+
+bool GitCli::ensureCredentialHelper(const std::filesystem::path& root,
+                                    std::string* outConfigured, std::string* err)
+{
+	if (outConfigured) outConfigured->clear();
+	if (!credentialHelper(root).empty()) return true;   // someone already chose
+
+#if defined(__APPLE__)
+	const char* helper = "osxkeychain";       // the macOS keychain
+#elif defined(_WIN32)
+	const char* helper = "manager";           // Git Credential Manager, ships with Git for Windows
+#else
+	// No universal secure store on Linux; a bounded in-memory cache is the only
+	// default that never writes a plaintext file. NEVER `store` — that is a
+	// token in a world-readable file, silently.
+	const char* helper = "cache --timeout=3600";
+#endif
+
+	// --local: this decision is scoped to the repository that asked for it, not
+	// imposed on the user's global git config.
+	if (!runChecked(root, { "config", "--local", "credential.helper", helper },
+	                kLocalTimeoutMs, err))
+	{
+		return false;
+	}
+	if (outConfigured) *outConfigured = helper;
+	HE_SC_INFO("Configured repo-local credential.helper: %s", helper);
+	return true;
+}
+
+bool GitCli::approveCredential(const std::filesystem::path& root,
+                               const std::string& host,
+                               const std::string& username,
+                               const std::string& secret,
+                               std::string* err)
+{
+	HE::Proc::Options o;
+	o.exe       = "git";
+	o.args      = { "credential", "approve" };
+	o.cwd       = root;
+	o.timeoutMs = 15000;
+	o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");
+	// The credential format git defines: key=value lines, blank line to end.
+	// stdin, never argv — argv is visible to every process on the machine.
+	o.stdinData = "protocol=https\nhost=" + host + "\nusername=" + username +
+	              "\npassword=" + secret + "\n\n";
+
+	const HE::Proc::Result r = HE::Proc::run(o);
+	if (!r.ok())
+	{
+		// Whatever git printed — its own messages never echo the password field.
+		if (err) *err = r.err.empty() ? "git credential approve failed" : trimTrailing(r.err);
+		return false;
+	}
+	return true;
+}
+
 } // namespace HE::Sc

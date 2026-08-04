@@ -14,11 +14,14 @@ add_library(HorizonSourceControl SHARED
 	src/StatusParser.cpp
 	src/GitCli.cpp
 	src/RepoConfig.cpp
+	src/GitHubApi.cpp
 	src/GitService.cpp
 )
 
 # HorizonCore for HE::Proc (the subprocess runner) and the engine log.
-target_link_libraries(HorizonSourceControl PRIVATE HorizonCore)
+# HorizonNet for HttpsClient — the one REST call that creates a repository on a
+# provider; everything else goes through the git CLI.
+target_link_libraries(HorizonSourceControl PRIVATE HorizonCore HorizonNet)
 
 target_include_directories(HorizonSourceControl
 	PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
