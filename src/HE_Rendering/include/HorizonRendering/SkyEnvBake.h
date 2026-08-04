@@ -27,12 +27,17 @@ namespace HE
 
 // Ray/sphere intersection in the atmosphere model's coordinates (planet centre at
 // the origin). Returns the two hit distances; x > y means "no hit".
+//
+// "No hit" returns a NEGATIVE near distance — see the shader comment: the caller's
+// sun-visibility test is `.x > 0` → shadowed, and a miss is precisely the case
+// where the sun IS visible, so a positive sentinel collapsed the sky to black at
+// sunset.
 inline glm::vec2 AtmoRaySphereCPU(glm::vec3 ro, glm::vec3 rd, float R)
 {
 	float b = glm::dot(ro, rd);
 	float c = glm::dot(ro, ro) - R * R;
 	float d = b * b - c;
-	if (d < 0.0f) return glm::vec2(1.0e9f, -1.0e9f);
+	if (d < 0.0f) return glm::vec2(-1.0e9f, -1.0e9f);
 	d = std::sqrt(d);
 	return glm::vec2(-b - d, -b + d);
 }
@@ -99,13 +104,36 @@ inline glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
 	float day  = glm::smoothstep(-0.10f, 0.10f, sunY);
 	float dusk = glm::smoothstep(-0.14f, 0.04f, sunY) * (1.0f - glm::smoothstep(0.04f, 0.26f, sunY));
-	float toNight = 1.0f - glm::smoothstep(-0.24f, -0.06f, sunY);
+	// Raw (unclamped) elevation for the two NIGHT ramps — see the shader comment:
+	// sunY saturates at -0.3, so twilight would never reach zero at midnight.
+	float sunYd = sunDir.y;
+	float toNight = 1.0f - glm::smoothstep(-0.34f, -0.14f, sunYd);
 	// Physically-based base sky (mirrors the shader), plus the deep-night floor.
 	glm::vec3 sky = AtmoScatterCPU(glm::normalize(glm::vec3(dir.x, std::max(dir.y, 0.004f), dir.z)), sunDir); // horizon clamp (see shader)
+	// Twilight wedge — mirrors the shader; see kSkyFuncMSL for the full rationale.
+	float twi = glm::smoothstep(0.10f, -0.01f, sunY) * glm::smoothstep(-0.36f, -0.12f, sunYd);
+	if (twi > 0.0f)
+	{
+		glm::vec2 sunAz = glm::normalize(glm::vec2(sunDir.x, sunDir.z) + glm::vec2(1e-5f));
+		glm::vec2 dxz(dir.x, dir.z);
+		float hlen   = glm::length(dxz);
+		float toward = (hlen > 1e-4f)
+			? glm::clamp(glm::dot(dxz / hlen, sunAz) * 0.5f + 0.5f, 0.0f, 1.0f) : 0.5f;
+		toward = glm::mix(0.5f, toward, glm::smoothstep(0.0f, 0.06f, hlen));
+		float el     = dir.y;                                       // SIGNED — see `above`
+		float band   = std::exp(-std::max(el, 0.0f) * 5.2f);
+		float climb  = glm::clamp(std::max(el, 0.0f) * 3.4f, 0.0f, 1.0f);
+		float above  = glm::smoothstep(-0.22f, -0.01f, el);
+		glm::vec3 warm(1.00f, 0.45f, 0.17f), mid(0.62f, 0.34f, 0.52f), cool(0.20f, 0.30f, 0.62f);
+		glm::vec3 col = glm::mix(glm::mix(warm, mid, glm::smoothstep(0.0f, 0.50f, climb)),
+		                         cool, glm::smoothstep(0.35f, 1.0f, climb));
+		col = glm::mix(cool, col, toward * toward);
+		sky += col * (twi * above * (0.065f + 0.34f * band * toward * toward));
+	}
 	float h = glm::clamp(dir.y, 0.0f, 1.0f);
 	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
-	glm::vec3 ground = glm::mix(glm::vec3(0.02f,0.02f,0.03f), glm::vec3(0.24f,0.23f,0.21f), day);
-	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.12f, dir.y));
+	glm::vec3 ground = glm::mix(sky * 0.32f, glm::vec3(0.24f,0.23f,0.21f), day);
+	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.20f, dir.y));
 	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
 	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
 	float s = std::max(glm::dot(dir, sunDir), 0.0f);

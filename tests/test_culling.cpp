@@ -416,7 +416,13 @@ TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independe
 			q.push_back(static_cast<uint16_t>(c * 4095.0f + 0.5f));
 		}
 	}
-	CHECK(heFnv1a(q.data(), q.size() * sizeof(uint16_t)) == 0x5a9df978ef064f65ull);
+	// Re-pinned with the twilight-sky fix (atmoRaySphere's miss sentinel + the
+	// twilight wedge + the horizon-derived ground haze). This sun is HIGH, so the
+	// twilight terms are all zero here and the change is confined to the eight
+	// just-below-horizon texels the widened ground band now reaches: 0.0007 on a
+	// 0.24 value, a fifth of one 8-bit step. Daylight ambient is unchanged; what
+	// the fix moves is dusk and dawn, which this sun does not sample.
+	CHECK(heFnv1a(q.data(), q.size() * sizeof(uint16_t)) == 0x6991c028c3256941ull);
 
 	// Row granularity must reproduce the whole-face path EXACTLY: OpenGL fans the
 	// six faces out row-per-task over the thread pool while Metal loops the rows
@@ -460,6 +466,66 @@ TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independe
 	CHECK(atOff.r == doctest::Approx(9.899f).epsilon(0.01));
 	// Deterministic across calls (pure functions, no cached state).
 	CHECK(HE::BuildSkyEnvFace(4, 0, sun) == HE::BuildSkyEnvFace(4, 0, sun));
+}
+
+// The sky used to fall off a cliff at sunset: atmoRaySphere returned a POSITIVE
+// near distance for "the sun ray misses the planet", which the sun-visibility test
+// read as "shadowed" — so every sample whose sun ray cleared the planet entirely
+// was skipped, and the scattering integral hit exactly zero at sunY = 0. On screen
+// that was a black sky under clouds the sun was still lighting, with a hard bright
+// band along the horizon. This pins the shape of the ramp, not its exact values.
+TEST_CASE("SkyEnvBake: the sky darkens smoothly through sunset, never off a cliff")
+{
+	// Sun sinking along +X, sampled from well above the horizon into deep night.
+	const float elev[] = { 0.20f, 0.10f, 0.05f, 0.02f, 0.0f, -0.02f, -0.05f,
+	                       -0.09f, -0.14f, -0.20f, -0.28f };
+	auto sunAt = [](float y) {
+		return glm::normalize(glm::vec3(std::sqrt(std::max(1e-6f, 1.0f - y * y)), y, 0.0f));
+	};
+	auto lum = [](const glm::vec3& c) { return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b; };
+
+	const glm::vec3 zenith(0.0f, 1.0f, 0.0f);
+	const glm::vec3 antiSun = glm::normalize(glm::vec3(-1.0f, 0.03f, 0.0f)); // horizon, away from the sun
+
+	float prevZ = lum(HE::SkyColorCPU(zenith,  sunAt(elev[0])));
+	float prevA = lum(HE::SkyColorCPU(antiSun, sunAt(elev[0])));
+	for (size_t i = 1; i < std::size(elev); ++i)
+	{
+		const glm::vec3 s = sunAt(elev[i]);
+		const float z = lum(HE::SkyColorCPU(zenith,  s));
+		const float a = lum(HE::SkyColorCPU(antiSun, s));
+
+		// Never black. The old code gave 0.008 at the zenith while the sun was
+		// still ABOVE the horizon, and 0.019 on the anti-sun horizon.
+		CHECK(z > 0.015f);
+		CHECK(a > 0.015f);
+		// No step steeper than 3x — the cliff was 9x at the zenith and 35x on the
+		// anti-sun horizon in ONE step.
+		CHECK(prevZ < z * 3.0f);
+		CHECK(prevA < a * 3.0f);
+		// The zenith only ever dims. The anti-solar horizon is allowed a small
+		// rise: that band really does brighten for a few minutes after sunset
+		// (the Belt of Venus), and the twilight wedge reproduces it. Bounded, so
+		// an accidental flat lift of the whole sky still trips this.
+		CHECK(z <= prevZ + 1e-4f);
+		CHECK(a <= prevA * 1.25f + 1e-4f);
+		prevZ = z; prevA = a;
+	}
+
+	// Twilight is warm toward the sun and cool away from it — the wedge is a
+	// direction-dependent term, not a flat lift of the whole sky.
+	const glm::vec3 dusk    = sunAt(-0.08f);
+	const glm::vec3 toSun   = HE::SkyColorCPU(glm::normalize(glm::vec3( 1.0f, 0.05f, 0.0f)), dusk);
+	const glm::vec3 awaySun = HE::SkyColorCPU(glm::normalize(glm::vec3(-1.0f, 0.05f, 0.0f)), dusk);
+	CHECK(toSun.r > toSun.b);        // warm on the sun side
+	CHECK(awaySun.b > awaySun.r);    // cool opposite it
+	CHECK(toSun.r > awaySun.r * 3.0f);
+
+	// ...and it is gone by the middle of the night, rather than leaving a
+	// permanent glow pinned at the sunY clamp.
+	const glm::vec3 midnight = HE::SkyColorCPU(glm::normalize(glm::vec3(1.0f, 0.05f, 0.0f)),
+	                                           glm::vec3(0.0f, -1.0f, 0.0f));
+	CHECK(midnight.r < midnight.b);
 }
 
 TEST_CASE("SeedWeatherParticles: both backend lane layouts carry identical particles")

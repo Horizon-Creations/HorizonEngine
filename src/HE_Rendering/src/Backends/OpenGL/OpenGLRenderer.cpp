@@ -1220,9 +1220,12 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
 	// Day/night/dusk drive the cloud colour (independent of the drift clock).
-	float sunY = clamp(sunDir.y, -0.2, 1.0);
+	// Same windows skyColor() uses, so the clouds and the sky behind them enter and
+	// leave sunset together instead of the clouds snapping to moonlit blue while
+	// the sky is still glowing.
+	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	float day  = smoothstep(-0.10, 0.10, sunY);
-	float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+	float dusk = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
 
 	// Forward-scatter phase (view vs. sun) — constant along the ray, so compute once.
 	float costh = max(dot(dir, sunDir), 0.0);
@@ -1260,7 +1263,10 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 
 			// Higher-contrast shading: dark cool shaded base, sun-coloured lit tops.
 			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
-			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
+			// Moonlit crown. Was nearly twenty times the night sky's own radiance,
+			// which is what made night clouds read as a lit overcast floating over
+			// a black sky; a real moonlit cloud is a few times the sky, not twenty.
+			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.13, 0.15, 0.24), lit);
 			vec3 cloudCol = mix(nightCol, dayCol, day);
 			vec3 duskTop  = sunColor * vec3(1.5, 0.85, 0.42);
 			// Even shaded cloud bodies pick up sunset warmth (0.35 floor), lit faces more —
@@ -1377,9 +1383,12 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	// undersampling shows as fine filterable dither, not coarse speckle/grain.
 	float jitter = skyIgn(gl_FragCoord.xy);
 
-	float sunY  = clamp(sunDir.y, -0.2, 1.0);
+	// Same windows skyColor() uses, so the clouds and the sky behind them enter and
+	// leave sunset together instead of the clouds snapping to moonlit blue while
+	// the sky is still glowing.
+	float sunY  = clamp(sunDir.y, -0.3, 1.0);
 	float day   = smoothstep(-0.10, 0.10, sunY);
-	float dusk  = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
+	float dusk  = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
 	float costh = max(dot(dir, sunDir), 0.0);
 	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
 
@@ -1466,12 +1475,21 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 			float powder = 1.0 - exp(-dens * mix(3.0, 4.5, fluff)); // softer fraying edges when fluffy
 			float lit    = sun * powder;
 			vec3 dayCol   = mix(vec3(0.17, 0.20, 0.29), sunColor * 1.12, lit);
-			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.26, 0.29, 0.45), lit);
+			// Moonlit crown. Was nearly twenty times the night sky's own radiance,
+			// which is what made night clouds read as a lit overcast floating over
+			// a black sky; a real moonlit cloud is a few times the sky, not twenty.
+			vec3 nightCol = mix(vec3(0.015, 0.018, 0.035), vec3(0.13, 0.15, 0.24), lit);
 			vec3 cloudCol = mix(nightCol, dayCol, day);
 			vec3 duskTop  = sunColor * vec3(1.5, 0.85, 0.42);
 			// Even shaded cloud bodies pick up sunset warmth (0.35 floor), lit faces more —
 			// so the whole cloud glows golden/orange at dawn & dusk, not just the rim.
 			cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
+			// Twilight fill: with the sun down, what lights a cloud IS the twilight
+			// sky around it. Taking it from baseSky rather than a constant ties the
+			// two together — the clouds cannot stay lit once the sky has gone out.
+			// (3D path only: the dome path's low-res pre-pass calls it with
+			// baseSky = 0, so the same term there would not survive the round trip.)
+			cloudCol += baseSky * ((1.0 - day) * (0.30 + 0.50 * lit));
 			cloudCol += sunColor * mix(vec3(1.0), vec3(1.25, 0.78, 0.42), dusk) * (phase * sun * 0.75 * max(day, dusk));
 			cloudCol *= mix(0.30, 1.32, hf);                      // strong base→crown contrast (3D relief)
 			cloudCol += vec3(0.07, 0.10, 0.17) * ((1.0 - hf) * day * 0.25);
@@ -2353,12 +2371,20 @@ static const char* kSkyFuncGLSL = R"GLSL(
 // and the horizon's pale saturation all EMERGE from the optical-depth integrals
 // instead of hand-tuned gradient blends. Mirrored in MSL + the CPU IBL bakes —
 // keep all four copies in sync.
+// "No hit" returns a NEGATIVE near distance. That sign matters: the caller's
+// sun-visibility test is `atmoRaySphere(p, sunDir, Rg).x > 0.0` → shadowed, and a
+// ray that misses the planet entirely is the one case where the sun is certainly
+// VISIBLE. A positive miss sentinel therefore marked every such sample shadowed,
+// which is most of the sky the moment the sun nears the horizon — atmoScatter
+// collapsed to exactly zero at sunY = 0 and the sky snapped to black at sunset.
+// The other two callers only test for a hit IN FRONT, so a negative sentinel is
+// correct for them too.
 vec2 atmoRaySphere(vec3 ro, vec3 rd, float R)
 {
 	float b = dot(ro, rd);
 	float c = dot(ro, ro) - R * R;
 	float d = b * b - c;
-	if (d < 0.0) return vec2(1.0e9, -1.0e9);
+	if (d < 0.0) return vec2(-1.0e9, -1.0e9);
 	d = sqrt(d);
 	return vec2(-b - d, -b + d);
 }
@@ -2420,10 +2446,18 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
+	// The clamp above pins everything below -0.3, which is fine for the day/dusk
+	// tints but useless for "how deep into the night are we" — at true midnight it
+	// still reads -0.3. The two night ramps therefore use the RAW elevation, so
+	// twilight actually reaches zero instead of leaving a permanent glow on the
+	// midnight horizon.
+	float sunYd = sunDir.y;
 	float day  = smoothstep(-0.10, 0.10, sunY);                 // 0 night → 1 day
 	float dusk = smoothstep(-0.14, 0.04, sunY)
 	           * (1.0 - smoothstep(0.04, 0.26, sunY));
-	float toNight = 1.0 - smoothstep(-0.24, -0.06, sunY);       // twilight vs deep night
+	// Handed over to only once the twilight wedge below has faded, so the two
+	// never leave a dark gap between them.
+	float toNight = 1.0 - smoothstep(-0.34, -0.14, sunYd);      // twilight vs deep night
 
 	// Physically-based base sky: day blue, sunset reddening and the blue hour all
 	// come from the single-scattering integral above. Below-horizon rays reuse the
@@ -2431,15 +2465,55 @@ vec3 skyColor(vec3 dir, vec3 sunDir)
 	// hard navy "ocean band" appears where the ray hits the planet after a short path.
 	vec3 sky = atmoScatter(normalize(vec3(dir.x, max(dir.y, 0.004), dir.z)), sunDir);
 
+	// ── Twilight wedge ──────────────────────────────────────────────────────
+	// Once the sun is under the horizon the 12-step single-scatter march has
+	// almost nothing left to integrate: what still lights the sky comes from
+	// hundreds of kilometres away, high up, after several scattering events —
+	// which is the whole of civil and nautical twilight. Without it the sky drops
+	// to the night floor within a couple of degrees of sunset while the clouds
+	// are still catching the sun, and the horizon reads as a hard black edge.
+	// Put back as an explicit wedge: warm at the horizon toward the sun, violet
+	// as it climbs, deep blue on the far side, fading out into the night floor.
+	float twi = smoothstep(0.10, -0.01, sunY) * smoothstep(-0.36, -0.12, sunYd);
+	if (twi > 0.0)
+	{
+		vec2  sunAz = normalize(sunDir.xz + vec2(1e-5));
+		vec2  dxz   = dir.xz;
+		float hlen  = length(dxz);
+		// Straight up and straight down have no azimuth; normalising a ~zero
+		// vector snaps to an arbitrary fixed heading, which would put the full
+		// sun-side glow on the poles. Fade to neutral instead.
+		float toward = (hlen > 1e-4)
+			? clamp(dot(dxz / hlen, sunAz) * 0.5 + 0.5, 0.0, 1.0) : 0.5;
+		toward = mix(0.5, toward, smoothstep(0.0, 0.06, hlen));
+		float el    = dir.y;                              // SIGNED — see `above`
+		float band  = exp(-max(el, 0.0) * 5.2);           // hugs the horizon
+		float climb = clamp(max(el, 0.0) * 3.4, 0.0, 1.0);// horizon → overhead
+		// The wedge is a SKY term: below the horizon it hands over to the ground
+		// blend. Clamping el to 0 instead gave every downward ray the peak
+		// horizon glow, and the ground lit up like a desert in the middle of
+		// nautical twilight.
+		float above = smoothstep(-0.22, -0.01, el);
+		vec3  warm  = vec3(1.00, 0.45, 0.17);
+		vec3  mid   = vec3(0.62, 0.34, 0.52);
+		vec3  cool  = vec3(0.20, 0.30, 0.62);
+		vec3  col   = mix(mix(warm, mid, smoothstep(0.0, 0.50, climb)),
+		                  cool, smoothstep(0.35, 1.0, climb));
+		col = mix(cool, col, toward * toward);     // anti-sun side stays blue
+		sky += col * (twi * above * (0.065 + 0.34 * band * toward * toward));
+	}
+
 	// Deep-night floor (the scattering term → 0 once the sun is far below the
 	// horizon): faint blue gradient so night reflections aren't pitch black.
 	float h = clamp(dir.y, 0.0, 1.0);
 	sky += mix(vec3(0.006, 0.009, 0.024), vec3(0.003, 0.005, 0.015), h) * toNight;
 
-	// Below the horizon: ease into a soft ground haze over a wide band so the
-	// sky stays atmospheric just under the horizon line.
-	vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
-	sky = mix(sky, ground, smoothstep(0.0, -0.12, dir.y));
+	// Below the horizon: ease into ground haze. `sky` still holds the HORIZON
+	// colour down here (the dir.y clamp above), so the haze is built out of it —
+	// the old fixed grey sat brighter than a twilight sky and drew a hard bright
+	// band across the horizon line, and it stayed grey while the sky went warm.
+	vec3 ground = mix(sky * 0.32, vec3(0.24, 0.23, 0.21), day);
+	sky = mix(sky, ground, smoothstep(0.0, -0.20, dir.y));
 
 	// Sun aureole ON TOP of the physical Mie glow — just the tight glare blooms now;
 	// the broad golden scatter comes from the Cornette-Shanks phase itself.
