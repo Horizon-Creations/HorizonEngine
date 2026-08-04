@@ -39,6 +39,10 @@ constexpr MessageId kMsgStructuralUpdate  = kFirstUserMessage + 20;  // client �
 constexpr MessageId kMsgStructuralRelay   = kFirstUserMessage + 21;  // host → clients
 constexpr MessageId kMsgComponentsUpdate  = kFirstUserMessage + 22;  // client → host
 constexpr MessageId kMsgComponentsRelay   = kFirstUserMessage + 23;  // host → clients
+constexpr MessageId kMsgDocDeltasUpdate   = kFirstUserMessage + 24;  // client → host
+constexpr MessageId kMsgDocDeltasRelay    = kFirstUserMessage + 25;  // host → clients
+constexpr MessageId kMsgLockQuery         = kFirstUserMessage + 26;  // client → host
+constexpr MessageId kMsgLockQueryResult   = kFirstUserMessage + 27;  // host → one client
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -90,6 +94,12 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgComponentsUpdate, [this](ConnectionId conn, BitReader& r) {
             handleComponentsUpdate(conn, r);
         });
+        m_net->on(kMsgDocDeltasUpdate, [this](ConnectionId conn, BitReader& r) {
+            handleDocDeltasUpdate(conn, r);
+        });
+        m_net->on(kMsgLockQuery, [this](ConnectionId conn, BitReader& r) {
+            handleLockQuery(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -109,6 +119,12 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgComponentsRelay, [this](ConnectionId, BitReader& r) {
             handleComponentsRelay(r);
+        });
+        m_net->on(kMsgDocDeltasRelay, [this](ConnectionId, BitReader& r) {
+            handleDocDeltasRelay(r);
+        });
+        m_net->on(kMsgLockQueryResult, [this](ConnectionId, BitReader& r) {
+            handleLockQueryResult(r);
         });
 
         // Roster updates for peers other than ourselves.
@@ -753,6 +769,166 @@ void CollabSession::handleComponentsRelay(BitReader& r) {
     ComponentUpdate u;
     if (!readComponentBody(r, u.netId, u.blob, m_cfg.maxSnapshotBytes)) return;
     if (m_onComponents) m_onComponents(sender, u);
+}
+
+// ─── Document deltas ─────────────────────────────────────────────────────────
+
+void CollabSession::writeDocDeltaBody(BitWriter& w, std::uint64_t subject,
+                                      const std::string& path,
+                                      const std::vector<DocDelta>& batch) const {
+    w.writeUInt64(subject);
+    w.writeString(path);
+    w.writeUInt16(static_cast<std::uint16_t>(batch.size()));
+    for (const DocDelta& d : batch) {
+        w.writeByte(d.scope);
+        w.writeByte(d.kind);
+        w.writeByte(d.op);
+        w.writeUInt64(static_cast<std::uint64_t>(d.itemId));
+        w.writeString(d.json);
+    }
+}
+
+bool CollabSession::readDocDeltaBody(BitReader& r, std::uint64_t& subject,
+                                     std::string& path,
+                                     std::vector<DocDelta>& out) const {
+    if (!r.readUInt64(subject)) return false;
+    if (!r.readString(path)) return false;
+    std::uint16_t count = 0;
+    if (!r.readUInt16(count)) return false;
+    if (count > m_cfg.maxDocDeltas) return false;   // bounds what a peer can make us build
+    out.clear();
+    out.reserve(count);
+    for (std::uint16_t i = 0; i < count; ++i) {
+        DocDelta d;
+        if (!r.readByte(d.scope) || !r.readByte(d.kind) || !r.readByte(d.op)) return false;
+        std::uint64_t id = 0;
+        if (!r.readUInt64(id)) return false;
+        d.itemId = static_cast<std::int64_t>(id);
+        if (!r.readString(d.json)) return false;
+        out.push_back(std::move(d));
+    }
+    // A partially-read batch must not be applied: half a paste is a broken graph,
+    // not a smaller one.
+    return !r.overflowed();
+}
+
+bool CollabSession::sendDocDeltas(std::uint64_t subject, const std::string& path,
+                                  const std::vector<DocDelta>& batch) {
+    if (!m_net || !m_joined || batch.empty()) return false;
+    // Same rule the transform and asset paths use: the lock is what makes an
+    // overwrite safe, because it guarantees nobody else is editing this document.
+    if (!ownsLock(subject)) return false;
+    if (batch.size() > m_cfg.maxDocDeltas) return false;
+
+    // Refuse rather than truncate. writeString cuts silently at 65535 bytes, and
+    // half a node's JSON is not a smaller edit — it is an unparseable one that
+    // would drop the item on the peer while looking like a success here. The
+    // caller falls back to publishing the whole file.
+    std::size_t total = path.size() + 16;
+    for (const DocDelta& d : batch) {
+        if (d.json.size() > m_cfg.maxDocItemBytes) return false;
+        total += d.json.size() + 16;
+        if (total > m_cfg.maxDocBatchBytes) return false;
+    }
+
+    if (m_role == NetRole::Host) {
+        BitWriter w;
+        w.writeUInt32(m_localId);
+        writeDocDeltaBody(w, subject, path, batch);
+        m_net->broadcast(kMsgDocDeltasRelay, w);
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    writeDocDeltaBody(w, subject, path, batch);   // no id — the host stamps it
+    m_net->send(m_net->connections().front(), kMsgDocDeltasUpdate, w);
+    return true;
+}
+
+void CollabSession::handleDocDeltasUpdate(ConnectionId conn, BitReader& r) {
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    std::uint64_t subject = 0;
+    std::string   path;
+    std::vector<DocDelta> batch;
+    if (!readDocDeltaBody(r, subject, path, batch)) return;
+
+    // Re-check authority on arrival rather than trusting the sender — a client
+    // that lost the lock (or never had it) must not be able to rewrite a
+    // document just because it addressed the message correctly.
+    const LockInfo* lock = lockFor(subject);
+    if (!lock || lock->owner != sender) return;
+
+    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch);
+
+    BitWriter w;
+    w.writeUInt32(sender);
+    writeDocDeltaBody(w, subject, path, batch);
+    for (const ConnectionId other : m_net->connections()) {
+        if (other != conn) m_net->send(other, kMsgDocDeltasRelay, w);
+    }
+}
+
+void CollabSession::handleDocDeltasRelay(BitReader& r) {
+    std::uint32_t sender = 0;
+    if (!r.readUInt32(sender)) return;
+    if (sender == m_localId) return;   // our own edit echoed back
+
+    std::uint64_t subject = 0;
+    std::string   path;
+    std::vector<DocDelta> batch;
+    if (!readDocDeltaBody(r, subject, path, batch)) return;
+    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch);
+}
+
+// ─── Lock query ──────────────────────────────────────────────────────────────
+
+bool CollabSession::queryLock(std::uint64_t subject) {
+    if (!m_net || !m_joined) return false;
+
+    // The host owns the table, so its answer needs no round trip. Answering
+    // inline (rather than making the host a special case at every call site)
+    // is what lets the editor drive both roles through one flow.
+    if (m_role == NetRole::Host) {
+        const LockInfo* lock = lockFor(subject);
+        if (m_onLockQuery) {
+            m_onLockQuery(subject, lock != nullptr,
+                          lock ? lock->owner : kInvalidParticipant,
+                          lock ? lock->ownerName : std::string());
+        }
+        return true;
+    }
+    if (m_net->connections().empty()) return false;
+
+    BitWriter w;
+    w.writeUInt64(subject);
+    m_net->send(m_net->connections().front(), kMsgLockQuery, w);
+    return true;
+}
+
+void CollabSession::handleLockQuery(ConnectionId conn, BitReader& r) {
+    std::uint64_t subject = 0;
+    if (!r.readUInt64(subject)) return;
+
+    const LockInfo* lock = lockFor(subject);
+    BitWriter w;
+    w.writeUInt64(subject);
+    w.writeBool(lock != nullptr);
+    w.writeUInt32(lock ? lock->owner : kInvalidParticipant);
+    w.writeString(lock ? lock->ownerName : std::string());
+    m_net->send(conn, kMsgLockQueryResult, w);
+}
+
+void CollabSession::handleLockQueryResult(BitReader& r) {
+    std::uint64_t subject = 0;
+    bool          held    = false;
+    std::uint32_t owner   = 0;
+    std::string   name;
+    if (!r.readUInt64(subject) || !r.readBool(held) ||
+        !r.readUInt32(owner) || !r.readString(name)) return;
+    if (m_onLockQuery) m_onLockQuery(subject, held, owner, name);
 }
 
 // ─── Structural changes ──────────────────────────────────────────────────────

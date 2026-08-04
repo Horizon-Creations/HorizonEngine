@@ -1167,3 +1167,246 @@ TEST_CASE("CollabSession: the joiner adopts the host's state sequence")
     // on where the shared state currently stands.
     CHECK(p->client->stateSequence() == p->host->stateSequence());
 }
+
+// ─── Document deltas ─────────────────────────────────────────────────────────
+// AssetUpdate replicates a whole file; these replicate one item inside one, so
+// an open graph/UI editor can be patched instead of reloaded.
+
+namespace {
+CollabSession::DocDelta upsert(std::uint8_t kind, std::int64_t id, std::string json)
+{
+    CollabSession::DocDelta d;
+    d.kind = kind; d.op = 0; d.itemId = id; d.json = std::move(json);
+    return d;
+}
+} // namespace
+
+TEST_CASE("CollabSession: a document delta batch reaches the other side intact")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2001ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    std::vector<CollabSession::DocDelta> got;
+    std::uint64_t gotSubject = 0;
+    std::string   gotPath;
+    p->host->onDocDeltas([&](ParticipantId, std::uint64_t s, const std::string& path,
+                             const std::vector<CollabSession::DocDelta>& batch) {
+        gotSubject = s; gotPath = path; got = batch;
+    });
+
+    std::vector<CollabSession::DocDelta> batch;
+    batch.push_back(upsert(/*kind Node*/ 0, 7, R"({"id":7,"type":"Add"})"));
+    batch.push_back(upsert(/*kind Link*/ 1, 0x0007'0000'0009'0001ll, "[7,0,9,1]"));
+    CollabSession::DocDelta rm;
+    rm.kind = 0; rm.op = 1; rm.itemId = 3;      // a removal carries no payload
+    batch.push_back(rm);
+    batch[1].scope = 1;                          // the widget's logic graph
+
+    REQUIRE(p->client->sendDocDeltas(kAsset, "Content/UI/Menu.hasset", batch));
+    p->pump(6);
+
+    REQUIRE(got.size() == 3);
+    CHECK(gotSubject == kAsset);
+    CHECK(gotPath == "Content/UI/Menu.hasset");
+    CHECK(got[0].kind == 0);
+    CHECK(got[0].itemId == 7);
+    CHECK(got[0].json == R"({"id":7,"type":"Add"})");
+    CHECK(got[1].scope == 1);
+    CHECK(got[1].itemId == 0x0007'0000'0009'0001ll);
+    CHECK(got[2].op == 1);
+    CHECK(got[2].itemId == 3);
+    CHECK(got[2].json.empty());
+}
+
+TEST_CASE("CollabSession: editing a document you do not hold is refused")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2002ull;
+    REQUIRE(p->host->requestLock(kAsset));       // the HOST holds it
+    p->pump(4);
+
+    bool arrived = false;
+    p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                             const std::vector<CollabSession::DocDelta>&) {
+        arrived = true;
+    });
+
+    std::vector<CollabSession::DocDelta> batch{ upsert(0, 1, "{}") };
+    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    p->pump(6);
+    CHECK_FALSE(arrived);
+}
+
+TEST_CASE("CollabSession: a forged document delta is rejected by the host, not merely by the sender")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2003ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    bool hostSaw = false;
+    p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                             const std::vector<CollabSession::DocDelta>&) {
+        hostSaw = true;
+    });
+
+    // Bypass sendDocDeltas entirely — a peer that skips its own guard must still
+    // be stopped by the authority, or the lock means nothing.
+    BitWriter w;
+    w.writeUInt64(kAsset);
+    w.writeString("Content/M.hasset");
+    w.writeUInt16(1);
+    w.writeByte(0); w.writeByte(0); w.writeByte(0);
+    w.writeUInt64(1);
+    w.writeString("{}");
+    p->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 24, w);
+
+    p->pump(4);
+    CHECK_FALSE(hostSaw);
+}
+
+TEST_CASE("CollabSession: a truncated document delta frame is rejected whole")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2004ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    bool hostSaw = false;
+    p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                             const std::vector<CollabSession::DocDelta>&) {
+        hostSaw = true;
+    });
+
+    // Announces three deltas and supplies one. Half a paste is a broken graph,
+    // not a smaller one, so nothing at all may be applied.
+    BitWriter w;
+    w.writeUInt64(kAsset);
+    w.writeString("Content/M.hasset");
+    w.writeUInt16(3);
+    w.writeByte(0); w.writeByte(0); w.writeByte(0);
+    w.writeUInt64(1);
+    w.writeString("{}");
+    p->clientNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 24, w);
+
+    p->pump(4);
+    CHECK_FALSE(hostSaw);
+}
+
+TEST_CASE("CollabSession: an oversized item is refused rather than truncated")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2005ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    bool arrived = false;
+    p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                             const std::vector<CollabSession::DocDelta>&) {
+        arrived = true;
+    });
+
+    // The wire's string length prefix is 16-bit and truncates SILENTLY, which
+    // would land as unparseable JSON on the peer. Refusing sends the editor to
+    // its whole-file fallback instead.
+    std::vector<CollabSession::DocDelta> batch{
+        upsert(0, 1, std::string(200 * 1024, 'x')) };
+    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    p->pump(4);
+    CHECK_FALSE(arrived);
+}
+
+TEST_CASE("CollabSession: the host's own document edit reaches clients")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2006ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    std::vector<CollabSession::DocDelta> got;
+    p->client->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                               const std::vector<CollabSession::DocDelta>& b) { got = b; });
+
+    std::vector<CollabSession::DocDelta> batch{ upsert(0, 42, R"({"id":42})") };
+    REQUIRE(p->host->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    p->pump(6);
+
+    REQUIRE(got.size() == 1);
+    CHECK(got[0].itemId == 42);
+}
+
+// ─── Lock query ──────────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: the host answers who holds a subject")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kFree = 0x8000'0000'0000'3001ull;
+    constexpr std::uint64_t kHeld = 0x8000'0000'0000'3002ull;
+    REQUIRE(p->host->requestLock(kHeld));
+    p->pump(4);
+
+    struct Answer { std::uint64_t subject; bool held; ParticipantId owner; std::string name; };
+    std::vector<Answer> answers;
+    p->client->onLockQueryResult([&](std::uint64_t s, bool held, ParticipantId o,
+                                     const std::string& n) {
+        answers.push_back({ s, held, o, n });
+    });
+
+    REQUIRE(p->client->queryLock(kFree));
+    REQUIRE(p->client->queryLock(kHeld));
+    p->pump(6);
+
+    REQUIRE(answers.size() == 2);
+    CHECK(answers[0].subject == kFree);
+    CHECK_FALSE(answers[0].held);
+    CHECK(answers[1].subject == kHeld);
+    CHECK(answers[1].held);
+    CHECK(answers[1].owner == p->host->localId());
+}
+
+TEST_CASE("CollabSession: the host answers its own lock query without a round trip")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kHeld = 0x8000'0000'0000'3003ull;
+    REQUIRE(p->client->requestLock(kHeld));
+    p->pump(4);
+
+    bool answered = false;
+    bool held = false;
+    p->host->onLockQueryResult([&](std::uint64_t, bool h, ParticipantId,
+                                   const std::string&) { answered = true; held = h; });
+
+    // No pump between the call and the check: the host IS the table, so a tab
+    // opening on the host must not have to wait a frame to know it may edit.
+    REQUIRE(p->host->queryLock(kHeld));
+    CHECK(answered);
+    CHECK(held);
+}

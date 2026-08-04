@@ -46,7 +46,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v2: every subject (locks, transforms, components, structure, selection) is
 // derived from the entity's stable uuid instead of its entt handle — the two
 // schemes resolve to different entities, so mixing them must be refused.
-inline constexpr std::uint16_t kCollabProtocolVersion = 2;
+// v3: document deltas (per node / per UI element) and the authoritative lock
+// query. A v2 peer would drop both silently and believe it was in sync while
+// the other side edited a graph it never saw — worse than refusing to connect.
+inline constexpr std::uint16_t kCollabProtocolVersion = 3;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -137,6 +140,17 @@ public:
         float         presenceRotationEpsilon = 0.001f;
         // Bounds the frame a peer can cause us to build.
         std::uint16_t maxSelectionIds = 1024;
+
+        // ── Document-delta bounds ──
+        // One item's JSON has to fit a length-prefixed string, which BitStream
+        // caps at 65535 and TRUNCATES silently — a truncated payload would land
+        // as unparseable JSON and quietly drop the item on the peer. Refusing
+        // well below that, and refusing an oversized batch, sends the caller to
+        // the whole-file fallback instead. A node or UI element is a few hundred
+        // bytes; anything near this cap is pathological.
+        std::uint32_t maxDocItemBytes  = 48u * 1024u;
+        std::uint32_t maxDocBatchBytes = 1024u * 1024u;
+        std::uint16_t maxDocDeltas     = 4096;
     };
 
     CollabSession(NetSession* net, NetRole role, Config cfg);
@@ -277,6 +291,45 @@ public:
         m_onAsset = std::move(fn);
     }
 
+    // ── Document deltas ──────────────────────────────────────────────────────
+    // AssetUpdate replicates a whole authored file; this replicates ONE ITEM
+    // inside one — a graph node, a link, a UI element. That is what makes an
+    // open editor live rather than periodically reloaded: the receiver patches
+    // the document it is already showing instead of re-reading the file, so its
+    // canvas, selection and undo history survive.
+    //
+    // Deliberately generic, exactly as AssetUpdate is one level up: HorizonCode,
+    // material, particle and animator graphs and the UI element tree all
+    // decompose into identified items with an item-level JSON form, so one
+    // message type covers all five and a sixth costs no protocol work.
+    // HorizonNet does not interpret `scope`, `kind` or `json` — see
+    // CollabDocSync in the editor for what they mean there.
+    struct DocDelta {
+        std::uint8_t  scope  = 0;   // which document inside the asset
+        std::uint8_t  kind   = 0;   // node / link / element / variable / …
+        std::uint8_t  op     = 0;   // 0 = upsert, 1 = remove
+        std::int64_t  itemId = 0;   // identifies the item within (scope, kind)
+        std::string   json;         // upsert payload; empty for a remove
+    };
+
+    // Publish a batch — everything one edit produced, so a paste of thirty nodes
+    // arrives as one atomic frame rather than thirty that can interleave with
+    // another peer's. Ignored unless we hold the lock on `subject`.
+    //
+    // Returns false when the batch cannot be sent AS DELTAS — no session, no
+    // lock, or it exceeds the size bounds below. The caller must then fall back
+    // to the whole-file AssetUpdate path: a coarser update is fine, a truncated
+    // one is not (BitWriter::writeString silently cuts at 65535 bytes, which
+    // would land as corrupt JSON on the peer).
+    bool sendDocDeltas(std::uint64_t subject, const std::string& path,
+                       const std::vector<DocDelta>& batch);
+
+    void onDocDeltas(std::function<void(ParticipantId, std::uint64_t subject,
+                                        const std::string& path,
+                                        const std::vector<DocDelta>&)> fn) {
+        m_onDocDeltas = std::move(fn);
+    }
+
     // ── Locks ──
     // Ask to own `subject`. On the host this is answered immediately; on a
     // client it is a request, and the answer arrives via onLockChanged /
@@ -298,6 +351,21 @@ public:
     // Our own request was refused.
     void onLockDenied(std::function<void(std::uint64_t, LockDenyReason)> fn) {
         m_onLockDenied = std::move(fn);
+    }
+
+    // Ask the HOST who holds `subject` right now. lockFor() reads the local
+    // replica, which is correct almost always but is up to one round trip stale
+    // — and that is exactly the moment an editor tab opens and has to decide
+    // whether it is editable. This asks the authority instead. On the host it is
+    // answered inline (it IS the table) so both roles have one code path.
+    // Returns false when there is nobody to ask.
+    bool queryLock(std::uint64_t subject);
+
+    // The answer. `owner`/`ownerName` are meaningless when `held` is false.
+    void onLockQueryResult(std::function<void(std::uint64_t subject, bool held,
+                                              ParticipantId owner,
+                                              const std::string& ownerName)> fn) {
+        m_onLockQuery = std::move(fn);
     }
 
     // Drive the session. Pump the transport first, then this.
@@ -370,6 +438,18 @@ private:
     static bool readStructuralBody(BitReader& r, StructuralChange& out,
                                    std::uint32_t maxBlob);
 
+    // Document deltas
+    void handleDocDeltasUpdate(ConnectionId conn, BitReader& r);   // host
+    void handleDocDeltasRelay(BitReader& r);                       // client
+    void writeDocDeltaBody(BitWriter& w, std::uint64_t subject, const std::string& path,
+                           const std::vector<DocDelta>& batch) const;
+    bool readDocDeltaBody(BitReader& r, std::uint64_t& subject, std::string& path,
+                          std::vector<DocDelta>& out) const;
+
+    // Lock query
+    void handleLockQuery(ConnectionId conn, BitReader& r);         // host
+    void handleLockQueryResult(BitReader& r);                      // client
+
     // Assets
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
     void handleAssetRelay(BitReader& r);                           // client
@@ -427,6 +507,10 @@ private:
     };
     std::vector<AssetAssembly> m_assetAssembly;
 
+    std::function<void(ParticipantId, std::uint64_t, const std::string&,
+                       const std::vector<DocDelta>&)>          m_onDocDeltas;
+    std::function<void(std::uint64_t, bool, ParticipantId, const std::string&)>
+                                                                m_onLockQuery;
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
