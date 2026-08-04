@@ -478,11 +478,21 @@ private:
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
 	void syncStructuralChanges();
-	// Asset-level collaboration: lazy locks on first edit, debounced in-session
-	// autosave (which doubles as the live-follow broadcast and the peers' file
-	// persistence), and lock release when the tab goes away.
+	// Asset-level collaboration. Two layers, doing different jobs: item-level
+	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the
+	// document it is already showing), and the debounced whole-file autosave
+	// underneath is the baseline that persists edits into each peer's project,
+	// serves a peer who opens the tab later, and covers the asset types with no
+	// item structure. Locks stay lazy — but "may I edit this" is answered by the
+	// HOST when the tab opens, not guessed from the replicated table.
 	void updateAssetCollabSync(std::uint64_t nowMs);
+	void publishDocDeltas(const std::string& absPath, const std::string& rel);
+	void applyRemoteDocDeltas(const std::string& rel,
+	                          const std::vector<HE::Net::CollabSession::DocDelta>& batch);
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
+	// Syncable asset tabs that were open last pass, so the ones that closed can
+	// drop what the host told them about their lock.
+	std::unordered_set<std::string> m_docMirrorPaths;
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;

@@ -1,4 +1,5 @@
 #pragma once
+#include "CollabDocSync.h"
 #include "EditorUI.h"
 #include <imgui.h>
 #include <string>
@@ -42,6 +43,12 @@ namespace MaterialEditorPanel
 
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);
+
+	// The live documents behind this tab, for collaboration's item-level sync.
+	// Empty when this panel does not hold `assetPath` — same "ask everyone, the
+	// owner answers" dispatch as save() and reloadFromDisk().
+	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
+
 
 	// One-shot "open this asset in an editor tab" request, set by the canvas (e.g.
 	// double-clicking a Material Function node) and consumed by EditorUI's tab bar.

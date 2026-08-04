@@ -1,4 +1,5 @@
 #pragma once
+#include "CollabDocSync.h"
 #include "EditorUI.h"
 #include <imgui.h>
 #include <string>
@@ -40,4 +41,10 @@ namespace UIEditorPanel
 
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);
+
+	// The live documents behind this tab, for collaboration's item-level sync.
+	// Empty when this panel does not hold `assetPath` — same "ask everyone, the
+	// owner answers" dispatch as save() and reloadFromDisk().
+	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
+
 }

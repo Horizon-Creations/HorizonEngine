@@ -49,6 +49,10 @@ struct State
 {
 	UIWidgetTree tree;
 	HC::Graph    graph;               // HorizonCode logic (Graph mode)
+	// One asset, two documents: the designer's element tree and the logic graph.
+	// They share ONE lock (deleting an element breaks the nodes that reference
+	// it) but sync separately, so a delta lands in the right one.
+	CollabDocSync::DocMirror collabTreeMirror, collabGraphMirror;
 	HE::UUID     assetId{};
 	bool         loaded = false;
 	bool         dirty  = false;     // unsaved-to-disk edits (tree OR graph)
@@ -1839,6 +1843,18 @@ namespace UIEditorPanel
 bool isWidgetAsset(const std::string& path)
 {
 	return EditorAssetTypeCache::is(path, HE::AssetType::Widget);
+}
+
+CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	if (!st || !st->loaded) return {};
+	CollabDocSync::DocBindings out;
+	out.push_back({ CollabDocSync::Scope::Primary,
+	                CollabDocSync::forUIWidgetTree(st->tree), &st->collabTreeMirror });
+	out.push_back({ CollabDocSync::Scope::LogicGraph,
+	                CollabDocSync::forHorizonCodeGraph(st->graph), &st->collabGraphMirror });
+	return out;
 }
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }

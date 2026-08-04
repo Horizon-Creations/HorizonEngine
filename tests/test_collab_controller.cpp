@@ -1,6 +1,10 @@
 #include "doctest.h"
 
 #include "../src/HE_Editor/CollabController.h"
+#include "../src/HE_Editor/CollabDocSync.h"
+
+#include <HorizonCode/HorizonCode.h>
+#include <UIWidget/UIWidgetTree.h>
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -458,6 +462,371 @@ TEST_CASE("CollabController: losing the asset-lock race fires the deny handler")
     CHECK_FALSE(client.ownsAssetLock(asset));
     // The denied path is no longer tracked as held-or-pending.
     CHECK(client.heldAssetLocks().empty());
+}
+
+TEST_CASE("CollabController: opening an editor asks the host, and waits for the answer")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    using EditState = CollabController::AssetEditState;
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    // Nothing asked yet: the tab must NOT assume it may edit.
+    CHECK(client.assetEditState(asset) == EditState::Unknown);
+    CHECK_FALSE(client.beginAssetEdit(asset));
+
+    // Opening the tab asks the host. Until it answers the tab stays read-only —
+    // that window is precisely the race this replaces.
+    client.beginAssetEditSession(asset);
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.assetEditState(asset) == EditState::Editable;
+    }));
+
+    // The first edit claims it, and now it is a confirmation rather than a race.
+    CHECK(client.beginAssetEdit(asset));
+    REQUIRE(pumpUntil(host, client, [&] { return client.ownsAssetLock(asset); }));
+    CHECK(client.assetEditState(asset) == EditState::Owned);
+}
+
+TEST_CASE("CollabController: a tab opened on a locked asset is told so by the host")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    using EditState = CollabController::AssetEditState;
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(asset); }));
+
+    client.beginAssetEditSession(asset);
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.assetEditState(asset) == EditState::HeldByOther;
+    }));
+    CHECK_FALSE(client.beginAssetEdit(asset));
+
+    // The live table wins while it still shows a holder: it is the most recent
+    // thing this peer knows, and it is what flips an already-open tab to
+    // read-only the moment someone else claims the asset.
+    host.releaseAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return !client.assetLockedByOther(asset); }));
+
+    // Closing and reopening asks the host again rather than trusting an answer
+    // from whenever the tab happened to be opened.
+    client.forgetAssetEditSession(asset);
+    CHECK(client.assetEditState(asset) == EditState::Unknown);
+    client.beginAssetEditSession(asset);
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.assetEditState(asset) == EditState::Editable;
+    }));
+}
+
+TEST_CASE("CollabController: the host answers its own open without a round trip")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    using EditState = CollabController::AssetEditState;
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    // No pump: the host IS the lock table, so a tab opening there must not sit
+    // read-only waiting for a message it would be sending to itself.
+    host.beginAssetEditSession(asset);
+    CHECK(host.assetEditState(asset) == EditState::Editable);
+    CHECK(host.beginAssetEdit(asset));
+}
+
+TEST_CASE("CollabController: document deltas need the lock and reach the peer")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Graphs/Door.hcode";
+
+    std::string gotPath;
+    std::vector<HE::Net::CollabSession::DocDelta> gotBatch;
+    client.onRemoteDocDeltas([&](const std::string& p,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        gotPath = p; gotBatch = b;
+    });
+
+    HE::Net::CollabSession::DocDelta d;
+    d.kind = 0; d.op = 0; d.itemId = 5; d.json = R"({"id":5,"type":"Print"})";
+    const std::vector<HE::Net::CollabSession::DocDelta> batch{ d };
+
+    // Without the lock nothing goes out — an editor that skipped its own gate
+    // must not be able to rewrite a document someone else owns.
+    CHECK_FALSE(host.publishDocDeltas(asset, batch));
+
+    host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(asset); }));
+
+    CHECK(host.publishDocDeltas(asset, batch));
+    REQUIRE(pumpUntil(host, client, [&] { return !gotBatch.empty(); }));
+    CHECK(gotPath == asset);
+    REQUIRE(gotBatch.size() == 1);
+    CHECK(gotBatch[0].itemId == 5);
+}
+
+// ─── The whole live-editing pipeline, end to end ─────────────────────────────
+// Two editors over a real socket, driving REAL documents through every stage the
+// running editor uses: open → host lock query → first edit claims → diff →
+// publish → receive → apply. The unit tests cover each stage; this is the one
+// that would catch them being wired together wrongly.
+
+namespace {
+
+// What EditorApplication does per frame for one open tab, without the ImGui.
+struct FakeTab {
+    std::string                path;
+    CollabDocSync::DocMirror   mirror;
+    CollabController*          peer = nullptr;
+
+    void open() { peer->beginAssetEditSession(path); }
+
+    // Diff whatever the adapter sees and publish it, exactly as
+    // EditorApplication::publishDocDeltas does.
+    bool publish(CollabDocSync::IDocAdapter& doc, CollabDocSync::Scope scope) {
+        if (!peer->ownsAssetLock(path)) {
+            CollabDocSync::seed(doc, mirror, scope);   // watching, not editing
+            return false;
+        }
+        std::vector<HE::Net::CollabSession::DocDelta> batch;
+        CollabDocSync::diffInto(doc, mirror, scope, batch);
+        if (batch.empty()) return false;
+        return peer->publishDocDeltas(path, batch);
+    }
+};
+
+} // namespace
+
+TEST_CASE("Live sync: a HorizonCode graph edit reaches the peer node by node")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Scripts/Door.hasset";
+
+    // Both open the same graph, starting from the same content.
+    HorizonCode::Graph hostGraph, clientGraph;
+    FakeTab hostTab{ asset, {}, &host };
+    FakeTab clientTab{ asset, {}, &client };
+    hostTab.open();
+    clientTab.open();
+
+    // The receiving side applies into its own live document.
+    client.onRemoteDocDeltas([&](const std::string& p,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        REQUIRE(p == asset);
+        auto doc = CollabDocSync::forHorizonCodeGraph(clientGraph);
+        CollabDocSync::applyDeltas(*doc, clientTab.mirror,
+                                   CollabDocSync::Scope::Primary, b);
+    });
+
+    using EditState = CollabController::AssetEditState;
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.assetEditState(asset)   == EditState::Editable &&
+               client.assetEditState(asset) == EditState::Editable;
+    }));
+
+    // Anna types first: her first edit claims the lock...
+    CHECK(host.beginAssetEdit(asset));
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(asset); }));
+
+    // ...and Bob's open tab goes read-only, without either of them having lost
+    // an edit to a race.
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.assetEditState(asset) == EditState::HeldByOther;
+    }));
+    CHECK_FALSE(client.beginAssetEdit(asset));
+
+    {
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CollabDocSync::seed(*doc, hostTab.mirror, CollabDocSync::Scope::Primary);
+    }
+
+    HorizonCode::Node ev; ev.type = HorizonCode::NodeType::Event; ev.s = "OnUse";
+    const int evId = hostGraph.addNode(ev);
+    HorizonCode::Node pr; pr.type = HorizonCode::NodeType::Print;
+    const int prId = hostGraph.addNode(pr);
+    hostGraph.links.push_back({ evId, 0, prId, 0 });
+
+    {
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CHECK(hostTab.publish(*doc, CollabDocSync::Scope::Primary));
+    }
+    REQUIRE(pumpUntil(host, client, [&] { return clientGraph.nodes.size() == 2; }));
+    CHECK(HorizonCode::toJson(clientGraph) == HorizonCode::toJson(hostGraph));
+
+    // Dragging one node sends one node, and the peer's graph tracks it.
+    hostGraph.findNode(prId)->x = 320.0f;
+    {
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CHECK(hostTab.publish(*doc, CollabDocSync::Scope::Primary));
+    }
+    REQUIRE(pumpUntil(host, client, [&] {
+        return clientGraph.findNode(prId) && clientGraph.findNode(prId)->x == 320.0f;
+    }));
+    CHECK(HorizonCode::toJson(clientGraph) == HorizonCode::toJson(hostGraph));
+
+    // Deleting takes the link with it on both sides.
+    hostGraph.removeNode(prId);
+    {
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CHECK(hostTab.publish(*doc, CollabDocSync::Scope::Primary));
+    }
+    REQUIRE(pumpUntil(host, client, [&] { return clientGraph.nodes.size() == 1; }));
+    CHECK(clientGraph.links.empty());
+    CHECK(HorizonCode::toJson(clientGraph) == HorizonCode::toJson(hostGraph));
+
+    // Anna closes her tab; Bob may now edit the same asset.
+    host.releaseAssetLock(asset);
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.assetEditState(asset) == EditState::Editable;
+    }));
+    CHECK(client.beginAssetEdit(asset));
+}
+
+TEST_CASE("Live sync: the designer and the logic graph of one widget travel separately")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/UI/Menu.hasset";
+
+    HE::UIWidgetTree     hostTree,  clientTree;
+    HorizonCode::Graph   hostGraph, clientGraph;
+    CollabDocSync::DocMirror hTreeM, hGraphM, cTreeM, cGraphM;
+
+    host.beginAssetEditSession(asset);
+    using EditState = CollabController::AssetEditState;
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.assetEditState(asset) == EditState::Editable;
+    }));
+    REQUIRE(host.beginAssetEdit(asset));
+    REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(asset); }));
+
+    client.onRemoteDocDeltas([&](const std::string&,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        auto tree  = CollabDocSync::forUIWidgetTree(clientTree);
+        auto graph = CollabDocSync::forHorizonCodeGraph(clientGraph);
+        CollabDocSync::applyDeltas(*tree,  cTreeM,  CollabDocSync::Scope::Primary,    b);
+        CollabDocSync::applyDeltas(*graph, cGraphM, CollabDocSync::Scope::LogicGraph, b);
+    });
+
+    {
+        auto t = CollabDocSync::forUIWidgetTree(hostTree);
+        auto g = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CollabDocSync::seed(*t, hTreeM, CollabDocSync::Scope::Primary);
+        CollabDocSync::seed(*g, hGraphM, CollabDocSync::Scope::LogicGraph);
+        CollabDocSync::seed(*CollabDocSync::forUIWidgetTree(clientTree), cTreeM,
+                            CollabDocSync::Scope::Primary);
+        CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(clientGraph), cGraphM,
+                            CollabDocSync::Scope::LogicGraph);
+    }
+
+    // One edit in each document, published as ONE batch — the asset has a single
+    // lock, so the two documents are always in step over the wire.
+    const int btn = hostTree.add(HE::UIWidgetType::Button);
+    hostTree.find(btn)->name = "Start";
+    HorizonCode::Node ev; ev.type = HorizonCode::NodeType::Event; ev.s = "OnClick";
+    ev.elem = btn;
+    hostGraph.addNode(ev);
+
+    std::vector<HE::Net::CollabSession::DocDelta> batch;
+    {
+        auto t = CollabDocSync::forUIWidgetTree(hostTree);
+        auto g = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        CollabDocSync::diffInto(*t, hTreeM, CollabDocSync::Scope::Primary,    batch);
+        CollabDocSync::diffInto(*g, hGraphM, CollabDocSync::Scope::LogicGraph, batch);
+    }
+    REQUIRE(batch.size() == 2);
+    CHECK(host.publishDocDeltas(asset, batch));
+
+    REQUIRE(pumpUntil(host, client, [&] {
+        return clientTree.elements.size() == 1 && clientGraph.nodes.size() == 1;
+    }));
+    CHECK(HE::uiWidgetTreeToJson(clientTree) == HE::uiWidgetTreeToJson(hostTree));
+    CHECK(HorizonCode::toJson(clientGraph)   == HorizonCode::toJson(hostGraph));
+    // The element id and the node id are both small integers; the scopes are
+    // what keep one from landing in the other's document.
+    CHECK(clientTree.find(btn) != nullptr);
+    CHECK(clientGraph.nodes[0].elem == btn);
 }
 
 TEST_CASE("projectRelativeAssetPath: normalises separators and rejects outsiders")

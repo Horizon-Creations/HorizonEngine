@@ -29,6 +29,8 @@ struct State
 	HE::UUID    assetId;
 	HE::AnimatorStateMachineGraph graph;
 	bool        dirty = false;
+	// Last state the peers have seen — see CollabDocSync.
+	CollabDocSync::DocMirror collabMirror;
 
 	GraphEditor::State geState;
 };
@@ -61,6 +63,16 @@ bool isAnimatorStateMachineAsset(const std::string& path)
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	if (!st || !st->loaded) return {};
+	CollabDocSync::DocBindings out;
+	out.push_back({ CollabDocSync::Scope::Primary,
+	                CollabDocSync::forAnimatorGraph(st->graph), &st->collabMirror });
+	return out;
+}
+
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 // Persist a tab's graph. The header's Save button AND the close/quit prompt's

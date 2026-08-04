@@ -559,6 +559,32 @@ void CollabController::wireCallbacks()
 		m_applyingRemoteAsset = false;
 	});
 
+	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
+	                             const std::string& path,
+	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch) {
+		// Straight through to the editor, which routes by path to whichever panel
+		// holds that asset. Deliberately NOT written to disk: the point of a delta
+		// is that the receiving panel patches the document it is already showing,
+		// keeping its canvas, selection and undo history — the whole-file path is
+		// what touches files, and it still runs underneath for persistence.
+		if (m_onRemoteDocDeltas) m_onRemoteDocDeltas(path, batch);
+	});
+
+	m_collab->onLockQueryResult([this](std::uint64_t subject, bool held,
+	                                   HE::Net::ParticipantId owner,
+	                                   const std::string& ownerName) {
+		const auto pit = m_assetSubjectPaths.find(subject);
+		if (pit == m_assetSubjectPaths.end()) return;   // not an asset we asked about
+		AssetAnswer& a = m_assetAnswers[pit->second];
+		a.pending = false;
+		// Our own lock is not "held by someone else" — the state accessor reads
+		// ownsLock first anyway, but leaving this true would flip a tab we own to
+		// read-only for a frame if the table lagged.
+		a.held      = held && owner != m_collab->localId();
+		a.owner     = owner;
+		a.ownerName = ownerName;
+	});
+
 	m_collab->onTransform([this](HE::Net::ParticipantId,
 	                             const HE::Net::CollabSession::TransformDelta& d) {
 		// Subjects are uuid-derived, never raw handles — resolve here so the
@@ -660,6 +686,11 @@ void CollabController::teardown()
 	m_netIds.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
+	// Leaving these behind would keep every open tab read-only after the session
+	// ends: assetEditState short-circuits to Editable without a session, but a
+	// stale "held by X" would resurface the moment a new one started.
+	m_assetAnswers.clear();
+	m_assetSubjectPaths.clear();
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
@@ -1116,6 +1147,79 @@ const HE::Net::LockInfo* CollabController::assetLockInfo(const std::string& rela
 {
 	if (!m_collab || !inSession()) return nullptr;
 	return m_collab->lockFor(assetSubject(relativePath));
+}
+
+// ─── Host-confirmed edit state ───────────────────────────────────────────────
+
+void CollabController::beginAssetEditSession(const std::string& relativePath)
+{
+	if (!m_collab || !inSession() || relativePath.empty()) return;
+	if (m_assetAnswers.count(relativePath)) return;   // already asked
+
+	const std::uint64_t subject = assetSubject(relativePath);
+	m_assetSubjectPaths[subject] = relativePath;
+	m_assetAnswers[relativePath] = AssetAnswer{};     // pending
+	if (!m_collab->queryLock(subject))
+	{
+		// Nobody to ask (the link went down between the checks) — do not leave the
+		// tab read-only forever waiting for an answer that cannot come.
+		m_assetAnswers.erase(relativePath);
+	}
+}
+
+CollabController::AssetEditState
+CollabController::assetEditState(const std::string& relativePath)
+{
+	// Outside a session every asset is simply editable — this whole mechanism is
+	// about arbitrating between peers, and there are none.
+	if (!m_collab || !inSession()) return AssetEditState::Editable;
+
+	const std::uint64_t subject = assetSubject(relativePath);
+	if (m_collab->ownsLock(subject)) return AssetEditState::Owned;
+
+	// The live table wins when it says someone else holds it: it is the most
+	// recent thing we know, and it is how a peer taking the lock while our tab
+	// sits open flips us to read-only.
+	if (const HE::Net::LockInfo* l = m_collab->lockFor(subject);
+	    l && l->owner != m_collab->localId())
+		return AssetEditState::HeldByOther;
+
+	const auto it = m_assetAnswers.find(relativePath);
+	if (it == m_assetAnswers.end()) return AssetEditState::Unknown; // not asked yet
+	if (it->second.pending)          return AssetEditState::Unknown;
+	if (it->second.held)             return AssetEditState::HeldByOther;
+	return AssetEditState::Editable;
+}
+
+bool CollabController::beginAssetEdit(const std::string& relativePath)
+{
+	const AssetEditState st = assetEditState(relativePath);
+	if (st == AssetEditState::Owned)    return true;
+	if (st == AssetEditState::Editable)
+	{
+		if (!m_collab || !inSession()) return true;   // solo: nothing to claim
+		requestAssetLock(relativePath);
+		// The grant is a round trip away. Editing is allowed to continue in the
+		// meantime — the host confirmed at open time that the asset was free, so
+		// this is a confirmation rather than the race it used to be, and the deny
+		// path is now the rare case it was meant to be.
+		return true;
+	}
+	return false;   // Unknown (still asking) or held by someone else
+}
+
+void CollabController::forgetAssetEditSession(const std::string& relativePath)
+{
+	m_assetAnswers.erase(relativePath);
+	m_assetSubjectPaths.erase(assetSubject(relativePath));
+}
+
+bool CollabController::publishDocDeltas(
+	const std::string& relativePath,
+	const std::vector<HE::Net::CollabSession::DocDelta>& batch)
+{
+	if (!m_collab || !inSession() || batch.empty()) return false;
+	return m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch);
 }
 
 std::string CollabController::projectRelativeAssetPath(const std::string& absolutePath,

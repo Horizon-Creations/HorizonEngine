@@ -273,6 +273,51 @@ public:
 	bool ownsAssetLock(const std::string& relativePath);
 	void requestAssetLock(const std::string& relativePath);
 	void releaseAssetLock(const std::string& relativePath);
+
+	// ── Host-confirmed edit state ────────────────────────────────────────────
+	// What a panel is allowed to do with an asset RIGHT NOW.
+	//
+	// The replicated lock table (assetLockedByOther) answers instantly and is
+	// right almost always, but it is up to one round trip stale — and that is
+	// exactly the moment a tab opens and has to decide whether it is editable.
+	// Opening therefore asks the HOST (CollabSession::queryLock) and the tab
+	// stays Unknown, drawn but not editable, for the one frame or two that takes.
+	// Without that step two people opening the same graph in the same second
+	// both believe they may edit, and one of them loses their work to the deny
+	// path a second later.
+	enum class AssetEditState : std::uint8_t
+	{
+		Editable,    // no session, or the answer is in and nobody else holds it
+		Unknown,     // asked the host, waiting — read-only until it answers
+		HeldByOther, // someone else has it; read-only with the banner
+		Owned,       // we hold the lock
+	};
+
+	// Ask the host about this asset. Idempotent per path: a second call while an
+	// answer is outstanding does nothing. Called when a tab is rendered for an
+	// asset we have not asked about yet.
+	void           beginAssetEditSession(const std::string& relativePath);
+	AssetEditState assetEditState(const std::string& relativePath);
+	// Claim before mutating. False = do not apply the edit (still Unknown, or
+	// someone else holds it). Safe to call every frame once owned.
+	bool           beginAssetEdit(const std::string& relativePath);
+	// Drop what we know about a path (its tab closed), so reopening asks again.
+	void           forgetAssetEditSession(const std::string& relativePath);
+
+	// Publish a document delta batch. False = it could not go as deltas (no
+	// lock, or over the wire's size bounds) and the caller must fall back to
+	// publishAsset — a coarser update, never a corrupt one.
+	bool publishDocDeltas(const std::string& relativePath,
+	                      const std::vector<HE::Net::CollabSession::DocDelta>& batch);
+
+	// A peer edited a document: (relativePath, batch). The editor routes it to
+	// whichever panel holds that asset — CollabController does not know panels.
+	void onRemoteDocDeltas(
+		std::function<void(const std::string&,
+		                   const std::vector<HE::Net::CollabSession::DocDelta>&)> fn)
+	{
+		m_onRemoteDocDeltas = std::move(fn);
+	}
 	// Who holds it (nullptr = nobody) — for the read-only banner.
 	const HE::Net::LockInfo* assetLockInfo(const std::string& relativePath);
 	// Every asset path we hold or have requested a lock for — the caller
@@ -406,6 +451,26 @@ private:
 	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
 	std::vector<std::string> m_heldAssetLocks;
 	std::function<void(const std::string&)> m_onAssetLockDenied;
+
+	// What the host last told us about an asset, keyed by project-relative path.
+	// Absent = never asked. This is the open-time answer, kept separate from the
+	// replicated table on purpose: the table is a live view that changes under
+	// us, this is "what were we told when this tab opened".
+	struct AssetAnswer
+	{
+		bool                   pending = true;  // asked, no reply yet
+		bool                   held    = false; // by someone else
+		HE::Net::ParticipantId owner   = 0;
+		std::string            ownerName;
+	};
+	std::unordered_map<std::string, AssetAnswer> m_assetAnswers;
+	// subject → path, so the reply (which carries only the subject) finds its way
+	// back to the path the editor keys on.
+	std::unordered_map<std::uint64_t, std::string> m_assetSubjectPaths;
+
+	std::function<void(const std::string&,
+	                   const std::vector<HE::Net::CollabSession::DocDelta>&)>
+		m_onRemoteDocDeltas;
 
 	std::function<std::uint32_t(std::uint32_t, const std::vector<std::uint8_t>&)>
 		m_onRemoteCreate;

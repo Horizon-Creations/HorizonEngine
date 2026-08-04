@@ -131,6 +131,21 @@ void diffInto(const IDocAdapter& doc, DocMirror& mirror, Scope scope,
 bool applyDeltas(IDocAdapter& doc, DocMirror& mirror, Scope scope,
                  const std::vector<HE::Net::CollabSession::DocDelta>& batch);
 
+// ── What a panel hands out ──────────────────────────────────────────────────
+// The live documents behind one open tab, each paired with the mirror tracking
+// what the peers have seen. The PANEL owns the mirror (it has to survive between
+// frames, alongside the document); the adapter is a per-call view over it.
+//
+// A vector because one asset can hold more than one document: a UI widget file
+// has the element tree AND its HorizonCode graph.
+struct DocBinding
+{
+    Scope                        scope = Scope::Primary;
+    std::unique_ptr<IDocAdapter> adapter;
+    DocMirror*                   mirror = nullptr;
+};
+using DocBindings = std::vector<DocBinding>;
+
 // ── Concrete adapters ───────────────────────────────────────────────────────
 // Each wraps a live document the panel owns; none of them owns it.
 std::unique_ptr<IDocAdapter> forHorizonCodeGraph(HorizonCode::Graph& g);

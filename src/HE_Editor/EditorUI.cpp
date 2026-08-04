@@ -426,6 +426,21 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	return ok && !tabHasUnsavedEdits(assetPath);
 }
 
+// The live documents behind an open tab, for collaboration's item-level sync.
+// Same dispatch as saveAsset/reloadAssetTabFromDisk: ask every panel, the one
+// holding the path answers, so there is still no path→panel map to keep in sync.
+// Empty for tabs that have no syncable document (meshes, scripts, the viewport).
+CollabDocSync::DocBindings EditorUI::collabDocsFor(const std::string& assetPath)
+{
+	if (assetPath.empty()) return {};
+	if (auto d = MaterialEditorPanel::collabDocs(assetPath);            !d.empty()) return d;
+	if (auto d = UIEditorPanel::collabDocs(assetPath);                  !d.empty()) return d;
+	if (auto d = HorizonCodeClassPanel::collabDocs(assetPath);          !d.empty()) return d;
+	if (auto d = ParticleGraphEditorPanel::collabDocs(assetPath);       !d.empty()) return d;
+	if (auto d = AnimatorStateMachineEditorPanel::collabDocs(assetPath); !d.empty()) return d;
+	return {};
+}
+
 // The read half of saveAsset's dispatch: ask every panel; whichever holds the
 // path refreshes. Same "no path→panel map" argument as over there.
 bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
@@ -1531,7 +1546,35 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         {
             const std::string rel = CollabController::projectRelativeAssetPath(
                 tabPath, ctx.contentManager->contentRoot());
-            if (!rel.empty() && ctx.collab->assetLockedByOther(rel))
+            using EditState = CollabController::AssetEditState;
+            const EditState edit = rel.empty() ? EditState::Editable
+                                               : ctx.collab->assetEditState(rel);
+
+            // Unknown = the tab just opened and the HOST has not answered who
+            // holds this asset yet. That is a frame or two, and editing through
+            // it is exactly the race this whole mechanism exists to remove — so
+            // the canvas draws (you can read it) but takes no input.
+            if (edit == EditState::Unknown)
+            {
+                tabReadOnly = true;
+                ImGui::SetNextWindowPos(tabPos);
+                ImGui::SetNextWindowSize(ImVec2(tabSize.x, kAssetLockBannerH));
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.11f, 0.11f, 0.13f, 1.0f));
+                if (ImGui::Begin("##asset_lock_pending", nullptr,
+                        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                        ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar))
+                {
+                    ImGui::TextDisabled("Checking with the host whether anyone is "
+                                        "editing this asset…");
+                }
+                ImGui::End();
+                ImGui::PopStyleColor();
+                tabPos.y  += kAssetLockBannerH;
+                tabSize.y -= kAssetLockBannerH;
+                ImGui::BeginDisabled(true);
+            }
+            else if (edit == EditState::HeldByOther)
             {
                 tabReadOnly = true;
                 const HE::Net::LockInfo* lock = ctx.collab->assetLockInfo(rel);

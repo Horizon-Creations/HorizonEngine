@@ -1,4 +1,5 @@
 #pragma once
+#include "CollabDocSync.h"
 #include <imgui.h>
 #include <string>
 #include <vector>
@@ -34,4 +35,10 @@ namespace HorizonCodeClassPanel
 	bool save(AppContext& ctx, const std::string& path);
 	// Drop the cached editor state (tab closed without unsaved edits).
 	void forget(const std::string& path);
+
+	// The live documents behind this tab, for collaboration's item-level sync.
+	// Empty when this panel does not hold `assetPath` — same "ask everyone, the
+	// owner answers" dispatch as save() and reloadFromDisk().
+	CollabDocSync::DocBindings collabDocs(const std::string& assetPath);
+
 }

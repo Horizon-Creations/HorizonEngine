@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CollabDocSync.h"
+
 #include <string>
 #include <vector>
 
@@ -38,6 +40,12 @@ public:
 	// the open tab must show it, not the state from before. Returns true if some
 	// panel was actually holding the path.
 	static bool reloadAssetTabFromDisk(const std::string& assetPath);
+
+	// The live documents behind an open tab, for collaboration's item-level sync
+	// (CollabDocSync). Same dispatch as the three above. Empty for tabs with no
+	// syncable document. The adapters are views: they must not outlive the frame,
+	// and the mirrors they point at belong to the panel.
+	static CollabDocSync::DocBindings collabDocsFor(const std::string& assetPath);
 
 private:
 	static void renderEditor(AppContext& ctx, float dt);

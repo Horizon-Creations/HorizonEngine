@@ -793,6 +793,8 @@ namespace
 struct ClassState
 {
 	HorizonCode::Graph graph;
+	// Last state the peers have seen — see CollabDocSync.
+	CollabDocSync::DocMirror collabMirror;
 	bool        loaded = false;
 	bool        dirty  = false;
 	std::string name;
@@ -851,6 +853,16 @@ bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 void HorizonCodeClassPanel::forget(const std::string& path) { s_classStates.forget(path); }
 
 bool HorizonCodeClassPanel::isDirty(const std::string& path) { return s_classStates.dirty(path); }
+
+CollabDocSync::DocBindings HorizonCodeClassPanel::collabDocs(const std::string& assetPath)
+{
+	ClassState* st = s_classStates.find(assetPath);
+	if (!st || !st->loaded) return {};
+	CollabDocSync::DocBindings out;
+	out.push_back({ CollabDocSync::Scope::Primary,
+	                CollabDocSync::forHorizonCodeGraph(st->graph), &st->collabMirror });
+	return out;
+}
 
 bool HorizonCodeClassPanel::reloadFromDisk(const std::string& assetPath)
 {

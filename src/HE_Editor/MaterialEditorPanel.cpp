@@ -37,6 +37,8 @@ using HE::MatPinType;
 struct State
 {
 	MaterialGraph graph;
+	// Last state the peers have seen — see CollabDocSync.
+	CollabDocSync::DocMirror collabMirror;
 	HE::UUID      materialId{};
 	bool          loaded  = false;
 	bool          dirty   = false;   // unsaved-to-disk graph edits
@@ -1322,6 +1324,20 @@ bool isMaterialAsset(const std::string& path)
 bool isMaterialFunctionAsset(const std::string& path)
 {
 	return EditorAssetTypeCache::is(path, HE::AssetType::MaterialFunction);
+}
+
+CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
+{
+	State* st = s_states.find(assetPath);
+	if (!st || !st->loaded) return {};
+	CollabDocSync::DocBindings out;
+	// A peer's edit invalidates the preview render and the generated shader —
+	// both are derived from the graph and neither notices on its own.
+	out.push_back({ CollabDocSync::Scope::Primary,
+	                CollabDocSync::forMaterialGraph(st->graph,
+	                    [st]() { st->previewDirty = true; }),
+	                &st->collabMirror });
+	return out;
 }
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }

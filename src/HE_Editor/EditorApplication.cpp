@@ -394,6 +394,15 @@ void EditorApplication::OnInit()
 		EditorUI::reloadAssetTabFromDisk(contentManager().resolveSavePath(relPath));
 	});
 
+	// A peer's item-level edit — patched into the open document, no file touched.
+	// This is what makes their graph/designer edits appear live instead of a
+	// second later via the file.
+	m_collab.onRemoteDocDeltas(
+		[this](const std::string& relPath,
+		       const std::vector<HE::Net::CollabSession::DocDelta>& batch) {
+			applyRemoteDocDeltas(relPath, batch);
+		});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
 		applyAssetBytes(relPath, bytes);
@@ -3256,13 +3265,25 @@ void EditorApplication::dumpFrameHeadless()
 
 void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 {
-	// Assets lock LAZILY: opening a tab is reading, and reading together is the
-	// point of a session — only a tab with unsaved edits claims its asset. The
-	// same pass then turns those edits into a debounced in-session autosave:
-	// ContentManager::saveAsset fires the publish hook, so one mechanism gives
-	// peers the live view (open tabs re-read the file on arrival), writes their
-	// local project files (edits survive the session), and needs no second
-	// serialization path per panel.
+	// Two layers, and they do different jobs:
+	//
+	//   * DOCUMENT DELTAS make the editors LIVE. Every frame, each open tab we
+	//     hold is diffed against what the peers have seen and the difference
+	//     goes out per node / per element. The receiver patches the document it
+	//     is already showing, so its canvas, selection and undo history survive
+	//     — which re-reading the file cannot do.
+	//   * The whole-file autosave underneath is the BASELINE: it persists the
+	//     edits into each peer's project (they have to survive the session) and
+	//     it is what a peer opening the tab later reads. It also carries the
+	//     asset types that have no item structure at all — scripts, input
+	//     assets, scenes — and is the fallback when a delta batch is too big for
+	//     the wire.
+	//
+	// Locks stay LAZY: opening a tab is reading, and reading together is the
+	// point of a session. What changed is that "may I edit this" is now answered
+	// by the HOST at open time (beginAssetEditSession) rather than guessed from
+	// the replicated table, so the first edit confirms a lock instead of racing
+	// for one.
 	constexpr std::uint64_t kAutosaveIntervalMs = 1000;
 
 	const std::string& root = contentManager().contentRoot();
@@ -3277,17 +3298,17 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 		if (rel.empty() || !CollabController::isSyncableAsset(rel)) continue;
 		openRel.insert(rel);
 
-		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
-		if (m_collab.assetLockedByOther(rel)) continue;   // read-only, gate draws the banner
+		// Ask the host about this asset the first time we see its tab. Idempotent,
+		// so this is just "have we asked yet".
+		m_collab.beginAssetEditSession(rel);
 
+		publishDocDeltas(tab.assetPath, rel);
+
+		if (!EditorUI::tabHasUnsavedEdits(tab.assetPath)) continue;
+		if (!m_collab.beginAssetEdit(rel))
+			continue;   // held by someone else, or the host has not answered yet
 		if (!m_collab.ownsAssetLock(rel))
-		{
-			// First edit: claim it. Optimistic — the edit already applied
-			// locally; the deny path (lost the race by one RTT) reloads the tab
-			// from disk, discarding that sliver.
-			m_collab.requestAssetLock(rel);
-			continue;   // wait for the grant before broadcasting anything
-		}
+			continue;   // claim in flight — the grant is one round trip away
 
 		auto& last = m_assetLastAutosaveMs[tab.assetPath];
 		if (nowMs - last < kAutosaveIntervalMs) continue;
@@ -3301,6 +3322,71 @@ void EditorApplication::updateAssetCollabSync(std::uint64_t nowMs)
 	{
 		if (!openRel.count(rel)) m_collab.releaseAssetLock(rel);
 	}
+
+	// Closed tabs forget what the host told them, so reopening asks again rather
+	// than trusting an answer from minutes ago, and their mirrors go with the
+	// panel state.
+	for (auto it = m_docMirrorPaths.begin(); it != m_docMirrorPaths.end(); )
+	{
+		if (openRel.count(*it)) { ++it; continue; }
+		m_collab.forgetAssetEditSession(*it);
+		it = m_docMirrorPaths.erase(it);
+	}
+	for (const std::string& rel : openRel) m_docMirrorPaths.insert(rel);
+}
+
+// One tab's outgoing deltas. Runs every frame for every tab we hold the lock on:
+// the diff is over a few hundred items and returns nothing at all when nothing
+// moved, which is the overwhelmingly common case.
+void EditorApplication::publishDocDeltas(const std::string& absPath,
+                                         const std::string& rel)
+{
+	if (!m_collab.inSession()) return;
+
+	CollabDocSync::DocBindings docs = EditorUI::collabDocsFor(absPath);
+	if (docs.empty()) return;
+
+	// A tab we do NOT hold still has to keep its mirror current, or the moment we
+	// take the lock the first diff would announce every change the peer made
+	// while we watched as if it were ours.
+	const bool owned = m_collab.ownsAssetLock(rel);
+
+	std::vector<HE::Net::CollabSession::DocDelta> batch;
+	for (CollabDocSync::DocBinding& d : docs)
+	{
+		if (!d.adapter || !d.mirror) continue;
+		if (owned) CollabDocSync::diffInto(*d.adapter, *d.mirror, d.scope, batch);
+		else       CollabDocSync::seed(*d.adapter, *d.mirror, d.scope);
+	}
+	if (batch.empty()) return;
+
+	if (!m_collab.publishDocDeltas(rel, batch))
+	{
+		// Too large for the wire (or the lock slipped). The whole-file autosave
+		// below is the fallback — force it on the next pass rather than dropping
+		// the edit, because a delta that was not sent is a silent fork.
+		m_assetLastAutosaveMs[absPath] = 0;
+	}
+}
+
+// A peer's item-level edit. Applied to the LIVE document rather than the file,
+// so the tab keeps its canvas, selection and undo history.
+void EditorApplication::applyRemoteDocDeltas(
+	const std::string& rel,
+	const std::vector<HE::Net::CollabSession::DocDelta>& batch)
+{
+	const std::string abs = contentManager().resolveSavePath(rel);
+	CollabDocSync::DocBindings docs = EditorUI::collabDocsFor(abs);
+	if (docs.empty()) return;   // nobody has that tab open — the file sync covers it
+
+	for (CollabDocSync::DocBinding& d : docs)
+	{
+		if (!d.adapter || !d.mirror) continue;
+		CollabDocSync::applyDeltas(*d.adapter, *d.mirror, d.scope, batch);
+	}
+	// Deliberately NOT marked dirty. The holder's whole-file autosave is what
+	// writes this into our project a moment later; flagging the tab here would
+	// put an unsaveable "*" on a read-only tab and offer it at the quit prompt.
 }
 
 void EditorApplication::syncStructuralChanges()
