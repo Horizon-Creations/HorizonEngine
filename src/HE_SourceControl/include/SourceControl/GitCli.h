@@ -172,6 +172,20 @@ public:
 	                              const std::string& username,
 	                              const std::string& secret,
 	                              std::string* err = nullptr);
+
+	// Read a stored credential back out of the helper (`git credential fill`),
+	// so a user already signed in for source control is not asked to produce a
+	// token a second time for something else.
+	//
+	// Strictly non-interactive: terminal prompting and the GUI helpers'
+	// interactive modes are disabled, so "nothing stored" comes back as false
+	// rather than as a dialog appearing behind the editor window. Returns false
+	// with an empty `outSecret` for that case — not an error worth showing.
+	static bool fillCredential(const std::filesystem::path& root,
+	                           const std::string& host,
+	                           std::string& outUsername,
+	                           std::string& outSecret,
+	                           std::string* err = nullptr);
 };
 
 } // namespace HE::Sc

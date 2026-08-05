@@ -10,11 +10,18 @@
 #include "EditorApplication.h"          // AppContext (renderer backend name)
 #include "EditorWidgets.h"              // pinDialogToEditorWindow
 #include "HorizonVersion.h"             // HE_VERSION_STRING / HE_VERSION_CODENAME
+#include <Diagnostics/GlobalState.h>    // project path — cwd for the credential probe
+#include <SourceControl/GitCli.h>       // reading a stored GitHub token back
+#include <SourceControl/GitHubApi.h>    // gist upload + issue creation
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>      // InputText overloads for std::string
 #include <SDL3/SDL.h>                   // SDL_OpenURL
+#include <atomic>
+#include <cstdio>
 #include <filesystem>
+#include <mutex>
 #include <system_error>
+#include <thread>
 #endif
 
 namespace ReportIssueDialog
@@ -95,12 +102,20 @@ std::string buildBody(const Report& report, int logLineLimit)
 	}
 
 	const bool wantLines = logLineLimit != 0 && !report.logLines.empty();
-	if (!report.logPath.empty() || wantLines)
+	if (!report.logPath.empty() || wantLines || !report.logGistUrl.empty())
 	{
 		body += "### Log\n\n";
+		// The uploaded copy first: it is the one a reader can actually open,
+		// and it makes the inlined lines below a summary rather than the story.
+		if (!report.logGistUrl.empty())
+		{
+			body += "Full log: ";
+			body += report.logGistUrl;
+			body += "\n";
+		}
 		if (!report.logPath.empty())
 		{
-			body += "Full log file: `";
+			body += report.logGistUrl.empty() ? "Full log file: `" : "Local path: `";
 			body += report.logPath;
 			body += "`\n";
 		}
@@ -308,6 +323,105 @@ const Preview& preview()
 	return s_preview;
 }
 
+// ── Direct submission through the GitHub API ────────────────────────────────
+// Both the token probe and the submit itself are HTTPS round trips, so both run
+// on a worker thread; the UI thread only ever reads the atomics and the
+// mutex-guarded strings below, and joins once running flips false.
+//
+// The token is deliberately NOT kept between the probe and the submit. It is
+// fetched from git's credential helper, used, and dropped — the same rule the
+// source-control layer follows, and the reason a report cannot leak one from a
+// dialog someone left open.
+
+enum class Phase { Idle, Probing, Submitting, Succeeded, Failed };
+
+std::atomic<bool> s_workerRunning{false};
+std::thread       s_worker;
+std::mutex        s_workerMutex;      // guards everything in this block
+
+Phase       s_phase = Phase::Idle;
+std::string s_githubLogin;            // "" = no usable stored token
+std::string s_workerStep;             // what the worker is doing right now
+std::string s_workerError;
+std::string s_issueUrl;               // set on success
+std::string s_gistNote;               // why the log upload did not happen, if so
+
+// Only ever holds what the user typed, and only while the dialog is open.
+std::string s_pastedToken;
+
+// Read on the UI thread at open time and handed to the worker: git's credential
+// helper is often configured repo-locally (ensureCredentialHelper writes
+// --local), so the probe has to run with the project as its working directory
+// or it will not see the token the Source Control panel stored.
+std::filesystem::path s_credentialRoot;
+
+struct WorkerView   // a UI-thread snapshot, taken under one lock
+{
+	Phase       phase = Phase::Idle;
+	std::string login, step, error, issueUrl, gistNote;
+};
+
+WorkerView workerView()
+{
+	std::lock_guard<std::mutex> lk(s_workerMutex);
+	return WorkerView{ s_phase, s_githubLogin, s_workerStep, s_workerError,
+	                   s_issueUrl, s_gistNote };
+}
+
+void setStep(const char* step)
+{
+	std::lock_guard<std::mutex> lk(s_workerMutex);
+	s_workerStep = step;
+}
+
+// Overwrite before releasing: a token that merely went out of scope is still
+// sitting in freed heap memory for anyone who looks.
+void wipe(std::string& secret)
+{
+	for (char& c : secret) c = '\0';
+	secret.clear();
+}
+
+// Reap a finished worker. Must run on the UI thread, and before starting
+// another — a joinable thread that gets overwritten terminates the process.
+void reapWorker()
+{
+	if (!s_workerRunning.load(std::memory_order_acquire) && s_worker.joinable())
+		s_worker.join();
+}
+
+// The tail of the log file, which is the whole file unless it has grown past
+// the cap. Read fresh from disk rather than from the ring: the point of the
+// upload is to carry MORE than the ring holds.
+std::string readLogTail(const std::string& path, std::size_t maxBytes)
+{
+	if (path.empty()) return {};
+	HE::Log::flush();
+
+	std::error_code ec;
+	const std::uintmax_t size = std::filesystem::file_size(path, ec);
+	if (ec) return {};
+
+	std::FILE* f = std::fopen(path.c_str(), "rb");
+	if (!f) return {};
+
+	std::string out;
+	std::size_t want = static_cast<std::size_t>(std::min<std::uintmax_t>(size, maxBytes));
+	if (size > want && std::fseek(f, static_cast<long>(size - want), SEEK_SET) != 0)
+	{
+		std::fclose(f);
+		return {};
+	}
+	out.resize(want);
+	const std::size_t got = std::fread(out.data(), 1, want, f);
+	std::fclose(f);
+	out.resize(got);
+
+	if (size > got)
+		out.insert(0, "[… earlier lines omitted; log is larger than the upload limit …]\n");
+	return out;
+}
+
 // Opens the platform file browser at the log's folder. There is no portable
 // "reveal this file" call, so the folder is the honest target — the file is
 // named right below the button.
@@ -322,6 +436,181 @@ void revealLogFile()
 	std::string path = dir.generic_string();
 	if (!path.empty() && path.front() != '/') url += '/';
 	SDL_OpenURL((url + path).c_str());
+}
+
+// Whatever git's helper holds for github.com, or empty. Not an error when there
+// is nothing: most users have never signed in, and the browser path is the
+// answer for them.
+//
+// `root` is passed rather than read from the static: reopening the dialog
+// rewrites s_credentialRoot, and a worker still reading it would be a race.
+std::string storedGitHubToken(const std::filesystem::path& root)
+{
+	std::string user, secret;
+	if (!HE::Sc::GitCli::fillCredential(root, "github.com", user, secret))
+		return {};
+	return secret;
+}
+
+// Is a token stored, and whose is it? Runs once when the dialog opens so the
+// user can see which account would speak for them BEFORE writing a report
+// against it — and so an expired token is caught now rather than at submit.
+void startTokenProbe()
+{
+	reapWorker();
+	if (s_workerRunning.load(std::memory_order_acquire)) return;
+
+	{
+		std::lock_guard<std::mutex> lk(s_workerMutex);
+		s_phase = Phase::Probing;
+		s_githubLogin.clear();
+		s_workerError.clear();
+		s_workerStep = "Looking for a stored GitHub sign-in…";
+	}
+	s_workerRunning.store(true, std::memory_order_release);
+
+	s_worker = std::thread([root = s_credentialRoot]
+	{
+		std::string token = storedGitHubToken(root);
+		std::string login, error;
+		if (!token.empty())
+		{
+			HE::Sc::GitHubUser user;
+			if (HE::Sc::GitHubApi::currentUser(token, user, &error)) login = user.login;
+		}
+		wipe(token);
+
+		{
+			std::lock_guard<std::mutex> lk(s_workerMutex);
+			s_githubLogin = login;
+			s_workerStep.clear();
+			// A stored token that GitHub rejects is worth saying out loud; having
+			// none at all is not a problem, it is just the other path.
+			s_workerError = login.empty() ? error : std::string();
+			s_phase       = Phase::Idle;
+		}
+		s_workerRunning.store(false, std::memory_order_release);
+	});
+}
+
+// Upload the log, file the issue. `pastedToken` wins over the stored one so a
+// user with the wrong token in their keychain can still get a report out.
+void startSubmit(Report report, std::string pastedToken, bool attachFullLog)
+{
+	reapWorker();
+	if (s_workerRunning.load(std::memory_order_acquire)) return;
+
+	{
+		std::lock_guard<std::mutex> lk(s_workerMutex);
+		s_phase = Phase::Submitting;
+		s_workerError.clear();
+		s_issueUrl.clear();
+		s_gistNote.clear();
+		s_workerStep = "Signing in to GitHub…";
+	}
+	s_workerRunning.store(true, std::memory_order_release);
+
+	const std::string logPath = s_logPath;
+
+	s_worker = std::thread(
+		[report = std::move(report), pastedToken = std::move(pastedToken),
+		 attachFullLog, logPath, root = s_credentialRoot]() mutable
+	{
+		std::string token = pastedToken.empty() ? storedGitHubToken(root) : pastedToken;
+		wipe(pastedToken);
+
+		const auto fail = [&](const std::string& why)
+		{
+			wipe(token);
+			// Logged as well as shown: the message names the missing scope, and
+			// that is exactly what a user pastes into a follow-up question.
+			HE_LOG_WARN(Editor, "Report Issue: %s", why.c_str());
+			std::lock_guard<std::mutex> lk(s_workerMutex);
+			s_workerError = why;
+			s_workerStep.clear();
+			s_phase = Phase::Failed;
+		};
+
+		if (token.empty())
+		{
+			fail("No GitHub token available. Paste one, or use \"Open in Browser\".");
+			s_workerRunning.store(false, std::memory_order_release);
+			return;
+		}
+
+		// Verify before uploading anything: a dead token should not cost the user
+		// a gist that then has no issue pointing at it.
+		std::string       error;
+		HE::Sc::GitHubUser user;
+		if (!HE::Sc::GitHubApi::currentUser(token, user, &error))
+		{
+			fail(error);
+			s_workerRunning.store(false, std::memory_order_release);
+			return;
+		}
+
+		std::string gistNote;
+		if (attachFullLog)
+		{
+			setStep("Uploading the log…");
+			const std::string contents = readLogTail(logPath, kMaxGistBytes);
+			if (contents.empty())
+			{
+				gistNote = "The log file could not be read, so only the lines below are attached.";
+			}
+			else
+			{
+				HE::Sc::CreatedGist gist;
+				std::string gistErr;
+				if (HE::Sc::GitHubApi::createGist(
+						token, "Horizon Engine log for a bug report", "HorizonEngine.log",
+						contents, /*isPublic=*/false, gist, &gistErr))
+				{
+					report.logGistUrl = gist.htmlUrl;
+				}
+				else
+				{
+					// Not fatal, and common: a token stored for pushing a game
+					// usually has no gist permission. File the issue anyway rather
+					// than throwing away a written report over an attachment.
+					gistNote = "The log could not be uploaded (" + gistErr +
+					           "). The issue was filed with the lines below only.";
+				}
+			}
+		}
+
+		setStep("Filing the issue…");
+		HE::Sc::CreatedIssue issue;
+		if (!HE::Sc::GitHubApi::createIssue(token, kIssueOwner, kIssueRepo, report.title,
+		                                    buildBody(report, -1), issue, &error))
+		{
+			// Say what DID happen — an uploaded gist is a real side effect, and a
+			// user who is told nothing will upload a second one on the next try.
+			if (!report.logGistUrl.empty())
+				error += "\nThe log was already uploaded to " + report.logGistUrl;
+			fail(error);
+			s_workerRunning.store(false, std::memory_order_release);
+			return;
+		}
+
+		wipe(token);
+		// The address goes in the log too. The dialog can be dismissed with
+		// Escape the moment it appears, and then this is the only record the
+		// user has of where their report went.
+		HE_LOG_INFO(Editor, "Report Issue: filed #%d — %s", issue.number,
+		            issue.htmlUrl.c_str());
+		if (!report.logGistUrl.empty())
+			HE_LOG_INFO(Editor, "Report Issue: log uploaded to %s", report.logGistUrl.c_str());
+
+		{
+			std::lock_guard<std::mutex> lk(s_workerMutex);
+			s_issueUrl = issue.htmlUrl;
+			s_gistNote = gistNote;
+			s_workerStep.clear();
+			s_phase = Phase::Succeeded;
+		}
+		s_workerRunning.store(false, std::memory_order_release);
+	});
 }
 
 } // namespace
@@ -346,6 +635,10 @@ bool isOpen()
 void DrawReportIssueDialog(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+	// Join a worker that finished while the dialog was closed, so a shut dialog
+	// never leaves a joinable thread lying around.
+	reapWorker();
+
 	if (s_openRequested)
 	{
 		s_openRequested = false;
@@ -360,10 +653,49 @@ void DrawReportIssueDialog(AppContext& ctx)
 		// a word. Fall back to everything rather than attaching nothing.
 		s_problemsOnly = !s_logProblems.empty();
 		s_isOpen       = true;
+
+		// git's credential helper is often configured repo-locally, so the probe
+		// has to run with the project as its working directory or it will not see
+		// the token the Source Control panel stored.
+		s_credentialRoot.clear();
+		if (ctx.globalState)
+		{
+			std::error_code ec;
+			std::filesystem::path p = ctx.globalState->getLastProjectPath();
+			if (!p.empty())
+			{
+				if (std::filesystem::is_regular_file(p, ec)) p = p.parent_path();
+				s_credentialRoot = p;
+			}
+		}
+		if (s_credentialRoot.empty())
+		{
+			std::error_code ec;
+			s_credentialRoot = std::filesystem::current_path(ec);
+		}
+
+		{
+			std::lock_guard<std::mutex> lk(s_workerMutex);
+			s_phase = Phase::Idle;
+			s_issueUrl.clear();
+			s_workerError.clear();
+			s_gistNote.clear();
+		}
+		wipe(s_pastedToken);
+		startTokenProbe();
+
 		ImGui::OpenPopup(kPopupId);
 	}
 
 	if (!s_isOpen) return;
+
+	// Escape closes an ImGui modal, and there is no flag to stop it. While a
+	// submit is in flight that would throw away the one thing the user is
+	// waiting for — whether their report landed, and its address — so the popup
+	// is put straight back. (ImGui also force-closes a modal when another
+	// same-level popup opens, which this covers too.)
+	const bool workBusy = s_workerRunning.load(std::memory_order_acquire);
+	if (workBusy && !ImGui::IsPopupOpen(kPopupId)) ImGui::OpenPopup(kPopupId);
 
 	ImGui::SetNextWindowSize(ImVec2(660.0f, 600.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow(ImVec2(520.0f, 0.0f));
@@ -377,8 +709,9 @@ void DrawReportIssueDialog(AppContext& ctx)
 	ImGui::PushTextWrapPos(0.0f);
 	ImGui::TextUnformatted(
 		"Describe what went wrong. The editor adds your engine version, this "
-		"machine and the recent log, then opens the issue form on GitHub — "
-		"nothing leaves the editor until you press Submit there.");
+		"machine and the recent log. File it directly if you are signed in to "
+		"GitHub, or open the pre-filled form in your browser and send it "
+		"yourself.");
 	ImGui::PopTextWrapPos();
 	ImGui::Spacing();
 
@@ -424,14 +757,15 @@ void DrawReportIssueDialog(AppContext& ctx)
 		if (s_problemsOnly && s_logProblems.empty())
 			ImGui::TextDisabled("Nothing was logged as a warning or an error this run.");
 
-		// Spelled out because it is the one thing here that could surprise
-		// someone: a link cannot carry a file, so the issue gets a slice of the
-		// log inline and the user drags the file in for the rest.
+		// The two routes attach genuinely different amounts, and which one the
+		// user is about to take changes what "attach the log" means — worth
+		// saying here rather than letting them find out afterwards.
 		ImGui::PushTextWrapPos(0.0f);
 		ImGui::TextDisabled(
-			"Those lines travel inside the issue text. A link cannot carry a file, "
-			"so for the complete log open the folder below and drag "
-			"HorizonEngine.log into the GitHub issue.");
+			"Those lines travel inside the issue text. Filing directly also uploads "
+			"the COMPLETE log file as a secret gist and links it. Through the "
+			"browser a link cannot carry a file — drag HorizonEngine.log into the "
+			"issue yourself for the rest.");
 		ImGui::PopTextWrapPos();
 		if (!s_logPath.empty())
 		{
@@ -448,10 +782,12 @@ void DrawReportIssueDialog(AppContext& ctx)
 	if (ImGui::TreeNode("Preview what gets sent"))
 	{
 		const Preview& p = preview();
-		ImGui::TextDisabled("%d of %d log lines fit into the link (%d of %d characters).",
-		                    p.linesKept,
-		                    static_cast<int>(s_includeLog ? chosenLogLines().size() : 0),
-		                    static_cast<int>(p.url.size()), static_cast<int>(kMaxUrlLength));
+		// Only the browser route is length-bound; filing directly sends all of it.
+		ImGui::TextDisabled(
+			"Filing directly sends all of this. Through the browser %d of %d log "
+			"lines fit into the link (%d of %d characters).",
+			p.linesKept, static_cast<int>(s_includeLog ? chosenLogLines().size() : 0),
+			static_cast<int>(p.url.size()), static_cast<int>(kMaxUrlLength));
 		std::string body = p.body;   // ReadOnly, but the widget wants a mutable target
 		ImGui::InputTextMultiline("##ri_preview", &body, ImVec2(-1.0f, 200.0f),
 		                          ImGuiInputTextFlags_ReadOnly);
@@ -462,10 +798,110 @@ void DrawReportIssueDialog(AppContext& ctx)
 	ImGui::Separator();
 	ImGui::Spacing();
 
+	// ── Filing it ────────────────────────────────────────────────────────────
+	const WorkerView w = workerView();
+	const bool busy = s_workerRunning.load(std::memory_order_acquire);
+
+	if (w.phase == Phase::Succeeded && !w.issueUrl.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.45f, 1.0f));
+		ImGui::TextUnformatted("The issue has been filed.");
+		ImGui::PopStyleColor();
+		ImGui::TextDisabled("%s", w.issueUrl.c_str());
+		if (!w.gistNote.empty())
+		{
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextDisabled("%s", w.gistNote.c_str());
+			ImGui::PopTextWrapPos();
+		}
+		ImGui::Spacing();
+		if (ImGui::Button("Open Issue", ImVec2(150.0f, 0.0f))) SDL_OpenURL(w.issueUrl.c_str());
+		ImGui::SameLine();
+		if (ImGui::Button("Copy Link", ImVec2(120.0f, 0.0f)))
+			ImGui::SetClipboardText(w.issueUrl.c_str());
+		ImGui::SameLine();
+		if (ImGui::Button("Close", ImVec2(100.0f, 0.0f)))
+		{
+			// A filed report is finished business — leaving the text behind would
+			// make the next one start as an edit of the last.
+			s_title.clear(); s_what.clear(); s_steps.clear(); s_expected.clear();
+			s_isOpen = false;
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+		return;
+	}
+
+	if (busy)
+	{
+		ImGui::TextUnformatted(w.step.empty() ? "Working…" : w.step.c_str());
+	}
+	else if (!w.login.empty())
+	{
+		// Named explicitly: this posts publicly under the user's own account, and
+		// they should see whose before they press anything.
+		ImGui::Text("Signed in to GitHub as %s.", w.login.c_str());
+		ImGui::TextDisabled("Filing directly posts the issue under that account.");
+	}
+	else
+	{
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextDisabled(
+			"Not signed in to GitHub. The browser route needs no account. To file "
+			"directly — and upload the whole log — paste a token with 'issues' and "
+			"'gist' access; it is used once and never stored.");
+		ImGui::PopTextWrapPos();
+		if (!w.error.empty())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextUnformatted(w.error.c_str());
+			ImGui::PopTextWrapPos();
+			ImGui::PopStyleColor();
+		}
+		ImGui::SetNextItemWidth(320.0f);
+		ImGui::InputTextWithHint("##ri_token", "GitHub token (optional)", &s_pastedToken,
+		                         ImGuiInputTextFlags_Password);
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Create a token"))
+			SDL_OpenURL("https://github.com/settings/tokens");
+	}
+
+	if (w.phase == Phase::Failed && !w.error.empty() && !busy)
+	{
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextUnformatted(w.error.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::PopStyleColor();
+	}
+
+	ImGui::Spacing();
+
+	// GitHub requires a title of its own; the browser form can be finished by
+	// hand, but an API call with no title is simply rejected.
+	const bool haveToken   = !w.login.empty() || !s_pastedToken.empty();
+	const bool canFile     = !busy && haveToken && !s_title.empty();
+	if (!canFile) ImGui::BeginDisabled();
+	if (ImGui::Button("File on GitHub", ImVec2(150.0f, 0.0f)))
+	{
+		s_status.clear();
+		Report report = currentReport();
+		startSubmit(std::move(report), s_pastedToken, s_includeLog);
+		wipe(s_pastedToken);
+	}
+	if (!canFile) ImGui::EndDisabled();
+	if (!busy && haveToken && s_title.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("GitHub needs a title for the issue.");
+	ImGui::SameLine();
+
+	if (busy) ImGui::BeginDisabled();
+
 	// Something has to be said; the rest can be filled in on the web form.
 	const bool submittable = !s_title.empty() || !s_what.empty();
 	if (!submittable) ImGui::BeginDisabled();
-	if (ImGui::Button("Open on GitHub", ImVec2(150.0f, 0.0f)))
+	if (ImGui::Button("Open in Browser", ImVec2(150.0f, 0.0f)))
 	{
 		const Preview& p = preview();
 		SDL_OpenURL(p.url.c_str());
@@ -508,6 +944,8 @@ void DrawReportIssueDialog(AppContext& ctx)
 		ImGui::CloseCurrentPopup();
 	}
 
+	if (busy) ImGui::EndDisabled();
+
 	if (!s_status.empty())
 	{
 		ImGui::Spacing();
@@ -519,6 +957,15 @@ void DrawReportIssueDialog(AppContext& ctx)
 	ImGui::EndPopup();
 #else
 	(void)ctx;
+#endif
+}
+
+void joinPendingWork()
+{
+#ifdef HE_IMGUI_ENABLED
+	// Editor shutdown. A submit in flight has already POSTED or is about to, so
+	// waiting is also the only way the user learns whether their report landed.
+	if (s_worker.joinable()) s_worker.join();
 #endif
 }
 

@@ -156,6 +156,10 @@ static bool s_showSourceControl = false;
 void EditorUI::joinPendingExport()
 {
 	ExportDialogPanel::joinPendingExport();
+	// Same rule, different worker: Help ▸ Report Issue may still be uploading a
+	// log or filing an issue, and a joinable std::thread destroyed at teardown
+	// terminates the process.
+	ReportIssueDialog::joinPendingWork();
 }
 
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)

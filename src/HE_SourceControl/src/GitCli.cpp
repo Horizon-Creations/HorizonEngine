@@ -454,4 +454,65 @@ bool GitCli::approveCredential(const std::filesystem::path& root,
 	return true;
 }
 
+bool GitCli::fillCredential(const std::filesystem::path& root,
+                            const std::string& host,
+                            std::string& outUsername,
+                            std::string& outSecret,
+                            std::string* err)
+{
+	outUsername.clear();
+	outSecret.clear();
+
+	HE::Proc::Options o;
+	o.exe       = "git";
+	o.args      = { "credential", "fill" };
+	o.cwd       = root;
+	o.timeoutMs = 15000;
+	// Every door a prompt could come through. Without these, a machine with no
+	// stored credential does not answer "no" — it stops and waits, either on a
+	// terminal nobody is looking at or in a dialog behind the editor window.
+	o.env.emplace_back("GIT_TERMINAL_PROMPT", "0");
+	o.env.emplace_back("GIT_ASKPASS", "");
+	o.env.emplace_back("SSH_ASKPASS", "");
+	o.env.emplace_back("GCM_INTERACTIVE", "never");     // Git Credential Manager
+	o.stdinData = "protocol=https\nhost=" + host + "\n\n";
+
+	const HE::Proc::Result r = HE::Proc::run(o);
+	if (!r.ok())
+	{
+		// The ordinary "nothing stored" outcome, not a failure to report: git
+		// exits non-zero when it cannot produce a credential without asking.
+		return false;
+	}
+
+	// key=value lines, terminated by a blank line — the same format approve
+	// consumes. Anything after the first blank line is not ours.
+	std::string line;
+	for (std::size_t i = 0; i <= r.out.size(); ++i)
+	{
+		if (i < r.out.size() && r.out[i] != '\n') { line += r.out[i]; continue; }
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		if (line.empty()) break;
+
+		const std::size_t eq = line.find('=');
+		if (eq != std::string::npos)
+		{
+			const std::string key   = line.substr(0, eq);
+			const std::string value = line.substr(eq + 1);
+			if      (key == "username") outUsername = value;
+			else if (key == "password") outSecret   = value;
+		}
+		line.clear();
+	}
+
+	if (outSecret.empty())
+	{
+		// git answered, but with no secret in it. Worth saying, because it means
+		// a helper IS configured and simply holds nothing for this host.
+		if (err) *err = "no stored credential for " + host;
+		return false;
+	}
+	return true;
+}
+
 } // namespace HE::Sc

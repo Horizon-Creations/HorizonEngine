@@ -11,12 +11,23 @@ struct AppContext;
 // issue in the browser. Nothing is transmitted by the editor itself: the URL is
 // opened, the user reads the filled-in form and presses Submit — or does not.
 //
-// On "attaching the log": GitHub's new-issue URL takes a body, not files, so the
-// log ride-along is the last N lines inlined into that body (folded into a
-// <details> block). A request line has a hard size limit, so buildIssueUrl drops
-// log lines from the oldest end until the URL fits. For the COMPLETE log the
-// dialog offers "Show Log File" — GitHub accepts a drag-and-drop of the file
-// into the comment box, which is the only way a real attachment can happen.
+// There are two ways out of this dialog:
+//
+//   Browser  — no account, no setup, works for everyone. The report rides in
+//              the URL, and a URL has a hard length limit, so buildIssueUrl
+//              drops log lines from the oldest end until it fits. The user
+//              reads the filled-in form and presses Submit themselves.
+//
+//   Direct   — for a user whose GitHub token the credential helper already
+//              holds (or who pastes one). The editor uploads the whole log as
+//              a SECRET gist, files the issue through the REST API with the
+//              gist linked, and hands back the issue's address. No length
+//              limit, and the complete log actually gets attached.
+//
+// The gist detour is not an aesthetic choice: GitHub has no REST endpoint for
+// attaching a file to an issue — that uploader is browser-session-only and
+// rejects tokens outright — and a gist is the supported way to get a whole file
+// onto GitHub from an application.
 namespace ReportIssueDialog
 {
 	// Open the dialog (Help ▸ Report Issue…, both menu bars).
@@ -25,6 +36,10 @@ namespace ReportIssueDialog
 
 	// Draw. Safe to call every frame; draws nothing while closed.
 	void DrawReportIssueDialog(AppContext& ctx);
+
+	// Editor shutdown: a token probe or a submit may still be in flight, and
+	// destroying a joinable std::thread terminates the process.
+	void joinPendingWork();
 
 	// ── Report → URL (pure, unit-tested; no ImGui/SDL involved) ──────────────
 
@@ -39,6 +54,15 @@ namespace ReportIssueDialog
 
 	// How many log lines are offered at most, before any URL-length trimming.
 	inline constexpr int kMaxLogLines = 400;
+
+	// Where the issue is filed. Split rather than one string because the API
+	// path puts them in a request path, where a stray separator would matter.
+	inline constexpr const char* kIssueOwner = "Horizon-Creations";
+	inline constexpr const char* kIssueRepo  = "HorizonEngine";
+
+	// Ceiling on the log uploaded as a gist. Well under GitHub's own limit, and
+	// past this the tail is what anyone would read anyway.
+	inline constexpr std::size_t kMaxGistBytes = 4u * 1024u * 1024u;
 
 	struct Report
 	{
@@ -55,6 +79,10 @@ namespace ReportIssueDialog
 		// dozen or two lines survive the URL limit, so a reader has to be told
 		// whether the gaps are filtering or truncation.
 		std::string logLabel = "log";
+		// Set on the direct path once the full log has been uploaded. Linked
+		// from the Log section, which is what makes that path's report complete
+		// rather than a sample.
+		std::string logGistUrl;
 	};
 
 	// Percent-encodes to RFC 3986 unreserved characters.

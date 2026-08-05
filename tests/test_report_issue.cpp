@@ -125,6 +125,39 @@ TEST_CASE("buildBody says whether the lines were filtered or merely cut")
 	CHECK(ReportIssueDialog::buildBody(r, -1).find("Last 4 log lines") != std::string::npos);
 }
 
+TEST_CASE("An uploaded log is linked, and demotes the local path")
+{
+	// The direct path uploads the whole log as a gist. Once that link is in the
+	// issue, the local file path is trivia — but leaving it labelled "Full log
+	// file" would point a reader at a machine they cannot reach, next to a link
+	// they can.
+	ReportIssueDialog::Report r = sampleReport(3);
+	r.logGistUrl = "https://gist.github.com/octocat/abc123";
+
+	const std::string body = ReportIssueDialog::buildBody(r, -1);
+	CHECK(body.find("Full log: https://gist.github.com/octocat/abc123") != std::string::npos);
+	CHECK(body.find("Local path: `" + r.logPath + "`") != std::string::npos);
+	CHECK(body.find("Full log file:") == std::string::npos);
+
+	// Without an upload the local path is all there is, and says so.
+	r.logGistUrl.clear();
+	const std::string plain = ReportIssueDialog::buildBody(r, -1);
+	CHECK(plain.find("Full log file: `" + r.logPath + "`") != std::string::npos);
+	CHECK(plain.find("Local path:") == std::string::npos);
+}
+
+TEST_CASE("A gist link survives even when every log line is dropped")
+{
+	// Belt and braces for the mixed case: a report long enough to lose its log
+	// lines must not also lose the link to the log that WAS uploaded.
+	ReportIssueDialog::Report r = sampleReport(ReportIssueDialog::kMaxLogLines);
+	r.logGistUrl = "https://gist.github.com/octocat/abc123";
+
+	const std::string body = ReportIssueDialog::buildBody(r, 0);
+	CHECK(body.find(r.logGistUrl) != std::string::npos);
+	CHECK(body.find("<details>") == std::string::npos);
+}
+
 TEST_CASE("buildIssueUrl stays under the budget and keeps as much log as fits")
 {
 	const ReportIssueDialog::Report r = sampleReport(ReportIssueDialog::kMaxLogLines);

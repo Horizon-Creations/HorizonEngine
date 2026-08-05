@@ -516,6 +516,120 @@ TEST_CASE("A credential reaches git's helper via stdin, never argv")
 	he_test::removeQuiet(repo);
 }
 
+TEST_CASE("A stored credential can be read back out of the helper")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("credfill");
+
+	// A shim helper that answers `get` with fixed values. The host below is
+	// deliberately unroutable: git consults the GLOBAL helper before the local
+	// one, so a real hostname here would reach into the developer's own keychain
+	// and pull out their actual token.
+	const std::string helper =
+		"!f() { test \"$1\" = get && printf 'username=tester\\npassword=tok_FILL_123\\n'; }; f";
+	REQUIRE(GitCli::run(repo, { "config", "--local", "credential.helper", helper }).ok);
+
+	std::string user, secret, err;
+	REQUIRE(GitCli::fillCredential(repo, "horizon-test.invalid", user, secret, &err));
+	CHECK(user   == "tester");
+	CHECK(secret == "tok_FILL_123");
+
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("Reading a credential nobody stored fails instead of prompting")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// The case that matters for the editor: with no helper holding anything for
+	// this host, git must ANSWER — not sit waiting on a terminal nobody is
+	// watching, or raise a dialog behind the editor window. If the prompt
+	// suppression in fillCredential ever regresses, this test hangs, which is
+	// the correct way to notice.
+	const fs::path repo = makeRepo("credfill_none");
+	REQUIRE(GitCli::run(repo, { "config", "--local", "credential.helper", "" }).ok);
+
+	std::string user, secret, err;
+	CHECK_FALSE(GitCli::fillCredential(repo, "horizon-test.invalid", user, secret, &err));
+	CHECK(secret.empty());
+
+	he_test::removeQuiet(repo);
+}
+
+TEST_CASE("GitHub issue/gist/user responses map to actionable messages")
+{
+	// Same discipline as the create-repo mapping above: pure interpretation, no
+	// network. These three are what Help ▸ Report Issue relies on, and the ones
+	// a user is most likely to hit are the scope failures — a token stored for
+	// pushing a game usually has neither 'gist' nor issue permission on someone
+	// else's repository.
+	std::string err;
+
+	SUBCASE("current user")
+	{
+		GitHubUser user;
+		CHECK(GitHubApi::parseUserResponse(200, R"({"login":"octocat"})", user, &err));
+		CHECK(user.login == "octocat");
+
+		CHECK_FALSE(GitHubApi::parseUserResponse(401, R"({"message":"Bad credentials"})",
+		                                         user, &err));
+		CHECK(err.find("token") != std::string::npos);
+		// A 200 that names nobody is not a success.
+		CHECK_FALSE(GitHubApi::parseUserResponse(200, "{}", user, &err));
+	}
+
+	SUBCASE("gist")
+	{
+		CreatedGist gist;
+		CHECK(GitHubApi::parseCreateGistResponse(201,
+			R"({"html_url":"https://gist.github.com/octocat/abc123"})", gist, &err));
+		CHECK(gist.htmlUrl == "https://gist.github.com/octocat/abc123");
+
+		// The common one: a token that can push but was never given 'gist'.
+		CHECK_FALSE(GitHubApi::parseCreateGistResponse(404, "{}", gist, &err));
+		CHECK(err.find("gist") != std::string::npos);
+		CHECK_FALSE(GitHubApi::parseCreateGistResponse(403, "{}", gist, &err));
+		CHECK(err.find("gist") != std::string::npos);
+
+		CHECK_FALSE(GitHubApi::parseCreateGistResponse(201, "not json", gist, &err));
+	}
+
+	SUBCASE("issue")
+	{
+		CreatedIssue issue;
+		CHECK(GitHubApi::parseCreateIssueResponse(201,
+			R"({"html_url":"https://github.com/o/r/issues/42","number":42})", issue, &err));
+		CHECK(issue.htmlUrl == "https://github.com/o/r/issues/42");
+		CHECK(issue.number == 42);
+
+		CHECK_FALSE(GitHubApi::parseCreateIssueResponse(410, "{}", issue, &err));
+		CHECK(err.find("disabled") != std::string::npos);
+
+		CHECK_FALSE(GitHubApi::parseCreateIssueResponse(404, "{}", issue, &err));
+		CHECK(err.find("issues") != std::string::npos);
+
+		// 201 without an address is a failure, not a silent success.
+		CHECK_FALSE(GitHubApi::parseCreateIssueResponse(201, R"({"number":42})", issue, &err));
+	}
+}
+
+TEST_CASE("createIssue refuses a repository name that is not one")
+{
+	// owner/repo are pasted straight into the request path. They are constants
+	// at today's only call site, but a path segment built from a string is
+	// exactly what stops being constant later — so the guard is checked here
+	// rather than trusted. No network is reached: the check runs first.
+	CreatedIssue issue;
+	std::string  err;
+	CHECK_FALSE(GitHubApi::createIssue("tok", "owner/../../etc", "repo", "t", "b",
+	                                   issue, &err));
+	CHECK(err.find("invalid repository name") != std::string::npos);
+
+	CHECK_FALSE(GitHubApi::createIssue("tok", "owner", "repo?x=1", "t", "b", issue, &err));
+	CHECK(err.find("invalid repository name") != std::string::npos);
+}
+
 TEST_CASE("ensureCredentialHelper leaves a repo with a usable helper")
 {
 	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
