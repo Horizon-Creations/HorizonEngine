@@ -124,31 +124,48 @@ namespace
 		return ImGui::GetColorU32(ImVec4(rgb[0], rgb[1], rgb[2], alpha));
 	}
 
-	// A round portrait with a ring in the participant's colour — the same colour
-	// their camera gizmo and lock badges use, so the footer and the viewport can
-	// be read as one thing rather than two unrelated colour schemes.
+	// How thick a participant's colour ring is at a given avatar size. Scaled so
+	// an 18 px footer face, a 28 px menu row and a 26 px viewport marker all carry
+	// the same visual weight, with a floor that keeps it from vanishing entirely.
+	float ringWidthFor(float size) { return std::max(2.0f, size * 0.12f); }
+
+	// A round portrait inside a ring in the participant's colour — the SAME colour
+	// as their camera marker in the viewport, their selection highlight and their
+	// lock badges. That is the whole point of the ring: it is the thing that says
+	// "the blue camera over there is this face down here", so the two are worth
+	// nothing if they are not obviously the same blue.
+	//
+	// The picture is inset to sit entirely INSIDE the ring rather than sharing its
+	// boundary. A stroke centred on the edge puts half its width under the image;
+	// at 18 px that left roughly one pixel of visible colour, which is how a frame
+	// that exists in the code manages not to exist on screen.
 	void drawAvatarAt(const AppContext& ctx, ImDrawList* dl, ImVec2 topLeft, float size,
 	                  ImTextureID tex, HE::Net::ParticipantId id, const std::string& name,
 	                  bool dim)
 	{
 		const float  radius = size * 0.5f;
 		const ImVec2 centre(topLeft.x + radius, topLeft.y + radius);
-		const float  alpha  = dim ? 0.45f : 1.0f;
+		const float  ring   = ringWidthFor(size);
+		const float  inner  = std::max(1.0f, radius - ring);
+		// Only the PICTURE dims for the local user — the ring never does. It is a
+		// colour key, and a key drawn at half strength reads as a different colour
+		// rather than as the same one, quieter.
+		const float  alpha  = dim ? 0.72f : 1.0f;
 
 		if (tex)
 		{
-			// Rounded to exactly half the side, which is a circle. Drawn slightly
-			// inside the ring so the two do not fight over the same pixels.
-			dl->AddImageRounded(tex, topLeft, ImVec2(topLeft.x + size, topLeft.y + size),
+			// Rounding equal to the radius turns the square into a circle.
+			dl->AddImageRounded(tex, ImVec2(centre.x - inner, centre.y - inner),
+			                    ImVec2(centre.x + inner, centre.y + inner),
 			                    ImVec2(0, 0), ImVec2(1, 1),
-			                    ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), radius);
+			                    ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), inner);
 		}
 		else
 		{
 			// No picture: their colour, with the initial on top. Better than a
 			// generic silhouette — the initial and the colour together are enough
 			// to tell three people apart at 18 pixels.
-			dl->AddCircleFilled(centre, radius, participantColorU32(ctx, id, 0.55f * alpha), 24);
+			dl->AddCircleFilled(centre, inner, participantColorU32(ctx, id, 0.55f * alpha), 24);
 
 			const char  initial[2] = { name.empty() ? '?' : name[0], '\0' };
 			const ImVec2 ts = ImGui::CalcTextSize(initial);
@@ -156,7 +173,10 @@ namespace
 			            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), initial);
 		}
 
-		dl->AddCircle(centre, radius, participantColorU32(ctx, id, alpha), 24, 1.5f);
+		// Stroked at the mid-line of the band it should occupy, so the ring covers
+		// exactly [radius - ring, radius] and meets the picture without a seam.
+		dl->AddCircle(centre, radius - ring * 0.5f, participantColorU32(ctx, id, 1.0f),
+		              28, ring);
 	}
 
 	// ── Hover-menu state ─────────────────────────────────────────────────────
@@ -184,7 +204,10 @@ namespace
 	// that grows a row of portraits until it collides with the FPS counter is not
 	// a footer.
 	constexpr int   kMaxShown = 4;
-	constexpr float kFaceSize = 18.0f;
+	// Sized to the footer's inner height (24 px bar less its 4 px of vertical
+	// padding). Bigger looked better and was quietly clipped along the bottom
+	// edge, which ate the very ring this is here to show.
+	constexpr float kFaceSize = 16.0f;
 	// Set apart rather than overlapped in the usual stacked-avatar style: an
 	// overlap needs each face plugged with the bar's own background colour to
 	// keep the seam clean, and the footer pushes that colour and pops it again
@@ -584,21 +607,28 @@ void DrawViewportMarkers(AppContext& ctx, const glm::mat4& view, const glm::mat4
 			                      ImVec2(sx + 5.0f, sy + radius - 1.0f), tip, col);
 		}
 
+		// Same construction as the footer face — picture inside the ring, ring in
+		// their colour — because these two are meant to be recognised as the same
+		// person, and a marker whose frame is drawn differently is a marker the eye
+		// has to think about.
+		const float ring  = ringWidthFor(kFace);
+		const float inner = std::max(1.0f, radius - ring);
+
 		if (const ImTextureID tex =
 		        avatarTexture(ctx.renderer, p.id, p.avatar.rgba, p.avatar.size))
 		{
-			dl->AddImageRounded(tex, ImVec2(sx - radius, sy - radius),
-			                    ImVec2(sx + radius, sy + radius),
-			                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, radius);
+			dl->AddImageRounded(tex, ImVec2(sx - inner, sy - inner),
+			                    ImVec2(sx + inner, sy + inner),
+			                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, inner);
 		}
 		else
 		{
-			dl->AddCircleFilled(centre, radius, colSoft, 28);
+			dl->AddCircleFilled(centre, inner, colSoft, 28);
 			const char   initial[2] = { p.name.empty() ? '?' : p.name[0], '\0' };
 			const ImVec2 ts = ImGui::CalcTextSize(initial);
 			dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), IM_COL32_WHITE, initial);
 		}
-		dl->AddCircle(centre, radius, col, 28, 2.5f);
+		dl->AddCircle(centre, radius - ring * 0.5f, col, 28, ring);
 
 		if (!onScreen)
 		{
