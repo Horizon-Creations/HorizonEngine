@@ -48,6 +48,39 @@ if [ ! -f "$DEPLOY_DIR/$APP_NAME" ]; then
     exit 1
 fi
 
+# The deploy directory is shared by every build directory, so it holds whatever
+# configuration was built LAST — which is how a Debug editor ends up inside a DMG
+# that looks like a release. That is not a cosmetic difference: a Debug build needs
+# ~83 s to initialise the Metal renderer where Release needs ~1.2 s (measured on an
+# M5), so the installer feels broken. The build stamps its configuration into
+# .build-type; refuse to package anything but an optimised one.
+BUILD_TYPE="$(cat "$DEPLOY_DIR/.build-type" 2>/dev/null | tr -d '[:space:]')"
+case "$BUILD_TYPE" in
+    Release|RelWithDebInfo|MinSizeRel) ;;
+    "")
+        echo "    WARNING: $DEPLOY_DIR/.build-type is missing — cannot tell which"
+        echo "             configuration this deploy came from. Rebuild the editor to"
+        echo "             stamp it. Packaging anyway."
+        ;;
+    *)
+        if [ "${HE_ALLOW_DEBUG_DMG:-0}" = "1" ]; then
+            echo "    WARNING: packaging a $BUILD_TYPE build (HE_ALLOW_DEBUG_DMG=1)."
+            echo "             Expect a startup of a minute or more, not a second."
+        else
+            echo "ERROR: $DEPLOY_DIR holds a $BUILD_TYPE build — refusing to package it."
+            echo "       A Debug editor takes ~83 s to start where Release takes ~1.2 s."
+            echo ""
+            echo "       Build an optimised editor first, e.g.:"
+            echo "         cmake -B cmake-build-release -DCMAKE_BUILD_TYPE=Release"
+            echo "         cmake --build cmake-build-release --target HorizonEditor"
+            echo "         cmake --build cmake-build-release --target dmg"
+            echo ""
+            echo "       To package a $BUILD_TYPE build on purpose: HE_ALLOW_DEBUG_DMG=1 $0"
+            exit 1
+        fi
+        ;;
+esac
+
 # ─── 1b. DMG tooling (icon + styled installer window) ─────────────────────────
 # A small Python venv (cached in out/.dmgvenv) provides Pillow (asset rendering)
 # and dmgbuild (headless styled-DMG layout — no Finder/AppleScript, so it never

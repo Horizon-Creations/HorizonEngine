@@ -237,6 +237,14 @@ add_custom_command(TARGET HorizonEditor POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		"${EDITOR_DEPS_DIR}/Images/HC_Logo.png"
 		"$<TARGET_FILE_DIR:HorizonEditor>/Images/HC_Logo.png"
+	# Stamp which configuration filled this deploy. The packagers read it: a Debug
+	# editor is ~70x slower to initialise the Metal renderer (83 s vs 1.2 s on an
+	# M5) and must never be handed out as a release build by accident. The stamp
+	# has to be written here, not read from CMAKE_BUILD_TYPE at package time,
+	# because the deploy directory is shared — whichever build ran last owns it.
+	COMMAND ${CMAKE_COMMAND}
+		-DSTAMP_FILE=${DEPLOY_EDITOR}/.build-type -DBUILD_TYPE=$<CONFIG>
+		-P "${CMAKE_SOURCE_DIR}/cmake/write_build_stamp.cmake"
 	COMMENT "Deploying HorizonEditor.exe to ${DEPLOY_EDITOR}"
 	VERBATIM
 )

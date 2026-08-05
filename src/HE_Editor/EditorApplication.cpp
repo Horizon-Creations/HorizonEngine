@@ -497,6 +497,21 @@ void EditorApplication::OnInit()
 	// where the SDL3 backend skips parenting (multi-monitor quirk upstream).
 	io.ConfigViewportsNoDefaultParent = false;
 
+	// ImGui's default ini path is "imgui.ini" — relative to the WORKING directory.
+	// A .app launched from Finder (or off a mounted DMG) has a working directory of
+	// "/", so the layout was written nowhere and silently lost: every panel that was
+	// docked at shutdown came back floating in the middle of the screen. Pin it to an
+	// absolute path next to config.json, chosen exactly the same way — an ini beside a
+	// portable config.json still wins, so dev checkouts keep their existing layout.
+	// Must be set before the first NewFrame(), which is when ImGui reads the file.
+	static const std::string s_iniPath = [] {
+		fs::path p = GlobalState::configFilePath();
+		p.replace_filename("imgui.ini");
+		return p.string();
+	}();
+	io.IniFilename = s_iniPath.c_str();
+	HE_LOG_INFO(Editor, "Editor layout file: %s", s_iniPath.c_str());
+
 	// ── Load editor fonts ─────────────────────────────────────────────────────
 	// Font file is deployed alongside the executable via the CMake post-build step.
 	{
