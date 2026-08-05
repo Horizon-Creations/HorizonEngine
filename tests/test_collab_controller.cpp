@@ -882,10 +882,15 @@ TEST_CASE("Live sync: a C++ class reaches the peer as a whole file")
         gotPath = p; gotBytes = b;
     });
 
-    // Write a real file for publishAsset to read.
+    // Write a real file for publishAsset to read. BINARY, deliberately: an
+    // ofstream in text mode translates \n to \r\n on Windows, so the bytes on
+    // disk would not be the bytes compared against below — and publishAsset
+    // reads binary, exactly as it must to transfer a file verbatim. (This is
+    // what broke the Windows CI run: the two strings printed identically and
+    // differed by a carriage return.)
     const fs::path tmp = fs::temp_directory_path() / "he_collab_src.h";
     const std::string contents = "#pragma once\nclass PlayerPawn { int hp = 100; };\n";
-    { std::ofstream f(tmp); f << contents; }
+    { std::ofstream f(tmp, std::ios::binary); f << contents; }
 
     host.requestAssetLock(key);
     REQUIRE(pumpUntil(host, client, [&] { return host.ownsAssetLock(key); }));
