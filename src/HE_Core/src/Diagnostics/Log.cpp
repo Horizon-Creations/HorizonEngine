@@ -8,12 +8,21 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <system_error>
 #include <thread>
 
 #ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>  // RtlGetVersion probe + GlobalMemoryStatusEx (system info block)
+  #include <intrin.h>   // __cpuid — CPU brand string
   #include <io.h>       // _isatty/_fileno
   #include <process.h>  // _getpid
   #define HE_ISATTY(fd) _isatty(fd)
@@ -743,34 +752,122 @@ namespace
 #endif
 	}
 
+#if defined(__linux__)
+	// First "Key=value" / "Key : value" match in a /etc or /proc text file, with
+	// surrounding quotes and whitespace stripped. Empty when the file or the key
+	// is missing — every caller has a fallback, none of this is load-bearing.
+	std::string firstFieldFromFile(const char* path, const char* key, char separator)
+	{
+		std::ifstream in(path);
+		if (!in) return {};
+		const size_t keyLen = std::strlen(key);
+		std::string line;
+		while (std::getline(in, line))
+		{
+			if (line.compare(0, keyLen, key) != 0) continue;
+			const size_t sep = line.find(separator, keyLen);
+			if (sep == std::string::npos) continue;
+			std::string value = line.substr(sep + 1);
+			const size_t first = value.find_first_not_of(" \t\"");
+			const size_t last  = value.find_last_not_of(" \t\"\r");
+			if (first == std::string::npos) continue;
+			return value.substr(first, last - first + 1);
+		}
+		return {};
+	}
+#endif
+
 	std::string osVersionString()
 	{
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(_WIN32)
+		// GetVersionEx reports 6.2 for anything past Windows 8 unless the exe
+		// carries a compatibility manifest. RtlGetVersion always tells the truth;
+		// resolving it from the already-loaded ntdll keeps this link-dependency
+		// free. The 22000 build cut-off is Microsoft's own Windows 11 boundary.
+		using RtlGetVersionFn = long(__stdcall*)(OSVERSIONINFOEXW*);
+		if (HMODULE nt = ::GetModuleHandleW(L"ntdll.dll"))
+		{
+			if (auto rtlGetVersion =
+			        reinterpret_cast<RtlGetVersionFn>(::GetProcAddress(nt, "RtlGetVersion")))
+			{
+				OSVERSIONINFOEXW vi{};
+				vi.dwOSVersionInfoSize = sizeof(vi);
+				if (rtlGetVersion(&vi) == 0)
+				{
+					char buf[96];
+					const char* name = vi.dwMajorVersion == 10
+						? (vi.dwBuildNumber >= 22000 ? "Windows 11" : "Windows 10")
+						: "Windows";
+					std::snprintf(buf, sizeof(buf), "%s (%lu.%lu build %lu)", name,
+					              static_cast<unsigned long>(vi.dwMajorVersion),
+					              static_cast<unsigned long>(vi.dwMinorVersion),
+					              static_cast<unsigned long>(vi.dwBuildNumber));
+					return buf;
+				}
+			}
+		}
+#elif defined(__APPLE__) || defined(__linux__)
 		struct utsname u{};
 		if (uname(&u) == 0)
-			return std::string(u.sysname) + " " + u.release + " (" + u.machine + ")";
+		{
+			std::string kernel = std::string(u.sysname) + " " + u.release + " (" + u.machine + ")";
+	#if defined(__linux__)
+			// The kernel version alone rarely identifies a Linux bug; the distro does.
+			const std::string distro = firstFieldFromFile("/etc/os-release", "PRETTY_NAME", '=');
+			if (!distro.empty()) return distro + " — " + kernel;
+	#endif
+			return kernel;
+		}
 #endif
 		return "unknown";
 	}
 
 	std::string cpuBrandString()
 	{
-#ifdef __APPLE__
+#if defined(__APPLE__)
 		char brand[128]{};
 		size_t size = sizeof(brand);
 		if (sysctlbyname("machdep.cpu.brand_string", brand, &size, nullptr, 0) == 0)
 			return brand;
+#elif defined(_WIN32) && (defined(_M_X64) || defined(_M_IX86))
+		// Leaves 0x80000002..4 spell the brand string 16 bytes at a time; leaf
+		// 0x80000000 reports how far the extended range goes.
+		int regs[4]{};
+		__cpuid(regs, static_cast<int>(0x80000000u));
+		if (static_cast<unsigned>(regs[0]) >= 0x80000004u)
+		{
+			char brand[49]{};
+			for (int leaf = 0; leaf < 3; ++leaf)
+			{
+				__cpuid(regs, static_cast<int>(0x80000002u + static_cast<unsigned>(leaf)));
+				std::memcpy(brand + leaf * 16, regs, 16);
+			}
+			brand[48] = '\0';
+			const std::string s(brand);
+			const size_t first = s.find_first_not_of(' ');
+			if (first != std::string::npos) return s.substr(first);
+		}
+#elif defined(__linux__)
+		// x86 spells it "model name"; ARM boards usually only offer "Hardware".
+		std::string brand = firstFieldFromFile("/proc/cpuinfo", "model name", ':');
+		if (brand.empty()) brand = firstFieldFromFile("/proc/cpuinfo", "Hardware", ':');
+		if (!brand.empty()) return brand;
 #endif
 		return "unknown";
 	}
 
 	uint64_t physicalMemoryMB()
 	{
-#ifdef __APPLE__
+#if defined(__APPLE__)
 		uint64_t mem = 0;
 		size_t size = sizeof(mem);
 		if (sysctlbyname("hw.memsize", &mem, &size, nullptr, 0) == 0)
 			return mem / (1024 * 1024);
+#elif defined(_WIN32)
+		MEMORYSTATUSEX status{};
+		status.dwLength = sizeof(status);
+		if (::GlobalMemoryStatusEx(&status))
+			return status.ullTotalPhys / (1024 * 1024);
 #elif defined(__linux__)
 		const long pages = sysconf(_SC_PHYS_PAGES);
 		const long page  = sysconf(_SC_PAGE_SIZE);
@@ -779,6 +876,29 @@ namespace
 #endif
 		return 0;
 	}
+}
+
+std::string systemInfoBlock()
+{
+	char buf[512];
+	std::string out;
+
+	std::snprintf(buf, sizeof(buf), "Build    : %s | %s | C++%ld | built %s %s",
+	              buildConfigName(), compilerName(), long(__cplusplus), __DATE__, __TIME__);
+	out += buf;
+	std::snprintf(buf, sizeof(buf), "\nPlatform : %s — %s",
+	              platformName(), osVersionString().c_str());
+	out += buf;
+	std::snprintf(buf, sizeof(buf), "\nCPU      : %s (%u hardware threads)",
+	              cpuBrandString().c_str(), std::thread::hardware_concurrency());
+	out += buf;
+	if (const uint64_t mb = physicalMemoryMB())
+	{
+		std::snprintf(buf, sizeof(buf), "\nMemory   : %llu MB physical",
+		              static_cast<unsigned long long>(mb));
+		out += buf;
+	}
+	return out;
 }
 
 void logStartupBanner(const char* appName, int argc, char** argv)

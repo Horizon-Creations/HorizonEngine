@@ -29,6 +29,7 @@
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
@@ -319,6 +320,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Same placement, and for the same reason: it must overlay the Project Hub
     // as well as the editor, since a user can clone a project before opening one.
     GitMissingDialog::DrawGitMissingDialog(ctx);
+
+    // ── Help ▸ Report Issue… ─────────────────────────────────────────────────
+    // Drawn here too: something worth reporting can just as easily happen while
+    // opening a project as after, and the macOS Help menu is reachable in both.
+    ReportIssueDialog::DrawReportIssueDialog(ctx);
 
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
@@ -708,6 +714,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ImportAsset:     triggerImportAsset();                                  break;
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
+			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
 			default: break;
 			}
 		}
@@ -812,6 +819,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		if (ImGui::MenuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
 			TutorialPanel::open();
+		ImGui::Separator();
+		if (ImGui::MenuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
+			ReportIssueDialog::open();
 		ImGui::Separator();
 		if (ImGui::MenuItem("Documentation")) {}
 		if (ImGui::MenuItem("About")) {}

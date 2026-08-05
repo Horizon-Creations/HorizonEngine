@@ -181,6 +181,12 @@ namespace HE::Log
 	// configuration, compiler, OS, CPU/RAM, process id, executable path,
 	// working directory and the command line. Called once from Application.
 	HE_API void logStartupBanner(const char* appName, int argc, char** argv);
+	// The machine-identifying half of that banner as "Key      : value" lines
+	// (newline separated, no trailing newline): build configuration, compiler,
+	// OS, CPU and RAM. Same facts, minus anything run-specific — the editor's
+	// Report-Issue dialog pastes this into a bug report, where "which machine"
+	// is the first question anyone asks.
+	HE_API std::string systemInfoBlock();
 	// Totals for the run ("12 warnings, 2 errors") plus wall time. Called at
 	// shutdown; also available to the editor for the post-PIE report.
 	HE_API void logShutdownSummary();

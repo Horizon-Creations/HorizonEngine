@@ -187,6 +187,8 @@ void install()
 	{
 		NSMenu* help = heAddSubmenu(main, @"Help");
 		heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false);
+		[help addItem:[NSMenuItem separatorItem]];
+		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
 		NSApp.helpMenu = help;
 	}
 

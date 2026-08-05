@@ -17,6 +17,7 @@ add_executable(he_tests
     test_horizoncode_shortcuts.cpp
     test_graph_editor_keys.cpp
     test_editor_row_widgets.cpp
+    test_report_issue.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_gi_bvh.cpp
@@ -111,6 +112,10 @@ add_executable(he_tests
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphShortcuts.cpp
+    # Report-Issue: the dialog is ImGui, but the part that has to be right — the
+    # markdown body and the URL that has to stay under GitHub's request-line
+    # limit — is pure and compiles without HE_IMGUI_ENABLED.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ReportIssueDialog.cpp
     # The node canvas + ImGui's CORE only (no backend, no GPU): ImGui runs
     # headless given a context and a display size, which is what lets
     # test_graph_editor_keys.cpp actually press the graph shortcuts. The editor
