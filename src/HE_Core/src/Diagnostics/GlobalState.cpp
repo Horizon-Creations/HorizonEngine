@@ -44,14 +44,33 @@ static HE::RendererBackend defaultRHI()
 void GlobalState::setLogFile(const std::string& exePath)
 {
 	m_engineStatus.startupPath = exePath;
-	// Derive log file next to the exe: <exeDir>/HorizonEngine.log
-	fs::path logPath =
-		fs::path(exePath).parent_path() / "HorizonEngine.log";
+
+	// Preferred location is next to the exe, which keeps a portable checkout or a
+	// zipped build self-contained. That directory is not always writable though: a
+	// .app running off a mounted DMG sits on a read-only volume, and one installed
+	// in /Applications is code-signed — writing a log INTO the bundle invalidates
+	// the signature. Both used to end with no log file at all and no hint why, so
+	// an installed build had nothing to attach to a bug report.
+	const fs::path exeDir = fs::path(exePath).parent_path();
+
 	// One run = one file, but the three previous runs are rotated to
 	// HorizonEngine.1/2/3.log rather than dropped: after a crash the interesting
 	// log is the one from BEFORE the restart, and truncating on launch used to
 	// destroy it before anyone could look.
-	HE::Log::openLogFile(logPath.string(), /*keepBackups=*/3);
+	auto openIn = [](const fs::path& dir) {
+		return !dir.empty()
+		    && HE::Log::openLogFile((dir / "HorizonEngine.log").string(), /*keepBackups=*/3);
+	};
+
+	if (openIn(exeDir))
+		m_diagnosticsDir = exeDir.string();
+	else
+	{
+		// Same per-user directory config.json uses, so all writable state of a run
+		// ends up in one place.
+		const fs::path userDir = userDataDir();
+		m_diagnosticsDir = openIn(userDir) ? userDir.string() : std::string();
+	}
 
 	// Verbosity comes from (lowest to highest priority) the built-in default,
 	// the "logVerbosity" config entry, and the HE_LOG environment variable, so a
@@ -61,17 +80,52 @@ void GlobalState::setLogFile(const std::string& exePath)
 		HE::Log::configureFromString(env);
 	if (std::getenv("HE_LOG_NO_CONSOLE"))
 		HE::Log::setConsoleEnabled(false);
+
+	// After the sinks are configured, so this lands in the file it is describing.
+	if (m_diagnosticsDir.empty())
+		HE_LOG_WARN(Core, "No writable log location (tried %s and the per-user data "
+		                  "directory) — this run logs to the console only",
+		            exeDir.string().c_str());
+	else if (m_diagnosticsDir != exeDir.string())
+		HE_LOG_INFO(Core, "Log file: %s/HorizonEngine.log (%s is not writable)",
+		            m_diagnosticsDir.c_str(), exeDir.string().c_str());
 }
 
 std::string GlobalState::getDumpsDir() const
 {
-	// Mirror setLogFile's exe-adjacent derivation: <exeDir>/dumps. startupPath is
-	// argv[0] (the executable), so parent_path() is the deploy directory — the same
-	// folder that holds HorizonEngine.log.
-	fs::path dumps = fs::path(m_engineStatus.startupPath).parent_path() / "dumps";
+	// Next to HorizonEngine.log, wherever setLogFile settled on — so a read-only
+	// exe directory moves crash dumps and profiler captures along with the log
+	// instead of dropping them. Before setLogFile has run (or with no writable
+	// location at all) fall back to the exe-adjacent path: a caller needs a
+	// directory to name even when writing there will fail.
+	const fs::path base = m_diagnosticsDir.empty()
+	                    ? fs::path(m_engineStatus.startupPath).parent_path()
+	                    : fs::path(m_diagnosticsDir);
+	fs::path dumps = base / "dumps";
 	std::error_code ec;
 	fs::create_directories(dumps, ec);
 	return dumps.string();
+}
+
+// ─── Where per-user state lives ──────────────────────────────────────────────
+std::filesystem::path GlobalState::userDataDir()
+{
+	static const fs::path resolved = [] {
+		std::error_code ec;
+		fs::path dir;
+#if defined(_WIN32)
+		if (const char* appdata = std::getenv("APPDATA")) dir = fs::path(appdata) / "HorizonEngine";
+#elif defined(__APPLE__)
+		if (const char* home = std::getenv("HOME"))
+			dir = fs::path(home) / "Library" / "Application Support" / "HorizonEngine";
+#else
+		if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) dir = fs::path(xdg) / "HorizonEngine";
+		else if (const char* home = std::getenv("HOME"))      dir = fs::path(home) / ".config" / "HorizonEngine";
+#endif
+		if (!dir.empty()) fs::create_directories(dir, ec);
+		return dir;
+	}();
+	return resolved;
 }
 
 // ─── Where the settings live ─────────────────────────────────────────────────
@@ -99,22 +153,13 @@ std::filesystem::path GlobalState::configFilePath()
 		//    from Finder has a working directory of "/", so anything
 		//    CWD-relative is unwritable — which is exactly how settings silently
 		//    stopped persisting.
-		fs::path dir;
-#if defined(_WIN32)
-		if (const char* appdata = std::getenv("APPDATA")) dir = fs::path(appdata) / "HorizonEngine";
-#elif defined(__APPLE__)
-		if (const char* home = std::getenv("HOME"))
-			dir = fs::path(home) / "Library" / "Application Support" / "HorizonEngine";
-#else
-		if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) dir = fs::path(xdg) / "HorizonEngine";
-		else if (const char* home = std::getenv("HOME"))      dir = fs::path(home) / ".config" / "HorizonEngine";
-#endif
+		const fs::path dir = userDataDir();
+
 		// 3. No home directory at all (a stripped service account, a sandbox):
 		//    fall back to the old behaviour rather than returning an empty path,
 		//    so the caller still has something to try.
 		if (dir.empty()) return fs::path("config.json");
 
-		fs::create_directories(dir, ec);
 		return dir / "config.json";
 	}();
 	return resolved;

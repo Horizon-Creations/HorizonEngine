@@ -24,14 +24,25 @@ public:
 	GlobalState(const GlobalState&) = delete;
 	void operator=(const GlobalState&) = delete;
 
-	// Opens <exeDir>/HorizonEngine.log for HE::Log (rotating the previous runs)
-	// and applies the HE_LOG environment overrides. The stream itself lives in
-	// HE::Log — see Diagnostics/Log.h.
+	// Opens HorizonEngine.log for HE::Log (rotating the previous runs) and applies
+	// the HE_LOG environment overrides. The stream itself lives in HE::Log — see
+	// Diagnostics/Log.h. Preferred location is next to the executable, which keeps
+	// a portable checkout self-contained; if that directory cannot be written the
+	// log moves to the per-user data directory (see diagnosticsDir()).
 	void setLogFile(const std::string& path);
 
-	// Deploy-adjacent "dumps/" directory (next to HorizonEngine.log), created on
-	// demand. Used by the profiler and crash handler for diagnostic output.
+	// Directory the diagnostic output of this run goes to — the one setLogFile
+	// settled on. Empty before setLogFile has run.
+	const std::string& diagnosticsDir() const { return m_diagnosticsDir; }
+
+	// "dumps/" directory next to HorizonEngine.log, created on demand. Used by the
+	// profiler and crash handler for diagnostic output.
 	std::string getDumpsDir() const;
+
+	// The per-user application-data directory (…/Application Support/HorizonEngine,
+	// %APPDATA%\HorizonEngine, $XDG_CONFIG_HOME/HorizonEngine). Empty when the
+	// platform gives us no home directory at all. Created if it does not exist.
+	static std::filesystem::path userDataDir();
 
 	// config
 	const HE::RendererBackend&        getSelectedRHI()        const { return m_engineStatus.selectedRHI; }
@@ -123,6 +134,7 @@ private:
 
 	//Structs
 	EngineStatus m_engineStatus;
+	std::string  m_diagnosticsDir;   // where the log (and dumps/) of this run live
 	HE::Folder m_contentFolder;
 	mutable std::shared_mutex m_contentFolderMutex;
 
