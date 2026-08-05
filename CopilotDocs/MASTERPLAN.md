@@ -34,10 +34,15 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 > Zwei Dinge aus 92 gehören nach oben, weil sie den Plan berühren: (a) `main` hätte 0.3.0 mit
 > `-march=native` in astcenc ausgeliefert — **SIGILL auf jeder älteren User-CPU beim ersten
 > ASTC-Cook**; der verifizierte Fix lag ungemergt herum und ist jetzt drin. (b) Beim Branch-Audit
-> tauchten zwei Branches mit echter, nicht gemergter Arbeit auf, die **direkt zu Block A gehören**:
-> `fix/terrain-bounds-gi-ambient` (Ambient-Parität Vulkan/D3D11/D3D12, GI-fp32-Weltpositionen,
-> Terrain-Schattenkarten) und `opengl-gi-reflections` (ray-traced GI-Reflections auf GL für
-> Windows/Linux, 04.08.). Beide sind in Forts. 78 noch nicht verbucht.
+> tauchten zwei Branches mit echter, nicht gemergter Arbeit auf, die **direkt zu Block A gehören**.
+> `opengl-gi-reflections` ist für 0.3.0 gemergt (Forts. 93). **Offen bleibt
+> `fix/terrain-bounds-gi-ambient`** (Ambient-Parität Vulkan/D3D11/D3D12, GI-fp32-Weltpositionen,
+> Terrain-Schattenkarten, 17.07.) — in Forts. 78 nicht verbucht und ein Kandidat für den nächsten
+> Block-A-Schritt.
+>
+> **Vertriebsweg:** Es gibt bewusst **keine GitHub-Releases und keine Tags**. Ausgeliefert wird über
+> die Website (`horizoncreations.dev`, Devlog-Eintrag + `HorizonEngine/packages/`); die
+> CI-Artefakte sind die Quelle dafür.
 
 | Bereich | Status |
 |---|---|
@@ -3170,3 +3175,37 @@ nicht gemergte Arbeit und sind Kandidaten für Block A.**
 **Doku (`1a375cd`).** Der README waren sieben früh geschriebene Zeilen, die die Engine als „only very
 basic functionality" beschrieben und die fünf Backends als Zukunft. SECURITY.md schickte
 Sicherheitslücken in den **öffentlichen** Issue-Tracker.
+
+## Forts. 93 — Ray-traced GI-Reflections auf OpenGL (Windows/Linux), in 0.3.0 (04.–05.08.2026)
+
+**Lücke.** Metallische und glatte Oberflächen spiegelten auf dem GL-Backend nur die prozedurale
+Sky-Cubemap — eine Spiegelung zeigte also eine andere Szene als die Beleuchtung ringsum.
+
+**Jetzt** ein Specular-Ray pro Half-Res-Pixel gegen **dieselbe CPU-BVH**, die die diffuse GI ohnehin
+baut ([[ao-gi-roadmap]]), jeder Treffer beleuchtet aus Sonne, lokalen Lichtern und dem DDGI-Probe-Feld.
+Braucht einen **GL-4.3-Kontext (Compute)** — also Windows und Linux; macOS-GL ist 4.1 und bleibt bei
+Metal, das das seit `docs/gi-reflections-plan.md` hat.
+
+- Eigener Toggle, **unabhängig von der diffusen GI**: der Half-Res-Pre-Pass ist von
+  `RenderGIShadow` nach `RenderGIPrepass` gewandert, damit jeder der beiden Konsumenten allein
+  laufen kann; ohne Probe-Feld fällt ein Treffer auf Sonne + lokale Lichter + den flachen
+  Ambient-Boden zurück.
+- **Im Shading-Pass komponiert**, nicht als eigener Fullscreen-Pass: die Kaskade Sky → Reflection
+  steht einmal in `kUnlitFS` (eingebautes PBR) und einmal in `heLitP` (für Metals Forward-Pfad schon
+  da), beide sampeln eine Textur auf Unit 18. Damit sind Graph-Materialien und der Deferred-Resolve
+  gratis abgedeckt — ohne Tile-G-Buffer und ohne Hardware-Raytracing.
+- **Zwei Dinge besser als das Metal-Original**, weil der Software-Pfad die Daten ohnehin hat: der
+  Closest-Hit liefert seinen Dreiecksindex, also eine echte geometrische Normale statt des
+  `-rayDir`-Platzhalters; und der Pre-Pass legt Weltpositionen ab, also ist die temporale
+  Reprojektion exakt statt aus der Tiefe rekonstruiert. Was er **nicht** kann: die Bounce-Schleife —
+  `GIReflectionSettings::bounces` wird auf GL ignoriert, und der Editor-Slider sagt das.
+- Instanz-Farben laufen jetzt über ein gemeinsames `HE::giInstanceSurface`, das ein
+  Material-Override auflöst und die BaseColor-/Emissive-Pins eines Node-Graphen faltet. GL nutzte
+  vorher `RenderObject::baseColor` allein — **jedes Material-Objekt spiegelte (und bounnte) weiß**.
+- `sampleDDGIIrradiance` existiert damit in vier handgepflegten Kopien; der Drift-Guard in
+  `test_culling.cpp` vergleicht alle vier (§7 des Plans).
+
+**Verifiziert** headless auf GL (`HE_DUMP_RHI=OpenGL` + `HE_DUMP_GIREFLTEST`): das A/B on/off ändert
+11,8 % des Bildes, der Spiegelboden zeigt den grünen Graph-Würfel als (35,193,65) und den emissiven
+als (251,178,178), wo vorher Himmel stand; Boden abseits der Objekte und Hintergrund bleiben
+byte-identisch. Gleiche Zahlen auf dem Deferred-Pfad. Feature aus = unverändert.
