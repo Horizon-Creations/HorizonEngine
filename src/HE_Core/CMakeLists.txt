@@ -69,7 +69,8 @@ endif()
 # Crypto backend (OpenSSL, or fetched mbedTLS fallback) — see root CMakeLists.
 target_link_libraries(HorizonCore PRIVATE he_crypto)
 if(HE_HAVE_ASTCENC)
-    target_link_libraries(HorizonCore PRIVATE astcenc-native-static)
+    # ISA-specific target name (native / sse4.1 / neon / …) — see HE_PORTABLE_BUILD.
+    target_link_libraries(HorizonCore PRIVATE ${HE_ASTCENC_TARGET})
     target_include_directories(HorizonCore PRIVATE ${astcenc_SOURCE_DIR}/Source)
     target_compile_definitions(HorizonCore PRIVATE HE_HAVE_ASTCENC)
 endif()
