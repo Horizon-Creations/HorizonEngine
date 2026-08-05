@@ -17,6 +17,11 @@ public:
 	// terminates the process.
 	static void joinPendingExport();
 
+	// Persist which DOCKED View-menu panels were open, so the next start brings
+	// the user's layout back whole. Normally written as it changes; this is the
+	// shutdown flush for a change made in the last moments before quitting.
+	static void savePanelVisibility(AppContext& ctx);
+
 	// True if the editor tab for `assetPath` holds edits that were never written
 	// to disk (see the definition in EditorUI.cpp for the panel list). Exposed so
 	// EditorApplication's OS-close veto (window X / Cmd+Q / app quit) can veto for

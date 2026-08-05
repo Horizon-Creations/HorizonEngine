@@ -4199,6 +4199,17 @@ void EditorApplication::OnShutdown()
 	// (destroying a joinable std::thread would terminate the process).
 	EditorUI::joinPendingExport();
 
+	// Which docked panels were open. Written as it changes during the session;
+	// this catches a toggle made in the last half-second before quitting. Before
+	// the ImGui teardown below — it reads the dock nodes.
+#ifdef HE_IMGUI_ENABLED
+	if (m_imguiReady)
+	{
+		AppContext ctx = makeContext();
+		EditorUI::savePanelVisibility(ctx);
+	}
+#endif
+
 	// Same rule for the toolchain probe (destroying a joinable std::thread
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();

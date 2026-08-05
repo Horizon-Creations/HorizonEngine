@@ -30,6 +30,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
+#include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
@@ -149,6 +150,85 @@ static bool s_showCollab = false;
 // Toggled by View > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
 
+// ── Remembering which panels were open ───────────────────────────────────────
+// A panel the user docked into the layout is part of how their editor looks;
+// having to re-tick it in the View menu after every restart makes the dock
+// pointless. A panel left FLOATING is the opposite — a thing pulled up to look
+// at once — so that one is not restored, and the editor comes back uncluttered.
+//
+// The dock test itself lives in EditorDockState — the obvious spelling of it
+// (ImGui::IsWindowDocked) is wrong in a way that fails silently, so it is
+// written down once and asserted in a test.
+static bool panelIsDockedInLayout(const char* title)
+{
+	return EditorDockState::isDockedInLayout(title);
+}
+
+struct PanelVisibilityPref
+{
+	const char* title;
+	const char* configKey;
+	bool*       open;
+	bool        written  = false;   // what config.json currently holds
+	bool        pending  = false;   // candidate, once it stops changing
+	int         stable   = 0;       // frames `pending` has held still
+};
+
+static PanelVisibilityPref s_panelPrefs[] = {
+	{ "Performance Profiler", "PanelOpenProfiler",      &s_showProfiler      },
+	{ "Environment",          "PanelOpenEnvironment",   &s_showEnvironment   },
+	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
+	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
+};
+static bool s_panelPrefsLoaded = false;
+
+// A dock node is not resolved on the frame a window first appears, and a drag
+// passes through undocked states on its way to a new slot. Persisting either
+// would write the wrong answer, so a value has to hold still first. Half a
+// second at 60 Hz: long enough to outlast both, short enough that quitting
+// right after a toggle still catches it (and OnShutdown flushes what has not).
+static constexpr int kPanelPrefStableFrames = 30;
+
+static void loadPanelVisibility(AppContext& ctx)
+{
+	if (s_panelPrefsLoaded || !ctx.globalState) return;
+	s_panelPrefsLoaded = true;
+	for (PanelVisibilityPref& p : s_panelPrefs)
+	{
+		const bool open = ctx.globalState->getCustomConfigBool(p.configKey, false);
+		*p.open   = open;
+		p.written = open;
+		p.pending = open;
+		p.stable  = kPanelPrefStableFrames;   // nothing to write until it changes
+	}
+}
+
+// Per frame, after the panels have been drawn.
+//
+// Only with a project open, and that guard is load-bearing rather than tidy:
+// the Project Hub draws no panels at all, so every window would be missing and
+// every preference would be read as "closed, not docked" and overwritten. The
+// same reason savePanelVisibility checks it.
+static void updatePanelVisibility(AppContext& ctx)
+{
+	if (!ctx.globalState || !ctx.projectLoaded) return;
+	bool dirty = false;
+	for (PanelVisibilityPref& p : s_panelPrefs)
+	{
+		const bool want = *p.open && panelIsDockedInLayout(p.title);
+		if (want != p.pending) { p.pending = want; p.stable = 0; continue; }
+		if (p.stable < kPanelPrefStableFrames) { ++p.stable; continue; }
+		if (p.pending != p.written)
+		{
+			ctx.globalState->setCustomConfigEntry(p.configKey, p.pending);
+			p.written = p.pending;
+			dirty     = true;
+		}
+	}
+	// One write for however many changed together (Reset Layout moves all four).
+	if (dirty) ctx.globalState->writeConfig();
+}
+
 // (Level Script + Game Instance open as editor tabs, not toggled windows.)
 
 // Build > Export Project — dialog state, the packing worker thread and the
@@ -160,6 +240,27 @@ void EditorUI::joinPendingExport()
 	// log or filing an issue, and a joinable std::thread destroyed at teardown
 	// terminates the process.
 	ReportIssueDialog::joinPendingWork();
+}
+
+void EditorUI::savePanelVisibility(AppContext& ctx)
+{
+	// Shutdown flush for a change that has not sat still long enough to have
+	// been written yet — closing a panel and immediately quitting is an ordinary
+	// thing to do, and it should still be remembered.
+	// Quitting from the Project Hub must not be read as "the user closed
+	// everything" — the hub simply never draws these panels (see
+	// updatePanelVisibility). Leave what the last editor session wrote.
+	if (!ctx.globalState || !s_panelPrefsLoaded || !ctx.projectLoaded) return;
+	bool dirty = false;
+	for (PanelVisibilityPref& p : s_panelPrefs)
+	{
+		const bool want = *p.open && panelIsDockedInLayout(p.title);
+		if (want == p.written) continue;
+		ctx.globalState->setCustomConfigEntry(p.configKey, want);
+		p.written = want;
+		dirty     = true;
+	}
+	if (dirty) ctx.globalState->writeConfig();
 }
 
 static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
@@ -316,6 +417,10 @@ void EditorUI::render(AppContext& ctx, float dt)
             EditorAssetTypeCache::invalidateAll();
         }
     }
+
+    // Which docked panels were open last time. Once, as soon as there is a
+    // config to read — before anything can draw a panel and report it closed.
+    loadPanelVisibility(ctx);
 
     // ── Startup toolchain check — overlays either screen below ───────────────
     ToolchainDialog::DrawToolchainDialog(ctx);
@@ -689,6 +794,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		MacMenuBar::setProjectLoaded(ctx.projectLoaded);
 		using MC = MacMenuBar::Cmd;
+		// The ImGui menu row shows these as ticked MenuItems; the native bar has
+		// to be told. Without it the menu most users see cannot say whether a
+		// panel is already open — which matters more now that a docked one comes
+		// back by itself and the menu is no longer how it got there.
+		MacMenuBar::setToggleState(MC::ToggleProfiler,      s_showProfiler);
+		MacMenuBar::setToggleState(MC::ToggleEnvironment,   s_showEnvironment);
+		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
+		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
+		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
 		{
 			switch (c)
@@ -1785,6 +1899,10 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
+
+	// After the panels: the dock state read here is the one they just produced,
+	// and a window closed by its own X has already cleared its flag.
+	updatePanelVisibility(ctx);
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

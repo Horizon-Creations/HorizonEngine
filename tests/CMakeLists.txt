@@ -18,6 +18,7 @@ add_executable(he_tests
     test_graph_editor_keys.cpp
     test_editor_row_widgets.cpp
     test_report_issue.cpp
+    test_editor_dock_state.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_gi_bvh.cpp
@@ -116,6 +117,9 @@ add_executable(he_tests
     # markdown body and the URL that has to stay under GitHub's request-line
     # limit — is pure and compiles without HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ReportIssueDialog.cpp
+    # "Is this panel docked?" — ImGui-only by construction (see the header),
+    # so the DockIsActive-vs-DockNode invariant it rests on can be asserted.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorDockState.cpp
     # The node canvas + ImGui's CORE only (no backend, no GPU): ImGui runs
     # headless given a context and a display size, which is what lets
     # test_graph_editor_keys.cpp actually press the graph shortcuts. The editor

@@ -6,12 +6,17 @@
 #include <SDL3/SDL.h>         // SDL_GetBasePath — locate the bundled logo
 #include <deque>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
 {
 	std::deque<MacMenuBar::Cmd> s_queue;      // menu actions run on the main thread
 	std::vector<NSMenuItem*>    s_projectItems; // enabled only with a project loaded
+	// Items that show an on/off tick (the View-menu panels + the tutorial).
+	// Small enough that a linear lookup beats a map, and it keeps the item
+	// registration in one place: heAddItem records, setToggleState finds.
+	std::vector<std::pair<MacMenuBar::Cmd, NSMenuItem*>> s_toggleItems;
 	bool s_installed     = false;
 	bool s_projectLoaded = false;
 }
@@ -152,10 +157,16 @@ void install()
 		fs.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
 		[view addItem:fs];   // responder chain → the key window
 		heAddItem(view, @"Reset Layout",          C::ResetLayout,    nil, 0, false);
-		heAddItem(view, @"Performance Profiler",  C::ToggleProfiler, nil, 0, false);
-		heAddItem(view, @"Environment",           C::ToggleEnvironment, nil, 0, false);
-		heAddItem(view, @"Collaboration",         C::ToggleCollab,      nil, 0, false);
-		heAddItem(view, @"Source Control",        C::ToggleSourceControl, nil, 0, true);
+		// The four panel toggles carry a tick showing whether the panel is open,
+		// kept in step every frame by setToggleState.
+		s_toggleItems.emplace_back(C::ToggleProfiler,
+			heAddItem(view, @"Performance Profiler",  C::ToggleProfiler, nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleEnvironment,
+			heAddItem(view, @"Environment",           C::ToggleEnvironment, nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleCollab,
+			heAddItem(view, @"Collaboration",         C::ToggleCollab,      nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleSourceControl,
+			heAddItem(view, @"Source Control",        C::ToggleSourceControl, nil, 0, true));
 		[view addItem:[NSMenuItem separatorItem]];
 		heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true);
 		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
@@ -186,7 +197,8 @@ void install()
 	// with no project open is most likely to reach for.
 	{
 		NSMenu* help = heAddSubmenu(main, @"Help");
-		heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false);
+		s_toggleItems.emplace_back(C::OpenTutorial,
+			heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false));
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
 		NSApp.helpMenu = help;
@@ -203,6 +215,19 @@ void setProjectLoaded(bool loaded)
 {
 	s_projectLoaded = loaded;   // ~10 items; cheap enough to set every frame
 	for (NSMenuItem* it : s_projectItems) it.enabled = loaded ? YES : NO;
+}
+
+void setToggleState(Cmd cmd, bool on)
+{
+	for (const auto& [itemCmd, item] : s_toggleItems)
+	{
+		if (itemCmd != cmd) continue;
+		const NSControlStateValue want = on ? NSControlStateValueOn : NSControlStateValueOff;
+		// Only on a change: assigning re-marks the menu as needing display, and
+		// this is called every frame for every toggle.
+		if (item.state != want) item.state = want;
+		return;
+	}
 }
 
 Cmd take()
