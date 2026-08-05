@@ -78,6 +78,55 @@ void runDockedFrames(const std::vector<const char*>& panels, int frames = 3)
 	}
 }
 
+// ── The editor's two tab states ──────────────────────────────────────────────
+// Same arrangement as above, but built on EditorUI's REAL host window name and
+// dockspace id, because that pairing is what the keep-alive depends on.
+// `dockedPanel` goes into the split, the Scene into the centre.
+void buildEditorLayout(const char* dockedPanel)
+{
+	const ImGuiID dockspaceId = EditorDockState::mainDockspaceId();
+	ImGui::DockBuilderRemoveNode(dockspaceId);
+	ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+	ImGui::DockBuilderSetNodeSize(dockspaceId, ImVec2(1280.0f, 720.0f));
+	ImGuiID main  = dockspaceId;
+	ImGuiID right = ImGui::DockBuilderSplitNode(main, ImGuiDir_Right, 0.26f, nullptr, &main);
+	ImGui::DockBuilderDockWindow(dockedPanel, right);
+	ImGui::DockBuilderDockWindow("Scene", main);
+	ImGui::DockBuilderFinish(dockspaceId);
+}
+
+// One editor frame, either tab state:
+//   sceneTab  — the scene tab is active: the dockspace host window is submitted
+//               and draws the layout (EditorUI's normal path).
+//   !sceneTab — an asset tab fills the editor: the host window is not submitted
+//               at all, only the keep-alive runs.
+// The panel is submitted EITHER way, which is the situation being tested: the
+// View-menu panels are drawn on every tab so a floating one stays usable.
+// `buildLayoutDocking` (first frame only) names the window the layout is built
+// around — pass the panel to have it docked, another name to leave it floating.
+// Returns what the panel's Begin() said — i.e. whether it is on screen.
+bool runEditorFrame(bool sceneTab, const char* panel,
+                    const char* buildLayoutDocking = nullptr, bool keepAlive = true)
+{
+	ImGui::NewFrame();
+	if (!sceneTab && keepAlive)
+		EditorDockState::keepMainDockspaceAlive();
+	if (sceneTab)
+	{
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(1280.0f, 720.0f));
+		ImGui::Begin(EditorDockState::kHostWindowName, nullptr, ImGuiWindowFlags_NoSavedSettings);
+		if (buildLayoutDocking) buildEditorLayout(buildLayoutDocking);
+		ImGui::DockSpace(EditorDockState::mainDockspaceId());
+		ImGui::End();
+		ImGui::Begin("Scene"); ImGui::End();
+	}
+	const bool panelVisible = ImGui::Begin(panel);
+	ImGui::End();
+	ImGui::Render();
+	return panelVisible;
+}
+
 } // namespace
 
 TEST_CASE("A panel docked alone in a split counts as docked")
@@ -143,6 +192,99 @@ TEST_CASE("A panel that was never opened does not count as docked")
 	// Degenerate inputs — this is reached from a table of panel names.
 	CHECK_FALSE(EditorDockState::isDockedInLayout(nullptr));
 	CHECK_FALSE(EditorDockState::isDockedInLayout(""));
+}
+
+TEST_CASE("The dockspace id matches the one the host window produces")
+{
+	// mainDockspaceId() is ImGui::GetID("##MainDockSpace") called inside the
+	// "##EditorDockSpace" window, spelled without needing that window. If the
+	// two ever disagree, every saved layout in every user's imgui.ini is filed
+	// under an id the editor no longer asks for — the dock arrangement would
+	// come up empty and be silently replaced by the default one.
+	ImGuiCtx ctx;
+
+	ImGui::NewFrame();
+	ImGui::Begin(EditorDockState::kHostWindowName, nullptr, ImGuiWindowFlags_NoSavedSettings);
+	const ImGuiID fromHostWindow = ImGui::GetID(EditorDockState::kDockspaceLabel);
+	ImGui::End();
+	ImGui::Render();
+
+	CHECK(fromHostWindow != 0);
+	CHECK(fromHostWindow == EditorDockState::mainDockspaceId());
+}
+
+TEST_CASE("A docked panel is hidden while the dockspace is not drawn")
+{
+	// The rule this whole change is about: a panel docked into the layout
+	// belongs to the scene tab. Open a material graph and it has to go with the
+	// layout — not hang over the graph because it happens to be submitted on
+	// every tab for the sake of the floating case.
+	ImGuiCtx ctx;
+	runEditorFrame(true, "Performance Profiler", /*dock it*/ "Performance Profiler");
+	runEditorFrame(true, "Performance Profiler");
+	REQUIRE(EditorDockState::isDockedInLayout("Performance Profiler"));
+	REQUIRE(runEditorFrame(true, "Performance Profiler"));   // on screen here
+
+	// Asset tab: submitted, docked — must not draw.
+	CHECK_FALSE(runEditorFrame(false, "Performance Profiler"));
+	CHECK_FALSE(runEditorFrame(false, "Performance Profiler"));
+
+	// And it kept its place: switching tabs is not allowed to cost the user
+	// their layout (see the undock case below for what that looks like).
+	CHECK(EditorDockState::isDockedInLayout("Performance Profiler"));
+
+	// Back on the scene tab it returns by itself.
+	runEditorFrame(true, "Performance Profiler");
+	CHECK(runEditorFrame(true, "Performance Profiler"));
+}
+
+TEST_CASE("Without the keep-alive a docked panel is torn out of the layout")
+{
+	// What keepMainDockspaceAlive() prevents, asserted so the call is not
+	// mistaken for a no-op and dropped: ImGui reacts to a docked window whose
+	// dockspace node went missing by undocking it. The panel then floats over
+	// the asset tab — which is exactly the reported symptom — and its slot in
+	// the layout is gone for good.
+	ImGuiCtx ctx;
+	runEditorFrame(true, "Source Control", /*dock it*/ "Source Control");
+	runEditorFrame(true, "Source Control");
+	REQUIRE(EditorDockState::isDockedInLayout("Source Control"));
+
+	runEditorFrame(false, "Source Control", nullptr, /*keepAlive*/ false);
+	CHECK_FALSE(EditorDockState::isDockedInLayout("Source Control"));
+}
+
+TEST_CASE("A panel restored into the layout survives starting on an asset tab")
+{
+	// The editor reopens the tab that was active last time, and that can be a
+	// material graph — so the dockspace host window is never submitted, not even
+	// once, and the panel is the first thing to touch the layout. This is why
+	// the id is derived from the window NAME instead of read off the live
+	// window: there is no live window to read it off here.
+	ImGuiCtx ctx;
+
+	ImGui::NewFrame();
+	buildEditorLayout("Source Control");           // stands in for the saved ini
+	EditorDockState::keepMainDockspaceAlive();
+	ImGui::Begin("Source Control"); ImGui::End();
+	ImGui::Render();
+
+	CHECK_FALSE(runEditorFrame(false, "Source Control"));
+	CHECK(EditorDockState::isDockedInLayout("Source Control"));
+}
+
+TEST_CASE("A floating panel is visible on every tab")
+{
+	// The other half of the rule, and the reason the panels are submitted
+	// outside the tab gating at all: a panel the user left floating was pulled
+	// up to look at, and it keeps drawing over whichever tab is open.
+	ImGuiCtx ctx;
+	runEditorFrame(true, "Environment", /*docks someone else*/ "Details");
+	runEditorFrame(true, "Environment");
+	REQUIRE_FALSE(EditorDockState::isDockedInLayout("Environment"));
+
+	CHECK(runEditorFrame(false, "Environment"));
+	CHECK(runEditorFrame(false, "Environment"));
 }
 
 TEST_CASE("Docking is answered without a live ImGui context")
