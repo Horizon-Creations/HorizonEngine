@@ -107,6 +107,24 @@ TEST_CASE("buildBody keeps the NEWEST log lines when it has to choose")
 	CHECK(body.find("Last 3 log lines") != std::string::npos);
 }
 
+TEST_CASE("buildBody says whether the lines were filtered or merely cut")
+{
+	// The fold's summary is the only place a reader learns why lines are
+	// missing. "Last 12 warning/error lines" and "Last 12 log lines" describe
+	// very different gaps, and reading the wrong one wastes a maintainer's time.
+	ReportIssueDialog::Report r = sampleReport(4);
+	r.logLabel = "warning/error";
+	CHECK(ReportIssueDialog::buildBody(r, -1).find("Last 4 warning/error lines") !=
+	      std::string::npos);
+
+	r.logLabel = "log";
+	CHECK(ReportIssueDialog::buildBody(r, -1).find("Last 4 log lines") != std::string::npos);
+
+	// An unset label must not produce "Last 4  lines".
+	r.logLabel.clear();
+	CHECK(ReportIssueDialog::buildBody(r, -1).find("Last 4 log lines") != std::string::npos);
+}
+
 TEST_CASE("buildIssueUrl stays under the budget and keeps as much log as fits")
 {
 	const ReportIssueDialog::Report r = sampleReport(ReportIssueDialog::kMaxLogLines);

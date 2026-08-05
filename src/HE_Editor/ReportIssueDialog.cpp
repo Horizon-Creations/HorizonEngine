@@ -121,8 +121,9 @@ std::string buildBody(const Report& report, int logLineLimit)
 
 		// <details> because a few hundred log lines would otherwise bury the
 		// description, which is what anyone triaging reads first.
-		char heading[96];
-		std::snprintf(heading, sizeof(heading), "Last %d log line%s", keep,
+		char heading[128];
+		std::snprintf(heading, sizeof(heading), "Last %d %s line%s", keep,
+		              report.logLabel.empty() ? "log" : report.logLabel.c_str(),
 		              keep == 1 ? "" : "s");
 		body += "<details><summary>";
 		body += heading;
@@ -211,12 +212,24 @@ std::string s_expected;
 bool        s_includeLog = true;
 std::string s_status;          // outcome line under the buttons
 
+// Which lines ride along inside the issue body. Only a dozen or two survive the
+// URL length limit, so the default spends them on the records that say
+// something went wrong rather than on startup chatter — "Everything" is there
+// for the bugs that produce no warning at all.
+bool s_problemsOnly = true;
+
 // Snapshotted at open time, not per frame: background work keeps logging while
 // the dialog is up, and a report should describe the moment it was raised.
-std::vector<std::string> s_logLines;
+std::vector<std::string> s_logAll;        // every level, newest kMaxLogLines
+std::vector<std::string> s_logProblems;   // Warning and above only
 std::string              s_logPath;
 std::string              s_logCounts;
 std::string              s_environment;
+
+const std::vector<std::string>& chosenLogLines()
+{
+	return s_problemsOnly ? s_logProblems : s_logAll;
+}
 
 std::string environmentBlock(AppContext& ctx)
 {
@@ -254,7 +267,8 @@ Report currentReport()
 	{
 		r.logPath   = s_logPath;
 		r.logCounts = s_logCounts;
-		r.logLines  = s_logLines;
+		r.logLines  = chosenLogLines();
+		r.logLabel  = s_problemsOnly ? "warning/error" : "log";
 	}
 	return r;
 }
@@ -279,8 +293,9 @@ const Preview& preview()
 	// The log snapshot is part of the key via its size: it only changes when the
 	// dialog is reopened, which also re-reads every other field.
 	const std::string key = s_title + '\x01' + s_what + '\x01' + s_steps + '\x01' +
-	                        s_expected + '\x01' + (s_includeLog ? "1" : "0") + '\x01' +
-	                        std::to_string(s_logLines.size());
+	                        s_expected + '\x01' + (s_includeLog ? "1" : "0") +
+	                        (s_problemsOnly ? "p" : "a") + '\x01' +
+	                        std::to_string(chosenLogLines().size());
 	if (!s_valid || key != s_key)
 	{
 		const Report report = currentReport();
@@ -335,11 +350,16 @@ void DrawReportIssueDialog(AppContext& ctx)
 	{
 		s_openRequested = false;
 		s_status.clear();
-		s_logLines    = HE::Log::recentLines(kMaxLogLines);
+		s_logAll      = HE::Log::recentLines(kMaxLogLines);
+		s_logProblems = HE::Log::recentProblemLines(kMaxLogLines, HE::LogLevel::Warning);
 		s_logPath     = HE::Log::logFilePath();
 		s_logCounts   = logCountsLine();
 		s_environment = environmentBlock(ctx);
-		s_isOpen      = true;
+		// A clean run has nothing to filter TO, and an empty fold would be worse
+		// than the tail: plenty of bugs (wrong pixels, a frozen gizmo) never log
+		// a word. Fall back to everything rather than attaching nothing.
+		s_problemsOnly = !s_logProblems.empty();
+		s_isOpen       = true;
 		ImGui::OpenPopup(kPopupId);
 	}
 
@@ -391,15 +411,27 @@ void DrawReportIssueDialog(AppContext& ctx)
 	if (s_includeLog)
 	{
 		ImGui::Indent();
+
+		// Only a dozen or two lines survive the URL limit, so which lines they
+		// are matters more than how many: warnings and errors first.
+		if (ImGui::RadioButton("Warnings & errors", s_problemsOnly)) s_problemsOnly = true;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Everything", !s_problemsOnly)) s_problemsOnly = false;
+		ImGui::SameLine();
+		ImGui::TextDisabled("(%d of %d lines)",
+		                    static_cast<int>(chosenLogLines().size()),
+		                    static_cast<int>(s_logAll.size()));
+		if (s_problemsOnly && s_logProblems.empty())
+			ImGui::TextDisabled("Nothing was logged as a warning or an error this run.");
+
 		// Spelled out because it is the one thing here that could surprise
-		// someone: a link cannot carry a file, so the issue gets the tail of the
+		// someone: a link cannot carry a file, so the issue gets a slice of the
 		// log inline and the user drags the file in for the rest.
 		ImGui::PushTextWrapPos(0.0f);
 		ImGui::TextDisabled(
-			"The most recent log lines travel inside the issue text (%d captured). "
-			"A link cannot carry a file, so for the complete log open the folder "
-			"below and drag HorizonEngine.log into the GitHub issue.",
-			static_cast<int>(s_logLines.size()));
+			"Those lines travel inside the issue text. A link cannot carry a file, "
+			"so for the complete log open the folder below and drag "
+			"HorizonEngine.log into the GitHub issue.");
 		ImGui::PopTextWrapPos();
 		if (!s_logPath.empty())
 		{
@@ -417,7 +449,8 @@ void DrawReportIssueDialog(AppContext& ctx)
 	{
 		const Preview& p = preview();
 		ImGui::TextDisabled("%d of %d log lines fit into the link (%d of %d characters).",
-		                    p.linesKept, static_cast<int>(s_includeLog ? s_logLines.size() : 0),
+		                    p.linesKept,
+		                    static_cast<int>(s_includeLog ? chosenLogLines().size() : 0),
 		                    static_cast<int>(p.url.size()), static_cast<int>(kMaxUrlLength));
 		std::string body = p.body;   // ReadOnly, but the widget wants a mutable target
 		ImGui::InputTextMultiline("##ri_preview", &body, ImVec2(-1.0f, 200.0f),
@@ -437,7 +470,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 		const Preview& p = preview();
 		SDL_OpenURL(p.url.c_str());
 
-		const int totalLines = static_cast<int>(s_includeLog ? s_logLines.size() : 0);
+		const int totalLines = static_cast<int>(s_includeLog ? chosenLogLines().size() : 0);
 		if (p.bodyCut)
 		{
 			// The browser did not get everything — hand over the whole thing rather

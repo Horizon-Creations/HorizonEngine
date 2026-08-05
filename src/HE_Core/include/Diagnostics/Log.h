@@ -175,6 +175,14 @@ namespace HE::Log
 	HE_API void forEachRecent(void (*fn)(const char* line, void* user), void* user);
 	// Convenience copy for in-process consumers (editor panels, tests).
 	HE_API std::vector<std::string> recentLines(int maxLines = 0);
+	// Only the records at `minLevel` or above, newest-biased: with a cap, the
+	// LAST maxLines matches survive (what preceded the problem), returned oldest
+	// first like recentLines. The severity comes from the ring itself, not from
+	// re-parsing the formatted line. Where a report has room for a dozen lines
+	// and not a thousand — a bug report body, a crash summary — spending them on
+	// Info chatter wastes the only lines anyone will read.
+	HE_API std::vector<std::string> recentProblemLines(int maxLines = 0,
+	                                                   Level minLevel = Level::Warning);
 
 	// ── Startup diagnostics ──────────────────────────────────────────────────
 	// Writes the header block every log should start with: engine build, build

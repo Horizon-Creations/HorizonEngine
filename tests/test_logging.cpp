@@ -315,6 +315,56 @@ TEST_CASE("Ring buffer retains recent lines for the crash report")
 	CHECK(tail[0].find("INFO") != std::string::npos);
 }
 
+TEST_CASE("recentProblemLines keeps only what went wrong, newest first")
+{
+	VerbosityGuard guard;
+	HE::Log::setVerbosity(HE::Log::Cat::Tool, HE::Log::Level::Trace);
+
+	// A realistic mix: chatter around the two records that matter. A report with
+	// room for a handful of lines must spend them on these, not on the chatter.
+	HE_LOG_INFO (Tool, "%s", "problem-filter-noise-1");
+	HE_LOG_WARN (Tool, "%s", "problem-filter-warning");
+	HE_LOG_INFO (Tool, "%s", "problem-filter-noise-2");
+	HE_LOG_ERROR(Tool, "%s", "problem-filter-error");
+	HE_LOG_DEBUG(Tool, "%s", "problem-filter-noise-3");
+
+	const auto problems = HE::Log::recentProblemLines(0, HE::Log::Level::Warning);
+	REQUIRE(problems.size() >= 2);
+	for (const std::string& l : problems)
+		CHECK(l.find("problem-filter-noise") == std::string::npos);
+
+	// Chronological order, oldest first — same contract as recentLines.
+	const auto findLine = [&](const char* needle) {
+		for (std::size_t i = 0; i < problems.size(); ++i)
+			if (problems[i].find(needle) != std::string::npos) return static_cast<int>(i);
+		return -1;
+	};
+	const int atWarning = findLine("problem-filter-warning");
+	const int atError   = findLine("problem-filter-error");
+	REQUIRE(atWarning >= 0);
+	REQUIRE(atError   >= 0);
+	CHECK(atWarning < atError);
+
+	// A cap keeps the NEWEST matches: what happened just before the report is
+	// worth more than what happened at startup.
+	const auto capped = HE::Log::recentProblemLines(1, HE::Log::Level::Warning);
+	REQUIRE(capped.size() == 1);
+	CHECK(capped[0].find("problem-filter-error") != std::string::npos);
+
+	// Raising the floor drops the warning too.
+	const auto errorsOnly = HE::Log::recentProblemLines(0, HE::Log::Level::Error);
+	for (const std::string& l : errorsOnly)
+		CHECK(l.find("problem-filter-warning") == std::string::npos);
+	CHECK(findLine("problem-filter-error") >= 0);
+
+	// Severity comes from the ring, not from matching "[ WARN]" in the text —
+	// a line that merely TALKS about a warning is still an Info record.
+	HE_LOG_INFO(Tool, "%s", "problem-filter-mentions [ WARN] in its text");
+	const auto after = HE::Log::recentProblemLines(0, HE::Log::Level::Warning);
+	for (const std::string& l : after)
+		CHECK(l.find("problem-filter-mentions") == std::string::npos);
+}
+
 TEST_CASE("Log file is written and previous runs are rotated")
 {
 	VerbosityGuard guard;

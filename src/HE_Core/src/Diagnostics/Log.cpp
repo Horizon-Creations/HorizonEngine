@@ -134,6 +134,11 @@ namespace
 	struct Ring
 	{
 		char lines[kRingCapacity][kRingLineSize]{};
+		// Kept alongside the formatted text so a consumer can filter by severity
+		// without parsing the "[ WARN]" column back out of the line — the crash
+		// handler and the bug reporter both want "only what went wrong", and
+		// re-parsing the format would break the moment the format changes.
+		uint8_t levels[kRingCapacity]{};
 		int  head  = 0;   // next write slot
 		int  count = 0;
 	};
@@ -238,20 +243,21 @@ namespace
 
 	// Everything below assumes mutex() is held.
 
-	void pushRing(const char* line, int length)
+	void pushRing(const char* line, int length, Level level)
 	{
 		Ring& r = ring();
 		char* slot = r.lines[r.head];
 		const int n = std::min(length, kRingLineSize - 1);
 		std::memcpy(slot, line, static_cast<size_t>(n));
 		slot[n] = '\0';
+		r.levels[r.head] = static_cast<uint8_t>(level);
 		r.head = (r.head + 1) % kRingCapacity;
 		if (r.count < kRingCapacity) ++r.count;
 	}
 
 	void emitLine(const Record& rec, const char* line, int length)
 	{
-		pushRing(line, length);
+		pushRing(line, length, rec.level);
 
 		if (s_file)
 		{
@@ -574,6 +580,26 @@ void forEachRecent(void (*fn)(const char* line, void* user), void* user)
 	for (int i = 0; i < r.count; ++i)
 		fn(r.lines[(start + i) % kRingCapacity], user);
 	if (locked) mutex().unlock();
+}
+
+std::vector<std::string> recentProblemLines(int maxLines, Level minLevel)
+{
+	std::lock_guard<std::mutex> lock(mutex());
+	const Ring& r = ring();
+	const int start = (r.head - r.count + kRingCapacity) % kRingCapacity;
+
+	// Walk newest → oldest so the cap keeps the LAST maxLines matches (what came
+	// just before the problem), then flip back to chronological order.
+	std::vector<std::string> out;
+	for (int i = r.count - 1; i >= 0; --i)
+	{
+		const int slot = (start + i) % kRingCapacity;
+		if (static_cast<Level>(r.levels[slot]) < minLevel) continue;
+		out.emplace_back(r.lines[slot]);
+		if (maxLines > 0 && static_cast<int>(out.size()) >= maxLines) break;
+	}
+	std::reverse(out.begin(), out.end());
+	return out;
 }
 
 std::vector<std::string> recentLines(int maxLines)

@@ -50,6 +50,11 @@ namespace ReportIssueDialog
 		std::string logPath;                // absolute path of the live log file
 		std::string logCounts;              // e.g. "2 errors, 7 warnings"
 		std::vector<std::string> logLines;  // oldest first; empty = no log wanted
+		// What the lines are, for the fold's summary: "warning/error" when they
+		// were filtered to those, "log" when everything is on offer. Only a
+		// dozen or two lines survive the URL limit, so a reader has to be told
+		// whether the gaps are filtering or truncation.
+		std::string logLabel = "log";
 	};
 
 	// Percent-encodes to RFC 3986 unreserved characters.
