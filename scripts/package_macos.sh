@@ -329,6 +329,27 @@ else
 fi
 
 # ─── 12. Create DMG ───────────────────────────────────────────────────────────
+# The volume name carries the codename, because Finder resolves the backdrop that
+# the DMG's .DS_Store points at *by path*. Two images with the same volume name are
+# a trap: the second one mounts at "/Volumes/<name> 1", the .DS_Store reference
+# still reads "/Volumes/<name>", and the installer window shows the OLD release's
+# backdrop. Version + codename keeps that name unique per release; the loop below
+# clears leftovers from earlier runs of this very build, which collide by definition.
+VOL_NAME="${APP_NAME} ${VERSION}"
+[ "$CODENAME" = "$VERSION" ] || VOL_NAME="${VOL_NAME} ${CODENAME}"
+
+shopt -s nullglob
+for mp in "/Volumes/${VOL_NAME}" "/Volumes/${VOL_NAME} "*; do
+    [ -d "$mp" ] || continue
+    if hdiutil detach "$mp" >/dev/null 2>&1; then
+        echo "--> Ejected stale volume from an earlier run: $mp"
+    else
+        echo "    WARNING: '$mp' is still mounted and busy — eject it by hand, or"
+        echo "             the new DMG will mount alongside it and show its backdrop."
+    fi
+done
+shopt -u nullglob
+
 mkdir -p "$SOURCE_DIR/out"
 rm -f "$DMG_OUT"
 
@@ -353,7 +374,7 @@ if [ "$FANCY" -eq 1 ]; then
                 -D app="$APP_PATH" \
                 -D background="$WORK/background.tiff" \
                 -D volicon="$RES_PATH/AppIcon.icns" \
-                "${APP_NAME} ${VERSION}" "$DMG_OUT"; then
+                "$VOL_NAME" "$DMG_OUT"; then
             echo "    Styled DMG created."
         else
             echo "    WARNING: dmgbuild failed — falling back to a plain DMG."
@@ -369,7 +390,7 @@ if [ "$FANCY" -eq 0 ]; then
     echo "--> Creating plain DMG..."
     ln -sf /Applications "$STAGING/Applications"
     hdiutil create \
-        -volname "${APP_NAME} ${VERSION}" \
+        -volname "$VOL_NAME" \
         -srcfolder "$STAGING" \
         -ov \
         -format UDZO \
