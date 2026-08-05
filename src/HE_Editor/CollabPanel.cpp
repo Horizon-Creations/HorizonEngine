@@ -2,14 +2,21 @@
 
 #include "CollabController.h"
 
+#include "CollabPresenceBar.h"
+
 #include <Net/Socket.h>
 #include "EditorApplication.h"
+
+#include <SDL3/SDL_dialog.h>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace CollabPanel
@@ -17,12 +24,31 @@ namespace CollabPanel
 #ifdef HE_IMGUI_ENABLED
 namespace
 {
-	// Panel-local input state. Not persisted across runs — a session ID is
-	// short-lived by design.
-	char s_displayName[64]  = "Horizon User";
+	// Panel-local input state. The session ID and join code are deliberately NOT
+	// persisted — a session is short-lived by design — but the display name is,
+	// alongside the profile picture, so identity is set once rather than retyped
+	// on every join (see CollabController::Identity).
+	char s_displayName[64]  = "";
 	int  s_hostPort         = 7777;
 	char s_joinSessionId[80] = "";
 	char s_joinCode[80]      = "";
+
+	// Why the last picture could not be used, shown until the next attempt.
+	std::string s_avatarError;
+	// Result slot for the picture file dialog. SDL may deliver the callback on
+	// another thread, so the flag is atomic and is set AFTER the path — the
+	// reader sees a complete path or no path at all, never half of one.
+	std::string             s_avatarPickPath;
+	std::atomic<bool>       s_avatarPickReady { false };
+
+	// Pull the stored name into the input box once per run, so the field shows
+	// what will actually be sent rather than a placeholder that silently differs.
+	void SyncDisplayNameFromIdentity()
+	{
+		if (s_displayName[0] != '\0') return;
+		const std::string& stored = CollabController::localIdentity().name;
+		std::snprintf(s_displayName, sizeof(s_displayName), "%s", stored.c_str());
+	}
 
 	void CopyableValue(const char* label, const std::string& value, const char* id)
 	{
@@ -32,6 +58,89 @@ namespace
 		ImGui::PopStyleColor();
 		ImGui::SameLine();
 		if (ImGui::SmallButton(id)) ImGui::SetClipboardText(value.c_str());
+	}
+
+	// ── Identity editor ──────────────────────────────────────────────────────
+	// The name and picture everyone else in a session sees. Persisted, so this is
+	// set once rather than on every join — and shown here rather than buried in
+	// Preferences because this window is where a user is already thinking about
+	// how they appear to other people.
+	//
+	// `editable` is false during a live session: the identity is read when the
+	// session STARTS, so changing it mid-session would edit a value nobody will
+	// look at again until the next join. Saying so beats silently doing nothing.
+	void DrawIdentity(AppContext& ctx, bool editable)
+	{
+		SyncDisplayNameFromIdentity();
+
+		ImGui::SeparatorText("You");
+
+		const float avatarSize = 56.0f;
+		CollabPresenceBar::DrawLocalAvatar(ctx, avatarSize);
+		ImGui::SameLine(0.0f, 12.0f);
+
+		ImGui::BeginGroup();
+		ImGui::BeginDisabled(!editable);
+
+		ImGui::SetNextItemWidth(200.0f);
+		ImGui::InputText("Display name", s_displayName, sizeof(s_displayName));
+		// Written when the field is left, not on every keystroke: setLocalName
+		// rewrites config.json, and a name is a dozen characters.
+		if (ImGui::IsItemDeactivatedAfterEdit()) CollabController::setLocalName(s_displayName);
+
+		const bool hasPicture = CollabController::localIdentity().avatarSize > 0;
+		if (ImGui::Button(hasPicture ? "Change picture..." : "Choose picture..."))
+		{
+			s_avatarError.clear();
+			SDL_DialogFileFilter filters[] = {
+				{ "Images", "png;jpg;jpeg;bmp;tga;gif" },
+			};
+			SDL_ShowOpenFileDialog(
+				[](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+				{
+					// The panel's own result slot, deliberately NOT the shared
+					// ctx.dialogBridge: that one is consumed by the scene/project
+					// handler in EditorUI, which runs BEFORE this window is drawn
+					// and would interpret a chosen portrait as a scene to open.
+					if (filelist && filelist[0]) s_avatarPickPath = filelist[0];
+					s_avatarPickReady.store(true, std::memory_order_release);
+				},
+				nullptr,
+				ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+				filters, 1, nullptr, false);
+		}
+		if (hasPicture)
+		{
+			ImGui::SameLine();
+			if (ImGui::Button("Remove")) CollabController::clearLocalAvatar();
+		}
+
+		ImGui::EndDisabled();
+		ImGui::EndGroup();
+
+		if (!editable)
+			ImGui::TextDisabled("Changes take effect the next time you join a session.");
+		if (!s_avatarError.empty())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+			ImGui::TextWrapped("%s", s_avatarError.c_str());
+			ImGui::PopStyleColor();
+		}
+	}
+
+	// Pick up a picture the OS dialog delivered, whichever thread it arrived on.
+	void ConsumePendingAvatarPick()
+	{
+		if (!s_avatarPickReady.load(std::memory_order_acquire)) return;
+		s_avatarPickReady.store(false, std::memory_order_relaxed);
+
+		const std::string path = s_avatarPickPath;
+		s_avatarPickPath.clear();
+		if (path.empty()) return;   // the user cancelled
+
+		std::string error;
+		if (!CollabController::setLocalAvatarFromFile(path, error)) s_avatarError = error;
+		else                                                        s_avatarError.clear();
 	}
 } // namespace
 #endif
@@ -52,12 +161,14 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		return;
 	}
 
+	ConsumePendingAvatarPick();
+
 	if (!collab->active())
 	{
 		ImGui::TextWrapped("Work on the same scene together. The host opens a session "
 		                   "and shares its ID and join code; that is all a guest needs.");
-		ImGui::Separator();
-		ImGui::InputText("Display name", s_displayName, sizeof(s_displayName));
+
+		DrawIdentity(ctx, true);
 
 		// ── Host ──
 		ImGui::SeparatorText("Host a session");
@@ -266,26 +377,30 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				ImGui::SetTooltip("Should read the same for everyone in the session.");
 		}
 
+		// The identity is fixed for the life of the session (it was read when the
+		// session started), so it is shown but not editable.
+		DrawIdentity(ctx, false);
+
 		ImGui::SeparatorText("Participants");
-		const auto people = collab->participants();
-		if (people.empty())
-		{
-			ImGui::TextDisabled("(none yet)");
-		}
-		else
-		{
-			const auto localId = collab->localParticipant();
-			for (const auto& p : people)
-			{
-				ImGui::BulletText("%s%s%s", p.name.c_str(),
-				                  p.isHost ? "  [host]" : "",
-				                  p.id == localId ? "  (you)" : "");
-			}
-		}
+		// Same list, same actions as the footer's hover menu — one implementation,
+		// so the two cannot end up offering different buttons.
+		CollabPresenceBar::DrawRoster(ctx);
 
 		ImGui::Spacing();
 		ImGui::Separator();
 		if (ImGui::Button("Leave session", ImVec2(170, 0))) collab->leave();
+	}
+
+	// Being thrown out looks exactly like the host's network dying unless it is
+	// said out loud, so it is said out loud — above the generic error below,
+	// which would otherwise be the only thing on screen.
+	if (!collab->removalNotice().empty())
+	{
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::TextWrapped("%s", collab->removalNotice().c_str());
+		ImGui::PopStyleColor();
+		if (ImGui::Button("OK##removal")) collab->clearRemovalNotice();
 	}
 
 	if (collab->status() == CollabController::Status::Failed &&

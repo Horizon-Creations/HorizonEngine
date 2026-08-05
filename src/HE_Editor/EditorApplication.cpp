@@ -1,6 +1,7 @@
 #include "EditorApplication.h"
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
+#include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
@@ -4314,8 +4315,10 @@ void EditorApplication::OnShutdown()
 		m_logoTexture = 0;
 	}
 	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
-	// textures, so they have to go while the renderer is still alive.
+	// textures, so they have to go while the renderer is still alive. The
+	// collaboration avatars are uploaded the same way and go with them.
 	AssetThumbnailCache::shutdown();
+	CollabPresenceBar::Shutdown(renderer());
 
 	m_audioEngine.shutdown();
 

@@ -109,6 +109,10 @@ add_executable(he_tests
     # tables can be asserted here without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TutorialSteps.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
+    # stb_image's single translation unit. AssetThumbnailCache draws texture
+    # tiles from an asset's own pixels and CollabController decodes a chosen
+    # profile picture; both call into it, so the tests need it linked too.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/stb_image_impl.cpp
     # The graph quick-spawn key table is deliberately plain data and ImGui-free
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.

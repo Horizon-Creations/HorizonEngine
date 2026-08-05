@@ -25,6 +25,7 @@
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
+#include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
@@ -1501,6 +1502,15 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
 		ImGui::Text("%s", fpsText.c_str());
 
+		// Collaboration presence, immediately left of the counters — ambient by
+		// design: who else is in the scene, without a window open.
+		if (const float presenceW = CollabPresenceBar::FooterWidth(ctx); presenceW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+			CollabPresenceBar::DrawFooter(ctx);
+		}
+
 		// Middle — status
 		const std::string statusText = "Ready";
 		const float       statusW    = ImGui::CalcTextSize(statusText.c_str()).x;
@@ -1903,6 +1913,10 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// After the panels: the dock state read here is the one they just produced,
 	// and a window closed by its own X has already cleared its flag.
 	updatePanelVisibility(ctx);
+
+    // Last of all, so the participant menu that hangs off the footer cluster
+    // cannot end up underneath a docked panel or a floating tool window.
+    CollabPresenceBar::DrawOverlay(ctx);
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

@@ -46,6 +46,18 @@ void NetSession::broadcast(MessageId id, const BitWriter& payload, SendMode mode
     }
 }
 
+void NetSession::disconnect(ConnectionId conn) {
+    if (!m_transport) return;
+    HE_LOG_INFO(Net, "Session: dropping conn %llu from this side",
+                static_cast<unsigned long long>(conn));
+    m_transport->disconnect(conn);
+    // The transport gives the initiator no Disconnected event, so the peer list
+    // has to be pruned here or broadcast() would keep sending into the void.
+    m_connections.erase(
+        std::remove(m_connections.begin(), m_connections.end(), conn),
+        m_connections.end());
+}
+
 void NetSession::pump() {
     if (!m_transport) return;
 

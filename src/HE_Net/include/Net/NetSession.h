@@ -58,6 +58,13 @@ public:
     // Call once per tick after transport->update().
     void pump();
 
+    // Drop a peer link from this side. The transport emits no Disconnected event
+    // for the initiator (see ITransport::disconnect), so the peer list is pruned
+    // here — otherwise a later broadcast would keep addressing a dead connection.
+    // The application layer is likewise responsible for its own cleanup: nothing
+    // calls the onDisconnect handler for a link we severed ourselves.
+    void disconnect(ConnectionId conn);
+
     const std::vector<ConnectionId>& connections() const { return m_connections; }
 
 private:

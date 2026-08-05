@@ -43,6 +43,7 @@ constexpr MessageId kMsgDocDeltasUpdate   = kFirstUserMessage + 24;  // client �
 constexpr MessageId kMsgDocDeltasRelay    = kFirstUserMessage + 25;  // host → clients
 constexpr MessageId kMsgLockQuery         = kFirstUserMessage + 26;  // client → host
 constexpr MessageId kMsgLockQueryResult   = kFirstUserMessage + 27;  // host → one client
+constexpr MessageId kMsgRemoved           = kFirstUserMessage + 28;  // host → one client
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -53,11 +54,33 @@ constexpr int kQuatBits = 16;
 
 CollabSession::CollabSession(NetSession* net, NetRole role, Config cfg)
     : m_net(net), m_role(role), m_cfg(std::move(cfg)) {
+    // An avatar over our own limit is dropped here rather than at every send
+    // site: a picture this editor cannot legally put on the wire is one it must
+    // not carry around pretending it will.
+    if (m_cfg.avatar.size > m_cfg.maxAvatarSize ||
+        m_cfg.avatar.rgba.size() !=
+            static_cast<std::size_t>(m_cfg.avatar.size) * m_cfg.avatar.size * 4u) {
+        if (!m_cfg.avatar.empty()) {
+            HE_LOG_WARN(Net, "Collab: discarding a %ux%u profile picture — %s",
+                        static_cast<unsigned>(m_cfg.avatar.size),
+                        static_cast<unsigned>(m_cfg.avatar.size),
+                        m_cfg.avatar.size > m_cfg.maxAvatarSize
+                            ? "over this session's size limit"
+                            : "its pixel buffer does not match its declared size");
+        }
+        m_cfg.avatar = Avatar{};
+    }
+
     if (m_role == NetRole::Host) {
         // The host occupies the first slot and is joined from the outset — there
         // is nobody to ask for permission.
         m_localId = m_nextId++;
-        m_participants.push_back(Participant{ m_localId, m_cfg.displayName, true });
+        Participant self;
+        self.id     = m_localId;
+        self.name   = m_cfg.displayName;
+        self.isHost = true;
+        self.avatar = m_cfg.avatar;
+        m_participants.push_back(std::move(self));
         m_joined = true;
     }
     installHandlers();
@@ -126,16 +149,18 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgLockQueryResult, [this](ConnectionId, BitReader& r) {
             handleLockQueryResult(r);
         });
+        m_net->on(kMsgRemoved, [this](ConnectionId, BitReader& r) { handleRemoved(r); });
 
         // Roster updates for peers other than ourselves.
         m_net->on(kMsgParticipantJoined, [this](ConnectionId, BitReader& r) {
             Participant p;
             std::uint32_t id = 0;
             if (!r.readUInt32(id) || !r.readString(p.name)) return;
+            if (!readAvatar(r, p.avatar, m_cfg.maxAvatarSize)) return;
             p.id = id;
             if (findParticipant(p.id)) return;         // already known
             m_participants.push_back(p);
-            if (m_onJoin) m_onJoin(p);
+            if (m_onJoin) m_onJoin(m_participants.back());
         });
         m_net->on(kMsgParticipantLeft, [this](ConnectionId, BitReader& r) {
             std::uint32_t id = 0;
@@ -173,8 +198,31 @@ void CollabSession::update(std::uint64_t nowMs) {
         // session addresses everything by uuids that only mean something inside
         // one project.
         w.writeString(m_cfg.projectKey);
+        // Who this editor install is, so a ban outlives the connection it was
+        // handed out on, and what its user looks like.
+        w.writeString(m_cfg.clientKey);
+        writeAvatar(w, m_cfg.avatar);
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
+    }
+
+    // Peers we ejected: told, and now out of time. Done before presence so a
+    // removed peer never receives one more relay on its way out.
+    for (auto it = m_pendingRemovals.begin(); it != m_pendingRemovals.end(); ) {
+        // Stamped here rather than at the kick: kickParticipant() is called from
+        // UI code that has no business knowing the session's clock, and this runs
+        // on the very next pump either way.
+        if (!it->armed) {
+            it->dueMs = nowMs + m_cfg.removalGraceMs;
+            it->armed = true;
+            ++it;
+            continue;
+        }
+        if (nowMs < it->dueMs) { ++it; continue; }
+        HE_LOG_INFO(Net, "Collab: closing the link to ejected conn %llu",
+                    static_cast<unsigned long long>(it->conn));
+        m_net->disconnect(it->conn);
+        it = m_pendingRemovals.erase(it);
     }
 
     // Presence: only once the participant actually exists in the session, at
@@ -248,9 +296,23 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // Read AFTER the version check: a peer speaking an older protocol did not
     // send this field, and reading a missing string would make it look like a
     // project mismatch instead of the version mismatch it is.
+    std::string clientKey;
+    Avatar      avatar;
     if (!r.readString(projectKey)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no project key)",
                     name.c_str());
+        return;
+    }
+    if (!r.readString(clientKey) || !readAvatar(r, avatar, m_cfg.maxAvatarSize)) {
+        HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no identity block)",
+                    name.c_str());
+        return;
+    }
+    // Checked before anything else that costs work — a banned peer must not be
+    // able to make the host serialize a scene by knocking repeatedly.
+    if (isBanned(clientKey, name)) {
+        HE_LOG_WARN(Net, "Collab: refusing \"%s\" — banned for this session", name.c_str());
+        reject(JoinRejectReason::Banned);
         return;
     }
     if (projectKey != m_cfg.projectKey) {
@@ -286,11 +348,18 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     }
 
     const ParticipantId id = m_nextId++;
-    Participant joiner{ id, name, false };
+    Participant joiner;
+    joiner.id        = id;
+    joiner.name      = name;
+    joiner.isHost    = false;
+    joiner.avatar    = std::move(avatar);
+    joiner.clientKey = std::move(clientKey);
 
     // Accept: assigned id, the sequence its snapshot corresponds to, and the
     // roster as it stands *before* adding the joiner (its own entry arrives via
     // the assigned id, and everyone else learns about it separately).
+    // Deliberately no clientKey in here: see Participant::clientKey — that field
+    // is the host's alone and is not a token to hand every peer.
     BitWriter accept;
     accept.writeUInt32(id);
     accept.writeUInt64(m_sequence);
@@ -299,6 +368,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         accept.writeUInt32(p.id);
         accept.writeString(p.name);
         accept.writeBool(p.isHost);
+        writeAvatar(accept, p.avatar);
     }
     m_net->send(conn, kMsgJoinAccepted, accept);
 
@@ -330,6 +400,9 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // Now register the joiner and tell everyone else.
     m_participants.push_back(joiner);
     m_connToParticipant.emplace_back(conn, id);
+    HE_LOG_DEBUG(Net, "Collab: \"%s\" identifies as client \"%s\"%s", name.c_str(),
+                 joiner.clientKey.empty() ? "(none)" : joiner.clientKey.c_str(),
+                 joiner.avatar.empty() ? "" : ", with a profile picture");
 
     // Hand over the current lock table, or a late arrival would believe every
     // asset is free and immediately collide with whoever is already editing.
@@ -354,6 +427,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     BitWriter announce;
     announce.writeUInt32(id);
     announce.writeString(name);
+    writeAvatar(announce, joiner.avatar);
     for (const ConnectionId other : m_net->connections()) {
         if (other != conn) m_net->send(other, kMsgParticipantJoined, announce);
     }
@@ -385,7 +459,22 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
     }
 
     const ParticipantId id = it->second;
-    m_connToParticipant.erase(it);
+    retireParticipant(id, conn, conn);
+
+    HE_LOG_INFO(Net, "Collab: participant %u left (%zu remain)",
+                static_cast<unsigned>(id), m_participants.size());
+    if (m_onLeft) m_onLeft(id);
+}
+
+// Everything that has to happen when a participant stops being in the session.
+// `except` is the connection NOT to announce to — the one that went away, or the
+// one we are about to cut loose (it is being told separately, and more usefully).
+void CollabSession::retireParticipant(ParticipantId id, ConnectionId conn,
+                                      ConnectionId except) {
+    m_connToParticipant.erase(
+        std::remove_if(m_connToParticipant.begin(), m_connToParticipant.end(),
+                       [conn](const auto& e) { return e.first == conn; }),
+        m_connToParticipant.end());
 
     // Free their locks BEFORE removing them from the roster, so the broadcast
     // still reaches everyone and nothing they held stays blocked forever.
@@ -405,12 +494,160 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
     BitWriter w;
     w.writeUInt32(id);
     for (const ConnectionId other : m_net->connections()) {
-        if (other != conn) m_net->send(other, kMsgParticipantLeft, w);
+        if (other != except) m_net->send(other, kMsgParticipantLeft, w);
+    }
+}
+
+// ─── Moderation ──────────────────────────────────────────────────────────────
+
+bool CollabSession::kickParticipant(ParticipantId id) {
+    return removeParticipant(id, RemovalReason::Kicked);
+}
+
+bool CollabSession::banParticipant(ParticipantId id) {
+    return removeParticipant(id, RemovalReason::Banned);
+}
+
+bool CollabSession::removeParticipant(ParticipantId id, RemovalReason reason) {
+    // Only the host holds the registry, and it cannot eject itself: there is no
+    // session left to be ejected from.
+    if (m_role != NetRole::Host || !m_net) return false;
+    if (id == kInvalidParticipant || id == m_localId) return false;
+
+    const Participant* found = findParticipant(id);
+    if (!found) return false;
+    const Participant victim = *found;   // copied: the roster entry is about to go
+
+    ConnectionId conn = kInvalidConnection;
+    for (const auto& [c, pid] : m_connToParticipant) {
+        if (pid == id) { conn = c; break; }
     }
 
-    HE_LOG_INFO(Net, "Collab: participant %u left (%zu remain)",
-                static_cast<unsigned>(id), m_participants.size());
-    if (m_onLeft) m_onLeft(id);
+    if (reason == RemovalReason::Banned) {
+        // Recorded before the eject, so a peer that reconnects in the window
+        // between the two is already refused.
+        if (!isBanned(victim.clientKey, victim.name)) {
+            m_bans.push_back(BanEntry{ victim.clientKey, victim.name });
+        }
+        HE_LOG_INFO(Net, "Collab: banning \"%s\" for this session (client \"%s\")",
+                    victim.name.c_str(),
+                    victim.clientKey.empty() ? "(none — matching by name)"
+                                             : victim.clientKey.c_str());
+    } else {
+        HE_LOG_INFO(Net, "Collab: kicking \"%s\"", victim.name.c_str());
+    }
+
+    if (conn != kInvalidConnection) {
+        // Tell them why first. The link is closed a moment later (update()), or
+        // the transport would discard this very message along with the socket.
+        BitWriter w;
+        w.writeByte(static_cast<std::uint8_t>(reason));
+        m_net->send(conn, kMsgRemoved, w);
+        m_pendingRemovals.push_back(PendingRemoval{ conn, 0, false });
+    }
+
+    retireParticipant(id, conn, conn);
+    if (m_onRemovedLocal) m_onRemovedLocal(victim, reason);
+    return true;
+}
+
+namespace {
+// One rule, used by both the join check and unban(), so a ban can always be
+// lifted by exactly the thing that would have matched it.
+//
+// The client key is the real subject: two identified peers are compared on that
+// alone, so two people who both left the display name at "Horizon User" cannot
+// ban one another by accident. The name is the fallback for when either side has
+// no durable identity — without it, deleting the identity file would lift every
+// ban, which is the one bypass worth closing.
+bool banMatches(const CollabSession::BanEntry& b, const std::string& clientKey,
+                const std::string& name) {
+    if (!clientKey.empty() && !b.clientKey.empty()) return b.clientKey == clientKey;
+    return !b.name.empty() && b.name == name;
+}
+} // namespace
+
+bool CollabSession::isBanned(const std::string& clientKey,
+                             const std::string& name) const {
+    for (const auto& b : m_bans) {
+        if (banMatches(b, clientKey, name)) return true;
+    }
+    return false;
+}
+
+bool CollabSession::unban(const std::string& clientKey, const std::string& name) {
+    const auto before = m_bans.size();
+    m_bans.erase(std::remove_if(m_bans.begin(), m_bans.end(),
+                                [&](const BanEntry& b) {
+                                    return banMatches(b, clientKey, name);
+                                }),
+                 m_bans.end());
+    return m_bans.size() != before;
+}
+
+void CollabSession::handleRemoved(BitReader& r) {
+    std::uint8_t reason = 0;
+    if (!r.readByte(reason)) return;
+    const auto why = static_cast<RemovalReason>(reason);
+    HE_LOG_WARN(Net, "Collab: the host removed us from the session (%s)",
+                why == RemovalReason::Banned ? "banned" : "kicked");
+    // The link itself goes down a moment later and takes the rest of the state
+    // with it (onPeerDisconnected). What matters here is that the editor learns
+    // WHY before that happens — afterwards it is indistinguishable from the
+    // host's network dropping.
+    if (m_onRemoved) m_onRemoved(why);
+}
+
+// ─── Avatars ─────────────────────────────────────────────────────────────────
+
+void CollabSession::writeAvatar(BitWriter& w, const Avatar& a) {
+    const bool ok = !a.empty() &&
+                    a.rgba.size() == static_cast<std::size_t>(a.size) * a.size * 4u;
+    w.writeUInt16(ok ? a.size : 0);
+    if (ok) w.writeBytes(a.rgba.data(), a.rgba.size());
+}
+
+bool CollabSession::readAvatar(BitReader& r, Avatar& out, std::uint16_t maxSize) {
+    out = Avatar{};
+    std::uint16_t size = 0;
+    if (!r.readUInt16(size)) return false;
+    if (size == 0) return true;   // no picture — perfectly normal
+
+    // Two separate bounds, because they answer two different questions.
+    //
+    // kAvatarSizeCeiling is what the WIRE allows: a uint16 side length means a
+    // peer can announce 65535², i.e. 17 GB of pixels, and sizing a buffer from
+    // that claim is how a one-line message becomes an out-of-memory abort. Past
+    // the ceiling is malformed, full stop.
+    //
+    // maxSize is what THIS session chooses to carry, and the two can legitimately
+    // differ between builds — so a picture that is merely over the local
+    // preference is read and dropped, never treated as an attack. Losing a
+    // portrait must not cost anyone their session.
+    constexpr std::uint16_t kAvatarSizeCeiling = 256;   // 256 KiB of pixels
+    if (size > kAvatarSizeCeiling) {
+        HE_LOG_WARN(Net, "Collab: refusing a %ux%u profile picture — no legitimate peer "
+                         "sends one that large",
+                    static_cast<unsigned>(size), static_cast<unsigned>(size));
+        return false;
+    }
+
+    const std::size_t bytes = static_cast<std::size_t>(size) * size * 4u;
+    // Nothing is allocated until the frame actually holds that many bytes.
+    if (r.bitsRemaining() < bytes * 8) return false;
+
+    std::vector<std::uint8_t> pixels(bytes);
+    if (!r.readBytes(pixels.data(), bytes)) return false;
+    if (size > maxSize) {
+        // Consumed so the rest of the message stays aligned, then discarded.
+        HE_LOG_WARN(Net, "Collab: ignoring a %ux%u profile picture — over the %ux%u limit",
+                    static_cast<unsigned>(size), static_cast<unsigned>(size),
+                    static_cast<unsigned>(maxSize), static_cast<unsigned>(maxSize));
+        return true;
+    }
+    out.size = size;
+    out.rgba = std::move(pixels);
+    return true;
 }
 
 // ─── Client side ─────────────────────────────────────────────────────────────
@@ -430,12 +667,20 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
         std::uint32_t pid = 0;
         bool isHost = false;
         if (!r.readUInt32(pid) || !r.readString(p.name) || !r.readBool(isHost)) return;
+        if (!readAvatar(r, p.avatar, m_cfg.maxAvatarSize)) return;
         p.id     = pid;
         p.isHost = isHost;
-        m_participants.push_back(p);
+        m_participants.push_back(std::move(p));
     }
-    // Our own entry is not in the host's list yet, so add it here.
-    m_participants.push_back(Participant{ m_localId, m_cfg.displayName, false });
+    // Our own entry is not in the host's list yet, so add it here — with our own
+    // picture, so the UI can draw every participant, ourselves included, from one
+    // roster instead of special-casing the local user.
+    Participant self;
+    self.id     = m_localId;
+    self.name   = m_cfg.displayName;
+    self.isHost = false;
+    self.avatar = m_cfg.avatar;
+    m_participants.push_back(std::move(self));
 
     HE_LOG_INFO(Net, "Collab: accepted as participant %u at sequence %llu, %u other(s) "
                      "already present — awaiting the scene snapshot",
@@ -459,6 +704,7 @@ void CollabSession::handleJoinRejected(BitReader& r) {
     case JoinRejectReason::SessionFull:     text = "the session is full"; break;
     case JoinRejectReason::SnapshotFailed:  text = "the host could not produce a scene snapshot"; break;
     case JoinRejectReason::ProjectMismatch: text = "the host has a different project open"; break;
+    case JoinRejectReason::Banned:          text = "the host banned you from this session"; break;
     default: break;
     }
     HE_LOG_WARN(Net, "Collab: join rejected by the host — %s%s%s", text,
@@ -674,11 +920,20 @@ void CollabSession::handlePresenceUpdate(ConnectionId conn, BitReader& r) {
     // never from the payload.
     const ParticipantId id = participantForConnection(conn);
     if (id == kInvalidParticipant) {
-        // Someone is publishing presence over a connection that never joined —
-        // the exact shape a spoofing attempt would take, hence Warning.
-        HE_LOG_WARN(Net, "Presence from conn %llu, which is not a joined participant "
-                         "— ignored",
-                    static_cast<unsigned long long>(conn));
+        // A peer we just ejected keeps publishing until its link actually goes
+        // down — that is the grace period working as intended, not an intrusion,
+        // and at 10 Hz it would bury the log in warnings.
+        const bool ejected = std::any_of(
+            m_pendingRemovals.begin(), m_pendingRemovals.end(),
+            [conn](const PendingRemoval& r) { return r.conn == conn; });
+        if (!ejected) {
+            // Someone is publishing presence over a connection that never
+            // joined — the exact shape a spoofing attempt would take, hence
+            // Warning.
+            HE_LOG_WARN(Net, "Presence from conn %llu, which is not a joined participant "
+                             "— ignored",
+                        static_cast<unsigned long long>(conn));
+        }
         return;   // not a joined participant
     }
 

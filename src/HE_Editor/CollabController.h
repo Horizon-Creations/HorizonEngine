@@ -104,6 +104,49 @@ public:
 	// same colour for the same person without having to agree on one.
 	static void participantColor(HE::Net::ParticipantId id, float outRgb[3]);
 
+	// ── Local identity ───────────────────────────────────────────────────────
+	// Who this editor is in a session: a display name, an optional profile
+	// picture, and a stable key identifying this installation. All three are
+	// persisted, so a user sets them once rather than on every join — and the
+	// key HAS to persist, since a session ban is keyed on it and would otherwise
+	// be shrugged off by restarting the editor.
+	//
+	// Read when a session STARTS. Editing them while one is running changes
+	// nothing until the next join; the panel says so rather than pretending.
+	struct Identity
+	{
+		std::string name = "Horizon User";
+		// Square RGBA8, `avatarSize` pixels per side; empty when the user has
+		// not picked a picture. Decoded here rather than on the wire so
+		// HorizonNet never has to parse an image file — see HE::Net::Avatar.
+		std::vector<std::uint8_t> avatarRgba;
+		std::uint16_t             avatarSize = 0;
+		std::string               clientKey;
+	};
+
+	// Everyone's picture is stored and sent at this size. Small enough that it
+	// rides along in the join handshake without chunking, large enough to stay
+	// legible on a HiDPI footer row at 2x.
+	static constexpr int kAvatarSize = 64;
+
+	// The stored identity, loaded (and the client key minted) on first use.
+	static const Identity& localIdentity();
+	static void setLocalName(const std::string& name);
+	// Replace the picture from an image file — png/jpg/bmp/tga, whatever
+	// stb_image reads. It is decoded, centre-cropped square and scaled to
+	// kAvatarSize here, so what is stored is already what goes on the wire.
+	// Returns false with a reason the UI can show verbatim.
+	static bool setLocalAvatarFromFile(const std::string& imagePath, std::string& error);
+	static void clearLocalAvatar();
+
+	// Centre-crop an RGBA8 image to a square and resample it to `size` pixels per
+	// side, averaging each destination pixel's source box. Public because it is
+	// the one part of the picture path with real edge cases — non-square sources,
+	// upscales, single-pixel images — and the only one that can be checked
+	// without touching the user's settings directory.
+	static std::vector<std::uint8_t> resampleSquareRgba(const std::uint8_t* rgba,
+	                                                    int width, int height, int size);
+
 	// Pump transport → session → collaboration. Call once per frame.
 	void update(std::uint64_t nowMs);
 
@@ -161,7 +204,25 @@ public:
 	bool  snapshotInProgress() const { return m_snapshotTotal > 0 &&
 	                                          m_snapshotGot < m_snapshotTotal; }
 
-	std::vector<HE::Net::Participant> participants() const;
+	// The live roster, by reference: a Participant now carries a profile picture,
+	// and the footer draws this every frame. Returning it by value copied every
+	// portrait in the session sixty times a second.
+	const std::vector<HE::Net::Participant>& participants() const;
+
+	// ── Moderation (host only) ───────────────────────────────────────────────
+	// Remove someone from the session. A ban also blacklists them for as long as
+	// this session lives, so their next join is refused without the host being
+	// asked again. Both are no-ops on a client and for our own id.
+	bool kickParticipant(HE::Net::ParticipantId id);
+	bool banParticipant(HE::Net::ParticipantId id);
+	const std::vector<HE::Net::CollabSession::BanEntry>& bans() const;
+	bool unban(const HE::Net::CollabSession::BanEntry& entry);
+
+	// Set when the HOST removed us — the one thing a dropped link cannot tell
+	// the user apart from a network failure. Empty when we left on our own or
+	// were never in a session. Shown once, then cleared by the UI.
+	const std::string& removalNotice() const { return m_removalNotice; }
+	void clearRemovalNotice() { m_removalNotice.clear(); }
 
 	// Short digest of the negotiated key, identical on both peers — lets two
 	// users confirm out of band that they are in the same session.
@@ -375,6 +436,10 @@ public:
 private:
 	void teardown();
 	void wireCallbacks();
+	// Copy the persisted name/picture/client key into a session config. Called
+	// on every host and join, so the identity the user just edited is the one
+	// that goes on the wire.
+	static void applyLocalIdentity(HE::Net::CollabSession::Config& cfg);
 	void pumpDirectory(std::uint64_t nowMs);
 	bool beginLink(const std::string& host, std::uint16_t port,
 	               const std::string& joinCode, const std::string& displayName);
@@ -460,6 +525,7 @@ private:
 
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
 	std::string   m_lockNotice;
+	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same
 	// reasoning as presence: a gizmo drag changes this every frame.

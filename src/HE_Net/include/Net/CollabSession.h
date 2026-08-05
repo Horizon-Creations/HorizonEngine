@@ -52,7 +52,11 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v4: the join handshake carries a project key, and a rejection carries a
 // detail string. A v3 peer omits both, so its join would read as a project
 // mismatch — the version check runs first and says something truthful instead.
-inline constexpr std::uint16_t kCollabProtocolVersion = 4;
+// v5: the handshake also carries a client key and a profile picture, and the
+// host can eject a participant (kMsgRemoved). A v4 peer sends neither, so the
+// host could not tell two of its editors apart — which is exactly what a ban
+// has to key on.
+inline constexpr std::uint16_t kCollabProtocolVersion = 5;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -64,12 +68,46 @@ enum class JoinRejectReason : std::uint8_t {
     // that only mean anything inside one project, so a joiner would receive a
     // scene whose every asset reference dangles. It used to be admitted anyway.
     ProjectMismatch = 4,
+    // The host banned this client earlier in this session. The refusal is
+    // automatic: the whole point of a ban is that the host is not asked again.
+    Banned          = 5,
+};
+
+// Why a participant stopped being in the session, as told to the participant
+// itself. A kick is a door held open; a ban locks it for the session's lifetime.
+enum class RemovalReason : std::uint8_t {
+    Kicked = 0,
+    Banned = 1,
+};
+
+// A profile picture. Raw RGBA8, square, `size` pixels per side — deliberately
+// NOT an encoded PNG: HorizonNet would then need an image decoder, and a peer
+// could hand us a decompression bomb dressed as a portrait. Raw pixels have
+// exactly one possible size (size*size*4), which the receiver checks before
+// allocating anything.
+struct Avatar {
+    std::uint16_t             size = 0;   // 0 = this participant has no picture
+    std::vector<std::uint8_t> rgba;       // size*size*4 bytes
+
+    bool empty() const { return size == 0 || rgba.empty(); }
 };
 
 struct Participant {
     ParticipantId id = kInvalidParticipant;
     std::string   name;
     bool          isHost = false;
+    Avatar        avatar;
+
+    // Stable identity of the editor install behind this participant, minted once
+    // per installation and sent in the join handshake. ONLY THE HOST EVER SEES
+    // IT: it is never relayed to the other clients, because the one thing it is
+    // for — keying a ban so the same person is refused on reconnect — is the
+    // host's job alone, and handing every peer a durable id for everyone else
+    // would be a tracking token nobody asked for.
+    //
+    // Empty on clients (including for their own entry) and for the host's own
+    // participant, since a host cannot ban itself.
+    std::string clientKey;
 };
 
 // ─── Presence ────────────────────────────────────────────────────────────────
@@ -131,6 +169,24 @@ public:
     struct Config {
         std::string   displayName   = "Horizon User";
         std::size_t   maxParticipants = 8;
+
+        // This user's profile picture, shown next to their name everywhere the
+        // roster appears. Optional — an empty avatar simply falls back to the
+        // participant's colour and initial.
+        Avatar        avatar;
+        // Upper bound on an ACCEPTED avatar, in pixels per side. A peer that
+        // announces more is refused its picture (not its join): a portrait is
+        // decoration, and losing it must never cost someone their session.
+        // 64² RGBA is 16 KiB, which rides along in the join handshake without
+        // being worth chunking.
+        std::uint16_t maxAvatarSize = 64;
+
+        // Stable identity of this editor install, sent to the host on join. See
+        // Participant::clientKey — it exists so a ban survives a reconnect, and
+        // so it must be the same string every time this editor joins. Empty is
+        // allowed (bans then fall back to matching the display name, which is
+        // weaker but better than nothing).
+        std::string   clientKey;
         // Upper bound on an accepted snapshot. Guards against a hostile or buggy
         // host announcing a size that would exhaust memory.
         std::uint32_t maxSnapshotBytes = 64u * 1024u * 1024u;
@@ -168,6 +224,14 @@ public:
         std::uint32_t maxDocItemBytes  = 48u * 1024u;
         std::uint32_t maxDocBatchBytes = 1024u * 1024u;
         std::uint16_t maxDocDeltas     = 4096;
+
+        // A removed peer is told first and cut loose a moment later. Closing the
+        // link in the same breath would be simpler and wrong: a transport
+        // discards whatever is still queued when the local side closes (see
+        // TcpTransport::disconnect), so the kick message — the only thing that
+        // distinguishes being thrown out from the host's network dying — is
+        // exactly what would be lost.
+        std::uint64_t removalGraceMs = 500;
     };
 
     CollabSession(NetSession* net, NetRole role, Config cfg);
@@ -390,6 +454,44 @@ public:
         m_onLockQuery = std::move(fn);
     }
 
+    // ── Moderation (host only) ───────────────────────────────────────────────
+    // The host owns the participant registry, so it is also the only side that
+    // can take someone out of it. Both calls are no-ops on a client and for the
+    // host's own id — there is nobody above the host to appeal to, and equally
+    // nobody for it to eject itself towards.
+    //
+    // Kicking ends the session for that peer, who may turn around and join
+    // again; banning also records them, so the next join request is refused
+    // without the host being asked. The ban lasts as long as THIS session —
+    // closing the session forgets it, which is the scope a host can reason about
+    // without maintaining a list they will never see again.
+    bool kickParticipant(ParticipantId id);
+    bool banParticipant(ParticipantId id);
+
+    struct BanEntry {
+        // What the ban is keyed on. Matching prefers the client key; when the
+        // peer sent none (an editor with no identity file yet), the display name
+        // is the fallback — weaker, but the alternative is a ban that does
+        // nothing at all.
+        std::string clientKey;
+        std::string name;
+    };
+    const std::vector<BanEntry>& bans() const { return m_bans; }
+    // Let someone back in. Matches the same way a join request is checked.
+    bool unban(const std::string& clientKey, const std::string& name);
+
+    // We were removed from the session by the host. Fires on the client only, and
+    // before the link goes down, so the editor can say which of the two happened
+    // instead of reporting a generic lost connection.
+    void onRemoved(std::function<void(RemovalReason)> fn) { m_onRemoved = std::move(fn); }
+
+    // A participant was ejected by us. Host-side counterpart of onParticipantLeft,
+    // kept apart from it so the UI can distinguish "they left" from "we removed
+    // them".
+    void onParticipantRemoved(std::function<void(const Participant&, RemovalReason)> fn) {
+        m_onRemovedLocal = std::move(fn);
+    }
+
     // Drive the session. Pump the transport first, then this.
     void update();
 
@@ -416,6 +518,23 @@ private:
     void sendSnapshotTo(ConnectionId conn);
     void onPeerConnected(ConnectionId conn);
     void onPeerDisconnected(ConnectionId conn);
+
+    // Moderation
+    bool removeParticipant(ParticipantId id, RemovalReason reason);
+    // Everything that has to happen when a participant stops being in the
+    // session, whichever way it happened: their locks freed, their presence
+    // dropped, the roster pruned, everyone else told. Shared by the disconnect
+    // path and the kick path so the two cannot drift apart.
+    void retireParticipant(ParticipantId id, ConnectionId conn, ConnectionId except);
+    bool isBanned(const std::string& clientKey, const std::string& name) const;
+    void handleRemoved(BitReader& r);   // client: the host ejected us
+
+    // Avatars ride along in the join handshake and in the roster announcements.
+    static void writeAvatar(BitWriter& w, const Avatar& a);
+    // Refuses an avatar larger than `maxSize` rather than allocating what the
+    // peer claims. A refused picture leaves `out` empty and still returns true —
+    // losing a portrait must not cost anyone their session.
+    static bool readAvatar(BitReader& r, Avatar& out, std::uint16_t maxSize);
 
     // Client side
     void handleJoinAccepted(BitReader& r);
@@ -500,6 +619,18 @@ private:
     // Host: which connection belongs to which participant.
     std::vector<std::pair<ConnectionId, ParticipantId>> m_connToParticipant;
 
+    // Host: peers told they are out, whose link is severed once the grace period
+    // is up (see Config::removalGraceMs). Until then they are already gone from
+    // the roster, and anything further they send is ignored — they are no longer
+    // a joined participant, which every host handler already checks.
+    struct PendingRemoval {
+        ConnectionId  conn  = kInvalidConnection;
+        std::uint64_t dueMs = 0;
+        bool          armed = false;   // dueMs is only meaningful once stamped
+    };
+    std::vector<PendingRemoval> m_pendingRemovals;
+    std::vector<BanEntry>       m_bans;
+
     // Client: snapshot assembly in progress.
     std::vector<std::uint8_t> m_snapshotBuf;
     std::uint32_t             m_snapshotExpected = 0;
@@ -544,6 +675,8 @@ private:
     std::function<void(JoinRejectReason, const std::string&)> m_onRejected;
     std::function<void(const Participant&)>           m_onJoin;
     std::function<void(ParticipantId)>                m_onLeft;
+    std::function<void(RemovalReason)>                m_onRemoved;
+    std::function<void(const Participant&, RemovalReason)> m_onRemovedLocal;
     std::function<void(std::uint32_t, std::uint32_t)> m_onProgress;
 };
 

@@ -1,6 +1,10 @@
 #include "CollabController.h"
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 
+// Profile pictures arrive as ordinary image files and leave as raw RGBA — the
+// decode happens here so HorizonNet never has to parse an image.
+#include "vendor/stb_image.h"
+
 #include <Net/HttpsClient.h>
 #include <Net/PortMapper.h>
 #include <Net/NetSession.h>
@@ -23,7 +27,10 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 
+#include <Diagnostics/GlobalState.h>
 #include <Diagnostics/Logger.h>
+
+#include <random>
 
 using namespace HE::Net;
 
@@ -161,6 +168,7 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
 	cfg.projectLabel = m_projectLabel;
+	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Host, cfg);
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
@@ -356,6 +364,224 @@ void CollabController::participantColor(HE::Net::ParticipantId id, float outRgb[
 	}
 }
 
+// ─── Local identity ──────────────────────────────────────────────────────────
+// Name and client key live in the editor's config.json; the picture lives beside
+// it as a raw file. Deliberately NOT in the json: 64² RGBA is 16 KiB, which
+// base64s to 22 KiB of noise in a file people open and read.
+
+namespace {
+
+constexpr const char* kCfgDisplayName = "CollabDisplayName";
+constexpr const char* kCfgClientKey   = "CollabClientKey";
+
+std::filesystem::path avatarFilePath()
+{
+	const std::filesystem::path dir = GlobalState::userDataDir();
+	return dir.empty() ? std::filesystem::path() : dir / "collab_avatar.rgba";
+}
+
+// A random, non-secret identifier for this installation. Not a credential — it
+// says "the same editor as last time", nothing more — so a plain PRNG is the
+// right tool and the join code stays the thing that actually guards a session.
+std::string mintClientKey()
+{
+	std::random_device rd;
+	std::uniform_int_distribution<unsigned> hex(0, 15);
+	static constexpr char kHex[] = "0123456789abcdef";
+	std::string out;
+	out.reserve(32);
+	for (int i = 0; i < 32; ++i) out.push_back(kHex[hex(rd)]);
+	return out;
+}
+
+} // namespace
+
+// Centre-crop to a square and resample to `dst` pixels per side by averaging
+// each destination pixel's source box. Box filtering (rather than picking one
+// source pixel) is what keeps a 2000px photo from turning into aliased confetti
+// at 64px — and a portrait is the one image in the editor a user will actually
+// look at closely.
+std::vector<std::uint8_t> CollabController::resampleSquareRgba(const std::uint8_t* src,
+                                                               int srcW, int srcH, int dst)
+{
+	if (!src || srcW <= 0 || srcH <= 0 || dst <= 0) return {};
+
+	const int side = std::min(srcW, srcH);
+	const int ox   = (srcW - side) / 2;
+	const int oy   = (srcH - side) / 2;
+
+	std::vector<std::uint8_t> out(static_cast<std::size_t>(dst) * dst * 4u);
+	for (int y = 0; y < dst; ++y)
+	{
+		// Source rows this destination row covers. The +1 floor keeps the box
+		// non-empty when upscaling, where several destination pixels share one
+		// source pixel.
+		const int y0 = oy + (y * side) / dst;
+		const int y1 = std::max(y0 + 1, oy + ((y + 1) * side) / dst);
+		for (int x = 0; x < dst; ++x)
+		{
+			const int x0 = ox + (x * side) / dst;
+			const int x1 = std::max(x0 + 1, ox + ((x + 1) * side) / dst);
+
+			std::uint32_t acc[4] { 0, 0, 0, 0 };
+			std::uint32_t n = 0;
+			for (int sy = y0; sy < y1; ++sy)
+			{
+				const std::uint8_t* row = src + (static_cast<std::size_t>(sy) * srcW) * 4u;
+				for (int sx = x0; sx < x1; ++sx)
+				{
+					for (int c = 0; c < 4; ++c) acc[c] += row[sx * 4 + c];
+					++n;
+				}
+			}
+			std::uint8_t* d = out.data() + (static_cast<std::size_t>(y) * dst + x) * 4u;
+			for (int c = 0; c < 4; ++c)
+				d[c] = static_cast<std::uint8_t>(n ? acc[c] / n : 0);
+		}
+	}
+	return out;
+}
+
+namespace {
+
+// The one mutable copy. localIdentity() hands it out read-only; the setters here
+// are the only writers, which is what keeps "changed on disk" and "changed in
+// memory" from ever disagreeing.
+CollabController::Identity& identityStorage()
+{
+	// Loaded once. The client key is minted on first use and written back
+	// immediately: a key that only existed in memory would change on every
+	// restart, and a session ban keyed on it would mean nothing.
+	static CollabController::Identity s_identity = [] {
+		CollabController::Identity id;
+		GlobalState& gs = GlobalState::getInstance();
+
+		id.name = gs.getCustomConfigString(kCfgDisplayName, "Horizon User");
+		if (id.name.empty()) id.name = "Horizon User";
+
+		id.clientKey = gs.getCustomConfigString(kCfgClientKey, "");
+		if (id.clientKey.empty())
+		{
+			id.clientKey = mintClientKey();
+			gs.setCustomConfigEntry(kCfgClientKey, id.clientKey);
+			gs.writeConfig();
+		}
+
+		const std::filesystem::path path = avatarFilePath();
+		std::error_code ec;
+		if (!path.empty() && std::filesystem::exists(path, ec))
+		{
+			std::ifstream in(path, std::ios::binary);
+			std::uint8_t header[2] {};
+			if (in.read(reinterpret_cast<char*>(header), 2))
+			{
+				const auto size = static_cast<std::uint16_t>(header[0] | (header[1] << 8));
+				const std::size_t bytes = static_cast<std::size_t>(size) * size * 4u;
+				// Sized from the file's own claim, so it is bounded before the
+				// read: a truncated or hand-edited file must not turn into a
+				// gigabyte allocation at editor startup.
+				if (size > 0 && size <= CollabController::kAvatarSize)
+				{
+					std::vector<std::uint8_t> px(bytes);
+					if (in.read(reinterpret_cast<char*>(px.data()),
+					            static_cast<std::streamsize>(bytes)))
+					{
+						id.avatarSize = size;
+						id.avatarRgba = std::move(px);
+					}
+				}
+			}
+			if (id.avatarSize == 0)
+			{
+				Logger::Log(Logger::LogLevel::Warning,
+				            "Collab: the stored profile picture could not be read — "
+				            "pick one again in the Collaboration window.");
+			}
+		}
+		return id;
+	}();
+	return s_identity;
+}
+
+} // namespace
+
+const CollabController::Identity& CollabController::localIdentity()
+{
+	return identityStorage();
+}
+
+void CollabController::setLocalName(const std::string& name)
+{
+	Identity& id = identityStorage();
+	id.name = name.empty() ? std::string("Horizon User") : name;
+	GlobalState& gs = GlobalState::getInstance();
+	gs.setCustomConfigEntry(kCfgDisplayName, id.name);
+	gs.writeConfig();
+}
+
+bool CollabController::setLocalAvatarFromFile(const std::string& imagePath,
+                                              std::string& error)
+{
+	error.clear();
+
+	int w = 0, h = 0, channels = 0;
+	unsigned char* pixels = stbi_load(imagePath.c_str(), &w, &h, &channels, 4);
+	if (!pixels || w <= 0 || h <= 0)
+	{
+		const char* why = stbi_failure_reason();
+		error = std::string("That file could not be read as an image") +
+		        (why ? std::string(" (") + why + ")." : ".");
+		if (pixels) stbi_image_free(pixels);
+		return false;
+	}
+
+	std::vector<std::uint8_t> square = resampleSquareRgba(pixels, w, h, kAvatarSize);
+	stbi_image_free(pixels);
+
+	const std::filesystem::path path = avatarFilePath();
+	if (path.empty())
+	{
+		error = "There is no writable settings directory to store the picture in.";
+		return false;
+	}
+
+	// Written before the in-memory copy is swapped in: a picture the editor
+	// cannot persist would come back as the old one on restart, which reads as
+	// the change having silently failed a week later.
+	{
+		std::ofstream out(path, std::ios::binary | std::ios::trunc);
+		const std::uint8_t header[2] {
+			static_cast<std::uint8_t>(kAvatarSize & 0xFF),
+			static_cast<std::uint8_t>((kAvatarSize >> 8) & 0xFF)
+		};
+		out.write(reinterpret_cast<const char*>(header), 2);
+		out.write(reinterpret_cast<const char*>(square.data()),
+		          static_cast<std::streamsize>(square.size()));
+		if (!out)
+		{
+			error = "The picture could not be saved to " + path.string() + ".";
+			return false;
+		}
+	}
+
+	Identity& id  = identityStorage();
+	id.avatarSize = kAvatarSize;
+	id.avatarRgba = std::move(square);
+	Logger::Log(Logger::LogLevel::Info,
+	            ("Collab: profile picture set from " + imagePath).c_str());
+	return true;
+}
+
+void CollabController::clearLocalAvatar()
+{
+	Identity& id  = identityStorage();
+	id.avatarSize = 0;
+	id.avatarRgba.clear();
+	std::error_code ec;
+	if (const std::filesystem::path path = avatarFilePath(); !path.empty())
+		std::filesystem::remove(path, ec);
+}
+
 std::string CollabController::directoryEndpoint()
 {
 	if (const char* env = std::getenv("HE_COLLAB_DIRECTORY"); env && *env) return env;
@@ -468,6 +694,7 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
 	cfg.projectLabel = m_projectLabel;
+	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Client, cfg);
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
@@ -482,8 +709,32 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	return true;
 }
 
+// The picture and the install key ride along with every session this editor
+// opens or joins. Read HERE rather than stashed at construction, so a picture
+// picked a minute ago is the one that travels.
+void CollabController::applyLocalIdentity(HE::Net::CollabSession::Config& cfg)
+{
+	const Identity& me = localIdentity();
+	cfg.clientKey      = me.clientKey;
+	cfg.avatar.size    = me.avatarSize;
+	cfg.avatar.rgba    = me.avatarRgba;
+}
+
 void CollabController::wireCallbacks()
 {
+	m_collab->onRemoved([this](HE::Net::RemovalReason why) {
+		// The link drops right after this. Without the notice the user sees a
+		// bare "connection lost" and has no way to tell being thrown out from
+		// the host's wifi giving up.
+		m_removalNotice = why == HE::Net::RemovalReason::Banned
+			? std::string("The host removed you from this session and blocked you from "
+			              "rejoining it. A new session is not affected.")
+			: std::string("The host removed you from this session. You can join again if "
+			              "they let you back in.");
+		m_error  = m_removalNotice;
+		m_status = Status::Failed;
+	});
+
 	m_collab->onJoined([this](HE::Net::ParticipantId id) {
 		m_status = Status::Joined;
 		Logger::Log(Logger::LogLevel::Info,
@@ -690,6 +941,9 @@ void CollabController::teardown()
 	m_secure.reset();
 
 	m_isHost        = false;
+	// Starting or leaving a session is the one moment the last one's ejection
+	// notice stops being news.
+	m_removalNotice.clear();
 	m_joinCode.clear();
 	m_sessionId.clear();
 	m_localAddress.clear();
@@ -868,10 +1122,35 @@ float CollabController::snapshotProgress() const
 	return static_cast<float>(m_snapshotGot) / static_cast<float>(m_snapshotTotal);
 }
 
-std::vector<HE::Net::Participant> CollabController::participants() const
+const std::vector<HE::Net::Participant>& CollabController::participants() const
 {
-	if (!m_collab) return {};
-	return m_collab->participants();
+	// A stable empty roster rather than a temporary, so callers can hold the
+	// reference for the frame whether or not a session is running.
+	static const std::vector<HE::Net::Participant> kNone;
+	return m_collab ? m_collab->participants() : kNone;
+}
+
+// ─── Moderation ──────────────────────────────────────────────────────────────
+
+bool CollabController::kickParticipant(HE::Net::ParticipantId id)
+{
+	return m_collab && m_collab->kickParticipant(id);
+}
+
+bool CollabController::banParticipant(HE::Net::ParticipantId id)
+{
+	return m_collab && m_collab->banParticipant(id);
+}
+
+const std::vector<HE::Net::CollabSession::BanEntry>& CollabController::bans() const
+{
+	static const std::vector<HE::Net::CollabSession::BanEntry> kNone;
+	return m_collab ? m_collab->bans() : kNone;
+}
+
+bool CollabController::unban(const HE::Net::CollabSession::BanEntry& entry)
+{
+	return m_collab && m_collab->unban(entry.clientKey, entry.name);
 }
 
 std::string CollabController::sessionFingerprint() const

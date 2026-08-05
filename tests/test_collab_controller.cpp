@@ -1135,3 +1135,110 @@ TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")
     CHECK_FALSE(CollabController::isSyncableAsset("Content/NoExtension"));
     CHECK_FALSE(CollabController::isSyncableAsset(""));
 }
+
+// ─── Profile pictures ────────────────────────────────────────────────────────
+// The crop-and-scale step, which is the only part of the picture path with real
+// arithmetic in it. Everything around it (the file dialog, stb_image, the
+// settings directory) is either the OS's or would mean writing into the
+// developer's own editor configuration to observe.
+
+namespace {
+
+// A w×h RGBA image whose red channel is the column index and green channel the
+// row, so a resampled result says exactly which source pixels it came from.
+std::vector<std::uint8_t> gradientRgba(int w, int h)
+{
+    std::vector<std::uint8_t> px(static_cast<std::size_t>(w) * h * 4u);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            std::uint8_t* p = px.data() + (static_cast<std::size_t>(y) * w + x) * 4u;
+            p[0] = static_cast<std::uint8_t>(x);
+            p[1] = static_cast<std::uint8_t>(y);
+            p[2] = 0;
+            p[3] = 255;
+        }
+    }
+    return px;
+}
+
+} // namespace
+
+TEST_CASE("CollabController: a picture is cropped to a square from the centre")
+{
+    // 4 wide, 2 tall → the 2×2 centre, i.e. columns 1 and 2. Cropping from the
+    // corner instead would take columns 0 and 1 and behead every portrait that
+    // is not already square.
+    const auto src = gradientRgba(4, 2);
+    const auto out = CollabController::resampleSquareRgba(src.data(), 4, 2, 2);
+
+    // Row stride is dst * 4 bytes, so the second output row starts at byte 8.
+    REQUIRE(out.size() == 2u * 2u * 4u);
+    CHECK(out[0] == 1);        // top-left came from column 1
+    CHECK(out[4] == 2);        // top-right from column 2
+    CHECK(out[1] == 0);        // …both of row 0
+    CHECK(out[8 + 1] == 1);    // and the second output row is source row 1
+}
+
+TEST_CASE("CollabController: a flat colour survives any rescale")
+{
+    // Averaging must not tint or darken. A portrait that comes back a shade off
+    // is the kind of thing nobody reports and everybody notices.
+    std::vector<std::uint8_t> src(64 * 64 * 4);
+    for (std::size_t i = 0; i < src.size(); i += 4)
+    {
+        src[i + 0] = 200; src[i + 1] = 100; src[i + 2] = 50; src[i + 3] = 255;
+    }
+
+    for (const int size : { 1, 7, 16, 64, 128 })
+    {
+        const auto out = CollabController::resampleSquareRgba(src.data(), 64, 64, size);
+        REQUIRE(out.size() == static_cast<std::size_t>(size) * size * 4u);
+        for (std::size_t i = 0; i < out.size(); i += 4)
+        {
+            CHECK(out[i + 0] == 200);
+            CHECK(out[i + 1] == 100);
+            CHECK(out[i + 2] == 50);
+            CHECK(out[i + 3] == 255);
+        }
+    }
+}
+
+TEST_CASE("CollabController: upscaling a one-pixel image fills the whole square")
+{
+    // The degenerate case: every destination box collapses onto the single
+    // source pixel. Without the box floor it would collapse to nothing and the
+    // result would be transparent black.
+    const std::uint8_t one[4] = { 10, 20, 30, 40 };
+    const auto out = CollabController::resampleSquareRgba(one, 1, 1, 4);
+
+    REQUIRE(out.size() == 4u * 4u * 4u);
+    for (std::size_t i = 0; i < out.size(); i += 4)
+    {
+        CHECK(out[i + 0] == 10);
+        CHECK(out[i + 1] == 20);
+        CHECK(out[i + 2] == 30);
+        CHECK(out[i + 3] == 40);
+    }
+}
+
+TEST_CASE("CollabController: a tall picture keeps its width, not its height")
+{
+    // 2 wide, 6 tall → the square side is 2, taken from rows 2 and 3.
+    const auto src = gradientRgba(2, 6);
+    const auto out = CollabController::resampleSquareRgba(src.data(), 2, 6, 2);
+
+    REQUIRE(out.size() == 2u * 2u * 4u);
+    CHECK(out[1] == 2);        // first output row is source row 2
+    CHECK(out[8 + 1] == 3);    // second is row 3
+}
+
+TEST_CASE("CollabController: degenerate picture input yields nothing, not a crash")
+{
+    const std::uint8_t one[4] = { 1, 2, 3, 4 };
+    CHECK(CollabController::resampleSquareRgba(nullptr, 8, 8, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 0, 8, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 8, 0, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 1, 1, 0).empty());
+}

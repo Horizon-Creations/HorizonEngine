@@ -21,8 +21,10 @@ public:
     bool captureOk = true;
     bool applyOk   = true;
     int  applyCalls = 0;
+    int  captureCalls = 0;
 
     bool captureSnapshot(std::vector<std::uint8_t>& out) override {
+        ++captureCalls;
         if (!captureOk) return false;
         out = data;
         return true;
@@ -61,7 +63,8 @@ struct Pair {
 
 std::unique_ptr<Pair> makePair(const std::string& hostName = "Anna",
                                const std::string& clientName = "Bob",
-                               CollabSession::Config clientCfg = {}) {
+                               CollabSession::Config clientCfg = {},
+                               CollabSession::Config hostCfg = {}) {
     auto p = std::make_unique<Pair>();
     auto [a, b] = LoopbackTransport::createPair();
     p->hostT   = std::move(a);
@@ -70,7 +73,6 @@ std::unique_ptr<Pair> makePair(const std::string& hostName = "Anna",
     p->hostNet   = std::make_unique<NetSession>(p->hostT.get(), NetRole::Host);
     p->clientNet = std::make_unique<NetSession>(p->clientT.get(), NetRole::Client);
 
-    CollabSession::Config hostCfg;
     hostCfg.displayName = hostName;
     clientCfg.displayName = clientName;
 
@@ -87,6 +89,38 @@ std::vector<std::uint8_t> makeBlob(std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) v[i] = static_cast<std::uint8_t>((i * 7 + 3) & 0xFF);
     return v;
 }
+
+// A square RGBA portrait with recognisable content, so a test can tell one
+// participant's picture from another's rather than merely counting bytes.
+Avatar makeAvatar(std::uint16_t size, std::uint8_t seed) {
+    Avatar a;
+    a.size = size;
+    a.rgba.resize(static_cast<std::size_t>(size) * size * 4u);
+    for (std::size_t i = 0; i < a.rgba.size(); ++i) {
+        a.rgba[i] = static_cast<std::uint8_t>((i * 13 + seed) & 0xFF);
+    }
+    return a;
+}
+
+// A join request written by hand, the way a peer that is not a CollabSession
+// would send it. Several tests need to knock on the host's door more than once
+// over the same link (a reconnect after a kick or a ban), which a client session
+// object deliberately refuses to do.
+void writeJoinRequest(BitWriter& w, const std::string& name,
+                      const std::string& projectKey = {},
+                      const std::string& clientKey  = {},
+                      std::uint16_t avatarSize = 0) {
+    w.writeUInt16(kCollabProtocolVersion);
+    w.writeString(name);
+    w.writeString(projectKey);
+    w.writeString(clientKey);
+    w.writeUInt16(avatarSize);
+    const std::size_t bytes = static_cast<std::size_t>(avatarSize) * avatarSize * 4u;
+    for (std::size_t i = 0; i < bytes; ++i) w.writeByte(static_cast<std::uint8_t>(i & 0xFF));
+}
+
+constexpr MessageId kIdJoinRequest  = kFirstUserMessage + 0;
+constexpr MessageId kIdJoinRejected = kFirstUserMessage + 2;
 
 } // namespace
 
@@ -309,10 +343,8 @@ TEST_CASE("CollabSession: a full session refuses further joins")
     hostNet.pump(); clientNet.pump();
 
     BitWriter w;
-    w.writeUInt16(kCollabProtocolVersion);
-    w.writeString("Latecomer");
-    w.writeString("");   // project key — empty matches the host's empty one
-    clientNet.send(LoopbackTransport::kPeer, kFirstUserMessage + 0, w);
+    writeJoinRequest(w, "Latecomer");
+    clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
 
     for (int i = 0; i < 6; ++i) {
         a->update(); b->update();
@@ -1501,4 +1533,470 @@ TEST_CASE("CollabSession: two projectless editors still collaborate")
 
     CHECK_FALSE(rejected);
     CHECK(p->client->isJoined());
+}
+
+// ─── Profile pictures ────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: profile pictures travel in both directions")
+{
+    CollabSession::Config clientCfg, hostCfg;
+    clientCfg.avatar = makeAvatar(16, 7);
+    hostCfg.avatar   = makeAvatar(16, 200);
+
+    auto p = makePair("Anna", "Bob", clientCfg, hostCfg);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    REQUIRE(p->client->isJoined());
+
+    // The host received Bob's picture in the join handshake…
+    const Participant* bobOnHost = nullptr;
+    for (const auto& part : p->host->participants()) {
+        if (part.name == "Bob") bobOnHost = &part;
+    }
+    REQUIRE(bobOnHost != nullptr);
+    CHECK(bobOnHost->avatar.size == 16);
+    CHECK(bobOnHost->avatar.rgba == clientCfg.avatar.rgba);
+
+    // …and Bob received Anna's with the accepted roster.
+    const Participant* annaOnClient = nullptr;
+    for (const auto& part : p->client->participants()) {
+        if (part.name == "Anna") annaOnClient = &part;
+    }
+    REQUIRE(annaOnClient != nullptr);
+    CHECK(annaOnClient->avatar.size == 16);
+    CHECK(annaOnClient->avatar.rgba == hostCfg.avatar.rgba);
+}
+
+TEST_CASE("CollabSession: your own roster entry carries your own picture")
+{
+    // The UI draws every participant, itself included, from one list — so the
+    // local entry has to be as complete as everyone else's.
+    CollabSession::Config clientCfg;
+    clientCfg.avatar = makeAvatar(8, 3);
+
+    auto p = makePair("Anna", "Bob", clientCfg);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    const Participant* self = nullptr;
+    for (const auto& part : p->client->participants()) {
+        if (part.id == p->client->localId()) self = &part;
+    }
+    REQUIRE(self != nullptr);
+    CHECK(self->avatar.rgba == clientCfg.avatar.rgba);
+}
+
+TEST_CASE("CollabSession: a participant without a picture joins normally")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    REQUIRE(p->client->isJoined());
+    for (const auto& part : p->host->participants()) CHECK(part.avatar.empty());
+}
+
+TEST_CASE("CollabSession: an oversized picture is dropped, the join is not")
+{
+    // The two sides may legitimately disagree about how big a portrait may be.
+    // Losing the picture is acceptable; losing the session over it is not.
+    CollabSession::Config clientCfg, hostCfg;
+    clientCfg.avatar        = makeAvatar(64, 5);
+    clientCfg.maxAvatarSize = 64;
+    hostCfg.maxAvatarSize   = 32;
+
+    auto p = makePair("Anna", "Bob", clientCfg, hostCfg);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    CHECK(p->client->isJoined());
+    for (const auto& part : p->host->participants()) {
+        if (part.name == "Bob") CHECK(part.avatar.empty());
+    }
+}
+
+TEST_CASE("CollabSession: a picture the sender itself cannot carry is discarded")
+{
+    // 128² against a 64 limit: the session drops it at construction rather than
+    // announcing a size it would refuse to accept from anyone else.
+    CollabSession::Config clientCfg;
+    clientCfg.avatar        = makeAvatar(128, 9);
+    clientCfg.maxAvatarSize = 64;
+
+    auto p = makePair("Anna", "Bob", clientCfg);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    CHECK(p->client->isJoined());
+    for (const auto& part : p->host->participants()) CHECK(part.avatar.empty());
+}
+
+TEST_CASE("CollabSession: an absurd picture size is refused without allocating it")
+{
+    // 4096² RGBA would be 64 MiB sized from a two-byte claim. The frame does not
+    // contain those bytes, and the point is that nothing tries to reserve them.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession host(&hostNet, NetRole::Host);
+    host.setStateProvider(&hostState);
+
+    a->update(); b->update();
+    hostNet.pump(); clientNet.pump();
+
+    BitWriter w;
+    w.writeUInt16(kCollabProtocolVersion);
+    w.writeString("Bomber");
+    w.writeString("");
+    w.writeString("bomber-key");
+    w.writeUInt16(4096);          // …and no pixels behind it
+    clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
+
+    for (int i = 0; i < 6; ++i) {
+        a->update(); b->update();
+        hostNet.pump(); clientNet.pump();
+    }
+
+    CHECK(host.participants().size() == 1);   // nobody admitted
+}
+
+// ─── Kick and ban ────────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: the host kicks a participant, who is told why")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->host->participants().size() == 2);
+
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : p->host->participants()) {
+        if (!part.isHost) bob = part.id;
+    }
+    REQUIRE(bob != kInvalidParticipant);
+
+    int  removedCalls = 0;
+    auto why = RemovalReason::Banned;
+    p->client->onRemoved([&](RemovalReason r) { ++removedCalls; why = r; });
+
+    std::string ejectedName;
+    p->host->onParticipantRemoved([&](const Participant& part, RemovalReason) {
+        ejectedName = part.name;
+    });
+
+    CHECK(p->host->kickParticipant(bob));
+
+    // The host's roster drops them at once — it does not wait for the link.
+    CHECK(p->host->participants().size() == 1);
+    CHECK(ejectedName == "Bob");
+
+    p->pump();
+
+    CHECK(removedCalls == 1);
+    CHECK(why == RemovalReason::Kicked);
+    // A kick is not a ban: nothing is recorded against them.
+    CHECK(p->host->bans().empty());
+}
+
+TEST_CASE("CollabSession: a kicked participant's locks are freed")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->requestLock(4242);
+    p->pump();
+    REQUIRE(p->host->lockFor(4242) != nullptr);
+
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : p->host->participants()) {
+        if (!part.isHost) bob = part.id;
+    }
+    p->host->kickParticipant(bob);
+
+    // Whatever they were editing has to become editable again, or the session
+    // stays blocked on someone who is no longer in it.
+    CHECK(p->host->lockFor(4242) == nullptr);
+}
+
+TEST_CASE("CollabSession: the link to a kicked participant is closed")
+{
+    CollabSession::Config hostCfg;
+    hostCfg.removalGraceMs = 100;   // the pump steps a second at a time
+
+    auto p = makePair("Anna", "Bob", {}, hostCfg);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : p->host->participants()) {
+        if (!part.isHost) bob = part.id;
+    }
+    p->host->kickParticipant(bob);
+    p->pump();
+
+    // Told first, cut loose after — the client saw the reason before the link
+    // went down, which is the whole reason for the grace period.
+    CHECK_FALSE(p->client->isJoined());
+    CHECK(p->hostT->connectionCount() == 0);
+}
+
+TEST_CASE("CollabSession: a client cannot kick, and the host cannot kick itself")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    ParticipantId anna = kInvalidParticipant, bob = kInvalidParticipant;
+    for (const auto& part : p->host->participants()) {
+        (part.isHost ? anna : bob) = part.id;
+    }
+
+    CHECK_FALSE(p->client->kickParticipant(anna));   // not the authority
+    CHECK_FALSE(p->client->banParticipant(anna));
+    CHECK_FALSE(p->host->kickParticipant(anna));     // itself
+    CHECK_FALSE(p->host->kickParticipant(kInvalidParticipant));
+    CHECK(p->host->participants().size() == 2);
+    CHECK(p->host->bans().empty());
+
+    // The one call that IS legitimate still works.
+    CHECK(p->host->kickParticipant(bob));
+}
+
+TEST_CASE("CollabSession: a ban refuses the same client when it comes back")
+{
+    // Driven by hand: a CollabSession client sends exactly one join request per
+    // link by design, and the point here is the SECOND one.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession::Config hostCfg;
+    // Long enough that the link survives the ban, so the reconnect can be tested
+    // on the same transport pair.
+    hostCfg.removalGraceMs = 1000 * 1000;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    clientNet.on(kIdJoinRejected, [&](ConnectionId, BitReader& r) {
+        std::uint8_t code = 0;
+        r.readByte(code);
+        reason = static_cast<JoinRejectReason>(code);
+    });
+
+    const auto step = [&] {
+        for (int i = 0; i < 6; ++i) {
+            a->update(); b->update();
+            hostNet.pump(); clientNet.pump();
+            host.update(0);
+        }
+    };
+
+    step();
+
+    BitWriter first;
+    writeJoinRequest(first, "Bob", "", "bob-install-key");
+    clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, first);
+    step();
+
+    REQUIRE(host.participants().size() == 2);
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : host.participants()) {
+        if (!part.isHost) bob = part.id;
+    }
+
+    CHECK(host.banParticipant(bob));
+    REQUIRE(host.bans().size() == 1);
+    CHECK(host.bans()[0].clientKey == "bob-install-key");
+    CHECK(host.bans()[0].name == "Bob");
+    step();
+
+    const int capturesBefore = hostState.captureCalls;
+
+    // Back again, under a different display name — the ban follows the install,
+    // not the label the user typed into the panel.
+    BitWriter second;
+    writeJoinRequest(second, "Definitely Not Bob", "", "bob-install-key");
+    clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, second);
+    step();
+
+    CHECK(reason == JoinRejectReason::Banned);
+    CHECK(host.participants().size() == 1);
+    // Refused before any work: a banned peer must not be able to make the host
+    // serialize its whole scene by knocking repeatedly.
+    CHECK(hostState.captureCalls == capturesBefore);
+}
+
+TEST_CASE("CollabSession: a kicked client may come back, a banned one may not")
+{
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession::Config hostCfg;
+    hostCfg.removalGraceMs = 1000 * 1000;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    const auto step = [&] {
+        for (int i = 0; i < 6; ++i) {
+            a->update(); b->update();
+            hostNet.pump(); clientNet.pump();
+            host.update(0);
+        }
+    };
+    const auto knock = [&](const std::string& name) {
+        BitWriter w;
+        writeJoinRequest(w, name, "", "bob-install-key");
+        clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
+        step();
+    };
+
+    step();
+    knock("Bob");
+    REQUIRE(host.participants().size() == 2);
+
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : host.participants()) if (!part.isHost) bob = part.id;
+    host.kickParticipant(bob);
+    step();
+    REQUIRE(host.participants().size() == 1);
+
+    // A kick is a door held open.
+    knock("Bob");
+    CHECK(host.participants().size() == 2);
+}
+
+TEST_CASE("CollabSession: unbanning lets someone back in")
+{
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession::Config hostCfg;
+    hostCfg.removalGraceMs = 1000 * 1000;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    const auto step = [&] {
+        for (int i = 0; i < 6; ++i) {
+            a->update(); b->update();
+            hostNet.pump(); clientNet.pump();
+            host.update(0);
+        }
+    };
+    const auto knock = [&] {
+        BitWriter w;
+        writeJoinRequest(w, "Bob", "", "bob-install-key");
+        clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
+        step();
+    };
+
+    step();
+    knock();
+    ParticipantId bob = kInvalidParticipant;
+    for (const auto& part : host.participants()) if (!part.isHost) bob = part.id;
+    host.banParticipant(bob);
+    step();
+
+    knock();
+    REQUIRE(host.participants().size() == 1);   // still out
+
+    CHECK(host.unban("bob-install-key", "Bob"));
+    CHECK(host.bans().empty());
+    CHECK_FALSE(host.unban("bob-install-key", "Bob"));   // idempotent, and says so
+
+    knock();
+    CHECK(host.participants().size() == 2);
+}
+
+TEST_CASE("CollabSession: a ban on a nameless install falls back to the display name")
+{
+    // An editor that has never written its identity file sends no client key.
+    // Matching on the name alone is weaker, but a ban that does nothing at all
+    // would be worse.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession::Config hostCfg;
+    hostCfg.removalGraceMs = 1000 * 1000;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    const auto step = [&] {
+        for (int i = 0; i < 6; ++i) {
+            a->update(); b->update();
+            hostNet.pump(); clientNet.pump();
+            host.update(0);
+        }
+    };
+    const auto knock = [&] {
+        BitWriter w;
+        writeJoinRequest(w, "Nameless", "", "");
+        clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
+        step();
+    };
+
+    step();
+    knock();
+    ParticipantId who = kInvalidParticipant;
+    for (const auto& part : host.participants()) if (!part.isHost) who = part.id;
+    REQUIRE(who != kInvalidParticipant);
+
+    host.banParticipant(who);
+    step();
+    REQUIRE(host.bans().size() == 1);
+    CHECK(host.bans()[0].clientKey.empty());
+
+    knock();
+    CHECK(host.participants().size() == 1);
+}
+
+TEST_CASE("CollabSession: a ban does not catch a namesake with a different install")
+{
+    // Two people who both left the display name at its default must not be able
+    // to ban each other by accident — the client key is what a ban is really on.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession::Config hostCfg;
+    hostCfg.removalGraceMs = 1000 * 1000;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    const auto step = [&] {
+        for (int i = 0; i < 6; ++i) {
+            a->update(); b->update();
+            hostNet.pump(); clientNet.pump();
+            host.update(0);
+        }
+    };
+    const auto knock = [&](const std::string& key) {
+        BitWriter w;
+        writeJoinRequest(w, "Horizon User", "", key);
+        clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
+        step();
+    };
+
+    step();
+    knock("install-one");
+    ParticipantId who = kInvalidParticipant;
+    for (const auto& part : host.participants()) if (!part.isHost) who = part.id;
+    host.banParticipant(who);
+    step();
+    REQUIRE(host.participants().size() == 1);
+
+    knock("install-two");
+    CHECK(host.participants().size() == 2);
 }
