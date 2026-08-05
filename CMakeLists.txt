@@ -127,6 +127,26 @@ set(RECASTNAVIGATION_TESTS    OFF CACHE BOOL "" FORCE)
 set(RECASTNAVIGATION_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(recastnavigation)
 
+# ─── Kein -g in den Release-Builds der Physik/Navigation ──────────────────────
+# Jolt (option GENERATE_DEBUG_SYMBOLS, default ON) und Recast (add_compile_options(-g),
+# ohne jede Bedingung) hängen -g an CMAKE_CXX_FLAGS, also an JEDE Konfiguration —
+# auch an Release. Sichtbar wird das nur auf Linux: MSVC legt Debuginfo in separate
+# .pdb, Apple-Clang lässt sie in den .o-Dateien (erst dsymutil baut ein .dSYM), GCC
+# linkt DWARF dagegen IN die .so. libHorizonScene.so trug so 42 MB Debuginfo von 49 MB,
+# im Tarball zweimal (Editor + gebündeltes Game): rund 30 der 68 MB Download, ohne dass
+# eine einzige Compile-Unit davon Engine-Code gewesen wäre.
+#
+# Ein nachgestelltes -g0 gewinnt gegen das -g aus CMAKE_CXX_FLAGS, weil target-Optionen
+# in der Kommandozeile dahinter stehen und beim letzten Vorkommen bleibt. Nur für Release
+# — durch Jolt und Recast steppen zu können, ist genau der Zweck der anderen Konfigurationen.
+if(NOT MSVC)
+    foreach(_he_dep_tgt Jolt Recast Detour DetourCrowd DetourTileCache DebugUtils)
+        if(TARGET ${_he_dep_tgt})
+            target_compile_options(${_he_dep_tgt} PRIVATE $<$<CONFIG:Release>:-g0>)
+        endif()
+    endforeach()
+endif()
+
 # ─── LZ4 (hpak compression) ───────────────────────────────────────────────────
 # Use system lz4 if available (Homebrew on macOS, package manager on Linux/Windows).
 # Falls back gracefully: if not found, hpak entries can still be stored uncompressed.
