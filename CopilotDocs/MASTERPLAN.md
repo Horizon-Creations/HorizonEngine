@@ -23,6 +23,21 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 > **Umsetzungsplan der offenen Punkte steht in Forts. 78** ganz unten. Phasen 0–5 sind
 > feature-complete; offen bleibt im Kern die D3D/Vulkan-Render-Parität (Block A), Reife-Schulden
 > (BCn, Linux, Docs) und die optionale Phase-7-Kür.
+>
+> **Nachtrag 05.08.2026 (Version 0.3.0 „Aurora", HEAD `1a375cd`):** 23 Commits seit Forts. 85
+> nachgezogen — Source-Control-**Restore auf jeden Commit** + Branches aus der History (86),
+> Aurora-Vorhänge als Netz + Zwielicht-Fix (87), **Collaboration auf Dokument-Deltas** statt
+> Datei-Replikation (Protokoll v3, 88), Szene/Details-Korrekturen (89), **Help ▸ Report Issue** mit
+> Log-Anhang über einen secret Gist (90), gedockte Panels merken ihren Zustand (91), und die
+> Release-Vorbereitung (92). Details **Forts. 86–92** ganz unten.
+>
+> Zwei Dinge aus 92 gehören nach oben, weil sie den Plan berühren: (a) `main` hätte 0.3.0 mit
+> `-march=native` in astcenc ausgeliefert — **SIGILL auf jeder älteren User-CPU beim ersten
+> ASTC-Cook**; der verifizierte Fix lag ungemergt herum und ist jetzt drin. (b) Beim Branch-Audit
+> tauchten zwei Branches mit echter, nicht gemergter Arbeit auf, die **direkt zu Block A gehören**:
+> `fix/terrain-bounds-gi-ambient` (Ambient-Parität Vulkan/D3D11/D3D12, GI-fp32-Weltpositionen,
+> Terrain-Schattenkarten) und `opengl-gi-reflections` (ray-traced GI-Reflections auf GL für
+> Windows/Linux, 04.08.). Beide sind in Forts. 78 noch nicht verbucht.
 
 | Bereich | Status |
 |---|---|
@@ -2967,3 +2982,191 @@ der Dialog sie selbst — genau wie die Szene.
   abbrechen, bevor der asynchrone Save-As-Dialog der Szene in der Luft ist.
 - Unverändert: welche Aktionen überhaupt gegated sind, das OS-Close-Veto und `s_guardSaveThenAct` (Save-As einer
   Untitled-Szene führt die Aktion weiterhin erst nach erfolgreichem Schreiben aus).
+
+---
+
+## Forts. 86 — Source Control: Restore auf jeden Commit + Branches aus der History (31.07.–05.08.2026)
+
+**Restore (`0bf653f`).** Rechtsklick auf einen Commit in der History → „Restore project to this
+commit…". Jede Datei im Projektordner geht auf den Stand dieses Commits zurück: seither
+hinzugefügte verschwinden, geänderte werden zurückgesetzt, gelöschte kommen wieder.
+
+Bewusst **kein** `reset --hard` — das löscht Commits, und ein Fehlklick würde Arbeit vernichten, die
+sonst nichts sichert. Stattdessen `read-tree -u --reset <commit>`: der Baum wird exakt angeglichen
+(inklusive der Löschungen, die `restore --source` gar nicht ausdrücken kann, weil es Dateien, die der
+Quell-Commit nicht kennt, nie entfernt), während HEAD und Branch stehen bleiben. Die Differenz landet
+staged und wird als gewöhnlicher Commit aufgezeichnet — die Wiederherstellung steht damit selbst in
+der History und ist rückgängig zu machen, indem man auf einen späteren Commit restauriert.
+
+Zwei Wächter, weil das alles auf einmal anfasst:
+- Der Worker verweigert bei dirty Tree und nennt die Anzahl. Für ungespeicherte Arbeit gibt es keinen
+  Commit zum Zurückkehren, und vorher zu committen ist die Entscheidung des Nutzers.
+- Das Bestätigungs-Modal nennt die volle Konsequenz, die Zusicherung, dass die History überlebt, und
+  das Einzige, was die Engine nicht richten kann: offene Szenen und Asset-Tabs halten noch die alten
+  Inhalte und würden sie zurückschreiben — vorher speichern und schließen.
+
+**Branches (`0c5f16e`).** Zwei Einstiege: „New branch…" neben dem Branch-Namen ab dem aktuellen Stand,
+und „Create branch from this commit…" im History-Kontextmenü für jeden Commit. Der Name wird beim
+Tippen validiert — per `check-ref-format` von git selbst gefragt statt nachgebaut, damit die Antwort
+nicht von dem abweichen kann, was der Befehl akzeptiert.
+
+Der Wächter sitzt dort, wo das Risiko liegt: einen Ref zu schreiben fasst nichts auf der Platte an,
+also bleibt **Erstellen** bei dirty Tree erlaubt — genau dann will man „park das hier auf einem
+Branch". Das **Umschalten** ersetzt den Arbeitsbaum und wird bei ungespeicherten Änderungen
+verweigert, mit Anzahl und benannter Alternative; die Checkbox deaktiviert sich, statt hinterher zu
+scheitern.
+
+**Dialogbreite (`bcdb1d6`).** Beide Dialoge wuchsen über den Bildschirmrand hinaus: `AlwaysAutoResize`
+zusammen mit `TextWrapped` hat keine Breite, gegen die es umbrechen könnte, also wächst das Fenster
+bis zum längsten ungebrochenen Textlauf. Fällt erst bei größerer Font-Skalierung auf. Jetzt fixiert
+`SetNextWindowSizeConstraints` die Breite als Vielfaches der Fontgröße (nicht als Pixelzahl), womit
+`AlwaysAutoResize` wieder das tut, wofür es gedacht war: automatische **Höhe**.
+
+## Forts. 87 — Sky: Aurora-Vorhänge als Netz, und kein schwarzes Zwielicht mehr (31.07.–01.08.2026)
+
+**Aurora-Netz (`ac41bae`, `815b0ba`).** Die Bänder liefen als parallele Streifen über den Himmel, was
+aus jedem Blickwinkel wie eine Tapete aussah. Jetzt kreuzen sich mehrere Vorhang-Scharen zu einem
+Netz, mit Tiefenstaffelung, breiterem Farbspektrum und mehrschichtiger Eigenbewegung. GL und Metal
+zeilengleich (siehe [[metal-sky-port]]).
+
+**Zwielicht (`756e7d3`).** Der Basishimmel fiel bei Sonnenauf- und -untergang auf Schwarz zusammen —
+also genau in den zwei Minuten, in denen jeder hinsieht.
+
+> **D3D/Vulkan-Konsequenz:** Beide Änderungen sind reine Fragment-Shader-Arbeit und vergrößern
+> damit die A5-Lücke aus Forts. 78 (Sky/Nebula-Parität) um eine weitere Iteration.
+
+## Forts. 88 — Collaboration: Dokument-Deltas statt Datei-Replikation (Protokoll v3) (01.–04.08.2026)
+
+**Lücke.** Authored Assets wurden als **ganze Dateien** repliziert: ein dirty Tab holte sich den Lock,
+wurde jede Sekunde autosaved, und der Peer schrieb diese Datei und **lud den Tab von der Platte neu**
+— Canvas, Selektion und Undo-History des Lesers waren jedes Mal weg. Ob man überhaupt editieren
+durfte, entschied die replizierte Lock-Tabelle, die bis zu einen Round-Trip alt ist: zwei Leute, die
+denselben Graphen in derselben Sekunde öffneten, hielten sich beide für berechtigt, und einer verlor
+seine Arbeit an den Deny-Pfad.
+
+**`DocDelta` (`bada7a3`, Protokoll v3).** Repliziert **ein Item innerhalb** einer Datei — einen
+Graph-Knoten, eine Verbindung, ein UI-Element — wo `AssetUpdate` die ganze Datei repliziert. Der
+empfangende Editor patcht damit das Dokument, das er ohnehin anzeigt. Generisch in derselben Weise
+wie `AssetUpdate` eine Ebene darüber: HorizonCode-, Material-, Partikel- und Animator-Graphen und der
+UI-Element-Baum zerfallen alle in identifizierte Items mit item-level JSON-Form (`994d2b1`) — eine
+Nachricht deckt fünf Dokumenttypen ab, ein sechster kostet keine Protokollarbeit. Gebatcht, damit ein
+Paste von dreißig Knoten ein atomarer Frame ist.
+
+Sends werden **verweigert, nie abgeschnitten**: `writeString` kappt still bei 65535 Byte, und ein
+halbes Knoten-JSON ist keine kleinere Änderung, sondern eine unparsebare — das Item verschwände beim
+Peer, während hier Erfolg gemeldet wird. Dazu eine autoritative Lock-Abfrage, damit „darf ich?" nicht
+mehr aus einer veralteten Tabelle beantwortet wird.
+
+**Editor-Seite (`e5e65d4`, `6d7d982`).** `CollabDocSync` diffed jeden Frame jeden offenen Tab, den wir
+halten, gegen den Stand, den die Peers gesehen haben, und schickt die Differenz als Knoten-/Link-/
+Variablen-/Kommentar-/Element-Delta. Nichts wird geschrieben, nichts neu geladen, der Canvas bleibt
+stehen. Später abgesichert: Diff gegated und Mirror verworfen, wenn sein Panel neu lädt (`4f83c78`),
+handgeschriebene Parser auf dem Delta-Pfad begrenzt (`54a2e58`).
+
+**Reichweite (`dfcfa94`).** Level-Script, GameInstance-Graph und der C++-Quellbaum synchronisieren
+mit.
+
+**Zwei Bugs auf dem Weg.** Asset-Sync traf kein echtes Asset, weil die **Extension nicht der Typ ist**
+(`7e0b4ad`). Und ein Join zwischen Editoren mit **verschiedenen Projekten** gelang bisher (`dd5d533`):
+die Szene wurde übertragen und dann dangelte jede Asset-Referenz darin, weil eine Session alles über
+UUIDs adressiert, die nur innerhalb **eines** Projekts etwas bedeuten — und die offene Szene des
+Joiners war auf dem Weg hinein auch noch ersetzt. Projekte tragen jetzt eine stabile Id im
+`.heproj`-Manifest; der Name taugt nicht, weil zwei Leute routinemäßig unterschiedlich benannte Kopien
+desselben Projekts haben (und gleichnamige Kopien verschiedener). Ältere Projekte bekommen die Id beim
+ersten Laden und schreiben sie sofort zurück — eine bei jedem Laden neu gewürfelte Identität
+identifiziert nichts.
+
+## Forts. 89 — Szene/Details-Korrekturen (01.08.2026)
+
+- **`6896f01`** — Subtree-Serialisierung klonte die engine-eigenen Entities mit.
+- **`ac94e22`** — Das Details-Panel sagt jetzt, wenn eine Sky-/Weather-Entity das **wirkungslose
+  Duplikat** ist. Seit Forts. 77 sind das gewöhnliche löschbare Szenen-Entities, also kann es zwei
+  geben; nur eine wird gelesen, und ohne Hinweis dreht man an der falschen.
+- **`3c263bb`** — Die C++-Klassen-Fixture wird binär geschrieben (Windows-CI-Fehlschlag, CRLF).
+
+## Forts. 90 — Help ▸ Report Issue: vorausgefülltes GitHub-Issue mit Log (05.08.2026)
+
+Neuer Menüpunkt in **beiden** Menüleisten (ImGui-Zeile und native macOS-Leiste). Zwei Wege hinaus:
+
+**Browser** — ohne Konto, ohne Einrichtung. Titel/Beschreibung/Schritte plus Engine-Version, Renderer,
+OS, CPU und RAM gehen als vorausgefülltes `issues/new` in den Browser; abgeschickt wird vom Nutzer.
+Eine URL hat eine harte Längengrenze: gemessen passen **27 von 400 Log-Zeilen**. Deshalb wirft
+`buildIssueUrl` Log-Zeilen vom ältesten Ende weg, bis es passt — **nie** den Text des Nutzers — und der
+Dialog sagt, wie viele es geschafft haben.
+
+**Direkt (`ea62894`)** — für Nutzer, deren GitHub-Token der Credential-Helper schon hält (oder die
+eines einfügen). Der Editor lädt das **vollständige Log als secret Gist** hoch, legt das Issue per
+REST-API an und verlinkt den Gist. Der Gist-Umweg ist keine Stilfrage: **GitHub hat keinen
+REST-Endpoint zum Anhängen von Dateien an ein Issue** — der Uploader des Web-UI ist an eine
+Browser-Session gebunden und lehnt Tokens ab.
+
+- Token: `GitCli::fillCredential` liest ihn mit allen Prompt-Türen zu (Terminal, askpass, GCM
+  interactive), sonst wäre die Alternative zu einem sauberen „nichts gespeichert" ein Dialog hinter
+  dem Editor-Fenster. Nie zwischen Probe und Submit gehalten, nie gespeichert. Die Probe läuft beim
+  Öffnen, damit der Dialog den Account **nennen** kann — es wird öffentlich unter dessen Namen gepostet.
+- Fehler sind abgestuft: fehlende `gist`-Berechtigung filed das Issue trotzdem und sagt warum; ein
+  fehlgeschlagenes Issue nach erfolgreichem Upload nennt die Gist-Adresse, damit der zweite Versuch
+  nicht ein zweites Mal hochlädt. Die Issue-URL landet auch im Log.
+- **Nur Warnungen und Fehler (`9459393`).** Bei 27 Zeilen Budget wäre Startup-Geplapper Verschwendung.
+  Der Level kommt aus dem Ring-Buffer, der jetzt pro Eintrag das Level neben dem Text hält
+  (`HE::Log::recentProblemLines`) — **nicht** aus dem Zurückparsen von `[ WARN]`, das beim nächsten
+  Formatwechsel still gebrochen wäre. Ein sauberer Lauf wählt automatisch „Everything", denn viele
+  Bugs (falsche Pixel, hängendes Gizmo) loggen kein Wort.
+- `HE::Log::systemInfoBlock()` exponiert die Maschinen-Hälfte des Startup-Banners; die Plattform-Sonden
+  dahinter liefern außerhalb von macOS nicht mehr „unknown" (Windows via `RtlGetVersion` + `__cpuid` +
+  `GlobalMemoryStatusEx`, Linux via `/etc/os-release` und `/proc/cpuinfo`).
+
+## Forts. 91 — Gedockte Panels merken ihren Zustand, macOS-Menü zeigt ihn (05.08.2026)
+
+Ein **gedocktes** Panel ist Teil davon, wie der Editor des Nutzers aussieht — es nach jedem Neustart
+erneut im View-Menü anzuhaken macht das Docken sinnlos. Der Zustand wird jetzt über Sitzungen hinweg
+gemerkt. Ein **schwebendes** Panel ist das Gegenteil (einmal hochgezogen, um hinzusehen) und wird
+nicht wiederhergestellt. Gilt für alle vier View-Panels, nicht nur die zwei angefragten: die Regel
+handelt vom Docken, und abweichendes Verhalten bei Profiler/Environment läse sich selbst wie ein Bug.
+
+- **`EditorDockState::isDockedInLayout`** in eigener ImGui-only-Datei, damit die Aussage headless über
+  echtes DockBuilder-Docking geprüft werden kann. Liest `ImGuiWindow::DockNode` statt
+  `ImGui::IsWindowDocked()` aufzurufen — letzteres ist nur zwischen `Begin`/`End` eines Fensters gültig,
+  und die Buchführung sitzt außerhalb aller vier Panels.
+- **Debounce (30 stabile Frames) + Projekt-Wächter**, beide tragend: ein Dock-Node ist in dem Frame,
+  in dem ein Fenster erstmals auftaucht, noch nicht aufgelöst, und der Project Hub zeichnet **gar keine**
+  Panels — ein Beenden aus dem Hub läse sonst jedes Panel als „zu, nicht gedockt" und überschriebe die
+  Einstellungen, die es gerade wiederhergestellt hat. `OnShutdown` flusht eine zu frische Änderung.
+- Das **native macOS-Menü** hakt die Panel-Einträge jetzt ab (`NSMenuItem.state`), was die ImGui-Zeile
+  über `MenuItem`s `selected` immer schon tat. Die Lücke wiegt jetzt schwerer: das Menü ist nicht mehr
+  der Weg, wie ein gedocktes Panel aufgeht.
+
+> **Test-Fallstrick, dokumentiert:** Fenster im Docking-Test dürfen **kein**
+> `ImGuiWindowFlags_NoSavedSettings` tragen. Das Flag lässt imgui gespeicherte Fenster-Settings
+> überspringen, und die `DockId`, die `DockBuilderDockWindow` einem noch nicht existierenden Fenster
+> zuweist, reist genau darin — das Fenster käme undocked hoch und **jeder Fall bestünde aus dem
+> falschen Grund**. Platte bleibt über `io.IniFilename = nullptr` sauber.
+
+## Forts. 92 — Release-Vorbereitung 0.3.0: der Blocker, den niemand gesehen hätte (05.08.2026)
+
+**Portable Builds (`152e8a9`, Merge von `8f01460`).** Auf `main` stand noch `ASTCENC_ISA_NATIVE ON`,
+und die CI übergab **kein** `HE_PORTABLE_BUILD`. Die Pakete werden auf GitHub-Runnern gebaut — astcenc
+bekommt damit `-march=native`, der Cook-Pfad enthält AVX2/AVX-512 der Runner-CPU und stirbt auf einer
+älteren User-CPU mit **SIGILL, sobald eine Textur nach ASTC gekocht wird**. In CI durch einen
+Valgrind-Lauf belegt. Der Fix lag verifiziert auf einem nicht gemergten Branch; **die Artefakte, die
+zu dem Zeitpunkt auf main lagen, waren betroffen.** `HE_PORTABLE_BUILD=ON` wählt jetzt in allen drei
+CI-Jobs eine feste Baseline je Zielarchitektur.
+
+**Repo-Bereinigung (`5a363c7`).** 145 MB CI-Pakete waren committet — ein Linux-Tarball, ein
+Windows-Zip **zweimal**, und ein veraltetes **0.2.0-DMG**, das jedem, der es fand, eine zwei Releases
+alte Version auslieferte — dazu 17 MB Entwicklungs-Screenshots (darunter Aufnahmen **anderer Engines**,
+die in einem MIT-lizenzierten öffentlichen Repo nichts zu suchen haben). Entfernt per
+`git-filter-repo` statt nur aus HEAD, weil ein am Tip gelöschter Blob in jedem Clone bleibt.
+**Frischer Clone: 18 MB statt 224 MB.** Bewusst jetzt: nach einem 0.3.0-Tag würde ein Rewrite den Tag
+und jedes darauf zeigende Release entwerten.
+
+Vorher geprüft: alle 15 Remote-Branches auf Inhalt **und** Merge-Status (`git cherry`, nicht nur
+Ahead-Count — rebasete Commits haben andere Hashes). 12 waren Vorfahren von main, zwei inhaltlich
+über PR #14/#15 schon drin; gelöscht wurden nur diese. Behalten: `fix/terrain-bounds-gi-ambient`
+(Ambient-Parität Vulkan/D3D11/D3D12, GI-fp32-Weltpositionen, Terrain-Schattenkarten) und
+`opengl-gi-reflections` (ray-traced GI-Reflections auf GL für Windows/Linux) — **beide tragen echte,
+nicht gemergte Arbeit und sind Kandidaten für Block A.**
+
+**Doku (`1a375cd`).** Der README waren sieben früh geschriebene Zeilen, die die Engine als „only very
+basic functionality" beschrieben und die fünf Backends als Zukunft. SECURITY.md schickte
+Sicherheitslücken in den **öffentlichen** Issue-Tracker.
