@@ -56,7 +56,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // host can eject a participant (kMsgRemoved). A v4 peer sends neither, so the
 // host could not tell two of its editors apart — which is exactly what a ban
 // has to key on.
-inline constexpr std::uint16_t kCollabProtocolVersion = 5;
+// v6: participants choose their own colour, and the host assigns the final one.
+// A v5 peer neither states a preference nor reads the answer, so it would draw
+// everyone in a colour nobody else agrees with — the one thing a colour is for.
+inline constexpr std::uint16_t kCollabProtocolVersion = 6;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -92,11 +95,52 @@ struct Avatar {
     bool empty() const { return size == 0 || rgba.empty(); }
 };
 
+// ─── Participant colours ─────────────────────────────────────────────────────
+// The colour someone's viewport marker, selection highlight and lock badges are
+// drawn in. It is the fastest way to tell two collaborators apart, so it is worth
+// getting right: users pick their own, and the HOST has the last word, because
+// only it can see everybody and refuse a colour that is already taken.
+struct ParticipantColor {
+    std::uint8_t r = 0, g = 0, b = 0;
+
+    // All-zero is the "no preference" marker rather than the colour black: black
+    // is unusable as a marker on any background the editor actually has, so
+    // nothing is lost by spending the value on a sentinel.
+    bool unset() const { return r == 0 && g == 0 && b == 0; }
+};
+
+// The colours the editor offers as presets and the host draws from when it has
+// to assign one itself. Well separated on the wheel and all legible against a
+// dark viewport — a palette whose neighbours are a nudge apart tells nobody
+// anything. Their mutual separation is asserted in the tests, so adding one
+// carelessly fails there rather than in someone's session.
+inline constexpr ParticipantColor kParticipantPalette[] = {
+    { 232,  74,  74 },   // red
+    { 240, 150,  50 },   // orange
+    { 226, 206,  64 },   // yellow
+    { 110, 205,  70 },   // green
+    {  60, 200, 175 },   // teal
+    {  70, 150, 235 },   // blue
+    { 150, 110, 240 },   // violet
+    { 230,  95, 190 },   // pink
+};
+
+// How close two colours may be before the host treats them as the same one.
+// Straight Euclidean distance in RGB — crude as colour science, but the job here
+// is only to catch "these two are indistinguishable at gizmo size", and every
+// palette entry clears it comfortably.
+inline constexpr int kColorCollisionDistance = 48;
+
 struct Participant {
     ParticipantId id = kInvalidParticipant;
     std::string   name;
     bool          isHost = false;
     Avatar        avatar;
+    // ASSIGNED BY THE HOST. A joiner says what it would like; if that clashes
+    // with somebody already here, the host hands back a free one instead. Every
+    // peer therefore agrees on who is which colour, which a locally derived
+    // colour could never guarantee once people pick their own.
+    ParticipantColor color;
 
     // Stable identity of the editor install behind this participant, minted once
     // per installation and sent in the join handshake. ONLY THE HOST EVER SEES
@@ -180,6 +224,11 @@ public:
         // 64² RGBA is 16 KiB, which rides along in the join handshake without
         // being worth chunking.
         std::uint16_t maxAvatarSize = 64;
+
+        // What this user would like to be drawn in. Left unset, the host picks
+        // one — which is also what happens when the wish is already taken, so
+        // this is a preference and never a guarantee.
+        ParticipantColor preferredColor;
 
         // Stable identity of this editor install, sent to the host on join. See
         // Participant::clientKey — it exists so a ban survives a reconnect, and
@@ -528,6 +577,13 @@ private:
     void retireParticipant(ParticipantId id, ConnectionId conn, ConnectionId except);
     bool isBanned(const std::string& clientKey, const std::string& name) const;
     void handleRemoved(BitReader& r);   // client: the host ejected us
+
+    // Host: settle on a colour for a joiner. Honours `wish` when it is set and
+    // far enough from everyone already here; otherwise takes a free palette
+    // entry, starting from an offset derived from `seed` so consecutive joiners
+    // do not all land on red. Deterministic given the same inputs — which is
+    // what makes it testable without making it predictable to a user.
+    ParticipantColor assignColor(ParticipantColor wish, std::uint32_t seed) const;
 
     // Avatars ride along in the join handshake and in the roster announcements.
     static void writeAvatar(BitWriter& w, const Avatar& a);

@@ -60,6 +60,102 @@ namespace
 		if (ImGui::SmallButton(id)) ImGui::SetClipboardText(value.c_str());
 	}
 
+	// ── Colour ───────────────────────────────────────────────────────────────
+	// The colour this user is drawn in throughout the session: viewport marker,
+	// selection highlight, lock badges, footer avatar. Presets first because they
+	// are the answer for almost everyone and they are guaranteed to be legible
+	// against the viewport; the free picker is there for the person who wants
+	// their own and knows what they are doing.
+	//
+	// Nothing here is a promise. The host settles collisions, so someone who
+	// picks a taken colour is quietly given a free one — which is why the panel
+	// also shows what was actually assigned once a session is running.
+	void DrawColorChoice(AppContext& ctx, bool editable)
+	{
+		using HE::Net::ParticipantColor;
+
+		ImGui::Spacing();
+		ImGui::TextUnformatted("Colour");
+		ImGui::BeginDisabled(!editable);
+
+		const ParticipantColor mine = CollabController::localIdentity().color;
+
+		constexpr float kSwatch = 20.0f;
+		int index = 0;
+		for (const ParticipantColor& preset : HE::Net::kParticipantPalette)
+		{
+			ImGui::PushID(index++);
+			const ImVec4 col(preset.r / 255.0f, preset.g / 255.0f, preset.b / 255.0f, 1.0f);
+			const bool   chosen = !mine.unset() && mine.r == preset.r &&
+			                      mine.g == preset.g && mine.b == preset.b;
+
+			// The current pick gets a border thick enough to read at 20 px; a
+			// tick mark would not survive on a saturated background.
+			ImGui::PushStyleColor(ImGuiCol_Button,        col);
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  col);
+			ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(1, 1, 1, chosen ? 1.0f : 0.0f));
+			ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, chosen ? 2.0f : 0.0f);
+			if (ImGui::Button("##swatch", ImVec2(kSwatch, kSwatch)))
+				CollabController::setLocalColor(preset);
+			ImGui::PopStyleVar();
+			ImGui::PopStyleColor(4);
+			ImGui::PopID();
+			ImGui::SameLine(0.0f, 4.0f);
+		}
+
+		// "Automatic" is a real choice, not the absence of one: it means the host
+		// hands out whatever is free, which is the right answer for a user who
+		// does not care and the only answer that never collides.
+		const bool automatic = mine.unset();
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, automatic ? 2.0f : 0.0f);
+		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, automatic ? 1.0f : 0.0f));
+		if (ImGui::Button("Auto", ImVec2(0.0f, kSwatch)))
+			CollabController::setLocalColor(ParticipantColor{});
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Let the host pick a colour that is still free.");
+
+		float custom[3] = { mine.r / 255.0f, mine.g / 255.0f, mine.b / 255.0f };
+		ImGui::SetNextItemWidth(160.0f);
+		if (ImGui::ColorEdit3("Custom", custom,
+		                      ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel))
+		{
+			ParticipantColor picked;
+			picked.r = static_cast<std::uint8_t>(std::clamp(custom[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+			picked.g = static_cast<std::uint8_t>(std::clamp(custom[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+			picked.b = static_cast<std::uint8_t>(std::clamp(custom[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+			// Pure black is the "no preference" sentinel and is unusable as a
+			// marker anyway, so it is nudged rather than silently meaning Auto.
+			if (picked.unset()) picked.r = picked.g = picked.b = 1;
+			CollabController::setLocalColor(picked);
+		}
+		ImGui::SameLine();
+		ImGui::TextDisabled("custom");
+
+		ImGui::EndDisabled();
+
+		// What was actually handed out — which is the interesting number the
+		// moment somebody else already had the colour you asked for.
+		if (ctx.collab && ctx.collab->inSession())
+		{
+			const auto localId = ctx.collab->localParticipant();
+			for (const HE::Net::Participant& p : ctx.collab->participants())
+			{
+				if (p.id != localId || p.color.unset()) continue;
+				const bool asWished = !mine.unset() && p.color.r == mine.r &&
+				                      p.color.g == mine.g && p.color.b == mine.b;
+				if (!asWished)
+				{
+					ImGui::TextDisabled("The colour you picked was taken — you were "
+					                    "given a free one for this session.");
+				}
+				break;
+			}
+		}
+	}
+
 	// ── Identity editor ──────────────────────────────────────────────────────
 	// The name and picture everyone else in a session sees. Persisted, so this is
 	// set once rather than on every join — and shown here rather than buried in
@@ -117,6 +213,8 @@ namespace
 
 		ImGui::EndDisabled();
 		ImGui::EndGroup();
+
+		DrawColorChoice(ctx, editable);
 
 		if (!editable)
 			ImGui::TextDisabled("Changes take effect the next time you join a session.");

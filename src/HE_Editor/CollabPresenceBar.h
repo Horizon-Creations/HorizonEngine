@@ -16,6 +16,8 @@
 // hovered, and DrawOverlay() — called from the editor's overlay pass — draws the
 // menu and the ban confirmation on top of everything.
 
+#include <glm/glm.hpp>
+
 #include <cstdint>
 #include <string>
 
@@ -61,6 +63,42 @@ namespace CollabPresenceBar
 	// a destructive confirmation that exists twice is a confirmation that will
 	// eventually differ in wording between the two.
 	void RequestBan(std::uint32_t participantId, const std::string& name);
+
+	// Where a participant's marker belongs on screen.
+	struct MarkerPlacement
+	{
+		float x = 0.0f, y = 0.0f;
+		// True when they are in front of the camera AND inside the image. False
+		// means the marker is pinned to the border and `arrowAngle` says which
+		// way to turn to find them (radians, screen space, +x right, +y down).
+		bool  onScreen   = false;
+		float arrowAngle = 0.0f;
+	};
+
+	// Project a world position into the viewport image. Pure geometry, and
+	// deliberately reachable without ImGui: the Y flip and the behind-the-camera
+	// case are exactly the kind of thing that is silently wrong in one backend or
+	// one direction, and neither can be spotted by looking at a screenshot of a
+	// scene where everyone happens to be in front of you.
+	MarkerPlacement PlaceMarker(const glm::mat4& view, const glm::mat4& proj,
+	                            const glm::vec3& world,
+	                            float rectMinX, float rectMinY,
+	                            float rectMaxX, float rectMaxY, float inset);
+
+	// Name tags for the other people in the session, drawn on top of the
+	// rendered viewport image. Call from inside the viewport window, after the
+	// ImGui::Image, with THIS frame's camera matrices and the rectangle the
+	// image occupies on screen.
+	//
+	// This is the half of the presence marker that cannot be missed: it is drawn
+	// over the frame rather than into it, so no amount of scene detail hides it,
+	// and someone outside the view is pinned to the nearest edge with an arrow
+	// instead of simply not being there. The depth-aware half — rings and a
+	// direction arrow that the scene can occlude — is drawn as debug lines in
+	// EditorApplication, and the two are deliberately different things.
+	void DrawViewportMarkers(AppContext& ctx, const glm::mat4& view, const glm::mat4& proj,
+	                         float rectMinX, float rectMinY,
+	                         float rectMaxX, float rectMaxY);
 
 	// Release the uploaded avatar textures while the renderer is still alive.
 	// Same contract as AssetThumbnailCache::shutdown().

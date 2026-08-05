@@ -342,6 +342,19 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	return true;
 }
 
+void CollabController::colorFor(HE::Net::ParticipantId id, float outRgb[3]) const
+{
+	for (const HE::Net::Participant& p : participants())
+	{
+		if (p.id != id || p.color.unset()) continue;
+		outRgb[0] = p.color.r / 255.0f;
+		outRgb[1] = p.color.g / 255.0f;
+		outRgb[2] = p.color.b / 255.0f;
+		return;
+	}
+	participantColor(id, outRgb);
+}
+
 void CollabController::participantColor(HE::Net::ParticipantId id, float outRgb[3])
 {
 	// Golden-ratio hue stepping: consecutive ids land far apart on the colour
@@ -373,6 +386,10 @@ namespace {
 
 constexpr const char* kCfgDisplayName = "CollabDisplayName";
 constexpr const char* kCfgClientKey   = "CollabClientKey";
+// Packed 0xRRGGBB. 0 is the sentinel for "no preference" (see
+// HE::Net::ParticipantColor::unset), so an absent key and an unset colour are
+// the same thing and there is no third state to get wrong.
+constexpr const char* kCfgColor       = "CollabColor";
 
 std::filesystem::path avatarFilePath()
 {
@@ -459,6 +476,11 @@ CollabController::Identity& identityStorage()
 		id.name = gs.getCustomConfigString(kCfgDisplayName, "Horizon User");
 		if (id.name.empty()) id.name = "Horizon User";
 
+		const int packed = gs.getCustomConfigInt(kCfgColor, 0);
+		id.color.r = static_cast<std::uint8_t>((packed >> 16) & 0xFF);
+		id.color.g = static_cast<std::uint8_t>((packed >> 8)  & 0xFF);
+		id.color.b = static_cast<std::uint8_t>( packed        & 0xFF);
+
 		id.clientKey = gs.getCustomConfigString(kCfgClientKey, "");
 		if (id.clientKey.empty())
 		{
@@ -516,6 +538,18 @@ void CollabController::setLocalName(const std::string& name)
 	id.name = name.empty() ? std::string("Horizon User") : name;
 	GlobalState& gs = GlobalState::getInstance();
 	gs.setCustomConfigEntry(kCfgDisplayName, id.name);
+	gs.writeConfig();
+}
+
+void CollabController::setLocalColor(HE::Net::ParticipantColor color)
+{
+	Identity& id = identityStorage();
+	id.color     = color;
+
+	GlobalState& gs = GlobalState::getInstance();
+	gs.setCustomConfigEntry(kCfgColor, (static_cast<int>(color.r) << 16) |
+	                                   (static_cast<int>(color.g) << 8)  |
+	                                    static_cast<int>(color.b));
 	gs.writeConfig();
 }
 
@@ -714,10 +748,11 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 // picked a minute ago is the one that travels.
 void CollabController::applyLocalIdentity(HE::Net::CollabSession::Config& cfg)
 {
-	const Identity& me = localIdentity();
-	cfg.clientKey      = me.clientKey;
-	cfg.avatar.size    = me.avatarSize;
-	cfg.avatar.rgba    = me.avatarRgba;
+	const Identity& me   = localIdentity();
+	cfg.clientKey        = me.clientKey;
+	cfg.avatar.size      = me.avatarSize;
+	cfg.avatar.rgba      = me.avatarRgba;
+	cfg.preferredColor   = me.color;
 }
 
 void CollabController::wireCallbacks()

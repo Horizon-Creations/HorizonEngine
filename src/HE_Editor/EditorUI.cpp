@@ -1717,7 +1717,7 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
                 tabReadOnly = true;
                 const HE::Net::LockInfo* lock = ctx.collab->assetLockInfo(rel);
                 float rgb[3] = { 1.0f, 0.75f, 0.3f };
-                if (lock) CollabController::participantColor(lock->owner, rgb);
+                if (lock) ctx.collab->colorFor(lock->owner, rgb);
 
                 ImGui::SetNextWindowPos(tabPos);
                 ImGui::SetNextWindowSize(ImVec2(tabSize.x, kAssetLockBannerH));

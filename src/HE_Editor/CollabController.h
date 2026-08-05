@@ -99,9 +99,19 @@ public:
 	// HE_COLLAB_DIRECTORY environment variable when testing against another.
 	static std::string directoryEndpoint();
 
-	// A stable, well-separated colour for a participant, used for their camera
-	// gizmo and selection highlight. Derived from the id so both peers pick the
-	// same colour for the same person without having to agree on one.
+	// The colour a participant is drawn in: viewport marker, selection highlight,
+	// lock badges, footer avatar. Prefers the colour the HOST assigned them —
+	// that is the one everybody in the session agrees on — and falls back to a
+	// value derived from the id.
+	//
+	// The fallback is not dead weight: lock badges name an owner who may already
+	// have left the roster, and panels ask about ids that were never in it.
+	void colorFor(HE::Net::ParticipantId id, float outRgb[3]) const;
+
+	// The fallback on its own. Golden-ratio hue stepping off the id, so two
+	// people who joined one after another never land on near-identical colours.
+	// Static because the places that need a colour without a session — a lock
+	// badge left behind by someone who is gone — have no controller to ask.
 	static void participantColor(HE::Net::ParticipantId id, float outRgb[3]);
 
 	// ── Local identity ───────────────────────────────────────────────────────
@@ -122,6 +132,10 @@ public:
 		std::vector<std::uint8_t> avatarRgba;
 		std::uint16_t             avatarSize = 0;
 		std::string               clientKey;
+		// The colour this user would like to be drawn in. Unset means "whatever
+		// is free" — and so does a colour the host finds already taken, which is
+		// why this is only ever a wish. What you actually get is in the roster.
+		HE::Net::ParticipantColor color;
 	};
 
 	// Everyone's picture is stored and sent at this size. Small enough that it
@@ -138,6 +152,8 @@ public:
 	// Returns false with a reason the UI can show verbatim.
 	static bool setLocalAvatarFromFile(const std::string& imagePath, std::string& error);
 	static void clearLocalAvatar();
+	// Pass an unset colour to go back to "let the host choose".
+	static void setLocalColor(HE::Net::ParticipantColor color);
 
 	// Centre-crop an RGBA8 image to a square and resample it to `size` pixels per
 	// side, averaging each destination pixel's source box. Public because it is

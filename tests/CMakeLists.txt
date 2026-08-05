@@ -113,6 +113,11 @@ add_executable(he_tests
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/stb_image_impl.cpp
+    # The presence bar is almost entirely ImGui, and almost entirely guarded by
+    # HE_IMGUI_ENABLED — which the tests do not define. What survives is
+    # PlaceMarker: pure projection geometry, and the piece where a wrong Y flip
+    # or a mishandled behind-the-camera case hides best.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabPresenceBar.cpp
     # The graph quick-spawn key table is deliberately plain data and ImGui-free
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.

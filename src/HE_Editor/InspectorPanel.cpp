@@ -80,7 +80,7 @@ void render(AppContext& ctx)
 		    lock && lock->owner != ctx.collab->localParticipant())
 		{
 			float rgb[3];
-			CollabController::participantColor(lock->owner, rgb);
+			ctx.collab->colorFor(lock->owner, rgb);
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
 			ImGui::TextWrapped("%s is editing this entity — your changes would "
 			                   "collide with theirs.",

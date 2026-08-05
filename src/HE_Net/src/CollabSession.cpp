@@ -50,6 +50,24 @@ constexpr MessageId kMsgRemoved           = kFirstUserMessage + 28;  // host →
 // size of raw floats.
 constexpr int kQuatBits = 16;
 
+// Colours travel as three raw bytes wherever a participant does.
+void writeColor(BitWriter& w, const ParticipantColor& c) {
+    w.writeByte(c.r);
+    w.writeByte(c.g);
+    w.writeByte(c.b);
+}
+
+bool readColor(BitReader& r, ParticipantColor& out) {
+    return r.readByte(out.r) && r.readByte(out.g) && r.readByte(out.b);
+}
+
+int colorDistanceSq(const ParticipantColor& a, const ParticipantColor& b) {
+    const int dr = static_cast<int>(a.r) - static_cast<int>(b.r);
+    const int dg = static_cast<int>(a.g) - static_cast<int>(b.g);
+    const int db = static_cast<int>(a.b) - static_cast<int>(b.b);
+    return dr * dr + dg * dg + db * db;
+}
+
 } // namespace
 
 CollabSession::CollabSession(NetSession* net, NetRole role, Config cfg)
@@ -80,6 +98,10 @@ CollabSession::CollabSession(NetSession* net, NetRole role, Config cfg)
         self.name   = m_cfg.displayName;
         self.isHost = true;
         self.avatar = m_cfg.avatar;
+        // Nobody to clash with yet, so the host always gets what it asked for —
+        // but it still goes through assignColor, which is what gives a host that
+        // expressed no preference a colour at all.
+        self.color  = assignColor(m_cfg.preferredColor, m_localId);
         m_participants.push_back(std::move(self));
         m_joined = true;
     }
@@ -157,6 +179,7 @@ void CollabSession::installHandlers() {
             std::uint32_t id = 0;
             if (!r.readUInt32(id) || !r.readString(p.name)) return;
             if (!readAvatar(r, p.avatar, m_cfg.maxAvatarSize)) return;
+            if (!readColor(r, p.color)) return;
             p.id = id;
             if (findParticipant(p.id)) return;         // already known
             m_participants.push_back(p);
@@ -202,6 +225,8 @@ void CollabSession::update(std::uint64_t nowMs) {
         // handed out on, and what its user looks like.
         w.writeString(m_cfg.clientKey);
         writeAvatar(w, m_cfg.avatar);
+        // A wish, not a claim — the host answers with the colour we actually get.
+        writeColor(w, m_cfg.preferredColor);
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
     }
@@ -296,14 +321,16 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // Read AFTER the version check: a peer speaking an older protocol did not
     // send this field, and reading a missing string would make it look like a
     // project mismatch instead of the version mismatch it is.
-    std::string clientKey;
-    Avatar      avatar;
+    std::string      clientKey;
+    Avatar           avatar;
+    ParticipantColor wish;
     if (!r.readString(projectKey)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no project key)",
                     name.c_str());
         return;
     }
-    if (!r.readString(clientKey) || !readAvatar(r, avatar, m_cfg.maxAvatarSize)) {
+    if (!r.readString(clientKey) || !readAvatar(r, avatar, m_cfg.maxAvatarSize) ||
+        !readColor(r, wish)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no identity block)",
                     name.c_str());
         return;
@@ -354,6 +381,9 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     joiner.isHost    = false;
     joiner.avatar    = std::move(avatar);
     joiner.clientKey = std::move(clientKey);
+    // Settled before the roster goes out, so the joiner's own entry and
+    // everyone else's copy of it carry the same colour from the first frame.
+    joiner.color     = assignColor(wish, id);
 
     // Accept: assigned id, the sequence its snapshot corresponds to, and the
     // roster as it stands *before* adding the joiner (its own entry arrives via
@@ -362,6 +392,9 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // is the host's alone and is not a token to hand every peer.
     BitWriter accept;
     accept.writeUInt32(id);
+    // The answer to the joiner's colour wish. It has to come back explicitly:
+    // the joiner cannot work out on its own that its choice was taken.
+    writeColor(accept, joiner.color);
     accept.writeUInt64(m_sequence);
     accept.writeUInt16(static_cast<std::uint16_t>(m_participants.size()));
     for (const auto& p : m_participants) {
@@ -369,6 +402,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         accept.writeString(p.name);
         accept.writeBool(p.isHost);
         writeAvatar(accept, p.avatar);
+        writeColor(accept, p.color);
     }
     m_net->send(conn, kMsgJoinAccepted, accept);
 
@@ -428,6 +462,7 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     announce.writeUInt32(id);
     announce.writeString(name);
     writeAvatar(announce, joiner.avatar);
+    writeColor(announce, joiner.color);
     for (const ConnectionId other : m_net->connections()) {
         if (other != conn) m_net->send(other, kMsgParticipantJoined, announce);
     }
@@ -598,6 +633,57 @@ void CollabSession::handleRemoved(BitReader& r) {
     if (m_onRemoved) m_onRemoved(why);
 }
 
+// ─── Colours ─────────────────────────────────────────────────────────────────
+
+ParticipantColor CollabSession::assignColor(ParticipantColor wish,
+                                            std::uint32_t seed) const {
+    constexpr int kMinSq = kColorCollisionDistance * kColorCollisionDistance;
+
+    const auto freeFor = [this, kMinSq](const ParticipantColor& c) {
+        for (const auto& p : m_participants) {
+            if (!p.color.unset() && colorDistanceSq(p.color, c) < kMinSq) return false;
+        }
+        return true;
+    };
+
+    // The wish wins whenever it can. Someone who deliberately picked teal should
+    // get teal, and only be moved when that would make them indistinguishable
+    // from somebody already in the room.
+    if (!wish.unset() && freeFor(wish)) return wish;
+
+    constexpr int kPaletteSize =
+        static_cast<int>(sizeof(kParticipantPalette) / sizeof(kParticipantPalette[0]));
+
+    // Start somewhere in the palette rather than always at index 0, so the
+    // second and third person to be reassigned do not both end up red. A cheap
+    // integer hash of the seed spreads consecutive participant ids apart.
+    std::uint32_t h = seed * 2654435761u;
+    h ^= h >> 15;
+    const int start = static_cast<int>(h % static_cast<std::uint32_t>(kPaletteSize));
+
+    for (int i = 0; i < kPaletteSize; ++i) {
+        const ParticipantColor& c = kParticipantPalette[(start + i) % kPaletteSize];
+        if (freeFor(c)) return c;
+    }
+
+    // More people than the palette has colours. Rather than hand out a duplicate
+    // silently, take the one that is furthest from everybody present — two
+    // similar markers beat two identical ones.
+    ParticipantColor best = kParticipantPalette[start];
+    int bestScore = -1;
+    for (const ParticipantColor& c : kParticipantPalette) {
+        int worst = 1 << 30;
+        for (const auto& p : m_participants) {
+            if (p.color.unset()) continue;
+            worst = std::min(worst, colorDistanceSq(p.color, c));
+        }
+        if (worst > bestScore) { bestScore = worst; best = c; }
+    }
+    HE_LOG_WARN(Net, "Collab: the colour palette is exhausted — two participants will "
+                     "look similar");
+    return best;
+}
+
 // ─── Avatars ─────────────────────────────────────────────────────────────────
 
 void CollabSession::writeAvatar(BitWriter& w, const Avatar& a) {
@@ -653,10 +739,14 @@ bool CollabSession::readAvatar(BitReader& r, Avatar& out, std::uint16_t maxSize)
 // ─── Client side ─────────────────────────────────────────────────────────────
 
 void CollabSession::handleJoinAccepted(BitReader& r) {
-    std::uint32_t id = 0;
-    std::uint64_t sequence = 0;
-    std::uint16_t count = 0;
-    if (!r.readUInt32(id) || !r.readUInt64(sequence) || !r.readUInt16(count)) return;
+    std::uint32_t    id = 0;
+    std::uint64_t    sequence = 0;
+    std::uint16_t    count = 0;
+    ParticipantColor assigned;
+    if (!r.readUInt32(id) || !readColor(r, assigned) ||
+        !r.readUInt64(sequence) || !r.readUInt16(count)) {
+        return;
+    }
 
     m_localId  = id;
     m_sequence = sequence;
@@ -668,6 +758,7 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
         bool isHost = false;
         if (!r.readUInt32(pid) || !r.readString(p.name) || !r.readBool(isHost)) return;
         if (!readAvatar(r, p.avatar, m_cfg.maxAvatarSize)) return;
+        if (!readColor(r, p.color)) return;
         p.id     = pid;
         p.isHost = isHost;
         m_participants.push_back(std::move(p));
@@ -680,6 +771,10 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
     self.name   = m_cfg.displayName;
     self.isHost = false;
     self.avatar = m_cfg.avatar;
+    // What the host gave us, NOT what we asked for — the two differ whenever
+    // somebody already had that colour, and drawing ourselves in the wish would
+    // put us in a colour nobody else uses for us.
+    self.color  = assigned;
     m_participants.push_back(std::move(self));
 
     HE_LOG_INFO(Net, "Collab: accepted as participant %u at sequence %llu, %u other(s) "

@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
@@ -112,18 +113,23 @@ namespace
 
 	// ── Drawing ──────────────────────────────────────────────────────────────
 
-	ImU32 participantColorU32(HE::Net::ParticipantId id, float alpha = 1.0f)
+	// The colour everybody in the session agrees this person is, straight from
+	// the roster the host handed out.
+	ImU32 participantColorU32(const AppContext& ctx, HE::Net::ParticipantId id,
+	                          float alpha = 1.0f)
 	{
 		float rgb[3];
-		CollabController::participantColor(id, rgb);
+		if (ctx.collab) ctx.collab->colorFor(id, rgb);
+		else            CollabController::participantColor(id, rgb);
 		return ImGui::GetColorU32(ImVec4(rgb[0], rgb[1], rgb[2], alpha));
 	}
 
 	// A round portrait with a ring in the participant's colour — the same colour
 	// their camera gizmo and lock badges use, so the footer and the viewport can
 	// be read as one thing rather than two unrelated colour schemes.
-	void drawAvatarAt(ImDrawList* dl, ImVec2 topLeft, float size, ImTextureID tex,
-	                  HE::Net::ParticipantId id, const std::string& name, bool dim)
+	void drawAvatarAt(const AppContext& ctx, ImDrawList* dl, ImVec2 topLeft, float size,
+	                  ImTextureID tex, HE::Net::ParticipantId id, const std::string& name,
+	                  bool dim)
 	{
 		const float  radius = size * 0.5f;
 		const ImVec2 centre(topLeft.x + radius, topLeft.y + radius);
@@ -142,7 +148,7 @@ namespace
 			// No picture: their colour, with the initial on top. Better than a
 			// generic silhouette — the initial and the colour together are enough
 			// to tell three people apart at 18 pixels.
-			dl->AddCircleFilled(centre, radius, participantColorU32(id, 0.55f * alpha), 24);
+			dl->AddCircleFilled(centre, radius, participantColorU32(ctx, id, 0.55f * alpha), 24);
 
 			const char  initial[2] = { name.empty() ? '?' : name[0], '\0' };
 			const ImVec2 ts = ImGui::CalcTextSize(initial);
@@ -150,7 +156,7 @@ namespace
 			            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), initial);
 		}
 
-		dl->AddCircle(centre, radius, participantColorU32(id, alpha), 24, 1.5f);
+		dl->AddCircle(centre, radius, participantColorU32(ctx, id, alpha), 24, 1.5f);
 	}
 
 	// ── Hover-menu state ─────────────────────────────────────────────────────
@@ -266,7 +272,7 @@ void DrawFooter(AppContext& ctx)
 	{
 		const HE::Net::Participant& p = roster[static_cast<std::size_t>(i)];
 		const ImVec2 at(origin.x + i * (kFaceSize + kFaceGap), origin.y);
-		drawAvatarAt(dl, at, kFaceSize,
+		drawAvatarAt(ctx, dl, at, kFaceSize,
 		             avatarTexture(ctx.renderer, p.id, p.avatar.rgba, p.avatar.size),
 		             p.id, p.name, p.id == localId);
 	}
@@ -520,6 +526,118 @@ void DrawRoster(AppContext& ctx)
 #endif
 }
 
+void DrawViewportMarkers(AppContext& ctx, const glm::mat4& view, const glm::mat4& proj,
+                         float rectMinX, float rectMinY, float rectMaxX, float rectMaxY)
+{
+#ifdef HE_IMGUI_ENABLED
+	CollabController* collab = ctx.collab;
+	if (!collab || !collab->inSession()) return;
+
+	const float width  = rectMaxX - rectMinX;
+	const float height = rectMaxY - rectMinY;
+	if (width < 32.0f || height < 32.0f) return;
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->PushClipRect(ImVec2(rectMinX, rectMinY), ImVec2(rectMaxX, rectMaxY), true);
+
+	const auto localId = collab->localParticipant();
+
+	constexpr float kFace   = 26.0f;   // marker diameter
+	constexpr float kInset  = 22.0f;   // how far inside the border a pinned marker sits
+
+	for (const HE::Net::Participant& p : collab->participants())
+	{
+		if (p.id == localId) continue;   // we are not our own guest
+
+		const HE::Net::PresenceState* pres = collab->presenceOf(p.id);
+		if (!pres || !pres->valid) continue;
+
+		const MarkerPlacement place = PlaceMarker(
+			view, proj,
+			glm::vec3(pres->cameraPos[0], pres->cameraPos[1], pres->cameraPos[2]),
+			rectMinX, rectMinY, rectMaxX, rectMaxY, kInset);
+
+		const float sx = place.x;
+		const float sy = place.y;
+		const bool  onScreen   = place.onScreen;
+		const float arrowAngle = place.arrowAngle;
+
+		float rgb[3];
+		collab->colorFor(p.id, rgb);
+		const ImU32 col     = ImGui::GetColorU32(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+		const ImU32 colSoft = ImGui::GetColorU32(ImVec4(rgb[0], rgb[1], rgb[2], 0.35f));
+
+		const float  radius = kFace * 0.5f;
+		const ImVec2 centre(sx, sy);
+
+		// A dark halo under everything. The viewport can be any colour at all —
+		// a bright sky, a white floor — and without this the marker is legible on
+		// roughly half of them.
+		dl->AddCircleFilled(centre, radius + 3.0f, IM_COL32(0, 0, 0, 110), 28);
+
+		if (onScreen)
+		{
+			// A tail pointing at the exact spot, so the circle reads as a pin
+			// stuck into the scene rather than as something floating near it.
+			const ImVec2 tip(sx, sy + radius + 9.0f);
+			dl->AddTriangleFilled(ImVec2(sx - 5.0f, sy + radius - 1.0f),
+			                      ImVec2(sx + 5.0f, sy + radius - 1.0f), tip, col);
+		}
+
+		if (const ImTextureID tex =
+		        avatarTexture(ctx.renderer, p.id, p.avatar.rgba, p.avatar.size))
+		{
+			dl->AddImageRounded(tex, ImVec2(sx - radius, sy - radius),
+			                    ImVec2(sx + radius, sy + radius),
+			                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, radius);
+		}
+		else
+		{
+			dl->AddCircleFilled(centre, radius, colSoft, 28);
+			const char   initial[2] = { p.name.empty() ? '?' : p.name[0], '\0' };
+			const ImVec2 ts = ImGui::CalcTextSize(initial);
+			dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), IM_COL32_WHITE, initial);
+		}
+		dl->AddCircle(centre, radius, col, 28, 2.5f);
+
+		if (!onScreen)
+		{
+			// An outward arrowhead just past the ring: which way to turn.
+			const float ax = std::cos(arrowAngle), ay = std::sin(arrowAngle);
+			const float px = -ay, py = ax;
+			const ImVec2 tip(sx + ax * (radius + 12.0f), sy + ay * (radius + 12.0f));
+			const ImVec2 b0(sx + ax * (radius + 3.0f) + px * 7.0f,
+			                sy + ay * (radius + 3.0f) + py * 7.0f);
+			const ImVec2 b1(sx + ax * (radius + 3.0f) - px * 7.0f,
+			                sy + ay * (radius + 3.0f) - py * 7.0f);
+			dl->AddTriangleFilled(tip, b0, b1, col);
+		}
+
+		// The name, below an on-screen marker and above a pinned one — a pinned
+		// marker sits at the border, where "below" would be off the image.
+		const ImVec2 ts = ImGui::CalcTextSize(p.name.c_str());
+		const float  padX = 6.0f, padY = 2.0f;
+		const float  labelY = onScreen ? sy + radius + 12.0f
+		                               : sy - radius - 12.0f - (ts.y + padY * 2.0f);
+		const ImVec2 lmin(sx - ts.x * 0.5f - padX, labelY);
+		const ImVec2 lmax(sx + ts.x * 0.5f + padX, labelY + ts.y + padY * 2.0f);
+
+		// Dark pill with a coloured edge rather than a coloured fill: white on a
+		// saturated background fails for half the palette, and dark-on-colour
+		// fails for the other half.
+		dl->AddRectFilled(lmin, lmax, IM_COL32(18, 18, 22, 220), 4.0f);
+		dl->AddRect(lmin, lmax, col, 4.0f, 0, 1.5f);
+		dl->AddText(ImVec2(lmin.x + padX, lmin.y + padY), IM_COL32(240, 240, 245, 255),
+		            p.name.c_str());
+	}
+
+	dl->PopClipRect();
+#else
+	(void)ctx; (void)view; (void)proj;
+	(void)rectMinX; (void)rectMinY; (void)rectMaxX; (void)rectMaxY;
+#endif
+}
+
 void RequestBan(std::uint32_t participantId, const std::string& name)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -535,7 +653,7 @@ void DrawAvatar(AppContext& ctx, const HE::Net::Participant& participant, float 
 {
 #ifdef HE_IMGUI_ENABLED
 	const ImVec2 at = ImGui::GetCursorScreenPos();
-	drawAvatarAt(ImGui::GetWindowDrawList(), at, size,
+	drawAvatarAt(ctx, ImGui::GetWindowDrawList(), at, size,
 	             avatarTexture(ctx.renderer, participant.id,
 	                           participant.avatar.rgba, participant.avatar.size),
 	             participant.id, participant.name, false);
@@ -556,7 +674,7 @@ void DrawLocalAvatar(AppContext& ctx, float size)
 		(ctx.collab && ctx.collab->inSession()) ? ctx.collab->localParticipant() : 1u;
 
 	const ImVec2 at = ImGui::GetCursorScreenPos();
-	drawAvatarAt(ImGui::GetWindowDrawList(), at, size,
+	drawAvatarAt(ctx, ImGui::GetWindowDrawList(), at, size,
 	             avatarTexture(ctx.renderer, kLocalKey, me.avatarRgba, me.avatarSize),
 	             id, me.name, false);
 	ImGui::Dummy(ImVec2(size, size));
@@ -576,6 +694,74 @@ void Shutdown(IRenderer* renderer)
 #else
 	(void)renderer;
 #endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deliberately OUTSIDE the ImGui guard: this is geometry, it needs nothing but
+// glm, and keeping it reachable is what lets the Y flip and the
+// behind-the-camera case be asserted instead of eyeballed.
+
+MarkerPlacement PlaceMarker(const glm::mat4& view, const glm::mat4& proj,
+                            const glm::vec3& world,
+                            float rectMinX, float rectMinY,
+                            float rectMaxX, float rectMaxY, float inset)
+{
+	MarkerPlacement out;
+
+	const float width  = rectMaxX - rectMinX;
+	const float height = rectMaxY - rectMinY;
+	if (width <= 0.0f || height <= 0.0f) return out;
+
+	const glm::vec4 viewPos = view * glm::vec4(world, 1.0f);
+
+	// Behind the eye plane the projection is worse than useless: it mirrors the
+	// point through the origin, so someone standing behind you appears in front.
+	// View space answers both questions honestly — glm's convention is -Z
+	// forward, so z >= 0 is behind — and its x/y stay the direction to turn in.
+	const bool behind = viewPos.z >= -0.0001f;
+
+	if (!behind)
+	{
+		const glm::vec4 clip = proj * viewPos;
+		if (std::abs(clip.w) > 1e-6f)
+		{
+			const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+			out.x = rectMinX + (ndc.x * 0.5f + 0.5f) * width;
+			// Screen y grows downwards while NDC y grows upwards. The editor's
+			// picking code makes the same conversion in the other direction
+			// (ndc.y = 1 - 2v), and the two have to agree or a click and a marker
+			// disagree about where the same point is.
+			out.y = rectMinY + (1.0f - (ndc.y * 0.5f + 0.5f)) * height;
+			out.onScreen = std::abs(ndc.x) <= 1.0f && std::abs(ndc.y) <= 1.0f;
+			if (out.onScreen) return out;
+		}
+	}
+
+	// Pin to the border in the direction they lie in, so the marker also answers
+	// "which way do I turn". View-space x/y is that direction in screen terms,
+	// with y negated because screen y points down.
+	const float cx = rectMinX + width * 0.5f;
+	const float cy = rectMinY + height * 0.5f;
+	float dx = viewPos.x;
+	float dy = -viewPos.y;
+	const float len = std::sqrt(dx * dx + dy * dy);
+	// Directly behind and dead centre: no direction is more right than any other,
+	// so pick down — the one place a marker is least likely to land on top of
+	// whatever the user is working on.
+	if (len < 1e-4f) { dx = 0.0f; dy = 1.0f; }
+	else             { dx /= len; dy /= len; }
+
+	// Grow the direction until it meets the inset rectangle; whichever axis runs
+	// out first is the edge it leaves through.
+	const float halfW = std::max(0.0f, width  * 0.5f - inset);
+	const float halfH = std::max(0.0f, height * 0.5f - inset);
+	const float t = std::min(halfW / std::max(std::abs(dx), 1e-4f),
+	                         halfH / std::max(std::abs(dy), 1e-4f));
+	out.x = cx + dx * t;
+	out.y = cy + dy * t;
+	out.onScreen   = false;
+	out.arrowAngle = std::atan2(dy, dx);
+	return out;
 }
 
 } // namespace CollabPresenceBar
