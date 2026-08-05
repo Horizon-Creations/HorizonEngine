@@ -9,6 +9,7 @@
 #include <SourceControl/RepoStatus.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <map>
 #include <string>
 #include <vector>
@@ -84,6 +85,35 @@ const char* letterFor(HE::Sc::FileState s)
 	case FS::Unmodified:  break;
 	}
 	return " ";
+}
+
+// ImGui pitfall these two modals kept walking into: AlwaysAutoResize together
+// with TextWrapped has no width to wrap AGAINST, so the window grows to the
+// longest unbroken run of text and gets clipped by the viewport edge. Pinning
+// the width turns the flag back into what it is wanted for — auto HEIGHT.
+//
+// Sized in multiples of the font size rather than pixels, so it follows the
+// editor's font scale instead of assuming one.
+void beginModalSizing(float widthInChars = 26.0f)
+{
+	const float w = ImGui::GetFontSize() * widthInChars;
+	ImGui::SetNextWindowSizeConstraints(ImVec2(w, 0.0f), ImVec2(w, FLT_MAX));
+}
+
+// Two equal buttons filling the row, so they scale with the dialog rather than
+// spilling out of a font-scaled window at a hardcoded 120 px.
+bool modalButtonRow(const char* confirmLabel, const char* cancelLabel,
+                    bool confirmDisabled, bool& outCancelled)
+{
+	const float spacing = ImGui::GetStyle().ItemSpacing.x;
+	const float w       = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
+
+	ImGui::BeginDisabled(confirmDisabled);
+	const bool confirmed = ImGui::Button(confirmLabel, ImVec2(w, 0.0f));
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	outCancelled = ImGui::Button(cancelLabel, ImVec2(w, 0.0f));
+	return confirmed;
 }
 
 struct Row
@@ -560,6 +590,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 	// ── Create branch ────────────────────────────────────────────────────────
 	if (s_branchDialog) ImGui::OpenPopup("Create branch");
+	beginModalSizing();
 	if (ImGui::BeginPopupModal("Create branch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		if (s_branchFromOid.empty())
@@ -570,13 +601,15 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		else
 		{
 			ImGui::TextWrapped("New branch starting at:");
-			ImGui::TextDisabled("%s", s_branchFromOid.c_str());
-			ImGui::SameLine();
-			ImGui::TextWrapped("%s", s_branchFromSubject.c_str());
+			// One wrapped run, not TextDisabled + SameLine + TextWrapped: at a
+			// fixed dialog width the second half would wrap back under the
+			// first and read as two unrelated lines.
+			ImGui::TextWrapped("%s  %s", s_branchFromOid.c_str(),
+			                   s_branchFromSubject.c_str());
 		}
 		ImGui::Spacing();
 
-		ImGui::SetNextItemWidth(260.0f);
+		ImGui::SetNextItemWidth(-FLT_MIN);   // fill the (now fixed) width
 		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
 		ImGui::InputTextWithHint("##branchname", "feature/new-lighting",
 		                         s_branchName, sizeof(s_branchName));
@@ -611,18 +644,12 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		}
 
 		ImGui::Spacing();
-		ImGui::BeginDisabled(empty || !nameOk || taken || git->busy());
-		if (ImGui::Button("Create", ImVec2(120.0f, 0.0f)))
-		{
+		bool cancelled = false;
+		const bool create = modalButtonRow(
+			"Create", "Cancel", empty || !nameOk || taken || git->busy(), cancelled);
+		if (create)
 			git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
-			s_branchDialog = false;
-			s_branchFromOid.clear();
-			s_branchFromSubject.clear();
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::EndDisabled();
-		ImGui::SameLine();
-		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+		if (create || cancelled)
 		{
 			s_branchDialog = false;
 			s_branchFromOid.clear();
@@ -637,15 +664,14 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	// full consequence AND the reassurance: the restore is recorded as a new
 	// commit, so nothing in the history is lost and this itself is undoable.
 	if (!s_restoreOid.empty()) ImGui::OpenPopup("Restore project?");
+	beginModalSizing();
 	if (ImGui::BeginPopupModal("Restore project?", nullptr,
 	                           ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		ImGui::TextWrapped("Every file in the project folder will be put back to how "
 		                   "it was at this commit:");
 		ImGui::Spacing();
-		ImGui::TextDisabled("%s", s_restoreOid.c_str());
-		ImGui::SameLine();
-		ImGui::TextWrapped("%s", s_restoreSubject.c_str());
+		ImGui::TextWrapped("%s  %s", s_restoreOid.c_str(), s_restoreSubject.c_str());
 		ImGui::Spacing();
 		ImGui::TextWrapped("Files added since are removed, changed files are reverted, "
 		                   "deleted files come back.");
@@ -662,15 +688,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::PopStyleColor();
 		ImGui::Spacing();
 
-		if (ImGui::Button("Restore", ImVec2(120.0f, 0.0f)))
-		{
-			git->requestRestoreTo(s_restoreOid, s_restoreOid);
-			s_restoreOid.clear();
-			s_restoreSubject.clear();
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+		bool cancelled = false;
+		const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled);
+		if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
+		if (restore || cancelled)
 		{
 			s_restoreOid.clear();
 			s_restoreSubject.clear();
