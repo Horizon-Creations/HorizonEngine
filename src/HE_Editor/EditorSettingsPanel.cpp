@@ -276,14 +276,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 				cfg.GIReflQuality = grQ;
 			// Mirror-like surfaces seen IN a reflection reflect onward instead of
 			// flattening to their base colour; each bounce costs one more trace
-			// on the affected pixels only.
-			Row::sliderInt("GI Refl Bounces", &cfg.GIReflBounces, 1, 4);
+			// on the affected pixels only. Labelled: the OpenGL kernel traces a
+			// single segment and ignores this, so on Windows/Linux the slider
+			// would otherwise drag with no effect on the image.
+			Row::sliderInt("GI Refl Bounces (Metal)", &cfg.GIReflBounces, 1, 4);
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
-			ImGui::SetTooltip("Metal only, with Render Path = Deferred.");
+			ImGui::SetTooltip("Needs Metal (Render Path = Deferred) or an OpenGL 4.3 context.");
 		else if (supported)
-			hint("Scene rays fill SSR's off-screen gaps (hits lit by the GI probes).");
+			hint("Real scene rays instead of the sky cubemap (hits lit by the GI probes).");
 	});
 
 	row("gpuparticles", "Effects", [&]{

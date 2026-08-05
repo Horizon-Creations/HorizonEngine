@@ -273,3 +273,113 @@ genau so — Verhalten beibehalten).
   des Q2-Kernels auch im SSR-Trace an (High tier) — beide Reflexionsquellen
   bauen Glossy jetzt gleich auf (Cone-Jitter + Temporal + Wide-Blur-Lerp);
   Details in docs/ssr-plan.md („Trace v3").
+
+## 10. GL-Port (Windows/Linux) — umgesetzt
+
+> Stand: 2026-08-04. §7 hatte den Port als „später über `gi_refl.comp` analog
+> `gi_shadow.comp`" geparkt; genau das ist er geworden, nur mit dem GLSL im
+> Backend-String statt als Datei (der GL-Pfad hält alle Kernel als
+> `R"GLSL(...)"` in `OpenGLRenderer.cpp`, die `shaders/*.comp` gehören Vulkan).
+> `Capabilities::supportsGIReflections = m_giSupported` (GL 4.3 ⇒ Windows/Linux;
+> macOS-GL ist 4.1 und bleibt bei Metal).
+
+**Pass-Kette** (alles halbe Auflösung, auf den GI-Pre-Pass-Targets):
+
+```
+RenderGIPrepass   ← NEU herausgelöst aus RenderGIShadow: Weltpos + Normale
+                    + (roughness, metallic) als 3. MRT-Ziel
+RenderGIShadow    ← nur wenn GI-Diffuse an
+RenderGIReflections: kGiReflCS → [kGiReflTemporalFS] → [kGiReflBlurFS ×2]
+```
+
+Der Pre-Pass läuft, sobald **einer** der beiden Verbraucher ihn will — GI-Reflektionen
+sind ein eigener Toggle und funktionieren mit ausgeschaltetem Diffus-GI (Treffer werden
+dann nur von Sonne + lokalen Lichtern + Ambient-Floor beleuchtet, ohne Probe-Feld).
+`UpdateGIAccel` baut die BVH entsprechend bei `m_giEnabled || m_giReflEnabled`.
+
+**Composite:** kein eigener Fullscreen-Pass wie auf Metal. GL komponiert *im
+Shading-Pass* — die Kaskade `envSpec = mix(sky, refl.rgb, refl.a·intensity·fade)`
+steht einmal in `kUnlitFS` (Built-in-PBR) und einmal in `heLitP`
+(`MaterialShaderLibrary.cpp`, `heGIReflFwd` + `heLight.giRefl`, war für Metals
+Forward-Pfad schon da). Beide sampeln dieselbe Textur auf **Unit 18**, einmal
+gebunden. Folge: der Deferred-Pfad ist gratis mitversorgt (sein Resolve ruft
+dasselbe `heLitP`), und es gibt keinen Tile-/Stored-G-Buffer-Zwang.
+
+**Was der GL-Kernel BESSER kann als der Metal-Erstwurf:**
+- **Echte Trefferflächennormale ohne Zusatzinfrastruktur.** `giSceneClosestHitTri`
+  liefert den Dreiecksindex mit; `giHitNormal` baut daraus die geometrische
+  Normale (Objektraum → Welt via `transpose(mat3(invTransform))`). Kein
+  `-rayDir`-Ersatz, kein Argument-Buffer aus GPU-Adressen (Metal P4).
+- **Exakte temporale Reprojektion.** Der Pre-Pass speichert Weltpositionen, also
+  reicht `prevViewProj · worldPos` — keine Tiefenrekonstruktion.
+
+**Was er NICHT kann (bewusst, nicht vergessen):**
+1. **Kein Bounce-Loop.** `GIReflectionSettings::bounces` wird auf GL ignoriert
+   (`SetGIReflectionSettings` dokumentiert das) — ein Spiegel im Spiegel zeigt
+   seine flache Basisfarbe. Der Metal-Kernel hat die Schleife, GL nicht.
+2. **Kein SSR darunter/darüber.** GL hat keinen Screen-Space-Trace; die Kaskade
+   besteht nur aus Sky → GIRefl. Der `heLight.ssr.*`-Zweig faltet sich tot.
+3. **Kein Sky-Cubemap-Sampling im Kernel** (das brauchte erst der Sekundär-Miss
+   des Bounce-Loops). Primär-Miss = Confidence 0 → das Composite behält den
+   Sky-Term, was exakt richtig ist.
+4. Gleiche Lücken wie GI-Diffus: **Terrain und skinned Meshes sind nicht in der
+   BVH**, spiegeln sich also nicht; skinned Empfänger stehen auch nicht im
+   Pre-Pass (`cmds.drawCalls()` ist statisch) und fallen auf den Sky-Term zurück.
+
+**Quality-Tiers** (gemessen am Witness, Laplace-Energie im Reflexionsband —
+Reflektionen AUS = 1.65 als Referenz für den vorhandenen Dither):
+`0` roh (1.29) · `1` + confidence-gewichteter separabler Blur (0.50, am
+glattesten) · `2` + Cone-Jitter (erst ab roughness > 0.08 — darunter läuft eine
+1°-Streuung an Silhouetten vorbei und dithert sichtbar) + temporale EMA mit
+Nachbarschafts-Klammer (1.11). Die Klammer ist der Ersatz für Metals
+Luminanz-Bruch-Test: ein hartes Reject würde die Akkumulation genau an den
+Hit/Miss-Rändern der Jitter-Strahlen wegwerfen.
+
+**Drift-Guard.** `sampleDDGIIrradiance` existiert damit in **vier** Kopien
+(`kLightingPreamble`, `scene.frag`, GLs `kUnlitFS`, GLs `kGiReflCS`). Was §7 für
+diesen Fall verlangt hat, ist umgesetzt: der Subcase „DDGI probe sampling on the
+shading side" in `tests/test_culling.cpp` vergleicht jetzt alle vier (die beiden
+GL-Kopien werden per String-Literal-Namen aus `OpenGLRenderer.cpp` geschnitten).
+Negativkontrolle gelaufen: 0.05 → 0.06 im Chebyshev-Floor des Refl-Kernels lässt
+den Test rot werden.
+
+**Instanzfarben.** Neu geteilt: `HE::giInstanceSurface`
+(`HorizonRendering/GiInstanceSurface.h`) löst albedo/emissive/metallic/roughness
+eines `RenderObject` auf — inklusive `MaterialAsset::approx*`-Fold für
+Graph-Materialien. Vorher nahm GL nur `obj.baseColor`, d.h. **jedes**
+Material-Objekt war in Bounce UND Reflexion weiß. Metals `giInstanceShading` ist
+dieselbe Auflösung und sollte auf die geteilte Funktion umgestellt werden (nicht
+getan: hier nicht kompilierbar). GLs `GiInst` trägt jetzt das Metal-Layout
+(baseColor.a = metallic, emissive.a = roughness) — der Bounce-Loop hätte alles,
+was er bräuchte.
+
+**Verifikation** (headless, `HE_DUMP_RHI=OpenGL` + `HE_DUMP_GIREFLTEST=1`; die
+`HE_DUMP_*`-Familie ist backend-agnostisch, `scripts/he_shot.py` selbst ist
+macOS-only):
+A/B `HE_DUMP_GIREFL=0/1` — 11.8 % der Pixel ändern sich, der Rest ist identisch.
+Der Spiegelboden zeigt an der Stelle des grünen Graph-Würfels (35,193,65) statt
+Himmelblau (108,159,198), an der des Emissive-Würfels (251,178,178) — Albedo-Fold
+und Emissive kommen also beide an. Boden abseits der Objekte und Hintergrund:
+byte-identisch (Miss → Sky-Fallback).
+**Deferred separat verifiziert** (`HE_DUMP_RENDERPATH=1`, dass der Pfad wirklich
+greift zeigt `HE_DUMP_GBUFFER=2` → 50 % Bildänderung): dieselbe A/B liefert
+dieselben Zahlen (11.8 %, 35,193,65 / 251,178,178). Damit ist die
+heLitP-Hälfte der Kaskade belegt, nicht nur die `kUnlitFS`-Hälfte — im Forward
+kommt man an sie nicht heran, weil die Graph-Würfel dort ohnehin nicht rendern
+(s.u.). Beiläufig: Forward und Deferred sind in dieser Szene fast pixelgleich —
+sichtbar sind nur Sky und zwei Spiegel, deren Erscheinung fast vollständig aus
+`envSpec` kommt, und das rechnen beide Shader gleich.
+**„Aus = unverändert"** gegen den Stand VOR dem Port: 45 von 230 400 Samples,
+alle im animierten Wolken-Dither, max. Delta 22. Der Rauschboden zweier
+identischer Läufe desselben Binaries liegt bei 33 Samples / Delta 18 — die
+Änderung liegt also im Messrauschen, und jeder Szenen-Messpunkt ist byte-gleich.
+Zusätzlich: die GLSL-Strings werden vom C++-Build **nie** kompiliert — vor jedem
+Commit `glslangValidator` über `"#version 430 core\n" + kGiTraversalGLSL +
+kGiReflCS` laufen lassen, sonst schaltet ein Tippfehler GI still für die ganze
+Session ab (`m_giSupported = false`).
+
+**Nicht von diesem Port verursacht, beim Verifizieren aufgefallen:** im
+`HE_DUMP_GIREFLTEST`-Witness rendern die beiden Graph-Material-Würfel auf GL
+**direkt gar nicht** (in der Reflexion schon — die läuft über die BVH, nicht über
+das Material-Programm), und die erste Szenenframe meldet `glGetError=0x502`.
+Beides reproduziert unverändert auf dem Stand vor diesem Port.

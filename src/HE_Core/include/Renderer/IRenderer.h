@@ -92,8 +92,10 @@ public:
         bool supportsScreenSpaceReflections = false;
         // Ray-traced GI reflections (docs/gi-reflections-plan.md): specular rays
         // against the GI acceleration structure, hit-shaded from the DDGI probe
-        // field, composited UNDER SSR (fills its off-screen gaps). v1: Metal
-        // only, deferred tile mode + hardware ray tracing.
+        // field. Metal composites them UNDER SSR (filling its off-screen gaps)
+        // in the deferred tile path and needs hardware ray tracing; OpenGL
+        // (§10, GL 4.3+ = Windows/Linux) composites in the shading pass itself,
+        // so BOTH render paths work there and there is no SSR to sit under.
         bool supportsGIReflections = false;
     };
 
@@ -243,12 +245,14 @@ public:
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI
     // acceleration structure; hits are shaded from the sun + the DDGI probe
-    // field, so reflections stay consistent with the diffuse GI. Composited
-    // UNDER SSR: where the screen-space trace has a confident hit, SSR wins;
-    // where it misses (off-screen geometry), the traced result fills in.
-    // v1 Metal-only, deferred tile mode + hardware RT (Capabilities::
-    // supportsGIReflections gates the UI). Disabled = image byte-identical to
-    // the feature never having existed.
+    // field, so reflections stay consistent with the diffuse GI. Where SSR also
+    // runs they sit UNDER it: the screen-space trace wins where it has a
+    // confident hit, the traced result fills its off-screen gaps.
+    // Metal: deferred tile mode + hardware RT. OpenGL 4.3+ (Windows/Linux):
+    // the software BVH the diffuse GI already builds, composited in the shading
+    // pass, so BOTH render paths work and there is no SSR to sit under.
+    // Capabilities::supportsGIReflections gates the UI. Disabled = image
+    // byte-identical to the feature never having existed.
     struct GIReflectionSettings
     {
         bool  enabled      = false;
@@ -258,6 +262,8 @@ public:
         // Ray bounces (1–4): mirror-like surfaces seen IN a reflection reflect
         // onward instead of flattening to their base colour. Each extra bounce
         // costs one more trace + sun-occlusion ray on the affected pixels only.
+        // Metal only — the OpenGL kernel traces a single segment and ignores
+        // this rather than pretending to honour it.
         int   bounces      = 1;
         // 0 = raw mirror trace; 1 = + confidence-weighted blur; 2 = + roughness-
         // jittered cone rays with temporal accumulation and a wide second blur

@@ -65,6 +65,7 @@ public:
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
+	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -719,6 +720,7 @@ private:
 	unsigned int m_ssaoBlurTex    = 0;   // R8 (sampled by the scene shader)
 	unsigned int m_ssaoNoiseTex   = 0;   // 4×4 random rotation vectors
 	unsigned int m_whiteTex       = 0;   // 1×1 white (bound as AO when disabled)
+	unsigned int m_blackTex       = 0;   // 1×1 transparent black (bound as the reflection result when disabled)
 	int          m_ssaoW          = 0;
 	int          m_ssaoH          = 0;
 	bool         m_ssaoEnabled    = true;
@@ -750,12 +752,15 @@ private:
 		int32_t triOffset  = 0, triCount  = 0;
 		bool    valid      = false;
 	};
-	// Matches the std430 GiInstance block the GL-B kernels will declare: two
-	// mat4 rows + colour + BLAS offsets (16-byte aligned).
+	// Matches the std430 GiInst block the kernels declare (kGiTraversalGLSL):
+	// mat4 + two shading rows + BLAS offsets, 112 bytes, 16-byte aligned.
+	// The shading pair is HE::giInstanceSurface's output — the probe kernel uses
+	// only baseColor.rgb, the reflection kernel all four fields.
 	struct GIInstanceGpu
 	{
 		glm::mat4 invTransform{1.0f};   // world → object (rays enter BLAS space)
-		glm::vec4 baseColor{1.0f};      // probe one-bounce tint (GL-C)
+		glm::vec4 baseColor{1.0f};      // rgb = flat albedo (probe bounce tint), a = metallic
+		glm::vec4 emissive{0.0f};       // rgb = emissive (reflections only), a = roughness
 		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
 	};
 	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
@@ -770,10 +775,20 @@ private:
 	void         EnsureGIProbeGrid();   // one-shot grid fit over the scene AABB
 	void         EnsureGIProbeAtlas();
 	void         DestroyGIProbeAtlas();
-	// Half-res G-buffer → compute shadow rays → temporal → blur. Returns the
-	// blurred mask texture (0 if unavailable). Uses THIS frame's extraction.
-	unsigned int RenderGIShadow(const CommandBuffer& cmds, int width, int height,
-	                            const glm::mat4& viewProj);
+	// Half-res world-space G-buffer (position + normal + roughness/metallic).
+	// Shared by the shadow-ray and reflection kernels — either can be the only
+	// consumer, so it is not folded into RenderGIShadow. Uses THIS frame's
+	// extraction (Metal lesson: mask and scene pass must share one camera).
+	bool         RenderGIPrepass(const CommandBuffer& cmds, int width, int height,
+	                             const glm::mat4& viewProj);
+	// Compute shadow rays → temporal → blur on the pre-pass targets. Returns the
+	// blurred mask texture (0 if unavailable).
+	unsigned int RenderGIShadow(int width, int height, const glm::mat4& viewProj);
+	// Specular trace → (temporal) → (blur) on the pre-pass targets. Returns the
+	// texture the shading pass samples (rgb radiance, a confidence), 0 = the
+	// pass could not run. probesValid = the DDGI atlases hold real data.
+	unsigned int RenderGIReflections(int width, int height, const glm::mat4& viewProj,
+	                                 bool probesValid);
 	void         DispatchGIProbeUpdate();
 
 	static constexpr float kGIProbeSpacing     = 4.0f; // metres between probes
@@ -786,17 +801,34 @@ private:
 	unsigned int m_giTemporalProgram  = 0;
 	unsigned int m_giBlurProgram      = 0;
 	unsigned int m_giProbeCSProgram   = 0;
+	unsigned int m_giReflCSProgram       = 0; // specular trace (GLSL 430 compute)
+	unsigned int m_giReflTemporalProgram = 0; // MRT: radiance+confidence / receiver pos
+	unsigned int m_giReflBlurProgram     = 0; // separable, confidence-weighted
 	// G-buffer + mask targets (all half-res).
 	unsigned int m_giGBufFBO   = 0, m_giGBufPosTex = 0, m_giGBufNormTex = 0, m_giGBufDepth = 0;
+	unsigned int m_giGBufMatTex = 0;                      // rgba16f, r = roughness, g = metallic (reflection kernel only)
 	unsigned int m_giRawTex    = 0;                       // r16f, compute image store
 	unsigned int m_giLocalMaskTex = 0;                    // rgba16f, per-pixel local-light visibility (1 channel per light, first 4)
 	unsigned int m_giHistFBO[2] = { 0, 0 }, m_giHistTex[2] = { 0, 0 }; // RGBA16F ping-pong
 	unsigned int m_giResultFBO = 0, m_giResultTex = 0;    // r16f, sampled by the scene
+	// Reflection chain: raw compute output → optional temporal ping-pong →
+	// optional separable blur ending in m_giReflTex. All rgba16f half-res
+	// (rgb = radiance arriving along the mirror ray, a = confidence).
+	unsigned int m_giReflRawTex = 0;
+	unsigned int m_giReflFBO = 0, m_giReflTex = 0;
+	unsigned int m_giReflBlurFBO = 0, m_giReflBlurTex = 0;
+	unsigned int m_giReflHistFBO[2]    = { 0, 0 };
+	unsigned int m_giReflHistTex[2]    = { 0, 0 };
+	unsigned int m_giReflHistPosTex[2] = { 0, 0 }; // receiver world pos (disocclusion reject)
 	int          m_giShadowW = 0, m_giShadowH = 0;
 	int          m_giHistIdx = 0;
 	bool         m_giHistValid = false;
 	glm::mat4    m_giPrevViewProj{1.0f};
 	float        m_giFrameSeed = 0.0f;
+	int          m_giReflHistIdx = 0;
+	bool         m_giReflHistValid = false;
+	glm::mat4    m_giReflPrevViewProj{1.0f};
+	float        m_giReflFrameSeed = 0.0f;
 	// Probe grid + atlases.
 	glm::vec3    m_giGridOrigin{0.0f};
 	glm::ivec3   m_giGridCounts{0};
@@ -808,10 +840,11 @@ private:
 	{
 		int enabled = -1, shadowTex = -1, irrTex = -1, visTex = -1, localTex = -1;
 		int gridOrigin = -1, gridCounts = -1, intensity = -1;
+		int reflTex = -1, reflParams = -1;   // ray-traced reflections (own toggle)
 	};
 	GISceneLocs  m_giLocsUnlit, m_giLocsSkinned, m_giLocsInstanced;
 	GISceneLocs  FetchGISceneLocs(unsigned int program) const;
-	void         PushGISceneUniforms(const GISceneLocs& locs, bool active);
+	void         PushGISceneUniforms(const GISceneLocs& locs, bool active, bool reflActive);
 	std::unordered_map<HE::UUID, GIBlasRange> m_giBlasCache;
 	std::vector<HE::GiBvhNode>     m_giNodesCpu;      // concatenated BLAS nodes (all meshes)
 	std::vector<HE::GiBvhTriangle> m_giTrisCpu;       // concatenated BLAS triangles
@@ -827,6 +860,15 @@ private:
 	float        m_giLightRadius       = 0.5f;        // degrees, shadow-ray cone
 	int          m_giRaysPerProbe        = 128;
 	int          m_giProbeBudgetPerFrame = 256;
+	// ── Ray-traced GI reflections (docs/gi-reflections-plan.md §10) ──────────
+	// Independent of m_giEnabled: the pass needs the acceleration structures and
+	// the half-res pre-pass, not the diffuse probe field (which it uses when it
+	// is there and falls back to sun + ambient floor when it is not).
+	bool         m_giReflEnabled      = false;
+	float        m_giReflIntensity    = 1.0f;   // 0…1 mix against the sky cubemap
+	float        m_giReflMaxRoughness = 0.6f;   // above this the sky term stands alone
+	float        m_giReflMaxDistance  = 200.0f; // world-space ray length
+	int          m_giReflQuality      = 1;      // 0 raw / 1 + blur / 2 + cone jitter + temporal
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t     m_viewportReqW  = 0;   // requested by the UI, 0 = direct to window
