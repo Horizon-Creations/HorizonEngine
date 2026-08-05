@@ -127,14 +127,14 @@ struct D3D12DescriptorHeapAllocator
 #ifdef HE_IMGUI_METAL_ENABLED
 #include "ImGuiMetalBridge.h"
 #include <Backends/Metal/MetalRenderer.h>
+#endif
+#endif // HE_IMGUI_ENABLED
 
 // File-local alias. It used to arrive transitively from the public
 // HorizonRendering/ShaderManager.h, which declared it at global scope and so
-// leaked `fs` into every consumer of that header.
+// leaked `fs` into every consumer of that header. Must stay outside the
+// backend #ifdefs — the non-Metal builds use it too.
 namespace fs = std::filesystem;
-
-#endif
-#endif // HE_IMGUI_ENABLED
 
 std::string getRHIName(HE::RendererBackend backend)
 {
