@@ -56,6 +56,22 @@ public:
 	// any active session.
 	void setWorld(HorizonWorld* world) { m_world = world; }
 
+	// Which project this editor has open. Compared on join and refused when the
+	// two sides differ, because everything a session sends — scene entities,
+	// asset references, lock subjects — is addressed by uuids that only mean
+	// something inside ONE project. Joining a session whose host had a different
+	// project open used to succeed: the scene arrived and every asset reference
+	// in it dangled, leaving the content browser showing nothing that resolved.
+	//
+	// `id` is the project manifest's stable uuid (ProjectData::id); `label` is
+	// its display name, which the host sends back with a refusal so the joiner
+	// can be told WHICH project to open. Set before hosting or joining.
+	void setProjectIdentity(std::string id, std::string label)
+	{
+		m_projectId    = std::move(id);
+		m_projectLabel = std::move(label);
+	}
+
 	// Fires after a received snapshot replaced the world. The editor must drop
 	// its selection and undo history here — both refer to entity handles that no
 	// longer exist, and acting on them would touch freed storage.
@@ -405,6 +421,8 @@ private:
 	std::unique_ptr<HE::Net::CollabSession>    m_collab;
 
 	HorizonWorld* m_world  = nullptr;
+	std::string   m_projectId;      // manifest uuid — compared on join
+	std::string   m_projectLabel;   // display name — shown to a refused joiner
 	Status        m_status = Status::Idle;
 	bool          m_isHost = false;
 

@@ -2,6 +2,7 @@
 #include "CppScaffoldTemplates.h"
 #include <ContentManager/DefaultAssets.h> // well-known UUIDs seeded into the tutorial scene
 #include <Types/Enums.h>                  // HE::LightType
+#include <Types/UUID.h>                   // stable project identity
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -41,6 +42,17 @@ static std::string jsonString(const json& j, const char* key, const std::string&
 	auto it = j.find(key);
 	return (it != j.end() && it->is_string()) ? it->get<std::string>() : def;
 }
+// A fresh project identity, hex, lower case. Written into the manifest as "id".
+static std::string newProjectId()
+{
+	const HE::UUID u = HE::UUID::generate();
+	char buf[33];
+	std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+	              static_cast<unsigned long long>(u.hi),
+	              static_cast<unsigned long long>(u.lo));
+	return buf;
+}
+
 static bool jsonBool(const json& j, const char* key, bool def)
 {
 	auto it = j.find(key);
@@ -430,6 +442,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 
 	json j;
 	j["name"]           = projectName;
+	j["id"]             = newProjectId();
 	j["version"]        = "1.0";
 	j["preset"]         = static_cast<int>(preset);
 	j["startupScene"]   = "Content/StartupScene.hescene";
@@ -508,6 +521,19 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.name = jsonString(j, "name", fs::path(projectPath).stem().string());
 	m_currentProject.path = projectPath;
 
+	// Projects created before the manifest had an "id" get one now, and it is
+	// written back immediately: an identity that is re-minted on every load
+	// identifies nothing, and collaboration would reject two editors that DO
+	// have the same project open. Failing to write it back is not fatal — the
+	// project still opens, it just cannot be matched against a peer's.
+	m_currentProject.id = jsonString(j, "id");
+	bool mintedId = false;
+	if (m_currentProject.id.empty())
+	{
+		m_currentProject.id = newProjectId();
+		mintedId = true;
+	}
+
 	// Resolve startup scene relative to the project root
 	fs::path projectRoot = fs::path(projectPath).parent_path();
 	std::string relScene = jsonString(j, "startupScene");
@@ -536,6 +562,11 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	            m_currentProject.exportProfiles.size(),
 	            m_currentProject.startupScene.empty() ? "(none)"
 	                                                  : m_currentProject.startupScene.c_str());
+
+	if (mintedId && !saveProject(projectPath))
+		HE_LOG_WARN(Config, "Project '%s' had no id and it could not be written back — "
+		                    "collaboration cannot verify that peers share this project",
+		            m_currentProject.name.c_str());
 
 	if (m_onProjectLoaded)
 		m_onProjectLoaded(m_currentProject.startupScene);
@@ -570,6 +601,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	}
 
 	j["name"]    = m_currentProject.name;
+	if (!m_currentProject.id.empty()) j["id"] = m_currentProject.id;
 	if (!j.contains("version")) j["version"] = "1.0";
 
 	json jp = json::array();

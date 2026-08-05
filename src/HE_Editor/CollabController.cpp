@@ -158,7 +158,9 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	m_net = std::make_unique<NetSession>(m_secure.get(), NetRole::Host);
 
 	CollabSession::Config cfg;
-	cfg.displayName = displayName;
+	cfg.displayName  = displayName;
+	cfg.projectKey   = m_projectId;
+	cfg.projectLabel = m_projectLabel;
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Host, cfg);
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
@@ -463,7 +465,9 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_net = std::make_unique<NetSession>(m_secure.get(), NetRole::Client);
 
 	CollabSession::Config cfg;
-	cfg.displayName = displayName;
+	cfg.displayName  = displayName;
+	cfg.projectKey   = m_projectId;
+	cfg.projectLabel = m_projectLabel;
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Client, cfg);
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
@@ -486,7 +490,7 @@ void CollabController::wireCallbacks()
 		            ("Collab: joined as participant " + std::to_string(id)).c_str());
 	});
 
-	m_collab->onJoinRejected([this](JoinRejectReason reason) {
+	m_collab->onJoinRejected([this](JoinRejectReason reason, const std::string& detail) {
 		switch (reason)
 		{
 		case JoinRejectReason::VersionMismatch:
@@ -497,6 +501,17 @@ void CollabController::wireCallbacks()
 			break;
 		case JoinRejectReason::SnapshotFailed:
 			m_error = "The scene could not be transferred.";
+			break;
+		case JoinRejectReason::ProjectMismatch:
+			// Say what to DO, not just what went wrong: the fix is one action,
+			// and without naming the project the user cannot take it.
+			m_error = detail.empty()
+				? std::string("This session is editing a different project. Open the same "
+				              "project as the host, then join again.")
+				: ("This session is editing the project \"" + detail +
+				   "\". You have \"" + (m_projectLabel.empty() ? std::string("(no project)")
+				                                              : m_projectLabel) +
+				   "\" open — open \"" + detail + "\" and join again.");
 			break;
 		default:
 			m_error = "The host refused the join.";

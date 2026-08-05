@@ -49,13 +49,21 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v3: document deltas (per node / per UI element) and the authoritative lock
 // query. A v2 peer would drop both silently and believe it was in sync while
 // the other side edited a graph it never saw — worse than refusing to connect.
-inline constexpr std::uint16_t kCollabProtocolVersion = 3;
+// v4: the join handshake carries a project key, and a rejection carries a
+// detail string. A v3 peer omits both, so its join would read as a project
+// mismatch — the version check runs first and says something truthful instead.
+inline constexpr std::uint16_t kCollabProtocolVersion = 4;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
     VersionMismatch = 1,   // peer speaks a different collaboration protocol
     SessionFull     = 2,
     SnapshotFailed  = 3,   // host could not capture its own state
+    // The two sides have DIFFERENT projects open. Everything a session sends —
+    // scene entities, asset references, lock subjects — is addressed by uuids
+    // that only mean anything inside one project, so a joiner would receive a
+    // scene whose every asset reference dangles. It used to be admitted anyway.
+    ProjectMismatch = 4,
 };
 
 struct Participant {
@@ -141,6 +149,15 @@ public:
         // Bounds the frame a peer can cause us to build.
         std::uint16_t maxSelectionIds = 1024;
 
+        // Opaque identity of the thing being edited together, compared on join;
+        // a mismatch is refused with ProjectMismatch. HorizonNet does not
+        // interpret it — the editor puts the project's uuid here — and an empty
+        // key on BOTH sides matches, so a projectless session still works.
+        std::string projectKey;
+        // Human-readable name for the same thing, sent with a rejection so the
+        // joiner can be told WHICH project to open rather than just "no".
+        std::string projectLabel;
+
         // ── Document-delta bounds ──
         // One item's JSON has to fit a length-prefixed string, which BitStream
         // caps at 65535 and TRUNCATES silently — a truncated payload would land
@@ -167,7 +184,12 @@ public:
     // ── Callbacks ──
     // Client: the join completed and the snapshot has been applied.
     void onJoined(std::function<void(ParticipantId)> fn)          { m_onJoined = std::move(fn); }
-    void onJoinRejected(std::function<void(JoinRejectReason)> fn) { m_onRejected = std::move(fn); }
+    // `detail` carries whatever the host could say about the refusal — for a
+    // project mismatch, the name of the project the session is editing. Empty
+    // when the host had nothing to add.
+    void onJoinRejected(std::function<void(JoinRejectReason, const std::string& detail)> fn) {
+        m_onRejected = std::move(fn);
+    }
     void onParticipantJoined(std::function<void(const Participant&)> fn) { m_onJoin = std::move(fn); }
     void onParticipantLeft(std::function<void(ParticipantId)> fn)  { m_onLeft = std::move(fn); }
     // Client: snapshot transfer progress, for a progress bar (received, total).
@@ -519,7 +541,7 @@ private:
     std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;
     std::function<void(ParticipantId, const PresenceState&)> m_onPresence;
     std::function<void(ParticipantId)>                m_onJoined;
-    std::function<void(JoinRejectReason)>             m_onRejected;
+    std::function<void(JoinRejectReason, const std::string&)> m_onRejected;
     std::function<void(const Participant&)>           m_onJoin;
     std::function<void(ParticipantId)>                m_onLeft;
     std::function<void(std::uint32_t, std::uint32_t)> m_onProgress;

@@ -205,7 +205,7 @@ TEST_CASE("CollabSession: a client that cannot apply the snapshot does not count
     p->clientState.applyOk = false;   // deserialization fails
 
     JoinRejectReason reason = JoinRejectReason::None;
-    p->client->onJoinRejected([&](JoinRejectReason r) { reason = r; });
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
 
     p->pump();
 
@@ -220,7 +220,7 @@ TEST_CASE("CollabSession: the host refuses the join when it cannot capture state
     p->hostState.captureOk = false;
 
     JoinRejectReason reason = JoinRejectReason::None;
-    p->client->onJoinRejected([&](JoinRejectReason r) { reason = r; });
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
 
     p->pump();
 
@@ -240,7 +240,7 @@ TEST_CASE("CollabSession: a snapshot larger than the client's limit is refused")
     p->hostState.data = makeBlob(64 * 1024);
 
     JoinRejectReason reason = JoinRejectReason::None;
-    p->client->onJoinRejected([&](JoinRejectReason r) { reason = r; });
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
 
     p->pump(30);
 
@@ -311,6 +311,7 @@ TEST_CASE("CollabSession: a full session refuses further joins")
     BitWriter w;
     w.writeUInt16(kCollabProtocolVersion);
     w.writeString("Latecomer");
+    w.writeString("");   // project key — empty matches the host's empty one
     clientNet.send(LoopbackTransport::kPeer, kFirstUserMessage + 0, w);
 
     for (int i = 0; i < 6; ++i) {
@@ -1409,4 +1410,95 @@ TEST_CASE("CollabSession: the host answers its own lock query without a round tr
     REQUIRE(p->host->queryLock(kHeld));
     CHECK(answered);
     CHECK(held);
+}
+
+// ─── Project identity ────────────────────────────────────────────────────────
+// A session addresses everything — scene entities, asset references, lock
+// subjects — by uuids that only mean something inside ONE project. Joining a
+// host who has a different project open used to succeed: the scene arrived and
+// every asset reference in it dangled.
+
+namespace {
+// A pair whose two sides have different projects open. Same wiring as makePair,
+// with a project identity on each side.
+std::unique_ptr<Pair> makeProjectPair(const std::string& hostKey,
+                                      const std::string& hostLabel,
+                                      const std::string& clientKey)
+{
+    auto p = std::make_unique<Pair>();
+    auto [a, b] = LoopbackTransport::createPair();
+    p->hostT   = std::move(a);
+    p->clientT = std::move(b);
+    p->hostNet   = std::make_unique<NetSession>(p->hostT.get(),   NetRole::Host);
+    p->clientNet = std::make_unique<NetSession>(p->clientT.get(), NetRole::Client);
+
+    CollabSession::Config hostCfg;
+    hostCfg.displayName  = "Anna";
+    hostCfg.projectKey   = hostKey;
+    hostCfg.projectLabel = hostLabel;
+    CollabSession::Config clientCfg;
+    clientCfg.displayName = "Bob";
+    clientCfg.projectKey  = clientKey;
+
+    p->host   = std::make_unique<CollabSession>(p->hostNet.get(),   NetRole::Host,   hostCfg);
+    p->client = std::make_unique<CollabSession>(p->clientNet.get(), NetRole::Client, clientCfg);
+    p->host->setStateProvider(&p->hostState);
+    p->client->setStateProvider(&p->clientState);
+    return p;
+}
+} // namespace
+
+TEST_CASE("CollabSession: a peer with a different project open is refused, and told which")
+{
+    auto p = makeProjectPair("proj-aaa", "ShadowValidation", "proj-bbb");
+    p->hostState.data = makeBlob(64);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    std::string      detail;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string& d) {
+        reason = r; detail = d;
+    });
+
+    p->pump();
+
+    CHECK_FALSE(p->client->isJoined());
+    CHECK(reason == JoinRejectReason::ProjectMismatch);
+    // The name matters as much as the refusal: without it the user is told "no"
+    // and cannot tell which of their projects to open.
+    CHECK(detail == "ShadowValidation");
+    // And the scene never transferred — that is the damage being prevented.
+    CHECK(p->clientState.applyCalls == 0);
+    CHECK(p->host->participants().size() == 1);
+}
+
+TEST_CASE("CollabSession: the same project id joins normally")
+{
+    auto p = makeProjectPair("proj-aaa", "ShadowValidation", "proj-aaa");
+    p->hostState.data = makeBlob(64);
+
+    bool rejected = false;
+    p->client->onJoinRejected([&](JoinRejectReason, const std::string&) { rejected = true; });
+
+    p->pump();
+
+    CHECK_FALSE(rejected);
+    CHECK(p->client->isJoined());
+    CHECK(p->host->participants().size() == 2);
+}
+
+TEST_CASE("CollabSession: two projectless editors still collaborate")
+{
+    // Nothing forces a project to have an id — one written by an older build has
+    // none until it is loaded once. Two empty keys match, so this stays usable
+    // rather than locking people out of their own session.
+    auto p = makeProjectPair("", "", "");
+    p->hostState.data = makeBlob(64);
+
+    bool rejected = false;
+    p->client->onJoinRejected([&](JoinRejectReason, const std::string&) { rejected = true; });
+
+    p->pump();
+
+    CHECK_FALSE(rejected);
+    CHECK(p->client->isJoined());
 }

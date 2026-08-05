@@ -140,6 +140,16 @@ struct ProjectData
 {
 	std::string name;
 	std::string path;
+	// Stable project identity, persisted as the manifest's "id" and minted the
+	// first time a project is created or loaded without one.
+	//
+	// The name cannot serve this purpose: two people routinely have differently
+	// named copies of the same project, and identically named copies of
+	// different ones. Collaboration compares this — joining a session whose host
+	// has a DIFFERENT project open used to transfer the scene happily and leave
+	// the joiner with a content browser full of unresolvable asset references,
+	// because every uuid in that scene names something in someone else's project.
+	std::string id;
 	std::string startupScene; // absolute path to the startup .hescene file (empty = none)
 
 	std::vector<ExportProfile> exportProfiles;      // never empty after load/create

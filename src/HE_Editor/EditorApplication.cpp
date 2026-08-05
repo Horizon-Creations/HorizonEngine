@@ -1912,6 +1912,11 @@ void EditorApplication::OnRender(float dt)
 	// happens — no joins, no snapshots, no presence.
 	{
 		m_collab.setWorld(m_editorWorld.get());
+		// Refreshed here rather than at load time so switching projects mid-run
+		// cannot leave a stale identity behind — the next join would then be
+		// compared against a project this editor no longer has open.
+		m_collab.setProjectIdentity(m_projectManager.currentProject().id,
+		                            m_projectManager.currentProject().name);
 		const auto nowMs = static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count());

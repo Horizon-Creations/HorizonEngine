@@ -169,6 +169,10 @@ void CollabSession::update(std::uint64_t nowMs) {
         BitWriter w;
         w.writeUInt16(kCollabProtocolVersion);
         w.writeString(m_cfg.displayName);
+        // Which project we have open. The host refuses a mismatch outright: a
+        // session addresses everything by uuids that only mean something inside
+        // one project.
+        w.writeString(m_cfg.projectKey);
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
     }
@@ -217,6 +221,7 @@ void CollabSession::onPeerConnected(ConnectionId) {
 void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     std::uint16_t version = 0;
     std::string   name;
+    std::string   projectKey;
     if (!r.readUInt16(version) || !r.readString(name)) {
         HE_LOG_WARN(Net, "Collab: malformed join request on conn %llu",
                     static_cast<unsigned long long>(conn));
@@ -226,9 +231,10 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
                 name.c_str(), static_cast<unsigned>(version),
                 static_cast<unsigned long long>(conn));
 
-    const auto reject = [&](JoinRejectReason reason) {
+    const auto reject = [&](JoinRejectReason reason, const std::string& detail = {}) {
         BitWriter w;
         w.writeByte(static_cast<std::uint8_t>(reason));
+        w.writeString(detail);
         m_net->send(conn, kMsgJoinRejected, w);
     };
 
@@ -237,6 +243,21 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
                     name.c_str(), static_cast<unsigned>(version),
                     static_cast<unsigned>(kCollabProtocolVersion));
         reject(JoinRejectReason::VersionMismatch);
+        return;
+    }
+    // Read AFTER the version check: a peer speaking an older protocol did not
+    // send this field, and reading a missing string would make it look like a
+    // project mismatch instead of the version mismatch it is.
+    if (!r.readString(projectKey)) {
+        HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no project key)",
+                    name.c_str());
+        return;
+    }
+    if (projectKey != m_cfg.projectKey) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — different project open "
+                         "(this session is editing \"%s\")",
+                    name.c_str(), m_cfg.projectLabel.c_str());
+        reject(JoinRejectReason::ProjectMismatch, m_cfg.projectLabel);
         return;
     }
     if (m_participants.size() >= m_cfg.maxParticipants) {
@@ -428,18 +449,22 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
 void CollabSession::handleJoinRejected(BitReader& r) {
     std::uint8_t reason = 0;
     r.readByte(reason);
-    // Spelled out rather than left as a number: these are the three things a
-    // user can actually be told when a join does not go through.
+    std::string detail;
+    r.readString(detail);   // absent on an older host — the empty string is fine
+    // Spelled out rather than left as a number: these are the things a user can
+    // actually be told when a join does not go through.
     const char* text = "unknown reason";
     switch (static_cast<JoinRejectReason>(reason)) {
     case JoinRejectReason::VersionMismatch: text = "collab protocol mismatch (different engine build)"; break;
     case JoinRejectReason::SessionFull:     text = "the session is full"; break;
     case JoinRejectReason::SnapshotFailed:  text = "the host could not produce a scene snapshot"; break;
+    case JoinRejectReason::ProjectMismatch: text = "the host has a different project open"; break;
     default: break;
     }
-    HE_LOG_WARN(Net, "Collab: join rejected by the host — %s", text);
+    HE_LOG_WARN(Net, "Collab: join rejected by the host — %s%s%s", text,
+                detail.empty() ? "" : ": ", detail.c_str());
     m_joined = false;
-    if (m_onRejected) m_onRejected(static_cast<JoinRejectReason>(reason));
+    if (m_onRejected) m_onRejected(static_cast<JoinRejectReason>(reason), detail);
 }
 
 void CollabSession::handleSnapshotBegin(BitReader& r) {
@@ -453,7 +478,7 @@ void CollabSession::handleSnapshotBegin(BitReader& r) {
                      detail::logBytes(total).c_str(),
                      detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
         m_snapshotActive = false;
-        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
+        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed, {});
         return;
     }
 
@@ -482,7 +507,7 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
                           "(%u + %u > %u) — aborting the transfer",
                      index, m_snapshotReceived, len, m_snapshotExpected);
         m_snapshotActive = false;
-        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
+        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed, {});
         return;
     }
 
@@ -492,7 +517,7 @@ void CollabSession::handleSnapshotChunk(BitReader& r) {
         HE_LOG_ERROR(Net, "Collab: snapshot chunk %u is truncated — aborting the transfer", index);
         m_snapshotBuf.resize(offset);   // truncated frame
         m_snapshotActive = false;
-        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
+        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed, {});
         return;
     }
 
@@ -515,13 +540,13 @@ void CollabSession::handleSnapshotEnd() {
                           "partial scene",
                      detail::logBytes(m_snapshotReceived).c_str(),
                      detail::logBytes(m_snapshotExpected).c_str());
-        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
+        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed, {});
         return;
     }
     if (!m_state || !m_state->applySnapshot(m_snapshotBuf)) {
         HE_LOG_ERROR(Net, "Collab: the snapshot arrived intact but could not be applied — "
                           "the scene it describes may need assets this project lacks");
-        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed);
+        if (m_onRejected) m_onRejected(JoinRejectReason::SnapshotFailed, {});
         return;
     }
 
