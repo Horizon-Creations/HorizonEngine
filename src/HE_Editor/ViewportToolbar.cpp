@@ -7,6 +7,7 @@
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
 
 #include <imgui.h>
+#include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -401,6 +402,27 @@ void render(AppContext& ctx, State& st)
 	            ImVec2(origin.x + barW, origin.y + m.bar - 1.0f),
 	            playing ? kStopFg : kBarLine, playing ? 2.0f : 1.0f);
 
+	// The Scene panel starts with its dock tab bar hidden, and ImGui's way back —
+	// a small triangle in the node's corner — is drawn during Begin(), i.e. UNDER
+	// the band above. Re-draw it on top and keep the first group clear of it;
+	// otherwise the only route back to the tab bar is an invisible 8 px corner.
+	// Interaction is ImGui's ("#UNHIDE" already ran in Begin), this is paint only.
+	float edgeL = kEdgeGap;
+	{
+		ImGuiWindow*   win  = ImGui::GetCurrentWindow();
+		ImGuiDockNode* node = win ? win->DockNode : nullptr;
+		if (win && win->DockIsActive && node && node->IsHiddenTabBar() && !node->IsNoTabBar())
+		{
+			const float  sz  = std::floor(ImGui::GetFontSize() * 0.70f);
+			const float  hit = std::floor(ImGui::GetFontSize() * 0.55f);
+			const ImVec2 p   = node->Pos;
+			const bool   hov = ImGui::IsMouseHoveringRect(p, ImVec2(p.x + hit, p.y + hit), false);
+			dl->AddTriangleFilled(p, ImVec2(p.x + sz, p.y), ImVec2(p.x, p.y + sz),
+				ImGui::GetColorU32(hov ? ImGuiCol_ButtonHovered : ImGuiCol_Button));
+			edgeL = std::max(kEdgeGap, sz + 3.0f);
+		}
+	}
+
 	// ── Fit ─────────────────────────────────────────────────────────────────
 	// Measure first, draw second: the transport has to be centred on the strip,
 	// not on "whatever is left after the left-hand controls", and the shrink
@@ -429,7 +451,7 @@ void render(AppContext& ctx, State& st)
 	};
 
 	const float centreW = playW + kWellPad * 2.0f;
-	const float slack   = kEdgeGap * 2.0f + kGroupGap * 2.0f;     // breathing room around the transport
+	const float slack   = edgeL + kEdgeGap + kGroupGap * 2.0f;     // breathing room around the transport
 	bool labels = true, showCamera = true, showSnap = true;
 	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera) + slack <= barW; };
 	if (!fits()) labels     = false;
@@ -440,7 +462,7 @@ void render(AppContext& ctx, State& st)
 	const float wRight = rightWidth(showCamera);
 
 	// ── Left zone: what the mouse does in the viewport ───────────────────────
-	float x = origin.x + kEdgeGap;
+	float x = origin.x + edgeL;
 
 	// Editor mode. Two entries today, but the row is the natural home for any
 	// future one (paint, foliage), so it stays a segmented list rather than a
@@ -537,7 +559,7 @@ void render(AppContext& ctx, State& st)
 	// Centred on the strip, then clamped so it can never land under a group —
 	// the old hand-tuned offset only looked centred at one panel width.
 	{
-		const float leftEnd    = origin.x + kEdgeGap + wLeft;
+		const float leftEnd    = origin.x + edgeL + wLeft;
 		const float rightStart = origin.x + barW - kEdgeGap - wRight;
 		float cx = origin.x + (barW - centreW) * 0.5f;
 		cx = std::min(cx, rightStart - kGroupGap - centreW);

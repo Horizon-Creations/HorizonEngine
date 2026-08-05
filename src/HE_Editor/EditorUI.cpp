@@ -122,6 +122,10 @@ namespace fs = std::filesystem;
 // to force a rebuild of the default layout even when a layout is already loaded.
 static bool s_resetLayoutRequested = false;
 
+// Latch for HideSceneTabBarOnce() below — cleared when the layout is rebuilt,
+// because a fresh layout comes back with the tab bar showing.
+static bool s_sceneTabBarHandled = false;
+
 
 // Times Assets > Import Asset opened the file dialog this run (guided tour signal).
 static int s_importDialogOpens = 0;
@@ -286,6 +290,32 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 	ImGui::DockBuilderDockWindow("Content Browser", dockDown);
 	ImGui::DockBuilderDockWindow("Scene",          dockMain);
 	ImGui::DockBuilderFinish(dockspaceId);
+}
+
+// The Scene viewport starts without its tab bar — the strip holding a single tab
+// labelled with the window it is already inside, which costs a row of pixels off
+// the rendered image. This is the state behind the little arrow in a docked
+// window's corner ▸ "Hide tab bar", applied for you.
+//
+// It runs once per editor run rather than once ever: the state belongs to the
+// dock node and is saved into imgui.ini, so an existing layout (or one the user
+// re-showed the tab bar in) would otherwise keep it. Re-showing it during a
+// session still works — ImGui leaves a small triangle in the node's corner for
+// exactly that — the next start just goes back to hidden.
+//
+// Only ever applied to a node holding the viewport ALONE. Hiding the tab bar of
+// a node the user docked a second window into would make that window
+// unreachable, which is why ImGui itself only offers the option on a single tab.
+static void HideSceneTabBarOnce()
+{
+	if (s_sceneTabBarHandled) return;
+	ImGuiWindow* scene = ImGui::FindWindowByName("Scene");
+	if (!scene || !scene->DockIsActive || !scene->DockNode)
+		return;   // not submitted or not docked yet — try again next frame
+	ImGuiDockNode* node = scene->DockNode;
+	if (node->Windows.Size <= 1 && !node->IsHiddenTabBar() && !node->IsNoTabBar())
+		node->SetLocalFlags(node->LocalFlags | ImGuiDockNodeFlags_HiddenTabBar);
+	s_sceneTabBarHandled = true;
 }
 
 
@@ -1813,6 +1843,7 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         {
             BuildDefaultDockLayout(dockspaceId, ImGui::GetContentRegionAvail());
             s_resetLayoutRequested = false;
+            s_sceneTabBarHandled   = false;   // fresh layout → hide the viewport's tab bar again
             // Persist immediately so the layout survives an early exit and becomes
             // the baseline the user then customises.
             if (const char* ini = ImGui::GetIO().IniFilename)
@@ -1829,6 +1860,9 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 	// Toolbar, editor-camera navigation, scene extract, drag-drop spawn, gizmo,
 	// picking and the Landscape brush all live in ViewportPanel.cpp.
 	ViewportPanel::render(ctx, dt);
+	// After the window exists this frame: its dock node is only reachable once
+	// "Scene" has been submitted at least once.
+	HideSceneTabBarOnce();
 
 
     // ── Landscape / Quick Settings panel ────────────────────────────────────
