@@ -42,3 +42,24 @@ CMakeUserPresets.json
 config.json
 /.vs
 build-wt/
+
+# Working screenshots and scratch output. Kept on disk, never committed: these
+# are development reference images (some of them screenshots of OTHER engines,
+# which have no business in an MIT-licensed public repo) and they put 17 MB into
+# every clone, forever, for files nothing in the build or the docs reads.
+_shots/
+_repro_inc_out.txt
+build_errors.txt
+
+# CI build artifacts. They belong on a release, not in git — 145 MB of them were
+# committed once and had to be removed by rewriting history. Download them from
+# the CI run or the GitHub release instead.
+HorizonEditor-linux-x64/
+HorizonEditor-macos-arm64/
+HorizonEditor-windows-x64/
+HorizonEditor-*.zip
+HorizonEditor-*.tar.gz
+HorizonEditor-*.dmg
+
+# Editor runtime state written next to the exe during local runs.
+imgui.ini
