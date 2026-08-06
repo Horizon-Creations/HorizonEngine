@@ -544,7 +544,7 @@ void DrawRoster(AppContext& ctx)
 				ImGui::SetTooltip("End the session for %s. They can join again.",
 				                  p.name.c_str());
 			ImGui::SameLine(0.0f, 4.0f);
-			if (ImGui::SmallButton("Block"))
+			if (EditorWidgets::dangerSmallButton("Block"))
 			{
 				RequestBan(p.id, p.name);
 				s_pinned = true;   // keep the menu up behind the dialog
