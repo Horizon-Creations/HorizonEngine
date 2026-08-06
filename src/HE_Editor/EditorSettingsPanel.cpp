@@ -1115,24 +1115,44 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
 	// ── Left: category navigation ────────────────────────────────────────────
-	ImGui::BeginChild("##prefnav", ImVec2(200.0f, 0.0f), ImGuiChildFlags_None,
+	// Its own shade, taller rows, and the active page marked with an accent bar
+	// at the rail's edge — the way every settings sidebar this decade says
+	// "you are here". The Selectable's own blue fill comes from the theme.
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.09f, 0.095f, 1.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
+	ImGui::BeginChild("##prefnav", ImVec2(210.0f, 0.0f), ImGuiChildFlags_AlwaysUseWindowPadding,
 	                  ImGuiWindowFlags_NoScrollbar);
+	ImGui::PopStyleVar();
 	for (const NavGroup& group : kNavGroups)
 	{
-		if (&group != &kNavGroups[0]) ImGui::Spacing();
+		if (&group != &kNavGroups[0]) { ImGui::Spacing(); ImGui::Spacing(); }
 		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
 		ImGui::TextDisabled("%s", group.label);
 		if (ctx.fontSubheading) ImGui::PopFont();
+		ImGui::Spacing();
 		for (int i = 0; i < group.count; ++i)
 		{
 			const NavItem& item = group.items[i];
-			ImGui::Indent(8.0f);
-			if (ImGui::Selectable(item.label, s_page == item.page))
+			const bool active = s_page == item.page;
+			ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
+			ImGui::Indent(6.0f);
+			if (ImGui::Selectable(item.label, active, 0,
+			                      ImVec2(0.0f, ImGui::GetFrameHeight())))
 				s_page = item.page;
-			ImGui::Unindent(8.0f);
+			if (active)
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin();
+				const ImVec2 mx = ImGui::GetItemRectMax();
+				ImGui::GetWindowDrawList()->AddRectFilled(
+					ImVec2(mn.x - 6.0f, mn.y + 3.0f), ImVec2(mn.x - 3.0f, mx.y - 3.0f),
+					IM_COL32(72, 130, 205, 255), 2.0f);
+			}
+			ImGui::Unindent(6.0f);
+			ImGui::PopStyleVar();
 		}
 	}
 	ImGui::EndChild();
+	ImGui::PopStyleColor();
 
 	ImGui::SameLine();
 

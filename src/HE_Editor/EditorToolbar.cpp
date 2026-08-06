@@ -291,7 +291,7 @@ void Bar::group()
 	m_inGroup      = true;
 	m_groupIsRight = false;
 	m_groupX       = m_left;
-	m_groupW       = kWellPad;      // opening padding; cells add themselves
+	m_cursor       = kWellPad;      // opening padding; cells add themselves
 	m_first        = true;
 }
 
@@ -301,6 +301,7 @@ void Bar::rightGroup(float width)
 	m_inGroup      = true;
 	m_groupIsRight = true;
 	m_groupX       = m_right - width;
+	m_cursor       = kWellPad;      // cells fill in from the group's LEFT edge
 	m_groupW       = width;
 	m_first        = true;
 	m_right        = m_groupX - kGroupGap;
@@ -309,7 +310,7 @@ void Bar::rightGroup(float width)
 void Bar::endGroup()
 {
 	if (!m_inGroup) return;
-	const float w = m_groupIsRight ? m_groupW : m_groupW + kWellPad;
+	const float w = m_groupIsRight ? m_groupW : m_cursor + kWellPad;
 
 	m_dl->ChannelsSetCurrent(0);
 	EditorToolbar::well(m_m, m_groupX, w);
@@ -325,9 +326,9 @@ bool Bar::item(const char* id, IconFn icon, const char* label, bool on, bool ena
                const char* tooltip)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
-	if (!m_first) m_groupW += kSegGap;
-	const float x = m_groupX + m_groupW;
-	m_groupW += w;
+	if (!m_first) m_cursor += kSegGap;
+	const float x = m_groupX + m_cursor;
+	m_cursor += w;
 	m_first = false;
 	return EditorToolbar::cell(m_m, x, w, id, icon, label, on, enabled, tooltip);
 }
@@ -336,9 +337,9 @@ bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
                      bool enabled, const char* tooltip)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
-	if (!m_first) m_groupW += kSegGap;
-	const float x = m_groupX + m_groupW;
-	m_groupW += w;
+	if (!m_first) m_cursor += kSegGap;
+	const float x = m_groupX + m_cursor;
+	m_cursor += w;
 	m_first = false;
 	return EditorToolbar::cellTinted(m_m, x, w, id, icon, label, fg, enabled, tooltip);
 }
@@ -346,9 +347,9 @@ bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
 void Bar::readout(IconFn icon, const char* label, ImU32 fg)
 {
 	const float w = EditorToolbar::cellWidth(m_m, label);
-	if (!m_first) m_groupW += kSegGap;
-	const float x = m_groupX + m_groupW;
-	m_groupW += w;
+	if (!m_first) m_cursor += kSegGap;
+	const float x = m_groupX + m_cursor;
+	m_cursor += w;
 	m_first = false;
 
 	const float labelW   = label ? ImGui::CalcTextSize(label).x : 0.0f;
@@ -365,10 +366,10 @@ void Bar::readout(IconFn icon, const char* label, ImU32 fg)
 void Bar::divider()
 {
 	if (m_first) return;
-	const float x = m_groupX + m_groupW + kSegGap + 1.0f;
+	const float x = m_groupX + m_cursor + kSegGap + 1.0f;
 	m_dl->AddLine(ImVec2(x, m_m.y + kWellPad * 2.0f),
 	              ImVec2(x, m_m.y + m_m.wellH - kWellPad * 2.0f), kBarLine, 1.0f);
-	m_groupW += kSegGap * 2.0f + 2.0f;
+	m_cursor += kSegGap * 2.0f + 2.0f;
 }
 
 void Bar::label(const char* text, ImU32 col)
@@ -397,7 +398,7 @@ float Bar::labelGroupWidth(std::initializer_list<const char*> labels) const
 
 float Bar::remaining() const
 {
-	return m_right - (m_inGroup ? m_groupX + m_groupW + kWellPad : m_left);
+	return m_right - (m_inGroup ? m_groupX + m_cursor + kWellPad : m_left);
 }
 
 // ─── Asset-editor header ─────────────────────────────────────────────────────

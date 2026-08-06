@@ -95,6 +95,7 @@ struct State
 	bool        compileOk  = false;
 	std::string compileMsg;
 	int         compileNode = 0;
+	double      compileAt  = 0.0;   // when the check ran (ImGui::GetTime)
 
 	// Undo/redo: combined snapshots (treeJson + '\x1f' + graphJson).
 	std::vector<std::string> undo;
@@ -2094,7 +2095,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 		uiBar.group();
 		uiBar.readout(st.currentGraph == 0 ? T::iconList : T::iconCode, uiWhere.c_str());
 		uiBar.endGroup();
-		if (st.compileHas)
+		// Success fades after a few seconds; an error stays until it is fixed
+		// or the next check — same reasoning as the class graph's strip.
+		const bool showCompile = st.compileHas &&
+			(!st.compileOk || ImGui::GetTime() - st.compileAt < 6.0);
+		if (showCompile)
 		{
 			uiBar.group();
 			uiBar.readout(st.compileOk ? T::iconCheck : T::iconWarning,
@@ -2117,6 +2122,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 			HorizonCode::fromJson(HorizonCode::toJson(st.graph), src.graph);
 			const HE::hccg::Result res = HE::hccg::generate({ src }, {});
 			st.compileHas  = true;
+			st.compileAt   = ImGui::GetTime();
 			st.compileNode = 0;
 			if (!res.fallbacks.empty())
 			{

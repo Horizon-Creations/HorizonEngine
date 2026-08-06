@@ -1,5 +1,7 @@
 #include "EditorWidgets.h"
 
+#include <imgui_internal.h>   // PushMultiItemsWidths — the same splitter DragFloatN uses
+
 #include <cfloat>
 #include <cstdarg>
 #include <cstring>
@@ -39,6 +41,48 @@ bool row(const char* label, F&& body)
 	return changed;
 }
 
+// A multi-component drag whose components carry their axis colour: a red X, a
+// green Y, a blue Z as a strip inside each field's left edge. DragFloat3 shows
+// three identical grey boxes, and which of them is Z is something the user has
+// to count — the whole reason every other DCC colours its axes. The strip sits
+// INSIDE the frame rather than being a separate label so the row costs no extra
+// width, which the Details panel does not have.
+bool axisDragN(const char* id, float* v, int n, float speed, float min, float max,
+               const char* fmt)
+{
+	// X red, Y green, Z blue — the gizmo's colours, because these fields and
+	// that gizmo edit the same three numbers. W stays neutral.
+	static const ImU32 kAxis[4] = {
+		IM_COL32(214,  88,  88, 255),
+		IM_COL32(118, 190,  96, 255),
+		IM_COL32( 92, 140, 228, 255),
+		IM_COL32(160, 160, 170, 255),
+	};
+
+	bool changed = false;
+	ImGui::BeginGroup();
+	ImGui::PushID(id);
+	ImGui::PushMultiItemsWidths(n, ImGui::CalcItemWidth());
+	for (int i = 0; i < n; ++i)
+	{
+		if (i > 0) ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+		ImGui::PushID(i);
+		changed |= ImGui::DragFloat("##c", &v[i], speed, min, max, fmt);
+		// Painted after the item so it sits on top of the frame background —
+		// clipped to the frame's rounding so the corner stays clean.
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const ImVec2 mn = ImGui::GetItemRectMin();
+		const ImVec2 mx = ImGui::GetItemRectMax();
+		dl->AddRectFilled(mn, ImVec2(mn.x + 3.0f, mx.y), kAxis[i < 4 ? i : 3],
+		                  ImGui::GetStyle().FrameRounding, ImDrawFlags_RoundCornersLeft);
+		ImGui::PopID();
+		ImGui::PopItemWidth();
+	}
+	ImGui::PopID();
+	ImGui::EndGroup();
+	return changed;
+}
+
 } // namespace
 
 bool sliderFloat(const char* label, float* v, float min, float max,
@@ -59,17 +103,17 @@ bool dragFloat(const char* label, float* v, float speed, float min, float max, c
 
 bool dragFloat2(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return ImGui::DragFloat2("##v", v, speed, min, max, fmt); });
+	return row(label, [&]{ return axisDragN("##v", v, 2, speed, min, max, fmt); });
 }
 
 bool dragFloat3(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return ImGui::DragFloat3("##v", v, speed, min, max, fmt); });
+	return row(label, [&]{ return axisDragN("##v", v, 3, speed, min, max, fmt); });
 }
 
 bool dragFloat4(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return ImGui::DragFloat4("##v", v, speed, min, max, fmt); });
+	return row(label, [&]{ return axisDragN("##v", v, 4, speed, min, max, fmt); });
 }
 
 bool dragInt(const char* label, int* v, float speed, int min, int max)

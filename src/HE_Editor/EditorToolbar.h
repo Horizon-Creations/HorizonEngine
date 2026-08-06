@@ -194,7 +194,12 @@ private:
 	float       m_left      = 0.0f;   // next left-hand x
 	float       m_right     = 0.0f;   // right-hand groups grow leftwards from here
 	float       m_groupX    = 0.0f;
-	float       m_groupW    = 0.0f;   // fixed for a right group, accumulated for a left one
+	// The running cell cursor and the group's width are two different numbers:
+	// a right-hand group's width is fixed up front while its cells still fill in
+	// from the left. Conflating them placed every right-group cell at the
+	// group's END — half off the window, since the group hugs the edge.
+	float       m_cursor    = 0.0f;   // next cell x, relative to m_groupX
+	float       m_groupW    = 0.0f;   // fixed width of a right group; unused for left
 	bool        m_inGroup   = false;
 	bool        m_groupIsRight = false;
 	bool        m_first     = true;   // no separating gap before the first cell

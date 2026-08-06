@@ -99,6 +99,7 @@ struct LSState
 	std::string compileMsg;
 	int         compileNode = 0;
 	std::string compileFor;         // panel title the result belongs to
+	double      compileAt  = 0.0;   // when the check ran (ImGui::GetTime)
 };
 LSState g;
 
@@ -115,6 +116,7 @@ void runCompileCheck(const HC::Graph& graph, const char* title)
 
 	g.compileHas  = true;
 	g.compileFor  = title;
+	g.compileAt   = ImGui::GetTime();
 	g.compileNode = 0;
 	if (!res.fallbacks.empty())
 	{
@@ -689,7 +691,13 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		// The compile result belongs on the strip too: it is a state of this
 		// graph, and as a line underneath it pushed the canvas down and up again
 		// every time someone pressed the button.
-		if (g.compileHas)
+		// A clean result is an answer, not a state: it fades after a few
+		// seconds, the way a "saved" toast would. An ERROR stays — it names a
+		// node someone still has to fix, and a problem that hides itself on a
+		// timer just gets rediscovered the hard way on export.
+		const bool showCompile = g.compileHas &&
+			(!g.compileOk || ImGui::GetTime() - g.compileAt < 6.0);
+		if (showCompile)
 		{
 			bar.group();
 			bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,

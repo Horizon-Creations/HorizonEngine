@@ -183,103 +183,129 @@ void ApplyHorizonDarkTheme()
 
 	ImGuiStyle& s = ImGui::GetStyle();
 
-	s.WindowRounding = 0.0f;
-	s.Colors[ImGuiCol_WindowBg].w = 1.0f;
-	s.ChildRounding = 0.0f;
-	s.FrameRounding = 0.0f;
-	s.PopupRounding = 0.0f;
-	s.ScrollbarRounding = 0.0f;
-	s.GrabRounding = 0.0f;
-	s.TabRounding = 0.0f;
+	// ── Shape ────────────────────────────────────────────────────────────────
+	// The old theme zeroed every rounding, which is what made each context menu
+	// and combo read as a decade older than the toolbars next to it. The radii
+	// follow EditorToolbar's (wells 7, cells 5) so chrome and widgets agree.
+	// WindowRounding only shows on floating windows — ImGui flattens docked ones
+	// and platform-owned viewports on its own.
+	s.WindowRounding    = 6.0f;
+	s.ChildRounding     = 6.0f;
+	s.FrameRounding     = 5.0f;
+	s.PopupRounding     = 7.0f;
+	s.ScrollbarRounding = 8.0f;
+	s.GrabRounding      = 5.0f;
+	s.TabRounding       = 5.0f;
+
 	s.WindowBorderSize = 1.0f;
-	s.FrameBorderSize = 0.0f;
-	s.PopupBorderSize = 1.0f;
-	s.FramePadding = ImVec2(6, 4);
-	s.ItemSpacing = ImVec2(8, 5);
-	s.IndentSpacing = 16.0f;
-	s.ScrollbarSize = 12.0f;
+	s.ChildBorderSize  = 1.0f;
+	s.PopupBorderSize  = 1.0f;
+	s.FrameBorderSize  = 0.0f;
+	s.TabBarBorderSize = 1.0f;
+
+	// Roomier than ImGui's defaults: cramped padding is most of what "looks old"
+	// actually is. FramePadding.y also drives every row height, so this is the
+	// single biggest lever the theme has.
+	s.WindowPadding    = ImVec2(10.0f, 8.0f);
+	s.FramePadding     = ImVec2(8.0f, 4.0f);
+	s.CellPadding      = ImVec2(6.0f, 4.0f);
+	s.ItemSpacing      = ImVec2(8.0f, 6.0f);
+	s.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+	s.IndentSpacing    = 16.0f;
+	s.ScrollbarSize    = 11.0f;
+	s.GrabMinSize      = 10.0f;
+
+	// SeparatorText is the section header of every properties panel (Details,
+	// material properties, the input-asset pages, Preferences). Left-aligned
+	// with a heavier rule reads as a heading; centred with hairlines reads as
+	// 1990s group boxes — which is exactly the complaint.
+	s.SeparatorTextBorderSize = 2.0f;
+	s.SeparatorTextAlign      = ImVec2(0.0f, 0.5f);
+	s.SeparatorTextPadding    = ImVec2(16.0f, 8.0f);
 
 	ImVec4* c = s.Colors;
 
+	// One accent, EditorToolbar's armed-blue, spent only on state: selection,
+	// checks, grabs, the focused tab. Everything decorative stays greyscale.
+	const ImVec4 accent      (0.22f, 0.42f, 0.70f, 1.00f);
+	const ImVec4 accentHi    (0.28f, 0.51f, 0.80f, 1.00f);
+	const ImVec4 accentBright(0.42f, 0.62f, 0.90f, 1.00f);
+
 	// Text
-	c[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-	c[ImGuiCol_TextDisabled] = ImVec4(0.35f, 0.35f, 0.35f, 1.00f);
+	c[ImGuiCol_Text]         = ImVec4(0.92f, 0.92f, 0.94f, 1.00f);
+	c[ImGuiCol_TextDisabled] = ImVec4(0.42f, 0.42f, 0.46f, 1.00f);
 
-	// Backgrounds
-	c[ImGuiCol_WindowBg]  = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-	c[ImGuiCol_ChildBg]   = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-	c[ImGuiCol_PopupBg]   = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
+	// Backgrounds. Popups sit slightly ABOVE the window shade — elevation is
+	// what makes a context menu look like it belongs to this decade.
+	c[ImGuiCol_WindowBg] = ImVec4(0.105f, 0.105f, 0.11f, 1.00f);
+	c[ImGuiCol_ChildBg]  = ImVec4(0.085f, 0.085f, 0.09f, 1.00f);
+	c[ImGuiCol_PopupBg]  = ImVec4(0.13f,  0.13f,  0.14f, 1.00f);
 
-	// Borders
-	c[ImGuiCol_Border]       = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
+	c[ImGuiCol_Border]       = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
 	c[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-	// Frame
-	c[ImGuiCol_FrameBg]        = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-	c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-	c[ImGuiCol_FrameBgActive]  = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
+	// Frames (inputs, drags, combos, checkboxes)
+	c[ImGuiCol_FrameBg]        = ImVec4(0.16f, 0.16f, 0.175f, 1.00f);
+	c[ImGuiCol_FrameBgHovered] = ImVec4(0.21f, 0.21f, 0.23f,  1.00f);
+	c[ImGuiCol_FrameBgActive]  = ImVec4(0.24f, 0.27f, 0.33f,  1.00f);
 
-	// Title
-	c[ImGuiCol_TitleBg]          = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-	c[ImGuiCol_TitleBgActive]    = ImVec4(0.13f, 0.13f, 0.13f, 1.00f);
-	c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
+	// Title / menu
+	c[ImGuiCol_TitleBg]          = ImVec4(0.08f, 0.08f, 0.085f, 1.00f);
+	c[ImGuiCol_TitleBgActive]    = ImVec4(0.12f, 0.12f, 0.13f,  1.00f);
+	c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.06f, 0.06f, 0.065f, 1.00f);
+	c[ImGuiCol_MenuBarBg]        = ImVec4(0.10f, 0.10f, 0.105f, 1.00f);
 
-	// Menubar
-	c[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+	// Scrollbars: no boxed track, just a grab that firms up under the mouse.
+	c[ImGuiCol_ScrollbarBg]          = ImVec4(0.00f, 0.00f, 0.00f, 0.12f);
+	c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.26f, 0.26f, 0.29f, 0.85f);
+	c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.33f, 0.33f, 0.37f, 1.00f);
+	c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
 
-	// Scrollbar
-	c[ImGuiCol_ScrollbarBg]          = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
-	c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-	c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.28f, 0.28f, 0.28f, 1.00f);
-	c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.34f, 0.34f, 0.34f, 1.00f);
+	// The one place the accent is loud on purpose: the mark that answers
+	// "is this on".
+	c[ImGuiCol_CheckMark]        = accentBright;
+	c[ImGuiCol_SliderGrab]       = ImVec4(accent.x, accent.y, accent.z, 0.90f);
+	c[ImGuiCol_SliderGrabActive] = accentHi;
 
-	// Checkmark + Slider
-	c[ImGuiCol_CheckMark]       = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-	c[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-	c[ImGuiCol_SliderGrabActive]= ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
+	c[ImGuiCol_Button]        = ImVec4(0.19f, 0.19f, 0.21f, 1.00f);
+	c[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
+	c[ImGuiCol_ButtonActive]  = ImVec4(accent.x, accent.y, accent.z, 0.80f);
 
-	// Buttons
-	c[ImGuiCol_Button]        = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-	c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-	c[ImGuiCol_ButtonActive]  = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+	// Header drives Selectable rows (outliner, lists, menus) AND CollapsingHeader
+	// (every Details section). Blue-grey rather than full accent: a selected row
+	// should read selected, a section header should not shout on every component.
+	c[ImGuiCol_Header]        = ImVec4(0.24f, 0.28f, 0.36f, 0.65f);
+	c[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.34f, 0.44f, 0.75f);
+	c[ImGuiCol_HeaderActive]  = ImVec4(accent.x, accent.y, accent.z, 0.85f);
 
-	// Header (Selectable, TreeNode, CollapsingHeader)
-	c[ImGuiCol_Header]        = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
-	c[ImGuiCol_HeaderHovered] = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-	c[ImGuiCol_HeaderActive]  = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+	c[ImGuiCol_Separator]        = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
+	c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+	c[ImGuiCol_SeparatorActive]  = accentHi;
 
-	// Separator
-	c[ImGuiCol_Separator]        = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-	c[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-	c[ImGuiCol_SeparatorActive]  = ImVec4(0.38f, 0.38f, 0.38f, 1.00f);
+	c[ImGuiCol_ResizeGrip]        = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+	c[ImGuiCol_ResizeGripHovered] = ImVec4(accent.x, accent.y, accent.z, 0.60f);
+	c[ImGuiCol_ResizeGripActive]  = accentHi;
 
-	// Resize grip
-	c[ImGuiCol_ResizeGrip]        = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-	c[ImGuiCol_ResizeGripHovered] = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-	c[ImGuiCol_ResizeGripActive]  = ImVec4(0.32f, 0.32f, 0.32f, 1.00f);
+	c[ImGuiCol_Tab]                = ImVec4(0.11f, 0.11f, 0.12f,  1.00f);
+	c[ImGuiCol_TabHovered]         = ImVec4(0.26f, 0.31f, 0.40f,  1.00f);
+	c[ImGuiCol_TabActive]          = ImVec4(0.21f, 0.22f, 0.26f,  1.00f);
+	c[ImGuiCol_TabUnfocused]       = ImVec4(0.09f, 0.09f, 0.10f,  1.00f);
+	c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.14f, 0.16f,  1.00f);
 
-	// Tabs
-	c[ImGuiCol_Tab]               = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-	c[ImGuiCol_TabHovered]        = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
-	c[ImGuiCol_TabActive]         = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
-	c[ImGuiCol_TabUnfocused]      = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-	c[ImGuiCol_TabUnfocusedActive]= ImVec4(0.13f, 0.13f, 0.13f, 1.00f);
+	c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.45f);
+	c[ImGuiCol_DockingEmptyBg] = ImVec4(0.08f, 0.08f, 0.085f, 1.00f);
 
-	// Docking
-	c[ImGuiCol_DockingPreview] = ImVec4(0.35f, 0.35f, 0.35f, 0.50f);
-	c[ImGuiCol_DockingEmptyBg] = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-
-	// Misc
-	c[ImGuiCol_PlotLines]            = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-	c[ImGuiCol_PlotLinesHovered]     = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-	c[ImGuiCol_PlotHistogram]        = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-	c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-	c[ImGuiCol_TableHeaderBg]        = ImVec4(0.12f, 0.12f, 0.12f, 1.00f);
-	c[ImGuiCol_TableBorderStrong]    = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
-	c[ImGuiCol_TableBorderLight]     = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);
-	c[ImGuiCol_TextSelectedBg]       = ImVec4(0.25f, 0.25f, 0.25f, 0.60f);
-	c[ImGuiCol_NavHighlight]         = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
-	c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
+	c[ImGuiCol_PlotLines]            = ImVec4(0.55f, 0.55f, 0.58f, 1.00f);
+	c[ImGuiCol_PlotLinesHovered]     = accentBright;
+	c[ImGuiCol_PlotHistogram]        = ImVec4(accent.x, accent.y, accent.z, 0.85f);
+	c[ImGuiCol_PlotHistogramHovered] = accentHi;
+	c[ImGuiCol_TableHeaderBg]        = ImVec4(0.14f, 0.14f, 0.15f, 1.00f);
+	c[ImGuiCol_TableBorderStrong]    = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
+	c[ImGuiCol_TableBorderLight]     = ImVec4(0.17f, 0.17f, 0.19f, 1.00f);
+	c[ImGuiCol_TextSelectedBg]       = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+	c[ImGuiCol_DragDropTarget]       = ImVec4(accentBright.x, accentBright.y, accentBright.z, 0.90f);
+	c[ImGuiCol_NavHighlight]         = accentHi;
+	c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
 #endif // HE_IMGUI_ENABLED
 }
 
