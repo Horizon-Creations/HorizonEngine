@@ -45,6 +45,12 @@ struct TerrainComponent {
     // the chunks' draw calls so the layer-blend node can sample it.
     HE::UUID weightmapTextureId{};
     bool     weightsDirty = false;   // re-upload the texture on the next tick
+    // Mean of layerWeights over the whole terrain, normalised (Σ = 1). Recomputed
+    // with the texture upload — consumers that shade the landscape FLAT, with no
+    // texel to sample (the GI ray kernels colour a hit per instance), blend the
+    // material's per-layer colours by this instead of reflecting one fixed layer.
+    // Unpainted → { 1, 0, 0, 0 }, matching the shader's 1×1 default weightmap.
+    float    avgLayerWeights[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
 
     // ── Runtime chunk/LOD state (never serialised) ──────────────────────────
     // Sculpt dirty-region in terrain-local XZ: the brush sets it so TerrainSystem

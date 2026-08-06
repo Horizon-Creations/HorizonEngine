@@ -59,6 +59,13 @@ struct RenderObject {
     // resolves. Per-OBJECT, not per-material: two landscapes can share one
     // material and still paint independently.
     HE::UUID     weightmapTextureId;
+    // Mean of that weightmap over the whole landscape (TerrainComponent::
+    // avgLayerWeights). The rasterizer samples the real texel and never needs
+    // this; the GI ray kernels shade a hit per INSTANCE with no texel at all, so
+    // they blend the material's per-layer colours by this mean instead of
+    // reflecting one arbitrary layer. { 1, 0, 0, 0 } (= layer 0, the shader's
+    // unpainted default) for everything that is not a landscape chunk.
+    glm::vec4    landscapeLayerWeights = { 1.0f, 0.0f, 0.0f, 0.0f };
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

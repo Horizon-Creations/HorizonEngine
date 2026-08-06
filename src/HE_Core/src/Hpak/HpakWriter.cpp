@@ -379,11 +379,15 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 HAsset::Writer::appendPOD(mtrl, slotOf(ap.emissiveParam));
                 HAsset::Writer::appendPOD(mtrl, ap.metallic);
                 HAsset::Writer::appendPOD(mtrl, ap.roughness);
-                // Skip the source's own approx block (40 B current, 32 B the
-                // pre-metallic revision, 0 B pre-feature) and pass any FUTURE
-                // fields after it through verbatim.
+                for (int i = 0; i < 4; ++i)
+                    for (int k = 0; k < 3; ++k)
+                        HAsset::Writer::appendPOD(mtrl, ap.layerColor[i][k]);
+                HAsset::Writer::appendPOD(mtrl, ap.layerCount);
+                // Skip the source's own approx block (92 B current, 40 B the
+                // pre-landscape-split revision, 32 B the pre-metallic one, 0 B
+                // pre-feature) and pass any FUTURE fields after it verbatim.
                 const size_t rem  = c.data.size() - afterGBuf;
-                const size_t skip = rem >= 40 ? 40 : (rem >= 32 ? 32 : rem);
+                const size_t skip = rem >= 92 ? 92 : (rem >= 40 ? 40 : (rem >= 32 ? 32 : rem));
                 mtrl.insert(mtrl.end(), c.data.begin() + afterGBuf + skip, c.data.end());
             }
             else

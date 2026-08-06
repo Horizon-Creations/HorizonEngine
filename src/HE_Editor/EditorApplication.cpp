@@ -2846,6 +2846,106 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_GIREFLTEST witness scene added");
 	}
 
+	// ── Landscape-in-a-mirror witness (HE_DUMP_GIREFLLANDSCAPE=1) ────────────
+	// A painted landscape with a Landscape Layer Blend material, and an upright
+	// mirror standing on it: the mirror's lower half must show the terrain in
+	// its PAINTED colour. A GI hit shades per instance with no texel to sample,
+	// so a landscape used to reflect plain white — the layer-blend pin folds to
+	// nothing, and the noise a real terrain material multiplies in whitened even
+	// the layers. Here layer 0 is green × FBM and layer 1 is red, painted
+	// green-dominant: a red or white mirror is the regression.
+	// HE_DUMP_GIREFLLANDSCAPE=2 paints the RED layer over everything instead —
+	// the mirror must follow, which is what proves the blend reads the terrain's
+	// own paint rather than a fixed layer.
+	if (const char* lw = std::getenv("HE_DUMP_GIREFLLANDSCAPE"); lw && *lw && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const bool paintRed = std::atoi(lw) >= 2;
+
+		MaterialAsset lm;
+		lm.type = HE::AssetType::Material;
+		lm.name = "GIReflLandscape";
+		{
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+			g.findNode(lb)->s = "Grass\nClay";
+			// Layer 0: green × FBM — the mottling chain a real landscape uses,
+			// and the one that used to whiten the whole pin.
+			const int green = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(green)->p[0] = 0.07f; g.findNode(green)->p[1] = 0.92f;
+			g.findNode(green)->p[2] = 0.33f;
+			const int fbm = g.addNode(HE::MatNodeType::Fbm);
+			const int mul = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(green, 0, mul, 0);
+			g.connect(fbm,   0, mul, 1);
+			g.connect(mul,   0, lb,  0);
+			const int red = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(red)->p[0] = 0.95f; g.findNode(red)->p[1] = 0.10f;
+			g.findNode(red)->p[2] = 0.05f;
+			g.connect(red, 0, lb, 1);
+			g.connect(lb,  0, out, HE::kMatOutputBaseColorPin);
+			lm.nodeGraphJson = HE::materialGraphToJson(g);
+		}
+		const HE::UUID lmId = contentManager().registerMaterial(std::move(lm));
+		contentManager().regenerateMaterialFromGraph(lmId); // codegen + approx fold
+
+		auto land = m_editorWorld->createEntity("GIReflLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 120.0f;
+		ltc.resolution  = 33;    // already 2ⁿ+1 → no resample
+		ltc.heightScale = 0.0f;  // flat: the colour is the whole point
+		ltc.seed        = 0;
+		ltc.weightRes   = 128;
+		ltc.dirty       = true;
+		TerrainPaint::ensureWeightmap(ltc);       // every texel on layer 0 (grass)
+		if (paintRed)
+			TerrainPaint::paint(ltc, 0.0f, 0.0f, /*Clay*/1, 200.0f, 1.0f, 1.0f);
+		reg.emplace<TerrainComponent>(land, ltc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
+
+		MaterialAsset mirror;
+		mirror.type = HE::AssetType::Material;
+		mirror.name = "GIReflLandscapeMirror";
+		mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
+		mirror.metallic  = 1.0f;
+		mirror.roughness = 0.05f;
+		const HE::UUID mirrorId = contentManager().registerMaterial(std::move(mirror));
+		auto addMirror = [&](const char* name, glm::vec3 pos, float yawDeg, glm::vec3 scale)
+		{
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tf;
+			tf.position = pos;
+			tf.rotation = glm::vec3(0.0f, yawDeg, 0.0f);
+			tf.scale    = scale;
+			reg.emplace<TransformComponent>(e, tf);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e, MaterialComponent{ mirrorId });
+		};
+		// Camera-facing mirror: its reflected rays run straight back at the eye,
+		// which SCREEN-space tracing cannot resolve by construction (SSR's own
+		// facing gate rejects them and falls back to the sky cubemap). Only the
+		// ray-traced GI reflection answers here — so this is the one that shows
+		// whether a GI hit on the landscape carries the landscape's colour.
+		addMirror("GIReflLandscapeMirror", glm::vec3(0.0f, 306.0f, -22.0f), 0.0f,
+		          glm::vec3(24.0f, 12.0f, 0.4f));
+		// Yawed mirror: its rays run ACROSS the frame and land on terrain that is
+		// itself on screen — the case SSR can trace. Both techniques must show the
+		// same painted colour here.
+		addMirror("GIReflLandscapeMirrorAngled", glm::vec3(-24.0f, 305.0f, -12.0f), 55.0f,
+		          glm::vec3(18.0f, 10.0f, 0.4f));
+
+		// The headless dump renders from OnInit, BEFORE the main loop's
+		// SceneSystems::tick — without this the terrain has no chunk entities
+		// yet and there is nothing for the rays to hit.
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_GIREFLLANDSCAPE witness scene added");
+	}
+
 	// ── Decal witness (HE_DUMP_DECALTEST=1): a grey floor slab with a red decal
 	// projector box over its centre. In the deferred (tile) path the floor must
 	// show a red patch exactly under the box; forward ignores decals (v1) — the

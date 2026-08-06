@@ -257,6 +257,11 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			HAsset::Reader::readPOD(c->data,o,a.approxEmissiveSlot);
 			HAsset::Reader::readPOD(c->data,o,a.approxMetallic);
 			HAsset::Reader::readPOD(c->data,o,a.approxRoughness);
+			// Landscape layer split (appended after the scalars; absent → count 0
+			// = "not layer-blended", i.e. approxBaseColor alone, as before).
+			for (int i = 0; i < 4; ++i)
+				for (int k = 0; k < 3; ++k) HAsset::Reader::readPOD(c->data,o,a.approxLayerColor[i][k]);
+			HAsset::Reader::readPOD(c->data,o,a.approxLayerCount);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -476,6 +481,9 @@ static void applyApproxSurface(MaterialAsset& m, const HE::MaterialGraph& g,
 	}
 	m.approxMetallic  = ap.metallic;
 	m.approxRoughness = ap.roughness;
+	m.approxLayerCount = ap.layerCount;
+	for (int i = 0; i < 4; ++i)
+		for (int k = 0; k < 3; ++k) m.approxLayerColor[i][k] = ap.layerColor[i][k];
 	auto slotOf = [&](const std::string& name) -> int32_t
 	{
 		if (name.empty()) return -1;
@@ -611,6 +619,10 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->approxEmissiveSlot  = parent->approxEmissiveSlot;
 		inst->approxMetallic      = parent->approxMetallic;
 		inst->approxRoughness     = parent->approxRoughness;
+		inst->approxLayerCount    = parent->approxLayerCount;
+		for (int i = 0; i < 4; ++i)
+			for (int k = 0; k < 3; ++k)
+				inst->approxLayerColor[i][k] = parent->approxLayerColor[i][k];
 	}
 	// Re-apply the instance's own values on overridden slots.
 	for (size_t i = 0; i < inst->graphParamNames.size(); ++i)
@@ -1148,6 +1160,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		HAsset::Writer::appendPOD(b,a.approxEmissiveSlot);
 		HAsset::Writer::appendPOD(b,a.approxMetallic);
 		HAsset::Writer::appendPOD(b,a.approxRoughness);
+		// Landscape layer split — lets a terrain's GI hit weight the layers by its
+		// own paint instead of settling for their average.
+		for (int i = 0; i < 4; ++i)
+			for (int k = 0; k < 3; ++k) HAsset::Writer::appendPOD(b,a.approxLayerColor[i][k]);
+		HAsset::Writer::appendPOD(b,a.approxLayerCount);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

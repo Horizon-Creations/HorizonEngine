@@ -142,6 +142,7 @@ namespace
 			HE::AABB  localBounds; // real mesh AABB; invalid → world bounds stay invalid (never culled)
 			std::vector<float> paramOverride; // merged HeParams block, or empty
 			HE::UUID  weightmapId;            // landscape layer weights (chunks only)
+			glm::vec4 avgLayerWeights{ 1.0f, 0.0f, 0.0f, 0.0f }; // their terrain-wide mean
 		};
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		std::vector<EntityData> items;
@@ -181,7 +182,13 @@ namespace
 			if (const auto* chunk = reg.try_get<TerrainChunkComponent>(e))
 				if (reg.valid(chunk->terrain))
 					if (const auto* pt = reg.try_get<TerrainComponent>(chunk->terrain))
+					{
 						d.weightmapId = pt->weightmapTextureId;
+						// Same source, for the consumers that cannot sample a texel
+						// (GI hits shade per instance) — see RenderObject.
+						d.avgLayerWeights = { pt->avgLayerWeights[0], pt->avgLayerWeights[1],
+						                      pt->avgLayerWeights[2], pt->avgLayerWeights[3] };
+					}
 			d.entId  = static_cast<uint32_t>(e);
 			d.lod    = mesh.lodBias;
 			d.castsShadow = mesh.castsShadow;
@@ -221,6 +228,7 @@ namespace
 			obj.castsShadow     = d.castsShadow;
 			obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
+			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
 		});
 	}
 

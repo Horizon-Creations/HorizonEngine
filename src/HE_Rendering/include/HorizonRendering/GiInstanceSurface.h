@@ -19,9 +19,9 @@ class ContentManager; // global namespace (HE_Core's ContentManager is not names
 // tint) and glaring in reflections: before the approx fold existed, EVERY
 // graph material reflected plain white.
 //
-// SYNC: MetalRenderer.mm's static giInstanceShading() is the same resolution,
-// written before this shared copy existed. The two must agree — a divergence
-// shows up as the same scene reflecting different colours per backend.
+// Every backend routes through THIS function (Metal's giInstanceShading is a
+// thin out-param adapter over it) — a second hand-kept copy drifts, and the
+// drift shows up as the same scene reflecting different colours per backend.
 namespace HE
 {
 

@@ -54,6 +54,37 @@ namespace
     {
         return aMinX <= bMaxX && aMaxX >= bMinX && aMinZ <= bMaxZ && aMaxZ >= bMinZ;
     }
+
+    // Unpainted terrain: the shader binds the 1×1 (1,0,0,0) default weightmap, so
+    // the flat approximation has to agree — layer 0 alone, not an even split.
+    void setUnpaintedLayerAverage(TerrainComponent& tc)
+    {
+        tc.avgLayerWeights[0] = 1.0f;
+        tc.avgLayerWeights[1] = tc.avgLayerWeights[2] = tc.avgLayerWeights[3] = 0.0f;
+    }
+
+    // Mean painted weight per layer over the whole terrain, normalised to Σ = 1 —
+    // one scan per PAINT (not per frame), which is what makes it affordable for
+    // the flat-shaded consumers (GI hits) to reproduce the terrain's colour.
+    // Normalising per texel first matches the shader, which divides each texel's
+    // blend by that texel's weight sum, so half-painted texels don't count less.
+    void computeAverageLayerWeights(TerrainComponent& tc)
+    {
+        double acc[4] = { 0.0, 0.0, 0.0, 0.0 };
+        size_t texels = 0;
+        for (size_t i = 0; i + 3 < tc.layerWeights.size(); i += 4)
+        {
+            const double w[4] = { tc.layerWeights[i + 0] / 255.0, tc.layerWeights[i + 1] / 255.0,
+                                  tc.layerWeights[i + 2] / 255.0, tc.layerWeights[i + 3] / 255.0 };
+            const double s = w[0] + w[1] + w[2] + w[3];
+            if (s <= 1e-4) continue;                       // blank texel: the shader's
+            for (int k = 0; k < 4; ++k) acc[k] += w[k] / s; // 1e-4 floor, same skip
+            ++texels;
+        }
+        if (texels == 0) { setUnpaintedLayerAverage(tc); return; }
+        for (int k = 0; k < 4; ++k)
+            tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
+    }
 }
 
 namespace TerrainSystem
@@ -137,6 +168,7 @@ namespace TerrainSystem
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
                 tc.weightsDirty = false;
+                setUnpaintedLayerAverage(tc);
                 continue;
             }
             const uint32_t wr = std::max(1u, tc.weightRes);
@@ -145,11 +177,13 @@ namespace TerrainSystem
                 tc.layerWeights.clear();              // defensive: never upload a short blob
                 tc.weightmapTextureId = HE::UUID{};
                 tc.weightsDirty = false;
+                setUnpaintedLayerAverage(tc);
                 continue;
             }
             const bool have = tc.weightmapTextureId != HE::UUID{}
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
+            computeAverageLayerWeights(tc);           // paint changed → refresh the mean
 
             TextureAsset tex;
             tex.type     = HE::AssetType::Texture;

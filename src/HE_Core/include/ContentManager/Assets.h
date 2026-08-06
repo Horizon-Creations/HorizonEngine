@@ -178,6 +178,13 @@ struct MaterialAsset : public RuntimeAsset
 	// mirror-ness. Plain materials use the asset metallic/roughness instead.
 	float   approxMetallic  = 0.0f;
 	float   approxRoughness = 0.5f;
+	// BaseColor driven by a Landscape Layer Blend: the layers folded separately,
+	// in weightmap-channel order (HE::kMatMaxLandscapeLayers × rgb). Count 0 =
+	// not layer-blended → approxBaseColor is the whole answer. A landscape's GI
+	// hit blends these by the terrain's AVERAGE painted weights, so a terrain
+	// painted all-grass reflects grass instead of the average of every layer.
+	float   approxLayerColor[4][3] = {};
+	int32_t approxLayerCount       = 0;
 
 	// Exposed graph parameters (Param nodes), 4 floats per HeParams UBO slot, in slot
 	// order. Generated alongside customShaderFragGlsl; the renderer uploads this per

@@ -1339,3 +1339,111 @@ TEST_CASE("matGraphApproxSurface folds the taken StaticSwitch branch")
 	const HE::MatApproxSurface off = HE::matGraphApproxSurface(g, &ov);
 	CHECK(off.baseColor[0] == doctest::Approx(1.0f));
 }
+
+// ─── matGraphApproxSurface: procedural chains + landscape layers ──────────────
+// The fold is what colours a GI ray hit (there is no material evaluation at a
+// BVH/TLAS hit — see HE::giInstanceSurface). Anything it cannot fold reflects
+// plain white, so a generator in the chain used to whiten the WHOLE pin.
+
+TEST_CASE("matGraphApproxSurface folds the procedural generators to their mean")
+{
+	auto pinnedTo = [](HE::MatNodeType gen)
+	{
+		MaterialGraph g;
+		const int outId = g.addNode(MatNodeType::Output);
+		const int genId = g.addNode(gen);
+		REQUIRE(g.connect(genId, 0, outId, HE::kMatOutputBaseColorPin));
+		return HE::matGraphApproxSurface(g).baseColor[0];
+	};
+	// heValueNoise: uniform hash → 0.5. heFbm/heFbm3: four octaves with
+	// amplitudes 0.5+0.25+0.125+0.0625 = 0.9375, so 0.9375 × 0.5. Checker: 0/1.
+	CHECK(pinnedTo(MatNodeType::ValueNoise)   == doctest::Approx(0.5f));
+	CHECK(pinnedTo(MatNodeType::Fbm)          == doctest::Approx(0.46875f));
+	CHECK(pinnedTo(MatNodeType::NoiseTexture) == doctest::Approx(0.46875f));
+	CHECK(pinnedTo(MatNodeType::Checker)      == doctest::Approx(0.5f));
+
+	// The real point: `Colour × Noise` keeps the COLOUR. Before, one unfoldable
+	// generator made the whole pin fall back to white.
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	const int col   = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 0.2f; g.findNode(col)->p[1] = 0.8f; g.findNode(col)->p[2] = 0.4f;
+	const int fbm = g.addNode(MatNodeType::Fbm);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	REQUIRE(g.connect(col, 0, mul, 0));
+	REQUIRE(g.connect(fbm, 0, mul, 1));
+	REQUIRE(g.connect(mul, 0, outId, HE::kMatOutputBaseColorPin));
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g);
+	CHECK(ap.baseColor[0] == doctest::Approx(0.2f * 0.46875f));
+	CHECK(ap.baseColor[1] == doctest::Approx(0.8f * 0.46875f));
+	CHECK(ap.baseColor[2] == doctest::Approx(0.4f * 0.46875f));
+}
+
+TEST_CASE("matGraphApproxSurface splits a Landscape Layer Blend into its layers")
+{
+	// The shape of a real landscape material: layer 1 = green × fbm mottling,
+	// layer 2 = flat red, blended by the terrain's painted weightmap.
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	const int blend = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(blend)->s = "Layer 1\nLayer 2";
+	const int green = g.addNode(MatNodeType::ConstColor);
+	g.findNode(green)->p[0] = 0.0f; g.findNode(green)->p[1] = 1.0f; g.findNode(green)->p[2] = 0.0f;
+	const int fbm = g.addNode(MatNodeType::Fbm);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	const int red = g.addNode(MatNodeType::ConstColor);
+	g.findNode(red)->p[0] = 1.0f; g.findNode(red)->p[1] = 0.0f; g.findNode(red)->p[2] = 0.0f;
+	REQUIRE(g.connect(green, 0, mul,   0));
+	REQUIRE(g.connect(fbm,   0, mul,   1));
+	REQUIRE(g.connect(mul,   0, blend, 0)); // Layer 1
+	REQUIRE(g.connect(red,   0, blend, 1)); // Layer 2
+	REQUIRE(g.connect(blend, 0, outId, HE::kMatOutputBaseColorPin));
+
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g);
+	REQUIRE(ap.layerCount == 2);
+	// Per-layer folds survive separately, so a consumer holding the terrain's
+	// paint can reproduce THAT terrain's colour.
+	CHECK(ap.layerColor[0][1] == doctest::Approx(0.46875f)); // green × fbm mean
+	CHECK(ap.layerColor[0][0] == doctest::Approx(0.0f));
+	CHECK(ap.layerColor[1][0] == doctest::Approx(1.0f));     // flat red
+	CHECK(ap.layerColor[1][1] == doctest::Approx(0.0f));
+	// baseColor is the paint-agnostic fallback: the average over the layers —
+	// and crucially NOT white, which is what it used to be.
+	CHECK(ap.baseColor[0] == doctest::Approx(0.5f));
+	CHECK(ap.baseColor[1] == doctest::Approx(0.46875f * 0.5f));
+	CHECK(ap.baseColor[2] == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Landscape layer split ignores unconnected layers, and needs one that folds")
+{
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	const int blend = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(blend)->s = "A\nB\nC";
+	const int blue = g.addNode(MatNodeType::ConstColor);
+	g.findNode(blue)->p[0] = 0.0f; g.findNode(blue)->p[1] = 0.0f; g.findNode(blue)->p[2] = 1.0f;
+	REQUIRE(g.connect(blue,  0, blend, 1)); // only layer B authored
+	REQUIRE(g.connect(blend, 0, outId, HE::kMatOutputBaseColorPin));
+
+	const HE::MatApproxSurface ap = HE::matGraphApproxSurface(g);
+	REQUIRE(ap.layerCount == 3);
+	CHECK(ap.layerColor[1][2] == doctest::Approx(1.0f));
+	// The average skips the unauthored layers instead of dragging in black…
+	CHECK(ap.baseColor[2] == doctest::Approx(1.0f));
+	// …and the unauthored ones stand in with that average, never white.
+	CHECK(ap.layerColor[0][2] == doctest::Approx(1.0f));
+	CHECK(ap.layerColor[2][2] == doctest::Approx(1.0f));
+
+	// A layer the fold genuinely cannot evaluate (a texture) leaves no split at
+	// all — the caller keeps its own default rather than inventing a colour.
+	MaterialGraph t;
+	const int tOut   = t.addNode(MatNodeType::Output);
+	const int tBlend = t.addNode(MatNodeType::LandscapeLayerBlend);
+	t.findNode(tBlend)->s = "Only";
+	const int tex = t.addNode(MatNodeType::TextureSample);
+	REQUIRE(t.connect(tex,    0, tBlend, 0));
+	REQUIRE(t.connect(tBlend, 0, tOut,   HE::kMatOutputBaseColorPin));
+	const HE::MatApproxSurface tap = HE::matGraphApproxSurface(t);
+	CHECK(tap.layerCount == 0);
+	CHECK(tap.baseColor[0] == doctest::Approx(1.0f)); // unchanged default
+}

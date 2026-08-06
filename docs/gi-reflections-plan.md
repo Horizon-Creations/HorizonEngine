@@ -383,3 +383,60 @@ Session ab (`m_giSupported = false`).
 **direkt gar nicht** (in der Reflexion schon — die läuft über die BVH, nicht über
 das Material-Programm), und die erste Szenenframe meldet `glGetError=0x502`.
 Beides reproduziert unverändert auf dem Stand vor diesem Port.
+
+---
+
+## Landschaften in der Reflexion (Nachtrag)
+
+**Symptom:** Ein gespiegeltes Landscape war weiß — die Geometrie stimmte, die
+Farbe fehlte komplett. SSR war davon **nicht** betroffen (Begründung unten).
+
+**Ursache:** Ein Ray-Hit wird pro INSTANZ geshadet, es gibt keine UV und keine
+Material-Auswertung — die Farbe kommt aus dem CPU-Fold `matGraphApproxSurface`.
+Der konnte einen `Landscape Layer Blend` gar nicht falten (`default: return
+false`), und ebenso wenig die prozeduralen Generatoren. Ein reales
+Landschafts-Material trifft beides: BaseColor hängt am Layer-Blend, und jede
+Layer-Farbe ist typischerweise `Farbe × FBM`-Mottling. „Linked but unfoldable"
+heißt im Fold: Default behalten → **weiß**.
+
+**Fix in drei Teilen:**
+
+1. **Generatoren falten zu ihrem analytischen Mittelwert** statt zu scheitern:
+   `heValueNoise` → 0.5, `heFbm`/`heFbm3` → 0.46875 (vier Oktaven,
+   0.5+0.25+0.125+0.0625 = 0.9375 Amplitude × 0.5), `Checker` → 0.5. Damit
+   überlebt die `Farbe × Noise`-Kette ihre Farbe. Mitgenommen: `Power`, `Sine`,
+   `Step`, `Smoothstep`, `Absolute`, `Fract`, `Combine3`, `CombineRGBA`.
+2. **Layer-Blend wird gesplittet, nicht gemittelt.** `MatApproxSurface` trägt
+   jetzt `layerColor[4]` + `layerCount` (→ `MaterialAsset::approxLayerColor/
+   approxLayerCount`, MTRL-Tail angehängt, Packer re-foldet mit). `baseColor`
+   bleibt als paint-agnostischer Fallback der Layer-Durchschnitt.
+3. **Der Hit blendet mit der PAINT des Terrains.** `TerrainComponent::
+   avgLayerWeights` = Mittel der Weightmap über das ganze Terrain, einmal pro
+   **Paint** berechnet (nicht pro Frame), via `RenderObject::
+   landscapeLayerWeights` bis in `HE::giInstanceSurface`. Ein grün gemaltes
+   Landscape spiegelt grün, ein rot gemaltes rot — der Durchschnitt aller Layer
+   wäre in beiden Fällen dasselbe Orange gewesen.
+
+Nebenbei: Metals `giInstanceShading` war eine handgepflegte Zweitkopie derselben
+Auflösung (der Header warnte davor) und ist jetzt ein dünner Adapter über
+`HE::giInstanceSurface` — eine Quelle für alle Backends.
+
+**Warum SSR nicht betroffen ist:** Der SSR-Trace liest die Trefferfarbe aus
+`heSceneColor`, also aus dem fertig geshadeten Bild — Material, Texturen und
+Layer-Blend sind dort schon drin. SSR kann die Materialfarbe strukturell nicht
+verlieren; sein Ausfallmodus ist ein anderer (kein Screenspace-Treffer → Sky-
+Cubemap-Fallback).
+
+**Witness:** `HE_DUMP_GIREFLLANDSCAPE=1` — bemaltes Landscape (Layer 0 = grün ×
+FBM, Layer 1 = rot) mit zwei Spiegeln: einem kamerazugewandten (nur die
+Ray-Reflexion kann ihn beantworten, SSRs Facing-Gate verwirft solche Strahlen
+per Konstruktion) und einem um 55° gegierten (dessen Strahlen laufen quer durchs
+Bild → SSR trifft). `=2` malt stattdessen den roten Layer über alles; der
+Spiegel muss mitgehen — das ist der Beweis, dass die Paint gelesen wird und
+nicht ein fester Layer. Verifiziert auf Metal (macOS, `scripts/he_shot.py`).
+
+**Offen (gleiche Klasse, nicht von diesem Fix abgedeckt):** Ein `Texture
+Sample` auf der BaseColor faltet weiterhin nicht — ein texturiertes Material
+spiegelt seinen Skalar-`baseColor` (meist weiß). Sauberer Weg wäre eine
+Durchschnittsfarbe der Textur (gebacken wie `approx*`), analog zu dem, was hier
+für die Layer passiert ist.

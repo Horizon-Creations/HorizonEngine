@@ -3,6 +3,8 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 
+#include <algorithm>
+
 namespace HE
 {
 
@@ -41,6 +43,33 @@ GiInstanceSurface giInstanceSurface(const RenderObject& obj, const ContentManage
 		}
 		return { fallback[0], fallback[1], fallback[2] };
 	};
+	// A Landscape Layer Blend BaseColor has no single folded colour — the shader
+	// picks per texel from the terrain's paint. Blend the per-layer folds by that
+	// terrain's AVERAGE weights (carried on the object) so a landscape painted
+	// all-grass reflects grass, not the average of every layer it declares.
+	// Unpainted objects carry { 1, 0, 0, 0 } = layer 0, which is exactly what the
+	// shader's 1×1 default weightmap resolves to.
+	if (ma->approxLayerCount > 0)
+	{
+		const int   n = std::min(ma->approxLayerCount, 4);
+		glm::vec3   blend(0.0f);
+		float       wsum = 0.0f;
+		for (int i = 0; i < n; ++i)
+		{
+			const float w = obj.landscapeLayerWeights[i];
+			if (w <= 0.0f) continue;
+			blend += glm::vec3(ma->approxLayerColor[i][0], ma->approxLayerColor[i][1],
+			                   ma->approxLayerColor[i][2]) * w;
+			wsum  += w;
+		}
+		// No weight on any DECLARED layer (paint that only touches channels the
+		// material doesn't use) → the layer average the fold already computed.
+		s.albedo *= (wsum > 1e-4f) ? blend / wsum
+		                           : glm::vec3(ma->approxBaseColor[0], ma->approxBaseColor[1],
+		                                       ma->approxBaseColor[2]);
+		s.emissive = slotValue(ma->approxEmissiveSlot, ma->approxEmissive);
+		return s;
+	}
 	s.albedo   *= slotValue(ma->approxBaseColorSlot, ma->approxBaseColor);
 	s.emissive  = slotValue(ma->approxEmissiveSlot,  ma->approxEmissive);
 	return s;

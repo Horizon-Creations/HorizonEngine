@@ -1303,6 +1303,16 @@ const MatGraphLink* approxFindLink(const MaterialGraph& g, int dstNode, int dstP
 bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
                     const std::map<std::string, bool>* sw);
 
+// Analytic means of the procedural generators (MaterialShaderLibrary's noise
+// helpers). Folding them to their average instead of failing is what keeps the
+// ubiquitous `Colour × Noise` mottling chain from collapsing the WHOLE pin to
+// white: heHash21/heHash31 are uniform on [0,1) → mean 0.5, and heFbm/heFbm3
+// sum four octaves with amplitudes 0.5+0.25+0.125+0.0625 = 0.9375, so their
+// mean is 0.9375 × 0.5. Checker emits 0 or 1 in equal measure.
+constexpr float kApproxNoiseMean   = 0.5f;
+constexpr float kApproxFbmMean     = 0.46875f;
+constexpr float kApproxCheckerMean = 0.5f;
+
 // Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
 // registry default (splat — the same coercion codegen applies to scalars).
 bool approxFoldInput(const MaterialGraph& g, const MatGraphNode& node, int pin,
@@ -1313,6 +1323,51 @@ bool approxFoldInput(const MaterialGraph& g, const MatGraphNode& node, int pin,
     const MatNodeDesc& d = matNodeDesc(node.type);
     const float def = (pin >= 0 && pin < (int)d.inputs.size()) ? d.inputs[pin].def : 0.0f;
     out[0] = out[1] = out[2] = out[3] = def;
+    return true;
+}
+
+// Fold a Landscape Layer Blend's layer inputs, ONE colour each (index = weightmap
+// channel). `foldedMask` bit k = layer k folded; an UNCONNECTED layer is not
+// authored at all and never counts, so it stays out of both the mask and any
+// average built from these.
+int approxFoldLayers(const MaterialGraph& g, const MatGraphNode& n, int depth,
+                     float layers[kMatMaxLandscapeLayers][4], uint32_t& foldedMask,
+                     const std::map<std::string, bool>* sw)
+{
+    const std::vector<std::string> names = matLandscapeLayerNames(n.s);
+    const int count = std::min((int)names.size(), kMatMaxLandscapeLayers);
+    foldedMask = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        for (int k = 0; k < 4; ++k) layers[i][k] = 0.0f;
+        if (!approxFindLink(g, n.id, i)) continue;  // unconnected → not authored
+        if (approxFoldInput(g, n, i, depth + 1, layers[i], sw))
+            foldedMask |= (1u << i);
+    }
+    return count;
+}
+
+// The shader weights the layers by the terrain's painted weightmap — per-texel
+// data no CPU fold can see — so the flat average over the AUTHORED layers is the
+// honest per-instance answer. All-unfoldable → false (the caller keeps its
+// default). Consumers that DO know the paint (giInstanceSurface, via the
+// terrain's average weights) re-blend MatApproxSurface::layerColor instead.
+bool approxFoldLayerBlend(const MaterialGraph& g, const MatGraphNode& n, int depth,
+                          float out[4], const std::map<std::string, bool>* sw)
+{
+    float layers[kMatMaxLandscapeLayers][4];
+    uint32_t mask = 0;
+    const int count = approxFoldLayers(g, n, depth, layers, mask, sw);
+    float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    int   folded = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (!(mask & (1u << i))) continue;
+        for (int k = 0; k < 4; ++k) acc[k] += layers[i][k];
+        ++folded;
+    }
+    if (folded == 0) return false;
+    for (int k = 0; k < 4; ++k) out[k] = acc[k] / static_cast<float>(folded);
     return true;
 }
 
@@ -1383,8 +1438,74 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
             !approxFoldInput(g, *n, 2, depth + 1, t, sw)) return false;
         for (int k = 0; k < 4; ++k) out[k] = a[k] + (b[k] - a[k]) * t[0];
         return true;
+    case MatNodeType::Absolute:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw)) return false;
+        for (int k = 0; k < 4; ++k) out[k] = std::abs(a[k]);
+        return true;
+    case MatNodeType::Fract:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw)) return false;
+        for (int k = 0; k < 4; ++k) out[k] = a[k] - std::floor(a[k]);
+        return true;
+    // Scalar-result nodes: codegen coerces their inputs to float (component .x)
+    // and the single result splats on the way out — the fold mirrors both.
+    case MatNodeType::Power:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw)) return false;
+        out[0] = out[1] = out[2] = out[3] = std::pow(std::max(a[0], 0.0f), b[0]);
+        return true;
+    case MatNodeType::Sine:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw)) return false;
+        out[0] = out[1] = out[2] = out[3] = std::sin(a[0]);
+        return true;
+    case MatNodeType::Step:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw)) return false;
+        out[0] = out[1] = out[2] = out[3] = (b[0] < a[0]) ? 0.0f : 1.0f;
+        return true;
+    case MatNodeType::Smoothstep:
+    {
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw) ||
+            !approxFoldInput(g, *n, 2, depth + 1, t, sw)) return false;
+        const float den = b[0] - a[0];
+        const float x   = std::abs(den) > 1e-8f
+            ? std::clamp((t[0] - a[0]) / den, 0.0f, 1.0f) : 0.0f;
+        out[0] = out[1] = out[2] = out[3] = x * x * (3.0f - 2.0f * x);
+        return true;
+    }
+    case MatNodeType::Combine3:
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw) ||
+            !approxFoldInput(g, *n, 2, depth + 1, t, sw)) return false;
+        out[0] = a[0]; out[1] = b[0]; out[2] = t[0]; out[3] = 1.0f;
+        return true;
+    case MatNodeType::CombineRGBA:
+    {
+        float w[4];
+        if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
+            !approxFoldInput(g, *n, 1, depth + 1, b, sw) ||
+            !approxFoldInput(g, *n, 2, depth + 1, t, sw) ||
+            !approxFoldInput(g, *n, 3, depth + 1, w, sw)) return false;
+        out[0] = a[0]; out[1] = b[0]; out[2] = t[0]; out[3] = w[0];
+        return true;
+    }
+    // Procedural generators: their analytic mean (see the k*Mean constants).
+    // Noise Texture's two pins (vec3(v) and v) are the same scalar, so the
+    // splat is right for whichever pin the consumer read.
+    case MatNodeType::ValueNoise:
+        out[0] = out[1] = out[2] = out[3] = kApproxNoiseMean;
+        return true;
+    case MatNodeType::Fbm:
+    case MatNodeType::NoiseTexture:
+        out[0] = out[1] = out[2] = out[3] = kApproxFbmMean;
+        return true;
+    case MatNodeType::Checker:
+        out[0] = out[1] = out[2] = out[3] = kApproxCheckerMean;
+        return true;
+    case MatNodeType::LandscapeLayerBlend:
+        return approxFoldLayerBlend(g, *n, depth, out, sw);
     default:
-        return false; // textures, noise, per-fragment inputs … cannot fold
+        return false; // textures, per-fragment inputs … cannot fold
     }
 }
 
@@ -1449,6 +1570,23 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g,
     };
     foldPin(kMatOutputBaseColorPin, out.baseColor, out.baseColorParam);
     foldPin(kMatOutputEmissivePin,  out.emissive,  out.emissiveParam);
+    // BaseColor straight off a Landscape Layer Blend: keep the layers SEPARATE
+    // as well, so a consumer holding a specific terrain's painted weights can
+    // reproduce that terrain's colour instead of the layer average above. A
+    // layer that will not fold takes the average as its stand-in — the blend
+    // then stays in the material's own colour range rather than jumping white.
+    if (const MatGraphNode* src = approxSource(g, output->id, kMatOutputBaseColorPin,
+                                               switchOverrides);
+        src && src->type == MatNodeType::LandscapeLayerBlend)
+    {
+        float layers[kMatMaxLandscapeLayers][4];
+        uint32_t mask = 0;
+        out.layerCount = approxFoldLayers(g, *src, 0, layers, mask, switchOverrides);
+        for (int i = 0; i < out.layerCount; ++i)
+            for (int k = 0; k < 3; ++k)
+                out.layerColor[i][k] = (mask & (1u << i)) ? layers[i][k] : out.baseColor[k];
+        if (mask == 0) out.layerCount = 0; // nothing folded → no usable split
+    }
     // Scalar pins (metallic/roughness) — constants only: the GI bounce loop
     // needs a per-instance mirror-ness, a fold-time snapshot is good enough.
     auto foldScalar = [&](int pin, float& v)

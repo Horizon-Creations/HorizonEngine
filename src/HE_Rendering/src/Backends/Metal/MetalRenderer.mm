@@ -11,6 +11,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
+#include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -5511,49 +5512,19 @@ void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
 // material colour is resolved at DRAW time from the MaterialComponent's asset —
 // so resolve it here the same way, or every ray hit reads white and the GI
 // bounce/reflections lose the object's colour entirely.
-// Per-instance shading constants for the GI ray kernels (TLAS/BVH hits carry no
-// material evaluation): albedo + emissive. Graph materials use the CPU fold
-// (MaterialAsset::approxBaseColor/approxEmissive, see matGraphApproxSurface); a
-// Param-driven pin reads the CURRENT slot value — per-entity paramOverride block
-// first (it is the merged HeParams block), else the material's shaderParamData —
-// so editor slider drags and per-entity colours reflect live. Plain materials
-// keep the asset baseColor; they have no emissive.
+//
+// The resolution itself is HE::giInstanceSurface (shared with the GL 4.3 port):
+// this used to be a hand-kept second copy, and the two drifting apart showed up
+// as the same scene reflecting different colours per backend. Thin adapter only.
 static void giInstanceShading(const RenderObject& obj, const ContentManager* cm,
                               glm::vec3& albedoOut, glm::vec3& emissiveOut,
                               float& metallicOut, float& roughnessOut)
 {
-	albedoOut    = obj.baseColor * glm::vec3(obj.instanceTint);
-	emissiveOut  = glm::vec3(0.0f);
-	metallicOut  = 0.0f;
-	roughnessOut = 0.5f;
-	if (!cm || obj.materialAssetId == HE::UUID{}) return;
-	const MaterialAsset* ma = cm->getMaterial(obj.materialAssetId);
-	if (!ma) return;
-	if (ma->customShaderFragGlsl.empty())
-	{
-		albedoOut *= glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]);
-		metallicOut  = ma->metallic;
-		roughnessOut = ma->roughness;
-		return;
-	}
-	metallicOut  = ma->approxMetallic;
-	roughnessOut = ma->approxRoughness;
-	auto slotValue = [&](int32_t slot, const float fallback[3]) -> glm::vec3
-	{
-		if (slot >= 0)
-		{
-			const size_t base = static_cast<size_t>(slot) * 4;
-			if (obj.paramOverride.size() >= base + 3)
-				return { obj.paramOverride[base], obj.paramOverride[base + 1],
-				         obj.paramOverride[base + 2] };
-			if (ma->shaderParamData.size() >= base + 3)
-				return { ma->shaderParamData[base], ma->shaderParamData[base + 1],
-				         ma->shaderParamData[base + 2] };
-		}
-		return { fallback[0], fallback[1], fallback[2] };
-	};
-	albedoOut   *= slotValue(ma->approxBaseColorSlot, ma->approxBaseColor);
-	emissiveOut  = slotValue(ma->approxEmissiveSlot,  ma->approxEmissive);
+	const HE::GiInstanceSurface s = HE::giInstanceSurface(obj, cm);
+	albedoOut    = s.albedo;
+	emissiveOut  = s.emissive;
+	metallicOut  = s.metallic;
+	roughnessOut = s.roughness;
 }
 
 MetalRenderer::GISwBlasRange MetalRenderer::BuildGISwBlas(const HE::UUID& meshId)

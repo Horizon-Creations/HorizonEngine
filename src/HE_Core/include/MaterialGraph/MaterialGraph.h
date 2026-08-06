@@ -247,8 +247,11 @@ using MatFunctionLoader = std::function<const MaterialGraph*(const std::string& 
 //   *Param empty — the folded constant (Const*/Param nodes and pure component-wise
 //     math: Add/Subtract/Multiply/Divide/Lerp/OneMinus/Saturate folded recursively;
 //     Param values fold from the node defaults, i.e. fold-time snapshots).
-// Anything computed (textures, noise, UV/time/view inputs …) does not fold:
-// BaseColor falls back to white, Emissive to black — exactly the pre-approx look.
+// The procedural GENERATORS (Value Noise / FBM / Noise Texture / Checker) fold to
+// their analytic MEAN rather than failing, so the common `Colour × Noise` mottling
+// chain keeps the colour instead of collapsing the whole pin to white.
+// Anything genuinely per-texel (textures, UV/time/view inputs …) still does not
+// fold: BaseColor falls back to white, Emissive to black — the pre-approx look.
 struct MatApproxSurface
 {
     float       baseColor[3] = { 1.0f, 1.0f, 1.0f };
@@ -257,6 +260,13 @@ struct MatApproxSurface
     float       roughness    = 0.5f;
     std::string baseColorParam; // non-empty = read the pin live from this param slot
     std::string emissiveParam;
+    // BaseColor driven by a Landscape Layer Blend: each layer folded on its own,
+    // in weightmap-channel order. layerCount = 0 → not layer-blended, baseColor is
+    // the whole answer. A consumer that knows the terrain's PAINTED weights blends
+    // these by them (a green-painted landscape then reflects green); one that does
+    // not falls back to baseColor, which holds the flat average of the layers.
+    float       layerColor[kMatMaxLandscapeLayers][3] = {};
+    int         layerCount = 0;
 };
 // switchOverrides: a material INSTANCE's StaticSwitch permutation (name → on);
 // the fold follows the TAKEN branch exactly like codegen. Null = node defaults.
