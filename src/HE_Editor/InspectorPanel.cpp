@@ -782,28 +782,13 @@ void render(AppContext& ctx)
 						hint("%zu override(s) on this entity.", m->paramOverrides.size());
 				}
 
-				// Custom shader (fragment GLSL). Empty → built-in PBR. When set, the
-				// renderer cross-compiles it (shared MaterialShaderLibrary) and draws this
-				// material with its own pipeline. Edited in a separate buffer so the pipeline
-				// isn't recompiled on every keystroke — applied on focus-loss / Apply, then
-				// picked up live (the renderer re-resolves the shader each frame).
-				ImGui::SeparatorText("Custom Shader (Fragment GLSL)");
-				hint("in vec3 vNormal (loc0), vColor (loc1)  ->  out vec4 oColor (loc0)");
-				static std::string s_shaderEdit;
-				static HE::UUID    s_shaderEditFor{};
-				if (!(s_shaderEditFor == m->materialAssetId))
-				{
-					s_shaderEdit    = mat->customShaderFragGlsl;
-					s_shaderEditFor = m->materialAssetId;
-				}
-				ImGui::InputTextMultiline("##customShader", &s_shaderEdit, ImVec2(-1.0f, 160.0f));
-				bool applyShader = ImGui::IsItemDeactivatedAfterEdit();
-				if (ImGui::Button("Apply Shader")) applyShader = true;
-				ImGui::SameLine();
-				if (ImGui::Button("Clear (use PBR)")) { s_shaderEdit.clear(); applyShader = true; }
-				ImGui::SameLine();
-				ImGui::TextDisabled(mat->customShaderFragGlsl.empty() ? "(built-in PBR)" : "(custom active)");
-				if (applyShader) mat->customShaderFragGlsl = s_shaderEdit;
+				// Deliberately NO shader code here. customShaderFragGlsl is what
+				// the material GRAPH generates — a hand-edit box on the entity was
+				// a leftover from before the graph existed, and anything typed
+				// into it was silently overwritten by the next regenerate. The
+				// shader is read in the Material Editor's Shader Code view and
+				// authored as nodes; the Details panel stays at the surface
+				// parameters an entity actually owns.
 
 				ImGui::Spacing();
 				// Built-in defaults (DefaultMaterial / DefaultTerrainMaterial) are

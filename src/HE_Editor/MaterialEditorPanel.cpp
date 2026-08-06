@@ -1847,10 +1847,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 	}
 	else if (!showGraph)
 	{
-		// Read-only generated fragment GLSL.
+		// Read-only generated fragment GLSL. The flag alone was already set, but
+		// the box drew exactly like every editable field — same background, same
+		// UI font — so it INVITED typing it would then swallow. Code font and a
+		// sunken background say "viewer" before the first keystroke bounces.
 		ImGui::TextDisabled("Generated fragment GLSL (read-only)");
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.07f, 0.07f, 0.075f, 1.0f));
+		if (ctx.codeFont) ImGui::PushFont(ctx.codeFont);
 		ImGui::InputTextMultiline("##shaderView", &st.lastGlsl, ImGui::GetContentRegionAvail(),
 			ImGuiInputTextFlags_ReadOnly);
+		if (ctx.codeFont) ImGui::PopFont();
+		ImGui::PopStyleColor();
 	}
 	else
 	{
