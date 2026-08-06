@@ -32,15 +32,19 @@ void GitController::openProject(const std::filesystem::path& projectRoot)
 	m_projectRoot = projectRoot;
 	m_service.open(projectRoot);
 	// Force the first poll to happen on the next update rather than after a full
-	// interval, so opening a project shows its state immediately.
-	m_lastPollMs = 0;
+	// interval, so opening a project shows its state immediately. The FETCH clock
+	// restarts too, so switching projects does not inherit the previous one's
+	// timer and hit the network on the first frame.
+	m_lastPollMs  = 0;
+	m_lastFetchMs = 0;
 }
 
 void GitController::closeProject()
 {
 	m_service.close();
 	m_projectRoot.clear();
-	m_lastPollMs = 0;
+	m_lastPollMs  = 0;
+	m_lastFetchMs = 0;
 }
 
 void GitController::requestRefresh()
@@ -140,11 +144,57 @@ void GitController::update(std::uint64_t nowMs)
 	// behind it, and git serialises on index.lock anyway.
 	if (m_service.busy()) return;
 
+	// ── Background fetch ─────────────────────────────────────────────────────
+	// Off by default and never on the first frame after opening a project: the
+	// point is to keep the ahead/behind counters honest over a long session, not
+	// to reach out to the network the moment the editor starts.
+	//
+	// Read-only by construction — git fetch updates the remote-tracking refs and
+	// nothing else, so it is safe to run on a timer AND safe for a collaboration
+	// guest, who may not push or pull. mayModify() is deliberately not consulted
+	// here: nothing on disk moves.
+	//
+	// Checked before the status poll, since a fetch queues its own refresh and
+	// doing both would be one whole-tree walk too many.
+	if (autoFetch && autoFetchMinutes > 0 && m_service.isRepo() &&
+	    !m_service.remoteUrl().empty())
+	{
+		// Floored rather than trusted. The preference offers sane values, but it
+		// lands in config.json where a typo (or a zero) turns a background task
+		// into a request storm against someone's forge.
+		const std::uint64_t minutes =
+			static_cast<std::uint64_t>(std::max(kMinFetchMinutes, autoFetchMinutes));
+		const std::uint64_t interval = minutes * 60u * 1000u;
+		if (m_lastFetchMs == 0)
+		{
+			// Start the clock rather than firing immediately.
+			m_lastFetchMs = nowMs;
+		}
+		else if (nowMs - m_lastFetchMs >= interval)
+		{
+			m_lastFetchMs = nowMs;
+			// Quiet: a fetch nobody asked for has no business writing into the
+			// panel's status line. A failure still surfaces through lastError(),
+			// because an expired token IS worth knowing about — and the minimum
+			// interval keeps a broken remote from being retried more than a
+			// handful of times an hour, which is why there is no backoff here.
+			m_service.requestFetch(/*quiet=*/true);
+			return;
+		}
+	}
+
 	const std::uint64_t interval = m_panelVisible ? kPollVisibleMs : kPollHiddenMs;
 	if (m_lastPollMs != 0 && nowMs - m_lastPollMs < interval) return;
 
 	m_lastPollMs = nowMs;
 	m_service.requestStatus();
+}
+
+void GitController::requestFetch()
+{
+	if (m_service.remoteUrl().empty()) return;
+	m_lastFetchMs = 0;   // a manual fetch restarts the automatic clock
+	m_service.requestFetch(/*quiet=*/false);
 }
 
 std::string GitController::toRepoRelative(const std::string& absolutePath) const

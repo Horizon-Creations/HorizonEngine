@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
+#include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -652,6 +653,13 @@ void render(AppContext& ctx, float dt)
 					navigating, viewportHovered, dt,
 					[](const HE::UUID& meshId) { s_aabbCache.erase(meshId); });
 
+				// ── Collaboration name tags ────────────────────────────────
+				// Last, so they sit over the gizmo and the brush cursor: this is
+				// the layer that has to stay findable, and the camera matrices it
+				// projects with are the ones the frame was just rendered from.
+				CollabPresenceBar::DrawViewportMarkers(
+					ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+					rectMin.x, rectMin.y, rectMax.x, rectMax.y);
 			}
 			else
 				ImGui::TextDisabled("  Viewport not available on this backend yet.");

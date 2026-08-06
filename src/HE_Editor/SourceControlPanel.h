@@ -16,4 +16,17 @@ struct AppContext;
 namespace SourceControlPanel
 {
 	void DrawSourceControlWindow(AppContext& ctx, bool& open);
+
+	// One line of repository status for the editor's footer bar: the branch and
+	// how many files have changed. The point is ambient awareness — "I have
+	// eleven files open that I have not committed" is the sort of thing you want
+	// to notice, not to go looking for.
+	//
+	// Returns true when it was clicked, which the caller turns into "reveal the
+	// panel". The reveal itself lives with the panel's open flag in EditorUI
+	// rather than here, so there is exactly one place that decides what showing a
+	// tool window means.
+	//
+	// Call from inside the footer window; draws nothing without a project.
+	bool DrawFooterStatus(AppContext& ctx);
 }

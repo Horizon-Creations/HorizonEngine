@@ -124,7 +124,7 @@ void render(AppContext& ctx)
             {
                 // Dim the row: it is not yours to edit right now.
                 float rgb[3];
-                CollabController::participantColor(lock->owner, rgb);
+                ctx.collab->colorFor(lock->owner, rgb);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
             }
 
@@ -145,7 +145,7 @@ void render(AppContext& ctx)
                 else
                 {
                     float rgb[3];
-                    CollabController::participantColor(lock->owner, rgb);
+                    ctx.collab->colorFor(lock->owner, rgb);
                     ImGui::TextColored(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f),
                                        "[%s]", lock->ownerName.c_str());
                 }

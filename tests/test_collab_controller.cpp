@@ -1135,3 +1135,255 @@ TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")
     CHECK_FALSE(CollabController::isSyncableAsset("Content/NoExtension"));
     CHECK_FALSE(CollabController::isSyncableAsset(""));
 }
+
+// ─── Profile pictures ────────────────────────────────────────────────────────
+// The crop-and-scale step, which is the only part of the picture path with real
+// arithmetic in it. Everything around it (the file dialog, stb_image, the
+// settings directory) is either the OS's or would mean writing into the
+// developer's own editor configuration to observe.
+
+namespace {
+
+// A w×h RGBA image whose red channel is the column index and green channel the
+// row, so a resampled result says exactly which source pixels it came from.
+std::vector<std::uint8_t> gradientRgba(int w, int h)
+{
+    std::vector<std::uint8_t> px(static_cast<std::size_t>(w) * h * 4u);
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            std::uint8_t* p = px.data() + (static_cast<std::size_t>(y) * w + x) * 4u;
+            p[0] = static_cast<std::uint8_t>(x);
+            p[1] = static_cast<std::uint8_t>(y);
+            p[2] = 0;
+            p[3] = 255;
+        }
+    }
+    return px;
+}
+
+} // namespace
+
+TEST_CASE("CollabController: a picture is cropped to a square from the centre")
+{
+    // 4 wide, 2 tall → the 2×2 centre, i.e. columns 1 and 2. Cropping from the
+    // corner instead would take columns 0 and 1 and behead every portrait that
+    // is not already square.
+    const auto src = gradientRgba(4, 2);
+    const auto out = CollabController::resampleSquareRgba(src.data(), 4, 2, 2);
+
+    // Row stride is dst * 4 bytes, so the second output row starts at byte 8.
+    REQUIRE(out.size() == 2u * 2u * 4u);
+    CHECK(out[0] == 1);        // top-left came from column 1
+    CHECK(out[4] == 2);        // top-right from column 2
+    CHECK(out[1] == 0);        // …both of row 0
+    CHECK(out[8 + 1] == 1);    // and the second output row is source row 1
+}
+
+TEST_CASE("CollabController: a flat colour survives any rescale")
+{
+    // Averaging must not tint or darken. A portrait that comes back a shade off
+    // is the kind of thing nobody reports and everybody notices.
+    std::vector<std::uint8_t> src(64 * 64 * 4);
+    for (std::size_t i = 0; i < src.size(); i += 4)
+    {
+        src[i + 0] = 200; src[i + 1] = 100; src[i + 2] = 50; src[i + 3] = 255;
+    }
+
+    for (const int size : { 1, 7, 16, 64, 128 })
+    {
+        const auto out = CollabController::resampleSquareRgba(src.data(), 64, 64, size);
+        REQUIRE(out.size() == static_cast<std::size_t>(size) * size * 4u);
+        for (std::size_t i = 0; i < out.size(); i += 4)
+        {
+            CHECK(out[i + 0] == 200);
+            CHECK(out[i + 1] == 100);
+            CHECK(out[i + 2] == 50);
+            CHECK(out[i + 3] == 255);
+        }
+    }
+}
+
+TEST_CASE("CollabController: upscaling a one-pixel image fills the whole square")
+{
+    // The degenerate case: every destination box collapses onto the single
+    // source pixel. Without the box floor it would collapse to nothing and the
+    // result would be transparent black.
+    const std::uint8_t one[4] = { 10, 20, 30, 40 };
+    const auto out = CollabController::resampleSquareRgba(one, 1, 1, 4);
+
+    REQUIRE(out.size() == 4u * 4u * 4u);
+    for (std::size_t i = 0; i < out.size(); i += 4)
+    {
+        CHECK(out[i + 0] == 10);
+        CHECK(out[i + 1] == 20);
+        CHECK(out[i + 2] == 30);
+        CHECK(out[i + 3] == 40);
+    }
+}
+
+TEST_CASE("CollabController: a tall picture keeps its width, not its height")
+{
+    // 2 wide, 6 tall → the square side is 2, taken from rows 2 and 3.
+    const auto src = gradientRgba(2, 6);
+    const auto out = CollabController::resampleSquareRgba(src.data(), 2, 6, 2);
+
+    REQUIRE(out.size() == 2u * 2u * 4u);
+    CHECK(out[1] == 2);        // first output row is source row 2
+    CHECK(out[8 + 1] == 3);    // second is row 3
+}
+
+TEST_CASE("CollabController: degenerate picture input yields nothing, not a crash")
+{
+    const std::uint8_t one[4] = { 1, 2, 3, 4 };
+    CHECK(CollabController::resampleSquareRgba(nullptr, 8, 8, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 0, 8, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 8, 0, 4).empty());
+    CHECK(CollabController::resampleSquareRgba(one, 1, 1, 0).empty());
+}
+
+// ─── Viewport markers ────────────────────────────────────────────────────────
+// Where a participant's name tag lands on screen. The drawing is ImGui's and
+// cannot be asserted here; the projection can, and it is the part that goes
+// silently wrong — an inverted Y puts every tag on the wrong side of the image,
+// and a mishandled behind-the-camera case puts somebody standing behind you in
+// front of you, which is worse than not drawing them at all.
+
+#include "../src/HE_Editor/CollabPresenceBar.h"
+
+#include <glm/gtc/matrix_transform.hpp>
+
+namespace {
+
+// A camera at the origin looking down -Z, glm's convention throughout the
+// engine, with a 640×480 image at screen origin (100, 50).
+struct Cam
+{
+    glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f),
+                                 glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), 640.0f / 480.0f, 0.1f, 1000.0f);
+    float minX = 100.0f, minY = 50.0f, maxX = 740.0f, maxY = 530.0f;
+    float centreX() const { return (minX + maxX) * 0.5f; }
+    float centreY() const { return (minY + maxY) * 0.5f; }
+
+    CollabPresenceBar::MarkerPlacement place(const glm::vec3& p, float inset = 22.0f) const
+    {
+        return CollabPresenceBar::PlaceMarker(view, proj, p, minX, minY, maxX, maxY, inset);
+    }
+};
+
+} // namespace
+
+TEST_CASE("CollabPresenceBar: a point straight ahead lands in the middle")
+{
+    const Cam cam;
+    const auto m = cam.place({ 0.0f, 0.0f, -10.0f });
+
+    CHECK(m.onScreen);
+    CHECK(m.x == doctest::Approx(cam.centreX()).epsilon(0.001));
+    CHECK(m.y == doctest::Approx(cam.centreY()).epsilon(0.001));
+}
+
+TEST_CASE("CollabPresenceBar: up is up and right is right")
+{
+    // The Y flip in one assertion: a participant floating ABOVE the camera must
+    // draw in the upper half of the image, where screen y is SMALLER.
+    const Cam cam;
+
+    const auto above = cam.place({ 0.0f, 2.0f, -10.0f });
+    REQUIRE(above.onScreen);
+    CHECK(above.y < cam.centreY());
+    CHECK(above.x == doctest::Approx(cam.centreX()).epsilon(0.001));
+
+    const auto below = cam.place({ 0.0f, -2.0f, -10.0f });
+    REQUIRE(below.onScreen);
+    CHECK(below.y > cam.centreY());
+
+    const auto right = cam.place({ 2.0f, 0.0f, -10.0f });
+    REQUIRE(right.onScreen);
+    CHECK(right.x > cam.centreX());
+
+    const auto left = cam.place({ -2.0f, 0.0f, -10.0f });
+    REQUIRE(left.onScreen);
+    CHECK(left.x < cam.centreX());
+}
+
+TEST_CASE("CollabPresenceBar: someone behind you is pinned, never drawn in front")
+{
+    // The failure this rules out: the projection mirrors a point behind the eye
+    // through the origin, so somebody standing behind and to the LEFT would be
+    // drawn in front and to the right — confidently, and wrongly.
+    const Cam cam;
+    const auto m = cam.place({ -3.0f, 0.0f, 10.0f });   // behind, to the left
+
+    CHECK_FALSE(m.onScreen);
+    // Pinned to the left edge…
+    CHECK(m.x < cam.centreX());
+    // …with the arrow pointing left (π radians, allowing for the wrap).
+    CHECK(std::abs(std::cos(m.arrowAngle) + 1.0f) < 0.001f);
+}
+
+TEST_CASE("CollabPresenceBar: a pinned marker stays inside the image")
+{
+    const Cam cam;
+    constexpr float inset = 22.0f;
+
+    const glm::vec3 offscreen[] = {
+        {  0.0f,  0.0f,  10.0f },   // directly behind
+        { 60.0f,  0.0f, -10.0f },   // far right, in front
+        {-60.0f,  0.0f, -10.0f },
+        {  0.0f, 60.0f, -10.0f },
+        {  0.0f,-60.0f, -10.0f },
+        { 40.0f, 40.0f,  10.0f },   // behind and off to a corner
+    };
+    for (const glm::vec3& p : offscreen)
+    {
+        const auto m = cam.place(p, inset);
+        CHECK_FALSE(m.onScreen);
+        CHECK(m.x >= cam.minX + inset - 0.5f);
+        CHECK(m.x <= cam.maxX - inset + 0.5f);
+        CHECK(m.y >= cam.minY + inset - 0.5f);
+        CHECK(m.y <= cam.maxY - inset + 0.5f);
+    }
+}
+
+TEST_CASE("CollabPresenceBar: the arrow points the way you have to turn")
+{
+    const Cam cam;
+
+    // In front but far off to the right: pinned right, arrow right.
+    const auto right = cam.place({ 60.0f, 0.0f, -10.0f });
+    REQUIRE_FALSE(right.onScreen);
+    CHECK(std::cos(right.arrowAngle) > 0.9f);
+
+    // Above: pinned up, arrow up — which in screen space is NEGATIVE y, so the
+    // sine is negative. Getting this backwards sends people the wrong way.
+    const auto up = cam.place({ 0.0f, 60.0f, -10.0f });
+    REQUIRE_FALSE(up.onScreen);
+    CHECK(std::sin(up.arrowAngle) < -0.9f);
+}
+
+TEST_CASE("CollabPresenceBar: directly behind and dead centre picks a direction")
+{
+    // Degenerate: no direction is more correct than any other. What matters is
+    // that it does not produce a NaN and does not land outside the image.
+    const Cam cam;
+    const auto m = cam.place({ 0.0f, 0.0f, 10.0f });
+
+    CHECK_FALSE(m.onScreen);
+    CHECK(std::isfinite(m.x));
+    CHECK(std::isfinite(m.y));
+    CHECK(m.x >= cam.minX);
+    CHECK(m.x <= cam.maxX);
+    CHECK(m.y >= cam.minY);
+    CHECK(m.y <= cam.maxY);
+}
+
+TEST_CASE("CollabPresenceBar: a degenerate viewport rectangle draws nothing")
+{
+    Cam cam;
+    cam.maxX = cam.minX;
+    const auto m = cam.place({ 0.0f, 0.0f, -10.0f });
+    CHECK_FALSE(m.onScreen);
+}

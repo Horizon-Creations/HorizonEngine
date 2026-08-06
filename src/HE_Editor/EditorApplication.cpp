@@ -1,6 +1,7 @@
 #include "EditorApplication.h"
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
+#include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
@@ -1764,21 +1765,34 @@ void EditorApplication::OnRender(float dt)
 			}
 
 			// ── Collaboration presence ───────────────────────────────────────
-			// Where everyone else is looking, and what they have selected. Drawn
-			// as overlay lines only — presence never touches scene state, which
-			// is what makes it the low-risk half of collaboration.
+			// Where everyone else is, and what they have selected. Overlay lines
+			// only — presence never touches scene state, which is what makes it
+			// the low-risk half of collaboration.
+			//
+			// This is the DEPTH-AWARE half of the marker: it is occluded by the
+			// scene, so it says "behind that wall" the way nothing drawn on top
+			// of the image can. The legible half — name, face, off-screen arrow —
+			// is CollabPresenceBar::DrawViewportMarkers, over the rendered frame.
+			//
+			// It used to be a wire frustum: eight hairlines forming a box seen
+			// edge-on half the time, which is exactly the shape that disappears
+			// against a detailed scene. Rings billboarded into the LOCAL viewer's
+			// view plane keep the same apparent shape from every angle, and three
+			// of them nested give a line renderer something that reads as a solid
+			// stroke rather than a scratch.
 			if (m_collab.inSession())
 			{
+				const glm::vec3 viewer = m_editorCamera.position();
 				const auto localId = m_collab.localParticipant();
 				for (const auto& p : m_collab.participants())
 				{
-					if (p.id == localId) continue;   // no gizmo for our own camera
+					if (p.id == localId) continue;   // no marker for our own camera
 
 					const HE::Net::PresenceState* pres = m_collab.presenceOf(p.id);
 					if (!pres || !pres->valid) continue;
 
 					float rgb[3];
-					CollabController::participantColor(p.id, rgb);
+					m_collab.colorFor(p.id, rgb);
 					const glm::vec3 color(rgb[0], rgb[1], rgb[2]);
 
 					const glm::vec3 eye(pres->cameraPos[0], pres->cameraPos[1],
@@ -1786,31 +1800,60 @@ void EditorApplication::OnRender(float dt)
 					const glm::quat rot(pres->cameraRot[3], pres->cameraRot[0],
 					                    pres->cameraRot[1], pres->cameraRot[2]);
 
-					// A small frustum: four corner rays out to a fixed depth,
-					// closed by the far rectangle. Fixed size on purpose — this
-					// marks a viewpoint, it does not reproduce their FOV.
-					constexpr float kDepth = 1.6f;
-					constexpr float kHalfW = 0.55f;
-					constexpr float kHalfH = 0.32f;
+					// Screen-constant size. A fixed world radius is a speck at
+					// 80 m and swallows the view at 1 m, so it is scaled with the
+					// distance to the local camera and clamped at both ends.
+					const glm::vec3 toViewer = viewer - eye;
+					const float     dist     = glm::length(toViewer);
+					if (dist < 0.001f) continue;   // standing inside their camera
+					const float r = std::clamp(dist * 0.030f, 0.05f, 4.0f);
 
-					const glm::vec3 fwd = rot * glm::vec3(0.0f, 0.0f, -1.0f);
-					const glm::vec3 rgt = rot * glm::vec3(1.0f, 0.0f,  0.0f);
-					const glm::vec3 up  = rot * glm::vec3(0.0f, 1.0f,  0.0f);
-					const glm::vec3 c   = eye + fwd * kDepth;
+					// Billboard basis. The world-up cross degenerates when someone
+					// is directly above or below us, so fall back to their own
+					// right vector there.
+					const glm::vec3 n = toViewer / dist;
+					glm::vec3 right = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), n);
+					if (glm::dot(right, right) < 1e-6f) right = rot * glm::vec3(1, 0, 0);
+					right = glm::normalize(right);
+					const glm::vec3 up = glm::cross(n, right);
 
-					const glm::vec3 corners[4] = {
-						c + rgt * kHalfW + up * kHalfH,
-						c - rgt * kHalfW + up * kHalfH,
-						c - rgt * kHalfW - up * kHalfH,
-						c + rgt * kHalfW - up * kHalfH,
-					};
-					for (int i = 0; i < 4; ++i)
+					// Three nested rings — the line renderer has no thickness, so
+					// this is how a stroke is made wide enough to survive a busy
+					// background.
+					constexpr int kSegments = 28;
+					for (const float scale : { 1.0f, 0.90f, 0.80f })
 					{
-						dbg.line(eye, corners[i], color);
-						dbg.line(corners[i], corners[(i + 1) % 4], color);
+						const float rr = r * scale;
+						glm::vec3 prev = eye + right * rr;
+						for (int i = 1; i <= kSegments; ++i)
+						{
+							const float a = 6.2831853f * float(i) / float(kSegments);
+							const glm::vec3 cur =
+								eye + right * (std::cos(a) * rr) + up * (std::sin(a) * rr);
+							dbg.line(prev, cur, color);
+							prev = cur;
+						}
 					}
-					// Short stub marking "up", so the gizmo's roll is readable.
-					dbg.line(c, c + up * (kHalfH * 1.6f), color);
+
+					// Where they are looking, as an arrow lying in the same
+					// billboard plane — projected there rather than drawn in 3D so
+					// it never points straight at the viewer and vanishes.
+					const glm::vec3 fwd = rot * glm::vec3(0.0f, 0.0f, -1.0f);
+					glm::vec3 flat(glm::dot(fwd, right), glm::dot(fwd, up), 0.0f);
+					if (glm::dot(glm::vec2(flat), glm::vec2(flat)) > 1e-6f)
+					{
+						flat = glm::normalize(flat);
+						const glm::vec3 dir  = right * flat.x + up * flat.y;
+						const glm::vec3 side = right * -flat.y + up * flat.x;
+						const glm::vec3 tip  = eye + dir * (r * 2.4f);
+						const glm::vec3 base = eye + dir * (r * 1.15f);
+						// Barbs plus a crossbar, so the head reads as filled at a
+						// distance instead of as two stray hairs.
+						dbg.line(base, tip, color);
+						dbg.line(tip, base + side * (r * 0.45f), color);
+						dbg.line(tip, base - side * (r * 0.45f), color);
+						dbg.line(base + side * (r * 0.45f), base - side * (r * 0.45f), color);
+					}
 
 					// Their selection, in the same colour — this is what makes
 					// "don't both grab that object" visible before it happens.
@@ -1825,8 +1868,12 @@ void EditorApplication::OnRender(float dt)
 						if (!reg.valid(e)) continue;
 						if (auto* tc = reg.try_get<TransformComponent>(e))
 						{
-							dbg.aabb(tc->position - glm::vec3(0.6f),
-							         tc->position + glm::vec3(0.6f), color);
+							// Two boxes a hair apart, for the same reason the rings
+							// are nested: one hairline cube is easy to lose.
+							dbg.aabb(tc->position - glm::vec3(0.60f),
+							         tc->position + glm::vec3(0.60f), color);
+							dbg.aabb(tc->position - glm::vec3(0.64f),
+							         tc->position + glm::vec3(0.64f), color);
 						}
 					}
 				}
@@ -4314,8 +4361,10 @@ void EditorApplication::OnShutdown()
 		m_logoTexture = 0;
 	}
 	// Same for the Content Browser's rendered asset tiles — they are renderer-owned
-	// textures, so they have to go while the renderer is still alive.
+	// textures, so they have to go while the renderer is still alive. The
+	// collaboration avatars are uploaded the same way and go with them.
 	AssetThumbnailCache::shutdown();
+	CollabPresenceBar::Shutdown(renderer());
 
 	m_audioEngine.shutdown();
 

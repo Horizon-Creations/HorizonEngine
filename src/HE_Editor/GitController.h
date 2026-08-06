@@ -66,6 +66,25 @@ public:
 	void requestPull();
 	void requestSetRemote(const std::string& url);
 
+	// ── Background fetch ─────────────────────────────────────────────────────
+	// Update the remote-tracking refs on a timer so "3 behind" is a fact rather
+	// than whatever was true when the project was opened. Nothing on disk moves,
+	// which is what separates this from a pull and makes it safe to automate —
+	// and safe for a collaboration guest, who may not pull at all.
+	//
+	// Persisted by the Preferences page, not here, exactly like
+	// autoPushAfterCommit: the controller is where the schedule lives, the panel
+	// is where the user's choice does.
+	bool autoFetch        = false;
+	int  autoFetchMinutes = 15;
+	// Floor applied to autoFetchMinutes whatever the config says. A network call
+	// on a timer is worth being conservative about.
+	static constexpr int kMinFetchMinutes = 5;
+
+	// Fetch now, on the user's say-so. Announces itself in lastInfo(), unlike
+	// the timer, and restarts the automatic clock so the two do not stack up.
+	void requestFetch();
+
 	const std::string& lastInfo()  const { return m_service.lastInfo(); }
 	const std::string& remoteUrl() const { return m_service.remoteUrl(); }
 
@@ -121,4 +140,8 @@ private:
 
 	bool          m_panelVisible = false;
 	std::uint64_t m_lastPollMs   = 0;
+	// 0 = the fetch clock has not started. update() stamps it on the first frame
+	// with a repo rather than firing straight away — opening a project should not
+	// reach out to the network before the user has done anything.
+	std::uint64_t m_lastFetchMs  = 0;
 };

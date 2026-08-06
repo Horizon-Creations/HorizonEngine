@@ -203,6 +203,11 @@ bool GitCli::pull(const std::filesystem::path& root, std::string* err)
 	return runChecked(root, { "pull", "--ff-only" }, kNetworkTimeoutMs, err);
 }
 
+bool GitCli::fetch(const std::filesystem::path& root, std::string* err)
+{
+	return runChecked(root, { "fetch", "--prune" }, kNetworkTimeoutMs, err);
+}
+
 std::string GitCli::remoteUrl(const std::filesystem::path& root)
 {
 	const GitResult r = run(root, { "remote", "get-url", "origin" }, 5000);

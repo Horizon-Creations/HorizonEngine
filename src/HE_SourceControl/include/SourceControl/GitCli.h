@@ -71,6 +71,15 @@ public:
 	// branch comes back as an error telling the user what to decide.
 	static bool pull(const std::filesystem::path& root, std::string* err = nullptr);
 
+	// git fetch --prune: update the remote-tracking refs and nothing else. The
+	// working tree, the index and HEAD are all untouched, which is what makes
+	// this safe to run on a timer — the ahead/behind counters become true
+	// without anything on disk moving under the user.
+	//
+	// --prune so branches deleted on the remote stop being reported as existing;
+	// without it a long-lived editor accumulates refs to things that are gone.
+	static bool fetch(const std::filesystem::path& root, std::string* err = nullptr);
+
 	// The URL of `origin`, or empty when no remote is configured.
 	static std::string remoteUrl(const std::filesystem::path& root);
 

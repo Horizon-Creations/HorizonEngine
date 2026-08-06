@@ -347,7 +347,6 @@ char s_remoteUrl[512]  = "";
 char s_ghRepoName[128] = "";
 char s_ghToken[256]    = "";
 bool s_ghPrivate       = true;
-bool s_autoPushLoaded  = false;
 
 // Standalone "store a token for this remote" form (separate buffers from the
 // GitHub-create form above — the two are different flows and clearing one must
@@ -555,18 +554,67 @@ void drawRepositoryPage(AppContext& ctx)
 		// Auto-push: commit lands on the remote in the same action. The
 		// preference survives restarts — per user, not per project file, so
 		// nothing project-visible changes for collaborators.
-		if (!s_autoPushLoaded)
-		{
-			s_autoPushLoaded = true;
-			git->autoPushAfterCommit = GlobalState::getInstance()
-				.getCustomConfigBool("GitAutoPushAfterCommit", false);
-		}
+		//
+		// Loading it (and the fetch schedule) is SourceControlPanel's job now:
+		// this page is one of three places that need the values in the
+		// controller, and three copies of the same lazy load is two too many.
+		// The footer status runs every frame with a project open, so by the time
+		// anyone gets here it has already happened.
 		if (ImGui::Checkbox("Push automatically after each commit",
 		                    &git->autoPushAfterCommit))
 		{
 			GlobalState::getInstance().setCustomConfigEntry(
 				"GitAutoPushAfterCommit", git->autoPushAfterCommit);
 		}
+
+		// ── Background fetch ─────────────────────────────────────────────────
+		// Deliberately separate from auto-push, and worded as what it does rather
+		// than as "fetch": the reason to want it is that "3 behind" stops being
+		// whatever was true when the project was opened. Nothing on disk moves,
+		// which is exactly why this one is safe to automate and pulling is not.
+		if (ImGui::Checkbox("Check the remote for new commits periodically",
+		                    &git->autoFetch))
+		{
+			GlobalState::getInstance().setCustomConfigEntry("GitAutoFetch", git->autoFetch);
+		}
+		ImGui::TextDisabled("Runs git fetch in the background. Your files, your branch and "
+		                    "your commits are untouched — only the \"ahead / behind\" "
+		                    "counters become current.");
+
+		ImGui::BeginDisabled(!git->autoFetch);
+		ImGui::Indent();
+		// Presets rather than a free number: the useful range is narrow, and the
+		// one value nobody should be able to type is a small one.
+		struct Interval { const char* label; int minutes; };
+		static const Interval kIntervals[] = {
+			{ "Every 5 minutes",  5  },
+			{ "Every 15 minutes", 15 },
+			{ "Every 30 minutes", 30 },
+			{ "Every hour",       60 },
+		};
+		int current = std::max(GitController::kMinFetchMinutes, git->autoFetchMinutes);
+		const char* preview = "Every 15 minutes";
+		for (const Interval& i : kIntervals)
+			if (i.minutes == current) preview = i.label;
+
+		ImGui::SetNextItemWidth(200.0f);
+		if (ImGui::BeginCombo("##autofetchinterval", preview))
+		{
+			for (const Interval& i : kIntervals)
+			{
+				if (ImGui::Selectable(i.label, i.minutes == current))
+				{
+					git->autoFetchMinutes = i.minutes;
+					GlobalState::getInstance().setCustomConfigEntry("GitAutoFetchMinutes",
+					                                                i.minutes);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		ImGui::Unindent();
+		ImGui::EndDisabled();
+
+		ImGui::Spacing();
 		ImGui::TextDisabled("Commit, push and pull live in View \xe2\x96\xb8 Source Control.");
 	}
 
