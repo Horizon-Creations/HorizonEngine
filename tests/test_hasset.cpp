@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <ContentManager/HAsset.h>
+#include <Types/Enums.h>
 #include <Types/UUID.h>
 #include <cstdio>
 #include <cstring>
@@ -361,4 +362,42 @@ TEST_CASE("HAsset chunk_count is capped by what the file can hold")
     CHECK_NOTHROW(r2.open(file));
     CHECK(r2.chunks().empty());
     std::remove(file.c_str());
+}
+
+// The asset pickers scan whole content trees just to ask "what type is this?".
+// Reader::open() answers that by loading every chunk of every file — which on a
+// tree with big meshes means reading gigabytes to fill a dropdown. The header-only
+// read must give the same answer for a fraction of the I/O.
+TEST_CASE("HAsset readAssetTypeFromFile matches Reader::open without loading chunks")
+{
+    std::vector<uint8_t> payload(1u << 20, 0xAB); // 1 MiB of chunk data
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, payload.data(), payload.size());
+    const uint16_t type = static_cast<uint16_t>(HE::AssetType::StaticMesh);
+    const auto bytes = w.toBytes(type);
+
+    const std::string file = (std::filesystem::temp_directory_path() /
+                              "he_test_headeronly.hasset").string();
+    { std::ofstream f(file, std::ios::binary | std::ios::trunc);
+      f.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size())); }
+
+    uint16_t quick = 0;
+    REQUIRE(HAsset::readAssetTypeFromFile(file, quick));
+    HAsset::Reader r;
+    REQUIRE(r.open(file));
+    CHECK(quick == r.assetType());
+    CHECK(quick == type);
+
+    // A file that is not an .hasset is rejected rather than mis-typed.
+    const std::string junk = (std::filesystem::temp_directory_path() /
+                              "he_test_headeronly.txt").string();
+    { std::ofstream f(junk, std::ios::binary | std::ios::trunc); f << "not an asset at all"; }
+    uint16_t ignored = 0xFFFF;
+    CHECK_FALSE(HAsset::readAssetTypeFromFile(junk, ignored));
+    CHECK_FALSE(HAsset::readAssetTypeFromFile(
+        (std::filesystem::temp_directory_path() / "he_test_missing.hasset").string(), ignored));
+
+    std::remove(file.c_str());
+    std::remove(junk.c_str());
 }

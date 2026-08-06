@@ -44,6 +44,13 @@ namespace MaterialEditorPanel
 	// Drop cached editor state for `path`.
 	void forget(const std::string& assetPath);
 
+	// Hand back the assets this tab's PREVIEW pulled into memory — a picked static
+	// mesh that was not resident before. Call when the tab closes, before forget()
+	// and regardless of whether the state itself is kept (a dirty tab keeps its
+	// graph, but the megabytes behind its preview mesh have no reason to stay).
+	// A mesh the scene or another material tab still references is left alone.
+	void releasePreviewAssets(AppContext& ctx, const std::string& assetPath);
+
 	// The live documents behind this tab, for collaboration's item-level sync.
 	// Empty when this panel does not hold `assetPath` — same "ask everyone, the
 	// owner answers" dispatch as save() and reloadFromDisk().

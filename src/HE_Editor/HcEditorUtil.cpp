@@ -88,9 +88,12 @@ namespace
 			if (ec) break;
 			if (!it->is_regular_file(ec)) continue;
 			if (it->path().extension() != ".hasset") continue;
-			HAsset::Reader r;
-			if (r.open(it->path().string()) &&
-			    r.assetType() == static_cast<uint16_t>(type))
+			// Header only: Reader::open() would pull every chunk of every asset in
+			// the tree into memory just to answer "what type is this?" — with the
+			// static-mesh picker that means reading gigabytes to fill a dropdown.
+			uint16_t assetType = 0;
+			if (HAsset::readAssetTypeFromFile(it->path().string(), assetType) &&
+			    assetType == static_cast<uint16_t>(type))
 			{
 				ClassRef cr;
 				cr.label = it->path().stem().string();

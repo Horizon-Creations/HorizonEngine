@@ -70,6 +70,20 @@ public:
 			if (pred(st)) out.push_back(path);
 	}
 
+	// Walk every open tab's state — for the questions one tab has to ask about all
+	// the others ("is any other tab still using this asset?"), and for the answers
+	// that change them ("then YOU own it now").
+	template <class Fn>
+	void forEach(Fn fn) const
+	{
+		for (const auto& [path, st] : m_states) fn(path, st);
+	}
+	template <class Fn>
+	void forEach(Fn fn)
+	{
+		for (auto& [path, st] : m_states) fn(path, st);
+	}
+
 	// Drop a closed tab's state (see the lifecycle note above).
 	void forget(const std::string& assetPath) { m_states.erase(assetPath); }
 

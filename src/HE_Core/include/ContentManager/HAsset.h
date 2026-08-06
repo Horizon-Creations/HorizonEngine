@@ -238,6 +238,23 @@ private:
 	std::vector<Chunk> m_chunks;
 };
 
+// Read ONLY the 32-byte file header (asset type + version), never the chunk
+// payloads. Reader::open() below pulls every chunk into memory, which is the wrong
+// tool for a directory scan that just asks "what kind of asset is this?": on a
+// content tree holding a few hundred-megabyte meshes, filling a dropdown that way
+// reads the entire tree off disk. Returns false if the file is missing or not an
+// .hasset.
+inline bool readAssetTypeFromFile(const std::string& filePath, uint16_t& typeOut)
+{
+	std::ifstream f(filePath, std::ios::binary);
+	if (!f.is_open()) return false;
+	FileHeader hdr{};
+	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+	if (!f || std::memcmp(hdr.magic, k_magic, 4) != 0) return false;
+	typeOut = hdr.asset_type;
+	return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Reader
 // ─────────────────────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas frontend
 #include "HcEditorUtil.h"                       // asset dropdowns (texture picker)
 #include <MaterialGraph/MaterialGraph.h>
+#include <HorizonScene/SceneSystems.h>          // who else references a mesh (scene refs)
 #include <material/MaterialShaderLibrary.h> // inline compile check (canvas error banner)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -60,6 +61,10 @@ struct State
 	// the picker can show the pick and re-resolve it without another content scan.
 	HE::UUID      previewMeshId{};
 	std::string   previewMeshPath, previewMeshLabel;
+	// True when THIS preview is what pulled the mesh into memory (it was not
+	// resident when picked). Only then is the preview allowed to drop it again —
+	// an asset the scene or another tab was already using is none of our business.
+	bool          previewMeshOwned = false;
 	// A picked mesh is streamed in the background — a hundred-megabyte asset must not
 	// freeze the editor mid-frame. While this path is set the preview box shows the
 	// read progress instead of guessing.
@@ -1351,15 +1356,121 @@ std::string previewSubjectLabel(const State& st)
 	return kPreviewShapes[std::clamp(st.previewShape, 0, 2)];
 }
 
-// The mesh is in memory — point the preview at it.
-void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path, const std::string& label)
+// Is anything OTHER than `except`'s preview still interested in this mesh? Three
+// claimants are asked here: another material tab previewing the same asset, the
+// scene itself (MeshComponent / LOD level / foliage entry — collectAssetRefs knows
+// them all), and any editor tab that has the mesh open as its own document (the
+// Static Mesh viewer). A fourth, an AssetRef pin held elsewhere, needs no check:
+// unloadAsset refuses outright while one is alive.
+bool previewMeshStillNeeded(const State& except, AppContext& ctx,
+                            const HE::UUID& id, const std::string& relPath)
+{
+	if (id == HE::UUID{}) return true; // nothing to release
+	bool used = false;
+	s_states.forEach([&](const std::string&, const State& other)
+	{
+		if (&other == &except) return;
+		// Showing it, or on its way to showing it: a tab whose pick is still
+		// streaming has no id yet, and dropping the asset out from under that load
+		// would only make it read the file a second time.
+		if (other.previewMeshId == id) used = true;
+		if (!relPath.empty() && other.pendingMeshPath == relPath) used = true;
+	});
+	if (used) return true;
+	if (ctx.world)
+		for (const HE::UUID& ref : SceneSystems::collectAssetRefs(*ctx.world))
+			if (ref == id) return true;
+	if (ctx.contentManager && !relPath.empty())
+	{
+		const std::filesystem::path abs =
+			std::filesystem::path(ctx.contentManager->resolveAbsolutePath(relPath)).lexically_normal();
+		for (const auto& tab : ctx.tabs)
+			if (!tab.assetPath.empty() &&
+			    std::filesystem::path(tab.assetPath).lexically_normal() == abs)
+				return true;
+	}
+	return false;
+}
+
+// Streams that outlived their tab: closed while the mesh was still on its way in.
+// The result still lands in the ContentManager, with nobody left to adopt — or to
+// let go of — it, so those paths are parked here and dropped once they arrive.
+std::vector<std::string> s_orphanedMeshLoads;
+
+void drainOrphanedMeshLoads(AppContext& ctx)
+{
+	if (s_orphanedMeshLoads.empty() || !ctx.contentManager) return;
+	ctx.contentManager->pollAsyncResults();
+	for (size_t i = 0; i < s_orphanedMeshLoads.size();)
+	{
+		const std::string path = s_orphanedMeshLoads[i];
+		if (ctx.contentManager->isAsyncPending(path)) { ++i; continue; }
+		if (ctx.contentManager->isLoaded(path))
+		{
+			const HE::UUID id = ctx.contentManager->loadAsset(path); // resident → map hit
+			static const State kNobody{}; // not in s_states → every tab is asked
+			if (id != HE::UUID{} && !previewMeshStillNeeded(kNobody, ctx, id, path))
+			{
+				if (ctx.renderer) ctx.renderer->InvalidateMesh(id);
+				ctx.contentManager->unloadAsset(id);
+			}
+		}
+		s_orphanedMeshLoads.erase(s_orphanedMeshLoads.begin() + i);
+	}
+}
+
+// Give back a mesh this preview pulled in. Deliberately narrow: only an asset the
+// preview itself loaded, and only while nobody else wants it — the editor must not
+// yank a mesh out from under the scene or a second material tab. The GPU copy goes
+// with it, otherwise the renderer keeps the buffers of an asset that no longer
+// exists on the CPU side.
+void releasePreviewMesh(State& st, AppContext& ctx)
+{
+	// A pick that is still streaming has no id yet — hand it to the orphan list so
+	// closing the tab mid-load does not strand the megabytes it asked for.
+	if (!st.pendingMeshPath.empty()) s_orphanedMeshLoads.push_back(st.pendingMeshPath);
+	const HE::UUID    id      = st.previewMeshId;
+	const std::string relPath = st.previewMeshPath;
+	const bool        owned   = st.previewMeshOwned;
+	st.previewMeshId    = HE::UUID{};
+	st.previewMeshPath.clear();
+	st.previewMeshLabel.clear();
+	st.previewMeshOwned = false;
+	st.pendingMeshPath.clear();
+	st.pendingMeshLabel.clear();
+	st.previewDirty     = true;
+	if (!owned || id == HE::UUID{} || !ctx.contentManager) return;
+	// Another material tab is showing the same mesh: hand ownership over instead of
+	// stranding it. Whoever closes LAST is then the one that gives it back.
+	bool handedOver = false;
+	s_states.forEach([&](const std::string&, State& other)
+	{
+		if (handedOver || &other == &st) return;
+		if (other.previewMeshId == id && !other.previewMeshOwned)
+		{ other.previewMeshOwned = true; handedOver = true; }
+	});
+	if (handedOver) return;
+	if (previewMeshStillNeeded(st, ctx, id, relPath)) return;
+	if (ctx.renderer) ctx.renderer->InvalidateMesh(id);
+	ctx.contentManager->unloadAsset(id); // no-op while an AssetRef pin is alive
+}
+
+// The mesh is in memory — point the preview at it. `owned` marks a load this
+// preview caused, i.e. one it may undo later.
+void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path,
+                      const std::string& label, bool owned)
 {
 	if (!ctx.contentManager) return;
 	const HE::UUID id = ctx.contentManager->loadAsset(path); // resident by now → no disk read
 	if (id == HE::UUID{}) return;
+	// Re-picking the mesh this preview already owns must not silently hand it over
+	// to "somebody else loaded it" — it is resident precisely BECAUSE we loaded it.
+	const bool keepOwned = (st.previewMeshId == id && st.previewMeshOwned);
+	if (st.previewMeshId != id) releasePreviewMesh(st, ctx); // drop the previous pick first
 	st.previewMeshId    = id;
 	st.previewMeshPath  = path;
 	st.previewMeshLabel = label;
+	st.previewMeshOwned = owned || keepOwned;
 	st.previewDirty     = true;
 }
 
@@ -1377,12 +1488,15 @@ void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, c
 // once it has landed. A failed load clears the pending state instead of hanging on it.
 void tickPreviewMeshLoad(State& st, AppContext& ctx)
 {
+	drainOrphanedMeshLoads(ctx);
 	if (st.pendingMeshPath.empty() || !ctx.contentManager) return;
 	ctx.contentManager->pollAsyncResults();
 	if (ctx.contentManager->isAsyncPending(st.pendingMeshPath)) return;
-	applyPreviewMesh(st, ctx, st.pendingMeshPath, st.pendingMeshLabel);
+	// This load was started BECAUSE the asset was absent → the preview owns it.
+	const std::string path = st.pendingMeshPath, label = st.pendingMeshLabel;
 	st.pendingMeshPath.clear();
 	st.pendingMeshLabel.clear();
+	applyPreviewMesh(st, ctx, path, label, /*owned=*/true);
 }
 
 // The button + its searchable popup. Sets the primitive, adopts a resident mesh
@@ -1427,12 +1541,8 @@ void drawPreviewSubjectPicker(State& st, AppContext& ctx, float width)
 	for (int i = 0; i < 3; ++i)
 		if (matches(kPreviewShapes[i]) && HcEditorUtil::searchMenuItem(kPreviewShapes[i]))
 		{
-			st.previewShape  = i;
-			st.previewMeshId = HE::UUID{};
-			st.previewMeshPath.clear();
-			st.previewMeshLabel.clear();
-			st.pendingMeshPath.clear();
-			st.previewDirty  = true;
+			st.previewShape = i;
+			releasePreviewMesh(st, ctx); // back to a primitive → the mesh can go
 			ImGui::CloseCurrentPopup();
 		}
 
@@ -1447,7 +1557,9 @@ void drawPreviewSubjectPicker(State& st, AppContext& ctx, float width)
 			const bool resident = ctx.contentManager && ctx.contentManager->isLoaded(m.path);
 			if (HcEditorUtil::searchMenuItem(m.label + "##" + m.path))
 			{
-				if (resident)   applyPreviewMesh(st, ctx, m.path, m.label);
+				// Already in memory (the scene or another tab uses it): nothing to
+				// load, nothing to warn about, and nothing this preview may release.
+				if (resident)   applyPreviewMesh(st, ctx, m.path, m.label, /*owned=*/false);
 				else if (heavy) { st.confirmMeshPath  = m.path;
 				                  st.confirmMeshLabel = m.label;
 				                  st.confirmMeshBytes = m.bytes; }
@@ -1556,6 +1668,14 @@ bool reloadFromDisk(const std::string& assetPath)
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
+
+void releasePreviewAssets(AppContext& ctx, const std::string& assetPath)
+{
+	if (State* st = s_states.find(assetPath)) releasePreviewMesh(*st, ctx);
+	// EditorUI calls this for EVERY closing tab, whatever its type — the cheapest
+	// regular pump there is for loads whose tab is already gone.
+	drainOrphanedMeshLoads(ctx);
+}
 
 bool save(AppContext& ctx, const std::string& assetPath)
 {
