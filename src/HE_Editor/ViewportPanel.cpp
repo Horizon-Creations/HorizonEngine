@@ -47,6 +47,12 @@ static int s_viewportPxH = 0;
 static bool  s_rmbCaptured = false;
 static float s_rmbStartX   = 0.f;
 static float s_rmbStartY   = 0.f;
+// Trackpad fly TOGGLE: on a pad, holding RMB for the whole flight means pressing
+// with two fingers the whole time — so in trackpad mode a two-finger TAP
+// (a right-click) toggles fly mode on/off instead, and no button is held while
+// flying. File-scope for the same reason as s_rmbCaptured, and because the
+// capture invariant below must know a toggled fly is not a leaked capture.
+static bool  s_flyToggle   = false;
 
 // A StaticMesh .hasset dropped from the Content Browser onto the Scene
 // viewport image. Captured at the drop (the drop target must bind to the
@@ -121,6 +127,9 @@ void releaseViewportLookCapture(SDL_Window* win)
 	io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
 	io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
 	s_rmbCaptured = false;
+	// Every teardown path runs through here, so the fly toggle can never outlive
+	// its capture (tab switch, play mode, Esc — all of them land here).
+	s_flyToggle   = false;
 }
 
 // Belt-and-suspenders invariant, run once per frame BEFORE any early-out: fly-look
@@ -133,6 +142,9 @@ void releaseViewportLookCapture(SDL_Window* win)
 void enforceViewportLookCaptureInvariant(SDL_Window* win)
 {
 	if (!s_rmbCaptured) return;
+	// A toggled (trackpad) fly holds NO button by design — the invariant below
+	// only guards the held-RMB flavour of the capture.
+	if (s_flyToggle) return;
 	const bool rmbDown =
 		(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
 	if (!rmbDown) releaseViewportLookCapture(win);
@@ -248,7 +260,34 @@ void render(AppContext& ctx, float dt)
 				{
 					EditorCamera& cam = *ctx.editorCamera;
 					const bool imageHovered = ImGui::IsItemHovered();
-					const bool rmb    = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+					const bool trackpad = EditorInput::trackpadPointer(ctx);
+
+					// Trackpad fly toggle: a two-finger TAP (right-click) over the
+					// viewport enters fly mode, a second tap — or Esc — leaves it.
+					// While flying, look and WASDQE/Shift work with nothing held.
+					// The edge is read from the PHYSICAL SDL button, not ImGui:
+					// mid-fly the NoMouse flag zeroes ImGui's mouse state, so the
+					// exit tap would be invisible to IsMouseClicked.
+					const bool physRmb =
+						(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
+					static bool s_prevPhysRmb = false;
+					const bool physRmbTap = physRmb && !s_prevPhysRmb;
+					s_prevPhysRmb = physRmb;
+					if (trackpad)
+					{
+						if (physRmbTap)
+						{
+							if (s_flyToggle)          endLookCapture();   // clears the toggle too
+							else if (imageHovered && !io.KeyAlt) s_flyToggle = true;
+						}
+						if (s_flyToggle && ImGui::IsKeyPressed(ImGuiKey_Escape))
+							endLookCapture();
+					}
+
+					// In trackpad mode "RMB held" is replaced by the toggle; with a
+					// mouse it stays the physically held button, exactly as before.
+					const bool rmb    = trackpad ? s_flyToggle
+					                             : ImGui::IsMouseDown(ImGuiMouseButton_Right);
 					const bool mmb    = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
 					const bool altLmb = io.KeyAlt && ImGui::IsMouseDown(ImGuiMouseButton_Left);
 					const bool anyNav = rmb || mmb || altLmb;
@@ -278,8 +317,10 @@ void render(AppContext& ctx, float dt)
 						// Engage on a FRESH right-press over the viewport (click edge), never on
 						// "RMB happens to be down" — otherwise arriving on the Scene tab with a
 						// stale/held button state would capture the cursor without the user
-						// starting a look here.
-						const bool rmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+						// starting a look here. In trackpad mode the fresh toggle IS the edge.
+						const bool rmbClicked = trackpad
+							? (s_flyToggle && !s_rmbCaptured)
+							: ImGui::IsMouseClicked(ImGuiMouseButton_Right);
 						if (rmbClicked && !altLmb && imageHovered && !s_rmbCaptured)
 						{
 							SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
