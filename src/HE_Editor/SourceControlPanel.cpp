@@ -2,6 +2,7 @@
 #include "EditorApplication.h"    // AppContext
 #include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
 #include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
+#include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
 
 #include <Diagnostics/GlobalState.h>
@@ -126,16 +127,20 @@ void beginModalSizing(float widthInChars = 26.0f)
 // Two equal buttons filling the row, so they scale with the dialog rather than
 // spilling out of a font-scaled window at a hardcoded 120 px.
 bool modalButtonRow(const char* confirmLabel, const char* cancelLabel,
-                    bool confirmDisabled, bool& outCancelled)
+                    bool confirmDisabled, bool& outCancelled, bool danger = false)
 {
 	const float spacing = ImGui::GetStyle().ItemSpacing.x;
 	const float w       = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
 
-	ImGui::BeginDisabled(confirmDisabled);
-	const bool confirmed = ImGui::Button(confirmLabel, ImVec2(w, 0.0f));
-	ImGui::EndDisabled();
+	// The way out first, the commitment second — reading order ends on the
+	// action, and the filled button sits where the eye stops.
+	outCancelled = EditorWidgets::cancelButton(cancelLabel, ImVec2(w, 0.0f));
 	ImGui::SameLine();
-	outCancelled = ImGui::Button(cancelLabel, ImVec2(w, 0.0f));
+	ImGui::BeginDisabled(confirmDisabled);
+	const bool confirmed = danger
+		? EditorWidgets::dangerButton(confirmLabel, ImVec2(w, 0.0f))
+		: EditorWidgets::primaryButton(confirmLabel, ImVec2(w, 0.0f));
+	ImGui::EndDisabled();
 	return confirmed;
 }
 
@@ -891,7 +896,8 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::Spacing();
 
 		bool cancelled = false;
-		const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled);
+		const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled,
+		                                    /*danger=*/true);
 		if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
 		if (restore || cancelled)
 		{

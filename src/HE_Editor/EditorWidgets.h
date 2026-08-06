@@ -57,6 +57,25 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
                          bool        showClear  = false,
                          bool        undo       = true);
 
+// ── Confirm / cancel buttons ─────────────────────────────────────────────────
+// Every dialog answers the same question — "do it, or not?" — and until now the
+// two answers were drawn identically, so which button commits and which backs
+// out had to be read, not seen. Three verbs, styled once:
+//
+//   primaryButton  the accent-filled "do it" — one per dialog, the same blue
+//                  the editor already uses for "armed"
+//   dangerButton   the red "do it" for actions that remove or overwrite —
+//                  block, restore, delete
+//   cancelButton   the quiet way out: ghost-styled (border, no fill), because
+//                  a cancel that competes with the confirm defeats the point
+//
+// One helper per verb rather than colour-pushing at every call site — the ban
+// dialog, the restore dialog and the unsaved-changes prompt had each hand-rolled
+// their own shade of the same idea, all slightly different.
+bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
+bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
+
 // ── Labelled setting rows ────────────────────────────────────────────────────
 // ImGui puts a widget's label to the RIGHT of the control, which works in a wide
 // dialog and fails in the narrow panels the editor actually docks: the text runs

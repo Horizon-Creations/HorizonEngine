@@ -282,7 +282,7 @@ void render(AppContext& ctx)
             bool confirm = ImGui::InputText("##entity_rename_input",
                 s_entityRenameBuf, sizeof(s_entityRenameBuf),
                 ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
-            if (ImGui::Button("OK", ImVec2(140, 0)) || confirm)
+            if (EditorWidgets::primaryButton("OK", ImVec2(140, 0)) || confirm)
             {
                 if (s_entityRenameBuf[0] != '\0' &&
                     ctx.world->registry().valid(s_renameEntity))
@@ -294,7 +294,7 @@ void render(AppContext& ctx)
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(140, 0)))
+            if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
             {
                 s_renameEntity = entt::null;
                 ImGui::CloseCurrentPopup();

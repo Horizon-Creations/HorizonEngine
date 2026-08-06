@@ -1,5 +1,6 @@
 #include "LevelScriptPanel.h"
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorWidgets.h"    // primary/danger/cancel buttons
 #include <cstdint>
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
@@ -402,7 +403,7 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 		edited = true;
 
 	ImGui::Spacing();
-	if (ImGui::Button("Delete Variable"))
+	if (EditorWidgets::dangerButton("Delete Variable"))
 	{
 		const std::string gone = v->name;
 		graph.variables.erase(std::remove_if(graph.variables.begin(), graph.variables.end(),

@@ -1318,7 +1318,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// (A script's language is fixed by the project, chosen in the New
 			// Project wizard — there is no per-asset language picker here.)
 
-			if (ImGui::Button("OK", ImVec2(140, 0)) || confirm)
+			if (EditorWidgets::primaryButton("OK", ImVec2(140, 0)) || confirm)
 			{
 				std::string newName(s_renameBuf);
 				if (!newName.empty() && !s_renameTarget.empty())
@@ -1396,7 +1396,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(140, 0)))
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
 			{
 				// On create, Cancel just keeps the default name — the file already
 				// exists on disk; nothing to undo.
@@ -1435,7 +1435,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::Spacing();
 			const bool canCreate = s_cppClassName[0] != '\0' && ctx.projectManager &&
 				!ctx.projectManager->currentProject().path.empty();
-			if ((ImGui::Button("Create", ImVec2(150, 0)) || confirm) && canCreate)
+			if ((EditorWidgets::primaryButton("Create", ImVec2(150, 0)) || confirm) && canCreate)
 			{
 				const std::filesystem::path projRoot =
 					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
@@ -1448,7 +1448,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(150, 0)))
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(150, 0)))
 				ImGui::CloseCurrentPopup();
 			ImGui::EndPopup();
 		}

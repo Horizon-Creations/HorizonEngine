@@ -1,4 +1,5 @@
 #include "CollabPanel.h"
+#include "EditorWidgets.h"    // primary/danger/cancel buttons
 
 #include "CollabController.h"
 
@@ -278,7 +279,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("0 lets the system pick a free port.");
 
-		if (ImGui::Button("Open session", ImVec2(170, 0)))
+		if (EditorWidgets::primaryButton("Open session", ImVec2(170, 0)))
 			collab->startHosting(static_cast<std::uint16_t>(s_hostPort), s_displayName);
 
 		// What the startup probe already found out about this network, said BEFORE
@@ -334,7 +335,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 		const bool canJoin = s_joinSessionId[0] != '\0' && s_joinCode[0] != '\0';
 		ImGui::BeginDisabled(!canJoin);
-		if (ImGui::Button("Join", ImVec2(170, 0)))
+		if (EditorWidgets::primaryButton("Join", ImVec2(170, 0)))
 			collab->joinBySessionId(s_joinSessionId, s_joinCode, s_displayName);
 		ImGui::EndDisabled();
 		if (!canJoin)

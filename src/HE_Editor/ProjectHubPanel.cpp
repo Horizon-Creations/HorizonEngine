@@ -316,7 +316,7 @@ void render(AppContext& ctx)
 
     ImGui::SetCursorPosX(padding);
     const float btnW = panelW - padding * 2.0f;
-    if (ImGui::Button("Create##create", ImVec2(btnW, 36.0f)))
+    if (EditorWidgets::primaryButton("Create##create", ImVec2(btnW, 36.0f)))
     {
         ctx.hubCreateError.clear();
         std::string name = ctx.hubProjectName;

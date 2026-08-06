@@ -126,7 +126,7 @@ void DrawToolchainDialog(AppContext& ctx)
 		ImGui::Spacing();
 
 		if (installing) ImGui::BeginDisabled();
-		if (ImGui::Button("Install Automatically") && ctx.startToolchainInstall)
+		if (EditorWidgets::primaryButton("Install Automatically") && ctx.startToolchainInstall)
 		{
 			s_installTriggered = true;
 			s_installConsumed  = false;

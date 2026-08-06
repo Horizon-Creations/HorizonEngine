@@ -1456,7 +1456,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 
 			ImGui::Spacing();
 			ImGui::Separator();
-			if (ImGui::Button("Delete Variable"))
+			if (EditorWidgets::dangerButton("Delete Variable"))
 			{
 				const std::string gone = v->name;
 				st.graph.variables.erase(std::remove_if(st.graph.variables.begin(), st.graph.variables.end(),
@@ -1667,7 +1667,7 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (ImGui::Button("Delete Node"))
+	if (EditorWidgets::dangerButton("Delete Node"))
 	{
 		st.graph.removeNode(n->id);
 		st.selectedGraphNode = 0;

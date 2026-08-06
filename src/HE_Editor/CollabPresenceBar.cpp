@@ -430,17 +430,14 @@ namespace
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		if (ImGui::Button("Cancel", ImVec2(110.0f, 0.0f)))
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(110.0f, 0.0f)))
 		{
 			s_banCandidate = HE::Net::kInvalidParticipant;
 			s_pinned       = false;
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
-		ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.26f, 0.26f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
-		if (ImGui::Button("Block", ImVec2(110.0f, 0.0f)))
+		if (EditorWidgets::dangerButton("Block", ImVec2(110.0f, 0.0f)))
 		{
 			// They may have left while the question was on screen —
 			// banParticipant says so by returning false, and there is nothing
@@ -450,7 +447,6 @@ namespace
 			s_pinned       = false;
 			ImGui::CloseCurrentPopup();
 		}
-		ImGui::PopStyleColor(3);
 		ImGui::EndPopup();
 		return true;
 	}

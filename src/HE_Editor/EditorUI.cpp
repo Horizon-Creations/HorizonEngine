@@ -1161,9 +1161,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             }
             // Same button either way: run the action. It only DISCARDS anything while
             // something is still dirty, so the label follows that.
-            if (ImGui::Button(!anythingDirty ? "Continue"
-                                             : (ctx.sceneDirty ? "Don't Save" : "Discard"),
-                              ImVec2(110, 0)))
+            // "Continue" commits nothing and stays neutral; the two labels that
+            // DISCARD work are red, because that is the entire difference
+            // between them and the Save button next door.
+            const char* runLabel = !anythingDirty ? "Continue"
+                                 : (ctx.sceneDirty ? "Don't Save" : "Discard");
+            const bool runIt = anythingDirty
+                ? EditorWidgets::dangerButton(runLabel, ImVec2(110, 0))
+                : ImGui::Button(runLabel, ImVec2(110, 0));
+            if (runIt)
             {
                 runGuardedAction(action, arg);
                 s_guardAction = GuardedAction::None;
@@ -1171,7 +1177,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(110, 0)) ||
+            if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
                 ImGui::IsKeyPressed(ImGuiKey_Escape))
             {
                 s_guardAction      = GuardedAction::None;
@@ -1295,7 +1301,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::TextUnformatted(ctx.hubOpenError.c_str());
             ImGui::PopStyleColor();
             ImGui::Spacing();
-            if (ImGui::Button("OK", ImVec2(120, 0)))
+            if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
             {
                 ctx.hubOpenError.clear();
                 ImGui::CloseCurrentPopup();
@@ -1434,7 +1440,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ImGui::Separator();
             ImGui::Spacing();
             const float btnW = (480.0f - 16.0f * 2 - 8.0f) * 0.5f;
-            if (ImGui::Button("Create", ImVec2(btnW, 0)))
+            if (EditorWidgets::primaryButton("Create", ImVec2(btnW, 0)))
             {
                 ctx.hubCreateError.clear();
                 std::string name = ctx.hubProjectName;
@@ -1465,7 +1471,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(btnW, 0)))
+            if (EditorWidgets::cancelButton("Cancel", ImVec2(btnW, 0)))
             {
                 ctx.hubCreateError.clear();
                 ImGui::CloseCurrentPopup();

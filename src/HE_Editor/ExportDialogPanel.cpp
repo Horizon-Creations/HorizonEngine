@@ -714,7 +714,7 @@ void render(AppContext& ctx)
             const bool canExport = !s_exportOutputDir.empty()
                                 && ctx.contentManager && !running;
             if (!canExport) ImGui::BeginDisabled();
-            if (ImGui::Button("Export", ImVec2(110, 0)))
+            if (EditorWidgets::primaryButton("Export", ImVec2(110, 0)))
             {
                 // HorizonCode → C++ codegen runs for Host exports only (v1: the
                 // generated dylib is built with the host toolchain, plan §8.4).

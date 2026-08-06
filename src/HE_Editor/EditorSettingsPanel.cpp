@@ -520,7 +520,7 @@ void drawRepositoryPage(AppContext& ctx)
 		ImGui::SameLine();
 		ImGui::BeginDisabled(git->busy() || s_ghToken[0] == '\0' ||
 		                     s_ghRepoName[0] == '\0' || st.initialCommit);
-		if (ImGui::Button("Create & push", ImVec2(130.0f, 0.0f)))
+		if (EditorWidgets::primaryButton("Create & push", ImVec2(130.0f, 0.0f)))
 		{
 			git->requestSetupGitHub(s_ghRepoName, s_ghPrivate, std::string(s_ghToken));
 			// Wipe, not clear: the bytes must go, not just the length.
@@ -668,7 +668,7 @@ void drawRepositoryPage(AppContext& ctx)
 		ImGui::Spacing();
 		ImGui::BeginDisabled(git->busy() || s_credHost[0] == '\0' ||
 		                     s_credUser[0] == '\0' || s_credToken[0] == '\0');
-		if (ImGui::Button("Save token", ImVec2(140.0f, 0.0f)))
+		if (EditorWidgets::primaryButton("Save token", ImVec2(140.0f, 0.0f)))
 		{
 			git->requestStoreCredential(s_credHost, s_credUser, std::string(s_credToken));
 			// Wipe, not clear: the bytes must go, not just the length.
@@ -760,7 +760,7 @@ void drawGitSetupPage(AppContext& ctx)
 
 			const bool usable = s_idName[0] != '\0' && s_idEmail[0] != '\0';
 			if (!usable) ImGui::BeginDisabled();
-			if (ImGui::Button("Save Identity") && ctx.setGitIdentity)
+			if (EditorWidgets::primaryButton("Save Identity") && ctx.setGitIdentity)
 				ctx.setGitIdentity(s_idName, s_idEmail);
 			if (!usable) ImGui::EndDisabled();
 			if (applying) ImGui::EndDisabled();

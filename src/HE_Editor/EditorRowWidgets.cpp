@@ -17,6 +17,54 @@
 namespace EditorWidgets
 {
 
+// ── Confirm / cancel buttons (see the header for the vocabulary) ─────────────
+namespace
+{
+bool filledButton(const char* label, const ImVec2& size,
+                  ImVec4 base, ImVec4 hovered, ImVec4 active)
+{
+	ImGui::PushStyleColor(ImGuiCol_Button,        base);
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hovered);
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  active);
+	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+	const bool pressed = ImGui::Button(label, size);
+	ImGui::PopStyleColor(4);
+	return pressed;
+}
+} // namespace
+
+bool primaryButton(const char* label, const ImVec2& size)
+{
+	// The toolbar's armed-blue: "this is the thing that happens" is the same
+	// statement whether it is a tool or a dialog's confirm.
+	return filledButton(label, size,
+	                    ImVec4(0.22f, 0.42f, 0.70f, 1.0f),
+	                    ImVec4(0.28f, 0.51f, 0.80f, 1.0f),
+	                    ImVec4(0.18f, 0.35f, 0.60f, 1.0f));
+}
+
+bool dangerButton(const char* label, const ImVec2& size)
+{
+	return filledButton(label, size,
+	                    ImVec4(0.60f, 0.20f, 0.20f, 1.0f),
+	                    ImVec4(0.72f, 0.26f, 0.26f, 1.0f),
+	                    ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
+}
+
+bool cancelButton(const char* label, const ImVec2& size)
+{
+	// A ghost: border and text, no fill until hovered. The way out should be
+	// findable, not competitive.
+	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.0f, 1.0f, 1.0f, 0.14f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+	const bool pressed = ImGui::Button(label, size);
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor(3);
+	return pressed;
+}
+
 // ── Labelled setting rows (see the header for why these exist) ───────────────
 namespace Row
 {

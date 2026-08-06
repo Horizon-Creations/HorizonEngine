@@ -216,7 +216,7 @@ void DrawGitMissingDialog(AppContext& ctx)
 
 		const bool usable = s_name[0] != '\0' && s_email[0] != '\0';
 		if (!usable) ImGui::BeginDisabled();
-		if (ImGui::Button("Save Identity") && ctx.setGitIdentity)
+		if (EditorWidgets::primaryButton("Save Identity") && ctx.setGitIdentity)
 			ctx.setGitIdentity(s_name, s_email);
 		if (!usable) ImGui::EndDisabled();
 		if (applying) ImGui::EndDisabled();
