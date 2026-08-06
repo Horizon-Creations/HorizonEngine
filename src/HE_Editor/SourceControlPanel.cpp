@@ -706,4 +706,111 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 #endif
 }
 
+bool DrawFooterStatus(AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	GitController* git = ctx.git;
+	// No project, no build support, or discovery has not finished: draw nothing
+	// at all rather than a placeholder. A footer that permanently reads "no
+	// repository" for people who do not use git is noise in every session.
+	if (!git || !ctx.projectLoaded) return false;
+
+	const HE::Sc::RepoStatus& st = git->status();
+
+	// dirtyCount(), hasConflicts() and hasStagedChanges() each walk the whole
+	// file map. That is nothing for a handful of edits and quite a lot in a
+	// freshly created project where every asset is still untracked — and the
+	// footer asks every frame, forever. RepoStatus::generation exists precisely
+	// so a consumer can tell "same answer as last time" without comparing maps.
+	static std::uint64_t s_generation = ~0ull;
+	static const void*   s_source     = nullptr;
+	static std::size_t   s_dirty      = 0;
+	static bool          s_conflicts  = false;
+	static bool          s_staged     = false;
+	// The generation restarts at 0 for a different project, so the identity of
+	// the status object is part of the key — otherwise switching projects could
+	// leave the previous one's counts on screen.
+	if (s_generation != st.generation || s_source != static_cast<const void*>(&st))
+	{
+		s_generation = st.generation;
+		s_source     = &st;
+		s_dirty      = st.dirtyCount();
+		s_conflicts  = st.hasConflicts();
+		s_staged     = st.hasStagedChanges();
+	}
+
+	// Colour carries the state, the text carries the detail. Amber for "there is
+	// uncommitted work", red for conflicts, muted for a clean tree — a status bar
+	// that is bright when nothing is wrong trains people to ignore it.
+	ImVec4      tint  = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+	std::string label;
+	std::string tip;
+
+	if (!git->isRepo())
+	{
+		label = "No repository";
+		tip   = "This project is not under source control.\nClick to open Source Control.";
+	}
+	else
+	{
+		const std::size_t dirty     = s_dirty;
+		const bool        conflicts = s_conflicts;
+		const std::string branch    = st.detached ? std::string("detached")
+		                            : st.branch.empty() ? std::string("(no branch)")
+		                                                : st.branch;
+
+		label = branch + "   ";
+		if (conflicts)
+		{
+			label += "conflicts";
+			tint   = ImVec4(1.0f, 0.45f, 0.45f, 1.0f);
+		}
+		else if (dirty == 0)
+		{
+			label += "no changes";
+		}
+		else
+		{
+			label += std::to_string(dirty) + (dirty == 1 ? " change" : " changes");
+			tint   = ImVec4(1.0f, 0.78f, 0.35f, 1.0f);
+		}
+
+		// Ahead/behind belongs in the tooltip rather than the line: it matters
+		// when you go looking, and it is one more thing to read past when you do
+		// not. Same for the upstream and the last error.
+		tip = "Branch: " + branch;
+		if (!st.upstream.empty()) tip += "\nUpstream: " + st.upstream;
+		if (st.ahead > 0 || st.behind > 0)
+		{
+			tip += "\n" + std::to_string(st.ahead) + " to push, " +
+			       std::to_string(st.behind) + " to pull";
+		}
+		if (st.initialCommit) tip += "\nNothing committed yet";
+		tip += "\n" + std::to_string(dirty) + " changed file" + (dirty == 1 ? "" : "s");
+		if (s_staged) tip += " (some staged)";
+		if (!git->lastError().empty()) tip += "\n\n" + git->lastError();
+		tip += "\n\nClick to open Source Control.";
+	}
+
+	// A flat, borderless button so the footer keeps reading as a status strip
+	// rather than sprouting a toolbar.
+	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.10f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1, 1, 1, 0.20f));
+	ImGui::PushStyleColor(ImGuiCol_Text,          tint);
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 0.0f));
+
+	const bool clicked = ImGui::Button(label.c_str());
+
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor(4);
+
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip.c_str());
+	return clicked;
+#else
+	(void)ctx;
+	return false;
+#endif
+}
+
 } // namespace SourceControlPanel

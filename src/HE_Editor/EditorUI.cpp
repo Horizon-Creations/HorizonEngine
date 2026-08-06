@@ -140,6 +140,32 @@ static void toggleFloatingWindow(bool& open, const char* title)
     if (open) ImGui::SetWindowFocus(title);
 }
 
+// ── Revealing a tool window ──────────────────────────────────────────────────
+// Show it and bring it to the front, whatever state it was in: closed, floating
+// behind something else, or docked as a tab that is not the active one. Focusing
+// a docked window is what activates its tab, so all three collapse into one
+// call.
+//
+// Deliberately NOT toggleFloatingWindow: this is what the footer's status
+// widgets do, and a status line that CLOSES the panel it reports on when you
+// click it a second time is a trap rather than a shortcut.
+//
+// The two-frame latch covers the case the obvious version gets wrong. A window
+// that was closed does not exist yet at the moment of the click — it is created
+// later in the same frame — and SetWindowFocus on a name ImGui has never seen is
+// a silent no-op. So the request is repeated once the window is certain to be
+// there.
+static const char* s_revealTitle       = nullptr;
+static int         s_revealFocusFrames = 0;
+
+static void revealFloatingWindow(bool& open, const char* title)
+{
+    open = true;
+    ImGui::SetWindowFocus(title);
+    s_revealTitle       = title;
+    s_revealFocusFrames = 2;
+}
+
 // Toggled by View > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
@@ -1490,6 +1516,13 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 			ImGui::PopStyleColor(3);
 		}
 
+		// Source control, immediately right of Undo/Redo — the bottom-left corner
+		// every editor keeps it in. Ambient by design: "eleven files I have not
+		// committed" is something to notice in passing, not to go looking for.
+		ImGui::SameLine(0.0f, 14.0f);
+		if (SourceControlPanel::DrawFooterStatus(ctx))
+			revealFloatingWindow(s_showSourceControl, "Source Control");
+
 		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 		// The resolution is the actual viewport framebuffer size the scene renders at.
 		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
@@ -1909,6 +1942,15 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
+
+	// The second half of revealFloatingWindow: the window a footer widget asked
+	// for exists by now, so the focus request that was a no-op at click time
+	// finally lands — on its dock tab if it has one.
+	if (s_revealFocusFrames > 0 && s_revealTitle)
+	{
+		ImGui::SetWindowFocus(s_revealTitle);
+		if (--s_revealFocusFrames == 0) s_revealTitle = nullptr;
+	}
 
 	// After the panels: the dock state read here is the one they just produced,
 	// and a window closed by its own X has already cleared its flag.
