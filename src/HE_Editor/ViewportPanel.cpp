@@ -3,6 +3,7 @@
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
+#include "ViewportToolbar.h"             // the strip along the top of the Scene window
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -53,14 +54,10 @@ static float s_rmbStartY   = 0.f;
 static std::string s_viewportDropPath;   // absolute asset path ("" = nothing pending)
 static ImVec2      s_viewportDropMouse{};// screen pos of the drop
 
-// Active manipulation tool, shared by the viewport toolbar buttons and the
-// W/E/R shortcuts and consumed by the gizmo (Move / Rotate / Scale).
-static ImGuizmo::OPERATION s_gizmoOp   = ImGuizmo::TRANSLATE;
-// Gizmo orientation: LOCAL (object axes) or WORLD (axis-aligned). Toolbar toggle.
-static ImGuizmo::MODE      s_gizmoMode = ImGuizmo::LOCAL;
-// Show ImGuizmo's outer "screen-space" rotation ring (rotate about the view axis).
-// Off by default — its viewport-relative behaviour is confusing.
-static bool                s_rotateScreen = false;
+// Manipulation state (active tool, gizmo orientation, snapping, the screen-space
+// rotation ring). Edited by the toolbar and by the W/E/R shortcuts below,
+// consumed by the gizmo — one owner for all three.
+static ViewportToolbar::State s_tb;
 
 // Picking + sculpt AABB cache (keyed by mesh asset UUID)
 static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
@@ -159,83 +156,10 @@ void render(AppContext& ctx, float dt)
 		             ImGuiWindowFlags_NoMove);
 		ImGui::PopStyleVar();
 
-		// ── Inline toolbar (always at top of Scene, works docked or floating) ──
-		{
-			constexpr float kToolbarH = 36.0f;
-			ImGui::SetCursorPos(ImVec2(4.0f, 6.0f));
-
-			ImGui::SetNextItemWidth(120.0f);
-			if (ImGui::BeginCombo("##ModeSelector", ctx.editorConfig.modeString().c_str()))
-			{
-				if (ImGui::Selectable("View"))      ctx.editorConfig.mode = EditorMode::View;
-				if (ImGui::Selectable("Landscape")) ctx.editorConfig.mode = EditorMode::Landscape;
-				ImGui::EndCombo();
-			}
-			ImGui::SameLine();
-
-			auto toolBtn = [&](const char* label, ImGuizmo::OPERATION op, const char* tip)
-			{
-				const bool active = (s_gizmoOp == op);
-				if (active) ImGui::PushStyleColor(ImGuiCol_Button,
-					ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-				if (ImGui::Button(label)) s_gizmoOp = op;
-				if (active) ImGui::PopStyleColor();
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
-			};
-			toolBtn("Move",   ImGuizmo::TRANSLATE, "Move (W)");   ImGui::SameLine();
-			toolBtn("Rotate", ImGuizmo::ROTATE,    "Rotate (E)"); ImGui::SameLine();
-			toolBtn("Scale",  ImGuizmo::SCALE,     "Scale (R)");  ImGui::SameLine();
-
-			{
-				int modeIdx = (s_gizmoMode == ImGuizmo::WORLD) ? 1 : 0;
-				const char* modeItems[] = { "Local", "World" };
-				ImGui::SetNextItemWidth(90.0f);
-				if (ImGui::Combo("##GizmoMode", &modeIdx, modeItems, 2))
-					s_gizmoMode = (modeIdx == 1) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Gizmo axis orientation:\nLocal (object axes) or World (axis-aligned)");
-			}
-			ImGui::SameLine();
-
-			ImGui::Checkbox("Screen ring", &s_rotateScreen);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Show the rotate gizmo's outer screen-space ring\n(rotates about the view axis)");
-			ImGui::SameLine();
-
-			// Play / Stop button — centered in the remaining space
-			{
-				const bool playing = ctx.isPlaying;
-				constexpr float btnSize = 20.0f;
-				const float centerX = (ImGui::GetContentRegionAvail().x - 120 - btnSize) * 0.5f;
-				ImGui::SetCursorPosX(ImGui::GetCursorPosX() + centerX);
-
-				ImTextureID icon = playing ? ctx.toolbarIcons.stop : ctx.toolbarIcons.play;
-				ImVec4 tint = playing
-					? ImVec4(1.0f, 0.35f, 0.35f, 1.0f)
-					: ImVec4(0.35f, 1.0f, 0.55f, 1.0f);
-
-				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1,1,1,0.08f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1,1,1,0.16f));
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
-
-				bool toggled = false;
-				if (icon)
-					toggled = ImGui::ImageButton("##tbPlay", icon, ImVec2(btnSize, btnSize),
-						ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
-				else
-					toggled = ImGui::Button(playing ? "Stop" : "Play", ImVec2(btnSize * 2.0f, btnSize));
-
-				if (toggled && ctx.setPlayMode) ctx.setPlayMode(!playing);
-
-				ImGui::PopStyleVar();
-				ImGui::PopStyleColor(3);
-			}
-
-			// Advance cursor to fixed toolbar height and draw a separator line
-			ImGui::SetCursorPos(ImVec2(0.0f, kToolbarH));
-			ImGui::Separator();
-		}
+		// ── Toolbar (always at top of Scene, works docked or floating) ────────
+		// Zones, wells and the centred transport live in ViewportToolbar; it
+		// leaves the cursor on the first row below the strip.
+		ViewportToolbar::render(ctx, s_tb);
 
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
@@ -558,13 +482,12 @@ void render(AppContext& ctx, float dt)
 				{
 					// W/E/R switch operation while the viewport is hovered
 					// (but not while flying — W/A/S/D drive the camera then). The
-					// viewport toolbar's Move/Rotate/Scale buttons set the same
-					// shared s_gizmoOp.
+					// toolbar's Move/Rotate/Scale cells set the same shared state.
 					if (ImGui::IsWindowHovered() && !ImGui::GetIO().WantTextInput && !navigating)
 					{
-						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_gizmoOp = ImGuizmo::TRANSLATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_gizmoOp = ImGuizmo::ROTATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_gizmoOp = ImGuizmo::SCALE;
+						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_tb.op = ImGuizmo::TRANSLATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_tb.op = ImGuizmo::ROTATE;
+						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_tb.op = ImGuizmo::SCALE;
 					}
 
 					ImGuizmo::SetOrthographic(false);
@@ -584,9 +507,9 @@ void render(AppContext& ctx, float dt)
 
 					// For rotation, optionally drop ImGuizmo's outer screen-space
 					// ring (rotate about the view axis) — it's the confusing white
-					// circle. Toggled from the toolbar.
-					ImGuizmo::OPERATION effectiveOp = s_gizmoOp;
-					if (s_gizmoOp == ImGuizmo::ROTATE && !s_rotateScreen)
+					// circle. Toggled from the toolbar's options popup.
+					ImGuizmo::OPERATION effectiveOp = s_tb.op;
+					if (s_tb.op == ImGuizmo::ROTATE && !s_tb.rotateScreenRing)
 						effectiveOp = ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
 
 					// While a drag is in progress the gizmo works on the matrix IT
@@ -600,10 +523,14 @@ void render(AppContext& ctx, float dt)
 					static bool      s_gizmoWasUsing = false;
 					static glm::mat4 s_gizmoWorld(1.0f);
 					glm::mat4 world = s_gizmoWasUsing ? s_gizmoWorld : t->worldMatrix;
+					// Snapping (toolbar): ImGuizmo quantises the drag to the
+					// increment of whichever operation is armed, or moves freely
+					// when activeSnap() hands back nullptr.
 					ImGuizmo::Manipulate(
 						&s_sceneSnapshot.camera.view[0][0],
 						&s_sceneSnapshot.camera.projection[0][0],
-						effectiveOp, s_gizmoMode, &world[0][0]);
+						effectiveOp, s_tb.mode, &world[0][0],
+						nullptr, s_tb.activeSnap());
 					s_gizmoWorld = world;
 
 					// Undo session: one entry per drag
