@@ -4,6 +4,7 @@
 #include "EditorApplication.h" // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h" // shared per-tab state map + lazy asset open
+#include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
@@ -100,7 +101,7 @@ UvStats computeStats(const StaticMeshAsset& m)
 // it truncated rather than quietly showing a partial unwrap.
 constexpr size_t kMaxUvSegments = 120000;
 
-void drawUvView(const StaticMeshAsset& mesh, State& st, const ImVec2& size)
+void drawUvView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const ImVec2& size)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -124,15 +125,29 @@ void drawUvView(const StaticMeshAsset& mesh, State& st, const ImVec2& size)
 		const ImVec2 d = ImGui::GetIO().MouseDelta;
 		st.uvPan.x += d.x; st.uvPan.y += d.y;
 	}
-	if (hovered && ImGui::GetIO().MouseWheel != 0.0f)
+	ImGuiIO& io = ImGui::GetIO();
+	if (hovered && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
 	{
-		const float prev = st.uvZoom;
-		st.uvZoom = std::clamp(st.uvZoom * (1.0f + ImGui::GetIO().MouseWheel * 0.12f), 0.15f, 40.0f);
-		// Keep the point under the cursor put.
-		const ImVec2 m = ImGui::GetMousePos();
-		const float k = st.uvZoom / prev;
-		st.uvPan.x = m.x - origin.x - (m.x - origin.x - st.uvPan.x) * k;
-		st.uvPan.y = m.y - origin.y - (m.y - origin.y - st.uvPan.y) * k;
+		// Trackpad grammar: the two-finger SWIPE pans (no held press needed —
+		// exactly the gesture a pad is comfortable with), zoom moves behind
+		// Cmd/Ctrl+scroll. Mouse grammar: wheel zooms, exactly as before.
+		// Modifier first, so a zoom can never fall through into a pan.
+		const bool zoomMod = io.KeyCtrl || io.KeySuper;
+		if (EditorInput::trackpadPointer(ctx) && !zoomMod)
+		{
+			st.uvPan.x += io.MouseWheelH * 16.0f;
+			st.uvPan.y += io.MouseWheel  * 16.0f;
+		}
+		else if (io.MouseWheel != 0.0f)
+		{
+			const float prev = st.uvZoom;
+			st.uvZoom = std::clamp(st.uvZoom * (1.0f + io.MouseWheel * 0.12f), 0.15f, 40.0f);
+			// Keep the point under the cursor put.
+			const ImVec2 m = ImGui::GetMousePos();
+			const float k = st.uvZoom / prev;
+			st.uvPan.x = m.x - origin.x - (m.x - origin.x - st.uvPan.x) * k;
+			st.uvPan.y = m.y - origin.y - (m.y - origin.y - st.uvPan.y) * k;
+		}
 	}
 
 	const float tile = side * st.uvZoom;
@@ -315,13 +330,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	// controls, and this pane keeps the readouts it alone can give.
 	ImGui::SeparatorText("View");
 	ImGui::Text("Zoom %.2fx", st.uvZoom);
-	ImGui::TextDisabled("Drag to pan, wheel to zoom.");
+	ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+		? "Drag or two-finger swipe to pan,\nCmd/Ctrl+scroll to zoom."
+		: "Drag to pan, wheel to zoom.");
 	ImGui::EndChild();
 
 	// ── Right: the UV wireframe ──────────────────────────────────────────────
 	ImGui::SameLine();
 	ImGui::BeginChild("##smUv", ImVec2(0.0f, 0.0f), true);
-	drawUvView(*mesh, st, ImGui::GetContentRegionAvail());
+	drawUvView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
 	ImGui::EndChild();
 
 	ImGui::End();

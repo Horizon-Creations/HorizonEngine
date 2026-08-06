@@ -7,6 +7,7 @@
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
 #include "EditorWidgets.h"          // shared Content-Browser asset drop slot
+#include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/AnimationPreview.h>
@@ -222,6 +223,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	// about, so without the flag a right-drag never even activates the item.
 	ImGui::InvisibleButton("##skelOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
 		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+	// Claim the wheel over the preview so a swipe/zoom never also scrolls the pane.
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
 	if (ImGui::IsItemActive() &&
 	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 	{
@@ -229,8 +233,22 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.previewYaw   -= md.x * 0.01f;
 		st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 	}
-	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
-		st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
+	ImGuiIO& io = ImGui::GetIO();
+	if (ImGui::IsItemHovered() && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
+	{
+		// Trackpad grammar: the two-finger SWIPE orbits (holding a press-drag on
+		// a pad is tiring — that was the whole complaint), zoom moves behind
+		// Cmd/Ctrl+scroll. Mouse grammar: wheel zooms, exactly as before.
+		// Modifier first, so a zoom can never fall through into an orbit.
+		const bool zoomMod = io.KeyCtrl || io.KeySuper;
+		if (EditorInput::trackpadPointer(ctx) && !zoomMod)
+		{
+			st.previewYaw   -= io.MouseWheelH * 0.08f;
+			st.previewPitch  = std::clamp(st.previewPitch + io.MouseWheel * 0.08f, -1.45f, 1.45f);
+		}
+		else if (io.MouseWheel != 0.0f)
+			st.previewDist = std::clamp(st.previewDist - io.MouseWheel * 0.1f, 0.5f, 8.0f);
+	}
 
 	ImGui::EndChild();
 	ImGui::End();

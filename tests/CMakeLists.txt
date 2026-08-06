@@ -16,6 +16,7 @@ add_executable(he_tests
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
     test_graph_editor_keys.cpp
+    test_editor_input.cpp
     test_editor_row_widgets.cpp
     test_report_issue.cpp
     test_editor_dock_state.cpp

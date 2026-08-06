@@ -3,6 +3,7 @@
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map + lazy asset open
+#include "EditorInput.h"          // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "AudioImporter.h"        // raw .wav decode + the Import button
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -385,17 +386,26 @@ void drawWaveform(AppContext& ctx, const AudioAsset& clip, State& st, const ImVe
 		return origin.x + static_cast<float>((f - st.viewStart) / st.framesPerPx);
 	};
 
-	// Wheel zooms around the cursor; shift+wheel pans. Middle-drag pans too, so
-	// the pointer stays free for scrubbing.
-	if (hovered && ImGui::GetIO().MouseWheel != 0.0f)
+	// Mouse grammar: wheel zooms around the cursor, shift+wheel pans. Trackpad
+	// grammar: the two-finger swipe pans the timeline (both axes fold into the
+	// one axis a waveform has), zoom moves behind Cmd/Ctrl+scroll — same rule as
+	// every preview pane: bare scroll moves, modifier-scroll zooms. Middle-drag
+	// pans in both, so the pointer stays free for scrubbing.
+	ImGuiIO& io = ImGui::GetIO();
+	if (hovered && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
 	{
-		const float wheel = ImGui::GetIO().MouseWheel;
-		if (ImGui::GetIO().KeyShift)
-			st.viewStart -= static_cast<double>(wheel) * st.framesPerPx * 80.0;
-		else
+		const bool trackpad = EditorInput::trackpadPointer(ctx);
+		const bool zoomMod  = io.KeyCtrl || io.KeySuper;
+		const bool panning  = trackpad ? !zoomMod : io.KeyShift;
+		if (panning)
+		{
+			const float pan = trackpad ? (io.MouseWheelH + io.MouseWheel) : io.MouseWheel;
+			st.viewStart -= static_cast<double>(pan) * st.framesPerPx * 80.0;
+		}
+		else if (io.MouseWheel != 0.0f)
 		{
 			const double anchor = frameAtX(mouse.x);
-			st.framesPerPx *= static_cast<double>(std::pow(0.86f, wheel));
+			st.framesPerPx *= static_cast<double>(std::pow(0.86f, io.MouseWheel));
 			clampView(st, frames, width);
 			// Keep the frame under the cursor under the cursor.
 			st.viewStart = anchor - static_cast<double>(mouse.x - origin.x) * st.framesPerPx;
@@ -493,8 +503,6 @@ void drawWaveform(AppContext& ctx, const AudioAsset& clip, State& st, const ImVe
 	}
 	dl->PopClipRect();
 	dl->AddRect(origin, br, IM_COL32(255, 255, 255, 26));
-
-	(void)ctx;
 }
 
 // ── Transport ────────────────────────────────────────────────────────────────
@@ -809,8 +817,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		ImGui::Text("%s / %s", now, total);
 		ImGui::SameLine();
 		const double visibleSec = st.framesPerPx * canvasW / rate;
-		ImGui::TextDisabled("   |   %.3g s visible   |   drag to scrub, wheel to zoom, "
-		                    "middle-drag to pan", visibleSec);
+		ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+			? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
+			: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
+			visibleSec);
 	}
 	ImGui::EndChild();
 

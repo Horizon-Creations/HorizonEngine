@@ -4,6 +4,7 @@
 #include "GitController.h"               // Source Control pages
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
+#include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
@@ -308,6 +309,21 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
 			ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
+	});
+
+	row("pointerinput", "Viewport", [&]{
+		// The Auto item SAYS what it resolved to, so "why does scroll orbit?"
+		// answers itself right here instead of needing a trip to a manual.
+		const char* items[] = {
+			EditorInput::detectTrackpad() ? "Auto (trackpad detected)" : "Auto (mouse detected)",
+			"Mouse", "Trackpad" };
+		cfg.PointerInput = std::clamp(cfg.PointerInput, 0, 2);
+		Row::combo("Pointer Device", &cfg.PointerInput, items, IM_ARRAYSIZE(items));
+		if (EditorInput::resolveTrackpad(cfg.PointerInput, EditorInput::detectTrackpad()))
+			hint("Trackpad grammar: two-finger scroll orbits/pans the preview panes; "
+			     "hold Cmd/Ctrl and scroll to zoom.");
+		else
+			hint("Mouse grammar: drag orbits/pans the preview panes, wheel zooms.");
 	});
 
 	row("fontscale", "Appearance", [&]{

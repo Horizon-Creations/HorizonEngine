@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
+#include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
 #include "EditorWidgets.h"          // shared Content-Browser asset drop target
 #include "GraphEditor.h"            // shared node-graph canvas frontend
@@ -286,6 +287,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			// Right-drag orbits too — same muscle memory as the RMB-steered viewport.
 			ImGui::InvisibleButton("##ptOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
 				ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+			// Claim the wheel over the preview so a swipe/zoom never also scrolls
+			// the surrounding column.
+			ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+			ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
 			if (ImGui::IsItemActive() &&
 			    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 			{
@@ -293,8 +298,20 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				st.previewYaw   -= md.x * 0.01f;
 				st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 			}
-			if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
-				st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.3f, 8.0f);
+			ImGuiIO& pio = ImGui::GetIO();
+			if (ImGui::IsItemHovered() && (pio.MouseWheel != 0.0f || pio.MouseWheelH != 0.0f))
+			{
+				// Trackpad grammar: two-finger swipe orbits, Cmd/Ctrl+scroll zooms.
+				// Mouse grammar: wheel zooms, exactly as before.
+				const bool zoomMod = pio.KeyCtrl || pio.KeySuper;
+				if (EditorInput::trackpadPointer(ctx) && !zoomMod)
+				{
+					st.previewYaw   -= pio.MouseWheelH * 0.08f;
+					st.previewPitch  = std::clamp(st.previewPitch + pio.MouseWheel * 0.08f, -1.45f, 1.45f);
+				}
+				else if (pio.MouseWheel != 0.0f)
+					st.previewDist = std::clamp(st.previewDist - pio.MouseWheel * 0.1f, 0.3f, 8.0f);
+			}
 		}
 		ImGui::EndChild();
 

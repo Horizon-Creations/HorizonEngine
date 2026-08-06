@@ -66,6 +66,9 @@ struct EditorConfig
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
 	float MaxFps            = 0.0f;   // VSync-off frame cap (0 = unlimited); paces mouse-look
+	// Pointer-device grammar for the preview panes (see EditorInput.h):
+	// 0 = Auto (detect trackpad), 1 = Mouse, 2 = Trackpad.
+	int   PointerInput      = 0;
 
 	// Post-process: bloom (pushed to the renderer each frame via SetBloomSettings)
 	bool  BloomEnabled   = true;
