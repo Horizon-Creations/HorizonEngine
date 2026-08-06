@@ -133,16 +133,8 @@ static int s_importDialogOpens = 0;
 
 // (Preferences opens as an editor tab — see EditorSettingsPanel::kTabPath.)
 
-// Menu toggle for a floating (non-docked) panel. On open it also pulls the window
-// to the front: it may still exist from an earlier session, sitting underneath
-// another floating window, in which case ticking the menu item would otherwise
-// look like it did nothing. Unknown title = no-op (the window is created this
-// frame and comes up on top anyway).
-static void toggleFloatingWindow(bool& open, const char* title)
-{
-    open = !open;
-    if (open) ImGui::SetWindowFocus(title);
-}
+// (The View-menu panel toggle is `togglePanelWindow` inside renderEditor — it
+// needs the tab list to reveal a docked panel.)
 
 // ── Revealing a tool window ──────────────────────────────────────────────────
 // Show it and bring it to the front, whatever state it was in: closed, floating
@@ -825,6 +817,30 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		else ctx.activeTab = (int)std::distance(ctx.tabs.begin(), it);
 		s_tabSelectRequest = ctx.activeTab;
 	};
+	// Back to the scene tab (the one with no asset behind it, normally index 0).
+	auto openViewportTab = [&]()
+	{
+		const auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+			[](const AppContext::EditorTab& t){ return t.assetPath.empty(); });
+		if (it == ctx.tabs.end()) return;
+		ctx.activeTab      = static_cast<int>(std::distance(ctx.tabs.begin(), it));
+		s_tabSelectRequest = ctx.activeTab;
+	};
+	// View-menu panel toggle. Ticking one on has to make it VISIBLE, and where
+	// that is depends on how the user keeps it: a FLOATING panel draws over
+	// whichever tab is open, so it is only pulled to the front (it may already
+	// exist from an earlier session, buried under another floating window). A
+	// DOCKED one lives in the scene layout and is hidden on every other tab, so
+	// opening it from inside a material graph would otherwise tick the menu item
+	// and show nothing at all — switch to the tab it lives on instead.
+	auto togglePanelWindow = [&](bool& open, const char* title)
+	{
+		const bool opening = !open;
+		open = opening;
+		if (!opening) return;
+		if (panelIsDockedInLayout(title)) openViewportTab();
+		else                              ImGui::SetWindowFocus(title);
+	};
 	// Open request raised outside this function (e.g. the Source Control window's
 	// "set up the remote in Preferences" pointer) — consumed here where the tab
 	// list lives.
@@ -875,11 +891,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
-			case MC::ToggleProfiler:  toggleFloatingWindow(s_showProfiler, "Performance Profiler"); break;
-			case MC::ToggleEnvironment: toggleFloatingWindow(s_showEnvironment, "Environment"); break;
-			case MC::ToggleCollab:      toggleFloatingWindow(s_showCollab, "Collaboration");    break;
+			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
+			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
+			case MC::ToggleCollab:      togglePanelWindow(s_showCollab, "Collaboration");    break;
 			case MC::ToggleSourceControl:
-				toggleFloatingWindow(s_showSourceControl, "Source Control"); break;
+				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -964,13 +980,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler))
-            toggleFloatingWindow(s_showProfiler, "Performance Profiler");
+            togglePanelWindow(s_showProfiler, "Performance Profiler");
         if (ImGui::MenuItem("Environment", nullptr, s_showEnvironment))
-            toggleFloatingWindow(s_showEnvironment, "Environment");
+            togglePanelWindow(s_showEnvironment, "Environment");
         if (ImGui::MenuItem("Collaboration", nullptr, s_showCollab))
-            toggleFloatingWindow(s_showCollab, "Collaboration");
+            togglePanelWindow(s_showCollab, "Collaboration");
         if (ImGui::MenuItem("Source Control", nullptr, s_showSourceControl))
-            toggleFloatingWindow(s_showSourceControl, "Source Control");
+            togglePanelWindow(s_showSourceControl, "Source Control");
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1712,9 +1728,6 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         ImGui::End();
     }
 
-    // Post-PIE report window (drawn before the tab gating so it shows on any tab).
-    PlayReportPanel::drawPlayReport(ctx);
-
     // ── Top-level tab gating ───────────────────────────────────────────────────
     // The built-in "Scene" tab (empty assetPath) shows the dockspace + all panels
     // below. A script tab instead fills that same area with its code editor and we
@@ -1724,6 +1737,18 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
     const bool sceneTabActive =
         ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size())
         || ctx.tabs[ctx.activeTab].assetPath.empty();
+
+    // The dockspace itself is only drawn on the scene tab (below). On every other
+    // tab it still has to be declared alive, or the windows docked into it that
+    // ARE submitted on this tab — the View-menu panels, the play report — get
+    // undocked by ImGui and start floating over the asset editor. Alive-but-not-
+    // drawn hides them instead, which is what "docked = part of the scene tab"
+    // means. Before the first such Begin, hence up here.
+    if (!sceneTabActive) EditorDockState::keepMainDockspaceAlive();
+
+    // Post-PIE report window (drawn before the tab gating so it shows on any tab).
+    PlayReportPanel::drawPlayReport(ctx);
+
     if (!sceneTabActive)
     {
         // The scene viewport (and its RMB fly-look release) won't run this frame. If the
@@ -1864,7 +1889,7 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         // could not even be clicked back to the front: gone for good. With the flag
         // the host stays at the back of the z-order, where a dockspace belongs.
         // (ImGui's own DockSpaceOverViewport() sets exactly these two flags.)
-        ImGui::Begin("##EditorDockSpace", nullptr,
+        ImGui::Begin(EditorDockState::kHostWindowName, nullptr,
             ImGuiWindowFlags_NoTitleBar             |
             ImGuiWindowFlags_NoResize               |
             ImGuiWindowFlags_NoMove                 |
@@ -1878,7 +1903,10 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor(2);
 
-        const ImGuiID dockspaceId = ImGui::GetID("##MainDockSpace");
+        // Same value as ImGui::GetID(kDockspaceLabel) right here — but spelled
+        // in one place, because the asset-tab path needs it too (see
+        // keepMainDockspaceAlive) and cannot call GetID from inside this window.
+        const ImGuiID dockspaceId = EditorDockState::mainDockspaceId();
         // Build the default layout on first run (no saved layout in imgui.ini) or
         // on demand via View > Reset Layout. A layout loaded from imgui.ini
         // otherwise always wins, so user customisations persist.
@@ -1970,6 +1998,14 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 // Drawn after renderEditor returns, so they are on top of both layouts. The menu
 // toggles they read are file statics in this translation unit, hence the
 // explicit hand-over into UiFlags.
+//
+// "On screen no matter which tab" is about the FLOATING case, which is what a
+// window pulled up over a material graph is. A panel the user DOCKED is part of
+// the scene layout and has no business hanging over another tab — it is still
+// submitted here (this code cannot know which of the two it is, and ImGui would
+// undock it if it stopped), but renderEditor has told ImGui the dockspace is
+// alive-but-not-drawn, and ImGui hides everything docked into it. See
+// EditorDockState::keepMainDockspaceAlive.
 void EditorUI::renderOverlays(AppContext& ctx, float dt)
 {
     ProfilerPanel::DrawProfilerWindow(ctx, s_showProfiler);
