@@ -35,4 +35,13 @@ namespace EditorInput
 
 	// The one call panels make: is the trackpad grammar active?
 	bool trackpadPointer(const AppContext& ctx);
+
+	// The same answer for call sites that have no AppContext (the shared
+	// GraphEditor canvas). Returns whatever the last trackpadPointer() call
+	// resolved — EditorUI refreshes it once per frame, so it is never stale by
+	// more than a frame. Header-inline on purpose: GraphEditor.cpp is also
+	// compiled into he_tests, which must not inherit EditorInput.cpp's SDL
+	// dependency just to read a cached bool (it stays false there).
+	namespace detail { inline bool g_trackpadActive = false; }
+	inline bool trackpadActive() { return detail::g_trackpadActive; }
 }

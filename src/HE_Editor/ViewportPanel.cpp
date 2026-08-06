@@ -369,36 +369,13 @@ void render(AppContext& ctx, float dt)
 							if (ImGui::IsKeyDown(ImGuiKey_S)) cin.moveAxis.z -= 1.0f;
 						}
 					}
-					// Wheel zoom works on hover without holding a button.
-					//
-					// Trackpad grammar (see EditorInput.h): every held-button gesture
-					// here means physically pressing the pad for the whole drag — RMB
-					// even with two fingers. So the two-finger SWIPE navigates instead,
-					// Blender-style: bare swipe orbits the pivot, Shift+swipe pans,
-					// Cmd/Ctrl+scroll dollies. The swipe is turned into a synthetic
-					// drag (orbit/pan read Input::mouseDelta), scaled so one wheel
-					// unit ≈ one comfortable drag step. Held-button drags keep working
-					// and win over a simultaneous swipe. Mouse grammar: wheel dollies,
-					// exactly as before.
-					if (imageHovered && EditorInput::trackpadPointer(ctx))
-					{
-						const bool swipe = io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f;
-						if (swipe && !navigating)
-						{
-							if (io.KeyCtrl || io.KeySuper)
-								cin.wheel = io.MouseWheel;
-							else
-							{
-								constexpr float kSwipeToPx = 8.0f; // wheel units → drag pixels
-								const glm::vec2 d(io.MouseWheelH * kSwipeToPx,
-								                  io.MouseWheel  * kSwipeToPx);
-								if (io.KeyShift) cin.pan   = true;
-								else             cin.orbit = true;
-								cin.mouseDelta = d;
-							}
-						}
-					}
-					else if (imageHovered) cin.wheel = io.MouseWheel;
+					// Wheel zoom works on hover without holding a button — on every
+					// pointer device. (A swipe-orbits variant was tried here and
+					// reverted: it took the bare scroll away from the dolly, which
+					// reads as "zoom is broken" on a pad. Trackpad navigation is the
+					// fly TOGGLE above plus Alt+drag orbit; swipe-pan belongs to the
+					// 2D canvases.)
+					if (imageHovered) cin.wheel = io.MouseWheel;
 
 					// Focus on selection (F) — frame the selected entity.
 					if (imageHovered && !io.WantTextInput && !navigating &&

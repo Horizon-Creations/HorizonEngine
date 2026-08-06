@@ -1,4 +1,5 @@
 #include "GraphEditor.h"
+#include "EditorInput.h" // pointer-device grammar (trackpad swipe pans, modifier-scroll zooms)
 #include <cstdint>
 #include <algorithm>
 #include <unordered_set>
@@ -242,14 +243,26 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         st.focusNode = 0;
     }
 
-    // ── Zoom (wheel / touchpad over the canvas, about the cursor) ────────────
+    // ── Wheel over the canvas ────────────────────────────────────────────────
+    // Mouse grammar: wheel zooms about the cursor. Trackpad grammar: the
+    // two-finger SWIPE pans (panning is the constant gesture on a graph, and
+    // holding the pad pressed for a right-drag the whole time is what made it
+    // exhausting), zoom moves behind Cmd/Ctrl+scroll — modifier checked first,
+    // so a zoom can never fall through into a pan.
     if (interact)
     {
-        const float wheel = ImGui::GetIO().MouseWheel;
-        if (wheel != 0.0f)
+        ImGuiIO& gio = ImGui::GetIO();
+        const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
+        if (EditorInput::trackpadActive() && !zoomMod)
+        {
+            constexpr float kSwipeToPx = 16.0f; // wheel units → canvas pixels
+            st.pan.x += gio.MouseWheelH * kSwipeToPx;
+            st.pan.y += gio.MouseWheel  * kSwipeToPx;
+        }
+        else if (gio.MouseWheel != 0.0f)
         {
             const ImVec2 before = toGraph(mouse);
-            st.zoom = std::clamp(st.zoom * (1.0f + wheel * 0.1f), 0.3f, 2.5f);
+            st.zoom = std::clamp(st.zoom * (1.0f + gio.MouseWheel * 0.1f), 0.3f, 2.5f);
             st.pan.x = mouse.x - origin.x - before.x * st.zoom;
             st.pan.y = mouse.y - origin.y - before.y * st.zoom;
         }

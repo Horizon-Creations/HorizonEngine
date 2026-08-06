@@ -320,10 +320,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		cfg.PointerInput = std::clamp(cfg.PointerInput, 0, 2);
 		Row::combo("Pointer Device", &cfg.PointerInput, items, IM_ARRAYSIZE(items));
 		if (EditorInput::resolveTrackpad(cfg.PointerInput, EditorInput::detectTrackpad()))
-			hint("Trackpad grammar: two-finger scroll orbits/pans the preview panes; "
-			     "hold Cmd/Ctrl and scroll to zoom.");
+			hint("Trackpad grammar: two-finger swipe pans graphs and 2D views "
+			     "(Cmd/Ctrl+scroll zooms them); scroll zooms 3D previews; a "
+			     "two-finger tap over the viewport toggles fly mode (WASDQE, "
+			     "tap again or Esc to exit).");
 		else
-			hint("Mouse grammar: drag orbits/pans the preview panes, wheel zooms.");
+			hint("Mouse grammar: wheel zooms, right/middle-drag pans, "
+			     "RMB-hold flies the viewport.");
 	});
 
 	row("fontscale", "Appearance", [&]{

@@ -14,6 +14,7 @@
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AudioEditorPanel.h"
+#include "EditorInput.h"    // pointer-device grammar frame cache
 #include "AnimatorStateMachineEditorPanel.h"
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
@@ -347,6 +348,10 @@ void EditorUI::render(AppContext& ctx, float dt)
 {
 #ifdef HE_IMGUI_ENABLED
     if (!ctx.imguiReady) return;
+
+    // Refresh the frame-cached pointer-grammar answer for ctx-less call sites
+    // (the shared GraphEditor canvas asks via EditorInput::trackpadActive()).
+    EditorInput::trackpadPointer(ctx);
 
     ImGuiIO& io = ImGui::GetIO();
 

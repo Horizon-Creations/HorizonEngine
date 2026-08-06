@@ -46,7 +46,8 @@ bool detectTrackpad()
 
 bool trackpadPointer(const AppContext& ctx)
 {
-	return resolveTrackpad(ctx.editorConfig.PointerInput, detectTrackpad());
+	detail::g_trackpadActive = resolveTrackpad(ctx.editorConfig.PointerInput, detectTrackpad());
+	return detail::g_trackpadActive;
 }
 
 } // namespace EditorInput

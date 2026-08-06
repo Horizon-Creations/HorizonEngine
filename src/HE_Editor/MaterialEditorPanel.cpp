@@ -2156,23 +2156,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 					st.previewDirty  = true;
 				}
 			}
-			ImGuiIO& pio = ImGui::GetIO();
-			if (ImGui::IsItemHovered() && (pio.MouseWheel != 0.0f || pio.MouseWheelH != 0.0f))
+			// Scroll = zoom on every pointer device — a 3D orbit view zooms far
+			// more often than it orbits, and taking the bare scroll away for a
+			// swipe-orbit (tried once) just made zooming feel broken on a pad.
+			// Orbiting is the drags above; 2D canvases are where swipe pans.
+			if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
 			{
-				// Trackpad grammar: two-finger swipe orbits, Cmd/Ctrl+scroll zooms.
-				// Mouse grammar: wheel zooms, exactly as before.
-				const bool zoomMod = pio.KeyCtrl || pio.KeySuper;
-				if (EditorInput::trackpadPointer(ctx) && !zoomMod)
-				{
-					st.previewYaw   -= pio.MouseWheelH * 0.08f;
-					st.previewPitch  = std::clamp(st.previewPitch + pio.MouseWheel * 0.08f, -1.45f, 1.45f);
-					st.previewDirty  = true;
-				}
-				else if (pio.MouseWheel != 0.0f)
-				{
-					st.previewDist  = std::clamp(st.previewDist - pio.MouseWheel * 0.25f, 1.6f, 8.0f);
-					st.previewDirty = true;
-				}
+				st.previewDist  = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.25f, 1.6f, 8.0f);
+				st.previewDirty = true;
 			}
 
 			// ── Streaming overlay: REAL read progress for a picked mesh. ──────────

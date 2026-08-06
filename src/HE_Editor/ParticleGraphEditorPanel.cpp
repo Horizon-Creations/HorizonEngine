@@ -298,20 +298,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				st.previewYaw   -= md.x * 0.01f;
 				st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 			}
-			ImGuiIO& pio = ImGui::GetIO();
-			if (ImGui::IsItemHovered() && (pio.MouseWheel != 0.0f || pio.MouseWheelH != 0.0f))
-			{
-				// Trackpad grammar: two-finger swipe orbits, Cmd/Ctrl+scroll zooms.
-				// Mouse grammar: wheel zooms, exactly as before.
-				const bool zoomMod = pio.KeyCtrl || pio.KeySuper;
-				if (EditorInput::trackpadPointer(ctx) && !zoomMod)
-				{
-					st.previewYaw   -= pio.MouseWheelH * 0.08f;
-					st.previewPitch  = std::clamp(st.previewPitch + pio.MouseWheel * 0.08f, -1.45f, 1.45f);
-				}
-				else if (pio.MouseWheel != 0.0f)
-					st.previewDist = std::clamp(st.previewDist - pio.MouseWheel * 0.1f, 0.3f, 8.0f);
-			}
+			// Scroll = zoom on every pointer device (see the material preview's
+			// note) — orbiting is the drags above, swipe-pan belongs to the 2D
+			// canvases.
+			if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+				st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.3f, 8.0f);
 		}
 		ImGui::EndChild();
 

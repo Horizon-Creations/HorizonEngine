@@ -233,22 +233,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.previewYaw   -= md.x * 0.01f;
 		st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 	}
-	ImGuiIO& io = ImGui::GetIO();
-	if (ImGui::IsItemHovered() && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
-	{
-		// Trackpad grammar: the two-finger SWIPE orbits (holding a press-drag on
-		// a pad is tiring — that was the whole complaint), zoom moves behind
-		// Cmd/Ctrl+scroll. Mouse grammar: wheel zooms, exactly as before.
-		// Modifier first, so a zoom can never fall through into an orbit.
-		const bool zoomMod = io.KeyCtrl || io.KeySuper;
-		if (EditorInput::trackpadPointer(ctx) && !zoomMod)
-		{
-			st.previewYaw   -= io.MouseWheelH * 0.08f;
-			st.previewPitch  = std::clamp(st.previewPitch + io.MouseWheel * 0.08f, -1.45f, 1.45f);
-		}
-		else if (io.MouseWheel != 0.0f)
-			st.previewDist = std::clamp(st.previewDist - io.MouseWheel * 0.1f, 0.5f, 8.0f);
-	}
+	// Scroll = zoom on every pointer device — a 3D orbit view zooms far more
+	// often than it orbits, and taking the bare scroll away for a swipe-orbit
+	// (tried once) just made zooming feel broken on a pad. Orbiting is the
+	// drags above; 2D canvases are where swipe pans.
+	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+		st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
 
 	ImGui::EndChild();
 	ImGui::End();
