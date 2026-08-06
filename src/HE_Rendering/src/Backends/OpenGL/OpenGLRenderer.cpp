@@ -6009,14 +6009,27 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	}
 	m_giReflPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-	// ── 3. Separable confidence-weighted blur (quality Medium and up) ────────
-	if (m_giReflQuality >= 1 && m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
+	// ── 3. Separable confidence-weighted blur ────────────────────────────────
+	// WIDTH is inverse to the ray count — the other half of what the quality
+	// tier means. The blur stands in for a glossy lobe the trace did not sample:
+	// one deterministic ray knows nothing about the lobe and needs a wide blur
+	// to fake one; four stratified rays have sampled it and need barely any, so
+	// the reflection stays SHARP. Higher tier = sharper, not softer.
+	//
+	// KNOWN GAP vs Metal: there the sharp trace and the blurred copy are kept
+	// apart and lerped per pixel by roughness, so a mirror stays mirror-sharp at
+	// every tier. The GL scene shader samples ONE reflection texture (uGIRefl),
+	// so the blur lands on mirrors too. Closing it needs the same roughness-mix
+	// pass Metal got (kSSRRoughMixFS) plus one more render target.
+	if (m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
 	{
+		const float rays = m_giReflQuality >= 2 ? 4.0f : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
+		const float blurTexels = 4.0f / rays; // 4 / 2 / 1
 		glUseProgram(m_giReflBlurProgram);
 		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
 		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
-		const float tx = 1.0f / static_cast<float>(std::max(1, width));
-		const float ty = 1.0f / static_cast<float>(std::max(1, height));
+		const float tx = blurTexels / static_cast<float>(std::max(1, width));
+		const float ty = blurTexels / static_cast<float>(std::max(1, height));
 		glActiveTexture(GL_TEXTURE0);
 		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
 		glBindTexture(GL_TEXTURE_2D, src);

@@ -11102,9 +11102,12 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 			bindTex(ssrSharp, 4, m_linearSampler);
 			bindTex(ssrOn ? (m_ssrQuality >= 2 ? m_ssrRoughTex : ssrSharp)
 			              : m_dummyTexture, 5, m_linearSampler);
-			bindTex(giReflOn ? m_giReflTex : m_dummyTexture, 6, m_linearSampler);
-			bindTex(giReflOn ? (m_giReflQuality >= 2 ? m_giReflRoughTex : m_giReflTex)
-			                 : m_dummyTexture, 7, m_linearSampler);
+			// Sharp trace + its blurred copy; the composite lerps by roughness.
+			// Every tier now produces the pair (the blur WIDTH is what the tier
+			// changes — wide when few rays sampled the lobe, narrow when many
+			// did), so this no longer collapses both slots onto one texture.
+			bindTex(giReflOn ? m_giReflTex      : m_dummyTexture, 6, m_linearSampler);
+			bindTex(giReflOn ? m_giReflRoughTex : m_dummyTexture, 7, m_linearSampler);
 			bindTex(m_skyEnvCube, 14, m_linearSampler);
 			bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15, m_linearSampler);
 			[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -11505,14 +11508,9 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		m_giReflPrevViewProj = viewProj; // for NEXT frame's reprojection
 
 		// ── Blur chain: the SSR blur pipeline verbatim — same RGBA16F fullscreen
-		// pass, confidence-weighted 5-tap. H refl→ping, V ping→refl, so the
-		// composite reads m_giReflTex either way. The TIER sets the strength
-		// (the other half of what quality means here — see the `rays` comment):
-		// Low none, Medium a 1-texel narrow pass, High that plus a 3-texel wide
-		// pass into m_giReflRoughTex and the per-pixel roughness lerp between
-		// them. With High also tracing 4 rays, the blur now cleans up a genuinely
-		// averaged estimate instead of hiding a single sample.
-		if (m_giReflQuality >= 1 && m_ssrBlurPipeline)
+		// confidence-weighted 5-tap, run at EVERY tier (Low needs it most, see
+		// the width comment below).
+		if (m_ssrBlurPipeline)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)
 			{
@@ -11534,19 +11532,26 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 				[benc endEncoding];
 				++m_counters.draws;
 			};
-			blurPass(m_giReflTex, m_giReflPingTex, 1.0f / static_cast<float>(tw), 0.0f);
-			blurPass(m_giReflPingTex, m_giReflTex, 0.0f, 1.0f / static_cast<float>(th));
-			if (m_giReflQuality >= 2)
+			// Blur WIDTH is inverse to the ray count, which is the whole point of
+			// spending rays: the blur is there to stand in for a glossy lobe the
+			// trace did not sample. One deterministic ray knows nothing about the
+			// lobe, so it needs a wide blur to fake one; four stratified rays
+			// have sampled it, so they need barely any and the reflection stays
+			// SHARP. Higher tier = sharper, not softer.
+			//
+			// m_giReflTex keeps the UNBLURRED trace and m_giReflRoughTex the
+			// blurred copy; the roughness lerp between them (deferred: in the
+			// composite, forward: the mix pass below) is what keeps a mirror
+			// mirror-sharp at every tier while a rough surface gets the lobe.
+			const float blurTexels = 4.0f / static_cast<float>(rays); // 4 / 2 / 1
+			blurPass(m_giReflTex, m_giReflPingTex,  blurTexels / static_cast<float>(tw), 0.0f);
+			blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, blurTexels / static_cast<float>(th));
 			{
-				blurPass(m_giReflTex, m_giReflPingTex,  3.0f / static_cast<float>(tw), 0.0f);
-				blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, 3.0f / static_cast<float>(th));
-				// FORWARD path only: bake the narrow/wide roughness lerp into the
-				// texture the scene shader samples. The deferred composite does
-				// this per pixel itself — doing it here too would blur twice.
-				// Without it the wide blur above was computed every frame and
-				// then never sampled, so a glossy surface in the forward path
-				// showed ONE jittered ray per pixel through a 5-tap blur. Result
-				// lands in ping, which the blur chain is finished with.
+				// FORWARD path only: bake the sharp/blurred roughness lerp into
+				// the texture the scene shader samples — it only gets ONE. The
+				// deferred composite does the same lerp per pixel itself, so
+				// doing it here too would blur twice. Result lands in ping,
+				// which the blur chain is finished with.
 				if (!deferredIn && m_ssrRoughMixPipeline)
 				{
 					HE::MaterialShaderLibrary::SSRBlurUniforms bu;

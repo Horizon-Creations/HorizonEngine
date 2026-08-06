@@ -574,11 +574,25 @@ eigenes Rauschen als Inhaltswechsel missdeutete.
 
 Jetzt bedeutet der Tier **zwei Zahlen und sonst nichts**:
 
-| Tier | Rays/Pixel | Blur |
+| Tier | Rays/Pixel | Blur-Breite |
 |---|---|---|
-| Low | 1 (deterministisch) | keiner |
-| Medium | 2 | schmal (1 Texel, 5-Tap) |
-| High | 4 | schmal + breit (3 Texel) mit Roughness-Lerp |
+| Low | 1 (deterministisch) | 4 Texel |
+| Medium | 2 | 2 Texel |
+| High | 4 | 1 Texel |
+
+**Der Blur wird mit steigender Qualität SCHMALER, nicht breiter** — erster Anlauf
+hatte es genau falsch herum. Der Blur ist kein Denoiser, er ist der Ersatz für
+eine Glossy-Lobe, die der Trace nicht abgetastet hat: ein deterministischer
+Strahl weiß nichts über die Lobe und braucht einen breiten Blur, um eine
+vorzutäuschen; vier stratifizierte Strahlen haben sie abgetastet und brauchen
+kaum noch etwas. Mehr Rays kaufen also **Schärfe**, was der Sinn der Sache ist.
+Formel: `blurTexels = 4 / rays`.
+
+Der Blur läuft jetzt auf **jedem** Tier (Low braucht ihn am dringendsten) und
+geht in eine ZWEITE Textur; die scharfe Trace-Ausgabe bleibt daneben stehen und
+wird per Pixel nach Roughness dazwischen gelerpt (deferred im Composite, forward
+im `kSSRRoughMixFS`-Pass). Damit bleibt ein Spiegel auf jedem Tier
+spiegelscharf, während eine raue Fläche ihre Lobe bekommt.
 
 Die Strahlen sind über Sample-Index UND Frame stratifiziert, also verteilt sich
 schon ein einzelner Frame über die Lobe statt zu klumpen. Ein **Near-Mirror
@@ -594,3 +608,9 @@ Kompensation dafür, nur einen Strahl zu haben. Metal (HW + SW-BVH) und GL sind
 identisch aufgebaut; der GL-Kernel mittelt zusätzlich Misses als Confidence 0
 ein, sodass eine halb ins Leere zeigende Lobe proportional Himmel durchlässt —
 was sie soll.
+
+**Bekannte GL-Lücke:** dort gibt es den Sharp/Blurred-Lerp nicht — der GL-Scene-
+Shader sampelt EINE Reflexionstextur (`uGIRefl`), also trifft der Blur auch
+Spiegel. Die Breite skaliert korrekt mit dem Tier, aber ein Spiegel ist auf GL
+um `blurTexels` weicher als auf Metal. Zu schließen mit demselben
+Roughness-Mix-Pass (`kSSRRoughMixFS`) plus einem weiteren Render-Target.
