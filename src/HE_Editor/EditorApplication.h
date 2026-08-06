@@ -199,6 +199,13 @@ struct AppContext
 	HorizonWorld*      world        = nullptr;
 	ContentManager*    contentManager = nullptr;
 
+	// The editor's own audio device — alive for the whole session, not just play
+	// mode, so a panel can audition a clip without entering PIE. Panels must stop
+	// the handles they start (a tab that closes while looping has no UI left to
+	// kill it); everything an editor preview needs beyond play/stop lives on the
+	// transport block of AudioEngine.
+	AudioEngine*       audioEngine  = nullptr;
+
 	// The project's app-wide GameInstance graph (edited in the Game Instance
 	// window). commitGameInstance re-registers it with the app runtime + saves it.
 	HorizonCode::Graph*   gameInstanceGraph = nullptr;

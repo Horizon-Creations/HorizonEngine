@@ -250,6 +250,7 @@ void iconBrush(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconFlip(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconSparkle(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconWidget(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconWave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 
 } // namespace EditorToolbar
 

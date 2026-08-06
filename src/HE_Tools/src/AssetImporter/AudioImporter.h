@@ -16,6 +16,14 @@ public:
 		bool     mono             = false;
 	};
 
+	// Decode a WAV into `out` (interleaved int16 PCM + rate/channels/name) WITHOUT
+	// writing anything to disk. Split out of import() so the editor can audition a
+	// raw .wav before — or without ever — importing it: engine-content .wav files
+	// cannot be imported at all unless HE_ENGINE_CONTENT_EDITABLE is set, and a
+	// preview should not depend on that. `out.path` is left alone (the caller owns
+	// where, or whether, the asset lands). Returns false and logs on a decode error.
+	static bool decode(const std::filesystem::path& sourcePath, AudioAsset& out);
+
 	// Returns the imported asset (already written to disk) or nullptr.
 	static std::unique_ptr<AudioAsset> import(
 		const std::filesystem::path& sourcePath,

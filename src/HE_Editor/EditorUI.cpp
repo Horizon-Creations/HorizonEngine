@@ -13,6 +13,7 @@
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
+#include "AudioEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
 #include "ContentBrowserPanel.h"         // bottom dock: folder tree + asset grid
@@ -1689,6 +1690,7 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
                 AnimatorStateMachineEditorPanel::forget(t.assetPath);
                 StaticMeshEditorPanel::forget(t.assetPath);      // view-only, never dirty
                 SkeletalMeshEditorPanel::forget(t.assetPath);    // view-only, never dirty
+                AudioEditorPanel::forget(t.assetPath);           // also silences the preview
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )
@@ -1868,6 +1870,11 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
             AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        // Audio .hasset AND raw .wav. Like the C++ viewer below it, the raw-file half
+        // is an extension check, so it has to beat the ScriptEditorPanel fallthrough —
+        // which would render megabytes of PCM as text.
+        else if (AudioEditorPanel::isAudioAsset(tabPath))
+            AudioEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         // C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
         // come before the ScriptEditorPanel fallthrough, which assumes an HAsset.
         else if (CppClassEditorPanel::isCppSourceAsset(tabPath))

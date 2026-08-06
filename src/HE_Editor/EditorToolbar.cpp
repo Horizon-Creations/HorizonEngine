@@ -628,6 +628,21 @@ void iconWidget(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	            col, 1.0f, 0, t * 0.8f);
 }
 
+// A sound wave: a centre line with a symmetric envelope around it.
+void iconWave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.42f, t = stroke(s);
+	// Four bars of rising then falling height — the shape of a waveform view,
+	// which is what the audio tab actually shows.
+	const float amp[4] = { 0.34f, 0.92f, 0.55f, 0.78f };
+	for (int i = 0; i < 4; ++i)
+	{
+		const float x = c.x + (static_cast<float>(i) - 1.5f) * (h * 0.52f);
+		const float a = h * amp[i];
+		dl->AddLine({ x, c.y - a }, { x, c.y + a }, col, t * 1.2f);
+	}
+}
+
 } // namespace EditorToolbar
 
 #endif // HE_IMGUI_ENABLED
