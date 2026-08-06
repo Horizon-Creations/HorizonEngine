@@ -111,12 +111,15 @@ void drawUvView(const StaticMeshAsset& mesh, State& st, const ImVec2& size)
 	const float  side = std::min(canvasSize.x, canvasSize.y);
 
 	ImGui::InvisibleButton("##uvcanvas", canvasSize,
-		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle |
+		ImGuiButtonFlags_MouseButtonRight);
 	const bool hovered = ImGui::IsItemHovered();
 
-	// Pan with a left/middle drag, zoom on the wheel around the cursor.
+	// Pan with any button's drag (RMB steers the main viewport, so that muscle
+	// memory lands here too), zoom on the wheel around the cursor.
 	if (ImGui::IsItemActive() &&
-	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle)))
+	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+	     ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 	{
 		const ImVec2 d = ImGui::GetIO().MouseDelta;
 		st.uvPan.x += d.x; st.uvPan.y += d.y;

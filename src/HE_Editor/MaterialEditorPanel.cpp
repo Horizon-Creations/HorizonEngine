@@ -2136,8 +2136,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 			// Orbit interaction over the whole preview area (an invisible button on top).
 			ImGui::SetCursorScreenPos(org);
-			ImGui::InvisibleButton("##orbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)));
-			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			// Right-drag orbits too — same muscle memory as the RMB-steered viewport.
+			ImGui::InvisibleButton("##orbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
+				ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+			if (ImGui::IsItemActive() &&
+			    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 			{
 				const ImVec2 md = ImGui::GetIO().MouseDelta;
 				if (md.x != 0.0f || md.y != 0.0f)

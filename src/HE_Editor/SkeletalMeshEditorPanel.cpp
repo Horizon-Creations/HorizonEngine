@@ -217,8 +217,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 	// Orbit interaction over the whole preview pane (same feel as Material's).
 	ImGui::SetCursorScreenPos(org);
-	ImGui::InvisibleButton("##skelOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)));
-	if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+	// Right-drag orbits too: the main viewport steers with RMB, and that muscle
+	// memory lands here. InvisibleButton only reacts to buttons it was told
+	// about, so without the flag a right-drag never even activates the item.
+	ImGui::InvisibleButton("##skelOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+	if (ImGui::IsItemActive() &&
+	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 	{
 		const ImVec2 md = ImGui::GetIO().MouseDelta;
 		st.previewYaw   -= md.x * 0.01f;

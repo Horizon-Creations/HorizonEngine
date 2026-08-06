@@ -283,8 +283,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			// Orbit interaction over the whole preview pane, same feel as the
 			// Material/Skeletal-Mesh preview panes.
 			ImGui::SetCursorScreenPos(org);
-			ImGui::InvisibleButton("##ptOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)));
-			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			// Right-drag orbits too — same muscle memory as the RMB-steered viewport.
+			ImGui::InvisibleButton("##ptOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
+				ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+			if (ImGui::IsItemActive() &&
+			    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 			{
 				const ImVec2 md = ImGui::GetIO().MouseDelta;
 				st.previewYaw   -= md.x * 0.01f;
