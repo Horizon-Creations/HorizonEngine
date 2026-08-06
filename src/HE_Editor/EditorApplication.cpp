@@ -2920,7 +2920,12 @@ void EditorApplication::dumpFrameHeadless()
 		mirror.name = "GIReflLandscapeMirror";
 		mirror.baseColor[0] = mirror.baseColor[1] = mirror.baseColor[2] = 0.9f;
 		mirror.metallic  = 1.0f;
+		// HE_DUMP_GIREFLROUGH overrides the mirror roughness: a near-mirror (the
+		// default) never opens the glossy cone, so it cannot show the sampling
+		// noise the GLOSSY tier is judged on. 0.3–0.5 is the band that does.
 		mirror.roughness = 0.05f;
+		if (const char* rr = std::getenv("HE_DUMP_GIREFLROUGH"); rr && *rr)
+			mirror.roughness = static_cast<float>(std::atof(rr));
 		const HE::UUID mirrorId = contentManager().registerMaterial(std::move(mirror));
 		auto addMirror = [&](const char* name, glm::vec3 pos, float yawDeg, glm::vec3 scale)
 		{

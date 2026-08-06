@@ -465,3 +465,58 @@ Sample` auf der BaseColor faltet weiterhin nicht — ein texturiertes Material
 spiegelt seinen Skalar-`baseColor` (meist weiß). Sauberer Weg wäre eine
 Durchschnittsfarbe der Textur (gebacken wie `approx*`), analog zu dem, was hier
 für die Layer passiert ist.
+
+---
+
+## Warum in Spiegeln „immer der Himmel drin" war (Nachtrag 2)
+
+Die Kaskade ist **geschichtet**: Basis ist die prozedurale Sky-Cubemap
+`heSkyEnv`, GI-Reflexion und SSR werden per Confidence darüber gemischt
+(`envSpec = mix(envSpec, rr.rgb, rr.a * intensity * fade)`). Alles, was nicht
+volle Confidence hat, lässt also Himmel durch. Vier Gründe, warum das öfter
+passierte als es sollte:
+
+1. **Der Bug:** die Confidence eines Ray-Treffers war
+   `roughFade * (1 - 0.25 * dist/maxDist)` — sie erreichte **nie 1**. Ein
+   perfekter Treffer bei 200 m behielt 25 % Himmel bei, als weicher Verlauf
+   über die Fläche. Die Formel stammt aus dem SSR-Trace, wo Confidence mit der
+   Marschdistanz zu Recht sinkt (die Evidenz wird dünner); ein getracter
+   Treffer ist bei jeder Distanz **exakt**. Ersetzt durch die Form, die der
+   GL-Kernel schon hatte: volle Confidence bis 75 % der Reichweite, Abblenden
+   nur im letzten Viertel, wo „Reichweite zu Ende" der echte Fehlerfall ist.
+2. Die Cubemap ist **nicht die Szene**, sondern reiner Atmosphären-Himmel mit
+   einer *pauschalen* Bodenhälfte (`ground = mix(sky*0.32, vec3(0.24,0.23,0.21),
+   day)` unterhalb des Horizonts, `SkyEnvBake.h`). Ein nach unten zeigender
+   Strahl, der nichts trifft, bekommt also ein generisches Graubraun statt des
+   Terrains.
+3. **Primär-Miss = Confidence 0 = reine Cubemap** — per Design, damit der
+   Composite-Fallback exakt ist. Bei `maxDistance` 200 m (Default) ist ein
+   flacher Strahl über ein großes Landscape schnell ein Miss.
+4. `ambSpec = envSpec * fresnel * (1 - 0.6*rough)` plus der Roughness-Fade
+   Richtung Cubemap oberhalb `0.7 * maxRoughness`.
+
+1 ist behoben; 2–4 sind Designgrenzen der Kaskade (echte Reflection-Probes wären
+die Antwort auf 2, eine größere `maxDistance` auf 3 — beides mit Kosten).
+
+## Warum „High" verrauschter aussah als „Medium"
+
+High (Quality 2) heißt: Glossy-Cone-**Jitter**, EIN Strahl pro Pixel, auf halber
+Auflösung. Der einzige Integrator dieser stochastischen Schätzung ist die
+temporale EMA — und die muss unter Kamerabewegung gedämpft werden (0.85 → 0.55),
+weil der reflektierte Inhalt mangels Motion Vectors nicht reprojiziert wird; im
+Kernel kollabiert sie zusätzlich bei Luminanz-Brüchen bis ~0.14. Ergebnis: beim
+Navigieren zahlte der Tier die volle Jitter-Varianz bei halber Integration,
+während Medium (deterministischer Strahl + Blur) sauber blieb. Der höhere Tier
+sah also schlechter aus — eine Inversion, kein Geschmacksfrage.
+
+Fix: der Cone folgt jetzt **demselben Signal** wie die EMA. Bewegt sich die
+Kamera, schließt er sich (→ deterministischer Strahl, exakt Medium-Verhalten,
+null Varianz); steht sie still, öffnet er sich über ~8 Frames wieder und die EMA
+integriert ihn zu einer echten Glossy-Lobe. Kostet keine zusätzlichen Strahlen.
+Metal und GL identisch (`GIReflParams::land.y` / `uJitterScale`).
+
+**Ehrlichkeitshinweis zur Verifikation:** headless lässt sich das NICHT zeigen —
+der Dump rendert aus einer stehenden Kamera, und genau dort konvergiert die EMA
+ohnehin (gemessen: Quality 1 und 2 haben denselben Hochfrequenz-Gradienten in der
+Spiegelfläche). Die Diagnose kommt aus dem Code, der Fix entfernt den
+Mechanismus; bestätigen lässt er sich nur beim Navigieren im Editor.

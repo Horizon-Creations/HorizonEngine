@@ -773,6 +773,10 @@ private:
 		glm::vec4 layer[4]{};     // per-layer folded colour (rgb)
 	};
 	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the GLSL GiLand layout");
+	// Glossy-cone ramp (quality High): 0 while the camera moves, climbing back
+	// to 1 over a few still frames — keeps the jittered tier from being noisier
+	// than the deterministic one below it. Mirrors the Metal member.
+	float        m_giReflJitterRamp = 0.0f;
 	unsigned int m_giLandSSBO = 0;
 	int          m_giLandCount = 0;
 	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order

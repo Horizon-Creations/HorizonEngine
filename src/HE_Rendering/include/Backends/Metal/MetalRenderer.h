@@ -294,6 +294,10 @@ private:
 	float m_giReflIntensity    = 1.0f;
 	float m_giReflMaxRoughness = 0.6f;
 	float m_giReflMaxDistance  = 200.0f;
+	// Glossy-cone ramp (quality High): 0 while the camera moves, climbing back to
+	// 1 over a few still frames. Keeps the jittered tier from being NOISIER than
+	// the deterministic one below it — see EncodeGIReflections.
+	float m_giReflJitterRamp   = 0.0f;
 	int   m_giReflBounces      = 1;   // 1-4 mirror bounces (extra.w in the kernels)
 	int   m_giReflQuality      = 1;      // 0 raw / 1 blur / 2 glossy+temporal
 	bool  m_giReflFrameActive  = false;  // this frame traces GI reflections (tile deferred + accel built)

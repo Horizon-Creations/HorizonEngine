@@ -2884,6 +2884,7 @@ layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
 layout(std430, binding = 3) readonly buffer GiLands { GiLand giLands[]; };
 uniform int uGiInstanceCount;
 uniform int uGiLandCount;              // 0 = no painted terrain in this scene
+uniform float uJitterScale;            // glossy-cone scale: 0 while the camera moves
 uniform sampler2D uLandWeights[4];     // one per landscape, in giLands order
 
 // Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
@@ -3533,8 +3534,13 @@ void main()
 	// across a silhouette, which reads as a dithered band exactly where the
 	// reflection should be sharpest. 0.08 is below any surface a viewer would
 	// call glossy rather than mirrored.
-	if (uFrame.w > 0.5 && rm.x > 0.08)
-		R = giConeSample(R, rm.x * 0.5, giHash2(gid, uFrame.x));
+	// uJitterScale collapses to 0 while the CAMERA MOVES: the jitter is a ONE-
+	// sample stochastic estimate whose only integrator is the temporal EMA, and
+	// that EMA has to be damped under motion (reflected content is not
+	// reprojected). Paying full variance with half the integration made this
+	// tier look NOISIER than the deterministic one below it. Mirrors Metal.
+	if (uFrame.w > 0.5 && rm.x > 0.08 && uJitterScale > 0.01)
+		R = giConeSample(R, rm.x * 0.5 * uJitterScale, giHash2(gid, uFrame.x));
 	// Normal-offset origin + a min-t, the same self-intersection guards the
 	// shadow kernel uses.
 	vec3 origin = pv.xyz + N * 0.05;
@@ -5936,6 +5942,14 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// a slot it was not given.
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_giLandSSBO);
 	glUniform1i(loc("uGiLandCount"), m_giLandCount);
+	// Same signal the temporal blend below uses: closed under motion, ramping
+	// back over ~8 still frames so the glossy lobe grows instead of popping.
+	{
+		const glm::mat4 vp = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+		const bool moving = (vp != m_giReflPrevViewProj);
+		m_giReflJitterRamp = moving ? 0.0f : std::min(1.0f, m_giReflJitterRamp + 0.125f);
+	}
+	glUniform1f(loc("uJitterScale"), m_giReflHistValid ? m_giReflJitterRamp : 0.0f);
 	for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
 	{
 		const std::string nm = "uLandWeights[" + std::to_string(i) + "]";
