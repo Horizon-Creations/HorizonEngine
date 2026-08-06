@@ -789,17 +789,20 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 		return;
 	}
 
+	auto progress = std::make_shared<AsyncProgress>();
 	{
 		std::unique_lock<std::mutex> lock(m_pendingMutex);
 		if (m_pendingPaths.count(relativePath))
 			return; // already in flight — coalesce
 		m_pendingPaths.insert(relativePath);
+		m_pendingProgress[relativePath] = progress;
 	}
 
 	const std::string fullPath = resolveAbsolutePath(relativePath);
 
-	// Captures the sink, never `this` — the job may outlive this ContentManager.
-	globalPool().submit([relativePath, fullPath, sink = m_asyncSink,
+	// Captures the sink and the progress cell, never `this` — the job may outlive
+	// this ContentManager.
+	globalPool().submit([relativePath, fullPath, sink = m_asyncSink, progress,
 	                     cb = std::move(callback)]() mutable
 	{
 		AsyncResult result;
@@ -807,11 +810,33 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 		result.fullPath     = fullPath;
 		result.callback     = std::move(cb);
 
-		std::ifstream f(fullPath, std::ios::binary);
+		std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
 		if (f)
 		{
-			result.fileBytes.assign(std::istreambuf_iterator<char>(f),
-			                        std::istreambuf_iterator<char>());
+			// Read in blocks rather than in one istreambuf_iterator gulp: the caller
+			// gets a live byte count (asyncProgress → the editor's progress bar for a
+			// heavy mesh), and a sized single allocation beats the iterator's repeated
+			// grow-and-copy on a several-hundred-megabyte asset.
+			const std::streamoff end = f.tellg();
+			const std::uint64_t total = end > 0 ? static_cast<std::uint64_t>(end) : 0;
+			progress->bytesTotal.store(total, std::memory_order_relaxed);
+			f.seekg(0, std::ios::beg);
+			result.fileBytes.resize(static_cast<size_t>(total));
+			constexpr std::uint64_t kBlock = 4ull << 20; // 4 MiB
+			std::uint64_t done = 0;
+			while (done < total)
+			{
+				const std::uint64_t n = std::min(kBlock, total - done);
+				if (!f.read(reinterpret_cast<char*>(result.fileBytes.data() + done),
+				            static_cast<std::streamsize>(n)))
+				{
+					result.fileBytes.resize(static_cast<size_t>(done + (std::uint64_t)f.gcount()));
+					break;
+				}
+				done += n;
+				progress->bytesRead.store(done, std::memory_order_relaxed);
+			}
+			if (result.fileBytes.empty()) result.failed = true;
 		}
 		else
 		{
@@ -844,6 +869,7 @@ std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 		{
 			std::unique_lock<std::mutex> lock(m_pendingMutex);
 			m_pendingPaths.erase(r.relativePath);
+			m_pendingProgress.erase(r.relativePath); // the worker's cell dies with it
 		}
 
 		HE::UUID id;
@@ -888,6 +914,22 @@ bool ContentManager::isAsyncPending(const std::string& relativePath) const
 {
 	std::unique_lock<std::mutex> lock(m_pendingMutex);
 	return m_pendingPaths.count(relativePath) > 0;
+}
+
+// ─── asyncProgress ────────────────────────────────────────────────────────────
+bool ContentManager::asyncProgress(const std::string& relativePath,
+                                    std::uint64_t& bytesRead, std::uint64_t& bytesTotal) const
+{
+	std::shared_ptr<AsyncProgress> cell;
+	{
+		std::unique_lock<std::mutex> lock(m_pendingMutex);
+		const auto it = m_pendingProgress.find(relativePath);
+		if (it == m_pendingProgress.end()) return false;
+		cell = it->second; // keep it alive past the lock
+	}
+	bytesRead  = cell->bytesRead.load(std::memory_order_relaxed);
+	bytesTotal = cell->bytesTotal.load(std::memory_order_relaxed);
+	return true;
 }
 
 // ─── loadAssetAsync (by UUID, from a mounted pak) ─────────────────────────────

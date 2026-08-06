@@ -2226,8 +2226,12 @@ dort als mögliche Ausnahme vorgesehen). Design-Doc: `docs/material-system-desig
 (Meilenstein-Plan M0–M4, danach informelle Wellen ohne strikte Nummerierung).
 Editor: `src/HE_Editor/MaterialEditorPanel.h/.cpp`, seit der GraphEditor-Migration auf dem
 geteilten Canvas (61.2); Undo/Redo, Clipboard, Kommentar-Boxen, Reroute-Nodes, Per-Node-Preview,
-Shader-Komplexitäts-Anzeige, Live-Preview via Offscreen-Render (Sphere/Cube/Plane) in
-`ImGui::Image`. ~45 Node-Typen (Math, Texture-Sample, prozedurale Noise/FBM/Checker, Fresnel,
+Shader-Komplexitäts-Anzeige, Live-Preview via Offscreen-Render in `ImGui::Image` — die
+Preview-Geometrie ist wählbar: die Primitive Sphere/Cube/Plane ODER jedes StaticMesh aus
+Projekt- und Engine-Content (`RenderMaterialPreview(..., meshId)`, Auto-Framing auf die
+Mesh-Bounds). Der Picker zeigt pro Mesh die Dateigröße, fragt ab 32 MB nach, und lädt über
+`loadAssetAsync` mit echter Byte-Progress-Bar (`ContentManager::asyncProgress`), statt den
+Editor beim Griff nach einem schweren Mesh einzufrieren. ~45 Node-Typen (Math, Texture-Sample, prozedurale Noise/FBM/Checker, Fresnel,
 Panner, Logik/Vergleich, Static-Switches für Compile-Time-Permutationen, Normal-Mapping,
 WPO). Blend-Modes Opaque/Masked/Translucent; Material-Functions (wiederverwendbare Sub-Graphen,
 beim Codegen geinlined); Material-Instanzen (Parent + Parameter-/Switch-Overrides, kein

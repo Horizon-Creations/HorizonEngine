@@ -6,6 +6,7 @@
 #include "Assets.h"
 #include "ContentManager/DefaultAssets.h"
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -263,6 +264,13 @@ public:
 	std::vector<HE::UUID> pollAsyncResults(size_t maxRegistrations = SIZE_MAX);
 	// True while a background job for this relative path is in flight.
 	bool isAsyncPending(const std::string& relativePath) const;
+	// Live read progress of an in-flight job: bytes read so far and the file's total
+	// size (0 until the worker has opened the file). False when nothing is in flight
+	// for that path — so a caller can drive a real progress bar for a big asset and
+	// stop drawing it the moment the load lands. Only the DISK READ is measured; the
+	// parse + GPU upload happen in pollAsyncResults on the main thread.
+	bool asyncProgress(const std::string& relativePath,
+	                   std::uint64_t& bytesRead, std::uint64_t& bytesTotal) const;
 
 	const std::string& contentRoot() const { return m_contentRoot; }
 	// Point the manager at a different content directory (e.g. when the
@@ -378,6 +386,15 @@ private:
 
 	mutable std::mutex              m_pendingMutex;
 	std::unordered_set<std::string> m_pendingPaths;  // in-flight relative paths
+	// Live byte counter of an in-flight disk read, shared with its worker (same
+	// lifetime rule as the sink below: the job owns a reference, so a late worker
+	// never writes into a dead manager). Lets a caller show REAL progress for a
+	// multi-hundred-megabyte asset instead of a guess — see asyncProgress().
+	struct AsyncProgress {
+		std::atomic<std::uint64_t> bytesRead{ 0 };
+		std::atomic<std::uint64_t> bytesTotal{ 0 };
+	};
+	std::unordered_map<std::string, std::shared_ptr<AsyncProgress>> m_pendingProgress;
 
 	// Where finished jobs drop their results. Deliberately NOT a plain member: a job
 	// is submitted fire-and-forget, so it can still be queued (or mid-read) when this

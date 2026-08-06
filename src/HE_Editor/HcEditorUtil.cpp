@@ -95,6 +95,9 @@ namespace
 				ClassRef cr;
 				cr.label = it->path().stem().string();
 				cr.path  = pathPrefix + std::filesystem::relative(it->path(), root, ec).generic_string();
+				std::error_code sec;
+				const auto sz = std::filesystem::file_size(it->path(), sec);
+				cr.bytes = sec ? 0 : static_cast<std::uint64_t>(sz);
 				out.push_back(std::move(cr));
 			}
 		}

@@ -3129,9 +3129,19 @@ void EditorApplication::dumpFrameHeadless()
 	// render the test material's preview sphere and let the backend dump it.
 	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})
 	{
-		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's shape combo).
+		// HE_DUMP_PREVIEW=1 → sphere (default); =2 cube, =3 plane (the editor's primitives).
 		const int shape = std::clamp(std::atoi(pv) - 1, 0, 2);
-		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape);
+		// HE_DUMP_PREVIEWMESH=<content-relative path> witnesses the OTHER preview
+		// subject: any static mesh the Material Editor's picker can choose (e.g.
+		// "Engine/Meshes/Torus.hasset"), auto-framed on its bounds.
+		HE::UUID pvMesh{};
+		if (const char* pm = std::getenv("HE_DUMP_PREVIEWMESH"); pm && *pm)
+		{
+			pvMesh = contentManager().loadAsset(pm);
+			HE_LOG_INFO(Editor, "%s", (std::string("EditorApplication: preview mesh '") + pm
+				+ (pvMesh != HE::UUID{} ? "' loaded" : "' NOT FOUND")).c_str());
+		}
+		r->RenderMaterialPreview(contentManager(), s_matTestId, 512, 0.6f, 0.35f, 3.1f, shape, pvMesh);
 		// Stress the property-change→re-preview path (repro for the side-panel crash):
 		// mutate the material's shader source + params like an editor edit would, then
 		// re-preview. HE_DUMP_PREVIEW_STRESS=N repeats N times.

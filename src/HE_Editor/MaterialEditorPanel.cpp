@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
@@ -54,6 +55,19 @@ struct State
 	bool          previewDirty = true;
 	int           previewPx    = 0;
 	int           previewShape = 0;  // 0 sphere / 1 cube / 2 plane (RenderMaterialPreview)
+	// Preview subject: a built-in primitive (previewShape) or ANY static mesh from the
+	// project / engine content. The id is what the renderer draws; path+label exist so
+	// the picker can show the pick and re-resolve it without another content scan.
+	HE::UUID      previewMeshId{};
+	std::string   previewMeshPath, previewMeshLabel;
+	// A picked mesh is streamed in the background — a hundred-megabyte asset must not
+	// freeze the editor mid-frame. While this path is set the preview box shows the
+	// read progress instead of guessing.
+	std::string   pendingMeshPath, pendingMeshLabel;
+	double        pendingMeshStart = 0.0; // ImGui::GetTime() when the load was kicked off
+	// Heavy pick awaiting confirmation (see kHeavyMeshBytes).
+	std::string   confirmMeshPath, confirmMeshLabel;
+	std::uint64_t confirmMeshBytes = 0;
 	int           previewNodeId = 0; // 0 = whole material; else preview THAT node's output, unlit
 	HE::UUID      fnPreviewMatId{};  // function tabs: lazily registered scratch material that
 	                                 // wraps this function in a FunctionCall for the preview
@@ -1309,6 +1323,184 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		}
 	}
 }
+
+// ── Preview subject: primitives + every static mesh in the project/engine ──────
+// A material is judged on the geometry it will actually sit on, so the preview is
+// not limited to three built-in primitives. Meshes are the heavy asset type, and
+// picking one from a list must not mean "the editor freezes for eight seconds":
+// the list shows each mesh's on-disk size, asks before pulling a big one into
+// memory, and streams it through the ContentManager's async path so the frame
+// keeps running while a progress bar reports the bytes actually read.
+constexpr std::uint64_t kHeavyMeshBytes = 32ull << 20; // ask for confirmation above this
+
+std::string formatBytes(std::uint64_t b)
+{
+	char buf[32];
+	if (b >= (1ull << 30))      std::snprintf(buf, sizeof buf, "%.1f GB", (double)b / (double)(1ull << 30));
+	else if (b >= (1ull << 20)) std::snprintf(buf, sizeof buf, "%.0f MB", (double)b / (double)(1ull << 20));
+	else                        std::snprintf(buf, sizeof buf, "%.0f KB", (double)b / 1024.0);
+	return buf;
+}
+
+const char* kPreviewShapes[] = { "Sphere", "Cube", "Plane" };
+
+// Name shown on the picker button: the picked mesh, or the primitive.
+std::string previewSubjectLabel(const State& st)
+{
+	if (st.previewMeshId != HE::UUID{} && !st.previewMeshLabel.empty()) return st.previewMeshLabel;
+	return kPreviewShapes[std::clamp(st.previewShape, 0, 2)];
+}
+
+// The mesh is in memory — point the preview at it.
+void applyPreviewMesh(State& st, AppContext& ctx, const std::string& path, const std::string& label)
+{
+	if (!ctx.contentManager) return;
+	const HE::UUID id = ctx.contentManager->loadAsset(path); // resident by now → no disk read
+	if (id == HE::UUID{}) return;
+	st.previewMeshId    = id;
+	st.previewMeshPath  = path;
+	st.previewMeshLabel = label;
+	st.previewDirty     = true;
+}
+
+void startPreviewMeshLoad(State& st, AppContext& ctx, const std::string& path, const std::string& label)
+{
+	if (!ctx.contentManager) return;
+	ctx.contentManager->loadAssetAsync(path);
+	st.pendingMeshPath  = path;
+	st.pendingMeshLabel = label;
+	st.pendingMeshStart = ImGui::GetTime();
+}
+
+// Drive an in-flight pick: register whatever the workers finished (the editor runs
+// no global async pump — this panel is the only thing streaming) and adopt the mesh
+// once it has landed. A failed load clears the pending state instead of hanging on it.
+void tickPreviewMeshLoad(State& st, AppContext& ctx)
+{
+	if (st.pendingMeshPath.empty() || !ctx.contentManager) return;
+	ctx.contentManager->pollAsyncResults();
+	if (ctx.contentManager->isAsyncPending(st.pendingMeshPath)) return;
+	applyPreviewMesh(st, ctx, st.pendingMeshPath, st.pendingMeshLabel);
+	st.pendingMeshPath.clear();
+	st.pendingMeshLabel.clear();
+}
+
+// The button + its searchable popup. Sets the primitive, adopts a resident mesh
+// straight away, or routes a heavy one through the confirmation dialog.
+void drawPreviewSubjectPicker(State& st, AppContext& ctx, float width)
+{
+	const std::string cur = previewSubjectLabel(st);
+	if (ImGui::Button((cur + "##previewSubject").c_str(), ImVec2(width, 0)))
+		ImGui::OpenPopup("##previewSubjectPopup");
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Preview geometry — a primitive, or any static mesh\n"
+		                  "from this project or the engine's default content.");
+	if (!ImGui::BeginPopup("##previewSubjectPopup")) return;
+
+	const std::string q = HcEditorUtil::searchMenuBegin("##meshSearch", "Search meshes…", 250.0f);
+	auto matches = [&q](const std::string& s)
+	{
+		if (q.empty()) return true;
+		std::string low = s;
+		std::transform(low.begin(), low.end(), low.begin(),
+		               [](unsigned char c) { return (char)std::tolower(c); });
+		return low.find(q) != std::string::npos;
+	};
+
+	// Scanned once per popup-open, not per frame: this walks the whole content tree
+	// and stats every .hasset — fine occasionally, silly at 60 Hz.
+	static std::vector<HcEditorUtil::ClassRef> s_engineMeshes, s_projectMeshes;
+	if (ImGui::IsWindowAppearing())
+	{
+		s_engineMeshes.clear();
+		s_projectMeshes.clear();
+		for (auto& m : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::StaticMesh))
+			(m.path.rfind("Engine/", 0) == 0 ? s_engineMeshes : s_projectMeshes).push_back(std::move(m));
+		auto byLabel = [](const HcEditorUtil::ClassRef& a, const HcEditorUtil::ClassRef& b)
+		{ return a.label < b.label; };
+		std::sort(s_engineMeshes.begin(),  s_engineMeshes.end(),  byLabel);
+		std::sort(s_projectMeshes.begin(), s_projectMeshes.end(), byLabel);
+	}
+
+	ImGui::BeginChild("##subjectList", ImVec2(300.0f, 340.0f));
+	ImGui::TextDisabled("Primitives");
+	for (int i = 0; i < 3; ++i)
+		if (matches(kPreviewShapes[i]) && HcEditorUtil::searchMenuItem(kPreviewShapes[i]))
+		{
+			st.previewShape  = i;
+			st.previewMeshId = HE::UUID{};
+			st.previewMeshPath.clear();
+			st.previewMeshLabel.clear();
+			st.pendingMeshPath.clear();
+			st.previewDirty  = true;
+			ImGui::CloseCurrentPopup();
+		}
+
+	auto section = [&](const char* title, const std::vector<HcEditorUtil::ClassRef>& list)
+	{
+		bool header = false;
+		for (const auto& m : list)
+		{
+			if (!matches(m.label)) continue;
+			if (!header) { ImGui::Spacing(); ImGui::TextDisabled("%s", title); header = true; }
+			const bool heavy    = m.bytes >= kHeavyMeshBytes;
+			const bool resident = ctx.contentManager && ctx.contentManager->isLoaded(m.path);
+			if (HcEditorUtil::searchMenuItem(m.label + "##" + m.path))
+			{
+				if (resident)   applyPreviewMesh(st, ctx, m.path, m.label);
+				else if (heavy) { st.confirmMeshPath  = m.path;
+				                  st.confirmMeshLabel = m.label;
+				                  st.confirmMeshBytes = m.bytes; }
+				else            startPreviewMeshLoad(st, ctx, m.path, m.label);
+				ImGui::CloseCurrentPopup();
+			}
+			// The weight of the pick, BEFORE making it — heavy ones are called out.
+			const std::string size = formatBytes(m.bytes);
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(size.c_str()).x - 4.0f);
+			if (heavy) ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.30f, 1.0f), "%s", size.c_str());
+			else       ImGui::TextDisabled("%s", size.c_str());
+		}
+	};
+	section("Engine",  s_engineMeshes);
+	section("Project", s_projectMeshes);
+	if (s_engineMeshes.empty() && s_projectMeshes.empty())
+	{
+		ImGui::Spacing();
+		ImGui::TextDisabled("(no static meshes found)");
+	}
+	ImGui::EndChild();
+	HcEditorUtil::searchMenuEnd();
+	ImGui::EndPopup();
+}
+
+// "That mesh is big" confirmation. Drawn at window scope, not inside the picker
+// popup — that one is long closed by the time the user answers.
+void drawHeavyMeshConfirm(State& st, AppContext& ctx)
+{
+	if (st.confirmMeshPath.empty()) return;
+	constexpr const char* kId = "Load heavy mesh?";
+	if (!ImGui::IsPopupOpen(kId)) ImGui::OpenPopup(kId);
+	if (!ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+	ImGui::Text("\"%s\" is %s on disk.", st.confirmMeshLabel.c_str(),
+	            formatBytes(st.confirmMeshBytes).c_str());
+	ImGui::TextDisabled("Loading it keeps the whole mesh in memory and uploads it to the GPU.\n"
+	                    "The editor stays responsive — the read runs in the background and the\n"
+	                    "preview shows its progress.");
+	ImGui::Spacing();
+	if (EditorWidgets::primaryButton("Load"))
+	{
+		startPreviewMeshLoad(st, ctx, st.confirmMeshPath, st.confirmMeshLabel);
+		st.confirmMeshPath.clear();
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (EditorWidgets::cancelButton("Cancel"))
+	{
+		st.confirmMeshPath.clear();
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
+}
 } // namespace
 
 namespace MaterialEditorPanel
@@ -1655,12 +1847,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 	const float leftW = 300.0f;
 	ImGui::BeginChild("##matLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
+		// Adopt a mesh that finished streaming (and pump the loader) before anything
+		// below reads previewMeshId.
+		tickPreviewMeshLoad(st, ctx);
 		ImGui::TextDisabled("Preview");
-		// Preview primitive selector (sphere shows curvature, cube face seams, plane UVs).
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 92.0f);
-		ImGui::SetNextItemWidth(96.0f);
-		static const char* kShapes[] = { "Sphere", "Cube", "Plane" };
-		if (ImGui::Combo("##pshape", &st.previewShape, kShapes, 3)) st.previewDirty = true;
+		// Preview subject: the built-in primitives (sphere shows curvature, cube face
+		// seams, plane UVs) plus every static mesh in the project and engine content.
+		constexpr float kSubjectW = 140.0f;
+		ImGui::SameLine(std::max(60.0f, ImGui::GetContentRegionAvail().x - kSubjectW));
+		drawPreviewSubjectPicker(st, ctx, kSubjectW);
 		ImGui::BeginChild("##matPreview", ImVec2(0, 240), ImGuiChildFlags_Borders);
 		{
 			// Live material preview: a sphere shaded with THIS material, rendered
@@ -1738,7 +1933,8 @@ void render(AppContext& ctx, const std::string& assetPath,
 					}
 				}
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
-					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape);
+					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape,
+					st.previewMeshId);
 				if (swapped && mat)
 				{
 					mat->customShaderFragGlsl = std::move(origGlsl);
@@ -1794,7 +1990,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 						sm->graphLayerNames   = gen.layerNames;
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
-							st.previewDist, st.previewShape);
+							st.previewDist, st.previewShape, st.previewMeshId);
 						// Consumed only where a render was actually ATTEMPTED — bailing out
 						// above (no output pin yet, unsaved path) used to clear the flag too,
 						// which left the preview blank until the next edit re-set it.
@@ -1835,6 +2031,30 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				st.previewDist  = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.25f, 1.6f, 8.0f);
 				st.previewDirty = true;
+			}
+
+			// ── Streaming overlay: REAL read progress for a picked mesh. ──────────
+			// Only once the load has outlived a couple of frames — a small mesh lands
+			// in one and a bar that flashes for 16 ms is noise, not information.
+			if (!st.pendingMeshPath.empty() && ctx.contentManager &&
+			    ImGui::GetTime() - st.pendingMeshStart > 0.15)
+			{
+				std::uint64_t rd = 0, total = 0;
+				ctx.contentManager->asyncProgress(st.pendingMeshPath, rd, total);
+				const float frac = total ? (float)((double)rd / (double)total) : 0.0f;
+				pdl->AddRectFilled(org, ImVec2(org.x + av.x, org.y + av.y), IM_COL32(10, 12, 16, 175));
+				const float pad = 14.0f, barH = 8.0f;
+				const ImVec2 b0(org.x + pad, org.y + av.y * 0.5f - barH * 0.5f);
+				const ImVec2 b1(org.x + av.x - pad, b0.y + barH);
+				pdl->AddRectFilled(b0, b1, IM_COL32(38, 42, 52, 255), barH * 0.5f);
+				if (frac > 0.0f)
+					pdl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * frac, b1.y),
+					                   IM_COL32(96, 156, 240, 255), barH * 0.5f);
+				const std::string head = "Loading " + st.pendingMeshLabel;
+				const std::string tail = total ? (formatBytes(rd) + " / " + formatBytes(total))
+				                               : std::string("opening…");
+				pdl->AddText(ImVec2(b0.x, b0.y - 22.0f), IM_COL32(226, 230, 238, 255), head.c_str());
+				pdl->AddText(ImVec2(b0.x, b1.y + 8.0f),  IM_COL32(150, 158, 172, 255), tail.c_str());
 			}
 		}
 		ImGui::EndChild();
@@ -1924,6 +2144,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 		pushUndo(st);           // every committed edit becomes an undo step
 		st.previewDirty = true; // material changed → refresh the preview
 	}
+
+	// Heavy-mesh confirmation for the preview picker — at window scope, since the
+	// popup it was requested from is already closed.
+	drawHeavyMeshConfirm(st, ctx);
 
 	ImGui::End();
 }

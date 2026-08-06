@@ -300,3 +300,89 @@ TEST_CASE("ContentManager destroyed with an async job still queued is safe")
     he_test::removeQuiet(full);
     CHECK(true);
 }
+
+// ─── Block-wise read + live progress ─────────────────────────────────────────
+// The worker used to slurp the file with a single istreambuf_iterator, which gave
+// the caller nothing to show while a several-hundred-megabyte asset streamed in.
+// It now reads in 4 MiB blocks and publishes the byte counts (asyncProgress), which
+// is what the Material Editor's preview-mesh picker draws its progress bar from.
+//
+// The interesting risk in that rewrite is the reassembly: a file spanning several
+// blocks must come back byte-identical. This asset carries a ~9 MiB payload (three
+// blocks, last one partial) and is checked across both block boundaries.
+TEST_CASE("loadAssetAsync: multi-block read is byte-exact and reports progress")
+{
+    const HE::UUID id{0x0B10CB10CB10CB10ULL, 0x0123456789ABCDEFULL};
+    const std::string name = "async_bigpayload";
+
+    // A material whose custom-shader string is the bulk payload — a pattern, so a
+    // mis-stitched block boundary shows up as a mismatch rather than as zeroes.
+    std::string payload(9u * 1024u * 1024u + 12345u, '\0');
+    for (size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<char>('a' + (i % 26));
+
+    std::vector<uint8_t> meta;
+    const uint16_t typeVal = static_cast<uint16_t>(HE::AssetType::Material);
+    HAsset::Writer::appendPOD(meta, typeVal);
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, name);
+    HAsset::Writer::appendString(meta, name + ".hasset");
+
+    std::vector<uint8_t> mtrl;
+    HAsset::Writer::appendString(mtrl, "");    // shaderPath
+    const uint64_t texCount = 0;
+    HAsset::Writer::appendPOD(mtrl, texCount); // texturePaths
+    float c = 0.5f;
+    HAsset::Writer::appendPOD(mtrl, c); HAsset::Writer::appendPOD(mtrl, c); HAsset::Writer::appendPOD(mtrl, c);
+    float metallic = 0.f, roughness = 0.5f, opacity = 1.f;
+    HAsset::Writer::appendPOD(mtrl, metallic);
+    HAsset::Writer::appendPOD(mtrl, roughness);
+    HAsset::Writer::appendPOD(mtrl, opacity);
+    HAsset::Writer::appendString(mtrl, payload); // customShaderFragGlsl — the bulk
+
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
+    const auto bytes = w.toBytes(typeVal);
+
+    const auto full = std::filesystem::temp_directory_path() / (name + ".hasset");
+    {
+        std::ofstream f(full, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+
+    ContentManager cm(full.parent_path().string());
+    cm.loadAssetAsync(name + ".hasset");
+
+    // Sample the live counters. Whatever we catch must be self-consistent: the total
+    // is either "not opened yet" or the real file size, and the read count only grows.
+    std::uint64_t lastRead = 0;
+    for (int i = 0; i < 200 && cm.isAsyncPending(name + ".hasset"); ++i)
+    {
+        std::uint64_t rd = 0, total = 0;
+        if (cm.asyncProgress(name + ".hasset", rd, total))
+        {
+            CHECK(rd >= lastRead);
+            CHECK(rd <= (total ? total : rd));
+            CHECK((total == 0 || total == bytes.size()));
+            lastRead = rd;
+        }
+        cm.pollAsyncResults();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    drainAsync(cm, 100);
+
+    // Landed, and the progress cell is gone with it (no leak per finished load).
+    std::uint64_t rd = 0, total = 0;
+    CHECK_FALSE(cm.asyncProgress(name + ".hasset", rd, total));
+    REQUIRE(cm.isLoaded(name + ".hasset"));
+
+    const MaterialAsset* mat = cm.getMaterial(cm.loadAsset(name + ".hasset"));
+    REQUIRE(mat != nullptr);
+    REQUIRE(mat->customShaderFragGlsl.size() == payload.size());
+    CHECK(mat->customShaderFragGlsl == payload);   // every block, stitched in order
+
+    he_test::removeQuiet(full);
+}
