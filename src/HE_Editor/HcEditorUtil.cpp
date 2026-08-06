@@ -1,4 +1,5 @@
 #include "HcEditorUtil.h"
+#include "EditorWidgets.h"    // danger buttons for deletion
 #include <cstdint>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -437,7 +438,7 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 			ImGui::SameLine();
 			if (pinTypeCombo("##ty", list[i].type)) changed = true;
 			ImGui::SameLine();
-			if (ImGui::SmallButton("X")) removeIdx = (int)i;
+			if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeIdx = (int)i;
 			ImGui::PopID();
 		}
 		if (removeIdx >= 0) { list.erase(list.begin() + removeIdx); changed = true; }
@@ -799,7 +800,7 @@ bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 			default: break;
 		}
 		ImGui::SameLine();
-		if (ImGui::SmallButton("X")) removeIdx = (int)i;
+		if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeIdx = (int)i;
 		ImGui::PopID();
 	}
 	if (removeIdx >= 0)

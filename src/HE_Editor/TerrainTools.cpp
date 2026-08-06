@@ -637,7 +637,7 @@ void renderPanel(AppContext& ctx)
                     ImGui::TextDisabled("Resolution is fixed once painted.");
                 ImGui::TextDisabled("LMB drag in viewport to paint");
                 ImGui::Spacing();
-                if (ImGui::Button("Clear Paint") && !ptc.layerWeights.empty())
+                if (EditorWidgets::dangerButton("Clear Paint") && !ptc.layerWeights.empty())
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     ptc.layerWeights.clear();   // back to "everything is layer 0"
@@ -711,7 +711,7 @@ void renderPanel(AppContext& ctx)
         ImGui::TextDisabled("Ctrl+click a field to type a value");
 
         ImGui::Spacing();
-        if (ImGui::Button("Reset Sculpting"))
+        if (EditorWidgets::dangerButton("Reset Sculpting"))
         {
             Entity terrainEnt = terrainView.front();
             auto& tc = reg.get<TerrainComponent>(terrainEnt);

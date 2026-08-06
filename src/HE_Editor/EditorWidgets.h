@@ -76,6 +76,15 @@ bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 
+// The compact variants, for deletion that lives INSIDE content rather than at
+// the foot of a dialog. Ghost-red on purpose — red text, fill only under the
+// mouse: a list where every row ends in a filled red block has no warning
+// colour left, but a row whose × turns out to be red on approach still says
+// "this one bites" before the click.
+bool dangerSmallButton(const char* label);
+// Context-menu entries that delete: same red, menu ergonomics.
+bool dangerMenuItem(const char* label, bool enabled = true);
+
 // ── Labelled setting rows ────────────────────────────────────────────────────
 // ImGui puts a widget's label to the RIGHT of the control, which works in a wide
 // dialog and fails in the narrow panels the editor actually docks: the text runs

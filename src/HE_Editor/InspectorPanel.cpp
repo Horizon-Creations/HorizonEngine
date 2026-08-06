@@ -700,7 +700,7 @@ void render(AppContext& ctx)
 						if (ctx.renderer) ctx.renderer->InvalidateMaterial(m->materialAssetId);
 					}
 					ImGui::SameLine();
-					if (ImGui::SmallButton("X")) removeSlot = static_cast<int>(i);
+					if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeSlot = static_cast<int>(i);
 					ImGui::PopID();
 				}
 				if (removeSlot >= 0)
@@ -1206,7 +1206,7 @@ void render(AppContext& ctx)
 				}
 				ImGui::SameLine();
 				ImGui::TextDisabled("UUID %llx", static_cast<unsigned long long>(lvl.meshId.hi));
-				if (ImGui::Button("Remove##lodlvl")) { lod->levels.erase(lod->levels.begin() + li); trackEdit(); --li; }
+				if (EditorWidgets::dangerButton("Remove##lodlvl")) { lod->levels.erase(lod->levels.begin() + li); trackEdit(); --li; }
 				ImGui::PopID();
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }

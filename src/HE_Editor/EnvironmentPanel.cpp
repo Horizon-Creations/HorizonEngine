@@ -1,4 +1,5 @@
 #include "EnvironmentPanel.h"
+#include "EditorWidgets.h"    // danger buttons for deletion
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
 #include <HorizonScene/HorizonScene.h>
 
@@ -41,7 +42,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         ImGui::TextUnformatted("Sky is in the scene.");
         if (ImGui::Button("Select##sky")) ctx.selectedEntity = sky;
         ImGui::SameLine();
-        if (ImGui::Button("Remove##sky"))
+        if (EditorWidgets::dangerButton("Remove##sky"))
         {
             snapshot();
             if (ctx.selectedEntity == sky) ctx.selectedEntity = entt::null;
@@ -67,7 +68,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             ImGui::TextDisabled("(needs a Sky to drive — add one above)");
         if (ImGui::Button("Select##weather")) ctx.selectedEntity = weather;
         ImGui::SameLine();
-        if (ImGui::Button("Remove##weather"))
+        if (EditorWidgets::dangerButton("Remove##weather"))
         {
             snapshot();
             if (ctx.selectedEntity == weather) ctx.selectedEntity = entt::null;

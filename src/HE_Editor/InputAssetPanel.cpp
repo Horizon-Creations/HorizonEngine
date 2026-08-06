@@ -4,7 +4,8 @@
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"
-#include "EditorToolbar.h"       // shared toolbar strip     // shared per-tab state map
+#include "EditorToolbar.h"       // shared toolbar strip
+#include "EditorWidgets.h"    // danger buttons for deletion     // shared per-tab state map
 #include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -411,7 +412,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndCombo();
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
+		if (EditorWidgets::dangerButton("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
 
 		// ── Keys ─────────────────────────────────────────────────────────────
 		int removeKey = -1;
@@ -432,7 +433,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					keyBindCells("key", "Key name", e.keys[k], st.dirty, assetPath, i, k,
 					             CaptureKind::Key, capturedKeyName, captureWasCancelled);
 					ImGui::TableNextColumn();
-					if (ImGui::Button("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
+					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this key");
 					ImGui::PopID();
 				}
@@ -476,7 +477,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 						st.dirty = true;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale");
 					ImGui::TableNextColumn();
-					if (ImGui::Button("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAxis = k;
+					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAxis = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this axis");
 					ImGui::PopID();
 				}

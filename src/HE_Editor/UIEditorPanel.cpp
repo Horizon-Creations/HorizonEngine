@@ -403,7 +403,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 			st.selected = duplicateSubtree(st, nodeId, n->parentId);
 			structureEdit = true;
 		}
-		if (ImGui::MenuItem("Delete"))
+		if (EditorWidgets::dangerMenuItem("Delete"))
 		{
 			st.tree.removeSubtree(nodeId);
 			if (st.selected == nodeId) st.selected = 0;
@@ -499,7 +499,7 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 			if (ImGui::InputText((id + "_row").c_str(), &list[i])) listEdit = true;
 			listCommit |= ImGui::IsItemDeactivatedAfterEdit();
 			ImGui::SameLine();
-			if (ImGui::SmallButton("x")) { removeAt = i; listCommit = true; }
+			if (EditorWidgets::dangerSmallButton("\xc3\x97")) { removeAt = i; listCommit = true; }
 			ImGui::PopID();
 		}
 		if (removeAt >= 0) list.erase(list.begin() + removeAt);

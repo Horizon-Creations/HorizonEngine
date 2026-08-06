@@ -209,7 +209,7 @@ namespace
 		if (hasPicture)
 		{
 			ImGui::SameLine();
-			if (ImGui::Button("Remove")) CollabController::clearLocalAvatar();
+			if (EditorWidgets::dangerSmallButton("Remove")) CollabController::clearLocalAvatar();
 		}
 
 		ImGui::EndDisabled();

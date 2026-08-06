@@ -1235,7 +1235,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_openRenamePopup = true;
 				ImGui::CloseCurrentPopup();
 			}
-			if (!engineLocked && !s_ctxMenuIsFolder && ImGui::MenuItem("Delete"))
+			if (!engineLocked && !s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem("Delete"))
 			{
 				std::error_code ec;
 				std::filesystem::remove(s_ctxMenuItem, ec);

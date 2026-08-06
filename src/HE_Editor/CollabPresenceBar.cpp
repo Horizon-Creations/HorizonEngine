@@ -539,7 +539,7 @@ void DrawRoster(AppContext& ctx)
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 			                     std::max(0.0f, ImGui::GetContentRegionAvail().x
 			                                    - kBtnW * 2.0f - 4.0f));
-			if (ImGui::SmallButton("Remove")) collab->kickParticipant(p.id);
+			if (EditorWidgets::dangerSmallButton("Remove")) collab->kickParticipant(p.id);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("End the session for %s. They can join again.",
 				                  p.name.c_str());

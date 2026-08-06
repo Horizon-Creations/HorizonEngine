@@ -51,6 +51,25 @@ bool dangerButton(const char* label, const ImVec2& size)
 	                    ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
 }
 
+bool dangerSmallButton(const char* label)
+{
+	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.60f, 0.20f, 0.20f, 0.20f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.66f, 0.23f, 0.23f, 0.75f));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
+	const bool pressed = ImGui::SmallButton(label);
+	ImGui::PopStyleColor(4);
+	return pressed;
+}
+
+bool dangerMenuItem(const char* label, bool enabled)
+{
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.48f, 0.45f, 1.0f));
+	const bool pressed = ImGui::MenuItem(label, nullptr, false, enabled);
+	ImGui::PopStyleColor();
+	return pressed;
+}
+
 bool cancelButton(const char* label, const ImVec2& size)
 {
 	// A ghost: border and text, no fill until hovered. The way out should be

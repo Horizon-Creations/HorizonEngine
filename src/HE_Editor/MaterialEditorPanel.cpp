@@ -350,7 +350,7 @@ bool drawFunctionInterfacePanel(MaterialGraph& g)
 			// A function needs at least one output; inputs may go to zero.
 			const bool lastOutput = type == MatNodeType::FnOutput && rows.size() <= 1;
 			ImGui::BeginDisabled(lastOutput);
-			if (ImGui::SmallButton("x")) removeId = n->id;
+			if (EditorWidgets::dangerSmallButton("\xc3\x97")) removeId = n->id;
 			ImGui::EndDisabled();
 			ImGui::PopID();
 		}
@@ -478,7 +478,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				if (ImGui::InputText("##ln", &names[i])) committed = false;
 				if (ImGui::IsItemDeactivatedAfterEdit()) committed = true;
 				ImGui::SameLine();
-				if (ImGui::SmallButton("x")) { removeAt = static_cast<int>(i); committed = true; }
+				if (EditorWidgets::dangerSmallButton("\xc3\x97")) { removeAt = static_cast<int>(i); committed = true; }
 				ImGui::PopID();
 			}
 			if (removeAt >= 0 && names.size() > 1)
@@ -532,7 +532,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
-			if (!n.s.empty() && ImGui::SmallButton("Clear")) { n.s.clear(); committed = true; }
+			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
 			break;
 		}
 		case MatNodeType::TextureSample:
@@ -546,7 +546,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
-			if (!n.s.empty() && ImGui::SmallButton("Clear")) { n.s.clear(); committed = true; }
+			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
 			ImGui::TextDisabled("(drop, or right-click → Set Texture)");
 			break;
 		}
@@ -1001,7 +1001,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				if (ImGui::BeginPopupContextItem("##cmtCtx"))
 				{
 					if (ImGui::MenuItem("Rename")) st.editingComment = cb.id;
-					if (ImGui::MenuItem("Delete Comment")) deleteComment = cb.id;
+					if (EditorWidgets::dangerMenuItem("Delete Comment")) deleteComment = cb.id;
 					ImGui::EndPopup();
 				}
 			}
@@ -1102,7 +1102,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const bool on = st.previewNodeId == nodeId;
 			if (ImGui::MenuItem("Preview This Node", nullptr, on)) togglePreviewNode = nodeId;
 		}
-		if (ImGui::MenuItem("Delete Node", nullptr, false, deletable)) deleteNode = nodeId;
+		if (EditorWidgets::dangerMenuItem("Delete Node", deletable)) deleteNode = nodeId;
 	};
 
 	// ── Double-click a FunctionCall node → open that function's editor tab. ──

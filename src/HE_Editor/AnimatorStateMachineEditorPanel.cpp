@@ -359,7 +359,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
 				ImGui::DragFloat("Duration##t", &t.duration, 0.01f, 0.0f, 10.0f, "%.2f s");
 				structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
-				if (ImGui::SmallButton("Remove##t")) transToDelete = i;
+				if (EditorWidgets::dangerSmallButton("Remove##t")) transToDelete = i;
 				ImGui::Separator();
 				ImGui::PopID();
 			}
@@ -379,7 +379,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				ImGui::DragFloat(k.c_str(), &v, 0.01f, -999.0f, 999.0f, "%.2f");
 				structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
 				ImGui::SameLine();
-				if (ImGui::SmallButton("X")) paramToDelete = k;
+				if (EditorWidgets::dangerSmallButton("\xc3\x97")) paramToDelete = k;
 				ImGui::PopID();
 			}
 			if (!paramToDelete.empty()) { st.graph.defaultParams.erase(paramToDelete); structuralEdit = true; }

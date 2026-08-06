@@ -206,7 +206,7 @@ void render(AppContext& ctx)
                     prefab.data = std::move(data);
                     ctx.contentManager->registerPrefab(std::move(prefab));
                 }
-                if (!isRoot && ImGui::MenuItem("Delete"))
+                if (!isRoot && EditorWidgets::dangerMenuItem("Delete"))
                 {
                     if (ctx.selectedEntity == node.entity)
                         ctx.selectedEntity = entt::null;
