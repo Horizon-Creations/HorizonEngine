@@ -1,6 +1,7 @@
 #include "HcGraphHost.h"
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
+#include "EditorWidgets.h"       // dangerMenuItem for node deletion
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include <HorizonScene/EngineApi.h>
 #include <ContentManager/ContentManager.h>
@@ -352,7 +353,7 @@ GraphEditor::Model buildModel(const Host& h)
 				h.onEdit(true);
 			}
 		}
-		if (ImGui::MenuItem(multi ? "Delete Selection" : "Delete Node"))
+		if (EditorWidgets::dangerMenuItem(multi ? "Delete Selection" : "Delete Node"))
 		{
 			const std::vector<int> doomed = multi ? ge.selection : std::vector<int>{ nodeId };
 			for (int id : doomed) graph.removeNode(id);

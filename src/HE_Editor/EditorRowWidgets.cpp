@@ -51,6 +51,18 @@ bool dangerButton(const char* label, const ImVec2& size)
 	                    ImVec4(0.52f, 0.16f, 0.16f, 1.0f));
 }
 
+bool addButton(const char* id, const char* tooltip)
+{
+	// "+##id": the visible label is always just the glyph, the identity is the
+	// caller's. Frame-height square, so it lines up with any input row.
+	char label[64];
+	std::snprintf(label, sizeof(label), "+%s", id);
+	const float sz = ImGui::GetFrameHeight();
+	const bool pressed = ImGui::Button(label, ImVec2(sz, sz));
+	if (tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+	return pressed;
+}
+
 bool dangerSmallButton(const char* label)
 {
 	ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.95f, 0.48f, 0.45f, 1.0f));

@@ -1211,8 +1211,8 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	// ── Graph variables (user-defined, persistent per running widget) ─────────
 	ImGui::Spacing();
 	ImGui::TextDisabled("Variables");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
-	if (ImGui::SmallButton("+##addvar"))
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
+	if (EditorWidgets::addButton("##addvar", "Add a variable"))
 	{
 		HC::Variable v;
 		v.name = HGH::uniqueVarName(st.graph);
@@ -1257,8 +1257,8 @@ void drawGraphVariables(State& st, AppContext& ctx)
 	{
 		ImGui::Spacing();
 		ImGui::TextDisabled("Local Variables");
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
-		if (ImGui::SmallButton("+##addlvar"))
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
+		if (EditorWidgets::addButton("##addlvar", "Add a local variable — reset to its default on every call"))
 		{
 			HC::Variable v;
 			v.name = HGH::uniqueVarName(st.graph);
@@ -1283,8 +1283,8 @@ void drawGraphVariables(State& st, AppContext& ctx)
 
 	ImGui::Spacing();
 	ImGui::TextDisabled("Functions");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24.0f);
-	if (ImGui::SmallButton("+##addfn"))
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::GetFrameHeight());
+	if (EditorWidgets::addButton("##addfn", "Add a function"))
 	{
 		// A function is its own sub-graph: a start (entry) + a Return node.
 		HC::Node fn; fn.type = NT::FunctionEntry; fn.s = HGH::uniqueFunctionName(st.graph);

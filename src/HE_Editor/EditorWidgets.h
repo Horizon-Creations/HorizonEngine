@@ -76,6 +76,12 @@ bool primaryButton(const char* label, const ImVec2& size = ImVec2(0, 0));
 bool dangerButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 bool cancelButton (const char* label, const ImVec2& size = ImVec2(0, 0));
 
+// The counterpart for creation: a square, frame-height "+" — big enough to be
+// a target, small enough to sit in a section header. The glyph alone carries
+// the meaning; what it adds goes in the tooltip, not the label, which is what
+// kept these buttons from being three different spellings of "+ Add".
+bool addButton(const char* id, const char* tooltip = nullptr);
+
 // The compact variants, for deletion that lives INSIDE content rather than at
 // the foot of a dialog. Ghost-red on purpose — red text, fill only under the
 // mouse: a list where every row ends in a filled red block has no warning

@@ -206,7 +206,7 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	};
 
 	ImGui::SeparatorText("Variables");
-	if (ImGui::SmallButton("+ Add##var"))
+	if (EditorWidgets::addButton("##var", "Add a variable"))
 	{
 		HC::Variable v;
 		v.name = HGH::uniqueVarName(graph);
@@ -223,7 +223,7 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	if (g.currentGraph != 0)
 	{
 		ImGui::SeparatorText("Local Variables");
-		if (ImGui::SmallButton("+ Add##lvar"))
+		if (EditorWidgets::addButton("##lvar", "Add a local variable — reset to its default on every call"))
 		{
 			HC::Variable v;
 			v.name = HGH::uniqueVarName(graph);
@@ -249,7 +249,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 	{ g.currentGraph = 0; g.selectedNode = 0; g.selectedVar.clear(); }
 
 	ImGui::SeparatorText("Functions");
-	if (ImGui::SmallButton("+ Add##fn"))
+	if (EditorWidgets::addButton("##fn", "Add a function"))
 	{
 		// A function is its own sub-graph: a start (FunctionEntry) + a Return node.
 		const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
