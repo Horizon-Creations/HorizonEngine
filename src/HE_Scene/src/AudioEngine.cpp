@@ -314,6 +314,72 @@ bool AudioEngine::isPlaying(uint64_t handle) const
     return ma_sound_is_playing(&it->second->sound) == MA_TRUE;
 }
 
+uint64_t AudioEngine::getSoundCursorFrames(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return 0;
+
+    ma_uint64 cursor = 0;
+    if (ma_sound_get_cursor_in_pcm_frames(&it->second->sound, &cursor) != MA_SUCCESS)
+        return 0;
+    return static_cast<uint64_t>(cursor);
+}
+
+uint64_t AudioEngine::getSoundLengthFrames(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return 0;
+
+    ma_uint64 length = 0;
+    if (ma_sound_get_length_in_pcm_frames(&it->second->sound, &length) != MA_SUCCESS)
+        return 0;
+    return static_cast<uint64_t>(length);
+}
+
+void AudioEngine::seekSound(uint64_t handle, uint64_t frame)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    ma_sound_seek_to_pcm_frame(&it->second->sound, static_cast<ma_uint64>(frame));
+}
+
+void AudioEngine::pauseSound(uint64_t handle)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    // ma_sound_stop only halts playback — the voice, its buffer and its cursor
+    // all stay put, which is what makes resumeSound() free.
+    ma_sound_stop(&it->second->sound);
+}
+
+void AudioEngine::resumeSound(uint64_t handle)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    ma_sound_start(&it->second->sound);
+}
+
+void AudioEngine::setSoundLooping(uint64_t handle, bool loop)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    ma_sound_set_looping(&it->second->sound, loop ? MA_TRUE : MA_FALSE);
+}
+
+void AudioEngine::setSoundVolume(uint64_t handle, float volume)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    ma_sound_set_volume(&it->second->sound, volume);
+}
+
+void AudioEngine::setSoundPitch(uint64_t handle, float pitch)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    ma_sound_set_pitch(&it->second->sound, pitch);
+}
+
 int AudioEngine::getSoundSampleRate(uint64_t handle) const
 {
     auto it = m_impl->sounds.find(handle);

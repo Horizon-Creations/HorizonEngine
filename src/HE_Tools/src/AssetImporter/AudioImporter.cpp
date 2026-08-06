@@ -6,14 +6,8 @@
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
-std::unique_ptr<AudioAsset> AudioImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir,
-	const ImportSettings&        settings)
+bool AudioImporter::decode(const std::filesystem::path& sourcePath, AudioAsset& out)
 {
-	(void)settings; // resampling not implemented yet
-
 	unsigned int   channels   = 0;
 	unsigned int   sampleRate = 0;
 	drwav_uint64   frameCount = 0;
@@ -24,19 +18,38 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	{
 		HE_LOG_ERROR(Tool, "%s",
 			("AudioImporter: failed to decode " + sourcePath.string()).c_str());
-		return nullptr;
+		return false;
 	}
 
-	auto asset = std::make_unique<AudioAsset>();
-	asset->type       = HE::AssetType::Audio;
-	asset->name       = sourcePath.stem().string();
-	asset->path       = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
-	asset->sampleRate = static_cast<int>(sampleRate);
-	asset->channels   = static_cast<int>(channels);
+	out.type       = HE::AssetType::Audio;
+	out.name       = sourcePath.stem().string();
+	out.sampleRate = static_cast<int>(sampleRate);
+	out.channels   = static_cast<int>(channels);
 
 	const auto* bytes = reinterpret_cast<const uint8_t*>(samples);
-	asset->audioData.assign(bytes, bytes + frameCount * channels * sizeof(drwav_int16));
+	out.audioData.assign(bytes, bytes + frameCount * channels * sizeof(drwav_int16));
 	drwav_free(samples, nullptr);
+	return true;
+}
+
+std::unique_ptr<AudioAsset> AudioImporter::import(
+	const std::filesystem::path& sourcePath,
+	const std::filesystem::path& contentRoot,
+	const std::filesystem::path& relativeOutputDir,
+	const ImportSettings&        settings)
+{
+	(void)settings; // resampling not implemented yet
+
+	auto asset = std::make_unique<AudioAsset>();
+	if (!decode(sourcePath, *asset))
+		return nullptr;
+
+	// decode() fills name/rate/channels/PCM; only the on-disk location is the
+	// importer's business.
+	asset->path = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
+
+	const unsigned int sampleRate = static_cast<unsigned int>(asset->sampleRate);
+	const unsigned int channels   = static_cast<unsigned int>(asset->channels);
 
 	if (!Importer::writeAsset(*asset, contentRoot))
 		return nullptr;

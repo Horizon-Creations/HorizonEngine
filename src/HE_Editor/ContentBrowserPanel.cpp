@@ -14,6 +14,7 @@
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
+#include "AudioEditorPanel.h"
 #include "EditorAssetTypeCache.h"
 #include "GitController.h"        // per-file source-control status for the tile badge
 #include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
@@ -783,11 +784,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 				// Script assets open the code editor tab, material assets the node-graph
 				// editor tab. Other asset types have no dedicated editor yet → no-op.
-				// C++ source/header (Source root) opens the h/cpp class viewer; the
-				// grid item's path is the class's canonical file (its header when the
-				// pair has one). The predicate is a raw extension check, not an HAsset
-				// sniff, so it must be tested explicitly here.
+				// C++ source/header (Source root) opens the h/cpp class viewer; a raw
+				// .wav opens the audio tab (auditioning a source file must not require
+				// importing it first). Both predicates are raw extension checks, not
+				// HAsset sniffs, so they must be tested explicitly here.
 				else if (CppClassEditorPanel::isCppSourceAsset(file->fullPath) ||
+				         AudioEditorPanel::isAudioAsset(file->fullPath) ||
 				         ScriptEditorPanel::isScriptAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
 				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||

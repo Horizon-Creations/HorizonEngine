@@ -659,3 +659,143 @@ TEST_CASE("AudioSourceComponent: busName serializes and deserializes")
     const auto& loaded = dst_world.registry().get<AudioSourceComponent>(*view.begin());
     CHECK(loaded.busName == "Music");
 }
+
+// ─── Transport (editor preview / audio tab) ──────────────────────────────────
+// All of these run in noDevice mode, where nothing pulls frames through the
+// mixer — so a sound never ADVANCES on its own here. That is exactly why the
+// tests below drive the cursor with seekSound() and read it back rather than
+// waiting for playback to move it.
+
+TEST_CASE("AudioEngine: getSoundLengthFrames reports the buffer length")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4800, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 4800);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: seekSound moves the cursor and it reads back")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(48000, 1);
+    uint64_t h = engine.play(pcm, 48000, 1);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundCursorFrames(h) == 0);
+
+    engine.seekSound(h, 12000);
+    CHECK(engine.getSoundCursorFrames(h) == 12000);
+
+    engine.seekSound(h, 0);
+    CHECK(engine.getSoundCursorFrames(h) == 0);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: cursor is in SOURCE frames, unaffected by pitch")
+{
+    // The audio tab maps cursor/sampleRate straight to seconds. That only holds
+    // if the cursor counts frames of the clip rather than of the mixer's output,
+    // which resampling at a non-1.0 pitch would otherwise skew.
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(48000, 1);
+    uint64_t h = engine.play(pcm, 48000, 1, 1.0f, 2.0f);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundLengthFrames(h) == 48000);
+
+    engine.seekSound(h, 24000);
+    CHECK(engine.getSoundCursorFrames(h) == 24000);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: pause keeps the voice and the cursor, resume restarts it")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(48000, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    REQUIRE(h != 0);
+    engine.seekSound(h, 9000);
+
+    engine.pauseSound(h);
+    CHECK(!engine.isPlaying(h));           // paused reads as not-playing …
+    CHECK(engine.getSoundCursorFrames(h) == 9000); // … but the voice is still there
+
+    engine.resumeSound(h);
+    CHECK(engine.isPlaying(h));
+    CHECK(engine.getSoundCursorFrames(h) == 9000);
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: live looping/volume/pitch changes are safe on a playing voice")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4800, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    REQUIRE(h != 0);
+
+    engine.setSoundLooping(h, true);
+    engine.setSoundVolume(h, 0.25f);
+    engine.setSoundPitch(h, 1.5f);
+    CHECK(engine.isPlaying(h));
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: transport calls on an unknown handle are no-ops")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    CHECK(engine.getSoundCursorFrames(0)     == 0);
+    CHECK(engine.getSoundLengthFrames(0)     == 0);
+    CHECK(engine.getSoundCursorFrames(99999) == 0);
+    CHECK(engine.getSoundLengthFrames(99999) == 0);
+
+    // None of these may touch anything for a handle that does not exist.
+    engine.seekSound(99999, 100);
+    engine.pauseSound(99999);
+    engine.resumeSound(99999);
+    engine.setSoundLooping(99999, true);
+    engine.setSoundVolume(99999, 0.5f);
+    engine.setSoundPitch(99999, 2.0f);
+
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: stop after pause releases the voice")
+{
+    // The audio tab reaps finished voices to give multi-megabyte PCM copies back;
+    // a paused voice has to survive that path and still be stoppable.
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4800, 1);
+    uint64_t h = engine.play(pcm, 48000, 1);
+    REQUIRE(h != 0);
+
+    engine.pauseSound(h);
+    engine.stop(h);
+    CHECK(!engine.isPlaying(h));
+    CHECK(engine.getSoundCursorFrames(h) == 0); // handle is gone entirely
+
+    engine.shutdown();
+}

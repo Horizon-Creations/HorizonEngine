@@ -59,6 +59,32 @@ public:
     void stopAll();
     bool isPlaying(uint64_t handle) const;
 
+    // ─── Transport / live parameters ─────────────────────────────────────────
+    // Everything below is a no-op (or 0) for an unknown handle.
+
+    // Playback position and total length, both in SOURCE PCM frames — i.e. frames
+    // of the buffer that was handed to play(), not of the engine's output rate. So
+    // `cursor / asset.sampleRate` is the position in seconds no matter what pitch
+    // the sound is running at, and no resampler compensation is needed anywhere.
+    uint64_t getSoundCursorFrames(uint64_t handle) const;
+    uint64_t getSoundLengthFrames(uint64_t handle) const;
+
+    // Jump to `frame` (source frames, clamped by miniaudio to the buffer length).
+    void seekSound(uint64_t handle, uint64_t frame);
+
+    // Pause keeping the cursor and the decoded buffer, resume from where it left
+    // off. Distinct from stop(), which tears the voice down — for a long clip
+    // that difference is a multi-megabyte PCM copy per press. isPlaying() reports
+    // false while paused, so a caller that reaps finished voices has to remember
+    // it paused this one.
+    void pauseSound(uint64_t handle);
+    void resumeSound(uint64_t handle);
+
+    // Change what play() set up, on a sound that is already running.
+    void setSoundLooping(uint64_t handle, bool loop);
+    void setSoundVolume(uint64_t handle, float volume);
+    void setSoundPitch(uint64_t handle, float pitch);
+
     // Sample rate the playing sound is actually being fed to the mixer with, in Hz.
     // Should equal the rate passed to play()/playSpatial(); 0 = unknown handle.
     int  getSoundSampleRate(uint64_t handle) const;

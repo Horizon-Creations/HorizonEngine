@@ -3841,6 +3841,7 @@ AppContext EditorApplication::makeContext()
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
+		.audioEngine         = &m_audioEngine,
 		.gameInstanceGraph   = &m_gameInstanceGraph,
 		.commitGameInstance  = [this]{
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
