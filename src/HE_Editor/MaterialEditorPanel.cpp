@@ -1681,33 +1681,52 @@ void render(AppContext& ctx, const std::string& assetPath,
 			// change (camera/size/material edit). Reuse the handle otherwise.
 			static HE::UUID s_lastPreviewMat{};
 			if (s_lastPreviewMat != st.materialId) st.previewDirty = true;
-			if (st.previewDirty && !st.isFunction && ctx.renderer && ctx.contentManager &&
+			// What this tab SHOWS is the canvas graph, and that graph is allowed to have no
+			// counterpart on the asset yet: a material created in the Content Browser is born
+			// with nothing but its META chunk, so the default graph stateFor() builds lives
+			// only in this tab until the first edit writes it. Previews resolve out of
+			// MaterialAsset::customShaderFragGlsl — so for such a material the renderer had
+			// NOTHING to draw, which is why the preview stayed empty until a node was added,
+			// deleted or moved: that edit was the first thing to bake a shader into the asset.
+			// Generate from the canvas graph for the render instead, exactly like the per-node
+			// preview below — the asset itself stays untouched until a real edit.
+			const bool noBakedShader = mat && mat->customShaderFragGlsl.empty();
+			if (st.previewDirty && !st.isFunction && mat && ctx.renderer && ctx.contentManager &&
 			    st.materialId != HE::UUID{} && px >= 32)
 			{
 				// Per-node preview: route the flagged node's first output straight into an
-				// UNLIT BaseColor on a COPY of the graph, and swap the generated shader into
-				// the material just for this render. Pipelines are cached by source hash, so
-				// both variants coexist and swapping back costs nothing.
+				// UNLIT BaseColor on a COPY of the graph. Either source is swapped into the
+				// material just for this render. Pipelines are cached by source hash, so the
+				// variants coexist and swapping back costs nothing.
 				bool swapped = false;
-				std::string origGlsl; std::vector<float> origData; std::vector<std::string> origTex;
+				std::string origGlsl; std::vector<float> origData;
+				std::vector<std::string> origTex, origLayers;
 				if (st.previewNodeId != 0 && !st.graph.findNode(st.previewNodeId))
 					st.previewNodeId = 0; // node got deleted → fall back to the material
-				if (st.previewNodeId != 0 && mat)
+				if (st.previewNodeId != 0 || noBakedShader)
 				{
 					HE::MaterialGraph pg = st.graph;
 					int outId = 0;
 					for (auto& nn : pg.nodes)
-						if (nn.type == MatNodeType::Output) { outId = nn.id; nn.p[0] = 0.0f; break; }
-					if (outId)
+						if (nn.type == MatNodeType::Output) { outId = nn.id; break; }
+					if (outId && st.previewNodeId != 0)
 					{
+						pg.findNode(outId)->p[0] = 0.0f; // unlit — the raw node value, unshaded
 						for (int pin = 0; pin < 5; ++pin) pg.disconnectInput(outId, pin);
 						pg.connect(st.previewNodeId, 0, outId, 0);
-						HE::MatFunctionLoader loader = [&ctx](const std::string& path)
-						{ return loadFunctionGraph(ctx, path); };
-						const HE::MatShaderGen pgen = HE::generateFragment(pg, loader);
-						origGlsl = mat->customShaderFragGlsl;
-						origData = mat->shaderParamData;
-						origTex  = mat->graphTexturePaths;
+					}
+					HE::MatFunctionLoader loader = [&ctx](const std::string& path)
+					{ return loadFunctionGraph(ctx, path); };
+					const HE::MatShaderGen pgen = outId ? HE::generateFragment(pg, loader)
+					                                    : HE::MatShaderGen{};
+					if (!pgen.glsl.empty())
+					{
+						origGlsl   = mat->customShaderFragGlsl;
+						origData   = mat->shaderParamData;
+						origTex    = mat->graphTexturePaths;
+						origLayers = mat->graphLayerNames; // restored too — a node preview
+						                                   // must not eat a landscape
+						                                   // material's paint-layer list
 						mat->customShaderFragGlsl = pgen.glsl;
 						mat->shaderParamData.clear();
 						for (const auto& slot : pgen.params)
@@ -1725,6 +1744,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 					mat->customShaderFragGlsl = std::move(origGlsl);
 					mat->shaderParamData      = std::move(origData);
 					mat->graphTexturePaths    = std::move(origTex);
+					mat->graphLayerNames      = std::move(origLayers);
 				}
 				st.previewDirty  = false;
 				s_lastPreviewMat = st.materialId;
@@ -1754,8 +1774,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 					const int call = pg.addNode(MatNodeType::FunctionCall);
 					pg.findNode(call)->s = st.relPath;
 					pg.connect(call, 0, out, 0);   // first FnOutput → BaseColor
-					HE::MatFunctionLoader loader = [&ctx](const std::string& path)
-					{ return loadFunctionGraph(ctx, path); };
+					// THIS function resolves to the canvas graph, not to the asset: a function
+					// created in the Content Browser carries no graph until the first edit
+					// saves one, so going through the asset previewed an empty function. Nested
+					// FunctionCalls still resolve the normal way.
+					HE::MatFunctionLoader loader = [&ctx, &st](const std::string& path)
+					{
+						return path == st.relPath ? &st.graph : loadFunctionGraph(ctx, path);
+					};
 					const HE::MatShaderGen gen = HE::generateFragment(pg, loader);
 					if (MaterialAsset* sm = ctx.contentManager->getMaterialMutable(st.fnPreviewMatId))
 					{
@@ -1769,10 +1795,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 						st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager,
 							st.fnPreviewMatId, (uint32_t)px, st.previewYaw, st.previewPitch,
 							st.previewDist, st.previewShape);
+						// Consumed only where a render was actually ATTEMPTED — bailing out
+						// above (no output pin yet, unsaved path) used to clear the flag too,
+						// which left the preview blank until the next edit re-set it.
+						st.previewDirty  = false;
+						s_lastPreviewMat = st.materialId;
 					}
 				}
-				st.previewDirty  = false;
-				s_lastPreviewMat = st.materialId;
 			}
 			void* tex = st.previewTex;
 
