@@ -1,6 +1,7 @@
 #include "SourceControlPanel.h"
 #include "EditorApplication.h"    // AppContext
 #include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
+#include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
 #include "GitController.h"
 
 #include <Diagnostics/GlobalState.h>
@@ -10,6 +11,8 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -27,7 +30,27 @@ namespace {
 // Panel-local input state. A commit message is short-lived by design. (Repo
 // init and remote/GitHub setup live in Preferences ▸ Source Control now.)
 char s_commitMessage[512] = "";
-bool s_autoPushLoaded     = false;
+bool s_prefsLoaded        = false;
+
+// The settings the CONTROLLER acts on but the Preferences page owns: auto-push
+// (read by requestCommitAll) and the background-fetch schedule (read by
+// update()). Both have to be in the controller before the user visits that page,
+// or the first commit of a session ignores auto-push and the fetch timer never
+// starts for anyone who never opens Preferences.
+//
+// Called from the panel AND from the footer status, because the footer runs on
+// every frame with a project open while the panel may never be opened at all —
+// and a guest in a collaboration session, who sees no commit UI, still wants the
+// ahead/behind counters to stay honest.
+void ensureSettingsLoaded(GitController& git)
+{
+	if (s_prefsLoaded) return;
+	s_prefsLoaded = true;
+	GlobalState& gs = GlobalState::getInstance();
+	git.autoPushAfterCommit = gs.getCustomConfigBool("GitAutoPushAfterCommit", false);
+	git.autoFetch           = gs.getCustomConfigBool("GitAutoFetch", false);
+	git.autoFetchMinutes    = gs.getCustomConfigInt("GitAutoFetchMinutes", 15);
+}
 // Changes as a folder tree (VS Code's tree mode) or a flat list. Persisted.
 bool s_treeView       = true;
 bool s_treeViewLoaded = false;
@@ -247,6 +270,274 @@ void drawChangeList(const HE::Sc::RepoStatus& st)
 	section("Untracked", untracked, false);
 }
 
+// ── Header bar ───────────────────────────────────────────────────────────────
+// Built from the same primitives as the Scene toolbar (EditorToolbar), so the
+// two read as one editor rather than as two applications sharing a window:
+//
+//   [ ⑂ main ]   [ ⟳ │ ☁ │ ↓ 2 │ ↑ 1 ]                    [ tree │ ⚙ ]
+//    ← where you are   ← what to do about the remote        ← how it looks
+//
+// It shrinks in defined steps rather than overflowing — first the sync labels
+// go, then the view toggle, then the branch name — and everything that gets
+// dropped stays reachable in the ⚙ popup, which is never dropped.
+
+void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
+{
+	ImGui::TextDisabled("Branches");
+	ImGui::Separator();
+	if (git.branches().empty())
+	{
+		ImGui::TextDisabled("(none yet)");
+	}
+	else
+	{
+		// Listed, not switchable: checking out replaces the whole working tree,
+		// and doing that from a hover menu is how someone loses an afternoon.
+		// Switching lives behind the branch dialog's explicit checkbox.
+		for (const std::string& b : git.branches())
+			ImGui::BulletText("%s%s", b.c_str(), b == st.branch ? "  (current)" : "");
+	}
+	ImGui::Separator();
+	ImGui::BeginDisabled(git.busy() || st.initialCommit || !git.mayModify());
+	if (ImGui::MenuItem("New branch…"))
+	{
+		s_branchFromOid.clear();          // empty start = branch off HEAD
+		s_branchFromSubject.clear();
+		s_branchName[0]  = '\0';
+		s_branchCheckout = st.dirtyCount() == 0;
+		s_branchDialog   = true;
+	}
+	ImGui::EndDisabled();
+	if (st.initialCommit)
+		ImGui::TextDisabled("Make the first commit first.");
+}
+
+void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
+{
+	ImGui::TextDisabled("Changes");
+	ImGui::Separator();
+	if (ImGui::MenuItem("Tree view", nullptr, s_treeView))
+	{
+		s_treeView = true;
+		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", true);
+	}
+	if (ImGui::MenuItem("Flat list", nullptr, !s_treeView))
+	{
+		s_treeView = false;
+		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", false);
+	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("Remote");
+	ImGui::Separator();
+	if (git.remoteUrl().empty())
+	{
+		ImGui::TextDisabled("None configured");
+	}
+	else
+	{
+		ImGui::TextDisabled("origin: %s", git.remoteUrl().c_str());
+		if (!st.upstream.empty())
+			ImGui::TextDisabled("tracking %s", st.upstream.c_str());
+		// The schedule itself is a preference, not a per-panel switch — this is
+		// only the readout, so the panel never disagrees with the settings page.
+		ImGui::TextDisabled(git.autoFetch
+			? "Fetching automatically every %d min"
+			: "Automatic fetching is off", std::max(GitController::kMinFetchMinutes,
+			                                        git.autoFetchMinutes));
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	if (ImGui::MenuItem("Open source-control settings…"))
+		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
+}
+
+void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
+{
+	namespace T = EditorToolbar;
+
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	const float  barW   = ImGui::GetContentRegionAvail().x;
+	const T::Metrics m  = T::metrics(origin.y);
+
+	const bool conflicts = st.hasConflicts();
+	// A repository with unresolved conflicts is not in a state to be synced, and
+	// that is worth seeing before reading a single filename — so it washes the
+	// whole strip, exactly as play mode does in the Scene bar.
+	T::bar(origin, barW, m,
+	       conflicts ? T::kBadWell : 0u,
+	       conflicts ? T::kBad : T::kBarLine,
+	       conflicts ? 2.0f : 1.0f);
+
+	const bool mayWrite  = git.mayModify();
+	const bool hasRemote = !git.remoteUrl().empty();
+	const bool idle      = !git.busy();
+
+	const char* branchLabel = st.detached ? "detached"
+	                        : st.branch.empty() ? "(no branch)"
+	                                            : st.branch.c_str();
+
+	char aheadTxt[16], behindTxt[16];
+	std::snprintf(aheadTxt,  sizeof(aheadTxt),  "%d", st.ahead);
+	std::snprintf(behindTxt, sizeof(behindTxt), "%d", st.behind);
+
+	// ── Fit ─────────────────────────────────────────────────────────────────
+	// Measured before anything is drawn, so the shrink steps are decided once
+	// and the row cannot reflow halfway through.
+	const float branchW = T::cellWidth(m, branchLabel);
+	auto syncWidth = [&](bool labels)
+	{
+		float w = T::kWellPad * 2.0f + m.cell;                        // refresh
+		if (hasRemote) w += T::kSegGap + m.cell;                      // fetch
+		if (hasRemote && mayWrite)
+		{
+			w += T::kSegGap + (labels ? T::cellWidth(m, behindTxt) : m.cell);
+			w += T::kSegGap + (labels ? T::cellWidth(m, aheadTxt)  : m.cell);
+		}
+		return w;
+	};
+	auto rightWidth = [&](bool viewToggle)
+	{
+		float w = T::kWellPad * 2.0f + m.cell;                        // options
+		if (viewToggle) w += T::kSegGap + m.cell;
+		return w;
+	};
+
+	bool labels = true, viewToggle = true, branchName = true;
+	auto leftWidth = [&](bool name)
+	{
+		return T::kWellPad * 2.0f + (name ? branchW : m.cell);
+	};
+	auto fits = [&] {
+		return leftWidth(branchName) + T::kGroupGap + syncWidth(labels) +
+		       T::kGroupGap + rightWidth(viewToggle) + T::kEdgeGap * 2.0f <= barW;
+	};
+	if (!fits()) labels     = false;
+	if (!fits()) viewToggle = false;
+	if (!fits()) branchName = false;
+
+	// ── Left: where you are ─────────────────────────────────────────────────
+	float x = origin.x + T::kEdgeGap;
+	{
+		const float w = leftWidth(branchName);
+		T::well(m, x, w);
+		if (T::cell(m, x + T::kWellPad, w - T::kWellPad * 2.0f, "##branch",
+		            T::iconBranch, branchName ? branchLabel : nullptr,
+		            false, true,
+		            st.detached ? "Detached HEAD — commits here belong to no branch"
+		                        : "Branch. Click for the branch list."))
+		{
+			ImGui::OpenPopup("##branchPopup");
+		}
+		if (ImGui::BeginPopup("##branchPopup")) { drawBranchPopup(git, st); ImGui::EndPopup(); }
+		x += w + T::kGroupGap;
+	}
+
+	// ── Middle: the remote ──────────────────────────────────────────────────
+	{
+		const float w = syncWidth(labels);
+		T::well(m, x, w);
+		float cx = x + T::kWellPad;
+
+		if (T::cell(m, cx, m.cell, "##refresh", T::iconRefresh, nullptr, false, idle,
+		            "Refresh status"))
+		{
+			git.requestRefresh();
+		}
+		cx += m.cell + T::kSegGap;
+
+		if (hasRemote)
+		{
+			if (T::cell(m, cx, m.cell, "##fetch", T::iconCloud, nullptr, false, idle,
+			            "Fetch — update what the remote has, without changing anything "
+			            "here.\nAutomatic fetching is set up in Preferences \xe2\x96\xb8 "
+			            "Source Control."))
+			{
+				git.requestFetch();
+			}
+			cx += m.cell + T::kSegGap;
+		}
+
+		if (hasRemote && mayWrite)
+		{
+			// Ahead and behind ARE the pull and push buttons: the count is the
+			// reason you would press them, so putting it anywhere else means
+			// reading one thing and clicking another.
+			const float pullW = labels ? T::cellWidth(m, behindTxt) : m.cell;
+			const bool  canPull = idle && !st.initialCommit;
+			if (T::cellTinted(m, cx, pullW, "##pull", T::iconArrowDown,
+			                  labels ? behindTxt : nullptr,
+			                  st.behind > 0 ? T::kWarn : T::kFg, canPull,
+			                  st.behind > 0
+			                      ? "Pull — fast-forward only; a diverged branch is "
+			                        "reported, never auto-merged."
+			                      : "Pull (nothing to pull)"))
+			{
+				git.requestPull();
+			}
+			cx += pullW + T::kSegGap;
+
+			const float pushW = labels ? T::cellWidth(m, aheadTxt) : m.cell;
+			if (T::cellTinted(m, cx, pushW, "##push", T::iconArrowUp,
+			                  labels ? aheadTxt : nullptr,
+			                  st.ahead > 0 ? T::kGood : T::kFg, canPull,
+			                  st.initialCommit ? "Make the first commit before pushing"
+			                                   : "Push"))
+			{
+				git.requestPush();
+			}
+		}
+		x += w + T::kGroupGap;
+	}
+
+	// ── Right: how it looks ─────────────────────────────────────────────────
+	{
+		const float w  = rightWidth(viewToggle);
+		const float rx = origin.x + barW - T::kEdgeGap - w;
+		T::well(m, rx, w);
+		float cx = rx + T::kWellPad;
+
+		if (viewToggle)
+		{
+			if (T::cell(m, cx, m.cell, "##view", s_treeView ? T::iconTree : T::iconList,
+			            nullptr, false, true,
+			            s_treeView ? "Showing changes as a folder tree — click for a flat list"
+			                       : "Showing changes as a flat list — click for a folder tree"))
+			{
+				s_treeView = !s_treeView;
+				GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", s_treeView);
+			}
+			cx += m.cell + T::kSegGap;
+		}
+
+		if (T::cell(m, cx, m.cell, "##scopts", T::iconGear, nullptr, false, true, "Options"))
+			ImGui::OpenPopup("##scOptions");
+		if (ImGui::BeginPopup("##scOptions")) { drawOptionsPopup(git, st); ImGui::EndPopup(); }
+	}
+
+	// Busy and conflicts, on the strip itself rather than as a line under it —
+	// they are states of the bar's own controls, and a line that appears and
+	// disappears shoves the whole panel up and down.
+	if (!idle || conflicts)
+	{
+		const char* note = conflicts ? "conflicts" : "working…";
+		const float noteW = ImGui::CalcTextSize(note).x;
+		const float slot  = origin.x + barW - T::kEdgeGap - rightWidth(viewToggle)
+		                  - T::kGroupGap - noteW;
+		if (slot > x)
+		{
+			ImGui::GetWindowDrawList()->AddText(
+				ImVec2(std::floor(slot), std::floor(m.cy - ImGui::GetFontSize() * 0.5f)),
+				conflicts ? T::kBad : T::kFgDim, note);
+		}
+	}
+
+	// Hand the rest of the window to the panel body, exactly as the Scene bar
+	// hands it to the viewport image.
+	ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + m.bar));
+}
+
 } // namespace
 #endif // HE_IMGUI_ENABLED
 
@@ -257,7 +548,11 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	// The controller only polls often while the panel is on screen, so it has to
 	// be told even on the frame where the window is closed. The Preferences tab's
 	// Source Control pages count as "on screen" too — they show the same status.
-	if (git) git->setPanelVisible(open || EditorSettingsPanel::sourceControlPageActive());
+	if (git)
+	{
+		git->setPanelVisible(open || EditorSettingsPanel::sourceControlPageActive());
+		ensureSettingsLoaded(*git);
+	}
 	if (!open) return;
 
 	ImGui::SetNextWindowSize(ImVec2(420.0f, 460.0f), ImGuiCond_FirstUseEver);
@@ -315,96 +610,53 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		return;
 	}
 
-	// ── Branch line ─────────────────────────────────────────────────────────
-	if (st.detached)
+	// ── Header bar ───────────────────────────────────────────────────────────
+	// Branch, sync and view, in the same visual language as the Scene toolbar:
+	// related controls in one rounded well, groups separated by a gap, cells
+	// icon-first with a tooltip. The row used to be a text line, three loose
+	// buttons and a SeparatorText per section, spread over a third of the panel
+	// before the first change was visible.
+	// Tree ⇄ flat, the same choice VS Code's source-control view offers. Sticky
+	// across sessions — a layout preference, not a per-repo fact. Loaded before
+	// the bar, which is where the toggle now lives.
+	if (!s_treeViewLoaded)
 	{
-		// Worth calling out: commits made here belong to no branch and are easy
-		// to lose.
-		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "Detached HEAD");
-	}
-	else
-	{
-		ImGui::Text("Branch: %s", st.branch.empty() ? "(unknown)" : st.branch.c_str());
-		if (!git->branches().empty() && ImGui::IsItemHovered())
-		{
-			// The other branches, on hover — enough to know what exists without
-			// spending a permanent row on it.
-			std::string all;
-			for (const std::string& b : git->branches())
-			{
-				all += (b == st.branch ? "\xe2\x97\x8f " : "  ") + b + "\n";
-			}
-			ImGui::SetTooltip("Local branches:\n%s", all.c_str());
-		}
-		// Branching off the current state, as opposed to off a commit in the
-		// history (that entry lives in the History context menu).
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 84.0f);
-		ImGui::BeginDisabled(git->busy() || st.initialCommit);
-		if (ImGui::SmallButton("New branch…"))
-		{
-			s_branchFromOid.clear();          // empty start = branch off HEAD
-			s_branchFromSubject.clear();
-			s_branchName[0]  = '\0';
-			s_branchCheckout = st.dirtyCount() == 0;
-			s_branchDialog   = true;
-		}
-		ImGui::EndDisabled();
+		s_treeViewLoaded = true;
+		s_treeView = GlobalState::getInstance().getCustomConfigBool("GitChangesTreeView", true);
 	}
 
-	if (st.initialCommit)
-	{
-		ImGui::TextDisabled("No commits yet.");
-	}
-	else if (!st.upstream.empty())
-	{
-		ImGui::SameLine();
-		if (st.ahead == 0 && st.behind == 0)
-			ImGui::TextDisabled("(up to date with %s)", st.upstream.c_str());
-		else
-			ImGui::TextDisabled("(%d ahead, %d behind %s)", st.ahead, st.behind,
-			                    st.upstream.c_str());
-	}
-	else
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("(no remote configured)");
-	}
+	drawHeaderBar(*git, st);
 
-	// ── Who may write ────────────────────────────────────────────────────────
+	// ── What is in the way ───────────────────────────────────────────────────
+	// Errors and the guest notice sit directly under the bar and nowhere else.
+	// The old layout scattered status text between every section, so the panel
+	// grew and shrank as things happened and the change list moved with it.
 	if (git->blockedByCollabSession())
 	{
 		// Explained rather than silently absent: a user who cannot find the
 		// commit button should learn why, not conclude the feature is broken.
-		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.80f, 1.0f, 1.0f));
-		ImGui::TextWrapped("You are a guest in a collaboration session. The host "
-		                   "manages source control for this project — your changes "
-		                   "reach the others through the session.");
+		ImGui::TextWrapped("You are a guest in a collaboration session. The host manages "
+		                   "source control for this project — your changes reach the "
+		                   "others through the session.");
 		ImGui::PopStyleColor();
 	}
-
 	if (!git->lastError().empty())
 	{
-		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
 		ImGui::TextWrapped("%s", git->lastError().c_str());
 		ImGui::PopStyleColor();
 	}
-
-	if (!git->lastInfo().empty() && git->lastError().empty())
+	else if (!git->lastInfo().empty())
 	{
-		ImGui::Spacing();
-		ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "%s", git->lastInfo().c_str());
+		ImGui::TextDisabled("%s", git->lastInfo().c_str());
 	}
 
-	// ── Commit / sync ────────────────────────────────────────────────────────
+	// ── Commit ───────────────────────────────────────────────────────────────
 	// Hidden — not greyed out — for a session guest: reading status is always
 	// allowed, it is writing and moving HEAD that would desync the session.
 	if (!git->blockedByCollabSession())
 	{
-		ImGui::Spacing();
-		ImGui::SeparatorText("Commit");
-
 		const bool identityOk = !ctx.gitProbe || ctx.gitProbe->identityConfigured;
 		if (!identityOk)
 		{
@@ -414,12 +666,27 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::PopStyleColor();
 		}
 
-		ImGui::InputTextMultiline("##commitmsg", s_commitMessage, sizeof(s_commitMessage),
-		                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.0f));
+		ImGui::InputTextWithHint("##commitmsg", "Message for this commit",
+		                         s_commitMessage, sizeof(s_commitMessage));
 
-		const bool hasConflicts = st.hasConflicts();
+		const std::size_t dirty     = st.dirtyCount();
+		const bool hasConflicts     = st.hasConflicts();
 		const bool canCommit = !git->busy() && s_commitMessage[0] != '\0' &&
-		                       st.dirtyCount() > 0 && !hasConflicts;
+		                       dirty > 0 && !hasConflicts;
+
+		char commitLabel[64];
+		if (dirty == 0)      std::snprintf(commitLabel, sizeof(commitLabel), "Nothing to commit");
+		else if (dirty == 1) std::snprintf(commitLabel, sizeof(commitLabel), "Commit 1 change");
+		else std::snprintf(commitLabel, sizeof(commitLabel), "Commit %zu changes", dirty);
+
+		ImGui::BeginDisabled(!canCommit);
+		if (ImGui::Button(commitLabel, ImVec2(-FLT_MIN, 0.0f)))
+		{
+			git->requestCommitAll(s_commitMessage);
+			s_commitMessage[0] = '\0';
+		}
+		ImGui::EndDisabled();
+
 		if (hasConflicts)
 		{
 			// A commit with unresolved conflict markers preserves the mess
@@ -428,77 +695,12 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::TextWrapped("Conflicts must be resolved before committing.");
 			ImGui::PopStyleColor();
 		}
-		ImGui::BeginDisabled(!canCommit);
-		if (ImGui::Button("Commit all changes", ImVec2(180.0f, 0.0f)))
+		else if (st.initialCommit && git->remoteUrl().empty())
 		{
-			git->requestCommitAll(s_commitMessage);
-			s_commitMessage[0] = '\0';
+			ImGui::TextDisabled("No remote yet — set one up in Preferences \xe2\x96\xb8 "
+			                    "Source Control.");
 		}
-		ImGui::EndDisabled();
 
-		// ── Remote ───────────────────────────────────────────────────────────
-		ImGui::Spacing();
-		ImGui::SeparatorText("Remote");
-		if (git->remoteUrl().empty())
-		{
-			// Setup (GitHub create + token, or pasting an existing URL) lives in
-			// the Preferences tab — this window is the daily driver, not the
-			// one-time configuration.
-			ImGui::TextWrapped("No remote configured — set one up in "
-			                   "Preferences \xe2\x96\xb8 Source Control.");
-			if (ImGui::Button("Set up remote…"))
-				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
-		}
-		else
-		{
-			ImGui::TextDisabled("origin: %s", git->remoteUrl().c_str());
-
-			ImGui::BeginDisabled(git->busy() || st.initialCommit);
-			if (ImGui::Button("Push", ImVec2(86.0f, 0.0f))) git->requestPush();
-			ImGui::SameLine();
-			if (ImGui::Button("Pull", ImVec2(86.0f, 0.0f))) git->requestPull();
-			ImGui::EndDisabled();
-
-			// Auto-push is toggled in Preferences ▸ Source Control ▸ Repository,
-			// but requestCommitAll reads the flag — so the persisted value must be
-			// loaded here too, before the first commit, even if the Preferences
-			// page was never opened this session.
-			if (!s_autoPushLoaded)
-			{
-				s_autoPushLoaded = true;
-				git->autoPushAfterCommit = GlobalState::getInstance()
-					.getCustomConfigBool("GitAutoPushAfterCommit", false);
-			}
-
-			if (st.initialCommit)
-				ImGui::TextDisabled("Make the first commit before pushing.");
-			else if (st.behind > 0)
-				ImGui::TextDisabled("Pulling fast-forwards only — a diverged branch is "
-				                    "reported, never auto-merged.");
-		}
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	if (git->busy()) ImGui::BeginDisabled();
-	if (ImGui::Button("Refresh")) git->requestRefresh();
-	if (git->busy()) ImGui::EndDisabled();
-	ImGui::SameLine();
-	if (git->busy()) ImGui::TextDisabled("Working…");
-	else             ImGui::TextDisabled("%zu change(s)", st.dirtyCount());
-
-	// Tree ⇄ flat, the same toggle VS Code's source-control view has. Sticky
-	// across sessions — a layout choice, not a per-repo fact.
-	if (!s_treeViewLoaded)
-	{
-		s_treeViewLoaded = true;
-		s_treeView = GlobalState::getInstance().getCustomConfigBool("GitChangesTreeView", true);
-	}
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 74.0f);
-	if (ImGui::SmallButton(s_treeView ? "List view" : "Tree view"))
-	{
-		s_treeView = !s_treeView;
-		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", s_treeView);
 	}
 
 	// ── Changes ──────────────────────────────────────────────────────────────
@@ -714,6 +916,7 @@ bool DrawFooterStatus(AppContext& ctx)
 	// at all rather than a placeholder. A footer that permanently reads "no
 	// repository" for people who do not use git is noise in every session.
 	if (!git || !ctx.projectLoaded) return false;
+	ensureSettingsLoaded(*git);
 
 	const HE::Sc::RepoStatus& st = git->status();
 

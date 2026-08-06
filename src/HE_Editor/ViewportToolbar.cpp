@@ -5,6 +5,7 @@
 #include "EditorApplication.h"   // AppContext, EditorConfig, EditorMode
 #include "EditorCamera.h"
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
+#include "EditorToolbar.h"        // palette, metrics, cell/well — shared with the SC bar
 
 #include <imgui.h>
 #include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
@@ -17,44 +18,23 @@ namespace ViewportToolbar
 namespace
 {
 
-// ── Palette ──────────────────────────────────────────────────────────────────
-// The editor theme is deliberately greyscale, so the bar stays greyscale too and
-// spends its one colour on state: blue = "this tool is armed", green/red = "the
-// scene is (not) running". Nothing else in the strip is coloured.
-constexpr ImU32 kBarBg      = IM_COL32( 21,  21,  21, 255);
-constexpr ImU32 kBarLine    = IM_COL32( 44,  44,  44, 255);
-constexpr ImU32 kWellBg     = IM_COL32( 33,  33,  33, 255);
-constexpr ImU32 kHoverBg    = IM_COL32(255, 255, 255,  20);
-constexpr ImU32 kDownBg     = IM_COL32(255, 255, 255,  38);
-constexpr ImU32 kOnBg       = IM_COL32( 56, 108, 178, 255);
-constexpr ImU32 kOnBgHover  = IM_COL32( 72, 130, 205, 255);
-constexpr ImU32 kFg         = IM_COL32(198, 198, 198, 255);
-constexpr ImU32 kFgOn       = IM_COL32(255, 255, 255, 255);
-constexpr ImU32 kFgDim      = IM_COL32( 96,  96,  96, 255);
-constexpr ImU32 kPlayFg     = IM_COL32( 96, 196, 124, 255);
-constexpr ImU32 kStopFg     = IM_COL32(222,  92,  92, 255);
-constexpr ImU32 kPlayWell   = IM_COL32( 96, 196, 124,  28);
-constexpr ImU32 kStopWell   = IM_COL32(222,  92,  92,  38);
-constexpr ImU32 kPlayTint   = IM_COL32(222,  92,  92,  16);   // whole-bar wash while running
+// ── Scene-only colour ────────────────────────────────────────────────────────
+// The shared palette lives in EditorToolbar.h. What stays here is the one thing
+// only this bar has: play mode, which tints the whole strip so "am I editing or
+// playing?" is answered in peripheral vision rather than by reading a button.
+using namespace EditorToolbar;
 
-constexpr float kWellRound  = 7.0f;
-constexpr float kCellRound  = 5.0f;
-constexpr float kWellPad    = 3.0f;   // well border → cell
-constexpr float kSegGap     = 2.0f;   // cell → cell inside a well
-constexpr float kGroupGap   = 9.0f;   // well → well
-constexpr float kEdgeGap    = 8.0f;   // bar edge → first/last well
-constexpr float kLabelGap   = 6.0f;   // icon → label
-constexpr float kCellPadX   = 9.0f;   // side padding of a labelled cell
+constexpr ImU32 kPlayFg   = kGood;
+constexpr ImU32 kStopFg   = kBad;
+constexpr ImU32 kPlayWell = kGoodWell;
+constexpr ImU32 kStopWell = kBadWell;
+constexpr ImU32 kPlayTint = IM_COL32(222, 92, 92, 16);   // whole-bar wash while running
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 // Drawn as vectors rather than shipped as textures: the bar has to look right at
 // any UI font scale and on HiDPI, and a 16 px PNG does neither. `s` is the box
 // the glyph is fitted into, `c` its centre.
-using IconFn = void (*)(ImDrawList*, const ImVec2&, float, ImU32);
-
 constexpr float kPi = 3.14159265358979323846f;   // IM_PI is in imgui_internal.h
-
-inline float stroke(float s) { return std::max(1.2f, s * 0.10f); }
 
 // Mouse pointer — View mode (click to select, drag the gizmo).
 void iconCursor(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
@@ -206,76 +186,6 @@ void iconStop(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddRectFilled({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 1.5f);
 }
 
-// ── Per-frame metrics ────────────────────────────────────────────────────────
-struct Metrics
-{
-	float bar   = 0.0f;   // strip height
-	float cell  = 0.0f;   // interactive cell height (= square icon cell width)
-	float icon  = 0.0f;   // glyph box inside a cell
-	float wellH = 0.0f;   // cell + padding
-	float y     = 0.0f;   // well top, screen space
-	float cy    = 0.0f;   // vertical centre of the strip, screen space
-};
-
-Metrics metrics(float originY)
-{
-	Metrics m;
-	m.cell  = ImGui::GetFrameHeight();
-	m.bar   = std::floor(m.cell + 12.0f);
-	m.icon  = std::floor(m.cell * 0.60f);
-	m.wellH = m.cell + kWellPad * 2.0f;
-	m.y     = std::floor(originY + (m.bar - m.wellH) * 0.5f);
-	m.cy    = m.y + m.wellH * 0.5f;
-	return m;
-}
-
-// Width of one cell: square when icon-only, icon + label otherwise.
-float cellWidth(const Metrics& m, const char* label)
-{
-	if (!label) return m.cell;
-	return std::floor(m.icon + kLabelGap + ImGui::CalcTextSize(label).x + kCellPadX * 2.0f);
-}
-
-// One interactive cell inside a well. Returns true when clicked. `on` paints the
-// armed state, `enabled == false` dims it and swallows the click.
-bool cell(const Metrics& m, float x, float w, const char* id, IconFn icon,
-          const char* label, bool on, bool enabled, const char* tooltip)
-{
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	const ImVec2 p0(x, m.y + kWellPad);
-	const ImVec2 p1(x + w, p0.y + m.cell);
-
-	ImGui::SetCursorScreenPos(p0);
-	if (!enabled) ImGui::BeginDisabled();
-	const bool pressed = ImGui::InvisibleButton(id, ImVec2(w, m.cell));
-	const bool hovered = ImGui::IsItemHovered();
-	const bool held    = ImGui::IsItemActive();
-	if (tooltip && enabled) ImGui::SetItemTooltip("%s", tooltip);
-	if (!enabled) ImGui::EndDisabled();
-
-	const ImU32 bg = on      ? (hovered ? kOnBgHover : kOnBg)
-	               : held    ? kDownBg
-	               : hovered ? kHoverBg
-	                         : 0u;
-	if (bg) dl->AddRectFilled(p0, p1, bg, kCellRound);
-
-	const ImU32 fg = !enabled ? kFgDim : (on ? kFgOn : kFg);
-	const float labelW  = label ? ImGui::CalcTextSize(label).x : 0.0f;
-	const float contentW = m.icon + (label ? kLabelGap + labelW : 0.0f);
-	const float left     = x + (w - contentW) * 0.5f;
-	if (icon) icon(dl, ImVec2(std::floor(left + m.icon * 0.5f), std::floor(m.cy)), m.icon, fg);
-	if (label)
-		dl->AddText(ImVec2(std::floor(left + m.icon + kLabelGap),
-		                   std::floor(m.cy - ImGui::GetFontSize() * 0.5f)), fg, label);
-	return pressed && enabled;
-}
-
-void well(const Metrics& m, float x, float w, ImU32 col = kWellBg)
-{
-	ImGui::GetWindowDrawList()->AddRectFilled(
-		ImVec2(x, m.y), ImVec2(x + w, m.y + m.wellH), col, kWellRound);
-}
-
 // Snap increment for the armed operation, formatted for the value cell.
 void snapText(const State& st, ImGuizmo::OPERATION op, char* buf, size_t n)
 {
@@ -377,10 +287,7 @@ const float* State::activeSnap() const
 	return m_snapBuf;
 }
 
-float height()
-{
-	return std::floor(ImGui::GetFrameHeight() + 12.0f);
-}
+float height() { return EditorToolbar::height(); }
 
 void render(AppContext& ctx, State& st)
 {
@@ -395,12 +302,10 @@ void render(AppContext& ctx, State& st)
 	// controls floating on the panel background. While the scene is running the
 	// band is washed red and the hairline turns red with it — the "am I editing
 	// or playing?" answer belongs in peripheral vision, not in a button icon.
-	dl->AddRectFilled(origin, ImVec2(origin.x + barW, origin.y + m.bar), kBarBg);
-	if (playing)
-		dl->AddRectFilled(origin, ImVec2(origin.x + barW, origin.y + m.bar), kPlayTint);
-	dl->AddLine(ImVec2(origin.x,        origin.y + m.bar - 1.0f),
-	            ImVec2(origin.x + barW, origin.y + m.bar - 1.0f),
-	            playing ? kStopFg : kBarLine, playing ? 2.0f : 1.0f);
+	EditorToolbar::bar(origin, barW, m,
+	                   playing ? kPlayTint : 0u,
+	                   playing ? kStopFg : kBarLine,
+	                   playing ? 2.0f : 1.0f);
 
 	// The Scene panel starts with its dock tab bar hidden, and ImGui's way back —
 	// a small triangle in the node's corner — is drawn during Begin(), i.e. UNDER

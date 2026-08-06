@@ -99,6 +99,13 @@ public:
 
 	void requestPush(bool upstreamConfigured);
 	void requestPull();
+
+	// Update the remote-tracking refs without touching anything on disk, then
+	// refresh, so ahead/behind become true. `quiet` suppresses the "Fetched."
+	// note in lastInfo(): a fetch the user asked for is worth confirming, one
+	// that fired on a timer is not — a panel that keeps announcing itself every
+	// quarter of an hour trains people to stop reading it.
+	void requestFetch(bool quiet = false);
 	void requestSetRemote(const std::string& url);
 
 	// Human-readable outcome of the last completed operation ("Pushed.",
@@ -133,7 +140,7 @@ public:
 
 private:
 	enum class Kind : std::uint8_t {
-		Open, Status, Init, CommitAll, Push, Pull, SetRemote, SetupGitHub,
+		Open, Status, Init, CommitAll, Push, Pull, Fetch, SetRemote, SetupGitHub,
 		StoreCredential, RestoreTo, CreateBranch, Quit
 	};
 

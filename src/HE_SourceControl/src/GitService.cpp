@@ -139,6 +139,14 @@ void GitService::requestPull()
 	push(Command{ Kind::Pull, {} });
 }
 
+void GitService::requestFetch(bool quiet)
+{
+	if (!m_worker.joinable()) return;
+	Command c{ Kind::Fetch, {} };
+	c.flag = quiet;
+	push(std::move(c));
+}
+
 void GitService::requestSetRemote(const std::string& url)
 {
 	if (!m_worker.joinable()) return;
@@ -316,6 +324,17 @@ void GitService::workerMain()
 			std::string err;
 			if (!GitCli::pull(m_root, &err)) { ev.error = err; break; }
 			ev.info    = "Pulled.";
+			wantStatus = true;
+			break;
+		}
+		case Kind::Fetch:
+		{
+			std::string err;
+			if (!GitCli::fetch(m_root, &err)) { ev.error = err; break; }
+			// cmd.flag = quiet: a timer-driven fetch reports nothing on success.
+			// The refresh still runs — the whole point is that ahead/behind stop
+			// being stale, and that shows up in the numbers, not in a sentence.
+			if (!cmd.flag) ev.info = "Fetched.";
 			wantStatus = true;
 			break;
 		}
