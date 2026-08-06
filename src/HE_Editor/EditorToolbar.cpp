@@ -242,6 +242,391 @@ void iconPlus(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddLine({ c.x, c.y - h }, { c.x, c.y + h }, col, t);
 }
 
+
+// ─── Bar builder ─────────────────────────────────────────────────────────────
+
+Bar::Bar()
+{
+	m_dl     = ImGui::GetWindowDrawList();
+	m_origin = ImGui::GetCursorScreenPos();
+	m_width  = ImGui::GetContentRegionAvail().x;
+	m_m      = EditorToolbar::metrics(m_origin.y);
+
+	EditorToolbar::bar(m_origin, m_width, m_m);
+
+	// Channel 0 carries the wells, channel 1 the cells on top of them. That is
+	// what lets a well be painted after the cells it sits behind — its width is
+	// not known until the group closes, and measuring everything twice for that
+	// is how the two hand-built bars ended up with their own copies of the
+	// arithmetic.
+	m_dl->ChannelsSplit(2);
+	m_dl->ChannelsSetCurrent(1);
+
+	m_left  = m_origin.x + kEdgeGap;
+	m_right = m_origin.x + m_width - kEdgeGap;
+}
+
+Bar::~Bar()
+{
+	if (m_inGroup) endGroup();
+	m_dl->ChannelsMerge();
+	// Hand the rest of the window to the panel body.
+	ImGui::SetCursorScreenPos(ImVec2(m_origin.x, m_origin.y + m_m.bar));
+}
+
+void Bar::tint(ImU32 wash, ImU32 line, float thickness)
+{
+	// Painted into the well channel so it stays under every cell.
+	m_dl->ChannelsSetCurrent(0);
+	if (wash)
+		m_dl->AddRectFilled(m_origin, ImVec2(m_origin.x + m_width, m_origin.y + m_m.bar), wash);
+	m_dl->AddLine(ImVec2(m_origin.x,            m_origin.y + m_m.bar - 1.0f),
+	              ImVec2(m_origin.x + m_width,  m_origin.y + m_m.bar - 1.0f), line, thickness);
+	m_dl->ChannelsSetCurrent(1);
+}
+
+void Bar::group()
+{
+	if (m_inGroup) endGroup();
+	m_inGroup      = true;
+	m_groupIsRight = false;
+	m_groupX       = m_left;
+	m_groupW       = kWellPad;      // opening padding; cells add themselves
+	m_first        = true;
+}
+
+void Bar::rightGroup(float width)
+{
+	if (m_inGroup) endGroup();
+	m_inGroup      = true;
+	m_groupIsRight = true;
+	m_groupX       = m_right - width;
+	m_groupW       = width;
+	m_first        = true;
+	m_right        = m_groupX - kGroupGap;
+}
+
+void Bar::endGroup()
+{
+	if (!m_inGroup) return;
+	const float w = m_groupIsRight ? m_groupW : m_groupW + kWellPad;
+
+	m_dl->ChannelsSetCurrent(0);
+	EditorToolbar::well(m_m, m_groupX, w);
+	m_dl->ChannelsSetCurrent(1);
+
+	if (!m_groupIsRight) m_left = m_groupX + w + kGroupGap;
+	m_inGroup = false;
+}
+
+void Bar::gap() { if (!m_inGroup) m_left += kGroupGap; }
+
+bool Bar::item(const char* id, IconFn icon, const char* label, bool on, bool enabled,
+               const char* tooltip)
+{
+	const float w = EditorToolbar::cellWidth(m_m, label);
+	if (!m_first) m_groupW += kSegGap;
+	const float x = m_groupX + m_groupW;
+	m_groupW += w;
+	m_first = false;
+	return EditorToolbar::cell(m_m, x, w, id, icon, label, on, enabled, tooltip);
+}
+
+bool Bar::itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
+                     bool enabled, const char* tooltip)
+{
+	const float w = EditorToolbar::cellWidth(m_m, label);
+	if (!m_first) m_groupW += kSegGap;
+	const float x = m_groupX + m_groupW;
+	m_groupW += w;
+	m_first = false;
+	return EditorToolbar::cellTinted(m_m, x, w, id, icon, label, fg, enabled, tooltip);
+}
+
+void Bar::readout(IconFn icon, const char* label, ImU32 fg)
+{
+	const float w = EditorToolbar::cellWidth(m_m, label);
+	if (!m_first) m_groupW += kSegGap;
+	const float x = m_groupX + m_groupW;
+	m_groupW += w;
+	m_first = false;
+
+	const float labelW   = label ? ImGui::CalcTextSize(label).x : 0.0f;
+	const float iconW    = icon ? m_m.icon : 0.0f;
+	const float gapX     = (icon && label) ? kLabelGap : 0.0f;
+	const float left     = x + (w - (iconW + gapX + labelW)) * 0.5f;
+	if (icon) icon(m_dl, ImVec2(std::floor(left + m_m.icon * 0.5f), std::floor(m_m.cy)),
+	               m_m.icon, fg);
+	if (label)
+		m_dl->AddText(ImVec2(std::floor(left + iconW + gapX),
+		                     std::floor(m_m.cy - ImGui::GetFontSize() * 0.5f)), fg, label);
+}
+
+void Bar::divider()
+{
+	if (m_first) return;
+	const float x = m_groupX + m_groupW + kSegGap + 1.0f;
+	m_dl->AddLine(ImVec2(x, m_m.y + kWellPad * 2.0f),
+	              ImVec2(x, m_m.y + m_m.wellH - kWellPad * 2.0f), kBarLine, 1.0f);
+	m_groupW += kSegGap * 2.0f + 2.0f;
+}
+
+void Bar::label(const char* text, ImU32 col)
+{
+	if (m_inGroup) endGroup();
+	const float w = ImGui::CalcTextSize(text).x;
+	m_dl->AddText(ImVec2(std::floor(m_left),
+	                     std::floor(m_m.cy - ImGui::GetFontSize() * 0.5f)), col, text);
+	m_left += w + kGroupGap;
+}
+
+float Bar::iconGroupWidth(int n) const
+{
+	if (n <= 0) return 0.0f;
+	return kWellPad * 2.0f + n * m_m.cell + (n - 1) * kSegGap;
+}
+
+float Bar::labelGroupWidth(std::initializer_list<const char*> labels) const
+{
+	float w = kWellPad * 2.0f;
+	int   n = 0;
+	for (const char* l : labels) { w += EditorToolbar::cellWidth(m_m, l); ++n; }
+	if (n > 1) w += (n - 1) * kSegGap;
+	return w;
+}
+
+float Bar::remaining() const
+{
+	return m_right - (m_inGroup ? m_groupX + m_groupW + kWellPad : m_left);
+}
+
+// ─── Asset-editor header ─────────────────────────────────────────────────────
+
+void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty)
+{
+	bar.group();
+	bar.readout(kindIcon, name && *name ? name : "(unnamed)");
+	// The dot is the whole message: a word would be read once and then stop
+	// being noticed, a mark in the one colour the editor uses for "needs
+	// attention" keeps working from the corner of the eye.
+	if (dirty) bar.readout(nullptr, "\xe2\x97\x8f", kWarn);
+	bar.endGroup();
+}
+
+bool saveButton(Bar& bar, bool enabled)
+{
+	bar.rightGroup(bar.iconGroupWidth(1));
+	const bool pressed = bar.item("##save", iconSave, nullptr, false, enabled,
+	                              enabled ? "Save (Cmd/Ctrl+S)" : "Nothing to save");
+	bar.endGroup();
+	return pressed;
+}
+
+// ─── More icons ──────────────────────────────────────────────────────────────
+
+// Floppy: outer body, shutter at the top, label at the bottom.
+void iconSave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.46f, t = stroke(s);
+	dl->AddRect({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 2.0f, 0, t);
+	dl->AddRectFilled({ c.x - h * 0.52f, c.y - h }, { c.x + h * 0.42f, c.y - h * 0.24f }, col, 1.0f);
+	dl->AddRect({ c.x - h * 0.60f, c.y + h * 0.14f }, { c.x + h * 0.60f, c.y + h }, col, 1.0f, 0, t);
+}
+
+void iconPlay(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f;
+	dl->AddTriangleFilled({ c.x - h * 0.72f, c.y - h },
+	                      { c.x - h * 0.72f, c.y + h },
+	                      { c.x + h * 0.86f, c.y }, col);
+}
+
+void iconPause(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, w = s * 0.14f, gap = s * 0.12f;
+	dl->AddRectFilled({ c.x - gap - w * 2.0f, c.y - h }, { c.x - gap, c.y + h }, col, 1.0f);
+	dl->AddRectFilled({ c.x + gap, c.y - h }, { c.x + gap + w * 2.0f, c.y + h }, col, 1.0f);
+}
+
+void iconStop(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.42f;
+	dl->AddRectFilled({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 1.5f);
+}
+
+void iconGrid(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.45f, t = stroke(s), third = (h * 2.0f) / 3.0f;
+	dl->AddRect({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 1.5f, 0, t);
+	for (int i = 1; i < 3; ++i)
+	{
+		const float o = -h + third * i;
+		dl->AddLine({ c.x + o, c.y - h }, { c.x + o, c.y + h }, col, t * 0.8f);
+		dl->AddLine({ c.x - h, c.y + o }, { c.x + h, c.y + o }, col, t * 0.8f);
+	}
+}
+
+// Angle brackets — source text.
+void iconCode(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.42f, t = stroke(s);
+	dl->PathLineTo({ c.x - h * 0.30f, c.y - h });
+	dl->PathLineTo({ c.x - h,         c.y });
+	dl->PathLineTo({ c.x - h * 0.30f, c.y + h });
+	dl->PathStroke(col, 0, t);
+	dl->PathLineTo({ c.x + h * 0.30f, c.y - h });
+	dl->PathLineTo({ c.x + h,         c.y });
+	dl->PathLineTo({ c.x + h * 0.30f, c.y + h });
+	dl->PathStroke(col, 0, t);
+}
+
+void iconEye(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.46f, t = stroke(s);
+	// Two arcs meeting at the corners — a lens, not a circle.
+	dl->PathLineTo({ c.x - h, c.y });
+	dl->PathBezierCubicCurveTo({ c.x - h * 0.45f, c.y - h * 0.72f },
+	                           { c.x + h * 0.45f, c.y - h * 0.72f },
+	                           { c.x + h,         c.y }, 16);
+	dl->PathBezierCubicCurveTo({ c.x + h * 0.45f, c.y + h * 0.72f },
+	                           { c.x - h * 0.45f, c.y + h * 0.72f },
+	                           { c.x - h,         c.y }, 16);
+	dl->PathStroke(col, 0, t);
+	dl->AddCircleFilled(c, h * 0.28f, col, 12);
+}
+
+// Three stacked plates.
+void iconLayers(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float w = s * 0.46f, t = stroke(s);
+	for (int i = 0; i < 3; ++i)
+	{
+		const float y = c.y - s * 0.26f + i * s * 0.26f;
+		if (i == 0)
+			dl->AddQuadFilled({ c.x, y - s * 0.16f }, { c.x + w, y },
+			                  { c.x, y + s * 0.16f }, { c.x - w, y }, col);
+		else
+			dl->AddQuad({ c.x, y - s * 0.16f }, { c.x + w, y },
+			            { c.x, y + s * 0.16f }, { c.x - w, y }, col, t * 0.9f);
+	}
+}
+
+void iconHammer(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.46f, t = stroke(s);
+	dl->AddLine({ c.x + h * 0.42f, c.y - h * 0.30f }, { c.x - h * 0.55f, c.y + h }, col, t * 1.6f);
+	dl->AddQuadFilled({ c.x - h * 0.05f, c.y - h },
+	                  { c.x + h,         c.y - h * 0.42f },
+	                  { c.x + h * 0.72f, c.y - h * 0.06f },
+	                  { c.x - h * 0.32f, c.y - h * 0.62f }, col);
+}
+
+void iconFolder(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.40f, t = stroke(s);
+	dl->PathLineTo({ c.x - h * 1.15f, c.y + h });
+	dl->PathLineTo({ c.x - h * 1.15f, c.y - h });
+	dl->PathLineTo({ c.x - h * 0.30f, c.y - h });
+	dl->PathLineTo({ c.x - h * 0.02f, c.y - h * 0.56f });
+	dl->PathLineTo({ c.x + h * 1.15f, c.y - h * 0.56f });
+	dl->PathLineTo({ c.x + h * 1.15f, c.y + h });
+	dl->PathStroke(col, ImDrawFlags_Closed, t);
+}
+
+void iconSearch(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float r = s * 0.30f, t = stroke(s);
+	const ImVec2 o(c.x - s * 0.08f, c.y - s * 0.08f);
+	dl->AddCircle(o, r, col, 20, t);
+	dl->AddLine({ o.x + r * 0.72f, o.y + r * 0.72f },
+	            { c.x + s * 0.44f, c.y + s * 0.44f }, col, t * 1.3f);
+}
+
+// Four corner brackets — frame the content.
+void iconFit(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s), a = s * 0.24f;
+	const float xs[2] = { c.x - h, c.x + h };
+	const float ys[2] = { c.y - h, c.y + h };
+	for (int i = 0; i < 2; ++i)
+		for (int j = 0; j < 2; ++j)
+		{
+			const float sx = i ? -1.0f : 1.0f, sy = j ? -1.0f : 1.0f;
+			dl->AddLine({ xs[i], ys[j] }, { xs[i] + a * sx, ys[j] }, col, t);
+			dl->AddLine({ xs[i], ys[j] }, { xs[i], ys[j] + a * sy }, col, t);
+		}
+}
+
+void iconTrash(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s), w = s * 0.30f;
+	dl->AddLine({ c.x - w * 1.35f, c.y - h * 0.55f }, { c.x + w * 1.35f, c.y - h * 0.55f }, col, t);
+	dl->AddLine({ c.x - w * 0.45f, c.y - h }, { c.x + w * 0.45f, c.y - h }, col, t);
+	dl->AddRect({ c.x - w, c.y - h * 0.40f }, { c.x + w, c.y + h }, col, 1.5f, 0, t);
+	dl->AddLine({ c.x, c.y - h * 0.10f }, { c.x, c.y + h * 0.66f }, col, t * 0.8f);
+}
+
+// A long bone with two knuckles — skeletal data.
+void iconBone(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.40f, t = stroke(s), r = s * 0.13f;
+	const ImVec2 a(c.x - h * 0.78f, c.y + h * 0.78f);
+	const ImVec2 b(c.x + h * 0.78f, c.y - h * 0.78f);
+	dl->AddLine(a, b, col, t * 1.5f);
+	dl->AddCircle({ a.x - r * 0.5f, a.y + r * 0.5f }, r, col, 12, t);
+	dl->AddCircle({ b.x + r * 0.5f, b.y - r * 0.5f }, r, col, 12, t);
+}
+
+void iconBrush(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s);
+	dl->AddLine({ c.x + h * 0.72f, c.y - h }, { c.x - h * 0.16f, c.y + h * 0.14f }, col, t * 1.7f);
+	dl->AddTriangleFilled({ c.x - h * 0.44f, c.y - h * 0.10f },
+	                      { c.x + h * 0.10f, c.y + h * 0.42f },
+	                      { c.x - h,         c.y + h }, col);
+}
+
+// Horizontal mirror: an arrow each way across a dashed axis.
+void iconFlip(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s);
+	for (int i = 0; i < 3; ++i)
+	{
+		const float y = c.y - h + i * h;
+		dl->AddLine({ c.x, y }, { c.x, y + h * 0.55f }, col, t * 0.8f);
+	}
+	dl->AddLine({ c.x - h, c.y }, { c.x - h * 0.30f, c.y }, col, t);
+	dl->AddLine({ c.x + h * 0.30f, c.y }, { c.x + h, c.y }, col, t);
+	const float k = s * 0.16f;
+	dl->AddTriangleFilled({ c.x - h, c.y }, { c.x - h + k, c.y - k }, { c.x - h + k, c.y + k }, col);
+	dl->AddTriangleFilled({ c.x + h, c.y }, { c.x + h - k, c.y - k }, { c.x + h - k, c.y + k }, col);
+}
+
+// A four-pointed star with a small companion — particles.
+void iconSparkle(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	auto star = [&](ImVec2 o, float r)
+	{
+		dl->AddQuadFilled({ o.x, o.y - r }, { o.x + r * 0.30f, o.y },
+		                  { o.x, o.y + r }, { o.x - r * 0.30f, o.y }, col);
+		dl->AddQuadFilled({ o.x - r, o.y }, { o.x, o.y - r * 0.30f },
+		                  { o.x + r, o.y }, { o.x, o.y + r * 0.30f }, col);
+	};
+	star({ c.x - s * 0.10f, c.y - s * 0.06f }, s * 0.34f);
+	star({ c.x + s * 0.30f, c.y + s * 0.28f }, s * 0.17f);
+}
+
+// A frame with a title bar — a widget/panel.
+void iconWidget(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s);
+	dl->AddRect({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 2.0f, 0, t);
+	dl->AddRectFilled({ c.x - h, c.y - h }, { c.x + h, c.y - h * 0.42f }, col, 2.0f,
+	                  ImDrawFlags_RoundCornersTop);
+	dl->AddRect({ c.x - h * 0.55f, c.y - h * 0.10f }, { c.x + h * 0.30f, c.y + h * 0.62f },
+	            col, 1.0f, 0, t * 0.8f);
+}
+
 } // namespace EditorToolbar
 
 #endif // HE_IMGUI_ENABLED

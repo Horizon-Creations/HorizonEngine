@@ -1,4 +1,5 @@
 #include "CppClassEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorApplication.h"                 // AppContext
 #include "EditorPanelState.h"                  // shared per-tab state map
 #include "TextEditor.h"                        // ImGuiColorTextEdit (vendored, MIT)
@@ -182,45 +183,36 @@ namespace CppClassEditorPanel
 		const bool saveKey = (io.KeyCtrl || io.KeySuper) && ImGui::IsKeyPressed(ImGuiKey_S, false);
 		bool doSave = false;
 
-		// ── Header bar: class name + Header/Source toggle + dirty + Save ──────
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
-		if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted(st.className.empty() ? "class" : st.className.c_str());
-		ImGui::SameLine();
-
-		// Toggle: a half that doesn't exist on disk is shown disabled.
-		auto tabButton = [&](const char* label, int which, bool exists)
-		{
-			const bool selected = (st.active == which);
-			ImGui::BeginDisabled(!exists);
-			ImGui::PushStyleColor(ImGuiCol_Button, selected
-				? ImVec4(0.26f, 0.46f, 0.78f, 1.0f) : ImVec4(0.22f, 0.22f, 0.24f, 1.0f));
-			if (ImGui::SmallButton(label)) st.active = which;
-			ImGui::PopStyleColor();
-			ImGui::EndDisabled();
-		};
-		tabButton(".h##cppHdr",  0, !st.header.path.empty());
-		ImGui::SameLine(0, 4);
-		tabButton(".cpp##cppSrc", 1, !st.source.path.empty());
-
 		FileBuf& cur = (st.active == 1) ? st.source : st.header;
 		const bool curExists = !cur.path.empty();
 
-		if (bufDirty(cur))
+		// ── Toolbar ───────────────────────────────────────────────────────────
+		// The .h/.cpp pair is one choice, so it is one well of two cells rather
+		// than two buttons tinted by hand. A half that is not on disk is disabled,
+		// which the shared cell already draws as such.
 		{
-			ImGui::SameLine();
-			ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.30f, 1.0f), "* unsaved");
+			namespace T = EditorToolbar;
+			if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
+			T::Bar bar;
+			T::assetHeader(bar, st.className.empty() ? "class" : st.className.c_str(),
+			               T::iconCode, bufDirty(cur));
+
+			bar.group();
+			if (bar.item("##cppHdr", nullptr, ".h", st.active == 0,
+			             !st.header.path.empty(), "The class declaration"))
+			{
+				st.active = 0;
+			}
+			if (bar.item("##cppSrc", nullptr, ".cpp", st.active == 1,
+			             !st.source.path.empty(), "The class implementation"))
+			{
+				st.active = 1;
+			}
+			bar.endGroup();
+
+			if (T::saveButton(bar, curExists)) doSave = true;
+			if (ctx.fontBody) ImGui::PopFont();
 		}
-		const float saveW = 72.0f;
-		ImGui::SameLine();
-		ImGui::SetCursorPosX(ImGui::GetWindowWidth() - saveW - 8.0f);
-		ImGui::BeginDisabled(!curExists);
-		if (ImGui::Button("Save", ImVec2(saveW, 0.0f))) doSave = true;
-		ImGui::EndDisabled();
-		if (ctx.fontBody) ImGui::PopFont();
-		ImGui::PopStyleVar();
-		ImGui::Separator();
 
 		if ((doSave || saveKey) && curExists) saveBuf(cur);
 

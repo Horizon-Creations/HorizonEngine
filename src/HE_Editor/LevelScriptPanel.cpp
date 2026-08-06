@@ -1,4 +1,5 @@
 #include "LevelScriptPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include <cstdint>
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
@@ -668,26 +669,49 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	ImGui::BeginChild("##ls_canvas_host", ImVec2(0.0f, 0.0f), true);
 	// A stale compile result from another tab must not anchor to this graph.
 	if (g.compileHas && g.compileFor != title) g.compileHas = false;
-	// Header: which sub-graph is shown + the compile check.
-	ImGui::AlignTextToFramePadding();
-	if (g.currentGraph == 0) ImGui::TextDisabled("Event Graph");
-	else { const HC::Node* e = graph.findNode(g.currentGraph);
-		ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 64.0f);
-	if (ImGui::SmallButton("Compile"))
-		runCompileCheck(graph, title);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Translate this class to C++ the way a packaged export would.\n"
-		                  "Errors highlight the offending node; a clean result means the\n"
-		                  "class ships compiled (everything else runs interpreted).");
+	// Which sub-graph is shown, and the compile check — the canvas gets its own
+	// strip, in the same language as the tab's own bar above it.
+	{
+		namespace T = EditorToolbar;
+		std::string where = "Event Graph";
+		if (g.currentGraph != 0)
+		{
+			const HC::Node* e = graph.findNode(g.currentGraph);
+			where = std::string("Function: ") +
+			        (e && !e->s.empty() ? e->s.c_str() : "(unnamed)");
+		}
+
+		T::Bar bar;
+		bar.group();
+		bar.readout(g.currentGraph == 0 ? T::iconList : T::iconCode, where.c_str());
+		bar.endGroup();
+
+		// The compile result belongs on the strip too: it is a state of this
+		// graph, and as a line underneath it pushed the canvas down and up again
+		// every time someone pressed the button.
+		if (g.compileHas)
+		{
+			bar.group();
+			bar.readout(g.compileOk ? T::iconCheck : T::iconWarning,
+			            g.compileMsg.c_str(), g.compileOk ? T::kGood : T::kBad);
+			bar.endGroup();
+		}
+
+		bar.rightGroup(bar.labelGroupWidth({ "Compile" }));
+		if (bar.item("##hccompile", T::iconHammer, "Compile", false, true,
+		             "Translate this class to C++ the way a packaged export would.\n"
+		             "Errors highlight the offending node; a clean result means the\n"
+		             "class ships compiled (everything else runs interpreted)."))
+		{
+			runCompileCheck(graph, title);
+		}
+		bar.endGroup();
+	}
 	if (g.compileHas)
 	{
-		if (g.compileOk)
-			ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.35f, 1.0f), "Compile: %s", g.compileMsg.c_str());
-		else
+		if (!g.compileOk)
 		{
-			ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
-			                   "Compile error: %s — runs interpreted", g.compileMsg.c_str());
+			ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Runs interpreted.");
 			if (g.compileNode != 0)
 			{
 				ImGui::SameLine();
@@ -916,13 +940,15 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	                      : "HorizonCode Class";
 
 	beginTabWindow(("##hcclass_" + assetPath).c_str(), pos, size);
-	ImGui::AlignTextToFramePadding();
-	ImGui::Text("%s", st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("%s%s", kindLabel, st.dirty ? "  (unsaved)" : "");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f))) saveClassState(st, ctx);
-	ImGui::Separator();
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, st.name.c_str(), T::iconCode, st.dirty);
+		bar.group();
+		bar.readout(nullptr, kindLabel, T::kFgDim);
+		bar.endGroup();
+		if (T::saveButton(bar, true)) saveClassState(st, ctx);
+	}
 
 	// Classes expose the lifecycle events (Construct on create, Destruct on
 	// destroy) as a catalog, and can also name their own custom dispatcher events.

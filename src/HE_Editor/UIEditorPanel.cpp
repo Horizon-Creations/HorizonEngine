@@ -1,4 +1,7 @@
 #include "UIEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
+
+#include <cstdio>
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
@@ -1905,29 +1908,38 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings |
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-	// ── Header ────────────────────────────────────────────────────────────────
-	ImGui::AlignTextToFramePadding();
-	ImGui::Text("%s", st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("UI Widget%s", st.dirty ? "  (unsaved)" : "");
-
-	// Designer | Graph mode toggle (UMG-style).
-	ImGui::SameLine(0.0f, 24.0f);
-	if (ImGui::RadioButton("Designer", st.viewMode == 0)) st.viewMode = 0;
-	ImGui::SameLine();
-	if (ImGui::RadioButton("Graph", st.viewMode == 1)) st.viewMode = 1;
-
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 150.0f);
-	if (ImGui::Button("Reset View"))
+	// ── Toolbar ───────────────────────────────────────────────────────────────
 	{
-		if (st.viewMode == 0) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
-		else                  { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, st.name.c_str(), T::iconWidget, st.dirty);
+
+		// Designer | Graph, the UMG split. Two radio buttons became a segmented
+		// pair in one well: they are one choice, and the well is what says so.
+		bar.group();
+		if (bar.item("##uidesigner", T::iconWidget, "Designer", st.viewMode == 0, true,
+		             "Lay the widget out"))
+		{
+			st.viewMode = 0;
+		}
+		if (bar.item("##uigraph", T::iconCode, "Graph", st.viewMode == 1, true,
+		             "The widget\'s HorizonCode logic"))
+		{
+			st.viewMode = 1;
+		}
+		bar.endGroup();
+
+		bar.group();
+		if (bar.item("##uifit", T::iconFit, nullptr, false, true,
+		             "Reset the view (zoom and pan)"))
+		{
+			if (st.viewMode == 0) { st.zoom = 1.0f; st.pan = ImVec2(0, 0); }
+			else                  { st.geState.zoom = 1.0f; st.geState.pan = ImVec2(60, 60); }
+		}
+		bar.endGroup();
+
+		if (T::saveButton(bar, st.dirty)) saveState(st, ctx);
 	}
-	ImGui::SameLine();
-	ImGui::BeginDisabled(!st.dirty);
-	if (ImGui::Button("Save")) saveState(st, ctx);
-	ImGui::EndDisabled();
-	ImGui::Separator();
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
 	// WantTextInput as well as IsAnyItemActive: an InputText that has keyboard
@@ -2068,13 +2080,34 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImVec2(ImGui::GetContentRegionAvail().x - rightW - ImGui::GetStyle().ItemSpacing.x, 0),
 			ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-		// Header: which sub-graph is shown + the compile check.
-		ImGui::AlignTextToFramePadding();
-		if (st.currentGraph == 0) ImGui::TextDisabled("Event Graph");
-		else { const HC::Node* e = st.graph.findNode(st.currentGraph);
-			ImGui::TextDisabled("Function: %s", e && !e->s.empty() ? e->s.c_str() : "(unnamed)"); }
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 64.0f);
-		if (ImGui::SmallButton("Compile"))
+		// Which sub-graph is shown, the compile result, and the check itself —
+		// the canvas gets its own strip, same as the HorizonCode class tab.
+		namespace T = EditorToolbar;
+		std::string uiWhere = "Event Graph";
+		if (st.currentGraph != 0)
+		{
+			const HC::Node* e = st.graph.findNode(st.currentGraph);
+			uiWhere = std::string("Function: ") +
+			          (e && !e->s.empty() ? e->s.c_str() : "(unnamed)");
+		}
+		T::Bar uiBar;
+		uiBar.group();
+		uiBar.readout(st.currentGraph == 0 ? T::iconList : T::iconCode, uiWhere.c_str());
+		uiBar.endGroup();
+		if (st.compileHas)
+		{
+			uiBar.group();
+			uiBar.readout(st.compileOk ? T::iconCheck : T::iconWarning,
+			              st.compileMsg.c_str(), st.compileOk ? T::kGood : T::kBad);
+			uiBar.endGroup();
+		}
+		uiBar.rightGroup(uiBar.labelGroupWidth({ "Compile" }));
+		const bool uiCompile = uiBar.item("##uicompile", T::iconHammer, "Compile", false, true,
+			"Translate this widget\'s script to C++ the way a packaged export\n"
+			"would. Errors highlight the offending node; a clean result means\n"
+			"the script ships compiled (otherwise it runs interpreted).");
+		uiBar.endGroup();
+		if (uiCompile)
 		{
 			// The single-class check a packaged export would run (JSON round
 			// trip, then generate); key = the content-relative asset path.
@@ -2110,22 +2143,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 						("HorizonCode compile check: " + w).c_str());
 			}
 		}
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Translate this widget's script to C++ the way a packaged export\n"
-			                  "would. Errors highlight the offending node; a clean result means\n"
-			                  "the script ships compiled (otherwise it runs interpreted).");
-		if (st.compileHas)
+		// The result itself is on the strip above; what stays here is the one
+		// thing a strip cannot carry — the jump to the node that failed.
+		if (st.compileHas && !st.compileOk)
 		{
-			if (st.compileOk)
-				ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.35f, 1.0f), "Compile: %s", st.compileMsg.c_str());
-			else
 			{
-				ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
-				                   "Compile error: %s — runs interpreted", st.compileMsg.c_str());
 				if (st.compileNode != 0)
 				{
-					ImGui::SameLine();
-					if (ImGui::SmallButton("Show node"))
+					if (ImGui::SmallButton("Show the node that failed"))
 						if (const HC::Node* n = st.graph.findNode(st.compileNode))
 						{
 							st.currentGraph      = n->subgraph;

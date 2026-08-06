@@ -1,4 +1,5 @@
 #include "AnimatorStateMachineEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
@@ -156,16 +157,27 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	AnimatorStateMachineAsset* asset = ctx.contentManager
 		? ctx.contentManager->getAnimatorStateMachineMutable(st.assetId) : nullptr;
 
-	// ── Header ───────────────────────────────────────────────────────────────
-	ImGui::TextUnformatted(st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("state machine%s — %zu state(s), %zu transition(s)",
-		st.dirty ? "  (unsaved)" : "", st.graph.states.size(), st.graph.transitions.size());
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100.0f);
-	if (ImGui::Button("Save##asmsave") && asset) saveToDisk(st, ctx);
-	if (!asset)
-		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
-	ImGui::Separator();
+	// ── Toolbar ──────────────────────────────────────────────────────────────
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, st.name.c_str(), T::iconBone, st.dirty);
+
+		// The two counts that say whether the machine is worth looking at, as a
+		// readout rather than a sentence — nothing here is clickable and it
+		// should not pretend to be.
+		char counts[64];
+		std::snprintf(counts, sizeof(counts), "%zu state%s, %zu transition%s",
+		              st.graph.states.size(), st.graph.states.size() == 1 ? "" : "s",
+		              st.graph.transitions.size(),
+		              st.graph.transitions.size() == 1 ? "" : "s");
+		bar.group();
+		bar.readout(T::iconLayers, counts, T::kFgDim);
+		bar.endGroup();
+
+		if (!asset) bar.label("Asset could not be loaded", T::kBad);
+		if (T::saveButton(bar, asset != nullptr)) saveToDisk(st, ctx);
+	}
 
 	bool structuralEdit = false;
 

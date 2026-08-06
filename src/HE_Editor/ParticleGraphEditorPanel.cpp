@@ -1,4 +1,7 @@
 #include "ParticleGraphEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
+
+#include <cstdio>
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
@@ -188,15 +191,26 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ParticleGraphAsset* asset = ctx.contentManager
 		? ctx.contentManager->getParticleGraphMutable(st.assetId) : nullptr;
 
-	// ── Header ───────────────────────────────────────────────────────────────
-	ImGui::TextUnformatted(st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("particle system%s", st.dirty ? "  (unsaved)" : "");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100.0f);
-	if (ImGui::Button("Save##ptsave") && asset) saveToDisk(st, ctx);
-	if (!asset)
-		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
-	ImGui::Separator();
+	// ── Toolbar ──────────────────────────────────────────────────────────────
+	// Same strip as the Scene viewport and Source Control: name and unsaved mark
+	// on the left, the preview transport in its own well, Save on the right.
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, st.name.c_str(), T::iconSparkle, st.dirty);
+
+		bar.group();
+		if (bar.item("##ptplay", st.previewPlaying ? T::iconPause : T::iconPlay, nullptr,
+		             st.previewPlaying, true,
+		             st.previewPlaying ? "Pause the preview" : "Play the preview"))
+		{
+			st.previewPlaying = !st.previewPlaying;
+		}
+		bar.endGroup();
+
+		if (!asset) bar.label("Asset could not be loaded", T::kBad);
+		if (T::saveButton(bar, asset != nullptr)) saveToDisk(st, ctx);
+	}
 
 	bool structuralEdit = false;
 
@@ -204,9 +218,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	const float leftW = 280.0f;
 	ImGui::BeginChild("##ptLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
+		// The transport lives in the toolbar now — one place for "is this
+		// running", the same place the Scene bar keeps it.
 		ImGui::TextDisabled("Preview");
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-		if (ImGui::Button(st.previewPlaying ? "Pause" : "Play")) st.previewPlaying = !st.previewPlaying;
 
 		// Re-evaluate only on an actual graph change (see State's comment).
 		const std::string curJson = HE::particleGraphToJson(st.graph);

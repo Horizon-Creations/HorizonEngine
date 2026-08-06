@@ -1,4 +1,5 @@
 #include "ContentBrowserPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include <algorithm>
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
@@ -338,19 +339,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		const HE::Folder* displayFolder = s_gridFolder ? s_gridFolder : &cbRootFolder(s_selectedRootKind);
 		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
 
-		// ── Breadcrumb ────────────────────────────────────────────────────
-		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-		ImGui::Text("Assets");
-		if (ctx.fontSubheading) ImGui::PopFont();
-
-		// Simple breadcrumb: root > ... > current folder name
+		// ── Toolbar: where you are ────────────────────────────────────────
+		// A breadcrumb, not a row of tools — so it keeps its own semantics and
+		// only borrows the editor's toolbar surface: the same band, the same
+		// well, the same cells the Scene and Source Control bars use, so the
+		// browser stops being the one panel with its own idea of a header.
 		{
-			ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f,0.3f,0.3f,0.5f));
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.4f,0.4f,0.4f,0.7f));
-			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 1));
+			namespace T = EditorToolbar;
 
-			// Build ancestor chain via DFS
+			// Ancestor chain to the folder on screen, by DFS from the active root.
 			std::vector<const HE::Folder*> crumbs;
 			if (s_gridFolder)
 			{
@@ -368,45 +365,34 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				findPath(&cbRootFolder(s_selectedRootKind));
 			}
 
-			const char* rootBtnLabel = s_selectedRootKind == 1 ? "Engine##bc_root"
-			                         : s_selectedRootKind == 2 ? "Source##bc_root"
-			                         : "Content##bc_root";
-			if (ImGui::SmallButton(rootBtnLabel))
+			const char* rootLabel = s_selectedRootKind == 1 ? "Engine"
+			                      : s_selectedRootKind == 2 ? "Source"
+			                                                : "Content";
+
+			T::Bar bar;
+			bar.group();
+			if (bar.item("##bc_root", T::iconFolder, rootLabel, crumbs.empty(), true,
+			             "Back to the top of this root"))
 			{
 				s_gridFolder         = nullptr;
 				s_selectedTreeFolder = nullptr;
 			}
-
 			for (int ci = 0; ci < static_cast<int>(crumbs.size()); ++ci)
 			{
-				ImGui::SameLine(0, 2);
-				ImGui::TextDisabled(">");
-				ImGui::SameLine(0, 2);
-				const HE::Folder* crumb = crumbs[ci];
-				bool isLast = (ci == static_cast<int>(crumbs.size()) - 1);
-				if (isLast)
+				const HE::Folder*  crumb  = crumbs[ci];
+				const bool         isLast = (ci == static_cast<int>(crumbs.size()) - 1);
+				const std::string  id     = "##bc_" + std::to_string(ci);
+				// The folder you are IN is armed rather than disabled: it is where
+				// you are, not something that failed to be available.
+				if (bar.item(id.c_str(), nullptr, crumb->name.c_str(), isLast, !isLast,
+				             isLast ? nullptr : "Go up to this folder"))
 				{
-					// Current folder – shown as a dimmed button (no navigation)
-					ImGui::BeginDisabled();
-					ImGui::SmallButton(crumb->name.c_str());
-					ImGui::EndDisabled();
-				}
-				else
-				{
-					std::string btnId = crumb->name + "##bc_" + std::to_string(ci);
-					if (ImGui::SmallButton(btnId.c_str()))
-					{
-						s_gridFolder         = crumb;
-						s_selectedTreeFolder = crumb;
-					}
+					s_gridFolder         = crumb;
+					s_selectedTreeFolder = crumb;
 				}
 			}
-
-			ImGui::PopStyleVar();
-			ImGui::PopStyleColor(3);
+			bar.endGroup();
 		}
-
-		ImGui::Separator();
 
 		// ── Grid ──────────────────────────────────────────────────────────
 		constexpr float k_cellSize    = 72.0f;

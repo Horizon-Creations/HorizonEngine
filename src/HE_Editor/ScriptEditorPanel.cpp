@@ -1,4 +1,5 @@
 #include "ScriptEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"              // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"                  // shared per-tab state map
@@ -129,30 +130,21 @@ namespace ScriptEditorPanel
 		const bool saveKey = (io.KeyCtrl || io.KeySuper) && ImGui::IsKeyPressed(ImGuiKey_S, false);
 		bool doSave = false;
 
-		// ── Header: filename + language badge + dirty marker + Save button ────
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
-		if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted(st.name.empty() ? "script" : st.name.c_str());
-		ImGui::SameLine();
-		ImGui::PushStyleColor(ImGuiCol_Button,
-			st.python ? ImVec4(0.24f, 0.42f, 0.72f, 1.0f) : ImVec4(0.26f, 0.52f, 0.34f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_Button));
-		ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImGui::GetStyleColorVec4(ImGuiCol_Button));
-		ImGui::SmallButton(st.python ? "Python" : "Lua");
-		ImGui::PopStyleColor(3);
-		if (dirty)
+		// ── Toolbar ───────────────────────────────────────────────────────────
+		// The language badge was a SmallButton tinted to look like a label, which
+		// invites a click that does nothing. It is a readout now, and says so.
 		{
-			ImGui::SameLine();
-			ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.30f, 1.0f), "* unsaved");
+			namespace T = EditorToolbar;
+			if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
+			T::Bar bar;
+			T::assetHeader(bar, st.name.empty() ? "script" : st.name.c_str(),
+			               T::iconCode, dirty);
+			bar.group();
+			bar.readout(nullptr, st.python ? "Python" : "Lua", T::kFgDim);
+			bar.endGroup();
+			if (T::saveButton(bar, true)) doSave = true;
+			if (ctx.fontBody) ImGui::PopFont();
 		}
-		const float saveW = 72.0f;
-		ImGui::SameLine();
-		ImGui::SetCursorPosX(ImGui::GetWindowWidth() - saveW - 8.0f);
-		if (ImGui::Button("Save", ImVec2(saveW, 0.0f))) doSave = true;
-		if (ctx.fontBody) ImGui::PopFont();
-		ImGui::PopStyleVar();
-		ImGui::Separator();
 
 		if (doSave || saveKey) saveToDisk(st, path);
 

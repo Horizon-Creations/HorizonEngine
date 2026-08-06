@@ -1,4 +1,5 @@
 #include "MaterialEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "AssetThumbnailCache.h"                // Content-Browser tile, re-rendered on save
@@ -1536,79 +1537,111 @@ void render(AppContext& ctx, const std::string& assetPath,
 		? ctx.contentManager->getMaterialFunctionMutable(st.materialId) : nullptr;
 	const bool assetOk = mat || fnAsset;
 
-	// ── Header: name, view toggle, save ────────────────────────────────────────
-	ImGui::TextUnformatted(st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("%s%s",
-	                    st.isInstance ? "material instance"
-	                                  : (st.isFunction ? "material function" : "material graph"),
-	                    st.dirty ? "  (unsaved)" : "");
-	// Shader complexity gauge (updated on every regenerate).
-	if (!st.isFunction && !st.complexity.empty())
-	{
-		ImGui::SameLine();
-		ImGui::TextDisabled("·  %s", st.complexity.c_str());
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Estimated cost of the generated shader\n"
-			                  "(statements + weighted texture/noise calls)");
-	}
-	// Blend mode — a MATERIAL-level setting (changes the Output node's pins + which
-	// render pass the material uses), so it lives in the header, not on the canvas.
+	// ── Toolbar ───────────────────────────────────────────────────────────────
+	// Was a text run followed by five controls placed with hand-tuned offsets
+	// (610 / 480 / 330 / 250 / 140 px from the right edge) that only lined up at
+	// one panel width and overlapped each other at any smaller one. Now the same
+	// strip the Scene viewport and Source Control use, laid out by measurement.
 	bool headerEdit = false;
-	if (!st.isFunction && !st.isInstance)
 	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+
+		const char* kind = st.isInstance ? "material instance"
+		                 : st.isFunction ? "material function"
+		                                 : "material graph";
+		T::assetHeader(bar, st.name.c_str(), T::iconLayers, st.dirty);
+
+		bar.group();
+		bar.readout(nullptr, kind, T::kFgDim);
+		// Shader complexity gauge (updated on every regenerate).
+		if (!st.isFunction && !st.complexity.empty())
+			bar.readout(nullptr, st.complexity.c_str(), T::kFgDim);
+		bar.endGroup();
+
+		// Blend mode — a MATERIAL-level setting (it changes the Output node's pins
+		// and which render pass the material uses), so it belongs to the bar and
+		// not to the canvas. A cell with a popup rather than an inline combo: the
+		// cutoff only exists for Masked, and a control that appears and disappears
+		// mid-row is what made the old offsets impossible to get right.
 		MatGraphNode* outN = nullptr;
-		for (auto& n : st.graph.nodes)
-			if (n.type == MatNodeType::Output) { outN = &n; break; }
+		if (!st.isFunction && !st.isInstance)
+		{
+			for (auto& n : st.graph.nodes)
+				if (n.type == MatNodeType::Output) { outN = &n; break; }
+		}
 		if (outN)
 		{
-			const int  bmCur  = std::clamp(static_cast<int>(outN->p[1]), 0, 2);
-			const bool masked = bmCur == 1;
-			ImGui::SameLine(ImGui::GetContentRegionAvail().x - (masked ? 610.0f : 480.0f));
-			ImGui::TextDisabled("Blend");
-			ImGui::SameLine();
 			static const char* kBlend[] = { "Opaque", "Masked", "Translucent" };
-			int bm = bmCur;
-			ImGui::SetNextItemWidth(110.0f);
-			if (ImGui::Combo("##blend", &bm, kBlend, 3))
+			const int bmCur = std::clamp(static_cast<int>(outN->p[1]), 0, 2);
+
+			bar.group();
+			if (bar.item("##blend", T::iconEye, kBlend[bmCur], false, true,
+			             "Opaque: solid (no Opacity pin)\n"
+			             "Masked: OpacityMask pin — fragments below Clip discard\n"
+			             "Translucent: Opacity pin — sorted alpha-blend pass"))
 			{
-				outN->p[1] = (float)bm;
-				if (bm == 1 && outN->p[2] <= 0.0f) outN->p[2] = 0.5f; // sane default cutoff
-				headerEdit = true;
+				ImGui::OpenPopup("##blendPopup");
 			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Opaque: solid (no Opacity pin)\n"
-				                  "Masked: OpacityMask pin — fragments below Clip discard\n"
-				                  "Translucent: Opacity pin — sorted alpha-blend pass");
-			if (masked)
+			bar.endGroup();
+
+			if (ImGui::BeginPopup("##blendPopup"))
 			{
-				ImGui::SameLine();
-				ImGui::SetNextItemWidth(110.0f);
-				ImGui::DragFloat("Clip", &outN->p[2], 0.01f, 0.01f, 1.0f);
-				headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
+				for (int i = 0; i < 3; ++i)
+				{
+					if (!ImGui::Selectable(kBlend[i], i == bmCur)) continue;
+					outN->p[1] = static_cast<float>(i);
+					// A sane default cutoff, or Masked would discard everything.
+					if (i == 1 && outN->p[2] <= 0.0f) outN->p[2] = 0.5f;
+					headerEdit = true;
+				}
+				if (bmCur == 1)
+				{
+					ImGui::Separator();
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Clip", &outN->p[2], 0.01f, 0.01f, 1.0f);
+					headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
+				}
+				ImGui::EndPopup();
 			}
 		}
+
+		// Graph|Overrides / Shader-code toggle for the right pane. A function has
+		// no shader of its own, so it has no second view either.
+		if (!st.isFunction)
+		{
+			bar.group();
+			if (bar.item("##vgraph", T::iconLayers, st.isInstance ? "Overrides" : "Graph",
+			             st.viewMode == 0, true,
+			             st.isInstance ? "The values this instance overrides"
+			                           : "The node graph"))
+			{
+				st.viewMode = 0;
+			}
+			if (bar.item("##vcode", T::iconCode, "Shader Code", st.viewMode == 1, true,
+			             "The generated shader source"))
+			{
+				st.viewMode = 1;
+			}
+			bar.endGroup();
+		}
+
+		if (st.isInstance && mat)
+		{
+			bar.group();
+			if (bar.item("##openparent", T::iconFolder, "Parent", false, true,
+			             "Open the material this instance derives from")
+			    && ctx.contentManager)
+			{
+				s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(
+					mat->parentMaterialPath);
+			}
+			bar.endGroup();
+		}
+
+		if (!assetOk) bar.label("Asset could not be loaded", T::kBad);
+		if (T::saveButton(bar, assetOk)) saveToDisk(st, ctx, assetPath);
 	}
-	// Graph|Overrides / Shader-code toggle for the right pane (functions have no shader).
-	if (!st.isFunction)
-	{
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 330.0f);
-		if (ImGui::RadioButton(st.isInstance ? "Overrides" : "Graph", st.viewMode == 0)) st.viewMode = 0;
-		ImGui::SameLine();
-		if (ImGui::RadioButton("Shader Code", st.viewMode == 1)) st.viewMode = 1;
-	}
-	if (st.isInstance && mat)
-	{
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 250.0f);
-		if (ImGui::Button("Open Parent") && ctx.contentManager)
-			s_openAssetRequest = ctx.contentManager->resolveAbsolutePath(mat->parentMaterialPath);
-	}
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 140.0f);
-	if (ImGui::Button(st.isFunction ? "Save Function" : "Save Material") && assetOk)
-		saveToDisk(st, ctx, assetPath);
-	if (!assetOk)
-		ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "Asset could not be loaded.");
-	ImGui::Separator();
 
 	// Edit flags — both columns contribute; applied once at the end.
 	bool structuralEdit = false; // connect/disconnect/add/delete → apply immediately

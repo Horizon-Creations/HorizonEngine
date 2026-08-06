@@ -1,4 +1,7 @@
 #include "SkeletalMeshEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
+
+#include <cstdio>
 #include <cstdint>
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
@@ -89,6 +92,44 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		return;
 	}
 
+	// ── Toolbar ─────────────────────────────────────────────────────────────
+	// The clip transport and the skeleton overlay were tucked in next to the drop
+	// slot in the preview pane, where a slider and two controls fought over one
+	// row. They are tools, so they belong on the strip.
+	{
+		namespace T = EditorToolbar;
+		const AnimationClipAsset* barClip = (st.clipId != HE::UUID{} && ctx.contentManager)
+			? ctx.contentManager->getAnimationClip(st.clipId) : nullptr;
+
+		char joints[48];
+		std::snprintf(joints, sizeof(joints), "%zu joint%s", mesh->skeleton.size(),
+		              mesh->skeleton.size() == 1 ? "" : "s");
+
+		T::Bar bar;
+		bar.group();
+		bar.readout(T::iconBone, st.name.c_str());
+		bar.readout(nullptr, joints, T::kFgDim);
+		bar.endGroup();
+
+		bar.group();
+		if (bar.item("##skelPlay", st.playing ? T::iconPause : T::iconPlay, nullptr,
+		             st.playing, barClip != nullptr,
+		             barClip ? (st.playing ? "Pause the clip" : "Play the clip")
+		                     : "Drop an animation clip below to play one"))
+		{
+			st.playing = !st.playing;
+		}
+		bar.endGroup();
+
+		bar.group();
+		if (bar.item("##skelBones", T::iconBone, nullptr, st.showSkeleton, true,
+		             "Draw the skeleton over the mesh"))
+		{
+			st.showSkeleton = !st.showSkeleton;
+		}
+		bar.endGroup();
+	}
+
 	// ── Left: bone hierarchy ────────────────────────────────────────────────
 	const float leftW = std::max(220.0f, size.x * 0.28f);
 	ImGui::BeginChild("##skelBoneTree", ImVec2(leftW, 0.0f), true);
@@ -127,13 +168,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		? ctx.contentManager->getAnimationClip(st.clipId) : nullptr;
 	if (clip)
 	{
-		ImGui::SameLine();
-		if (ImGui::Button(st.playing ? "Pause##skelPlay" : "Play##skelPlay")) st.playing = !st.playing;
-		ImGui::SetNextItemWidth(160.0f);
-		ImGui::SliderFloat("Time##skelScrub", &st.clipTime, 0.0f, std::max(clip->duration, 0.01f), "%.2fs");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::SliderFloat("##skelScrub", &st.clipTime, 0.0f,
+		                   std::max(clip->duration, 0.01f), "%.2fs");
 	}
-	ImGui::SameLine();
-	ImGui::Checkbox("Show Skeleton##skel", &st.showSkeleton);
 
 	if (st.playing && clip && clip->duration > 0.0f)
 		st.clipTime = std::fmod(st.clipTime + ImGui::GetIO().DeltaTime, clip->duration);

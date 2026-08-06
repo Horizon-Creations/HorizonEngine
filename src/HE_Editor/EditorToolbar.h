@@ -24,6 +24,8 @@ struct AppContext;
 
 #include <imgui.h>
 
+#include <initializer_list>
+
 namespace EditorToolbar
 {
 
@@ -105,6 +107,113 @@ void well(const Metrics& m, float x, float w, ImU32 col = kWellBg);
 void bar(const ImVec2& origin, float width, const Metrics& m,
          ImU32 tint = 0, ImU32 lineCol = kBarLine, float lineThickness = 1.0f);
 
+// ── Bar builder ──────────────────────────────────────────────────────────────
+// The primitives above are enough to build a bar by hand, and the Scene and
+// Source Control bars do exactly that because both need custom fitting rules.
+// Every other panel wants the same three things — a band, a couple of wells, a
+// Save on the right — and hand-rolling the width arithmetic for that eleven more
+// times is eleven more chances to be off by a pixel in a way nobody notices
+// until the font scale changes.
+//
+// So: a single-pass builder. A well has to be painted BEHIND its cells but its
+// width is only known once they are all placed, which normally forces a measure
+// pass; this splits the draw list into two channels instead and back-fills the
+// well when the group closes. The caller writes what the bar contains, in order.
+//
+//   {
+//       EditorToolbar::Bar bar;
+//       bar.group();
+//       if (bar.item("##play", iconPlay, nullptr, playing, true, "Play")) …
+//       bar.item("##loop", iconRefresh, "Loop", looping, true, "Loop the clip");
+//       bar.endGroup();
+//       bar.rightGroup(bar.iconGroupWidth(1));
+//       if (bar.item("##save", iconSave, nullptr, false, dirty, "Save")) …
+//       bar.endGroup();
+//   }   // destructor merges the channels and puts the cursor below the strip
+//
+// Right-hand groups take their width from the caller because a single pass
+// cannot know it in advance; iconGroupWidth()/labelGroupWidth() do the sum.
+class Bar
+{
+public:
+	Bar();
+	~Bar();
+
+	Bar(const Bar&)            = delete;
+	Bar& operator=(const Bar&) = delete;
+
+	// Wash the band and recolour the hairline — for a bar that carries a state
+	// worth seeing peripherally. Call before the first group.
+	void tint(ImU32 wash, ImU32 line, float thickness = 2.0f);
+
+	// Open a well at the current left-hand position, or flush against the right
+	// edge at `width` pixels wide. Groups after a rightGroup keep stacking
+	// leftwards from it.
+	void group();
+	void rightGroup(float width);
+	void endGroup();
+	// Extra space between two left-hand groups, for a bar that wants a wider
+	// break than the usual well-to-well gap.
+	void gap();
+
+	// One cell. Same semantics as cell() above.
+	bool item(const char* id, IconFn icon, const char* label, bool on, bool enabled,
+	          const char* tooltip);
+	// A cell whose foreground colour is forced — for a readout rather than a tool.
+	bool itemTinted(const char* id, IconFn icon, const char* label, ImU32 fg,
+	                bool enabled, const char* tooltip);
+	// A cell that reports rather than acts: icon and label inside the current
+	// well, with no hit box at all. An InvisibleButton that does nothing still
+	// lights up on hover, which promises a click that never happens.
+	void readout(IconFn icon, const char* label, ImU32 fg = kFg);
+	// A hairline between two cells inside one well, for a group that holds two
+	// unrelated things and is not worth splitting.
+	void divider();
+	// Plain text on the band, outside any well.
+	void label(const char* text, ImU32 col = kFgDim);
+
+	// Width of a group of `n` square icon cells, wells included.
+	float iconGroupWidth(int n) const;
+	// Width of a group of labelled cells.
+	float labelGroupWidth(std::initializer_list<const char*> labels) const;
+
+	// Room still free between the left cursor and the right-hand groups. Lets a
+	// bar drop its labels when it runs out — the same shrink idea the Scene bar
+	// applies by hand.
+	float remaining() const;
+
+	const Metrics& metrics() const { return m_m; }
+
+private:
+	void flushGroup();
+
+	Metrics     m_m;
+	ImDrawList* m_dl        = nullptr;
+	ImVec2      m_origin    { 0.0f, 0.0f };
+	float       m_width     = 0.0f;
+	float       m_left      = 0.0f;   // next left-hand x
+	float       m_right     = 0.0f;   // right-hand groups grow leftwards from here
+	float       m_groupX    = 0.0f;
+	float       m_groupW    = 0.0f;   // fixed for a right group, accumulated for a left one
+	bool        m_inGroup   = false;
+	bool        m_groupIsRight = false;
+	bool        m_first     = true;   // no separating gap before the first cell
+};
+
+// ── Asset-editor header ──────────────────────────────────────────────────────
+// Every asset tab — material, HorizonCode, particle, animator, UI widget, mesh,
+// script — opens with the same question ("what am I looking at, and is it
+// saved?") and ends with the same answer ("Save"). Written out per panel that is
+// six copies of one row, each free to drift in wording and spacing.
+
+// The left-hand group: kind icon, asset name, and an "unsaved" mark when there
+// are pending edits.
+void assetHeader(Bar& bar, const char* name, IconFn kindIcon, bool dirty);
+
+// The right-hand Save. True when pressed. `enabled` is the panel's answer to
+// "is there anything to write, and did the asset even load".
+bool saveButton(Bar& bar, bool enabled);
+
 // ── Icons shared by more than one bar ────────────────────────────────────────
 void iconGear(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconRefresh(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
@@ -118,6 +227,24 @@ void iconList(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconTree(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconHistory(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 void iconPlus(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconSave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconPlay(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconPause(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconStop(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconGrid(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconCode(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconEye(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconLayers(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconHammer(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconFolder(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconSearch(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconFit(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconTrash(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconBone(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconBrush(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconFlip(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconSparkle(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
+void iconWidget(ImDrawList* dl, const ImVec2& c, float s, ImU32 col);
 
 } // namespace EditorToolbar
 

@@ -1,4 +1,7 @@
 #include "TerrainTools.h"
+#include "EditorToolbar.h"   // shared toolbar strip
+
+#include <cstdio>
 #include "EditorApplication.h"           // AppContext
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include <HorizonScene/HorizonScene.h>
@@ -580,14 +583,29 @@ void renderPanel(AppContext& ctx)
                 lmat2 ? lmat2->graphLayerNames : std::vector<std::string>{};
             if (layers.empty()) s_landscapePaint = false;
 
-            ImGui::SeparatorText("Mode");
-            if (ImGui::RadioButton("Sculpt", !s_landscapePaint)) s_landscapePaint = false;
-            ImGui::SameLine();
-            ImGui::BeginDisabled(layers.empty());
-            if (ImGui::RadioButton("Paint", s_landscapePaint)) s_landscapePaint = true;
-            ImGui::EndDisabled();
-            if (layers.empty())
-                ImGui::TextDisabled("Paint needs a material with a\nLandscape Layer Blend node.");
+            // Sculpt | Paint is one choice between two tools, so it is one well
+            // of two cells — the same shape the Scene bar uses for View |
+            // Landscape, and the reason a row of radio buttons never reads as
+            // "pick one of these".
+            {
+                namespace T = EditorToolbar;
+                T::Bar bar;
+                bar.group();
+                if (bar.item("##lsSculpt", T::iconBrush, "Sculpt", !s_landscapePaint, true,
+                             "Raise, lower and smooth the ground"))
+                {
+                    s_landscapePaint = false;
+                }
+                if (bar.item("##lsPaint", T::iconLayers, "Paint", s_landscapePaint,
+                             !layers.empty(),
+                             layers.empty()
+                                 ? "Painting needs a material with a Landscape Layer Blend node"
+                                 : "Paint the material layers onto the ground"))
+                {
+                    s_landscapePaint = true;
+                }
+                bar.endGroup();
+            }
 
             if (s_landscapePaint)
             {
@@ -631,17 +649,37 @@ void renderPanel(AppContext& ctx)
         // ── Sculpt tools (hidden while painting) ─────────────────────────
         if (!s_landscapePaint)
         {
-        ImGui::SeparatorText("Sculpt Tool");
-
-        const char* toolLabels[] = { "Raise", "Lower", "Smooth",
-                                     "Flatten", "Ramp", "Roughen" };
-        const int toolCount = static_cast<int>(sizeof(toolLabels) / sizeof(toolLabels[0]));
-        const int toolIdx   = static_cast<int>(s_terrainTool);
-        for (int i = 0; i < toolCount; ++i)
+        // Six brushes, one armed. A well per row rather than radio buttons: the
+        // armed tool is what the mouse will do in the viewport, and that deserves
+        // the same "this is on" paint the gizmo tools get.
         {
-            if (i % 3 != 0) ImGui::SameLine();   // 3 tools per row
-            if (ImGui::RadioButton(toolLabels[i], toolIdx == i))
-                s_terrainTool = static_cast<TerrainTool>(i);
+            namespace T = EditorToolbar;
+            struct Tool { const char* label; T::IconFn icon; const char* tip; };
+            static const Tool kTools[] = {
+                { "Raise",   T::iconArrowUp,   "Pull the ground up" },
+                { "Lower",   T::iconArrowDown, "Push the ground down" },
+                { "Smooth",  T::iconRefresh,   "Average out the neighbourhood" },
+                { "Flatten", T::iconGrid,      "Level towards the first height touched" },
+                { "Ramp",    T::iconFlip,      "Blend between two heights along the drag" },
+                { "Roughen", T::iconSparkle,   "Add noise to the surface" },
+            };
+            const int toolIdx = static_cast<int>(s_terrainTool);
+            for (int row = 0; row < 2; ++row)
+            {
+                T::Bar bar;
+                bar.group();
+                for (int i = row * 3; i < row * 3 + 3; ++i)
+                {
+                    char id[24];
+                    std::snprintf(id, sizeof(id), "##lsTool%d", i);
+                    if (bar.item(id, kTools[i].icon, kTools[i].label, toolIdx == i, true,
+                                 kTools[i].tip))
+                    {
+                        s_terrainTool = static_cast<TerrainTool>(i);
+                    }
+                }
+                bar.endGroup();
+            }
         }
 
         ImGui::Spacing();

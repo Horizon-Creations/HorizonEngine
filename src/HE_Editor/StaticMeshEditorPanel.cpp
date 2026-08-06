@@ -1,4 +1,5 @@
 #include "StaticMeshEditorPanel.h"
+#include "EditorToolbar.h"   // shared toolbar strip
 #include <cstdint>
 #include "EditorApplication.h" // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
@@ -215,10 +216,40 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	}
 	if (!st.statsDone) { st.stats = computeStats(*mesh); st.statsDone = true; }
 
-	ImGui::TextUnformatted(mesh->name.empty() ? st.name.c_str() : mesh->name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("%s", st.relPath.c_str());
-	ImGui::Separator();
+	// ── Toolbar ──────────────────────────────────────────────────────────────
+	// A viewer, so no Save: what the strip carries is what is open and the two
+	// switches that change how the unwrap reads.
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		bar.group();
+		bar.readout(T::iconLayers,
+		            mesh->name.empty() ? st.name.c_str() : mesh->name.c_str());
+		bar.endGroup();
+
+		bar.group();
+		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
+		bar.endGroup();
+
+		bar.rightGroup(bar.iconGroupWidth(3));
+		if (bar.item("##smgrid", T::iconGrid, nullptr, st.showTileGrid, true,
+		             "Show the 0..1 tile grid"))
+		{
+			st.showTileGrid = !st.showTileGrid;
+		}
+		if (bar.item("##smflip", T::iconFlip, nullptr, st.flipV, true,
+		             "Flip V.\nThe engine uses a GL-style bottom-left UV origin; flip to "
+		             "preview\nhow the unwrap reads under the other convention."))
+		{
+			st.flipV = !st.flipV;
+		}
+		if (bar.item("##smfit", T::iconFit, nullptr, false, true, "Reset the UV view"))
+		{
+			st.uvZoom = 1.0f;
+			st.uvPan  = ImVec2(0.0f, 0.0f);
+		}
+		bar.endGroup();
+	}
 
 	// ── Left: stats + UV health ──────────────────────────────────────────────
 	ImGui::BeginChild("##smInfo", ImVec2(280.0f, 0.0f), true);
@@ -261,14 +292,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::TextDisabled("Fully inside the 0..1 tile.");
 	}
 
+	// Tile grid, Flip V and Reset live on the toolbar now — one place for the
+	// controls, and this pane keeps the readouts it alone can give.
 	ImGui::SeparatorText("View");
-	ImGui::Checkbox("Tile grid", &st.showTileGrid);
-	ImGui::Checkbox("Flip V", &st.flipV);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("The engine uses a GL-style bottom-left UV origin.\n"
-		                  "Flip to preview how the unwrap reads under the other convention.");
 	ImGui::Text("Zoom %.2fx", st.uvZoom);
-	if (ImGui::Button("Reset View")) { st.uvZoom = 1.0f; st.uvPan = ImVec2(0.0f, 0.0f); }
 	ImGui::TextDisabled("Drag to pan, wheel to zoom.");
 	ImGui::EndChild();
 
