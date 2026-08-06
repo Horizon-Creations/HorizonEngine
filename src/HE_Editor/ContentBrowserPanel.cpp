@@ -96,6 +96,53 @@ static void retargetReferences(AppContext& ctx, const std::string& oldAbs,
 	ctx.contentManager->retargetAssetReferences(oldRel, newRel, folder);
 }
 
+// Is `path` inside `folder`? Both are absolute disk paths, but they are not
+// built the same way everywhere in the panel (the folder scan uses the native
+// separator, the create handlers append '/'), so the boundary character is
+// accepted in either form rather than compared against one separator.
+static bool isUnderFolder(const std::string& path, const std::string& folder)
+{
+	if (folder.empty() || path.size() <= folder.size()) return false;
+	if (path.compare(0, folder.size(), folder) != 0)    return false;
+	const char sep = path[folder.size()];
+	return sep == '/' || sep == '\\';
+}
+
+// Every file below `folderAbs`, as paths relative to it — what a folder delete
+// would take with it, for the confirmation dialog. Dotfiles/dotfolders are
+// skipped for the same reason GlobalState's content scan hides them: they are
+// VCS/OS bookkeeping (.gitkeep, .DS_Store), not content the user put there. The
+// deletion itself removes them regardless; this list only decides what the
+// warning shows and whether a folder counts as empty enough to go without one.
+static std::vector<std::string> collectFolderContents(const std::string& folderAbs)
+{
+	std::vector<std::string> out;
+	std::error_code ec;
+	std::filesystem::recursive_directory_iterator it(
+		folderAbs, std::filesystem::directory_options::skip_permission_denied, ec);
+	if (ec) return out;
+
+	const std::filesystem::recursive_directory_iterator end;
+	for (; it != end; it.increment(ec))
+	{
+		if (ec) break; // iteration broke down — warn with what was readable
+		const std::filesystem::path p = it->path();
+		if (p.filename().string().rfind('.', 0) == 0)
+		{
+			std::error_code dirEc;
+			if (it->is_directory(dirEc)) it.disable_recursion_pending();
+			continue;
+		}
+		std::error_code fileEc;
+		if (!it->is_regular_file(fileEc)) continue;
+		std::error_code relEc;
+		const std::filesystem::path rel = std::filesystem::relative(p, folderAbs, relEc);
+		out.push_back(relEc ? p.filename().string() : rel.generic_string());
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
 void render(AppContext& ctx, int& tabSelectRequest,
             const std::function<void(const std::string&)>& openSceneGuarded)
 {
@@ -498,6 +545,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static bool        s_renameIsCreate   = false; // naming a freshly created item
 		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
 		static bool        s_rightClickOnItem = false;
+		// Delete-folder confirmation: the dialog outlives the frame its context
+		// menu closed in, so the target and the list of files that go with it are
+		// kept as STRINGS — a Folder* would dangle across the content refresh
+		// (same use-after-free the grid navigation statics above guard against).
+		static std::string              s_deleteFolderTarget;
+		static std::vector<std::string> s_deleteFolderFiles;
+		static bool                     s_openDeleteFolderPopup = false;
 		// Name-a-C++-class popup (C++ projects only): the create menu stages a
 		// class name here, then this popup writes Source/<Name>.{h,cpp}.
 		static bool        s_openCppClassPopup = false;
@@ -1058,6 +1112,42 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
 		};
 
+		// ── Delete a folder and everything under it ───────────────────────
+		// Shared by the two ways in: a folder with nothing in it goes straight
+		// away, one holding assets only gets here after the confirmation dialog.
+		auto deleteFolderNow = [&](const std::string& folderAbs)
+		{
+			std::error_code ec;
+			std::filesystem::remove_all(folderAbs, ec);
+			if (ec)
+			{
+				HE_LOG_ERROR(Editor, "%s",
+					("Editor: could not delete folder '" + folderAbs + "': " + ec.message()).c_str());
+				return;
+			}
+			// Both caches are keyed by path and every asset below the folder just
+			// lost its path — same call the folder RENAME makes, which drops the
+			// whole map rather than walking the subtree it no longer owns.
+			EditorAssetTypeCache::invalidateAll();
+			AssetThumbnailCache::clear();
+
+			// An editor tab still open on one of those assets would write the file
+			// back into the folder that was just deleted on its next Save, so close
+			// them here; EditorUI erases them (and forgets their state) next frame.
+			for (auto& t : ctx.tabs)
+				if (t.closable && !t.assetPath.empty() && isUnderFolder(t.assetPath, folderAbs))
+					t.open = false;
+
+			if (s_selectedItem == folderAbs || isUnderFolder(s_selectedItem, folderAbs))
+				s_selectedItem.clear();
+			s_ctxMenuItem.clear();
+			// The grid may be standing inside the folder that just went away: the
+			// refresh bumps the folder version, the re-resolution at the top of the
+			// panel fails to find the remembered path and falls back to the root.
+			ctx.contentRefreshPending = true;
+			HE_LOG_INFO(Editor, "%s", ("Editor: deleted folder " + folderAbs).c_str());
+		};
+
 		if (s_rightClickOnItem)
 		{
 			ImGui::OpenPopup("##cb_item_ctx");
@@ -1270,6 +1360,26 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			}
 
+			// A folder deletes as a unit — the whole subtree goes with it. That is
+			// the one browser operation that destroys work the user cannot see from
+			// where they clicked, so anything but an empty folder has to pass a
+			// confirmation that names every asset going with it.
+			if (!engineLocked && s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem("Delete"))
+			{
+				s_deleteFolderTarget = s_ctxMenuItem;
+				s_deleteFolderFiles  = collectFolderContents(s_ctxMenuItem);
+				if (s_deleteFolderFiles.empty())
+				{
+					// Nothing to lose (an empty folder, or one holding only empty
+					// sub-folders) — no dialog worth the interruption.
+					deleteFolderNow(s_deleteFolderTarget);
+					s_deleteFolderTarget.clear();
+				}
+				else
+					s_openDeleteFolderPopup = true;
+				ImGui::CloseCurrentPopup();
+			}
+
 			// The asset-create submenu makes no sense in the Source root (it would
 			// write .hasset files there) — the background right-click there offers
 			// "C++ Class" instead.
@@ -1408,6 +1518,68 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			}
 
+			ImGui::EndPopup();
+		}
+
+		// ── Delete-folder confirmation ────────────────────────────────────
+		// Raised from the item context menu, opened here for the same reason the
+		// rename dialog is: a modal cannot be opened from inside the context
+		// popup's ID stack, and the content-refresh gate keeps it from competing
+		// with the "##ContentRefresh" modal (which a delete requests as well).
+		if (s_openDeleteFolderPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_delete_folder_popup");
+			s_openDeleteFolderPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_delete_folder_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			const std::string folderName =
+				std::filesystem::path(s_deleteFolderTarget).filename().string();
+			const int fileCount = static_cast<int>(s_deleteFolderFiles.size());
+
+			ImGui::Text("Delete Folder \"%s\"", folderName.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+				"This deletes the folder and the %d asset%s inside it.",
+				fileCount, fileCount == 1 ? "" : "s");
+			ImGui::TextDisabled("Anything still referencing them keeps a broken reference.");
+			ImGui::Spacing();
+
+			// The list is what makes the warning worth reading, so it is shown in
+			// full up to a point — a folder with thousands of assets would cost a
+			// line of text per entry per frame, and the tail says nothing the count
+			// above has not already said.
+			constexpr int k_maxListed = 200;
+			const int listed = (std::min)(fileCount, k_maxListed);
+			const float lineH  = ImGui::GetTextLineHeightWithSpacing();
+			const float listH  = std::clamp(lineH * static_cast<float>(listed) + 8.0f, lineH, 220.0f);
+			ImGui::BeginChild("##cb_delete_folder_list", ImVec2(-1.0f, listH), true,
+				ImGuiWindowFlags_HorizontalScrollbar);
+			for (int i = 0; i < listed; ++i)
+				ImGui::TextUnformatted(s_deleteFolderFiles[static_cast<size_t>(i)].c_str());
+			if (fileCount > listed)
+				ImGui::TextDisabled("... and %d more", fileCount - listed);
+			ImGui::EndChild();
+			ImGui::Spacing();
+
+			if (EditorWidgets::dangerButton("Delete", ImVec2(210, 0)))
+			{
+				deleteFolderNow(s_deleteFolderTarget);
+				s_deleteFolderTarget.clear();
+				s_deleteFolderFiles.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+			{
+				s_deleteFolderTarget.clear();
+				s_deleteFolderFiles.clear();
+				ImGui::CloseCurrentPopup();
+			}
 			ImGui::EndPopup();
 		}
 
