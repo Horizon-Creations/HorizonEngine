@@ -7639,10 +7639,12 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 
 void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
                                            const std::vector<glm::mat4>& boneMatrices,
-                                           uint32_t size, float yaw, float pitch, float dist,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
                                            bool showSkeleton)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	const int W = std::clamp(static_cast<int>(width),  32, 2048);
+	const int H = std::clamp(static_cast<int>(height), 32, 2048);
 	if (!m_contentManager) m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
@@ -7722,20 +7724,21 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 
 	// ── Lazy / resized target: RGBA16F color (same format as m_debugLinePipeline
 	// expects, so the bone overlay below can reuse it verbatim) + depth.
-	if (!m_skelPreviewColorTex || m_skelPreviewSize != S)
+	if (!m_skelPreviewColorTex || m_skelPreviewW != W || m_skelPreviewH != H)
 	{
 		if (m_skelPreviewColorTex) { CFBridgingRelease(m_skelPreviewColorTex); m_skelPreviewColorTex = nullptr; }
 		if (m_skelPreviewDepthTex) { CFBridgingRelease(m_skelPreviewDepthTex); m_skelPreviewDepthTex = nullptr; }
 		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
-			width:S height:S mipmapped:NO];
+			width:W height:H mipmapped:NO];
 		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		cd.storageMode = MTLStorageModePrivate;
 		m_skelPreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
 		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
-			width:S height:S mipmapped:NO];
+			width:W height:H mipmapped:NO];
 		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
 		m_skelPreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
-		m_skelPreviewSize = S;
+		m_skelPreviewW = W;
+		m_skelPreviewH = H;
 	}
 	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_skelPreviewColorTex;
 
@@ -7763,7 +7766,8 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	const float cp = std::cos(pitch), sp = std::sin(pitch);
 	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
 	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f),
+		static_cast<float>(W) / static_cast<float>(H), 0.01f, camDist * 20.0f + 10.0f);
 	const glm::mat4 model(1.0f);
 
 	UnlitUniforms u;
@@ -7857,12 +7861,12 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	if (dp && *dp)
 	{
 		MTLTextureDescriptor* sd2 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
-			width:S height:S mipmapped:NO];
+			width:W height:H mipmapped:NO];
 		sd2.storageMode = MTLStorageModeManaged; sd2.usage = MTLTextureUsageShaderRead;
 		staging = [device newTextureWithDescriptor:sd2];
 		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 		[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
-		           sourceSize:MTLSizeMake(S,S,1) toTexture:staging destinationSlice:0 destinationLevel:0
+		           sourceSize:MTLSizeMake(W,H,1) toTexture:staging destinationSlice:0 destinationLevel:0
 		    destinationOrigin:MTLOriginMake(0,0,0)];
 		[blit synchronizeResource:staging];
 		[blit endEncoding];
@@ -7872,9 +7876,9 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 
 	if (staging)
 	{
-		std::vector<uint16_t> half((size_t)S * S * 4);
-		[staging getBytes:half.data() bytesPerRow:S * 4 * sizeof(uint16_t)
-		       fromRegion:MTLRegionMake2D(0, 0, S, S) mipmapLevel:0];
+		std::vector<uint16_t> half((size_t)W * H * 4);
+		[staging getBytes:half.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+		       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
 		auto h2f = [](uint16_t h) -> float {
 			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
 			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
@@ -7884,11 +7888,11 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 		};
 		if (std::ofstream fo(dp, std::ios::binary); fo)
 		{
-			fo << "P6\n" << S << " " << S << "\n255\n";
-			for (int y = 0; y < S; ++y)
-				for (int x = 0; x < S; ++x)
+			fo << "P6\n" << W << " " << H << "\n255\n";
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
 				{
-					const uint16_t* pxl = &half[((size_t)y * S + x) * 4];
+					const uint16_t* pxl = &half[((size_t)y * W + x) * 4];
 					for (int c = 0; c < 3; ++c)
 					{
 						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);

@@ -193,20 +193,23 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	if (clip) AnimationPreview::evaluateClipPose(*mesh, *clip, st.clipTime, boneMatrices);
 
 	ImGui::Separator();
-	const ImVec2 av  = ImGui::GetContentRegionAvail();
-	const float  px  = std::max(64.0f, std::min(av.x, av.y));
+	// The preview target matches the pane, so the render fills it edge to edge —
+	// it used to be a centred square, which left a dead strip beside it in any
+	// non-square pane.
+	const ImVec2 av  = ImVec2(std::max(64.0f, ImGui::GetContentRegionAvail().x),
+	                          std::max(64.0f, ImGui::GetContentRegionAvail().y));
 	const ImVec2 org = ImGui::GetCursorScreenPos();
 
 	void* tex = nullptr;
-	if (ctx.renderer && ctx.contentManager && px >= 32.0f)
+	if (ctx.renderer && ctx.contentManager)
 		tex = ctx.renderer->RenderSkeletalPreview(*ctx.contentManager, st.meshId, boneMatrices,
-			static_cast<uint32_t>(px), st.previewYaw, st.previewPitch, st.previewDist, st.showSkeleton);
+			static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
+			st.previewYaw, st.previewPitch, st.previewDist, st.showSkeleton);
 
 	if (tex)
 	{
 		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
-		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (av.x - px) * 0.5f);
-		ImGui::Image(reinterpret_cast<ImTextureID>(tex), ImVec2(px, px),
+		ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
 			flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
 	}
 	else

@@ -7557,10 +7557,12 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 
 void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
                                            const std::vector<glm::mat4>& boneMatrices,
-                                           uint32_t size, float yaw, float pitch, float dist,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
                                            bool showSkeleton)
 {
-	const int S = std::clamp(static_cast<int>(size), 32, 1024);
+	const int W = std::clamp(static_cast<int>(width),  32, 2048);
+	const int H = std::clamp(static_cast<int>(height), 32, 2048);
 	if (!m_contentManager) m_contentManager = &cm;
 
 	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
@@ -7604,7 +7606,7 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	if (!m_skelPreviewProgram || !m_skelPreviewLineProgram) return nullptr;
 
 	// ── Lazy / resized offscreen target.
-	if (!m_skelPreviewFBO || m_skelPreviewSize != S)
+	if (!m_skelPreviewFBO || m_skelPreviewW != W || m_skelPreviewH != H)
 	{
 		if (m_skelPreviewColor) glDeleteTextures(1, &m_skelPreviewColor);
 		if (m_skelPreviewDepth) glDeleteRenderbuffers(1, &m_skelPreviewDepth);
@@ -7612,17 +7614,18 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 		glBindFramebuffer(GL_FRAMEBUFFER, m_skelPreviewFBO);
 		glGenTextures(1, &m_skelPreviewColor);
 		glBindTexture(GL_TEXTURE_2D, m_skelPreviewColor);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, S, S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_skelPreviewColor, 0);
 		glGenRenderbuffers(1, &m_skelPreviewDepth);
 		glBindRenderbuffer(GL_RENDERBUFFER, m_skelPreviewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, S, S);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_skelPreviewDepth);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glBindTexture(GL_TEXTURE_2D, 0);
-		m_skelPreviewSize = S;
+		m_skelPreviewW = W;
+		m_skelPreviewH = H;
 	}
 
 	// ── Orbit camera auto-framed around the mesh's local bounds (arbitrary
@@ -7635,7 +7638,7 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_skelPreviewFBO);
-	glViewport(0, 0, S, S);
+	glViewport(0, 0, W, H);
 	glClearColor(0.0f, 0.0f, 0.0f, 0.0f); // transparent — editor composites over its own backdrop
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
@@ -7644,7 +7647,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	const float cp = std::cos(pitch), sp = std::sin(pitch);
 	const glm::vec3 camPos = center + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
 	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj = glm::perspective(glm::radians(35.0f), 1.0f, 0.01f, camDist * 20.0f + 10.0f);
+	const glm::mat4 proj = glm::perspective(glm::radians(35.0f),
+		static_cast<float>(W) / static_cast<float>(H), 0.01f, camDist * 20.0f + 10.0f);
 	const glm::mat4 model(1.0f);
 	const glm::mat4 mvp = proj * view * model;
 
@@ -7721,14 +7725,14 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	// Headless witness (same convention as RenderMaterialPreview): HE_SKEL_PREVIEW_DUMP=path.
 	if (const char* dp = std::getenv("HE_SKEL_PREVIEW_DUMP"); dp && *dp)
 	{
-		std::vector<uint8_t> px((size_t)S * S * 3);
+		std::vector<uint8_t> px((size_t)W * H * 3);
 		glPixelStorei(GL_PACK_ALIGNMENT, 1);
-		glReadPixels(0, 0, S, S, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
 		if (std::ofstream f(dp, std::ios::binary); f)
 		{
-			f << "P6\n" << S << " " << S << "\n255\n";
-			for (int y = S - 1; y >= 0; --y) // flip to top-down
-				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * S * 3), (std::streamsize)S * 3);
+			f << "P6\n" << W << " " << H << "\n255\n";
+			for (int y = H - 1; y >= 0; --y) // flip to top-down
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * W * 3), (std::streamsize)W * 3);
 		}
 	}
 

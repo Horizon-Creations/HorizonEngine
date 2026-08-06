@@ -93,7 +93,8 @@ public:
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
-	                            uint32_t size, float yaw, float pitch, float dist,
+	                            uint32_t width, uint32_t height,
+	                            float yaw, float pitch, float dist,
 	                            bool showSkeleton = true) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
@@ -553,7 +554,8 @@ private:
 	// fog/sky-env) rather than the scene-integrated skinnedVertex+fragmentMain pair.
 	void* m_skelPreviewColorTex = nullptr; // id<MTLTexture> (retained)
 	void* m_skelPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
-	int   m_skelPreviewSize     = 0;
+	int   m_skelPreviewW        = 0;
+	int   m_skelPreviewH        = 0;
 	void* m_skelPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated RGBA16F

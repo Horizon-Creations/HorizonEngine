@@ -48,7 +48,8 @@ public:
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
-	                            uint32_t size, float yaw, float pitch, float dist,
+	                            uint32_t width, uint32_t height,
+	                            float yaw, float pitch, float dist,
 	                            bool showSkeleton = true) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
@@ -258,7 +259,8 @@ private:
 	// fog/sky-env) rather than the full scene-integrated m_skinnedProgram — same
 	// "isolated preview, own tiny lighting model" idea as the material preview.
 	unsigned int m_skelPreviewFBO = 0, m_skelPreviewColor = 0, m_skelPreviewDepth = 0;
-	int          m_skelPreviewSize = 0;
+	int          m_skelPreviewW = 0;
+	int          m_skelPreviewH = 0;
 	unsigned int m_skelPreviewProgram = 0;
 	int          m_uSkelPvMVP = -1, m_uSkelPvModel = -1, m_uSkelPvBones = -1;
 	int          m_uSkelPvColor = -1, m_uSkelPvHasTex = -1;

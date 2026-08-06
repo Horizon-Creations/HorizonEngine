@@ -104,8 +104,11 @@ void drawUvView(const StaticMeshAsset& mesh, State& st, const ImVec2& size)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	const float  side   = std::max(64.0f, std::min(size.x, size.y));
-	const ImVec2 canvasSize(side, side);
+	// The canvas fills the whole pane; only the 0..1 TILE is sized off the short
+	// side. A square canvas left a dead strip beside it in any non-square pane —
+	// no drawing, no pan/zoom input, looking simply broken.
+	const ImVec2 canvasSize(std::max(64.0f, size.x), std::max(64.0f, size.y));
+	const float  side = std::min(canvasSize.x, canvasSize.y);
 
 	ImGui::InvisibleButton("##uvcanvas", canvasSize,
 		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);

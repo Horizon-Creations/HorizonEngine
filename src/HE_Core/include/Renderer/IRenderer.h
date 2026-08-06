@@ -386,9 +386,13 @@ public:
     // `showSkeleton` overlays joint markers + parent-child bone lines drawn
     // directly into this preview target (independent of the main viewport's
     // DebugDrawBuffer). Returns nullptr on backends without a preview path.
+    // width/height in pixels — the target matches the panel's pane, so the
+    // preview fills it edge to edge instead of sitting as a square in a strip
+    // of dead space (the projection takes its aspect from the same numbers).
     virtual void* RenderSkeletalPreview(class ContentManager& /*cm*/, const HE::UUID& /*meshId*/,
                                         const std::vector<glm::mat4>& /*boneMatrices*/,
-                                        uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
+                                        uint32_t /*width*/, uint32_t /*height*/,
+                                        float /*yaw*/, float /*pitch*/, float /*dist*/,
                                         bool /*showSkeleton*/ = true)
     { return nullptr; }
 
