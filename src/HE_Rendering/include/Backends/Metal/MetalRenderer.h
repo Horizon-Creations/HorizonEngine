@@ -294,10 +294,6 @@ private:
 	float m_giReflIntensity    = 1.0f;
 	float m_giReflMaxRoughness = 0.6f;
 	float m_giReflMaxDistance  = 200.0f;
-	// Glossy-cone ramp (quality High): 0 while the camera moves, climbing back to
-	// 1 over a few still frames. Keeps the jittered tier from being NOISIER than
-	// the deterministic one below it — see EncodeGIReflections.
-	float m_giReflJitterRamp   = 0.0f;
 	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
 	// lerp the DEFERRED composite does per pixel into the half-res texture the
 	// forward scene shader samples — it only gets one. Optional; null just means

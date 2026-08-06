@@ -2884,7 +2884,7 @@ layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
 layout(std430, binding = 3) readonly buffer GiLands { GiLand giLands[]; };
 uniform int uGiInstanceCount;
 uniform int uGiLandCount;              // 0 = no painted terrain in this scene
-uniform float uJitterScale;            // glossy-cone scale: 0 while the camera moves
+uniform float uRays;                   // rays per pixel (quality tier)
 uniform sampler2D uLandWeights[4];     // one per landscape, in giLands order
 
 // Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
@@ -3526,31 +3526,42 @@ void main()
 	vec3 N = normalize(texelFetch(uGNorm, px, 0).xyz);
 	vec3 V = normalize(uCamPos.xyz - pv.xyz);
 	vec3 R = reflect(-V, N);
-	// Glossy cone jitter (quality High): spread the mirror ray inside a cone
-	// that widens with roughness. Pure noise on its own — the temporal pass
-	// below is what turns it into a glossy lobe, so the two are one tier.
-	// NOT applied to near-mirrors: their specular lobe is essentially a delta,
-	// and even a 1° cone walks the hit point far enough at distance to flip
-	// across a silhouette, which reads as a dithered band exactly where the
+	// Near-mirrors keep a single deterministic ray: their specular lobe is
+	// essentially a delta, and even a 1° cone walks the hit point far enough at
+	// distance to flip across a silhouette — a dithered band exactly where the
 	// reflection should be sharpest. 0.08 is below any surface a viewer would
 	// call glossy rather than mirrored.
-	// uJitterScale collapses to 0 while the CAMERA MOVES: the jitter is a ONE-
-	// sample stochastic estimate whose only integrator is the temporal EMA, and
-	// that EMA has to be damped under motion (reflected content is not
-	// reprojected). Paying full variance with half the integration made this
-	// tier look NOISIER than the deterministic one below it. Mirrors Metal.
-	if (uFrame.w > 0.5 && rm.x > 0.08 && uJitterScale > 0.01)
-		R = giConeSample(R, rm.x * 0.5 * uJitterScale, giHash2(gid, uFrame.x));
+	// Rays per pixel + cone width come from the quality tier (uRays): the tier
+	// means how many rays and how much blur, nothing else. ONE jittered ray with
+	// the temporal EMA as its only integrator is what made the top tier look
+	// noisier than the one below it. A near-mirror cone is narrower than a pixel,
+	// so it stays at a single deterministic ray and costs what it always did.
+	float coneW = (uFrame.w > 0.5 && rm.x > 0.08) ? rm.x * 0.5 : 0.0;
+	int rays = (coneW > 1e-3) ? clamp(int(uRays), 1, 8) : 1;
 	// Normal-offset origin + a min-t, the same self-intersection guards the
 	// shadow kernel uses.
 	vec3 origin = pv.xyz + N * 0.05;
 
-	float dist; int tri;
-	int hitInst = giSceneClosestHitTri(origin, R, 0.02, max(uReflParams.x, 1.0), dist, tri);
-	if (hitInst < 0) { imageStore(uOut, px, vec4(0.0)); return; } // miss → sky
+	vec3  outRadiance = vec3(0.0);
+	float outConf     = 0.0;
+	for (int sIdx = 0; sIdx < rays; ++sIdx)
+	{
+	// Stratified over the sample index AND the frame, so this frame's rays
+	// spread across the lobe instead of clumping.
+	vec3 Rs = R;
+	if (coneW > 1e-3)
+	{
+		vec2 xi = giHash2(gid, uFrame.x + float(sIdx) * 7.13);
+		Rs = giConeSample(R, coneW, vec2((float(sIdx) + xi.x) / float(rays), xi.y));
+		if (dot(Rs, N) <= 0.0) Rs = R;
+	}
 
-	vec3 hitPos = origin + R * dist;
-	vec3 hitN   = giHitNormal(hitInst, tri, R);
+	float dist; int tri;
+	int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
+	if (hitInst < 0) continue; // miss → this sample contributes nothing (sky)
+
+	vec3 hitPos = origin + Rs * dist;
+	vec3 hitN   = giHitNormal(hitInst, tri, Rs);
 	vec3 albedo = giInsts[hitInst].baseColor.rgb;
 	// Landscape hit: the paint at THIS point instead of one flat colour for the
 	// whole terrain. A landscape is a heightfield over an axis-aligned local
@@ -3629,7 +3640,14 @@ void main()
 	// outside the BVH) as right, and fading into the sky term is the graceful
 	// failure. The composite multiplies this by the intensity setting.
 	float conf = 1.0 - smoothstep(uReflParams.x * 0.75, uReflParams.x, dist);
-	imageStore(uOut, px, vec4(radiance, conf));
+	outRadiance += radiance;
+	outConf     += conf;
+	}
+	// Averaged over the rays this pixel actually traced. A sample that MISSED
+	// contributed nothing to either, so a partly-missing lobe comes out with a
+	// proportionally lower confidence and the composite blends that much sky in
+	// — which is exactly what a lobe half off the geometry should look like.
+	imageStore(uOut, px, vec4(outRadiance / float(rays), outConf / float(rays)));
 }
 )GLSL";
 
@@ -5942,14 +5960,10 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// a slot it was not given.
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_giLandSSBO);
 	glUniform1i(loc("uGiLandCount"), m_giLandCount);
-	// Same signal the temporal blend below uses: closed under motion, ramping
-	// back over ~8 still frames so the glossy lobe grows instead of popping.
-	{
-		const glm::mat4 vp = m_renderWorld.camera.projection * m_renderWorld.camera.view;
-		const bool moving = (vp != m_giReflPrevViewProj);
-		m_giReflJitterRamp = moving ? 0.0f : std::min(1.0f, m_giReflJitterRamp + 0.125f);
-	}
-	glUniform1f(loc("uJitterScale"), m_giReflHistValid ? m_giReflJitterRamp : 0.0f);
+	// Rays per pixel from the tier — the tier means rays + blur, nothing else.
+	// Low 1, Medium 2, High 4; a near-mirror traces one regardless.
+	glUniform1f(loc("uRays"), m_giReflQuality >= 2 ? 4.0f
+	                        : (m_giReflQuality >= 1 ? 2.0f : 1.0f));
 	for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
 	{
 		const std::string nm = "uLandWeights[" + std::to_string(i) + "]";

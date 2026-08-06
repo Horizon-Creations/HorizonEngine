@@ -556,3 +556,41 @@ der Dump rendert aus einer stehenden Kamera, und genau dort konvergiert die EMA
 ohnehin (gemessen: Quality 1 und 2 haben denselben Hochfrequenz-Gradienten in der
 Spiegelfläche). Die Diagnose kommt aus dem Code, der Fix entfernt den
 Mechanismus; bestätigen lässt er sich nur beim Navigieren im Editor.
+
+
+---
+
+## Quality-Tiers heißen jetzt: Rays + Blur
+
+Nach zwei Runden Nachbessern am Rauschen war klar, dass die Tier-Semantik selbst
+das Problem war. Sie schaltete FEATURES um — Low roher Trace, Medium + Blur,
+High + gejitterter Cone mit temporaler Akkumulation — und der oberste Tier
+tauschte damit einen deterministischen Strahl gegen eine stochastische Schätzung
+ein, deren einziger Integrator die temporale EMA war. Die muss unter
+Kamerabewegung gedämpft werden (kein Motion-Vector-Reprojection des
+reflektierten Inhalts), also war „High" genau dann schlechter als „Medium", wenn
+man sich bewegt — und beim Stehenbleiben hing alles an einer EMA, die ihr
+eigenes Rauschen als Inhaltswechsel missdeutete.
+
+Jetzt bedeutet der Tier **zwei Zahlen und sonst nichts**:
+
+| Tier | Rays/Pixel | Blur |
+|---|---|---|
+| Low | 1 (deterministisch) | keiner |
+| Medium | 2 | schmal (1 Texel, 5-Tap) |
+| High | 4 | schmal + breit (3 Texel) mit Roughness-Lerp |
+
+Die Strahlen sind über Sample-Index UND Frame stratifiziert, also verteilt sich
+schon ein einzelner Frame über die Lobe statt zu klumpen. Ein **Near-Mirror
+traced immer genau einen** Strahl (sein Cone ist schmaler als ein Pixel, alle
+Samples wären identisch) — Spiegel kosten auf jedem Tier dasselbe, die Kosten
+wachsen nur dort, wo die Reflexion wirklich glossy ist. Die temporale EMA bleibt,
+ist aber jetzt Zugabe auf getracte Strahlen statt der Integrator, an dem das Bild
+hängt; entsprechend darf sie unter Bewegung konservativ bleiben, ohne dass der
+Tier zusammenbricht.
+
+Damit fällt der Cone-Ramp aus dem vorigen Nachtrag ersatzlos weg — er war eine
+Kompensation dafür, nur einen Strahl zu haben. Metal (HW + SW-BVH) und GL sind
+identisch aufgebaut; der GL-Kernel mittelt zusätzlich Misses als Confidence 0
+ein, sodass eine halb ins Leere zeigende Lobe proportional Himmel durchlässt —
+was sie soll.

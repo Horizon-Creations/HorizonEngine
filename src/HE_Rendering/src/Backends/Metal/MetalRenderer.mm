@@ -1754,7 +1754,7 @@ struct GIReflParams {
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
-	float4 land;            // x = landscape count (painted-terrain table), y = glossy-cone scale (0 while the camera moves)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -1933,23 +1933,20 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	const float3 N = octDecodeR(g1.rg * 2.0 - 1.0);
 	const float3 V = normalize(Pw - P.camPos.xyz);
 	float3 R = reflect(V, N);
-	// Quality 2: jitter the ray inside a roughness-scaled cone (GGX-lobe-ish
-	// width) — the temporal accumulation below turns the per-frame samples
-	// into a real glossy reflection instead of the lower tiers' blur-only
-	// approximation. Kept deterministic (no jitter) below quality 2.
-	// P.land.y scales the cone: it collapses to 0 while the CAMERA MOVES. The
-	// jitter is a ONE-sample-per-pixel stochastic estimate and the temporal EMA
-	// is its only integrator — but that EMA has to be damped under motion
-	// (reflected content is not reprojected, no motion vectors), so under motion
-	// the tier was paying full jitter variance with half the integration and
-	// looked NOISIER than the deterministic tier below it. Now motion falls back
-	// to that deterministic ray and the cone reopens as the camera settles.
-	if (P.extra.x > 0.5 && rough > 0.03 && P.land.y > 0.01)
-	{
-		const float3 jit = giConeSampleR(R, min(0.30, rough * rough * 1.2) * P.land.y,
-		                                 giHash2R(gid, P.sunColor.w));
-		if (dot(jit, N) > 0.0) R = jit; // keep the sample above the surface
-	}
+	// Glossy sampling. The quality tier sets exactly two things (see
+	// GIReflectionSettings): how many RAYS this pixel gets, and how strong the
+	// blur afterwards is. Everything the reflection knows therefore comes from
+	// rays it actually traced — the temporal EMA below is a bonus on top, not
+	// the integrator the image depends on. It used to be the latter: ONE
+	// jittered ray per pixel with the EMA expected to resolve the lobe, which
+	// falls apart the moment that EMA has to be damped (camera motion, no
+	// motion vectors) and made the higher tier look noisier than the lower one.
+	//
+	// A near-mirror cone is narrower than a pixel — every sample would trace the
+	// same ray — so it stays at one, and mirrors cost exactly what they did.
+	const float coneW = (P.extra.x > 0.5 && rough > 0.03)
+		? min(0.30, rough * rough * 1.2) : 0.0;
+	const int rays = (coneW > 1e-3) ? clamp(int(P.land.y), 1, 8) : 1;
 
 	// Bounce loop (P.extra.w = max bounces, 1-4): a mirror-like hit (metallic,
 	// low roughness — packed in the instance-shading pair) reflects ONWARD
@@ -1958,12 +1955,24 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 	// exact fallback); a SECONDARY miss samples the sky cube directly — that
 	// ray genuinely reflects the sky.
 	float4 sampleOut = float4(0.0);
+	for (int sIdx = 0; sIdx < rays; ++sIdx)
 	{
+		// Stratified over the sample index AND the frame, so this frame's N rays
+		// spread across the lobe instead of clumping, and successive frames keep
+		// filling the gaps for the EMA.
+		float3 rayDir = R;
+		if (coneW > 1e-3)
+		{
+			const float2 xi = giHash2R(gid, P.sunColor.w + float(sIdx) * 7.13);
+			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
+			const float3 jit = giConeSampleR(R, coneW, st);
+			if (dot(jit, N) > 0.0) rayDir = jit; // keep the sample above the surface
+		}
 		float3 accum      = float3(0.0);
 		float3 throughput = float3(1.0);
 		float  conf       = 0.0;
 		float3 ro = Pw + N * 0.05;
-		float3 rd = R;
+		float3 rd = rayDir;
 		const int maxBounce = clamp(int(P.extra.w), 1, 4);
 		for (int b = 0; b < maxBounce; ++b)
 		{
@@ -2083,7 +2092,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			ro = hitPos + hitN * 0.05;
 			rd = reflect(rd, hitN);
 		}
-		sampleOut = float4(accum, conf);
+		sampleOut += float4(accum, conf) / float(rays);
 	}
 
 	// Temporal accumulation (quality 2, gated by skyAmbient.w): reproject the
@@ -2135,7 +2144,7 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					// this kernel's early-outs make unsafe. Splitting the pass is
 					// the real fix and is worth doing if glossy reflections of
 					// MOVING objects ever smear noticeably.
-					const float collapse = 0.75 * (1.0 - P.land.y);
+					const float collapse = (coneW > 1e-3) ? 0.0 : 0.75;
 					const float hEff = h * (1.0 - collapse * smoothstep(0.2, 0.8, rel));
 					resultOut = mix(sampleOut, hist, hEff);
 				}
@@ -2560,7 +2569,7 @@ struct GIReflParams {
 	float4 gridOrigin;
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
-	float4 land;            // x = landscape count (painted-terrain table), y = glossy-cone scale (0 while the camera moves)
+	float4 land;            // x = landscape count (painted-terrain table), y = rays per pixel (quality tier)
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -2710,24 +2719,30 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 	const float3 N = octDecode(g1.rg * 2.0 - 1.0);
 	const float3 V = normalize(Pw - P.camPos.xyz);
 	float3 R = reflect(V, N);
-	// Cone collapses while the camera moves — see the HW kernel's comment.
-	if (P.extra.x > 0.5 && rough > 0.03 && P.land.y > 0.01)
-	{
-		const float3 jit = giConeSample(R, min(0.30, rough * rough * 1.2) * P.land.y,
-		                                giHash2(gid, P.sunColor.w));
-		if (dot(jit, N) > 0.0) R = jit;
-	}
+	// Rays per pixel + cone width from the quality tier — see the HW kernel.
+	const float coneW = (P.extra.x > 0.5 && rough > 0.03)
+		? min(0.30, rough * rough * 1.2) : 0.0;
+	const int rays = (coneW > 1e-3) ? clamp(int(P.land.y), 1, 8) : 1;
 
 	// Bounce loop — mirrors the HW kernel (see its comment); geometric triangle
 	// normals instead of interpolated vertex normals.
 	const int instCount = int(P.extra.z);
 	float4 sampleOut = float4(0.0);
+	for (int sIdx = 0; sIdx < rays; ++sIdx)
 	{
+		float3 rayDir = R;
+		if (coneW > 1e-3)
+		{
+			const float2 xi = giHash2(gid, P.sunColor.w + float(sIdx) * 7.13);
+			const float2 st = float2((float(sIdx) + xi.x) / float(rays), xi.y);
+			const float3 jit = giConeSample(R, coneW, st);
+			if (dot(jit, N) > 0.0) rayDir = jit;
+		}
 		float3 accum      = float3(0.0);
 		float3 throughput = float3(1.0);
 		float  conf       = 0.0;
 		float3 ro = Pw + N * 0.05;
-		float3 rd = R;
+		float3 rd = rayDir;
 		const int maxBounce = clamp(int(P.extra.w), 1, 4);
 		for (int b = 0; b < maxBounce; ++b)
 		{
@@ -2792,7 +2807,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			ro = hitPos + hitN * 0.05;
 			rd = reflect(rd, hitN);
 		}
-		sampleOut = float4(accum, conf);
+		sampleOut += float4(accum, conf) / float(rays);
 	}
 
 	// Temporal accumulation — byte-identical logic to the HW kernel (adaptive
@@ -2837,7 +2852,7 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					// this kernel's early-outs make unsafe. Splitting the pass is
 					// the real fix and is worth doing if glossy reflections of
 					// MOVING objects ever smear noticeably.
-					const float collapse = 0.75 * (1.0 - P.land.y);
+					const float collapse = (coneW > 1e-3) ? 0.0 : 0.75;
 					const float hEff = h * (1.0 - collapse * smoothstep(0.2, 0.8, rel));
 					resultOut = mix(sampleOut, hist, hEff);
 				}
@@ -4695,7 +4710,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = glossy-cone scale
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -11342,7 +11357,17 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// Quality 2 jitters the ray per frame; only then is the temporal EMA
 		// worth anything (lower tiers are deterministic → blend 0, but the
 		// history is still written so a mid-session quality switch just works).
-		const bool jitter   = m_giReflQuality >= 2;
+		// The quality tier means exactly two things now: RAYS per pixel and how
+		// wide the blur afterwards is. Low = 1 deterministic ray, no blur;
+		// Medium = 2 rays + the narrow blur; High = 4 rays + narrow, plus the
+		// wide pass and its roughness lerp. Nothing else keys off the tier —
+		// which is what makes the ladder monotone. It was not: the top tier used
+		// to switch ON a stochastic cone whose only integrator was the temporal
+		// EMA, so it looked WORSE than the tier below whenever that EMA had to
+		// be damped. A near-mirror still traces one ray (its cone is narrower
+		// than a pixel), so mirrors cost the same at every tier.
+		const int  rays     = m_giReflQuality >= 2 ? 4 : (m_giReflQuality >= 1 ? 2 : 1);
+		const bool jitter   = rays > 1;
 		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
 		m_giReflFrameSeed += 1.0f;
 
@@ -11366,29 +11391,19 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// a strong EMA under camera motion is exactly the "reflection drags
 		// behind" artefact. The kernel additionally collapses the weight on
 		// luminance breaks (moving CONTENT with a still camera).
+		// History weight. This is now a BONUS on top of the traced rays, not the
+		// thing the image depends on — so it can stay conservative under motion
+		// (reflected content is never reprojected; the engine has no motion
+		// vectors) without the tier falling apart, which is exactly what used to
+		// happen. Still: 0.94 ≈ 17 effective samples on top of the 4 traced.
 		float hist = 0.0f;
-		// Jitter factor: the glossy cone only pays off when the temporal EMA can
-		// integrate it, and the EMA has to be damped while the camera moves
-		// (reflected content is not reprojected). So the cone follows the same
-		// signal — closed under motion (deterministic ray, no variance), opening
-		// again as the view settles. It ramps rather than snapping so the glossy
-		// lobe grows back instead of popping.
-		float jitterScale = jitter ? 1.0f : 0.0f;
 		if (jitter && m_giReflHistValid)
 		{
 			float delta = 0.0f;
 			for (int c = 0; c < 4; ++c)
 				for (int r = 0; r < 4; ++r)
 					delta = std::max(delta, std::abs(viewProj[c][r] - m_giReflPrevViewProj[c][r]));
-			const bool moving = delta > 1e-5f;
-			// Still: 0.94 ≈ 17 effective samples instead of 0.85's ≈ 7 — that is
-			// what actually resolves a wide glossy cone. Safe because the
-			// receiver-position match already rejects disocclusion, and the
-			// camera is by definition not moving here.
-			hist = moving ? 0.55f : 0.94f;
-			// Ramp over ~8 frames of stillness; motion drops it immediately.
-			m_giReflJitterRamp = moving ? 0.0f : std::min(1.0f, m_giReflJitterRamp + 0.125f);
-			jitterScale = m_giReflJitterRamp;
+			hist = (delta > 1e-5f) ? 0.55f : 0.94f;
 		}
 		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
 		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
@@ -11404,7 +11419,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// for the whole landscape (see GiLandscape.h).
 		std::vector<void*> landTex;
 		const int landCount = BuildGILandscapeTable(landTex);
-		rp.land         = glm::vec4(static_cast<float>(landCount), jitterScale, 0.0f, 0.0f);
+		rp.land         = glm::vec4(static_cast<float>(landCount),
+		                            static_cast<float>(rays), 0.0f, 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -11488,11 +11504,14 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		m_giReflHistValid    = true;
 		m_giReflPrevViewProj = viewProj; // for NEXT frame's reprojection
 
-		// ── Blur chain (quality ≥ 1): the SSR blur pipeline verbatim — same
-		// RGBA16F fullscreen pass, confidence-weighted 5-tap. H refl→ping,
-		// V ping→refl, so the composite reads m_giReflTex either way. Quality 2
-		// adds the wide (3-texel) pass into m_giReflRoughTex for the glossy
-		// roughness lerp, exactly like SSR's High tier.
+		// ── Blur chain: the SSR blur pipeline verbatim — same RGBA16F fullscreen
+		// pass, confidence-weighted 5-tap. H refl→ping, V ping→refl, so the
+		// composite reads m_giReflTex either way. The TIER sets the strength
+		// (the other half of what quality means here — see the `rays` comment):
+		// Low none, Medium a 1-texel narrow pass, High that plus a 3-texel wide
+		// pass into m_giReflRoughTex and the per-pixel roughness lerp between
+		// them. With High also tracing 4 rays, the blur now cleans up a genuinely
+		// averaged estimate instead of hiding a single sample.
 		if (m_giReflQuality >= 1 && m_ssrBlurPipeline)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)

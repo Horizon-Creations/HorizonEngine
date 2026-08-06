@@ -268,9 +268,14 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			SubGroup sub(cfg.GIReflectionsEnabled);
 			Row::sliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
 			Row::sliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
-			// Low = raw mirror trace; Med = + confidence-weighted blur; High =
-			// + roughness-jittered cone rays with temporal accumulation (glossy).
-			const char* kGIReflQuality[] = { "Low", "Medium", "High" };
+			// The tier means exactly two things: RAYS per pixel and how strong
+			// the blur over them is. Low 1 ray / no blur, Medium 2 rays /
+			// narrow blur, High 4 rays / narrow + wide with a per-pixel
+			// roughness lerp. Mirror-like surfaces trace ONE ray at every tier
+			// (their lobe is narrower than a pixel), so the cost only grows
+			// where the reflection is actually glossy.
+			const char* kGIReflQuality[] = { "Low (1 ray)", "Medium (2 rays)",
+			                                 "High (4 rays)" };
 			int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
 			if (Row::combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
 				cfg.GIReflQuality = grQ;
