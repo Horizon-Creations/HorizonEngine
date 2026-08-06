@@ -19,6 +19,10 @@ namespace HcEditorUtil
 	{
 		std::string label; // display name (file stem)
 		std::string path;  // content-relative path (what nodes store)
+		// On-disk size of the .hasset. Free to collect while scanning, and the only
+		// thing a picker can say about an asset's WEIGHT before loading it — the
+		// Material Editor's preview-mesh picker warns on the heavy ones with it.
+		std::uint64_t bytes = 0;
 	};
 	std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type);
 	// Convenience wrapper for the Create Object class picker.

@@ -7141,7 +7141,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // the Material Editor is showing. The caller owns FBO/viewport/clear and the
 // depth/blend/cull state; this only touches program, UBOs, textures and the VAO.
 bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
-                                                 float dist, int shape)
+                                                 float dist, int shape, const HE::UUID& meshId)
 {
 	// Resolve the material's node-graph program (built-in-PBR materials have none →
 	// nothing to draw). Reuses the same program cache + precompiled-variant path.
@@ -7155,10 +7155,28 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	const unsigned int prog = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
 	if (!prog) return false;
 
-	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
+	// ── Geometry: a picked STATIC MESH, else the procedural primitive. A GpuMesh's
+	// VAO carries the same pos3/normal3/uv2 attributes at locations 0/1/2 that the
+	// material program reads in the scene, so it binds here unchanged — only the
+	// camera has to grow to the mesh's bounds instead of the unit sphere's.
+	const GpuMesh* gm = meshId != HE::UUID{} ? ResolveMesh(meshId) : nullptr;
+	unsigned int drawVAO = 0;
+	int          drawIdxCount = 0;
+	glm::vec3    center(0.0f);
+	float        radius = 1.0f; // what `dist` is measured in, so it frames alike
+	if (gm && gm->vao && gm->indexCount > 0)
+	{
+		drawVAO = gm->vao; drawIdxCount = gm->indexCount;
+		if (gm->localBounds.isValid())
+		{
+			center = (gm->localBounds.min + gm->localBounds.max) * 0.5f;
+			radius = std::max(glm::length(gm->localBounds.max - gm->localBounds.min) * 0.5f, 1e-4f);
+		}
+	}
+	// Lazy preview primitive (interleaved pos3/normal3/uv2 — the material vertex
 	// layout), rebuilt when the requested shape changes. Geometry is shared with the
 	// Metal path via buildPreviewMesh so the two backends can never drift apart.
-	if (!m_previewVAO || m_previewShape != shape)
+	if (!drawVAO && (!m_previewVAO || m_previewShape != shape))
 	{
 		std::vector<float> verts; std::vector<uint32_t> idx;
 		HE::buildPreviewMesh(shape, verts, idx);
@@ -7177,13 +7195,21 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 		glEnableVertexAttribArray(2); glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
 		glBindVertexArray(0);
 	}
+	if (!drawVAO) { drawVAO = m_previewVAO; drawIdxCount = m_previewIdxCount; }
+	if (!drawVAO || drawIdxCount <= 0) return false;
 
 	glUseProgram(prog);
-	// Orbit camera around the sphere at the origin (yaw/pitch/dist from the editor).
+	// Orbit camera around the subject (yaw/pitch/dist from the editor), which is the
+	// unit sphere at the origin for a primitive and the mesh's bounds centre for a
+	// picked mesh.
 	const float cp = std::cos(pitch), sp = std::sin(pitch);
-	const glm::vec3 camPos(std::sin(yaw) * cp * dist, sp * dist, std::cos(yaw) * cp * dist);
-	const glm::mat4 view = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj = glm::perspective(glm::radians(32.0f), 1.0f, 0.05f, 50.0f);
+	const glm::vec3 camPos = center
+		+ glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * (dist * radius);
+	const glm::mat4 view = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	// Clip planes scale with the subject: a 400 m mesh must not sit behind the unit
+	// sphere's fixed 50 m far plane, and a 5 cm one must not clip on near.
+	const glm::mat4 proj = glm::perspective(glm::radians(32.0f), 1.0f,
+		std::max(0.001f, 0.02f * radius), (dist + 8.0f) * radius + 1.0f);
 	const glm::mat4 model(1.0f);
 	struct { glm::mat4 mvp, model; glm::vec4 color, flags, pbr; } obj;
 	obj.mvp = proj * view * model; obj.model = model;
@@ -7236,8 +7262,8 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 		}
 	}
 
-	glBindVertexArray(m_previewVAO);
-	glDrawElements(GL_TRIANGLES, m_previewIdxCount, GL_UNSIGNED_INT, nullptr);
+	glBindVertexArray(drawVAO);
+	glDrawElements(GL_TRIANGLES, drawIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
 	return true;
@@ -7456,7 +7482,7 @@ bool OpenGLRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
 
 void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape)
+                                           int shape, const HE::UUID& meshId)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -7501,7 +7527,7 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape))
+	if (!DrawMaterialPreviewGeometry(materialId, yaw, pitch, dist, shape, meshId))
 	{
 		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);

@@ -6972,7 +6972,8 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 // Material Editor is showing. The caller owns the render pass, its clear and the
 // depth-stencil state; this only sets the pipeline, buffers and textures.
 bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& materialId,
-                                          float yaw, float pitch, float dist, int shape)
+                                          float yaw, float pitch, float dist, int shape,
+                                          const HE::UUID& meshId)
 {
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
@@ -6989,30 +6990,56 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	id<MTLRenderPipelineState> pso = (__bridge id<MTLRenderPipelineState>)GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
 	if (!pso) return false;
 
-	// ── Lazy preview primitive (interleaved pos3/normal3/uv2 + uint32 indices),
-	// rebuilt when the requested shape changes. Geometry is shared with the GL path
-	// via buildPreviewMesh so the two backends can never drift apart.
-	if (!m_previewVB || m_previewShape != shape)
+	// ── Geometry: a picked STATIC MESH, else the procedural primitive. A GpuMesh
+	// carries the same interleaved pos3/normal3/uv2 buffer the material pipeline
+	// reads in the scene, so it binds here unchanged — only the camera has to grow
+	// to the mesh's bounds instead of the unit sphere's.
+	const GpuMesh* gm = meshId != HE::UUID{} ? ResolveMesh(meshId) : nullptr;
+	void* vertBuf = nullptr; void* idxBuf = nullptr; int idxCount = 0;
+	glm::vec3 center(0.0f);
+	float     radius = 1.0f; // what `dist` is measured in, so it frames alike
+	if (gm && gm->vertexBuf && gm->indexBuf && gm->indexCount > 0)
 	{
-		if (m_previewVB) { CFBridgingRelease(m_previewVB); m_previewVB = nullptr; }
-		if (m_previewIB) { CFBridgingRelease(m_previewIB); m_previewIB = nullptr; }
-		std::vector<float> verts; std::vector<uint32_t> idx;
-		HE::buildPreviewMesh(shape, verts, idx);
-		m_previewIdxCount = (int)idx.size();
-		m_previewShape    = shape;
-		m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
-			length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
-		m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()
-			length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+		vertBuf = gm->vertexBuf; idxBuf = gm->indexBuf; idxCount = gm->indexCount;
+		if (gm->localBounds.isValid())
+		{
+			center = (gm->localBounds.min + gm->localBounds.max) * 0.5f;
+			radius = std::max(glm::length(gm->localBounds.max - gm->localBounds.min) * 0.5f, 1e-4f);
+		}
 	}
+	else
+	{
+		// Lazy preview primitive (interleaved pos3/normal3/uv2 + uint32 indices),
+		// rebuilt when the requested shape changes. Geometry is shared with the GL
+		// path via buildPreviewMesh so the two backends can never drift apart.
+		if (!m_previewVB || m_previewShape != shape)
+		{
+			if (m_previewVB) { CFBridgingRelease(m_previewVB); m_previewVB = nullptr; }
+			if (m_previewIB) { CFBridgingRelease(m_previewIB); m_previewIB = nullptr; }
+			std::vector<float> verts; std::vector<uint32_t> idx;
+			HE::buildPreviewMesh(shape, verts, idx);
+			m_previewIdxCount = (int)idx.size();
+			m_previewShape    = shape;
+			m_previewVB = (void*)CFBridgingRetain([device newBufferWithBytes:verts.data()
+				length:verts.size() * sizeof(float) options:MTLResourceStorageModeShared]);
+			m_previewIB = (void*)CFBridgingRetain([device newBufferWithBytes:idx.data()
+				length:idx.size() * sizeof(uint32_t) options:MTLResourceStorageModeShared]);
+		}
+		vertBuf = m_previewVB; idxBuf = m_previewIB; idxCount = m_previewIdxCount;
+	}
+	if (!vertBuf || !idxBuf || idxCount <= 0) return false;
 
 	[enc setRenderPipelineState:pso];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 
 	const float cp = std::cos(pitch), sp = std::sin(pitch);
-	const glm::vec3 camPos(std::sin(yaw) * cp * dist, sp * dist, std::cos(yaw) * cp * dist);
-	const glm::mat4 view  = glm::lookAt(camPos, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj  = glm::perspective(glm::radians(32.0f), 1.0f, 0.05f, 50.0f);
+	const glm::vec3 camPos = center
+		+ glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * (dist * radius);
+	const glm::mat4 view  = glm::lookAt(camPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+	// Clip planes scale with the subject: a 400 m mesh must not sit behind the
+	// unit sphere's fixed 50 m far plane, and a 5 cm one must not clip on near.
+	const glm::mat4 proj  = glm::perspective(glm::radians(32.0f), 1.0f,
+		std::max(0.001f, 0.02f * radius), (dist + 8.0f) * radius + 1.0f);
 	const glm::mat4 model(1.0f);
 	UnlitUniforms ui;
 	ui.mvp   = proj * view * model;
@@ -7020,7 +7047,7 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	ui.color = glm::vec4(ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2]) : glm::vec3(1.0f), 1.0f);
 	ui.flags = glm::vec4(0.0f);
 	ui.pbr   = glm::vec4(ma ? ma->metallic : 0.0f, ma ? ma->roughness : 0.5f, ma ? ma->opacity : 1.0f, 0.0f);
-	[enc setVertexBuffer:(__bridge id<MTLBuffer>)m_previewVB offset:0 atIndex:0];
+	[enc setVertexBuffer:(__bridge id<MTLBuffer>)vertBuf offset:0 atIndex:0];
 	[enc setVertexBytes:&ui length:sizeof(ui) atIndex:1];
 
 	HE::MaterialShaderLibrary::Lighting lit{};
@@ -7073,8 +7100,8 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 			}
 		}
 	}
-	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)m_previewIdxCount
-	                 indexType:MTLIndexTypeUInt32 indexBuffer:(__bridge id<MTLBuffer>)m_previewIB
+	[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)idxCount
+	                 indexType:MTLIndexTypeUInt32 indexBuffer:(__bridge id<MTLBuffer>)idxBuf
 	         indexBufferOffset:0];
 	return true;
 }
@@ -7189,7 +7216,7 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
 
 void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
                                            uint32_t size, float yaw, float pitch, float dist,
-                                           int shape)
+                                           int shape, const HE::UUID& meshId)
 {
 	const int S = std::clamp(static_cast<int>(size), 32, 1024);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -7236,7 +7263,8 @@ void* MetalRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-	const bool encoded = EncodeMaterialPreview((__bridge void*)enc, materialId, yaw, pitch, dist, shape);
+	const bool encoded = EncodeMaterialPreview((__bridge void*)enc, materialId, yaw, pitch, dist,
+	                                           shape, meshId);
 	[enc endEncoding];
 	if (!encoded) { [cb commit]; return nullptr; }
 

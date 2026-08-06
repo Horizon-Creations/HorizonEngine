@@ -45,7 +45,7 @@ public:
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
-	                            int shape = 0) override;
+	                            int shape = 0, const HE::UUID& meshId = HE::UUID{}) override;
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t size, float yaw, float pitch, float dist,
@@ -299,8 +299,11 @@ private:
 	// Draws one material-graph preview primitive into the CURRENTLY BOUND target
 	// (caller owns FBO/viewport/clear). False when the material has no node-graph
 	// program — the thumbnail path then falls back to m_meshPreviewProgram.
+	// `meshId` (optional) draws that static mesh instead of the primitive, framed
+	// on its own bounds; an unresolvable mesh falls back to `shape`.
 	bool DrawMaterialPreviewGeometry(const HE::UUID& materialId, float yaw, float pitch,
-	                                 float dist, int shape);
+	                                 float dist, int shape,
+	                                 const HE::UUID& meshId = HE::UUID{});
 	// Compile the billboard program + instance VAO once; false on failure.
 	bool EnsureParticlePreviewProgram();
 	// Draw the particle cloud into the CURRENTLY BOUND target — shared by the

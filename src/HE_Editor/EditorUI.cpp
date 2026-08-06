@@ -1671,8 +1671,13 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
             // preview textures) so per-session cost stays flat no matter how many
             // tabs were opened. Dirty states are kept: reopening the tab restores
             // the unsaved edits instead of silently discarding them.
-            auto forgetTabState = [](const AppContext::EditorTab& t){
+            auto forgetTabState = [&ctx](const AppContext::EditorTab& t){
                 if (t.assetPath.empty()) return;
+                // Assets a panel's PREVIEW streamed in go back regardless of the
+                // dirty check below: an unsaved graph is worth keeping in memory,
+                // the mesh its preview happened to sit on is not. Panels leave
+                // anything the scene or another tab still uses alone.
+                MaterialEditorPanel::releasePreviewAssets(ctx, t.assetPath);
                 if (tabHasUnsavedEdits(t.assetPath)) return;
                 ScriptEditorPanel::forget(t.assetPath);
                 CppClassEditorPanel::forget(t.assetPath);

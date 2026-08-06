@@ -362,9 +362,17 @@ public:
     // transparent (alpha 0) so the editor can composite it over its own backdrop.
     // Returns nullptr on backends without a preview path or on failure — the
     // editor then shows a placeholder. Independent of the main viewport target.
+    //
+    // `meshId` overrides `shape` with a STATIC MESH asset (any project or engine
+    // mesh — the Material Editor lets the author pick one), auto-framed on its
+    // bounds so `dist` means the same thing for a teapot as for the unit sphere.
+    // A mesh that is not loaded/uploadable falls back to `shape`, so a caller
+    // never has to pre-check: the preview shows the primitive instead. The CALLER
+    // owns getting the asset into the ContentManager (the editor streams it
+    // asynchronously and shows progress) — this does no blocking disk I/O.
     virtual void* RenderMaterialPreview(class ContentManager& /*cm*/, const HE::UUID& /*materialId*/,
                                         uint32_t /*size*/, float /*yaw*/, float /*pitch*/, float /*dist*/,
-                                        int /*shape*/ = 0)
+                                        int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{})
     { return nullptr; }
 
     // ── Skeletal mesh preview ──────────────────────────────────────────────
