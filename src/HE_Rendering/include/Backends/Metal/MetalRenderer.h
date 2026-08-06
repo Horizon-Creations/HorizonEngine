@@ -298,6 +298,12 @@ private:
 	// 1 over a few still frames. Keeps the jittered tier from being NOISIER than
 	// the deterministic one below it — see EncodeGIReflections.
 	float m_giReflJitterRamp   = 0.0f;
+	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
+	// lerp the DEFERRED composite does per pixel into the half-res texture the
+	// forward scene shader samples — it only gets one. Optional; null just means
+	// the forward path keeps the narrow blur.
+	void* m_ssrRoughMixPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	void* m_giReflGlossyTex     = nullptr; // borrowed: this frame's lerped result, or null
 	int   m_giReflBounces      = 1;   // 1-4 mirror bounces (extra.w in the kernels)
 	int   m_giReflQuality      = 1;      // 0 raw / 1 blur / 2 glossy+temporal
 	bool  m_giReflFrameActive  = false;  // this frame traces GI reflections (tile deferred + accel built)

@@ -515,6 +515,42 @@ null Varianz); steht sie still, öffnet er sich über ~8 Frames wieder und die E
 integriert ihn zu einer echten Glossy-Lobe. Kostet keine zusätzlichen Strahlen.
 Metal und GL identisch (`GIReflParams::land.y` / `uJitterScale`).
 
+### Nachtrag: der Cone-Ramp allein reichte nicht
+
+Rückmeldung nach dem obigen Fix: beim Bewegen sauber (wie Medium), beim
+**Stehenbleiben** aber sogar stärker verrauscht als vorher. Zwei echte Ursachen
+dahinter, die der Ramp nur sichtbarer gemacht hat:
+
+1. **Der breite Glossy-Blur wurde im Forward-Pfad nie gesampelt.** Quality 2
+   rechnet zwei Blur-Stufen: schmal (5-Tap) nach `m_giReflTex`, breit (3-Texel)
+   nach `m_giReflRoughTex`. Der DEFERRED-Composite lerpt beide per Pixel nach
+   G-Buffer-Roughness. Der Forward-Pfad hat keinen Composite — sein Scene-Shader
+   sampelt **eine** Textur, und das war immer die schmale. Der breite Blur wurde
+   also jeden Frame berechnet und weggeworfen; eine glossy Fläche bekam einen
+   einzigen gejitterten Strahl pro Pixel durch einen 5-Tap-Blur. Der Editor läuft
+   per Default forward — genau der Pfad, in dem es auffiel. Fix: ein kleiner
+   Fullscreen-Pass (`kSSRRoughMixFS`) backt denselben Lerp in die Textur, mit der
+   Roughness aus dem Reflexions-Prepass (`heGB1.b`, gleiche Halbauflösung). Kein
+   zusätzlicher Sampler-Slot — das Metal-Budget im Scene-Shader ist voll.
+2. **Die adaptive History deutete Jitter-Rauschen als Inhaltswechsel.**
+   `hEff = h * (1 - 0.75*smoothstep(0.2, 0.8, rel))` sollte eine EMA einbrechen
+   lassen, wenn sich der reflektierte INHALT ändert. Bei offenem Cone ist ein
+   großer Frame-zu-Frame-Luminanzsprung aber genau das Sampling-Rauschen — die
+   Bedingung bestraft also die Integration, die dieses Rauschen braucht, und ist
+   selbsterhaltend: verrauscht → Kollaps → verrauschter. Effektiv ~1.2 statt ~7
+   akkumulierte Samples. Der Kollaps blendet jetzt mit dem Cone aus (Spiegel:
+   volle Bewegt-Objekt-Ablehnung, glossy: vertraut seiner History), und das
+   Still-Gewicht steigt 0.85 → 0.94 (≈17 statt ≈7 effektive Samples).
+
+   **Der GL-Kernel löst dasselbe Problem sauberer** — mit einem 3×3-
+   Neighbourhood-Clamp (`kGiReflTemporalFS`), der beide Garantien behält statt
+   eine gegen die andere zu tauschen. Er kann das, weil seine Temporal ein
+   eigener Fullscreen-Pass über den rohen Trace ist; in Metal ist sie IN den
+   Trace-Kernel gefused, wo ein Thread nur sein eigenes Sample hat und ein
+   Threadgroup-Austausch eine Barriere bräuchte, die die Early-Outs dieses
+   Kernels unsicher machen. Den Pass aufzuspalten ist der echte Fix und lohnt
+   sich, falls glossy Reflexionen BEWEGTER Objekte je sichtbar nachziehen.
+
 **Ehrlichkeitshinweis zur Verifikation:** headless lässt sich das NICHT zeigen —
 der Dump rendert aus einer stehenden Kamera, und genau dort konvergiert die EMA
 ohnehin (gemessen: Quality 1 und 2 haben denselben Hochfrequenz-Gradienten in der

@@ -1492,7 +1492,51 @@ void main() {
     oSSR = vec4(conf > 1e-4 ? rgb / conf : vec3(0.0), conf);
 }
 )";
+
+// ─── Glossy roughness mix (forward path, quality High) ───────────────────────
+// The DEFERRED composite lerps the narrow and the wide blur per pixel by the
+// G-buffer roughness. The FORWARD path has no such composite — its scene shader
+// samples ONE reflection texture — so the same lerp is baked into that texture
+// here, using the roughness the reflection prepass already stores (heGB1.b, the
+// same half-res attribute target the trace itself reads). Without it a glossy
+// surface in the forward path got only the narrow 5-tap blur over a single
+// jittered sample per pixel, which is exactly the "High is noisier than Medium"
+// complaint: the wide blur was computed every frame and then never sampled.
+constexpr const char* kSSRRoughMixFS = R"(#version 450
+layout(location = 0) out vec4 oMix;
+layout(set = 0, binding = 19) uniform sampler2D heNarrow; // 5-tap blur (sharp)
+layout(set = 0, binding = 20) uniform sampler2D heWide;   // 3-texel blur (glossy)
+layout(set = 0, binding = 21) uniform sampler2D heAttr;   // rg oct normal, b roughness
+layout(std140, set = 0, binding = 23) uniform HeSSRBlur {
+    vec4 dir; // zw = 1 / target size (xy unused here — same UBO as the blur)
+} heBlur;
+void main() {
+    vec2 uv = gl_FragCoord.xy * heBlur.dir.zw;
+    float rough = clamp(texture(heAttr, uv).b, 0.0, 1.0);
+    // Same curve as the deferred composite's, against the same max-roughness
+    // cutoff (heBlur.dir.x carries it here) so both paths blur alike.
+    float t = smoothstep(0.0, max(heBlur.dir.x, 1e-3), rough);
+    oMix = mix(texture(heNarrow, uv), texture(heWide, uv), t);
+}
+)";
 } // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrRoughMix(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 3;
+    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(kSSRRoughMixFS, Stage::Fragment,
+            { { Stage::Fragment, 0, 23, 0 },     // HeSSRBlur UBO → fragment buffer 0
+              { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
+              { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
+              { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
+    else
+        out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
+    return m_ssrCache.emplace(key, std::move(out)).first->second;
+}
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend backend)
 {

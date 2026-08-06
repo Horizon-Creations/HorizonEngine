@@ -183,6 +183,10 @@ public:
     const Compiled& ssrTrace(Backend backend);
     const Compiled& ssrComposite(Backend backend);
     const Compiled& ssrBlur(Backend backend);
+    // Forward-path glossy mix: bakes the deferred composite's narrow/wide
+    // roughness lerp into the reflection texture (the forward scene shader
+    // samples only one). See kSSRRoughMixFS.
+    const Compiled& ssrRoughMix(Backend backend);
 
     // std140 layout of the blur shader's HeSSRBlur UBO (binding 23).
     struct SSRBlurUniforms

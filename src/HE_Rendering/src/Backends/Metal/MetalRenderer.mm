@@ -2116,7 +2116,27 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 					const float lc  = dot(sampleOut.rgb, float3(0.299, 0.587, 0.114));
 					const float lh  = dot(hist.rgb,      float3(0.299, 0.587, 0.114));
 					const float rel = abs(lh - lc) / (max(lh, lc) + 0.05);
-					const float hEff = h * (1.0 - 0.75 * smoothstep(0.2, 0.8, rel));
+					// The collapse exists for MOVING CONTENT under a still
+					// camera. But with the glossy cone open, a large frame-to-
+					// frame luminance difference IS the sampling noise —
+					// punishing it kills the very integration that noise needs,
+					// and it is self-sustaining (noisy → collapse → noisier).
+					// So the collapse fades out as the cone opens: a mirror
+					// (cone 0) keeps the full moving-object rejection, a glossy
+					// surface trusts its history and converges.
+					//
+					// The GL kernel solves the same problem properly, with a 3x3
+					// NEIGHBOURHOOD CLAMP (see kGiReflTemporalFS) — which keeps
+					// both guarantees instead of trading one for the other. It
+					// can: its temporal is a separate fullscreen pass over the
+					// raw trace, so neighbouring samples exist. Here the temporal
+					// is fused INTO the trace kernel, where each thread only has
+					// its own sample; a threadgroup exchange would need a barrier
+					// this kernel's early-outs make unsafe. Splitting the pass is
+					// the real fix and is worth doing if glossy reflections of
+					// MOVING objects ever smear noticeably.
+					const float collapse = 0.75 * (1.0 - P.land.y);
+					const float hEff = h * (1.0 - collapse * smoothstep(0.2, 0.8, rel));
 					resultOut = mix(sampleOut, hist, hEff);
 				}
 			}
@@ -2798,7 +2818,27 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 					const float lc  = dot(sampleOut.rgb, float3(0.299, 0.587, 0.114));
 					const float lh  = dot(hist.rgb,      float3(0.299, 0.587, 0.114));
 					const float rel = abs(lh - lc) / (max(lh, lc) + 0.05);
-					const float hEff = h * (1.0 - 0.75 * smoothstep(0.2, 0.8, rel));
+					// The collapse exists for MOVING CONTENT under a still
+					// camera. But with the glossy cone open, a large frame-to-
+					// frame luminance difference IS the sampling noise —
+					// punishing it kills the very integration that noise needs,
+					// and it is self-sustaining (noisy → collapse → noisier).
+					// So the collapse fades out as the cone opens: a mirror
+					// (cone 0) keeps the full moving-object rejection, a glossy
+					// surface trusts its history and converges.
+					//
+					// The GL kernel solves the same problem properly, with a 3x3
+					// NEIGHBOURHOOD CLAMP (see kGiReflTemporalFS) — which keeps
+					// both guarantees instead of trading one for the other. It
+					// can: its temporal is a separate fullscreen pass over the
+					// raw trace, so neighbouring samples exist. Here the temporal
+					// is fused INTO the trace kernel, where each thread only has
+					// its own sample; a threadgroup exchange would need a barrier
+					// this kernel's early-outs make unsafe. Splitting the pass is
+					// the real fix and is worth doing if glossy reflections of
+					// MOVING objects ever smear noticeably.
+					const float collapse = 0.75 * (1.0 - P.land.y);
+					const float hEff = h * (1.0 - collapse * smoothstep(0.2, 0.8, rel));
 					resultOut = mix(sampleOut, hist, hEff);
 				}
 			}
@@ -10723,6 +10763,7 @@ bool MetalRenderer::EnsureSSRPipelines()
 		const auto& ft = m_matShaderLib.ssrTrace(Backend::Metal);
 		const auto& fc = m_matShaderLib.ssrComposite(Backend::Metal);
 		const auto& fb = m_matShaderLib.ssrBlur(Backend::Metal);
+		const auto& fm = m_matShaderLib.ssrRoughMix(Backend::Metal);
 		if (!(v.ok && ft.ok && fc.ok && fb.ok))
 		{
 			HE_LOG_ERROR(RHI, "%s",
@@ -10769,6 +10810,26 @@ bool MetalRenderer::EnsureSSRPipelines()
 			bd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
 			id<MTLRenderPipelineState> bp = [device newRenderPipelineStateWithDescriptor:bd error:&err];
 			if (bp) m_ssrBlurPipeline = (void*)CFBridgingRetain(bp);
+
+			// Forward glossy mix — same fullscreen shape as the blur. OPTIONAL:
+			// a failure here costs the forward path its roughness lerp, nothing
+			// else, so it gets its own error object and never fails the build.
+			if (fm.ok)
+			{
+				NSError* mErr = nil;
+				id<MTLLibrary> mLib = [device newLibraryWithSource:
+					[NSString stringWithUTF8String:fm.source.c_str()] options:nil error:&mErr];
+				if (mLib)
+				{
+					MTLRenderPipelineDescriptor* md = [[MTLRenderPipelineDescriptor alloc] init];
+					md.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+					md.fragmentFunction = [mLib newFunctionWithName:@"main0"];
+					md.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+					id<MTLRenderPipelineState> mp =
+						[device newRenderPipelineStateWithDescriptor:md error:&mErr];
+					if (mp) m_ssrRoughMixPipeline = (void*)CFBridgingRetain(mp);
+				}
+			}
 		}
 		const bool ok = m_ssrTracePipeline && m_ssrCompositePipeline && m_ssrBlurPipeline;
 		if (!ok)
@@ -11320,7 +11381,11 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 				for (int r = 0; r < 4; ++r)
 					delta = std::max(delta, std::abs(viewProj[c][r] - m_giReflPrevViewProj[c][r]));
 			const bool moving = delta > 1e-5f;
-			hist = moving ? 0.55f : 0.85f;
+			// Still: 0.94 ≈ 17 effective samples instead of 0.85's ≈ 7 — that is
+			// what actually resolves a wide glossy cone. Safe because the
+			// receiver-position match already rejects disocclusion, and the
+			// camera is by definition not moving here.
+			hist = moving ? 0.55f : 0.94f;
 			// Ramp over ~8 frames of stillness; motion drops it immediately.
 			m_giReflJitterRamp = moving ? 0.0f : std::min(1.0f, m_giReflJitterRamp + 0.125f);
 			jitterScale = m_giReflJitterRamp;
@@ -11456,6 +11521,37 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			{
 				blurPass(m_giReflTex, m_giReflPingTex,  3.0f / static_cast<float>(tw), 0.0f);
 				blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, 3.0f / static_cast<float>(th));
+				// FORWARD path only: bake the narrow/wide roughness lerp into the
+				// texture the scene shader samples. The deferred composite does
+				// this per pixel itself — doing it here too would blur twice.
+				// Without it the wide blur above was computed every frame and
+				// then never sampled, so a glossy surface in the forward path
+				// showed ONE jittered ray per pixel through a 5-tap blur. Result
+				// lands in ping, which the blur chain is finished with.
+				if (!deferredIn && m_ssrRoughMixPipeline)
+				{
+					HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+					bu.dir[0] = m_giReflMaxRoughness; // lerp cutoff (see kSSRRoughMixFS)
+					bu.dir[1] = 0.0f;
+					bu.dir[2] = 1.0f / static_cast<float>(tw);
+					bu.dir[3] = 1.0f / static_cast<float>(th);
+					MTLRenderPassDescriptor* mp = [MTLRenderPassDescriptor renderPassDescriptor];
+					mp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_giReflPingTex;
+					mp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+					mp.colorAttachments[0].storeAction = MTLStoreActionStore;
+					id<MTLRenderCommandEncoder> menc = [cmdBuf renderCommandEncoderWithDescriptor:mp];
+					[menc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_ssrRoughMixPipeline];
+					[menc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+					[menc setFragmentTexture:(__bridge id<MTLTexture>)m_giReflTex      atIndex:0];
+					[menc setFragmentTexture:(__bridge id<MTLTexture>)m_giReflRoughTex atIndex:1];
+					[menc setFragmentTexture:(__bridge id<MTLTexture>)attrTex          atIndex:2];
+					for (int i = 0; i < 3; ++i)
+						[menc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:i];
+					[menc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+					[menc endEncoding];
+					++m_counters.draws;
+					m_giReflGlossyTex = m_giReflPingTex;
+				}
 			}
 		}
 	}
@@ -12156,8 +12252,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				if (m_giReflFrameActive)
 				{
+					m_giReflGlossyTex = nullptr;
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
-					m_fwdReflGiTex = m_giReflTex;
+					// Quality 2 hands back the roughness-lerped copy; the lower
+					// tiers (and a missing mix pipeline) keep the narrow blur.
+					m_fwdReflGiTex = m_giReflGlossyTex ? m_giReflGlossyTex : m_giReflTex;
 				}
 				EncodeForwardSSR((__bridge void*)cmdBuf, sceneW, sceneH);
 			}
