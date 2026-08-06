@@ -203,15 +203,28 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.loaded = true;
 	}
 
-	ImGui::SetCursorScreenPos(pos);
-	ImGui::BeginChild("##staticMeshEditorRoot", size, false);
+	// A REAL host window pinned to the tab area, not a bare BeginChild: with no
+	// window open, every ImGui call lands in the implicit "Debug" window — which
+	// has a title bar and is user-movable, so the whole tab appeared inside a
+	// draggable floating window. Same setup as ScriptEditorPanel.
+	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0.0f, 0.0f));
+	ImGui::Begin("##StaticMeshEditor", nullptr,
+		ImGuiWindowFlags_NoTitleBar         | ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove             | ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoScrollbar        | ImGuiWindowFlags_NoScrollWithMouse |
+		ImGuiWindowFlags_NoSavedSettings    | ImGuiWindowFlags_NoBringToFrontOnFocus |
+		ImGuiWindowFlags_NoDocking);
+	ImGui::PopStyleVar(2);
 
 	const StaticMeshAsset* mesh = ctx.contentManager
 		? ctx.contentManager->getStaticMesh(st.meshId) : nullptr;
 	if (!mesh)
 	{
 		ImGui::TextDisabled("Could not load '%s' as a static mesh.", st.name.c_str());
-		ImGui::EndChild();
+		ImGui::End();
 		return;
 	}
 	if (!st.statsDone) { st.stats = computeStats(*mesh); st.statsDone = true; }
@@ -305,7 +318,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	drawUvView(*mesh, st, ImGui::GetContentRegionAvail());
 	ImGui::EndChild();
 
-	ImGui::EndChild();
+	ImGui::End();
 }
 
 } // namespace StaticMeshEditorPanel

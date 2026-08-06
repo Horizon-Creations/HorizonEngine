@@ -570,8 +570,21 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.loaded = true;
 	}
 
-	ImGui::SetCursorScreenPos(pos);
-	ImGui::BeginChild("##audioEditorRoot", size, false);
+	// A REAL host window pinned to the tab area, not a bare BeginChild: with no
+	// window open, every ImGui call lands in the implicit "Debug" window — which
+	// has a title bar and is user-movable, so the whole tab appeared inside a
+	// draggable floating window. Same setup as ScriptEditorPanel.
+	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0.0f, 0.0f));
+	ImGui::Begin("##AudioEditor", nullptr,
+		ImGuiWindowFlags_NoTitleBar         | ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove             | ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoScrollbar        | ImGuiWindowFlags_NoScrollWithMouse |
+		ImGuiWindowFlags_NoSavedSettings    | ImGuiWindowFlags_NoBringToFrontOnFocus |
+		ImGuiWindowFlags_NoDocking);
+	ImGui::PopStyleVar(2);
 
 	const AudioAsset* clip = clipOf(ctx, st);
 	// A zero sample rate is as unusable as no samples at all — every time readout
@@ -583,7 +596,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			? "Could not decode '%s'. Only uncompressed WAV is supported "
 			  "(mp3/ogg/flac have no decoder linked in)."
 			: "Could not load '%s' as an audio clip.", st.name.c_str());
-		ImGui::EndChild();
+		ImGui::End();
 		return;
 	}
 
@@ -801,7 +814,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	}
 	ImGui::EndChild();
 
-	ImGui::EndChild();
+	ImGui::End();
 }
 
 } // namespace AudioEditorPanel

@@ -81,14 +81,27 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 {
 	State& st = stateFor(assetPath, ctx);
 
-	ImGui::SetCursorScreenPos(pos);
-	ImGui::BeginChild("##skelMeshEditorRoot", size, false);
+	// A REAL host window pinned to the tab area, not a bare BeginChild: with no
+	// window open, every ImGui call lands in the implicit "Debug" window — which
+	// has a title bar and is user-movable, so the whole tab appeared inside a
+	// draggable floating window. Same setup as ScriptEditorPanel.
+	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+	ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0.0f, 0.0f));
+	ImGui::Begin("##SkeletalMeshEditor", nullptr,
+		ImGuiWindowFlags_NoTitleBar         | ImGuiWindowFlags_NoResize |
+		ImGuiWindowFlags_NoMove             | ImGuiWindowFlags_NoCollapse |
+		ImGuiWindowFlags_NoScrollbar        | ImGuiWindowFlags_NoScrollWithMouse |
+		ImGuiWindowFlags_NoSavedSettings    | ImGuiWindowFlags_NoBringToFrontOnFocus |
+		ImGuiWindowFlags_NoDocking);
+	ImGui::PopStyleVar(2);
 
 	const SkeletalMeshAsset* mesh = ctx.contentManager ? ctx.contentManager->getSkeletalMesh(st.meshId) : nullptr;
 	if (!mesh)
 	{
 		ImGui::TextDisabled("Skeletal mesh not loaded.");
-		ImGui::EndChild();
+		ImGui::End();
 		return;
 	}
 
@@ -212,7 +225,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
 
 	ImGui::EndChild();
-	ImGui::EndChild();
+	ImGui::End();
 }
 
 } // namespace SkeletalMeshEditorPanel
