@@ -8,6 +8,7 @@ void RenderWorld::clear()
 	decals.clear();
 	uiObjects.clear();
 	particleBatches.clear();
+	landscapes.clear();
 	camera = CameraData{};
 	shadow = ShadowData{};
 	sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);

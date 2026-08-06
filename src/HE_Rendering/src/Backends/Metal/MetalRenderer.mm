@@ -1754,6 +1754,7 @@ struct GIReflParams {
 	float4 gridOrigin;      // xyz = probe-grid origin, w = spacing
 	float4 gridCounts;      // xyz = probes per axis, w = probesPerRow
 	float4 extra;           // x = glossy cone jitter on (quality 2), y = mesh data valid (true hit normals), z = SW instance count, w = max bounces (1-4)
+	float4 land;            // x = landscape count (painted-terrain table)
 };
 
 // P4 (HW only): tier-2 argument buffer of per-unique-BLAS mesh pointers —
@@ -1764,7 +1765,50 @@ struct GIMeshPtrs {
 	device const uint*  idx;
 };
 
+// Painted landscape (HE::GiLandscape) — see GiLandscape.h. Mirrored byte-for-byte
+// by MetalRenderer::GILandGpu.
+struct GILand {
+	float4x4 worldToLocal;
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+	float4   layer[4]; // per-layer folded colour (rgb)
+};
+
 constant int kGIProbeOctSize = 8; // must match MetalRenderer::kGIProbeOctSize
+
+// Albedo of a landscape hit, sampled at the PAINT rather than averaged over the
+// whole terrain. A landscape is a heightfield over an axis-aligned local rect
+// whose mesh UVs are linear in it, so the hit's UV comes straight out of the hit
+// POSITION — no per-vertex UV in the acceleration structure. Weights are read
+// with the same clamp+linear the rasterizer uses, so mirror and surface agree.
+// Returns false when this instance is not a landscape (caller keeps its flat
+// per-instance albedo).
+static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
+                              array<texture2d<float>, 4> weightTex,
+                              float3 hitPos, thread float3& albedoOut)
+{
+	if (li < 0 || li >= landCount || li >= 4) return false;
+	const device GILand& L = lands[li];
+	const int layers = int(L.cfg.w);
+	if (layers <= 0) return false;
+	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
+	// Local XZ → 0..1 across the terrain, then the terrain's own UV tiling —
+	// exactly TerrainMeshGenerator's mapping, which is what the mesh UVs carry.
+	const float2 uv = (float2(lp.x, lp.z) * L.cfg.xy + 0.5) * L.cfg.z;
+	constexpr sampler wsmp(coord::normalized, address::clamp_to_edge, filter::linear);
+	const float4 w = weightTex[li].sample(wsmp, uv);
+	float3 sum = float3(0.0);
+	float  wsum = 0.0;
+	for (int i = 0; i < layers && i < 4; ++i)
+	{
+		const float wi = w[i];
+		if (wi <= 0.0) continue;
+		sum  += L.layer[i].rgb * wi;
+		wsum += wi;
+	}
+	// Blank texel: the rasterizer's own 1e-4 floor falls back to layer 0.
+	albedoOut = (wsum > 1e-4) ? sum / wsum : L.layer[0].rgb;
+	return true;
+}
 
 // Same signed-octahedral mapping as kGIProbeMSL/kUnlitMSL (each MSL string is
 // its own compilation unit — copies are the established pattern here).
@@ -1857,7 +1901,10 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
                       const device float4* instanceColors        [[buffer(1)]],
                       constant GIReflParams& P                    [[buffer(2)]],
                       const device GIMeshPtrs* meshes             [[buffer(3)]],
-                      const device uint* instanceMesh             [[buffer(4)]])
+                      const device uint* instanceMesh             [[buffer(4)]],
+                      const device GILand* lands                  [[buffer(5)]],
+                      const device int* instanceLand              [[buffer(6)]],
+                      array<texture2d<float>, 4> landWeights      [[texture(9)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	// Nearest sampling: interpolated oct-encoded normals / depths at geometry
@@ -1930,10 +1977,19 @@ kernel void giReflRay(uint2 gid [[thread_position_in_grid]],
 			const uint   instId   = q.get_committed_instance_id();
 			const float4 alb4     = instanceColors[instId * 2];     // rgb albedo, a metallic
 			const float4 emi4     = instanceColors[instId * 2 + 1]; // rgb emissive, a roughness
-			const float3 albedo   = alb4.rgb;
+			float3       albedo   = alb4.rgb;
 			const float3 emissive = emi4.rgb;
 			const float  dist   = q.get_committed_distance();
 			const float3 hitPos = ro + rd * dist;
+			// Landscape hit: replace the flat per-instance tint with the paint at
+			// THIS point, or a red ridge on a green hillside mirrors as one
+			// averaged colour. Non-landscape hits leave `albedo` untouched.
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, instanceLand[instId], int(P.land.x),
+				                      landWeights, hitPos, painted))
+					albedo = painted;
+			}
 
 			// Hit normal: true interpolated vertex normal through the mesh-pointer
 			// argument buffer when available (P4); -rayDir fallback otherwise
@@ -2076,7 +2132,43 @@ using namespace metal;
 
 struct GiNode { float4 d0; float4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), d1.xyz bmax, d1.w triCount (int bits)
 struct GiTri  { float4 v0; float4 v1; float4 v2; };
-struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 offsets; }; // offsets.x nodeOffset, .y triOffset — must match GISwInstanceCPU
+struct GiInst { float4x4 invTransform; float4 baseColor; float4 emissive; int4 offsets; }; // offsets.x nodeOffset, .y triOffset, .z landscape index (-1 = none) — must match GISwInstanceCPU
+
+// Painted landscape — same contract as the HW kernel's GILand (GiLandscape.h);
+// each MSL string is its own compilation unit, so the pair is duplicated here
+// exactly like GIReflParams and the octahedral helpers are.
+struct GILand {
+	float4x4 worldToLocal;
+	float4   cfg;      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+	float4   layer[4];
+};
+
+// Albedo of a landscape hit sampled at the PAINT — see the HW kernel's copy for
+// why the hit POSITION is enough to recover the UV. false = not a landscape.
+static bool giLandscapeAlbedo(const device GILand* lands, int li, int landCount,
+                              array<texture2d<float>, 4> weightTex,
+                              float3 hitPos, thread float3& albedoOut)
+{
+	if (li < 0 || li >= landCount || li >= 4) return false;
+	const device GILand& L = lands[li];
+	const int layers = int(L.cfg.w);
+	if (layers <= 0) return false;
+	const float3 lp = (L.worldToLocal * float4(hitPos, 1.0)).xyz;
+	const float2 uv = (float2(lp.x, lp.z) * L.cfg.xy + 0.5) * L.cfg.z;
+	constexpr sampler wsmp(coord::normalized, address::clamp_to_edge, filter::linear);
+	const float4 w = weightTex[li].sample(wsmp, uv);
+	float3 sum = float3(0.0);
+	float  wsum = 0.0;
+	for (int i = 0; i < layers && i < 4; ++i)
+	{
+		const float wi = w[i];
+		if (wi <= 0.0) continue;
+		sum  += L.layer[i].rgb * wi;
+		wsum += wi;
+	}
+	albedoOut = (wsum > 1e-4) ? sum / wsum : L.layer[0].rgb;
+	return true;
+}
 
 static bool giTriHit(GiTri tri, float3 o, float3 d, float tMin, float tMax, thread float& tOut)
 {
@@ -2436,6 +2528,7 @@ struct GIReflParams {
 	float4 gridOrigin;
 	float4 gridCounts;
 	float4 extra;           // x = glossy jitter on, y = (HW-only, unused), z = instance count, w = max bounces
+	float4 land;            // x = landscape count (painted-terrain table)
 };
 
 // Closest hit that also reports WHICH triangle was hit (global index into the
@@ -2560,7 +2653,9 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
                         const device GiNode* nodes [[buffer(0)]],
                         const device GiTri*  tris  [[buffer(1)]],
                         const device GiInst* insts [[buffer(2)]],
-                        constant GIReflParams& P    [[buffer(3)]])
+                        constant GIReflParams& P    [[buffer(3)]],
+                        const device GILand* lands  [[buffer(4)]],
+                        array<texture2d<float>, 4> landWeights [[texture(9)]])
 {
 	if (float(gid.x) >= P.texSize.x || float(gid.y) >= P.texSize.y) return;
 	constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
@@ -2615,8 +2710,15 @@ kernel void giReflRaySw(uint2 gid [[thread_position_in_grid]],
 			}
 			const float4 alb4     = insts[hitInst].baseColor; // rgb albedo, a metallic
 			const float4 emi4     = insts[hitInst].emissive;  // rgb emissive, a roughness
-			const float3 albedo   = alb4.rgb;
+			float3       albedo   = alb4.rgb;
 			const float3 hitPos = ro + rd * dist;
+			// Landscape hit → the paint at THIS point, not the terrain-wide mean.
+			{
+				float3 painted;
+				if (giLandscapeAlbedo(lands, insts[hitInst].offsets.z, int(P.land.x),
+				                      landWeights, hitPos, painted))
+					albedo = painted;
+			}
 			// Geometric triangle normal, object → world via the row-vector product
 			// with the stored INVERSE transform ((M^-1)^T · n) — two-sided.
 			float3 hitN = -rd;
@@ -4538,9 +4640,10 @@ struct GIReflParamsCPU
 	glm::vec4 skyAmbient;   // rgb = flat ambient floor, w = history blend (0 = temporal off)
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
-	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count
+	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
+	glm::vec4 land;         // x = landscape count (RenderWorld::landscapes, capped at kGiMaxLandscapes)
 };
-static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 8 * 16, "must match the MSL GIReflParams layout");
+static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
 {
 	glm::mat4 prevViewProj;
@@ -4727,6 +4830,8 @@ void MetalRenderer::Shutdown()
 	if (m_giTlas)                { CFBridgingRelease(m_giTlas);                m_giTlas = nullptr; }
 	if (m_giInstanceBuffer)      { CFBridgingRelease(m_giInstanceBuffer);      m_giInstanceBuffer = nullptr; }
 	if (m_giInstanceColorBuffer) { CFBridgingRelease(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr; }
+	if (m_giLandBuf)         { CFBridgingRelease(m_giLandBuf);         m_giLandBuf         = nullptr; }
+	if (m_giInstanceLandBuf) { CFBridgingRelease(m_giInstanceLandBuf); m_giInstanceLandBuf = nullptr; }
 	m_giUniqueBlas.clear();
 	if (m_giGBufPipeline)           { CFBridgingRelease(m_giGBufPipeline);           m_giGBufPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
@@ -5582,6 +5687,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		inst.emissive     = glm::vec4(emissive, roughness); // w = roughness
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
+		inst.landIndex    = obj.landscapeIndex;             // paint sampling at the hit
 		instances.push_back(inst);
 	}
 	m_giSwInstanceCount = static_cast<int>(instances.size());
@@ -5614,6 +5720,49 @@ void MetalRenderer::EncodeGISwAccelBuild()
 	}
 }
 
+// ─── Painted-landscape table for the reflection kernels ──────────────────────
+// One entry per terrain the extractor found paintable (a layer-blend material
+// whose layers folded, plus a weightmap), plus that terrain's weightmap texture
+// for the kernel's texture array. Without this a landscape hit can only be one
+// flat colour for the whole terrain — a red ridge on a green hillside mirrors as
+// the average of the two, which is visibly not what the terrain looks like.
+// Rebuilt per frame: it is a handful of 144-byte entries, and the weightmap
+// TEXTURES come from the same UUID-keyed cache the raster path uses (uploaded
+// once, re-uploaded only when the paint changes).
+int MetalRenderer::BuildGILandscapeTable(std::vector<void*>& outWeightTex)
+{
+	outWeightTex.clear();
+	RetireGIObject(m_giLandBuf); m_giLandBuf = nullptr;
+	if (m_renderWorld.landscapes.empty() || !m_device) return 0;
+
+	std::vector<GILandGpu> gpu;
+	gpu.reserve(m_renderWorld.landscapes.size());
+	for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
+	{
+		if (static_cast<int>(gpu.size()) >= HE::kGiMaxLandscapes) break;
+		// No resident weightmap (still streaming, or unpainted) → skip the entry;
+		// those chunks keep their flat per-instance colour, which for an unpainted
+		// terrain is layer 0 and therefore already right.
+		void* wm = ResolveGraphTexture(ls.weightmapId, {});
+		if (!wm) continue;
+		GILandGpu g;
+		g.worldToLocal = ls.worldToLocal;
+		g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
+		                  static_cast<float>(ls.layerCount));
+		for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+		gpu.push_back(g);
+		outWeightTex.push_back(wm);
+	}
+	if (gpu.empty()) return 0;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLBuffer> buf = [device newBufferWithBytes:gpu.data()
+	                                        length:gpu.size() * sizeof(GILandGpu)
+	                                       options:MTLResourceStorageModeShared];
+	if (!buf) return 0;
+	m_giLandBuf = (void*)CFBridgingRetain(buf);
+	return static_cast<int>(gpu.size());
+}
+
 void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 {
 	// GI reflections reuse the acceleration structures without the probe/
@@ -5628,6 +5777,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		RetireGIObject(m_giTlas);              m_giTlas               = nullptr;
 		RetireGIObject(m_giInstanceBuffer);    m_giInstanceBuffer     = nullptr;
 		RetireGIObject(m_giInstanceColorBuffer); m_giInstanceColorBuffer = nullptr;
+		RetireGIObject(m_giLandBuf);           m_giLandBuf            = nullptr;
+		RetireGIObject(m_giInstanceLandBuf);   m_giInstanceLandBuf    = nullptr;
 		RetireGIObject(m_giMeshPtrBuf);        m_giMeshPtrBuf         = nullptr;
 		RetireGIObject(m_giInstanceMeshBuf);   m_giInstanceMeshBuf    = nullptr;
 		m_giMeshResources.clear();
@@ -5695,9 +5846,14 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		// Bounce tint + reflection shading: TWO float4 per instance
 		// (albedo, emissive) — see giInstanceShading.
 		std::vector<glm::vec4> instanceBaseColor;
+		// Parallel to the instance array: index into m_giLandBuf, -1 = not a
+		// landscape chunk. Kept OUT of instanceBaseColor so the hot 2-float4
+		// stride stays what it is.
+		std::vector<int32_t> instanceLandIndex;
 		instanceBlasIndex.reserve(m_renderWorld.objects.size());
 		instanceTransform.reserve(m_renderWorld.objects.size());
 		instanceBaseColor.reserve(m_renderWorld.objects.size() * 2);
+		instanceLandIndex.reserve(m_renderWorld.objects.size());
 
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
@@ -5735,6 +5891,7 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 			giInstanceShading(obj, m_contentManager, albedo, emissive, metallic, roughness);
 			instanceBaseColor.push_back(glm::vec4(albedo, metallic));
 			instanceBaseColor.push_back(glm::vec4(emissive, roughness));
+			instanceLandIndex.push_back(obj.landscapeIndex); // paint sampling at the hit
 		}
 		if (uniqueBlas.empty()) return;
 
@@ -5749,6 +5906,9 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		id<MTLBuffer> colorBuf = [device newBufferWithBytes:instanceBaseColor.data()
 		                                              length:sizeof(glm::vec4) * count * 2
 		                                             options:MTLResourceStorageModeShared];
+		id<MTLBuffer> landIdxBuf = [device newBufferWithBytes:instanceLandIndex.data()
+		                                               length:sizeof(int32_t) * count
+		                                              options:MTLResourceStorageModeShared];
 		for (NSUInteger i = 0; i < count; ++i)
 		{
 			instances[i].accelerationStructureIndex        = instanceBlasIndex[i];
@@ -5795,6 +5955,8 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		m_giTlas                = (void*)CFBridgingRetain(tlas);
 		m_giInstanceBuffer      = (void*)CFBridgingRetain(instanceBuf);
 		m_giInstanceColorBuffer = (void*)CFBridgingRetain(colorBuf);
+		RetireGIObject(m_giInstanceLandBuf);
+		m_giInstanceLandBuf     = landIdxBuf ? (void*)CFBridgingRetain(landIdxBuf) : nullptr;
 		// Cache the unique-BLAS set for EncodeGIShadowRays/EncodeGIProbeUpdate — every
 		// compute encoder that traces against m_giTlas must useResource: each of
 		// these too (same residency requirement as the build encoder above).
@@ -11147,6 +11309,12 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		rp.extra        = glm::vec4(jitter ? 1.0f : 0.0f, meshData ? 1.0f : 0.0f,
 		                            static_cast<float>(m_giSwInstanceCount),
 		                            static_cast<float>(m_giReflBounces));
+		// Painted landscapes: the table + one weightmap texture each, so a hit on
+		// a terrain reads the PAINT at that point instead of one averaged colour
+		// for the whole landscape (see GiLandscape.h).
+		std::vector<void*> landTex;
+		const int landCount = BuildGILandscapeTable(landTex);
+		rp.land         = glm::vec4(static_cast<float>(landCount), 0.0f, 0.0f, 0.0f);
 
 		const int curIdx  = m_giReflHistIdx;
 		const int prevIdx = 1 - curIdx;
@@ -11181,6 +11349,15 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceMeshBuf ? m_giInstanceMeshBuf
 			                                                            : m_giInstanceColorBuffer)
 			        offset:0 atIndex:4];
+			// Landscape table + per-instance index. Both are declared by the
+			// pipeline, so bind a harmless placeholder when there is no terrain —
+			// rp.land.x = 0 then keeps the kernel from ever dereferencing them.
+			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
+			                                                    : m_giInstanceColorBuffer)
+			        offset:0 atIndex:5];
+			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giInstanceLandBuf ? m_giInstanceLandBuf
+			                                                           : m_giInstanceColorBuffer)
+			        offset:0 atIndex:6];
 			// Every BLAS the TLAS references must be explicitly declared used — Metal
 			// does not auto-track residency through an acceleration structure. The
 			// mesh vertex/index buffers reached through the argument buffer need
@@ -11198,7 +11375,19 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwTriBuf      offset:0 atIndex:1];
 			[enc setBuffer:(__bridge id<MTLBuffer>)m_giSwInstanceBuf offset:0 atIndex:2];
 			[enc setBytes:&rp length:sizeof(rp) atIndex:3];
+			// SW instances carry their landscape index in offsets.z; the table
+			// itself binds here (placeholder when there is no terrain).
+			[enc setBuffer:(__bridge id<MTLBuffer>)(m_giLandBuf ? m_giLandBuf
+			                                                    : m_giSwInstanceBuf)
+			        offset:0 atIndex:4];
 		}
+		// Weightmap per landscape, slots 9..9+kGiMaxLandscapes-1. Unused slots
+		// take the 1x1 dummy: the pipeline declares the whole array, and an
+		// unbound texture in it is undefined behaviour even when never sampled.
+		for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
+			[enc setTexture:(__bridge id<MTLTexture>)(i < (int)landTex.size() && landTex[i]
+			                                          ? landTex[i] : m_dummyTexture)
+			        atIndex:9 + i];
 		const MTLSize tgSize  = MTLSizeMake(8, 8, 1);
 		const MTLSize tgCount = MTLSizeMake(static_cast<NSUInteger>((tw + 7) / 8),
 		                                    static_cast<NSUInteger>((th + 7) / 8), 1);

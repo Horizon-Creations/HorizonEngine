@@ -2874,11 +2874,17 @@ struct GiNode { vec4 d0; vec4 d1; }; // d0.xyz bmin, d0.w leftFirst (int bits), 
 struct GiTri  { vec4 v0; vec4 v1; vec4 v2; };
 // baseColor.a = metallic, emissive.a = roughness (HE::giInstanceSurface —
 // mirrors OpenGLRenderer::GIInstanceGpu; 112 bytes, std430 stride 112).
-struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset
+struct GiInst { mat4 invTransform; vec4 baseColor; vec4 emissive; ivec4 offsets; }; // offsets.x = nodeOffset, .y = triOffset, .z = landscape index (-1 = none)
+// Painted landscape — HE::GiLandscape / GILandGpu. std430 keeps the mat4 and the
+// vec4s naturally aligned, so the CPU struct maps 1:1.
+struct GiLand { mat4 worldToLocal; vec4 cfg; vec4 layer[4]; }; // cfg: xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
 layout(std430, binding = 0) readonly buffer GiNodes { GiNode giNodes[]; };
 layout(std430, binding = 1) readonly buffer GiTris  { GiTri  giTris[];  };
 layout(std430, binding = 2) readonly buffer GiInsts { GiInst giInsts[]; };
+layout(std430, binding = 3) readonly buffer GiLands { GiLand giLands[]; };
 uniform int uGiInstanceCount;
+uniform int uGiLandCount;              // 0 = no painted terrain in this scene
+uniform sampler2D uLandWeights[4];     // one per landscape, in giLands order
 
 // Möller-Trumbore, both faces — mirrors GiBvh.cpp's triHit().
 bool giTriHit(GiTri tri, vec3 o, vec3 d, float tMin, float tMax, out float tOut)
@@ -3540,6 +3546,32 @@ void main()
 	vec3 hitPos = origin + R * dist;
 	vec3 hitN   = giHitNormal(hitInst, tri, R);
 	vec3 albedo = giInsts[hitInst].baseColor.rgb;
+	// Landscape hit: the paint at THIS point instead of one flat colour for the
+	// whole terrain. A landscape is a heightfield over an axis-aligned local
+	// rect whose mesh UVs are linear in it, so the hit POSITION recovers the UV
+	// — no per-vertex UV in the BVH. Mirrors the Metal kernels (GiLandscape.h).
+	int li = giInsts[hitInst].offsets.z;
+	if (li >= 0 && li < uGiLandCount && li < 4 && int(giLands[li].cfg.w) > 0)
+	{
+		vec3 lp = (giLands[li].worldToLocal * vec4(hitPos, 1.0)).xyz;
+		vec2 luv = (vec2(lp.x, lp.z) * giLands[li].cfg.xy + 0.5) * giLands[li].cfg.z;
+		// Dynamic indexing of a sampler array is not allowed below GL 4.0 rules
+		// for non-uniform indices, so branch on the (uniform-per-instance) index.
+		vec4 lw = (li == 0) ? texture(uLandWeights[0], luv)
+		        : (li == 1) ? texture(uLandWeights[1], luv)
+		        : (li == 2) ? texture(uLandWeights[2], luv)
+		                    : texture(uLandWeights[3], luv);
+		vec3 lsum = vec3(0.0);
+		float wsum = 0.0;
+		int layers = int(giLands[li].cfg.w);
+		for (int k = 0; k < layers && k < 4; ++k)
+		{
+			if (lw[k] <= 0.0) continue;
+			lsum += giLands[li].layer[k].rgb * lw[k];
+			wsum += lw[k];
+		}
+		albedo = (wsum > 1e-4) ? lsum / wsum : giLands[li].layer[0].rgb;
+	}
 
 	// ── Hit shading: one bounce, then the probe field ────────────────────────
 	// Emissive first (a glowing object is visible in a mirror even unlit); the
@@ -5297,10 +5329,42 @@ void OpenGLRenderer::UpdateGIAccel()
 		inst.emissive     = glm::vec4(surf.emissive, surf.roughness);
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
+		inst.landIndex    = obj.landscapeIndex;   // paint sampling at the hit
 		m_giInstancesCpu.push_back(inst);
 	}
 	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
 	if (m_giInstanceCount == 0) return;
+
+	// ── Painted-landscape table ──────────────────────────────────────────────
+	// One entry (+ its weightmap texture) per terrain the extractor found
+	// paintable, so a landscape hit reads the paint instead of one flat colour
+	// for the whole terrain. Same contract and cap as the Metal path.
+	{
+		std::vector<GILandGpu> lands;
+		m_giLandWeightTex.clear();
+		for (const HE::GiLandscape& ls : m_renderWorld.landscapes)
+		{
+			if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
+			const unsigned int wm = ResolveGraphTexture(ls.weightmapId, {});
+			if (!wm) continue;   // not resident yet → keep the flat colour
+			GILandGpu g;
+			g.worldToLocal = ls.worldToLocal;
+			g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling,
+			                  static_cast<float>(ls.layerCount));
+			for (int i = 0; i < 4; ++i) g.layer[i] = ls.layerColor[i];
+			lands.push_back(g);
+			m_giLandWeightTex.push_back(wm);
+		}
+		m_giLandCount = static_cast<int>(lands.size());
+		if (!m_giLandSSBO) glGenBuffers(1, &m_giLandSSBO);
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giLandSSBO);
+		// Never size 0: an empty SSBO binding is a validation error on some
+		// drivers, and uGiLandCount = 0 already gates every read.
+		const GILandGpu dummy{};
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(std::max<size_t>(lands.size(), 1) * sizeof(GILandGpu)),
+		             lands.empty() ? &dummy : lands.data(), GL_DYNAMIC_DRAW);
+	}
 
 	// SSBO uploads: nodes/tris only when a new BLAS was appended, instances
 	// every frame (transforms move). GL_SHADER_STORAGE_BUFFER is a 4.3 enum but
@@ -5332,6 +5396,9 @@ void OpenGLRenderer::DestroyGIAccel()
 	if (m_giNodeSSBO)     { glDeleteBuffers(1, &m_giNodeSSBO);     m_giNodeSSBO = 0; }
 	if (m_giTriSSBO)      { glDeleteBuffers(1, &m_giTriSSBO);      m_giTriSSBO = 0; }
 	if (m_giInstanceSSBO) { glDeleteBuffers(1, &m_giInstanceSSBO); m_giInstanceSSBO = 0; }
+	if (m_giLandSSBO)     { glDeleteBuffers(1, &m_giLandSSBO);     m_giLandSSBO     = 0; }
+	m_giLandWeightTex.clear();
+	m_giLandCount = 0;
 	m_giBlasCache.clear();
 	m_giNodesCpu.clear();
 	m_giTrisCpu.clear();
@@ -5864,6 +5931,18 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		glUniform4fv(loc("uLightDirCos"),    lights.count, glm::value_ptr(lights.dirCos[0]));
 	}
 	glUniform1i(loc("uGiInstanceCount"), m_giInstanceCount);
+	// Painted landscapes: table + one weightmap each (units 5..8). Unused units
+	// take the black dummy; uGiLandCount gates the kernel, which never samples
+	// a slot it was not given.
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_giLandSSBO);
+	glUniform1i(loc("uGiLandCount"), m_giLandCount);
+	for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
+	{
+		const std::string nm = "uLandWeights[" + std::to_string(i) + "]";
+		bindTex(GL_TEXTURE5 + i, nm.c_str(),
+		        i < static_cast<int>(m_giLandWeightTex.size()) ? m_giLandWeightTex[i] : m_blackTex,
+		        5 + i);
+	}
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
 

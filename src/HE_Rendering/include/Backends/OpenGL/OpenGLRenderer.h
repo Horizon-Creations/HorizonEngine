@@ -761,8 +761,21 @@ private:
 		glm::mat4 invTransform{1.0f};   // world → object (rays enter BLAS space)
 		glm::vec4 baseColor{1.0f};      // rgb = flat albedo (probe bounce tint), a = metallic
 		glm::vec4 emissive{0.0f};       // rgb = emissive (reflections only), a = roughness
-		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+		// landIndex → m_giLandSSBO: a terrain chunk's hit is coloured from the
+		// PAINT at the hit point, not from this flat baseColor (GiLandscape.h).
+		int32_t   nodeOffset = 0, triOffset = 0, landIndex = -1, pad1 = 0;
 	};
+	// GPU mirror of HE::GiLandscape — must match the kernel's GiLand (std430).
+	struct GILandGpu
+	{
+		glm::mat4 worldToLocal{1.0f};
+		glm::vec4 cfg{0.0f};      // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+		glm::vec4 layer[4]{};     // per-layer folded colour (rgb)
+	};
+	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the GLSL GiLand layout");
+	unsigned int m_giLandSSBO = 0;
+	int          m_giLandCount = 0;
+	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order
 	GIBlasRange  BuildGIBlas(const HE::UUID& meshId); // CPU build from ContentManager data
 	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGIAccel();

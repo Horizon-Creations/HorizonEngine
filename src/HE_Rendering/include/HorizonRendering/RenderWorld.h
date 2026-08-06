@@ -1,6 +1,7 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
+#include "GiLandscape.h"
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
@@ -143,6 +144,10 @@ public:
     std::vector<DecalData>           decals;
     std::vector<UIRenderObject>      uiObjects;
     std::vector<ParticleBatch>       particleBatches;
+    // Painted landscapes, referenced by RenderObject::landscapeIndex. Only the GI
+    // reflection kernels read these (to sample the paint per ray hit) — see
+    // GiLandscape.h. Empty in scenes without a terrain.
+    std::vector<HE::GiLandscape>     landscapes;
     CameraData                camera;
     ShadowData                shadow;
 

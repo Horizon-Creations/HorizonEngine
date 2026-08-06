@@ -795,8 +795,24 @@ private:
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
 		glm::vec4 emissive{0.0f}; // rgb — reflected emissive surfaces keep their glow
-		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+		// landIndex → m_giLandBuf: a terrain chunk's hit is coloured from the
+		// PAINT at the hit point, not from this flat baseColor (GiLandscape.h).
+		int32_t   nodeOffset = 0, triOffset = 0, landIndex = -1, pad1 = 0;
 	};
+	// GPU mirror of HE::GiLandscape — must match kGIReflMSL/kGISWMSL's GILand.
+	struct GILandGpu
+	{
+		glm::mat4 worldToLocal{1.0f};
+		glm::vec4 cfg{0.0f};       // xy = 1/(sizeX,sizeZ), z = uvTiling, w = layer count
+		glm::vec4 layer[4]{};      // per-layer folded colour (rgb)
+	};
+	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the MSL GILand layout");
+	void* m_giLandBuf         = nullptr; // id<MTLBuffer> (retained), rebuilt per frame
+	void* m_giInstanceLandBuf = nullptr; // id<MTLBuffer> (retained), HW per-instance index
+	// Packs RenderWorld::landscapes into m_giLandBuf and returns how many made it
+	// (capped at HE::kGiMaxLandscapes); `outWeightTex` receives each one's
+	// weightmap texture in the same order, for the kernel's texture array.
+	int BuildGILandscapeTable(std::vector<void*>& outWeightTex);
 	std::unordered_map<HE::UUID, GISwBlasRange> m_giSwBlasCache;
 	std::vector<HE::GiBvhNode>     m_giSwNodesCpu;
 	std::vector<HE::GiBvhTriangle> m_giSwTrisCpu;

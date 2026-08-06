@@ -410,12 +410,27 @@ heißt im Fold: Default behalten → **weiß**.
    jetzt `layerColor[4]` + `layerCount` (→ `MaterialAsset::approxLayerColor/
    approxLayerCount`, MTRL-Tail angehängt, Packer re-foldet mit). `baseColor`
    bleibt als paint-agnostischer Fallback der Layer-Durchschnitt.
-3. **Der Hit blendet mit der PAINT des Terrains.** `TerrainComponent::
-   avgLayerWeights` = Mittel der Weightmap über das ganze Terrain, einmal pro
-   **Paint** berechnet (nicht pro Frame), via `RenderObject::
-   landscapeLayerWeights` bis in `HE::giInstanceSurface`. Ein grün gemaltes
-   Landscape spiegelt grün, ein rot gemaltes rot — der Durchschnitt aller Layer
-   wäre in beiden Fällen dasselbe Orange gewesen.
+3. **Der Hit sampelt die Paint PRO TEXEL.** Erster Anlauf war ein Mittel der
+   Weightmap über das ganze Terrain (`TerrainComponent::avgLayerWeights`, einmal
+   pro Paint berechnet) — das machte aus „weiß" zwar „die Farbe des Landscapes",
+   aber eben **eine** Farbe: ein roter Streifen auf grünem Hang spiegelte als
+   Mischton. Der Mittelwert bleibt als Fallback (DDGI-Probe-Bounce, Landscapes
+   jenseits des Kernel-Caps), die Reflexion sampelt jetzt echt.
+
+   Möglich ist das, weil ein Landscape die **einzige** Fläche ist, deren
+   fehlende UV sich rekonstruieren lässt: Heightfield über einem achsparallelen
+   lokalen XZ-Rechteck, und `TerrainMeshGenerator` schreibt GLOBALE (nicht
+   per-Chunk) UVs — die Welt-Trefferposition liefert die UV also exakt. Keine
+   Vertex-UVs in der Beschleunigungsstruktur, kein Vertex-Format-Umbau, und in
+   allen drei Kerneln (Metal HW, Metal SW-BVH, GL 4.3) identisch.
+
+   `HE::GiLandscape` (`RenderWorld::landscapes`, gefüllt vom Extractor) trägt
+   `worldToLocal` + Größe + die vier Layer-Farben; `RenderObject::
+   landscapeIndex` zeigt vom Chunk darauf. Der Kernel rechnet Treffer → lokal →
+   UV, sampelt die Weightmap-Textur (dieselbe, die der Rasterizer bindet, mit
+   demselben clamp+linear) und blendet die Layer-Farben. Cap
+   `HE::kGiMaxLandscapes = 4` (eine Textur-Bindung pro Landscape); darüber
+   greift der flache Mittelwert.
 
 Nebenbei: Metals `giInstanceShading` war eine handgepflegte Zweitkopie derselben
 Auflösung (der Header warnte davor) und ist jetzt ein dünner Adapter über
@@ -427,13 +442,23 @@ Layer-Blend sind dort schon drin. SSR kann die Materialfarbe strukturell nicht
 verlieren; sein Ausfallmodus ist ein anderer (kein Screenspace-Treffer → Sky-
 Cubemap-Fallback).
 
-**Witness:** `HE_DUMP_GIREFLLANDSCAPE=1` — bemaltes Landscape (Layer 0 = grün ×
-FBM, Layer 1 = rot) mit zwei Spiegeln: einem kamerazugewandten (nur die
-Ray-Reflexion kann ihn beantworten, SSRs Facing-Gate verwirft solche Strahlen
-per Konstruktion) und einem um 55° gegierten (dessen Strahlen laufen quer durchs
-Bild → SSR trifft). `=2` malt stattdessen den roten Layer über alles; der
-Spiegel muss mitgehen — das ist der Beweis, dass die Paint gelesen wird und
-nicht ein fester Layer. Verifiziert auf Metal (macOS, `scripts/he_shot.py`).
+**Witness:** `HE_DUMP_GIREFLLANDSCAPE=1` — Landscape mit Layer 0 = grün × FBM
+überall und Layer 1 = rot als **Band** quer darüber, dazu zwei Spiegel: ein
+kamerazugewandter (nur die Ray-Reflexion kann ihn beantworten, SSRs Facing-Gate
+verwirft solche Strahlen per Konstruktion) und ein um 55° gegierter (dessen
+Strahlen laufen quer durchs Bild → SSR trifft). Der Spiegel muss das Band an
+der richtigen STELLE zeigen; ein einfarbiger Spiegel — grün oder gemischt — ist
+die Regression. `=2` flutet stattdessen den roten Layer über alles.
+Verifiziert auf Metal (macOS, `scripts/he_shot.py`); der GL-Kernel ist wie beim
+Port selbst blind geschrieben und offline mit `glslangValidator` über
+`"#version 430 core" + kGiTraversalGLSL + kGiReflCS` geprüft (ebenso Probe und
+Shadow, die sich denselben Traversal-Block teilen).
+
+**Stolperstein beim Bauen, fürs nächste Mal:** `RenderWorld::clear()` räumte die
+neue `landscapes`-Liste nicht mit auf. Die wuchs also pro Frame, die Indizes der
+Chunks liefen über `kGiMaxLandscapes` hinaus, der Kernel verwarf sie stillschweigend
+— und der Spiegel sah exakt so aus wie vor dem Fix. Jedes neue `RenderWorld`-Feld
+gehört in `clear()`.
 
 **Offen (gleiche Klasse, nicht von diesem Fix abgedeckt):** Ein `Texture
 Sample` auf der BaseColor faltet weiterhin nicht — ein texturiertes Material

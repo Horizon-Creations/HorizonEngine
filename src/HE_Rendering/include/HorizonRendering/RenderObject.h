@@ -61,11 +61,16 @@ struct RenderObject {
     HE::UUID     weightmapTextureId;
     // Mean of that weightmap over the whole landscape (TerrainComponent::
     // avgLayerWeights). The rasterizer samples the real texel and never needs
-    // this; the GI ray kernels shade a hit per INSTANCE with no texel at all, so
-    // they blend the material's per-layer colours by this mean instead of
-    // reflecting one arbitrary layer. { 1, 0, 0, 0 } (= layer 0, the shader's
+    // this; a consumer that shades per INSTANCE with no texel at all (the DDGI
+    // probe bounce) blends the material's per-layer colours by this mean instead
+    // of reflecting one arbitrary layer. { 1, 0, 0, 0 } (= layer 0, the shader's
     // unpainted default) for everything that is not a landscape chunk.
     glm::vec4    landscapeLayerWeights = { 1.0f, 0.0f, 0.0f, 0.0f };
+    // Index into RenderWorld::landscapes, or -1. Set on terrain chunks only: it
+    // is what lets the GI REFLECTION kernels reconstruct the hit's UV and sample
+    // the paint per texel, instead of settling for the mean above (a mirrored
+    // hillside would otherwise be one flat colour). See GiLandscape.h.
+    int32_t      landscapeIndex = -1;
 };
 
 // Skinned renderable: same as RenderObject but carries bone matrices for GPU skinning.

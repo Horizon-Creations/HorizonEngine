@@ -27,6 +27,7 @@
 #include <glm/common.hpp>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 // extract() is split into one free function per phase (the banners this file used
 // to carry inline). The phases run in the order extract() calls them and each one
@@ -143,7 +144,41 @@ namespace
 			std::vector<float> paramOverride; // merged HeParams block, or empty
 			HE::UUID  weightmapId;            // landscape layer weights (chunks only)
 			glm::vec4 avgLayerWeights{ 1.0f, 0.0f, 0.0f, 0.0f }; // their terrain-wide mean
+			int32_t   landscapeIndex = -1;    // → RenderWorld::landscapes
 		};
+
+		// ── Landscape table (GI reflection paint sampling) ───────────────────
+		// One entry per terrain, built BEFORE the mesh loop so every chunk can
+		// point at its own. The layer colours come from the LANDSCAPE entity's
+		// material (TerrainSystem keeps the chunks in sync with it), folded on
+		// the CPU into MaterialAsset::approxLayerColor. See GiLandscape.h for
+		// why a landscape — and only a landscape — can be sampled per texel.
+		std::unordered_map<uint32_t, int32_t> landscapeOf; // terrain entity → index
+		for (auto [te, ttf, tc] : reg.view<TransformComponent, TerrainComponent>().each())
+		{
+			HE::GiLandscape ls;
+			ls.worldToLocal = glm::inverse(ttf.worldMatrix);
+			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
+			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+			ls.weightmapId  = tc.weightmapTextureId;
+			if (contentManager)
+				if (const auto* lmat = reg.try_get<MaterialComponent>(te))
+					if (const MaterialAsset* ma = contentManager->getMaterial(lmat->materialAssetId))
+					{
+						ls.layerCount = std::min(ma->approxLayerCount, 4);
+						for (int i = 0; i < ls.layerCount; ++i)
+							ls.layerColor[i] = { ma->approxLayerColor[i][0], ma->approxLayerColor[i][1],
+							                     ma->approxLayerColor[i][2], 0.0f };
+					}
+			// No layer split (plain material, or a BaseColor the fold could not
+			// reach) → nothing to blend per texel; the flat colour already says
+			// everything this landscape can say.
+			if (ls.layerCount <= 0 || ls.weightmapId == HE::UUID{}) continue;
+			landscapeOf.emplace(static_cast<uint32_t>(te),
+			                    static_cast<int32_t>(out.landscapes.size()));
+			out.landscapes.push_back(ls);
+		}
+
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		std::vector<EntityData> items;
 		items.reserve(meshView.size_hint());
@@ -185,9 +220,12 @@ namespace
 					{
 						d.weightmapId = pt->weightmapTextureId;
 						// Same source, for the consumers that cannot sample a texel
-						// (GI hits shade per instance) — see RenderObject.
+						// (the DDGI probe bounce) — see RenderObject.
 						d.avgLayerWeights = { pt->avgLayerWeights[0], pt->avgLayerWeights[1],
 						                      pt->avgLayerWeights[2], pt->avgLayerWeights[3] };
+						if (auto it = landscapeOf.find(static_cast<uint32_t>(chunk->terrain));
+						    it != landscapeOf.end())
+							d.landscapeIndex = it->second;
 					}
 			d.entId  = static_cast<uint32_t>(e);
 			d.lod    = mesh.lodBias;
@@ -229,6 +267,7 @@ namespace
 			obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
+			obj.landscapeIndex     = d.landscapeIndex;     // → RenderWorld::landscapes
 		});
 	}
 

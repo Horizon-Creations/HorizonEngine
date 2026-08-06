@@ -2848,15 +2848,18 @@ void EditorApplication::dumpFrameHeadless()
 
 	// ── Landscape-in-a-mirror witness (HE_DUMP_GIREFLLANDSCAPE=1) ────────────
 	// A painted landscape with a Landscape Layer Blend material, and an upright
-	// mirror standing on it: the mirror's lower half must show the terrain in
-	// its PAINTED colour. A GI hit shades per instance with no texel to sample,
-	// so a landscape used to reflect plain white — the layer-blend pin folds to
-	// nothing, and the noise a real terrain material multiplies in whitened even
-	// the layers. Here layer 0 is green × FBM and layer 1 is red, painted
-	// green-dominant: a red or white mirror is the regression.
-	// HE_DUMP_GIREFLLANDSCAPE=2 paints the RED layer over everything instead —
-	// the mirror must follow, which is what proves the blend reads the terrain's
-	// own paint rather than a fixed layer.
+	// mirror standing on it. A GI hit shades per instance with no texel to
+	// sample, so a landscape first reflected plain white (the layer-blend pin
+	// folded to nothing, and the FBM a real terrain material multiplies in
+	// whitened even the layers), and then — once the layers folded — ONE colour
+	// for the whole terrain, which flattens paint that varies across it.
+	//
+	// So the paint here deliberately varies: layer 0 is green × FBM everywhere,
+	// layer 1 is red in a BAND across the middle. The mirror must show green
+	// with a red band through it, at the same place the terrain has it. A
+	// uniformly green (or uniformly orange) mirror is the regression.
+	// HE_DUMP_GIREFLLANDSCAPE=2 floods the red layer over everything instead —
+	// the whole mirror must follow.
 	if (const char* lw = std::getenv("HE_DUMP_GIREFLLANDSCAPE"); lw && *lw && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -2904,6 +2907,11 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainPaint::ensureWeightmap(ltc);       // every texel on layer 0 (grass)
 		if (paintRed)
 			TerrainPaint::paint(ltc, 0.0f, 0.0f, /*Clay*/1, 200.0f, 1.0f, 1.0f);
+		else
+			// A band, not a disc: a straight edge in the mirror is unmistakable,
+			// and its POSITION is what proves the sample follows the hit point.
+			for (float z = -60.0f; z <= 60.0f; z += 3.0f)
+				TerrainPaint::paint(ltc, 0.0f, z, /*Clay*/1, 9.0f, 2.0f, 1.0f);
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 
