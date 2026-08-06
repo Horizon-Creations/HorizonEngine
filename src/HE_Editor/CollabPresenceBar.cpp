@@ -11,6 +11,8 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -129,6 +131,29 @@ namespace
 	// the same visual weight, with a floor that keeps it from vanishing entirely.
 	float ringWidthFor(float size) { return std::max(2.0f, size * 0.12f); }
 
+	// The fallback initial, sized from the FACE it sits in rather than from the
+	// UI font: the footer face is 18 px and the UI font is not, so drawn at full
+	// size the glyph overflows the little circle and its centring is at the
+	// mercy of whatever font scale the user picked. Centring needs a second
+	// correction on top: CalcTextSizeA's height is the full line box, and a
+	// capital only fills the ascent — centring the box leaves the letter riding
+	// high, so it is nudged down by a whisker of the size to centre the LETTER.
+	void drawInitial(ImDrawList* dl, const ImVec2& centre, float faceSize,
+	                 const std::string& name, ImU32 col)
+	{
+		const char initial[2] = {
+			name.empty() ? '?'
+			             : static_cast<char>(std::toupper(
+			                   static_cast<unsigned char>(name[0]))), '\0' };
+		ImFont*      font = ImGui::GetFont();
+		const float  fs   = faceSize * 0.58f;
+		const ImVec2 ts   = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, initial);
+		dl->AddText(font, fs,
+		            ImVec2(std::floor(centre.x - ts.x * 0.5f),
+		                   std::floor(centre.y - ts.y * 0.5f + fs * 0.06f)),
+		            col, initial);
+	}
+
 	// A round portrait inside a ring in the participant's colour — the SAME colour
 	// as their camera marker in the viewport, their selection highlight and their
 	// lock badges. That is the whole point of the ring: it is the thing that says
@@ -167,10 +192,8 @@ namespace
 			// to tell three people apart at 18 pixels.
 			dl->AddCircleFilled(centre, inner, participantColorU32(ctx, id, 0.55f * alpha), 24);
 
-			const char  initial[2] = { name.empty() ? '?' : name[0], '\0' };
-			const ImVec2 ts = ImGui::CalcTextSize(initial);
-			dl->AddText(ImVec2(centre.x - ts.x * 0.5f, centre.y - ts.y * 0.5f),
-			            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), initial);
+			drawInitial(dl, centre, size, name,
+			            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)));
 		}
 
 		// Stroked at the mid-line of the band it should occupy, so the ring covers
@@ -624,9 +647,7 @@ void DrawViewportMarkers(AppContext& ctx, const glm::mat4& view, const glm::mat4
 		else
 		{
 			dl->AddCircleFilled(centre, inner, colSoft, 28);
-			const char   initial[2] = { p.name.empty() ? '?' : p.name[0], '\0' };
-			const ImVec2 ts = ImGui::CalcTextSize(initial);
-			dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), IM_COL32_WHITE, initial);
+			drawInitial(dl, centre, kFace, p.name, IM_COL32_WHITE);
 		}
 		dl->AddCircle(centre, radius - ring * 0.5f, col, 28, ring);
 
