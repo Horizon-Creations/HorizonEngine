@@ -145,13 +145,28 @@ namespace
 			name.empty() ? '?'
 			             : static_cast<char>(std::toupper(
 			                   static_cast<unsigned char>(name[0]))), '\0' };
-		ImFont*      font = ImGui::GetFont();
-		const float  fs   = faceSize * 0.58f;
-		const ImVec2 ts   = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, initial);
-		dl->AddText(font, fs,
-		            ImVec2(std::floor(centre.x - ts.x * 0.5f),
-		                   std::floor(centre.y - ts.y * 0.5f + fs * 0.06f)),
-		            col, initial);
+		ImFont*     font = ImGui::GetFont();
+		const float fs   = faceSize * 0.58f;
+
+		// Centred on the glyph's actual ink, not on its line box. CalcTextSize
+		// measures the full line — ascent room the letter may not use, descent
+		// room a capital never uses — so centring that box parks the letter off
+		// centre by however the font distributes its slack, and any constant
+		// nudge is right for exactly one font. The atlas knows where the pixels
+		// really are (X0..X1, Y0..Y1, relative to the pen at top-left); place
+		// the pen so THAT box lands on the centre.
+		// This ImGui bakes fonts per size, so the metrics are asked for at
+		// exactly the size the glyph will be drawn at — no rescaling involved.
+		ImFontBaked* baked = font->GetFontBaked(fs);
+		const ImFontGlyph* g = baked ? baked->FindGlyph(
+			static_cast<ImWchar>(static_cast<unsigned char>(initial[0]))) : nullptr;
+		if (g)
+		{
+			dl->AddText(font, fs,
+			            ImVec2(std::floor(centre.x - (g->X0 + g->X1) * 0.5f),
+			                   std::floor(centre.y - (g->Y0 + g->Y1) * 0.5f)),
+			            col, initial);
+		}
 	}
 
 	// A round portrait inside a ring in the participant's colour — the SAME colour

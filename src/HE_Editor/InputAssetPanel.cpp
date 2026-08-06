@@ -3,7 +3,8 @@
 #include <cstdint>
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
-#include "EditorPanelState.h"     // shared per-tab state map
+#include "EditorPanelState.h"
+#include "EditorToolbar.h"       // shared toolbar strip     // shared per-tab state map
 #include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -13,6 +14,7 @@
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <SDL3/SDL.h>
+#include <cfloat>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -132,22 +134,22 @@ void helpMarker(const char* desc)
 	}
 }
 
-// One key-name field: a "<label> [text box] [Bind]" row. The text box still
-// accepts free-typed SDL scancode names (and gets a red outline + tooltip if
-// the typed name doesn't resolve), but "Bind" lets the user just press the
-// physical key instead of having to know its exact name.
+// One key binding as TWO table cells — the name field in the current column,
+// the Bind button in the next — so every field and every button in a section
+// lines up on the same two rails instead of each row finding its own width.
+// The field stretches to its column; the old fixed 100 px is what made the
+// whole panel read as a cramped heap.
 //
-// `capturedName`/`captureCancelled` are this frame's poll result (computed
-// once per render() call, see the call site) — applied here only if this
-// field is the one s_capture is currently pointed at.
-void keyBindField(const char* label, std::string& value, bool& dirty,
-                   const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind,
-                   const std::string& capturedName, bool captureCancelled)
+// The text box still accepts free-typed SDL scancode names (red outline +
+// tooltip when the name doesn't resolve); "Bind" captures the next physical
+// key press instead. `capturedName`/`captureCancelled` are this frame's poll
+// result (computed once per render(), see the call site) — applied here only
+// if this field is the one s_capture is currently pointed at.
+void keyBindCells(const char* id, const char* hintText, std::string& value, bool& dirty,
+                  const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind,
+                  const std::string& capturedName, bool captureCancelled)
 {
-	// Scope IDs by `label` too: an axis row calls this twice ("+" and "-")
-	// under the same outer PushID, so the Bind/Press-a-key buttons would
-	// otherwise collide (both just say "Bind").
-	ImGui::PushID(label);
+	ImGui::PushID(id);
 
 	const bool mine = s_capture.kind == kind && s_capture.assetPath == assetPath &&
 	                   s_capture.entryIndex == entryIndex && s_capture.subIndex == subIndex;
@@ -157,26 +159,33 @@ void keyBindField(const char* label, std::string& value, bool& dirty,
 		else if (captureCancelled)  { s_capture.kind = CaptureKind::None; }
 	}
 
-	ImGui::SetNextItemWidth(100.0f);
-	if (ImGui::InputText(label, &value)) dirty = true;
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::InputTextWithHint("##name", hintText, &value)) dirty = true;
 	const bool known = value.empty() || SDL_GetScancodeFromName(value.c_str()) != SDL_SCANCODE_UNKNOWN;
 	if (!known)
 	{
 		ImGui::GetWindowDrawList()->AddRect(
-			ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(220, 70, 70, 255));
+			ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(220, 70, 70, 255),
+			ImGui::GetStyle().FrameRounding);
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
 			                   "anything at runtime. Click Bind and press the key instead.", value.c_str());
 	}
-	ImGui::SameLine();
+
+	ImGui::TableNextColumn();
 	if (mine)
 	{
-		ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(214, 122, 30, 255));
+		// The armed state in the editor's warn amber, full cell width, and the
+		// how-to-cancel in the tooltip rather than crammed into the label.
+		ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
 		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
-		if (ImGui::SmallButton("Press a key\xE2\x80\xA6 (click to cancel)")) s_capture.kind = CaptureKind::None;
+		if (ImGui::Button("Press a key\xE2\x80\xA6", ImVec2(-FLT_MIN, 0.0f)))
+			s_capture.kind = CaptureKind::None;
 		ImGui::PopStyleColor(2);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Press the key you want to bind.\nClick again or press Esc to cancel.");
 	}
-	else if (ImGui::SmallButton("Bind"))
+	else if (ImGui::Button("Bind", ImVec2(-FLT_MIN, 0.0f)))
 	{
 		beginCapture(assetPath, entryIndex, subIndex, kind);
 	}
@@ -281,14 +290,17 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
 		ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
 
-	ImGui::AlignTextToFramePadding();
-	ImGui::Text("%s", st.name.c_str());
-	ImGui::SameLine();
-	ImGui::TextDisabled("%s%s", st.isMapping ? "Input Mapping Context" : "Input Action",
-	                    st.dirty ? "  (unsaved)" : "");
-	ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-	if (ImGui::Button("Save", ImVec2(56.0f, 0.0f))) saveState(st, ctx);
-	ImGui::Separator();
+	{
+		namespace T = EditorToolbar;
+		T::Bar bar;
+		T::assetHeader(bar, st.name.c_str(), T::iconGear, st.dirty);
+		bar.group();
+		bar.readout(nullptr, st.isMapping ? "Input Mapping Context" : "Input Action",
+		            T::kFgDim);
+		bar.endGroup();
+		if (T::saveButton(bar, true)) saveState(st, ctx);
+	}
+	ImGui::Spacing();
 
 	if (!st.isMapping)
 	{
@@ -359,18 +371,39 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 
 	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;
+
+	// Column rails shared by every card, so a Bind button in entry three sits
+	// exactly under the one in entry one. The remove column is square-ish; the
+	// bind column fits its longest label.
+	const float bindW   = ImGui::CalcTextSize("Press a key\xE2\x80\xA6").x
+	                    + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f;
+	const float removeW = ImGui::GetFrameHeight();
+
 	for (int i = 0; i < static_cast<int>(st.entries.size()); ++i)
 	{
 		MapEntry& e = st.entries[i];
 		ImGui::PushID(i);
-		ImGui::Separator();
 
-		// Action picker (content-relative path; stem = logical action name).
+		// One entry, one card: its own bordered, padded, auto-sized region. The
+		// old layout ran every entry into the next with a hairline between two
+		// heaps of SameLine'd controls — the card is what turns "a heap" into
+		// "a list of things".
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+		ImGui::BeginChild("##entry", ImVec2(0.0f, 0.0f),
+		                  ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY |
+		                  ImGuiChildFlags_AlwaysUseWindowPadding);
+		ImGui::PopStyleVar();
+
+		// ── Card header: which action, and the way out ───────────────────────
 		const std::string shown = e.actionPath.empty()
-			? std::string("<select action>")
+			? std::string("Select an action\xE2\x80\xA6")
 			: HE::inputActionNameFromPath(e.actionPath);
-		ImGui::SetNextItemWidth(220.0f);
-		if (ImGui::BeginCombo("Action", shown.c_str()))
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextDisabled("Action");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(std::max(160.0f,
+			ImGui::GetContentRegionAvail().x - 100.0f - ImGui::GetStyle().ItemSpacing.x));
+		if (ImGui::BeginCombo("##action", shown.c_str()))
 		{
 			for (const auto& a : actions)
 				if (ImGui::Selectable(a.label.c_str(), a.path == e.actionPath))
@@ -378,50 +411,94 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndCombo();
 		}
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Remove Entry")) removeEntry = i;
+		if (ImGui::Button("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
 
-		// Button bindings
+		// ── Keys ─────────────────────────────────────────────────────────────
 		int removeKey = -1;
-		for (int k = 0; k < static_cast<int>(e.keys.size()); ++k)
+		if (!e.keys.empty())
 		{
-			ImGui::PushID(1000 + k);
-			keyBindField("Key", e.keys[k], st.dirty, assetPath, i, k, CaptureKind::Key,
-			             capturedKeyName, captureWasCancelled);
-			ImGui::SameLine();
-			if (ImGui::SmallButton("x")) removeKey = k;
-			ImGui::PopID();
+			ImGui::Spacing();
+			ImGui::TextDisabled("Keys");
+			if (ImGui::BeginTable("##keys", 3, ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("##name",   ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("##bind",   ImGuiTableColumnFlags_WidthFixed, bindW);
+				ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, removeW);
+				for (int k = 0; k < static_cast<int>(e.keys.size()); ++k)
+				{
+					ImGui::PushID(1000 + k);
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					keyBindCells("key", "Key name", e.keys[k], st.dirty, assetPath, i, k,
+					             CaptureKind::Key, capturedKeyName, captureWasCancelled);
+					ImGui::TableNextColumn();
+					if (ImGui::Button("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this key");
+					ImGui::PopID();
+				}
+				ImGui::EndTable();
+			}
 		}
 		if (removeKey >= 0) { e.keys.erase(e.keys.begin() + removeKey); st.dirty = true; cancelCaptureForThisAsset(); }
-		if (ImGui::SmallButton("+ Key")) { e.keys.emplace_back(); st.dirty = true; }
 
-		// Axis bindings
+		// ── Axes ─────────────────────────────────────────────────────────────
 		int removeAxis = -1;
-		for (int k = 0; k < static_cast<int>(e.axes.size()); ++k)
+		if (!e.axes.empty())
 		{
-			AxisRow& a = e.axes[k];
-			ImGui::PushID(2000 + k);
-			keyBindField("+", a.positive, st.dirty, assetPath, i, k, CaptureKind::AxisPositive,
-			             capturedKeyName, captureWasCancelled);
+			ImGui::Spacing();
+			ImGui::TextDisabled("Axes");
 			ImGui::SameLine();
-			keyBindField("-", a.negative, st.dirty, assetPath, i, k, CaptureKind::AxisNegative,
-			             capturedKeyName, captureWasCancelled);
-			ImGui::SameLine();
-			ImGui::SetNextItemWidth(70.0f);
-			if (ImGui::DragFloat("Scale", &a.scale, 0.05f)) st.dirty = true;
-			ImGui::SameLine();
-			if (ImGui::SmallButton("x")) removeAxis = k;
-			ImGui::PopID();
+			helpMarker("Holding the \"+\" key drives the axis toward +1, the \"-\" key "
+			           "toward -1; either can stay blank for a one-sided axis. Scale "
+			           "multiplies the raw value \xe2\x80\x94 -1 inverts.");
+			if (ImGui::BeginTable("##axes", 6, ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("##pos",     ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("##posbind", ImGuiTableColumnFlags_WidthFixed, bindW);
+				ImGui::TableSetupColumn("##neg",     ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("##negbind", ImGuiTableColumnFlags_WidthFixed, bindW);
+				ImGui::TableSetupColumn("##scale",   ImGuiTableColumnFlags_WidthFixed, 74.0f);
+				ImGui::TableSetupColumn("##remove",  ImGuiTableColumnFlags_WidthFixed, removeW);
+				for (int k = 0; k < static_cast<int>(e.axes.size()); ++k)
+				{
+					AxisRow& a = e.axes[k];
+					ImGui::PushID(2000 + k);
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					keyBindCells("pos", "+ key", a.positive, st.dirty, assetPath, i, k,
+					             CaptureKind::AxisPositive, capturedKeyName, captureWasCancelled);
+					ImGui::TableNextColumn();
+					keyBindCells("neg", "\xe2\x88\x92 key", a.negative, st.dirty, assetPath, i, k,
+					             CaptureKind::AxisNegative, capturedKeyName, captureWasCancelled);
+					ImGui::TableNextColumn();
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					if (ImGui::DragFloat("##scale", &a.scale, 0.05f, 0.0f, 0.0f, "\xc3\x97 %.2f"))
+						st.dirty = true;
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale");
+					ImGui::TableNextColumn();
+					if (ImGui::Button("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAxis = k;
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this axis");
+					ImGui::PopID();
+				}
+				ImGui::EndTable();
+			}
 		}
 		if (removeAxis >= 0) { e.axes.erase(e.axes.begin() + removeAxis); st.dirty = true; cancelCaptureForThisAsset(); }
-		ImGui::SameLine();
-		if (ImGui::SmallButton("+ Axis")) { e.axes.emplace_back(); st.dirty = true; }
 
+		// ── Card footer: grow the entry ──────────────────────────────────────
+		ImGui::Spacing();
+		if (ImGui::Button("+ Key", ImVec2(110.0f, 0.0f)))  { e.keys.emplace_back(); st.dirty = true; }
+		ImGui::SameLine();
+		if (ImGui::Button("+ Axis", ImVec2(110.0f, 0.0f))) { e.axes.emplace_back(); st.dirty = true; }
+
+		ImGui::EndChild();
+		ImGui::Spacing();
 		ImGui::PopID();
 	}
 	if (removeEntry >= 0) { st.entries.erase(st.entries.begin() + removeEntry); st.dirty = true; cancelCaptureForThisAsset(); }
 
-	ImGui::Separator();
-	if (ImGui::Button("+ Add Action Entry")) { st.entries.emplace_back(); st.dirty = true; }
+	if (ImGui::Button("+ Add Action Entry", ImVec2(220.0f, 0.0f)))
+	{ st.entries.emplace_back(); st.dirty = true; }
 
 	ImGui::End();
 }
