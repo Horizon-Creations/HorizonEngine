@@ -4099,6 +4099,17 @@ void EditorApplication::setPlayMode(bool play)
 		Logger::setSink(&hePlayLogSink, this);
 		m_undo.clearHistory(); // edits made while playing are not undoable
 
+		// fs/save sandbox: the project's Saved/ dir. Set HERE — before OnInit and
+		// the script starts below — because Lua/Python dispatch straight into the
+		// HE::api registry without the HC callApi lambda that also assigns it; in
+		// a pure Lua/Python project this is the only place the root gets a value.
+		{
+			const std::string& projPath = m_projectManager.currentProject().path;
+			if (!projPath.empty())
+				HE::api::fs::setSandboxRoot(
+					(std::filesystem::path(projPath).parent_path() / "Saved").string());
+		}
+
 		// GameInstance OnInit fires first — before scripts, the level and any
 		// widgets — mirroring the packaged game's "before anything loads".
 		m_gameInstance.fireInit();

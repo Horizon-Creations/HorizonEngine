@@ -195,6 +195,21 @@ void GameApplication::OnInit()
 			m_gameInstance.setGraph(giJson);
 	}
 
+	// fs/save sandbox: the per-user pref dir (never the install dir, which may be
+	// read-only). All script/graph file I/O is jailed under <pref>/Saved. This
+	// MUST happen before fireInit and the player host's BeginPlay below — "load
+	// the save on startup" is the most common save pattern, and with an empty
+	// root every fs/save call silently no-ops.
+	{
+		const std::string org = "HorizonCreations";
+		const std::string app = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
+		if (char* pref = SDL_GetPrefPath(org.c_str(), app.c_str()))
+		{
+			HE::api::fs::setSandboxRoot((std::filesystem::path(pref) / "Saved").string());
+			SDL_free(pref);
+		}
+	}
+
 	// The GameInstance's UI is APP-LEVEL: widgets live in m_widgets (owned here,
 	// not by any world), so they exist before the first world and PERSIST across
 	// scene switches — the world only holds the 3D scene. Wire it onto the app
@@ -306,18 +321,6 @@ void GameApplication::OnInit()
 	else
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
-
-	// fs/save sandbox: the per-user pref dir (never the install dir, which may be
-	// read-only). All script/graph file I/O is jailed under <pref>/Saved.
-	{
-		const std::string org = "HorizonCreations";
-		const std::string app = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
-		if (char* pref = SDL_GetPrefPath(org.c_str(), app.c_str()))
-		{
-			HE::api::fs::setSandboxRoot((std::filesystem::path(pref) / "Saved").string());
-			SDL_free(pref);
-		}
-	}
 
 	HE_LOG_INFO(Core, "%s",
 		("GameApplication: streaming " + std::to_string(streamSceneAssets(*m_world)) +
