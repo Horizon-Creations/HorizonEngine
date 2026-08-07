@@ -32,6 +32,7 @@ struct PanelState
 	bool loaded = false;
 	bool dirty  = false;
 	bool isEnum = false;
+	bool isTemplate = false;   // savegame template: struct-shaped fields, not a type
 	std::string name;      // asset stem — the type's display name
 	std::string relPath;   // content-relative path — the TypeRegistry key
 	HE::UUID    assetId;
@@ -88,6 +89,16 @@ bool saveState(PanelState& st, AppContext& ctx)
 		a->json = HE::TypeRegistry::enumToJson(st.enumDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerEnum(st.enumDef);
+	}
+	else if (st.isTemplate)
+	{
+		// A template is not a registered type — just its field schema on disk.
+		SaveGameTemplateAsset* a = ctx.contentManager->getSaveGameTemplateMutable(st.assetId);
+		if (!a) return false;
+		st.structDef.name = st.name;
+		st.structDef.assetPath = st.relPath;
+		a->json = HE::TypeRegistry::structToJson(st.structDef);
+		if (!ctx.contentManager->saveAsset(*a)) return false;
 	}
 	else
 	{
@@ -219,8 +230,10 @@ bool TypeAssetPanel::isStructAsset(const std::string& path)
 { return sniffType(path, HE::AssetType::StructType); }
 bool TypeAssetPanel::isEnumAsset(const std::string& path)
 { return sniffType(path, HE::AssetType::EnumType); }
+bool TypeAssetPanel::isSaveTemplateAsset(const std::string& path)
+{ return sniffType(path, HE::AssetType::SaveGameTemplate); }
 bool TypeAssetPanel::isTypeAsset(const std::string& path)
-{ return isStructAsset(path) || isEnumAsset(path); }
+{ return isStructAsset(path) || isEnumAsset(path) || isSaveTemplateAsset(path); }
 
 bool TypeAssetPanel::isDirty(const std::string& path) { return s_states.dirty(path); }
 
@@ -253,6 +266,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		st.relPath  = ctx.contentManager->toContentRelativePath(assetPath);
 		st.assetId  = ctx.contentManager->loadAsset(st.relPath);
 		st.isEnum   = isEnumAsset(assetPath);
+		st.isTemplate = isSaveTemplateAsset(assetPath);
 		st.name     = std::filesystem::path(assetPath).stem().string();
 		st.structDef = {};
 		st.enumDef   = {};
@@ -260,6 +274,8 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			HE::TypeRegistry::enumFromJson(a->json, st.enumDef);
 		else if (const StructTypeAsset* a2 = ctx.contentManager->getStructType(st.assetId))
 			HE::TypeRegistry::structFromJson(a2->json, st.structDef);
+		else if (const SaveGameTemplateAsset* a3 = ctx.contentManager->getSaveGameTemplate(st.assetId))
+			HE::TypeRegistry::structFromJson(a3->json, st.structDef); // same field shape
 		st.loaded = true;
 	}
 
@@ -275,7 +291,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		T::Bar bar;
 		T::assetHeader(bar, st.name.c_str(), T::iconGear, st.dirty);
 		bar.group();
-		bar.readout(nullptr, st.isEnum ? "Enum" : "Struct", T::kFgDim);
+		bar.readout(nullptr, st.isEnum ? "Enum" : st.isTemplate ? "SaveGame Template" : "Struct", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, true)) saveState(st, ctx);
 	}
@@ -285,7 +301,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
 		ImGui::PopStyleColor();
 	}
-	if (HE::TypeRegistry::instance().nameCollides(st.name, st.relPath))
+	if (!st.isTemplate && HE::TypeRegistry::instance().nameCollides(st.name, st.relPath))
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(214, 122, 30, 255));
 		ImGui::TextWrapped("Another type in this project is also named \"%s\" — the "
@@ -354,9 +370,33 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		return;
 	}
 
-	// ── Struct: one card per field ──────────────────────────────────────────
-	ImGui::TextDisabled("Named, typed fields with defaults. Scripts build one with");
-	ImGui::TextDisabled("horizon.structs.%s(); graphs get Make/Break nodes.", st.name.c_str());
+	// ── Struct / SaveGame Template: one card per field ──────────────────────
+	if (st.isTemplate)
+	{
+		ImGui::TextDisabled("The fields a save of this template carries. save.create()");
+		ImGui::TextDisabled("seeds them from the defaults; get/set validate against them.");
+		if (ctx.projectManager)
+		{
+			ProjectData& proj = ctx.projectManager->currentProject();
+			const bool isDefault = proj.defaultSaveTemplate == st.relPath;
+			if (isDefault)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(120, 210, 140, 255));
+				ImGui::TextUnformatted("Project default â save.create() uses this template.");
+				ImGui::PopStyleColor();
+			}
+			else if (ImGui::Button("Set as Project Default", ImVec2(220.0f, 0.0f)))
+			{
+				proj.defaultSaveTemplate = st.relPath;
+				ctx.projectManager->saveProject(proj.path);
+			}
+		}
+	}
+	else
+	{
+		ImGui::TextDisabled("Named, typed fields with defaults. Scripts build one with");
+		ImGui::TextDisabled("horizon.structs.%s(); graphs get Make/Break nodes.", st.name.c_str());
+	}
 	ImGui::Spacing();
 
 	int removeAt = -1;

@@ -321,6 +321,14 @@ struct EnumTypeAsset : public RuntimeAsset
 	std::string json;
 };
 
+// Savegame field schema: which typed fields (incl. struct/enum refs) a save of
+// this template carries, with defaults. Same JSON shape as CHUNK_STDF
+// (TypeRegistry::structFromJson round-trips it); consumed by HE::api::save.
+struct SaveGameTemplateAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

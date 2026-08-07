@@ -113,6 +113,7 @@ inline constexpr uint32_t CHUNK_ASMG = makeChunkId('A','S','M','G'); // states/t
 // User-defined types (HE::TypeRegistry round-trips the JSON)
 inline constexpr uint32_t CHUNK_STDF = makeChunkId('S','T','D','F'); // struct definition (JSON)
 inline constexpr uint32_t CHUNK_ENDF = makeChunkId('E','N','D','F'); // enum definition (JSON)
+inline constexpr uint32_t CHUNK_SGTP = makeChunkId('S','G','T','P'); // savegame template (JSON, struct-def shape)
 
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes

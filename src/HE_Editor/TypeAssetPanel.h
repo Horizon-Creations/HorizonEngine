@@ -21,7 +21,8 @@ namespace TypeAssetPanel
 	// Header sniffs (cached) for the double-click/tab dispatch chains.
 	bool isStructAsset(const std::string& path);
 	bool isEnumAsset(const std::string& path);
-	bool isTypeAsset(const std::string& path); // either of the two
+	bool isSaveTemplateAsset(const std::string& path);
+	bool isTypeAsset(const std::string& path); // any of the three
 
 	// True if the cached editor for `path` has unsaved edits (tab dirty mark).
 	bool isDirty(const std::string& path);

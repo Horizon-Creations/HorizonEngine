@@ -554,6 +554,7 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	readProfiles(j, m_currentProject);
 	m_currentProject.scriptLanguage =
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
+	m_currentProject.defaultSaveTemplate = jsonString(j, "defaultSaveTemplate");
 
 	HE_LOG_INFO(Config, "Project '%s' loaded from '%s': language %s, %zu export profile(s), "
 	                    "startup scene '%s'",
@@ -610,6 +611,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	j["exportProfiles"]      = std::move(jp);
 	j["activeExportProfile"] = m_currentProject.activeExportProfile;
 	j["scriptLanguage"]      = HE::tools::toString(m_currentProject.scriptLanguage);
+	j["defaultSaveTemplate"] = m_currentProject.defaultSaveTemplate;
 
 	// Write temp + rename: an in-place ofstream truncates the only copy before
 	// the new content is durable, so disk-full/kill mid-write would leave an

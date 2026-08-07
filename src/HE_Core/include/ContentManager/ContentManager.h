@@ -75,6 +75,8 @@ public:
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
+	const SaveGameTemplateAsset* getSaveGameTemplate(HE::UUID id) const;
+	SaveGameTemplateAsset*       getSaveGameTemplateMutable(HE::UUID id);
 	const StructTypeAsset*     getStructType(HE::UUID id) const;
 	StructTypeAsset*           getStructTypeMutable(HE::UUID id);
 	const EnumTypeAsset*       getEnumType(HE::UUID id) const;
@@ -148,6 +150,7 @@ public:
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
 	HE::UUID registerEnumType(EnumTypeAsset asset);
+	HE::UUID registerSaveGameTemplate(SaveGameTemplateAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -448,6 +451,7 @@ private:
 	SlotMap<PropertyAnimClipAsset>   m_propAnimClipAssets;
 	SlotMap<StructTypeAsset>         m_structTypeAssets;
 	SlotMap<EnumTypeAsset>           m_enumTypeAssets;
+	SlotMap<SaveGameTemplateAsset>   m_saveTemplateAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {

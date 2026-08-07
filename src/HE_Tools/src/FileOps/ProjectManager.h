@@ -157,6 +157,11 @@ struct ProjectData
 
 	// Primary gameplay scripting language (chosen in the new-project wizard).
 	ProjectScriptLanguage scriptLanguage = ProjectScriptLanguage::HorizonCode;
+
+	// Content-relative path of the SaveGameTemplate asset save.create() uses
+	// (".heproj \"defaultSaveTemplate\""). Empty = the project's single template
+	// if exactly one exists, else create() fails loud.
+	std::string defaultSaveTemplate;
 };
 
 class HE_TOOLS_API ProjectManager

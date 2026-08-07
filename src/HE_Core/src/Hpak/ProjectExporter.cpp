@@ -618,7 +618,8 @@ static void addTypeIndex(HpakWriter& packer, const ExportContext& ctx,
             HAsset::Reader r;
             if (r.open(p.string()) &&
                 (r.assetType() == static_cast<uint16_t>(HE::AssetType::StructType) ||
-                 r.assetType() == static_cast<uint16_t>(HE::AssetType::EnumType)))
+                 r.assetType() == static_cast<uint16_t>(HE::AssetType::EnumType) ||
+                 r.assetType() == static_cast<uint16_t>(HE::AssetType::SaveGameTemplate)))
                 idx.push_back(relPath);
             break;
         }

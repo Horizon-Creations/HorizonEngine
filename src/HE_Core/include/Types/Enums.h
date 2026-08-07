@@ -99,7 +99,8 @@ namespace HE
         ParticleSystem,   // particle emitter node graph (Emitter Output + math/const/random nodes)
         AnimatorStateMachine, // authored states/transitions graph, referenced by AnimatorStateMachineComponent
         StructType,       // user-defined struct (named typed fields) — see HE::TypeRegistry
-        EnumType          // user-defined enum (named int-backed entries) — see HE::TypeRegistry
+        EnumType,         // user-defined enum (named int-backed entries) — see HE::TypeRegistry
+        SaveGameTemplate  // savegame field schema (typed fields + defaults), consumed by HE::api::save
     };
 
     enum class TextureFormat : uint32_t

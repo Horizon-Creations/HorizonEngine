@@ -490,6 +490,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// they earn their own .tga.
 				case HE::AssetType::StructType:          return { I.horizonCodeClass,     {0.60f, 0.95f, 0.80f, 1.0f} };
 				case HE::AssetType::EnumType:            return { I.horizonCodeClass,     {0.80f, 0.95f, 0.60f, 1.0f} };
+				case HE::AssetType::SaveGameTemplate:    return { I.horizonCodeClass,     {0.95f, 0.85f, 0.95f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -1051,6 +1052,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						const char* json = "{\"entries\":[]}";
 						w.addChunk(HAsset::CHUNK_ENDF, json, std::strlen(json));
 					}
+					if (type == HE::AssetType::SaveGameTemplate)
+					{
+						const char* json = "{\"fields\":[]}";
+						w.addChunk(HAsset::CHUNK_SGTP, json, std::strlen(json));
+					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
 				// A path that was probed while it was still free (or held a deleted
@@ -1086,6 +1092,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// constants, C++ codegen all consume them) — offered in every project.
 			if (ImGui::MenuItem("Struct"))       tryCreate("NewStruct",    ".hasset",  HE::AssetType::StructType);
 			if (ImGui::MenuItem("Enum"))         tryCreate("NewEnum",      ".hasset",  HE::AssetType::EnumType);
+			if (ImGui::MenuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
