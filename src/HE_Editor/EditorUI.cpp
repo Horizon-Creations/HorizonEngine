@@ -30,6 +30,8 @@
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
+#include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
+#include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
@@ -485,6 +487,9 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Same placement, and for the same reason: it must overlay the Project Hub
     // as well as the editor, since a user can clone a project before opening one.
     GitMissingDialog::DrawGitMissingDialog(ctx);
+
+    // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
+    EngineContentPublishDialog::Draw(ctx);
 
     // ── Help ▸ Report Issue… ─────────────────────────────────────────────────
     // Drawn here too: something worth reporting can just as easily happen while
@@ -1009,6 +1014,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (ImGui::MenuItem("Import Asset...", nullptr, false, ctx.projectLoaded))
 			triggerImportAsset();
 		if (ImGui::MenuItem("Refresh Assets")) {}
+#ifdef HE_HAVE_LIBSSH2
+		// Dev-only: publishes the local EngineContent library to the SFTP
+		// server other Editors download it from on demand (see HE_ContentSync).
+		// Same gate ContentManager uses to decide whether writes to "Engine/..."
+		// target the shared default instead of a per-project override.
+		if (ContentManager::isEngineContentDevMode())
+		{
+			ImGui::Separator();
+			if (ImGui::MenuItem("Publish Engine Content to Server..."))
+				EngineContentPublishDialog::open(ctx);
+		}
+#endif
 		ImGui::EndMenu();
 	}
 	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
@@ -1585,6 +1602,15 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 		ImGui::SameLine(0.0f, 14.0f);
 		if (SourceControlPanel::DrawFooterStatus(ctx))
 			revealFloatingWindow(s_showSourceControl, "Source Control");
+
+		// EngineContent SFTP download queue, immediately right of source control —
+		// same "ambient, draws nothing when idle" rule. Purely informational (no
+		// window to reveal), so no return value to act on.
+		if (EngineContentSyncBar::FooterWidth(ctx) > 0.0f)
+		{
+			ImGui::SameLine(0.0f, 14.0f);
+			EngineContentSyncBar::DrawFooter(ctx);
+		}
 
 		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 		// The resolution is the actual viewport framebuffer size the scene renders at.

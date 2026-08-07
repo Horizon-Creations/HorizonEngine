@@ -44,6 +44,15 @@ public:
 	// platform gives us no home directory at all. Created if it does not exist.
 	static std::filesystem::path userDataDir();
 
+	// Where EngineContent assets fetched on demand from the SFTP manifest (see
+	// HE::Cs::EngineContentManifest, HE_ContentSync) land once downloaded. Shared
+	// across every project on this machine — NOT per-project and NOT next to the
+	// Editor executable (which is often not writable: a signed macOS .app bundle,
+	// "Program Files"). A local default/override always wins over this cache; see
+	// refreshEngineFolder()'s remoteOnly merge and ContentManager's read-side
+	// resolution order.
+	static std::filesystem::path engineContentCacheDir();
+
 	// config
 	const HE::RendererBackend&        getSelectedRHI()        const { return m_engineStatus.selectedRHI; }
 	const std::string&                getLastProjectPath()    const { return m_engineStatus.lastProjectPath; }
@@ -105,8 +114,16 @@ public:
 	// (see ContentManager::resolveSavePath) are merged into the displayed
 	// tree, shadowing the default they override. Pass empty to skip merging
 	// (e.g. before any project is loaded).
+	// remoteOnly (optional): EngineContent assets known from the SFTP manifest
+	// (see HE::Cs::EngineContentManifest, HE_ContentSync) that are not present in
+	// EITHER the default tree or the project override — these are added as
+	// File nodes with isRemoteOnly=true so the Content Browser shows the full
+	// set of available defaults even before anything is downloaded. An entry
+	// whose path already resolves locally is skipped (a real, already-present
+	// file always wins over a remote placeholder).
 	bool refreshEngineFolder(const std::string& engineContentAbsPath,
-	                          const std::string& projectContentRoot = std::string());
+	                          const std::string& projectContentRoot = std::string(),
+	                          const std::vector<HE::RemoteEngineAsset>& remoteOnly = {});
 
 	std::atomic<uint64_t> engineFolderVersion{0};
 

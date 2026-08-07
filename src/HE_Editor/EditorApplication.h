@@ -21,6 +21,9 @@
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <SourceControl/GitProbe.h>
+#ifdef HE_HAVE_LIBSSH2
+#include <ContentSync/SftpProbe.h>
+#endif
 #include <Net/RouterProbe.h>
 #include "GitController.h"
 #include <atomic>
@@ -617,6 +620,22 @@ private:
 	std::thread       m_gitIdentityThread;
 	std::atomic<bool> m_gitIdentityApplying{false};
 	void applyGitIdentity(std::string name, std::string email);
+
+#ifdef HE_HAVE_LIBSSH2
+	// EngineContent SFTP reachability probe. Same lifecycle as the other
+	// startup probes above. Absent entirely when libssh2 could not be
+	// resolved at configure time (see the libssh2 block in the root
+	// CMakeLists) — every call site is guarded the same way.
+	std::thread          m_sftpThread;
+	std::atomic<bool>    m_sftpChecked{false};
+	HE::Cs::SftpProbeResult m_sftpProbe;
+	void startSftpProbe();
+	// Set by startSftpProbe()'s worker once a fresh manifest is available;
+	// consumed (exchanged back to false) once, on the main thread in OnRender,
+	// which is the only thread allowed to mutate ContentManager — see
+	// registerRemoteAsset()'s contract.
+	std::atomic<bool> m_sftpManifestReady{false};
+#endif
 
 	// Collaboration reachability probe (router / port forwarding / IPv6). Same
 	// lifecycle again, with one addition: it is the only probe that waits on the

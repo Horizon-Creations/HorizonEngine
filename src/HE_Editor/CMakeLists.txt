@@ -146,6 +146,8 @@ add_executable(HorizonEditor WIN32
 	CollabPanel.cpp
 	CollabPresenceBar.cpp
 	CollabUndo.cpp
+	EngineContentSyncBar.cpp
+	EngineContentPublishDialog.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp
 	EditorPanelState.cpp
@@ -195,6 +197,14 @@ if(HE_VULKAN_ENABLED)
 endif()
 if(APPLE)
 	target_link_libraries(HorizonEditor PRIVATE RendererMetal)
+endif()
+
+if(TARGET HorizonContentSync)
+	# EngineContent SFTP sync (see src/HE_ContentSync). Absent when libssh2 could
+	# not be resolved at configure time — HE_HAVE_LIBSSH2 gates every call site
+	# in the editor so it still builds and runs without the feature.
+	target_link_libraries(HorizonEditor PRIVATE HorizonContentSync)
+	target_compile_definitions(HorizonEditor PRIVATE HE_HAVE_LIBSSH2)
 endif()
 
 if(HE_IMGUI_AVAILABLE)

@@ -344,6 +344,57 @@ elseif(HE_HAVE_MBEDTLS)
     target_compile_definitions(he_crypto INTERFACE HE_HAVE_CRYPTO HE_HAVE_MBEDTLS)
 endif()
 
+# ─── libssh2 (Editor EngineContent SFTP sync, HE_ContentSync) ─────────────────
+# The Editor's EngineContent library can be fetched on demand from a webhosting
+# server over SFTP instead of shipping in full with every Editor download (see
+# src/HE_ContentSync). Password auth is required (the configured account is not
+# key-based), which the plain OpenSSH `sftp` CLI cannot do non-interactively in
+# batch mode — so this links libssh2 directly rather than shelling out, mirroring
+# how HorizonSourceControl shells out to `git` only because THAT protocol has no
+# non-interactive password constraint to work around.
+#
+# Reuses whichever crypto backend the block above already resolved, rather than
+# pulling in a second, independent crypto stack.
+find_package(Libssh2 QUIET)
+if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
+    if(HE_HAVE_OPENSSL)
+        set(CRYPTO_BACKEND "OpenSSL" CACHE STRING "" FORCE)
+    elseif(HE_HAVE_MBEDTLS)
+        set(CRYPTO_BACKEND "mbedTLS" CACHE STRING "" FORCE)
+    else()
+        set(CRYPTO_BACKEND "" CACHE STRING "" FORCE)
+    endif()
+    if(CRYPTO_BACKEND)
+        message(STATUS "HorizonEngine: fetching libssh2 (crypto backend: ${CRYPTO_BACKEND})")
+        set(BUILD_SHARED_LIBS_SAVE ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE) # static libssh2, linked into HorizonContentSync only
+        set(BUILD_TESTING     OFF CACHE BOOL "" FORCE)
+        set(BUILD_EXAMPLES    OFF CACHE BOOL "" FORCE)
+        set(ENABLE_ZLIB_COMPRESSION OFF CACHE BOOL "" FORCE) # not needed for our use (whole-file get/put)
+        FetchContent_Declare(
+            libssh2
+            GIT_REPOSITORY https://github.com/libssh2/libssh2.git
+            GIT_TAG        libssh2-1.11.1
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(libssh2)
+        set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVE} CACHE BOOL "" FORCE)
+        if(TARGET libssh2)
+            set(HE_HAVE_LIBSSH2 TRUE)
+            message(STATUS "HorizonEngine: libssh2 fetched — Editor EngineContent SFTP sync enabled")
+        else()
+            message(WARNING "HorizonEngine: libssh2 fetch did not produce a usable target — "
+                             "Editor EngineContent SFTP sync (HE_ContentSync) will be unavailable.")
+        endif()
+    else()
+        message(WARNING "HorizonEngine: no crypto backend resolved — libssh2 (and Editor "
+                         "EngineContent SFTP sync) will be unavailable.")
+    endif()
+else()
+    message(STATUS "HorizonEngine: libssh2 found (system) — Editor EngineContent SFTP sync enabled")
+    set(HE_HAVE_LIBSSH2 TRUE)
+endif()
+
 # ─── Python (optional: CPython embedding for Python gameplay scripting) ───────
 # Gameplay scripts can be written in Python (in addition to Lua). Dev builds link
 # libpython; without it, the Python script backend is compiled out and only Lua
@@ -631,6 +682,12 @@ add_subdirectory(src/HE_Core)
 add_subdirectory(src/HE_Net)
 # Editor-only; deliberately absent from HE_Game's and hc_codegen's deploy lists.
 add_subdirectory(src/HE_SourceControl)
+# Editor-only, same reasoning as HE_SourceControl. Skipped entirely when libssh2
+# could not be resolved (see the libssh2 block above) — the Editor still builds
+# and runs, it just falls back to whatever EngineContent is present on disk.
+if(HE_HAVE_LIBSSH2)
+    add_subdirectory(src/HE_ContentSync)
+endif()
 add_subdirectory(src/HE_Scene)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)

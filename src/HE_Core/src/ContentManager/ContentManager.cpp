@@ -8,6 +8,7 @@
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
+#include "Diagnostics/GlobalState.h" // engineContentCacheDir() — the third "Engine/" resolution tier
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__
 #include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
@@ -716,7 +717,17 @@ std::string ContentManager::resolveAbsolutePath(const std::string& relativePath)
 		// shared default when present.
 		const std::string overridePath = m_contentRoot + "/" + relativePath;
 		if (std::filesystem::exists(overridePath)) return overridePath;
-		return m_engineContentRoot + "/" + relativePath.substr(kEnginePrefixLen);
+		const std::string defaultPath = m_engineContentRoot + "/" + relativePath.substr(kEnginePrefixLen);
+		if (std::filesystem::exists(defaultPath)) return defaultPath;
+		// Neither the override nor the shipped default has this file — it may
+		// have been fetched once by the EngineContent SFTP sync (HE_ContentSync)
+		// into the shared, per-machine download cache, in which case every
+		// project on this machine can use it from here on without re-downloading.
+		// Checked LAST: a real shipped default always wins over a cached copy.
+		const std::string cachedPath =
+			GlobalState::engineContentCacheDir().string() + "/" + relativePath.substr(kEnginePrefixLen);
+		if (std::filesystem::exists(cachedPath)) return cachedPath;
+		return defaultPath; // preserves prior behaviour: the canonical location even when absent
 	}
 	return m_contentRoot + "/" + relativePath;
 }
@@ -888,6 +899,38 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
 std::vector<HE::UUID> ContentManager::pollAsyncResults(size_t maxRegistrations)
 {
+	// Drain remote-materialization completions FIRST, on this (main) thread —
+	// see registerRemoteAsset()/loadAssetAsync(UUID)'s remote branch and
+	// RemoteReadySink's comment in the header for why this cannot happen inside
+	// materialize's own completion callback. A success re-enters loadAssetAsync,
+	// which now resolves through the normal (just-updated) disk registry and
+	// queues a real async read — that read's own AsyncResult surfaces on a LATER
+	// pollAsyncResults() call, not this one.
+	{
+		std::vector<PendingRemoteReady> remoteReady;
+		{
+			std::lock_guard<std::mutex> lock(m_remoteReadySink->mutex);
+			remoteReady.swap(m_remoteReadySink->ready);
+		}
+		for (auto& r : remoteReady)
+		{
+			{
+				std::unique_lock<std::mutex> lock(m_pendingMutex);
+				m_pendingPaths.erase(r.coalesceKey);
+			}
+			if (r.success)
+			{
+				m_diskRegistry[r.id] = r.relativePath;
+				m_remoteAssets.erase(r.id);
+				loadAssetAsync(r.id, r.callback);
+			}
+			else if (r.callback)
+			{
+				r.callback(HE::UUID{});
+			}
+		}
+	}
+
 	std::vector<AsyncResult> ready;
 	{
 		std::unique_lock<std::mutex> lock(m_asyncSink->mutex);
@@ -988,6 +1031,39 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 			loadAssetAsync(d->second, std::move(callback));
 			return;
 		}
+		// A remote-only EngineContent asset (see registerRemoteAsset): materialize
+		// it first, then load it the normal way. Coalesced by the same synthetic-key
+		// mechanism as the pak branch below, on its own "remote://" namespace so it
+		// cannot collide with a pak UUID or a real relative path.
+		if (const auto r = m_remoteAssets.find(id); r != m_remoteAssets.end())
+		{
+			const std::string coalesceKey =
+				"remote://" + std::to_string(id.hi) + "-" + std::to_string(id.lo);
+			{
+				std::unique_lock<std::mutex> lock(m_pendingMutex);
+				if (m_pendingPaths.count(coalesceKey))
+				{
+					// Already materializing — like the pak branch, this caller's
+					// callback is not chained; it can retry or poll isLoaded().
+					if (callback) callback(HE::UUID{});
+					return;
+				}
+				m_pendingPaths.insert(coalesceKey);
+			}
+
+			const std::string relativePath = r->second.relativePath;
+			const auto&       materialize  = r->second.materialize;
+			// Captures the sink, never `this` — materialize's completion can fire
+			// long after this ContentManager is gone (a network download outlives a
+			// closed project). See RemoteReadySink's comment in the header.
+			auto sink = m_remoteReadySink;
+			materialize([sink, id, relativePath, coalesceKey, callback](bool success)
+			{
+				std::lock_guard<std::mutex> lock(sink->mutex);
+				sink->ready.push_back(PendingRemoteReady{ id, relativePath, coalesceKey, success, callback });
+			});
+			return;
+		}
 		if (callback) callback(HE::UUID{}); // unknown UUID
 		return;
 	}
@@ -1029,6 +1105,20 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 		std::unique_lock<std::mutex> lock(sink->mutex);
 		sink->results.push(std::move(result));
 	});
+}
+
+// ─── registerRemoteAsset ───────────────────────────────────────────────────────
+void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
+                                          std::function<void(std::function<void(bool)>)> materialize)
+{
+	// Already resolvable some other way — a real local/override/mounted file
+	// always wins, and there is nothing for a materializer to add.
+	if (isLoaded(id) || m_diskRegistry.count(id)) return;
+
+	RemoteAssetEntry entry;
+	entry.relativePath = std::move(relativePath);
+	entry.materialize   = std::move(materialize);
+	m_remoteAssets[id]  = std::move(entry);
 }
 
 // ─── streamMountedAssets ──────────────────────────────────────────────────────
@@ -2049,6 +2139,12 @@ size_t ContentManager::scanContentDirectory()
 	// cube on reload (the UUID resolves to nothing on disk).
 	scanDirInto(m_contentRoot, "");
 	scanDirInto(m_engineContentRoot, std::string(kEnginePrefix));
+	// EngineContent assets fetched by a previous SFTP sync (HE_ContentSync) —
+	// same "Engine/<rest>" key shape as the shared default scan above, so which
+	// scan happens to write a given UUID first is immaterial (see the two
+	// scanDirInto calls' comment): resolveAbsolutePath() re-derives the actual
+	// override/default/cache precedence from the filesystem every time anyway.
+	scanDirInto(GlobalState::engineContentCacheDir().string(), std::string(kEnginePrefix));
 	return m_diskRegistry.size();
 }
 
@@ -2061,9 +2157,20 @@ bool ContentManager::ensureResident(HE::UUID id)
 	{
 		// Not in any mounted pak — fall back to loose content on disk.
 		const auto d = m_diskRegistry.find(id);
-		if (d == m_diskRegistry.end()) return false;
-		loadAsset(d->second);
-		return isLoaded(id);
+		if (d != m_diskRegistry.end())
+		{
+			loadAsset(d->second);
+			return isLoaded(id);
+		}
+		// A remote-only EngineContent asset (see registerRemoteAsset): materializing
+		// it is a network operation, and ensureResident is synchronous/main-thread by
+		// contract — waiting here would freeze the Editor on every reference to an
+		// undownloaded default. Kick the same materialization loadAssetAsync() would
+		// off in the background instead, and report "not resident YET", exactly what
+		// this function already returns for any other not-yet-loaded UUID. A caller
+		// that needs to know when it lands should call loadAssetAsync(id, callback).
+		if (m_remoteAssets.count(id)) loadAssetAsync(id);
+		return false;
 	}
 
 	MountedPak& mount = m_mounts[it->second];

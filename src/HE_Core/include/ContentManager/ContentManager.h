@@ -253,6 +253,33 @@ public:
 	// gets an empty UUID if the id is in no mount. Duplicate in-flight requests for
 	// the same UUID are coalesced.
 	void     loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> callback = {});
+
+	// ── Remote (SFTP-backed) EngineContent assets ──────────────────────────────
+	// Registers `id` as resolvable via `materialize` instead of any local root —
+	// for an EngineContent asset the manifest (HE::Cs::EngineContentManifest,
+	// HE_ContentSync) knows about but that has not been downloaded to this
+	// machine yet. A no-op if `id` is already loaded or already resolvable some
+	// other way (a real local/override file always wins).
+	//
+	// `materialize` is invoked AT MOST ONCE — the first time `id` is requested
+	// via loadAssetAsync() and found nowhere else — with a completion callback it
+	// must call exactly once: true once relativePath actually exists on disk
+	// (ContentManager then loads it the normal way), false on failure. HOW
+	// materialize does its work — network, thread, timing — is entirely up to
+	// the caller; ContentManager places no requirement on it beyond "call the
+	// completion callback exactly once, from any thread" (the completion is
+	// marshalled back to the main thread internally, same as every other async
+	// arrival — see pollAsyncResults()).
+	//
+	// Deliberately NOT consulted by ensureResident(): materializing a remote
+	// asset is a network operation, and ensureResident is synchronous/main-thread
+	// by contract (freezing the Editor on a network call would defeat the whole
+	// point). ensureResident() kicks off the same materialization via
+	// loadAssetAsync() and returns false immediately, exactly as it already does
+	// for any other not-yet-loaded UUID.
+	void registerRemoteAsset(HE::UUID id, std::string relativePath,
+	                          std::function<void(std::function<void(bool)>)> materialize);
+
 	// Kick off async background loads for every mounted-but-not-yet-resident asset
 	// (stream a whole pak without blocking startup). Drain via pollAsyncResults().
 	// UUIDs in `exclude` are skipped (e.g. the packed startup scene, which is not a
@@ -426,6 +453,32 @@ private:
 		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
 	};
 	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
+
+	// ── Remote (SFTP-backed) EngineContent assets — see registerRemoteAsset() ──
+	struct RemoteAssetEntry {
+		std::string relativePath;
+		std::function<void(std::function<void(bool)>)> materialize;
+	};
+	std::unordered_map<HE::UUID, RemoteAssetEntry> m_remoteAssets;
+
+	struct PendingRemoteReady {
+		HE::UUID                      id;
+		std::string                   relativePath;
+		std::string                   coalesceKey;   // erased from m_pendingPaths on drain
+		bool                          success = false;
+		std::function<void(HE::UUID)> callback;
+	};
+	// Same shared_ptr-sink discipline as AsyncSink above, and for the identical
+	// reason: `materialize`'s completion callback can fire long after this
+	// ContentManager is gone (a network download outlives a closed project), so
+	// it must never capture `this`. The sink outlives it; drained on the main
+	// thread by pollAsyncResults(), which is where m_remoteAssets/m_diskRegistry
+	// actually get mutated.
+	struct RemoteReadySink {
+		std::mutex                     mutex;
+		std::vector<PendingRemoteReady> ready;
+	};
+	std::shared_ptr<RemoteReadySink> m_remoteReadySink = std::make_shared<RemoteReadySink>();
 
 	std::string m_contentRoot;
 	std::string m_engineContentRoot;

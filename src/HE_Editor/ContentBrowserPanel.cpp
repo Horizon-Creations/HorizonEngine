@@ -2,6 +2,7 @@
 #include "EditorToolbar.h"   // shared toolbar strip
 #include <algorithm>
 #include <cstdint>
+#include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "ScriptEditorPanel.h"
@@ -19,6 +20,9 @@
 #include "EditorAssetTypeCache.h"
 #include "GitController.h"        // per-file source-control status for the tile badge
 #include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
+#ifdef HE_HAVE_LIBSSH2
+#include <ContentSync/EngineContentSync.h> // remote-only asset download queue
+#endif
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -57,6 +61,20 @@ namespace ContentBrowserPanel
 {
 
 static bool s_quietContentRefresh = false;
+
+#ifdef HE_HAVE_LIBSSH2
+// The inverse of mergeManifestInto's fullPath synthesis (GlobalState.cpp):
+// a remote-only File's fullPath is always engineContentCacheDir()/relativePath,
+// so this recovers the SFTP-side relative path (== the manifest's own "path"
+// field, and — per the deployment's remote layout — the same string EngineContent
+// sync downloads from) straight back out of it.
+static std::string engineRelativePath(const std::string& fullPath)
+{
+	std::error_code ec;
+	const fs::path rel = fs::relative(fullPath, GlobalState::engineContentCacheDir(), ec);
+	return ec ? std::string() : rel.generic_string();
+}
+#endif
 
 // Which root the tree/grid is showing: 0=Content, 1=Engine, 2=Source. At
 // namespace scope rather than inside render() only so browsedRootKind() can read
@@ -558,6 +576,86 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static std::string              s_deleteFolderTarget;
 		static std::vector<std::string> s_deleteFolderFiles;
 		static bool                     s_openDeleteFolderPopup = false;
+#ifdef HE_HAVE_LIBSSH2
+		// Remote-download confirmation: same "outlives the popup's opening frame,
+		// so keep it as plain data, never a File*" reasoning as the delete-folder
+		// state above — a content refresh (which the download itself triggers)
+		// would dangle a pointer into the old tree.
+		static std::string s_remoteDownloadRelativePath;
+		static HE::UUID    s_remoteDownloadUuid;
+		static std::string s_remoteDownloadTabLabel;
+		static std::string s_remoteDownloadFullPath;
+		static bool        s_openRemoteDownloadPopup = false;
+		// A completed download's onComplete callback (see the confirmation popup
+		// below) runs on a WORKER thread and must not touch ctx.tabs directly —
+		// it drops the path here instead, and the drain right below (main thread,
+		// once per frame) does the actual opening. Same shape as ContentManager's
+		// AsyncSink: producer on a worker, consumer on the main thread, never both.
+		static std::mutex               s_pendingOpenMutex;
+		static std::vector<std::string> s_pendingOpenFullPaths;
+#endif
+
+		// Opens (or focuses) a tab for `fullPath`, exactly what a double-click on a
+		// known asset type does. Factored out so a completed EngineContent download
+		// can auto-open the tab the user originally asked for, without duplicating
+		// the type dispatch below.
+		auto openAssetTab = [&](const std::string& fullPath)
+		{
+			if (std::filesystem::path(fullPath).extension() == ".hescene")
+			{
+				openSceneGuarded(fullPath);
+				return;
+			}
+			// Script assets open the code editor tab, material assets the node-graph
+			// editor tab. Other asset types have no dedicated editor yet → no-op.
+			// C++ source/header (Source root) opens the h/cpp class viewer; a raw
+			// .wav opens the audio tab (auditioning a source file must not require
+			// importing it first). Both predicates are raw extension checks, not
+			// HAsset sniffs, so they must be tested explicitly here.
+			if (!(CppClassEditorPanel::isCppSourceAsset(fullPath) ||
+			      AudioEditorPanel::isAudioAsset(fullPath) ||
+			      ScriptEditorPanel::isScriptAsset(fullPath) ||
+			      MaterialEditorPanel::isMaterialAsset(fullPath) ||
+			      MaterialEditorPanel::isMaterialFunctionAsset(fullPath) ||
+			      UIEditorPanel::isWidgetAsset(fullPath) ||
+			      HorizonCodeClassPanel::isClassAsset(fullPath) ||
+			      InputAssetPanel::isInputAsset(fullPath) ||
+			      TypeAssetPanel::isTypeAsset(fullPath) ||
+			      SkeletalMeshEditorPanel::isSkeletalMeshAsset(fullPath) ||
+			      StaticMeshEditorPanel::isStaticMeshAsset(fullPath) ||
+			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||
+			      AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(fullPath)))
+				return; // no dedicated editor for this type — same no-op the old inline dispatch had
+
+			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();
+			auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
+				[&](const AppContext::EditorTab& t){ return t.assetPath == fullPath; });
+			if (it == ctx.tabs.end())
+			{
+				ctx.tabs.push_back({ tabLabel, fullPath, true, true });
+				ctx.activeTab = static_cast<int>(ctx.tabs.size()) - 1;
+			}
+			else
+			{
+				ctx.activeTab = static_cast<int>(std::distance(ctx.tabs.begin(), it));
+			}
+			// Force the tab bar to select this tab next frame (else ImGui keeps the
+			// Scene tab selected and the editor never opens).
+			tabSelectRequest = ctx.activeTab;
+		};
+
+#ifdef HE_HAVE_LIBSSH2
+		// Drain downloads that finished since the last frame — once per frame,
+		// before the grid loop, so it can never re-enter mid-iteration.
+		{
+			std::vector<std::string> ready;
+			{
+				std::lock_guard<std::mutex> lock(s_pendingOpenMutex);
+				ready.swap(s_pendingOpenFullPaths);
+			}
+			for (const std::string& p : ready) openAssetTab(p);
+		}
+#endif
 		// Name-a-C++-class popup (C++ projects only): the create menu stages a
 		// class name here, then this popup writes Source/<Name>.{h,cpp}.
 		static bool        s_openCppClassPopup = false;
@@ -750,6 +848,28 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				            IM_COL32(180, 240, 210, 255), "f");
 			}
 
+			// EngineContent SFTP remote-only badge, TOP-left (the material-function
+			// badge owns the top-right, the git-status badge owns the bottom-left —
+			// see below). A plain downward-triangle-in-a-circle rather than a text
+			// glyph, so it never depends on the loaded font's glyph ranges.
+			if (file->isRemoteOnly)
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				const float r = 9.0f;
+				const ImVec2 c(mn.x + r + 3.0f, mn.y + r + 3.0f);
+				dl->AddCircleFilled(c, r, IM_COL32(24, 26, 30, 225));
+				dl->AddCircle(c, r, IM_COL32(120, 170, 230, 235), 0, 1.5f);
+				const float tr = 3.5f;
+				dl->AddTriangleFilled(
+					ImVec2(c.x - tr, c.y - tr * 0.6f),
+					ImVec2(c.x + tr, c.y - tr * 0.6f),
+					ImVec2(c.x,      c.y + tr * 0.9f),
+					IM_COL32(150, 195, 240, 255));
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					ImGui::SetTooltip("On the EngineContent server — double-click to download");
+			}
+
 			// Source-control status, drawn in the BOTTOM-left so it cannot collide
 			// with the material-function badge in the top-right. Same technique:
 			// over the tile via the item rect, so the cached thumbnail stays a
@@ -835,49 +955,23 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_selectedItem     = file->fullPath;
 				s_selectedIsFolder = false;
 			}
-			// Double-click → open tab
+			// Double-click → open tab (or, for an EngineContent asset that only
+			// exists on the SFTP server so far, ask before downloading it — see
+			// the "##cb_remote_download_popup" modal below).
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
-				if (std::filesystem::path(file->fullPath).extension() == ".hescene")
+#ifdef HE_HAVE_LIBSSH2
+				if (file->isRemoteOnly)
 				{
-					openSceneGuarded(file->fullPath);
-				}
-				// Script assets open the code editor tab, material assets the node-graph
-				// editor tab. Other asset types have no dedicated editor yet → no-op.
-				// C++ source/header (Source root) opens the h/cpp class viewer; a raw
-				// .wav opens the audio tab (auditioning a source file must not require
-				// importing it first). Both predicates are raw extension checks, not
-				// HAsset sniffs, so they must be tested explicitly here.
-				else if (CppClassEditorPanel::isCppSourceAsset(file->fullPath) ||
-				         AudioEditorPanel::isAudioAsset(file->fullPath) ||
-				         ScriptEditorPanel::isScriptAsset(file->fullPath) ||
-				         MaterialEditorPanel::isMaterialAsset(file->fullPath) ||
-				         MaterialEditorPanel::isMaterialFunctionAsset(file->fullPath) ||
-				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
-				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
-				         InputAssetPanel::isInputAsset(file->fullPath) ||
-				         TypeAssetPanel::isTypeAsset(file->fullPath) ||
-				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
-				         StaticMeshEditorPanel::isStaticMeshAsset(file->fullPath) ||
-				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath) ||
-				         AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(file->fullPath))
-				{
-				const std::string tabLabel = std::filesystem::path(file->name).stem().string();
-				auto it = std::find_if(ctx.tabs.begin(), ctx.tabs.end(),
-					[&](const AppContext::EditorTab& t){ return t.assetPath == file->fullPath; });
-				if (it == ctx.tabs.end())
-				{
-					ctx.tabs.push_back({ tabLabel, file->fullPath, true, true });
-					ctx.activeTab = static_cast<int>(ctx.tabs.size()) - 1;
+					s_remoteDownloadRelativePath = engineRelativePath(file->fullPath);
+					s_remoteDownloadUuid         = file->remoteUuid;
+					s_remoteDownloadTabLabel     = std::filesystem::path(file->name).stem().string();
+					s_remoteDownloadFullPath     = file->fullPath;
+					s_openRemoteDownloadPopup    = true;
 				}
 				else
-				{
-					ctx.activeTab = static_cast<int>(std::distance(ctx.tabs.begin(), it));
-				}
-					// Force the tab bar to select this tab next frame (else ImGui keeps the
-					// Scene tab selected and the editor never opens).
-					tabSelectRequest = ctx.activeTab;
-				}
+#endif
+					openAssetTab(file->fullPath);
 			}
 			// Right click → select only, open menu after loop
 			if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
@@ -1611,6 +1705,77 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			ImGui::EndPopup();
 		}
+
+#ifdef HE_HAVE_LIBSSH2
+		// ── EngineContent remote-download confirmation ─────────────────────
+		// Raised from the file-grid double-click above. Same "cannot open a modal
+		// from inside another ID stack" reason the delete-folder dialog is opened
+		// out here instead of at the click site.
+		if (s_openRemoteDownloadPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_remote_download_popup");
+			s_openRemoteDownloadPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_remote_download_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			ImGui::Text("Download \"%s\"?", s_remoteDownloadTabLabel.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"This EngineContent asset is not on this machine yet — it lives on the "
+				"EngineContent server. Downloading it saves a copy in the shared "
+				"EngineContent cache, so every project (not just this one) can use it "
+				"from now on without downloading it again.");
+			ImGui::Spacing();
+
+			if (EditorWidgets::primaryButton("Download", ImVec2(200, 0)))
+			{
+				const std::string relPath           = s_remoteDownloadRelativePath;
+				const std::string fullPath          = s_remoteDownloadFullPath;
+				GlobalState*      gs                = ctx.globalState;
+				const std::string engineContentPath = ctx.contentManager->engineContentRoot();
+				const std::string projectContentRoot = ctx.contentManager->contentRoot();
+				HE::Cs::EngineContentSync::instance().enqueueDownload(
+					relPath, s_remoteDownloadUuid, HE::Cs::DownloadTrigger::Explicit,
+					[fullPath, gs, engineContentPath, projectContentRoot](bool success)
+					{
+						// Worker thread — must not touch ctx/ImGui. GlobalState's own
+						// refresh is safe here (mutex-guarded, filesystem-only, same
+						// fact startSftpProbe's manifest refresh already relies on);
+						// it clears this asset's isRemoteOnly flag for the next frame.
+						// The tab-open request, which DOES need the main thread, goes
+						// through s_pendingOpenFullPaths (static storage, so this
+						// reference stays valid regardless of when the callback fires).
+						if (!success) return;
+						if (gs && !engineContentPath.empty())
+						{
+							std::vector<HE::RemoteEngineAsset> remoteOnly;
+							for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
+								remoteOnly.push_back(HE::RemoteEngineAsset{ e.relativePath, e.uuid });
+							gs->refreshEngineFolder(engineContentPath, projectContentRoot, remoteOnly);
+						}
+						std::lock_guard<std::mutex> lock(s_pendingOpenMutex);
+						s_pendingOpenFullPaths.push_back(fullPath);
+					});
+				s_remoteDownloadRelativePath.clear();
+				s_remoteDownloadTabLabel.clear();
+				s_remoteDownloadFullPath.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(200, 0)))
+			{
+				s_remoteDownloadRelativePath.clear();
+				s_remoteDownloadTabLabel.clear();
+				s_remoteDownloadFullPath.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+#endif
 
 		// ── Name-a-C++-class popup (C++ projects only) ────────────────────
 		// The Create menu's "C++ Class" item stages a default name and raises
