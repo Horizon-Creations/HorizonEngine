@@ -191,6 +191,38 @@ namespace
 	}
 } // namespace
 
+// Per-registry-id help for the entries whose behaviour the id alone doesn't
+// convey. Deliberately NOT a doc field on every one of the ~140 registry rows:
+// only the calls with real preconditions need a sentence.
+static const char* engineCallDoc(const std::string& id)
+{
+	struct Row { const char* id; const char* doc; };
+	static constexpr Row kDocs[] = {
+		{ "save.create",   "Starts a NEW save from the project's SaveGame Template\n(fields seeded with the template defaults) and makes it active.\nIn memory only until Write Save." },
+		{ "save.load",     "Loads Saves/<id>.json, re-validates it against the template\nit names and makes it active. Fails if the save or its template\nis missing." },
+		{ "save.write",    "Persists the active save to disk (atomically)." },
+		{ "save.close",    "Drops the active save without writing." },
+		{ "save.activeId", "Id of the active save; empty when there is none." },
+		{ "save.list",     "Ids of every save on disk." },
+		{ "save.exists",   "Is there a save with this id on disk?" },
+		{ "save.delete",   "Deletes a save file. Does not touch the active save." },
+		{ "save.fields",   "Field names the active save's template declares —\nso a graph never has to hardcode them." },
+		{ "save.setNumber","Writes a Float/Int/Enum field of the active save.\nThe field is picked from the template below." },
+		{ "save.getNumber","Reads a Float/Int/Enum field; unknown field or no active\nsave yields the Default input." },
+		{ "save.setString","Writes a String field of the active save." },
+		{ "save.getString","Reads a String field; falls back to the Default input." },
+		{ "save.setBool",  "Writes a Bool field of the active save." },
+		{ "save.getBool",  "Reads a Bool field; falls back to the Default input." },
+		{ "save.setStruct","Writes a Struct field; the value's definition must match\nthe one the template declares." },
+		{ "save.getStruct","Reads a Struct field of the active save." },
+		{ "entity.saveState",       "Stores this entity's flagged attributes (see its Save State\ncomponent) in the active save, keyed by its UUID.\nPlay mode only." },
+		{ "entity.hasSavedState",   "Does the active save carry state for this entity?" },
+		{ "entity.applySavedState", "Applies every attribute the active save carries for this\nentity back onto it. Partial: what the save lacks stays.\nPlay mode only." },
+	};
+	for (const Row& r : kDocs) if (id == r.id) return r.doc;
+	return nullptr;
+}
+
 std::string nodeTooltipText(const HorizonCode::Node& n)
 {
 	using T = HorizonCode::NodeType;
@@ -204,6 +236,10 @@ std::string nodeTooltipText(const HorizonCode::Node& n)
 		{
 			out += "Engine API call: ";
 			out += fn->category; out += " - "; out += fn->id;
+			// The savegame calls carry real semantics the id can't convey (an
+			// active document, a template, a play-mode gate) — spell those out.
+			// Ids not listed here fall back to the generic line above.
+			if (const char* doc = engineCallDoc(n.s)) { out += "\n"; out += doc; }
 			out += fn->isExec ? "\nRuns when executed." : "\nPure — evaluated whenever an output is used.";
 		}
 		else { out += "Engine API call: "; out += n.s; out += " (unknown registry id)"; }
@@ -212,6 +248,16 @@ std::string nodeTooltipText(const HorizonCode::Node& n)
 	{
 		const char* d = HorizonCode::nodeTooltip(n.type);
 		if (d && *d) out += d;
+		// User-defined-type nodes: name the definition they are bound to, so a
+		// canvas full of "Make Struct" nodes is readable on hover.
+		if (!n.typeName.empty())
+		{
+			out += "\nType: ";
+			out += std::filesystem::path(n.typeName).stem().string();
+			const bool known = HE::TypeRegistry::instance().hasStruct(n.typeName)
+			                || HE::TypeRegistry::instance().hasEnum(n.typeName);
+			if (!known) out += "  (definition missing!)";
+		}
 	}
 
 	const HorizonCode::NodeSig sig = HorizonCode::signatureOf(n);

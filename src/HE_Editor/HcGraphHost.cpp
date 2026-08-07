@@ -545,7 +545,15 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				char lbl[256]; std::snprintf(lbl, sizeof lbl, r.fmt, d.name.c_str());
 				if (!matches(lbl, "Structs")) continue;
 				if (!sh) { ImGui::TextDisabled("Structs"); sh = true; }
-				if (HcEditorUtil::searchMenuItem(lbl)) spawn(r.t, d.assetPath);
+				const bool picked = HcEditorUtil::searchMenuItem(lbl);
+				// Same hover help the generic category rows show — these entries
+				// are generated per asset, so they need it spelled out here.
+				if (ImGui::IsItemHovered())
+				{
+					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(probe).c_str());
+				}
+				if (picked) spawn(r.t, d.assetPath);
 			}
 		}
 		if (sh) ImGui::Spacing();
@@ -564,7 +572,13 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				char lbl[256]; std::snprintf(lbl, sizeof lbl, r.fmt, d.name.c_str());
 				if (!matches(lbl, "Enums")) continue;
 				if (!eh) { ImGui::TextDisabled("Enums"); eh = true; }
-				if (HcEditorUtil::searchMenuItem(lbl)) spawn(r.t, d.assetPath);
+				const bool picked = HcEditorUtil::searchMenuItem(lbl);
+				if (ImGui::IsItemHovered())
+				{
+					HC::Node probe; probe.type = r.t; probe.typeName = d.assetPath;
+					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(probe).c_str());
+				}
+				if (picked) spawn(r.t, d.assetPath);
 			}
 		}
 	}
