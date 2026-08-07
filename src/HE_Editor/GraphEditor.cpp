@@ -249,7 +249,20 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // holding the pad pressed for a right-drag the whole time is what made it
     // exhausting), zoom moves behind Cmd/Ctrl+scroll — modifier checked first,
     // so a zoom can never fall through into a pan.
-    if (interact)
+    //
+    // Gated on ITS OWN hover test, not on `interact`: `interact` rides on the
+    // canvas item's hover, which any node (or node-body widget) under the
+    // cursor turns off — wheel input would die the moment the mouse crossed a
+    // node. The wheel belongs to the canvas REGION: mouse inside the canvas
+    // rect and over this window or a node-body child of it. An open popup (a
+    // node's combo, the add-menu) is its own window, so IsWindowHovered goes
+    // false and the popup keeps its wheel.
+    const bool wheelHovered =
+        mouse.x >= origin.x && mouse.y >= origin.y &&
+        mouse.x <  origin.x + size.x && mouse.y < origin.y + size.y &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+                               ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    if (wheelHovered && !st.suppressInteraction && !behindConsumed)
     {
         ImGuiIO& gio = ImGui::GetIO();
         const bool zoomMod = gio.KeyCtrl || gio.KeySuper;
