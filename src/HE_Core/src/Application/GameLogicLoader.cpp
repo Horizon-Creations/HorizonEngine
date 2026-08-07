@@ -1,4 +1,5 @@
 #include "Application/GameLogicLoader.h"
+#include <HorizonGameServices.h>
 #include "Diagnostics/Logger.h"
 #include <cstdio>
 #include <system_error>
@@ -104,5 +105,21 @@ bool GameLogicLoader::reload(const std::filesystem::path& dllPath, HorizonWorld&
 
 bool GameLogicLoader::isLoaded() const { return m_logic != nullptr; }
 IGameLogic* GameLogicLoader::logic() const { return m_logic; }
+
+bool GameLogicLoader::injectServices(const HeSaveServices* services)
+{
+	if (!isLoaded()) return false;
+	auto setFn = reinterpret_cast<FnSetEngineServices>(m_lib.getSymbol("HE_SetEngineServices"));
+	if (!setFn)
+	{
+		HE_LOG_INFO(GameLogic, "%s",
+			"GameLogicLoader: library has no HE_SetEngineServices export "
+			"(older scaffold) — he::save/he::entity read as unavailable in game code");
+		return false;
+	}
+	setFn(services);
+	HE_LOG_INFO(GameLogic, "%s", "GameLogicLoader: engine services injected");
+	return true;
+}
 
 } // namespace HE

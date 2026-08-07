@@ -5,6 +5,7 @@
 #include <filesystem>
 
 class HorizonWorld;
+struct HeSaveServices;   // HorizonGameServices.h (global scope, C ABI)
 
 namespace HE {
 
@@ -32,6 +33,13 @@ public:
 
     bool         isLoaded()  const;
     IGameLogic*  logic()     const;   // nullptr if not loaded
+
+    // Hand the loaded library its engine-services table (HorizonGameServices.h)
+    // through its optional HE_SetEngineServices export. Call after load() and
+    // BEFORE onStart, with a table that outlives the library. Returns false when
+    // the library predates the export (older scaffold) — save APIs then read as
+    // unavailable on the game side, which is a state, not an error.
+    bool injectServices(const ::HeSaveServices* services);
 
 private:
     DynLib                m_lib;

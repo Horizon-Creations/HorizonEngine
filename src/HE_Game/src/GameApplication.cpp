@@ -372,6 +372,13 @@ void GameApplication::OnInit()
 #endif
 	if (std::filesystem::exists(logicPath) && logicLoader().load(logicPath))
 	{
+		// Engine services (savegames) go in BEFORE onStart, so "load the save
+		// on startup" works from the first native line. The world resolves per
+		// call — scene switches stay transparent to the library.
+		m_saveServicesBinding.world   = [this]() { return m_world.get(); };
+		m_saveServicesBinding.content = &contentManager();
+		HE::api::fillSaveServices(m_saveServices, &m_saveServicesBinding);
+		logicLoader().injectServices(&m_saveServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
 	}

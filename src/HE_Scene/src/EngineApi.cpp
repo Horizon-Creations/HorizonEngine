@@ -18,6 +18,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/TypeRegistry.h>   // save-template schemas + struct field values
+#include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include <DebugDraw/DebugDraw.h>
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
@@ -907,6 +908,31 @@ Value getStructV(const std::string& field)
     return active()->fields[i];
 }
 
+bool setStructJson(const std::string& field, const std::string& json)
+{
+    const int i = fieldIndex("setStructJson", field);
+    if (i < 0) return false;
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("setStructJson", f, { P::Struct })) return false;
+    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object())
+    {
+        HE_LOG_WARN(Script, "%s",
+            ("save.setStructJson: field '" + field + "' — invalid JSON").c_str());
+        return false;
+    }
+    active()->fields[i] = valueFromJson(j, f);
+    return true;
+}
+std::string getStructJson(const std::string& field)
+{
+    const int i = fieldIndex("getStructJson", field);
+    if (i < 0) return {};
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("getStructJson", f, { P::Struct })) return {};
+    return valueToJson(active()->fields[i]).dump();
+}
+
 bool setEntityState(const std::string& uuid, const std::string& json)
 {
     if (!active())
@@ -1719,6 +1745,92 @@ const ApiFn* find(const std::string& id)
 
     const auto it = index.find(std::string_view(id));
     return it == index.end() ? nullptr : it->second;
+}
+
+} // namespace HE::api
+
+// ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
+// Every bridge below is a captureless lambda decaying to a C function pointer;
+// `host` carries the SaveServicesBinding. Entity calls resolve the world PER
+// CALL through the binding so a scene switch never leaves a stale pointer in
+// the game library's hands.
+
+namespace HE::api {
+namespace {
+
+Ctx bindingCtx(void* host)
+{
+    auto* b = static_cast<SaveServicesBinding*>(host);
+    Ctx c;
+    c.world   = b && b->world ? b->world() : nullptr;
+    c.content = b ? b->content : nullptr;
+    return c;
+}
+// (host, buf, cap) string return: copy up to cap-1 bytes, always NUL-terminate,
+// report the FULL length so the caller can grow and retry.
+int copyOut(const std::string& s, char* buf, int cap)
+{
+    if (buf && cap > 0)
+    {
+        const int n = (int)std::min<size_t>(s.size(), (size_t)cap - 1);
+        std::memcpy(buf, s.data(), (size_t)n);
+        buf[n] = '\0';
+    }
+    return (int)s.size();
+}
+std::string joinLines(const std::vector<std::string>& v)
+{
+    std::string out;
+    for (size_t i = 0; i < v.size(); ++i) { if (i) out += '\n'; out += v[i]; }
+    return out;
+}
+
+} // namespace
+
+void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_SAVE_ABI_VERSION;
+    out.host       = binding;
+
+    out.create = [](void* h, const char* id) {
+        auto* b = static_cast<SaveServicesBinding*>(h);
+        return save::create(id ? id : "", b ? b->content : nullptr); };
+    out.load = [](void* h, const char* id) {
+        auto* b = static_cast<SaveServicesBinding*>(h);
+        return save::load(id ? id : "", b ? b->content : nullptr); };
+    out.write      = [](void*) { return save::write(); };
+    out.close      = [](void*) { save::close(); };
+    out.exists     = [](void*, const char* id) { return save::exists(id ? id : ""); };
+    out.removeSave = [](void*, const char* id) { return save::remove(id ? id : ""); };
+    out.activeId   = [](void*, char* buf, int cap) { return copyOut(save::activeId(), buf, cap); };
+    out.listIds    = [](void*, char* buf, int cap) { return copyOut(joinLines(save::list()), buf, cap); };
+    out.fields     = [](void*, char* buf, int cap) { return copyOut(joinLines(save::fields()), buf, cap); };
+
+    out.setNumber = [](void*, const char* f, float v) { return save::setNumber(f ? f : "", v); };
+    out.getNumber = [](void*, const char* f, float d) { return save::getNumber(f ? f : "", d); };
+    out.setString = [](void*, const char* f, const char* v) { return save::setString(f ? f : "", v ? v : ""); };
+    out.getString = [](void*, const char* f, char* buf, int cap) {
+        return copyOut(save::getString(f ? f : "", ""), buf, cap); };
+    out.setBool = [](void*, const char* f, bool v) { return save::setBool(f ? f : "", v); };
+    out.getBool = [](void*, const char* f, bool d) { return save::getBool(f ? f : "", d); };
+    out.setStructJson = [](void*, const char* f, const char* json) {
+        return save::setStructJson(f ? f : "", json ? json : ""); };
+    out.getStructJson = [](void*, const char* f, char* buf, int cap) {
+        return copyOut(save::getStructJson(f ? f : ""), buf, cap); };
+
+    out.findEntityByName = [](void* h, const char* name) {
+        Ctx c = bindingCtx(h);
+        return (uint32_t)entity::findByName(c, name ? name : ""); };
+    out.entitySaveState = [](void* h, uint32_t e) {
+        Ctx c = bindingCtx(h);
+        return entity::saveState(c, e); };
+    out.entityHasSavedState = [](void* h, uint32_t e) {
+        Ctx c = bindingCtx(h);
+        return entity::hasSavedState(c, e); };
+    out.entityApplySavedState = [](void* h, uint32_t e) {
+        Ctx c = bindingCtx(h);
+        return entity::applySavedState(c, e); };
 }
 
 } // namespace HE::api

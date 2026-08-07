@@ -140,11 +140,16 @@ R"(// ── GameLogic entry point ───────────────
 // LevelScript. Call setActiveScene() to switch levels (see the <Scene>LevelScript
 // files, which self-register their scene names).
 #include <IGameLogic.h>
+#include <HorizonGameServices.h>
 #include "GameLogicRuntime.h"
 #include "GameInstance.h"
 
 #include <memory>
 #include <string>
+
+// Receives the engine's savegame services right after this library loads (see
+// <HorizonGameServices.h>) — he::save::* / he::entity::* work from onStart on.
+HE_IMPLEMENT_ENGINE_SERVICES()
 
 namespace
 {
@@ -321,6 +326,13 @@ std::string readme(const std::string& projectName)
 "\n"
 "This project is authored in native C++. Gameplay lives here in `Source/` and\n"
 "compiles into a `GameLogic` shared library the engine loads at runtime.\n"
+"\n"
+"Savegames: `<HorizonGameServices.h>` gives you `he::save::*` (create/load/\n"
+"write/typed field access against the project's SaveGame Template) and\n"
+"`he::entity::*` (saveState/applySavedState on entities carrying a Save State\n"
+"component). The engine injects the services right after this library loads;\n"
+"`he::save::available()` tells you whether it did. Struct fields cross as JSON\n"
+"and pair with the generated `Generated/GameTypes.h` types.\n"
 "\n"
 "## Files\n"
 "\n"

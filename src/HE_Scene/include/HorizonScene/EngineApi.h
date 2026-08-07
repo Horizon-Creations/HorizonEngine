@@ -11,7 +11,8 @@ class HorizonWorld;
 class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
-struct DebugLine;   // HE_Core DebugDraw.h (renderer debug-line vertex pair)
+struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
+struct HeSaveServices; // HorizonGameServices.h (global scope, C ABI)
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -321,6 +322,10 @@ namespace save {
     bool        getBool(const std::string& field, bool def);
     bool               setStructV(const std::string& field, const HorizonCode::Value& v);
     HorizonCode::Value getStructV(const std::string& field);
+    // JSON text form of a Struct field (the save file's own encoding) — the
+    // C++ GameLogic boundary, which has no Value type. Same validation.
+    bool        setStructJson(const std::string& field, const std::string& json);
+    std::string getStructJson(const std::string& field);      // "" on failure
 
     // Entity-state section (SaveStateComponent, see entity.saveState /
     // applySavedState): an opaque JSON object per entity UUID.
@@ -333,6 +338,17 @@ namespace save {
     void setPlayMode(bool inPlay);
     bool inPlayMode();
 }
+
+// ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
+// Fill the C-ABI table a GameLogic library receives via HE_SetEngineServices.
+// `binding` must outlive the table's use (the app owns both); world resolves
+// per call so scene switches stay transparent.
+struct SaveServicesBinding
+{
+    std::function<HorizonWorld*()> world;   // may return null (calls then no-op loud)
+    ContentManager*                content = nullptr;
+};
+void fillSaveServices(::HeSaveServices& out, SaveServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

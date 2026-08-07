@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonScene/EngineApi.h>
 #include <Types/TypeRegistry.h>
+#include <HorizonGameServices.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -1099,6 +1100,76 @@ TEST_CASE("entity save-state: guarded round-trip through the active save")
     CHECK(reg.get<TransformComponent>(e).position.z == doctest::Approx(3.0f));
 
     save::setPlayMode(false);
+}
+
+// The game-side receiver, exactly as a GameLogic library defines it — the test
+// binary plays the "loaded library" role here.
+HE_IMPLEMENT_ENGINE_SERVICES()
+
+TEST_CASE("save services: the C-ABI table drives the full save path for C++ GameLogic")
+{
+    SaveTestRig rig;
+
+    HorizonWorld world;
+    HorizonWorld* worldPtr = &world;
+    const auto e = world.createEntity("Hero");
+    world.registry().emplace<TransformComponent>(e);
+    world.registry().emplace<SaveStateComponent>(e);
+    HE::api::save::setPlayMode(true);
+
+    // Before injection every wrapper is a safe no-op default.
+    HE_SetEngineServices(nullptr);
+    CHECK(!he::save::available());
+    CHECK(!he::save::create("slot1"));
+    CHECK(he::save::activeId().empty());
+
+    HE::api::SaveServicesBinding binding;
+    binding.world   = [&worldPtr]() { return worldPtr; };
+    binding.content = &rig.cm;
+    HeSaveServices table{};
+    HE::api::fillSaveServices(table, &binding);
+    HE_SetEngineServices(&table);
+    REQUIRE(he::save::available());
+
+    // An ABI mismatch is rejected, not half-used.
+    HeSaveServices wrong = table;
+    wrong.abiVersion = HE_SAVE_ABI_VERSION + 1;
+    HE_SetEngineServices(&wrong);
+    CHECK(!he::save::available());
+    HE_SetEngineServices(&table);
+
+    REQUIRE(he::save::create("cpp-run"));
+    CHECK(he::save::activeId() == "cpp-run");
+    CHECK(he::save::fields() ==
+          std::vector<std::string>({ "hp", "title", "hardcore", "stats" }));
+    CHECK(he::save::setNumber("hp", 12.0f));
+    CHECK(he::save::getNumber("hp") == doctest::Approx(12.0f));
+    CHECK(he::save::setString("title", "Native"));
+    CHECK(he::save::getString("title") == "Native");
+    // Struct fields cross as JSON text.
+    CHECK(he::save::setStructJson("stats", "{\"__type\":\"Content/T/SaveStats.hasset\",\"level\":7}"));
+    CHECK(he::save::getStructJson("stats").find("7") != std::string::npos);
+
+    // Entity save-state through the table, entity found by name.
+    const uint32_t handle = he::entity::findByName("Hero");
+    CHECK(handle == (uint32_t)e);
+    REQUIRE(he::entity::saveState(handle));
+    CHECK(he::entity::hasSavedState(handle));
+    world.registry().get<TransformComponent>(e).position.x = 5.0f;
+    REQUIRE(he::entity::applySavedState(handle));
+    CHECK(world.registry().get<TransformComponent>(e).position.x == doctest::Approx(0.0f));
+
+    // Disk round-trip through the table.
+    REQUIRE(he::save::write());
+    he::save::close();
+    CHECK(he::save::activeId().empty());
+    REQUIRE(he::save::load("cpp-run"));
+    CHECK(he::save::getNumber("hp") == doctest::Approx(12.0f));
+    CHECK(he::save::list() == std::vector<std::string>({ "cpp-run" }));
+    CHECK(he::save::remove("cpp-run"));
+
+    HE_SetEngineServices(nullptr);
+    HE::api::save::setPlayMode(false);
 }
 
 // ═══ Scene transition requests + packed-scene UUIDs + additive tracking ═══════

@@ -10,6 +10,8 @@
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/AudioEngine.h>
+#include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
+#include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
 
 class ScriptContext;
 
@@ -84,6 +86,12 @@ private:
     // switches. Each world borrows it via setWidgetManager. Declared after
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
+
+    // C++ GameLogic services (HorizonGameServices.h): the table + its binding
+    // must outlive the loaded library, so they live here. Filled + injected
+    // right after the library loads.
+    HE::api::SaveServicesBinding m_saveServicesBinding;
+    HeSaveServices               m_saveServices{};
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
