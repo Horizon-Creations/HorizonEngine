@@ -1,4 +1,5 @@
 #include "LevelScriptPanel.h"
+#include <Types/TypeRegistry.h>
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorWidgets.h"    // primary/danger/cancel buttons
 #include <cstdint>
@@ -333,15 +334,20 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 	// Picking an object type sets v->className to the class; the label shows the
 	// class name instead of "Object".
 	const PT oldType = v->type;
-	if (HcEditorUtil::drawTypePicker("Type", content, v->type, &v->className))
+	const std::string oldTypeName = v->typeName;
+	if (HcEditorUtil::drawTypePicker("Type", content, v->type, &v->className, &v->typeName))
 	{
-		if (v->type != oldType)
+		// A different Enum/Struct DEFINITION is a type change too — the pins
+		// keep their PinType but stop typechecking against the old wires.
+		if (v->type != oldType || v->typeName != oldTypeName)
 		{
 			v->defaultItems.clear(); // array slots hold the OLD element type
+			v->s.clear();            // enum default entry name belongs to the old enum
 			for (auto& n : graph.nodes)
 				if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == v->name)
 				{
 					n.propType = v->type;
+					n.typeName = v->typeName;
 					const PinRanges r = HGH::pinRanges(n);
 					const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
 					HGH::removePinLinks(graph, n.id, valuePin);
@@ -395,6 +401,25 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 				if (ImGui::DragFloat3("Position##vdef", &v->tpos.x, 0.1f)) edited = true;
 				if (ImGui::DragFloat3("Rotation##vdef", &v->trot.x, 0.5f)) edited = true;
 				if (ImGui::DragFloat3("Scale##vdef",    &v->tscl.x, 0.05f)) edited = true;
+				break;
+			case PT::Enum:
+			{
+				// The default is the entry NAME (renumber-safe; resolved at seed).
+				HE::EnumDef def;
+				if (!HE::TypeRegistry::instance().getEnum(v->typeName, def) || def.entries.empty())
+				{ ImGui::TextDisabled("(no definition)"); break; }
+				const char* shown = v->s.empty() ? def.entries.front().name.c_str() : v->s.c_str();
+				if (ImGui::BeginCombo("##vdef", shown))
+				{
+					for (const auto& e : def.entries)
+						if (ImGui::Selectable(e.name.c_str(), e.name == v->s))
+						{ v->s = e.name; edited = true; }
+					ImGui::EndCombo();
+				}
+				break;
+			}
+			case PT::Struct:
+				ImGui::TextDisabled("Seeds from the struct's own field defaults.");
 				break;
 			default: break;
 		}

@@ -1,4 +1,5 @@
 #include "HcEditorUtil.h"
+#include <Types/TypeRegistry.h>
 #include "EditorWidgets.h"    // danger buttons for deletion
 #include <cstdint>
 #include <ContentManager/ContentManager.h>
@@ -163,6 +164,8 @@ namespace
 			case P::Color:     return "Color";
 			case P::Ref:       return "Object";
 			case P::Transform: return "Transform";
+			case P::Enum:      return "Enum";
+			case P::Struct:    return "Struct";
 			default:           return "Exec";
 		}
 	}
@@ -254,6 +257,8 @@ std::uint32_t pinTypeColor(HorizonCode::PinType t)
 		case P::Color:  return IM_COL32(230, 210, 110, 255);
 		case P::Ref:    return IM_COL32(180, 140, 240, 255);
 		case P::Transform: return IM_COL32(240, 160, 100, 255);   // orange
+		case P::Enum:   return IM_COL32(100, 220, 160, 255);      // mint
+		case P::Struct: return IM_COL32( 90, 150, 235, 255);      // struct blue
 	}
 	return IM_COL32_WHITE;
 }
@@ -364,12 +369,15 @@ namespace
 }
 
 bool drawTypePicker(const char* label, ContentManager* cm,
-                    HorizonCode::PinType& type, std::string* className)
+                    HorizonCode::PinType& type, std::string* className,
+                    std::string* typeName)
 {
 	using P = HorizonCode::PinType;
 	bool changed = false;
 	std::string cur = (type == P::Ref && className && !className->empty())
 		? std::filesystem::path(*className).stem().string()
+		: ((type == P::Enum || type == P::Struct) && typeName && !typeName->empty())
+		? std::filesystem::path(*typeName).stem().string()
 		: valueTypeName(type);
 	if (ImGui::BeginCombo(label, cur.c_str()))
 	{
@@ -384,7 +392,32 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		const P defs[] = { P::Float, P::Bool, P::Int, P::String, P::Vec2, P::Color, P::Transform };
 		for (P d : defs)
 			if (hit(valueTypeName(d)) && ImGui::Selectable(valueTypeName(d), type == d && (!className || className->empty())))
-			{ type = d; if (className) className->clear(); changed = true; }
+			{ type = d; if (className) className->clear(); if (typeName) typeName->clear(); changed = true; }
+
+		if (typeName) // user-defined types (Enum/Struct assets) where allowed
+		{
+			auto& reg = HE::TypeRegistry::instance();
+			const auto enums = reg.enums();
+			if (!enums.empty())
+			{
+				ImGui::Separator();
+				ImGui::TextDisabled("Enums");
+				for (const auto& d : enums)
+					if (hit(d.name) && ImGui::Selectable((d.name + "##e").c_str(),
+					        type == P::Enum && *typeName == d.assetPath))
+					{ type = P::Enum; *typeName = d.assetPath; if (className) className->clear(); changed = true; }
+			}
+			const auto structs = reg.structs();
+			if (!structs.empty())
+			{
+				ImGui::Separator();
+				ImGui::TextDisabled("Structs");
+				for (const auto& d : structs)
+					if (hit(d.name) && ImGui::Selectable((d.name + "##s").c_str(),
+					        type == P::Struct && *typeName == d.assetPath))
+					{ type = P::Struct; *typeName = d.assetPath; if (className) className->clear(); changed = true; }
+			}
+		}
 
 		if (className) // object types only where a class binding is allowed
 		{
@@ -392,7 +425,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 			ImGui::TextDisabled("Objects");
 			for (const auto& c : listClasses(cm, nullptr, nullptr))
 				if (hit(c.label) && ImGui::Selectable(c.label.c_str(), type == P::Ref && *className == c.path))
-				{ type = P::Ref; *className = c.path; changed = true; }
+				{ type = P::Ref; *className = c.path; if (typeName) typeName->clear(); changed = true; }
 		}
 		ImGui::EndCombo();
 	}
@@ -498,6 +531,7 @@ float literalNodeBodyHeight(const HorizonCode::Node& n)
 		case T::ConstFloat:
 		case T::ConstVec2:   return 24.0f;
 		case T::ConstColor:  return 22.0f;
+		case T::ConstEnum:   return 24.0f;
 		case T::ConstTransform: return 72.0f;   // three rows: position / rotation / scale
 		case T::ConstString:
 		{
@@ -522,6 +556,21 @@ bool drawLiteralNodeBody(HorizonCode::Node& n, bool& committed)
 		{
 			bool b = n.f[0] != 0.0f;
 			if (ImGui::Checkbox("##litv", &b)) { n.f[0] = b ? 1.0f : 0.0f; changed = true; committed = true; }
+			break;
+		}
+		case T::ConstEnum:
+		{
+			HE::EnumDef def;
+			if (!HE::TypeRegistry::instance().getEnum(n.typeName, def) || def.entries.empty())
+			{ ImGui::TextDisabled("(no definition)"); break; }
+			const HE::EnumEntry* cur = def.findValue((int)n.f[0]);
+			if (ImGui::BeginCombo("##litv", cur ? cur->name.c_str() : "(pick)"))
+			{
+				for (const auto& e : def.entries)
+					if (ImGui::Selectable(e.name.c_str(), cur && cur->name == e.name))
+					{ n.f[0] = (float)e.value; changed = true; committed = true; }
+				ImGui::EndCombo();
+			}
 			break;
 		}
 		case T::ConstInt:

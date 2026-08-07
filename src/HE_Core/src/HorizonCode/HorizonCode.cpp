@@ -1,6 +1,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <cstdint>
 #include <Diagnostics/Logger.h>
+#include <Types/TypeRegistry.h>   // struct/enum definitions (field/entry resolution)
 #include <GraphCommon/GraphJson.h>
 #include <GraphCommon/GraphModel.h>
 #include <nlohmann/json.hpp>
@@ -65,13 +66,13 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataOuts = { { "Value", n.propType } }; // pass the set value through
         break;
     case T::GetVariable:
-        s.dataOuts = { { "Value", n.propType, n.isArray } };
+        s.dataOuts = { { "Value", n.propType, n.isArray, n.typeName.c_str() } };
         break;
     case T::SetVariable:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Value", n.propType, n.isArray } };
-        s.dataOuts = { { "Value", n.propType, n.isArray } }; // pass the set value through
+        s.dataIns  = { { "Value", n.propType, n.isArray, n.typeName.c_str() } };
+        s.dataOuts = { { "Value", n.propType, n.isArray, n.typeName.c_str() } }; // pass the set value through
         break;
     case T::ShowSelf:
     case T::HideSelf:
@@ -102,13 +103,13 @@ void signatureInto(const Node& n, NodeSig& s)
         break;
     case T::GetExternal:
         s.dataIns  = { { "Target", P::Ref } };
-        s.dataOuts = { { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType, false, n.typeName.c_str() } };
         break;
     case T::SetExternal:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Target", P::Ref }, { "Value", n.propType } };
-        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
+        s.dataIns  = { { "Target", P::Ref }, { "Value", n.propType, false, n.typeName.c_str() } };
+        s.dataOuts = { { "Value", n.propType, false, n.typeName.c_str() } }; // pass the set value through
         break;
     case T::BindEvent:
         s.execIns  = { { "", P::Exec } };
@@ -231,6 +232,52 @@ void signatureInto(const Node& n, NodeSig& s)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "", P::String } };
+        break;
+    case T::MakeStruct:
+        // params mirror the struct's fields (synced from the TypeRegistry), so
+        // pins resolve without the registry — same idea as EngineCall.
+        for (const auto& p : n.params)
+            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray,
+                                  p.typeName.empty() ? nullptr : p.typeName.c_str() });
+        s.dataOuts = { { "Struct", P::Struct, false, n.typeName.c_str() } };
+        break;
+    case T::BreakStruct:
+        s.dataIns = { { "Struct", P::Struct, false, n.typeName.c_str() } };
+        for (const auto& p : n.params)
+            s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray,
+                                   p.typeName.empty() ? nullptr : p.typeName.c_str() });
+        break;
+    case T::SetStructField:
+        // params[0] mirrors the chosen field (name + type).
+        s.dataIns = { { "Struct", P::Struct, false, n.typeName.c_str() } };
+        if (!n.params.empty())
+            s.dataIns.push_back({ n.params[0].name.c_str(), n.params[0].type,
+                                  n.params[0].isArray,
+                                  n.params[0].typeName.empty() ? nullptr : n.params[0].typeName.c_str() });
+        s.dataOuts = { { "Struct", P::Struct, false, n.typeName.c_str() } };
+        break;
+    case T::ConstEnum:
+        s.dataOuts = { { "", P::Enum, false, n.typeName.c_str() } };
+        break;
+    case T::SwitchOnEnum:
+        // params mirror the entry names; the trailing Default catches values no
+        // entry claims (or a missing definition).
+        s.execIns = { { "", P::Exec } };
+        for (const auto& p : n.params) s.execOuts.push_back({ p.name.c_str(), P::Exec });
+        s.execOuts.push_back({ "Default", P::Exec });
+        s.dataIns = { { "Value", P::Enum, false, n.typeName.c_str() } };
+        break;
+    case T::EnumToInt:
+        s.dataIns  = { { "", P::Enum, false, n.typeName.c_str() } };
+        s.dataOuts = { { "", P::Int } };
+        break;
+    case T::IntToEnum:
+        s.dataIns  = { { "", P::Int } };
+        s.dataOuts = { { "", P::Enum, false, n.typeName.c_str() } };
+        break;
+    case T::EnumToString:
+        s.dataIns  = { { "", P::Enum, false, n.typeName.c_str() } };
+        s.dataOuts = { { "", P::String } };
         break;
     default: break;
     }
@@ -356,6 +403,14 @@ const char* nodeDisplayName(NodeType t)
         case T::Print:        return "Print";
         case T::FunctionReturn:return "Return";
         case T::EngineCall:   return "Engine Call";
+        case T::MakeStruct:     return "Make Struct";
+        case T::BreakStruct:    return "Break Struct";
+        case T::SetStructField: return "Set Struct Field";
+        case T::ConstEnum:      return "Enum Value";
+        case T::SwitchOnEnum:   return "Switch on Enum";
+        case T::EnumToInt:      return "Enum to Int";
+        case T::IntToEnum:      return "Int to Enum";
+        case T::EnumToString:   return "Enum to String";
         default:              return "?";
     }
 }
@@ -491,6 +546,23 @@ const char* nodeTooltip(NodeType t)
         case T::IsValid:
             return "True when the Target reference points to a live instance — the guard\n"
                    "to run before touching an object that may have been destroyed.";
+        case T::MakeStruct:
+            return "Builds a value of the chosen Struct asset: one input per field,\n"
+                   "unwired fields fall back to their declared defaults.";
+        case T::BreakStruct:
+            return "Splits a struct value into its fields — one output per field.";
+        case T::SetStructField:
+            return "Outputs a COPY of the struct with the chosen field replaced by Value.\n"
+                   "The original struct is not modified.";
+        case T::ConstEnum:
+            return "Enum literal of the chosen Enum asset. Pick the entry on the node body.";
+        case T::SwitchOnEnum:
+            return "Routes execution to the exec output matching the enum value;\n"
+                   "unmatched values (or a missing definition) take Default.";
+        case T::EnumToInt:    return "Outputs the enum value's underlying Int.";
+        case T::IntToEnum:    return "Reinterprets an Int as the chosen Enum asset's value.";
+        case T::EnumToString: return "Outputs the NAME of the enum entry matching the value\n"
+                   "(empty when no entry matches).";
         default: return "";
     }
 }
@@ -540,6 +612,9 @@ const char* nodeCategory(NodeType t)
         case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd:
         case T::ArraySet: case T::ArrayInsert: case T::ArrayRemove:
         case T::ArrayContains: case T::ArrayIndexOf: case T::ForEach: return "Array";
+        case T::MakeStruct: case T::BreakStruct: case T::SetStructField: return "Structs";
+        case T::ConstEnum: case T::SwitchOnEnum:
+        case T::EnumToInt: case T::IntToEnum: case T::EnumToString: return "Enums";
         default: return "Misc";
     }
 }
@@ -630,6 +705,22 @@ Value variableDefaultValue(const Variable& v)
         case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
         case P::Ref:    return Value::ofRef(0);
         case P::Transform: return Value::ofTransform(v.tpos, v.trot, v.tscl);
+        case P::Enum:
+        {
+            // The stored default is the entry NAME in `s` (renumber-safe);
+            // resolve against the current definition, first entry as fallback.
+            Value r; r.type = P::Enum; r.typeName = v.typeName;
+            HE::EnumDef def;
+            if (HE::TypeRegistry::instance().getEnum(v.typeName, def))
+            {
+                if (const HE::EnumEntry* e = def.findEntry(v.s)) r.i = e->value;
+                else if (!def.entries.empty())                   r.i = def.entries.front().value;
+            }
+            return r;
+        }
+        case P::Struct:
+            // Struct variables seed from the definition's own field defaults.
+            return HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
         default:        return Value::ofFloat(v.f[0]);
     }
 }
@@ -727,6 +818,20 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         if (dataPinType(*s, false, si) != dataPinType(*d, true, di) ||
             dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
             return false;
+        // User-defined types connect only to the SAME definition: a Struct pin
+        // for PlayerStats must not accept an Inventory, and enums likewise.
+        {
+            const PinType pt = dataPinType(*s, false, si);
+            if (pt == P::Enum || pt == P::Struct)
+            {
+                PinDesc sd{}, dd{};
+                dataPinDescOf(*s, false, si, sd);
+                dataPinDescOf(*d, true,  di, dd);
+                const char* a = sd.typeName ? sd.typeName : "";
+                const char* b = dd.typeName ? dd.typeName : "";
+                if (std::string_view(a) != std::string_view(b)) return false;
+            }
+        }
         HE::graph::disconnectInput(links, dstNode, dstPin); // an input holds one link
         links.push_back({ srcNode, srcPin, dstNode, dstPin });
         return true;
@@ -840,6 +945,7 @@ nlohmann::json nodeToJsonObj(const Node& n)
         {
             nlohmann::json pe = { { "name", p.name }, { "type", (int)p.type } };
             if (p.isArray) pe["arr"] = true;
+            if (!p.typeName.empty()) pe["typeName"] = p.typeName;
             a.push_back(std::move(pe));
         }
         return a;
@@ -848,6 +954,7 @@ nlohmann::json nodeToJsonObj(const Node& n)
     if (!n.results.empty()) e["results"] = dumpParams(n.results);
     if (n.subgraph)         e["subgraph"] = n.subgraph;
     if (n.isArray)          e["arr"]     = true;
+    if (!n.typeName.empty()) e["typeName"] = n.typeName;
     if (!n.pinDefaults.empty())
     {
         nlohmann::json pd = nlohmann::json::array();
@@ -877,6 +984,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
         e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
                        v.tscl.x, v.tscl.y, v.tscl.z };
     if (!v.className.empty()) e["className"] = v.className;
+    if (!v.typeName.empty())  e["typeName"]  = v.typeName;
 return e;
 }
 
@@ -909,6 +1017,7 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
             p.name = pe.value("name", std::string());
             p.type = (PinType)pe.value("type", (int)P::Float);
             p.isArray = pe.value("arr", false);
+            p.typeName = pe.value("typeName", std::string());
             ps.push_back(std::move(p));
         }
     };
@@ -916,6 +1025,7 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     loadParams(e.value("results", nlohmann::json::array()), n.results);
     n.subgraph = e.value("subgraph", 0);
     n.isArray  = e.value("arr", false);
+    n.typeName = e.value("typeName", std::string());
     if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
         for (const auto& entry : pd)
         {
@@ -943,6 +1053,7 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
         if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
             for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
     v.className = e.value("className", std::string());
+    v.typeName  = e.value("typeName", std::string());
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
@@ -1007,6 +1118,7 @@ bool fromJson(const std::string& json, Graph& out)
         g.variables.push_back(std::move(v));
     }
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
+    syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
     return true;
@@ -1050,6 +1162,68 @@ void syncFunctionSignatures(Graph& g)
         if (!entry) continue;
         n.params  = entry->params;
         n.results = entry->results;
+    }
+}
+
+void syncTypeSignatures(Graph& g)
+{
+    auto& reg = HE::TypeRegistry::instance();
+    auto fieldsToParams = [](const HE::StructDef& def)
+    {
+        std::vector<FuncParam> ps;
+        ps.reserve(def.fields.size());
+        for (const HE::StructField& f : def.fields)
+            ps.push_back({ f.name, f.type, f.isArray, f.typeName });
+        return ps;
+    };
+    for (Node& n : g.nodes)
+    {
+        switch (n.type)
+        {
+        case NodeType::MakeStruct:
+        case NodeType::BreakStruct:
+        {
+            HE::StructDef def;
+            if (!n.typeName.empty() && reg.getStruct(n.typeName, def))
+                n.params = fieldsToParams(def);
+            break;   // missing def: keep the stored mirror (may load later)
+        }
+        case NodeType::SetStructField:
+        {
+            // Revalidate the chosen field (params[0]) against the current def:
+            // retype a renamed-type field, keep the mirror if the def is gone,
+            // drop the choice entirely if the FIELD is gone.
+            HE::StructDef def;
+            if (n.typeName.empty() || !reg.getStruct(n.typeName, def)) break;
+            if (n.params.empty()) break;
+            if (const HE::StructField* f = def.findField(n.params[0].name))
+                n.params[0] = { f->name, f->type, f->isArray, f->typeName };
+            else
+                n.params.clear();
+            break;
+        }
+        case NodeType::SwitchOnEnum:
+        {
+            HE::EnumDef def;
+            if (n.typeName.empty() || !reg.getEnum(n.typeName, def)) break;
+            std::vector<FuncParam> ps;
+            ps.reserve(def.entries.size());
+            for (const HE::EnumEntry& e : def.entries)
+                ps.push_back({ e.name, PinType::Exec, false, {} });
+            n.params = std::move(ps);
+            break;
+        }
+        case NodeType::ConstEnum:
+        {
+            // Clamp a stale stored value onto a live entry so the dropdown and
+            // the emitted literal never disagree.
+            HE::EnumDef def;
+            if (n.typeName.empty() || !reg.getEnum(n.typeName, def) || def.entries.empty()) break;
+            if (!def.findValue((int)n.f[0])) n.f[0] = (float)def.entries.front().value;
+            break;
+        }
+        default: break;
+        }
     }
 }
 
@@ -1133,6 +1307,7 @@ bool valueEquals(const Value& a, const Value& b, PinType t)
         case P::Color:  return a.col == b.col;
         case P::Ref:    return a.ref == b.ref;
         case P::Transform: return a.tpos == b.tpos && a.trot == b.trot && a.tscl == b.tscl;
+        case P::Enum:   return a.i == b.i;
         default:        return false;
     }
 }
@@ -1145,7 +1320,10 @@ bool valueEquals(const Value& a, const Value& b, PinType t)
 //     diverges from what the editor previewed.
 //   • UIWidgetBinding.cpp `uiHcValueToProp` — the widget-property bridge, which
 //     coerces into UIPropValue instead of Value but follows the same rule.
-// Only Float↔Int↔Bool convert; any other mismatch yields the target's zero.
+// Only Float↔Int↔Bool convert (an Enum counts as its Int); any other mismatch
+// yields the target's zero. Coercing INTO Enum/Struct never invents a typeName —
+// wiring already type-checked the definition, so a same-type value passes
+// through above and a mismatch degrades to a typed empty value.
 Value coerce(Value v, PinType want)
 {
     if (v.isArray) return v;   // arrays are never scalar-coerced (pass through whole)
@@ -1154,11 +1332,15 @@ Value coerce(Value v, PinType want)
     switch (want)
     {
         case P::Float:  r.f = v.type == P::Bool ? (v.b ? 1.0f : 0.0f)
-                            : v.type == P::Int ? (float)v.i : 0.0f; break;
+                            : v.type == P::Int ? (float)v.i
+                            : v.type == P::Enum ? (float)v.i : 0.0f; break;
         case P::Int:    r.i = v.type == P::Float ? (int)v.f
-                            : v.type == P::Bool ? (v.b ? 1 : 0) : 0; break;
+                            : v.type == P::Bool ? (v.b ? 1 : 0)
+                            : v.type == P::Enum ? v.i : 0; break;
         case P::Bool:   r.b = v.type == P::Float ? v.f != 0.0f
                             : v.type == P::Int ? v.i != 0 : false; break;
+        case P::Enum:   r.i = v.type == P::Int ? v.i
+                            : v.type == P::Float ? (int)v.f : 0; break;
         default: break;
     }
     return r;
@@ -1270,7 +1452,8 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         if (!n) return;
         execNode(*n, depth);
         if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
-            n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop)
+            n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop ||
+            n->type == T::SwitchOnEnum)
             return; // they steer their own exec-outs internally (Delay: later)
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
@@ -1444,6 +1627,22 @@ void Runner::execNode(const Node& n, int depth)
         runExecChain(n, pinRanges(n).execOut0 + (isA ? 0 : 1), depth + 1);
         break;
     }
+    case T::SwitchOnEnum:
+    {
+        // Match the value against the CURRENT definition, then route to the
+        // exec-out whose mirrored entry name matches — renumber-safe. No match
+        // (or missing def) → the trailing Default.
+        const int val = evalInput(n, 0, depth + 1).i;
+        const PinRanges r = pinRanges(n);
+        int branch = (int)n.params.size();                 // Default
+        HE::EnumDef def;
+        if (HE::TypeRegistry::instance().getEnum(n.typeName, def))
+            if (const HE::EnumEntry* e = def.findValue(val))
+                for (size_t i = 0; i < n.params.size(); ++i)
+                    if (n.params[i].name == e->name) { branch = (int)i; break; }
+        runExecChain(n, r.execOut0 + branch, depth + 1);
+        break;
+    }
     default: break;
     }
 }
@@ -1479,6 +1678,93 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::ConstVec2:   return Value::ofVec2({ n.f[0], n.f[1] });
     case T::ConstColor:  return Value::ofColor({ n.f[0], n.f[1], n.f[2], n.f[3] });
     case T::ConstTransform: return Value::ofTransform(n.tpos, n.trot, n.tscl);
+    case T::ConstEnum:
+    {
+        Value v; v.type = P::Enum; v.typeName = n.typeName; v.i = (int)n.f[0];
+        return v;
+    }
+    case T::EnumToInt: return Value::ofInt(evalInput(n, 0, depth + 1).i);
+    case T::IntToEnum:
+    {
+        Value v; v.type = P::Enum; v.typeName = n.typeName;
+        v.i = evalInput(n, 0, depth + 1).i;
+        return v;
+    }
+    case T::EnumToString:
+    {
+        const int val = evalInput(n, 0, depth + 1).i;
+        HE::EnumDef def;
+        if (HE::TypeRegistry::instance().getEnum(n.typeName, def))
+            if (const HE::EnumEntry* e = def.findValue(val))
+                return Value::ofString(e->name);
+        return Value::ofString("");
+    }
+    case T::MakeStruct:
+    {
+        // Field values in the node's mirrored order — which syncTypeSignatures
+        // keeps equal to DEFINITION order, the layout every consumer resolves
+        // against. Unwired fields fall back to their declared defaults (the
+        // whole-struct default is built first, then wired pins overwrite).
+        Value v = HE::TypeRegistry::instance().makeDefaultValue(n.typeName);
+        v.typeName = n.typeName;
+        if (v.items.size() < n.params.size()) v.items.resize(n.params.size());
+        const PinRanges r = pinRanges(n);
+        for (size_t i = 0; i < n.params.size(); ++i)
+        {
+            // Only overwrite fields that are actually wired or carry an inline
+            // default — an untouched pin keeps the definition's default.
+            const int pin = r.dataIn0 + (int)i;
+            bool wired = false;
+            for (const auto& l : m_graph.links)
+                if (l.dstNode == n.id && l.dstPin == pin) { wired = true; break; }
+            if (wired || n.pinDefaults.count((int)i))
+                v.items[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+        }
+        return v;
+    }
+    case T::BreakStruct:
+    {
+        // Resolve the requested field BY NAME against the current definition —
+        // the value's items are in def order, so a def edit mid-session can't
+        // silently hand back the wrong field.
+        if (dataOutPin < 0 || dataOutPin >= (int)n.params.size()) return {};
+        const Value v = evalInput(n, 0, depth + 1);
+        HE::StructDef def;
+        if (HE::TypeRegistry::instance().getStruct(n.typeName, def))
+        {
+            for (size_t i = 0; i < def.fields.size(); ++i)
+                if (def.fields[i].name == n.params[dataOutPin].name)
+                    return i < v.items.size()
+                        ? coerce(v.items[i], n.params[dataOutPin].type)
+                        : coerce(Value{}, n.params[dataOutPin].type);
+        }
+        // Def missing: trust the mirrored order (best effort).
+        return dataOutPin < (int)v.items.size()
+            ? coerce(v.items[dataOutPin], n.params[dataOutPin].type)
+            : coerce(Value{}, n.params[dataOutPin].type);
+    }
+    case T::SetStructField:
+    {
+        Value v = evalInput(n, 0, depth + 1);              // a copy (pure)
+        if (n.params.empty()) return v;
+        if (v.type != P::Struct || v.typeName != n.typeName)
+        {
+            v = HE::TypeRegistry::instance().makeDefaultValue(n.typeName);
+            v.typeName = n.typeName;
+        }
+        HE::StructDef def;
+        if (HE::TypeRegistry::instance().getStruct(n.typeName, def))
+        {
+            for (size_t i = 0; i < def.fields.size(); ++i)
+                if (def.fields[i].name == n.params[0].name)
+                {
+                    if (v.items.size() < def.fields.size()) v.items.resize(def.fields.size());
+                    v.items[i] = coerce(evalInput(n, 1, depth + 1), n.params[0].type);
+                    break;
+                }
+        }
+        return v;
+    }
     case T::ArrayMake:
     {
         Value r; r.isArray = true; r.type = n.propType; return r;   // empty array of the element type

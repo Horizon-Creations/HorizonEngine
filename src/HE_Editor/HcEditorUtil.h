@@ -70,8 +70,12 @@ namespace HcEditorUtil
 	// `className` (the class path); clears className for a default type. Shows the
 	// class name for an object type instead of a bare "Object". Returns true when
 	// changed. Pass className=nullptr where object types aren't allowed.
+	// With `typeName` non-null the picker also offers the project's Enum and
+	// Struct assets (HE::TypeRegistry): picking one sets type to Enum/Struct and
+	// writes the definition's asset path into `typeName` (cleared otherwise).
 	bool drawTypePicker(const char* label, ContentManager* cm,
-	                    HorizonCode::PinType& type, std::string* className);
+	                    HorizonCode::PinType& type, std::string* className,
+	                    std::string* typeName = nullptr);
 
 	// Interface editor for a HorizonCode function: edit the FunctionEntry's typed
 	// Inputs (params) and Outputs (results). On any change it re-syncs the matching

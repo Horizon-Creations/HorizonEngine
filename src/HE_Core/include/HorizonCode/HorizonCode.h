@@ -139,6 +139,19 @@ enum class NodeType : uint8_t
     // reseedVariables): DoOnce lets the chain through only the FIRST time;
     // FlipFlop alternates its A/B exec-outs (IsA data-out = which one just ran).
     DoOnce, FlipFlop,
+    // User-defined types (HE::TypeRegistry; the node's typeName names the
+    // definition asset). Make/Break/SetField mirror the struct's fields into
+    // `params` (like EngineCall mirrors the ApiFn) so pins resolve without the
+    // registry; the interpreter resolves fields BY NAME against the current def
+    // so a def edit can't silently shift data. All pure, copy semantics.
+    MakeStruct,       // one data-in per field → Struct out
+    BreakStruct,      // Struct in → one data-out per field
+    SetStructField,   // Struct + Value in → updated copy out (params[0] = the field)
+    ConstEnum,        // enum literal; entry VALUE in f[0], dropdown on the body
+    // Exec switch: one exec-out per entry (params mirror the entry names) plus
+    // a trailing Default for values no entry claims.
+    SwitchOnEnum,
+    EnumToInt, IntToEnum, EnumToString,   // conversions (pure)
     COUNT
 };
 
@@ -151,6 +164,8 @@ struct FuncParam
     std::string name;
     PinType     type = PinType::Float;
     bool        isArray = false;   // the pin carries an array of `type`
+    // Enum/Struct params: the definition asset's path (HE::TypeRegistry key).
+    std::string typeName;
 };
 
 // A user-defined graph variable: named, typed, persistent per running instance.
@@ -180,6 +195,10 @@ struct Variable
     // path). Purely editor metadata — lets the context menu surface that class's
     // public functions/variables. Empty = untyped object.
     std::string className;
+    // Enum/Struct variables: the definition asset's path (HE::TypeRegistry key).
+    // An Enum variable's default is the entry NAME in `s` (renumber-safe); a
+    // Struct variable seeds from the definition's own field defaults.
+    std::string typeName;
 };
 
 struct Node
@@ -213,6 +232,9 @@ struct Node
     // exec-pin prefix). A wired pin ignores its default; evalInput falls back to
     // it before the type's zero. Spares a literal node per constant.
     std::unordered_map<int, Value> pinDefaults;
+    // Struct/Enum nodes (Make/Break/SetField/ConstEnum/SwitchOnEnum/IntToEnum…):
+    // the definition asset's path (HE::TypeRegistry key).
+    std::string typeName;
 };
 
 // Links connect unified pin indices (see pin ranges below).
@@ -220,7 +242,11 @@ struct Link { int srcNode = 0, srcPin = 0, dstNode = 0, dstPin = 0; };
 
 // Pin metadata for one node instance (variable-pin nodes like Event/Get/Set
 // depend on the node's own fields, so this is computed per node, not per type).
-struct PinDesc { const char* name; PinType type; bool isArray = false; };
+// typeName: the Enum/Struct definition asset behind a pin of those types —
+// borrowed from the node's own strings (never the signature scratch), null for
+// every built-in type. Graph::connect requires matching typeNames.
+struct PinDesc { const char* name; PinType type; bool isArray = false;
+                 const char* typeName = nullptr; };
 struct NodeSig { std::vector<PinDesc> execIns, execOuts, dataIns, dataOuts; };
 HE_API NodeSig signatureOf(const Node& n);
 
@@ -289,6 +315,13 @@ HE_API bool        variableFromJson(const std::string& json, Variable& out);
 // graph. FunctionReturn mirrors results (its data-ins); a call with no matching
 // entry keeps its own mirror (the entry may live in another class's graph).
 HE_API void syncFunctionSignatures(Graph& g);
+
+// Re-mirror every struct/enum node's pin lists (params) from the CURRENT
+// HE::TypeRegistry definitions: MakeStruct/BreakStruct get the field list,
+// SetStructField revalidates its chosen field, SwitchOnEnum gets the entry
+// names. Call after loading a graph or after a definition changed. A node whose
+// definition is missing keeps its stored mirror (the def may load later).
+HE_API void syncTypeSignatures(Graph& g);
 
 // Partition a flat (pre-sub-graph) graph in place: assign every function-body
 // node the `subgraph` of its owning FunctionEntry, leaving event-graph nodes at

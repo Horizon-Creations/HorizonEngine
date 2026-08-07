@@ -1,4 +1,5 @@
 #include "HcGraphHost.h"
+#include <Types/TypeRegistry.h>
 #include "HcEditorUtil.h"        // HcEditorUtil: colors, tooltips, engine-API menu
 #include "HcGraphClipboard.h"    // shared HorizonCode node clipboard (copy/cut/paste)
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
@@ -119,6 +120,8 @@ const char* pinTypeName(PT t)
 		case PT::Vec2:   return "Vec2";
 		case PT::Color:  return "Color";
 		case PT::Ref:    return "Object";
+		case PT::Enum:   return "Enum";
+		case PT::Struct: return "Struct";
 		default:         return "Exec";
 	}
 }
@@ -195,10 +198,13 @@ std::string lower(std::string v)
 
 std::string variableTypeLabel(const HC::Variable& v)
 {
-	// An Object variable shows the class it holds, not a bare "Object" — otherwise
-	// every reference variable in the list looks the same.
+	// An Object variable shows the class it holds, not a bare "Object" — and an
+	// Enum/Struct variable its definition asset — otherwise every one of them
+	// looks the same in the list.
 	return ((v.type == PT::Ref && !v.className.empty())
 		? std::filesystem::path(v.className).stem().string()
+		: ((v.type == PT::Enum || v.type == PT::Struct) && !v.typeName.empty())
+		? std::filesystem::path(v.typeName).stem().string()
 		: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
 }
 
@@ -508,9 +514,60 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				                       drop, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				nn->typeName = v.typeName;
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}
+	if (vh) ImGui::Spacing();
+
+	// ── User-defined types: one entry per project Struct/Enum asset ─────────
+	// The node is born fully mirrored (params from the definition), so its pins
+	// resolve immediately; syncTypeSignatures keeps it fresh on later loads.
+	{
+		auto& reg = HE::TypeRegistry::instance();
+		auto spawn = [&](NT t, const std::string& typeName) {
+			const int id = addNode(graph, t, drop, h.currentGraph);
+			HC::Node* nn = graph.findNode(id);
+			nn->typeName = typeName;
+			HC::syncTypeSignatures(graph);
+			created = id; ImGui::CloseCurrentPopup();
+		};
+		bool sh = false;
+		for (const auto& d : reg.structs())
+		{
+			const struct { const char* fmt; NT t; } rows[] = {
+				{ "Make %s",            NT::MakeStruct },
+				{ "Break %s",           NT::BreakStruct },
+				{ "Set %s Field",       NT::SetStructField },
+			};
+			for (const auto& r : rows)
+			{
+				char lbl[256]; std::snprintf(lbl, sizeof lbl, r.fmt, d.name.c_str());
+				if (!matches(lbl, "Structs")) continue;
+				if (!sh) { ImGui::TextDisabled("Structs"); sh = true; }
+				if (HcEditorUtil::searchMenuItem(lbl)) spawn(r.t, d.assetPath);
+			}
+		}
+		if (sh) ImGui::Spacing();
+		bool eh = false;
+		for (const auto& d : reg.enums())
+		{
+			const struct { const char* fmt; NT t; } rows[] = {
+				{ "%s Value",           NT::ConstEnum },
+				{ "Switch on %s",       NT::SwitchOnEnum },
+				{ "%s to Int",          NT::EnumToInt },
+				{ "Int to %s",          NT::IntToEnum },
+				{ "%s to String",       NT::EnumToString },
+			};
+			for (const auto& r : rows)
+			{
+				char lbl[256]; std::snprintf(lbl, sizeof lbl, r.fmt, d.name.c_str());
+				if (!matches(lbl, "Enums")) continue;
+				if (!eh) { ImGui::TextDisabled("Enums"); eh = true; }
+				if (HcEditorUtil::searchMenuItem(lbl)) spawn(r.t, d.assetPath);
+			}
+		}
+	}
 	return created;
 }
 
@@ -775,6 +832,64 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
 		return true;
 
+	// ── User-defined types ───────────────────────────────────────────────────
+	case NT::ConstEnum:
+	{
+		HE::EnumDef def;
+		if (!HE::TypeRegistry::instance().getEnum(n.typeName, def))
+		{ ImGui::TextDisabled("Enum definition missing:\n%s", n.typeName.c_str()); return true; }
+		const HE::EnumEntry* cur = def.findValue((int)n.f[0]);
+		if (ImGui::BeginCombo("Value", cur ? cur->name.c_str() : "(pick)"))
+		{
+			for (const auto& e : def.entries)
+				if (ImGui::Selectable(e.name.c_str(), cur && cur->name == e.name))
+				{ n.f[0] = (float)e.value; edit(true); }
+			ImGui::EndCombo();
+		}
+		return true;
+	}
+	case NT::SetStructField:
+	{
+		HE::StructDef def;
+		if (!HE::TypeRegistry::instance().getStruct(n.typeName, def))
+		{ ImGui::TextDisabled("Struct definition missing:\n%s", n.typeName.c_str()); return true; }
+		const std::string cur = n.params.empty() ? "(pick a field)" : n.params[0].name;
+		if (ImGui::BeginCombo("Field", cur.c_str()))
+		{
+			for (const auto& f : def.fields)
+				if (ImGui::Selectable(f.name.c_str(), !n.params.empty() && n.params[0].name == f.name))
+				{
+					n.params.clear();
+					n.params.push_back({ f.name, f.type, f.isArray, f.typeName });
+					// The Value pin changed type — drop its link.
+					const PinRanges r = pinRanges(n);
+					removePinLinks(g, n.id, r.dataIn0 + 1);
+					edit(true);
+				}
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Outputs a copy with the field replaced.");
+		return true;
+	}
+	case NT::MakeStruct:
+	case NT::BreakStruct:
+	{
+		ImGui::TextDisabled("%s", std::filesystem::path(n.typeName).stem().string().c_str());
+		if (!HE::TypeRegistry::instance().hasStruct(n.typeName))
+			ImGui::TextDisabled("Struct definition missing:\n%s", n.typeName.c_str());
+		return true;
+	}
+	case NT::SwitchOnEnum:
+	case NT::EnumToInt:
+	case NT::IntToEnum:
+	case NT::EnumToString:
+	{
+		ImGui::TextDisabled("%s", std::filesystem::path(n.typeName).stem().string().c_str());
+		if (!HE::TypeRegistry::instance().hasEnum(n.typeName))
+			ImGui::TextDisabled("Enum definition missing:\n%s", n.typeName.c_str());
+		return true;
+	}
+
 	case NT::GetVariable:
 	case NT::SetVariable:
 	{
@@ -787,10 +902,12 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 				if (ImGui::Selectable(v.name.c_str(), n.s == v.name))
 				{
 					const PT before = n.propType; const bool wasArr = n.isArray;
+					const std::string beforeTn = n.typeName;
 					n.s        = v.name;
 					n.propType = v.type;      // node takes the variable's type…
 					n.isArray  = v.isArray;   // …and its array-ness
-					if (n.propType != before || n.isArray != wasArr)
+					n.typeName = v.typeName;  // …and its enum/struct definition
+					if (n.propType != before || n.isArray != wasArr || n.typeName != beforeTn)
 					{
 						const PinRanges r = pinRanges(n);
 						const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
@@ -904,8 +1021,8 @@ void drawQuickPickPopup(const Host& h)
 				nn->s = fn->id;
 				nn->hasArg = fn->isExec;             // exec node vs pure data node
 				nn->params.clear(); nn->results.clear();
-				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
-				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray, {} });
+				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray, {} });
 				selectNode(h, id);
 				h.onEdit(true);
 			}
