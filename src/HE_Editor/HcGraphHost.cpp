@@ -538,6 +538,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			const struct { const char* fmt; NT t; } rows[] = {
 				{ "Make %s",            NT::MakeStruct },
 				{ "Break %s",           NT::BreakStruct },
+				{ "Get %s Field",       NT::GetStructField },
 				{ "Set %s Field",       NT::SetStructField },
 			};
 			for (const auto& r : rows)
@@ -862,8 +863,10 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		}
 		return true;
 	}
+	case NT::GetStructField:
 	case NT::SetStructField:
 	{
+		const bool isGet = n.type == NT::GetStructField;
 		HE::StructDef def;
 		if (!HE::TypeRegistry::instance().getStruct(n.typeName, def))
 		{ ImGui::TextDisabled("Struct definition missing:\n%s", n.typeName.c_str()); return true; }
@@ -875,14 +878,16 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 				{
 					n.params.clear();
 					n.params.push_back({ f.name, f.type, f.isArray, f.typeName });
-					// The Value pin changed type — drop its link.
+					// The field pin changed type — drop its link. Get retypes its
+					// OUTPUT (the value it reads), Set its second INPUT.
 					const PinRanges r = pinRanges(n);
-					removePinLinks(g, n.id, r.dataIn0 + 1);
+					removePinLinks(g, n.id, isGet ? r.dataOut0 : r.dataIn0 + 1);
 					edit(true);
 				}
 			ImGui::EndCombo();
 		}
-		ImGui::TextDisabled("Outputs a copy with the field replaced.");
+		ImGui::TextDisabled(isGet ? "Reads this one field out of the struct."
+		                          : "Outputs a copy with the field replaced.");
 		return true;
 	}
 	case NT::MakeStruct:

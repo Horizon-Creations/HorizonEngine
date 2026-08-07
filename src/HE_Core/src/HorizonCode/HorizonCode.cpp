@@ -247,6 +247,15 @@ void signatureInto(const Node& n, NodeSig& s)
             s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray,
                                    p.typeName.empty() ? nullptr : p.typeName.c_str() });
         break;
+    case T::GetStructField:
+        // params[0] mirrors the chosen field; one output, so a graph reads a
+        // single property without breaking the whole struct apart.
+        s.dataIns = { { "Struct", P::Struct, false, n.typeName.c_str() } };
+        if (!n.params.empty())
+            s.dataOuts.push_back({ n.params[0].name.c_str(), n.params[0].type,
+                                   n.params[0].isArray,
+                                   n.params[0].typeName.empty() ? nullptr : n.params[0].typeName.c_str() });
+        break;
     case T::SetStructField:
         // params[0] mirrors the chosen field (name + type).
         s.dataIns = { { "Struct", P::Struct, false, n.typeName.c_str() } };
@@ -405,6 +414,7 @@ const char* nodeDisplayName(NodeType t)
         case T::EngineCall:   return "Engine Call";
         case T::MakeStruct:     return "Make Struct";
         case T::BreakStruct:    return "Break Struct";
+        case T::GetStructField: return "Get Struct Field";
         case T::SetStructField: return "Set Struct Field";
         case T::ConstEnum:      return "Enum Value";
         case T::SwitchOnEnum:   return "Switch on Enum";
@@ -551,6 +561,9 @@ const char* nodeTooltip(NodeType t)
                    "unwired fields fall back to their declared defaults.";
         case T::BreakStruct:
             return "Splits a struct value into its fields — one output per field.";
+        case T::GetStructField:
+            return "Reads ONE field out of a struct — pick which on the node.\n"
+                   "Use Break Struct when you want every field at once.";
         case T::SetStructField:
             return "Outputs a COPY of the struct with the chosen field replaced by Value.\n"
                    "The original struct is not modified.";
@@ -612,7 +625,8 @@ const char* nodeCategory(NodeType t)
         case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd:
         case T::ArraySet: case T::ArrayInsert: case T::ArrayRemove:
         case T::ArrayContains: case T::ArrayIndexOf: case T::ForEach: return "Array";
-        case T::MakeStruct: case T::BreakStruct: case T::SetStructField: return "Structs";
+        case T::MakeStruct: case T::BreakStruct:
+        case T::GetStructField: case T::SetStructField: return "Structs";
         case T::ConstEnum: case T::SwitchOnEnum:
         case T::EnumToInt: case T::IntToEnum: case T::EnumToString: return "Enums";
         default: return "Misc";
@@ -1191,6 +1205,7 @@ void syncTypeSignatures(Graph& g)
                 n.params = fieldsToParams(def);
             break;   // missing def: keep the stored mirror (may load later)
         }
+        case NodeType::GetStructField:
         case NodeType::SetStructField:
         {
             // Revalidate the chosen field (params[0]) against the current def:
@@ -1745,6 +1760,23 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         return dataOutPin < (int)v.items.size()
             ? coerce(v.items[dataOutPin], n.params[dataOutPin].type)
             : coerce(Value{}, n.params[dataOutPin].type);
+    }
+    case T::GetStructField:
+    {
+        // Resolve BY NAME against the current definition (like BreakStruct), so
+        // a field inserted since this graph was authored can't shift the read.
+        if (n.params.empty()) return {};
+        const Value v = evalInput(n, 0, depth + 1);
+        HE::StructDef def;
+        if (HE::TypeRegistry::instance().getStruct(n.typeName, def))
+        {
+            for (size_t i = 0; i < def.fields.size(); ++i)
+                if (def.fields[i].name == n.params[0].name)
+                    return i < v.items.size()
+                        ? coerce(v.items[i], n.params[0].type)
+                        : coerce(Value{}, n.params[0].type);
+        }
+        return coerce(Value{}, n.params[0].type);          // def missing → typed zero
     }
     case T::SetStructField:
     {

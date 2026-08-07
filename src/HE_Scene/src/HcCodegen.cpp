@@ -358,7 +358,8 @@ private:
         {
             switch (n.type)
             {
-            case NT::MakeStruct: case NT::BreakStruct: case NT::SetStructField:
+            case NT::MakeStruct: case NT::BreakStruct:
+            case NT::GetStructField: case NT::SetStructField:
                 throw FallbackError{ "struct nodes are interpreted (codegen v1)", n.id };
             case NT::SwitchOnEnum: case NT::EnumToString:
             case NT::ConstEnum: case NT::EnumToInt: case NT::IntToEnum:

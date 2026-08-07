@@ -146,6 +146,7 @@ enum class NodeType : uint8_t
     // so a def edit can't silently shift data. All pure, copy semantics.
     MakeStruct,       // one data-in per field → Struct out
     BreakStruct,      // Struct in → one data-out per field
+    GetStructField,   // Struct in → ONE field out (params[0] = the field)
     SetStructField,   // Struct + Value in → updated copy out (params[0] = the field)
     ConstEnum,        // enum literal; entry VALUE in f[0], dropdown on the body
     // Exec switch: one exec-out per entry (params mirror the entry names) plus

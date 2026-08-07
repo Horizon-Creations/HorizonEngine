@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonCode/HorizonCode.h>
 #include <Types/TypeRegistry.h>
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -140,6 +141,65 @@ TEST_CASE("BreakStruct + SetStructField resolve fields by name and copy on write
     Runner r(g, store.ctx());
     r.fireEvent("Go", 0, {});
     CHECK(store.vars["hp"].f == doctest::Approx(9.0f));
+}
+
+TEST_CASE("GetStructField reads one field and survives a definition edit")
+{
+    TypeFixture fx;
+    Graph g;
+    Variable title; title.name = "title"; title.type = PinType::String;
+    g.variables.push_back(title);
+
+    Node ev; ev.type = NodeType::Event; ev.s = "Go";
+    const int e = g.addNode(ev);
+    const int mk = addTypedNode(g, NodeType::MakeStruct, kStats);   // all defaults
+    const int gf = addTypedNode(g, NodeType::GetStructField, kStats);
+    { Node* n = g.findNode(gf);
+      n->params.clear();
+      n->params.push_back({ "title", PinType::String, false, {} }); }
+    syncTypeSignatures(g);
+    Node sv; sv.type = NodeType::SetVariable; sv.s = "title"; sv.propType = PinType::String;
+    const int s = g.addNode(sv);
+
+    // GetStructField pins: dataIn Struct=0, dataOut field=1.
+    REQUIRE(g.connect(mk, 3, gf, 0));
+    REQUIRE(g.connect(e, 0, s, 0));
+    REQUIRE(g.connect(gf, 1, s, 2));
+
+    VarStore store;
+    Runner r(g, store.ctx());
+    r.fireEvent("Go", 0, {});
+    CHECK(store.vars["title"].s == "Rookie");
+
+    // A field INSERTED before it must not shift the read (name resolution).
+    {
+        HE::StructDef edited;
+        REQUIRE(HE::TypeRegistry::instance().getStruct(kStats, edited));
+        HE::StructField extra; extra.name = "armor"; extra.type = PinType::Float;
+        extra.defaultValue = Value::ofFloat(4.0f);
+        edited.fields.insert(edited.fields.begin(), extra);
+        HE::TypeRegistry::instance().registerStruct(edited);
+    }
+    syncTypeSignatures(g);   // re-mirrors MakeStruct's inputs (now 4)
+    VarStore store2;
+    Runner r2(g, store2.ctx());
+    r2.fireEvent("Go", 0, {});
+    CHECK(store2.vars["title"].s == "Rookie");
+
+    // A REMOVED field clears the choice; the node then reads a typed zero.
+    {
+        HE::StructDef edited;
+        REQUIRE(HE::TypeRegistry::instance().getStruct(kStats, edited));
+        edited.fields.erase(std::remove_if(edited.fields.begin(), edited.fields.end(),
+            [](const HE::StructField& f){ return f.name == "title"; }), edited.fields.end());
+        HE::TypeRegistry::instance().registerStruct(edited);
+    }
+    syncTypeSignatures(g);
+    CHECK(g.findNode(gf)->params.empty());
+    VarStore store3;
+    Runner r3(g, store3.ctx());
+    r3.fireEvent("Go", 0, {});
+    CHECK(store3.vars["title"].s.empty());
 }
 
 TEST_CASE("ConstEnum + SwitchOnEnum route by entry, renumber-safely by name")
