@@ -124,6 +124,7 @@ inline float coerceFloat(const Value& v)
     if (v.isArray || v.type == PinType::Float) return v.f;
     if (v.type == PinType::Bool) return v.b ? 1.0f : 0.0f;
     if (v.type == PinType::Int)  return (float)v.i;
+    if (v.type == PinType::Enum) return (float)v.i;   // int-backed
     return 0.0f;
 }
 inline int coerceInt(const Value& v)
@@ -131,6 +132,7 @@ inline int coerceInt(const Value& v)
     if (v.isArray || v.type == PinType::Int) return v.i;
     if (v.type == PinType::Float) return (int)v.f;
     if (v.type == PinType::Bool)  return v.b ? 1 : 0;
+    if (v.type == PinType::Enum)  return v.i;   // int-backed
     return 0;
 }
 inline bool coerceBool(const Value& v)

@@ -1,4 +1,5 @@
 #include "HorizonScene/HcCodegen.h"
+#include <Types/TypeRegistry.h>   // enum defs at generation time
 #include <cstdint>
 #include "HorizonScene/EngineApi.h"
 #include <nlohmann/json.hpp>
@@ -89,6 +90,7 @@ const char* cppScalar(PinType t)
         case PT::Color:     return "glm::vec4";
         case PT::Ref:       return "uint32_t";
         case PT::Transform: return "hc::Transform";
+        case PT::Enum:      return "int";   // enums are int-backed everywhere
         default:            return "float";
     }
 }
@@ -143,6 +145,7 @@ std::string zeroLit(TypeRef tr)
         case PT::Color:     return "glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)";
         case PT::Ref:       return "0u";
         case PT::Transform: return "hc::Transform{}";
+        case PT::Enum:      return "0";
         default:            return "0.0f";
     }
 }
@@ -160,6 +163,7 @@ std::string valueLit(const Value& v)
         case PT::Color:  return "glm::vec4(" + floatLit(v.col.x) + ", " + floatLit(v.col.y) + ", " +
                                  floatLit(v.col.z) + ", " + floatLit(v.col.w) + ")";
         case PT::Ref:    return std::to_string(v.ref) + "u";
+        case PT::Enum:   return std::to_string(v.i);
         case PT::Transform:
             return "hc::Transform{ glm::vec3(" + floatLit(v.tpos.x) + ", " + floatLit(v.tpos.y) + ", " + floatLit(v.tpos.z) +
                    "), glm::vec3(" + floatLit(v.trot.x) + ", " + floatLit(v.trot.y) + ", " + floatLit(v.trot.z) +
@@ -178,11 +182,15 @@ Value coerceValue(Value v, PinType want)
     switch (want)
     {
         case PT::Float: r.f = v.type == PT::Bool ? (v.b ? 1.0f : 0.0f)
-                            : v.type == PT::Int ? (float)v.i : 0.0f; break;
+                            : v.type == PT::Int ? (float)v.i
+                            : v.type == PT::Enum ? (float)v.i : 0.0f; break;
         case PT::Int:   r.i = v.type == PT::Float ? (int)v.f
-                            : v.type == PT::Bool ? (v.b ? 1 : 0) : 0; break;
+                            : v.type == PT::Bool ? (v.b ? 1 : 0)
+                            : v.type == PT::Enum ? v.i : 0; break;
         case PT::Bool:  r.b = v.type == PT::Float ? v.f != 0.0f
                             : v.type == PT::Int ? v.i != 0 : false; break;
+        case PT::Enum:  r.i = v.type == PT::Int ? v.i
+                            : v.type == PT::Float ? (int)v.f : 0; break;
         default: break;
     }
     return r;
@@ -204,14 +212,20 @@ std::string convertExpr(const std::string& e, TypeRef from, TypeRef to)
         case PT::Float:
             if (from.t == PT::Bool) return "((" + e + ") ? 1.0f : 0.0f)";
             if (from.t == PT::Int)  return "((float)(" + e + "))";
+            if (from.t == PT::Enum) return "((float)(" + e + "))";
             break;
         case PT::Int:
             if (from.t == PT::Float) return "((int)(" + e + "))";
             if (from.t == PT::Bool)  return "((" + e + ") ? 1 : 0)";
+            if (from.t == PT::Enum)  return e;   // int-backed, no-op
             break;
         case PT::Bool:
             if (from.t == PT::Float) return "((" + e + ") != 0.0f)";
             if (from.t == PT::Int)   return "((" + e + ") != 0)";
+            break;
+        case PT::Enum:
+            if (from.t == PT::Int)   return e;   // int-backed, no-op
+            if (from.t == PT::Float) return "((int)(" + e + "))";
             break;
         default: break;
     }
@@ -335,7 +349,32 @@ private:
             }
         }
 
-        // 2. Exec cycles would compile to unbounded loops (the interpreter only
+        // 2. Struct nodes/pins → interpreted fallback (deliberate v1 scope: the
+        //    Value-typed struct plumbing isn't emitted yet; the hybrid runs such
+        //    classes interpreted, which is correct just not compiled). Enum
+        //    nodes DO compile (int-backed) but need their definition at
+        //    generation time to resolve entries.
+        for (const Node& n : m_g.nodes)
+        {
+            switch (n.type)
+            {
+            case NT::MakeStruct: case NT::BreakStruct: case NT::SetStructField:
+                throw FallbackError{ "struct nodes are interpreted (codegen v1)", n.id };
+            case NT::SwitchOnEnum: case NT::EnumToString:
+            case NT::ConstEnum: case NT::EnumToInt: case NT::IntToEnum:
+                if (!HE::TypeRegistry::instance().hasEnum(n.typeName))
+                    throw FallbackError{ "enum definition '" + n.typeName +
+                                         "' not registered at generation time", n.id };
+                break;
+            default: break;
+            }
+        }
+        for (const auto& v : m_g.variables)
+            if (v.type == PT::Struct)
+                throw FallbackError{ "struct variable '" + v.name +
+                                     "' is interpreted (codegen v1)", 0 };
+
+        // 3. Exec cycles would compile to unbounded loops (the interpreter only
         //    tolerates them via the step guard) → interpreted fallback.
         checkCycles(/*execEdges=*/true, "exec cycle at node ");
         // 3. Pure-data cycles likewise (the interpreter yields {} via the depth
@@ -611,6 +650,22 @@ private:
         case NT::Not:     return "(!(" + input(n, 0, fnCtx) + "))";
         case NT::Concat:  return "(" + input(n, 0, fnCtx) + " + " + input(n, 1, fnCtx) + ")";
         case NT::ToString:return "hc::toStringG(" + input(n, 0, fnCtx) + ")";
+        case NT::ConstEnum: return std::to_string((int)n.f[0]);
+        case NT::EnumToInt:
+        case NT::IntToEnum: return input(n, 0, fnCtx);   // int-backed, no-op
+        case NT::EnumToString:
+        {
+            // Entry names resolved at GENERATION time (validate() guaranteed the
+            // def; packed defs are immutable, so this matches the interpreter's
+            // runtime lookup). Unmatched values → "" like the interpreter.
+            HE::EnumDef def;
+            HE::TypeRegistry::instance().getEnum(n.typeName, def);
+            std::string e = "([&](int _ev) -> std::string { switch (_ev) {";
+            for (const auto& en : def.entries)
+                e += " case " + std::to_string(en.value) + ": return " + strLit(en.name) + ";";
+            e += " default: return std::string(); } })(" + input(n, 0, fnCtx) + ")";
+            return e;
+        }
         default:
             return zeroLit(out);   // unknown data-out (§3.3: Value{} → zero)
         }
@@ -641,7 +696,8 @@ private:
             // Return and Delay (latent — resumes via resumeFrom) are terminal.
             if (n->type == NT::Branch || n->type == NT::Sequence || n->type == NT::ForEach ||
                 n->type == NT::FunctionReturn || n->type == NT::Delay ||
-                n->type == NT::DoOnce || n->type == NT::FlipFlop)
+                n->type == NT::DoOnce || n->type == NT::FlipFlop ||
+                n->type == NT::SwitchOnEnum)
                 return;
             l = execLinkFrom(n->id, pinRanges(*n).execOut0);
         }
@@ -894,6 +950,37 @@ private:
             --b.indent;
             b.line("}");
             break;
+        case NT::SwitchOnEnum:
+        {
+            // Route on the entry VALUES, resolved from the definition at
+            // generation time by the mirrored entry NAMES (params) — the same
+            // renumber-safe matching the interpreter does at runtime.
+            HE::EnumDef def;
+            HE::TypeRegistry::instance().getEnum(n.typeName, def);
+            b.line("switch (" + input(n, 0, fnCtx) + ")");
+            b.line("{");
+            for (size_t i = 0; i < n.params.size(); ++i)
+            {
+                const HE::EnumEntry* e = def.findEntry(n.params[i].name);
+                if (!e) continue;   // stale mirror entry: unreachable branch
+                b.line("case " + std::to_string(e->value) + ":");
+                b.line("{");
+                ++b.indent;
+                chain(n, r.execOut0 + (int)i, fnCtx, b);
+                b.line("break;");
+                --b.indent;
+                b.line("}");
+            }
+            b.line("default:");
+            b.line("{");
+            ++b.indent;
+            chain(n, r.execOut0 + (int)n.params.size(), fnCtx, b);
+            b.line("break;");
+            --b.indent;
+            b.line("}");
+            b.line("}");
+            break;
+        }
         default:
             // Event/FunctionEntry never appear mid-chain; anything else is a
             // pure node that can't be exec-wired.

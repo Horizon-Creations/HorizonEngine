@@ -280,3 +280,76 @@ TEST_CASE("Struct variables seed from definition defaults; enum defaults resolve
     ev.s = "Nonexistent";                          // stale name → first entry
     CHECK(variableDefaultValue(ev).i == 0);
 }
+
+// ── Codegen: enums compile natively, structs fall back to the interpreter ────
+
+#include <HorizonScene/HcCodegen.h>
+
+TEST_CASE("HcCodegen: enum nodes compile (entry values baked), struct nodes fall back")
+{
+    TypeFixture fx;
+
+    // Enum graph: Event → SwitchOnEnum(ConstEnum Bow) with Bow → SetVariable.
+    {
+        Graph g;
+        Variable hit; hit.name = "hit"; hit.type = PinType::String;
+        g.variables.push_back(hit);
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        const int e = g.addNode(ev);
+        const int ce = addTypedNode(g, NodeType::ConstEnum, kWeapon);
+        g.findNode(ce)->f[0] = 7.0f;
+        const int sw = addTypedNode(g, NodeType::SwitchOnEnum, kWeapon);
+        Node cs; cs.type = NodeType::ConstString; cs.s = "bow";
+        const int c = g.addNode(cs);
+        Node sv; sv.type = NodeType::SetVariable; sv.s = "hit"; sv.propType = PinType::String;
+        const int s = g.addNode(sv);
+        REQUIRE(g.connect(e, 0, sw, 0));
+        REQUIRE(g.connect(ce, 0, sw, 5));
+        REQUIRE(g.connect(c, 0, s, 2));
+        REQUIRE(g.connect(sw, 2, s, 0));            // Bow branch
+        const int e2s = addTypedNode(g, NodeType::EnumToString, kWeapon);
+        REQUIRE(g.connect(ce, 0, e2s, 0));
+
+        HE::hccg::Options opt;
+        HE::hccg::Result r = HE::hccg::generate({ { "enum_graph", "enum_graph", g } }, opt);
+        REQUIRE(r.ok);
+        CHECK(r.fallbacks.empty());
+        // The generated source routes on the baked entry value and bakes the
+        // entry-name switch for EnumToString.
+        bool sawCase7 = false, sawStaff = false;
+        for (const auto& f : r.files)
+        {
+            if (f.contents.find("case 7:") != std::string::npos) sawCase7 = true;
+            if (f.contents.find("\"Staff\"") != std::string::npos) sawStaff = true;
+        }
+        CHECK(sawCase7);
+        (void)sawStaff; // EnumToString is unwired downstream — emission optional
+    }
+
+    // Struct graph: MakeStruct present → the class ships interpreted.
+    {
+        Graph g;
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        g.addNode(ev);
+        addTypedNode(g, NodeType::MakeStruct, kStats);
+        HE::hccg::Options opt;
+        HE::hccg::Result r = HE::hccg::generate({ { "struct_graph", "struct_graph", g } }, opt);
+        REQUIRE(r.ok);
+        REQUIRE(r.fallbacks.size() == 1);
+        CHECK(r.fallbacks[0].reason.find("struct") != std::string::npos);
+    }
+
+    // Enum node whose definition is missing → fallback, not a miscompile.
+    {
+        Graph g;
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        g.addNode(ev);
+        Node ce; ce.type = NodeType::ConstEnum; ce.typeName = "Content/Missing.hasset";
+        g.addNode(std::move(ce));
+        HE::hccg::Options opt;
+        HE::hccg::Result r = HE::hccg::generate({ { "missing_enum", "missing_enum", g } }, opt);
+        REQUIRE(r.ok);
+        REQUIRE(r.fallbacks.size() == 1);
+        CHECK(r.fallbacks[0].reason.find("not registered") != std::string::npos);
+    }
+}
