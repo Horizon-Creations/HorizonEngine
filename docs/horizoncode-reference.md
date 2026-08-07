@@ -169,12 +169,16 @@ Notes:
   same API through `<HorizonGameServices.h>` (`he::save::*` / `he::entity::*`,
   injected after the library loads; struct fields cross as JSON).
 - **User types**: Struct and Enum **assets** define project types once and light up
-  everywhere — HorizonCode pins/variables (Make/Break Struct, Set Struct Field, Enum
-  Value, Switch on Enum, conversions; wires require the SAME definition), Lua/Python
+  everywhere — HorizonCode pins/variables (Make/Break Struct, Get/Set Struct Field,
+  Enum Value, Switch on Enum, conversions; wires require the SAME definition; a
+  struct variable can override individual field defaults per graph), Lua/Python
   (`horizon.enums.<Name>.<Entry>` ints and `horizon.structs.<Name>()` constructors;
   structs cross as tables/dicts with `__type`), generated C++
-  (`Source/Generated/GameTypes.h`), and savegame-template fields. Packed builds load
-  the definitions eagerly from the pak's `__type_index__` before any script runs.
+  (`Source/Generated/GameTypes.h`), and savegame-template fields. Array fields can
+  carry authored starting elements; lists stay dynamic either way (Array
+  Append/Insert/Remove at runtime). In Lua/Python a struct simply IS a table/dict —
+  `stats.hp`, `stats.tags[1]` — so field access needs no API. Packed builds load the
+  definitions eagerly from the pak's `__type_index__` before any script runs.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in
   Lua/Python).
 
