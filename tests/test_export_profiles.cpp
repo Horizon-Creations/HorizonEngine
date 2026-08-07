@@ -1238,3 +1238,92 @@ TEST_CASE("Pack-time approx re-fold: switch-override instance folds its own perm
 
     he_test::removeAllQuiet(dir);
 }
+
+// ─── Type index + hcfg v3: the seam that ships user types + save templates ────
+
+// Like tinyHasset, but with an arbitrary asset type and one JSON chunk.
+static std::vector<uint8_t> tinyJsonAsset(HE::UUID id, const std::string& relPath,
+                                          HE::AssetType type, uint32_t chunkId,
+                                          const std::string& json)
+{
+    std::vector<uint8_t> meta;
+    HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
+    HAsset::Writer::appendPOD(meta, id.hi);
+    HAsset::Writer::appendPOD(meta, id.lo);
+    HAsset::Writer::appendString(meta, fs::path(relPath).stem().string());
+    HAsset::Writer::appendString(meta, relPath);
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    w.addChunk(chunkId, json.data(), json.size());
+    return w.toBytes(static_cast<uint16_t>(type));
+}
+
+TEST_CASE("Export bakes a __type_index__ naming every struct/enum/template asset")
+{
+    const auto dir = fs::temp_directory_path() / "he_typeidx_export";
+    const auto out = fs::temp_directory_path() / "he_typeidx_export_out";
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
+    writeBlob(dir / "mesh.hasset", tinyHasset({0x1, 0x1}, "mesh.hasset"));
+    writeBlob(dir / "Types" / "Weapon.hasset",
+              tinyJsonAsset({0x2, 0x2}, "Types/Weapon.hasset", HE::AssetType::EnumType,
+                            HAsset::CHUNK_ENDF, "{\"entries\":[{\"name\":\"Bow\",\"value\":7}]}"));
+    writeBlob(dir / "MainSave.hasset",
+              tinyJsonAsset({0x3, 0x3}, "MainSave.hasset", HE::AssetType::SaveGameTemplate,
+                            HAsset::CHUNK_SGTP, "{\"fields\":[]}"));
+
+    ExportSettings settings;
+    settings.compress = false;
+    const auto res = ProjectExporter::exportProject(dir, "TypeIdx", "", out, settings);
+    REQUIRE(res.success);
+
+    HpakReader reader;
+    REQUIRE(reader.open((out / "TypeIdx.hpak").string()));
+    const auto bytes = reader.readEntry(sceneUuidForPath(kTypeIndexEntry));
+    REQUIRE(!bytes.empty());
+    const auto idx = nlohmann::json::parse(bytes.begin(), bytes.end(),
+                                           nullptr, /*allow_exceptions=*/false);
+    REQUIRE(idx.is_array());
+    std::vector<std::string> paths;
+    for (const auto& e : idx) if (e.is_string()) paths.push_back(e.get<std::string>());
+    std::sort(paths.begin(), paths.end());
+    CHECK(paths == std::vector<std::string>({ "MainSave.hasset", "Types/Weapon.hasset" }));
+    // Ordinary assets stay OUT of the index (it drives eager loads).
+    CHECK(std::find(paths.begin(), paths.end(), "mesh.hasset") == paths.end());
+    he_test::removeAllQuiet(dir); he_test::removeAllQuiet(out);
+}
+
+TEST_CASE("project.hcfg: defaultSaveTemplate round-trips as v3, empty stays v2-compatible")
+{
+    const auto dir = fs::temp_directory_path() / "he_hcfg_v3";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+
+    // With a template: v3 tail round-trips.
+    ProjectConfig cfg;
+    cfg.projectName = "Cfg";
+    cfg.hpakFilename = "Cfg.hpak";
+    cfg.defaultSaveTemplate = "Content/MainSave.hasset";
+    REQUIRE(ProjectConfigLoader::save(dir, cfg));
+    ProjectConfig back;
+    REQUIRE(ProjectConfigLoader::load(dir, back));
+    CHECK(back.defaultSaveTemplate == "Content/MainSave.hasset");
+    CHECK(back.projectName == "Cfg");
+
+    // Without a template the file is emitted as PLAIN v2 — a stale prebuilt
+    // runtime bundle (which rejects unknown versions and would boot pak-less)
+    // keeps reading it. Byte check: the version word after the 4-byte magic.
+    cfg.defaultSaveTemplate.clear();
+    REQUIRE(ProjectConfigLoader::save(dir, cfg));
+    {
+        std::ifstream f(dir / "project.hcfg", std::ios::binary);
+        REQUIRE(f.is_open());
+        char magic[4]; uint16_t version = 0;
+        f.read(magic, 4);
+        f.read(reinterpret_cast<char*>(&version), 2);
+        CHECK(version == 2);
+    }
+    ProjectConfig back2;
+    REQUIRE(ProjectConfigLoader::load(dir, back2));
+    CHECK(back2.defaultSaveTemplate.empty());
+    he_test::removeAllQuiet(dir);
+}

@@ -15,7 +15,13 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
 
     std::vector<uint8_t> buf;
     buf.insert(buf.end(), k_magic, k_magic + 4);
-    HAsset::Writer::appendPOD(buf, k_version);
+    // Backward compatibility for user-dropped prebuilt runtime bundles
+    // (GameRuntimes/<Platform>/ can lag the editor): an old runtime rejects any
+    // version it doesn't know and boots pak-less. So the v3 tail is only
+    // written when it actually carries something — a project without a default
+    // save template keeps emitting plain v2, which every runtime reads.
+    const uint16_t version = cfg.defaultSaveTemplate.empty() ? 2 : k_version;
+    HAsset::Writer::appendPOD(buf, version);
     const uint16_t reserved = 0;
     HAsset::Writer::appendPOD(buf, reserved);
 
@@ -30,7 +36,8 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
-    HAsset::Writer::appendString(buf, cfg.defaultSaveTemplate);
+    if (version >= 3)
+        HAsset::Writer::appendString(buf, cfg.defaultSaveTemplate);
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
