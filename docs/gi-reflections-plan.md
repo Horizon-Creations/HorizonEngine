@@ -733,3 +733,40 @@ Offen und bewusst nicht in dieser Runde:
   Prepass.
 * GL-Auflösungsachse (s. o.), und die 5-Tap-Kette hat keine Edge-Stopping-
   Gewichte, kann also über Silhouetten bluten.
+
+
+---
+
+## Runde 6: der Lobe-Blur muss mit den Rays schrumpfen
+
+Rückmeldung: im Deferred-Pfad weiterhin „Low am wenigsten geblurred, High und
+Medium stärker". Das war richtig beobachtet und meine Runde-5-Entscheidung war
+schuld: ich hatte die Lobe-Reichweite bewusst **konstant in Schirmpixeln** über
+alle Stufen gemacht (Argument: die Streuweite ist Materialeigenschaft). Das
+stimmt für die LOBE — aber der Blur ersetzt nicht die Lobe, sondern nur den Teil
+davon, den die Rays **nicht** gesampelt haben. Vier Rays lassen ein Viertel
+dessen übrig, was einer übrig lässt. Also:
+
+    lobeScreen = kGIReflLobeScreenPx * maxRoughness / rays
+
+Damit fällt die Reichweite von Stufe zu Stufe, und die Kante im Spiegel wird mit
+jeder Stufe schärfer statt weicher (`edge_zoom.png`: Low weich, High knackig).
+Bei glossy 0.4 bleiben alle drei glatt und keine speckt.
+
+### Metrologie-Lehre
+
+Zwei aggregierte Kennzahlen über die Spiegelfläche haben mich nacheinander in die
+falsche Richtung geschickt:
+
+* **Mittlerer |Gradient|** verwechselt Rauschen mit Detail — solange es rauschte,
+  war er brauchbar, danach maß er Signal.
+* **Mittlerer |Laplacian|** über die ganze Fläche ebenso: eine unschärfere Stufe
+  mit einem größeren niederfrequenten Verlauf kann höher punkten als eine
+  schärfere. Genau daran habe ich in Runde 5 abgelesen, die Leiter sei in
+  Ordnung, während sie sichtbar falsch herum lief.
+
+Was trägt: **|Laplacian| in einem Bereich, dessen gespiegelter Inhalt FLACH ist**
+(dort ist alles Hochfrequente Rauschen) getrennt von **Kantenschärfe an einer
+echten Kante**, und als letzte Instanz der 4×-Zoom auf diese Kante über die drei
+Stufen nebeneinander. Zahlen allein reichen hier nicht; der Zoom ist das
+eigentliche Gate.

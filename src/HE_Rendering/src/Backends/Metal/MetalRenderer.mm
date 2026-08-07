@@ -11594,19 +11594,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			//     1–4 texel blur over a lobe tens of pixels across, and every
 			//     extra ray sharpened the trace without widening the filter that
 			//     has to clean up what the rays still missed. It scales with the
-			//     widest lobe the settings allow (maxRoughness). It is measured in
-			//     SCREEN pixels and stays the SAME at every tier, because how far
-			//     a rough surface scatters is a property of the material, not of
-			//     the settings — dividing it by √rays (the first attempt) made
-			//     the better tier filter LESS while its noise grain got finer,
-			//     which is precisely how the ladder stayed inverted.
-			//
-			// What the tier buys is then honest: RESOLUTION buys sharpness (finer
-			// detail survives the same screen-space blur, and a mirror — whose
-			// lobe term is zero after the roughness lerp — is simply crisper),
-			// and RAYS buy cleanliness (the same screen footprint averages
-			// resDiv² times more texels, each of them an average of `rays`
-			// samples). Both move the right way at once.
+			//     widest lobe the settings allow (maxRoughness), divided by the
+			//     RAY COUNT: the blur only has to stand in for the part of the
+			//     lobe the rays did not sample, and four rays leave a quarter of
+			//     what one leaves. Keeping this term constant across tiers (the
+			//     previous attempt) meant High blurred as hard as Low despite
+			//     tracing sixteen times the samples per screen area — measurably
+			//     softer, which is exactly what it was reported as.
 			// The reach is built as an À-TROUS CHAIN of the same 5-tap kernel at
 			// doubling strides, NOT as one wide 5-tap: five taps spread over 16
 			// texels leave visible banding between them, while 1+2+4+8 covers the
@@ -11618,7 +11612,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			// mirror-sharp at every tier while a rough surface gets the lobe.
 			// Screen pixels → reflection texels: one texel spans resDiv of them.
 			const float lobeScreen = kGIReflLobeScreenPx
-			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f);
+			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f)
+			                       / static_cast<float>(std::max(rays, 1));
 			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
 			                               1.0f, 512.0f); // also pins a NaN setting
 			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw

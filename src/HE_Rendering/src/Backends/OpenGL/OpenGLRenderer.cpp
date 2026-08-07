@@ -6084,9 +6084,13 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		// target snaps the total to 2^n − 1, which quantizes the "tier-
 		// independent" screen reach and can make a better tier blur wider.
 		const float resDiv = 2.0f;
+		// Lobe term divided by the RAY COUNT, like Metal: the blur only stands in
+		// for the part of the lobe the rays did not sample, so a tier that traces
+		// four of them needs a quarter of the filter. Holding it constant across
+		// tiers made the better tier measurably softer.
 		const float reach = std::clamp(
 			1.0f + (kGIReflLobeScreenPx * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f))
-			     / resDiv, 1.0f, 512.0f);
+			     / (resDiv * std::max(giReflRays, 1.0f)), 1.0f, 512.0f);
 		const int   levels = std::clamp(
 			static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
 		const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
