@@ -353,16 +353,31 @@ endif()
 # how HorizonSourceControl shells out to `git` only because THAT protocol has no
 # non-interactive password constraint to work around.
 #
-# Reuses whichever crypto backend the block above already resolved, rather than
-# pulling in a second, independent crypto stack.
+# Deliberately does NOT reuse he_crypto's OpenSSL/mbedTLS choice above: when that
+# resolved to mbedTLS, it is a source build fetched by THIS SAME configure step —
+# a real CMake target (`mbedcrypto`), but not yet a built file on disk. libssh2's
+# own FindMbedTLS.cmake does a classic find_library() search for an already-built
+# library, which cannot see an in-tree target that has not been compiled yet, and
+# hard-fails the whole configure ("Could NOT find MbedTLS") the moment it tries —
+# this broke CI (both the mbedTLS-preferring Windows and Linux legs) even though
+# it worked locally (a dev machine's system OpenSSL was found instead). So libssh2
+# gets its OWN, independent crypto backend resolution instead: WinCNG on Windows
+# (a Windows OS component — zero external dependency, zero find_package risk),
+# system OpenSSL everywhere else (present on effectively every Linux/macOS CI
+# image and dev machine; HE_ContentSync is Editor-only tooling, not the shipped
+# game, so a system OpenSSL runtime dependency here is a much smaller concern
+# than it would be for the packaged build's own hpak crypto).
 find_package(Libssh2 QUIET)
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
-    if(HE_HAVE_OPENSSL)
-        set(CRYPTO_BACKEND "OpenSSL" CACHE STRING "" FORCE)
-    elseif(HE_HAVE_MBEDTLS)
-        set(CRYPTO_BACKEND "mbedTLS" CACHE STRING "" FORCE)
+    if(WIN32)
+        set(CRYPTO_BACKEND "WinCNG" CACHE STRING "" FORCE)
     else()
-        set(CRYPTO_BACKEND "" CACHE STRING "" FORCE)
+        find_package(OpenSSL QUIET COMPONENTS Crypto)
+        if(OPENSSL_FOUND)
+            set(CRYPTO_BACKEND "OpenSSL" CACHE STRING "" FORCE)
+        else()
+            set(CRYPTO_BACKEND "" CACHE STRING "" FORCE)
+        endif()
     endif()
     if(CRYPTO_BACKEND)
         message(STATUS "HorizonEngine: fetching libssh2 (crypto backend: ${CRYPTO_BACKEND})")
