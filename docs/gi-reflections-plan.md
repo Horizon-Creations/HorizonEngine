@@ -614,3 +614,47 @@ Shader sampelt EINE Reflexionstextur (`uGIRefl`), also trifft der Blur auch
 Spiegel. Die Breite skaliert korrekt mit dem Tier, aber ein Spiegel ist auf GL
 um `blurTexels` weicher als auf Metal. Zu schließen mit demselben
 Roughness-Mix-Pass (`kSSRRoughMixFS`) plus einem weiteren Render-Target.
+
+
+---
+
+## Tiers final: Rays + Auflösung, Blur nur als Kaschierung
+
+Rückmeldung nach dem Rays-Umbau: höhere Qualität brachte immer noch mehr Blur
+UND eine Latenz von mehreren Frames, Low war am schärfsten und am direktesten.
+Beides stimmte — und beides kam daher, dass am Tier noch Dinge hingen, die
+nichts mit Qualität zu tun haben.
+
+**Die Latenz war die temporale EMA.** Sie lief nur auf den oberen Stufen, mit
+einem Gewicht von zuletzt 0.94 — das sind ~17 Frames History. Die Reflexion zog
+also dem Rest des Bildes sichtbar hinterher, und zwar **umso mehr, je höher die
+Stufe**. Sie ist jetzt aus (Metal und GL; die History-Targets bleiben verdrahtet,
+das Wiedereinschalten ist je eine Konstante). Die Strahlen tragen die Schätzung,
+der Blur deckt die Auflösung — eine etwas rauschigere Reflexion ist besser als
+eine, die mehrere Frames alt ist.
+
+**Der Tier bedeutet jetzt Rays UND Auflösung:**
+
+| Tier | Rays/Pixel | Trace-Auflösung | Blur |
+|---|---|---|---|
+| Low | 1 | ¼ Bildschirm | 4 Texel + Floor 0.75 |
+| Medium | 2 | ½ | 2 Texel + Floor 0.35 |
+| High | 4 | voll | 1 Texel, kein Floor |
+
+Der Blur ist **keine Tier-Eigenschaft**, sondern der Platzhalter für die Pixel,
+die eine niedrigere Auflösung nicht getract hat: ein Reflexions-Texel deckt
+`resDiv` Bildschirmpixel ab, also muss ein Tap genau so weit reichen. Er
+schrumpft damit exakt so, wie die Stufe besser wird.
+
+Der **Resolution-Floor** ist dabei der Punkt, den der reine Roughness-Lerp
+übersehen hatte: der hält einen Spiegel auf jeder Stufe scharf — aber „scharf"
+bei Viertel-Auflösung heißt „treppig", weil das Ergebnis auf den Bildschirm
+hochskaliert wird. Also bekommt auch ein Spiegel unterhalb voller Auflösung
+einen Mindest-Blur (0.75 / 0.35 / 0), getragen in `heBlur.dir.y` (Forward-Mix)
+bzw. `heLight.giRefl.w` (Deferred-Composite).
+
+Kostenhinweis: High traced 4 Strahlen pro Pixel bei voller Auflösung — gegenüber
+dem alten Stand (1 Strahl, halbe Auflösung) das 16-fache an Reflexions-Strahlen.
+Near-Mirrors bleiben bei einem Strahl (ihr Cone ist schmaler als ein Pixel), die
+Strahlkosten wachsen also nur auf glossy Flächen; die Auflösungskosten gelten
+überall.

@@ -216,7 +216,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 giProbe;        // x = indirect intensity, y = probe atlases bound
     vec4 weather;        // x = wetness, y = snow amount
     vec4 ssr;            // x = 1 → heSSR bound (FORWARD path), y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
-    vec4 giRefl;         // x = ray-traced GI-reflection intensity, y = max roughness, z = 1 → heGIRefl bound (FORWARD path)
+    vec4 giRefl;         // x = ray-traced GI-reflection intensity, y = max roughness, z = 1 → heGIRefl bound (FORWARD path), w = resolution blur floor
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -1431,7 +1431,10 @@ void main() {
         // quality High both samplers hold the same texture → no-op).
         vec4 gg0 = texture(heGIRefl, uv);
         vec4 gg1 = texture(heGIReflRough, uv);
-        vec4 gg  = mix(gg0, gg1, smoothstep(0.0, max(heLight.giRefl.y, 1e-3), rough));
+        // giRefl.w = resolution blur floor (see kSSRRoughMixFS): below full
+        // resolution even a mirror gets some blur, or its stair-steps show.
+        vec4 gg  = mix(gg0, gg1, max(clamp(heLight.giRefl.w, 0.0, 1.0),
+                                     smoothstep(0.0, max(heLight.giRefl.y, 1e-3), rough)));
         envSpec = mix(envSpec, gg.rgb, gg.a * heLight.giRefl.x);
         // Glossy lerp (ssr-plan §4.3 v2): mirror-like surfaces read the
         // near-sharp result, rough ones the wide second blur — the mip-chain
@@ -1515,7 +1518,12 @@ void main() {
     float rough = clamp(texture(heAttr, uv).b, 0.0, 1.0);
     // Same curve as the deferred composite's, against the same max-roughness
     // cutoff (heBlur.dir.x carries it here) so both paths blur alike.
-    float t = smoothstep(0.0, max(heBlur.dir.x, 1e-3), rough);
+    // heBlur.dir.y is the RESOLUTION floor: below full resolution even a mirror
+    // needs some blur, because "sharp" at quarter res just means blocky — the
+    // reflection is upsampled to the screen and the stair-steps are what the
+    // viewer sees. 0 at full res, so High keeps the mirror perfectly crisp.
+    float t = max(clamp(heBlur.dir.y, 0.0, 1.0),
+                  smoothstep(0.0, max(heBlur.dir.x, 1e-3), rough));
     oMix = mix(texture(heNarrow, uv), texture(heWide, uv), t);
 }
 )";

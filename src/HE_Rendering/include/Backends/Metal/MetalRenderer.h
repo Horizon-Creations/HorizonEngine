@@ -295,6 +295,10 @@ private:
 	float m_giReflIntensity    = 1.0f;
 	float m_giReflMaxRoughness = 0.6f;
 	float m_giReflMaxDistance  = 200.0f;
+	// How much blur even a mirror gets, purely to hide the trace resolution
+	// (0 at full res). Set with the target size in EncodeGIReflections and read
+	// by both composites — see kSSRRoughMixFS.
+	float m_giReflBlurFloor    = 0.0f;
 	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
 	// lerp the DEFERRED composite does per pixel into the half-res texture the
 	// forward scene shader samples — it only gets one. Optional; null just means

@@ -3514,16 +3514,20 @@ void main()
 	uvec2 gid = gl_GlobalInvocationID.xy;
 	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
 	ivec2 px = ivec2(gid);
+	// NORMALIZED sample of the prepass, not a texel fetch: the reflection target
+	// has its own resolution now (the quality tier picks it), so the two grids no
+	// longer line up 1:1. Nearest filtering keeps the old behaviour where they do.
+	vec2 guv = (vec2(gid) + 0.5) / vec2(uFrame.y, uFrame.z);
 
-	vec4 pv = texelFetch(uGPos, px, 0);
+	vec4 pv = texture(uGPos, guv);
 	// Background, or a receiver too rough to show a traced reflection: confidence
 	// 0 means the composite keeps the sky cubemap term unchanged, which is the
 	// correct answer for both.
 	if (pv.a < 0.5) { imageStore(uOut, px, vec4(0.0)); return; }
-	vec2 rm = texelFetch(uGMat, px, 0).rg;
+	vec2 rm = texture(uGMat, guv).rg;
 	if (rm.x > uReflParams.y) { imageStore(uOut, px, vec4(0.0)); return; }
 
-	vec3 N = normalize(texelFetch(uGNorm, px, 0).xyz);
+	vec3 N = normalize(texture(uGNorm, guv).xyz);
 	vec3 V = normalize(uCamPos.xyz - pv.xyz);
 	vec3 R = reflect(-V, N);
 	// Near-mirrors keep a single deterministic ray: their specular lobe is
@@ -5980,7 +5984,9 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	glBindVertexArray(m_fsVAO);
 
 	// ── 2. Temporal accumulation (quality High) ──────────────────────────────
-	if (m_giReflQuality >= 2 && m_giReflTemporalProgram && m_giReflHistFBO[0])
+	// Temporal pass disabled with the blend below — see there. Left in the build
+	// (and still gated on the tier) so re-enabling is one constant.
+	if (false && m_giReflQuality >= 2 && m_giReflTemporalProgram && m_giReflHistFBO[0])
 	{
 		const int curIdx = m_giReflHistIdx, prevIdx = 1 - curIdx;
 		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflHistFBO[curIdx]);
@@ -6000,7 +6006,12 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		// surface carrying it — reflected content is never reprojected, only the
 		// receiver is. Damp on any view change, hold the long history when still.
 		const bool camMoved = (viewProj != m_giReflPrevViewProj);
-		const float blend = m_giReflHistValid ? (camMoved ? 0.55f : 0.85f) : 0.0f;
+		// Temporal accumulation is OFF: it was the reflection's latency (an EMA of
+		// 0.85 is several frames of history, and only the upper tiers ran it, so
+		// the better the tier the more it dragged). Rays carry the estimate, the
+		// blur covers the resolution. Kept wired so it is one constant to undo.
+		const float blend = 0.0f;
+		(void)camMoved;
 		glUniform1f(tloc("uBlend"), blend);
 		glDrawArrays(GL_TRIANGLES, 0, 3);
 		src = m_giReflHistTex[curIdx];
@@ -6023,8 +6034,12 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// pass Metal got (kSSRRoughMixFS) plus one more render target.
 	if (m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
 	{
-		const float rays = m_giReflQuality >= 2 ? 4.0f : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
-		const float blurTexels = 4.0f / rays; // 4 / 2 / 1
+		// Blur width follows the RESOLUTION: one reflection texel covers this
+		// many screen pixels, so that is how far a tap must reach to stand in
+		// for what was never traced. Quarter-res 4, half 2, full 1 — the blur
+		// shrinks as the tier improves. Same constant as Metal's resDiv.
+		const float blurTexels =
+			m_giReflQuality >= 2 ? 1.0f : (m_giReflQuality >= 1 ? 2.0f : 4.0f);
 		glUseProgram(m_giReflBlurProgram);
 		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
 		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
@@ -8610,6 +8625,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		unsigned int giShadowTex = 0u;
 		unsigned int giReflTex   = 0u;
 		const int  giW = std::max(1, pw / 2), giH = std::max(1, ph / 2);
+		// Reflections trace at their OWN resolution, set by the quality tier:
+		// Low quarter, Medium half, High full screen. The prepass stays half-res
+		// (it is shared with the GI shadow pass) and is sampled by UV.
+		const int  grDiv = m_giReflQuality >= 2 ? 1 : (m_giReflQuality >= 1 ? 2 : 4);
+		const int  grW = std::max(1, pw / grDiv), grH = std::max(1, ph / grDiv);
 		const bool giAnyActive =
 			(m_giEnabled || m_giReflEnabled) && m_giSupported && m_giInstanceCount > 0;
 		bool giPrepassOk = false;
@@ -8631,7 +8651,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		if (giPrepassOk && m_giReflEnabled)
 		{
 			GpuPassScope _giReflTimer(this, "GIRefl");
-			giReflTex = RenderGIReflections(giW, giH, viewProj, giShadingActive);
+			giReflTex = RenderGIReflections(grW, grH, viewProj, giShadingActive);
 		}
 		// Gate for both shading paths: a valid trace result AND a non-zero
 		// intensity. Off → a 1×1 transparent-black dummy is bound and the gate
