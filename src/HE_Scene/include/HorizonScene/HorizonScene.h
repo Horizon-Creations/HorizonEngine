@@ -4,6 +4,7 @@
 #include "SceneSerializer.h"
 
 #include "Components/NameComponent.h"
+#include "Components/SaveStateComponent.h"
 #include "Components/TransformComponent.h"
 #include "Components/Transform2DComponent.h"
 #include "Components/HierarchyComponent.h"

@@ -12,6 +12,8 @@
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
+#include "HorizonScene/Components/EntityIdComponent.h"
+#include "HorizonScene/Components/SaveStateComponent.h"
 #include <Hpak/ProjectExporter.h>   // sceneUuidForPath (packed scene index)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -105,6 +107,107 @@ bool getVisible(Ctx& c, Entity e)
     if (const auto* l  = reg.try_get<LightComponent>(en))          return l->visible;
     if (const auto* ps = reg.try_get<ParticleSystemComponent>(en)) return ps->visible;
     if (const auto* f  = reg.try_get<FoliageComponent>(en))        return f->visible;
+    return true;
+}
+
+// ── Savegame state ───────────────────────────────────────────────────────────
+namespace {
+// The stable identity the save keys on ("hi:lo", the pak-index spelling).
+std::string entityUuidKey(Ctx& c, Entity e)
+{
+    if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
+    if (auto* idc = c.world->registry().try_get<EntityIdComponent>((entt::entity)e))
+        return std::to_string(idc->id.hi) + ":" + std::to_string(idc->id.lo);
+    return {};
+}
+// Shared precondition walk for saveState/applySavedState — every miss logs.
+const SaveStateComponent* saveStateGuard(const char* op, Ctx& c, Entity e, std::string& uuid)
+{
+    if (!save::inPlayMode())
+    {
+        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
+            ": only available in play mode (the editor's SceneSerializer owns edit-mode state)").c_str());
+        return nullptr;
+    }
+    if (save::activeId().empty())
+    {
+        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
+            ": no active save — call save.create/load first").c_str());
+        return nullptr;
+    }
+    uuid = entityUuidKey(c, e);
+    if (uuid.empty())
+    {
+        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op + ": invalid entity").c_str());
+        return nullptr;
+    }
+    auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
+    if (!ss || !ss->enabled)
+    {
+        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
+            ": entity has no enabled SaveStateComponent").c_str());
+        return nullptr;
+    }
+    return ss;
+}
+} // namespace
+
+bool saveState(Ctx& c, Entity e)
+{
+    std::string uuid;
+    const SaveStateComponent* ss = saveStateGuard("saveState", c, e, uuid);
+    if (!ss) return false;
+    nlohmann::json j = nlohmann::json::object();
+    if (ss->saveTransform)
+    {
+        if (auto* t = c.world->registry().try_get<TransformComponent>((entt::entity)e))
+            j["transform"] = {
+                { "pos", { t->position.x, t->position.y, t->position.z } },
+                { "rot", { t->rotation.x, t->rotation.y, t->rotation.z } },
+                { "scl", { t->scale.x,    t->scale.y,    t->scale.z } } };
+    }
+    if (ss->saveVisibility)
+        j["visible"] = getVisible(c, e);
+    return save::setEntityState(uuid, j.dump());
+}
+
+bool hasSavedState(Ctx& c, Entity e)
+{
+    const std::string uuid = entityUuidKey(c, e);
+    return !uuid.empty() && save::hasEntityState(uuid);
+}
+
+bool applySavedState(Ctx& c, Entity e)
+{
+    std::string uuid;
+    const SaveStateComponent* ss = saveStateGuard("applySavedState", c, e, uuid);
+    if (!ss) return false;
+    const std::string text = save::entityState(uuid);
+    if (text.empty())
+    {
+        HE_LOG_WARN(Script, "%s",
+            "entity.applySavedState: the active save holds no state for this entity");
+        return false;
+    }
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object()) return false;
+    // Partial application: only what the save carries touches the instance.
+    if (auto t = j.find("transform"); t != j.end() && t->is_object() && ss->saveTransform)
+    {
+        if (auto* tc = c.world->registry().try_get<TransformComponent>((entt::entity)e))
+        {
+            auto vec3 = [&](const char* key, glm::vec3& out) {
+                auto it = t->find(key);
+                if (it != t->end() && it->is_array() && it->size() >= 3)
+                    out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+            };
+            vec3("pos", tc->position);
+            vec3("rot", tc->rotation);
+            vec3("scl", tc->scale);
+        }
+    }
+    if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
+        setVisible(c, e, v->get<bool>());
     return true;
 }
 } // namespace entity
@@ -1269,6 +1372,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::exists(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "entity.setVisible", "Entity", true, {{"entity", P::Int}, {"visible", P::Bool}}, {}, "HE::api::entity::setVisible",
             [](Ctx& c, const VV& a){ entity::setVisible(c, (Entity)aI(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "entity.saveState", "Entity", true, {{"entity", P::Int}}, {{"ok", P::Bool}}, "HE::api::entity::saveState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::saveState(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "entity.hasSavedState", "Entity", false, {{"entity", P::Int}}, {{"has", P::Bool}}, "HE::api::entity::hasSavedState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::hasSavedState(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "entity.applySavedState", "Entity", true, {{"entity", P::Int}}, {{"ok", P::Bool}}, "HE::api::entity::applySavedState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::applySavedState(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "entity.getVisible", "Entity", false, {{"entity", P::Int}}, {{"visible", P::Bool}}, "HE::api::entity::getVisible",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::getVisible(c, (Entity)aI(a, 0))) }; } });
 
@@ -1521,6 +1630,9 @@ const std::vector<ApiFn>& registry()
             { "input.scrollDelta", "Scroll Delta" },
             { "entity.findByName", "Find By Name" },  { "entity.exists", "Entity Exists" },
             { "entity.setVisible", "Set Entity Visible" }, { "entity.getVisible", "Get Entity Visible" },
+            { "entity.saveState", "Save Entity State" },
+            { "entity.hasSavedState", "Has Saved State" },
+            { "entity.applySavedState", "Apply Saved State" },
             { "camera.getPosition", "Get Camera Position" }, { "camera.setPosition", "Set Camera Position" },
             { "camera.getRotation", "Get Camera Rotation" }, { "camera.setRotation", "Set Camera Rotation" },
             { "camera.getFov", "Get Camera FOV" },           { "camera.setFov", "Set Camera FOV" },

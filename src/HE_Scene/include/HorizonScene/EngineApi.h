@@ -66,6 +66,16 @@ namespace entity {
     // first renderable found (true when the entity has none).
     void        setVisible(Ctx&, Entity e, bool visible);
     bool        getVisible(Ctx&, Entity e);
+    // ── Savegame state (SaveStateComponent + the ACTIVE save) ────────────────
+    // saveState writes the component-flagged attributes under the entity's
+    // stable UUID into the active save; applySavedState applies every attribute
+    // PRESENT there back onto the instance (partial by design). Both require
+    // play mode (PIE/packaged — the SceneSerializer owns edit-mode persistence),
+    // an active save, and an enabled SaveStateComponent — anything missing
+    // fails LOUD (log + false). hasSavedState only needs an active save.
+    bool saveState(Ctx&, Entity e);
+    bool hasSavedState(Ctx&, Entity e);
+    bool applySavedState(Ctx&, Entity e);
 }
 
 // ── Transform (Euler degrees for rotation) ───────────────────────────────────

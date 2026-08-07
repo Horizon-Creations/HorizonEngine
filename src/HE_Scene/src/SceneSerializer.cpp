@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
@@ -305,6 +306,14 @@ namespace
 				{ "moduleName", s->moduleName },
 				{ "enabled",    s->enabled },
 				{ "properties", props },
+			};
+		}
+		if (auto* ss = registry.try_get<SaveStateComponent>(entity))
+		{
+			comps["saveState"] = {
+				{ "enabled",        ss->enabled },
+				{ "saveTransform",  ss->saveTransform },
+				{ "saveVisibility", ss->saveVisibility },
 			};
 		}
 		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
@@ -771,6 +780,15 @@ namespace
 			cc.mass       = c.value("mass",       cc.mass);
 			cc.gravity    = c.value("gravity",    cc.gravity);
 			registry.emplace_or_replace<CharacterControllerComponent>(entity, cc);
+		}
+		if (comps.contains("saveState"))
+		{
+			const json& c = comps["saveState"];
+			SaveStateComponent ss;
+			ss.enabled        = c.value("enabled",        ss.enabled);
+			ss.saveTransform  = c.value("saveTransform",  ss.saveTransform);
+			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
+			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
 		}
 		if (comps.contains("script"))
 		{

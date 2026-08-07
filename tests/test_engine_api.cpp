@@ -4,6 +4,8 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/SaveStateComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1048,6 +1050,55 @@ TEST_CASE("save v2: write/load round-trip through Saves/<id>.json, list/exists/d
     CHECK(save::remove("run-42"));
     CHECK(!save::exists("run-42"));
     CHECK(save::list().empty());
+}
+
+TEST_CASE("entity save-state: guarded round-trip through the active save")
+{
+    SaveTestRig rig;
+    namespace save = HE::api::save;
+
+    HorizonWorld world;
+    HE::api::Ctx c{ &world, nullptr, &rig.cm };
+    const auto e = world.createEntity("Hero");
+    auto& reg = world.registry();
+    {
+        TransformComponent t;
+        t.position = { 1.0f, 2.0f, 3.0f };
+        t.rotation = { 0.0f, 90.0f, 0.0f };
+        reg.emplace<TransformComponent>(e, t);
+    }
+    const HE::api::Entity handle = (HE::api::Entity)e;
+
+    // Every guard fails LOUD before anything works: edit mode, then no active
+    // save, then no component.
+    save::setPlayMode(false);
+    CHECK(!HE::api::entity::saveState(c, handle));
+    save::setPlayMode(true);
+    CHECK(!HE::api::entity::saveState(c, handle));          // no active save
+    REQUIRE(save::create("run", &rig.cm));
+    CHECK(!HE::api::entity::saveState(c, handle));          // no SaveStateComponent
+    reg.emplace<SaveStateComponent>(e);
+
+    CHECK(!HE::api::entity::hasSavedState(c, handle));
+    REQUIRE(HE::api::entity::saveState(c, handle));
+    CHECK(HE::api::entity::hasSavedState(c, handle));
+
+    // Mutate, then re-apply — the saved state wins.
+    reg.get<TransformComponent>(e).position = { 9.0f, 9.0f, 9.0f };
+    REQUIRE(HE::api::entity::applySavedState(c, handle));
+    CHECK(reg.get<TransformComponent>(e).position.x == doctest::Approx(1.0f));
+    CHECK(reg.get<TransformComponent>(e).rotation.y == doctest::Approx(90.0f));
+
+    // The entity section survives the disk round-trip keyed by the stable UUID.
+    REQUIRE(save::write());
+    save::close();
+    REQUIRE(save::load("run", &rig.cm));
+    CHECK(HE::api::entity::hasSavedState(c, handle));
+    reg.get<TransformComponent>(e).position = { 5.0f, 5.0f, 5.0f };
+    REQUIRE(HE::api::entity::applySavedState(c, handle));
+    CHECK(reg.get<TransformComponent>(e).position.z == doctest::Approx(3.0f));
+
+    save::setPlayMode(false);
 }
 
 // ═══ Scene transition requests + packed-scene UUIDs + additive tracking ═══════

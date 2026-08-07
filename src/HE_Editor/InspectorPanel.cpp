@@ -977,6 +977,23 @@ void render(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
 	}
 
+	// ── Save State (savegames) ──────────────────────────────────────────────
+	if (auto* ss = registry.try_get<SaveStateComponent>(entity))
+	{
+		if (componentHeader("Save State", true, removed))
+		{
+			ImGui::Checkbox("Enabled", &ss->enabled); trackEdit();
+			hint("Lets scripts write this entity's state into the active save "
+			     "(entity.saveState) and re-apply it later (entity.applySavedState). "
+			     "Play mode only; the attributes below choose WHAT is captured.");
+			ImGui::BeginDisabled(!ss->enabled);
+			ImGui::Checkbox("Transform", &ss->saveTransform); trackEdit();
+			ImGui::Checkbox("Visibility", &ss->saveVisibility); trackEdit();
+			ImGui::EndDisabled();
+		}
+		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
+	}
+
 	// ── Script (Lua) ────────────────────────────────────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
@@ -1312,6 +1329,7 @@ void render(AppContext& ctx)
 			addItem("Decal",        DecalComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
+			addItem("Save State",          SaveStateComponent{});
 			// A ScriptComponent points at a Lua/Python Script asset, so it's only
 			// offered when the project is authored in one of those languages
 			// (HorizonCode drives entities via player/level graphs; C++ via native
