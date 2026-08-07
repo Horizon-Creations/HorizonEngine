@@ -778,6 +778,11 @@ private:
 		glm::vec4 layer[4]{};     // per-layer folded colour (rgb)
 	};
 	static_assert(sizeof(GILandGpu) == 64 + 5 * 16, "must match the GLSL GiLand layout");
+	// How far, in SCREEN pixels, the widest allowed lobe scatters — the span the
+	// blur must cover for the rays not to show as noise. Same constant and same
+	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
+	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	unsigned int m_giReflMixProgram = 0; // sharp/blurred roughness lerp (kGiReflMixFS)
 	unsigned int m_giLandSSBO = 0;
 	int          m_giLandCount = 0;
 	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order

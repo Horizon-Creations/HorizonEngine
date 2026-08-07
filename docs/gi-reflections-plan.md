@@ -658,3 +658,78 @@ dem alten Stand (1 Strahl, halbe Auflösung) das 16-fache an Reflexions-Strahlen
 Near-Mirrors bleiben bei einem Strahl (ihr Cone ist schmaler als ein Pixel), die
 Strahlkosten wachsen also nur auf glossy Flächen; die Auflösungskosten gelten
 überall.
+
+
+---
+
+## Runde 5: warum die Leiter trotzdem invertiert blieb — und das Messinstrument
+
+Rückmeldung mit drei Screenshots: Medium extrem verrauscht, Low am klarsten,
+High dazwischen. Genau umgekehrt zur Absicht. Die Ursachenkette:
+
+**1. Vier Verifikationsrunden waren blind.** Jede vorherige Runde hat an
+Witnesses geprüft, die den Fehler strukturell nicht zeigen konnten — entweder an
+Spiegeln mit Roughness 0.05 (Cone geschlossen, kein Rauschen möglich) oder mit
+temporaler Akkumulation bei stehender Kamera (konvergiert immer). Der
+entscheidende blinde Fleck: **der FORWARD-Prepass schreibt Roughness 0**
+(`reflPosFragment`, „b roughness (0)" — er hat keine Materialdaten), also öffnet
+sich der Glossy-Cone im Forward-Pfad NIE. Alle Dumps liefen forward.
+`scripts/../reflnoise.py` (Scratch) rendert deshalb mit `RENDERPATH=1` und misst
+den Laplacian in der Spiegelfläche; erst damit reproduziert der Fehler headless:
+bei Roughness 0.4 Low 0.66 / Medium 2.20 / High 4.24.
+
+**2. Low war nicht „gut", sondern untätig.** Bei einem Ray ist `jitter = rays > 1`
+falsch, der Cone bleibt zu, der Strahl ist deterministisch — kein Rauschen, weil
+die Lobe gar nicht gesampelt wird. Die Stufe war also nie der Maßstab.
+
+**3. Der Blur kannte die Lobe nicht.** Er war auf `resDiv` dimensioniert, also
+1–4 Texel, während eine Lobe bei Roughness 0.4 zig Pixel breit streut. Jeder
+zusätzliche Ray schärfte den Trace, ohne das Filter zu verbreitern, das aufräumen
+muss, was die Rays weiterhin verfehlen. Jetzt: `reach = 1 + kGIReflLobeScreenPx *
+maxRoughness / resDiv`, in SCHIRMPIXELN konstant über alle Stufen (die Streuweite
+ist eine Materialeigenschaft, keine Einstellung), als **À-trous-Kette** mit auf
+`reach` skalierten Strides. Die Rays kaufen Sauberkeit, die Auflösung Schärfe.
+
+**4. Der Roughness-Lerp ließ rohes Rauschen durch.** Er rampte gegen
+`maxRoughness`, also nahm eine 0.4-Fläche noch ~26 % des UNGEFILTERTEN Traces —
+das Rest-Speckle, das kein Blur mehr einfangen konnte. Der scharfe Zweig darf nur
+gewinnen, wo der Trace deterministisch ist, also rampt er jetzt gegen die
+Cone-Schwelle: `smoothstep(0.03, 0.20, rough)`.
+
+Ergebnis bei Roughness 0.4 (deferred, Laplacian in der Spiegelfläche):
+0.59 / 0.91 / 0.93 statt 0.66 / 2.20 / 4.24 — und bei 3× Zoom ist auf allen drei
+Stufen kein Speckle mehr zu sehen. Die Restwerte sind Verlaufssignal, nicht
+Rauschen: die Metrik kann ab hier Schärfe und Rauschen nicht mehr trennen, also
+entscheidet die Sichtprüfung.
+
+### Vom Audit gefunden (28 Agenten, adversariell verifiziert)
+
+Behoben:
+* **GL: die Reflexions-Targets werden nie auf die Tier-Auflösung resized.** Ich
+  hatte den Trace auf `grW/grH` umgestellt, aber alle Targets entstehen in
+  `EnsureGIShadowTargets` an der Prepass-Größe. High hätte einen Bildschirm-
+  Quadranten über alles gestreckt, Low drei Viertel der Textur ungeschrieben
+  gelassen. Die Auflösungsachse ist auf GL **zurückgenommen** und als Lücke
+  dokumentiert: sie bräuchte auch den Prepass resized (der gehört dem
+  Shadow-Pass), und auf dieser Maschine ist GL nicht lauffähig.
+* **GL: Medium castete 1 Ray statt 2** — das Cone-Gate hing an `quality >= 2`
+  statt an `rays > 1` wie auf Metal, die Ray-Leiter las also 1/1/4.
+* **GL hatte kein scharf/unscharf-Paar**, der neue lobenbreite Blur hätte dort
+  auch Spiegel getroffen. `kGiReflMixFS` schließt die Lücke (Ziel ist der tote
+  H-Ping, kein zusätzliches Target).
+* **À-trous-Reach auf Zweierpotenzen gerastert** (`2^n − 1`), wodurch die
+  „stufenunabhängige" Reichweite quantisierte und Medium breiter blurren konnte
+  als Low. Strides werden jetzt auf `reach` skaliert, Level auf 6 gedeckelt,
+  `maxRoughness` geclampt (auch gegen NaN).
+* **Forward High verwarf die ganze Blur-Kette** (Lerp degeneriert dort zum
+  Resolution-Floor = 0). Die Kette wird jetzt übersprungen, statt ein Dutzend
+  Vollbild-Passes pro Frame zu rechnen und wegzuwerfen.
+
+Offen und bewusst nicht in dieser Runde:
+* **Der Forward-Prepass schreibt keine Roughness.** Damit ist im Forward-Pfad die
+  Ray-Achse tot (immer 1 Strahl) und der Roughness-Lerp wirkungslos — glossy
+  Reflexionen funktionieren dort schlicht nicht, nur Spiegel. Das ist die
+  eigentliche nächste Aufgabe; sie braucht Material-Roughness pro Draw im
+  Prepass.
+* GL-Auflösungsachse (s. o.), und die 5-Tap-Kette hat keine Edge-Stopping-
+  Gewichte, kann also über Silhouetten bluten.

@@ -299,6 +299,12 @@ private:
 	// (0 at full res). Set with the target size in EncodeGIReflections and read
 	// by both composites — see kSSRRoughMixFS.
 	float m_giReflBlurFloor    = 0.0f;
+	// How far, in SCREEN pixels, the widest allowed lobe (roughness =
+	// GIReflMaxRoughness) scatters — the span the filter has to cover for the
+	// rays not to show as noise. Tier-independent on purpose: it describes the
+	// material, not the settings. Its absence, and then its scaling by the tier,
+	// is what made every higher tier noisier than the one below it.
+	static constexpr float kGIReflLobeScreenPx = 24.0f;
 	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
 	// lerp the DEFERRED composite does per pixel into the half-res texture the
 	// forward scene shader samples — it only gets one. Optional; null just means

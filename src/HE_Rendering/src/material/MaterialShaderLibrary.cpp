@@ -1431,10 +1431,11 @@ void main() {
         // quality High both samplers hold the same texture → no-op).
         vec4 gg0 = texture(heGIRefl, uv);
         vec4 gg1 = texture(heGIReflRough, uv);
-        // giRefl.w = resolution blur floor (see kSSRRoughMixFS): below full
-        // resolution even a mirror gets some blur, or its stair-steps show.
+        // Same curve as kSSRRoughMixFS — see there for why it ramps against the
+        // cone-opening threshold (0.03) and not against maxRoughness, and what
+        // giRefl.w (the resolution floor) is for.
         vec4 gg  = mix(gg0, gg1, max(clamp(heLight.giRefl.w, 0.0, 1.0),
-                                     smoothstep(0.0, max(heLight.giRefl.y, 1e-3), rough)));
+                                     smoothstep(0.03, 0.20, rough)));
         envSpec = mix(envSpec, gg.rgb, gg.a * heLight.giRefl.x);
         // Glossy lerp (ssr-plan §4.3 v2): mirror-like surfaces read the
         // near-sharp result, rough ones the wide second blur — the mip-chain
@@ -1516,14 +1517,18 @@ layout(std140, set = 0, binding = 23) uniform HeSSRBlur {
 void main() {
     vec2 uv = gl_FragCoord.xy * heBlur.dir.zw;
     float rough = clamp(texture(heAttr, uv).b, 0.0, 1.0);
-    // Same curve as the deferred composite's, against the same max-roughness
-    // cutoff (heBlur.dir.x carries it here) so both paths blur alike.
+    // The sharp copy may only win where the trace is DETERMINISTIC. The kernel
+    // opens its glossy cone above roughness 0.03, and from there every ray is a
+    // random sample — so the sharp copy is raw noise, not detail. Ramping this
+    // against maxRoughness (the previous curve) meant a 0.4-rough surface still
+    // took ~26% of the unfiltered trace, which is exactly the speckle the blur
+    // then could not remove no matter how wide it got. Above 0.2 the blurred
+    // copy is the whole answer; a mirror (below 0.03) is untouched.
     // heBlur.dir.y is the RESOLUTION floor: below full resolution even a mirror
     // needs some blur, because "sharp" at quarter res just means blocky — the
     // reflection is upsampled to the screen and the stair-steps are what the
     // viewer sees. 0 at full res, so High keeps the mirror perfectly crisp.
-    float t = max(clamp(heBlur.dir.y, 0.0, 1.0),
-                  smoothstep(0.0, max(heBlur.dir.x, 1e-3), rough));
+    float t = max(clamp(heBlur.dir.y, 0.0, 1.0), smoothstep(0.03, 0.20, rough));
     oMix = mix(texture(heNarrow, uv), texture(heWide, uv), t);
 }
 )";

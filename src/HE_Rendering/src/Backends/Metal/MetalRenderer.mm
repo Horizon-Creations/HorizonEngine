@@ -11553,7 +11553,16 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// ── Blur chain: the SSR blur pipeline verbatim — same RGBA16F fullscreen
 		// confidence-weighted 5-tap, run at EVERY tier (Low needs it most, see
 		// the width comment below).
-		if (m_ssrBlurPipeline)
+		//
+		// SKIPPED when its result provably cannot be used. In the FORWARD path
+		// the reflection prepass writes roughness 0 (it has no material data —
+		// reflPosFragment), so the per-pixel lerp between sharp and blurred can
+		// only ever return the resolution floor; at full resolution that floor is
+		// 0, i.e. the blurred copy is discarded. Without this the High forward
+		// tier encoded a dozen full-screen RGBA16F passes per frame and threw
+		// every one of them away.
+		const bool blurUsed = deferredIn || m_giReflBlurFloor > 0.0f;
+		if (m_ssrBlurPipeline && blurUsed)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)
 			{
@@ -11575,19 +11584,66 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 				[benc endEncoding];
 				++m_counters.draws;
 			};
-			// Blur WIDTH follows the RESOLUTION: one reflection texel covers
-			// resDiv screen pixels, so that is how far a tap has to reach to
-			// stand in for what was never traced. Quarter-res needs four texels,
-			// full res one — the blur shrinks exactly as the tier gets better,
-			// instead of growing with it.
+			// The blur stands in for TWO things the trace did not sample, and
+			// sizing it to only one of them is what kept inverting this ladder:
+			//   · the RESOLUTION — one reflection texel covers resDiv screen
+			//     pixels, so a tap must reach that far. Constant per tier.
+			//   · the LOBE — a glossy surface scatters over a cone that a handful
+			//     of rays only sparsely sample, and the leftover variance IS the
+			//     noise. This term was missing entirely, so a rough surface got a
+			//     1–4 texel blur over a lobe tens of pixels across, and every
+			//     extra ray sharpened the trace without widening the filter that
+			//     has to clean up what the rays still missed. It scales with the
+			//     widest lobe the settings allow (maxRoughness). It is measured in
+			//     SCREEN pixels and stays the SAME at every tier, because how far
+			//     a rough surface scatters is a property of the material, not of
+			//     the settings — dividing it by √rays (the first attempt) made
+			//     the better tier filter LESS while its noise grain got finer,
+			//     which is precisely how the ladder stayed inverted.
+			//
+			// What the tier buys is then honest: RESOLUTION buys sharpness (finer
+			// detail survives the same screen-space blur, and a mirror — whose
+			// lobe term is zero after the roughness lerp — is simply crisper),
+			// and RAYS buy cleanliness (the same screen footprint averages
+			// resDiv² times more texels, each of them an average of `rays`
+			// samples). Both move the right way at once.
+			// The reach is built as an À-TROUS CHAIN of the same 5-tap kernel at
+			// doubling strides, NOT as one wide 5-tap: five taps spread over 16
+			// texels leave visible banding between them, while 1+2+4+8 covers the
+			// same span densely for the same number of passes.
 			//
 			// m_giReflTex keeps the UNBLURRED trace and m_giReflRoughTex the
 			// blurred copy; the roughness lerp between them (deferred: in the
-			// composite, forward: the mix pass below) is what keeps a mirror
+			// composite, forward: the mix pass below) is what keeps a MIRROR
 			// mirror-sharp at every tier while a rough surface gets the lobe.
-			const float blurTexels = static_cast<float>(resDiv); // 4 / 2 / 1
-			blurPass(m_giReflTex, m_giReflPingTex,  blurTexels / static_cast<float>(tw), 0.0f);
-			blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, blurTexels / static_cast<float>(th));
+			// Screen pixels → reflection texels: one texel spans resDiv of them.
+			const float lobeScreen = kGIReflLobeScreenPx
+			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f);
+			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
+			                               1.0f, 512.0f); // also pins a NaN setting
+			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw
+			// strides 1,2,4,… and stopping at the first one past the target snaps
+			// the total to 2^n − 1, so the "tier-independent" screen reach came out
+			// quantized — Medium could end up blurring WIDER than Low, which is the
+			// inversion this whole rework exists to remove. n levels of scaled
+			// strides sum to `reach` for any value.
+			const int levels = std::clamp(
+				static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
+			const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+			// Every pass reads ONE texture and writes a DIFFERENT one: H always
+			// lands in ping, V always in rough, and the next level reads rough.
+			// Letting a non-final level write back into ping is a read-write
+			// hazard on the same texture — on a tile GPU that does not fail, it
+			// silently produces large BLACK TILES, which is what the first
+			// version of this chain rendered.
+			void* blurSrc = m_giReflTex;
+			for (int lvl = 0; lvl < levels; ++lvl)
+			{
+				const float stride = unit * std::exp2(static_cast<float>(lvl));
+				blurPass(blurSrc, m_giReflPingTex, stride / static_cast<float>(tw), 0.0f);
+				blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, stride / static_cast<float>(th));
+				blurSrc = m_giReflRoughTex;
+			}
 			{
 				// FORWARD path only: bake the sharp/blurred roughness lerp into
 				// the texture the scene shader samples — it only gets ONE. The
