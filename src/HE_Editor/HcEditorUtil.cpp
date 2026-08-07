@@ -867,6 +867,98 @@ std::string engineCallTitle(const std::string& apiId)
 	return apiId.empty() ? std::string("Engine Call") : apiId;
 }
 
+bool drawStructDefaultEditor(HorizonCode::Variable& v)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	HE::StructDef def;
+	ImGui::SeparatorText("Default");
+	if (v.typeName.empty() || !HE::TypeRegistry::instance().getStruct(v.typeName, def))
+	{ ImGui::TextDisabled("(no definition)"); return false; }
+	if (def.fields.empty())
+	{ ImGui::TextDisabled("The struct has no fields yet."); return false; }
+
+	ImGui::TextDisabled("Per-field defaults for THIS graph's variable.");
+	ImGui::TextDisabled("Untouched fields follow the struct's own defaults.");
+	bool changed = false;
+	for (const HE::StructField& f : def.fields)
+	{
+		ImGui::PushID(f.name.c_str());
+		auto it = v.structDefaults.find(f.name);
+		const bool overridden = it != v.structDefaults.end();
+
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(f.name.c_str());
+		ImGui::SameLine(140.0f);
+
+		// Nested structs and arrays keep their own defaults in v1 — overriding
+		// them per graph needs a nested editor, which this row can't be.
+		if (f.isArray || f.type == P::Struct)
+		{
+			ImGui::TextDisabled(f.isArray ? "(array — seeds from the field's own default)"
+			                              : "(struct — seeds from its own defaults)");
+			ImGui::PopID();
+			continue;
+		}
+
+		// Seed the editable copy from the current effective value the first time
+		// this field is touched, so editing starts where the default is.
+		V edit = overridden ? it->second : f.defaultValue;
+		edit.type = f.type;
+		bool touched = false;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 76.0f);
+		switch (f.type)
+		{
+			case P::Float:  if (ImGui::DragFloat("##sd", &edit.f, 0.1f)) touched = true; break;
+			case P::Int:    if (ImGui::DragInt("##sd", &edit.i)) touched = true; break;
+			case P::Bool:   if (ImGui::Checkbox("##sd", &edit.b)) touched = true; break;
+			case P::String: ImGui::InputText("##sd", &edit.s);
+			                if (ImGui::IsItemDeactivatedAfterEdit()) touched = true; break;
+			case P::Vec2:   if (ImGui::DragFloat2("##sd", &edit.v2.x, 0.1f)) touched = true; break;
+			case P::Color:  if (ImGui::ColorEdit4("##sd", &edit.col.x,
+			                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) touched = true; break;
+			case P::Transform:
+				if (ImGui::DragFloat3("Pos##sd", &edit.tpos.x, 0.1f))  touched = true;
+				if (ImGui::DragFloat3("Rot##sd", &edit.trot.x, 0.5f))  touched = true;
+				if (ImGui::DragFloat3("Scl##sd", &edit.tscl.x, 0.05f)) touched = true;
+				break;
+			case P::Enum:
+			{
+				// Stored as the entry NAME, like every other enum default.
+				HE::EnumDef ed;
+				if (!HE::TypeRegistry::instance().getEnum(f.typeName, ed) || ed.entries.empty())
+				{ ImGui::TextDisabled("(no enum definition)"); break; }
+				const std::string cur = !edit.s.empty() ? edit.s
+				                      : (!f.defaultValue.s.empty() ? f.defaultValue.s
+				                                                   : ed.entries.front().name);
+				if (ImGui::BeginCombo("##sd", cur.c_str()))
+				{
+					for (const auto& en : ed.entries)
+						if (ImGui::Selectable(en.name.c_str(), en.name == cur))
+						{ edit.s = en.name; touched = true; }
+					ImGui::EndCombo();
+				}
+				break;
+			}
+			default: ImGui::TextDisabled("\xe2\x80\x94"); break;
+		}
+		if (touched) { v.structDefaults[f.name] = edit; changed = true; }
+
+		ImGui::SameLine();
+		if (overridden)
+		{
+			if (ImGui::SmallButton("Reset")) { v.structDefaults.erase(f.name); changed = true; }
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Follow the struct's own default for this field again.");
+		}
+		else
+		{
+			ImGui::TextDisabled("(default)");
+		}
+		ImGui::PopID();
+	}
+	return changed;
+}
+
 bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;

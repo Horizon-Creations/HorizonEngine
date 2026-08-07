@@ -198,8 +198,16 @@ struct Variable
     std::string className;
     // Enum/Struct variables: the definition asset's path (HE::TypeRegistry key).
     // An Enum variable's default is the entry NAME in `s` (renumber-safe); a
-    // Struct variable seeds from the definition's own field defaults.
+    // Struct variable seeds from the definition's own field defaults, which
+    // structDefaults then overrides PER GRAPH.
     std::string typeName;
+    // Struct variables: per-graph overrides of individual field defaults, keyed
+    // by FIELD NAME (never by position — a field inserted into the definition
+    // must not silently shift what this graph authored; same contract as the
+    // TypeRegistry's own name-keyed persistence). Resolved at seed time in
+    // variableDefaultValue: the definition's defaults first, then these on top;
+    // a name the definition no longer has simply doesn't apply.
+    std::unordered_map<std::string, Value> structDefaults;
 };
 
 struct Node

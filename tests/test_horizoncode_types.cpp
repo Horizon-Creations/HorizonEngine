@@ -321,6 +321,51 @@ TEST_CASE("connect() refuses to wire mismatched struct/enum definitions")
     HE::TypeRegistry::instance().removeType("Content/Types/Other.hasset");
 }
 
+TEST_CASE("Struct variables: per-graph field overrides win, by NAME, and survive JSON")
+{
+    TypeFixture fx;
+    Variable v; v.name = "stats"; v.type = PinType::Struct; v.typeName = kStats;
+    // hp (Float 100), title (String "Rookie"), weapon (Enum, "Bow" = 7).
+    v.structDefaults["hp"]     = Value::ofFloat(55.0f);
+    v.structDefaults["weapon"] = Value::ofString("Staff");   // enum override = entry NAME
+
+    const Value seeded = variableDefaultValue(v);
+    REQUIRE(seeded.items.size() == 3);
+    CHECK(seeded.items[0].f == doctest::Approx(55.0f));   // overridden
+    CHECK(seeded.items[1].s == "Rookie");                 // untouched → definition default
+    CHECK(seeded.items[2].i == 2);                        // "Staff" resolved
+
+    // A field INSERTED before the overridden ones must not shift them.
+    {
+        HE::StructDef edited;
+        REQUIRE(HE::TypeRegistry::instance().getStruct(kStats, edited));
+        HE::StructField extra; extra.name = "armor"; extra.type = PinType::Float;
+        extra.defaultValue = Value::ofFloat(4.0f);
+        edited.fields.insert(edited.fields.begin(), extra);
+        HE::TypeRegistry::instance().registerStruct(edited);
+    }
+    const Value after = variableDefaultValue(v);
+    REQUIRE(after.items.size() == 4);
+    CHECK(after.items[0].f == doctest::Approx(4.0f));     // the new field's own default
+    CHECK(after.items[1].f == doctest::Approx(55.0f));    // the override followed its NAME
+    CHECK(after.items[3].i == 2);
+
+    // A stale enum entry name falls back to the definition default, silently.
+    v.structDefaults["weapon"] = Value::ofString("Nonexistent");
+    CHECK(variableDefaultValue(v).items[3].i == 7);       // "Bow"
+
+    // Overrides round-trip through the graph JSON.
+    Graph g;
+    g.variables.push_back(v);
+    Graph back;
+    REQUIRE(fromJson(toJson(g), back));
+    REQUIRE(back.variables.size() == 1);
+    const auto& sd = back.variables[0].structDefaults;
+    REQUIRE(sd.size() == 2);
+    CHECK(sd.at("hp").f == doctest::Approx(55.0f));
+    CHECK(sd.at("weapon").s == "Nonexistent");
+}
+
 TEST_CASE("Struct variables seed from definition defaults; enum defaults resolve by name")
 {
     TypeFixture fx;

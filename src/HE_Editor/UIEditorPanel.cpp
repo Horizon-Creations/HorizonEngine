@@ -1464,11 +1464,11 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 						}
 						break;
 					}
-					case PT::Struct:
-						ImGui::TextDisabled("Seeds from the struct's own field defaults.");
-						break;
+					case PT::Struct: break;   // drawn below (own section)
 					default: break;
 				}
+				if (v->type == PT::Struct && HcEditorUtil::drawStructDefaultEditor(*v))
+					{ ed = true; commitEdit(st, ctx); }
 				if (ed) st.dirty = true;
 				if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
 			}

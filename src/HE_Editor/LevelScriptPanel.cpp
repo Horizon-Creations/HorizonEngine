@@ -418,11 +418,11 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 				}
 				break;
 			}
-			case PT::Struct:
-				ImGui::TextDisabled("Seeds from the struct's own field defaults.");
-				break;
+			case PT::Struct: break;   // drawn below (it needs its own section)
 			default: break;
 		}
+		if (v->type == PT::Struct && HcEditorUtil::drawStructDefaultEditor(*v))
+			edited = true;
 	}
 	else if (HcEditorUtil::drawArrayDefaultEditor(*v)) // slot list seeds the array
 		edited = true;

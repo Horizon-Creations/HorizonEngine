@@ -144,6 +144,15 @@ namespace HcEditorUtil
 	// Returns true when anything changed (the caller commits for undo).
 	bool drawArrayDefaultEditor(HorizonCode::Variable& v);
 
+	// Default editor for a STRUCT variable: one row per field of its definition,
+	// each overridable PER GRAPH (Variable::structDefaults, name-keyed). A row
+	// with no override shows the definition's own default and says so; "Reset"
+	// drops back to it. Nested-struct and array fields are read-only in v1 (they
+	// carry their own defaults). Returns true when something changed. Shared by
+	// the level/GI/class variable panel and the widget one, so the two can't
+	// drift apart.
+	bool drawStructDefaultEditor(HorizonCode::Variable& v);
+
 	// Inline pin defaults: simple UNWIRED data inputs (Bool/Int/Float/String, no
 	// arrays) show a small entry right on the node — no literal node needed.
 	// `pinSupportsInlineDefault` gates per unified pin; the editor draws inside

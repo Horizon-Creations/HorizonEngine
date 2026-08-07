@@ -733,8 +733,39 @@ Value variableDefaultValue(const Variable& v)
             return r;
         }
         case P::Struct:
-            // Struct variables seed from the definition's own field defaults.
-            return HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
+        {
+            // The definition's own field defaults, then this graph's overrides
+            // on top — matched BY NAME against the current definition.
+            Value r = HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
+            if (!v.structDefaults.empty())
+            {
+                HE::StructDef def;
+                if (HE::TypeRegistry::instance().getStruct(v.typeName, def))
+                    for (size_t i = 0; i < def.fields.size() && i < r.items.size(); ++i)
+                        if (auto it = v.structDefaults.find(def.fields[i].name);
+                            it != v.structDefaults.end())
+                        {
+                            Value ov = it->second;
+                            if (def.fields[i].type == P::Enum)
+                            {
+                                // Stored as the entry NAME (renumber-safe).
+                                HE::EnumDef ed;
+                                ov.type = P::Enum; ov.typeName = def.fields[i].typeName;
+                                if (HE::TypeRegistry::instance().getEnum(ov.typeName, ed))
+                                {
+                                    if (const HE::EnumEntry* en = ed.findEntry(it->second.s)) ov.i = en->value;
+                                    else continue;   // stale entry name → keep the definition default
+                                }
+                            }
+                            else
+                            {
+                                ov.type = def.fields[i].type;
+                            }
+                            r.items[i] = std::move(ov);
+                        }
+            }
+            return r;
+        }
         default:        return Value::ofFloat(v.f[0]);
     }
 }
@@ -872,6 +903,17 @@ nlohmann::json scalarValueToJson(const Value& v, PinType t)
         case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
         case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
         case P::Ref:    return v.ref;
+        case P::Enum:   return v.s;   // the entry NAME (renumber-safe)
+        case P::Struct:
+        {
+            // Name-keyed field object, like everything else about user types.
+            nlohmann::json o = nlohmann::json::object();
+            HE::StructDef def;
+            if (HE::TypeRegistry::instance().getStruct(v.typeName, def))
+                for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+                    o[def.fields[i].name] = scalarValueToJson(v.items[i], def.fields[i].type);
+            return o;
+        }
         case P::Transform:
             return nlohmann::json::array({ v.tpos.x, v.tpos.y, v.tpos.z,
                                            v.trot.x, v.trot.y, v.trot.z,
@@ -893,6 +935,7 @@ Value scalarValueFromJson(const nlohmann::json& j, PinType t)
         case P::Color:  if (j.is_array() && j.size() >= 4)
                             v.col = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() }; break;
         case P::Ref:    if (j.is_number()) v.ref = j.get<uint32_t>(); break;
+        case P::Enum:   if (j.is_string()) v.s = j.get<std::string>(); break;  // entry NAME
         case P::Transform:
             if (j.is_array() && j.size() >= 9)
             {
@@ -1002,6 +1045,15 @@ nlohmann::json variableToJsonObj(const Variable& v)
                        v.tscl.x, v.tscl.y, v.tscl.z };
     if (!v.className.empty()) e["className"] = v.className;
     if (!v.typeName.empty())  e["typeName"]  = v.typeName;
+    if (!v.structDefaults.empty())
+    {
+        // Name-keyed, and each value tagged with its own type so a definition
+        // edit can't reinterpret what was authored here.
+        nlohmann::json sd = nlohmann::json::object();
+        for (const auto& [field, val] : v.structDefaults)
+            sd[field] = { { "t", (int)val.type }, { "v", scalarValueToJson(val, val.type) } };
+        e["structDefaults"] = std::move(sd);
+    }
 return e;
 }
 
@@ -1071,6 +1123,13 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
             for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
     v.className = e.value("className", std::string());
     v.typeName  = e.value("typeName", std::string());
+    if (const auto& sd = e.value("structDefaults", nlohmann::json::object()); sd.is_object())
+        for (auto it = sd.begin(); it != sd.end(); ++it)
+        {
+            if (!it->is_object()) continue;
+            const PinType t = (PinType)it->value("t", (int)P::Float);
+            v.structDefaults[it.key()] = scalarValueFromJson(it->value("v", nlohmann::json()), t);
+        }
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) v.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
