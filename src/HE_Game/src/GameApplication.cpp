@@ -238,6 +238,10 @@ void GameApplication::OnInit()
 			SDL_free(pref);
 		}
 	}
+	// Savegames: the shipped game IS play mode, and save.create() resolves the
+	// project's default template from the hcfg.
+	HE::api::save::setDefaultTemplate(m_config.defaultSaveTemplate);
+	HE::api::save::setPlayMode(true);
 
 	// The GameInstance's UI is APP-LEVEL: widgets live in m_widgets (owned here,
 	// not by any world), so they exist before the first world and PERSIST across

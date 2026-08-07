@@ -4126,6 +4126,11 @@ void EditorApplication::setPlayMode(bool play)
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 		}
+		// Savegames: PIE mirrors the packaged game — the project's default
+		// template resolves save.create(), and the play-mode gate opens for the
+		// entity save-state API. Mirrored teardown below.
+		HE::api::save::setDefaultTemplate(m_projectManager.currentProject().defaultSaveTemplate);
+		HE::api::save::setPlayMode(true);
 
 		// GameInstance OnInit fires first — before scripts, the level and any
 		// widgets — mirroring the packaged game's "before anything loads".
@@ -4221,6 +4226,10 @@ void EditorApplication::setPlayMode(bool play)
 		// PIE-loaded zones die with the snapshot restore below — drop the table
 		// so stale zone ids don't survive into the next play session.
 		HE::api::scene::clearZones();
+		// The active save dies with the session too (the old KV store leaked
+		// across PIE runs and even project switches); the play-mode gate closes.
+		HE::api::save::close();
+		HE::api::save::setPlayMode(false);
 
 		// Tear down physics
 		m_physicsWorld.reset();

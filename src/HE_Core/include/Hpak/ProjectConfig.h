@@ -29,6 +29,10 @@ struct HE_API ProjectConfig {
     // to the interpreter either way, but a missing/rejected library becomes a
     // LOUD warning instead of a silent slowdown.
     bool         horizonCodeCompiled = false;
+    // Content-relative path of the project's default SaveGameTemplate asset —
+    // what save.create() bases a new save on (see HE::api::save). Empty = the
+    // project defined none (v2 configs load as empty).
+    std::string  defaultSaveTemplate;
 };
 
 class HE_API ProjectConfigLoader {

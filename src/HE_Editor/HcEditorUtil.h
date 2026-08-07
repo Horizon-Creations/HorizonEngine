@@ -39,6 +39,14 @@ namespace HcEditorUtil
 	// Returns true when changed; no-op (returns false, draws nothing) otherwise.
 	bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm);
 
+	// If `n` is a save.* Engine Call with a String "field" param, draw a
+	// dropdown of the PROJECT DEFAULT SaveGameTemplate's fields — filtered to
+	// the types the accessor touches (save.getNumber lists Float/Int/Enum
+	// fields, save.getStruct lists Struct fields, …) — and write the pick to
+	// that param's inline pin default. So the field is CHOSEN, never remembered.
+	// Returns true when changed; no-op otherwise.
+	bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm);
+
 	// ── HC class registry ─────────────────────────────────────────────────────
 	// The public interface of one HorizonCode class the editor knows about — an
 	// asset (widget / HC class) or an in-memory graph (level / GameInstance). This

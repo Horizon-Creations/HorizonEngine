@@ -980,11 +980,24 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	}
 
 	case NT::EngineCall:
+	{
 		// scene.load / scene.loadAdditive: choose the scene from a dropdown
-		// instead of typing the path (a typo silently fails to load).
-		if (HcEditorUtil::drawSceneParamPicker(n, h.content)) edit(true);
-		else ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
+		// instead of typing the path (a typo silently fails to load); save.*
+		// field params get the template-field dropdown the same way.
+		// Each picker draws its combo when the node matches (returning true only
+		// on a CHANGE), so "did one draw" is the node-shape test, not the return.
+		const bool hasFieldParam = [&]{
+			for (const auto& p : n.params)
+				if (p.name == "field" && p.type == PT::String) return true;
+			return false; }();
+		const bool sceneNode = n.s == "scene.load" || n.s == "scene.loadAdditive";
+		const bool saveField = n.s.rfind("save.", 0) == 0 && hasFieldParam;
+		if (HcEditorUtil::drawSceneParamPicker(n, h.content))          edit(true);
+		else if (HcEditorUtil::drawSaveFieldParamPicker(n, h.content)) edit(true);
+		if (!sceneNode && !saveField)
+			ImGui::TextDisabled("Engine call — inputs are set on the node's pins.");
 		return true;
+	}
 
 	default:
 		return false;   // host-specific (or nothing to edit) — the frontend decides

@@ -36,6 +36,10 @@ struct HE_API ExportSettings {
     // defaults are not packed (the pre-existing behaviour; tools that pack a bare
     // directory keep it).
     std::filesystem::path engineContentDir;
+    // Content-relative path of the project's default SaveGameTemplate asset
+    // (.heproj "defaultSaveTemplate") — written into project.hcfg so
+    // save.create() in the shipped game resolves the same schema.
+    std::string defaultSaveTemplate;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.

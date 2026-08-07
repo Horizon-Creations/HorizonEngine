@@ -819,7 +819,10 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
             dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
             return false;
         // User-defined types connect only to the SAME definition: a Struct pin
-        // for PlayerStats must not accept an Inventory, and enums likewise.
+        // for PlayerStats must not accept an Inventory, and enums likewise. An
+        // EMPTY typeName is the generic boundary (e.g. the save.setStruct
+        // engine call, whose registry params carry no definition) — it accepts
+        // anything, like an untyped Object reference; the callee validates.
         {
             const PinType pt = dataPinType(*s, false, si);
             if (pt == P::Enum || pt == P::Struct)
@@ -827,9 +830,9 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
                 PinDesc sd{}, dd{};
                 dataPinDescOf(*s, false, si, sd);
                 dataPinDescOf(*d, true,  di, dd);
-                const char* a = sd.typeName ? sd.typeName : "";
-                const char* b = dd.typeName ? dd.typeName : "";
-                if (std::string_view(a) != std::string_view(b)) return false;
+                const std::string_view a = sd.typeName ? sd.typeName : "";
+                const std::string_view b = dd.typeName ? dd.typeName : "";
+                if (!a.empty() && !b.empty() && a != b) return false;
             }
         }
         HE::graph::disconnectInput(links, dstNode, dstPin); // an input holds one link

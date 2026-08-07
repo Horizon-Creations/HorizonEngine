@@ -262,20 +262,66 @@ namespace fs {
     bool        remove(const std::string& rel);               // files only
     bool        makeDir(const std::string& rel);
 }
-// Key/value save store (in-memory; persisted to Saves/slot<N>.json via fs).
+// ── Savegames: one ACTIVE, template-shaped save document ─────────────────────
+// A save is { id, templateRef, fields, entities }: its fields are declared by a
+// SaveGameTemplate asset (typed, with defaults — so scripts never have to
+// remember what lives where; save.fields() and the editor's field dropdowns
+// enumerate them), and serialized entity state (SaveStateComponent) is appended
+// under entity UUIDs. Exactly one save is active at a time.
+//
+// create()/load() and every field accessor work purely IN MEMORY — only
+// write()/list()/exists()/remove() touch disk (Saves/<id>.json under the fs
+// sandbox; write is atomic temp+rename). Ids are restricted to
+// [A-Za-z0-9_-]+ so they round-trip as filenames. Failures are LOUD: a call
+// without an active save, an unknown field, or a type mismatch logs and
+// returns false / the default — never silently.
 namespace save {
-    void        setNumber(const std::string& key, float v);
-    float       getNumber(const std::string& key, float def);
-    void        setString(const std::string& key, const std::string& v);
-    std::string getString(const std::string& key, const std::string& def);
-    void        setBool(const std::string& key, bool v);
-    bool        getBool(const std::string& key, bool def);
-    bool        hasKey(const std::string& key);
-    void        deleteKey(const std::string& key);
-    void        clearAll();
-    bool        saveToSlot(int slot);    // persists the store
-    bool        loadFromSlot(int slot);  // replaces the store
-    bool        slotExists(int slot);
+    // App hooks.
+    void setDefaultTemplate(const std::string& contentRelPath); // editor: .heproj; game: hcfg
+    std::string defaultTemplate();
+
+    // Lifecycle. create() seeds the fields from the template's defaults
+    // (explicit `templatePath` empty → the project default; none configured →
+    // fail). load() reads Saves/<id>.json, resolves the template it names and
+    // re-validates every stored field against it (unknown/missing template =
+    // loud failure). Both replace the previously active save.
+    bool create(const std::string& id, ::ContentManager* cm,
+                const std::string& templatePath = {});
+    bool load(const std::string& id, ::ContentManager* cm);
+    bool write();                    // persist the active save (atomic)
+    void close();                    // drop the active save (PIE stop / project switch)
+    std::string activeId();          // "" = none
+
+    // Disk queries (independent of the active save).
+    std::vector<std::string> list(); // ids of every save under Saves/
+    bool exists(const std::string& id);
+    bool remove(const std::string& id);
+
+    // Template introspection: the active save's field names.
+    std::vector<std::string> fields();
+
+    // Typed field access, validated against the template. getNumber/setNumber
+    // cover Float, Int and Enum fields (int-backed); Vec2/Color/Transform
+    // fields are reachable by wrapping them in a struct field.
+    bool        setNumber(const std::string& field, float v);
+    float       getNumber(const std::string& field, float def);
+    bool        setString(const std::string& field, const std::string& v);
+    std::string getString(const std::string& field, const std::string& def);
+    bool        setBool(const std::string& field, bool v);
+    bool        getBool(const std::string& field, bool def);
+    bool               setStructV(const std::string& field, const HorizonCode::Value& v);
+    HorizonCode::Value getStructV(const std::string& field);
+
+    // Entity-state section (SaveStateComponent, see entity.saveState /
+    // applySavedState): an opaque JSON object per entity UUID.
+    bool        setEntityState(const std::string& uuid, const std::string& json);
+    std::string entityState(const std::string& uuid);   // "" = none
+    bool        hasEntityState(const std::string& uuid);
+
+    // Play-mode gate for the entity-state API (the SceneSerializer owns
+    // edit-mode persistence): set by the editor's PIE toggle and the game.
+    void setPlayMode(bool inPlay);
+    bool inPlayMode();
 }
 
 // ── Scene transitions (process-global request queue; the app executes) ────────

@@ -480,7 +480,10 @@ TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save 
 	// The seed arg coerced Float(42.7) → Int(42) — visible in the trace.
 	REQUIRE(!p.interp.trace.empty());
 	CHECK(p.interp.trace[0] == "callApi random.seed(i:42) -> ()");
-	CHECK(p.var("saved").f == 3.5f);
+	// save v2: with no active save the set fails and the get returns its
+	// default (-1) — identically on both backends. The VALUE round-trip lives
+	// in test_engine_api's save-v2 cases.
+	CHECK(p.var("saved").f == -1.0f);
 }
 
 TEST_CASE("codegen parity: refs_objects (create/destroy, external access, warn paths)")

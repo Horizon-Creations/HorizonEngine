@@ -715,7 +715,10 @@ inline HE::hccg::ClassSource fxEngineExecCached()
     const int s2 = f.setVar("v2", PT::Float);
     f.data(range, 0, s2, 0);
     f.exec(range, s2);
-    // save round trip: exec set, pure get (dispatch per read).
+    // save v2: with no active save both calls take the loud-failure path —
+    // set returns false, get returns the default. Parity still must hold
+    // (identical dispatch through the same registry lambda on both backends);
+    // the VALUE round-trip is covered by test_engine_api's save-v2 cases.
     const int save = f.engineCall("save.setNumber");
     { Node* n = f.g.findNode(save);
       n->pinDefaults[0] = Value::ofString("hc.parity");

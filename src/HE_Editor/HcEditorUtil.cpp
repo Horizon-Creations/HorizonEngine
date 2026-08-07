@@ -931,6 +931,67 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed)
 	}
 }
 
+bool drawSaveFieldParamPicker(HorizonCode::Node& n, ContentManager* cm)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	if (n.type != HorizonCode::NodeType::EngineCall) return false;
+	if (n.s.rfind("save.", 0) != 0) return false;
+	int di = -1;
+	for (size_t i = 0; i < n.params.size(); ++i)
+		if (n.params[i].type == P::String && !n.params[i].isArray && n.params[i].name == "field")
+			{ di = (int)i; break; }
+	if (di < 0) return false;
+
+	// The accessor's type decides which template fields it can touch.
+	auto accepts = [&](const HE::StructField& f) -> bool {
+		if (f.isArray) return false;
+		if (n.s == "save.getNumber" || n.s == "save.setNumber")
+			return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
+		if (n.s == "save.getString" || n.s == "save.setString") return f.type == P::String;
+		if (n.s == "save.getBool"   || n.s == "save.setBool")   return f.type == P::Bool;
+		if (n.s == "save.getStruct" || n.s == "save.setStruct") return f.type == P::Struct;
+		return true;
+	};
+
+	// Resolve the project default template's schema (same rules the runtime uses).
+	HE::StructDef schema;
+	bool haveSchema = false;
+	const std::string tpl = HE::api::save::defaultTemplate();
+	if (cm && !tpl.empty())
+		if (const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl)))
+			haveSchema = HE::TypeRegistry::structFromJson(a->json, schema);
+
+	std::string cur;
+	if (auto it = n.pinDefaults.find(di); it != n.pinDefaults.end() && it->second.type == P::String)
+		cur = it->second.s;
+
+	bool changed = false;
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::BeginCombo("Field", cur.empty() ? "(pick a field)" : cur.c_str()))
+	{
+		bool any = false;
+		if (haveSchema)
+			for (const auto& f : schema.fields)
+			{
+				if (!accepts(f)) continue;
+				any = true;
+				if (ImGui::Selectable(f.name.c_str(), cur == f.name))
+				{
+					V v; v.type = P::String; v.s = f.name;
+					n.pinDefaults[di] = std::move(v);
+					changed = true;
+				}
+			}
+		if (!any)
+			ImGui::TextDisabled(haveSchema
+				? "No template field matches this accessor's type"
+				: "No default SaveGameTemplate set for the project");
+		ImGui::EndCombo();
+	}
+	ImGui::TextDisabled("Fields come from the project's default SaveGame\\nTemplate - no remembering what lives where.");
+	return changed;
+}
+
 bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;

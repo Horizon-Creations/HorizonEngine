@@ -895,6 +895,10 @@ void render(AppContext& ctx)
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.incremental      = s_exportIncremental;
+                // The project's default SaveGameTemplate rides into project.hcfg
+                // so save.create() in the shipped game finds the same schema.
+                if (ctx.projectManager)
+                    es.defaultSaveTemplate = ctx.projectManager->currentProject().defaultSaveTemplate;
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Texture-compression cook target, chosen automatically from the
                 // export target's GPU family (all encoding happens at pack time —

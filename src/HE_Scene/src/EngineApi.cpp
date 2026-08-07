@@ -15,7 +15,9 @@
 #include <Hpak/ProjectExporter.h>   // sceneUuidForPath (packed scene index)
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Types/TypeRegistry.h>   // save-template schemas + struct field values
 #include <DebugDraw/DebugDraw.h>
+#include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -25,6 +27,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <string_view>
 #include <utility>
@@ -45,6 +48,7 @@ namespace fs = std::filesystem;
 // need new Ctx providers: audio, input, camera, time, scene, fs/save.
 
 namespace HE::api {
+
 
 // ── Debug ────────────────────────────────────────────────────────────────────
 void log(Ctx&, const std::string& message) { ScriptApi::log(message.c_str()); }
@@ -398,50 +402,428 @@ bool makeDir(const std::string& rel)
 
 namespace save {
 namespace {
-// One in-memory store; values kept as tagged strings for a trivial JSON shape.
-struct Entry { int kind; float f; bool b; std::string s; }; // 0 num, 1 str, 2 bool
-std::unordered_map<std::string, Entry>& store() { static std::unordered_map<std::string, Entry> s; return s; }
-std::string slotPath(int slot) { return "Saves/slot" + std::to_string(slot) + ".json"; }
-} // namespace
-void  setNumber(const std::string& k, float v)                { store()[k] = { 0, v, false, {} }; }
-float getNumber(const std::string& k, float def)
-{ auto it = store().find(k); return it != store().end() && it->second.kind == 0 ? it->second.f : def; }
-void  setString(const std::string& k, const std::string& v)   { store()[k] = { 1, 0, false, v }; }
-std::string getString(const std::string& k, const std::string& def)
-{ auto it = store().find(k); return it != store().end() && it->second.kind == 1 ? it->second.s : def; }
-void  setBool(const std::string& k, bool v)                   { store()[k] = { 2, 0, v, {} }; }
-bool  getBool(const std::string& k, bool def)
-{ auto it = store().find(k); return it != store().end() && it->second.kind == 2 ? it->second.b : def; }
-bool  hasKey(const std::string& k)     { return store().count(k) != 0; }
-void  deleteKey(const std::string& k)  { store().erase(k); }
-void  clearAll()                       { store().clear(); }
-bool saveToSlot(int slot)
+
+using P = PinType;
+
+// ── The one active save document ─────────────────────────────────────────────
+struct ActiveSave
 {
-    nlohmann::json j;
-    for (const auto& [k, e] : store())
-    {
-        if (e.kind == 0)      j[k] = e.f;
-        else if (e.kind == 1) j[k] = e.s;
-        else                  j[k] = e.b;
-    }
-    return fs::writeText(slotPath(slot), j.dump(2));
+    std::string        id;
+    std::string        templatePath;    // content-relative SaveGameTemplate asset
+    HE::StructDef      schema;          // resolved template fields
+    std::vector<Value> fields;          // values, schema order
+    nlohmann::json     entities = nlohmann::json::object(); // uuid → state blob
+};
+std::unique_ptr<ActiveSave>& active() { static std::unique_ptr<ActiveSave> a; return a; }
+std::string& defaultTpl() { static std::string t; return t; }
+bool& playMode() { static bool p = false; return p; }
+
+bool validId(const std::string& id)
+{
+    if (id.empty()) return false;
+    for (char c : id)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+            return false;
+    return true;
 }
-bool loadFromSlot(int slot)
+std::string savePath(const std::string& id) { return "Saves/" + id + ".json"; }
+
+// Resolve a template asset into a field schema. Loud on every miss.
+bool resolveTemplate(::ContentManager* cm, const std::string& path, HE::StructDef& out)
 {
-    const std::string text = fs::readText(slotPath(slot));
-    if (text.empty()) return false;
-    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded() || !j.is_object()) return false;
-    store().clear();
-    for (auto it = j.begin(); it != j.end(); ++it)
+    if (!cm)
+    { HE_LOG_WARN(Script, "%s", "save: no content manager — cannot resolve the template"); return false; }
+    if (path.empty())
+    { HE_LOG_WARN(Script, "%s", "save: no SaveGameTemplate configured (project default is empty)"); return false; }
+    const HE::UUID id = cm->loadAsset(path);
+    const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(id);
+    if (!a)
     {
-        if (it->is_number())      setNumber(it.key(), it->get<float>());
-        else if (it->is_string()) setString(it.key(), it->get<std::string>());
-        else if (it->is_boolean()) setBool(it.key(), it->get<bool>());
+        HE_LOG_WARN(Script, "%s",
+            ("save: SaveGameTemplate '" + path + "' not found").c_str());
+        return false;
+    }
+    if (!HE::TypeRegistry::structFromJson(a->json, out))
+    {
+        HE_LOG_WARN(Script, "%s",
+            ("save: SaveGameTemplate '" + path + "' has invalid JSON").c_str());
+        return false;
+    }
+    out.name = a->name;
+    out.assetPath = path;
+    return true;
+}
+
+// Seed a fresh field vector from the schema defaults (same resolution rules as
+// struct defaults: enum defaults by entry name, nested structs recursive).
+std::vector<Value> seedFields(const HE::StructDef& schema)
+{
+    auto& reg = HE::TypeRegistry::instance();
+    std::vector<Value> out;
+    out.reserve(schema.fields.size());
+    for (const HE::StructField& f : schema.fields)
+    {
+        if (f.isArray)
+        {
+            Value v; v.isArray = true; v.type = f.type; v.typeName = f.typeName;
+            out.push_back(std::move(v));
+        }
+        else if (f.type == P::Struct)
+            out.push_back(reg.makeDefaultValue(f.typeName));
+        else if (f.type == P::Enum)
+        {
+            Value v; v.type = P::Enum; v.typeName = f.typeName;
+            HE::EnumDef ed;
+            if (reg.getEnum(f.typeName, ed))
+            {
+                if (const HE::EnumEntry* e = ed.findEntry(f.defaultValue.s)) v.i = e->value;
+                else if (!ed.entries.empty()) v.i = ed.entries.front().value;
+            }
+            out.push_back(std::move(v));
+        }
+        else
+        {
+            Value v = f.defaultValue;
+            v.type = f.type;
+            out.push_back(std::move(v));
+        }
+    }
+    return out;
+}
+
+// ── Field values ⇄ JSON (name-keyed, mirrors the script-boundary shapes) ─────
+nlohmann::json valueToJson(const Value& v);
+Value valueFromJson(const nlohmann::json& j, const HE::StructField& f);
+
+nlohmann::json scalarToJson(const Value& v)
+{
+    switch (v.type)
+    {
+    case P::Float:  return v.f;
+    case P::Int:    return v.i;
+    case P::Enum:   return v.i;
+    case P::Bool:   return v.b;
+    case P::String: return v.s;
+    case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
+    case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
+    case P::Transform:
+        return nlohmann::json{
+            { "pos", { v.tpos.x, v.tpos.y, v.tpos.z } },
+            { "rot", { v.trot.x, v.trot.y, v.trot.z } },
+            { "scl", { v.tscl.x, v.tscl.y, v.tscl.z } } };
+    case P::Struct:
+    {
+        HE::StructDef def;
+        nlohmann::json o = nlohmann::json::object();
+        o["__type"] = v.typeName;
+        if (HE::TypeRegistry::instance().getStruct(v.typeName, def))
+            for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+                o[def.fields[i].name] = valueToJson(v.items[i]);
+        return o;
+    }
+    default: return nullptr;
+    }
+}
+nlohmann::json valueToJson(const Value& v)
+{
+    if (!v.isArray) return scalarToJson(v);
+    nlohmann::json a = nlohmann::json::array();
+    for (const Value& it : v.items) a.push_back(scalarToJson(it));
+    return a;
+}
+
+Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std::string& typeName)
+{
+    Value v; v.type = t; v.typeName = typeName;
+    switch (t)
+    {
+    case P::Float:  if (j.is_number())  v.f = j.get<float>(); break;
+    case P::Int:
+    case P::Enum:   if (j.is_number())  v.i = j.get<int>();   break;
+    case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>();  break;
+    case P::String: if (j.is_string())  v.s = j.get<std::string>(); break;
+    case P::Vec2:
+        if (j.is_array() && j.size() >= 2)
+            v.v2 = { j[0].get<float>(), j[1].get<float>() };
+        break;
+    case P::Color:
+        if (j.is_array() && j.size() >= 4)
+            v.col = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
+        break;
+    case P::Transform:
+        if (j.is_object())
+        {
+            auto vec3 = [&](const char* key, glm::vec3& out, const glm::vec3& def) {
+                out = def;
+                auto it = j.find(key);
+                if (it != j.end() && it->is_array() && it->size() >= 3)
+                    out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+            };
+            vec3("pos", v.tpos, glm::vec3(0.0f));
+            vec3("rot", v.trot, glm::vec3(0.0f));
+            vec3("scl", v.tscl, glm::vec3(1.0f));
+        }
+        break;
+    case P::Struct:
+    {
+        // Seed defaults, then overwrite the fields present — a schema edit
+        // between write and load keeps missing fields at their defaults.
+        v = HE::TypeRegistry::instance().makeDefaultValue(typeName);
+        HE::StructDef def;
+        if (j.is_object() && HE::TypeRegistry::instance().getStruct(typeName, def))
+            for (size_t i = 0; i < def.fields.size(); ++i)
+                if (auto it = j.find(def.fields[i].name); it != j.end() && i < v.items.size())
+                    v.items[i] = valueFromJson(*it, def.fields[i]);
+        break;
+    }
+    default: break;
+    }
+    return v;
+}
+Value valueFromJson(const nlohmann::json& j, const HE::StructField& f)
+{
+    if (!f.isArray) return scalarFromJson(j, f.type, f.typeName);
+    Value v; v.isArray = true; v.type = f.type; v.typeName = f.typeName;
+    if (j.is_array())
+        for (const auto& e : j)
+            v.items.push_back(scalarFromJson(e, f.type, f.typeName));
+    return v;
+}
+
+// Field lookup with the loud-failure contract.
+int fieldIndex(const char* op, const std::string& name)
+{
+    if (!active())
+    {
+        HE_LOG_WARN(Script, "%s",
+            (std::string("save.") + op + ": no active save — call save.create/load first").c_str());
+        return -1;
+    }
+    for (size_t i = 0; i < active()->schema.fields.size(); ++i)
+        if (active()->schema.fields[i].name == name) return (int)i;
+    HE_LOG_WARN(Script, "%s",
+        (std::string("save.") + op + ": template '" + active()->templatePath +
+         "' has no field '" + name + "'").c_str());
+    return -1;
+}
+bool typeMismatch(const char* op, const HE::StructField& f, std::initializer_list<P> accepted)
+{
+    for (P t : accepted) if (f.type == t && !f.isArray) return false;
+    HE_LOG_WARN(Script, "%s",
+        (std::string("save.") + op + ": field '" + f.name + "' has a different type").c_str());
+    return true;
+}
+
+} // namespace
+
+void setDefaultTemplate(const std::string& p) { defaultTpl() = p; }
+std::string defaultTemplate() { return defaultTpl(); }
+void setPlayMode(bool p) { playMode() = p; }
+bool inPlayMode() { return playMode(); }
+
+bool create(const std::string& id, ::ContentManager* cm, const std::string& templatePath)
+{
+    if (!validId(id))
+    { HE_LOG_WARN(Script, "%s", ("save.create: invalid id '" + id + "' (use A-Z a-z 0-9 _ -)").c_str()); return false; }
+    const std::string tpl = templatePath.empty() ? defaultTpl() : templatePath;
+    HE::StructDef schema;
+    if (!resolveTemplate(cm, tpl, schema)) return false;
+    auto doc = std::make_unique<ActiveSave>();
+    doc->id = id;
+    doc->templatePath = tpl;
+    doc->fields = seedFields(schema);
+    doc->schema = std::move(schema);
+    active() = std::move(doc);
+    return true;
+}
+
+bool load(const std::string& id, ::ContentManager* cm)
+{
+    if (!validId(id))
+    { HE_LOG_WARN(Script, "%s", ("save.load: invalid id '" + id + "'").c_str()); return false; }
+    const std::string text = fs::readText(savePath(id));
+    if (text.empty())
+    { HE_LOG_WARN(Script, "%s", ("save.load: no save '" + id + "'").c_str()); return false; }
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.is_object())
+    { HE_LOG_WARN(Script, "%s", ("save.load: save '" + id + "' is corrupt").c_str()); return false; }
+
+    HE::StructDef schema;
+    if (!resolveTemplate(cm, j.value("template", std::string{}), schema)) return false;
+
+    auto doc = std::make_unique<ActiveSave>();
+    doc->id = id;
+    doc->templatePath = schema.assetPath;
+    doc->fields = seedFields(schema);          // defaults first — partial files load clean
+    if (auto f = j.find("fields"); f != j.end() && f->is_object())
+        for (size_t i = 0; i < schema.fields.size(); ++i)
+            if (auto it = f->find(schema.fields[i].name); it != f->end())
+                doc->fields[i] = valueFromJson(*it, schema.fields[i]);
+    if (auto e = j.find("entities"); e != j.end() && e->is_object())
+        doc->entities = *e;
+    doc->schema = std::move(schema);
+    active() = std::move(doc);
+    return true;
+}
+
+bool write()
+{
+    if (!active())
+    { HE_LOG_WARN(Script, "%s", "save.write: no active save"); return false; }
+    nlohmann::json j;
+    j["template"] = active()->templatePath;
+    nlohmann::json f = nlohmann::json::object();
+    for (size_t i = 0; i < active()->schema.fields.size(); ++i)
+        f[active()->schema.fields[i].name] = valueToJson(active()->fields[i]);
+    j["fields"]   = std::move(f);
+    j["entities"] = active()->entities;
+
+    // Atomic: temp + rename inside the sandbox (fs::writeText would truncate the
+    // only copy before the new bytes are durable).
+    const std::string rel = savePath(active()->id);
+    const std::string tmpRel = rel + ".tmp";
+    if (!fs::writeText(tmpRel, j.dump(2)))
+    { HE_LOG_WARN(Script, "%s", "save.write: sandbox write failed (no sandbox root?)"); return false; }
+    std::error_code ec;
+    const std::filesystem::path root(fs::sandboxRoot());
+    std::filesystem::rename(root / tmpRel, root / rel, ec);
+    if (ec)
+    {
+        std::filesystem::remove(root / tmpRel, ec);
+        HE_LOG_WARN(Script, "%s", "save.write: atomic replace failed");
+        return false;
     }
     return true;
 }
-bool slotExists(int slot) { return fs::exists(slotPath(slot)); }
+
+void close() { active().reset(); }
+std::string activeId() { return active() ? active()->id : std::string{}; }
+
+std::vector<std::string> list()
+{
+    std::vector<std::string> out;
+    const std::string root = fs::sandboxRoot();
+    if (root.empty()) return out;
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::path(root) / "Saves";
+    std::filesystem::directory_iterator it(dir, ec), end;
+    for (; !ec && it != end; it.increment(ec))
+    {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".json") continue;
+        const std::string id = it->path().stem().string();
+        if (validId(id)) out.push_back(id);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool exists(const std::string& id) { return validId(id) && fs::exists(savePath(id)); }
+bool remove(const std::string& id) { return validId(id) && fs::remove(savePath(id)); }
+
+std::vector<std::string> fields()
+{
+    std::vector<std::string> out;
+    if (!active()) return out;
+    for (const auto& f : active()->schema.fields) out.push_back(f.name);
+    return out;
+}
+
+bool setNumber(const std::string& field, float v)
+{
+    const int i = fieldIndex("setNumber", field);
+    if (i < 0) return false;
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("setNumber", f, { P::Float, P::Int, P::Enum })) return false;
+    Value& dst = active()->fields[i];
+    dst.type = f.type; dst.typeName = f.typeName;
+    if (f.type == P::Float) dst.f = v;
+    else                    dst.i = (int)v;
+    return true;
+}
+float getNumber(const std::string& field, float def)
+{
+    const int i = fieldIndex("getNumber", field);
+    if (i < 0) return def;
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("getNumber", f, { P::Float, P::Int, P::Enum })) return def;
+    const Value& v = active()->fields[i];
+    return f.type == P::Float ? v.f : (float)v.i;
+}
+bool setString(const std::string& field, const std::string& v)
+{
+    const int i = fieldIndex("setString", field);
+    if (i < 0) return false;
+    if (typeMismatch("setString", active()->schema.fields[i], { P::String })) return false;
+    active()->fields[i] = Value::ofString(v);
+    return true;
+}
+std::string getString(const std::string& field, const std::string& def)
+{
+    const int i = fieldIndex("getString", field);
+    if (i < 0) return def;
+    if (typeMismatch("getString", active()->schema.fields[i], { P::String })) return def;
+    return active()->fields[i].s;
+}
+bool setBool(const std::string& field, bool v)
+{
+    const int i = fieldIndex("setBool", field);
+    if (i < 0) return false;
+    if (typeMismatch("setBool", active()->schema.fields[i], { P::Bool })) return false;
+    active()->fields[i] = Value::ofBool(v);
+    return true;
+}
+bool getBool(const std::string& field, bool def)
+{
+    const int i = fieldIndex("getBool", field);
+    if (i < 0) return def;
+    if (typeMismatch("getBool", active()->schema.fields[i], { P::Bool })) return def;
+    return active()->fields[i].b;
+}
+bool setStructV(const std::string& field, const Value& v)
+{
+    const int i = fieldIndex("setStruct", field);
+    if (i < 0) return false;
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("setStruct", f, { P::Struct })) return false;
+    if (v.type != P::Struct || v.typeName != f.typeName)
+    {
+        HE_LOG_WARN(Script, "%s",
+            ("save.setStruct: field '" + field + "' holds '" + f.typeName +
+             "', got '" + v.typeName + "'").c_str());
+        return false;
+    }
+    active()->fields[i] = v;
+    return true;
+}
+Value getStructV(const std::string& field)
+{
+    const int i = fieldIndex("getStruct", field);
+    if (i < 0) return {};
+    const HE::StructField& f = active()->schema.fields[i];
+    if (typeMismatch("getStruct", f, { P::Struct })) return {};
+    return active()->fields[i];
+}
+
+bool setEntityState(const std::string& uuid, const std::string& json)
+{
+    if (!active())
+    { HE_LOG_WARN(Script, "%s", "save: entity state needs an active save"); return false; }
+    nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded()) return false;
+    active()->entities[uuid] = std::move(j);
+    return true;
+}
+std::string entityState(const std::string& uuid)
+{
+    if (!active()) return {};
+    auto it = active()->entities.find(uuid);
+    return it != active()->entities.end() ? it->dump() : std::string{};
+}
+bool hasEntityState(const std::string& uuid)
+{
+    return active() && active()->entities.contains(uuid);
+}
+
 } // namespace save
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -987,29 +1369,49 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "fs.makeDir", "File", true, {{"path", P::String}}, {{"ok", P::Bool}}, "HE::api::fs::makeDir",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
 
-        // Save-game store
-        t.push_back({ "save.setNumber", "Save", true, {{"key", P::String}, {"value", P::Float}}, {}, "HE::api::save::setNumber",
-            [](Ctx&, const VV& a){ save::setNumber(aS(a, 0), aF(a, 1)); return VV{}; } });
-        t.push_back({ "save.getNumber", "Save", false, {{"key", P::String}, {"default", P::Float}}, {{"value", P::Float}}, "HE::api::save::getNumber",
+        // Savegames: ONE active template-shaped document (see the header block).
+        // create/load resolve the SaveGameTemplate through the Ctx's content
+        // manager; field access validates against it and fails LOUD.
+        t.push_back({ "save.create", "Save", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::save::create",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(save::create(aS(a, 0), c.content)) }; } });
+        t.push_back({ "save.load", "Save", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::save::load",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(save::load(aS(a, 0), c.content)) }; } });
+        t.push_back({ "save.write", "Save", true, {}, {{"ok", P::Bool}}, "HE::api::save::write",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(save::write()) }; } });
+        t.push_back({ "save.close", "Save", true, {}, {}, "HE::api::save::close",
+            [](Ctx&, const VV&){ save::close(); return VV{}; } });
+        t.push_back({ "save.activeId", "Save", false, {}, {{"id", P::String}}, "HE::api::save::activeId",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(save::activeId()) }; } });
+        t.push_back({ "save.list", "Save", false, {}, {{"ids", P::String, /*isArray=*/true}}, "HE::api::save::list",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& id : save::list()) arr.items.push_back(Value::ofString(std::move(id)));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "save.exists", "Save", false, {{"id", P::String}}, {{"exists", P::Bool}}, "HE::api::save::exists",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::exists(aS(a, 0))) }; } });
+        t.push_back({ "save.delete", "Save", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::save::remove",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::remove(aS(a, 0))) }; } });
+        t.push_back({ "save.fields", "Save", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::save::fields",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& n : save::fields()) arr.items.push_back(Value::ofString(std::move(n)));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "save.setNumber", "Save", true, {{"field", P::String}, {"value", P::Float}}, {{"ok", P::Bool}}, "HE::api::save::setNumber",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::setNumber(aS(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "save.getNumber", "Save", false, {{"field", P::String}, {"default", P::Float}}, {{"value", P::Float}}, "HE::api::save::getNumber",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(save::getNumber(aS(a, 0), aF(a, 1))) }; } });
-        t.push_back({ "save.setString", "Save", true, {{"key", P::String}, {"value", P::String}}, {}, "HE::api::save::setString",
-            [](Ctx&, const VV& a){ save::setString(aS(a, 0), aS(a, 1)); return VV{}; } });
-        t.push_back({ "save.getString", "Save", false, {{"key", P::String}, {"default", P::String}}, {{"value", P::String}}, "HE::api::save::getString",
+        t.push_back({ "save.setString", "Save", true, {{"field", P::String}, {"value", P::String}}, {{"ok", P::Bool}}, "HE::api::save::setString",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::setString(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "save.getString", "Save", false, {{"field", P::String}, {"default", P::String}}, {{"value", P::String}}, "HE::api::save::getString",
             [](Ctx&, const VV& a){ return VV{ Value::ofString(save::getString(aS(a, 0), aS(a, 1))) }; } });
-        t.push_back({ "save.setBool", "Save", true, {{"key", P::String}, {"value", P::Bool}}, {}, "HE::api::save::setBool",
-            [](Ctx&, const VV& a){ save::setBool(aS(a, 0), aB(a, 1)); return VV{}; } });
-        t.push_back({ "save.getBool", "Save", false, {{"key", P::String}, {"default", P::Bool}}, {{"value", P::Bool}}, "HE::api::save::getBool",
+        t.push_back({ "save.setBool", "Save", true, {{"field", P::String}, {"value", P::Bool}}, {{"ok", P::Bool}}, "HE::api::save::setBool",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::setBool(aS(a, 0), aB(a, 1))) }; } });
+        t.push_back({ "save.getBool", "Save", false, {{"field", P::String}, {"default", P::Bool}}, {{"value", P::Bool}}, "HE::api::save::getBool",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::getBool(aS(a, 0), aB(a, 1))) }; } });
-        t.push_back({ "save.hasKey", "Save", false, {{"key", P::String}}, {{"has", P::Bool}}, "HE::api::save::hasKey",
-            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::hasKey(aS(a, 0))) }; } });
-        t.push_back({ "save.deleteKey", "Save", true, {{"key", P::String}}, {}, "HE::api::save::deleteKey",
-            [](Ctx&, const VV& a){ save::deleteKey(aS(a, 0)); return VV{}; } });
-        t.push_back({ "save.saveToSlot", "Save", true, {{"slot", P::Int}}, {{"ok", P::Bool}}, "HE::api::save::saveToSlot",
-            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::saveToSlot(aI(a, 0))) }; } });
-        t.push_back({ "save.loadFromSlot", "Save", true, {{"slot", P::Int}}, {{"ok", P::Bool}}, "HE::api::save::loadFromSlot",
-            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::loadFromSlot(aI(a, 0))) }; } });
-        t.push_back({ "save.slotExists", "Save", false, {{"slot", P::Int}}, {{"exists", P::Bool}}, "HE::api::save::slotExists",
-            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::slotExists(aI(a, 0))) }; } });
+        t.push_back({ "save.setStruct", "Save", true, {{"field", P::String}, {"value", P::Struct}}, {{"ok", P::Bool}}, "HE::api::save::setStructV",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(save::setStructV(aS(a, 0), a.size() > 1 ? a[1] : Value{})) }; } });
+        t.push_back({ "save.getStruct", "Save", false, {{"field", P::String}}, {{"value", P::Struct}}, "HE::api::save::getStructV",
+            [](Ctx&, const VV& a){ return VV{ save::getStructV(aS(a, 0)) }; } });
 
         // Scene transitions (deferred; the app runtime executes the requests).
         // "hidden": unwired = false = present immediately (today's behavior); true
@@ -1145,12 +1547,15 @@ const std::vector<ApiFn>& registry()
             { "fs.writeText", "Write Text File" }, { "fs.readText", "Read Text File" },
             { "fs.exists", "File Exists" },        { "fs.remove", "Delete File" },
             { "fs.makeDir", "Make Directory" },
+            { "save.create", "Create Save" },        { "save.load", "Load Save" },
+            { "save.write", "Write Save" },          { "save.close", "Close Save" },
+            { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
+            { "save.exists", "Save Exists" },        { "save.delete", "Delete Save" },
+            { "save.fields", "Save Fields" },
             { "save.setNumber", "Save Set Number" }, { "save.getNumber", "Save Get Number" },
             { "save.setString", "Save Set String" }, { "save.getString", "Save Get String" },
             { "save.setBool", "Save Set Bool" },     { "save.getBool", "Save Get Bool" },
-            { "save.hasKey", "Save Has Key" },       { "save.deleteKey", "Save Delete Key" },
-            { "save.saveToSlot", "Save To Slot" },   { "save.loadFromSlot", "Load From Slot" },
-            { "save.slotExists", "Save Slot Exists" },
+            { "save.setStruct", "Save Set Struct" }, { "save.getStruct", "Save Get Struct" },
             { "scene.load", "Load Scene" },          { "scene.loadAdditive", "Load Scene Additive" },
             { "scene.unloadZone", "Unload Zone" },   { "scene.activate", "Activate Loaded Scene" },
             { "scene.hasPendingLevel", "Has Pending Scene" },

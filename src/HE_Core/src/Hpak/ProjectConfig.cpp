@@ -5,7 +5,8 @@
 #include <cstring>
 
 static constexpr char     k_magic[4] = {'H','C','F','G'};
-static constexpr uint16_t k_version  = 2;
+// v3: appends defaultSaveTemplate (string) after startupSceneUuid.
+static constexpr uint16_t k_version  = 3;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -29,6 +30,7 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
+    HAsset::Writer::appendString(buf, cfg.defaultSaveTemplate);
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -50,7 +52,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     uint16_t version = 0, reserved = 0;
     if (!HAsset::Reader::readPOD(buf, off, version))  return false;
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
-    if (version != k_version) return false;
+    if (version != 2 && version != k_version) return false;   // v2 = no template tail
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -70,5 +72,8 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     if (off + 16 > buf.size()) return false;
     std::memcpy(out.startupSceneUuid, buf.data() + off, 16);
     off += 16;
+    out.defaultSaveTemplate.clear();
+    if (version >= 3 && !HAsset::Reader::readString(buf, off, out.defaultSaveTemplate))
+        return false;
     return true;
 }

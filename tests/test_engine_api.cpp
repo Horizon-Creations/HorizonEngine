@@ -1,5 +1,8 @@
 #include "doctest.h"
 #include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -913,35 +916,138 @@ TEST_CASE("fs: sandboxed I/O works inside the root and rejects escapes")
     std::filesystem::remove_all(root, ec);
 }
 
-TEST_CASE("save: typed KV store round-trips through a slot file")
+// A ContentManager holding one in-memory SaveGameTemplate ("mem://tpl") with
+// hp (Float, 100), title (String, "Rookie"), hardcore (Bool), stats (Struct →
+// a registered PlayerStats def). Shared by the save-v2 cases below.
+namespace
 {
-    const auto root = std::filesystem::temp_directory_path() / "he_api_save_test";
-    std::error_code ec;
-    std::filesystem::remove_all(root, ec);
-    HE::api::fs::setSandboxRoot(root.string());
+struct SaveTestRig
+{
+    ContentManager cm;
+    std::filesystem::path root;
+    static constexpr const char* kStatsDef = "Content/T/SaveStats.hasset";
 
-    HE::api::save::clearAll();
-    HE::api::save::setNumber("score", 42.5f);
-    HE::api::save::setString("name", "Hero");
-    HE::api::save::setBool("hardcore", true);
-    CHECK(HE::api::save::hasKey("score"));
-    CHECK(HE::api::save::getNumber("score", 0) == doctest::Approx(42.5f));
-    CHECK(!HE::api::save::slotExists(3));
-    CHECK(HE::api::save::saveToSlot(3));
-    CHECK(HE::api::save::slotExists(3));
+    SaveTestRig() : root(std::filesystem::temp_directory_path() / "he_api_save_test")
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+        HE::api::fs::setSandboxRoot(root.string());
+        HE::api::save::close();
 
-    // A fresh store loads the slot back with types intact.
-    HE::api::save::clearAll();
-    CHECK(!HE::api::save::hasKey("score"));
-    CHECK(HE::api::save::loadFromSlot(3));
-    CHECK(HE::api::save::getNumber("score", 0) == doctest::Approx(42.5f));
-    CHECK(HE::api::save::getString("name", "") == "Hero");
-    CHECK(HE::api::save::getBool("hardcore", false) == true);
-    HE::api::save::deleteKey("score");
-    CHECK(!HE::api::save::hasKey("score"));
+        HE::StructDef stats;
+        stats.name = "SaveStats"; stats.assetPath = kStatsDef;
+        {
+            HE::StructField lvl; lvl.name = "level"; lvl.type = HorizonCode::PinType::Int;
+            lvl.defaultValue = HE::api::Value::ofInt(1);
+            stats.fields = { lvl };
+        }
+        HE::TypeRegistry::instance().registerStruct(stats);
 
-    HE::api::save::clearAll();
-    std::filesystem::remove_all(root, ec);
+        HE::StructDef tpl;
+        {
+            HE::StructField hp; hp.name = "hp"; hp.type = HorizonCode::PinType::Float;
+            hp.defaultValue = HE::api::Value::ofFloat(100.0f);
+            HE::StructField title; title.name = "title"; title.type = HorizonCode::PinType::String;
+            title.defaultValue = HE::api::Value::ofString("Rookie");
+            HE::StructField hc; hc.name = "hardcore"; hc.type = HorizonCode::PinType::Bool;
+            HE::StructField st; st.name = "stats"; st.type = HorizonCode::PinType::Struct;
+            st.typeName = kStatsDef;
+            tpl.fields = { hp, title, hc, st };
+        }
+        SaveGameTemplateAsset a;
+        a.name = "MainTemplate";
+        a.path = "mem://save_template";
+        a.json = HE::TypeRegistry::structToJson(tpl);
+        cm.registerSaveGameTemplate(std::move(a));
+        HE::api::save::setDefaultTemplate("mem://save_template");
+    }
+    ~SaveTestRig()
+    {
+        HE::api::save::close();
+        HE::api::save::setDefaultTemplate("");
+        HE::TypeRegistry::instance().removeType(kStatsDef);
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+};
+} // namespace
+
+TEST_CASE("save v2: create seeds template defaults; typed access validates loud")
+{
+    SaveTestRig rig;
+    namespace save = HE::api::save;
+
+    // No active save → every accessor fails to its default.
+    CHECK(save::activeId().empty());
+    CHECK(!save::setNumber("hp", 1.0f));
+    CHECK(save::getNumber("hp", -7.0f) == doctest::Approx(-7.0f));
+
+    // Ids are filenames — reject anything outside [A-Za-z0-9_-].
+    CHECK(!save::create("../evil", &rig.cm));
+    CHECK(!save::create("has space", &rig.cm));
+    CHECK(!save::create("", &rig.cm));
+
+    REQUIRE(save::create("slot1", &rig.cm));
+    CHECK(save::activeId() == "slot1");
+    CHECK(save::fields() == std::vector<std::string>{ "hp", "title", "hardcore", "stats" });
+
+    // Template defaults are live before any set.
+    CHECK(save::getNumber("hp", 0) == doctest::Approx(100.0f));
+    CHECK(save::getString("title", "") == "Rookie");
+    CHECK(save::getBool("hardcore", true) == false);
+    const HE::api::Value stats = save::getStructV("stats");
+    REQUIRE(stats.type == HorizonCode::PinType::Struct);
+    REQUIRE(stats.items.size() == 1);
+    CHECK(stats.items[0].i == 1);
+
+    // Unknown fields and type mismatches fail loud, never write.
+    CHECK(!save::setNumber("mana", 5.0f));
+    CHECK(!save::setNumber("title", 5.0f));
+    CHECK(!save::setString("hp", "nope"));
+
+    // Struct writes validate the definition.
+    HE::api::Value wrong; wrong.type = HorizonCode::PinType::Struct;
+    wrong.typeName = "Content/T/Other.hasset";
+    CHECK(!save::setStructV("stats", wrong));
+}
+
+TEST_CASE("save v2: write/load round-trip through Saves/<id>.json, list/exists/delete")
+{
+    SaveTestRig rig;
+    namespace save = HE::api::save;
+
+    REQUIRE(save::create("run-42", &rig.cm));
+    CHECK(save::setNumber("hp", 37.5f));
+    CHECK(save::setString("title", "Veteran"));
+    CHECK(save::setBool("hardcore", true));
+    HE::api::Value stats = save::getStructV("stats");
+    stats.items[0] = HE::api::Value::ofInt(9);
+    CHECK(save::setStructV("stats", stats));
+    CHECK(save::setEntityState("uuid-1", "{\"x\":1.5}"));
+
+    CHECK(!save::exists("run-42"));
+    REQUIRE(save::write());
+    CHECK(save::exists("run-42"));
+    CHECK(save::list() == std::vector<std::string>{ "run-42" });
+
+    // A fresh load restores fields, struct contents and entity state.
+    save::close();
+    CHECK(save::activeId().empty());
+    REQUIRE(save::load("run-42", &rig.cm));
+    CHECK(save::getNumber("hp", 0) == doctest::Approx(37.5f));
+    CHECK(save::getString("title", "") == "Veteran");
+    CHECK(save::getBool("hardcore", false) == true);
+    CHECK(save::getStructV("stats").items[0].i == 9);
+    CHECK(save::hasEntityState("uuid-1"));
+    CHECK(!save::hasEntityState("uuid-2"));
+    CHECK(save::entityState("uuid-1").find("1.5") != std::string::npos);
+
+    // Loading a save that does not exist fails loud.
+    CHECK(!save::load("nope", &rig.cm));
+
+    CHECK(save::remove("run-42"));
+    CHECK(!save::exists("run-42"));
+    CHECK(save::list().empty());
 }
 
 // ═══ Scene transition requests + packed-scene UUIDs + additive tracking ═══════
