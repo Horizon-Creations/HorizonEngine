@@ -3514,16 +3514,20 @@ void main()
 	uvec2 gid = gl_GlobalInvocationID.xy;
 	if (float(gid.x) >= uFrame.y || float(gid.y) >= uFrame.z) return;
 	ivec2 px = ivec2(gid);
+	// NORMALIZED sample of the prepass, not a texel fetch: the reflection target
+	// has its own resolution now (the quality tier picks it), so the two grids no
+	// longer line up 1:1. Nearest filtering keeps the old behaviour where they do.
+	vec2 guv = (vec2(gid) + 0.5) / vec2(uFrame.y, uFrame.z);
 
-	vec4 pv = texelFetch(uGPos, px, 0);
+	vec4 pv = texture(uGPos, guv);
 	// Background, or a receiver too rough to show a traced reflection: confidence
 	// 0 means the composite keeps the sky cubemap term unchanged, which is the
 	// correct answer for both.
 	if (pv.a < 0.5) { imageStore(uOut, px, vec4(0.0)); return; }
-	vec2 rm = texelFetch(uGMat, px, 0).rg;
+	vec2 rm = texture(uGMat, guv).rg;
 	if (rm.x > uReflParams.y) { imageStore(uOut, px, vec4(0.0)); return; }
 
-	vec3 N = normalize(texelFetch(uGNorm, px, 0).xyz);
+	vec3 N = normalize(texture(uGNorm, guv).xyz);
 	vec3 V = normalize(uCamPos.xyz - pv.xyz);
 	vec3 R = reflect(-V, N);
 	// Near-mirrors keep a single deterministic ray: their specular lobe is
@@ -3729,6 +3733,30 @@ void main()
 		sumA += s.a * wi;
 	}
 	FragColor = vec4(sumC / max(sumA, 1e-4), sumA);
+}
+)GLSL";
+
+// Roughness lerp between the SHARP trace and the blurred copy — GL's counterpart
+// of Metal's kSSRRoughMixFS. Without it GL had only ONE reflection texture, so
+// the blur (now sized to the glossy lobe, i.e. wide) landed on mirrors too and a
+// mirror came out soft at every tier. The sharp copy may only win where the trace
+// is DETERMINISTIC: the kernel opens its cone above roughness 0.08, and from
+// there every ray is a random sample, so the sharp copy is raw noise, not detail.
+// uFloor is the resolution floor — below full resolution even a mirror needs some
+// blur, or its upsampled stair-steps show.
+static const char* kGiReflMixFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uSharp;
+uniform sampler2D uBlurred;
+uniform sampler2D uGMat;   // r = roughness, g = metallic (the trace's own prepass)
+uniform float uFloor;
+out vec4 FragColor;
+void main()
+{
+	float rough = clamp(texture(uGMat, vUV).r, 0.0, 1.0);
+	float t = max(clamp(uFloor, 0.0, 1.0), smoothstep(0.08, 0.25, rough));
+	FragColor = mix(texture(uSharp, vUV), texture(uBlurred, vUV), t);
 }
 )GLSL";
 
@@ -5273,6 +5301,7 @@ void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
 	m_giReflMaxDistance  = std::max(1.0f, s.maxDistance);
 	m_giReflQuality      = std::clamp(s.quality, 0, 2);
+	m_giReflBlurEnabled  = s.blur;
 	// GIReflectionSettings::bounces is deliberately ignored here: the GL kernel
 	// traces a single segment (no bounce loop — see docs/gi-reflections-plan.md
 	// §10), so honouring the slider would promise something the image does not
@@ -5526,6 +5555,8 @@ void OpenGLRenderer::CreateGIPipelines()
 		                               CompileStage(GL_FRAGMENT_SHADER, kGiReflTemporalFS));
 		m_giReflBlurProgram = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiReflBlurFS));
+		m_giReflMixProgram  = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
+		                           CompileStage(GL_FRAGMENT_SHADER, kGiReflMixFS));
 		const std::string header = "#version 430 core\n";
 		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
@@ -5544,6 +5575,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		if (m_giReflCSProgram)   { glDeleteProgram(m_giReflCSProgram);   m_giReflCSProgram = 0; }
 		if (m_giReflTemporalProgram) { glDeleteProgram(m_giReflTemporalProgram); m_giReflTemporalProgram = 0; }
 		if (m_giReflBlurProgram)     { glDeleteProgram(m_giReflBlurProgram);     m_giReflBlurProgram = 0; }
+		if (m_giReflMixProgram)      { glDeleteProgram(m_giReflMixProgram);      m_giReflMixProgram = 0; }
 		m_giSupported = false;
 	}
 }
@@ -5946,8 +5978,15 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 	glUniform4f(loc("uReflParams"), m_giReflMaxDistance, m_giReflMaxRoughness,
 	            m_giIndirectIntensity, probesValid ? 1.0f : 0.0f);
+	// uFrame.w gates the glossy cone. Deriving it from the TIER (quality >= 2)
+	// meant Medium uploaded uRays = 2 and then traced 1, because the gate closed
+	// the cone and the kernel collapses rays to 1 with no cone — the ray ladder
+	// read 1/1/4 on GL and 1/2/4 on Metal for the same setting. Derive it from
+	// the ray count instead, exactly as Metal derives `jitter = rays > 1`.
+	const float giReflRays = m_giReflQuality >= 2 ? 4.0f
+	                       : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
 	glUniform4f(loc("uFrame"), m_giReflFrameSeed, static_cast<float>(width),
-	            static_cast<float>(height), (m_giReflQuality >= 2) ? 1.0f : 0.0f);
+	            static_cast<float>(height), (giReflRays > 1.0f) ? 1.0f : 0.0f);
 	if (lights.count > 0)
 	{
 		glUniform4fv(loc("uLightPosRange"),  lights.count, glm::value_ptr(lights.posRange[0]));
@@ -5960,10 +5999,9 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// a slot it was not given.
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_giLandSSBO);
 	glUniform1i(loc("uGiLandCount"), m_giLandCount);
-	// Rays per pixel from the tier — the tier means rays + blur, nothing else.
-	// Low 1, Medium 2, High 4; a near-mirror traces one regardless.
-	glUniform1f(loc("uRays"), m_giReflQuality >= 2 ? 4.0f
-	                        : (m_giReflQuality >= 1 ? 2.0f : 1.0f));
+	// Rays per pixel from the tier — Low 1, Medium 2, High 4; a near-mirror
+	// traces one regardless (its cone is narrower than a pixel).
+	glUniform1f(loc("uRays"), giReflRays);
 	for (int i = 0; i < HE::kGiMaxLandscapes; ++i)
 	{
 		const std::string nm = "uLandWeights[" + std::to_string(i) + "]";
@@ -5980,7 +6018,9 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	glBindVertexArray(m_fsVAO);
 
 	// ── 2. Temporal accumulation (quality High) ──────────────────────────────
-	if (m_giReflQuality >= 2 && m_giReflTemporalProgram && m_giReflHistFBO[0])
+	// Temporal pass disabled with the blend below — see there. Left in the build
+	// (and still gated on the tier) so re-enabling is one constant.
+	if (false && m_giReflQuality >= 2 && m_giReflTemporalProgram && m_giReflHistFBO[0])
 	{
 		const int curIdx = m_giReflHistIdx, prevIdx = 1 - curIdx;
 		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflHistFBO[curIdx]);
@@ -6000,7 +6040,12 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		// surface carrying it — reflected content is never reprojected, only the
 		// receiver is. Damp on any view change, hold the long history when still.
 		const bool camMoved = (viewProj != m_giReflPrevViewProj);
-		const float blend = m_giReflHistValid ? (camMoved ? 0.55f : 0.85f) : 0.0f;
+		// Temporal accumulation is OFF: it was the reflection's latency (an EMA of
+		// 0.85 is several frames of history, and only the upper tiers ran it, so
+		// the better the tier the more it dragged). Rays carry the estimate, the
+		// blur covers the resolution. Kept wired so it is one constant to undo.
+		const float blend = 0.0f;
+		(void)camMoved;
 		glUniform1f(tloc("uBlend"), blend);
 		glDrawArrays(GL_TRIANGLES, 0, 3);
 		src = m_giReflHistTex[curIdx];
@@ -6021,26 +6066,77 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// every tier. The GL scene shader samples ONE reflection texture (uGIRefl),
 	// so the blur lands on mirrors too. Closing it needs the same roughness-mix
 	// pass Metal got (kSSRRoughMixFS) plus one more render target.
-	if (m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
+	if (m_giReflBlurEnabled && m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
 	{
-		const float rays = m_giReflQuality >= 2 ? 4.0f : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
-		const float blurTexels = 4.0f / rays; // 4 / 2 / 1
+		// The blur stands in for TWO things the trace did not sample, and sizing
+		// it to only one of them is what kept the ladder inverted (see Metal's
+		// copy of this comment for the full reasoning):
+		//   · the RESOLUTION — one texel spans resDiv screen pixels.
+		//   · the LOBE — constant in SCREEN pixels, because how far a rough
+		//     surface scatters is a property of the material, not of the tier.
+		// Built as an A-TROUS CHAIN at doubling strides rather than one wide
+		// 5-tap, which would band. Each pass reads one texture and writes a
+		// different one (H → blurTex, V → reflTex, next level reads reflTex):
+		// letting a level write back into what it reads is a read-write hazard.
+		// resDiv is 2 unconditionally here: GL traces at the prepass resolution
+		// (see the gap note in DrawScene), so one texel always spans two screen
+		// pixels. Reach is otherwise Metal's formula, and the strides are SCALED
+		// to land on it exactly — doubling raw strides and stopping past the
+		// target snaps the total to 2^n − 1, which quantizes the "tier-
+		// independent" screen reach and can make a better tier blur wider.
+		const float resDiv = 2.0f;
+		// Lobe term divided by the RAY COUNT, like Metal: the blur only stands in
+		// for the part of the lobe the rays did not sample, so a tier that traces
+		// four of them needs a quarter of the filter. Holding it constant across
+		// tiers made the better tier measurably softer.
+		const float reach = std::clamp(
+			1.0f + (kGIReflLobeScreenPx * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f))
+			     / (resDiv * std::max(giReflRays, 1.0f)), 1.0f, 512.0f);
+		const int   levels = std::clamp(
+			static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
+		const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
 		glUseProgram(m_giReflBlurProgram);
 		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
 		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
-		const float tx = blurTexels / static_cast<float>(std::max(1, width));
-		const float ty = blurTexels / static_cast<float>(std::max(1, height));
 		glActiveTexture(GL_TEXTURE0);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
-		glBindTexture(GL_TEXTURE_2D, src);
 		glUniform1i(uSrc, 0);
-		glUniform2f(uDir, tx, 0.0f);
-		glDrawArrays(GL_TRIANGLES, 0, 3);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_giReflFBO);
-		glBindTexture(GL_TEXTURE_2D, m_giReflBlurTex);
-		glUniform2f(uDir, 0.0f, ty);
-		glDrawArrays(GL_TRIANGLES, 0, 3);
-		src = m_giReflTex;
+		for (int lvl = 0; lvl < levels; ++lvl)
+		{
+			const float stride = unit * std::exp2(static_cast<float>(lvl));
+			const float tx = stride / static_cast<float>(std::max(1, width));
+			const float ty = stride / static_cast<float>(std::max(1, height));
+			glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
+			glBindTexture(GL_TEXTURE_2D, src);
+			glUniform2f(uDir, tx, 0.0f);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_giReflFBO);
+			glBindTexture(GL_TEXTURE_2D, m_giReflBlurTex);
+			glUniform2f(uDir, 0.0f, ty);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			src = m_giReflTex;
+		}
+		// Lerp the SHARP trace back in per pixel, so a mirror stays a mirror.
+		// m_giReflRawTex still holds the unblurred trace (the chain only ever
+		// read it); m_giReflBlurTex is the H ping, dead once the chain is done,
+		// so the mix needs no extra target. Reads raw/blurred/prepass, writes
+		// blurTex — no pass reads and writes the same texture.
+		if (m_giReflMixProgram)
+		{
+			glUseProgram(m_giReflMixProgram);
+			glBindFramebuffer(GL_FRAMEBUFFER, m_giReflBlurFBO);
+			glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_giReflRawTex);
+			glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_giReflTex);
+			glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_giGBufMatTex);
+			glUniform1i(glGetUniformLocation(m_giReflMixProgram, "uSharp"),    0);
+			glUniform1i(glGetUniformLocation(m_giReflMixProgram, "uBlurred"),  1);
+			glUniform1i(glGetUniformLocation(m_giReflMixProgram, "uGMat"),     2);
+			// Resolution floor: GL always traces at half res (see the gap note),
+			// so a mirror keeps the same mild floor Metal's Medium tier uses.
+			glUniform1f(glGetUniformLocation(m_giReflMixProgram, "uFloor"), 0.35f);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glActiveTexture(GL_TEXTURE0);
+			src = m_giReflBlurTex;
+		}
 	}
 
 	glActiveTexture(GL_TEXTURE0);
@@ -8610,6 +8706,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		unsigned int giShadowTex = 0u;
 		unsigned int giReflTex   = 0u;
 		const int  giW = std::max(1, pw / 2), giH = std::max(1, ph / 2);
+		// GAP vs Metal — the tier's RESOLUTION axis is Metal-only for now. Two
+		// things pin the GL trace to the prepass size: every reflection target is
+		// allocated inside EnsureGIShadowTargets (there is no EnsureGIReflTarget
+		// analogue), and the kernel reads that same half-res prepass for position,
+		// normal and roughness, so tracing finer would buy no geometric detail
+		// anyway. Dispatching at a tier resolution the targets were never resized
+		// to writes outside them: at quarter res only a quarter of the texture is
+		// filled and the rest is stale, at full res one screen quadrant is
+		// stretched over everything. Closing this needs the prepass resized too,
+		// which is shared with the GI shadow pass — its own change, and one that
+		// cannot be verified on this machine (no GL display). GL's tier therefore
+		// varies rays + blur only.
 		const bool giAnyActive =
 			(m_giEnabled || m_giReflEnabled) && m_giSupported && m_giInstanceCount > 0;
 		bool giPrepassOk = false;

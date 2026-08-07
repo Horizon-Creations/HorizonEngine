@@ -269,14 +269,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			SubGroup sub(cfg.GIReflectionsEnabled);
 			Row::sliderFloat("GI Refl Intensity", &cfg.GIReflIntensity, 0.0f, 1.0f, "%.2f");
 			Row::sliderFloat("GI Refl Max Roughness", &cfg.GIReflMaxRoughness, 0.05f, 1.0f, "%.2f");
-			// The tier means exactly two things: RAYS per pixel and how strong
-			// the blur over them is. Low 1 ray / no blur, Medium 2 rays /
-			// narrow blur, High 4 rays / narrow + wide with a per-pixel
-			// roughness lerp. Mirror-like surfaces trace ONE ray at every tier
-			// (their lobe is narrower than a pixel), so the cost only grows
-			// where the reflection is actually glossy.
-			const char* kGIReflQuality[] = { "Low (1 ray)", "Medium (2 rays)",
-			                                 "High (4 rays)" };
+			// The tier means RAYS per pixel and the RESOLUTION they are traced
+			// at — Low 1 ray at quarter res, Medium 2 at half, High 4 at full.
+			// Blur is not a tier feature, it is what stands in for the pixels a
+			// lower resolution did not trace, so it SHRINKS as the tier rises
+			// (4 / 2 / 1 texels). Mirror-like surfaces trace one ray at every
+			// tier — their lobe is narrower than a pixel — so the ray cost only
+			// grows where the reflection is actually glossy; the resolution
+			// cost applies everywhere, which is what makes High expensive.
+			const char* kGIReflQuality[] = { "Low (1 ray, 1/4 res)",
+			                                 "Medium (2 rays, 1/2 res)",
+			                                 "High (4 rays, full res)" };
 			int grQ = std::clamp(cfg.GIReflQuality, 0, 2);
 			if (Row::combo("GI Refl Quality", &grQ, kGIReflQuality, 3))
 				cfg.GIReflQuality = grQ;
@@ -286,6 +289,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			// single segment and ignores this, so on Windows/Linux the slider
 			// would otherwise drag with no effect on the image.
 			Row::sliderInt("GI Refl Bounces (Metal)", &cfg.GIReflBounces, 1, 4);
+			// The blur stands in for what the trace did NOT sample (skipped
+			// pixels at a lower resolution, the unsampled part of the glossy
+			// lobe), so it narrows as the tier rises. Off shows the raw trace at
+			// the tier's resolution and ray count — the direct way to tell
+			// whether a soft reflection is the blur or something else.
+			ImGui::Checkbox("GI Refl Blur", &cfg.GIReflBlur);
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)

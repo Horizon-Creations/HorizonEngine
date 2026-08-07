@@ -913,6 +913,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflectionsEnabled        = globalstate.getCustomConfigBool("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	m_editorConfig.GIReflIntensity             = globalstate.getCustomConfigFloat("GIReflIntensity",          m_editorConfig.GIReflIntensity);
 	m_editorConfig.GIReflMaxRoughness          = globalstate.getCustomConfigFloat("GIReflMaxRoughness",       m_editorConfig.GIReflMaxRoughness);
+	m_editorConfig.GIReflBlur                  = globalstate.getCustomConfigBool("GIReflBlur",                m_editorConfig.GIReflBlur);
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
@@ -1532,6 +1533,11 @@ void EditorApplication::OnRender(float dt)
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
 			gr.intensity    = m_editorConfig.GIReflIntensity;
 			gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
+		gr.blur         = m_editorConfig.GIReflBlur;
+		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
+			gr.blur = std::atof(b) > 0.5;
+			gr.blur         = m_editorConfig.GIReflBlur;
 			gr.quality      = m_editorConfig.GIReflQuality;
 			gr.bounces      = m_editorConfig.GIReflBounces;
 			renderer()->SetGIReflectionSettings(gr);
@@ -2223,6 +2229,10 @@ void EditorApplication::dumpFrameHeadless()
 		gr.enabled      = dumpGR;
 		gr.intensity    = m_editorConfig.GIReflIntensity;
 		gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
+		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
+		gr.blur         = m_editorConfig.GIReflBlur;
+		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
+			gr.blur = std::atof(b) > 0.5;
 		gr.quality      = m_editorConfig.GIReflQuality;
 		gr.bounces      = m_editorConfig.GIReflBounces;
 		if (const char* q = std::getenv("HE_DUMP_GIREFLQUALITY"); q && *q)
@@ -4554,6 +4564,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("GIReflectionsEnabled",      m_editorConfig.GIReflectionsEnabled);
 	globalstate.setCustomConfigEntry("GIReflIntensity",           m_editorConfig.GIReflIntensity);
 	globalstate.setCustomConfigEntry("GIReflMaxRoughness",        m_editorConfig.GIReflMaxRoughness);
+	globalstate.setCustomConfigEntry("GIReflBlur",                m_editorConfig.GIReflBlur);
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);

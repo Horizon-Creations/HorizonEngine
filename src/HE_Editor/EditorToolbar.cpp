@@ -270,8 +270,19 @@ Bar::~Bar()
 {
 	if (m_inGroup) endGroup();
 	m_dl->ChannelsMerge();
-	// Hand the rest of the window to the panel body.
-	ImGui::SetCursorScreenPos(ImVec2(m_origin.x, m_origin.y + m_m.bar));
+	// Hand the rest of the window to the panel body. A bare SetCursorScreenPos
+	// leaves ImGui's IsSetPos flag armed until the next item — if the body then
+	// submits nothing (e.g. an emptied Content-Browser folder), EndChild trips
+	// the "extend window boundaries" error check. The zero-size Dummy (with
+	// zero spacing so the cursor stays put) commits the position as a real
+	// item; the final SetCursorScreenPos restores the exact hand-off point and
+	// is harmless now that CursorMaxPos already covers it.
+	const ImVec2 handOff(m_origin.x, m_origin.y + m_m.bar);
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+	ImGui::SetCursorScreenPos(handOff);
+	ImGui::Dummy(ImVec2(0.0f, 0.0f));
+	ImGui::PopStyleVar();
+	ImGui::SetCursorScreenPos(handOff);
 }
 
 void Bar::tint(ImU32 wash, ImU32 line, float thickness)

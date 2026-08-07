@@ -9845,7 +9845,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// path (its composite pass supplies the term) and when the passes didn't run.
 	scene.reflCfg  = glm::vec4(m_fwdReflSsrTex ? 1.0f : 0.0f, m_ssrIntensity,
 	                           m_ssrMaxRoughness, m_fwdReflGiTex ? 1.0f : 0.0f);
-	scene.reflCfg2 = glm::vec4(m_giReflIntensity, m_giReflMaxRoughness, 0.0f, 0.0f);
+	scene.reflCfg2 = glm::vec4(m_giReflIntensity, m_giReflMaxRoughness,
+	                           0.0f, m_giReflBlurFloor);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
@@ -10368,6 +10369,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	matLight.giRefl[0] = m_giReflIntensity;
 	matLight.giRefl[1] = m_giReflMaxRoughness;
 	matLight.giRefl[2] = m_fwdReflGiTex ? 1.0f : 0.0f;
+	matLight.giRefl[3] = m_giReflBlurFloor; // resolution blur floor (deferred composite)
 	matLight.giParams[2] = giActive ? 1.0f : 0.0f;
 	// Full light window for heLitP() — same first-8 order as the built-in
 	// PBR shaders. Shared fill (HE::FillMaterialLightWindow); it also writes
@@ -11381,7 +11383,20 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
-		const int tw = std::max(1, width / 2), th = std::max(1, height / 2);
+		// RESOLUTION is the tier's second axis (rays being the first): Low traces
+		// at quarter, Medium at half, High at full screen resolution. The blur
+		// below then exists only to stand in for the pixels a lower resolution
+		// did not trace, so its width follows resDiv — quarter-res gets four
+		// texels of it, full res one. Higher tier = more rays AND more pixels =
+		// sharper, which is the direction a quality setting should move in.
+		const int resDiv = m_giReflQuality >= 2 ? 1 : (m_giReflQuality >= 1 ? 2 : 4);
+		const int tw = std::max(1, width / resDiv), th = std::max(1, height / resDiv);
+		// How much blur even a MIRROR gets, purely to hide the resolution:
+		// none at full res, most at quarter. Without it a quarter-res mirror
+		// keeps its stair-steps — "sharp" is not the same as "detailed".
+		const float giReflBlurFloor = m_giReflBlurEnabled
+			? (resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f)) : 0.0f;
+		m_giReflBlurFloor = giReflBlurFloor;
 		EnsureGIReflTarget(tw, th);
 		if (!m_giReflTex) return;
 
@@ -11426,20 +11441,17 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// a strong EMA under camera motion is exactly the "reflection drags
 		// behind" artefact. The kernel additionally collapses the weight on
 		// luminance breaks (moving CONTENT with a still camera).
-		// History weight. This is now a BONUS on top of the traced rays, not the
-		// thing the image depends on — so it can stay conservative under motion
-		// (reflected content is never reprojected; the engine has no motion
-		// vectors) without the tier falling apart, which is exactly what used to
-		// happen. Still: 0.94 ≈ 17 effective samples on top of the 4 traced.
-		float hist = 0.0f;
-		if (jitter && m_giReflHistValid)
-		{
-			float delta = 0.0f;
-			for (int c = 0; c < 4; ++c)
-				for (int r = 0; r < 4; ++r)
-					delta = std::max(delta, std::abs(viewProj[c][r] - m_giReflPrevViewProj[c][r]));
-			hist = (delta > 1e-5f) ? 0.55f : 0.94f;
-		}
+		// NO temporal accumulation. It was the last thing keying off the tier
+		// that was neither rays nor resolution, and it was the LATENCY: an EMA
+		// weight of 0.94 is ~17 frames of history, so the reflection visibly
+		// dragged behind the rest of the frame — and dragged MORE the higher the
+		// tier, because only the upper tiers ran it. That is why Low felt the
+		// most responsive. Rays carry the estimate now and the blur covers the
+		// resolution; a reflection that is a little noisier beats one that is
+		// several frames old. The history targets stay allocated and the kernels
+		// still write them, so switching it back on is one line (hist > 0
+		// re-enables the whole block in both kernels).
+		const float hist = 0.0f;
 		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
 		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
@@ -11542,7 +11554,19 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// ── Blur chain: the SSR blur pipeline verbatim — same RGBA16F fullscreen
 		// confidence-weighted 5-tap, run at EVERY tier (Low needs it most, see
 		// the width comment below).
-		if (m_ssrBlurPipeline)
+		//
+		// SKIPPED when its result provably cannot be used. In the FORWARD path
+		// the reflection prepass writes roughness 0 (it has no material data —
+		// reflPosFragment), so the per-pixel lerp between sharp and blurred can
+		// only ever return the resolution floor; at full resolution that floor is
+		// 0, i.e. the blurred copy is discarded. Without this the High forward
+		// tier encoded a dozen full-screen RGBA16F passes per frame and threw
+		// every one of them away.
+		// m_giReflBlurEnabled is the user's switch; the rest is "would the result
+		// be used at all" (see below).
+		const bool blurUsed = m_giReflBlurEnabled
+		                   && (deferredIn || m_giReflBlurFloor > 0.0f);
+		if (m_ssrBlurPipeline && blurUsed)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)
 			{
@@ -11564,20 +11588,61 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 				[benc endEncoding];
 				++m_counters.draws;
 			};
-			// Blur WIDTH is inverse to the ray count, which is the whole point of
-			// spending rays: the blur is there to stand in for a glossy lobe the
-			// trace did not sample. One deterministic ray knows nothing about the
-			// lobe, so it needs a wide blur to fake one; four stratified rays
-			// have sampled it, so they need barely any and the reflection stays
-			// SHARP. Higher tier = sharper, not softer.
+			// The blur stands in for TWO things the trace did not sample, and
+			// sizing it to only one of them is what kept inverting this ladder:
+			//   · the RESOLUTION — one reflection texel covers resDiv screen
+			//     pixels, so a tap must reach that far. Constant per tier.
+			//   · the LOBE — a glossy surface scatters over a cone that a handful
+			//     of rays only sparsely sample, and the leftover variance IS the
+			//     noise. This term was missing entirely, so a rough surface got a
+			//     1–4 texel blur over a lobe tens of pixels across, and every
+			//     extra ray sharpened the trace without widening the filter that
+			//     has to clean up what the rays still missed. It scales with the
+			//     widest lobe the settings allow (maxRoughness), divided by the
+			//     RAY COUNT: the blur only has to stand in for the part of the
+			//     lobe the rays did not sample, and four rays leave a quarter of
+			//     what one leaves. Keeping this term constant across tiers (the
+			//     previous attempt) meant High blurred as hard as Low despite
+			//     tracing sixteen times the samples per screen area — measurably
+			//     softer, which is exactly what it was reported as.
+			// The reach is built as an À-TROUS CHAIN of the same 5-tap kernel at
+			// doubling strides, NOT as one wide 5-tap: five taps spread over 16
+			// texels leave visible banding between them, while 1+2+4+8 covers the
+			// same span densely for the same number of passes.
 			//
 			// m_giReflTex keeps the UNBLURRED trace and m_giReflRoughTex the
 			// blurred copy; the roughness lerp between them (deferred: in the
-			// composite, forward: the mix pass below) is what keeps a mirror
+			// composite, forward: the mix pass below) is what keeps a MIRROR
 			// mirror-sharp at every tier while a rough surface gets the lobe.
-			const float blurTexels = 4.0f / static_cast<float>(rays); // 4 / 2 / 1
-			blurPass(m_giReflTex, m_giReflPingTex,  blurTexels / static_cast<float>(tw), 0.0f);
-			blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, blurTexels / static_cast<float>(th));
+			// Screen pixels → reflection texels: one texel spans resDiv of them.
+			const float lobeScreen = kGIReflLobeScreenPx
+			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f)
+			                       / static_cast<float>(std::max(rays, 1));
+			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
+			                               1.0f, 512.0f); // also pins a NaN setting
+			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw
+			// strides 1,2,4,… and stopping at the first one past the target snaps
+			// the total to 2^n − 1, so the "tier-independent" screen reach came out
+			// quantized — Medium could end up blurring WIDER than Low, which is the
+			// inversion this whole rework exists to remove. n levels of scaled
+			// strides sum to `reach` for any value.
+			const int levels = std::clamp(
+				static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
+			const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+			// Every pass reads ONE texture and writes a DIFFERENT one: H always
+			// lands in ping, V always in rough, and the next level reads rough.
+			// Letting a non-final level write back into ping is a read-write
+			// hazard on the same texture — on a tile GPU that does not fail, it
+			// silently produces large BLACK TILES, which is what the first
+			// version of this chain rendered.
+			void* blurSrc = m_giReflTex;
+			for (int lvl = 0; lvl < levels; ++lvl)
+			{
+				const float stride = unit * std::exp2(static_cast<float>(lvl));
+				blurPass(blurSrc, m_giReflPingTex, stride / static_cast<float>(tw), 0.0f);
+				blurPass(m_giReflPingTex, m_giReflRoughTex, 0.0f, stride / static_cast<float>(th));
+				blurSrc = m_giReflRoughTex;
+			}
 			{
 				// FORWARD path only: bake the sharp/blurred roughness lerp into
 				// the texture the scene shader samples — it only gets ONE. The
@@ -11588,7 +11653,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 				{
 					HE::MaterialShaderLibrary::SSRBlurUniforms bu;
 					bu.dir[0] = m_giReflMaxRoughness; // lerp cutoff (see kSSRRoughMixFS)
-					bu.dir[1] = 0.0f;
+					bu.dir[1] = giReflBlurFloor;      // resolution floor
 					bu.dir[2] = 1.0f / static_cast<float>(tw);
 					bu.dir[3] = 1.0f / static_cast<float>(th);
 					MTLRenderPassDescriptor* mp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -13023,6 +13088,7 @@ void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflIntensity    = s.intensity;
 	m_giReflMaxRoughness = s.maxRoughness;
 	m_giReflMaxDistance  = s.maxDistance;
+	m_giReflBlurEnabled  = s.blur;
 	m_giReflQuality      = s.quality;
 	m_giReflBounces      = std::clamp(s.bounces, 1, 4);
 }

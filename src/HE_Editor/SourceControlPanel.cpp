@@ -257,6 +257,11 @@ void drawChangeList(const HE::Sc::RepoStatus& st)
 		if (rows.empty()) return;
 		ImGui::Spacing();
 		ImGui::SeparatorText(title);
+		// Sections share one ID scope, and the same folder legitimately shows up
+		// in more than one of them (Content/ both changed and untracked). Without
+		// a per-section scope those tree nodes collide on ID — they would fold
+		// and unfold together, and ImGui flags the conflict.
+		ImGui::PushID(title);
 		if (s_treeView)
 		{
 			drawRowsAsTree(rows, useIndexState);
@@ -265,6 +270,7 @@ void drawChangeList(const HE::Sc::RepoStatus& st)
 		{
 			for (const Row& r : rows) drawFileRow(r, useIndexState, r.path->c_str());
 		}
+		ImGui::PopID();
 	};
 
 	// Conflicts first — they block a commit entirely, so burying them under a

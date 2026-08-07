@@ -116,6 +116,11 @@ struct EditorConfig
 	float GIReflMaxRoughness   = 0.6f;
 	int   GIReflQuality        = 1;   // 0 raw / 1 blur / 2 glossy+temporal (SSR-style tiers)
 	int   GIReflBounces        = 1;   // 1-4 mirror bounces (Metal only — the GL kernel traces one segment)
+	// Post-trace blur. TEST DEFAULT OFF: the blur is meant to shrink as the tier
+	// rises, and the fastest way to tell whether it is what a soft reflection is
+	// actually made of is to look with it gone. Flip the checkbox in Preferences
+	// (or this default) to bring it back.
+	bool  GIReflBlur           = false;
 
 	// NOTE: environment / sky settings (day-night, sun, moon, clouds, fog, night
 	// sky, wind) are scene data now — they live on the World root entity as an

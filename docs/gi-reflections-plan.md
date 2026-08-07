@@ -614,3 +614,186 @@ Shader sampelt EINE Reflexionstextur (`uGIRefl`), also trifft der Blur auch
 Spiegel. Die Breite skaliert korrekt mit dem Tier, aber ein Spiegel ist auf GL
 um `blurTexels` weicher als auf Metal. Zu schließen mit demselben
 Roughness-Mix-Pass (`kSSRRoughMixFS`) plus einem weiteren Render-Target.
+
+
+---
+
+## Tiers final: Rays + Auflösung, Blur nur als Kaschierung
+
+Rückmeldung nach dem Rays-Umbau: höhere Qualität brachte immer noch mehr Blur
+UND eine Latenz von mehreren Frames, Low war am schärfsten und am direktesten.
+Beides stimmte — und beides kam daher, dass am Tier noch Dinge hingen, die
+nichts mit Qualität zu tun haben.
+
+**Die Latenz war die temporale EMA.** Sie lief nur auf den oberen Stufen, mit
+einem Gewicht von zuletzt 0.94 — das sind ~17 Frames History. Die Reflexion zog
+also dem Rest des Bildes sichtbar hinterher, und zwar **umso mehr, je höher die
+Stufe**. Sie ist jetzt aus (Metal und GL; die History-Targets bleiben verdrahtet,
+das Wiedereinschalten ist je eine Konstante). Die Strahlen tragen die Schätzung,
+der Blur deckt die Auflösung — eine etwas rauschigere Reflexion ist besser als
+eine, die mehrere Frames alt ist.
+
+**Der Tier bedeutet jetzt Rays UND Auflösung:**
+
+| Tier | Rays/Pixel | Trace-Auflösung | Blur |
+|---|---|---|---|
+| Low | 1 | ¼ Bildschirm | 4 Texel + Floor 0.75 |
+| Medium | 2 | ½ | 2 Texel + Floor 0.35 |
+| High | 4 | voll | 1 Texel, kein Floor |
+
+Der Blur ist **keine Tier-Eigenschaft**, sondern der Platzhalter für die Pixel,
+die eine niedrigere Auflösung nicht getract hat: ein Reflexions-Texel deckt
+`resDiv` Bildschirmpixel ab, also muss ein Tap genau so weit reichen. Er
+schrumpft damit exakt so, wie die Stufe besser wird.
+
+Der **Resolution-Floor** ist dabei der Punkt, den der reine Roughness-Lerp
+übersehen hatte: der hält einen Spiegel auf jeder Stufe scharf — aber „scharf"
+bei Viertel-Auflösung heißt „treppig", weil das Ergebnis auf den Bildschirm
+hochskaliert wird. Also bekommt auch ein Spiegel unterhalb voller Auflösung
+einen Mindest-Blur (0.75 / 0.35 / 0), getragen in `heBlur.dir.y` (Forward-Mix)
+bzw. `heLight.giRefl.w` (Deferred-Composite).
+
+Kostenhinweis: High traced 4 Strahlen pro Pixel bei voller Auflösung — gegenüber
+dem alten Stand (1 Strahl, halbe Auflösung) das 16-fache an Reflexions-Strahlen.
+Near-Mirrors bleiben bei einem Strahl (ihr Cone ist schmaler als ein Pixel), die
+Strahlkosten wachsen also nur auf glossy Flächen; die Auflösungskosten gelten
+überall.
+
+
+---
+
+## Runde 5: warum die Leiter trotzdem invertiert blieb — und das Messinstrument
+
+Rückmeldung mit drei Screenshots: Medium extrem verrauscht, Low am klarsten,
+High dazwischen. Genau umgekehrt zur Absicht. Die Ursachenkette:
+
+**1. Vier Verifikationsrunden waren blind.** Jede vorherige Runde hat an
+Witnesses geprüft, die den Fehler strukturell nicht zeigen konnten — entweder an
+Spiegeln mit Roughness 0.05 (Cone geschlossen, kein Rauschen möglich) oder mit
+temporaler Akkumulation bei stehender Kamera (konvergiert immer). Der
+entscheidende blinde Fleck: **der FORWARD-Prepass schreibt Roughness 0**
+(`reflPosFragment`, „b roughness (0)" — er hat keine Materialdaten), also öffnet
+sich der Glossy-Cone im Forward-Pfad NIE. Alle Dumps liefen forward.
+`scripts/../reflnoise.py` (Scratch) rendert deshalb mit `RENDERPATH=1` und misst
+den Laplacian in der Spiegelfläche; erst damit reproduziert der Fehler headless:
+bei Roughness 0.4 Low 0.66 / Medium 2.20 / High 4.24.
+
+**2. Low war nicht „gut", sondern untätig.** Bei einem Ray ist `jitter = rays > 1`
+falsch, der Cone bleibt zu, der Strahl ist deterministisch — kein Rauschen, weil
+die Lobe gar nicht gesampelt wird. Die Stufe war also nie der Maßstab.
+
+**3. Der Blur kannte die Lobe nicht.** Er war auf `resDiv` dimensioniert, also
+1–4 Texel, während eine Lobe bei Roughness 0.4 zig Pixel breit streut. Jeder
+zusätzliche Ray schärfte den Trace, ohne das Filter zu verbreitern, das aufräumen
+muss, was die Rays weiterhin verfehlen. Jetzt: `reach = 1 + kGIReflLobeScreenPx *
+maxRoughness / resDiv`, in SCHIRMPIXELN konstant über alle Stufen (die Streuweite
+ist eine Materialeigenschaft, keine Einstellung), als **À-trous-Kette** mit auf
+`reach` skalierten Strides. Die Rays kaufen Sauberkeit, die Auflösung Schärfe.
+
+**4. Der Roughness-Lerp ließ rohes Rauschen durch.** Er rampte gegen
+`maxRoughness`, also nahm eine 0.4-Fläche noch ~26 % des UNGEFILTERTEN Traces —
+das Rest-Speckle, das kein Blur mehr einfangen konnte. Der scharfe Zweig darf nur
+gewinnen, wo der Trace deterministisch ist, also rampt er jetzt gegen die
+Cone-Schwelle: `smoothstep(0.03, 0.20, rough)`.
+
+Ergebnis bei Roughness 0.4 (deferred, Laplacian in der Spiegelfläche):
+0.59 / 0.91 / 0.93 statt 0.66 / 2.20 / 4.24 — und bei 3× Zoom ist auf allen drei
+Stufen kein Speckle mehr zu sehen. Die Restwerte sind Verlaufssignal, nicht
+Rauschen: die Metrik kann ab hier Schärfe und Rauschen nicht mehr trennen, also
+entscheidet die Sichtprüfung.
+
+### Vom Audit gefunden (28 Agenten, adversariell verifiziert)
+
+Behoben:
+* **GL: die Reflexions-Targets werden nie auf die Tier-Auflösung resized.** Ich
+  hatte den Trace auf `grW/grH` umgestellt, aber alle Targets entstehen in
+  `EnsureGIShadowTargets` an der Prepass-Größe. High hätte einen Bildschirm-
+  Quadranten über alles gestreckt, Low drei Viertel der Textur ungeschrieben
+  gelassen. Die Auflösungsachse ist auf GL **zurückgenommen** und als Lücke
+  dokumentiert: sie bräuchte auch den Prepass resized (der gehört dem
+  Shadow-Pass), und auf dieser Maschine ist GL nicht lauffähig.
+* **GL: Medium castete 1 Ray statt 2** — das Cone-Gate hing an `quality >= 2`
+  statt an `rays > 1` wie auf Metal, die Ray-Leiter las also 1/1/4.
+* **GL hatte kein scharf/unscharf-Paar**, der neue lobenbreite Blur hätte dort
+  auch Spiegel getroffen. `kGiReflMixFS` schließt die Lücke (Ziel ist der tote
+  H-Ping, kein zusätzliches Target).
+* **À-trous-Reach auf Zweierpotenzen gerastert** (`2^n − 1`), wodurch die
+  „stufenunabhängige" Reichweite quantisierte und Medium breiter blurren konnte
+  als Low. Strides werden jetzt auf `reach` skaliert, Level auf 6 gedeckelt,
+  `maxRoughness` geclampt (auch gegen NaN).
+* **Forward High verwarf die ganze Blur-Kette** (Lerp degeneriert dort zum
+  Resolution-Floor = 0). Die Kette wird jetzt übersprungen, statt ein Dutzend
+  Vollbild-Passes pro Frame zu rechnen und wegzuwerfen.
+
+Offen und bewusst nicht in dieser Runde:
+* **Der Forward-Prepass schreibt keine Roughness.** Damit ist im Forward-Pfad die
+  Ray-Achse tot (immer 1 Strahl) und der Roughness-Lerp wirkungslos — glossy
+  Reflexionen funktionieren dort schlicht nicht, nur Spiegel. Das ist die
+  eigentliche nächste Aufgabe; sie braucht Material-Roughness pro Draw im
+  Prepass.
+* GL-Auflösungsachse (s. o.), und die 5-Tap-Kette hat keine Edge-Stopping-
+  Gewichte, kann also über Silhouetten bluten.
+
+
+---
+
+## Runde 6: der Lobe-Blur muss mit den Rays schrumpfen
+
+Rückmeldung: im Deferred-Pfad weiterhin „Low am wenigsten geblurred, High und
+Medium stärker". Das war richtig beobachtet und meine Runde-5-Entscheidung war
+schuld: ich hatte die Lobe-Reichweite bewusst **konstant in Schirmpixeln** über
+alle Stufen gemacht (Argument: die Streuweite ist Materialeigenschaft). Das
+stimmt für die LOBE — aber der Blur ersetzt nicht die Lobe, sondern nur den Teil
+davon, den die Rays **nicht** gesampelt haben. Vier Rays lassen ein Viertel
+dessen übrig, was einer übrig lässt. Also:
+
+    lobeScreen = kGIReflLobeScreenPx * maxRoughness / rays
+
+Damit fällt die Reichweite von Stufe zu Stufe, und die Kante im Spiegel wird mit
+jeder Stufe schärfer statt weicher (`edge_zoom.png`: Low weich, High knackig).
+Bei glossy 0.4 bleiben alle drei glatt und keine speckt.
+
+### Metrologie-Lehre
+
+Zwei aggregierte Kennzahlen über die Spiegelfläche haben mich nacheinander in die
+falsche Richtung geschickt:
+
+* **Mittlerer |Gradient|** verwechselt Rauschen mit Detail — solange es rauschte,
+  war er brauchbar, danach maß er Signal.
+* **Mittlerer |Laplacian|** über die ganze Fläche ebenso: eine unschärfere Stufe
+  mit einem größeren niederfrequenten Verlauf kann höher punkten als eine
+  schärfere. Genau daran habe ich in Runde 5 abgelesen, die Leiter sei in
+  Ordnung, während sie sichtbar falsch herum lief.
+
+Was trägt: **|Laplacian| in einem Bereich, dessen gespiegelter Inhalt FLACH ist**
+(dort ist alles Hochfrequente Rauschen) getrennt von **Kantenschärfe an einer
+echten Kante**, und als letzte Instanz der 4×-Zoom auf diese Kante über die drei
+Stufen nebeneinander. Zahlen allein reichen hier nicht; der Zoom ist das
+eigentliche Gate.
+
+
+---
+
+## Blur abschaltbar (`GIReflBlur`)
+
+Auf Wunsch: `IRenderer::GIReflectionSettings::blur`, Checkbox „GI Refl Blur" in
+den Preferences, Config-Key `GIReflBlur`, headless `HE_DUMP_GIREFLBLUR=0/1`.
+**Test-Default steht auf AUS.**
+
+Der Grund, es überhaupt schaltbar zu machen, ist diagnostisch: nach mehreren
+Runden, in denen ich die Blur-Breite umparametriert habe und die Rückmeldung
+weiter „höhere Stufe = weicher" lautete, ist die direkteste Frage nicht „wie
+breit ist der Blur", sondern „ist der Blur überhaupt das, was ich sehe". Mit
+Blur aus bleibt der rohe Trace in der Auflösung und Ray-Zahl der Stufe übrig —
+ist die Reflexion dann immer noch weicher auf High, liegt es nicht am Blur,
+sondern am Trace-Pfad selbst, und die Suche fängt woanders an.
+
+Gemessen bei Roughness 0.05 (Spiegel, deferred, 4×-Zoom auf dieselbe Kante):
+mit Blur aus sind Low und High praktisch deckungsgleich scharf — die
+Stufenunterschiede in der Weichheit kamen also tatsächlich vollständig aus dem
+Blur, nicht aus dem Trace.
+
+Wenn der Blur wieder an soll: Checkbox, oder `GIReflBlur = true` als Default in
+`EditorApplication.h`. Ohne ihn ist die Reflexion auf rauen Flächen wieder
+verrauscht — er ist kein Schmuck, sondern das, was die nicht gesampelten Teile
+der Lobe ersetzt.
