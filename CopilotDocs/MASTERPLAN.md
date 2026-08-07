@@ -3525,3 +3525,37 @@ Ein Nebenbefund, der über Block E hinausreicht: die Lücken in E0 und E1 waren 
 kommentiert** — jemand hat sie beim Schreiben gesehen und als „yet" markiert. Was fehlte, war der
 Weg von einem solchen Kommentar in dieses Dokument. Das ist der eigentliche Grund, warum es diesen
 Eintrag erst jetzt gibt.
+
+---
+
+## Fortsetzung 72 — Savegame-System v2 + projektdefinierte Structs/Enums (07.08.2026)
+
+**Alles auf origin/main (fdd69c12…f52dd2c0), 1390 Tests.** Zwei Systeme, aufeinander gebaut:
+
+**Projekt-Typen.** Struct- und Enum-Assets (`AssetType::StructType/EnumType`, CHUNK_STDF/ENDF)
+mit prozessglobaler `HE::TypeRegistry` als sprachneutraler Sicht. Ein Typ, vier Frontends:
+HorizonCode (PinType::Enum/Struct, Make/Break Struct, Set Struct Field, Enum Value, Switch on
+Enum, Konvertierungen; connect() verlangt dieselbe Definition, leerer typeName = generische
+Boundary), Lua/Python (`horizon.enums.X.Y`, `horizon.structs.X()`; Structs als Table/Dict mit
+`__type`), generiertes C++ (`Source/Generated/GameTypes.h`, Regeneration bei Panel-Save) und
+Savegame-Templates. Packaged Builds laden Definitionen eager über den gebackenen
+`__type_index__` der .hpak, VOR fireInit und Script-Bootstrap. Codegen: Enums nativ als int
+(Eintrags-Aufloesung zur Generierungszeit), Struct-Graphen bewusst interpretierter Fallback.
+
+**Savegames.** Die alte Slot-/KV-API ist ersatzlos raus. Neu: genau EIN aktives Save-Dokument
+{id, templateRef, fields, entities}, geformt von einem SaveGame-Template-Asset (Feld-Schema mit
+Defaults, „Set as Project Default" → .heproj + project.hcfg v3). `save.create/load/write(atomar)/
+close/list/exists/delete/activeId/fields` + typisierte, Template-validierte Feld-Accessors —
+jeder Fehlgriff laut. Feld-Dropdown an den `save.*`-Nodes (nach Accessor-Typ gefiltert).
+Entities opt-in via SaveStateComponent: `entity.saveState/hasSavedState/applySavedState`
+(UUID-keyed, partielles Apply, Play-Mode-gated — Edit-Modus gehört dem SceneSerializer).
+C++-GameLogic erreicht dieselbe API ohne zu linken: `<HorizonGameServices.h>`, versionierte
+C-ABI-Tabelle, vom GameLogicLoader über den optionalen `HE_SetEngineServices`-Export injiziert
+(`he::save::*`/`he::entity::*`; Structs als JSON zu den generierten Typen).
+
+Vorweg gefixt: die Save-Sandbox stand im Spiel erst NACH fireInit/BeginPlay (Startup-Loads
+liefen still ins Leere), und reine Lua/Python-Projekte bekamen im Editor nie eine Wurzel.
+
+Bewusste Lücken (v2-Arbeit): Struct-Codegen interpretiert; Array-Element-/Funktions-Param-Typen
+ohne Enum/Struct; AssetRefRetarget kennt typeName-Referenzen nicht (Asset-Rename dangelt);
+SaveStateComponent erfasst keine Script-Variablen (nur Transform/Sichtbarkeit).

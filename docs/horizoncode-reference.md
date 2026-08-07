@@ -117,12 +117,12 @@ registry function under a readable name (e.g. *Set Position*, *Sine*, *Play Soun
 ## 3. Engine subsystems (the `HE::api` registry)
 
 One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and** the
-`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 122 functions.**
+`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 131 functions.**
 
 | Group | # | Functions |
 |-------|---|-----------|
 | **Debug** | 5 | `log`, `debug.line`, `debug.sphere`, `debug.box`, `debug.clear` |
-| **Entity** | 8 | `getName`, `spawn`, `destroy`, `distance`, `findByName`, `exists`, `setVisible`, `getVisible` |
+| **Entity** | 11 | `getName`, `spawn`, `destroy`, `distance`, `findByName`, `exists`, `setVisible`, `getVisible`, `saveState`, `hasSavedState`, `applySavedState` |
 | **Transform** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getScale`/`setScale` |
 | **Physics** | 3 | `raycast`, `setVelocity`, `isGrounded` |
 | **Material** | 2 | `getParam`, `setParam` |
@@ -138,7 +138,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **Audio** | 7 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition` |
 | **String** | 11 | `length`, `substring`, `contains`, `find`, `replace`, `toUpper`, `toLower`, `trim`, `startsWith`, `endsWith`, `toNumber` |
 | **File** (`fs`) | 5 | `writeText`, `readText`, `exists`, `remove`, `makeDir` — jailed to a per-user sandbox |
-| **Save** | 11 | `set/getNumber`, `set/getString`, `set/getBool`, `hasKey`, `deleteKey`, `saveToSlot`, `loadFromSlot`, `slotExists` |
+| **Save** | 17 | `create`, `load`, `write`, `close`, `activeId`, `list`, `exists`, `delete`, `fields`, `set/getNumber`, `set/getString`, `set/getBool`, `set/getStruct` |
 | **Scene** | 12 | `load`, `loadAdditive`, `unloadZone`, `activate`, `hasPendingLevel`, `showZone`, `hideZone`, `zonePosition`, `setZonePosition`, `zoneScene`, `loadedZones`, `available` |
 
 Notes:
@@ -150,8 +150,31 @@ Notes:
   (project scenes by their project-relative path, e.g. `Content/123.hescene`) — that
   exact string is what the exporter packs the scene under and what the game resolves,
   so a hand-typed path can't silently miss.
-- **File**/**Save** are sandboxed to `<user pref>/Saved`; absolute paths and `..` are
-  rejected.
+- **File** is sandboxed to `<user pref>/Saved` (editor PIE: `<project>/Saved`);
+  absolute paths and `..` are rejected.
+- **Save** is a whole system, not a KV store: exactly ONE save document is active,
+  shaped by a **SaveGame Template** asset (typed fields incl. Struct/Enum refs, with
+  defaults; the project default is set on the template itself and ships in
+  `project.hcfg`). `save.create(id)` seeds the fields from the template,
+  `save.load(id)` reads `Saves/<id>.json` and re-validates against it, `save.write()`
+  persists atomically; ids are `[A-Za-z0-9_-]+`. Field access is typed and validated —
+  `get/setNumber` covers Float/Int/Enum fields, `get/setStruct` carries whole structs —
+  and every miss (no active save, unknown field, wrong type) logs and returns the
+  default, never silently. The `field` input on `save.*` nodes is **picked from a
+  dropdown** of the template's fields, filtered by the accessor's type. `save.fields()`
+  enumerates them at runtime. Entities opt in via the **Save State** component:
+  `entity.saveState` stores the flagged attributes (transform, visibility) under the
+  entity's stable UUID in the active save, `entity.applySavedState` re-applies what the
+  save carries (partial by design) — play mode only. Native C++ GameLogic reaches the
+  same API through `<HorizonGameServices.h>` (`he::save::*` / `he::entity::*`,
+  injected after the library loads; struct fields cross as JSON).
+- **User types**: Struct and Enum **assets** define project types once and light up
+  everywhere — HorizonCode pins/variables (Make/Break Struct, Set Struct Field, Enum
+  Value, Switch on Enum, conversions; wires require the SAME definition), Lua/Python
+  (`horizon.enums.<Name>.<Entry>` ints and `horizon.structs.<Name>()` constructors;
+  structs cross as tables/dicts with `__type`), generated C++
+  (`Source/Generated/GameTypes.h`), and savegame-template fields. Packed builds load
+  the definitions eagerly from the pak's `__type_index__` before any script runs.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in
   Lua/Python).
 
