@@ -43,18 +43,42 @@ Unity/Godot-Featureset, nicht Unreal-AAA).
 > **Vertriebsweg:** Es gibt bewusst **keine GitHub-Releases und keine Tags**. Ausgeliefert wird über
 > die Website (`horizoncreations.dev`, Devlog-Eintrag + `HorizonEngine/packages/`); die
 > CI-Artefakte sind die Quelle dafür.
+>
+> **Nachtrag 07.08.2026 (Gameplay-Reife-Audit, `Forts. 94` + neuer `Block E`):** Beim Planen eines
+> konkreten Spiels (Third-Person-Traversal) fiel auf, dass dieses Dokument eine ganze Kategorie offener
+> Arbeit nicht kannte. Die Blöcke A–D beschreiben Render-Parität, Plattform-Breite,
+> Scripting-Restschulden und Kür — **Gameplay-Reife kam in keinem davon vor.** Zwei Befunde gehören
+> nach oben, weil sie den Plan im Kern berühren:
+>
+> (a) **Das gepackte Spiel hat keine Physik.** `PhysicsWorld` wird ausschließlich vom Editor erzeugt
+> (`EditorApplication.cpp:4135`); `GameApplication` übergibt `nullptr` an `SceneSystems::tick` (`:830`)
+> und sagt es im Kommentar selbst (`:600`). Play-in-Editor simuliert, der Export nicht — **ohne
+> Fehlermeldung.** Jedes Spiel jenseits reiner Skript-Transformationen ist damit bis zu diesem Fix
+> still kaputt, und zwar erst nach dem Packen sichtbar.
+>
+> (b) **Der native C++-Gameplay-Pfad ist abgeschnitten.** Die `GameLogic`-Bibliothek wird im Export
+> geladen (`GameApplication.cpp:326`), bekommt über `IGameLogic` aber nur `HorizonWorld&` — und das
+> kennt weder `PhysicsWorld` noch `Input` noch `ContentManager`. C++-Gameplay kann nicht raycasten,
+> keinen Charakter bewegen, keine Taste lesen. Das ist die konkrete Ausprägung von C3.
+>
+> Beides zusammen ist ~2 PT reine Verdrahtung ohne Design-Risiko und steht deshalb **vor** Block A in
+> der angepassten Sofort-Reihenfolge (Forts. 78). Der Satz „Block A ist der einzige kritische Pfad"
+> gilt nicht mehr: **Block A ist der kritische Pfad zur Auslieferbarkeit, Block E der zur
+> Bespielbarkeit.** Ein Nebenbefund, der über die Technik hinausgeht: beide Lücken waren **im Code
+> als „yet" kommentiert** — was fehlte, war der Weg von so einem Kommentar in dieses Dokument.
 
 | Bereich | Status |
 |---|---|
 | Core: Window, App-Loop, Input, Logger, ContentManager, `.hasset` v2 (UUID-persistent), Engine-Content-Root (`/Engine/` Read-only-Defaults + Copy-on-Write-Override, Primitiv-Meshes) | ✅ |
 | Rendering GL+Metal (Vollausbau-Paar) — RenderGraph/Passes, PBR, CSM-Schatten, HDR/Bloom/FXAA, SSAO+HBAO+GTAO, sortierte Transparenz, Skybox+IBL, GPU-Instancing, Skeletal-GPU-Skinning, volumetrische Wolken, Nebula v3.4 + physikalische Atmosphären-Streuung, Material-Node-Graph-Editor | ✅ |
-| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare/**Basecolor-Texturen** (A1)/**MaterialComponent-Override + Invalidate** (A2) ✅ auf allen drei — A1+A2 seit 14.07., Windows-GPU-Visual offen); offen: echtes GPU-Instancing (A3), Material-Graph-Shader (A4), Nebula v2+/Atmosphären-Sky (A5) — siehe Phase 6.2 + Forts. 78 |
+| Rendering D3D11/D3D12/Vulkan | 🟡 fast auf GL/Metal-Parität (HDR/Bloom/FXAA/SSAO+HBAO+GTAO/Skybox+IBL/Skinning/In-Game-UI-Pass/Transparenz/PBR-Skalare/**Basecolor-Texturen** (A1)/**MaterialComponent-Override + Invalidate** (A2) ✅ auf allen drei — A1+A2 seit 14.07., Windows-GPU-Visual offen); offen: echtes GPU-Instancing (A3), Material-Graph-Shader (A4), Nebula v2+/Atmosphären-Sky (A5), **Decals** (`DecalComponent` existiert, aber null Decal-Code auf GL/Vulkan/D3D11/D3D12 — Metal-only, seit 07.08.2026 verbucht als E6) — siehe Phase 6.2 + Forts. 78 |
 | Editor: Hub, Docking, Outliner, Content Browser (Content/Engine/Source-Roots, Viewport-Drag-Drop-Spawn), Inspector, Gizmos, Undo/Redo, Play-Mode, gemeinsamer `GraphEditor`-Canvas (Material- + HorizonCode-Graph), View ▸ Environment-Fenster, C++-`Source/`-Tree + `CppClassEditorPanel`, Toolchain-Startup-Check, crash-fester config.json | ✅ |
 | Asset-Pipeline: Importer (Textur/Mesh/Material/Audio), `asset_compiler`, hpak v2 (LZ4HC/zstd, AES-256-GCM, On-Demand-Streaming, Overlays), Export-Pipeline (Profile, Async, Inkrementell, Plattform-Ziele, lauffähige Exporte inkl. macOS-.app-Bundle) | ✅ |
 | SceneSerializer (alle Komponenten inkl. Animator/AnimatorBlend/SkeletalMesh/PropertyAnimator/NavMesh/NavAgent, JSON+CBOR) | ✅ |
 | RenderGraph, RenderResourceManager, GPUMemoryAllocator | ✅ |
 | Memory (`AssetRef<T>`-Pinning im ContentManager, Job-System) | ✅ |
-| Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen; **Projekt-Sprache jetzt harte, einsprachige Restriktion** — C++-Projekte mit kompilierbarem `Source/`-Scaffold), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | ✅ |
+| Engine-Systeme: Physik (Jolt), Scripting (Lua + Python + natives C++ `GameLogicLoader` + HorizonCode-Interpreter + HorizonCode-C++-Codegen; **Projekt-Sprache jetzt harte, einsprachige Restriktion** — C++-Projekte mit kompilierbarem `Source/`-Scaffold), Audio (miniaudio), Animation (Skinning/Blending/State-Machine/Property-Anim), Navigation (Recast/Detour), Partikel, In-Game-UI/Widget-System v3, Input-Mapping + Input-Assets + PlayerHost | 🟡 alle Systeme vorhanden und im Editor funktionsfähig — **aber `PhysicsWorld` läuft nicht im gepackten Spiel** (E0) und die Physik-API endet bei Raycast + `setVelocity`, ohne Impulse/Constraints/Shape-Casts/Laufzeit-Körper (E2). Siehe Forts. 94 |
+| Gameplay-Schicht: Kamera-Rigs (Third-Person/Follow/Spring-Arm/Shake), Gamepad-Input, Root Motion + Anim-Layer/Masks/Blend-Trees/Notifies + IK, `timeScale`/Pause, Rope-/Trail-/Spline-Rendering | 🔴 **existiert nicht** — die Schicht zwischen Eingabe und Bild. Block E, Belege in Forts. 94. (Was es *gibt*: Save-Slots, additives Zonen-Streaming, Audio-Busse, Debug-Draw aus dem Skript — siehe Forts. 94 E8) |
 | Textur-Kompression | 🟡 ASTC 4×4 (Metal/Apple-Silicon-Export) ✅ — BCn (D3D/Vulkan/GL) 🔴 |
 | Linux-Window/Input-Pfad | 🔴 kein Engine-Code |
 | Tests (810), CI (macOS+Windows-Matrix), Profiling (Tracy) | ✅ |
@@ -2739,8 +2763,56 @@ Reihenfolge bewusst: erst die **Fundament-Fähigkeiten** (Texturen, Material-Ove
     Optimierung) nicht begonnen; noch kein manueller HW-Smoke-Test eines gepackten Builds. Siehe
     [[horizoncode-vision]].
 12. **C3 — Natives C++-Scripting C3–C5** 🟡. `GameLogicLoader` (dlopen-Hot-Copy) + C++-`Source/`-Scaffold
-    stehen; die höheren C++-Gameplay-Stufen (weitergehende Engine-API-Abdeckung über [[engine-api-registry]])
-    sind noch offen.
+    stehen, und `GameApplication` lädt die `GameLogic`-Bibliothek im gepackten Spiel tatsächlich
+    (`GameApplication.cpp:326-341`). **Konkretisiert am 07.08.2026 (Forts. 94, E1):** was offen ist, ist
+    keine vage „höhere Stufe", sondern eine benennbare Lücke — `IGameLogic` bekommt nur `HorizonWorld&`,
+    und das kennt weder `PhysicsWorld` noch `Input` noch `ContentManager`. C++-Gameplay kann deshalb nicht
+    raycasten, keinen Charakter bewegen und keine Taste lesen, während Lua/Python/HorizonCode das über
+    [[engine-api-registry]] längst können. **Wird als E1 in Block E abgearbeitet (~1 PT).**
+
+### Block E — Gameplay-Reife (kritischer Pfad zur *Bespielbarkeit*)
+
+Neu am **07.08.2026**. Belege, Zeilennummern und die vollständige Begründung stehen in **Forts. 94**
+ganz unten; hier nur die Planzeilen. Der Audit lief gegen ein konkretes Spielvorhaben statt gegen eine
+Checkliste — deshalb fehlt hier nichts *Sichtbares*, sondern das, was zwischen Eingabe und Bild liegt.
+
+13. **E0 — `PhysicsWorld` ins gepackte Spiel-Runtime** 🔴 (~1 PT). `PhysicsWorld` wird nur vom Editor
+    erzeugt (`EditorApplication.cpp:4135`); `GameApplication` übergibt `nullptr` an `SceneSystems::tick`
+    (`:830`) und sagt im Kommentar selbst „No PhysicsWorld in the shipping runtime yet" (`:600`). **Jedes
+    Spiel jenseits reiner Skript-Transformationen läuft in PIE und ist im Export kaputt** — ohne
+    Fehlermeldung. Fix ist mechanisch: die Editor-Sequenz spiegeln.
+14. **E1 — Physik/Input/ContentManager für `IGameLogic` durchreichen** 🔴 (~1 PT). Siehe C3 oben; nach
+    dem Muster von `ScriptContext::setPhysicsWorld`. E0+E1 zusammen heben den nativen C++-Pfad von
+    „nominell vorhanden" auf „benutzbar".
+15. **E2 — Physik-API über Raycast + `setVelocity` hinaus** 🔴 (~4–6 PT). Die einzigen
+    zustandsverändernden Jolt-Aufrufe im Wrapper sind zwei `SetLinearVelocity` und ein
+    `CreateAndAddBody` in `initialize()`. Es fehlen: Ray-Filter/Ignore-Liste (**jeder Ray vom Spieler
+    trifft den Spieler**), Laufzeit-Körper (**kein Spawn simuliert je**), Shape-Casts, Overlap-Queries,
+    Impulse/Kräfte, Constraints (→ kein Ragdoll), Per-Objekt-Layer, Mesh-/Convex-Collider, CCD. In
+    dieser Reihenfolge ziehen.
+16. **E3 — Spielkamera-Rigs** 🔴 (~2–3 PT). Einziger Controller ist `FlyCameraController` (Freiflug).
+    Es fehlt die ganze Rig-Schicht: Third-Person/Follow/Orbit, Spring-Arm mit Kollision, Lag, Shake,
+    Kamera-Blend, FOV-Kick. Der *Zugriff* auf die Kamera existiert (`HE::api::camera::*`).
+17. **E4 — Gamepad + Maus im Input-Pfad** 🔴 (~2–3 PT). `SDL_Gamepad`/`SDL_Joystick` kommen außerhalb
+    des vendorten ImGui-Backends **nirgends** vor. Dazu: `input::pushSdlSnapshot()` nullt Maus-Delta
+    bewusst zugunsten des Freiflug-Akkumulators — dieser Ownership-Konflikt muss mit E3 zusammen gelöst
+    werden. Ferner analoge Dead-Zones, Rumble, Rebinding-UI, Hot-Plug.
+18. **E5 — Animation auf Action-Game-Niveau** 🟡 (~5–8 PT). Kein Root Motion, keine Layer/Bone-Masks/
+    Additiv, keine Blend-Trees, keine Animation-Events/Notifies, kein IK; FSM nur mit `float`-Params und
+    **einer** Bedingung pro Transition, ohne Exit-Time und „Any State".
+19. **E6 — Renderer-Bausteine: Rope/Trail-Rendering + Decal-Parität** 🟡. Kein 3D-Spline-/Rope-/Trail-/
+    Ribbon-Renderer (nur `DebugDraw::line`). **Decals nur auf Metal** — `DecalComponent` existiert, aber
+    GL/Vulkan/D3D11/D3D12 haben null Decal-Code; das gehört sachlich in Block A und fehlte dort bisher.
+    SSR ebenfalls faktisch Metal-only.
+20. **E7 — `timeScale` + Pause** 🔴 (~0,5 PT). Repo-weit nicht vorhanden → kein Pausenmenü, keine
+    Zeitlupe, kein Hit-Stop, kein Anhalten bei Fokusverlust. **Bester Aufwand-Wirkungs-Schnitt der
+    ganzen Liste.**
+
+> **Nicht bauen, ist schon da** (Forts. 94, E8 — mein erster Durchgang lag hier mehrfach daneben):
+> Spielstand-Slots (`save.saveToSlot/loadFromSlot`) + sandboxed `fs.*`, Szenen-Übergänge **und
+> additives Zonen-Streaming** (`scene.loadAdditive`/`unloadZone`/`setZonePosition`), Audio-Busse +
+> räumlicher Sound, `debug.line/sphere/box` aus dem Skript, Kollisions-Enter/Exit-Events, Navigation,
+> Partikel, Widgets, LOD, Foliage, Terrain, Prefabs, `PlayerHost`.
 
 ### Block D — Phase-7-Kür (nur bei Bedarf ziehen, von Catania getrieben)
 
@@ -2762,6 +2834,18 @@ mit sauberem GL-Fallback (Policy, siehe [[ao-gi-roadmap]]):
 (Windows-HW-Verify) **→ B2** (Linux, hängt an A) **→ B1** (BCn) **→ B4** (Docs). Block C + D laufen
 unabhängig nebenher, wenn ein konkreter Bedarf entsteht. Begründung: Block A ist der einzige *kritische
 Pfad* — er blockiert sowohl die Windows-Auslieferbarkeit als auch (über Vulkan) ganz Linux.
+
+> **Korrektur 07.08.2026 (Forts. 94).** Der Satz „Block A ist der einzige kritische Pfad" stimmt so
+> nicht mehr. Es gibt einen zweiten, dazu **orthogonalen**: **Block A ist der kritische Pfad zur
+> Auslieferbarkeit, Block E der zur Bespielbarkeit.** Die vollständigste Render-Parität nützt nichts,
+> wenn im exportierten Spiel der Charakter nicht fällt (E0).
+>
+> **Angepasste Reihenfolge: E0 → E1 → A3 → A4 → A5 → B3 → B2 → B1 → B4.** E0+E1 kosten zusammen ~2 PT,
+> sind reine Verdrahtung ohne Design-Risiko und erledigen C3 gleich mit — sie vor Block A zu ziehen
+> kostet also kaum etwas und beendet einen Zustand, in dem jedes gepackte Spiel still kaputt ist.
+> **E7** (~0,5 PT) mitnehmen, wann immer es passt. **E2–E6** sind echte Feature-Arbeit und sollen von
+> einem konkreten Spielbedarf gezogen werden, nicht auf Vorrat gebaut — mit einer Ausnahme:
+> **Decal-Parität aus E6 gehört inhaltlich in Block A** und sollte dort mitlaufen.
 
 > **Fortschritt 14.07.2026:** **A1 erledigt** (Basecolor-Texturen) auf D3D12 (`fa6b8ce`) + Vulkan
 > (`dfcf594`); **A2 erledigt** (MaterialComponent-Override + Invalidate) auf D3D12 (`09abba7`) + Vulkan
@@ -3213,3 +3297,228 @@ Metal, das das seit `docs/gi-reflections-plan.md` hat.
 11,8 % des Bildes, der Spiegelboden zeigt den grünen Graph-Würfel als (35,193,65) und den emissiven
 als (251,178,178), wo vorher Himmel stand; Boden abseits der Objekte und Hintergrund bleiben
 byte-identisch. Gleiche Zahlen auf dem Deferred-Pfad. Feature aus = unverändert.
+
+## Forts. 94 — Gameplay-Reife-Audit: was fehlt, um wirklich ein Spiel zu bauen (07.08.2026)
+
+> **Anlass.** Dieser Eintrag entstand nicht aus einer Checkliste, sondern aus dem Versuch, ein
+> konkretes Spiel zu planen (Third-Person-Traversal-Sandbox: Charakter, Stadt, Schwingen an
+> Ankerpunkten). Deshalb ist die Trefferlage eine andere als bei Block A. Es fehlt fast nichts
+> **Sichtbares** — Rendering, Editor, Asset-Pipeline und Serialisierung tragen. Es fehlt das, was
+> **zwischen Eingabe und Bild** liegt: die Schicht, die aus einer Welt ein Spiel macht.
+>
+> Die Punkte unten sind **am Code verifiziert**, nicht erinnert. Wo mein erster Durchgang falsch lag,
+> steht die Korrektur — siehe **E8**, das aus genau diesem Grund Teil des Eintrags ist.
+
+### E0 — Blocker: das exportierte Spiel hat keine Physik 🔴 (~1 PT)
+
+`PhysicsWorld` wird im ganzen Repo an **einer** Stelle erzeugt: `EditorApplication::onPlay`
+(`EditorApplication.cpp:4135-4137`, `make_unique` + `initialize`). `GameApplication` erzeugt keine.
+Der Code sagt es selbst, in `startScripts()` (`GameApplication.cpp:600`):
+
+> *„No PhysicsWorld in the shipping runtime yet → raycast/velocity/isGrounded no-op; onStart/onUpdate
+> + horizon.setMaterialParam work."*
+
+Entsprechend übergibt das Spiel `nullptr` als Physik-Zeiger an `SceneSystems::tick`
+(`GameApplication.cpp:830-831`), wo der Editor `m_physicsWorld.get()` reicht
+(`EditorApplication.cpp:1571-1574`). Das kostet nebenbei die echte Niederschlags-Kollision, die
+`SceneSystems.h` an diesem Parameter ausdrücklich anbietet — im Export fällt Regen auf eine flache
+Ersatzebene statt auf Dächer.
+
+**Warum das die schlimmste Fehlerart ist:** Play-in-Editor hat volle Physik. Ein Spiel wird also
+entwickelt, getestet und für gut befunden — und ist nach dem Packen kaputt. Der Charakter fällt
+nicht, kein Raycast trifft, `isGrounded` ist immer falsch. Es gibt keine Fehlermeldung; es passiert
+schlicht nichts. Jede Stunde, die jemand in ein Spiel steckt, das über reine Skript-Transformationen
+hinausgeht, ist bis zu diesem Fix auf Sand gebaut.
+
+Der Fix ist mechanisch, weil der Editor die Referenzimplementierung ist: Akkumulator + fixer
+`kPhysicsFixedDt`-Schritt, `initialize()`/`clear()` an den Szenenwechsel hängen,
+`ScriptContext::setPhysicsWorld`, `CollisionSystem::dispatch` für die Kollisions-Callbacks. Es ist
+kein Design-Problem, es ist ein nie gezogener Draht.
+
+### E1 — `IGameLogic` ist von der Engine abgeschnitten 🔴 (~1 PT)
+
+Der native C++-Pfad **existiert und shipt**: `GameApplication.cpp:326-341` sucht neben der
+Executable nach `GameLogic.dll`/`.dylib`/`.so`, lädt sie über den `GameLogicLoader` und ruft
+`onStart(*m_world)`; die Basis-`Application` tickt danach `onUpdate` im festen Zeitschritt. Das ist
+mehr, als der Doku-Stand vermuten lässt.
+
+Nur bekommt diese Logik nichts, womit sie arbeiten könnte. `IGameLogic.h` reicht ausschließlich
+`HorizonWorld&` durch, und `HorizonWorld` kennt weder `PhysicsWorld` noch `Input` noch
+`ContentManager` — es hält die Registry, die HorizonCode-Runtime und das Level-Script. Ein
+C++-Gameplay-Modul kann damit **nicht raycasten, keinen Charakter bewegen, keine Taste lesen und
+kein Asset nachladen**, während Lua, Python und HorizonCode all das über `HE::api` längst können.
+
+Der C++-Pfad ist damit *nominell* vorhanden und *praktisch* unbenutzbar. Das ist die konkrete,
+belegte Ausprägung dessen, was **C3** in Forts. 78 bisher nur vage als „höhere C++-Gameplay-Stufen
+offen" führte.
+
+Der Fix folgt einem Muster, das im Repo schon steht: `ScriptContext::setPhysicsWorld` ist genau diese
+Durchreichung für die Skriptsprachen. Dieselben non-owning Setter/Getter auf `HorizonWorld`, gesetzt
+von Editor **und** Spiel beim Play-Start und beim Stop genullt — dann läuft dieselbe
+`GameLogic.dylib` unverändert in PIE und im Export, was für die Iterationsgeschwindigkeit der
+eigentliche Gewinn ist.
+
+### E2 — Physik-API: nur Raycast + `setVelocity` 🔴 (~4–6 PT)
+
+`PhysicsWorld` ist ein PIMPL-Wrapper um Jolt 5.5. Die **einzigen** zustandsverändernden
+Jolt-Aufrufe im gesamten Wrapper sind zwei `SetLinearVelocity` (`PhysicsWorld.cpp:517` für den
+`CharacterVirtual`, `:598` für Rigidbodies) und ein `CreateAndAddBody` (`:358`). Sonst nichts. Was
+das ausschließt:
+
+| Fehlt | Was dadurch unmöglich ist |
+|---|---|
+| Kräfte / Impulse / Drehmomente | Explosionen, Rückstoß, Knockback — jede physikalische Reaktion auf ein Ereignis |
+| Constraints / Joints | Ragdoll, Seilbrücken, Türen, Fahrzeuge, Schaukeln, jede Gelenkmechanik |
+| Shape-Casts (Sphere/Capsule/Box) | Nahkampf-Trefferabfrage, Boden-Sonde, „passt der Charakter hier durch" |
+| Overlap-Queries | AoE, „was ist in Reichweite", Trigger-Abfrage auf Zuruf statt per Event |
+| Raycast mit Ignore-Liste / Layer-Filter | **Jeder Ray vom Spieler trifft zuerst den Spieler.** `raycast()` liefert nur den nächsten Treffer, ohne jeden Ausschluss — für Ziel-Auswahl, Kamera-Kollision und Aim-Assist unbrauchbar |
+| Multi-Hit-Raycast | Durchschüsse, Sichtlinie durch Trigger hindurch |
+| Per-Objekt-Layer/Masken | Es gibt genau zwei feste Layer (`HELayers::NON_MOVING`/`MOVING`, `PhysicsWorld.cpp:44-53`); `RigidBodyComponent` hat kein Layer-Feld. Keine Trennung Spieler/Gegner/Projektil/Trigger |
+| Körper zur Laufzeit erzeugen/entfernen | `CreateAndAddBody` läuft **ausschließlich** in `initialize()`. Ein zur Laufzeit gespawntes Objekt bekommt nie einen Körper — **kein Projektil, kein Pickup, kein Trümmerstück simuliert je** |
+| Mesh- / Convex-Collider | `ColliderComponent` kennt Box, Sphere, Capsule. Jede nicht-primitive Kollisionsgeometrie muss von Hand aus Kästen zusammengesetzt werden |
+| CCD-Flag | Schnelle Objekte tunneln durch Wände |
+
+Das ist die größte einzelne Lücke in diesem Dokument. Jolt beherrscht all das — es ist nur nicht
+durch den Wrapper geführt. Der Wrapper war für „Objekte fallen und der Charakter läuft" gebaut, und
+für genau das ist er gut. Er ist nie über diesen Anspruch hinausgewachsen.
+
+**Vorschlag zur Reihenfolge**, weil nicht alles gleich dringend ist:
+1. **Raycast mit Ignore/Filter** (blockiert schon die einfachste Kamera und jede Zielerfassung),
+2. **Laufzeit-Körper** (blockiert jedes Spawnen),
+3. **Shape-Casts + Overlap** (blockiert Treffererkennung),
+4. **Impulse/Kräfte**,
+5. **Constraints/Ragdoll + Mesh-Collider** zuletzt (größter Brocken, am seltensten zwingend).
+
+### E3 — Es gibt keine Spielkamera 🔴 (~2–3 PT)
+
+Der einzige Kamera-Controller der Engine ist `FlyCameraController` — Freiflug mit WASD und Mauslook,
+geteilt von Editor-PIE und gepacktem Spiel. `CameraComponent` hat fünf Felder: fov, near, far,
+isMain, orthographic.
+
+Es fehlt die gesamte Rig-Schicht: Third-Person-/Follow-/Orbit-Kamera, Spring-Arm mit
+Kollisions-Einkürzung, Positions- und Rotations-Lag, Kamera-Shake, Blend zwischen Kameras,
+First-Person-Rig, geschwindigkeitsabhängiger FOV-Kick.
+
+**Konsequenz:** Jedes Spiel, das keine Freiflug-Kamera will — also praktisch jedes — schreibt diese
+Schicht selbst. Orbit-Mathematik existiert im Repo, aber nur intern in den Asset-Preview-Pfaden der
+Renderer, nicht als wiederverwendbare Komponente. Der Zugriff auf die Kamera ist übrigens da
+(`HE::api::camera::get/setPosition/Rotation/Fov`) — was fehlt, ist nicht der Zugriff, sondern das
+Rig darüber.
+
+### E4 — Input: tastaturonly, kein Gamepad 🔴 (~2–3 PT)
+
+`Input` ist per Kommentar im Header ausdrücklich *keyboard-only*; Maus wird bewusst nicht getrackt,
+weil Editor (ImGui) und Spiel (`InputMapping`/SDL direkt) sie sich anders holen.
+
+**`SDL_Gamepad` und `SDL_Joystick` kommen in `HE_Core`, `HE_Scene`, `HE_Game` und `HE_Editor` kein
+einziges Mal vor.** Die einzigen Treffer im Repo stehen im vendorten ImGui-SDL3-Backend. Es gibt
+also keinerlei Controller-Unterstützung — kein Spiel dieser Engine ist heute mit einem Gamepad
+spielbar.
+
+Dazu eine feine, aber teure Falle: `HE::api::input::pushSdlSnapshot()` lässt **Maus-Delta und Scroll
+bewusst auf 0**, dokumentiert in `EngineApi.h`, um den SDL-Relativbewegungs-Akkumulator nicht
+leerzusaugen, den der Freiflug-Controller konsumiert. Für eine Spielkamera, die genau dieses Delta
+braucht, ist das ein direkter Ownership-Konflikt — er muss beim Bau von E3 aufgelöst werden, sonst
+bekommt entweder die Kamera oder das Skript die Mausbewegung, nie beide.
+
+Weiter offen: analoge Achsen mit Dead-Zone (`InputMappingContext` kennt nur 2-Tasten-Achsen),
+Rumble, Rebinding-UI zur Laufzeit, Geräte-Hot-Plug.
+
+### E5 — Animation: Basisumfang, kein Action-Game-Umfang 🟡 (~5–8 PT)
+
+Geprüft gegen `AnimatorStateMachineGraph.h`, `AnimationBlendSystem.cpp` (75 Zeilen),
+`AnimationStateMachineSystem.cpp` (242 Zeilen):
+
+- **Kein Root Motion.** Repo-weit null Treffer. Jede Fortbewegung muss künstlich aus Code-Velocity
+  entstehen; Attacken, Rollen und Sprünge mit authentischem Versatz sind nicht darstellbar, und
+  Fußgleiten lässt sich nur per Hand-Tuning der Geschwindigkeiten kaschieren.
+- **Keine Layer, keine Bone-Masks, kein Additiv.** Repo-weit null Treffer. Oberkörper-Zielen über
+  einer Laufanimation ist nicht möglich, ebenso wenig additive Treffer-Reaktionen, Atmung oder
+  Gesichtsanimation über einer Körperbewegung.
+- **Keine Blend-Trees.** Es gibt genau zwei Mechanismen: `AnimatorBlendComponent` (2-Clip-Linear) und
+  die Zustandsmaschine. Ein 1D-Geschwindigkeitsblend (Idle→Walk→Run) oder ein 2D-Direktionsblend
+  (Strafe) muss von Hand nachgebaut werden.
+- **FSM-Grenzen:** nur `float`-Parameter, **genau eine Bedingung pro Transition**, drei Operatoren
+  (`Greater`/`Less`/`Equal`), keine Exit-Time, kein „Any State", ein Layer. Für Idle/Run/Jump/Fall
+  reicht das; für einen Combo-Baum oder Zustandslogik mit mehreren Vorbedingungen nicht.
+- **Keine Animation-Events/Notifies.** Schritt-Sounds, Trefferfenster, VFX-Zeitpunkte,
+  Waffenwechsel-Marker: alle müssen über Zeitvergleiche im Gameplay-Code nachgebaut werden und
+  brechen bei jeder Clip-Änderung still.
+- **Kein IK** — kein FABRIK, kein Two-Bone, kein Look-At. Keine Fußplatzierung auf schrägem Boden,
+  keine Hand am Ziel, kein Kopf-Look-At.
+
+Ergänzend die bekannte Warze aus Forts. 71, hier nur zur Vollständigkeit: Transitions referenzieren
+Zustände **per Name** statt per `id`; das Fixup beim Umbenennen gehört dem Editor-Panel, und was es
+vergisst, bricht die Maschine still.
+
+### E6 — Fehlende Renderer-Bausteine für Action-Games 🟡
+
+- **Kein 3D-Spline-/Rope-/Trail-/Ribbon-Renderer.** Repo-weit kein `catmull`, `bezier` oder `spline`
+  in 3D-Rendering-Code; die einzigen Treffer sind ImGui-Bezier-Kurven für die Links im
+  GraphEditor. Seile, Ketten, Kabel, Schwert-Trails, Peitschen, Zip-Lines: nicht darstellbar.
+  `DebugDraw::line` existiert und trägt Prototypen, ist aber ein Debug-Pfad ohne Breite, Textur
+  oder Beleuchtung.
+- **Decals nur auf Metal.** `Decal` kommt in `MetalRenderer.mm` 7-mal vor, in `OpenGLRenderer.cpp`,
+  `VulkanRenderer.cpp`, `D3D11Renderer.cpp` und `D3D12Renderer.cpp` **null-mal** — obwohl es eine
+  `DecalComponent` gibt. Einschusslöcher, Blutspritzer, Reifenspuren, Pfützen fehlen also auf vier
+  von fünf Backends. Das gehört sachlich in Block A, ist dort aber bisher nicht gelistet.
+- **SSR faktisch Metal-only** (Metal 212 Treffer, D3D11 20, GL 7, D3D12 1, Vulkan 0). Forts. 93 hat
+  GL ray-traced *GI*-Reflections gegeben — das ist ein anderes Feature und ersetzt Screen-Space-
+  Reflections nicht auf D3D/Vulkan.
+- Für Geschwindigkeitsgefühl fehlen Camera-Motion-Blur und Radial-/Speed-Blur als Engine-Features.
+
+### E7 — Keine Zeitsteuerung 🔴 (~0,5 PT)
+
+Repo-weit kein `timeScale`, kein `setPaused`, kein `isPaused` in `HE_Core`, `HE_Scene` oder
+`HE_Game`. Damit gibt es kein Pausenmenü, keine Zeitlupe, keinen Hit-Stop, kein
+Slow-Motion-Finish — und keinen Weg, ein Spiel anzuhalten, wenn das Fenster den Fokus verliert.
+
+Ein zentraler `timeScale`, der in den Delta-Zeitschritt der Gameplay-Systeme multipliziert wird (und
+den Physik-Akkumulator mitnimmt, aber UI und Editor-Kamera **nicht**), ist der billigste Punkt
+dieser ganzen Liste und der mit dem höchsten Verhältnis von Wirkung zu Aufwand.
+
+### E8 — Was überraschend **schon da** ist
+
+Dieser Abschnitt gehört bewusst zum Eintrag: mein eigener erster Durchgang hielt mehrere dieser
+Dinge für fehlend, bis der Blick in `EngineApi.h` (die eigentliche Gameplay-Oberfläche, 1.207 Zeilen
+Implementierung in `EngineApi.cpp`) das widerlegte. Wer Block E abarbeitet, soll hier nichts
+doppelt bauen.
+
+- **Spielstand-System mit Slots.** `save.setNumber/setString/setBool/hasKey/deleteKey/clearAll` plus
+  `saveToSlot(int)` / `loadFromSlot(int)` / `slotExists(int)`, dazu sandboxed Datei-I/O
+  (`fs.writeText/readText/exists/remove/makeDir` unter einem gesetzten Sandbox-Root). Ein
+  Save-System muss **nicht** geschrieben werden.
+- **Szenen-Übergänge und additives Zonen-Streaming.** `scene.load(path)` (auch versteckt vorladen
+  und später `activate()`), `loadAdditive(path) → Zonen-ID`, `unloadZone`, `setZonePosition`
+  (verschiebt eine ganze Zone), `setZoneVisible`, `loadedZones()`, `zoneScene()`,
+  `availableScenes()`, `hasPendingLevel()`. Open-World-Streaming ist als Mechanik vorhanden — die
+  Header-Kommentare beschreiben ausdrücklich das Muster „nächste Zone additiv laden, Spieler
+  bewegen, Zone dahinter entladen".
+- **Audio.** `play/stop/stopAll/isPlaying/setBusVolume/setSoundPosition`, Bus-System über
+  `ma_sound_group`, räumliche Wiedergabe (Forts. 43/44).
+- **Debug-Draw aus dem Skript.** `debug.line/sphere/box` mit Lebensdauer in Sekunden, plus
+  `DebugDraw` für AABB/Sphere/Capsule im C++-Pfad. Trägt Prototyping komplett.
+- **Kollisions-Events.** `pollCollisionEnter()`/`pollCollisionExit()` mit Entity-Paaren, plus
+  `isTrigger` am Collider — Trigger-Zonen funktionieren, nur die aktive Abfrage fehlt (E2).
+- Ebenfalls fertig und für ein Spiel unmittelbar nutzbar: **Navigation** (Recast/Detour,
+  `NavAgentComponent`), **Partikel** (CPU+GPU, Node-Graph, Shader-Baking beim Export),
+  **In-Game-UI/Widgets v3**, **LOD**, **Foliage**, **Terrain mit Chunk-LOD**, **Prefabs**,
+  **Input-Assets + `PlayerHost`**, **Material-Parameter zur Laufzeit**, **Sichtbarkeit pro Entity**.
+
+### Einordnung: Block E neben Block A
+
+**Block A ist der kritische Pfad zur Auslieferbarkeit auf Windows und Linux. Block E ist der
+kritische Pfad zur Bespielbarkeit — überall.** Die beiden sind voneinander unabhängig, und keiner
+ersetzt den anderen: die vollständigste Render-Parität nützt nichts, wenn der Charakter im
+exportierten Spiel nicht fällt.
+
+Innerhalb von Block E gilt eine klare Priorität. **E0 und E1 kosten zusammen ~2 PT** und heben den
+gesamten nativen C++-Gameplay-Pfad von „nominell vorhanden" auf „benutzbar" — sie sind zugleich der
+konkrete Inhalt von C3. Alles andere in Block E ist echte Feature-Arbeit und sollte von einem
+tatsächlichen Spielbedarf gezogen werden, nicht auf Vorrat gebaut. Die Ausnahme ist **E7**, das für
+seinen halben Personentag unverhältnismäßig viel freischaltet.
+
+Ein Nebenbefund, der über Block E hinausreicht: die Lücken in E0 und E1 waren beide **im Code
+kommentiert** — jemand hat sie beim Schreiben gesehen und als „yet" markiert. Was fehlte, war der
+Weg von einem solchen Kommentar in dieses Dokument. Das ist der eigentliche Grund, warum es diesen
+Eintrag erst jetzt gibt.
