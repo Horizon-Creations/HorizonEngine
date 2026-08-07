@@ -153,3 +153,75 @@ TEST_CASE("writeCppClass: auto-uniquifies when a class of that name exists")
 
 	he_test::removeAllQuiet(root);
 }
+
+// ── Generated C++ types header (CppTypesHeaderGen) ───────────────────────────
+
+#include "CppTypesHeaderGen.h"
+#include <Types/TypeRegistry.h>
+
+TEST_CASE("CppTypesHeaderGen: enums, structs, defaults and dependency order")
+{
+	auto& reg = HE::TypeRegistry::instance();
+	HE::EnumDef weapon;
+	weapon.name = "Weapon"; weapon.assetPath = "Content/G/Weapon.hasset";
+	weapon.entries = { { "Sword", 0 }, { "Bow", 7 } };
+	reg.registerEnum(weapon);
+
+	// Outer embeds Inner — Inner must be emitted first regardless of name order
+	// ("Inner" < "Outer" alphabetically anyway, so flip: name them against it).
+	HE::StructDef inner;
+	inner.name = "ZInner"; inner.assetPath = "Content/G/ZInner.hasset";
+	{
+		HE::StructField sp; sp.name = "speed"; sp.type = HorizonCode::PinType::Float;
+		sp.defaultValue = HorizonCode::Value::ofFloat(3.5f);
+		inner.fields = { sp };
+	}
+	reg.registerStruct(inner);
+	HE::StructDef outer;
+	outer.name = "AOuter"; outer.assetPath = "Content/G/AOuter.hasset";
+	{
+		HE::StructField hp; hp.name = "hp"; hp.type = HorizonCode::PinType::Float;
+		hp.defaultValue = HorizonCode::Value::ofFloat(100.0f);
+		HE::StructField ttl; ttl.name = "title"; ttl.type = HorizonCode::PinType::String;
+		ttl.defaultValue = HorizonCode::Value::ofString("Rookie \"R1\"");
+		HE::StructField w; w.name = "weapon"; w.type = HorizonCode::PinType::Enum;
+		w.typeName = weapon.assetPath; w.defaultValue.s = "Bow";
+		HE::StructField in; in.name = "inner"; in.type = HorizonCode::PinType::Struct;
+		in.typeName = inner.assetPath;
+		HE::StructField tags; tags.name = "tags"; tags.type = HorizonCode::PinType::String;
+		tags.isArray = true;
+		HE::StructField bad; bad.name = "2 bad name!"; bad.type = HorizonCode::PinType::Int;
+		outer.fields = { hp, ttl, w, in, tags, bad };
+	}
+	reg.registerStruct(outer);
+
+	const std::string h = HE::generateCppTypesHeader();
+	CHECK(h.find("enum class Weapon : int") != std::string::npos);
+	CHECK(h.find("Bow = 7,") != std::string::npos);
+	CHECK(h.find("struct AOuter") != std::string::npos);
+	CHECK(h.find("float hp = 100.0f;") != std::string::npos);
+	CHECK(h.find("std::string title = \"Rookie \\\"R1\\\"\";") != std::string::npos);
+	CHECK(h.find("Weapon weapon = Weapon::Bow;") != std::string::npos);
+	CHECK(h.find("ZInner inner;") != std::string::npos);
+	CHECK(h.find("std::vector<std::string> tags;") != std::string::npos);
+	CHECK(h.find("int _2_bad_name_ = 0;") != std::string::npos);   // sanitized + commented
+	CHECK(h.find("\"2 bad name!\"") != std::string::npos);
+	// Dependency order: ZInner's definition precedes AOuter's.
+	CHECK(h.find("struct ZInner") < h.find("struct AOuter"));
+
+	// writeCppTypesHeader: writes once, then skips identical bytes.
+	const fs::path dir = fs::temp_directory_path() / "he_typegen_test";
+	fs::remove_all(dir);
+	fs::create_directories(dir);
+	CHECK(HE::writeCppTypesHeader(dir));
+	const fs::path file = dir / "Source" / "Generated" / "GameTypes.h";
+	REQUIRE(fs::exists(file));
+	const auto t0 = fs::last_write_time(file);
+	CHECK(HE::writeCppTypesHeader(dir));           // unchanged → no rewrite
+	CHECK(fs::last_write_time(file) == t0);
+	fs::remove_all(dir);
+
+	reg.removeType(weapon.assetPath);
+	reg.removeType(inner.assetPath);
+	reg.removeType(outer.assetPath);
+}

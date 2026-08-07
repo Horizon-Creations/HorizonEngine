@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(HorizonTools SHARED
             src/FileOps/ProjectManager.cpp
             src/FileOps/CppScaffoldTemplates.cpp
+            src/FileOps/CppTypesHeaderGen.cpp
 )
 
 target_compile_definitions(HorizonTools PRIVATE HE_TOOLS_BUILD_DLL)

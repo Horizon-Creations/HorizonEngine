@@ -9,6 +9,7 @@
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
 #include <Types/TypeRegistry.h>
+#include <CppTypesHeaderGen.h>  // regenerate GameTypes.h on save (C++ projects)
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -105,6 +106,17 @@ bool saveState(PanelState& st, AppContext& ctx)
 		a->json = HE::TypeRegistry::structToJson(st.structDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerStruct(st.structDef);
+	}
+	// C++ projects: the definitions ARE C++ types — regenerate the header so
+	// gameplay code sees this save on its next compile.
+	if (ctx.projectManager &&
+	    ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
+	{
+		std::filesystem::path projectPath = ctx.projectManager->currentProject().path;
+		if (std::filesystem::is_regular_file(projectPath))
+			projectPath = projectPath.parent_path();
+		if (!projectPath.empty())
+			HE::writeCppTypesHeader(projectPath);
 	}
 	st.dirty = false;
 	return true;

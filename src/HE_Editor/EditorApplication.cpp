@@ -20,6 +20,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Types/TypeRegistry.h>    // project-open refresh of struct/enum defs
+#include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
@@ -1154,6 +1155,10 @@ void EditorApplication::OnInit()
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: registered " + std::to_string(types) +
 					 " user type definitions").c_str());
+			// C++ projects get the definitions as real C++ types in
+			// Source/Generated/GameTypes.h (regenerated again on every panel save).
+			if (m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Cpp)
+				HE::writeCppTypesHeader(projectPath);
 		}
 
 		// Load this project's app-wide GameInstance script (referenceable from
