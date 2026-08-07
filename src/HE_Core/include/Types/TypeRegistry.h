@@ -49,7 +49,10 @@ struct StructField
     HorizonCode::PinType type = HorizonCode::PinType::Float;
     bool                 isArray = false;
     std::string          typeName;      // Enum/Struct fields: referenced def asset path
-    HorizonCode::Value   defaultValue;  // seeds new instances; scalar of `type` (arrays start empty)
+    // Seeds new instances. A scalar field holds one Value of `type`; an ARRAY
+    // field uses the Value's own array payload (isArray + items), so a field can
+    // ship authored starting elements instead of always beginning empty.
+    HorizonCode::Value   defaultValue;
 };
 
 struct StructDef

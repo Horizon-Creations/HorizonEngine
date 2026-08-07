@@ -133,8 +133,9 @@ bool saveState(PanelState& st, AppContext& ctx)
 	return true;
 }
 
-// Inline default-value editor for one scalar field. Structs and arrays carry no
-// inline default (nested defs supply their own; arrays start empty).
+// Inline default-value editor for one scalar field. Struct fields carry no
+// inline default (the nested definition supplies its own); ARRAY fields get the
+// shared slot editor instead (see the isArray branch at the call site).
 void defaultValueEditor(HE::StructField& f, bool& dirty)
 {
 	HorizonCode::Value& v = f.defaultValue;
@@ -454,11 +455,24 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			typeNamePicker(f, st.dirty, ctx, st.relPath);
 		}
 		ImGui::SameLine();
-		if (ImGui::Checkbox("Array", &f.isArray)) st.dirty = true;
+		if (ImGui::Checkbox("Array", &f.isArray))
+		{
+			// The payload changes shape: a scalar default and a slot list can't
+			// both live in one Value, so switching starts the new one clean.
+			f.defaultValue = {};
+			f.defaultValue.type = f.type;
+			f.defaultValue.isArray = f.isArray;
+			f.defaultValue.typeName = f.typeName;
+			st.dirty = true;
+		}
 
 		// Row 3: default value.
 		if (f.isArray)
-			ImGui::TextDisabled("Default: empty array");
+		{
+			ImGui::TextDisabled("Default elements");
+			if (HcEditorUtil::drawArraySlotsEditor(f.defaultValue.items, f.type, f.typeName))
+				st.dirty = true;
+		}
 		else if (f.type == PinType::Struct)
 			ImGui::TextDisabled("Default: the struct's own field defaults");
 		else

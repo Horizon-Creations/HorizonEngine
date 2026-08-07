@@ -642,7 +642,21 @@ void bootstrapUserTypes()
 	std::function<std::string(const HorizonCode::Value&)> lit =
 		[&](const HorizonCode::Value& v) -> std::string {
 		using P = HorizonCode::PinType;
-		if (v.isArray) return "[]";
+		if (v.isArray)
+		{
+			// The authored slots (see the Lua twin in ScriptContext.cpp — the
+			// two generators MUST agree on what a fresh struct looks like).
+			if (v.items.empty()) return "[]";
+			std::string t = "[";
+			for (size_t i = 0; i < v.items.size(); ++i)
+			{
+				if (i) t += ",";
+				HorizonCode::Value item = v.items[i];
+				item.isArray = false;
+				t += lit(item);
+			}
+			return t + "]";
+		}
 		switch (v.type)
 		{
 		case P::Bool:   return v.b ? "True" : "False";

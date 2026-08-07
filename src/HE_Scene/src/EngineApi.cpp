@@ -569,7 +569,27 @@ std::vector<Value> seedFields(const HE::StructDef& schema)
     {
         if (f.isArray)
         {
+            // Authored slots seed the array (mirrors TypeRegistry::fieldDefault —
+            // the two MUST agree: same template, same starting values).
             Value v; v.isArray = true; v.type = f.type; v.typeName = f.typeName;
+            v.items = f.defaultValue.items;
+            for (Value& it : v.items)
+            {
+                it.isArray = false; it.type = f.type; it.typeName = f.typeName;
+                if (f.type == P::Enum)
+                {
+                    HE::EnumDef ed;
+                    const std::string entry = it.s;
+                    it.i = 0;
+                    if (reg.getEnum(f.typeName, ed))
+                    {
+                        if (const HE::EnumEntry* e = ed.findEntry(entry)) it.i = e->value;
+                        else if (!ed.entries.empty())                     it.i = ed.entries.front().value;
+                    }
+                }
+                else if (f.type == P::Struct)
+                    it = reg.makeDefaultValue(f.typeName);
+            }
             out.push_back(std::move(v));
         }
         else if (f.type == P::Struct)

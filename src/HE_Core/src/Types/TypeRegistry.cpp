@@ -232,8 +232,31 @@ Value fieldDefault(const TypeRegistry& reg, const StructField& f,
 {
     if (f.isArray)
     {
-        // Arrays start empty (documented contract).
+        // The authored slots seed the array; no slots = an empty one.
         Value v; v.type = f.type; v.isArray = true; v.typeName = f.typeName;
+        v.items = f.defaultValue.items;
+        for (Value& it : v.items)
+        {
+            it.isArray = false;
+            it.type = f.type;
+            it.typeName = f.typeName;
+            if (f.type == PinType::Enum)
+            {
+                // Slots persist the entry NAME; resolve it like everywhere else.
+                EnumDef ed;
+                const std::string entry = it.s;
+                it.i = 0;
+                if (reg.getEnum(f.typeName, ed))
+                {
+                    if (const EnumEntry* e = ed.findEntry(entry)) it.i = e->value;
+                    else if (!ed.entries.empty())                 it.i = ed.entries.front().value;
+                }
+            }
+            else if (f.type == PinType::Struct)
+            {
+                it = reg.makeDefaultValue(f.typeName);   // elements use their own defaults
+            }
+        }
         return v;
     }
     switch (f.type)
@@ -376,7 +399,26 @@ std::string TypeRegistry::structToJson(const StructDef& def)
                  { "type", static_cast<int>(f.type) },
                  { "isArray", f.isArray },
                  { "typeName", f.typeName } };
-        if (!f.isArray && f.type != PinType::Struct)
+        if (f.isArray)
+        {
+            // Authored starting elements. Each slot uses the SCALAR encoding of
+            // the element type (enum = entry name); struct elements carry no
+            // slot payload — they seed from their own definition.
+            if (f.type != PinType::Struct && !f.defaultValue.items.empty())
+            {
+                json arr = json::array();
+                StructField elem = f; elem.isArray = false;
+                for (const Value& it : f.defaultValue.items)
+                {
+                    elem.defaultValue = it;
+                    elem.defaultValue.type = f.type;
+                    json d = defaultToJson(elem);
+                    if (!d.is_null()) arr.push_back(std::move(d));
+                }
+                if (!arr.empty()) jf["default"] = std::move(arr);
+            }
+        }
+        else if (f.type != PinType::Struct)
         {
             json d = defaultToJson(f);
             if (!d.is_null()) jf["default"] = std::move(d);
@@ -401,9 +443,32 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
             f.isArray  = e.value("isArray", false);
             f.typeName = e.value("typeName", std::string{});
             if (auto d = e.find("default"); d != e.end())
-                defaultFromJson(*d, f);
+            {
+                if (f.isArray)
+                {
+                    f.defaultValue = {};
+                    f.defaultValue.isArray = true;
+                    f.defaultValue.type = f.type;
+                    f.defaultValue.typeName = f.typeName;
+                    if (d->is_array())
+                        for (const json& slot : *d)
+                        {
+                            StructField elem = f; elem.isArray = false; elem.defaultValue = {};
+                            defaultFromJson(slot, elem);
+                            elem.defaultValue.isArray = false;
+                            f.defaultValue.items.push_back(std::move(elem.defaultValue));
+                        }
+                }
+                else
+                {
+                    defaultFromJson(*d, f);
+                }
+            }
             else
+            {
                 f.defaultValue.type = f.type;
+                f.defaultValue.isArray = f.isArray;
+            }
             if (!f.name.empty()) out.fields.push_back(std::move(f));
         }
     return true;

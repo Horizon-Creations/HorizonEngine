@@ -87,7 +87,24 @@ std::string fieldCppType(const StructField& f, const NameTable& nt)
 std::string fieldInitializer(const StructField& f, const NameTable& nt,
                              const TypeRegistry& reg)
 {
-    if (f.isArray) return {};                        // vectors start empty
+    if (f.isArray)
+    {
+        // Authored starting elements become a brace-init; no slots = empty.
+        if (f.defaultValue.items.empty()) return {};
+        std::string init = " = { ";
+        for (size_t i = 0; i < f.defaultValue.items.size(); ++i)
+        {
+            if (i) init += ", ";
+            StructField elem = f;
+            elem.isArray = false;
+            elem.defaultValue = f.defaultValue.items[i];
+            elem.defaultValue.type = f.type;
+            const std::string one = fieldInitializer(elem, nt, reg);
+            // fieldInitializer yields " = <expr>"; strip the assignment.
+            init += one.size() > 3 ? one.substr(3) : std::string("{}");
+        }
+        return init + " }";
+    }
     const Value& v = f.defaultValue;
     switch (f.type)
     {

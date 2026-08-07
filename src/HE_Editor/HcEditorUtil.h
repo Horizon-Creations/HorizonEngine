@@ -6,7 +6,7 @@
 
 class ContentManager;
 namespace HorizonCode { enum class PinType : std::uint8_t; enum class NodeType : std::uint8_t;
-                        struct Graph; struct Node; struct Variable; }
+                        struct Graph; struct Node; struct Variable; struct Value; }
 namespace HE::api { struct ApiFn; }
 
 // Small editor helper: enumerate the project's assets of a given type (for the
@@ -143,6 +143,14 @@ namespace HcEditorUtil
 	// with the element type's editor (drag-float, checkbox, color swatch, …).
 	// Returns true when anything changed (the caller commits for undo).
 	bool drawArrayDefaultEditor(HorizonCode::Variable& v);
+
+	// The slot list behind it, reusable wherever an array default is authored
+	// (an array VARIABLE's seed, a struct FIELD's seed). The list has no fixed
+	// length — slots are added/removed here, and Array Append/Insert/Remove do
+	// the same at runtime. Enum slots persist the entry NAME; struct slots seed
+	// from their own definition and are therefore read-only here.
+	bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
+	                          HorizonCode::PinType elemType, const std::string& elemTypeName);
 
 	// Default editor for a STRUCT variable: one row per field of its definition,
 	// each overridable PER GRAPH (Variable::structDefaults, name-keyed). A row

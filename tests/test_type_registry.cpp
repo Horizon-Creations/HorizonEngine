@@ -80,6 +80,66 @@ TEST_CASE("TypeRegistry: struct JSON round-trips typed fields and defaults")
     CHECK(back.findField("mp") == nullptr);
 }
 
+TEST_CASE("TypeRegistry: array fields carry authored default elements")
+{
+    RegistryCleanup cleanup;
+    cleanup.paths = { "Content/A/Weapon.hasset", "Content/A/Loadout.hasset" };
+    auto& reg = TypeRegistry::instance();
+
+    EnumDef weapon;
+    weapon.name = "Weapon"; weapon.assetPath = "Content/A/Weapon.hasset";
+    weapon.entries = { { "Sword", 0 }, { "Bow", 7 } };
+    reg.registerEnum(weapon);
+
+    StructDef def;
+    def.name = "Loadout"; def.assetPath = "Content/A/Loadout.hasset";
+    {
+        StructField tags; tags.name = "tags"; tags.type = PinType::String; tags.isArray = true;
+        tags.defaultValue.isArray = true; tags.defaultValue.type = PinType::String;
+        tags.defaultValue.items = { Value::ofString("starter"), Value::ofString("melee") };
+
+        StructField picks; picks.name = "picks"; picks.type = PinType::Enum; picks.isArray = true;
+        picks.typeName = weapon.assetPath;
+        picks.defaultValue.isArray = true; picks.defaultValue.type = PinType::Enum;
+        // Slots persist the entry NAME, like every other enum default.
+        picks.defaultValue.items = { Value::ofString("Bow"), Value::ofString("Sword") };
+
+        StructField empty; empty.name = "spare"; empty.type = PinType::Float; empty.isArray = true;
+        def.fields = { tags, picks, empty };
+    }
+    reg.registerStruct(def);
+
+    // Seeding: the authored slots arrive, enums resolved to their values.
+    const Value v = reg.makeDefaultValue(def.assetPath);
+    REQUIRE(v.items.size() == 3);
+    REQUIRE(v.items[0].items.size() == 2);
+    CHECK(v.items[0].items[0].s == "starter");
+    CHECK(v.items[0].items[1].s == "melee");
+    REQUIRE(v.items[1].items.size() == 2);
+    CHECK(v.items[1].items[0].i == 7);          // "Bow"
+    CHECK(v.items[1].items[1].i == 0);          // "Sword"
+    CHECK(v.items[2].isArray);
+    CHECK(v.items[2].items.empty());            // no slots authored → still empty
+
+    // The slots survive the definition's own JSON round-trip.
+    StructDef back;
+    REQUIRE(TypeRegistry::structFromJson(TypeRegistry::structToJson(def), back));
+    REQUIRE(back.fields.size() == 3);
+    REQUIRE(back.fields[0].defaultValue.items.size() == 2);
+    CHECK(back.fields[0].defaultValue.items[1].s == "melee");
+    REQUIRE(back.fields[1].defaultValue.items.size() == 2);
+    CHECK(back.fields[1].defaultValue.items[0].s == "Bow");   // still the NAME
+    CHECK(back.fields[2].defaultValue.items.empty());
+
+    // A stale enum slot name degrades to the first entry, never to garbage.
+    StructDef stale = def;
+    stale.fields[1].defaultValue.items = { Value::ofString("Gone") };
+    reg.registerStruct(stale);
+    const Value v2 = reg.makeDefaultValue(def.assetPath);
+    REQUIRE(v2.items[1].items.size() == 1);
+    CHECK(v2.items[1].items[0].i == 0);
+}
+
 TEST_CASE("TypeRegistry: upsert, remove and name collisions")
 {
     RegistryCleanup cleanup;

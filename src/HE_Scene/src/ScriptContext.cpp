@@ -682,7 +682,21 @@ static void registerUserTypes(lua_State* L)
     std::function<std::string(const HorizonCode::Value&)> lit =
         [&](const HorizonCode::Value& v) -> std::string {
         using P = HorizonCode::PinType;
-        if (v.isArray) return "{}";
+        if (v.isArray)
+        {
+            // The authored slots, not an unconditional empty table (the value
+            // arrives already seeded from TypeRegistry::makeDefaultValue).
+            if (v.items.empty()) return "{}";
+            std::string t = "{";
+            for (size_t i = 0; i < v.items.size(); ++i)
+            {
+                if (i) t += ",";
+                HorizonCode::Value item = v.items[i];
+                item.isArray = false;
+                t += lit(item);
+            }
+            return t + "}";
+        }
         switch (v.type)
         {
         case P::Bool:   return v.b ? "true" : "false";

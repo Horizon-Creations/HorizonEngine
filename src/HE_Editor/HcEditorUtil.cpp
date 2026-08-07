@@ -959,23 +959,23 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 	return changed;
 }
 
-bool drawArrayDefaultEditor(HorizonCode::Variable& v)
+bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
+                          HorizonCode::PinType elemType, const std::string& elemTypeName)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
 	bool changed = false;
-	ImGui::SeparatorText("Default");
 	ImGui::TextDisabled("%d element%s seed the array on creation.",
-	                    (int)v.defaultItems.size(), v.defaultItems.size() == 1 ? "" : "s");
+	                    (int)items.size(), items.size() == 1 ? "" : "s");
 	int removeIdx = -1;
-	for (size_t i = 0; i < v.defaultItems.size(); ++i)
+	for (size_t i = 0; i < items.size(); ++i)
 	{
-		V& it = v.defaultItems[i];
+		V& it = items[i];
 		ImGui::PushID((int)i);
 		ImGui::Text("%d", (int)i);
 		ImGui::SameLine(28.0f);
 		// Leave room for the remove button on the right.
 		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0f);
-		switch (v.type)
+		switch (elemType)
 		{
 			case P::Float:  if (ImGui::DragFloat("##el", &it.f, 0.1f)) changed = true; break;
 			case P::Int:  { int tmp = it.i; if (ImGui::DragInt("##el", &tmp)) { it.i = tmp; changed = true; } break; }
@@ -989,6 +989,23 @@ bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 				if (ImGui::DragFloat3("Rot##el", &it.trot.x, 0.5f))  changed = true;
 				if (ImGui::DragFloat3("Scl##el", &it.tscl.x, 0.05f)) changed = true;
 				break;
+			case P::Enum:
+			{
+				// Slots persist the entry NAME, like every other enum default.
+				HE::EnumDef ed;
+				if (!HE::TypeRegistry::instance().getEnum(elemTypeName, ed) || ed.entries.empty())
+				{ ImGui::TextDisabled("(no enum definition)"); break; }
+				const std::string cur = it.s.empty() ? ed.entries.front().name : it.s;
+				if (ImGui::BeginCombo("##el", cur.c_str()))
+				{
+					for (const auto& en : ed.entries)
+						if (ImGui::Selectable(en.name.c_str(), en.name == cur))
+						{ it.s = en.name; changed = true; }
+					ImGui::EndCombo();
+				}
+				break;
+			}
+			case P::Struct: ImGui::TextDisabled("(struct — seeds from its own defaults)"); break;
 			case P::Ref:    ImGui::TextDisabled("(object — resolved at runtime)"); break;
 			default: break;
 		}
@@ -998,16 +1015,24 @@ bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 	}
 	if (removeIdx >= 0)
 	{
-		v.defaultItems.erase(v.defaultItems.begin() + removeIdx);
+		items.erase(items.begin() + removeIdx);
 		changed = true;
 	}
+	// The list has no fixed length: slots are added and removed freely here, and
+	// at runtime Array Append/Insert/Remove grow and shrink it the same way.
 	if (ImGui::Button("+ Add Slot"))
 	{
-		V nv; nv.type = v.type;   // Value defaults are the per-type zeros (scale 1)
-		v.defaultItems.push_back(std::move(nv));
+		V nv; nv.type = elemType; nv.typeName = elemTypeName;  // per-type zeros (scale 1)
+		items.push_back(std::move(nv));
 		changed = true;
 	}
 	return changed;
+}
+
+bool drawArrayDefaultEditor(HorizonCode::Variable& v)
+{
+	ImGui::SeparatorText("Default");
+	return drawArraySlotsEditor(v.defaultItems, v.type, v.typeName);
 }
 
 namespace

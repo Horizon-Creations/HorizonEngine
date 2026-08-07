@@ -416,7 +416,14 @@ TEST_CASE("ScriptContext: horizon.enums constants + horizon.structs constructors
         hp.defaultValue = HorizonCode::Value::ofFloat(100.0f);
         HE::StructField w; w.name = "weapon"; w.type = HorizonCode::PinType::Enum;
         w.typeName = weapon.assetPath; w.defaultValue.s = "Bow";
-        stats.fields = { hp, w };
+        // An array field with AUTHORED slots — they must reach the constructor.
+        HE::StructField tags; tags.name = "tags"; tags.type = HorizonCode::PinType::String;
+        tags.isArray = true;
+        tags.defaultValue.isArray = true;
+        tags.defaultValue.type = HorizonCode::PinType::String;
+        tags.defaultValue.items = { HorizonCode::Value::ofString("starter"),
+                                    HorizonCode::Value::ofString("melee") };
+        stats.fields = { hp, w, tags };
     }
     reg.registerStruct(stats);
 
@@ -430,15 +437,28 @@ TEST_CASE("ScriptContext: horizon.enums constants + horizon.structs constructors
             "_G._hp = s.hp\n"
             "_G._w  = s.weapon\n"
             "_G._t  = s.__type == \"Content/T/PlayerStats.hasset\" and 1 or 0\n"
+            // Array fields arrive with their authored slots, as a 1-based list.
+            "_G._n    = #s.tags\n"
+            "_G._tag1 = s.tags[1] == \"starter\" and 1 or 0\n"
+            "_G._tag2 = s.tags[2] == \"melee\" and 1 or 0\n"
+            // …and the list is not fixed-length: it grows like any Lua table.
+            "table.insert(s.tags, \"extra\")\n"
+            "_G._grown = #s.tags\n"
             // A second construction is a FRESH table (no shared default state).
             "local s2 = horizon.structs.PlayerStats()\n"
             "s2.hp = 1\n"
-            "_G._fresh = horizon.structs.PlayerStats().hp\n"));
+            "_G._fresh = horizon.structs.PlayerStats().hp\n"
+            "_G._freshN = #horizon.structs.PlayerStats().tags\n"));
         CHECK(engine.getGlobalNumber("_bow") == doctest::Approx(7.0));
         CHECK(engine.getGlobalNumber("_hp") == doctest::Approx(100.0));
         CHECK(engine.getGlobalNumber("_w") == doctest::Approx(7.0));
         CHECK(engine.getGlobalNumber("_t") == doctest::Approx(1.0));
         CHECK(engine.getGlobalNumber("_fresh") == doctest::Approx(100.0));
+        CHECK(engine.getGlobalNumber("_n") == doctest::Approx(2.0));
+        CHECK(engine.getGlobalNumber("_tag1") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_tag2") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_grown") == doctest::Approx(3.0));
+        CHECK(engine.getGlobalNumber("_freshN") == doctest::Approx(2.0));   // untouched by the grow
     }
 
     reg.removeType(weapon.assetPath);
