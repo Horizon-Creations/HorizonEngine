@@ -3462,9 +3462,12 @@ vergisst, bricht die Maschine still.
   `VulkanRenderer.cpp`, `D3D11Renderer.cpp` und `D3D12Renderer.cpp` **null-mal** — obwohl es eine
   `DecalComponent` gibt. Einschusslöcher, Blutspritzer, Reifenspuren, Pfützen fehlen also auf vier
   von fünf Backends. Das gehört sachlich in Block A, ist dort aber bisher nicht gelistet.
-- **SSR faktisch Metal-only** (Metal 212 Treffer, D3D11 20, GL 7, D3D12 1, Vulkan 0). Forts. 93 hat
-  GL ray-traced *GI*-Reflections gegeben — das ist ein anderes Feature und ersetzt Screen-Space-
-  Reflections nicht auf D3D/Vulkan.
+- **SSR ausschließlich auf Metal.** Wortgenau gezählt (`\bSSR|\bssr`, ohne die `…SRV`-Fehltreffer,
+  die eine case-insensitive Suche hier massenhaft produziert): Metal 68 echte Treffer, GL 5, D3D11 1,
+  D3D12 1, Vulkan 0 — und die 5 GL-Treffer sind alle Kommentare, einer davon sagt es wörtlich:
+  *„GL has no SSR pass, and heLight.ssr.x = 0 keeps that branch dead"* (`OpenGLRenderer.cpp:4415`).
+  D3D11/D3D12 haben je genau eine Kommentarzeile, die auf `docs/ssr-plan.md` verweist. Forts. 93 hat
+  GL ray-traced *GI*-Reflections gegeben — ein anderes Feature, das SSR nirgends ersetzt.
 - Für Geschwindigkeitsgefühl fehlen Camera-Motion-Blur und Radial-/Speed-Blur als Engine-Features.
 
 ### E7 — Keine Zeitsteuerung 🔴 (~0,5 PT)
