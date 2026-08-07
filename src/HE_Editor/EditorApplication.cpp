@@ -19,6 +19,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/DefaultAssets.h>
+#include <Types/TypeRegistry.h>    // project-open refresh of struct/enum defs
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
 #include <glm/gtc/quaternion.hpp>
@@ -1142,6 +1143,17 @@ void EditorApplication::OnInit()
 			const size_t indexed = contentManager().scanContentDirectory();
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: indexed " + std::to_string(indexed) + " content assets").c_str());
+
+			// Struct/Enum definitions feed type dropdowns, script constants and
+			// savegame templates — refresh the process-global registry eagerly so
+			// they are complete before anything runs. Cleared first: a previously
+			// opened project's types must not bleed into this one.
+			HE::TypeRegistry::instance().clear();
+			const size_t types = HE::TypeRegistry::refreshFromContent(contentManager());
+			if (types)
+				HE_LOG_INFO(Editor, "%s",
+					("EditorApplication: registered " + std::to_string(types) +
+					 " user type definitions").c_str());
 		}
 
 		// Load this project's app-wide GameInstance script (referenceable from

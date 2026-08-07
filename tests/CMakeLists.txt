@@ -39,6 +39,7 @@ add_executable(he_tests
     test_scripting.cpp
     test_scripting_binding.cpp
     test_engine_api.cpp
+    test_type_registry.cpp
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp

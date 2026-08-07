@@ -10,6 +10,7 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
+#include "TypeAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -549,6 +550,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       UIEditorPanel::isDirty(assetPath)            ||
 	       HorizonCodeClassPanel::isDirty(assetPath)    ||
 	       InputAssetPanel::isDirty(assetPath)          ||
+	       TypeAssetPanel::isDirty(assetPath)           ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath);
 }
@@ -567,6 +569,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	UIEditorPanel::appendDirtyPaths(out);
 	HorizonCodeClassPanel::appendDirtyPaths(out);
 	InputAssetPanel::appendDirtyPaths(out);
+	TypeAssetPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	std::sort(out.begin(), out.end());
@@ -589,6 +592,7 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = UIEditorPanel::save(ctx, assetPath)                         && ok;
 	ok = HorizonCodeClassPanel::save(ctx, assetPath)                 && ok;
 	ok = InputAssetPanel::save(ctx, assetPath)                       && ok;
+	ok = TypeAssetPanel::save(ctx, assetPath)                        && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
@@ -623,6 +627,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = UIEditorPanel::reloadFromDisk(assetPath)                        || any;
 	any = HorizonCodeClassPanel::reloadFromDisk(assetPath)                || any;
 	any = InputAssetPanel::reloadFromDisk(assetPath)                      || any;
+	any = TypeAssetPanel::reloadFromDisk(assetPath)                       || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
@@ -1691,6 +1696,7 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
                 UIEditorPanel::forget(t.assetPath);
                 HorizonCodeClassPanel::forget(t.assetPath);
                 InputAssetPanel::forget(t.assetPath);
+                TypeAssetPanel::forget(t.assetPath);
                 ParticleGraphEditorPanel::forget(t.assetPath);
                 AnimatorStateMachineEditorPanel::forget(t.assetPath);
                 StaticMeshEditorPanel::forget(t.assetPath);      // view-only, never dirty
@@ -1867,6 +1873,8 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
             HorizonCodeClassPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (InputAssetPanel::isInputAsset(tabPath))
             InputAssetPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (TypeAssetPanel::isTypeAsset(tabPath))
+            TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))
             SkeletalMeshEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (StaticMeshEditorPanel::isStaticMeshAsset(tabPath))

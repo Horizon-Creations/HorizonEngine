@@ -110,6 +110,10 @@ inline constexpr uint32_t CHUNK_PPSD = makeChunkId('P','P','S','D'); // precompi
 // Animator State Machine
 inline constexpr uint32_t CHUNK_ASMG = makeChunkId('A','S','M','G'); // states/transitions/params graph (JSON)
 
+// User-defined types (HE::TypeRegistry round-trips the JSON)
+inline constexpr uint32_t CHUNK_STDF = makeChunkId('S','T','D','F'); // struct definition (JSON)
+inline constexpr uint32_t CHUNK_ENDF = makeChunkId('E','N','D','F'); // enum definition (JSON)
+
 // Font
 inline constexpr uint32_t CHUNK_FNTD = makeChunkId('F','N','T','D'); // raw font bytes
 inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font meta (size)

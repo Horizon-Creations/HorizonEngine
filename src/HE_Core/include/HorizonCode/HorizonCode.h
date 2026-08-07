@@ -22,9 +22,12 @@
 namespace HorizonCode {
 
 // Ref = a reference/handle to another running script instance (a Runtime
-// InstanceId). Transform = a position/rotation(euler)/scale bundle. Appended last
-// so existing serialized propType ints stay stable.
-enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform };
+// InstanceId). Transform = a position/rotation(euler)/scale bundle. Enum/Struct
+// = user-defined types from HE::TypeRegistry — a pin/value of these types names
+// its definition asset in `typeName`. Appended last so existing serialized
+// propType ints stay stable.
+enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform,
+                               Enum, Struct };
 
 struct Value
 {
@@ -42,6 +45,13 @@ struct Value
     // elements (each a scalar Value of `type`). An array is never scalar-coerced.
     bool               isArray = false;
     std::vector<Value> items;
+    // User-defined types (type == Enum/Struct): the definition asset's
+    // project-relative path (HE::TypeRegistry key). Enum values ride in `i`;
+    // a scalar Struct value holds its field values in `items` in DEFINITION
+    // ORDER (resolved against the def via typeName — never keyed by position in
+    // persisted JSON, see TypeRegistry). An array of structs nests normally:
+    // isArray + items = struct elements.
+    std::string        typeName;
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }

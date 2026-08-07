@@ -9,11 +9,13 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include <nlohmann/json.hpp>             // parse the pak's __asset_index__
+#include <Types/TypeRegistry.h>          // struct/enum defs mirror into the registry on load
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <unordered_set>
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -346,6 +348,34 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ASMG))
 			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_animatorStateMachineAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::StructType:
+	{
+		StructTypeAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_STDF))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		// Side effect: the TypeRegistry mirrors every loaded definition, so lazy
+		// pak loads keep it fresh too (same for EnumType below).
+		{
+			HE::StructDef def;
+			def.name = assetName; def.assetPath = relativePath;
+			if (HE::TypeRegistry::structFromJson(a.json, def))
+				HE::TypeRegistry::instance().registerStruct(std::move(def));
+		}
+		handle = m_structTypeAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::EnumType:
+	{
+		EnumTypeAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ENDF))
+			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		{
+			HE::EnumDef def;
+			def.name = assetName; def.assetPath = relativePath;
+			if (HE::TypeRegistry::enumFromJson(a.json, def))
+				HE::TypeRegistry::instance().registerEnum(std::move(def));
+		}
+		handle = m_enumTypeAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Audio:
 	{
@@ -1274,6 +1304,20 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		w.addChunk(HAsset::CHUNK_ASMG, a.graphJson.data(), a.graphJson.size());
 		break;
 	}
+	case HE::AssetType::StructType:
+	{
+		auto& a = static_cast<StructTypeAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_STDF, a.json.data(), a.json.size());
+		break;
+	}
+	case HE::AssetType::EnumType:
+	{
+		auto& a = static_cast<EnumTypeAsset&>(asset);
+		if (!a.json.empty())
+			w.addChunk(HAsset::CHUNK_ENDF, a.json.data(), a.json.size());
+		break;
+	}
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
@@ -1445,6 +1489,10 @@ const ShaderAsset*        ContentManager::getShader(HE::UUID id) const        { 
 const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { return lookupAsset(m_handleToUUID, m_prefabAssets, id); }
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
+const StructTypeAsset*    ContentManager::getStructType(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_structTypeAssets, id); }
+StructTypeAsset*          ContentManager::getStructTypeMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_structTypeAssets, id); }
+const EnumTypeAsset*      ContentManager::getEnumType(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_enumTypeAssets, id); }
+EnumTypeAsset*            ContentManager::getEnumTypeMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_enumTypeAssets, id); }
 MaterialAsset*            ContentManager::getMaterialMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_materialAssets, id); }
 
 bool ContentManager::setMaterialParam(HE::UUID id, const std::string& name,
@@ -1534,6 +1582,8 @@ HE::UUID ContentManager::registerParticleGraph(ParticleGraphAsset asset) { retur
 HE::UUID ContentManager::registerAnimatorStateMachine(AnimatorStateMachineAsset asset) { return registerRuntimeAsset(m_animatorStateMachineAssets, std::move(asset), HE::AssetType::AnimatorStateMachine); }
 HE::UUID ContentManager::registerAnimationClip(AnimationClipAsset asset)       { return registerRuntimeAsset(m_animClipAssets,     std::move(asset), HE::AssetType::AnimationClip);     }
 HE::UUID ContentManager::registerPropertyAnimClip(PropertyAnimClipAsset asset) { return registerRuntimeAsset(m_propAnimClipAssets, std::move(asset), HE::AssetType::PropertyAnimClip); }
+HE::UUID ContentManager::registerStructType(StructTypeAsset asset) { return registerRuntimeAsset(m_structTypeAssets, std::move(asset), HE::AssetType::StructType); }
+HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
@@ -1632,6 +1682,31 @@ std::vector<HE::UUID> ContentManager::enumerateIds(HE::AssetType type) const
 	for (const auto& [id, t] : m_assetTypeIndex)
 		if (t == type)
 			out.push_back(id);
+	return out;
+}
+
+std::vector<HE::UUID> ContentManager::discoverAssets(HE::AssetType type)
+{
+	std::vector<HE::UUID>        out = enumerateIds(type);
+	std::unordered_set<HE::UUID> seen(out.begin(), out.end());
+
+	const std::string root = contentRoot();
+	std::error_code ec;
+	if (root.empty() || !std::filesystem::is_directory(root, ec)) return out;
+
+	std::filesystem::recursive_directory_iterator it(root, ec), end;
+	for (; it != end; it.increment(ec))
+	{
+		if (ec) break;
+		if (!it->is_regular_file(ec) || it->path().extension() != ".hasset") continue;
+		HAsset::Reader r;
+		if (!r.open(it->path().string()) ||
+		    r.assetType() != static_cast<uint16_t>(type)) continue;
+		const std::string rel =
+			std::filesystem::relative(it->path(), root, ec).generic_string();
+		const HE::UUID id = loadAsset(rel);
+		if (!(id == HE::UUID{}) && seen.insert(id).second) out.push_back(id);
+	}
 	return out;
 }
 

@@ -10,6 +10,7 @@
 #include "UIEditorPanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "InputAssetPanel.h"
+#include "TypeAssetPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -485,6 +486,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				case HE::AssetType::InputMappingContext: return { I.inputMappingContext,  {0.60f, 0.82f, 0.96f, 1.0f} };
 				case HE::AssetType::Audio:               return { I.sound,                {0.60f, 0.90f, 0.90f, 1.0f} };
 				case HE::AssetType::Font:                return { I.font,                 {0.92f, 0.88f, 0.80f, 1.0f} };
+				// User-defined types share the HC-class glyph, tinted apart until
+				// they earn their own .tga.
+				case HE::AssetType::StructType:          return { I.horizonCodeClass,     {0.60f, 0.95f, 0.80f, 1.0f} };
+				case HE::AssetType::EnumType:            return { I.horizonCodeClass,     {0.80f, 0.95f, 0.60f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -850,6 +855,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				         UIEditorPanel::isWidgetAsset(file->fullPath) ||
 				         HorizonCodeClassPanel::isClassAsset(file->fullPath) ||
 				         InputAssetPanel::isInputAsset(file->fullPath) ||
+				         TypeAssetPanel::isTypeAsset(file->fullPath) ||
 				         SkeletalMeshEditorPanel::isSkeletalMeshAsset(file->fullPath) ||
 				         StaticMeshEditorPanel::isStaticMeshAsset(file->fullPath) ||
 				         ParticleGraphEditorPanel::isParticleAsset(file->fullPath) ||
@@ -1033,6 +1039,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						const char* json = "{\"entries\":[]}";
 						w.addChunk(HAsset::CHUNK_IMAP, json, std::strlen(json));
 					}
+					// Type-definition assets are born with valid empty JSON so the
+					// TypeAssetPanel and the TypeRegistry never see an empty payload.
+					if (type == HE::AssetType::StructType)
+					{
+						const char* json = "{\"fields\":[]}";
+						w.addChunk(HAsset::CHUNK_STDF, json, std::strlen(json));
+					}
+					if (type == HE::AssetType::EnumType)
+					{
+						const char* json = "{\"entries\":[]}";
+						w.addChunk(HAsset::CHUNK_ENDF, json, std::strlen(json));
+					}
 					w.write(path, static_cast<uint16_t>(type));
 				}
 				// A path that was probed while it was still free (or held a deleted
@@ -1064,6 +1082,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
 			if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
 			if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
+			// Type definitions are language-neutral (savegame templates, script
+			// constants, C++ codegen all consume them) — offered in every project.
+			if (ImGui::MenuItem("Struct"))       tryCreate("NewStruct",    ".hasset",  HE::AssetType::StructType);
+			if (ImGui::MenuItem("Enum"))         tryCreate("NewEnum",      ".hasset",  HE::AssetType::EnumType);
 			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
 			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
 			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);

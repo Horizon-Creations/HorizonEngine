@@ -75,6 +75,10 @@ public:
 	const PrefabAsset*         getPrefab(HE::UUID id) const;
 	const AnimationClipAsset*  getAnimationClip(HE::UUID id) const;
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
+	const StructTypeAsset*     getStructType(HE::UUID id) const;
+	StructTypeAsset*           getStructTypeMutable(HE::UUID id);
+	const EnumTypeAsset*       getEnumType(HE::UUID id) const;
+	EnumTypeAsset*             getEnumTypeMutable(HE::UUID id);
 
 	// ── Dual-mode reference resolution (used by the renderer backends) ─────────
 	// Resolve an asset→asset reference that carries a pack-time baked UUID and/or
@@ -142,6 +146,8 @@ public:
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
+	HE::UUID registerStructType(StructTypeAsset asset);
+	HE::UUID registerEnumType(EnumTypeAsset asset);
 
 	// Replace a registered asset's payload in place, keeping its UUID so existing
 	// references stay valid (e.g. regenerating a procedural terrain mesh after a
@@ -338,6 +344,10 @@ public:
 	std::vector<HE::UUID> enumerateIds() const;
 	// Returns only UUIDs of assets of the given type.
 	std::vector<HE::UUID> enumerateIds(HE::AssetType type) const;
+	// enumerateIds(type) plus a loose-content walk (header sniff → loadAsset):
+	// every asset of `type` the manager can currently discover. The walk covers
+	// the editor and dev builds; pak-only assets are found once registered.
+	std::vector<HE::UUID> discoverAssets(HE::AssetType type);
 	// Total number of loaded/registered assets (all types).
 	size_t assetCount() const { return m_handleToUUID.size(); }
 	// Returns the AssetType for a loaded/registered UUID, or Unknown if not found.
@@ -436,6 +446,8 @@ private:
 	SlotMap<PrefabAsset>        m_prefabAssets;
 	SlotMap<AnimationClipAsset>      m_animClipAssets;
 	SlotMap<PropertyAnimClipAsset>   m_propAnimClipAssets;
+	SlotMap<StructTypeAsset>         m_structTypeAssets;
+	SlotMap<EnumTypeAsset>           m_enumTypeAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {

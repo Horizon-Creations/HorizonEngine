@@ -308,6 +308,19 @@ struct InputMappingContextAsset : public RuntimeAsset
 	std::string json;
 };
 
+// User-defined struct / enum type definitions (see HE::TypeRegistry). The JSON
+// is the CHUNK_STDF / CHUNK_ENDF payload; loading one of these registers the
+// parsed definition in the TypeRegistry as a side effect.
+struct StructTypeAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
+struct EnumTypeAsset : public RuntimeAsset
+{
+	std::string json;
+};
+
 struct SceneAsset : public RuntimeAsset
 {
 	std::vector<std::string> objectPaths;

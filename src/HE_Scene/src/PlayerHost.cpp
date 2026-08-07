@@ -12,33 +12,12 @@
 
 namespace
 {
-// Load every asset of `type` the manager can currently discover and return the
-// UUIDs: already-registered assets plus a loose-content walk (header sniff →
-// loadAsset). The walk covers the editor and dev builds; pak-only assets are
-// found only once registered (see the header's known limitation).
+// Every asset of `type` the manager can currently discover — moved into
+// ContentManager::discoverAssets (the TypeRegistry refresh shares it); this
+// thin wrapper keeps the call sites below unchanged.
 std::vector<HE::UUID> discoverAssets(ContentManager& cm, HE::AssetType type)
 {
-	std::vector<HE::UUID>        out = cm.enumerateIds(type);
-	std::unordered_set<HE::UUID> seen(out.begin(), out.end());
-
-	const std::string root = cm.contentRoot();
-	std::error_code ec;
-	if (root.empty() || !std::filesystem::is_directory(root, ec)) return out;
-
-	std::filesystem::recursive_directory_iterator it(root, ec), end;
-	for (; it != end; it.increment(ec))
-	{
-		if (ec) break;
-		if (!it->is_regular_file(ec) || it->path().extension() != ".hasset") continue;
-		HAsset::Reader r;
-		if (!r.open(it->path().string()) ||
-		    r.assetType() != static_cast<uint16_t>(type)) continue;
-		const std::string rel =
-			std::filesystem::relative(it->path(), root, ec).generic_string();
-		const HE::UUID id = cm.loadAsset(rel);
-		if (!(id == HE::UUID{}) && seen.insert(id).second) out.push_back(id);
-	}
-	return out;
+	return cm.discoverAssets(type);
 }
 } // namespace
 
