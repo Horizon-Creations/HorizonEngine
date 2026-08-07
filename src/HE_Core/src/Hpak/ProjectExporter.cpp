@@ -1,4 +1,6 @@
 #include <Hpak/ProjectExporter.h>
+#include <ContentManager/HAsset.h>   // type-index sniff
+#include <Types/Enums.h>
 #include <cstdint>
 #include <Hpak/ProjectConfig.h>
 #include <HorizonCode/HcCompiledLoader.h>   // compiledLibraryName (artifact naming)
@@ -590,6 +592,43 @@ static void addAssetPathIndex(HpakWriter& packer, const ExportContext& ctx)
     }
 }
 
+// Phase 3c: the pak's user-type index — the paths of every packed Struct/Enum
+// definition asset, so the game can load them eagerly before the script
+// backends bootstrap (see kTypeIndexEntry). A header sniff per packed .hasset;
+// definitions are rare and tiny, the sniff is bounded by the pack set.
+static void addTypeIndex(HpakWriter& packer, const ExportContext& ctx,
+                         const std::vector<HpakWriter::SourceRoot>& roots)
+{
+    nlohmann::json idx = nlohmann::json::array();
+    std::error_code ec;
+    for (const auto& [relPath, id] : packer.packedPaths())
+    {
+        (void)id;
+        for (const auto& root : roots)
+        {
+            // Undo the root's pak prefix to find the file on disk.
+            std::string local = relPath;
+            if (!root.pathPrefix.empty())
+            {
+                if (relPath.rfind(root.pathPrefix, 0) != 0) continue;
+                local = relPath.substr(root.pathPrefix.size());
+            }
+            const std::filesystem::path p = root.dir / local;
+            if (!std::filesystem::is_regular_file(p, ec)) continue;
+            HAsset::Reader r;
+            if (r.open(p.string()) &&
+                (r.assetType() == static_cast<uint16_t>(HE::AssetType::StructType) ||
+                 r.assetType() == static_cast<uint16_t>(HE::AssetType::EnumType)))
+                idx.push_back(relPath);
+            break;
+        }
+    }
+    if (idx.empty()) return;
+    const std::string s = idx.dump();
+    packer.addEntry(sceneUuidForPath(kTypeIndexEntry),
+                    std::vector<uint8_t>(s.begin(), s.end()), ctx.packSettings);
+}
+
 // Phase 3: pack the content directory (reusing unchanged entries from the previous
 // export when possible), add the scene/index entries, write the .hpak and persist
 // the manifest the NEXT incremental export reads.
@@ -639,6 +678,7 @@ static std::optional<ExportResult> packContent(
 
     addSceneEntries(packer, startupSceneBinary, extraScenes, gameInstanceJson, ctx);
     addAssetPathIndex(packer, ctx);
+    addTypeIndex(packer, ctx, roots);
 
     if (!packer.write(pakPath.string()))
         return ExportResult{false, "Failed to write " + ctx.hpakFilename, 0};

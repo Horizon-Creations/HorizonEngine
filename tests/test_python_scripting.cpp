@@ -6,6 +6,7 @@
 #ifdef HE_HAVE_PYTHON
 
 #include <HorizonScene/PyScriptBackend.h>
+#include <Types/TypeRegistry.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -569,3 +570,51 @@ class F(horizon.Behavior):
 }
 
 #endif // HE_HAVE_PYTHON
+
+TEST_CASE("PyScriptBackend: horizon.enums constants + horizon.structs constructors")
+{
+    // User-defined types bootstrap from the TypeRegistry at backend creation.
+    auto& reg = HE::TypeRegistry::instance();
+    HE::EnumDef weapon;
+    weapon.name = "Weapon"; weapon.assetPath = "Content/T/Weapon.hasset";
+    weapon.entries = { { "Sword", 0 }, { "Bow", 7 } };
+    reg.registerEnum(weapon);
+    HE::StructDef stats;
+    stats.name = "PlayerStats"; stats.assetPath = "Content/T/PlayerStats.hasset";
+    {
+        HE::StructField hp; hp.name = "hp"; hp.type = HorizonCode::PinType::Float;
+        hp.defaultValue = HorizonCode::Value::ofFloat(100.0f);
+        HE::StructField w; w.name = "weapon"; w.type = HorizonCode::PinType::Enum;
+        w.typeName = weapon.assetPath; w.defaultValue.s = "Bow";
+        stats.fields = { hp, w };
+    }
+    reg.registerStruct(stats);
+
+    {
+        HorizonWorld world;
+        PyScriptBackend py(world);
+        // Report through the entity transform (the harness's readback channel):
+        // x = the Bow constant, y = the constructed struct's hp default, z = 1
+        // when __type round-trips.
+        static const char* kSrc = R"(
+import horizon
+class Reporter(horizon.Behavior):
+    def on_start(self):
+        s = horizon.structs.PlayerStats()
+        ok = 1.0 if s["__type"] == "Content/T/PlayerStats.hasset" else 0.0
+        horizon.setPosition(self.entity_id, float(horizon.enums.Weapon.Bow), s["hp"], ok)
+)";
+        REQUIRE(py.loadScript("reporter", kSrc));
+        auto e  = makeEntity(world, "Hero");
+        auto id = py.createInstance("reporter", static_cast<uint32_t>(e));
+        REQUIRE(id != IScriptBackend::kInvalidInstance);
+        REQUIRE(py.callOnStart(id));
+        const auto& t = world.registry().get<TransformComponent>(e);
+        CHECK(t.position.x == doctest::Approx(7.0f));
+        CHECK(t.position.y == doctest::Approx(100.0f));
+        CHECK(t.position.z == doctest::Approx(1.0f));
+    }
+
+    reg.removeType(weapon.assetPath);
+    reg.removeType(stats.assetPath);
+}

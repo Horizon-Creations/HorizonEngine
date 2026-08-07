@@ -28,6 +28,8 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <Types/TypeRegistry.h>      // eager struct/enum registration (type index)
+#include <nlohmann/json.hpp>
 #include <Types/UUID.h>
 #include <algorithm>
 #include <cmath>
@@ -148,6 +150,33 @@ void GameApplication::OnInit()
 	}
 	else
 		HE_LOG_WARN(Core, "%s", ("GameApplication: pak not found: " + pakPath).c_str());
+
+	// User-defined types (Struct/Enum assets): register their definitions in the
+	// process-global TypeRegistry BEFORE anything scripts — the Lua/Python
+	// bootstrap generates horizon.enums/horizon.structs from it, and graph type
+	// pins resolve against it. Packed builds read the exporter's type index
+	// (pak entries are UUID-keyed, on-demand streaming would never "happen to"
+	// touch a definition); loose dev runs walk the content dir.
+	{
+		size_t types = 0;
+		const auto idxBytes = contentManager().readMountedEntry(sceneUuidForPath(kTypeIndexEntry));
+		if (!idxBytes.empty())
+		{
+			const auto idx = nlohmann::json::parse(idxBytes.begin(), idxBytes.end(),
+			                                       nullptr, /*allow_exceptions=*/false);
+			if (idx.is_array())
+				for (const auto& e : idx)
+					if (e.is_string() &&
+					    !(contentManager().loadAsset(e.get<std::string>()) == HE::UUID{}))
+						++types;
+		}
+		else
+			types = HE::TypeRegistry::refreshFromContent(contentManager());
+		if (types)
+			HE_LOG_INFO(Core, "%s",
+				("GameApplication: registered " + std::to_string(types) +
+				 " user type definitions").c_str());
+	}
 
 	// Compiled HorizonCode classes: the export may have translated the project's
 	// graphs to native C++ (HorizonCodeGen library beside the executable). Loaded

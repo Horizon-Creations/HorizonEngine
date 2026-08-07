@@ -149,6 +149,14 @@ inline constexpr const char* kAssetPathIndexEntry = "__asset_index__";
 // the game looks up a UUID the exporter never wrote. "__scene_index__".
 inline constexpr const char* kSceneIndexEntry = "__scene_index__";
 
+// Well-known name (→ sceneUuidForPath UUID) of the pak's TYPE index: a JSON
+// array of every packed Struct/Enum definition asset's project-relative path.
+// The game loads these eagerly at startup — BEFORE the script backends
+// bootstrap — so horizon.enums/horizon.structs and every graph's type pins
+// resolve without waiting for on-demand streaming to happen to touch them.
+// "__type_index__".
+inline constexpr const char* kTypeIndexEntry = "__type_index__";
+
 // Well-known name (→ sceneUuidForPath UUID) of the packed app-wide GameInstance
 // graph (the project's GameInstance.hcode). It drives OnInit → app lifecycle and
 // commonly creates the game's UI, so it MUST ship — packed into the .hpak it

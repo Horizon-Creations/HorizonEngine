@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -396,4 +397,50 @@ TEST_CASE("ScriptContext: setMaterialParam is safe without a ContentManager")
     auto& engine = ctx.engine();
     engine.exec("_ok = horizon.setMaterialParam(1, 'K', 0.5) and 1 or 0");
     CHECK(engine.getGlobalNumber("_ok") == doctest::Approx(0.0)); // false, no crash
+}
+
+TEST_CASE("ScriptContext: horizon.enums constants + horizon.structs constructors (Lua)")
+{
+    // User-defined types bootstrap from the TypeRegistry at context creation:
+    // enum entries become plain int constants, struct constructors return the
+    // boundary-table form (named fields + __type) seeded with the defaults.
+    auto& reg = HE::TypeRegistry::instance();
+    HE::EnumDef weapon;
+    weapon.name = "Weapon"; weapon.assetPath = "Content/T/Weapon.hasset";
+    weapon.entries = { { "Sword", 0 }, { "Bow", 7 } };
+    reg.registerEnum(weapon);
+    HE::StructDef stats;
+    stats.name = "PlayerStats"; stats.assetPath = "Content/T/PlayerStats.hasset";
+    {
+        HE::StructField hp; hp.name = "hp"; hp.type = HorizonCode::PinType::Float;
+        hp.defaultValue = HorizonCode::Value::ofFloat(100.0f);
+        HE::StructField w; w.name = "weapon"; w.type = HorizonCode::PinType::Enum;
+        w.typeName = weapon.assetPath; w.defaultValue.s = "Bow";
+        stats.fields = { hp, w };
+    }
+    reg.registerStruct(stats);
+
+    {
+        HorizonWorld world;
+        ScriptContext ctx(world);
+        auto& engine = ctx.engine();
+        REQUIRE(engine.exec(
+            "_G._bow = horizon.enums.Weapon.Bow\n"
+            "local s = horizon.structs.PlayerStats()\n"
+            "_G._hp = s.hp\n"
+            "_G._w  = s.weapon\n"
+            "_G._t  = s.__type == \"Content/T/PlayerStats.hasset\" and 1 or 0\n"
+            // A second construction is a FRESH table (no shared default state).
+            "local s2 = horizon.structs.PlayerStats()\n"
+            "s2.hp = 1\n"
+            "_G._fresh = horizon.structs.PlayerStats().hp\n"));
+        CHECK(engine.getGlobalNumber("_bow") == doctest::Approx(7.0));
+        CHECK(engine.getGlobalNumber("_hp") == doctest::Approx(100.0));
+        CHECK(engine.getGlobalNumber("_w") == doctest::Approx(7.0));
+        CHECK(engine.getGlobalNumber("_t") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_fresh") == doctest::Approx(100.0));
+    }
+
+    reg.removeType(weapon.assetPath);
+    reg.removeType(stats.assetPath);
 }

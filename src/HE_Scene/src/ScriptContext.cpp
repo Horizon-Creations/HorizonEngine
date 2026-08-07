@@ -1,4 +1,6 @@
 #include "HorizonScene/ScriptContext.h"
+#include <Types/TypeRegistry.h>
+#include <functional>
 #include <cstdint>
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
@@ -394,6 +396,185 @@ static int lua_horizon_hideCursor(lua_State* L)
 // migration, not a cleanup, and is deliberately deferred:
 // docs/rework-2026-07-deferrals.md §1.
 
+// ── Struct values on the Lua boundary ────────────────────────────────────────
+// A struct crosses as a plain table: named fields plus `__type` = the
+// definition asset's path (what horizon.structs.<Name>() constructors emit).
+// Field encodings inside the table: Vec2 = {x, y}, Color = {r, g, b, a},
+// Transform = { pos={x,y,z}, rot={x,y,z}, scl={x,y,z} }, arrays = sequences,
+// nested structs = nested tables. Missing fields keep the definition default;
+// unknown keys are ignored. Depth-capped so a self-referencing table degrades
+// instead of recursing forever.
+static HorizonCode::Value luaToStructValue(lua_State* L, int idx, int depth);
+static void luaPushStructTable(lua_State* L, const HorizonCode::Value& v, int depth);
+
+static void luaPushVec3Table(lua_State* L, const glm::vec3& v)
+{
+    lua_createtable(L, 3, 0);
+    lua_pushnumber(L, v.x); lua_rawseti(L, -2, 1);
+    lua_pushnumber(L, v.y); lua_rawseti(L, -2, 2);
+    lua_pushnumber(L, v.z); lua_rawseti(L, -2, 3);
+}
+static glm::vec3 luaToVec3(lua_State* L, int idx, const glm::vec3& def)
+{
+    glm::vec3 r = def;
+    if (!lua_istable(L, idx)) return r;
+    for (int i = 0; i < 3; ++i)
+    { lua_rawgeti(L, idx, i + 1); if (lua_isnumber(L, -1)) r[i] = (float)lua_tonumber(L, -1); lua_pop(L, 1); }
+    return r;
+}
+
+// Push ONE field value as ONE Lua value (unlike the top-level ABI, which
+// spreads Vec2/Color — inside a table each field is a single slot).
+static void luaPushFieldValue(lua_State* L, const HorizonCode::Value& v, int depth)
+{
+    using P = HorizonCode::PinType;
+    if (v.isArray)
+    {
+        lua_createtable(L, (int)v.items.size(), 0);
+        for (size_t i = 0; i < v.items.size(); ++i)
+        {
+            HorizonCode::Value item = v.items[i];
+            item.isArray = false;
+            luaPushFieldValue(L, item, depth + 1);
+            lua_rawseti(L, -2, (int)i + 1);
+        }
+        return;
+    }
+    switch (v.type)
+    {
+    case P::Bool:   lua_pushboolean(L, v.b); break;
+    case P::Int:    lua_pushinteger(L, v.i); break;
+    case P::Enum:   lua_pushinteger(L, v.i); break;
+    case P::String: lua_pushstring(L, v.s.c_str()); break;
+    case P::Vec2:
+        lua_createtable(L, 2, 0);
+        lua_pushnumber(L, v.v2.x); lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, v.v2.y); lua_rawseti(L, -2, 2);
+        break;
+    case P::Color:
+        lua_createtable(L, 4, 0);
+        lua_pushnumber(L, v.col.x); lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, v.col.y); lua_rawseti(L, -2, 2);
+        lua_pushnumber(L, v.col.z); lua_rawseti(L, -2, 3);
+        lua_pushnumber(L, v.col.w); lua_rawseti(L, -2, 4);
+        break;
+    case P::Transform:
+        lua_createtable(L, 0, 3);
+        luaPushVec3Table(L, v.tpos); lua_setfield(L, -2, "pos");
+        luaPushVec3Table(L, v.trot); lua_setfield(L, -2, "rot");
+        luaPushVec3Table(L, v.tscl); lua_setfield(L, -2, "scl");
+        break;
+    case P::Struct:
+        luaPushStructTable(L, v, depth + 1);
+        break;
+    case P::Float:
+    default:        lua_pushnumber(L, v.f); break;
+    }
+}
+
+static void luaPushStructTable(lua_State* L, const HorizonCode::Value& v, int depth)
+{
+    HE::StructDef def;
+    if (depth > 16 || !HE::TypeRegistry::instance().getStruct(v.typeName, def))
+    { lua_pushnil(L); return; }
+    lua_createtable(L, 0, (int)def.fields.size() + 1);
+    lua_pushstring(L, v.typeName.c_str());
+    lua_setfield(L, -2, "__type");
+    for (size_t i = 0; i < def.fields.size(); ++i)
+    {
+        if (i < v.items.size()) luaPushFieldValue(L, v.items[i], depth);
+        else                    luaPushFieldValue(L, HorizonCode::Value{}, depth);
+        lua_setfield(L, -2, def.fields[i].name.c_str());
+    }
+}
+
+// Read ONE field value from ONE Lua slot at absolute index `idx`.
+static HorizonCode::Value luaToFieldValue(lua_State* L, int idx, const HE::StructField& f, int depth)
+{
+    using P = HorizonCode::PinType; using V = HorizonCode::Value;
+    if (f.isArray)
+    {
+        V arr; arr.isArray = true; arr.type = f.type; arr.typeName = f.typeName;
+        if (lua_istable(L, idx) && depth <= 16)
+        {
+            HE::StructField elem = f; elem.isArray = false;
+            const int n = (int)lua_rawlen(L, idx);
+            for (int i = 1; i <= n; ++i)
+            {
+                lua_rawgeti(L, idx, i);
+                arr.items.push_back(luaToFieldValue(L, lua_gettop(L), elem, depth + 1));
+                lua_pop(L, 1);
+            }
+        }
+        return arr;
+    }
+    switch (f.type)
+    {
+    case P::Bool:   return V::ofBool(lua_toboolean(L, idx) != 0);
+    case P::Int:    return V::ofInt((int)lua_tointeger(L, idx));
+    case P::Enum:
+    {
+        V v; v.type = P::Enum; v.typeName = f.typeName; v.i = (int)lua_tointeger(L, idx);
+        return v;
+    }
+    case P::String: return V::ofString(lua_isstring(L, idx) ? lua_tostring(L, idx) : "");
+    case P::Vec2:
+    {
+        glm::vec2 r{ 0.0f };
+        if (lua_istable(L, idx))
+            for (int i = 0; i < 2; ++i)
+            { lua_rawgeti(L, idx, i + 1); if (lua_isnumber(L, -1)) r[i] = (float)lua_tonumber(L, -1); lua_pop(L, 1); }
+        return V::ofVec2(r);
+    }
+    case P::Color:
+    {
+        glm::vec4 r{ 0.0f, 0.0f, 0.0f, 1.0f };
+        if (lua_istable(L, idx))
+            for (int i = 0; i < 4; ++i)
+            { lua_rawgeti(L, idx, i + 1); if (lua_isnumber(L, -1)) r[i] = (float)lua_tonumber(L, -1); lua_pop(L, 1); }
+        return V::ofColor(r);
+    }
+    case P::Transform:
+    {
+        glm::vec3 p{ 0.0f }, rot{ 0.0f }, scl{ 1.0f };
+        if (lua_istable(L, idx))
+        {
+            lua_getfield(L, idx, "pos"); p   = luaToVec3(L, lua_gettop(L), p);   lua_pop(L, 1);
+            lua_getfield(L, idx, "rot"); rot = luaToVec3(L, lua_gettop(L), rot); lua_pop(L, 1);
+            lua_getfield(L, idx, "scl"); scl = luaToVec3(L, lua_gettop(L), scl); lua_pop(L, 1);
+        }
+        return V::ofTransform(p, rot, scl);
+    }
+    case P::Struct:
+        return luaToStructValue(L, idx, depth + 1);
+    case P::Float:
+    default:        return V::ofFloat((float)lua_tonumber(L, idx));
+    }
+}
+
+static HorizonCode::Value luaToStructValue(lua_State* L, int idx, int depth)
+{
+    using P = HorizonCode::PinType;
+    HorizonCode::Value v; v.type = P::Struct;
+    if (depth > 16 || !lua_istable(L, idx)) return v;
+    idx = lua_absindex(L, idx);
+    lua_getfield(L, idx, "__type");
+    if (lua_isstring(L, -1)) v.typeName = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    HE::StructDef def;
+    if (!HE::TypeRegistry::instance().getStruct(v.typeName, def)) return v;
+    // Seed the definition defaults, then overwrite fields present in the table.
+    v = HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
+    for (size_t i = 0; i < def.fields.size(); ++i)
+    {
+        lua_getfield(L, idx, def.fields[i].name.c_str());
+        if (!lua_isnil(L, -1) && i < v.items.size())
+            v.items[i] = luaToFieldValue(L, lua_gettop(L), def.fields[i], depth);
+        lua_pop(L, 1);
+    }
+    return v;
+}
+
 static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinType t)
 {
     using P = HorizonCode::PinType; using V = HorizonCode::Value;
@@ -401,6 +582,7 @@ static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinT
     {
     case P::Bool:   return V::ofBool(lua_toboolean(L, idx++) != 0);
     case P::Int:    return V::ofInt(static_cast<int>(luaL_checkinteger(L, idx++)));
+    case P::Enum:   return V::ofInt(static_cast<int>(luaL_checkinteger(L, idx++)));
     case P::String: return V::ofString(luaL_checkstring(L, idx++));
     case P::Vec2:   { float x = (float)luaL_checknumber(L, idx++), y = (float)luaL_checknumber(L, idx++);
                       return V::ofVec2({ x, y }); }
@@ -408,6 +590,7 @@ static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinT
                             b = (float)luaL_checknumber(L, idx++), a = (float)luaL_checknumber(L, idx++);
                       return V::ofColor({ r, g, b, a }); }
     case P::Ref:    return V::ofRef(static_cast<uint32_t>(luaL_checkinteger(L, idx++)));
+    case P::Struct: return luaToStructValue(L, idx++, 0);
     case P::Float:
     default:        return V::ofFloat((float)luaL_checknumber(L, idx++));
     }
@@ -425,6 +608,8 @@ static int luaPushValue(lua_State* L, const HorizonCode::Value& v, HorizonCode::
     case P::Color:  lua_pushnumber(L, v.col.x); lua_pushnumber(L, v.col.y);
                     lua_pushnumber(L, v.col.z); lua_pushnumber(L, v.col.w); return 4;
     case P::Ref:    lua_pushinteger(L, static_cast<lua_Integer>(v.ref)); return 1;
+    case P::Enum:   lua_pushinteger(L, v.i); return 1;
+    case P::Struct: luaPushStructTable(L, v, 0); return 1;
     case P::Float:
     default:        lua_pushnumber(L, v.f); return 1;
     }
@@ -473,6 +658,78 @@ static void registerEngineApiGroups(lua_State* L)
         lua_pop(L, 1);                                     // [horizon]
     }
     lua_pop(L, 1);                                         // []
+}
+
+// ── User-defined types: horizon.enums.<Name>.<Entry> + horizon.structs.<Name>() ──
+// Generated from the TypeRegistry at context creation (the registry is complete
+// by then: editor = project open, game = the pak's type index). Constructors
+// build the boundary-table form documented at luaToStructValue, so a table from
+// horizon.structs.X() round-trips through any Struct-typed API parameter.
+static void registerUserTypes(lua_State* L)
+{
+    auto& reg = HE::TypeRegistry::instance();
+    auto luaStr = [](const std::string& in) {
+        std::string out = "\"";
+        for (char c : in)
+        {
+            if (c == '\\' || c == '\"') { out += '\\'; out += c; }
+            else if (c == '\n') out += "\\n";
+            else out += c;
+        }
+        out += "\"";
+        return out;
+    };
+    std::function<std::string(const HorizonCode::Value&)> lit =
+        [&](const HorizonCode::Value& v) -> std::string {
+        using P = HorizonCode::PinType;
+        if (v.isArray) return "{}";
+        switch (v.type)
+        {
+        case P::Bool:   return v.b ? "true" : "false";
+        case P::Int:
+        case P::Enum:   return std::to_string(v.i);
+        case P::String: return luaStr(v.s);
+        case P::Vec2:   return "{" + std::to_string(v.v2.x) + "," + std::to_string(v.v2.y) + "}";
+        case P::Color:  return "{" + std::to_string(v.col.x) + "," + std::to_string(v.col.y) + ","
+                             + std::to_string(v.col.z) + "," + std::to_string(v.col.w) + "}";
+        case P::Transform:
+            return "{pos={" + std::to_string(v.tpos.x) + "," + std::to_string(v.tpos.y) + "," + std::to_string(v.tpos.z)
+                 + "},rot={" + std::to_string(v.trot.x) + "," + std::to_string(v.trot.y) + "," + std::to_string(v.trot.z)
+                 + "},scl={" + std::to_string(v.tscl.x) + "," + std::to_string(v.tscl.y) + "," + std::to_string(v.tscl.z) + "}}";
+        case P::Struct:
+        {
+            HE::StructDef def;
+            if (!HE::TypeRegistry::instance().getStruct(v.typeName, def)) return "nil";
+            std::string t = "{__type=" + luaStr(v.typeName);
+            for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+                t += ",[" + luaStr(def.fields[i].name) + "]=" + lit(v.items[i]);
+            t += "}";
+            return t;
+        }
+        case P::Float:
+        default:        return std::to_string(v.f);
+        }
+    };
+
+    std::string src = "horizon.enums = horizon.enums or {}\n"
+                      "horizon.structs = horizon.structs or {}\n";
+    for (const auto& d : reg.enums())
+    {
+        src += "horizon.enums[" + luaStr(d.name) + "] = {";
+        for (const auto& e : d.entries)
+            src += "[" + luaStr(e.name) + "]=" + std::to_string(e.value) + ",";
+        src += "}\n";
+    }
+    for (const auto& d : reg.structs())
+        src += "horizon.structs[" + luaStr(d.name) + "] = function() return "
+             + lit(reg.makeDefaultValue(d.assetPath)) + " end\n";
+
+    if (luaL_dostring(L, src.c_str()) != LUA_OK)
+    {
+        HE_LOG_WARN(Script, "%s", ("ScriptContext: user-type bootstrap failed: " +
+            std::string(lua_isstring(L, -1) ? lua_tostring(L, -1) : "?")).c_str());
+        lua_pop(L, 1);
+    }
 }
 
 // ─── Registration table ──────────────────────────────────────────────────────
@@ -548,6 +805,7 @@ void ScriptContext::registerHorizonApi()
 
     // Registry-driven groups (horizon.math.*, …) layered on top of the flat API.
     registerEngineApiGroups(L);
+    registerUserTypes(L);
 }
 
 void ScriptContext::setPhysicsWorld(PhysicsWorld* pw)

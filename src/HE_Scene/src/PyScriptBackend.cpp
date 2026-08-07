@@ -1,4 +1,6 @@
 #include "HorizonScene/PyScriptBackend.h"
+#include <Types/TypeRegistry.h>
+#include <functional>
 #include <cstdint>
 #include <Diagnostics/Log.h>
 
@@ -275,6 +277,209 @@ PyObject* py_hideCursor(PyObject*, PyObject*)
 // packed vec3 spreads as 4 numbers on this path), i.e. it breaks existing user
 // scripts — a migration, not a cleanup, deliberately deferred:
 // docs/rework-2026-07-deferrals.md §1.
+// ── Struct values on the Python boundary ─────────────────────────────────────
+// A struct crosses as a plain dict: named fields plus "__type" = the definition
+// asset's path (what horizon.structs.<Name>() constructors emit). Field
+// encodings inside the dict: Vec2 = [x, y], Color = [r, g, b, a], Transform =
+// {"pos": [x,y,z], "rot": [...], "scl": [...]}, arrays = lists, nested structs
+// = nested dicts. Missing fields keep the definition default; unknown keys are
+// ignored. Depth-capped against self-referencing dicts. Mirrors the Lua
+// boundary exactly (luaToStructValue) — the two MUST stay in sync.
+HorizonCode::Value pyObjToStructValue(PyObject* o, int depth);
+PyObject* pyStructValueToDict(const HorizonCode::Value& v, int depth);
+
+glm::vec3 pyToVec3(PyObject* o, const glm::vec3& def)
+{
+	glm::vec3 r = def;
+	if (o && PySequence_Check(o))
+		for (int i = 0; i < 3 && i < (int)PySequence_Size(o); ++i)
+		{
+			PyObject* it = PySequence_GetItem(o, i);
+			if (it && PyNumber_Check(it)) r[i] = (float)PyFloat_AsDouble(it);
+			Py_XDECREF(it);
+		}
+	return r;
+}
+PyObject* pyVec3List(const glm::vec3& v)
+{
+	PyObject* l = PyList_New(3);
+	PyList_SetItem(l, 0, PyFloat_FromDouble(v.x));
+	PyList_SetItem(l, 1, PyFloat_FromDouble(v.y));
+	PyList_SetItem(l, 2, PyFloat_FromDouble(v.z));
+	return l;
+}
+
+// One field value as ONE Python object (inside the dict nothing spreads).
+PyObject* pyFieldValueToObj(const HorizonCode::Value& v, int depth)
+{
+	using P = HorizonCode::PinType;
+	if (v.isArray)
+	{
+		PyObject* l = PyList_New((Py_ssize_t)v.items.size());
+		for (size_t i = 0; i < v.items.size(); ++i)
+		{
+			HorizonCode::Value item = v.items[i];
+			item.isArray = false;
+			PyList_SetItem(l, (Py_ssize_t)i, pyFieldValueToObj(item, depth + 1));
+		}
+		return l;
+	}
+	switch (v.type)
+	{
+	case P::Bool:   return PyBool_FromLong(v.b);
+	case P::Int:
+	case P::Enum:   return PyLong_FromLong(v.i);
+	case P::String: return PyUnicode_FromString(v.s.c_str());
+	case P::Vec2:
+	{
+		PyObject* l = PyList_New(2);
+		PyList_SetItem(l, 0, PyFloat_FromDouble(v.v2.x));
+		PyList_SetItem(l, 1, PyFloat_FromDouble(v.v2.y));
+		return l;
+	}
+	case P::Color:
+	{
+		PyObject* l = PyList_New(4);
+		PyList_SetItem(l, 0, PyFloat_FromDouble(v.col.x));
+		PyList_SetItem(l, 1, PyFloat_FromDouble(v.col.y));
+		PyList_SetItem(l, 2, PyFloat_FromDouble(v.col.z));
+		PyList_SetItem(l, 3, PyFloat_FromDouble(v.col.w));
+		return l;
+	}
+	case P::Transform:
+	{
+		PyObject* d = PyDict_New();
+		PyObject* o;
+		o = pyVec3List(v.tpos); PyDict_SetItemString(d, "pos", o); Py_DECREF(o);
+		o = pyVec3List(v.trot); PyDict_SetItemString(d, "rot", o); Py_DECREF(o);
+		o = pyVec3List(v.tscl); PyDict_SetItemString(d, "scl", o); Py_DECREF(o);
+		return d;
+	}
+	case P::Struct: return pyStructValueToDict(v, depth + 1);
+	case P::Float:
+	default:        return PyFloat_FromDouble(v.f);
+	}
+}
+
+PyObject* pyStructValueToDict(const HorizonCode::Value& v, int depth)
+{
+	HE::StructDef def;
+	if (depth > 16 || !HE::TypeRegistry::instance().getStruct(v.typeName, def))
+		Py_RETURN_NONE;
+	PyObject* d = PyDict_New();
+	PyObject* t = PyUnicode_FromString(v.typeName.c_str());
+	PyDict_SetItemString(d, "__type", t); Py_DECREF(t);
+	for (size_t i = 0; i < def.fields.size(); ++i)
+	{
+		PyObject* fv = i < v.items.size() ? pyFieldValueToObj(v.items[i], depth)
+		                                  : pyFieldValueToObj(HorizonCode::Value{}, depth);
+		PyDict_SetItemString(d, def.fields[i].name.c_str(), fv);
+		Py_DECREF(fv);
+	}
+	return d;
+}
+
+// One field value from ONE Python object (borrowed reference).
+HorizonCode::Value pyObjToFieldValue(PyObject* o, const HE::StructField& f, int depth)
+{
+	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	if (f.isArray)
+	{
+		V arr; arr.isArray = true; arr.type = f.type; arr.typeName = f.typeName;
+		if (o && PySequence_Check(o) && !PyUnicode_Check(o) && depth <= 16)
+		{
+			HE::StructField elem = f; elem.isArray = false;
+			const Py_ssize_t n = PySequence_Size(o);
+			for (Py_ssize_t i = 0; i < n; ++i)
+			{
+				PyObject* it = PySequence_GetItem(o, i);
+				arr.items.push_back(pyObjToFieldValue(it, elem, depth + 1));
+				Py_XDECREF(it);
+			}
+		}
+		return arr;
+	}
+	switch (f.type)
+	{
+	case P::Bool:   return V::ofBool(o && PyObject_IsTrue(o));
+	case P::Int:    { const int i2 = o ? (int)PyLong_AsLong(o) : 0; PyErr_Clear(); return V::ofInt(i2); }
+	case P::Enum:
+	{
+		V v; v.type = P::Enum; v.typeName = f.typeName;
+		v.i = o ? (int)PyLong_AsLong(o) : 0;
+		PyErr_Clear();
+		return v;
+	}
+	case P::String:
+	{
+		const char* s2 = o && PyUnicode_Check(o) ? PyUnicode_AsUTF8(o) : nullptr;
+		return V::ofString(s2 ? s2 : "");
+	}
+	case P::Vec2:
+	{
+		glm::vec2 r{ 0.0f };
+		if (o && PySequence_Check(o))
+			for (int i = 0; i < 2 && i < (int)PySequence_Size(o); ++i)
+			{
+				PyObject* it = PySequence_GetItem(o, i);
+				if (it && PyNumber_Check(it)) r[i] = (float)PyFloat_AsDouble(it);
+				Py_XDECREF(it);
+			}
+		return V::ofVec2(r);
+	}
+	case P::Color:
+	{
+		glm::vec4 r{ 0.0f, 0.0f, 0.0f, 1.0f };
+		if (o && PySequence_Check(o))
+			for (int i = 0; i < 4 && i < (int)PySequence_Size(o); ++i)
+			{
+				PyObject* it = PySequence_GetItem(o, i);
+				if (it && PyNumber_Check(it)) r[i] = (float)PyFloat_AsDouble(it);
+				Py_XDECREF(it);
+			}
+		return V::ofColor(r);
+	}
+	case P::Transform:
+	{
+		glm::vec3 p2{ 0.0f }, rot{ 0.0f }, scl{ 1.0f };
+		if (o && PyDict_Check(o))
+		{
+			p2  = pyToVec3(PyDict_GetItemString(o, "pos"), p2);
+			rot = pyToVec3(PyDict_GetItemString(o, "rot"), rot);
+			scl = pyToVec3(PyDict_GetItemString(o, "scl"), scl);
+		}
+		return V::ofTransform(p2, rot, scl);
+	}
+	case P::Struct: return pyObjToStructValue(o, depth + 1);
+	case P::Float:
+	default:
+	{
+		const float f2 = o && PyNumber_Check(o) ? (float)PyFloat_AsDouble(o) : 0.0f;
+		PyErr_Clear();
+		return V::ofFloat(f2);
+	}
+	}
+}
+
+HorizonCode::Value pyObjToStructValue(PyObject* o, int depth)
+{
+	using P = HorizonCode::PinType;
+	HorizonCode::Value v; v.type = P::Struct;
+	if (depth > 16 || !o || !PyDict_Check(o)) return v;
+	PyObject* t = PyDict_GetItemString(o, "__type");   // borrowed
+	if (t && PyUnicode_Check(t)) v.typeName = PyUnicode_AsUTF8(t);
+	HE::StructDef def;
+	if (!HE::TypeRegistry::instance().getStruct(v.typeName, def)) return v;
+	v = HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
+	for (size_t i = 0; i < def.fields.size(); ++i)
+	{
+		PyObject* fv = PyDict_GetItemString(o, def.fields[i].name.c_str()); // borrowed
+		if (fv && i < v.items.size())
+			v.items[i] = pyObjToFieldValue(fv, def.fields[i], depth);
+	}
+	return v;
+}
+
 HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::PinType t)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
@@ -283,10 +488,12 @@ HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::Pin
 	{
 	case P::Bool:   { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofBool(o && PyObject_IsTrue(o)); }
 	case P::Int:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofInt(o ? (int)PyLong_AsLong(o) : 0); }
+	case P::Enum:   { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofInt(o ? (int)PyLong_AsLong(o) : 0); }
 	case P::String: { PyObject* o = PyTuple_GetItem(args, idx++); const char* s = o ? PyUnicode_AsUTF8(o) : nullptr; return V::ofString(s ? s : ""); }
 	case P::Vec2:   { float x = num(), y = num(); return V::ofVec2({ x, y }); }
 	case P::Color:  { float r = num(), g = num(), b = num(), a = num(); return V::ofColor({ r, g, b, a }); }
 	case P::Ref:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofRef(o ? (uint32_t)PyLong_AsUnsignedLong(o) : 0u); }
+	case P::Struct: { PyObject* o = PyTuple_GetItem(args, idx++); return pyObjToStructValue(o, 0); }
 	case P::Float:
 	default:        return V::ofFloat(num());
 	}
@@ -306,6 +513,8 @@ void pyAppendValue(PyObject* out, const HorizonCode::Value& v, HorizonCode::PinT
 	case P::Color:  add(PyFloat_FromDouble(v.col.x)); add(PyFloat_FromDouble(v.col.y));
 	                add(PyFloat_FromDouble(v.col.z)); add(PyFloat_FromDouble(v.col.w)); break;
 	case P::Ref:    add(PyLong_FromUnsignedLong(v.ref)); break;
+	case P::Enum:   add(PyLong_FromLong(v.i)); break;
+	case P::Struct: add(pyStructValueToDict(v, 0)); break;
 	case P::Float:
 	default:        add(PyFloat_FromDouble(v.f)); break;
 	}
@@ -411,6 +620,74 @@ void bootstrapEngineApiGroups()
 	PyErr_Clear();
 }
 
+// horizon.enums.<Name>.<Entry> constants + horizon.structs.<Name>() constructors,
+// generated from the TypeRegistry (complete by now: editor = project open, game
+// = the pak's type index). Constructors return the boundary-dict form documented
+// at pyObjToStructValue. Runs on every backend construction — the registry may
+// have changed with the project — and simply reassigns the namespaces.
+void bootstrapUserTypes()
+{
+	auto& reg = HE::TypeRegistry::instance();
+	auto pyStr = [](const std::string& in) {
+		std::string out = "\"";
+		for (char c : in)
+		{
+			if (c == '\\' || c == '\"') { out += '\\'; out += c; }
+			else if (c == '\n') out += "\\n";
+			else out += c;
+		}
+		out += "\"";
+		return out;
+	};
+	std::function<std::string(const HorizonCode::Value&)> lit =
+		[&](const HorizonCode::Value& v) -> std::string {
+		using P = HorizonCode::PinType;
+		if (v.isArray) return "[]";
+		switch (v.type)
+		{
+		case P::Bool:   return v.b ? "True" : "False";
+		case P::Int:
+		case P::Enum:   return std::to_string(v.i);
+		case P::String: return pyStr(v.s);
+		case P::Vec2:   return "[" + std::to_string(v.v2.x) + "," + std::to_string(v.v2.y) + "]";
+		case P::Color:  return "[" + std::to_string(v.col.x) + "," + std::to_string(v.col.y) + ","
+		                     + std::to_string(v.col.z) + "," + std::to_string(v.col.w) + "]";
+		case P::Transform:
+			return "{\"pos\":[" + std::to_string(v.tpos.x) + "," + std::to_string(v.tpos.y) + "," + std::to_string(v.tpos.z)
+			     + "],\"rot\":[" + std::to_string(v.trot.x) + "," + std::to_string(v.trot.y) + "," + std::to_string(v.trot.z)
+			     + "],\"scl\":[" + std::to_string(v.tscl.x) + "," + std::to_string(v.tscl.y) + "," + std::to_string(v.tscl.z) + "]}";
+		case P::Struct:
+		{
+			HE::StructDef def;
+			if (!HE::TypeRegistry::instance().getStruct(v.typeName, def)) return "None";
+			std::string d = "{\"__type\":" + pyStr(v.typeName);
+			for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+				d += "," + pyStr(def.fields[i].name) + ":" + lit(v.items[i]);
+			d += "}";
+			return d;
+		}
+		case P::Float:
+		default:        return std::to_string(v.f);
+		}
+	};
+
+	std::string src = "import horizon, types\n"
+	                  "horizon.enums = types.SimpleNamespace()\n"
+	                  "horizon.structs = types.SimpleNamespace()\n";
+	for (const auto& d : reg.enums())
+	{
+		src += "setattr(horizon.enums, " + pyStr(d.name) + ", types.SimpleNamespace(**{";
+		for (const auto& e : d.entries)
+			src += pyStr(e.name) + ": " + std::to_string(e.value) + ",";
+		src += "}))\n";
+	}
+	for (const auto& d : reg.structs())
+		src += "setattr(horizon.structs, " + pyStr(d.name) + ", lambda _l=(lambda: "
+		     + lit(reg.makeDefaultValue(d.assetPath)) + "): _l())\n";
+	PyRun_SimpleString(src.c_str());
+	PyErr_Clear();
+}
+
 bool g_pyInited = false;
 
 // Fetch the current Python error into a string and clear it.
@@ -506,6 +783,8 @@ PyScriptBackend::PyScriptBackend(HorizonWorld& world)
 	// Layer the registry-driven groups (horizon.math.*, …) onto the module once.
 	static bool s_engineApiBootstrapped = false;
 	if (!s_engineApiBootstrapped) { bootstrapEngineApiGroups(); s_engineApiBootstrapped = true; }
+	// User types re-bootstrap every time — the project's defs may have changed.
+	bootstrapUserTypes();
 }
 
 PyScriptBackend::~PyScriptBackend()
