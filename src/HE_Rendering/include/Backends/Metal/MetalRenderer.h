@@ -299,6 +299,7 @@ private:
 	// (0 at full res). Set with the target size in EncodeGIReflections and read
 	// by both composites — see kSSRRoughMixFS.
 	float m_giReflBlurFloor    = 0.0f;
+	bool  m_giReflBlurEnabled  = true;  // IRenderer::GIReflectionSettings::blur
 	// How far, in SCREEN pixels, the widest allowed lobe (roughness =
 	// GIReflMaxRoughness) scatters when ONE ray samples it. Divided by the tier's
 	// ray count at use: the filter only stands in for the part of the lobe the

@@ -782,6 +782,7 @@ private:
 	// blur must cover for the rays not to show as noise. Same constant and same
 	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
 	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	bool         m_giReflBlurEnabled = true; // IRenderer::GIReflectionSettings::blur
 	unsigned int m_giReflMixProgram = 0; // sharp/blurred roughness lerp (kGiReflMixFS)
 	unsigned int m_giLandSSBO = 0;
 	int          m_giLandCount = 0;

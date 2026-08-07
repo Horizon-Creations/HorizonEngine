@@ -5301,6 +5301,7 @@ void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
 	m_giReflMaxDistance  = std::max(1.0f, s.maxDistance);
 	m_giReflQuality      = std::clamp(s.quality, 0, 2);
+	m_giReflBlurEnabled  = s.blur;
 	// GIReflectionSettings::bounces is deliberately ignored here: the GL kernel
 	// traces a single segment (no bounce loop — see docs/gi-reflections-plan.md
 	// §10), so honouring the slider would promise something the image does not
@@ -6065,7 +6066,7 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// every tier. The GL scene shader samples ONE reflection texture (uGIRefl),
 	// so the blur lands on mirrors too. Closing it needs the same roughness-mix
 	// pass Metal got (kSSRRoughMixFS) plus one more render target.
-	if (m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
+	if (m_giReflBlurEnabled && m_giReflBlurProgram && m_giReflFBO && m_giReflBlurFBO)
 	{
 		// The blur stands in for TWO things the trace did not sample, and sizing
 		// it to only one of them is what kept the ladder inverted (see Metal's

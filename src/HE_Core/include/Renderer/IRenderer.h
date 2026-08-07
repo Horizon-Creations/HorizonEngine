@@ -265,10 +265,21 @@ public:
         // Metal only — the OpenGL kernel traces a single segment and ignores
         // this rather than pretending to honour it.
         int   bounces      = 1;
-        // 0 = raw mirror trace; 1 = + confidence-weighted blur; 2 = + roughness-
-        // jittered cone rays with temporal accumulation and a wide second blur
-        // for the glossy roughness lerp (mirrors SSR's tier semantics).
+        // The tier sets RAYS per pixel and the trace RESOLUTION:
+        //   0 Low    1 ray  @ 1/4 screen
+        //   1 Medium 2 rays @ 1/2
+        //   2 High   4 rays @ full
+        // (OpenGL varies rays only — its reflection targets live at the shared
+        // GI prepass resolution; see the gap note in OpenGLRenderer's DrawScene.)
         int   quality      = 1;
+        // Post-trace blur. It exists to stand in for what the trace did NOT
+        // sample — the pixels a lower resolution skipped and the part of the
+        // glossy lobe the rays missed — so its width shrinks as the tier rises.
+        // Switchable because "is the blur what I am looking at?" turned out to
+        // be the question worth answering directly: with this off, what remains
+        // is the raw trace at the tier's resolution and ray count, and any
+        // remaining softness has a different cause.
+        bool  blur         = true;
     };
     virtual void SetGIReflectionSettings(const GIReflectionSettings& /*settings*/) {}
 

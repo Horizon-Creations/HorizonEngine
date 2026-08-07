@@ -770,3 +770,30 @@ Was trägt: **|Laplacian| in einem Bereich, dessen gespiegelter Inhalt FLACH ist
 echten Kante**, und als letzte Instanz der 4×-Zoom auf diese Kante über die drei
 Stufen nebeneinander. Zahlen allein reichen hier nicht; der Zoom ist das
 eigentliche Gate.
+
+
+---
+
+## Blur abschaltbar (`GIReflBlur`)
+
+Auf Wunsch: `IRenderer::GIReflectionSettings::blur`, Checkbox „GI Refl Blur" in
+den Preferences, Config-Key `GIReflBlur`, headless `HE_DUMP_GIREFLBLUR=0/1`.
+**Test-Default steht auf AUS.**
+
+Der Grund, es überhaupt schaltbar zu machen, ist diagnostisch: nach mehreren
+Runden, in denen ich die Blur-Breite umparametriert habe und die Rückmeldung
+weiter „höhere Stufe = weicher" lautete, ist die direkteste Frage nicht „wie
+breit ist der Blur", sondern „ist der Blur überhaupt das, was ich sehe". Mit
+Blur aus bleibt der rohe Trace in der Auflösung und Ray-Zahl der Stufe übrig —
+ist die Reflexion dann immer noch weicher auf High, liegt es nicht am Blur,
+sondern am Trace-Pfad selbst, und die Suche fängt woanders an.
+
+Gemessen bei Roughness 0.05 (Spiegel, deferred, 4×-Zoom auf dieselbe Kante):
+mit Blur aus sind Low und High praktisch deckungsgleich scharf — die
+Stufenunterschiede in der Weichheit kamen also tatsächlich vollständig aus dem
+Blur, nicht aus dem Trace.
+
+Wenn der Blur wieder an soll: Checkbox, oder `GIReflBlur = true` als Default in
+`EditorApplication.h`. Ohne ihn ist die Reflexion auf rauen Flächen wieder
+verrauscht — er ist kein Schmuck, sondern das, was die nicht gesampelten Teile
+der Lobe ersetzt.

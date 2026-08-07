@@ -289,6 +289,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			// single segment and ignores this, so on Windows/Linux the slider
 			// would otherwise drag with no effect on the image.
 			Row::sliderInt("GI Refl Bounces (Metal)", &cfg.GIReflBounces, 1, 4);
+			// The blur stands in for what the trace did NOT sample (skipped
+			// pixels at a lower resolution, the unsampled part of the glossy
+			// lobe), so it narrows as the tier rises. Off shows the raw trace at
+			// the tier's resolution and ray count — the direct way to tell
+			// whether a soft reflection is the blur or something else.
+			ImGui::Checkbox("GI Refl Blur", &cfg.GIReflBlur);
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)

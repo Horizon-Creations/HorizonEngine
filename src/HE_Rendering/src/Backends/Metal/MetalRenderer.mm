@@ -11394,7 +11394,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// How much blur even a MIRROR gets, purely to hide the resolution:
 		// none at full res, most at quarter. Without it a quarter-res mirror
 		// keeps its stair-steps — "sharp" is not the same as "detailed".
-		const float giReflBlurFloor = resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f);
+		const float giReflBlurFloor = m_giReflBlurEnabled
+			? (resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f)) : 0.0f;
 		m_giReflBlurFloor = giReflBlurFloor;
 		EnsureGIReflTarget(tw, th);
 		if (!m_giReflTex) return;
@@ -11561,7 +11562,10 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// 0, i.e. the blurred copy is discarded. Without this the High forward
 		// tier encoded a dozen full-screen RGBA16F passes per frame and threw
 		// every one of them away.
-		const bool blurUsed = deferredIn || m_giReflBlurFloor > 0.0f;
+		// m_giReflBlurEnabled is the user's switch; the rest is "would the result
+		// be used at all" (see below).
+		const bool blurUsed = m_giReflBlurEnabled
+		                   && (deferredIn || m_giReflBlurFloor > 0.0f);
 		if (m_ssrBlurPipeline && blurUsed)
 		{
 			auto blurPass = [&](void* src, void* dst, float dx, float dy)
@@ -13084,6 +13088,7 @@ void MetalRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 	m_giReflIntensity    = s.intensity;
 	m_giReflMaxRoughness = s.maxRoughness;
 	m_giReflMaxDistance  = s.maxDistance;
+	m_giReflBlurEnabled  = s.blur;
 	m_giReflQuality      = s.quality;
 	m_giReflBounces      = std::clamp(s.bounces, 1, 4);
 }
