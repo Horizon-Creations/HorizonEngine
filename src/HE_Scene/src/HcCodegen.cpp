@@ -1,4 +1,5 @@
 #include "HorizonScene/HcCodegen.h"
+#include <HorizonCode/HorizonCodeGenSupport.h>   // hc::kMaxSteps — one definition of the limit
 #include <Types/TypeRegistry.h>   // enum defs at generation time
 #include <cstdint>
 #include "HorizonScene/EngineApi.h"
@@ -621,6 +622,7 @@ private:
     bool m_guard        = false;   // step/depth guards can be reached at all
     bool m_usesEventArg = false;   // some Event data-out is read
     bool m_rsTouched    = false;   // the body being emitted right now mentions `rs`
+    int  m_stmtCount    = 0;       // statements emitted in this translation pass
     bool useRunState() const { return m_guard || m_usesEventArg || !m_slots.empty(); }
     std::string rsParam(bool used = true) const
     { return useRunState() ? (used ? "RunState& rs" : "RunState&") : std::string(); }
@@ -1178,6 +1180,7 @@ private:
     void stmt(const Node& n, int fnCtx, Body& b)
     {
         const PinRanges r = pinRanges(n);
+        ++m_stmtCount;
         if (m_guard) { b.line("HC_STEP(rs);"); m_rsTouched = true; }
         switch (n.type)
         {
@@ -1513,6 +1516,7 @@ private:
 
     std::vector<Fragment> translateBodies()
     {
+        m_stmtCount = 0;
         std::vector<Fragment> out;
         auto translate = [this, &out](const std::string& name, const Node* start,
                                       const Node* fn, int fnCtx)
@@ -1551,7 +1555,16 @@ private:
         // Bodies FIRST: translating them is what reveals whether this class ever
         // reads the event argument, and that decides whether a RunState exists —
         // and with it the `rs` parameter every body would otherwise carry.
-        const std::vector<Fragment> frags = translateBodies();
+        std::vector<Fragment> frags = translateBodies();
+        // The "no ForEach/FunctionCall ⇒ the step abort is unreachable" argument
+        // rests on the emitted statement count staying under the limit. A graph
+        // whose branches fan out far enough to break that assumption gets the
+        // guard back — measured, not assumed.
+        if (!m_guard && m_stmtCount > hc::kMaxSteps)
+        {
+            m_guard = true;
+            frags = translateBodies();
+        }
 
         const bool rsOn    = useRunState();
         const auto delays  = delayNodeIds();
