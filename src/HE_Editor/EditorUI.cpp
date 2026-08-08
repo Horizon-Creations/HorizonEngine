@@ -922,6 +922,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
+#ifdef HE_HAVE_LIBSSH2
+			case MC::PublishEngineContent:       EngineContentPublishDialog::open(ctx);                break;
+			case MC::RebuildManifestFromServer:  EngineContentPublishDialog::openRebuildFromServer(ctx); break;
+#endif
 			default: break;
 			}
 		}
