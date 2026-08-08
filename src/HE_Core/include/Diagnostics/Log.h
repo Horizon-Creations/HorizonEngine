@@ -82,6 +82,7 @@ namespace HE::Log
 		Tool,          // offline tools (importers, packers, codegen)
 		Profiler,      // profiler captures
 		SourceControl, // git / LFS: probes, commands, provider calls
+		ContentSync,   // EngineContent SFTP sync: probes, transfers, manifest diffs
 		Count
 	};
 

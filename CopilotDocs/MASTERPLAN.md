@@ -3559,3 +3559,44 @@ liefen still ins Leere), und reine Lua/Python-Projekte bekamen im Editor nie ein
 Bewusste Lücken (v2-Arbeit): Struct-Codegen interpretiert; Array-Element-/Funktions-Param-Typen
 ohne Enum/Struct; AssetRefRetarget kennt typeName-Referenzen nicht (Asset-Rename dangelt);
 SaveStateComponent erfasst keine Script-Variablen (nur Transform/Sichtbarkeit).
+
+---
+
+## Fortsetzung 73 — EngineContent SFTP-Sync (07.08.2026)
+
+**Neues Modul `HE_ContentSync`, CP1–CP5 implementiert und einzeln durchgebaut (HorizonCore +
+HorizonNet + HorizonContentSync + HorizonEditor grün, 1392 Tests grün), CP6 (realer Server-Test)
+offen bis echte Zugangsdaten eingetragen sind.** Design-Doc:
+`docs/engine-content-sftp-sync-design.md`.
+
+**Ziel:** die Editor-EngineContent-Bibliothek nicht mehr komplett mit jedem Editor-Download
+mitliefern, sondern bei Bedarf vom eigenen Webhosting per SFTP nachladen (das Hosting bietet
+ausschließlich SFTP/SSH). Scope bewusst nur der Editor — das gepackte Spiel bleibt unangetastet
+(hat mit dem bestehenden Pak-Streaming bereits eine eigene, rein lokale Lösung).
+
+**Architektur:** libssh2 vendort (FetchContent, Crypto-Backend an die bestehende OpenSSL/mbedTLS-
+Wahl gekoppelt) statt CLI-Shell-out — der konfigurierte SFTP-Account nutzt ein Passwort, das der
+System-`sftp`-Client nicht automatisiert entgegennehmen kann. Zugangsdaten bewusst hartcodiert in
+genau einer Datei (`SftpCredentials.cpp`, explizite User-Entscheidung, dort dokumentiert).
+`HpakReader`/Pak-Mounting bleiben komplett unangetastet — EngineContent sind lose `.hasset`-
+Dateien, aufgelöst über eine dritte, niedrigste Priorität in `ContentManager::resolveAbsolutePath`
+(nach Projekt-Override und Shared-Default), gecacht **projektübergreifend** unter
+`GlobalState::userDataDir()/EngineContentCache` (nicht neben der Editor-Executable — oft nicht
+schreibbar, siehe [[macos-gui-app-path]]).
+
+**Content Browser:** der Engine-Ordner zeigt jetzt auch noch nicht heruntergeladene Defaults an
+(`HE::File::isRemoteOnly`, Manifest-Merge in `GlobalState::refreshEngineFolder`), mit Cloud-Badge.
+Doppelklick fragt vor dem Download nach Bestätigung; eine Szene, die passiv einen noch nicht
+lokalen Default referenziert, lädt automatisch (kein Dialog pro Referenz — zu störend), aber
+sichtbar über dieselbe Footer-Progressbar wie der bestätigte Download (eine Queue, zwei Trigger).
+
+**Threading-Lehre (wieder angewendet, nicht neu erfunden):** `ContentManager`s Maps sind
+Hauptthread-only; ein `materialize`-Callback (Download-Fertigstellung) kann auf jedem Thread
+feuern und die ContentManager/EditorApplication überleben — er darf daher niemals `this` fangen,
+sondern nur einen `shared_ptr`-Sink (exakt das schon bestehende `AsyncSink`-Muster). Der Editor
+hatte bisher **kein** Pro-Frame-`pollAsyncResults()` (nur das gepackte Spiel) — jetzt in
+`EditorApplication::OnRender` ergänzt (Budget 4/Frame), sonst wäre die Passiv-Auflösung nie fertig
+geworden.
+
+Offen: CP6 (echter Server-Round-Trip, sobald der User die Zugangsdaten einträgt), Byte-genauer
+Download-Fortschritt (nur „läuft" + n/m), Cache-Bereinigung (wächst unbegrenzt).

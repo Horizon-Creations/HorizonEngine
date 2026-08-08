@@ -11,6 +11,9 @@
 #include <Diagnostics/Profiler.h>
 #include <Platform/Process.h>       // git config for the identity fix
 #include <Diagnostics/Log.h>
+#ifdef HE_HAVE_LIBSSH2
+#include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#endif
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
@@ -1221,6 +1224,9 @@ void EditorApplication::OnInit()
 		startToolchainProbe();
 		startGitProbe();
 		startRouterProbe();
+#ifdef HE_HAVE_LIBSSH2
+		startSftpProbe();
+#endif
 	}
 }
 
@@ -1252,6 +1258,55 @@ void EditorApplication::startGitProbe()
 		m_gitChecked.store(true, std::memory_order_release);
 	});
 }
+
+#ifdef HE_HAVE_LIBSSH2
+// The manifest's {path, uuid} pairs, reshaped into the network-agnostic DTO
+// GlobalState::refreshEngineFolder() accepts — see RemoteEngineAsset's comment
+// in DiagnosticsStructs.h for why HE_Core cannot take the manifest type itself.
+static std::vector<HE::RemoteEngineAsset> engineManifestAsRemoteAssets()
+{
+	std::vector<HE::RemoteEngineAsset> result;
+	for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
+		result.push_back(HE::RemoteEngineAsset{ e.relativePath, e.uuid });
+	return result;
+}
+
+void EditorApplication::startSftpProbe()
+{
+	if (m_sftpThread.joinable()) m_sftpThread.join();
+	m_sftpChecked.store(false, std::memory_order_release);
+
+	// Captured by value for the worker, same discipline as the content-refresh
+	// async lambda above: never read contentManager()/m_globalState live from a
+	// background thread, capture the strings/pointer it actually needs first.
+	GlobalState* gs                = m_globalState;
+	std::string  engineContentPath = contentManager().engineContentRoot();
+	std::string  projectContentRoot = contentManager().contentRoot();
+
+	m_sftpThread = std::thread([this, gs, engineContentPath, projectContentRoot]
+	{
+		HE::Cs::SftpProbeResult probe = HE::Cs::probeSftp();
+		m_sftpProbe = probe;
+		m_sftpChecked.store(true, std::memory_order_release);
+
+		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
+		// GlobalState::refreshEngineFolder only touches its own mutex-guarded
+		// tree and the filesystem, never ImGui, so it is safe off the main
+		// thread (the existing m_contentRefreshFuture async path already relies
+		// on the same fact).
+		if (probe.ready() && gs && !engineContentPath.empty() &&
+		    HE::Cs::EngineContentSync::instance().refreshManifestBlocking())
+		{
+			gs->refreshEngineFolder(engineContentPath, projectContentRoot,
+			                         engineManifestAsRemoteAssets());
+			// ContentManager registration happens on the main thread — see
+			// OnRender's consumption of this flag and registerRemoteAsset()'s
+			// contract (this worker thread must never touch ContentManager).
+			m_sftpManifestReady.store(true, std::memory_order_release);
+		}
+	});
+}
+#endif
 
 void EditorApplication::startRouterProbe()
 {
@@ -1488,6 +1543,38 @@ void EditorApplication::OnRender(float dt)
 			}
 		}
 	}
+
+	// ── Async asset streaming: drain arrivals from loadAssetAsync ────────────
+	// The Editor otherwise has no per-frame drain (GameApplication::OnRender has
+	// its own, kStreamRegistrationsPerFrame) — this is the Editor's equivalent, a
+	// small budget since the Editor rarely streams the size of batch a packaged
+	// game's level load does. Needed for EngineContent SFTP materialization
+	// (registerRemoteAsset, HE_ContentSync) to actually complete once queued —
+	// without this, a passively-triggered download would finish and then sit in
+	// the sink forever, never registered.
+	contentManager().pollAsyncResults(4);
+
+#ifdef HE_HAVE_LIBSSH2
+	// Apply a freshly fetched EngineContent manifest to ContentManager — see
+	// startSftpProbe(), which fetches the manifest off-thread but must not touch
+	// ContentManager itself (registerRemoteAsset is main-thread only, like every
+	// other ContentManager mutator).
+	if (m_sftpManifestReady.exchange(false, std::memory_order_acq_rel))
+	{
+		for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
+		{
+			const HE::UUID    uuid         = e.uuid;
+			const std::string relativePath = e.relativePath;
+			contentManager().registerRemoteAsset(uuid, relativePath,
+				[relativePath, uuid](std::function<void(bool)> done)
+				{
+					HE::Cs::EngineContentSync::instance().enqueueDownload(
+						relativePath, uuid, HE::Cs::DownloadTrigger::Passive,
+						[done](bool success) { done(success); });
+				});
+		}
+	}
+#endif
 
 	// ── Hot-reload: poll disk assets every ~1.5 s ────────────────────────────
 	if (m_projectLoaded && renderer())
@@ -4474,6 +4561,10 @@ void EditorApplication::OnShutdown()
 	// terminates the process).
 	if (m_toolchainThread.joinable()) m_toolchainThread.join();
 	if (m_gitThread.joinable()) m_gitThread.join();
+#ifdef HE_HAVE_LIBSSH2
+	// Bounded by sftpTestConnection's own connect timeout, so this cannot hang shutdown.
+	if (m_sftpThread.joinable()) m_sftpThread.join();
+#endif
 	// The router probe waits on the network, so tell it to stop before waiting on
 	// it: it skips its remaining stages and returns whatever it already knows,
 	// instead of holding the quit for the rest of an SSDP or NAT-PMP timeout.

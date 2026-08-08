@@ -3,6 +3,7 @@
 #include <vector>
 #include "Types/Defines.h"
 #include "Types/Enums.h"
+#include "Types/UUID.h"
 
 struct EngineStatus
 {
@@ -28,6 +29,15 @@ namespace HE
 		std::string name;
 		std::string fullPath;
 		std::string extension;
+
+		// Set only for synthetic "Engine/" entries contributed by the EngineContent
+		// SFTP manifest (see HE::Cs::EngineContentManifest) for an asset that is not
+		// present in any local root yet. `fullPath` is then the path it will occupy
+		// ONCE downloaded (the shared EngineContent cache — see ContentManager), not
+		// an existing file. remoteUuid is that asset's UUID, used to look the entry
+		// back up in the manifest when a download is requested.
+		bool     isRemoteOnly = false;
+		HE::UUID remoteUuid;
 	};
 
 	struct Folder
@@ -36,5 +46,19 @@ namespace HE
 		std::string fullPath;
 		std::vector<Folder*> subfolders;
 		std::vector<File*> files;
+	};
+
+	// A minimal, network-agnostic description of one EngineContent asset that
+	// exists on the configured SFTP server but not (yet) locally — enough for
+	// GlobalState::refreshEngineFolder() to show it in the Content Browser tree.
+	// Deliberately just {path, uuid}: HE_Core must not know about HE_ContentSync
+	// (that module is editor-only and optional — see the HE_HAVE_LIBSSH2 guard),
+	// so the editor converts its HE::Cs::EngineContentManifest into a vector of
+	// these before calling refreshEngineFolder(), rather than GlobalState taking
+	// the manifest type directly.
+	struct RemoteEngineAsset
+	{
+		std::string relativePath;   // relative to the EngineContent root, e.g. "Materials/DefaultCube.hasset"
+		HE::UUID    uuid;
 	};
 }

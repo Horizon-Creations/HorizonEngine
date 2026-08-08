@@ -128,6 +128,17 @@ std::filesystem::path GlobalState::userDataDir()
 	return resolved;
 }
 
+std::filesystem::path GlobalState::engineContentCacheDir()
+{
+	static const fs::path resolved = [] {
+		const fs::path dir = userDataDir() / "EngineContentCache";
+		std::error_code ec;
+		if (!dir.empty()) fs::create_directories(dir, ec);
+		return dir;
+	}();
+	return resolved;
+}
+
 // ─── Where the settings live ─────────────────────────────────────────────────
 std::filesystem::path GlobalState::configFilePath()
 {
@@ -575,8 +586,75 @@ static void mergeOverrideInto(HE::Folder* base, const fs::path& overrideDir)
 	}
 }
 
+// Splits a manifest's forward-slash-separated relative path ("Materials/Foo.hasset")
+// into folder segments + a leaf filename, walking/creating HE::Folder nodes along
+// the way. Used only for entries that mergeManifestInto has already determined do
+// not exist locally — an existing folder is reused (by name, same rule
+// mergeOverrideInto uses), a missing one is created as an empty placeholder so the
+// tree still has somewhere to hang the remote-only leaf.
+static HE::Folder* walkOrCreateFolderPath(HE::Folder* root, const std::vector<std::string>& segments)
+{
+	HE::Folder* cur = root;
+	for (const std::string& seg : segments)
+	{
+		HE::Folder* next = nullptr;
+		for (HE::Folder* s : cur->subfolders)
+			if (s->name == seg) { next = s; break; }
+		if (!next)
+		{
+			std::unique_ptr<HE::Folder> owned(new HE::Folder());
+			owned->name     = seg;
+			owned->fullPath = (fs::path(cur->fullPath) / seg).string();
+			cur->subfolders.push_back(owned.get());
+			next = owned.release();
+		}
+		cur = next;
+	}
+	return cur;
+}
+
+// Adds a File node (isRemoteOnly=true) for every manifest entry whose relative
+// path is not already resolvable in `base` (default tree + project override,
+// already merged in by the time this runs) — so the Content Browser's Engine
+// folder shows the full catalogue of available defaults, not just what happens
+// to be downloaded already. fullPath is the path the asset WILL occupy once
+// downloaded (GlobalState::engineContentCacheDir() / relativePath), not an
+// existing file — SftpClient::sftpGetFile writes there when a download completes.
+static void mergeManifestInto(HE::Folder* base, const std::vector<HE::RemoteEngineAsset>& remoteOnly)
+{
+	for (const HE::RemoteEngineAsset& asset : remoteOnly)
+	{
+		if (asset.relativePath.empty()) continue;
+
+		const fs::path relPath(asset.relativePath);
+		const std::string leafName = relPath.filename().string();
+		if (leafName.empty()) continue;
+
+		std::vector<std::string> segments;
+		for (const auto& part : relPath.parent_path())
+			segments.push_back(part.string());
+
+		HE::Folder* parent = walkOrCreateFolderPath(base, segments);
+
+		bool existsLocally = false;
+		for (HE::File* f : parent->files)
+			if (f->name == leafName) { existsLocally = true; break; }
+		if (existsLocally) continue; // a real local/override file always wins
+
+		std::unique_ptr<HE::File> file(new HE::File());
+		file->name         = leafName;
+		file->extension    = relPath.extension().string();
+		file->isRemoteOnly = true;
+		file->remoteUuid   = asset.uuid;
+		file->fullPath     = (GlobalState::engineContentCacheDir() / relPath).string();
+		parent->files.push_back(file.get());
+		file.release();
+	}
+}
+
 bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
-                                       const std::string& projectContentRoot)
+                                       const std::string& projectContentRoot,
+                                       const std::vector<HE::RemoteEngineAsset>& remoteOnly)
 {
 	std::error_code ec;
 	fs::path enginePath = engineContentAbsPath;
@@ -601,6 +679,12 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 		if (fs::is_directory(overrideRoot, ec))
 			mergeOverrideInto(&fresh, overrideRoot);
 	}
+
+	// Remote-only placeholders merge in LAST: they must see the fully-merged
+	// default+override tree so a manifest entry that already exists in either
+	// one is correctly skipped rather than shown as a redundant "remote" copy.
+	if (!remoteOnly.empty())
+		mergeManifestInto(&fresh, remoteOnly);
 
 	{
 		std::unique_lock lock(m_engineFolderMutex);

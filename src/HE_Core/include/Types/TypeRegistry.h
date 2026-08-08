@@ -28,7 +28,13 @@ struct EnumEntry
     int         value = 0;
 };
 
-struct EnumDef
+// HE_API on the struct (not just the two out-of-line methods below): findEntry/
+// findValue are defined in TypeRegistry.cpp, so without it MSVC never exports
+// their symbols from HorizonCore.dll and any other DLL calling them (HcCodegen,
+// EngineApi — cross-module by design) fails to link with LNK2019. Trivial
+// members-only structs elsewhere (HE::UUID, EnumEntry) don't need this because
+// every one of their functions is inline; this one isn't.
+struct HE_API EnumDef
 {
     std::string name;        // display name (asset filename stem)
     std::string assetPath;   // project-relative path — the registry key
@@ -55,7 +61,8 @@ struct StructField
     HorizonCode::Value   defaultValue;
 };
 
-struct StructDef
+// HE_API for the same reason as EnumDef above: findField is out-of-line.
+struct HE_API StructDef
 {
     std::string name;        // display name (asset filename stem)
     std::string assetPath;   // project-relative path — the registry key
