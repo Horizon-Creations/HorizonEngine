@@ -31,21 +31,25 @@ void signatureInto(const Node& n, NodeSig& s)
     {
     case T::Event:
         s.execOuts = { { "", P::Exec } };
-        if (n.hasArg) s.dataOuts = { { "Value", n.propType } };
+        if (n.hasArg) s.dataOuts = { { "Value", n.propType, false, n.typeName.c_str() } };
         break;
     case T::FunctionEntry:
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params) s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray });
+        for (const auto& p : n.params)
+            s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray, p.typeName.c_str() });
         break;
     case T::FunctionCall:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
+        for (const auto& p : n.params)
+            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, p.typeName.c_str() });
+        for (const auto& r : n.results)
+            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, r.typeName.c_str() });
         break;
     case T::FunctionReturn:
         s.execIns = { { "", P::Exec } };
-        for (const auto& r : n.results) s.dataIns.push_back({ r.name.c_str(), r.type, r.isArray });
+        for (const auto& r : n.results)
+            s.dataIns.push_back({ r.name.c_str(), r.type, r.isArray, r.typeName.c_str() });
         break;
     case T::Branch:
         s.execIns  = { { "", P::Exec } };
@@ -57,13 +61,13 @@ void signatureInto(const Node& n, NodeSig& s)
         s.execOuts = { { "Then 0", P::Exec }, { "Then 1", P::Exec } };
         break;
     case T::GetProperty:
-        s.dataOuts = { { "Value", n.propType } };
+        s.dataOuts = { { "Value", n.propType, false, n.typeName.c_str() } };
         break;
     case T::SetProperty:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Value", n.propType } };
-        s.dataOuts = { { "Value", n.propType } }; // pass the set value through
+        s.dataIns  = { { "Value", n.propType, false, n.typeName.c_str() } };
+        s.dataOuts = { { "Value", n.propType, false, n.typeName.c_str() } }; // pass the set value through
         break;
     case T::GetVariable:
         s.dataOuts = { { "Value", n.propType, n.isArray, n.typeName.c_str() } };
@@ -120,21 +124,25 @@ void signatureInto(const Node& n, NodeSig& s)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Target", P::Ref } };
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
+        for (const auto& p : n.params)
+            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, p.typeName.c_str() });
+        for (const auto& r : n.results)
+            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, r.typeName.c_str() });
         break;
     case T::EmitEvent:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        if (n.hasArg) s.dataIns = { { "Arg", n.propType } };
+        if (n.hasArg) s.dataIns = { { "Arg", n.propType, false, n.typeName.c_str() } };
         break;
     case T::EngineCall:
         // hasArg = the registry entry's isExec: side-effecting calls get exec pins,
         // pure calls (getters/math) are compact data nodes. params → data-ins,
         // results → data-outs (mirrored on the node from the ApiFn descriptor).
         if (n.hasArg) { s.execIns = { { "", P::Exec } }; s.execOuts = { { "", P::Exec } }; }
-        for (const auto& p : n.params)  s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray });
-        for (const auto& r : n.results) s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray });
+        for (const auto& p : n.params)
+            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, p.typeName.c_str() });
+        for (const auto& r : n.results)
+            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, r.typeName.c_str() });
         break;
     case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
     case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
@@ -146,45 +154,45 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::ConstColor:  s.dataOuts = { { "", P::Color } };  break;
     case T::ConstTransform: s.dataOuts = { { "", P::Transform } }; break;
     case T::ArrayMake:
-        s.dataOuts = { { "Array", n.propType, true } };
+        s.dataOuts = { { "Array", n.propType, true, n.typeName.c_str() } };
         break;
     case T::ArrayLength:
-        s.dataIns  = { { "Array", n.propType, true } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() } };
         s.dataOuts = { { "Length", P::Int } };
         break;
     case T::ArrayGet:
-        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int } };
-        s.dataOuts = { { "Element", n.propType } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Index", P::Int } };
+        s.dataOuts = { { "Element", n.propType, false, n.typeName.c_str() } };
         break;
     case T::ArrayAdd:
-        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
-        s.dataOuts = { { "Array", n.propType, true } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Value", n.propType, false, n.typeName.c_str() } };
+        s.dataOuts = { { "Array", n.propType, true, n.typeName.c_str() } };
         break;
     case T::ArraySet:
-        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int }, { "Value", n.propType } };
-        s.dataOuts = { { "Array", n.propType, true } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Index", P::Int }, { "Value", n.propType, false, n.typeName.c_str() } };
+        s.dataOuts = { { "Array", n.propType, true, n.typeName.c_str() } };
         break;
     case T::ArrayInsert:
-        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int }, { "Value", n.propType } };
-        s.dataOuts = { { "Array", n.propType, true } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Index", P::Int }, { "Value", n.propType, false, n.typeName.c_str() } };
+        s.dataOuts = { { "Array", n.propType, true, n.typeName.c_str() } };
         break;
     case T::ArrayRemove:
-        s.dataIns  = { { "Array", n.propType, true }, { "Index", P::Int } };
-        s.dataOuts = { { "Array", n.propType, true } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Index", P::Int } };
+        s.dataOuts = { { "Array", n.propType, true, n.typeName.c_str() } };
         break;
     case T::ArrayContains:
-        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Value", n.propType, false, n.typeName.c_str() } };
         s.dataOuts = { { "Contains", P::Bool } };
         break;
     case T::ArrayIndexOf:
-        s.dataIns  = { { "Array", n.propType, true }, { "Value", n.propType } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() }, { "Value", n.propType, false, n.typeName.c_str() } };
         s.dataOuts = { { "Index", P::Int } };
         break;
     case T::ForEach:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "Body", P::Exec }, { "Done", P::Exec } };
-        s.dataIns  = { { "Array", n.propType, true } };
-        s.dataOuts = { { "Element", n.propType }, { "Index", P::Int } };
+        s.dataIns  = { { "Array", n.propType, true, n.typeName.c_str() } };
+        s.dataOuts = { { "Element", n.propType, false, n.typeName.c_str() }, { "Index", P::Int } };
         break;
     case T::Delay:
         s.execIns  = { { "", P::Exec } };

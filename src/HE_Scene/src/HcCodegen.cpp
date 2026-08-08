@@ -62,25 +62,50 @@ PinRanges pinRanges(const Node& n)
     return r;
 }
 
-struct TypeRef { PinType t = PT::Float; bool arr = false; };
+// A pin's static type. `typeName` is the Enum/Struct definition asset (the
+// TypeRegistry key); `cpp` is the generated C++ struct name for Struct pins,
+// resolved from the run's TypeTable when the TypeRef is built.
+struct TypeRef
+{
+    PinType     t   = PT::Float;
+    bool        arr = false;
+    std::string typeName;
+    std::string cpp;
+};
 
-TypeRef dataInType(const Node& n, int idx)
+// ── user-defined struct types (plan §6, extended) ────────────────────────────
+// Every struct definition the compiled classes touch becomes a REAL C++ struct
+// in the shared hcgen_types.h — no Value plumbing survives into the generated
+// bodies, so a struct field read is a member access. Enums need no entry here:
+// they stay int-backed (the engine treats them as ints everywhere), only their
+// Value boundaries carry the definition path back (hc::toEnumValue).
+struct StructType
 {
-    const NodeSig s = HorizonCode::signatureOf(n);
-    if (idx < 0 || idx >= (int)s.dataIns.size()) return {};
-    return { s.dataIns[idx].type, s.dataIns[idx].isArray };
-}
-TypeRef dataOutType(const Node& n, int idx)
+    std::string              cpp;       // generated C++ name ("S_PlayerStats")
+    HE::StructDef            def;       // the definition as of GENERATION time
+    std::vector<std::string> members;   // C++ member name per field, in def order
+};
+struct TypeTable
 {
-    const NodeSig s = HorizonCode::signatureOf(n);
-    if (idx < 0 || idx >= (int)s.dataOuts.size()) return {};
-    return { s.dataOuts[idx].type, s.dataOuts[idx].isArray };
-}
+    std::unordered_map<std::string, StructType> byPath;
+    std::vector<std::string> order;   // emission order: a struct after everything it embeds
+
+    const StructType* find(const std::string& assetPath) const
+    {
+        const auto it = byPath.find(assetPath);
+        return it != byPath.end() ? &it->second : nullptr;
+    }
+    std::string cppOf(const std::string& assetPath) const
+    {
+        const StructType* s = find(assetPath);
+        return s ? s->cpp : std::string();
+    }
+};
 
 // ── C++ type/literal tables (plan §6) ────────────────────────────────────────
-const char* cppScalar(PinType t)
+std::string cppScalar(const TypeRef& tr)
 {
-    switch (t)
+    switch (tr.t)
     {
         case PT::Float:     return "float";
         case PT::Bool:      return "bool";
@@ -91,13 +116,16 @@ const char* cppScalar(PinType t)
         case PT::Ref:       return "uint32_t";
         case PT::Transform: return "hc::Transform";
         case PT::Enum:      return "int";   // enums are int-backed everywhere
+        // validate() refuses a Struct pin whose definition the table doesn't
+        // carry, so `cpp` is set on every Struct TypeRef that reaches emission.
+        case PT::Struct:    return tr.cpp.empty() ? "float" : tr.cpp;
         default:            return "float";
     }
 }
-std::string cppType(TypeRef tr)
+std::string cppType(const TypeRef& tr)
 {
-    if (tr.arr) return std::string("hc::Array<") + cppScalar(tr.t) + ">";
-    return cppScalar(tr.t);
+    if (tr.arr) return "hc::Array<" + cppScalar(tr) + ">";
+    return cppScalar(tr);
 }
 
 std::string floatLit(float f)
@@ -132,7 +160,10 @@ std::string strLit(const std::string& s)
 
 // The zero value of a pin type — a fresh Value's field (§3.3): note Color's
 // alpha 1 and Transform's identity scale (hc::zeroOf mirrors this at runtime).
-std::string zeroLit(TypeRef tr)
+// A struct's zero is the all-fields-zero aggregate, which is exactly what the
+// generated struct's own member initializers give — matching the interpreter,
+// where an unwired Struct pin is an EMPTY Value whose field reads all miss.
+std::string zeroLit(const TypeRef& tr)
 {
     if (tr.arr) return cppType(tr) + "{}";
     switch (tr.t)
@@ -146,14 +177,51 @@ std::string zeroLit(TypeRef tr)
         case PT::Ref:       return "0u";
         case PT::Transform: return "hc::Transform{}";
         case PT::Enum:      return "0";
+        case PT::Struct:    return cppScalar(tr) + "{}";
         default:            return "0.0f";
     }
 }
 
-// A scalar Value as a C++ literal of its own type.
-std::string valueLit(const Value& v)
+// A Value as a C++ literal of the given static type. `want` matters for the
+// user-defined types: a Struct literal needs the definition (field order and
+// element types), which the Value alone doesn't pin down.
+std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want);
+
+// `S_X{ f0, f1, … }` — fields in DEFINITION order, each from the matching item
+// of `v` (a short/absent item is the field's own zero, like a missing item read).
+std::string structLit(const Value& v, const TypeTable& tt, const TypeRef& want)
 {
-    switch (v.type)
+    const StructType* st = tt.find(want.typeName);
+    if (!st) return zeroLit(want);
+    std::string out = st->cpp + "{";
+    for (size_t i = 0; i < st->def.fields.size(); ++i)
+    {
+        const HE::StructField& f = st->def.fields[i];
+        const TypeRef ft{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName) };
+        out += (i ? ", " : " ");
+        out += i < v.items.size() ? valueLit(v.items[i], tt, ft) : zeroLit(ft);
+    }
+    return out + (st->def.fields.empty() ? "}" : " }");
+}
+
+std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want)
+{
+    if (want.arr)
+    {
+        // Array literal of the element type (the items are scalars of it).
+        const TypeRef elem{ want.t, false, want.typeName, want.cpp };
+        std::string out = cppType(want) + "{";
+        for (size_t i = 0; i < v.items.size(); ++i)
+        {
+            Value item = v.items[i];
+            item.isArray = false;
+            if (item.type != want.t) item.type = want.t;   // seeded slots carry the element type
+            out += (i ? ", " : " ");
+            out += valueLit(item, tt, elem);
+        }
+        return out + (v.items.empty() ? "}" : " }");
+    }
+    switch (want.t)
     {
         case PT::Float:  return floatLit(v.f);
         case PT::Bool:   return v.b ? "true" : "false";
@@ -168,6 +236,7 @@ std::string valueLit(const Value& v)
             return "hc::Transform{ glm::vec3(" + floatLit(v.tpos.x) + ", " + floatLit(v.tpos.y) + ", " + floatLit(v.tpos.z) +
                    "), glm::vec3(" + floatLit(v.trot.x) + ", " + floatLit(v.trot.y) + ", " + floatLit(v.trot.z) +
                    "), glm::vec3(" + floatLit(v.tscl.x) + ", " + floatLit(v.tscl.y) + ", " + floatLit(v.tscl.z) + ") }";
+        case PT::Struct: return structLit(v, tt, want);
         default:         return "0.0f";
     }
 }
@@ -199,14 +268,19 @@ Value coerceValue(Value v, PinType want)
 // Static conversion between statically-known pin types — the compile-time
 // counterpart of coerce for typed C++ expressions. Anything the interpreter
 // can't convert becomes the target's zero value.
-std::string convertExpr(const std::string& e, TypeRef from, TypeRef to)
+std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef& to)
 {
+    // User-defined types only convert into THEMSELVES: a Struct is a distinct
+    // C++ type per definition, and an enum of another definition is a different
+    // set of entries (the interpreter's coerce passes Enum→Enum through, which
+    // is what the shared int backing does anyway).
+    const bool sameDef = from.t != PT::Struct || from.typeName == to.typeName;
     if (from.arr || to.arr)
     {
-        if (from.arr && to.arr && from.t == to.t) return e;
+        if (from.arr && to.arr && from.t == to.t && sameDef) return e;
         return zeroLit(to);   // unwireable; only reachable via stale nodes
     }
-    if (from.t == to.t) return e;
+    if (from.t == to.t) return sameDef ? e : zeroLit(to);
     switch (to.t)
     {
         case PT::Float:
@@ -234,15 +308,30 @@ std::string convertExpr(const std::string& e, TypeRef from, TypeRef to)
 
 // hc::coerce<T>/coerceArray<T> around a Value expression (dynamic coercion at
 // the Value boundaries: event args, host reads, undeclared variables).
-std::string coerceCall(const std::string& valueExpr, TypeRef to)
+std::string coerceCall(const std::string& valueExpr, const TypeRef& to)
 {
-    if (to.arr) return "hc::coerceArray<" + std::string(cppScalar(to.t)) + ">(" + valueExpr + ")";
-    return "hc::coerce<" + std::string(cppScalar(to.t)) + ">(" + valueExpr + ")";
+    if (to.arr) return "hc::coerceArray<" + cppScalar(to) + ">(" + valueExpr + ")";
+    // An Enum target is NOT coerce<int>: `coerce(v, Enum)` refuses Bool (§3.3).
+    if (to.t == PT::Enum) return "hc::coerceEnum(" + valueExpr + ")";
+    return "hc::coerce<" + cppScalar(to) + ">(" + valueExpr + ")";
 }
-std::string fromValueCall(const std::string& vecExpr, size_t k, TypeRef to)
+std::string fromValueCall(const std::string& vecExpr, size_t k, const TypeRef& to)
 {
-    if (to.arr) return "hc::fromValueArray<" + std::string(cppScalar(to.t)) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
-    return "hc::fromValue<" + std::string(cppScalar(to.t)) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
+    if (to.arr) return "hc::fromValueArray<" + cppScalar(to) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
+    return "hc::fromValue<" + cppScalar(to) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
+}
+
+// Box a typed C++ expression back into a Value (Set{Property,External},
+// EmitEvent, call args, variable reflection). The user-defined types carry
+// their definition path across this seam — for enums it is a baked literal
+// (they are plain ints in C++), for structs the generated converter sets it.
+std::string toValueCall(const std::string& expr, const TypeRef& from, const std::string& ns)
+{
+    if (from.t == PT::Enum)
+        return from.arr ? "hc::toEnumValueArray(" + expr + ")"
+                        : "hc::toEnumValue(" + expr + ", " + strLit(from.typeName) + ")";
+    if (from.t == PT::Struct && !from.arr) return ns + "::toValue(" + expr + ")";
+    return "hc::toValue(" + expr + ")";
 }
 
 std::string sanitize(const std::string& s)
@@ -266,20 +355,225 @@ std::string uniqueName(const std::string& base, std::unordered_set<std::string>&
     return name;
 }
 
+// ── the run's struct types (hcgen_types.h) ───────────────────────────────────
+// Every struct definition reachable from the sources, closed over nested
+// fields, ordered so a struct is emitted after everything it embeds.
+void collectStructPaths(const Graph& g, std::unordered_set<std::string>& out)
+{
+    auto take = [&out](PinType t, const std::string& name)
+    { if (t == PT::Struct && !name.empty()) out.insert(name); };
+
+    for (const Node& n : g.nodes)
+    {
+        switch (n.type)
+        {
+            case NT::MakeStruct: case NT::BreakStruct:
+            case NT::GetStructField: case NT::SetStructField:
+                if (!n.typeName.empty()) out.insert(n.typeName);
+                break;
+            default: break;
+        }
+        // Struct values also ride on nodes that merely pass them through:
+        // Get/SetVariable, Get/SetExternal, arrays, ForEach, function pins.
+        take(n.propType, n.typeName);
+        for (const auto& p : n.params)  take(p.type, p.typeName);
+        for (const auto& r : n.results) take(r.type, r.typeName);
+    }
+    for (const Variable& v : g.variables) take(v.type, v.typeName);
+}
+
+TypeTable buildTypeTable(const std::vector<ClassSource>& sources)
+{
+    const HE::TypeRegistry& reg = HE::TypeRegistry::instance();
+
+    std::unordered_set<std::string> wanted;
+    for (const ClassSource& s : sources) collectStructPaths(s.graph, wanted);
+
+    // Transitive closure over nested struct fields (the registry's own cycle
+    // guard makes this terminate; a hand-edited cycle stops at the seen-set).
+    std::unordered_map<std::string, HE::StructDef> defs;
+    std::vector<std::string> stack(wanted.begin(), wanted.end());
+    while (!stack.empty())
+    {
+        const std::string path = stack.back();
+        stack.pop_back();
+        if (defs.count(path)) continue;
+        HE::StructDef def;
+        if (!reg.getStruct(path, def)) continue;   // unknown → the class falls back
+        for (const auto& f : def.fields)
+            if (f.type == PT::Struct && !f.typeName.empty() && !defs.count(f.typeName))
+                stack.push_back(f.typeName);
+        defs.emplace(path, std::move(def));
+    }
+
+    // Deterministic order: sort by asset path, then topologically lift the
+    // dependencies (same shape as CppTypesHeaderGen's dependency pass).
+    TypeTable tt;
+    std::vector<std::string> paths;
+    paths.reserve(defs.size());
+    for (const auto& [path, _] : defs) paths.push_back(path);
+    std::sort(paths.begin(), paths.end());
+
+    std::unordered_set<std::string> emitted;
+    for (bool progress = true; progress; )
+    {
+        progress = false;
+        for (const std::string& path : paths)
+        {
+            if (emitted.count(path)) continue;
+            const HE::StructDef& def = defs.at(path);
+            const bool ready = std::all_of(def.fields.begin(), def.fields.end(),
+                [&](const HE::StructField& f)
+                {
+                    return f.type != PT::Struct || f.typeName.empty() ||
+                           !defs.count(f.typeName) || emitted.count(f.typeName);
+                });
+            if (!ready) continue;
+            emitted.insert(path);
+            tt.order.push_back(path);
+            progress = true;
+        }
+    }
+
+    std::unordered_set<std::string> usedNames;
+    for (const std::string& path : tt.order)
+    {
+        StructType st;
+        st.def = defs.at(path);
+        st.cpp = uniqueName("S_" + sanitize(st.def.name), usedNames);
+        std::unordered_set<std::string> usedFields;
+        for (const auto& f : st.def.fields)
+            st.members.push_back(uniqueName(sanitize(f.name), usedFields));
+        tt.byPath.emplace(path, std::move(st));
+    }
+    return tt;
+}
+
+// A member's initializer, omitted where default construction already IS the
+// zero value (std::string, hc::Array, hc::Transform, a nested struct) — the
+// generated struct should read like one somebody wrote by hand.
+std::string memberInit(const TypeRef& tr)
+{
+    if (tr.arr) return {};
+    switch (tr.t)
+    {
+        case PT::String: case PT::Transform: case PT::Struct: return {};
+        default: return " = " + zeroLit(tr);
+    }
+}
+
+// hcgen_types.h — the C++ struct per definition plus its Value converters and
+// the hc:: template hooks the generic array/coerce helpers dispatch through.
+// Order matters: a struct's converter reads its nested-struct fields through
+// hc::coerce<Nested>, so that specialization has to exist first. Definitions
+// therefore come in dependency order, then all declarations, then the hc::
+// specializations, then the bodies.
+std::string emitTypesHeader(const TypeTable& tt, const std::string& ns)
+{
+    auto fieldType = [&tt](const HE::StructField& f)
+    { return TypeRef{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName) }; };
+
+    std::string h;
+    h += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
+    h += "// The project's Struct assets as plain C++ types (one per definition).\n";
+    h += "#pragma once\n";
+    h += "#include <HorizonCode/HorizonCodeGenSupport.h>\n\n";
+    h += "namespace " + ns + " {\n";
+
+    for (const std::string& path : tt.order)
+    {
+        const StructType& st = tt.byPath.at(path);
+        h += "\n// \"" + st.def.name + "\" (" + path + ")\n";
+        h += "struct " + st.cpp + "\n{\n";
+        for (size_t i = 0; i < st.def.fields.size(); ++i)
+        {
+            const auto& f = st.def.fields[i];
+            h += "    " + cppType(fieldType(f)) + " " + st.members[i] + memberInit(fieldType(f)) + ";";
+            if (st.members[i] != f.name) h += "   // \"" + f.name + "\"";
+            h += "\n";
+        }
+        h += "};\n";
+    }
+
+    h += "\n";
+    for (const std::string& path : tt.order)
+    {
+        const StructType& st = tt.byPath.at(path);
+        h += "inline hc::Value toValue(const " + st.cpp + "& s);\n";
+        h += "inline " + st.cpp + " fromValue_" + st.cpp + "(const hc::Value& v);\n";
+    }
+    h += "\n} // namespace " + ns + "\n";
+
+    // The generic hc:: helpers (arrays, coerce, cached results) dispatch on
+    // these; hc::toValue is found by ADL in the namespace above.
+    h += "\nnamespace hc {\n";
+    for (const std::string& path : tt.order)
+    {
+        const std::string cpp = tt.byPath.at(path).cpp;
+        const std::string t   = ns + "::" + cpp;
+        h += "template <> inline " + t + " zeroOf<" + t + ">() { return {}; }\n";
+        h += "template <> inline " + t + " raw<" + t + ">(const Value& v) { return " +
+             ns + "::fromValue_" + cpp + "(v); }\n";
+        h += "template <> inline " + t + " coerce<" + t + ">(const Value& v) { return " +
+             ns + "::fromValue_" + cpp + "(v); }\n";
+        h += "template <> inline PinType tagOf<" + t + ">() { return PinType::Struct; }\n";
+    }
+    h += "} // namespace hc\n";
+
+    h += "\nnamespace " + ns + " {\n";
+    for (const std::string& path : tt.order)
+    {
+        const StructType& st = tt.byPath.at(path);
+
+        // → Value: fields in DEFINITION order, the layout every consumer
+        //   (interpreter, savegames, scripts) resolves against.
+        h += "\ninline hc::Value toValue(const " + st.cpp + "& s)\n{\n";
+        h += "    hc::Value v; v.type = hc::PinType::Struct; v.typeName = " + strLit(path) + ";\n";
+        if (st.def.fields.empty()) h += "    (void)s;\n";
+        else h += "    v.items.reserve(" + std::to_string(st.def.fields.size()) + ");\n";
+        for (size_t i = 0; i < st.def.fields.size(); ++i)
+            h += "    v.items.push_back(" +
+                 toValueCall("s." + st.members[i], fieldType(st.def.fields[i]), ns) + ");\n";
+        h += "    return v;\n}\n";
+
+        // ← Value: a non-struct Value reads as all-zero fields, exactly like the
+        //   interpreter's coerce(v, Struct) followed by field reads (§3.3).
+        h += "inline " + st.cpp + " fromValue_" + st.cpp + "(const hc::Value& v)\n{\n";
+        h += "    " + st.cpp + " s;\n";
+        h += "    if (v.type != hc::PinType::Struct) return s;\n";
+        for (size_t i = 0; i < st.def.fields.size(); ++i)
+        {
+            const auto& f  = st.def.fields[i];
+            const TypeRef ft = fieldType(f);
+            const std::string k = std::to_string(i);
+            std::string read;
+            if (f.isArray)               read = "hc::itemArray<" + cppScalar(ft) + ">(v.items, " + k + ")";
+            else if (f.type == PT::Enum) read = "hc::itemEnum(v.items, " + k + ")";
+            else                         read = "hc::item<" + cppScalar(ft) + ">(v.items, " + k + ")";
+            h += "    s." + st.members[i] + " = " + read + ";\n";
+        }
+        h += "    return s;\n}\n";
+    }
+    h += "\n} // namespace " + ns + "\n";
+    return h;
+}
+
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter
 {
 public:
     ClassEmitter(const ClassSource& src, const std::string& className,
-                 const Options& opt, std::vector<std::string>& warnings)
-        : m_src(src), m_g(src.graph), m_cls(className), m_opt(opt), m_warnings(warnings) {}
+                 const Options& opt, const TypeTable& tt, std::vector<std::string>& warnings)
+        : m_src(src), m_g(src.graph), m_cls(className), m_opt(opt), m_tt(tt), m_warnings(warnings) {}
 
-    void run(std::string& header, std::string& impl)
+    // One self-contained translation unit per class (plan §5.4). There is no
+    // generated header: the class is internal to its .cpp and the manifest only
+    // ever needs the two factory functions, declared in hc_registry.cpp.
+    void run(std::string& impl)
     {
         validate();
         buildNames();
         buildSlots();
-        emitHeader(header);
         emitImpl(impl);
     }
 
@@ -288,7 +582,31 @@ private:
     Graph              m_g;      // private copy: EngineCall pins may be re-mirrored
     std::string        m_cls;
     const Options&     m_opt;
+    const TypeTable&   m_tt;
     std::vector<std::string>& m_warnings;
+
+    // Pin types, with the user-defined definitions resolved against the run's
+    // type table (Struct pins get their generated C++ name here).
+    TypeRef trOf(const HorizonCode::PinDesc& d) const
+    {
+        const std::string tn = d.typeName ? d.typeName : "";
+        return { d.type, d.isArray, tn, m_tt.cppOf(tn) };
+    }
+    TypeRef dataInType(const Node& n, int idx) const
+    {
+        const NodeSig s = HorizonCode::signatureOf(n);
+        if (idx < 0 || idx >= (int)s.dataIns.size()) return {};
+        return trOf(s.dataIns[idx]);
+    }
+    TypeRef dataOutType(const Node& n, int idx) const
+    {
+        const NodeSig s = HorizonCode::signatureOf(n);
+        if (idx < 0 || idx >= (int)s.dataOuts.size()) return {};
+        return trOf(s.dataOuts[idx]);
+    }
+    // Variables/params carry their own definition path rather than a pin desc.
+    TypeRef trOf(PinType t, bool isArray, const std::string& typeName) const
+    { return { t, isArray, typeName, m_tt.cppOf(typeName) }; }
 
     std::unordered_map<std::string, std::string> m_varMember;  // instance var → v_*
     std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
@@ -296,6 +614,17 @@ private:
     std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
+
+    // ── what this class actually needs from the per-run scaffolding ─────────
+    // A small graph carries none of it, and then none of it is emitted: no
+    // RunState, no step guard, no `rs` parameter — just the statements.
+    bool m_guard        = false;   // step/depth guards can be reached at all
+    bool m_usesEventArg = false;   // some Event data-out is read
+    bool m_rsTouched    = false;   // the body being emitted right now mentions `rs`
+    bool useRunState() const { return m_guard || m_usesEventArg || !m_slots.empty(); }
+    std::string rsParam(bool used = true) const
+    { return useRunState() ? (used ? "RunState& rs" : "RunState&") : std::string(); }
+    std::string rsArg() const { return useRunState() ? "rs" : std::string(); }
 
     void warn(const std::string& msg) { m_warnings.push_back(m_src.key + ": " + msg); }
 
@@ -349,18 +678,27 @@ private:
             }
         }
 
-        // 2. Struct nodes/pins → interpreted fallback (deliberate v1 scope: the
-        //    Value-typed struct plumbing isn't emitted yet; the hybrid runs such
-        //    classes interpreted, which is correct just not compiled). Enum
-        //    nodes DO compile (int-backed) but need their definition at
-        //    generation time to resolve entries.
+        // 2. User-defined types compile against their DEFINITION as of now:
+        //    structs become real C++ types (the run's TypeTable), enums stay
+        //    int-backed but need their entries resolved. Either way a missing
+        //    definition means the emitted code couldn't match the interpreter's
+        //    by-name field/entry resolution → interpreted fallback.
+        auto requireStruct = [this](const std::string& typeName, int node)
+        {
+            if (typeName.empty())
+                throw FallbackError{ "struct pin without a definition (generic struct boundary)", node };
+            if (!m_tt.find(typeName))
+                throw FallbackError{ "struct definition '" + typeName +
+                                     "' not registered at generation time", node };
+        };
         for (const Node& n : m_g.nodes)
         {
             switch (n.type)
             {
             case NT::MakeStruct: case NT::BreakStruct:
             case NT::GetStructField: case NT::SetStructField:
-                throw FallbackError{ "struct nodes are interpreted (codegen v1)", n.id };
+                requireStruct(n.typeName, n.id);
+                break;
             case NT::SwitchOnEnum: case NT::EnumToString:
             case NT::ConstEnum: case NT::EnumToInt: case NT::IntToEnum:
                 if (!HE::TypeRegistry::instance().hasEnum(n.typeName))
@@ -369,11 +707,15 @@ private:
                 break;
             default: break;
             }
+            // Struct values also travel on plain pass-through nodes.
+            if (n.propType == PT::Struct) requireStruct(n.typeName, n.id);
+            for (const auto& p : n.params)
+                if (p.type == PT::Struct) requireStruct(p.typeName, n.id);
+            for (const auto& r : n.results)
+                if (r.type == PT::Struct) requireStruct(r.typeName, n.id);
         }
         for (const auto& v : m_g.variables)
-            if (v.type == PT::Struct)
-                throw FallbackError{ "struct variable '" + v.name +
-                                     "' is interpreted (codegen v1)", 0 };
+            if (v.type == PT::Struct) requireStruct(v.typeName, 0);
 
         // 3. Exec cycles would compile to unbounded loops (the interpreter only
         //    tolerates them via the step guard) → interpreted fallback.
@@ -464,20 +806,29 @@ private:
                 case NT::FunctionCall:
                 case NT::CallExternal:
                     for (size_t k = 0; k < n.results.size(); ++k)
-                        s.push_back({ field((int)k), { n.results[k].type, n.results[k].isArray } });
+                        s.push_back({ field((int)k), trOf(n.results[k].type, n.results[k].isArray,
+                                                          n.results[k].typeName) });
                     break;
                 case NT::EngineCall:
                     if (n.hasArg)
                         for (size_t k = 0; k < n.results.size(); ++k)
-                            s.push_back({ field((int)k), { n.results[k].type, n.results[k].isArray } });
+                            s.push_back({ field((int)k), trOf(n.results[k].type, n.results[k].isArray,
+                                                              n.results[k].typeName) });
                     break;
                 case NT::ForEach:
-                    s.push_back({ field(0), { n.propType, false } });
+                    s.push_back({ field(0), trOf(n.propType, false, n.typeName) });
                     s.push_back({ field(1), { PT::Int, false } });
                     break;
                 default: break;
             }
             if (!s.empty()) m_slots[n.id] = std::move(s);
+
+            // The step/depth guards (§3.6) exist for graphs that can repeat or
+            // nest. Only ForEach and FunctionCall do either — everything else
+            // lowers to straight-line code whose statement count is fixed at
+            // generation time, so the 4096-step abort is unreachable and the
+            // whole counter (and every HC_STEP with it) is dead weight.
+            if (n.type == NT::ForEach || n.type == NT::FunctionCall) m_guard = true;
         }
     }
 
@@ -498,8 +849,11 @@ private:
             }
         }
         // Unwired: the pin default constant-folded through coerce, else the zero.
+        // A Struct default is already a struct Value (there is nothing to coerce
+        // it into) — its items are read positionally, like the interpreter's.
         if (auto it = n.pinDefaults.find(inIdx); it != n.pinDefaults.end() && !want.arr)
-            return valueLit(coerceValue(it->second, want.t));
+            return valueLit(want.t == PT::Struct ? it->second : coerceValue(it->second, want.t),
+                            m_tt, want);
         return zeroLit(want);
     }
 
@@ -521,11 +875,12 @@ private:
         return ids;
     }
 
-    std::string slotRef(const Node& n, int outIdx) const
+    std::string slotRef(const Node& n, int outIdx)
     {
         auto it = m_slots.find(n.id);
         if (it == m_slots.end() || outIdx < 0 || outIdx >= (int)it->second.size())
             return zeroLit(dataOutType(n, outIdx));   // §3.3: out-of-range cache read → zero
+        m_rsTouched = true;
         return "rs." + it->second[outIdx].field;
     }
 
@@ -536,7 +891,8 @@ private:
         {
         case NT::Event:
             // §3.3: Event data-out ← this run's arg coerced to propType.
-            return coerceCall("rs.eventArg", { n.propType, false });
+            m_usesEventArg = m_rsTouched = true;
+            return coerceCall("rs.eventArg", trOf(n.propType, false, n.typeName));
         case NT::FunctionEntry:
         {
             // §3.4: FunctionEntry param reads the INNERMOST frame — in C++ that
@@ -556,33 +912,31 @@ private:
         case NT::ConstTransform:
         {
             Value v = Value::ofTransform(n.tpos, n.trot, n.tscl);
-            return valueLit(v);
+            return valueLit(v, m_tt, { PT::Transform, false });
         }
         case NT::GetVariable:
         {
             const Variable* v = m_g.findVariable(n.s);
+            const TypeRef pin = trOf(n.propType, n.isArray, n.typeName);
             if (v && v->scope != 0)
             {
                 // §13.4: locals are stack locals of the owning function only.
                 if (v->scope != fnCtx)
                     throw FallbackError{ "local '" + n.s + "' read outside its function", n.id };
-                return convertExpr(m_localName.at(n.s), { v->type, v->isArray },
-                                   { n.propType, n.isArray });
+                return convertExpr(m_localName.at(n.s), trOf(v->type, v->isArray, v->typeName), pin);
             }
             if (v)
-                return convertExpr(m_varMember.at(n.s), { v->type, v->isArray },
-                                   { n.propType, n.isArray });
+                return convertExpr(m_varMember.at(n.s), trOf(v->type, v->isArray, v->typeName), pin);
             // Undeclared: through the Context → the Runtime store (overflow for
             // compiled instances) so §3.4's dynamic-store semantics stay exact.
-            return coerceCall("hc::getVariableCtx(m_ctx, " + strLit(n.s) + ")",
-                              { n.propType, n.isArray });
+            return coerceCall("hc::getVariableCtx(m_ctx, " + strLit(n.s) + ")", pin);
         }
         case NT::GetProperty:
             return coerceCall("hc::getProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) + ")",
-                              { n.propType, false });
+                              trOf(n.propType, false, n.typeName));
         case NT::GetExternal:
             return coerceCall("hc::getExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ")",
-                              { n.propType, false });
+                              trOf(n.propType, false, n.typeName));
         // §3.4: Set pass-through re-evaluates the Value input (no store read).
         case NT::SetVariable:
         case NT::SetProperty:
@@ -606,7 +960,7 @@ private:
             for (size_t i = 0; i < n.params.size(); ++i)
             {
                 if (i) args += ", ";
-                args += "hc::toValue(" + input(n, (int)i, fnCtx) + ")";
+                args += toValueCall(input(n, (int)i, fnCtx), dataInType(n, (int)i), m_opt.namespaceName);
             }
             args += "}";
             return fromValueCall("hc::callApi(m_ctx, " + strLit(n.s) + ", " + args + ")",
@@ -626,10 +980,15 @@ private:
                    input(n, 2, fnCtx) + ")";
         case NT::ArrayRemove:
             return "hc::arrRemove(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        // §3.4: both search on valueEquals, which has no Struct case — a struct
+        // element never compares equal, so these are constant for struct arrays
+        // (the *Never helpers still take both inputs, so both still evaluate).
         case NT::ArrayContains:
-            return "hc::arrContains(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+            return std::string(n.propType == PT::Struct ? "hc::arrContainsNever(" : "hc::arrContains(") +
+                   input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::ArrayIndexOf:
-            return "hc::arrIndexOf(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+            return std::string(n.propType == PT::Struct ? "hc::arrIndexOfNever(" : "hc::arrIndexOf(") +
+                   input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::IsValid:
             return "hc::isValidRef(m_ctx, " + input(n, 0, fnCtx) + ")";
         case NT::FlipFlop:
@@ -661,15 +1020,93 @@ private:
             // runtime lookup). Unmatched values → "" like the interpreter.
             HE::EnumDef def;
             HE::TypeRegistry::instance().getEnum(n.typeName, def);
-            std::string e = "([&](int _ev) -> std::string { switch (_ev) {";
+            std::string e = "([](int _ev) -> std::string { switch (_ev) {";
+            // Nothing stops an author giving two entries the same value;
+            // EnumDef::findValue answers with the FIRST, so later duplicates are
+            // dead — and emitting them would be a duplicate `case` label, i.e. a
+            // generated file that does not compile.
+            std::unordered_set<int> seenValues;
             for (const auto& en : def.entries)
-                e += " case " + std::to_string(en.value) + ": return " + strLit(en.name) + ";";
+                if (seenValues.insert(en.value).second)
+                    e += " case " + std::to_string(en.value) + ": return " + strLit(en.name) + ";";
             e += " default: return std::string(); } })(" + input(n, 0, fnCtx) + ")";
             return e;
+        }
+        // ── user-defined structs: plain C++ aggregates (hcgen_types.h) ───────
+        case NT::MakeStruct:
+        {
+            // The definition's field defaults, with the wired/authored pins
+            // overwriting them — the interpreter builds exactly this, starting
+            // from makeDefaultValue and only touching pins that carry a value.
+            const StructType* st = m_tt.find(n.typeName);
+            if (!st) return zeroLit(out);
+            const Value defaults = HE::TypeRegistry::instance().makeDefaultValue(n.typeName);
+            std::string e = st->cpp + "{";
+            for (size_t i = 0; i < st->def.fields.size(); ++i)
+            {
+                const HE::StructField& f = st->def.fields[i];
+                const TypeRef ft = trOf(f.type, f.isArray, f.typeName);
+                e += (i ? ", " : " ");
+                const int idx = fieldPinIndex(n, f.name);
+                const bool authored = idx >= 0 &&
+                    (dataLinkTo(n.id, pinRanges(n).dataIn0 + idx) || n.pinDefaults.count(idx));
+                e += authored ? convertExpr(input(n, idx, fnCtx), dataInType(n, idx), ft)
+                              : (i < defaults.items.size() ? valueLit(defaults.items[i], m_tt, ft)
+                                                           : zeroLit(ft));
+            }
+            return e + (st->def.fields.empty() ? "}" : " }");
+        }
+        case NT::BreakStruct:
+            return structFieldRead(n, outIdx, fnCtx, out);
+        case NT::GetStructField:
+            return structFieldRead(n, 0, fnCtx, out);
+        case NT::SetStructField:
+        {
+            // A pure "copy with one field replaced". Evaluation order matters:
+            // the struct input is read before the value input (§3.4).
+            const StructType* st = m_tt.find(n.typeName);
+            const int fi = st && !n.params.empty() ? defFieldIndex(*st, n.params[0].name) : -1;
+            const std::string src = input(n, 0, fnCtx);
+            if (fi < 0) return src;   // field gone from the definition → unchanged copy
+            const HE::StructField& f = st->def.fields[(size_t)fi];
+            const TypeRef ft = trOf(f.type, f.isArray, f.typeName);
+            return "([&]{ " + st->cpp + " s__ = " + src + "; s__." + structMember(*st, (size_t)fi) +
+                   " = " + convertExpr(input(n, 1, fnCtx), dataInType(n, 1), ft) + "; return s__; }())";
         }
         default:
             return zeroLit(out);   // unknown data-out (§3.3: Value{} → zero)
         }
+    }
+
+    // ── struct field plumbing ────────────────────────────────────────────────
+    static const std::string& structMember(const StructType& st, size_t fieldIndex)
+    { return st.members[fieldIndex]; }
+    static int defFieldIndex(const StructType& st, const std::string& fieldName)
+    {
+        for (size_t i = 0; i < st.def.fields.size(); ++i)
+            if (st.def.fields[i].name == fieldName) return (int)i;
+        return -1;
+    }
+    // The data-in index of a MakeStruct pin mirroring `fieldName` (the node's
+    // params are the mirror; syncTypeSignatures keeps them in definition order,
+    // but resolve BY NAME anyway — that is what the interpreter does).
+    static int fieldPinIndex(const Node& n, const std::string& fieldName)
+    {
+        for (size_t i = 0; i < n.params.size(); ++i)
+            if (n.params[i].name == fieldName) return (int)i;
+        return -1;
+    }
+    // BreakStruct / GetStructField: resolve the mirrored pin name against the
+    // CURRENT definition, then read that member (§3.4 — never positional).
+    std::string structFieldRead(const Node& n, int paramIdx, int fnCtx, const TypeRef& out)
+    {
+        const StructType* st = m_tt.find(n.typeName);
+        if (!st || paramIdx < 0 || paramIdx >= (int)n.params.size()) return zeroLit(out);
+        const int fi = defFieldIndex(*st, n.params[(size_t)paramIdx].name);
+        if (fi < 0) return zeroLit(out);   // field gone from the definition → typed zero
+        const HE::StructField& f = st->def.fields[(size_t)fi];
+        return convertExpr("(" + input(n, 0, fnCtx) + ")." + structMember(*st, (size_t)fi),
+                           trOf(f.type, f.isArray, f.typeName), out);
     }
 
     // ── statements (exec walk = runExecChain, §3.2) ──────────────────────────
@@ -720,13 +1157,20 @@ private:
         b.line("std::vector<hc::Value> " + av + ";");
         if (!n.params.empty()) b.line(av + ".reserve(" + std::to_string(n.params.size()) + ");");
         for (size_t i = 0; i < n.params.size(); ++i)
-            b.line(av + ".push_back(hc::toValue(" + input(n, (int)i + firstArgPin, fnCtx) + "));");
+        {
+            const int pin = (int)i + firstArgPin;
+            b.line(av + ".push_back(" +
+                   toValueCall(input(n, pin, fnCtx), dataInType(n, pin), m_opt.namespaceName) + ");");
+        }
         b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
         const auto it = m_slots.find(n.id);
         if (it != m_slots.end())
+        {
+            m_rsTouched = true;
             for (size_t k = 0; k < it->second.size(); ++k)
                 b.line("rs." + it->second[k].field + " = " +
                        fromValueCall(rv, k, it->second[k].tr) + ";");
+        }
         --b.indent;
         b.line("}");
     }
@@ -734,7 +1178,7 @@ private:
     void stmt(const Node& n, int fnCtx, Body& b)
     {
         const PinRanges r = pinRanges(n);
-        b.line("HC_STEP(rs);");
+        if (m_guard) { b.line("HC_STEP(rs);"); m_rsTouched = true; }
         switch (n.type)
         {
         case NT::Branch:
@@ -761,7 +1205,8 @@ private:
             const std::string idx = "i" + std::to_string(n.id);
             b.line("{");
             ++b.indent;
-            b.line("const " + cppType({ n.propType, true }) + " " + arr + " = " + input(n, 0, fnCtx) + ";");
+            b.line("const " + cppType(trOf(n.propType, true, n.typeName)) + " " + arr + " = " +
+                   input(n, 0, fnCtx) + ";");
             b.line("if (++rs.depth <= hc::kMaxDepth)");
             b.line("{");
             ++b.indent;
@@ -784,6 +1229,7 @@ private:
         case NT::SetVariable:
         {
             const Variable* v = m_g.findVariable(n.s);
+            const TypeRef pin = trOf(n.propType, n.isArray, n.typeName);
             if (v && v->scope != 0)
             {
                 if (v->scope != fnCtx)
@@ -793,23 +1239,23 @@ private:
                     break;
                 }
                 b.line(m_localName.at(n.s) + " = " +
-                       convertExpr(input(n, 0, fnCtx), { n.propType, n.isArray },
-                                   { v->type, v->isArray }) + ";");
+                       convertExpr(input(n, 0, fnCtx), pin,
+                                   trOf(v->type, v->isArray, v->typeName)) + ";");
             }
             else if (v)
                 b.line(m_varMember.at(n.s) + " = " +
-                       convertExpr(input(n, 0, fnCtx), { n.propType, n.isArray },
-                                   { v->type, v->isArray }) + ";");
+                       convertExpr(input(n, 0, fnCtx), pin,
+                                   trOf(v->type, v->isArray, v->typeName)) + ";");
             else
                 // §3.4: Set on an undeclared name creates a store entry — routed
                 // through the Context to the Runtime's (overflow) store.
-                b.line("hc::setVariableCtx(m_ctx, " + strLit(n.s) + ", hc::toValue(" +
-                       input(n, 0, fnCtx) + "));");
+                b.line("hc::setVariableCtx(m_ctx, " + strLit(n.s) + ", " +
+                       toValueCall(input(n, 0, fnCtx), pin, m_opt.namespaceName) + ");");
             break;
         }
         case NT::SetProperty:
-            b.line("hc::setProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) +
-                   ", hc::toValue(" + input(n, 0, fnCtx) + "));");
+            b.line("hc::setProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) + ", " +
+                   toValueCall(input(n, 0, fnCtx), dataInType(n, 0), m_opt.namespaceName) + ");");
             break;
         case NT::ShowSelf: b.line("hc::showSelf(m_ctx);"); break;
         case NT::HideSelf: b.line("hc::hideSelf(m_ctx);"); break;
@@ -832,16 +1278,16 @@ private:
             b.line("hc::destroyObject(m_ctx, " + input(n, 0, fnCtx) + ");");
             break;
         case NT::SetExternal:
-            b.line("hc::setExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) +
-                   ", hc::toValue(" + input(n, 1, fnCtx) + "));");
+            b.line("hc::setExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ", " +
+                   toValueCall(input(n, 1, fnCtx), dataInType(n, 1), m_opt.namespaceName) + ");");
             break;
         case NT::BindEvent:
             b.line("hc::bindEvent(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ");");
             break;
         case NT::EmitEvent:
             if (n.hasArg)
-                b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", hc::toValue(" +
-                       input(n, 0, fnCtx) + "));");
+                b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", " +
+                       toValueCall(input(n, 0, fnCtx), dataInType(n, 0), m_opt.namespaceName) + ");");
             else
                 b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", hc::Value{});");
             break;
@@ -870,7 +1316,8 @@ private:
             for (size_t i = 0; i < entry->params.size(); ++i)
             {
                 const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
-                const TypeRef tr = { entry->params[i].type, entry->params[i].isArray };
+                const TypeRef tr = trOf(entry->params[i].type, entry->params[i].isArray,
+                                        entry->params[i].typeName);
                 // The call node mirrors the entry (synced) — pin type == param type.
                 b.line("const " + cppType(tr) + " " + a + " = " +
                        (i < n.params.size() ? input(n, (int)i, fnCtx) : zeroLit(tr)) + ";");
@@ -879,7 +1326,8 @@ private:
             for (size_t i = 0; i < entry->results.size(); ++i)
             {
                 const std::string rn = "r" + std::to_string(n.id) + "_" + std::to_string(i);
-                const TypeRef tr = { entry->results[i].type, entry->results[i].isArray };
+                const TypeRef tr = trOf(entry->results[i].type, entry->results[i].isArray,
+                                        entry->results[i].typeName);
                 b.line(cppType(tr) + " " + rn + " = " + zeroLit(tr) + ";");   // typed default results
                 resNames.push_back(rn);
             }
@@ -889,6 +1337,7 @@ private:
             call += ");";
             b.line("if (++rs.depth <= hc::kMaxDepth) " + call + "   // depth guard (§3.6)");
             b.line("--rs.depth;");
+            m_rsTouched = true;
             const auto it = m_slots.find(n.id);
             if (it != m_slots.end())
                 for (size_t k = 0; k < it->second.size() && k < resNames.size(); ++k)
@@ -905,9 +1354,9 @@ private:
                 const size_t count = std::min(n.results.size(), fn->results.size());
                 for (size_t i = 0; i < count; ++i)
                     b.line("r_" + std::to_string(i) + " = " +
-                           convertExpr(input(n, (int)i, fnCtx),
-                                       { n.results[i].type, n.results[i].isArray },
-                                       { fn->results[i].type, fn->results[i].isArray }) + ";");
+                           convertExpr(input(n, (int)i, fnCtx), dataInType(n, (int)i),
+                                       trOf(fn->results[i].type, fn->results[i].isArray,
+                                            fn->results[i].typeName)) + ";");
             }
             b.line("return;");
             break;
@@ -960,10 +1409,17 @@ private:
             HE::TypeRegistry::instance().getEnum(n.typeName, def);
             b.line("switch (" + input(n, 0, fnCtx) + ")");
             b.line("{");
+            // Two entries may share a value; the interpreter routes through
+            // findValue (the FIRST match), so only that entry's branch is
+            // reachable — and emitting the others would be a duplicate `case`.
+            std::unordered_set<int> seenValues;
             for (size_t i = 0; i < n.params.size(); ++i)
             {
                 const HE::EnumEntry* e = def.findEntry(n.params[i].name);
                 if (!e) continue;   // stale mirror entry: unreachable branch
+                if (!def.findValue(e->value) ||
+                    def.findValue(e->value)->name != n.params[i].name) continue;
+                if (!seenValues.insert(e->value).second) continue;
                 b.line("case " + std::to_string(e->value) + ":");
                 b.line("{");
                 ++b.indent;
@@ -990,23 +1446,10 @@ private:
     }
 
     // ── class emission ────────────────────────────────────────────────────────
+    TypeRef varType(const Variable& v) const { return trOf(v.type, v.isArray, v.typeName); }
+
     std::string memberDefault(const Variable& v) const
-    {
-        const Value d = HorizonCode::variableDefaultValue(v);
-        if (v.isArray)
-        {
-            std::string init = cppType({ v.type, true }) + "{";
-            for (size_t i = 0; i < d.items.size(); ++i)
-            {
-                if (i) init += ", ";
-                Value item = d.items[i];
-                item.type = v.type;
-                init += valueLit(item);
-            }
-            return init + "}";
-        }
-        return valueLit(d);
-    }
+    { return valueLit(HorizonCode::variableDefaultValue(v), m_tt, varType(v)); }
 
     // Events grouped by name in graph order (dispatch shape, §3.1).
     std::vector<std::pair<std::string, std::vector<const Node*>>> eventGroups() const
@@ -1034,79 +1477,19 @@ private:
         return fns;
     }
 
-    std::string fnSignature(const Node& fn, bool withClass) const
+    // Parameter list of a generated function body: the RunState only when the
+    // class has one, results by reference (the callee's out-params, §3.1).
+    std::string fnParamList(const Node& fn, bool rsUsed) const
     {
-        std::string sig = "void " + (withClass ? m_cls + "::" : std::string()) +
-                          m_fnName.at(fn.s) + "(RunState& rs";
+        std::string sig = rsParam(rsUsed);
+        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
         for (size_t i = 0; i < fn.params.size(); ++i)
-            sig += ", " + cppType({ fn.params[i].type, fn.params[i].isArray }) +
-                   " p_" + std::to_string(i);
+            add(cppType(trOf(fn.params[i].type, fn.params[i].isArray, fn.params[i].typeName)) +
+                " p_" + std::to_string(i));
         for (size_t i = 0; i < fn.results.size(); ++i)
-            sig += ", " + cppType({ fn.results[i].type, fn.results[i].isArray }) +
-                   "& r_" + std::to_string(i);
-        return sig + ")";
-    }
-
-    void emitHeader(std::string& h)
-    {
-        h += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
-        h += "// Source: " + m_src.label + " (key " + m_src.key + ")\n";
-        h += "#pragma once\n";
-        h += "#include <HorizonCode/HorizonCodeCompiled.h>\n";
-        h += "#include <HorizonCode/HorizonCodeGenSupport.h>\n\n";
-        h += "namespace " + m_opt.namespaceName + " {\n\n";
-        h += "class " + m_cls + " final : public HorizonCode::CompiledInstance\n{\npublic:\n";
-        h += "    const char* classKey() const override;\n";
-        h += "    const std::vector<HorizonCode::CompiledVarInfo>&   varInfos()   const override;\n";
-        h += "    const std::vector<HorizonCode::CompiledEventInfo>& eventInfos() const override;\n";
-        h += "    void fireEvent(const std::string& name, int elem, const hc::Value& arg) override;\n";
-        h += "    bool callFunction(const std::string& name, bool requirePublic,\n";
-        h += "                      const std::vector<hc::Value>& args,\n";
-        h += "                      std::vector<hc::Value>* results) override;\n";
-        h += "    hc::Value getVariable(const std::string& name) const override;\n";
-        h += "    bool setVariable(const std::string& name, const hc::Value& v) override;\n";
-        h += "    void reseedVariables() override;\n";
-        h += "    void collectRefs(std::vector<uint32_t>& out) const override;\n\n";
-        h += "private:\n";
-
-        // Instance variables → typed members at their declared defaults.
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0)
-                h += "    " + cppType({ v.type, v.isArray }) + " " + m_varMember.at(v.name) +
-                     " = " + memberDefault(v) + ";\n";
-
-        // Per-run state: mirrors the Runner exactly (§3.3/§5.4).
-        h += "\n    struct RunState\n    {\n";
-        h += "        int steps = 0, depth = 0;\n";
-        h += "        bool aborted = false;\n";
-        h += "        hc::Value eventArg;\n";
-        std::vector<int> slotIds;
-        for (const auto& [id, _] : m_slots) slotIds.push_back(id);
-        std::sort(slotIds.begin(), slotIds.end());
-        for (const int id : slotIds)
-            for (const auto& s : m_slots.at(id))
-                h += "        " + cppType(s.tr) + " " + s.field + " = " + zeroLit(s.tr) + ";\n";
-        h += "    };\n\n";
-
-        // Per-instance node state (DoOnce/FlipFlop) — persists like variables,
-        // reset by reseedVariables, never part of the public surface.
-        for (const int id : stateNodeIds())
-            h += "    bool " + stateMember(id) + " = false;\n";
-
-        for (const auto& [id, name] : sortedEvNames())
-            h += "    void " + name + "(RunState& rs);\n";
-        for (const Node* fn : functionEntries())
-            h += "    " + fnSignature(*fn, false) + ";\n";
-        if (!delayNodeIds().empty())
-        {
-            h += "public:\n";
-            h += "    void resumeFrom(int nodeId) override;\n";
-            h += "private:\n";
-            for (const int id : delayNodeIds())
-                h += "    void resume_" + std::to_string(id) + "(RunState& rs);\n";
-        }
-        h += "};\n\n";
-        h += "} // namespace " + m_opt.namespaceName + "\n";
+            add(cppType(trOf(fn.results[i].type, fn.results[i].isArray, fn.results[i].typeName)) +
+                "& r_" + std::to_string(i));
+        return sig;
     }
 
     std::vector<std::pair<int, std::string>> sortedEvNames() const
@@ -1116,171 +1499,295 @@ private:
         return evs;
     }
 
+    // One translated body: an event handler, a graph function, or a Delay
+    // continuation. `fn` is set for graph functions (their parameter list is
+    // rendered later, once it is known whether a RunState exists at all).
+    struct Fragment
+    {
+        std::string name;
+        const Node* fn      = nullptr;
+        std::string prelude;   // function locals
+        std::string body;
+        bool        rsUsed  = false;
+    };
+
+    std::vector<Fragment> translateBodies()
+    {
+        std::vector<Fragment> out;
+        auto translate = [this, &out](const std::string& name, const Node* start,
+                                      const Node* fn, int fnCtx)
+        {
+            Fragment f;
+            f.name = name;
+            f.fn   = fn;
+            if (fn)
+                for (const auto& v : m_g.variables)
+                    if (v.scope == fn->id)
+                        f.prelude += "        " + cppType(varType(v)) + " " + m_localName.at(v.name) +
+                                     " = " + memberDefault(v) + ";   // local, per invocation\n";
+            Body b;
+            b.indent = 2;   // inside a member function inside the class
+            m_rsTouched = false;
+            if (start) chain(*start, pinRanges(*start).execOut0, fnCtx, b);
+            f.body   = std::move(b.text);
+            f.rsUsed = m_rsTouched;
+            out.push_back(std::move(f));
+        };
+
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::Event) translate(m_evName.at(n.id), &n, nullptr, 0);
+        for (const Node* fn : functionEntries())
+            translate(m_fnName.at(fn->s), fn, fn, fn->id);
+        // Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
+        for (const int id : delayNodeIds())
+            translate("resume_" + std::to_string(id), m_g.findNode(id), nullptr, 0);
+        return out;
+    }
+
     void emitImpl(std::string& c)
     {
         const std::string ns = m_opt.namespaceName;
-        c += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
-        c += "#include \"hcgen_" + m_cls + ".h\"\n\n";
-        c += "namespace " + ns + " {\n\n";
 
-        c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n\n";
+        // Bodies FIRST: translating them is what reveals whether this class ever
+        // reads the event argument, and that decides whether a RunState exists —
+        // and with it the `rs` parameter every body would otherwise carry.
+        const std::vector<Fragment> frags = translateBodies();
+
+        const bool rsOn    = useRunState();
+        const auto delays  = delayNodeIds();
+        const auto states  = stateNodeIds();
+        const auto groups  = eventGroups();
+        const auto fns     = functionEntries();
+        bool anyElemFilter = false, anyPrivateFn = false, anyFnParams = false, anyRefVar = false;
+        for (const Node& n : m_g.nodes) if (n.type == NT::Event && n.elem != 0) anyElemFilter = true;
+        for (const Node* fn : fns)
+        {
+            if (fn->access != 0)      anyPrivateFn = true;
+            if (!fn->params.empty())  anyFnParams  = true;
+        }
+        size_t varCount = 0;
+        for (const auto& v : m_g.variables)
+        {
+            if (v.scope != 0) continue;
+            ++varCount;
+            if (v.type == PT::Ref) anyRefVar = true;
+        }
+        // A parameter the body never touches loses its NAME, not its slot — the
+        // generated code reads like hand-written C++, without `(void)x;` noise.
+        auto p = [](const char* type, const char* name, bool used)
+        { return used ? std::string(type) + " " + name : std::string(type); };
+
+        c += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
+        c += "// Source: " + m_src.label + " (key " + m_src.key + ")\n";
+        c += "#include <HorizonCode/HorizonCodeCompiled.h>\n";
+        c += "#include <HorizonCode/HorizonCodeGenSupport.h>\n";
+        {
+            std::unordered_set<std::string> used;
+            collectStructPaths(m_g, used);
+            if (!used.empty()) c += "#include \"hcgen_types.h\"\n";
+        }
+        c += "\nnamespace " + ns + " {\nnamespace {\n\n";
+        c += "class " + m_cls + " final : public HorizonCode::CompiledInstance\n{\npublic:\n";
+
+        c += "    const char* classKey() const override { return " + strLit(m_src.key) + "; }\n\n";
 
         // varInfos: scope-0 declared variables only (locals are invisible, §13.1).
-        c += "const std::vector<HorizonCode::CompiledVarInfo>& " + m_cls + "::varInfos() const\n{\n";
-        c += "    static const std::vector<HorizonCode::CompiledVarInfo> kVars = {\n";
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0)
-                c += "        { " + strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
-                     (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + " },\n";
-        c += "    };\n    return kVars;\n}\n\n";
+        c += "    const std::vector<HorizonCode::CompiledVarInfo>& varInfos() const override\n    {\n";
+        c += "        static const std::vector<HorizonCode::CompiledVarInfo> kVars";
+        if (varCount == 0) c += ";\n";
+        else
+        {
+            c += " = {\n";
+            for (const auto& v : m_g.variables)
+                if (v.scope == 0)
+                    c += "            { " + strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
+                         (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + " },\n";
+            c += "        };\n";
+        }
+        c += "        return kVars;\n    }\n\n";
 
-        c += "const std::vector<HorizonCode::CompiledEventInfo>& " + m_cls + "::eventInfos() const\n{\n";
-        c += "    static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
-        for (const Node& n : m_g.nodes)
-            if (n.type == NT::Event)
-                c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
-        c += "    };\n    return kEvents;\n}\n\n";
+        c += "    const std::vector<HorizonCode::CompiledEventInfo>& eventInfos() const override\n    {\n";
+        c += "        static const std::vector<HorizonCode::CompiledEventInfo> kEvents";
+        if (groups.empty()) c += ";\n";
+        else
+        {
+            c += " = {\n";
+            for (const Node& n : m_g.nodes)
+                if (n.type == NT::Event)
+                    c += "            { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
+            c += "        };\n";
+        }
+        c += "        return kEvents;\n    }\n\n";
 
         // ── fireEvent: fresh RunState per fire == the per-run cache clear (§3.1);
         //    every matching handler of one fire shares it, in graph order.
-        c += "void " + m_cls + "::fireEvent(const std::string& name, int elem, const hc::Value& arg)\n{\n";
-        c += "    (void)name; (void)elem;\n";
-        c += "    RunState rs;\n    rs.eventArg = arg;\n";
-        bool first = true;
-        for (const auto& [name, nodes] : eventGroups())
+        c += "    void fireEvent(" + p("const std::string&", "name", !groups.empty()) + ", " +
+             p("int", "elem", anyElemFilter) + ", " +
+             p("const hc::Value&", "arg", m_usesEventArg) + ") override\n";
+        if (groups.empty()) c += "    {\n    }\n\n";
+        else
         {
-            c += std::string("    ") + (first ? "if" : "else if") + " (name == " + strLit(name) + ")\n    {\n";
-            for (const Node* n : nodes)
+            c += "    {\n";
+            if (rsOn) c += "        RunState rs;\n";
+            if (m_usesEventArg) c += "        rs.eventArg = arg;\n";
+            bool first = true;
+            for (const auto& [name, nodes] : groups)
             {
-                if (n->elem == 0)
-                    c += "        " + m_evName.at(n->id) + "(rs);\n";
-                else
-                    c += "        if (elem == " + std::to_string(n->elem) + ") " +
-                         m_evName.at(n->id) + "(rs);\n";
+                c += std::string("        ") + (first ? "if" : "else if") + " (name == " +
+                     strLit(name) + ")\n        {\n";
+                for (const Node* n : nodes)
+                {
+                    const std::string call = m_evName.at(n->id) + "(" + rsArg() + ");";
+                    if (n->elem == 0) c += "            " + call + "\n";
+                    else c += "            if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
+                }
+                c += "        }\n";
+                first = false;
             }
-            c += "    }\n";
-            first = false;
+            c += "    }\n\n";
         }
-        c += "}\n\n";
 
         // ── callFunction: coerced args, typed default results (§3.1).
-        c += "bool " + m_cls + "::callFunction(const std::string& name, bool requirePublic,\n";
-        c += "                    const std::vector<hc::Value>& args, std::vector<hc::Value>* results)\n{\n";
-        c += "    (void)requirePublic; (void)args;\n";
-        for (const Node* fn : functionEntries())
+        c += "    bool callFunction(" + p("const std::string&", "name", !fns.empty()) + ", " +
+             p("bool", "requirePublic", anyPrivateFn) + ",\n                      " +
+             p("const std::vector<hc::Value>&", "args", anyFnParams) + ", " +
+             p("std::vector<hc::Value>*", "results", !fns.empty()) + ") override\n    {\n";
+        for (const Node* fn : fns)
         {
-            c += "    if (name == " + strLit(fn->s) + ")\n    {\n";
+            c += "        if (name == " + strLit(fn->s) + ")\n        {\n";
             if (fn->access != 0)
-                c += "        if (requirePublic) return false;   // private function\n";
-            c += "        RunState rs;\n";
+                c += "            if (requirePublic) return false;   // private function\n";
+            if (rsOn) c += "            RunState rs;\n";
             for (size_t i = 0; i < fn->params.size(); ++i)
             {
-                const TypeRef tr = { fn->params[i].type, fn->params[i].isArray };
-                c += "        " + cppType(tr) + " p" + std::to_string(i) + " = " +
+                const TypeRef tr = trOf(fn->params[i].type, fn->params[i].isArray,
+                                        fn->params[i].typeName);
+                c += "            " + cppType(tr) + " p" + std::to_string(i) + " = " +
                      coerceCall("hc::arg(args, " + std::to_string(i) + ")", tr) + ";\n";
             }
+            std::vector<TypeRef> resTypes;
             for (size_t i = 0; i < fn->results.size(); ++i)
             {
-                const TypeRef tr = { fn->results[i].type, fn->results[i].isArray };
-                c += "        " + cppType(tr) + " r" + std::to_string(i) + " = " + zeroLit(tr) + ";\n";
+                resTypes.push_back(trOf(fn->results[i].type, fn->results[i].isArray,
+                                        fn->results[i].typeName));
+                c += "            " + cppType(resTypes[i]) + " r" + std::to_string(i) + " = " +
+                     zeroLit(resTypes[i]) + ";\n";
             }
-            std::string call = "        " + m_fnName.at(fn->s) + "(rs";
-            for (size_t i = 0; i < fn->params.size(); ++i)  call += ", p" + std::to_string(i);
-            for (size_t i = 0; i < fn->results.size(); ++i) call += ", r" + std::to_string(i);
-            c += call + ");\n";
-            c += "        if (results)\n        {\n            results->clear();\n";
+            std::vector<std::string> callArgs;
+            if (rsOn) callArgs.push_back("rs");
+            for (size_t i = 0; i < fn->params.size(); ++i)  callArgs.push_back("p" + std::to_string(i));
+            for (size_t i = 0; i < fn->results.size(); ++i) callArgs.push_back("r" + std::to_string(i));
+            c += "            " + m_fnName.at(fn->s) + "(";
+            for (size_t i = 0; i < callArgs.size(); ++i) c += (i ? ", " : "") + callArgs[i];
+            c += ");\n";
+            c += "            if (results)\n            {\n                results->clear();\n";
             for (size_t i = 0; i < fn->results.size(); ++i)
-                c += "            results->push_back(hc::toValue(r" + std::to_string(i) + "));\n";
-            c += "        }\n        return true;\n    }\n";
+                c += "                results->push_back(" +
+                     toValueCall("r" + std::to_string(i), resTypes[i], ns) + ");\n";
+            c += "            }\n            return true;\n        }\n";
         }
-        c += "    return false;\n}\n\n";
+        c += "        return false;\n    }\n\n";
 
         // ── variable reflection (declared instance vars only).
-        c += "hc::Value " + m_cls + "::getVariable(const std::string& name) const\n{\n";
+        c += "    hc::Value getVariable(" + p("const std::string&", "name", varCount != 0) +
+             ") const override\n    {\n";
         for (const auto& v : m_g.variables)
             if (v.scope == 0)
-                c += "    if (name == " + strLit(v.name) + ") return hc::toValue(" +
-                     m_varMember.at(v.name) + ");\n";
-        c += "    return hc::Value{};\n}\n\n";
+                c += "        if (name == " + strLit(v.name) + ") return " +
+                     toValueCall(m_varMember.at(v.name), varType(v), ns) + ";\n";
+        c += "        return hc::Value{};\n    }\n\n";
 
-        c += "bool " + m_cls + "::setVariable(const std::string& name, const hc::Value& v)\n{\n";
-        c += "    (void)v;\n";
+        c += "    bool setVariable(" + p("const std::string&", "name", varCount != 0) + ", " +
+             p("const hc::Value&", "v", varCount != 0) + ") override\n    {\n";
         for (const auto& v : m_g.variables)
             if (v.scope == 0)
-                c += "    if (name == " + strLit(v.name) + ") { " + m_varMember.at(v.name) +
-                     " = " + coerceCall("v", { v.type, v.isArray }) + "; return true; }\n";
-        c += "    return false;\n}\n\n";
+                c += "        if (name == " + strLit(v.name) + ") { " + m_varMember.at(v.name) +
+                     " = " + coerceCall("v", varType(v)) + "; return true; }\n";
+        c += "        return false;\n    }\n\n";
 
-        c += "void " + m_cls + "::reseedVariables()\n{\n";
+        c += "    void reseedVariables() override\n    {\n";
         for (const auto& v : m_g.variables)
             if (v.scope == 0)
-                c += "    " + m_varMember.at(v.name) + " = " + memberDefault(v) + ";\n";
-        for (const int id : stateNodeIds())
-            c += "    " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
-        c += "}\n\n";
+                c += "        " + m_varMember.at(v.name) + " = " + memberDefault(v) + ";\n";
+        for (const int id : states)
+            c += "        " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
+        c += "    }\n\n";
 
-        c += "void " + m_cls + "::collectRefs(std::vector<uint32_t>& out) const\n{\n";
-        c += "    (void)out;\n";
+        c += "    void collectRefs(" + p("std::vector<uint32_t>&", "out", anyRefVar) +
+             ") const override\n    {\n";
+        // NOTE: Refs nested in Struct members are deliberately NOT collected —
+        // the interpreted GC scan (Runtime::retainOnlyReachableFrom) only marks
+        // Ref-TYPED store entries, so descending here would keep instances alive
+        // that the interpreted build collects.
         for (const auto& v : m_g.variables)
         {
             if (v.scope != 0 || v.type != PT::Ref) continue;
             if (v.isArray)
-                c += "    for (const uint32_t r__ : " + m_varMember.at(v.name) +
+                c += "        for (const uint32_t r__ : " + m_varMember.at(v.name) +
                      ") if (r__ != 0u) out.push_back(r__);\n";
             else
-                c += "    if (" + m_varMember.at(v.name) + " != 0u) out.push_back(" +
+                c += "        if (" + m_varMember.at(v.name) + " != 0u) out.push_back(" +
                      m_varMember.at(v.name) + ");\n";
         }
-        c += "}\n\n";
+        c += "    }\n";
 
-        // ── Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
-        if (const auto delays = delayNodeIds(); !delays.empty())
+        if (!delays.empty())
         {
-            c += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
-            c += "    RunState rs;\n";
+            c += "\n    void resumeFrom(int nodeId) override\n    {\n";
+            if (rsOn) c += "        RunState rs;\n";
             for (const int id : delays)
-                c += "    if (nodeId == " + std::to_string(id) + ") { resume_" +
-                     std::to_string(id) + "(rs); return; }\n";
-            c += "}\n\n";
-            for (const int id : delays)
+                c += "        if (nodeId == " + std::to_string(id) + ") { resume_" +
+                     std::to_string(id) + "(" + rsArg() + "); return; }\n";
+            c += "    }\n";
+        }
+
+        c += "\nprivate:\n";
+
+        // Per-run state: mirrors the Runner exactly (§3.3/§5.4) — and only the
+        // parts this class can actually reach (see m_guard/useRunState).
+        if (rsOn)
+        {
+            c += "    struct RunState\n    {\n";
+            if (m_guard)
             {
-                const Node* dn = m_g.findNode(id);
-                c += "void " + m_cls + "::resume_" + std::to_string(id) + "(RunState& rs)\n{\n";
-                c += "    (void)rs;\n";
-                Body b;
-                if (dn) chain(*dn, pinRanges(*dn).execOut0, /*fnCtx=*/0, b);
-                c += b.text;
-                c += "}\n\n";
+                c += "        int steps = 0, depth = 0;\n";
+                c += "        bool aborted = false;\n";
             }
+            if (m_usesEventArg) c += "        hc::Value eventArg;\n";
+            std::vector<int> slotIds;
+            for (const auto& [id, _] : m_slots) slotIds.push_back(id);
+            std::sort(slotIds.begin(), slotIds.end());
+            for (const int id : slotIds)
+                for (const auto& s : m_slots.at(id))
+                    c += "        " + cppType(s.tr) + " " + s.field + " = " + zeroLit(s.tr) + ";\n";
+            c += "    };\n\n";
         }
 
-        // ── event handler bodies.
-        for (const Node& n : m_g.nodes)
+        for (const Fragment& f : frags)
         {
-            if (n.type != NT::Event) continue;
-            c += "void " + m_cls + "::" + m_evName.at(n.id) + "(RunState& rs)\n{\n";
-            c += "    (void)rs;\n";
-            Body b;
-            chain(n, pinRanges(n).execOut0, /*fnCtx=*/0, b);
-            c += b.text;
-            c += "}\n\n";
+            const std::string params = f.fn ? fnParamList(*f.fn, f.rsUsed) : rsParam(f.rsUsed);
+            c += "    void " + f.name + "(" + params + ")\n    {\n";
+            c += f.prelude;
+            c += f.body;
+            c += "    }\n\n";
         }
 
-        // ── function bodies (locals = stack locals, §13.4).
-        for (const Node* fn : functionEntries())
-        {
-            c += fnSignature(*fn, true) + "\n{\n";
-            c += "    (void)rs;\n";
-            for (const auto& v : m_g.variables)
-                if (v.scope == fn->id)
-                    c += "    " + cppType({ v.type, v.isArray }) + " " + m_localName.at(v.name) +
-                         " = " + memberDefault(v) + ";   // local, per invocation\n";
-            Body b;
-            chain(*fn, pinRanges(*fn).execOut0, /*fnCtx=*/fn->id, b);
-            c += b.text;
-            c += "}\n\n";
-        }
+        // Instance variables → typed members at their declared defaults.
+        for (const auto& v : m_g.variables)
+            if (v.scope == 0)
+                c += "    " + cppType(varType(v)) + " " + m_varMember.at(v.name) +
+                     " = " + memberDefault(v) + ";\n";
+        // Per-instance node state (DoOnce/FlipFlop) — persists like variables,
+        // reset by reseedVariables, never part of the public surface.
+        for (const int id : states)
+            c += "    bool " + stateMember(id) + " = false;\n";
 
+        c += "};\n\n";
+        c += "} // namespace\n\n";
+        // The manifest's factory pair — the only symbols hc_registry.cpp needs,
+        // which is why the class itself stays internal to this file.
+        c += "HorizonCode::CompiledInstance* create_" + m_cls + "() { return new " + m_cls + "(); }\n";
+        c += "void destroy_" + m_cls + "(HorizonCode::CompiledInstance* p) { delete p; }\n\n";
         c += "} // namespace " + ns + "\n";
     }
 
@@ -1296,6 +1803,8 @@ private:
             case PT::Color:     return "Color";
             case PT::Ref:       return "Ref";
             case PT::Transform: return "Transform";
+            case PT::Enum:      return "Enum";
+            case PT::Struct:    return "Struct";
             default:            return "Float";
         }
     }
@@ -1326,6 +1835,12 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
 {
     std::unordered_set<std::string> usedNames;
 
+    // The project's Struct assets, as C++ types, shared by every class in the
+    // run (built before any class so its names are stable across them).
+    const TypeTable types = buildTypeTable(sources);
+    if (!types.order.empty())
+        res.files.push_back({ "hcgen_types.h", emitTypesHeader(types, opt.namespaceName) });
+
     struct Entry { std::string key, className; };
     std::vector<Entry> compiled;
 
@@ -1337,10 +1852,9 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         const std::string className = classNameFor(src.key, usedNames);
         try
         {
-            ClassEmitter em(src, className, opt, res.warnings);
-            std::string header, impl;
-            em.run(header, impl);
-            res.files.push_back({ "hcgen_" + className + ".h", std::move(header) });
+            ClassEmitter em(src, className, opt, types, res.warnings);
+            std::string impl;
+            em.run(impl);
             res.files.push_back({ "hcgen_" + className + ".cpp", std::move(impl) });
             compiled.push_back({ src.key, className });
         }
@@ -1382,18 +1896,21 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     std::string rc;
     rc += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
     rc += "#include \"hc_registry.h\"\n";
-    for (const auto& e : compiled)
-        rc += "#include \"hcgen_" + e.className + ".h\"\n";
     rc += "\nnamespace " + ns + " {\n\n";
     if (!compiled.empty())
     {
-        rc += "static const HorizonCode::CompiledClassEntry kClasses[] = {\n";
+        // Each class lives entirely in its own .cpp; only this factory pair
+        // crosses the file boundary, so there are no generated headers.
+        rc += "// Defined in the per-class translation units.\n";
         for (const auto& e : compiled)
         {
-            rc += "    { " + strLit(e.key) + ",\n";
-            rc += "      +[]() -> HorizonCode::CompiledInstance* { return new " + ns + "::" + e.className + "(); },\n";
-            rc += "      +[](HorizonCode::CompiledInstance* p) { delete p; } },\n";
+            rc += "HorizonCode::CompiledInstance* create_" + e.className + "();\n";
+            rc += "void destroy_" + e.className + "(HorizonCode::CompiledInstance* p);\n";
         }
+        rc += "\nstatic const HorizonCode::CompiledClassEntry kClasses[] = {\n";
+        for (const auto& e : compiled)
+            rc += "    { " + strLit(e.key) + ", &create_" + e.className +
+                  ", &destroy_" + e.className + " },\n";
         rc += "};\n\n";
         rc += "const HorizonCode::CompiledClassEntry* classes(int* count)\n";
         rc += "{ if (count) *count = " + std::to_string(compiled.size()) + "; return kClasses; }\n";

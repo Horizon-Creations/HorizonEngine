@@ -386,11 +386,11 @@ TEST_CASE("Struct variables seed from definition defaults; enum defaults resolve
     CHECK(variableDefaultValue(ev).i == 0);
 }
 
-// ── Codegen: enums compile natively, structs fall back to the interpreter ────
+// ── Codegen: enums and structs both compile against their definitions ───────
 
 #include <HorizonScene/HcCodegen.h>
 
-TEST_CASE("HcCodegen: enum nodes compile (entry values baked), struct nodes fall back")
+TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
 {
     TypeFixture fx;
 
@@ -431,7 +431,8 @@ TEST_CASE("HcCodegen: enum nodes compile (entry values baked), struct nodes fall
         (void)sawStaff; // EnumToString is unwired downstream — emission optional
     }
 
-    // Struct graph: MakeStruct present → the class ships interpreted.
+    // Struct graph: MakeStruct compiles into a real C++ aggregate, emitted once
+    // for the whole run into the shared hcgen_types.h.
     {
         Graph g;
         Node ev; ev.type = NodeType::Event; ev.s = "Go";
@@ -440,8 +441,33 @@ TEST_CASE("HcCodegen: enum nodes compile (entry values baked), struct nodes fall
         HE::hccg::Options opt;
         HE::hccg::Result r = HE::hccg::generate({ { "struct_graph", "struct_graph", g } }, opt);
         REQUIRE(r.ok);
+        CHECK(r.fallbacks.empty());
+        bool sawTypes = false, sawStruct = false;
+        for (const auto& f : r.files)
+        {
+            if (f.name == "hcgen_types.h")
+            {
+                sawTypes = true;
+                sawStruct = f.contents.find("struct S_PlayerStats") != std::string::npos;
+            }
+        }
+        CHECK(sawTypes);
+        CHECK(sawStruct);
+    }
+
+    // Struct node whose definition is missing → fallback, not a miscompile
+    // (the emitter has no field list to resolve names against).
+    {
+        Graph g;
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        g.addNode(ev);
+        Node ms; ms.type = NodeType::MakeStruct; ms.typeName = "Content/Missing.hasset";
+        g.addNode(std::move(ms));
+        HE::hccg::Options opt;
+        HE::hccg::Result r = HE::hccg::generate({ { "missing_struct", "missing_struct", g } }, opt);
+        REQUIRE(r.ok);
         REQUIRE(r.fallbacks.size() == 1);
-        CHECK(r.fallbacks[0].reason.find("struct") != std::string::npos);
+        CHECK(r.fallbacks[0].reason.find("not registered") != std::string::npos);
     }
 
     // Enum node whose definition is missing → fallback, not a miscompile.

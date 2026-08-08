@@ -47,15 +47,50 @@ namespace
 				              v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
 				              v.tscl.x, v.tscl.y, v.tscl.z);
 				return buf;
+			case PinType::Enum:   return "e:" + std::to_string(v.i) + "@" + v.typeName;
+			case PinType::Struct:
+			{
+				std::string s = "st{" + v.typeName;
+				for (const Value& it : v.items) s += ", " + valueStr(it);
+				return s + "}";
+			}
 			default: return "?";
 		}
 	}
 
-	bool valueEq(const Value& a, const Value& b)
+	// `inArray`: element Values are compared WITHOUT their typeName. The
+	// interpreter fills that field inconsistently for array payloads (an enum
+	// array seeded from a struct definition tags its items, one built by
+	// ArrayAdd does not), so it carries no meaning there — the declared element
+	// type lives on the pin. For scalars the typeName IS meaningful and is
+	// compared: it is how a consumer knows WHICH enum/struct it received.
+	bool valueEq(const Value& a, const Value& b, bool inArray = false)
 	{
 		if (a.type != b.type || a.isArray != b.isArray) return false;
+		if (!a.isArray && !inArray && a.type == PinType::Struct && a.typeName != b.typeName)
+			return false;
+		// Enums: compared only when BOTH sides name a definition. An enum Value
+		// that reaches the interpreter through a dynamic boundary (an Int event
+		// arg landing on an enum pin) keeps the EMPTY typeName `coerce` gives
+		// it, while generated code stamps the pin's DECLARED definition — it is
+		// the one place the compiled backend knows more than the interpreter,
+		// and the extra information is the correct one (a consumer needs to
+		// know which enum it holds). Values, which is what anything acts on,
+		// are still compared exactly.
+		if (!a.isArray && !inArray && a.type == PinType::Enum &&
+		    !a.typeName.empty() && !b.typeName.empty() && a.typeName != b.typeName)
+			return false;
 		if (a.isArray)
 		{
+			if (a.items.size() != b.items.size()) return false;
+			for (size_t i = 0; i < a.items.size(); ++i)
+				if (!valueEq(a.items[i], b.items[i], /*inArray=*/true)) return false;
+			return true;
+		}
+		if (a.type == PinType::Struct)
+		{
+			// Fields are matched positionally, which IS the layout contract:
+			// a struct Value's items are in definition order (§3.4).
 			if (a.items.size() != b.items.size()) return false;
 			for (size_t i = 0; i < a.items.size(); ++i)
 				if (!valueEq(a.items[i], b.items[i])) return false;
@@ -72,6 +107,7 @@ namespace
 			case PinType::Ref:    return a.ref == b.ref;
 			case PinType::Transform:
 				return a.tpos == b.tpos && a.trot == b.trot && a.tscl == b.tscl;
+			case PinType::Enum:   return a.i == b.i;   // int-backed on both sides
 			default: return false;
 		}
 	}
@@ -708,4 +744,121 @@ TEST_CASE("codegen parity: functions_locals (§13.4)")
 	CHECK(p.interp.rt.variablesSnapshot(p.interp.id).count("acc") == 0);
 	CHECK(p.comp.rt.variablesSnapshot(p.comp.id).count("acc") == 0);
 	CHECK(p.var("acc").f == 0.0f);
+}
+
+// ── user-defined types ───────────────────────────────────────────────────────
+// The definitions live in fixtures.h (registerTypes), so the interpreter and
+// hc_codegen resolve the SAME entries/fields — the whole point of the parity
+// pair being one graph and two backends.
+
+TEST_CASE("codegen parity: enums")
+{
+	ParityPair p("fix/enums");
+
+	// Sparse entry values: the default is the entry NAME "Angry" = 5, and the
+	// name comes back through EnumToString / the underlying int through ToInt.
+	p.fire("Init");
+	CHECK(p.var("m").type == PinType::Enum);
+	CHECK(p.var("m").i == 5);
+	CHECK(p.var("ms").s == "Angry");
+	CHECK(p.var("mi").i == 5);
+	CHECK(p.var("back").i == 1);          // IntToEnum(1) → Happy
+
+	// Switch routes on the VALUE via the entry name (renumber-safe), and an
+	// unclaimed value takes Default.
+	Value happy; happy.type = PinType::Enum; happy.typeName = hcfix::kMoodEnum; happy.i = 1;
+	p.fire("Pick", 0, happy);
+	CHECK(p.var("route").s == "happy");
+	Value none; none.type = PinType::Enum; none.typeName = hcfix::kMoodEnum; none.i = 99;
+	p.fire("Pick", 0, none);
+	CHECK(p.var("route").s == "other");
+	// A dynamic Value boundary: an Int coerces into an enum pin, a Bool does not.
+	p.fire("Pick", 0, Value::ofInt(0));
+	CHECK(p.var("route").s == "calm");
+	p.fire("Pick", 0, Value::ofBool(true));
+	CHECK(p.var("route").s == "calm");    // Bool → 0 → Calm (coerce, §3.3)
+
+	p.fire("Calm");
+	CHECK(p.var("m").i == 0);
+
+	// Enum arrays: elements carry the entry values, reads come back as enums.
+	p.fire("Push");
+	CHECK(p.var("marr").items.size() == 1);
+	CHECK(p.var("first").i == 5);
+	p.fire("Push");
+	CHECK(p.var("marr").items.size() == 2);
+
+	// Two entries on value 1: findValue answers "A", so "B" is unreachable —
+	// and the generated switch must not carry two `case 1:` labels at all.
+	p.fire("Dup");
+	CHECK(p.var("ds").s == "A");
+	CHECK(p.var("route").s == "A");
+
+	p.reseed();
+	CHECK(p.var("m").i == 5);
+}
+
+TEST_CASE("codegen parity: structs")
+{
+	ParityPair p("fix/structs");
+
+	// Seeding: the definition's field defaults, with this graph's override on
+	// top (hp 100 → 42), nested struct and array fields included.
+	const Value s0 = p.var("s");
+	CHECK(s0.type == PinType::Struct);
+	CHECK(s0.typeName == hcfix::kStatsType);
+	REQUIRE(s0.items.size() == 6);
+	CHECK(s0.items[0].f == 42.0f);        // per-graph override
+	CHECK(s0.items[1].i == 3);            // definition default
+	CHECK(s0.items[2].i == 1);            // enum default by entry NAME ("Happy")
+	CHECK(s0.items[4].items.size() == 2); // authored array slots
+
+	// Reads: one field, a nested field, a whole break, the enum field by name.
+	p.fire("Read");
+	CHECK(p.var("hp").f == 42.0f);
+	CHECK(p.var("tag").s == "in");
+	CHECK(p.var("lvl").i == 3);
+	CHECK(p.var("moodName").s == "Happy");
+	CHECK(p.var("hit0").f == 2.0f);
+
+	// Set Struct Field is a pure copy-with-one-field-replaced.
+	p.fire("Bump");
+	CHECK(p.var("s").items[0].f == 43.0f);
+	CHECK(p.var("s").items[1].i == 3);    // everything else survives the copy
+	p.fire("Read");
+	CHECK(p.var("hp").f == 43.0f);
+
+	// Make Struct: unwired pins keep the DEFINITION's defaults, not zeros.
+	p.fire("Make");
+	CHECK(p.var("s").items[0].f == 7.0f);
+	CHECK(p.var("s").items[1].i == 3);
+	CHECK(p.var("s").items[2].i == 1);
+
+	// Struct arrays: Add copies; Contains/IndexOf can never match, because
+	// valueEquals has no Struct case (§3.4) — both backends agree on that.
+	p.fire("Push");
+	CHECK(p.var("arr").items.size() == 1);
+	CHECK(p.var("found").b == false);
+	CHECK(p.var("idx").i == -1);
+
+	// A struct across the callFunction Value seam, in and out.
+	Value in = HE::TypeRegistry::instance().makeDefaultValue(hcfix::kStatsType);
+	auto [ok, res] = p.call("Scale", true, { in, Value::ofFloat(2.0f) });
+	CHECK(ok);
+	REQUIRE(res.size() == 1);
+	CHECK(res[0].type == PinType::Struct);
+	CHECK(res[0].typeName == hcfix::kStatsType);
+	REQUIRE(res[0].items.size() == 6);
+	CHECK(res[0].items[0].f == 200.0f);   // definition default 100 × 2
+	CHECK(res[0].items[1].i == 3);        // untouched fields survive
+
+	// NOTE: passing a NON-struct Value where a struct is expected is a
+	// sharpened non-goal (§3.6). The interpreter's struct Value remembers that
+	// it failed to coerce (empty typeName) and Set Struct Field then re-seeds it
+	// from the definition, while a generated S_Stats is statically the right
+	// type and stays at its zeros. Both are self-consistent; reproducing the
+	// interpreter's would cost a hidden "am I real" flag on every struct.
+
+	p.reseed();
+	CHECK(p.var("s").items[0].f == 42.0f);
 }

@@ -166,6 +166,41 @@ template <> inline glm::vec4   coerce<glm::vec4>(const Value& v)   { return coer
 template <> inline uint32_t    coerce<uint32_t>(const Value& v)    { return coerceRef(v); }
 template <> inline Transform   coerce<Transform>(const Value& v)   { return coerceTransform(v); }
 
+// ── enums (int-backed values, Value-typed at the boundaries) ────────────────
+// An Enum pin lowers to `int` (cppScalar), so handing one back as a Value needs
+// the definition path again — a generation-time constant, baked into the call.
+// Scalar enum Values carry the typeName; ARRAY enum Values do not, because the
+// interpreter's own array builders (variableDefaultValue :702, ArrayAdd) don't
+// set one either.
+inline Value toEnumValue(int v, const char* typeName)
+{ Value r; r.type = PinType::Enum; r.typeName = typeName; r.i = v; return r; }
+inline Value toEnumValueArray(const Array<int>& a)
+{
+    Value v; v.isArray = true; v.type = PinType::Enum;
+    v.items.reserve(a.size());
+    for (const int e : a) { Value it; it.type = PinType::Enum; it.i = e; v.items.push_back(it); }
+    return v;
+}
+// coerce(v, Enum) — deliberately NOT coerceInt: a Bool does NOT convert into an
+// enum (HorizonCode.cpp's `coerce`, case P::Enum, leaves r.i at 0).
+inline int coerceEnum(const Value& v)
+{
+    if (v.isArray || v.type == PinType::Enum) return v.i;
+    if (v.type == PinType::Int)   return v.i;
+    if (v.type == PinType::Float) return (int)v.f;
+    return 0;
+}
+
+// ── struct field reads (used by the generated Value ⇄ struct converters) ────
+// One field out of a struct Value's `items`, read the way BreakStruct reads it:
+// coerced to the field type, a missing item behaving as Value{} (§3.3).
+template <typename T> inline T item(const std::vector<Value>& items, size_t k)
+{ return k < items.size() ? coerce<T>(items[k]) : zeroOf<T>(); }
+template <typename T> inline Array<T> itemArray(const std::vector<Value>& items, size_t k)
+{ return k < items.size() ? rawArray<T>(items[k]) : Array<T>{}; }
+inline int itemEnum(const std::vector<Value>& items, size_t k)
+{ return k < items.size() ? coerceEnum(items[k]) : 0; }
+
 // ── math / logic / string (§3.4) ─────────────────────────────────────────────
 inline bool feq(float a, float b) { return std::fabs(a - b) < 1e-6f; }
 // And/Or must evaluate BOTH sides (the interpreter has no short-circuit; §5.5).
@@ -204,6 +239,12 @@ template <typename T> inline int arrIndexOf(const Array<T>& a, const T& key)
     for (size_t i = 0; i < a.size(); ++i) if (a[i] == key) return (int)i;
     return -1;
 }
+// Struct elements: `valueEquals` (HorizonCode.cpp) has no Struct case, so its
+// default arm makes EVERY comparison false — Contains never hits and IndexOf is
+// always -1 for a struct array. Both inputs are still parameters, so they are
+// still evaluated (pure-EngineCall dispatch counts are part of the trace, §3.4).
+template <typename T> inline bool arrContainsNever(const Array<T>&, const T&) { return false; }
+template <typename T> inline int  arrIndexOfNever (const Array<T>&, const T&) { return -1; }
 
 // ── host / engine seams (null-tolerant, §3.4 "unbound Context → no-op") ─────
 inline Value getProperty(const Context& c, int elem, const char* prop)

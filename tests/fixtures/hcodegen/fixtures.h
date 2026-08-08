@@ -9,6 +9,7 @@
 
 #include <HorizonScene/HcCodegen.h>
 #include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -24,6 +25,68 @@ using HorizonCode::Value;
 using HorizonCode::Variable;
 using NT = NodeType;
 using PT = PinType;
+
+// ── user-defined types (the Enum/Struct fixtures) ────────────────────────────
+// Registered in the process-global TypeRegistry, which is what BOTH consumers
+// read: hc_codegen at build time (resolving entries/fields while it emits) and
+// he_tests at run time (where the interpreter resolves the same names). They are
+// registered directly rather than loaded from .hasset files so the two stay
+// definitionally identical without a ContentManager in the loop.
+inline const char* kMoodEnum  = "fix/Types/Mood.hasset";
+inline const char* kDupEnum   = "fix/Types/Dup.hasset";
+inline const char* kInnerType = "fix/Types/Inner.hasset";
+inline const char* kStatsType = "fix/Types/Stats.hasset";
+
+inline void registerTypes()
+{
+    auto& reg = HE::TypeRegistry::instance();
+
+    HE::EnumDef mood;
+    mood.name = "FixMood"; mood.assetPath = kMoodEnum;
+    // Deliberately sparse and non-contiguous: entry VALUES (not indices) drive
+    // both the interpreter's routing and the generated switch.
+    mood.entries = { { "Calm", 0 }, { "Happy", 1 }, { "Angry", 5 } };
+    reg.registerEnum(mood);
+
+    // Two entries on the SAME value: nothing in the enum panel prevents it.
+    // findValue answers with the first, so "B" is dead — and a generator that
+    // emitted both would produce a duplicate `case` label, i.e. a .cpp that
+    // does not compile. This fixture is that regression.
+    HE::EnumDef dup;
+    dup.name = "FixDup"; dup.assetPath = kDupEnum;
+    dup.entries = { { "A", 1 }, { "B", 1 }, { "C", 2 } };
+    reg.registerEnum(dup);
+
+    auto field = [](const char* name, PT type, Value def, bool isArray = false,
+                    const char* typeName = "")
+    {
+        HE::StructField f;
+        f.name = name; f.type = type; f.isArray = isArray; f.typeName = typeName;
+        f.defaultValue = std::move(def);
+        return f;
+    };
+
+    HE::StructDef inner;
+    inner.name = "FixInner"; inner.assetPath = kInnerType;
+    inner.fields = { field("n", PT::Float, Value::ofFloat(2.5f)),
+                     field("tag", PT::String, Value::ofString("in")) };
+    reg.registerStruct(inner);
+
+    // Every field kind that changes the lowering: scalar, enum (default by entry
+    // NAME), nested struct, array with authored slots, and a Ref (which the GC
+    // scan must NOT see through a struct — see collectRefs).
+    Value hits; hits.isArray = true; hits.type = PT::Float;
+    hits.items = { Value::ofFloat(1.0f), Value::ofFloat(2.0f) };
+    HE::StructDef stats;
+    stats.name = "FixStats"; stats.assetPath = kStatsType;
+    stats.fields = { field("hp", PT::Float, Value::ofFloat(100.0f)),
+                     field("lvl", PT::Int, Value::ofInt(3)),
+                     field("mood", PT::Enum, Value::ofString("Happy"), false, kMoodEnum),
+                     field("inner", PT::Struct, Value{}, false, kInnerType),
+                     field("hits", PT::Float, hits, true),
+                     field("owner", PT::Ref, Value::ofRef(0)) };
+    reg.registerStruct(stats);
+}
 
 // ── wiring helpers (unified pin index space, like the interpreter) ───────────
 struct Fx
@@ -89,6 +152,66 @@ struct Fx
         for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
         return add(n);
     }
+
+    // ── user-defined-type nodes ──────────────────────────────────────────────
+    // Pins are mirrored from the definition at construction, exactly like the
+    // editor does — connect() checks pin types, so the mirror must be right
+    // BEFORE anything is wired (done()'s round trip re-syncs it afterwards).
+    int getVarT(const std::string& name, PT t, const std::string& typeName, bool isArray = false)
+    { Node n; n.type = NT::GetVariable; n.s = name; n.propType = t; n.typeName = typeName;
+      n.isArray = isArray; return add(n); }
+    int setVarT(const std::string& name, PT t, const std::string& typeName, bool isArray = false)
+    { Node n; n.type = NT::SetVariable; n.s = name; n.propType = t; n.typeName = typeName;
+      n.isArray = isArray; return add(n); }
+    int constEnum(const std::string& typeName, int value)
+    { Node n; n.type = NT::ConstEnum; n.typeName = typeName; n.f[0] = (float)value; return add(n); }
+    int enumOp(NT t, const std::string& typeName)
+    { Node n; n.type = t; n.typeName = typeName; return add(n); }
+    int switchEnum(const std::string& typeName)
+    {
+        HE::EnumDef def;
+        must(HE::TypeRegistry::instance().getEnum(typeName, def), "enum def");
+        Node n; n.type = NT::SwitchOnEnum; n.typeName = typeName;
+        for (const auto& e : def.entries) n.params.push_back({ e.name, PT::Exec, false, {} });
+        return add(n);
+    }
+    static std::vector<HorizonCode::FuncParam> structParams(const std::string& typeName)
+    {
+        HE::StructDef def;
+        must(HE::TypeRegistry::instance().getStruct(typeName, def), "struct def");
+        std::vector<HorizonCode::FuncParam> ps;
+        for (const auto& f : def.fields) ps.push_back({ f.name, f.type, f.isArray, f.typeName });
+        return ps;
+    }
+    int structOp(NT t, const std::string& typeName)
+    { Node n; n.type = t; n.typeName = typeName; n.params = structParams(typeName); return add(n); }
+    int fieldOp(NT t, const std::string& typeName, const std::string& fieldName)
+    {
+        HE::StructDef def;
+        must(HE::TypeRegistry::instance().getStruct(typeName, def), "struct def");
+        const HE::StructField* f = def.findField(fieldName);
+        must(f != nullptr, "struct field");
+        Node n; n.type = t; n.typeName = typeName;
+        n.params = { { f->name, f->type, f->isArray, f->typeName } };
+        return add(n);
+    }
+    int arrayOpT(NT t, PT elem, const std::string& typeName)
+    { Node n; n.type = t; n.propType = elem; n.typeName = typeName; return add(n); }
+
+    void enumVar(const std::string& name, const std::string& typeName,
+                 const std::string& defaultEntry)
+    { Variable v; v.name = name; v.type = PT::Enum; v.typeName = typeName; v.s = defaultEntry;
+      g.variables.push_back(std::move(v)); }
+    void structVar(const std::string& name, const std::string& typeName,
+                   std::unordered_map<std::string, Value> overrides = {})
+    { Variable v; v.name = name; v.type = PT::Struct; v.typeName = typeName;
+      v.structDefaults = std::move(overrides); g.variables.push_back(std::move(v)); }
+    void enumArrVar(const std::string& name, const std::string& typeName)
+    { Variable v; v.name = name; v.type = PT::Enum; v.typeName = typeName; v.isArray = true;
+      g.variables.push_back(std::move(v)); }
+    void structArrVar(const std::string& name, const std::string& typeName)
+    { Variable v; v.name = name; v.type = PT::Struct; v.typeName = typeName; v.isArray = true;
+      g.variables.push_back(std::move(v)); }
 
     void var(const std::string& name, PT t, float f0 = 0.0f, const std::string& s = {},
              int access = 0, int scope = 0)
@@ -973,15 +1096,216 @@ inline HE::hccg::ClassSource fxLatentFlow()
     return f.done("latent_flow");
 }
 
+// 20 — enums: sparse entry VALUES, Const/ToInt/IntTo/ToString, Switch routing,
+// enum arrays, and a definition with DUPLICATE entry values (§3.4).
+inline HE::hccg::ClassSource fxEnums()
+{
+    Fx f;
+    f.enumVar("m", kMoodEnum, "Angry");     // 5
+    f.enumVar("d", kDupEnum, "A");          // 1
+    f.enumVar("back", kMoodEnum, "Calm");
+    f.enumVar("first", kMoodEnum, "Calm");
+    f.enumArrVar("marr", kMoodEnum);
+    f.var("mi", PT::Int);
+    f.var("ms", PT::String);
+    f.var("ds", PT::String);
+    f.var("route", PT::String);
+
+    // Init: entry name ⇄ underlying int, both directions.
+    const int ev = f.event("Init");
+    const int sMs = f.setVar("ms", PT::String);
+    { const int e2s = f.enumOp(NT::EnumToString, kMoodEnum);
+      f.data(f.getVarT("m", PT::Enum, kMoodEnum), 0, e2s, 0);
+      f.data(e2s, 0, sMs, 0); }
+    f.exec(ev, sMs);
+    const int sMi = f.setVar("mi", PT::Int);
+    { const int e2i = f.enumOp(NT::EnumToInt, kMoodEnum);
+      f.data(f.getVarT("m", PT::Enum, kMoodEnum), 0, e2i, 0);
+      f.data(e2i, 0, sMi, 0); }
+    f.exec(sMs, sMi);
+    const int sBack = f.setVarT("back", PT::Enum, kMoodEnum);
+    { const int i2e = f.enumOp(NT::IntToEnum, kMoodEnum);
+      f.data(f.constI(1), 0, i2e, 0);
+      f.data(i2e, 0, sBack, 0); }
+    f.exec(sMi, sBack);
+
+    // Pick(arg): a dynamic Value boundary into an enum pin, then routing.
+    const int evP = f.event("Pick", 0, true, PT::Enum);
+    const int sM = f.setVarT("m", PT::Enum, kMoodEnum);
+    f.data(evP, 0, sM, 0);
+    f.exec(evP, sM);
+    const int sw = f.switchEnum(kMoodEnum);
+    f.data(f.getVarT("m", PT::Enum, kMoodEnum), 0, sw, 0);
+    f.exec(sM, sw);
+    { const char* names[] = { "calm", "happy", "angry", "other" };
+      for (int i = 0; i < 4; ++i)
+      {
+          const int s = f.setVar("route", PT::String);
+          f.g.findNode(s)->pinDefaults[0] = Value::ofString(names[i]);
+          f.exec(sw, s, i);
+      } }
+
+    // A literal entry from the palette.
+    const int evC = f.event("Calm");
+    const int sC = f.setVarT("m", PT::Enum, kMoodEnum);
+    f.data(f.constEnum(kMoodEnum, 0), 0, sC, 0);
+    f.exec(evC, sC);
+
+    // Enum arrays: built at run time so the elements carry real entry values.
+    const int evA = f.event("Push");
+    const int sArr = f.setVarT("marr", PT::Enum, kMoodEnum, true);
+    { const int add = f.arrayOpT(NT::ArrayAdd, PT::Enum, kMoodEnum);
+      f.data(f.getVarT("marr", PT::Enum, kMoodEnum, true), 0, add, 0);
+      f.data(f.constEnum(kMoodEnum, 5), 0, add, 1);
+      f.data(add, 0, sArr, 0); }
+    f.exec(evA, sArr);
+    const int sFirst = f.setVarT("first", PT::Enum, kMoodEnum);
+    { const int get = f.arrayOpT(NT::ArrayGet, PT::Enum, kMoodEnum);
+      f.data(f.getVarT("marr", PT::Enum, kMoodEnum, true), 0, get, 0);
+      f.data(f.constI(0), 0, get, 1);
+      f.data(get, 0, sFirst, 0); }
+    f.exec(sArr, sFirst);
+
+    // Duplicate entry VALUES: ToString and Switch must both follow findValue
+    // (first match wins) — and must not emit two `case 1:` labels.
+    const int evD = f.event("Dup");
+    const int sDs = f.setVar("ds", PT::String);
+    { const int e2s = f.enumOp(NT::EnumToString, kDupEnum);
+      f.data(f.getVarT("d", PT::Enum, kDupEnum), 0, e2s, 0);
+      f.data(e2s, 0, sDs, 0); }
+    f.exec(evD, sDs);
+    const int swD = f.switchEnum(kDupEnum);
+    f.data(f.getVarT("d", PT::Enum, kDupEnum), 0, swD, 0);
+    f.exec(sDs, swD);
+    { const char* names[] = { "A", "B", "C", "?" };
+      for (int i = 0; i < 4; ++i)
+      {
+          const int s = f.setVar("route", PT::String);
+          f.g.findNode(s)->pinDefaults[0] = Value::ofString(names[i]);
+          f.exec(swD, s, i);
+      } }
+    return f.done("enums");
+}
+
+// 21 — structs: definition defaults + per-graph overrides, Make/Break/Get/Set,
+// nested structs, enum + array + Ref fields, struct arrays, struct params (§3.4).
+inline HE::hccg::ClassSource fxStructs()
+{
+    Fx f;
+    f.structVar("s", kStatsType, { { "hp", Value::ofFloat(42.0f) } });
+    f.structArrVar("arr", kStatsType);
+    f.var("hp", PT::Float);
+    f.var("lvl", PT::Int);
+    f.var("tag", PT::String);
+    f.var("moodName", PT::String);
+    f.var("hit0", PT::Float);
+    f.var("found", PT::Bool);
+    f.var("idx", PT::Int);
+
+    // Read: one field, a nested field, a whole break, an enum field by name.
+    const int ev = f.event("Read");
+    const int sHp = f.setVar("hp", PT::Float);
+    { const int get = f.fieldOp(NT::GetStructField, kStatsType, "hp");
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, get, 0);
+      f.data(get, 0, sHp, 0); }
+    f.exec(ev, sHp);
+    const int sTag = f.setVar("tag", PT::String);
+    { const int inner = f.fieldOp(NT::GetStructField, kStatsType, "inner");
+      const int tag   = f.fieldOp(NT::GetStructField, kInnerType, "tag");
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, inner, 0);
+      f.data(inner, 0, tag, 0);
+      f.data(tag, 0, sTag, 0); }
+    f.exec(sHp, sTag);
+    const int brk = f.structOp(NT::BreakStruct, kStatsType);
+    f.data(f.getVarT("s", PT::Struct, kStatsType), 0, brk, 0);
+    const int sLvl = f.setVar("lvl", PT::Int);
+    f.data(brk, 1, sLvl, 0);                       // field 1 = lvl
+    f.exec(sTag, sLvl);
+    const int sMood = f.setVar("moodName", PT::String);
+    { const int e2s = f.enumOp(NT::EnumToString, kMoodEnum);
+      f.data(brk, 2, e2s, 0);                      // field 2 = mood (Enum)
+      f.data(e2s, 0, sMood, 0); }
+    f.exec(sLvl, sMood);
+    const int sHit = f.setVar("hit0", PT::Float);
+    { const int get = f.arrayOp(NT::ArrayGet, PT::Float);
+      f.data(brk, 4, get, 0);                      // field 4 = hits (Float[])
+      f.data(f.constI(1), 0, get, 1);
+      f.data(get, 0, sHit, 0); }
+    f.exec(sMood, sHit);
+
+    // Write: a copy with one field replaced (pure — the source is untouched).
+    const int evB = f.event("Bump");
+    const int sS = f.setVarT("s", PT::Struct, kStatsType);
+    { const int set = f.fieldOp(NT::SetStructField, kStatsType, "hp");
+      const int add = f.op(NT::Add);
+      const int get = f.fieldOp(NT::GetStructField, kStatsType, "hp");
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, get, 0);
+      f.data(get, 0, add, 0);
+      f.data(f.constF(1.0f), 0, add, 1);
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, set, 0);
+      f.data(add, 0, set, 1);
+      f.data(set, 0, sS, 0); }
+    f.exec(evB, sS);
+
+    // Make: one wired field, every other at the DEFINITION's default (not zero).
+    const int evM = f.event("Make");
+    const int sM = f.setVarT("s", PT::Struct, kStatsType);
+    { const int mk = f.structOp(NT::MakeStruct, kStatsType);
+      f.data(f.constF(7.0f), 0, mk, 0);            // hp
+      f.data(mk, 0, sM, 0); }
+    f.exec(evM, sM);
+
+    // Struct arrays: Add copies; Contains/IndexOf can never match, because
+    // valueEquals has no Struct case (§3.4).
+    const int evA = f.event("Push");
+    const int sArr = f.setVarT("arr", PT::Struct, kStatsType, true);
+    { const int add = f.arrayOpT(NT::ArrayAdd, PT::Struct, kStatsType);
+      f.data(f.getVarT("arr", PT::Struct, kStatsType, true), 0, add, 0);
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, add, 1);
+      f.data(add, 0, sArr, 0); }
+    f.exec(evA, sArr);
+    const int sFound = f.setVar("found", PT::Bool);
+    { const int c = f.arrayOpT(NT::ArrayContains, PT::Struct, kStatsType);
+      f.data(f.getVarT("arr", PT::Struct, kStatsType, true), 0, c, 0);
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, c, 1);
+      f.data(c, 0, sFound, 0); }
+    f.exec(sArr, sFound);
+    const int sIdx = f.setVar("idx", PT::Int);
+    { const int c = f.arrayOpT(NT::ArrayIndexOf, PT::Struct, kStatsType);
+      f.data(f.getVarT("arr", PT::Struct, kStatsType, true), 0, c, 0);
+      f.data(f.getVarT("s", PT::Struct, kStatsType), 0, c, 1);
+      f.data(c, 0, sIdx, 0); }
+    f.exec(sFound, sIdx);
+
+    // A function taking AND returning a struct — callFunction's Value seam.
+    const int fn = f.fnEntry("Scale", 0,
+                             { { "in", PT::Struct, false, kStatsType }, { "k", PT::Float } },
+                             { { "out", PT::Struct, false, kStatsType } });
+    const int ret = f.fnReturn("Scale");
+    HorizonCode::syncFunctionSignatures(f.g);
+    { const int set = f.fieldOp(NT::SetStructField, kStatsType, "hp");
+      const int mul = f.op(NT::Multiply);
+      const int get = f.fieldOp(NT::GetStructField, kStatsType, "hp");
+      f.data(fn, 0, get, 0);
+      f.data(get, 0, mul, 0);
+      f.data(fn, 1, mul, 1);
+      f.data(fn, 0, set, 0);
+      f.data(mul, 0, set, 1);
+      f.data(set, 0, ret, 0); }
+    f.exec(fn, ret);
+    return f.done("structs");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
+    registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
     return {
         fxFlow(), fxCoerce(), fxMath(), fxVariables(), fxFunctionsBasic(),
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
         fxEnginePureMultiout(), fxEngineExecCached(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
-        fxDispatchSink(), fxLatentFlow(),
+        fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
     };
 }
 
