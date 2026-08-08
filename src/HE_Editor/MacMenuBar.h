@@ -2,11 +2,19 @@
 
 // ── macOS native menu bar ─────────────────────────────────────────────────────
 // On macOS the editor's main menu lives in the system menu bar (next to the
-// Apple menu) like any Mac app, and the in-window ImGui menu row is dropped.
+// Apple menu) like any Mac app, and the in-window ImGui menu row is dropped
+// ENTIRELY (EditorUI.cpp: `if (!nativeMenu) { ... ImGui::BeginMainMenuBar() ... }`).
 // The native menu is built once (install) and posts commands into a queue;
 // EditorUI drains the queue each frame and runs the SAME actions the ImGui
 // menu items trigger on other platforms. Compiled only on __APPLE__
 // (MacMenuBar.mm); the header is safe to include everywhere.
+//
+// A menu item added to ONLY the ImGui path is invisible on macOS — not
+// disabled, not greyed out, simply never built (this bit the EngineContent
+// SFTP-sync menu items once already: they existed only in EditorUI.cpp's ImGui
+// block for a while and could never be reached on a Mac, regardless of any
+// runtime gate like isEngineContentDevMode()). Any new top-level menu action
+// needs an entry HERE too, wired the same way ImportAsset/ExportProject are.
 namespace MacMenuBar
 {
 	enum class Cmd
@@ -19,6 +27,9 @@ namespace MacMenuBar
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, ExportProject,
 		OpenTutorial, ReportIssue,
+		// Only added to the menu when HE_HAVE_LIBSSH2 AND ContentManager::
+		// isEngineContentDevMode() are both true — see install()'s Assets block.
+		PublishEngineContent, RebuildManifestFromServer,
 	};
 
 	// Build + set NSApp.mainMenu (idempotent). Call after SDL created the app.
