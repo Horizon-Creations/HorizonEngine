@@ -4,6 +4,9 @@
 
 #import <Cocoa/Cocoa.h>
 #include <SDL3/SDL.h>         // SDL_GetBasePath — locate the bundled logo
+#ifdef HE_HAVE_LIBSSH2
+#include <ContentManager/ContentManager.h> // ContentManager::isEngineContentDevMode
+#endif
 #include <deque>
 #include <string>
 #include <utility>
@@ -176,6 +179,19 @@ void install()
 	{
 		NSMenu* assets = heAddSubmenu(main, @"Assets");
 		heAddItem(assets, @"Import Asset…", C::ImportAsset, nil, 0, true);
+#ifdef HE_HAVE_LIBSSH2
+		// Mirrors EditorUI.cpp's ImGui Assets menu exactly, including the same
+		// dev-mode gate — see MacMenuBar.h's header comment for why this can't
+		// be skipped just because the ImGui side already has it.
+		if (ContentManager::isEngineContentDevMode())
+		{
+			[assets addItem:[NSMenuItem separatorItem]];
+			heAddItem(assets, @"Publish Engine Content to Server…",
+			          C::PublishEngineContent, nil, 0, false);
+			heAddItem(assets, @"Rebuild Manifest from Server…",
+			          C::RebuildManifestFromServer, nil, 0, false);
+		}
+#endif
 		NSMenu* build = heAddSubmenu(main, @"Build");
 		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
 	}
