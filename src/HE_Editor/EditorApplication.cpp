@@ -1563,6 +1563,15 @@ void EditorApplication::OnRender(float dt)
 	{
 		for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
 		{
+			// Raw/loose manifest entries (no .hasset → no UUID, see
+			// EngineContentManifestEntry) have nothing to register here: every
+			// one of them would collide on the same HE::UUID{} key in
+			// m_remoteAssets, silently shadowing each other. They are still
+			// fully downloadable — just via the path-driven Content Browser
+			// route (mergeManifestInto's remote-only File nodes), never via a
+			// UUID-keyed scene reference, which is the only thing this map serves.
+			if (e.uuid == HE::UUID{}) continue;
+
 			const HE::UUID    uuid         = e.uuid;
 			const std::string relativePath = e.relativePath;
 			contentManager().registerRemoteAsset(uuid, relativePath,

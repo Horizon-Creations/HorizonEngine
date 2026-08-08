@@ -168,4 +168,99 @@ PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
 	return result;
 }
 
+RebuildManifestResult rebuildManifestFromServerBlocking(std::function<void(const std::string&)> onLog)
+{
+	auto log = [&](const std::string& s) { if (onLog) onLog(s); };
+
+	RebuildManifestResult result;
+	const SftpEndpoint& endpoint = engineContentEndpoint();
+	if (!endpoint.configured())
+	{
+		result.error = "EngineContent SFTP endpoint is not configured";
+		return result;
+	}
+
+	std::vector<RemoteFileInfo> files;
+	const SftpResult listing = sftpListRemoteTree(endpoint, files);
+	if (!listing.ok)
+	{
+		result.error = "Could not list the server: " + listing.error;
+		return result;
+	}
+	log("Found " + std::to_string(files.size()) + " files on the server");
+
+	std::error_code ec;
+	EngineContentManifest manifest;
+	for (const RemoteFileInfo& f : files)
+	{
+		// manifest.json is the output of this very function, not content to
+		// describe — and would otherwise re-list itself as a mysterious
+		// zero-UUID raw entry on every subsequent rebuild.
+		if (f.relativePath == "manifest.json") continue;
+
+		if (fs::path(f.relativePath).extension() != ".hasset")
+		{
+			// Raw/loose file: server-reported size + mtime only, no download —
+			// see EngineContentManifestEntry's field comments for why.
+			EngineContentManifestEntry entry;
+			entry.relativePath = f.relativePath;
+			entry.size         = f.size;
+			entry.mtime        = f.mtime;
+			manifest.entries.push_back(std::move(entry));
+			++result.rawEntries;
+			continue;
+		}
+
+		// .hasset: the UUID lives inside the file, so there is no way to learn
+		// it without downloading — same cost publishEngineContentBlocking pays
+		// locally, just over the network here.
+		const fs::path tmp = fs::temp_directory_path(ec) / "engine_content_rebuild_scan.tmp";
+		const SftpResult dl = sftpGetFile(endpoint, f.relativePath, tmp.string());
+		if (!dl.ok)
+		{
+			log("Skipped " + f.relativePath + " (download failed: " + dl.error + ")");
+			continue;
+		}
+		const std::string bytesStr = readWholeFile(tmp);
+		std::error_code rmEc;
+		fs::remove(tmp, rmEc);
+
+		const std::vector<uint8_t> bytes(bytesStr.begin(), bytesStr.end());
+		HE::UUID id;
+		if (!readAssetUuid(bytes, id) || id == HE::UUID{})
+		{
+			log("Skipped " + f.relativePath + " (not a valid .hasset — no UUID)");
+			continue;
+		}
+
+		EngineContentManifestEntry entry;
+		entry.relativePath = f.relativePath;
+		entry.uuid          = id;
+		entry.contentHash   = Hpak::hash64(bytes.data(), bytes.size());
+		entry.size          = bytes.size();
+		manifest.entries.push_back(std::move(entry));
+		++result.hassetEntries;
+		log("Indexed " + f.relativePath);
+	}
+
+	const fs::path tmpManifest = fs::temp_directory_path(ec) / "engine_content_manifest.json.tmp";
+	{
+		std::ofstream out(tmpManifest, std::ios::binary | std::ios::trunc);
+		out << serializeManifest(manifest);
+	}
+	const SftpResult putManifest = sftpPutFile(endpoint, tmpManifest.string(), "manifest.json");
+	std::error_code  rmEc;
+	fs::remove(tmpManifest, rmEc);
+	if (!putManifest.ok)
+	{
+		result.error = "Uploading manifest.json failed: " + putManifest.error;
+		return result;
+	}
+
+	result.ok = true;
+	log("Manifest rebuilt: " + std::to_string(result.hassetEntries) + " .hasset assets, " +
+	    std::to_string(result.rawEntries) + " raw files");
+	return result;
+}
+
 } // namespace HE::Cs

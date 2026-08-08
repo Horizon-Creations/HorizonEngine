@@ -28,4 +28,25 @@ struct PublishResult
 HE_CS_API PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
                                                        std::function<void(const std::string&)> onLog = {});
 
+struct RebuildManifestResult
+{
+	bool        ok = false;
+	std::string error;              // empty when ok
+	std::size_t hassetEntries = 0;  // downloaded to read their UUID + hash
+	std::size_t rawEntries    = 0;  // size/mtime only, no download
+};
+
+// Bootstraps (or replaces) manifest.json from whatever is ALREADY on the
+// server, rather than from a local EngineContent folder — for a server that
+// already has content this tool never uploaded (e.g. a pre-existing archive of
+// raw source audio). Lists the whole remote tree (see SftpClient::
+// sftpListRemoteTree — metadata only, no download), then for each file:
+// a ".hasset" is downloaded once to read its UUID and content hash (the same
+// way publishEngineContentBlocking does it locally — there is no way around
+// downloading it, the UUID lives inside); anything else becomes a raw manifest
+// entry (empty UUID, size + mtime only, see EngineContentManifestEntry) with no
+// download at all. Blocking — call on a worker thread.
+HE_CS_API RebuildManifestResult rebuildManifestFromServerBlocking(
+	std::function<void(const std::string&)> onLog = {});
+
 } // namespace HE::Cs

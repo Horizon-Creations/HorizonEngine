@@ -6,6 +6,7 @@
 #include <libssh2.h>
 #include <libssh2_sftp.h>
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -172,6 +173,50 @@ std::string joinRemotePath(const std::string& base, const std::string& relPath)
 	return b + "/" + rel;
 }
 
+// Depth-first walk of one remote directory, recursing into subdirectories.
+// fullDirPath is the absolute remote path to opendir(); relPrefix is the
+// manifest-relative path built up alongside it (empty at the root). A missing
+// or unreadable directory contributes nothing rather than aborting the whole
+// walk — the same "degrade, don't abort" contract populateFolder() uses for
+// the local filesystem equivalent (GlobalState.cpp).
+void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
+                             const std::string& relPrefix,
+                             std::vector<RemoteFileInfo>& out)
+{
+	LIBSSH2_SFTP_HANDLE* dir = libssh2_sftp_opendir(s.sftp, fullDirPath.c_str());
+	if (!dir) return;
+
+	char nameBuf[512];
+	for (;;)
+	{
+		LIBSSH2_SFTP_ATTRIBUTES attrs;
+		std::memset(&attrs, 0, sizeof(attrs));
+		const int rc = libssh2_sftp_readdir_ex(dir, nameBuf, sizeof(nameBuf), nullptr, 0, &attrs);
+		if (rc <= 0) break; // 0 = end of directory, <0 = error — nothing more to read either way
+
+		const std::string name(nameBuf, static_cast<std::size_t>(rc));
+		if (name == "." || name == "..") continue;
+
+		const std::string childFull = fullDirPath + "/" + name;
+		const std::string childRel  = relPrefix.empty() ? name : relPrefix + "/" + name;
+
+		const bool isDir = (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) &&
+		                    LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
+		if (isDir)
+		{
+			listRemoteDirRecursive(s, childFull, childRel, out);
+			continue;
+		}
+
+		RemoteFileInfo info;
+		info.relativePath = childRel;
+		info.size  = (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE) ? attrs.filesize : 0;
+		info.mtime = (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) ? static_cast<std::uint64_t>(attrs.mtime) : 0;
+		out.push_back(std::move(info));
+	}
+	libssh2_sftp_close_handle(dir);
+}
+
 } // namespace
 
 SftpResult sftpTestConnection(const SftpEndpoint& endpoint)
@@ -319,6 +364,20 @@ SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint, const std::string& 
 		if (next == rel.size()) break;
 		pos = next + 1;
 	}
+	return { true, {} };
+}
+
+SftpResult sftpListRemoteTree(const SftpEndpoint& endpoint, std::vector<RemoteFileInfo>& outFiles)
+{
+	Session s;
+	if (!s.open(endpoint)) return { false, s.error };
+
+	std::string root = endpoint.remoteBasePath;
+	if (root.empty())        root = "/";
+	else if (root.front() != '/') root = "/" + root;
+
+	outFiles.clear();
+	listRemoteDirRecursive(s, root, "", outFiles);
 	return { true, {} };
 }
 

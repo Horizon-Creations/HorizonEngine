@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HE::Cs {
 
@@ -27,6 +28,16 @@ struct SftpResult
 {
 	bool        ok = false;
 	std::string error;   // human-readable, already scrubbed of the password — empty when ok
+};
+
+// One file found by sftpListRemoteTree — deliberately NOT the manifest entry
+// type (EngineContentManifest.h): this is raw directory-listing data (whatever
+// the server already has), the manifest is what a caller decides to make of it.
+struct RemoteFileInfo
+{
+	std::string   relativePath; // relative to endpoint.remoteBasePath, forward-slash separated
+	std::uint64_t size  = 0;
+	std::uint64_t mtime = 0;    // Unix timestamp, as SFTP reports it — no download needed for either field
 };
 
 // Connect, authenticate, disconnect. Used for the startup connectivity probe
@@ -54,5 +65,14 @@ HE_CS_API SftpResult sftpPutFile(const SftpEndpoint& endpoint,
 // directory at any level is not an error.
 HE_CS_API SftpResult sftpEnsureRemoteDir(const SftpEndpoint& endpoint,
                                           const std::string&  remoteRelDir);
+
+// Recursively lists every FILE under endpoint.remoteBasePath (directories are
+// walked but not themselves reported). Metadata only — size and mtime come
+// from the directory listing itself, nothing is downloaded. Used to bootstrap
+// a manifest from whatever a server already has (e.g. content uploaded outside
+// this tool), where re-hashing every file by downloading it would be wasteful
+// for anything that isn't a .hasset (see EngineContentPublish.h).
+HE_CS_API SftpResult sftpListRemoteTree(const SftpEndpoint& endpoint,
+                                         std::vector<RemoteFileInfo>& outFiles);
 
 } // namespace HE::Cs
