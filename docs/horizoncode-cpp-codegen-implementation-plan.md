@@ -446,7 +446,9 @@ the map key in the interpreter.
 
 ### 5.4 Stage C — emission model
 
-Per class `Foo` → `hcgen_Foo.h/.cpp`:
+Per class `Foo` → `hcgen_Foo.h/.cpp`. **(Superseded by §14.3: one `.cpp` per
+class, no generated header, and the RunState members below are emitted only
+where the graph can reach them.)**
 
 ```cpp
 namespace hcgen {
@@ -1181,6 +1183,93 @@ Possible later step on the same mechanics: **event-graph locals**
 (`scope` = a sentinel for sub-graph 0) — those would be per-*run* state:
 a run-scoped map in the Runner, `RunState` fields in the compiled class.
 Same building blocks, different scope; not needed now.
+
+## 14. Extension: user-defined types (Struct/Enum) & lean emission
+
+Both landed together; they touch the same emission model.
+
+### 14.1 Struct assets become real C++ types
+
+A run's Struct definitions (closed over nested fields, dependency-ordered) are
+emitted ONCE into a shared **`hcgen_types.h`**: one plain aggregate per
+definition, plus `toValue`/`fromValue_*` converters and the four `hc::`
+specializations the generic helpers dispatch through (`zeroOf`, `raw`,
+`coerce`, `tagOf`). A struct field read in a graph therefore lowers to a member
+access, not to Value plumbing.
+
+- **Member zero == the interpreter's empty struct.** An unwired Struct pin is
+  an *empty* `Value` in the interpreter, whose field reads all miss and yield
+  typed zeros — so the generated members default to their type's zero, and
+  `S_X{}` is exactly that. The DEFINITION's defaults are a different thing and
+  are emitted explicitly where the interpreter uses them (`MakeStruct`'s base,
+  `variableDefaultValue` incl. the graph's per-field `structDefaults`).
+- **Fields resolve BY NAME** against the definition at generation time
+  (`Break`/`Get`/`SetStructField`), never positionally — the same renumber-safe
+  matching `Runner::evalData` does at run time. Packed definitions are
+  immutable, which is what makes baking the lookup sound (same argument as
+  `EnumToString`).
+- **`Contains`/`IndexOf` on a struct array are constants.** `valueEquals` has
+  no Struct case, so its default arm makes every comparison false: the
+  interpreter never finds a struct in an array. `hc::arrContainsNever` /
+  `arrIndexOfNever` reproduce that while still taking (and therefore
+  evaluating) both inputs — pure-EngineCall dispatch counts are part of the
+  trace.
+- **`collectRefs` does not descend into structs**, because the interpreted GC
+  scan (`Runtime::retainOnlyReachableFrom`) only marks Ref-*typed* store
+  entries. Descending would keep instances alive that the interpreted build
+  collects.
+- A Struct pin with no definition (the generic boundary `Graph::connect`
+  allows) or one the registry doesn't know is a **Fallback**, not a guess.
+
+**Sharpened (§3.6-style non-goal):** feeding a NON-struct Value where a struct
+is expected. The interpreter's struct Value remembers that it failed to coerce
+(empty `typeName`), and `SetStructField` then re-seeds it from the definition;
+a generated `S_X` is statically the right type and stays at its zeros. Both are
+self-consistent; matching the interpreter would cost a hidden "am I real" flag
+on every struct.
+
+### 14.2 Enums
+
+Enums stay **int-backed** (the engine treats them as ints everywhere); only
+their Value boundaries carry the definition path back, via
+`hc::toEnumValue`/`toEnumValueArray`. Two fixes the fixtures now pin down:
+
+- **Duplicate entry values are legal** (nothing in the enum panel prevents
+  them). `EnumDef::findValue` answers with the FIRST, so later duplicates are
+  dead — and emitting them produced two `case 1:` labels, i.e. a generated
+  `.cpp` that did not compile. Both `EnumToString` and `SwitchOnEnum` now
+  deduplicate by value.
+- **`coerce(v, Enum)` is not `coerce(v, Int)`**: a Bool converts into an Int
+  but *not* into an enum (`HorizonCode.cpp`'s `coerce`, case `P::Enum`). Hence
+  `hc::coerceEnum`, and `pinName()` reporting Enum/Struct in `varInfos`.
+
+**Known benign divergence:** an enum Value that reaches the interpreter through
+a dynamic boundary (an Int event arg landing on an enum pin) keeps the EMPTY
+`typeName` `coerce` gives it, while generated code stamps the pin's DECLARED
+definition. It is the one place the compiled backend knows more than the
+interpreter, and the extra information is the correct one. The parity harness
+compares enum `typeName` only when both sides name one.
+
+### 14.3 Lean emission
+
+The per-run scaffolding is emitted only where it can be reached, so a small
+graph compiles to something that reads like hand-written C++:
+
+- **The step/depth guard** exists for graphs that can repeat or nest. Only
+  `ForEach` and `FunctionCall` do either; without them the emitted statement
+  count is fixed at generation time, the 4096-step abort is unreachable, and
+  `steps`/`aborted`/`depth` and every `HC_STEP` go away.
+- **`eventArg`** is a RunState field only when some `Event` data-out is read.
+  This is why bodies are translated BEFORE the class is assembled.
+- With no guard, no event arg and no exec-cache slots, **`RunState` itself
+  disappears**, and with it the `rs` parameter on every body.
+- **No generated headers.** One `.cpp` per class, the class in an anonymous
+  namespace, and only the factory pair (`create_C_X`/`destroy_C_X`) visible;
+  `hc_registry.cpp` declares them. §5.4's `hcgen_Foo.h/.cpp` is superseded.
+- A parameter a body never touches loses its NAME rather than collecting a
+  `(void)x;`.
+
+For the `dispatch_sink` fixture that is 122 lines across two files → 96 in one.
 
 ## Related
 - `horizoncode-cpp-codegen-plan.md` — the design this implements (§ mapping:
