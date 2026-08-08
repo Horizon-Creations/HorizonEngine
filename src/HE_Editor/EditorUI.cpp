@@ -716,6 +716,47 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
 		else if (ctx.saveSceneToPath)     ctx.saveSceneToPath(ctx.currentScenePath);
 	};
+	// ── Save (Ctrl/Cmd+S): the tab you are LOOKING AT ──────────────────────
+	// Saving the scene from inside a material graph is the wrong document: the
+	// user's edits are in the tab in front of them. So Save writes the active
+	// tab's asset, and only tabs with no asset of their own fall back to the
+	// scene:
+	//   • the Scene tab itself (empty assetPath),
+	//   • Level Script — its graph is stored INSIDE the scene, so the scene save
+	//     is its save (the guided tour says exactly that),
+	//   • Game Instance / Preferences — already persisted on every edit
+	//     (commitGameInstance / settings apply immediately); falling back keeps
+	//     the key from being dead there.
+	// View-only tabs (mesh, audio) reach saveAsset, which is a no-op for a path
+	// no panel holds edits for.
+	auto doSaveActiveTab = [&]()
+	{
+		const std::string path =
+			(ctx.activeTab >= 0 && ctx.activeTab < static_cast<int>(ctx.tabs.size()))
+				? ctx.tabs[ctx.activeTab].assetPath : std::string{};
+		if (path.empty()
+		    || path == LevelScriptPanel::kTabPath
+		    || path == GameInstancePanel::kTabPath
+		    || path == EditorSettingsPanel::kTabPath)
+		{
+			doSaveScene();
+			return;
+		}
+		if (!saveAsset(ctx, path))
+			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+	};
+	// ── Save All (Ctrl/Cmd+Shift+S): every unsaved asset, then the scene ────
+	// unsavedAssetPaths() is panel-driven, so this also catches assets whose tab
+	// the user already closed (the edits survive the close). The scene goes LAST
+	// on purpose: an unnamed scene opens the async Save-As dialog, and that is
+	// far less confusing at the end of the run than in the middle of it.
+	auto doSaveAll = [&]()
+	{
+		for (const std::string& path : unsavedAssetPaths())
+			if (!saveAsset(ctx, path))
+				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		if (ctx.sceneDirty) doSaveScene();
+	};
 	auto triggerOpenProject = [&]()
 	{
 		ctx.hubOpenError.clear();
@@ -902,7 +943,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::NewScene:        requestGuarded(GuardedAction::NewScene);               break;
 			case MC::OpenScene:       requestGuarded(GuardedAction::OpenSceneDialog);        break;
 			case MC::AddSceneAdditive:triggerAddSceneAdditive();                             break;
-			case MC::SaveScene:       doSaveScene();                                         break;
+			case MC::Save:            doSaveActiveTab();                                     break;
+			case MC::SaveAll:         doSaveAll();                                           break;
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
@@ -951,8 +993,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (ImGui::MenuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
         if (ImGui::MenuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
         if (ImGui::MenuItem("Add Scene Additive...")) triggerAddSceneAdditive();
-        if (ImGui::MenuItem("Save Scene", "Ctrl+S")) doSaveScene();
-        if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S")) triggerSaveSceneAs();
+        // Keep these three in step with MacMenuBar.mm's File block — a Mac user
+        // never sees this row (see MacMenuBar.h).
+        if (ImGui::MenuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
+        if (ImGui::MenuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
+        if (ImGui::MenuItem("Save Scene As...", "Ctrl+Alt+S"))    triggerSaveSceneAs();
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
@@ -1315,14 +1360,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         s_pendingFileOp = PendingFileOp::OpenProject; // reset to default
     }
 
-    // ── Scene shortcuts: Cmd/Ctrl+S save, Shift+Cmd/Ctrl+S save as ─────────
+    // ── Save shortcuts: Cmd/Ctrl+S = active tab, Shift+Cmd/Ctrl+S = save all ──
+    // (macOS never gets here for these two: the native menu's key equivalents
+    // swallow the keystroke before SDL sees it — the MacMenuBar dispatch above
+    // runs the SAME two lambdas.)
     {
         const ImGuiIO& kio = ImGui::GetIO();
         const bool mod = kio.KeyCtrl || kio.KeySuper;
         if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_S, false))
         {
-            if (kio.KeyShift) triggerSaveSceneAs();
-            else              doSaveScene();
+            if (kio.KeyAlt)        triggerSaveSceneAs();   // Save Scene As…
+            else if (kio.KeyShift) doSaveAll();
+            else                   doSaveActiveTab();
         }
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
         if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))

@@ -245,7 +245,9 @@ constexpr Step kComponents[] = {
 	  "Save the scene",
 	  "Scenes are files (.hescene) under your project's Content folder. The title "
 	  "and the tab show an asterisk while there are unsaved edits.\n"
-	  "Ctrl/Cmd+S saves; Ctrl/Cmd+Shift+S saves under a new name. The scene marked "
+	  "Ctrl/Cmd+S saves whichever tab is in front — here the scene, in a material "
+	  "tab that material. Ctrl/Cmd+Shift+S saves everything that is unsaved, "
+	  "Ctrl/Cmd+Alt+S saves the scene under a new name. The scene marked "
 	  "as the startup scene in your export profile is the one a packaged build "
 	  "opens first.",
 	  "Press Ctrl/Cmd+S to save the scene.",

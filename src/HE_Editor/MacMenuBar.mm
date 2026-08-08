@@ -147,9 +147,14 @@ void install()
 		heAddItem(file, @"New Scene",            C::NewScene,        nil, 0, true);
 		heAddItem(file, @"Open Scene…",          C::OpenScene,       nil, 0, true);
 		heAddItem(file, @"Add Scene Additive…",  C::AddSceneAdditive, nil, 0, true);
-		heAddItem(file, @"Save Scene",           C::SaveScene,   @"s", NSEventModifierFlagCommand, true);
-		heAddItem(file, @"Save Scene As…",       C::SaveSceneAs, @"s",
+		// ⌘S saves the tab in front, ⇧⌘S saves everything — Save As has to move
+		// off ⇧⌘S, or the menu would swallow that keystroke before Save All ever
+		// sees it (a key equivalent wins over anything the app does with the key).
+		heAddItem(file, @"Save",                 C::Save,        @"s", NSEventModifierFlagCommand, true);
+		heAddItem(file, @"Save All",             C::SaveAll,     @"s",
 		          NSEventModifierFlagCommand | NSEventModifierFlagShift, true);
+		heAddItem(file, @"Save Scene As…",       C::SaveSceneAs, @"s",
+		          NSEventModifierFlagCommand | NSEventModifierFlagOption, true);
 	}
 
 	// ── View ───────────────────────────────────────────────────────────────

@@ -21,7 +21,9 @@ namespace MacMenuBar
 	{
 		None = 0,
 		NewProject, OpenProject, CloseProject,
-		NewScene, OpenScene, AddSceneAdditive, SaveScene, SaveSceneAs,
+		// Save = whatever tab is in front (asset tab → that asset, Scene tab →
+		// the scene); SaveAll = every unsaved asset plus a dirty scene.
+		NewScene, OpenScene, AddSceneAdditive, Save, SaveAll, SaveSceneAs,
 		Quit, Preferences,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
 		OpenLevelScript, OpenGameInstance,
