@@ -22,4 +22,16 @@ namespace EngineContentPublishDialog
 
 	// Draws the dialog if open. Call once per frame from the Editor's popup pass.
 	void Draw(AppContext& ctx);
+
+	// True exactly once after a run finished SUCCESSFULLY (the flag is cleared by
+	// the call). Both operations rewrite the server's manifest.json, so whoever
+	// drains this must re-fetch the manifest — otherwise the Editor keeps serving
+	// the catalogue it read at startup and shows assets that are no longer there.
+	bool takeRunSucceeded();
+
+	// Joins the worker thread. MUST be called before the process tears down
+	// statics: startRun only joins the previous run's thread when a NEW run
+	// starts, so the last run of a session leaves a joinable std::thread whose
+	// destructor would call std::terminate.
+	void shutdown();
 }

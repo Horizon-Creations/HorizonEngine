@@ -1361,6 +1361,112 @@ TEST_CASE("GlobalState::refreshEngineFolder merges project overrides into the di
 	CHECK(meshes->files[0]->fullPath == (engineDir.path / "Meshes" / "Cube.hasset").string());
 }
 
+// The remote catalogue (EngineContent SFTP sync) is tree STATE, not a per-call
+// argument. It used to be a defaulted third parameter of refreshEngineFolder,
+// which meant every caller that did not know about the feature — the periodic
+// content refresh, project load, every create/rename refresh — silently rebuilt
+// the Engine tree without it, and the remote assets vanished from the Content
+// Browser roughly a minute after startup. These cases pin that down.
+TEST_CASE("GlobalState remote EngineContent assets survive an unrelated refreshEngineFolder")
+{
+	TempContentDir dir;
+	TempContentDir engineDir("he_test_engine_content");
+	fs::create_directories(engineDir.path / "Meshes");
+	std::ofstream(engineDir.path / "Meshes" / "Cube.hasset") << "default-bytes";
+
+	GlobalState& gs = GlobalState::getInstance();
+
+	// A remote-only asset in a folder that exists locally, and one in a folder
+	// that does not exist locally at all.
+	HE::RemoteEngineAsset remoteMesh;
+	remoteMesh.relativePath = "Meshes/Sphere.hasset";
+	remoteMesh.uuid         = HE::UUID{ 1, 2 };
+	HE::RemoteEngineAsset remoteAudio;
+	remoteAudio.relativePath = "Audio/Ambience/Rain.wav";
+	remoteAudio.uuid         = HE::UUID{};   // raw file: no .hasset, hence no UUID
+	gs.setEngineRemoteAssets({ remoteMesh, remoteAudio });
+
+	auto findFile = [](const HE::Folder& root, const std::vector<std::string>& segments,
+	                    const std::string& leaf) -> const HE::File*
+	{
+		const HE::Folder* cur = &root;
+		for (const std::string& seg : segments)
+		{
+			const HE::Folder* next = nullptr;
+			for (const HE::Folder* s : cur->subfolders)
+				if (s->name == seg) { next = s; break; }
+			if (!next) return nullptr;
+			cur = next;
+		}
+		for (const HE::File* f : cur->files)
+			if (f->name == leaf) return f;
+		return nullptr;
+	};
+
+	SUBCASE("a refresh that knows nothing about the feature keeps the catalogue")
+	{
+		REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
+		{
+			auto [tree, lock] = gs.lockEngineFolder();
+			const HE::File* sphere = findFile(tree, { "Meshes" }, "Sphere.hasset");
+			REQUIRE(sphere != nullptr);
+			CHECK(sphere->isRemoteOnly);
+			CHECK(sphere->remoteUuid == HE::UUID{ 1, 2 });
+			// A raw file in a folder that exists only remotely still appears.
+			const HE::File* rain = findFile(tree, { "Audio", "Ambience" }, "Rain.wav");
+			REQUIRE(rain != nullptr);
+			CHECK(rain->isRemoteOnly);
+		}
+
+		// The exact call the periodic refresh makes — same two arguments. Before
+		// the fix this wiped both entries.
+		REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
+		auto [tree, lock] = gs.lockEngineFolder();
+		CHECK(findFile(tree, { "Meshes" }, "Sphere.hasset") != nullptr);
+		CHECK(findFile(tree, { "Audio", "Ambience" }, "Rain.wav") != nullptr);
+	}
+
+	SUBCASE("an already-downloaded asset is a normal node, not a remote placeholder")
+	{
+		// Simulate a completed download landing in the shared cache.
+		const fs::path cached = GlobalState::engineContentCacheDir() / "Meshes" / "Sphere.hasset";
+		fs::create_directories(cached.parent_path());
+		std::ofstream(cached) << "downloaded-bytes";
+
+		REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
+		{
+			auto [tree, lock] = gs.lockEngineFolder();
+			const HE::File* sphere = findFile(tree, { "Meshes" }, "Sphere.hasset");
+			REQUIRE(sphere != nullptr);
+			// Cached: no badge, and it points at the file actually on disk. Without
+			// this the Content Browser would keep offering to download a file it
+			// already has, on every single double-click.
+			CHECK_FALSE(sphere->isRemoteOnly);
+			CHECK(sphere->fullPath == cached.string());
+		}
+		std::error_code ec;
+		fs::remove(cached, ec);
+	}
+
+	SUBCASE("a shipped default always wins over a remote entry of the same name")
+	{
+		HE::RemoteEngineAsset shadowing;
+		shadowing.relativePath = "Meshes/Cube.hasset";   // exists locally already
+		shadowing.uuid         = HE::UUID{ 9, 9 };
+		gs.setEngineRemoteAssets({ shadowing });
+
+		REQUIRE(gs.refreshEngineFolder(engineDir.path.string(), dir.path.string()));
+		auto [tree, lock] = gs.lockEngineFolder();
+		const HE::File* cube = findFile(tree, { "Meshes" }, "Cube.hasset");
+		REQUIRE(cube != nullptr);
+		CHECK_FALSE(cube->isRemoteOnly);
+		CHECK(cube->fullPath == (engineDir.path / "Meshes" / "Cube.hasset").string());
+	}
+
+	// GlobalState is a singleton — leave no catalogue behind for later cases.
+	gs.setEngineRemoteAssets({});
+}
+
 TEST_CASE("ContentManager isEngineDefaultPath / isEngineOverridePath classify absolute paths")
 {
 	TempContentDir dir;

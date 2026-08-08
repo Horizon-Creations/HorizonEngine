@@ -19,6 +19,7 @@
 #include "ContentSync/SftpCredentials.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,14 +45,21 @@ struct RemoteFileInfo
 // and the "Test Connection" affordance — never touches the filesystem.
 HE_CS_API SftpResult sftpTestConnection(const SftpEndpoint& endpoint);
 
+// Reports transfer progress as (bytesDone, bytesTotal). bytesTotal is 0 when
+// the server did not report a size — callers must treat that as "unknown",
+// never as zero work. Called from the read loop on the calling thread, so it
+// must be cheap and must not block.
+using SftpProgressFn = std::function<void(std::uint64_t bytesDone, std::uint64_t bytesTotal)>;
+
 // Downloads `remoteRelPath` (resolved against endpoint.remoteBasePath) to
 // `localPath`, creating localPath's parent directories if needed. Writes to a
 // temporary file next to localPath and renames on success, so a failed/killed
 // transfer never leaves a partial file where a caller might mistake it for a
-// complete one.
+// complete one. `onProgress` is optional.
 HE_CS_API SftpResult sftpGetFile(const SftpEndpoint& endpoint,
                                   const std::string&  remoteRelPath,
-                                  const std::string&  localPath);
+                                  const std::string&  localPath,
+                                  const SftpProgressFn& onProgress = {});
 
 // Uploads `localPath` to `remoteRelPath` (resolved against endpoint.remoteBasePath).
 // Does NOT create missing remote parent directories — call sftpEnsureRemoteDir
