@@ -1024,6 +1024,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ImGui::Separator();
 			if (ImGui::MenuItem("Publish Engine Content to Server..."))
 				EngineContentPublishDialog::open(ctx);
+			// For a server that already has content this tool never uploaded
+			// (e.g. a pre-existing archive of raw source audio) — lists the
+			// server directly instead of assuming local EngineContent is the
+			// source of truth. See EngineContentPublish.h.
+			if (ImGui::MenuItem("Rebuild Manifest from Server..."))
+				EngineContentPublishDialog::openRebuildFromServer(ctx);
 		}
 #endif
 		ImGui::EndMenu();

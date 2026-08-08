@@ -23,9 +23,27 @@ namespace HE::Cs {
 struct EngineContentManifestEntry
 {
 	std::string relativePath;   // e.g. "Materials/DefaultCube.hasset" — relative to EngineContent root
-	HE::UUID    uuid;           // the asset's own UUID (read from its META chunk at publish time)
-	std::uint64_t contentHash = 0; // Hpak::hash64 of the file's bytes — same function incremental packing uses
+
+	// uuid == HE::UUID{} means "not a .hasset asset" — a raw/loose file (e.g. a
+	// source .wav) that ContentManager never registers by UUID. It still
+	// downloads and shows up in the Content Browser just fine (both are
+	// path-driven, see EngineContentSync::enqueueDownload / mergeManifestInto);
+	// it simply can never be the target of a UUID-keyed scene reference. Set
+	// from a .hasset's own META chunk when publishing FROM local content
+	// (EngineContentPublish::publishEngineContentBlocking), left empty when
+	// discovered by scanning the server directly (rebuildManifestFromServerBlocking).
+	HE::UUID    uuid;
+	// hash64 of the file's bytes (Hpak::hash64 — same function incremental
+	// packing uses) — the change-detection key for .hasset entries. 0 for raw
+	// entries: computing it would mean downloading every file just to hash it,
+	// which defeats the point of a server-side scan (see RemoteFileInfo). Raw
+	// entries use `mtime` for change detection instead.
+	std::uint64_t contentHash = 0;
 	std::uint64_t size        = 0;
+	// Only meaningful (and only ever set) when uuid is empty — a raw entry's
+	// server-reported modification time, Unix epoch seconds. 0 for .hasset
+	// entries, which are change-tracked by contentHash instead.
+	std::uint64_t mtime       = 0;
 };
 
 struct EngineContentManifest
