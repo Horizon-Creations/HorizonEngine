@@ -195,7 +195,13 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 		if (rc <= 0) break; // 0 = end of directory, <0 = error — nothing more to read either way
 
 		const std::string name(nameBuf, static_cast<std::size_t>(rc));
-		if (name == "." || name == "..") continue;
+		// Dotfiles/dotfolders (.DS_Store, .git, ".", "..") are OS/VCS bookkeeping,
+		// never real content — same filter and same reasoning as populateFolder()
+		// uses for the local filesystem equivalent (GlobalState.cpp): a macOS
+		// Finder window opened on the SFTP mount (or any Finder-touched folder
+		// that got uploaded) litters .DS_Store into every directory, and none of
+		// that belongs in the manifest.
+		if (!name.empty() && name.front() == '.') continue;
 
 		const std::string childFull = fullDirPath + "/" + name;
 		const std::string childRel  = relPrefix.empty() ? name : relPrefix + "/" + name;
