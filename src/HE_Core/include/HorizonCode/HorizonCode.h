@@ -330,6 +330,18 @@ HE_API void syncFunctionSignatures(Graph& g);
 // SetStructField revalidates its chosen field, SwitchOnEnum gets the entry
 // names. Call after loading a graph or after a definition changed. A node whose
 // definition is missing keeps its stored mirror (the def may load later).
+// Recover the Enum/Struct DEFINITION of pins that only know their kind. Array
+// and ForEach nodes carry their element type in propType, but nothing ever
+// writes the definition path into their typeName — the editor's element-type
+// picker offers built-ins only. Without it such a pin is a user-defined type
+// nobody can resolve: no field pins, no entry list, "definition missing" in
+// every panel, and no C++ type for the codegen. Recovered from the wiring,
+// which is sound because Graph::connect only lets a definition-less pin join a
+// typed one (the generic boundary) — so a non-empty peer names THE definition.
+// Peers that disagree leave the node alone. Runs as part of fromJson, so every
+// loaded graph is repaired; idempotent, and never overwrites an existing name.
+HE_API void inferUserTypeNames(Graph& g);
+
 HE_API void syncTypeSignatures(Graph& g);
 
 // Partition a flat (pre-sub-graph) graph in place: assign every function-body

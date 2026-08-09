@@ -1214,6 +1214,7 @@ bool fromJson(const std::string& json, Graph& out)
         g.variables.push_back(std::move(v));
     }
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
+    inferUserTypeNames(g);     // recover Enum/Struct definitions from the wiring
     syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
@@ -1258,6 +1259,46 @@ void syncFunctionSignatures(Graph& g)
         if (!entry) continue;
         n.params  = entry->params;
         n.results = entry->results;
+    }
+}
+
+void inferUserTypeNames(Graph& g)
+{
+    // Declared variables are authoritative for their own Get/Set nodes.
+    for (Node& n : g.nodes)
+        if ((n.type == NodeType::GetVariable || n.type == NodeType::SetVariable) &&
+            n.typeName.empty())
+            if (const Variable* v = g.findVariable(n.s)) n.typeName = v->typeName;
+
+    // Then propagate along wires until nothing new is learned (a chain of array
+    // ops picks its element definition up one hop at a time).
+    for (bool changed = true; changed; )
+    {
+        changed = false;
+        for (Node& n : g.nodes)
+        {
+            if (!n.typeName.empty()) continue;
+            if (n.propType != P::Struct && n.propType != P::Enum) continue;
+            std::string found;
+            bool ambiguous = false;
+            for (const Link& l : g.links)
+            {
+                const bool weAreSrc = l.srcNode == n.id;
+                if (!weAreSrc && l.dstNode != n.id) continue;
+                const Node* peer = g.findNode(weAreSrc ? l.dstNode : l.srcNode);
+                if (!peer || peer->id == n.id) continue;
+                const PinRanges pr = pinRanges(*peer);
+                const int idx = weAreSrc ? l.dstPin - pr.dataIn0 : l.srcPin - pr.dataOut0;
+                PinDesc pd{};
+                if (!dataPinDescOf(*peer, /*input=*/weAreSrc, idx, pd)) continue;
+                if (pd.type != n.propType || !pd.typeName || !*pd.typeName) continue;
+                if (found.empty())            found = pd.typeName;
+                else if (found != pd.typeName) { ambiguous = true; break; }
+            }
+            if (ambiguous || found.empty()) continue;
+            n.typeName = found;
+            changed = true;
+        }
     }
 }
 

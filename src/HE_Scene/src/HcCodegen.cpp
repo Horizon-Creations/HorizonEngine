@@ -682,59 +682,16 @@ private:
     }
 
     // ── Stage A0: recover missing user-type definitions ─────────────────────
-    // Array/ForEach nodes carry their element type in `propType`, but nothing
-    // ever writes the DEFINITION path into their `typeName` — the editor's
-    // element-type picker offers built-ins only, and adoptForEachElementType
-    // copies just the type. Get/SetVariable have the same hole on two of their
-    // three spawn paths. Without the path a Struct pin has no C++ type, so the
-    // whole class would fall back for a perfectly ordinary struct-array graph.
-    // Recover it from what the node is wired to: Graph::connect only lets a
-    // definition-less pin join a typed one (the generic boundary), so a
-    // non-empty peer names THE definition. Peers that disagree leave the node
-    // untyped, and validate() then sends the class to the interpreter.
-    void inferTypeNames()
-    {
-        // Declared variables are authoritative for their own Get/Set nodes.
-        for (Node& n : m_g.nodes)
-            if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.typeName.empty())
-                if (const Variable* v = m_g.findVariable(n.s)) n.typeName = v->typeName;
-
-        // Then propagate along wires until nothing new is learned (a chain of
-        // array ops picks its element type up one hop at a time).
-        for (bool changed = true; changed; )
-        {
-            changed = false;
-            for (Node& n : m_g.nodes)
-            {
-                if (!n.typeName.empty()) continue;
-                if (n.propType != PT::Struct && n.propType != PT::Enum) continue;
-                std::string found;
-                bool ambiguous = false;
-                for (const Link& l : m_g.links)
-                {
-                    const bool weAreSrc = l.srcNode == n.id;
-                    if (!weAreSrc && l.dstNode != n.id) continue;
-                    const Node* peer = m_g.findNode(weAreSrc ? l.dstNode : l.srcNode);
-                    if (!peer || peer->id == n.id) continue;
-                    const PinRanges pr = pinRanges(*peer);
-                    const int idx = weAreSrc ? l.dstPin - pr.dataIn0 : l.srcPin - pr.dataOut0;
-                    HorizonCode::PinDesc pd{};
-                    if (!HorizonCode::dataPinDescOf(*peer, /*input=*/weAreSrc, idx, pd)) continue;
-                    if (pd.type != n.propType || !pd.typeName || !*pd.typeName) continue;
-                    if (found.empty()) found = pd.typeName;
-                    else if (found != pd.typeName) { ambiguous = true; break; }
-                }
-                if (ambiguous || found.empty()) continue;
-                n.typeName = found;
-                changed = true;
-            }
-        }
-    }
+    // Array/ForEach nodes carry their element type in `propType` but not the
+    // DEFINITION path, so a struct-array graph would have Struct pins with no
+    // C++ type. fromJson already repairs that on load; do it again here because
+    // generate() also accepts graphs handed in directly (tests, tooling), and
+    // the pass is idempotent.
 
     // ── Stage A: validation (plan §5.2) ──────────────────────────────────────
     void validate()
     {
-        inferTypeNames();
+        HorizonCode::inferUserTypeNames(m_g);
 
         // 1. EngineCall nodes must resolve in the registry; the registry is
         //    authoritative for the pin mirror (stale assets re-mirror + warn).

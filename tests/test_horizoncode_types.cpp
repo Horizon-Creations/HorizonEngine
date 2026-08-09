@@ -405,6 +405,37 @@ TEST_CASE("Array/ForEach pins expose their element definition")
     CHECK(signatureOf(plain).dataOuts[0].typeName == nullptr);
 }
 
+TEST_CASE("A loaded graph recovers Enum/Struct definitions its nodes never stored")
+{
+    TypeFixture fx;
+    Graph g;
+    Variable v; v.name = "list"; v.type = PinType::Struct; v.typeName = kStats; v.isArray = true;
+    g.variables.push_back(v);
+
+    Node get; get.type = NodeType::GetVariable; get.s = "list";
+    get.propType = PinType::Struct; get.typeName = kStats; get.isArray = true;
+    const int gv = g.addNode(std::move(get));
+    // Spawned by an older editor build: knows it holds structs, not WHICH.
+    Node add; add.type = NodeType::ArrayAdd; add.propType = PinType::Struct;
+    const int aa = g.addNode(std::move(add));
+    REQUIRE(g.connect(gv, 0, aa, 0));       // list → Array in
+
+    Graph loaded;
+    REQUIRE(fromJson(toJson(g), loaded));   // the load path repairs it
+    const Node* fixed = nullptr;
+    for (const Node& n : loaded.nodes) if (n.type == NodeType::ArrayAdd) fixed = &n;
+    REQUIRE(fixed != nullptr);
+    CHECK(fixed->typeName == kStats);
+
+    // An existing name is never overwritten, and a node with nothing to learn
+    // from stays untouched rather than guessing.
+    Graph lone;
+    Node solo; solo.type = NodeType::ArrayAdd; solo.propType = PinType::Struct;
+    lone.addNode(std::move(solo));
+    inferUserTypeNames(lone);
+    CHECK(lone.nodes[0].typeName.empty());
+}
+
 TEST_CASE("adoptForEachElementType carries the element's definition, not just its kind")
 {
     TypeFixture fx;
