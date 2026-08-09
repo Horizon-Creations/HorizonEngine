@@ -564,7 +564,7 @@ early-return; §3.6).
 | `Event` (stmt) | entry point → `ev_<name>_<id>(rs)`; (expr, data-out) → `hc::coerce<T>(rs.eventArg)` per the node's `propType` |
 | `FunctionEntry` | member fn; param data-out k → the C++ parameter `p_k` |
 | `FunctionCall` | §5.4 block; data-outs → `rs.nID_oK`; no local entry → omit (warn) |
-| `FunctionReturn` | assign out-params (coerced to result types), `return` |
+| `FunctionReturn` | assign out-params (coerced to result types), then END THE EMITTED CHAIN — **no C++ `return`**: Return has no exec-out, so the interpreter ends only the chain it sits in (Sequence still runs arm 1, ForEach still iterates), while a real `return` would leave the whole inlined body |
 | `Branch` | `if (E(Cond)) { …True… } else { …False… }` |
 | `Sequence` | `{ …Then0… } { …Then1… }` |
 | `ForEach` | `auto arr = E(Array); for (i…){ rs.nID_o0 = arr[i]; rs.nID_o1 = (int)i; …Body… } …Done…` |
@@ -1187,6 +1187,18 @@ Same building blocks, different scope; not needed now.
 ## 14. Extension: user-defined types (Struct/Enum) & lean emission
 
 Both landed together; they touch the same emission model.
+
+### 14.0 Recovering the definition path
+
+Array and `ForEach` nodes carry their element type in `propType`, but nothing
+ever writes the DEFINITION path into their `typeName` — the editor's
+element-type picker offers built-ins only, and `adoptForEachElementType` copies
+just the type. So a Stage A0 pass infers it: declared variables are
+authoritative for their own Get/Set nodes, and everything else adopts the
+definition its wired peer names (`Graph::connect` only lets a definition-less
+pin join a typed one, so a non-empty peer names THE definition). Peers that
+disagree leave the node untyped and the class falls back. Without this, an
+ordinary "struct array through a ForEach" graph would never compile.
 
 ### 14.1 Struct assets become real C++ types
 
