@@ -257,7 +257,15 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // rect and over this window or a node-body child of it. An open popup (a
     // node's combo, the add-menu) is its own window, so IsWindowHovered goes
     // false and the popup keeps its wheel.
+    //
+    // An open popup takes the wheel outright: its list scrolls INSIDE a child,
+    // and once that child hits its end ImGui hands the leftover wheel on — which
+    // landed on the canvas and zoomed it out from under the menu. While a menu
+    // is up the canvas is not what the wheel is for.
+    const bool popupOpen =
+        ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     const bool wheelHovered =
+        !popupOpen &&
         mouse.x >= origin.x && mouse.y >= origin.y &&
         mouse.x <  origin.x + size.x && mouse.y < origin.y + size.y &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |

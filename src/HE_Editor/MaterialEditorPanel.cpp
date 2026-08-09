@@ -1139,14 +1139,14 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		int created = 0;
 		const ImVec2 gp = st.geState.addMenuGraphPos;
 		const float gx = gp.x, gy = gp.y;
-		static std::string s_search;
-		if (ImGui::IsWindowAppearing()) { s_search.clear(); ImGui::SetKeyboardFocusHere(); }
-		ImGui::SetNextItemWidth(230.0f);
-		ImGui::InputTextWithHint("##nodeSearch", "Search nodes...", &s_search);
+		// The same searchable menu the HorizonCode graphs use: the best match is
+		// highlighted as you type and Enter takes it, ↑/↓ move the highlight.
+		// Hand-rolling the search box here is what left this menu without any of
+		// that.
+		const std::string q = HcEditorUtil::searchMenuBegin("##nodeSearch", "Search nodes...", 230.0f);
 		ImGui::Separator();
 		auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
 			[](unsigned char ch){ return (char)std::tolower(ch); }); return v; };
-		const std::string q = lower(s_search);
 		auto matches = [&](const char* name, const char* cat)
 		{ return q.empty() || lower(name).find(q) != std::string::npos
 		      || lower(cat).find(q) != std::string::npos; };
@@ -1156,7 +1156,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 		if (matches("Comment Box", "Editor"))
 		{
 			ImGui::TextDisabled("Editor");
-			if (ImGui::Selectable("Comment Box"))
+			if (HcEditorUtil::searchMenuItem("Comment Box"))
 			{
 				HE::MatGraphComment cbx;
 				cbx.id   = st.graph.nextId++;
@@ -1197,7 +1197,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 					ImGui::TextDisabled("%s", cat);
 					lastCat = cat;
 				}
-				if (ImGui::Selectable(d.name))
+				if (HcEditorUtil::searchMenuItem(d.name))
 				{
 					created = st.graph.addNode(d.type, gx, gy);
 					ImGui::CloseCurrentPopup();
@@ -1231,7 +1231,9 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 					ImGui::TextDisabled("Material Functions");
 					headerShown = true;
 				}
-				if (ImGui::Selectable(fnName.c_str()))
+				// "##fn" keeps a function named like a node type from colliding
+				// with it; searchMenuItem ranks on the visible text only.
+				if (HcEditorUtil::searchMenuItem(fnName + "##fn"))
 				{
 					const int id = st.graph.addNode(MatNodeType::FunctionCall, gx, gy);
 					st.graph.findNode(id)->s = fn->path;
@@ -1241,6 +1243,7 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			}
 		}
 		ImGui::EndChild();
+		HcEditorUtil::searchMenuEnd();
 		return created;
 	};
 
