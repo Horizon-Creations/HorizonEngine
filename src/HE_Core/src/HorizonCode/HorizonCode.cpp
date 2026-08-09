@@ -6,6 +6,7 @@
 #include <GraphCommon/GraphModel.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <mutex>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -1180,6 +1181,25 @@ std::string toJson(const Graph& g)
     nlohmann::json jv = nlohmann::json::array();
     for (const Variable& v : g.variables) jv.push_back(variableToJsonObj(v));
     j["variables"] = std::move(jv);
+
+    // The class's declared events. Name-keyed like everything else: renaming one
+    // rewrites the nodes, never the meaning of what is already on disk.
+    if (!g.events.empty())
+    {
+        nlohmann::json je = nlohmann::json::array();
+        for (const EventDecl& e : g.events)
+        {
+            nlohmann::json o = { { "name", e.name } };
+            if (e.hasArg)
+            {
+                o["hasArg"] = true;
+                o["argType"] = (int)e.argType;
+                if (!e.typeName.empty()) o["typeName"] = e.typeName;
+            }
+            je.push_back(std::move(o));
+        }
+        j["events"] = std::move(je);
+    }
     return j.dump(2);
 }
 
@@ -1213,6 +1233,18 @@ bool fromJson(const std::string& json, Graph& out)
         if (!variableFromJsonObj(e, v)) continue;
         g.variables.push_back(std::move(v));
     }
+    for (const auto& e : j.value("events", nlohmann::json::array()))
+    {
+        if (!e.is_object()) continue;
+        EventDecl d;
+        d.name = e.value("name", std::string());
+        if (d.name.empty()) continue;
+        d.hasArg  = e.value("hasArg", false);
+        d.argType = (PinType)e.value("argType", (int)P::Float);
+        d.typeName = e.value("typeName", std::string());
+        if (!g.findEvent(d.name)) g.events.push_back(std::move(d));
+    }
+    inferEventDecls(g);        // graphs older than declared events arrive with one
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
     inferUserTypeNames(g);     // recover Enum/Struct definitions from the wiring
     syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
@@ -1307,6 +1339,108 @@ void remapLinksForMirror(Graph& g, const std::vector<int>& nodes)
         l.srcPin = remap(l.srcNode, l.srcPin);
         l.dstPin = remap(l.dstNode, l.dstPin);
     }
+}
+
+EventDecl* Graph::findEvent(const std::string& name)
+{
+    for (auto& e : events) if (e.name == name) return &e;
+    return nullptr;
+}
+const EventDecl* Graph::findEvent(const std::string& name) const
+{
+    for (const auto& e : events) if (e.name == name) return &e;
+    return nullptr;
+}
+
+const std::vector<EngineEventDesc>& engineEvents()
+{
+    static const std::vector<EngineEventDesc> k = {
+        { "Construct",            "onConstruct",          P::Exec,   false },
+        { "Destruct",             "onDestruct",           P::Exec,   false },
+        { "Tick",                 "onTick",               P::Float,  false },
+        { "BeginPlay",            "onBeginPlay",          P::Exec,   false },
+        { "OnClicked",            "onClicked",            P::Exec,   true  },
+        { "OnPressed",            "onPressed",            P::Exec,   true  },
+        { "OnReleased",           "onReleased",           P::Exec,   true  },
+        { "OnHovered",            "onHovered",            P::Exec,   true  },
+        { "OnUnhovered",          "onUnhovered",          P::Exec,   true  },
+        { "OnMouseEnter",         "onMouseEnter",         P::Exec,   true  },
+        { "OnMouseLeave",         "onMouseLeave",         P::Exec,   true  },
+        { "OnFocused",            "onFocused",            P::Exec,   true  },
+        { "OnUnfocused",          "onUnfocused",          P::Exec,   true  },
+        { "OnTextChanged",        "onTextChanged",        P::String, true  },
+        { "OnTextCommitted",      "onTextCommitted",      P::String, true  },
+        { "OnValueChanged",       "onValueChanged",       P::Float,  true  },
+        { "OnCheckChanged",       "onCheckChanged",       P::Bool,   true  },
+        { "OnSelectionChanged",   "onSelectionChanged",   P::Int,    true  },
+        { "OnInit",               "onInit",               P::Exec,   false },
+        { "OnShutdown",           "onShutdown",           P::Exec,   false },
+        { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },
+        { "OnLevelLoaded",        "onLevelLoaded",        P::Exec,   false },
+        { "OnLevelUnloaded",      "onLevelUnloaded",      P::Exec,   false },
+    };
+    return k;
+}
+const EngineEventDesc* findEngineEvent(const std::string& name)
+{
+    for (const EngineEventDesc& e : engineEvents())
+        if (name == e.name) return &e;
+    return nullptr;
+}
+
+// ── interned event ids ───────────────────────────────────────────────────────
+// Append-only and process-global: an id handed out stays valid for the session,
+// so the listener tables and the generated code can hold on to one. Guarded
+// because graphs load on worker threads (asset streaming, the export worker).
+namespace
+{
+struct EventInternTable
+{
+    std::mutex                                    mutex;
+    std::vector<std::string>                      names{ std::string() };  // id 0 = "" (none)
+    std::unordered_map<std::string, EventId>      ids;
+};
+EventInternTable& interns()
+{
+    static EventInternTable t;
+    return t;
+}
+}
+
+EventId eventId(const std::string& name)
+{
+    if (name.empty()) return 0;
+    EventInternTable& t = interns();
+    std::lock_guard<std::mutex> lk(t.mutex);
+    if (const auto it = t.ids.find(name); it != t.ids.end()) return it->second;
+    const EventId id = (EventId)t.names.size();
+    t.names.push_back(name);
+    t.ids.emplace(name, id);
+    return id;
+}
+const std::string& eventName(EventId id)
+{
+    EventInternTable& t = interns();
+    std::lock_guard<std::mutex> lk(t.mutex);
+    static const std::string kNone;
+    return id < t.names.size() ? t.names[id] : kNone;
+}
+
+void inferEventDecls(Graph& g)
+{
+    auto declare = [&g](const Node& n)
+    {
+        if (n.s.empty() || findEngineEvent(n.s)) return;   // engine events are not ours
+        if (g.findEvent(n.s)) return;
+        EventDecl d;
+        d.name = n.s;
+        d.hasArg = n.hasArg;
+        d.argType = n.propType;
+        d.typeName = n.typeName;
+        g.events.push_back(std::move(d));
+    };
+    for (const Node& n : g.nodes)
+        if (n.type == NodeType::Event || n.type == NodeType::EmitEvent) declare(n);
 }
 
 void inferUserTypeNames(Graph& g)

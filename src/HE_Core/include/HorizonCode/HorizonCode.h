@@ -284,11 +284,33 @@ HE_API const char* nodeCategory(NodeType t);
 HE_API const char* nodeTooltip(NodeType t);
 HE_API const std::vector<NodeType>& nodeRegistry();
 
+// ── A declared event ─────────────────────────────────────────────────────────
+// The events a class raises are part of its interface, like its public
+// functions: another class binds to them, and this one emits them. Declaring
+// them once — instead of spelling the same name into an Event node, an Emit and
+// a Bind — is what makes a typo an error instead of silence, and what lets the
+// editor offer a list where it used to offer a text field.
+//
+// The NAME stays the identity on disk (renaming a declaration has to rewrite the
+// nodes, never the saved bytes of some id). At run time the name is interned
+// once into an EventId; see eventId() below.
+struct EventDecl
+{
+    std::string name;
+    // One optional argument, matching what an Event node and Emit Event carry.
+    bool        hasArg = false;
+    PinType     argType = PinType::Float;
+    std::string typeName;   // Enum/Struct argument: the definition asset
+};
+
 struct HE_API Graph
 {
-    std::vector<Node>     nodes;
-    std::vector<Link>     links;
-    std::vector<Variable> variables;
+    std::vector<Node>      nodes;
+    std::vector<Link>      links;
+    std::vector<Variable>  variables;
+    // Events this class declares (custom ones only — the engine's own are a
+    // fixed list, see engineEvents()).
+    std::vector<EventDecl> events;
     int nextId = 1;
 
     Node*       findNode(int id);
@@ -301,6 +323,8 @@ struct HE_API Graph
 
     Variable*       findVariable(const std::string& name);
     const Variable* findVariable(const std::string& name) const;
+    EventDecl*       findEvent(const std::string& name);
+    const EventDecl* findEvent(const std::string& name) const;
 };
 
 HE_API std::string toJson(const Graph& g);
@@ -343,7 +367,37 @@ HE_API void syncFunctionSignatures(Graph& g);
 // typed one (the generic boundary) — so a non-empty peer names THE definition.
 // Peers that disagree leave the node alone. Runs as part of fromJson, so every
 // loaded graph is repaired; idempotent, and never overwrites an existing name.
+// ── the engine's own events ──────────────────────────────────────────────────
+// Names the engine itself fires, each a string literal at exactly one call site
+// (WidgetManager, GameInstanceHost, HorizonWorld, PlayerHost, Runtime::destroy).
+// They are NOT declared per class: every class may handle any of them, and none
+// may raise them. `hook` is the CompiledInstance method a compiled class
+// overrides for it; `elem` says whether the call site carries an element id.
+struct EngineEventDesc
+{
+    const char* name;
+    const char* hook;
+    PinType     arg;    // Exec = the event carries none
+    bool        elem;
+};
+HE_API const std::vector<EngineEventDesc>& engineEvents();
+HE_API const EngineEventDesc* findEngineEvent(const std::string& name);
+
+// ── interned event ids ───────────────────────────────────────────────────────
+// The name is the format; the id is what dispatch runs on. Interning is
+// process-global and append-only, so an id stays valid for the whole session and
+// two graphs naming the same event agree without ever comparing strings.
+using EventId = std::uint32_t;
+HE_API EventId            eventId(const std::string& name);
+HE_API const std::string& eventName(EventId id);
+
 HE_API void inferUserTypeNames(Graph& g);
+
+// Harvest the custom event names a graph already uses into its declaration list
+// (Event nodes it handles, Emit Event nodes it raises). Graphs authored before
+// events were declarable carry them only on the nodes; this is how they arrive
+// with an interface. Runs as part of fromJson; never removes a declaration.
+HE_API void inferEventDecls(Graph& g);
 
 // Bind-a-definition's other half: re-mirror `nodes` (syncTypeSignatures) and
 // carry their links over to the pins that appear. Binding a definition CHANGES

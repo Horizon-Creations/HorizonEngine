@@ -1060,3 +1060,62 @@ TEST_CASE("fromJson drops links whose endpoints did not survive, and repairs nex
 	Node n; n.type = NodeType::ConstFloat;
 	CHECK(g.addNode(n) == 10);
 }
+
+// ── Declared events ─────────────────────────────────────────────────────────
+
+TEST_CASE("a graph's custom events survive a JSON round trip")
+{
+    Graph g;
+    Node ev; ev.type = NodeType::Event; ev.s = "Signal"; ev.hasArg = true;
+    ev.propType = PinType::Int;
+    g.addNode(std::move(ev));
+    Node em; em.type = NodeType::EmitEvent; em.s = "Other";
+    g.addNode(std::move(em));
+    // Engine events are a fixed list, not this class's interface.
+    Node ctor; ctor.type = NodeType::Event; ctor.s = "Construct";
+    g.addNode(std::move(ctor));
+
+    Graph loaded;
+    REQUIRE(fromJson(toJson(g), loaded));
+    REQUIRE(loaded.events.size() == 2);          // Signal + Other, not Construct
+    const EventDecl* sig = loaded.findEvent("Signal");
+    REQUIRE(sig != nullptr);
+    CHECK(sig->hasArg);
+    CHECK(sig->argType == PinType::Int);
+    CHECK(loaded.findEvent("Other") != nullptr);
+    CHECK(loaded.findEvent("Construct") == nullptr);
+
+    // A second trip changes nothing, and the declarations now come from the
+    // payload rather than being harvested again.
+    Graph twice;
+    REQUIRE(fromJson(toJson(loaded), twice));
+    CHECK(twice.events.size() == 2);
+}
+
+TEST_CASE("event ids are stable, shared, and reversible")
+{
+    const EventId a = eventId("Signal");
+    const EventId b = eventId("Signal");
+    CHECK(a == b);
+    CHECK(a != 0);
+    CHECK(eventId("Other") != a);
+    CHECK(eventName(a) == "Signal");
+    CHECK(eventId("") == 0);          // "no event" has an id of its own
+    CHECK(eventName(0).empty());
+    CHECK(eventName(999999).empty()); // an id nobody handed out reads as none
+}
+
+TEST_CASE("engine events are a closed list, separate from a class's own")
+{
+    CHECK(findEngineEvent("OnClicked") != nullptr);
+    CHECK(findEngineEvent("Construct") != nullptr);
+    CHECK(findEngineEvent("Signal") == nullptr);
+    const EngineEventDesc* tick = findEngineEvent("Tick");
+    REQUIRE(tick != nullptr);
+    CHECK(tick->arg == PinType::Float);
+    CHECK_FALSE(tick->elem);          // the call site carries no element
+    const EngineEventDesc* click = findEngineEvent("OnClicked");
+    REQUIRE(click != nullptr);
+    CHECK(click->elem);
+    CHECK(std::string(click->hook) == "onClicked");
+}

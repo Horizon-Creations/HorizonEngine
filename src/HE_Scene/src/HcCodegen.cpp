@@ -727,45 +727,12 @@ struct ClassTable
 };
 
 // ── the engine's own events ──────────────────────────────────────────────────
-// Names the engine spells out itself (WidgetManager, GameInstanceHost,
-// HorizonWorld, PlayerHost, Runtime::destroy). A graph handling one of them
-// gets a real override of the CompiledInstance hook, so the class documents its
-// contract and the engine can eventually call it without building a string.
-// `arg` is the type the engine sends (Exec = none); `elem` says whether the call
-// site carries an element id at all — where it does not, only handlers declared
-// for element 0 can ever match, exactly as fireEvent decides it.
-struct EngineEvent { const char* event; const char* hook; PinType arg; bool elem; };
-const EngineEvent kEngineEvents[] = {
-    { "Construct",          "onConstruct",         PT::Exec,   false },
-    { "Destruct",           "onDestruct",          PT::Exec,   false },
-    { "Tick",               "onTick",              PT::Float,  false },
-    { "BeginPlay",          "onBeginPlay",         PT::Exec,   false },
-    { "OnClicked",          "onClicked",           PT::Exec,   true  },
-    { "OnPressed",          "onPressed",           PT::Exec,   true  },
-    { "OnReleased",         "onReleased",          PT::Exec,   true  },
-    { "OnHovered",          "onHovered",           PT::Exec,   true  },
-    { "OnUnhovered",        "onUnhovered",         PT::Exec,   true  },
-    { "OnMouseEnter",       "onMouseEnter",        PT::Exec,   true  },
-    { "OnMouseLeave",       "onMouseLeave",        PT::Exec,   true  },
-    { "OnFocused",          "onFocused",           PT::Exec,   true  },
-    { "OnUnfocused",        "onUnfocused",         PT::Exec,   true  },
-    { "OnTextChanged",      "onTextChanged",       PT::String, true  },
-    { "OnTextCommitted",    "onTextCommitted",     PT::String, true  },
-    { "OnValueChanged",     "onValueChanged",      PT::Float,  true  },
-    { "OnCheckChanged",     "onCheckChanged",      PT::Bool,   true  },
-    { "OnSelectionChanged", "onSelectionChanged",  PT::Int,    true  },
-    { "OnInit",             "onInit",              PT::Exec,   false },
-    { "OnShutdown",         "onShutdown",          PT::Exec,   false },
-    { "OnWindowFocusChanged", "onWindowFocusChanged", PT::Bool, false },
-    { "OnLevelLoaded",      "onLevelLoaded",       PT::Exec,   false },
-    { "OnLevelUnloaded",    "onLevelUnloaded",     PT::Exec,   false },
-};
+// The table lives in HE_Core next to CompiledInstance, because the hook names
+// ARE that interface — see HorizonCode::engineEvents().
+using EngineEvent = HorizonCode::EngineEventDesc;
 const EngineEvent* engineEventFor(const std::string& name)
-{
-    for (const EngineEvent& e : kEngineEvents)
-        if (name == e.event) return &e;
-    return nullptr;
-}
+{ return HorizonCode::findEngineEvent(name); }
+
 // The hook's parameter list, and how the typed argument reaches rs.eventArg.
 std::string hookParams(const EngineEvent& e, bool argUsed)
 {
