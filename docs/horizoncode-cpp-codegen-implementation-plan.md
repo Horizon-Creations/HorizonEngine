@@ -1342,6 +1342,49 @@ Parity proves the fast path is CORRECT — the harness runs a fully compiled wor
 against a fully interpreted one. It cannot prove it is TAKEN (the fallback would
 answer the same), so one codegen test asserts the emission itself.
 
+### 14.2d The engine's own events, without a name
+
+The names the engine fires are not data: each is a string LITERAL at exactly one
+place in the engine source (`WidgetManager`, `GameInstanceHost`, `HorizonWorld`,
+`PlayerHost`, `Runtime::destroy`). `CompiledInstance` declares one virtual hook
+per name; a generated class overrides the ones its graph handles, and `Runtime`
+grew a typed entry point per event that the engine calls instead of
+`fireEvent(id, "OnClicked", elem, arg)`.
+
+```cpp
+class C_MainMenu final : public HorizonCode::CompiledInstance
+{
+public:
+    void onClicked(int elem) override;                              // elements 3 and 7
+    void onTextChanged(int elem, const std::string& arg) override;
+};
+```
+
+- **The default forwards, it is not empty.** `CompiledInstance::onClicked`
+  calls `fireEvent("OnClicked", elem, {})`. So overriding is purely an
+  optimization: a hand-written subclass, or a generated one whose graph does not
+  handle that event, behaves exactly as it did before the hooks existed. An
+  empty default would have silently stopped delivering to anything that only
+  implements `fireEvent` — which is how the first version of this broke a test.
+- **The listener pass stays.** `fireEvent` reaches everyone bound to the
+  instance AFTER the owner's own handlers (§3.5); every typed entry point does
+  the same. Routing the owner statically and dropping that would break
+  dispatcher patterns with nothing to report it.
+- **The element rule is unchanged**: a handler declared for element 0 answers
+  for every element. Where the engine's call site carries no element at all
+  (`Tick`, `OnInit`, …) only element-0 handlers can match, and the emitter emits
+  exactly those.
+- `Construct`/`Destruct` are ordinary hooks, **not** the C++ constructor and
+  destructor: the Context is bound AFTER construction (`Runtime::addCompiled`)
+  and the instance is still registered while `Destruct` runs. A C++ ctor/dtor
+  sits outside both windows, so graph nodes that touch the world would silently
+  do nothing there.
+
+What stays name-based: input actions (`PlayerHost` fires an action name that
+comes from an Input Action asset), `Emit Event` to user-defined names, and
+`widget.callFunction(id, name)` — an engine call a graph can hand a string it
+computed itself.
+
 ### 14.3 Lean emission
 
 The per-run scaffolding is emitted only where it can be reached, so a small

@@ -264,7 +264,7 @@ void GameApplication::OnInit()
 			{
 				const HorizonCode::InstanceId inst =
 					m_gameInstance.runtime().addCompiled(std::move(compiled));
-				m_gameInstance.runtime().fireEvent(inst, "Construct", 0);
+				m_gameInstance.runtime().fireConstruct(inst);
 				return inst;
 			}
 			const HE::UUID id = contentManager().loadAsset(p);
@@ -273,7 +273,7 @@ void GameApplication::OnInit()
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
-			m_gameInstance.runtime().fireEvent(inst, "Construct", 0);
+			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};
 		svc.destroyObject = [this](uint32_t ref){

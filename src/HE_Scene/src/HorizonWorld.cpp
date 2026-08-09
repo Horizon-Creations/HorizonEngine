@@ -575,13 +575,13 @@ void HorizonWorld::fireLevelLoaded()
             m_levelInstance = scripts().addCompiled(std::move(compiled));
             HE_LOG_INFO(HorizonCode, "Level script '%s' running (compiled native class)",
                         m_levelScriptKey.c_str());
-            scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
+            scripts().fireOnLevelLoaded(m_levelInstance);
             return;
         }
     m_levelInstance = scripts().add(m_levelScript, {});
     HE_LOG_INFO(HorizonCode, "Level script running (interpreted, %zu node(s)) — OnLevelLoaded",
                 m_levelScript.nodes.size());
-    scripts().fireEvent(m_levelInstance, "OnLevelLoaded", 0);
+    scripts().fireOnLevelLoaded(m_levelInstance);
 }
 
 void HorizonWorld::fireLevelUnloaded()
@@ -592,6 +592,6 @@ void HorizonWorld::fireLevelUnloaded()
     // Fire the event but KEEP the instance so its final variable state stays
     // readable after unload; it is dropped on the next load or on clear().
     HE_LOG_INFO(HorizonCode, "%s", "Level script OnLevelUnloaded");
-    scripts().fireEvent(m_levelInstance, "OnLevelUnloaded", 0);
+    scripts().fireOnLevelUnloaded(m_levelInstance);
 }
 

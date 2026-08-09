@@ -1083,7 +1083,7 @@ void EditorApplication::OnInit()
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
-			m_gameInstance.runtime().fireEvent(inst, "Construct", 0); // let the object init
+			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};
 		svc.destroyObject = [this](uint32_t ref){

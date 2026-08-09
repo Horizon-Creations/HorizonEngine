@@ -63,9 +63,14 @@ public:
     // ── the engine's own events, as methods ─────────────────────────────────
     // These names are not data: each is a string LITERAL at exactly one place in
     // the engine (WidgetManager, GameInstanceHost, HorizonWorld, PlayerHost,
-    // Runtime::destroy). A compiled class overrides the ones its graph handles;
-    // the rest keep the empty default, so a class costs nothing for an event it
-    // does not care about — and its header shows at a glance which ones it does.
+    // Runtime::destroy). A compiled class overrides the ones its graph handles,
+    // and its header then shows at a glance which ones those are.
+    //
+    // The DEFAULT forwards to fireEvent under the canonical name, so overriding
+    // is purely an optimization: a class that implements only fireEvent — a
+    // hand-written one, or a generated one whose graph does not handle this
+    // event — behaves exactly as it did before the hooks existed. Skipping the
+    // name is the win; needing to know about it is not a condition.
     //
     // `elem` is the widget element the event happened on (0 = the widget
     // itself); a handler declared for element 0 answers for every element, which
@@ -77,33 +82,39 @@ public:
     // and the instance is still registered while Destruct runs — a C++ ctor/dtor
     // sits outside both windows, and graph nodes that touch the world would
     // silently do nothing there.
-    virtual void onConstruct() {}
-    virtual void onDestruct() {}
-    virtual void onTick(float dt) { (void)dt; }
-    virtual void onBeginPlay() {}
+    virtual void onConstruct() { fireEvent("Construct", 0, Value{}); }
+    virtual void onDestruct()  { fireEvent("Destruct", 0, Value{}); }
+    virtual void onTick(float dt) { fireEvent("Tick", 0, Value::ofFloat(dt)); }
+    virtual void onBeginPlay() { fireEvent("BeginPlay", 0, Value{}); }
     // Widget pointer/focus events.
-    virtual void onClicked(int elem)     { (void)elem; }
-    virtual void onPressed(int elem)     { (void)elem; }
-    virtual void onReleased(int elem)    { (void)elem; }
-    virtual void onHovered(int elem)     { (void)elem; }
-    virtual void onUnhovered(int elem)   { (void)elem; }
-    virtual void onMouseEnter(int elem)  { (void)elem; }
-    virtual void onMouseLeave(int elem)  { (void)elem; }
-    virtual void onFocused(int elem)     { (void)elem; }
-    virtual void onUnfocused(int elem)   { (void)elem; }
+    virtual void onClicked(int elem)    { fireEvent("OnClicked", elem, Value{}); }
+    virtual void onPressed(int elem)    { fireEvent("OnPressed", elem, Value{}); }
+    virtual void onReleased(int elem)   { fireEvent("OnReleased", elem, Value{}); }
+    virtual void onHovered(int elem)    { fireEvent("OnHovered", elem, Value{}); }
+    virtual void onUnhovered(int elem)  { fireEvent("OnUnhovered", elem, Value{}); }
+    virtual void onMouseEnter(int elem) { fireEvent("OnMouseEnter", elem, Value{}); }
+    virtual void onMouseLeave(int elem) { fireEvent("OnMouseLeave", elem, Value{}); }
+    virtual void onFocused(int elem)    { fireEvent("OnFocused", elem, Value{}); }
+    virtual void onUnfocused(int elem)  { fireEvent("OnUnfocused", elem, Value{}); }
     // Widget value events — the argument is the new value.
-    virtual void onTextChanged(int elem, const std::string& text)   { (void)elem; (void)text; }
-    virtual void onTextCommitted(int elem, const std::string& text) { (void)elem; (void)text; }
-    virtual void onValueChanged(int elem, float value)     { (void)elem; (void)value; }
-    virtual void onCheckChanged(int elem, bool checked)    { (void)elem; (void)checked; }
-    virtual void onSelectionChanged(int elem, int index)   { (void)elem; (void)index; }
+    virtual void onTextChanged(int elem, const std::string& text)
+    { fireEvent("OnTextChanged", elem, Value::ofString(text)); }
+    virtual void onTextCommitted(int elem, const std::string& text)
+    { fireEvent("OnTextCommitted", elem, Value::ofString(text)); }
+    virtual void onValueChanged(int elem, float value)
+    { fireEvent("OnValueChanged", elem, Value::ofFloat(value)); }
+    virtual void onCheckChanged(int elem, bool checked)
+    { fireEvent("OnCheckChanged", elem, Value::ofBool(checked)); }
+    virtual void onSelectionChanged(int elem, int index)
+    { fireEvent("OnSelectionChanged", elem, Value::ofInt(index)); }
     // GameInstance lifecycle.
-    virtual void onInit() {}
-    virtual void onShutdown() {}
-    virtual void onWindowFocusChanged(bool focused) { (void)focused; }
+    virtual void onInit()     { fireEvent("OnInit", 0, Value{}); }
+    virtual void onShutdown() { fireEvent("OnShutdown", 0, Value{}); }
+    virtual void onWindowFocusChanged(bool focused)
+    { fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
     // Level script lifecycle.
-    virtual void onLevelLoaded() {}
-    virtual void onLevelUnloaded() {}
+    virtual void onLevelLoaded()   { fireEvent("OnLevelLoaded", 0, Value{}); }
+    virtual void onLevelUnloaded() { fireEvent("OnLevelUnloaded", 0, Value{}); }
 
     // ── execution (mirrors Runner's entry points) ───────────────────────────
     virtual void fireEvent(const std::string& name, int elem, const Value& arg)

@@ -154,7 +154,7 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	HE_LOG_INFO(Widget, "Created widget '%s' (id %d, %zu element(s), %s logic)",
 	            assetPath.c_str(), stored.id, stored.tree.elements.size(),
 	            graph.nodes.empty() ? "compiled/no" : "interpreted");
-	rt().fireEvent(stored.scriptId, "Construct", 0);
+	rt().fireConstruct(stored.scriptId);
 	return stored.id;
 }
 
@@ -229,7 +229,7 @@ void WidgetManager::tick(float dt)
 	for (auto& w : m_instances)
 	{
 		if (!w.visible) continue;
-		rt().fireEvent(w.scriptId, "Tick", 0, HorizonCode::Value::ofFloat(dt));
+		rt().fireTick(w.scriptId, dt);
 	}
 }
 
@@ -298,9 +298,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	{
 		const bool isTop = topW == &w;
 		const int  hot   = isTop ? topElem : 0;
-		auto fire = [&](const std::string& ev, int elem,
-		                const HorizonCode::Value& arg = {})
-		{ rt().fireEvent(w.scriptId, ev, elem, arg); };
+		// Typed entry points: the compiled side takes a method, the interpreted
+		// one the same named path as before, and both still reach everyone bound
+		// to this widget's script.
+		auto fireP = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int), int elem)
+		{ (rt().*fn)(w.scriptId, elem); };
 
 		// ── Hover transitions ────────────────────────────────────────────────
 		// Event names differ per type; fire BOTH candidate names — the Runner
@@ -309,13 +311,13 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (w.hoveredElem != 0)
 			{
-				fire("OnUnhovered", w.hoveredElem);
-				fire("OnMouseLeave", w.hoveredElem);
+				fireP(&HorizonCode::Runtime::fireOnUnhovered, w.hoveredElem);
+				fireP(&HorizonCode::Runtime::fireOnMouseLeave, w.hoveredElem);
 			}
 			if (hot != 0)
 			{
-				fire("OnHovered", hot);
-				fire("OnMouseEnter", hot);
+				fireP(&HorizonCode::Runtime::fireOnHovered, hot);
+				fireP(&HorizonCode::Runtime::fireOnMouseEnter, hot);
 			}
 			w.hoveredElem = hot;
 		}
@@ -328,7 +330,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			{
 				const HE::UIElement* e = w.tree.find(hot);
 				if (e && e->type() == HE::UIWidgetType::Button)
-					fire("OnPressed", hot);
+					fireP(&HorizonCode::Runtime::fireOnPressed, hot);
 				// Slider: start dragging (value updated below).
 				if (e && e->type() == HE::UIWidgetType::Slider)
 					w.draggingSlider = hot;
@@ -339,13 +341,13 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 					{
 						w.focusedElem = hot;
 						m_focusWidget = w.id;
-						fire("OnFocused", hot);
+						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
 					}
 				}
 				else if (w.focusedElem != 0)
 				{
 					// Pressed something else in this widget → unfocus its field.
-					fire("OnUnfocused", w.focusedElem);
+					fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
 					w.focusedElem = 0;
 					if (m_focusWidget == w.id) m_focusWidget = 0;
 				}
@@ -353,7 +355,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 			else if (w.focusedElem != 0)
 			{
 				// Pressed empty space → unfocus.
-				fire("OnUnfocused", w.focusedElem);
+				fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
 				w.focusedElem = 0;
 				if (m_focusWidget == w.id) m_focusWidget = 0;
 			}
@@ -373,8 +375,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (nv != s->value)
 				{
 					s->value = nv;
-					fire("OnValueChanged", w.draggingSlider,
-					                 HorizonCode::Value::ofFloat(nv));
+					rt().fireOnValueChanged(w.scriptId, w.draggingSlider, nv);
 				}
 			}
 		}
@@ -389,19 +390,18 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				switch (e ? e->type() : HE::UIWidgetType::COUNT)
 				{
 				case HE::UIWidgetType::Button:
-					fire("OnClicked", hot);
-					fire("OnReleased", hot);
+					fireP(&HorizonCode::Runtime::fireOnClicked, hot);
+					fireP(&HorizonCode::Runtime::fireOnReleased, hot);
 					break;
 				case HE::UIWidgetType::Panel:
 				case HE::UIWidgetType::Image:
-					fire("OnClicked", hot);
+					fireP(&HorizonCode::Runtime::fireOnClicked, hot);
 					break;
 				case HE::UIWidgetType::CheckBox:
 					if (auto* cb = dynamic_cast<HE::UICheckBox*>(e))
 					{
 						cb->checked = !cb->checked;
-						fire("OnCheckChanged", hot,
-						                 HorizonCode::Value::ofBool(cb->checked));
+						rt().fireOnCheckChanged(w.scriptId, hot, cb->checked);
 					}
 					break;
 				case HE::UIWidgetType::ComboBox:
@@ -410,8 +410,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						{
 							combo->selectedIndex =
 								(combo->selectedIndex + 1) % (int)combo->options.size();
-							fire("OnSelectionChanged", hot,
-							                 HorizonCode::Value::ofInt(combo->selectedIndex));
+							rt().fireOnSelectionChanged(w.scriptId, hot, combo->selectedIndex);
 						}
 					break;
 				default:
@@ -435,7 +434,7 @@ void WidgetManager::inputText(const std::string& utf8)
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
 	ti->text += utf8;
-	rt().fireEvent(w->scriptId, "OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireOnTextChanged(w->scriptId, w->focusedElem, ti->text);
 }
 
 void WidgetManager::inputBackspace()
@@ -449,7 +448,7 @@ void WidgetManager::inputBackspace()
 	size_t n = ti->text.size();
 	do { --n; } while (n > 0 && (static_cast<unsigned char>(ti->text[n]) & 0xC0) == 0x80);
 	ti->text.erase(n);
-	rt().fireEvent(w->scriptId, "OnTextChanged", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireOnTextChanged(w->scriptId, w->focusedElem, ti->text);
 }
 
 void WidgetManager::inputSubmit()
@@ -459,7 +458,7 @@ void WidgetManager::inputSubmit()
 	if (!w || w->focusedElem == 0) return;
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
-	rt().fireEvent(w->scriptId, "OnTextCommitted", w->focusedElem, HorizonCode::Value::ofString(ti->text));
+	rt().fireOnTextCommitted(w->scriptId, w->focusedElem, ti->text);
 }
 
 void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)

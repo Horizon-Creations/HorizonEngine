@@ -56,8 +56,8 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm)
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			inst = runtime.add(std::move(g));
 		}
-		runtime.fireEvent(inst, "Construct", 0);
-		runtime.fireEvent(inst, "BeginPlay", 0);
+		runtime.fireConstruct(inst);
+		runtime.fireBeginPlay(inst);
 		m_players.push_back(inst);
 	}
 
@@ -74,7 +74,7 @@ void PlayerHost::tick(const Input& input, float dt)
 	m_mapping.tick(input);
 
 	for (const HorizonCode::InstanceId inst : m_players)
-		m_runtime->fireEvent(inst, "Tick", 0, HorizonCode::Value::ofFloat(dt));
+		m_runtime->fireTick(inst, dt);
 
 	for (const ActionInfo& a : m_actions)
 	{

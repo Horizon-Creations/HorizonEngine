@@ -133,6 +133,39 @@ public:
     InstanceId setGameInstanceCompiled(CompiledPtr inst, HostBindings bindings = {});
     InstanceId gameInstance() const { return m_gameInstance; }
 
+    // ── the engine's own events, without a name ─────────────────────────────
+    // Same delivery as fireEvent(id, "OnClicked", elem, …) — a compiled
+    // instance takes the hook, an interpreted one the Runner, and either way
+    // everyone bound to this instance still hears it. The difference is that
+    // the caller never builds the string, and the compiled side never compares
+    // one. The name still exists here, for the interpreted path and for the
+    // listener list, which is keyed by it.
+    void fireEngineEvent(InstanceId id, const char* name, int elem, const Value& arg,
+                         void (CompiledInstance::*hook)(int), int hookElem);
+    void fireOnClicked(InstanceId id, int elem);
+    void fireOnPressed(InstanceId id, int elem);
+    void fireOnReleased(InstanceId id, int elem);
+    void fireOnHovered(InstanceId id, int elem);
+    void fireOnUnhovered(InstanceId id, int elem);
+    void fireOnMouseEnter(InstanceId id, int elem);
+    void fireOnMouseLeave(InstanceId id, int elem);
+    void fireOnFocused(InstanceId id, int elem);
+    void fireOnUnfocused(InstanceId id, int elem);
+    void fireOnTextChanged(InstanceId id, int elem, const std::string& text);
+    void fireOnTextCommitted(InstanceId id, int elem, const std::string& text);
+    void fireOnValueChanged(InstanceId id, int elem, float value);
+    void fireOnCheckChanged(InstanceId id, int elem, bool checked);
+    void fireOnSelectionChanged(InstanceId id, int elem, int index);
+    void fireConstruct(InstanceId id);
+    void fireDestruct(InstanceId id);
+    void fireBeginPlay(InstanceId id);
+    void fireTick(InstanceId id, float dt);
+    void fireOnInit(InstanceId id);
+    void fireOnShutdown(InstanceId id);
+    void fireOnWindowFocusChanged(InstanceId id, bool focused);
+    void fireOnLevelLoaded(InstanceId id);
+    void fireOnLevelUnloaded(InstanceId id);
+
     // Scene-switch garbage collection: keep `root` and every instance reachable
     // from it through Ref-typed variables, remove all others. Called on scene
     // teardown with the GameInstance as root, so only objects the GameInstance

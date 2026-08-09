@@ -85,7 +85,7 @@ void Runtime::destroy(InstanceId id)
     // Guard re-entrancy: a Destruct handler that destroys this same instance
     // (e.g. Destroy Widget on Get Self) would otherwise re-fire Destruct forever.
     if (!m_destructing.insert(id).second) return;
-    fireEvent(id, "Destruct", 0);
+    fireDestruct(id);
     remove(id);
     m_destructing.erase(id);
 }
@@ -389,6 +389,100 @@ void Runtime::update(float dt)
             runner.resumeFrom(p.node);
         }
     }
+}
+
+// ── the engine's own events ─────────────────────────────────────────────────
+// One shape, twenty-odd entry points. `hook` is the CompiledInstance method for
+// events whose only payload is the element; the ones that carry a value spell
+// their own dispatch out below, because their hook signatures differ.
+//
+// The listener pass is NOT optional: fireEvent reaches everyone bound to this
+// instance after the owner's own handlers (§3.5), and skipping it here would
+// break dispatcher patterns silently — nothing would report it.
+void Runtime::fireEngineEvent(InstanceId id, const char* name, int elem, const Value& arg,
+                              void (CompiledInstance::*hook)(int), int hookElem)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) (i->compiled.get()->*hook)(hookElem);
+    else { Runner runner(i->graph, makeContext(id)); runner.fireEvent(name, elem, arg); }
+    dispatchToListeners(id, name, arg);
+}
+
+// The element-only pointer/focus events.
+#define HE_HC_POINTER_EVENT(fn, name, hookFn)                                   \
+    void Runtime::fn(InstanceId id, int elem)                                   \
+    { fireEngineEvent(id, name, elem, {}, &CompiledInstance::hookFn, elem); }
+HE_HC_POINTER_EVENT(fireOnClicked,    "OnClicked",    onClicked)
+HE_HC_POINTER_EVENT(fireOnPressed,    "OnPressed",    onPressed)
+HE_HC_POINTER_EVENT(fireOnReleased,   "OnReleased",   onReleased)
+HE_HC_POINTER_EVENT(fireOnHovered,    "OnHovered",    onHovered)
+HE_HC_POINTER_EVENT(fireOnUnhovered,  "OnUnhovered",  onUnhovered)
+HE_HC_POINTER_EVENT(fireOnMouseEnter, "OnMouseEnter", onMouseEnter)
+HE_HC_POINTER_EVENT(fireOnMouseLeave, "OnMouseLeave", onMouseLeave)
+HE_HC_POINTER_EVENT(fireOnFocused,    "OnFocused",    onFocused)
+HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
+#undef HE_HC_POINTER_EVENT
+
+// The no-payload lifecycle events — their hooks take nothing, so they cannot
+// share the element-carrying helper above.
+#define HE_HC_PLAIN_EVENT(fn, name, hookFn)                                     \
+    void Runtime::fn(InstanceId id)                                             \
+    {                                                                           \
+        Inst* i = find(id);                                                     \
+        if (!i) return;                                                         \
+        if (i->compiled) i->compiled->hookFn();                                 \
+        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, 0, {}); } \
+        dispatchToListeners(id, name, {});                                      \
+    }
+HE_HC_PLAIN_EVENT(fireConstruct,       "Construct",       onConstruct)
+HE_HC_PLAIN_EVENT(fireDestruct,        "Destruct",        onDestruct)
+HE_HC_PLAIN_EVENT(fireBeginPlay,       "BeginPlay",       onBeginPlay)
+HE_HC_PLAIN_EVENT(fireOnInit,          "OnInit",          onInit)
+HE_HC_PLAIN_EVENT(fireOnShutdown,      "OnShutdown",      onShutdown)
+HE_HC_PLAIN_EVENT(fireOnLevelLoaded,   "OnLevelLoaded",   onLevelLoaded)
+HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
+#undef HE_HC_PLAIN_EVENT
+
+// The value-carrying ones: same order, own signatures.
+#define HE_HC_VALUE_EVENT(fn, name, argType, hookCall, boxed)                   \
+    void Runtime::fn(InstanceId id, int elem, argType v)                        \
+    {                                                                           \
+        Inst* i = find(id);                                                     \
+        if (!i) return;                                                         \
+        if (i->compiled) i->compiled->hookCall;                                 \
+        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, elem, boxed); } \
+        dispatchToListeners(id, name, boxed);                                   \
+    }
+HE_HC_VALUE_EVENT(fireOnTextChanged,   "OnTextChanged",   const std::string&,
+                  onTextChanged(elem, v),   Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnTextCommitted, "OnTextCommitted", const std::string&,
+                  onTextCommitted(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnValueChanged,  "OnValueChanged",  float,
+                  onValueChanged(elem, v),  Value::ofFloat(v))
+HE_HC_VALUE_EVENT(fireOnCheckChanged,  "OnCheckChanged",  bool,
+                  onCheckChanged(elem, v),  Value::ofBool(v))
+HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
+                  onSelectionChanged(elem, v), Value::ofInt(v))
+#undef HE_HC_VALUE_EVENT
+
+void Runtime::fireTick(InstanceId id, float dt)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onTick(dt);
+    else { Runner r(i->graph, makeContext(id)); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
+    dispatchToListeners(id, "Tick", Value::ofFloat(dt));
+}
+
+void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onWindowFocusChanged(focused);
+    else { Runner r(i->graph, makeContext(id));
+           r.fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
+    dispatchToListeners(id, "OnWindowFocusChanged", Value::ofBool(focused));
 }
 
 void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const Value& arg)

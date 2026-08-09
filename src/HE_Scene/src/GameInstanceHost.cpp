@@ -23,7 +23,7 @@ void GameInstanceHost::fireInit()
     // re-registered like scene scripts are — reset its variables here).
     m_runtime.reseedVariables(m_runtime.gameInstance());
     HE_LOG_INFO(HorizonCode, "%s", "GameInstance OnInit");
-    m_runtime.fireEvent(m_runtime.gameInstance(), "OnInit", 0);
+    m_runtime.fireOnInit(m_runtime.gameInstance());
 }
 
 void GameInstanceHost::fireShutdown()
@@ -31,7 +31,7 @@ void GameInstanceHost::fireShutdown()
     if (!m_running) return;
     m_running = false;
     HE_LOG_INFO(HorizonCode, "%s", "GameInstance OnShutdown");
-    m_runtime.fireEvent(m_runtime.gameInstance(), "OnShutdown", 0);
+    m_runtime.fireOnShutdown(m_runtime.gameInstance());
     // Drop any play-session state (and its refs to created objects) so the scene
     // teardown sweep collects objects the GameInstance was holding.
     m_runtime.reseedVariables(m_runtime.gameInstance());

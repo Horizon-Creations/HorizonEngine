@@ -327,6 +327,48 @@ TEST_CASE("eventBindingsOf serves both backends (widget interactivity source)")
 	CHECK(rt.eventBindingsOf(9999).empty());
 }
 
+TEST_CASE("a class that implements only fireEvent still gets the engine events")
+{
+	// The hooks are an optimization, not a condition: CompiledInstance's default
+	// forwards each of them to fireEvent under the canonical name, so a
+	// hand-written class — or a generated one whose graph does not handle that
+	// event — behaves exactly as it did before the hooks existed.
+	struct Probe final : CompiledInstance
+	{
+		std::vector<std::string> seen;
+		const char* classKey() const override { return "probe"; }
+		void fireEvent(const std::string& name, int elem, const Value& arg) override
+		{
+			seen.push_back(name + "/" + std::to_string(elem) + "/" + valueTag(arg));
+		}
+		static std::string valueTag(const Value& v)
+		{
+			switch (v.type)
+			{
+				case PinType::Float:  return std::to_string((int)(v.f * 100));
+				case PinType::Bool:   return v.b ? "true" : "false";
+				case PinType::String: return v.s;
+				case PinType::Int:    return std::to_string(v.i);
+				default:              return "?";
+			}
+		}
+	};
+	Probe p;
+	p.onConstruct();
+	p.onClicked(4);
+	p.onTick(0.5f);
+	p.onTextChanged(2, "hi");
+	p.onCheckChanged(7, true);
+	p.onLevelUnloaded();
+	REQUIRE(p.seen.size() == 6);
+	CHECK(p.seen[0] == "Construct/0/0");
+	CHECK(p.seen[1] == "OnClicked/4/0");
+	CHECK(p.seen[2] == "Tick/0/50");
+	CHECK(p.seen[3] == "OnTextChanged/2/hi");
+	CHECK(p.seen[4] == "OnCheckChanged/7/true");
+	CHECK(p.seen[5] == "OnLevelUnloaded/0/0");
+}
+
 TEST_CASE("destroy fires Destruct on a compiled instance before removing it")
 {
 	Runtime rt;
