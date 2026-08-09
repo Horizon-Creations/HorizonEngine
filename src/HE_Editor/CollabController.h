@@ -468,6 +468,9 @@ private:
 	{
 		bool        ok = false;
 		std::string publicIp;
+		// Only set when the directory VERIFIED it by connecting back, and it is
+		// what guests are given — so it, not publicIp, is the host's address.
+		std::string altAddress;
 		bool        reachable = false;
 		std::string token;
 		std::string error;
@@ -510,9 +513,23 @@ private:
 	std::string   m_joinCode;
 	std::string   m_sessionId;
 	std::string   m_localAddress;
-	std::string   m_publicAddress;   // as observed by the directory (router's WAN side)
+	// The address a GUEST is handed, which is the only one worth showing: the
+	// directory publishes a verified alt address when it has one, and guests dial
+	// that. Showing what the directory merely OBSERVED instead sends people
+	// chasing an address nobody connects to — on a Mac the registration leaves
+	// from the temporary privacy address while the pinhole sits on the stable
+	// one, so the two differ by design and only one of them accepts connections.
+	std::string   m_publicAddress;
 	std::uint16_t m_port = 0;
 	std::string   m_error;
+
+	// Connecting has no natural end: the socket is non-blocking, so a SYN into a
+	// black hole (no route to the host's address family, a firewall that drops
+	// rather than refuses) leaves the join pending with nothing to report it.
+	// Without a deadline the UI says "Connecting…" until the user gives up.
+	static constexpr std::uint64_t kConnectTimeoutMs = 20'000;
+	std::uint64_t m_connectDeadlineMs = 0;   // 0 = not connecting
+	std::string   m_connectTarget;           // address being dialled, for the message
 
 	// Directory state
 	std::future<RegisterResult> m_registerFuture;

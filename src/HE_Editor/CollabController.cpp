@@ -332,10 +332,11 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 			r.error = "Session directory unreachable — share the address manually.";
 			return r;
 		}
-		r.ok        = true;
-		r.publicIp  = reg.publicIp;
-		r.reachable = reg.reachable;
-		r.token     = reg.token;
+		r.ok         = true;
+		r.publicIp   = reg.publicIp;
+		r.altAddress = reg.altAddress;
+		r.reachable  = reg.reachable;
+		r.token      = reg.token;
 		return r;
 	});
 
@@ -649,6 +650,10 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 	m_isHost             = false;
 	m_status             = Status::Connecting;
 	m_directoryStatus    = "Looking up session...";
+	// Armed here rather than at the connect: the lookup can hang too, and from
+	// the user's side "nothing is happening" is the same either way.
+	m_connectDeadlineMs  = 0;   // set on the first update(), which knows the clock
+	m_connectTarget.clear();
 
 	const std::string endpoint = directoryEndpoint();
 	const std::string sid      = sessionId;
@@ -733,11 +738,12 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
 
-	m_joinCode     = joinCode;
-	m_localAddress = host;
-	m_port         = port;
-	m_isHost       = false;
-	m_status       = Status::Connecting;
+	m_joinCode      = joinCode;
+	m_localAddress  = host;
+	m_port          = port;
+	m_isHost        = false;
+	m_status        = Status::Connecting;
+	m_connectTarget = host;
 	Logger::Log(Logger::LogLevel::Info,
 	            ("Collab: connecting to " + host + ":" + std::to_string(port)).c_str());
 	return true;
@@ -1024,6 +1030,38 @@ void CollabController::update(std::uint64_t nowMs)
 	// collected.
 	pumpDirectory(nowMs);
 
+	// ── Joining has to be able to fail ──
+	// The socket is non-blocking, so a SYN that nothing answers — no route to
+	// the host's address family, a firewall that drops instead of refusing —
+	// never produces an event. Every other exit from Connecting (onJoined,
+	// onJoinRejected, onRemoved) needs a link that came up, so without this the
+	// UI sits on "Connecting…" for good. Checked before the transport early-out
+	// because a lookup that never returns leaves no transport at all.
+	if (m_status == Status::Connecting)
+	{
+		if (m_connectDeadlineMs == 0)
+			m_connectDeadlineMs = nowMs + kConnectTimeoutMs;
+		else if (nowMs > m_connectDeadlineMs)
+		{
+			// Name the address. It is the one thing that tells the two causes
+			// apart — an IPv6 address here and a guest without IPv6 is a
+			// different problem from an address that simply does not answer.
+			m_error = m_connectTarget.empty()
+				? std::string("The session could not be looked up in time. Check the "
+				              "session ID, and that you are online.")
+				: ("No answer from " + m_connectTarget + ":" + std::to_string(m_port) +
+				   " after 20 seconds. The host is published but nothing there accepted "
+				   "the connection — if that address is IPv6, your network may not have "
+				   "a route to it; otherwise the host's port is not actually forwarded.");
+			m_directoryStatus.clear();
+			m_status            = Status::Failed;
+			m_connectDeadlineMs = 0;
+			Logger::Log(Logger::LogLevel::Warning, ("Collab: " + m_error).c_str());
+			return;
+		}
+	}
+	else m_connectDeadlineMs = 0;
+
 	if (!m_secure || !m_net || !m_collab) return;
 
 	m_secure->update();   // drives the transport + handshake
@@ -1071,7 +1109,12 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 			m_reachable          = r.reachable;
 			m_reachabilityKnown  = true;
 			m_lastHeartbeatMs    = nowMs;
-			if (!r.publicIp.empty()) m_publicAddress = r.publicIp;
+			// The verified alt address first: that is the one the directory hands
+			// to guests, so it is the one that has to be on screen. publicIp is
+			// only where the registration came FROM — on a Mac that is the
+			// temporary privacy address, which no pinhole was opened for.
+			if (!r.altAddress.empty())    m_publicAddress = r.altAddress;
+			else if (!r.publicIp.empty()) m_publicAddress = r.publicIp;
 			m_directoryStatus = r.reachable
 				? "Session published — peers can join with the ID."
 				// Not an error: the entry exists, but nobody outside this network
