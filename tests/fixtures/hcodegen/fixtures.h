@@ -909,7 +909,10 @@ inline HE::hccg::ClassSource fxRefTarget()
 inline HE::hccg::ClassSource fxRefsObjects()
 {
     Fx f;
-    f.var("obj", PT::Ref);
+    // className is what lets codegen see WHICH class the ref holds — the direct
+    // call path is only emittable when it does (and still checks at run time).
+    { Variable v; v.name = "obj"; v.type = PT::Ref; v.className = "fix/ref_target";
+      f.g.variables.push_back(v); }
     f.var("objNull", PT::Ref);
     f.var("seen", PT::Float);
     f.var("left", PT::Float);

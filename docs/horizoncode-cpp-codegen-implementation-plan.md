@@ -1295,6 +1295,46 @@ Runtime state — routing it statically would be wrong, not just hard). What it
 buys is the removal of per-call `Value` marshalling and name lookup *between
 compiled classes*, plus the guarantee that no graph silently ran interpreted.
 
+### 14.2c Calls between compiled classes go direct
+
+A HorizonCode object reference is a Runtime HANDLE, not a pointer, so reaching
+another instance always costs one resolve. What it does not have to cost is the
+rest of the seam. `Context::resolveCompiled` hands the object over, and
+`hc::as<T>` turns the handle into a typed pointer:
+
+```cpp
+if (C_Enemy* o = hc::as<C_Enemy>(m_ctx, ref)) o->Damage(a, left);
+else { /* the seam, unchanged */ }
+```
+
+- **`hc::as` compares `classTag()` by POINTER, never `dynamic_cast`.** The
+  generated library builds with hidden visibility; RTTI across that boundary is
+  the kind of thing that breaks on one platform and nowhere else.
+- **It returns null for every case the fast path must not take**: reference 0, a
+  destroyed instance, a DIFFERENT class (a Ref variable's `className` is editor
+  metadata — nothing enforces it), and an INTERPRETED target. The seam in the
+  else-branch is therefore what keeps mixed populations behaving identically, in
+  either failure mode — the fast path is emitted in both.
+- **Emitted only when it means the same thing**: the callee's function must
+  exist, be public, and its signature must match the call node's mirror; a
+  variable must be declared public. Private or missing members stay on the seam,
+  which produces the interpreter's warning.
+- **`Get Self` is free** — that target is `this`, so there is no handle to
+  resolve and no class to check. It still calls the PUBLIC method, because
+  `callExternal` to yourself runs on a fresh Runner (§3.1) and the public
+  wrapper is what makes a fresh RunState.
+- Which classes are callable directly is only known after trying to compile them
+  all, so `generateInto` runs a **probe pass** first and emits for real second.
+
+What this removes per call: the name lookup, the access scan, and the two
+`std::vector<Value>` (arguments and results) — the heap traffic. What remains is
+the handle resolve, which is a hash lookup in `Runtime::m_insts`; making that an
+array index is a Runtime change (`HE::SlotMap`), not a codegen one.
+
+Parity proves the fast path is CORRECT — the harness runs a fully compiled world
+against a fully interpreted one. It cannot prove it is TAKEN (the fallback would
+answer the same), so one codegen test asserts the emission itself.
+
 ### 14.3 Lean emission
 
 The per-run scaffolding is emitted only where it can be reached, so a small

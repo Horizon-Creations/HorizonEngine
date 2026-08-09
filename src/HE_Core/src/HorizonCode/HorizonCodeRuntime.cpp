@@ -307,6 +307,14 @@ Context Runtime::makeContext(InstanceId id)
         { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
         i->vars[var] = val;
     };
+    // Compiled-to-compiled shortcut: hand the object over so generated code can
+    // call it directly. Interpreted instances answer null, which is exactly what
+    // makes the generated fast path fall back to the seam below.
+    ctx.resolveCompiled = [this](uint32_t target) -> CompiledInstance*
+    {
+        const Inst* i = find(target);
+        return i ? i->compiled.get() : nullptr;
+    };
     ctx.getSelf = [id] { return Value::ofRef(id); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
     // World-level services (shared by every instance) — forwarded through the

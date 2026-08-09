@@ -700,13 +700,41 @@ std::string emitTypesHeader(const TypeTable& tt, const std::string& ns)
     return h;
 }
 
+// ── the run's compiled classes ───────────────────────────────────────────────
+// Which class keys made it to native C++, and under which C++ name. A graph can
+// only call another class DIRECTLY if that class is in here — so the run
+// compiles once to find out, then again for real (generateInto). The graph
+// comes along because the caller has to check, at generation time, that the
+// function or variable it wants exists and is public on the target.
+struct CompiledClass
+{
+    std::string cpp;
+    const Graph* graph = nullptr;
+    // The C++ names its public surface got — a caller cannot re-derive them
+    // (they are uniquified against that class's whole scope), so the probe pass
+    // records them.
+    std::unordered_map<std::string, std::string> publicFn;    // graph function → method
+    std::unordered_map<std::string, std::string> publicVar;   // graph variable → accessor
+};
+struct ClassTable
+{
+    std::unordered_map<std::string, CompiledClass> byKey;   // class key → class
+    const CompiledClass* find(const std::string& key) const
+    {
+        const auto it = byKey.find(key);
+        return it != byKey.end() ? &it->second : nullptr;
+    }
+};
+
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter
 {
 public:
     ClassEmitter(const ClassSource& src, const std::string& className,
-                 const Options& opt, const TypeTable& tt, std::vector<std::string>& warnings)
-        : m_src(src), m_g(src.graph), m_cls(className), m_opt(opt), m_tt(tt), m_warnings(warnings) {}
+                 const Options& opt, const TypeTable& tt, const ClassTable& ct,
+                 std::vector<std::string>& warnings)
+        : m_src(src), m_g(src.graph), m_cls(className), m_opt(opt), m_tt(tt), m_ct(ct),
+          m_warnings(warnings) {}
 
     // A header carrying the whole class (its bodies inline — a generated class
     // has no reason to spread a declaration and a definition over two files),
@@ -714,6 +742,9 @@ public:
     // The header is what lets other C++ — generated or hand-written — include
     // the class and call its events and functions directly, instead of through
     // the Runtime's name-based seam.
+    const std::unordered_map<std::string, std::string>& publicFunctions() const { return m_publicFn; }
+    const std::unordered_map<std::string, std::string>& publicVariables()  const { return m_publicVar; }
+
     void run(std::string& header, std::string& impl)
     {
         validate();
@@ -728,6 +759,7 @@ private:
     std::string        m_cls;
     const Options&     m_opt;
     const TypeTable&   m_tt;
+    const ClassTable&  m_ct;
     std::vector<std::string>& m_warnings;
 
     // Pin types, with the user-defined definitions resolved against the run's
@@ -759,6 +791,7 @@ private:
     std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
     std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
     std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
+    std::unordered_map<std::string, std::string> m_publicVar;  // public variable → accessor
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
 
@@ -963,6 +996,11 @@ private:
                 m_publicEv[nodes[0]->id] = unique(cppIdent(name));
         for (const Node* fn : functionEntries())
             m_publicFn[fn->s] = unique(cppIdent(fn->s));
+        // A public variable gets a typed accessor: it is how another compiled
+        // class reads and writes it without going through the name seam.
+        for (const auto& v : m_g.variables)
+            if (v.scope == 0 && v.access == 0)
+                m_publicVar[v.name] = unique(cppIdent(v.name));
     }
 
     // ── RunState slots: one field per exec-cached data-out (plan §5.4) ───────
@@ -1005,6 +1043,92 @@ private:
             // whole counter (and every HC_STEP with it) is dead weight.
             if (n.type == NT::ForEach || n.type == NT::FunctionCall) m_guard = true;
         }
+    }
+
+    // ── who is on the other end of a Ref pin ─────────────────────────────────
+    // Only two target shapes are statically known: Get Self (it is `this`, so
+    // there is nothing to resolve at all) and a Ref VARIABLE whose declared
+    // class compiled to C++. Everything else stays on the Runtime's seam.
+    struct TargetInfo
+    {
+        bool                 self = false;
+        const CompiledClass* cls  = nullptr;
+    };
+    TargetInfo targetOf(const Node& n, int dataIn) const
+    {
+        TargetInfo t;
+        const Link* l = dataLinkTo(n.id, pinRanges(n).dataIn0 + dataIn);
+        if (!l) return t;
+        const Node* src = m_g.findNode(l->srcNode);
+        if (!src) return t;
+        if (src->type == NT::GetSelf) { t.self = true; return t; }
+        if (src->type == NT::GetVariable)
+            if (const Variable* v = m_g.findVariable(src->s))
+                if (v->type == PT::Ref && !v->isArray && !v->className.empty())
+                    t.cls = m_ct.find(v->className);
+        return t;
+    }
+    static const Node* entryOf(const Graph& g, const std::string& name)
+    {
+        for (const Node& n : g.nodes)
+            if (n.type == NT::FunctionEntry && n.s == name) return &n;
+        return nullptr;
+    }
+    // A call is only direct when the callee's signature is EXACTLY what the call
+    // node mirrors — a stale mirror would otherwise emit a type mismatch.
+    static bool signatureMatches(const Node& call, const Node& entry)
+    {
+        auto same = [](const std::vector<HorizonCode::FuncParam>& a,
+                       const std::vector<HorizonCode::FuncParam>& b)
+        {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (a[i].type != b[i].type || a[i].isArray != b[i].isArray ||
+                    a[i].typeName != b[i].typeName) return false;
+            return true;
+        };
+        return same(call.params, entry.params) && same(call.results, entry.results);
+    }
+    // The public method for `fnName` on `cls`, or empty when calling it directly
+    // would not mean the same thing (missing, private, or a stale mirror).
+    std::string directFn(const Node& call, const CompiledClass& cls, const Node** entryOut) const
+    {
+        const Node* e = cls.graph ? entryOf(*cls.graph, call.s) : nullptr;
+        if (!e || e->access != 0 || !signatureMatches(call, *e)) return {};
+        const auto it = cls.publicFn.find(call.s);
+        if (it == cls.publicFn.end()) return {};
+        if (entryOut) *entryOut = e;
+        return it->second;
+    }
+    // The accessor for a public variable of `cls`, and its declared type.
+    std::string directVar(const std::string& var, const CompiledClass& cls, TypeRef& typeOut) const
+    {
+        if (!cls.graph) return {};
+        const Variable* v = cls.graph->findVariable(var);
+        if (!v || v->scope != 0 || v->access != 0) return {};
+        const auto it = cls.publicVar.find(var);
+        if (it == cls.publicVar.end()) return {};
+        typeOut = trOf(v->type, v->isArray, v->typeName);
+        return it->second;
+    }
+    // Same, against THIS class (a Get Self target).
+    std::string selfFn(const Node& call, const Node** entryOut) const
+    {
+        const Node* e = entryOf(m_g, call.s);
+        if (!e || e->access != 0 || !signatureMatches(call, *e)) return {};
+        const auto it = m_publicFn.find(call.s);
+        if (it == m_publicFn.end()) return {};
+        if (entryOut) *entryOut = e;
+        return it->second;
+    }
+    std::string selfVar(const std::string& var, TypeRef& typeOut) const
+    {
+        const Variable* v = m_g.findVariable(var);
+        if (!v || v->scope != 0 || v->access != 0) return {};
+        const auto it = m_publicVar.find(var);
+        if (it == m_publicVar.end()) return {};
+        typeOut = trOf(v->type, v->isArray, v->typeName);
+        return it->second;
     }
 
     // ── expressions (pull evaluation, re-emitted at every read — §3.3) ───────
@@ -1110,8 +1234,35 @@ private:
             return coerceCall("hc::getProperty(m_ctx, " + std::to_string(n.elem) + ", " + strLit(n.s) + ")",
                               trOf(n.propType, false, n.typeName));
         case NT::GetExternal:
-            return coerceCall("hc::getExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ")",
-                              trOf(n.propType, false, n.typeName));
+        {
+            const TypeRef want = trOf(n.propType, false, n.typeName);
+            const std::string seam = coerceCall(
+                "hc::getExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ")", want);
+            const TargetInfo t = targetOf(n, 0);
+            TypeRef have;
+            if (t.self)
+            {
+                // `this`: no handle to resolve, no class to check.
+                const std::string acc = selfVar(n.s, have);
+                return acc.empty() ? seam : convertExpr(acc + "()", have, want);
+            }
+            if (t.cls)
+            {
+                const std::string acc = directVar(n.s, *t.cls, have);
+                if (!acc.empty())
+                {
+                    // The Ref is read ONCE — it may be a pure engine call, and
+                    // its dispatch count is part of the trace (§3.4).
+                    const std::string ref = input(n, 0, fnCtx);
+                    return "([&]() -> " + cppType(want) + " { const uint32_t t__ = " + ref + ";\n"
+                           "        if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t__)) return " +
+                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           "        return " + coerceCall("hc::getExternal(m_ctx, t__, " + strLit(n.s) + ")", want) +
+                           "; }())";
+                }
+            }
+            return seam;
+        }
         // §3.4: Set pass-through re-evaluates the Value input (no store read).
         case NT::SetVariable:
         case NT::SetProperty:
@@ -1473,9 +1624,39 @@ private:
             b.line("hc::destroyObject(m_ctx, " + input(n, 0, fnCtx) + ");");
             break;
         case NT::SetExternal:
-            b.line("hc::setExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ", " +
-                   toValueCall(input(n, 1, fnCtx), dataInType(n, 1), m_opt.namespaceName) + ");");
+        {
+            const TypeRef vt = dataInType(n, 1);
+            const TargetInfo t = targetOf(n, 0);
+            TypeRef have;
+            std::string acc;
+            if (t.self)      acc = selfVar(n.s, have);
+            else if (t.cls)  acc = directVar(n.s, *t.cls, have);
+            if (t.self && !acc.empty())
+            {
+                b.line(acc + "() = " + convertExpr(input(n, 1, fnCtx), vt, have) + ";");
+                break;
+            }
+            if (acc.empty())
+            {
+                b.line("hc::setExternal(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ", " +
+                       toValueCall(input(n, 1, fnCtx), vt, m_opt.namespaceName) + ");");
+                break;
+            }
+            b.line("{");
+            ++b.indent;
+            b.line("const uint32_t t" + std::to_string(n.id) + " = " + input(n, 0, fnCtx) + ";");
+            b.line("const " + cppType(vt) + " v" + std::to_string(n.id) + " = " + input(n, 1, fnCtx) + ";");
+            b.line("if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t" +
+                   std::to_string(n.id) + "))");
+            b.line("    o__->" + acc + "() = " +
+                   convertExpr("v" + std::to_string(n.id), vt, have) + ";");
+            b.line("else");
+            b.line("    hc::setExternal(m_ctx, t" + std::to_string(n.id) + ", " + strLit(n.s) + ", " +
+                   toValueCall("v" + std::to_string(n.id), vt, m_opt.namespaceName) + ");");
+            --b.indent;
+            b.line("}");
             break;
+        }
         case NT::BindEvent:
             b.line("hc::bindEvent(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ");");
             break;
@@ -1487,13 +1668,88 @@ private:
                 b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", hc::Value{});");
             break;
         case NT::CallExternal:
-            // §3.4: args (data-ins 1..) evaluate before the Target read (data-in 0).
-            emitValueCall(n, fnCtx, b, /*firstArgPin=*/1, [&](const std::string& av)
+        {
+            const TargetInfo t = targetOf(n, 0);
+            const Node* entry = nullptr;
+            std::string method;
+            if (t.self)     method = selfFn(n, &entry);
+            else if (t.cls) method = directFn(n, *t.cls, &entry);
+            if (method.empty())
             {
-                return "hc::callExternal(m_ctx, " + input(n, 0, fnCtx) + ", " +
-                       strLit(n.s) + ", " + av + ")";
-            });
+                // §3.4: args (data-ins 1..) evaluate before the Target read (data-in 0).
+                emitValueCall(n, fnCtx, b, /*firstArgPin=*/1, [&](const std::string& av)
+                {
+                    return "hc::callExternal(m_ctx, " + input(n, 0, fnCtx) + ", " +
+                           strLit(n.s) + ", " + av + ")";
+                });
+                break;
+            }
+            // Direct call: the arguments are typed C++ values and the results
+            // come back in typed out-params, so neither side needs a
+            // std::vector<Value>. The public method makes a FRESH RunState,
+            // which is what callExternal's own per-call Runner does (§3.1).
+            const std::string id = std::to_string(n.id);
+            b.line("{");
+            ++b.indent;
+            std::vector<std::string> argNames, resNames;
+            for (size_t i = 0; i < n.params.size(); ++i)   // args first (§3.4)
+            {
+                const std::string a = "a" + id + "_" + std::to_string(i);
+                const TypeRef tr = trOf(n.params[i].type, n.params[i].isArray, n.params[i].typeName);
+                b.line("const " + cppType(tr) + " " + a + " = " + input(n, (int)i + 1, fnCtx) + ";");
+                argNames.push_back(a);
+            }
+            for (size_t i = 0; i < n.results.size(); ++i)
+            {
+                const std::string r = "r" + id + "_" + std::to_string(i);
+                const TypeRef tr = trOf(n.results[i].type, n.results[i].isArray, n.results[i].typeName);
+                b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
+                resNames.push_back(r);
+            }
+            std::string args;
+            for (size_t i = 0; i < argNames.size(); ++i) args += (i ? ", " : "") + argNames[i];
+            for (size_t i = 0; i < resNames.size(); ++i)
+                args += (args.empty() ? "" : ", ") + resNames[i];
+            if (t.self)
+            {
+                b.line(method + "(" + args + ");");
+            }
+            else
+            {
+                b.line("const uint32_t t" + id + " = " + input(n, 0, fnCtx) + ";");
+                b.line("if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t" + id + "))");
+                b.line("    o__->" + method + "(" + args + ");");
+                b.line("else");
+                b.line("{");
+                ++b.indent;
+                const std::string av = "a" + id;
+                b.line("std::vector<hc::Value> " + av + ";");
+                if (!argNames.empty()) b.line(av + ".reserve(" + std::to_string(argNames.size()) + ");");
+                for (size_t i = 0; i < argNames.size(); ++i)
+                    b.line(av + ".push_back(" +
+                           toValueCall(argNames[i],
+                                       trOf(n.params[i].type, n.params[i].isArray,
+                                            n.params[i].typeName), m_opt.namespaceName) + ");");
+                b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, t" + id +
+                       ", " + strLit(n.s) + ", " + av + ");");
+                for (size_t i = 0; i < resNames.size(); ++i)
+                    b.line(resNames[i] + " = " +
+                           fromValueCall("rr" + id, i,
+                                         trOf(n.results[i].type, n.results[i].isArray,
+                                              n.results[i].typeName)) + ";");
+                --b.indent;
+                b.line("}");
+            }
+            if (const auto it = m_slots.find(n.id); it != m_slots.end())
+            {
+                m_rsTouched = true;
+                for (size_t k = 0; k < it->second.size() && k < resNames.size(); ++k)
+                    b.line("rs." + it->second[k].field + " = " + resNames[k] + ";");
+            }
+            --b.indent;
+            b.line("}");
             break;
+        }
         case NT::FunctionCall:
         {
             const Node* entry = fnEntryByName(n.s);
@@ -1861,8 +2117,19 @@ private:
                     h += "    void " + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) + ");\n";
             h += "\n";
         }
+        if (!m_publicVar.empty())
+        {
+            h += "    // Its public variables, by reference — read and write them directly.\n";
+            for (const auto& v : m_g.variables)
+                if (v.scope == 0 && v.access == 0)
+                    h += "    " + cppType(varType(v)) + "& " + m_publicVar.at(v.name) + "();\n";
+            h += "\n";
+        }
 
         h += "    const char* classKey() const override;\n";
+        h += "    // Identity for hc::as — see CompiledInstance::classTag.\n";
+        h += "    static const void* classTag_();\n";
+        h += "    const void* classTag() const override;\n";
         if (varCount)
         {
             h += "    // The declared variables as ONE table: the Runtime's name-based entry\n";
@@ -1941,7 +2208,15 @@ private:
                      ") { " + (rsOn ? "RunState rs; " : "") + publicFnForward(*fn) + " }\n";
         if (!m_publicEv.empty() || !m_publicFn.empty()) c += "\n";
 
-        c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n\n";
+        for (const auto& v : m_g.variables)
+            if (v.scope == 0 && v.access == 0)
+                c += cppType(varType(v)) + "& " + m_cls + "::" + m_publicVar.at(v.name) +
+                     "() { return " + m_varMember.at(v.name) + "; }\n";
+        if (!m_publicVar.empty()) c += "\n";
+
+        c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n";
+        c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
+        c += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
 
         if (varCount)
         {
@@ -2156,6 +2431,30 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     struct Entry { std::string key, className; };
     std::vector<Entry> compiled;
 
+    // Probe pass: which classes reach native C++ at all. A direct call into
+    // another class is only emittable if that class HAS a C++ type, and the only
+    // way to know is to try. Output and warnings are thrown away; the real pass
+    // below repeats the work with the answer in hand.
+    ClassTable classes;
+    {
+        std::unordered_set<std::string> probeNames;
+        const size_t warningsBefore = res.warnings.size();
+        for (const ClassSource& src : sources)
+        {
+            const std::string className = classNameFor(src.key, probeNames);
+            try
+            {
+                ClassEmitter em(src, className, opt, types, classes, res.warnings);
+                std::string h, c;
+                em.run(h, c);
+                classes.byKey[src.key] = { className, &src.graph,
+                                           em.publicFunctions(), em.publicVariables() };
+            }
+            catch (...) { probeNames.erase(className); }
+        }
+        res.warnings.resize(warningsBefore);
+    }
+
     for (size_t si = 0; si < sources.size(); ++si)
     {
         const ClassSource& src = sources[si];
@@ -2164,7 +2463,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         const std::string className = classNameFor(src.key, usedNames);
         try
         {
-            ClassEmitter em(src, className, opt, types, res.warnings);
+            ClassEmitter em(src, className, opt, types, classes, res.warnings);
             std::string header, impl;
             em.run(header, impl);
             res.files.push_back({ "hcgen_" + className + ".h",   std::move(header) });

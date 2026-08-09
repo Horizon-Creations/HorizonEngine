@@ -523,6 +523,74 @@ TEST_CASE("adoptForEachElementType carries the element's definition, not just it
     CHECK(std::string(signatureOf(*g.findNode(each)).dataOuts[0].typeName) == kStats);
 }
 
+// ── Codegen: calls between compiled classes go direct ───────────────────────
+// Parity (test_horizoncode_codegen.cpp) proves the fast path is CORRECT — it
+// runs a fully compiled world against a fully interpreted one. Nothing there
+// proves it is TAKEN, because the fallback would produce the same answers. That
+// is what this asserts.
+
+#include <HorizonScene/HcCodegen.h>
+
+TEST_CASE("HcCodegen: a call into another compiled class is emitted direct")
+{
+    // Callee: a public function and a public variable, plus a private one each.
+    Graph callee;
+    {
+        Variable hp;  hp.name  = "hp";  hp.type = PinType::Float;                 // public
+        Variable sec; sec.name = "sec"; sec.type = PinType::Float; sec.access = 1;
+        callee.variables.push_back(hp);
+        callee.variables.push_back(sec);
+        Node fn; fn.type = NodeType::FunctionEntry; fn.s = "Damage"; fn.access = 0;
+        fn.params  = { { "amount", PinType::Float, false, {} } };
+        fn.results = { { "left",   PinType::Float, false, {} } };
+        callee.addNode(std::move(fn));
+        Node hidden; hidden.type = NodeType::FunctionEntry; hidden.s = "Secret"; hidden.access = 1;
+        callee.addNode(std::move(hidden));
+    }
+
+    // Caller: an Object variable that names the callee's class.
+    Graph caller;
+    {
+        Variable obj; obj.name = "obj"; obj.type = PinType::Ref; obj.className = "callee";
+        caller.variables.push_back(obj);
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        const int e = caller.addNode(ev);
+        Node get; get.type = NodeType::GetVariable; get.s = "obj"; get.propType = PinType::Ref;
+        const int gv = caller.addNode(std::move(get));
+        Node call; call.type = NodeType::CallExternal; call.s = "Damage";
+        call.params  = { { "amount", PinType::Float, false, {} } };
+        call.results = { { "left",   PinType::Float, false, {} } };
+        const int cn = caller.addNode(std::move(call));
+        REQUIRE(caller.connect(e, 0, cn, 0));      // exec
+        REQUIRE(caller.connect(gv, 0, cn, 2));     // obj → Target
+        // A private function on the same target must NOT go direct.
+        Node hid; hid.type = NodeType::CallExternal; hid.s = "Secret";
+        const int hn = caller.addNode(std::move(hid));
+        REQUIRE(caller.connect(cn, 1, hn, 0));
+        REQUIRE(caller.connect(gv, 0, hn, 2));
+    }
+
+    HE::hccg::Options opt;
+    HE::hccg::Result r = HE::hccg::generate(
+        { { "callee", "callee", callee }, { "caller", "caller", caller } }, opt);
+    REQUIRE(r.ok);
+    REQUIRE(r.fallbacks.empty());
+
+    std::string callerCpp;
+    for (const auto& f : r.files)
+        if (f.name == "hcgen_C_caller.cpp") callerCpp = f.contents;
+    REQUIRE_FALSE(callerCpp.empty());
+
+    // The public function resolves to a checked downcast and a typed call...
+    CHECK(callerCpp.find("hc::as<C_callee>") != std::string::npos);
+    CHECK(callerCpp.find("->Damage(") != std::string::npos);
+    // ...with the seam kept as the fallback for a null/foreign/interpreted ref.
+    CHECK(callerCpp.find("hc::callExternal(m_ctx, t") != std::string::npos);
+    // The PRIVATE one stays entirely on the seam: going direct would skip the
+    // access check and the warning the interpreter produces.
+    CHECK(callerCpp.find("->Secret(") == std::string::npos);
+}
+
 // ── Codegen: enums and structs both compile against their definitions ───────
 
 #include <HorizonScene/HcCodegen.h>

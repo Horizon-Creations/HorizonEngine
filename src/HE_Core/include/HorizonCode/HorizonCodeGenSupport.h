@@ -408,6 +408,23 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
     return out;
 }
 
+// ── the compiled-to-compiled call path ──────────────────────────────────────
+// A HorizonCode object reference is a Runtime HANDLE, not a pointer, so calling
+// a function on another instance always costs one resolve. What it does NOT
+// have to cost is the rest of the seam — a name lookup, an access scan, and a
+// std::vector<Value> for the arguments and another for the results. `as` turns
+// the handle into a typed pointer when the target really is that compiled class,
+// and null otherwise: reference 0, a destroyed instance, a DIFFERENT class (a
+// Ref variable's declared className is editor metadata, never enforced), or an
+// interpreted target. Generated code falls back to the seam on null, which is
+// what keeps mixed compiled/interpreted populations behaving identically.
+template <typename T> inline T* as(const Context& c, uint32_t target)
+{
+    if (target == 0u || !c.resolveCompiled) return nullptr;
+    HorizonCode::CompiledInstance* i = c.resolveCompiled(target);
+    return (i && i->classTag() == T::classTag_()) ? static_cast<T*>(i) : nullptr;
+}
+
 // ── run guards (§3.6, sharpened) ─────────────────────────────────────────────
 HE_API void warnStepLimit();   // the interpreter's step-limit warning text
 constexpr int kMaxSteps = 4096;

@@ -49,6 +49,12 @@ public:
 
     // ── class metadata ───────────────────────────────────────────────────────
     virtual const char* classKey() const = 0;   // canonical registry key
+    // Identity for the checked downcast generated code uses before calling
+    // another compiled class directly (hc::as). A per-class address, compared by
+    // pointer — NOT dynamic_cast: the generated library is built with hidden
+    // visibility, and RTTI across that boundary is the kind of thing that breaks
+    // on one platform and nowhere else. Default null = "not any generated class".
+    virtual const void* classTag() const { return nullptr; }
     virtual const std::vector<CompiledVarInfo>& varInfos() const
     { static const std::vector<CompiledVarInfo> kNone; return kNone; }
     virtual const std::vector<CompiledEventInfo>& eventInfos() const

@@ -21,6 +21,9 @@
 
 namespace HorizonCode {
 
+// Defined in HorizonCodeCompiled.h — Context only ever passes the pointer on.
+class CompiledInstance;
+
 // Ref = a reference/handle to another running script instance (a Runtime
 // InstanceId). Transform = a position/rotation(euler)/scale bundle. Enum/Struct
 // = user-defined types from HE::TypeRegistry — a pin/value of these types names
@@ -413,6 +416,11 @@ struct Context
     // get/setExternal: read/write a PUBLIC variable on the `target` instance.
     std::function<Value(uint32_t target, const std::string& var)>              getExternal;
     std::function<void(uint32_t target, const std::string& var, const Value&)> setExternal;
+    // The target instance as a COMPILED object, or null when it is interpreted,
+    // destroyed, or never existed. Generated code uses it to call another
+    // compiled class directly instead of marshalling through callExternal; the
+    // null answer is what keeps mixed populations working (see hc::as).
+    std::function<CompiledInstance*(uint32_t target)> resolveCompiled;
     // References resolvable from any graph.
     std::function<Value()> getSelf;         // this instance
     std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)
