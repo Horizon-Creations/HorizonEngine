@@ -996,6 +996,22 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		drawDefinitionPicker(g, n, /*isStruct=*/false, edit);
 		return true;
 
+	case NT::FunctionEntry:
+	{
+		// Calls resolve BY NAME and the first entry wins, so a second function
+		// with the same name is dead code that still looks live on the canvas.
+		int same = 0;
+		for (const auto& o : g.nodes)
+			if (o.type == NT::FunctionEntry && o.s == n.s) ++same;
+		if (same > 1)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 120, 90, 255));
+			ImGui::TextWrapped("Another function is also called \"%s\". Calls always reach "
+			                   "the first one — rename this or delete it.", n.s.c_str());
+			ImGui::PopStyleColor();
+		}
+		return false;   // the hosts still draw the name/access rows themselves
+	}
 	case NT::GetVariable:
 	case NT::SetVariable:
 	{

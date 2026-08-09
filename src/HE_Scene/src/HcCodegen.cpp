@@ -907,6 +907,18 @@ private:
         for (const auto& v : m_g.variables)
             if (v.type == PT::Struct) requireStruct(v.typeName, 0);
 
+        // 2b. A function name is the whole identity of a call: callFunction and
+        //     every Call Function node resolve BY NAME, and the interpreter takes
+        //     the FIRST entry (§3.1). A second one with the same name is dead
+        //     code that looks live in the editor, so say so.
+        {
+            std::unordered_set<std::string> seenFns;
+            for (const Node& n : m_g.nodes)
+                if (n.type == NT::FunctionEntry && !seenFns.insert(n.s).second)
+                    warn("duplicate function '" + n.s + "' — only the first is ever "
+                         "called (node " + std::to_string(n.id) + " is dead)");
+        }
+
         // 3. Exec cycles would compile to unbounded loops (the interpreter only
         //    tolerates them via the step guard) → interpreted fallback.
         checkCycles(/*execEdges=*/true, "exec cycle at node ");

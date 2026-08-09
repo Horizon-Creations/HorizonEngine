@@ -269,8 +269,14 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 	{
 		if (n.type != NT::FunctionEntry) continue;
 		ImGui::PushID(n.id);
+		// A duplicate name is dead code: calls resolve by name, first one wins.
+		int same = 0;
+		for (const auto& o : graph.nodes)
+			if (o.type == NT::FunctionEntry && o.s == n.s) ++same;
 		const std::string label = (n.s.empty() ? "(unnamed)" : n.s) +
-		                          (n.access == 1 ? "  [private]" : "");
+		                          (n.access == 1 ? "  [private]" : "") +
+		                          (same > 1 ? "  (duplicate name!)" : "");
+		if (same > 1) ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 120, 90, 255));
 		if (ImGui::Selectable(label.c_str(), g.currentGraph == n.id))
 		{
 			g.currentGraph = n.id;                // open the function's sub-graph
@@ -278,6 +284,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 			g.selectedVar.clear();
 			g.focusSelected = true;
 		}
+		if (same > 1) ImGui::PopStyleColor();
 		ImGui::PopID();
 	}
 }

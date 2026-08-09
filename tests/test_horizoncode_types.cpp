@@ -591,6 +591,26 @@ TEST_CASE("HcCodegen: a call into another compiled class is emitted direct")
     CHECK(callerCpp.find("->Secret(") == std::string::npos);
 }
 
+TEST_CASE("HcCodegen: a duplicate function name is reported as dead code")
+{
+    Graph g;
+    Node ev; ev.type = NodeType::Event; ev.s = "Go";
+    g.addNode(ev);
+    for (int i = 0; i < 2; ++i)
+    {
+        Node fn; fn.type = NodeType::FunctionEntry; fn.s = "Reset";
+        g.addNode(std::move(fn));
+    }
+    HE::hccg::Options opt;
+    HE::hccg::Result r = HE::hccg::generate({ { "dup", "dup", g } }, opt);
+    REQUIRE(r.ok);
+    CHECK(r.fallbacks.empty());          // it still compiles — the first one wins
+    bool warned = false;
+    for (const auto& w : r.warnings)
+        if (w.find("duplicate function 'Reset'") != std::string::npos) warned = true;
+    CHECK(warned);
+}
+
 // ── Codegen: enums and structs both compile against their definitions ───────
 
 #include <HorizonScene/HcCodegen.h>
