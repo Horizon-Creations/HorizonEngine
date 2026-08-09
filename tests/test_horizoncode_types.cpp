@@ -611,6 +611,40 @@ TEST_CASE("HcCodegen: a duplicate function name is reported as dead code")
     CHECK(warned);
 }
 
+TEST_CASE("HcCodegen: event wiring that goes nowhere is reported")
+{
+    // Emit/Bind/handle name the same event as free text in three places, so a
+    // typo silently binds to nothing. Each half of the miss is its own message.
+    Graph emitter, listener;
+    {
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        emitter.addNode(ev);
+        Node em; em.type = NodeType::EmitEvent; em.s = "Sginal";   // typo
+        emitter.addNode(std::move(em));
+    }
+    {
+        Node ev; ev.type = NodeType::Event; ev.s = "Signal";       // the real name
+        listener.addNode(ev);
+        Node bind; bind.type = NodeType::BindEvent; bind.s = "Signal";
+        listener.addNode(std::move(bind));
+        Node bad; bad.type = NodeType::BindEvent; bad.s = "Sinal"; // typo, no handler
+        listener.addNode(std::move(bad));
+    }
+    HE::hccg::Options opt;
+    HE::hccg::Result r = HE::hccg::generate(
+        { { "emitter", "emitter", emitter }, { "listener", "listener", listener } }, opt);
+    REQUIRE(r.ok);
+    auto warned = [&](const char* needle)
+    {
+        for (const auto& w : r.warnings)
+            if (w.find(needle) != std::string::npos) return true;
+        return false;
+    };
+    CHECK(warned("emits 'Sginal' but no class in this project handles it"));
+    CHECK(warned("binds to 'Sinal' but has no handler"));
+    CHECK(warned("binds to 'Signal' but no class in this project emits it"));
+}
+
 // ── Codegen: enums and structs both compile against their definitions ───────
 
 #include <HorizonScene/HcCodegen.h>

@@ -2611,6 +2611,45 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         res.warnings.resize(warningsBefore);
     }
 
+    // ── event wiring across the run ──────────────────────────────────────────
+    // Emit/Bind/handle all name an event as free text in three different places,
+    // so a typo binds to nothing and reports nothing. Now it reports.
+    {
+        std::unordered_set<std::string> handled, emitted;
+        for (const ClassSource& src : sources)
+            for (const Node& n : src.graph.nodes)
+            {
+                if (n.type == NT::Event)     handled.insert(n.s);
+                if (n.type == NT::EmitEvent) emitted.insert(n.s);
+            }
+        // "Nobody else does the other half" only means anything when the whole
+        // project is on the table — the editor's per-asset check passes ONE.
+        const bool wholeProject = sources.size() > 1;
+        for (const ClassSource& src : sources)
+        {
+            for (const Node& n : src.graph.nodes)
+            {
+                if (wholeProject && n.type == NT::EmitEvent && !n.s.empty() && !handled.count(n.s))
+                    res.warnings.push_back(src.key + ": emits '" + n.s +
+                        "' but no class in this project handles it (node " +
+                        std::to_string(n.id) + ")");
+                if (n.type != NT::BindEvent || n.s.empty()) continue;
+                // Binding subscribes THIS class, so THIS class needs the handler.
+                bool mine = false;
+                for (const Node& h : src.graph.nodes)
+                    if (h.type == NT::Event && h.s == n.s) { mine = true; break; }
+                if (!mine)
+                    res.warnings.push_back(src.key + ": binds to '" + n.s +
+                        "' but has no handler for it, so nothing will run (node " +
+                        std::to_string(n.id) + ")");
+                else if (wholeProject && !emitted.count(n.s))
+                    res.warnings.push_back(src.key + ": binds to '" + n.s +
+                        "' but no class in this project emits it (node " +
+                        std::to_string(n.id) + ")");
+            }
+        }
+    }
+
     for (size_t si = 0; si < sources.size(); ++si)
     {
         const ClassSource& src = sources[si];
