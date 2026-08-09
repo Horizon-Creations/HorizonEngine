@@ -175,11 +175,11 @@ template <> inline Transform   coerce<Transform>(const Value& v)   { return coer
 // set one either.
 inline Value toEnumValue(int v, const char* typeName)
 { Value r; r.type = PinType::Enum; r.typeName = typeName; r.i = v; return r; }
-inline Value toEnumValueArray(const Array<int>& a)
+template <typename E> inline Value toEnumValueArray(const Array<E>& a)
 {
     Value v; v.isArray = true; v.type = PinType::Enum;
     v.items.reserve(a.size());
-    for (const int e : a) { Value it; it.type = PinType::Enum; it.i = e; v.items.push_back(it); }
+    for (const E e : a) { Value it; it.type = PinType::Enum; it.i = (int)e; v.items.push_back(it); }
     return v;
 }
 // Struct FIELDS are the exception: TypeRegistry::fieldDefault tags an array
@@ -349,7 +349,9 @@ inline Value slotRead(const VarSlot& s, const HorizonCode::CompiledInstance* sel
     Value v = s.get(self);
     if (s.type != PinType::Enum) return v;
     v.type = PinType::Enum;
-    if (v.isArray) for (Value& it : v.items) it.type = PinType::Enum;
+    // Array payloads carry no definition path — neither do the interpreter's
+    // (variableDefaultValue, ArrayAdd) — so normalize both ways.
+    if (v.isArray) for (Value& it : v.items) { it.type = PinType::Enum; it.typeName.clear(); }
     else           v.typeName = s.typeName;
     return v;
 }

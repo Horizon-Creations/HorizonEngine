@@ -86,20 +86,48 @@ struct StructType
     HE::StructDef            def;       // the definition as of GENERATION time
     std::vector<std::string> members;   // C++ member name per field, in def order
 };
+// An Enum asset becomes a real `enum class E : int` in the shared header — the
+// underlying int is still what every Value carries, so nothing about the
+// engine's int-backed enums changes; the generated code just says which enum it
+// means, and so can anyone including the header.
+struct EnumType
+{
+    std::string              cpp;       // generated C++ name ("E_Mood")
+    HE::EnumDef              def;
+    std::vector<std::string> entries;   // C++ enumerator per entry, in def order
+};
 struct TypeTable
 {
     std::unordered_map<std::string, StructType> byPath;
     std::vector<std::string> order;   // emission order: a struct after everything it embeds
+    std::unordered_map<std::string, EnumType> enumsByPath;
+    std::vector<std::string> enumOrder;
 
     const StructType* find(const std::string& assetPath) const
     {
         const auto it = byPath.find(assetPath);
         return it != byPath.end() ? &it->second : nullptr;
     }
+    const EnumType* findEnum(const std::string& assetPath) const
+    {
+        const auto it = enumsByPath.find(assetPath);
+        return it != enumsByPath.end() ? &it->second : nullptr;
+    }
+    // The C++ name for either kind — a pin knows which it is from its PinType.
     std::string cppOf(const std::string& assetPath) const
     {
-        const StructType* s = find(assetPath);
-        return s ? s->cpp : std::string();
+        if (const StructType* s = find(assetPath))   return s->cpp;
+        if (const EnumType* e = findEnum(assetPath)) return e->cpp;
+        return {};
+    }
+    // The enumerator for a value, or an empty string when no entry claims it.
+    std::string enumeratorOf(const std::string& assetPath, int value) const
+    {
+        const EnumType* e = findEnum(assetPath);
+        if (!e) return {};
+        for (size_t i = 0; i < e->def.entries.size(); ++i)
+            if (e->def.entries[i].value == value) return e->cpp + "::" + e->entries[i];
+        return {};
     }
 };
 
@@ -116,7 +144,10 @@ std::string cppScalar(const TypeRef& tr)
         case PT::Color:     return "glm::vec4";
         case PT::Ref:       return "uint32_t";
         case PT::Transform: return "hc::Transform";
-        case PT::Enum:      return "int";   // enums are int-backed everywhere
+        // Int-backed like everywhere else in the engine, but named: `enum class
+        // E_Mood : int`, so the generated code (and anyone including the
+        // header) says WHICH enum. Unresolved definitions never reach emission.
+        case PT::Enum:      return tr.cpp.empty() ? "int" : tr.cpp;
         // validate() refuses a Struct pin whose definition the table doesn't
         // carry, so `cpp` is set on every Struct TypeRef that reaches emission.
         case PT::Struct:    return tr.cpp.empty() ? "float" : tr.cpp;
@@ -177,7 +208,7 @@ std::string zeroLit(const TypeRef& tr)
         case PT::Color:     return "glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)";
         case PT::Ref:       return "0u";
         case PT::Transform: return "hc::Transform{}";
-        case PT::Enum:      return "0";
+        case PT::Enum:      return cppScalar(tr) + "{}";   // = 0, like a fresh Value
         case PT::Struct:    return cppScalar(tr) + "{}";
         default:            return "0.0f";
     }
@@ -232,7 +263,13 @@ std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want)
         case PT::Color:  return "glm::vec4(" + floatLit(v.col.x) + ", " + floatLit(v.col.y) + ", " +
                                  floatLit(v.col.z) + ", " + floatLit(v.col.w) + ")";
         case PT::Ref:    return std::to_string(v.ref) + "u";
-        case PT::Enum:   return std::to_string(v.i);
+        case PT::Enum:
+        {
+            // The enumerator when one claims the value; a cast otherwise (a
+            // stale stored value is still a legal enum object).
+            const std::string e = tt.enumeratorOf(want.typeName, v.i);
+            return !e.empty() ? e : "(" + cppScalar(want) + ")" + std::to_string(v.i);
+        }
         case PT::Transform:
             return "hc::Transform{ glm::vec3(" + floatLit(v.tpos.x) + ", " + floatLit(v.tpos.y) + ", " + floatLit(v.tpos.z) +
                    "), glm::vec3(" + floatLit(v.trot.x) + ", " + floatLit(v.trot.y) + ", " + floatLit(v.trot.z) +
@@ -281,26 +318,27 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
         if (from.arr && to.arr && from.t == to.t && sameDef) return e;
         return zeroLit(to);   // unwireable; only reachable via stale nodes
     }
-    if (from.t == to.t) return sameDef ? e : zeroLit(to);
+    const bool sameEnum = from.t != PT::Enum || from.typeName == to.typeName;
+    if (from.t == to.t) return (sameDef && sameEnum) ? e : zeroLit(to);
     switch (to.t)
     {
         case PT::Float:
             if (from.t == PT::Bool) return "((" + e + ") ? 1.0f : 0.0f)";
             if (from.t == PT::Int)  return "((float)(" + e + "))";
-            if (from.t == PT::Enum) return "((float)(" + e + "))";
+            if (from.t == PT::Enum) return "((float)(int)(" + e + "))";
             break;
         case PT::Int:
             if (from.t == PT::Float) return "((int)(" + e + "))";
             if (from.t == PT::Bool)  return "((" + e + ") ? 1 : 0)";
-            if (from.t == PT::Enum)  return e;   // int-backed, no-op
+            if (from.t == PT::Enum)  return "((int)(" + e + "))";
             break;
         case PT::Bool:
             if (from.t == PT::Float) return "((" + e + ") != 0.0f)";
             if (from.t == PT::Int)   return "((" + e + ") != 0)";
             break;
         case PT::Enum:
-            if (from.t == PT::Int)   return e;   // int-backed, no-op
-            if (from.t == PT::Float) return "((int)(" + e + "))";
+            if (from.t == PT::Int)   return "((" + cppScalar(to) + ")(" + e + "))";
+            if (from.t == PT::Float) return "((" + cppScalar(to) + ")(int)(" + e + "))";
             break;
         default: break;
     }
@@ -313,7 +351,8 @@ std::string coerceCall(const std::string& valueExpr, const TypeRef& to)
 {
     if (to.arr) return "hc::coerceArray<" + cppScalar(to) + ">(" + valueExpr + ")";
     // An Enum target is NOT coerce<int>: `coerce(v, Enum)` refuses Bool (§3.3).
-    if (to.t == PT::Enum) return "hc::coerceEnum(" + valueExpr + ")";
+    if (to.t == PT::Enum)
+        return "((" + cppScalar(to) + ")hc::coerceEnum(" + valueExpr + "))";
     return "hc::coerce<" + cppScalar(to) + ">(" + valueExpr + ")";
 }
 std::string fromValueCall(const std::string& vecExpr, size_t k, const TypeRef& to)
@@ -330,7 +369,7 @@ std::string toValueCall(const std::string& expr, const TypeRef& from, const std:
 {
     if (from.t == PT::Enum)
         return from.arr ? "hc::toEnumValueArray(" + expr + ")"
-                        : "hc::toEnumValue(" + expr + ", " + strLit(from.typeName) + ")";
+                        : "hc::toEnumValue((int)(" + expr + "), " + strLit(from.typeName) + ")";
     if (from.t == PT::Struct && !from.arr) return ns + "::toValue(" + expr + ")";
     return "hc::toValue(" + expr + ")";
 }
@@ -386,10 +425,10 @@ std::string uniqueName(const std::string& base, std::unordered_set<std::string>&
 // ── the run's struct types (hcgen_types.h) ───────────────────────────────────
 // Every struct definition reachable from the sources, closed over nested
 // fields, ordered so a struct is emitted after everything it embeds.
-void collectStructPaths(const Graph& g, std::unordered_set<std::string>& out)
+void collectUserTypePaths(const Graph& g, PinType kind, std::unordered_set<std::string>& out)
 {
-    auto take = [&out](PinType t, const std::string& name)
-    { if (t == PT::Struct && !name.empty()) out.insert(name); };
+    auto take = [&out, kind](PinType t, const std::string& name)
+    { if (t == kind && !name.empty()) out.insert(name); };
 
     for (const Node& n : g.nodes)
     {
@@ -397,11 +436,15 @@ void collectStructPaths(const Graph& g, std::unordered_set<std::string>& out)
         {
             case NT::MakeStruct: case NT::BreakStruct:
             case NT::GetStructField: case NT::SetStructField:
-                if (!n.typeName.empty()) out.insert(n.typeName);
+                if (kind == PT::Struct && !n.typeName.empty()) out.insert(n.typeName);
+                break;
+            case NT::ConstEnum: case NT::SwitchOnEnum:
+            case NT::EnumToInt: case NT::IntToEnum: case NT::EnumToString:
+                if (kind == PT::Enum && !n.typeName.empty()) out.insert(n.typeName);
                 break;
             default: break;
         }
-        // Struct values also ride on nodes that merely pass them through:
+        // User-defined values also ride on nodes that merely pass them through:
         // Get/SetVariable, Get/SetExternal, arrays, ForEach, function pins.
         take(n.propType, n.typeName);
         for (const auto& p : n.params)  take(p.type, p.typeName);
@@ -415,7 +458,7 @@ TypeTable buildTypeTable(const std::vector<ClassSource>& sources)
     const HE::TypeRegistry& reg = HE::TypeRegistry::instance();
 
     std::unordered_set<std::string> wanted;
-    for (const ClassSource& s : sources) collectStructPaths(s.graph, wanted);
+    for (const ClassSource& s : sources) collectUserTypePaths(s.graph, PT::Struct, wanted);
 
     // Transitive closure over nested struct fields (the registry's own cycle
     // guard makes this terminate; a hand-edited cycle stops at the seen-set).
@@ -464,6 +507,31 @@ TypeTable buildTypeTable(const std::vector<ClassSource>& sources)
     }
 
     std::unordered_set<std::string> usedNames;
+
+    // Enums first: they depend on nothing, and a struct field may name one.
+    {
+        std::unordered_set<std::string> wantedEnums;
+        for (const ClassSource& s : sources) collectUserTypePaths(s.graph, PT::Enum, wantedEnums);
+        for (const auto& [path, def] : defs)
+            for (const auto& f : def.fields)
+                if (f.type == PT::Enum && !f.typeName.empty()) wantedEnums.insert(f.typeName);
+        std::vector<std::string> epaths(wantedEnums.begin(), wantedEnums.end());
+        std::sort(epaths.begin(), epaths.end());
+        for (const std::string& path : epaths)
+        {
+            HE::EnumDef def;
+            if (!reg.getEnum(path, def)) continue;   // unknown → the class falls back
+            EnumType et;
+            et.def = def;
+            et.cpp = uniqueName("E_" + sanitize(def.name), usedNames);
+            std::unordered_set<std::string> usedEntries;
+            for (const auto& e : def.entries)
+                et.entries.push_back(uniqueName(cppIdent(e.name), usedEntries));
+            tt.enumOrder.push_back(path);
+            tt.enumsByPath.emplace(path, std::move(et));
+        }
+    }
+
     for (const std::string& path : tt.order)
     {
         StructType st;
@@ -503,10 +571,52 @@ std::string emitTypesHeader(const TypeTable& tt, const std::string& ns)
 
     std::string h;
     h += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
-    h += "// The project's Struct assets as plain C++ types (one per definition).\n";
+    h += "// The project's Struct and Enum assets as plain C++ types.\n";
     h += "#pragma once\n";
     h += "#include <HorizonCode/HorizonCodeGenSupport.h>\n\n";
     h += "namespace " + ns + " {\n";
+
+    for (const std::string& path : tt.enumOrder)
+    {
+        const EnumType& et = tt.enumsByPath.at(path);
+        h += "\n// \"" + et.def.name + "\" (" + path + ")\n";
+        h += "enum class " + et.cpp + " : int\n{\n";
+        // Two entries may share a value; EnumDef::findValue answers with the
+        // first, so the later one is unreachable — and a duplicate enumerator
+        // value would be legal C++ but a lie about what this enum can be.
+        std::unordered_set<int> seenValues;
+        for (size_t i = 0; i < et.def.entries.size(); ++i)
+        {
+            const auto& e = et.def.entries[i];
+            if (!seenValues.insert(e.value).second)
+            {
+                h += "    // " + et.entries[i] + " = " + std::to_string(e.value) +
+                     " — same value as an earlier entry, unreachable\n";
+                continue;
+            }
+            h += "    " + et.entries[i] + " = " + std::to_string(e.value) + ",";
+            if (et.entries[i] != e.name) h += "   // \"" + e.name + "\"";
+            h += "\n";
+        }
+        h += "};\n";
+        h += "inline hc::Value toValue(" + et.cpp + " e)\n";
+        h += "{ return hc::toEnumValue((int)e, " + strLit(path) + "); }\n";
+    }
+    if (!tt.enumOrder.empty())
+    {
+        // The generic hc:: helpers dispatch on these, exactly like the structs
+        // below; a struct FIELD of enum type needs them declared first.
+        h += "\n} // namespace " + ns + "\n\nnamespace hc {\n";
+        for (const std::string& path : tt.enumOrder)
+        {
+            const std::string t = ns + "::" + tt.enumsByPath.at(path).cpp;
+            h += "template <> inline " + t + " zeroOf<" + t + ">() { return {}; }\n";
+            h += "template <> inline " + t + " raw<" + t + ">(const Value& v) { return (" + t + ")v.i; }\n";
+            h += "template <> inline " + t + " coerce<" + t + ">(const Value& v) { return (" + t + ")coerceEnum(v); }\n";
+            h += "template <> inline PinType tagOf<" + t + ">() { return PinType::Enum; }\n";
+        }
+        h += "} // namespace hc\n\nnamespace " + ns + " {\n";
+    }
 
     for (const std::string& path : tt.order)
     {
@@ -580,9 +690,8 @@ std::string emitTypesHeader(const TypeTable& tt, const std::string& ns)
             const TypeRef ft = fieldType(f);
             const std::string k = std::to_string(i);
             std::string read;
-            if (f.isArray)               read = "hc::itemArray<" + cppScalar(ft) + ">(v.items, " + k + ")";
-            else if (f.type == PT::Enum) read = "hc::itemEnum(v.items, " + k + ")";
-            else                         read = "hc::item<" + cppScalar(ft) + ">(v.items, " + k + ")";
+            if (f.isArray) read = "hc::itemArray<" + cppScalar(ft) + ">(v.items, " + k + ")";
+            else           read = "hc::item<" + cppScalar(ft) + ">(v.items, " + k + ")";
             h += "    s." + st.members[i] + " = " + read + ";\n";
         }
         h += "    return s;\n}\n";
@@ -1076,9 +1185,13 @@ private:
         case NT::Not:     return "(!(" + input(n, 0, fnCtx) + "))";
         case NT::Concat:  return "(" + input(n, 0, fnCtx) + " + " + input(n, 1, fnCtx) + ")";
         case NT::ToString:return "hc::toStringG(" + input(n, 0, fnCtx) + ")";
-        case NT::ConstEnum: return std::to_string((int)n.f[0]);
-        case NT::EnumToInt:
-        case NT::IntToEnum: return input(n, 0, fnCtx);   // int-backed, no-op
+        case NT::ConstEnum:
+        {
+            Value v; v.type = PT::Enum; v.i = (int)n.f[0];
+            return valueLit(v, m_tt, out);
+        }
+        case NT::EnumToInt: return "((int)(" + input(n, 0, fnCtx) + "))";
+        case NT::IntToEnum: return "((" + cppScalar(out) + ")(" + input(n, 0, fnCtx) + "))";
         case NT::EnumToString:
         {
             // Entry names resolved at GENERATION time (validate() guaranteed the
@@ -1086,7 +1199,8 @@ private:
             // runtime lookup). Unmatched values → "" like the interpreter.
             HE::EnumDef def;
             HE::TypeRegistry::instance().getEnum(n.typeName, def);
-            std::string e = "([](int _ev) -> std::string { switch (_ev) {";
+            const std::string et = cppScalar(dataInType(n, 0));
+            std::string e = "([](" + et + " _ev) -> std::string { switch (_ev) {";
             // Nothing stops an author giving two entries the same value;
             // EnumDef::findValue answers with the FIRST, so later duplicates are
             // dead — and emitting them would be a duplicate `case` label, i.e. a
@@ -1094,7 +1208,11 @@ private:
             std::unordered_set<int> seenValues;
             for (const auto& en : def.entries)
                 if (seenValues.insert(en.value).second)
-                    e += " case " + std::to_string(en.value) + ": return " + strLit(en.name) + ";";
+                {
+                    const std::string lbl = m_tt.enumeratorOf(n.typeName, en.value);
+                    e += " case " + (lbl.empty() ? "(" + et + ")" + std::to_string(en.value) : lbl) +
+                         ": return " + strLit(en.name) + ";";
+                }
             e += " default: return std::string(); } })(" + input(n, 0, fnCtx) + ")";
             return e;
         }
@@ -1505,7 +1623,9 @@ private:
                 if (!def.findValue(e->value) ||
                     def.findValue(e->value)->name != n.params[i].name) continue;
                 if (!seenValues.insert(e->value).second) continue;
-                b.line("case " + std::to_string(e->value) + ":");
+                const std::string lbl = m_tt.enumeratorOf(n.typeName, e->value);
+                b.line("case " + (lbl.empty()
+                    ? "(" + cppScalar(dataInType(n, 0)) + ")" + std::to_string(e->value) : lbl) + ":");
                 b.line("{");
                 ++b.indent;
                 chain(n, r.execOut0 + (int)i, fnCtx, b);
@@ -1724,7 +1844,8 @@ private:
         h += "#include <HorizonCode/HorizonCodeGenSupport.h>\n";
         {
             std::unordered_set<std::string> used;
-            collectStructPaths(m_g, used);
+            collectUserTypePaths(m_g, PT::Struct, used);
+            collectUserTypePaths(m_g, PT::Enum, used);
             if (!used.empty()) h += "#include \"hcgen_types.h\"\n";
         }
         h += "\nnamespace " + ns + " {\n\n";
@@ -2029,7 +2150,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     // The project's Struct assets, as C++ types, shared by every class in the
     // run (built before any class so its names are stable across them).
     const TypeTable types = buildTypeTable(sources);
-    if (!types.order.empty())
+    if (!types.order.empty() || !types.enumOrder.empty())
         res.files.push_back({ "hcgen_types.h", emitTypesHeader(types, opt.namespaceName) });
 
     struct Entry { std::string key, className; };
@@ -2091,7 +2212,8 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         gh += "// from anywhere in the library (or from your own C++) is free of\n";
         gh += "// ordering concerns.\n";
         gh += "#pragma once\n";
-        if (!types.order.empty()) gh += "#include \"hcgen_types.h\"\n";
+        if (!types.order.empty() || !types.enumOrder.empty())
+            gh += "#include \"hcgen_types.h\"\n";
         for (const auto& e : compiled) gh += "#include \"hcgen_" + e.className + ".h\"\n";
         gh += "#include \"hc_registry.h\"\n";
         res.files.push_back({ "hcgen.h", std::move(gh) });

@@ -1242,9 +1242,15 @@ on every struct.
 
 ### 14.2 Enums
 
-Enums stay **int-backed** (the engine treats them as ints everywhere); only
-their Value boundaries carry the definition path back, via
-`hc::toEnumValue`/`toEnumValueArray`. Two fixes the fixtures now pin down:
+An Enum asset becomes a real `enum class E_Mood : int` in the shared header,
+alongside the structs. The underlying int is still exactly what every `Value`
+carries — nothing about the engine's int-backed enums changes — but the
+generated code now says WHICH enum it means (`case E_Mood::Angry:`, not
+`case 5:`), and so can anyone including the header. Two entries on the same
+value emit only the first: `EnumDef::findValue` makes the later one
+unreachable, and a duplicate enumerator would be a lie about what the type can
+hold. Value boundaries still carry the definition path via
+`hc::toEnumValue`/`toEnumValueArray`. Two fixes the fixtures pin down:
 
 - **Duplicate entry values are legal** (nothing in the enum panel prevents
   them). `EnumDef::findValue` answers with the FIRST, so later duplicates are

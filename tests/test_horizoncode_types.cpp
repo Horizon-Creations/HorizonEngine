@@ -556,15 +556,19 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         HE::hccg::Result r = HE::hccg::generate({ { "enum_graph", "enum_graph", g } }, opt);
         REQUIRE(r.ok);
         CHECK(r.fallbacks.empty());
-        // The generated source routes on the baked entry value and bakes the
-        // entry-name switch for EnumToString.
-        bool sawCase7 = false, sawStaff = false;
+        // The enum is a real C++ type in the shared header, and the switch
+        // routes on its enumerator — not on a bare 7 nobody can read.
+        bool sawEnumType = false, sawCaseBow = false, sawStaff = false;
         for (const auto& f : r.files)
         {
-            if (f.contents.find("case 7:") != std::string::npos) sawCase7 = true;
+            if (f.name == "hcgen_types.h" &&
+                f.contents.find("enum class E_Weapon : int") != std::string::npos)
+                sawEnumType = true;
+            if (f.contents.find("case E_Weapon::Bow:") != std::string::npos) sawCaseBow = true;
             if (f.contents.find("\"Staff\"") != std::string::npos) sawStaff = true;
         }
-        CHECK(sawCase7);
+        CHECK(sawEnumType);
+        CHECK(sawCaseBow);
         (void)sawStaff; // EnumToString is unwired downstream — emission optional
     }
 
