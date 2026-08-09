@@ -212,7 +212,8 @@ set(HCGEN_CLASSES
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
 # too: deleting one has to re-run the generator, not fail the compile.
-set(HCGEN_HEADERS ${HCGEN_DIR}/hc_registry.h ${HCGEN_DIR}/hcgen_types.h)
+set(HCGEN_HEADERS ${HCGEN_DIR}/hc_registry.h ${HCGEN_DIR}/hcgen_types.h
+                  ${HCGEN_DIR}/hcgen.h)
 foreach(c ${HCGEN_CLASSES})
     list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)

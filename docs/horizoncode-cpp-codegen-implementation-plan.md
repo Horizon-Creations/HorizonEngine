@@ -1302,10 +1302,13 @@ graph compiles to something that reads like hand-written C++:
   This is why bodies are translated BEFORE the class is assembled.
 - With no guard, no event arg and no exec-cache slots, **`RunState` itself
   disappears**, and with it the `rs` parameter on every body.
-- **A header per class, carrying the whole class** (bodies inline — a generated
-  class has no reason to spread a declaration and a definition over two files);
-  the `.cpp` holds only the factory pair `hc_registry.cpp` links against. The
-  header is the point: other C++, generated or hand-written, can include it and
+- **A header per class in the classic shape** — declarations in
+  `hcgen_<Class>.h`, definitions in `hcgen_<Class>.cpp` — plus **`hcgen.h`, the
+  whole library in one include**: every class and every user-defined type,
+  declared once. That is what a generated `.cpp` includes, so a graph can reach
+  into any other compiled class without per-file include bookkeeping, and two
+  classes that call each other cannot deadlock on one another's header. It is
+  also the single include hand-written C++ needs. The header is the point: other C++, generated or hand-written, can include it and
   call the graph's events and functions **directly**, under the names they were
   authored with, instead of going through the Runtime's name-based seam. An
   event gets such a method when it is unambiguous (one node, no element filter);
