@@ -343,9 +343,17 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
         return;
     }
     if (projectKey != m_cfg.projectKey) {
-        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — different project open "
-                         "(this session is editing \"%s\")",
-                    name.c_str(), m_cfg.projectLabel.c_str());
+        // Both keys, spelled out. Without them this verdict is unfalsifiable
+        // from the outside: two people whose .heproj files carry the same id
+        // still land here when one editor is running on an id it minted in
+        // memory, and the message alone gives them nothing to check. An empty
+        // key is worth naming separately — that is "no project open on that
+        // side", a different mistake with a different fix.
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — different project. This session "
+                         "edits \"%s\" (id %s); the joiner sent id %s",
+                    name.c_str(), m_cfg.projectLabel.c_str(),
+                    m_cfg.projectKey.empty() ? "<none>" : m_cfg.projectKey.c_str(),
+                    projectKey.empty() ? "<none — nothing open there>" : projectKey.c_str());
         reject(JoinRejectReason::ProjectMismatch, m_cfg.projectLabel);
         return;
     }

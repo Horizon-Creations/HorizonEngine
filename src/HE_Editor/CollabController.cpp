@@ -750,8 +750,13 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_isHost        = false;
 	m_status        = Status::Connecting;
 	m_connectTarget = host;
+	// The project key goes in the line: it is what the host compares the join
+	// against, and a refusal is otherwise only diagnosable from the HOST's log.
 	Logger::Log(Logger::LogLevel::Info,
-	            ("Collab: connecting to " + host + ":" + std::to_string(port)).c_str());
+	            ("Collab: connecting to " + host + ":" + std::to_string(port) +
+	             " as project \"" + (m_projectLabel.empty() ? std::string("(none)") : m_projectLabel) +
+	             "\" (id " + (m_projectId.empty() ? std::string("<none — no project open>") : m_projectId) +
+	             ")").c_str());
 	return true;
 }
 
