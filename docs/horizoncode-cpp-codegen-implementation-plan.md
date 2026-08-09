@@ -1320,7 +1320,14 @@ else { /* the seam, unchanged */ }
   variable must be declared public. Private or missing members stay on the seam,
   which produces the interpreter's warning.
 - **`Get Self` is free** — that target is `this`, so there is no handle to
-  resolve and no class to check. It still calls the PUBLIC method, because
+  resolve and no class to check.
+- **`Get Game Instance` is nearly free.** Its class is fixed at generation time
+  (the key `__game_instance__`), and the Runtime keeps the object beside the id
+  (`m_gameInstanceCompiled`), so `hc::gameInstanceAs<T>` skips the map lookup
+  the general path needs. It is NOT guaranteed to exist — null before startup
+  registers one, null again after it is removed, null while it runs interpreted
+  — so the check stays; it is a branch on an already-loaded pointer. The id is
+  only fetched on the fallback, and reading it has no observable effect. It still calls the PUBLIC method, because
   `callExternal` to yourself runs on a fresh Runner (§3.1) and the public
   wrapper is what makes a fresh RunState.
 - Which classes are callable directly is only known after trying to compile them

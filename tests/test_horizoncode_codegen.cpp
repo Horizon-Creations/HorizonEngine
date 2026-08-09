@@ -236,6 +236,17 @@ namespace
 			comp.useCompiled = true;
 			interp.bindServices();
 			comp.bindServices();
+			// Both worlds get the GameInstance, each in its own backend: it is
+			// the one reference generated code resolves without a lookup, so it
+			// has to be present for that path to be exercised at all.
+			{
+				for (auto& s : hcfix::all())
+					if (s.key == "__game_instance__")
+					{ interp.rt.setGameInstance(std::move(s.graph)); break; }
+				if (const CompiledClassEntry* gi = findCompiled("__game_instance__"))
+					comp.rt.setGameInstanceCompiled(
+						CompiledPtr(gi->create(), CompiledDeleter{ gi->destroy }));
+			}
 			interp.id = interp.rt.add(std::move(src.graph), interp.host());
 
 			const CompiledClassEntry* entry = findCompiled(key);
@@ -551,7 +562,9 @@ TEST_CASE("codegen parity: refs_objects (create/destroy, external access, warn p
 
 	p.fire("Who");
 	CHECK(p.var("meRef").ref == p.interp.id);   // GetSelf
-	CHECK(p.var("giRef").ref == 0);             // no GameInstance registered
+	// The harness registers a GameInstance in both worlds (see ParityPair), and
+	// both mint ids identically — checkParity has already compared the two.
+	CHECK(p.var("giRef").ref != 0);
 
 	p.fire("Kill");
 	CHECK_FALSE(p.interp.rt.alive(obj));
@@ -879,4 +892,15 @@ TEST_CASE("codegen parity: structs")
 
 	p.reseed();
 	CHECK(p.var("s").items[0].f == 42.0f);
+}
+
+TEST_CASE("codegen parity: gi_caller (the GameInstance resolves without a lookup)")
+{
+	ParityPair p("fix/gi_caller");
+	p.fire("Bump");
+	CHECK(p.var("seen").f == 3.0f);     // public variable, written then read back
+	CHECK(p.var("total").f == 13.0f);   // public function on the GameInstance
+	CHECK(p.var("sneak").f == 0.0f);    // private one still refused, via the seam
+	p.fire("Bump");
+	CHECK(p.var("total").f == 13.0f);   // Set 3 again, then +10
 }

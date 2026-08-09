@@ -196,6 +196,13 @@ private:
     std::unordered_map<InstanceId, std::unordered_map<std::string, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
+    // The same instance as an object, when it is a compiled one. Kept beside the
+    // id so generated code can reach the GameInstance without the map lookup
+    // every other reference needs — it is the one target whose class is known at
+    // generation time ("__game_instance__"). Null while none is set, or while
+    // the one that is set runs interpreted; both are ordinary states, not
+    // errors, so the generated fast path still checks.
+    CompiledInstance* m_gameInstanceCompiled = nullptr;
     int        m_dispatchDepth = 0;   // guards cross-instance event recursion (depth)
     // Total listener fires per top-level event cascade. The depth guard bounds
     // RECURSION only — a bind cycle of re-emitting listeners branches the

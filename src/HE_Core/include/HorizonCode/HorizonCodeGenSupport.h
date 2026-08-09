@@ -425,6 +425,18 @@ template <typename T> inline T* as(const Context& c, uint32_t target)
     return (i && i->classTag() == T::classTag_()) ? static_cast<T*>(i) : nullptr;
 }
 
+// The GameInstance is the one reference whose class is known while generating
+// ("__game_instance__"), and the Runtime already holds the object — so this
+// costs neither a handle lookup nor an id round trip. It is NOT guaranteed to
+// exist (a project may have none, and it is null before startup sets one and
+// again after it is removed), hence the same checked shape as `as`.
+template <typename T> inline T* gameInstanceAs(const Context& c)
+{
+    if (!c.gameInstanceCompiled) return nullptr;
+    HorizonCode::CompiledInstance* i = c.gameInstanceCompiled();
+    return (i && i->classTag() == T::classTag_()) ? static_cast<T*>(i) : nullptr;
+}
+
 // ── run guards (§3.6, sharpened) ─────────────────────────────────────────────
 HE_API void warnStepLimit();   // the interpreter's step-limit warning text
 constexpr int kMaxSteps = 4096;

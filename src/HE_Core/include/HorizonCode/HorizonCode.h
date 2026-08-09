@@ -421,6 +421,10 @@ struct Context
     // compiled class directly instead of marshalling through callExternal; the
     // null answer is what keeps mixed populations working (see hc::as).
     std::function<CompiledInstance*(uint32_t target)> resolveCompiled;
+    // The GameInstance as an object, skipping the handle→instance lookup the
+    // general path needs: the Runtime already holds it. Null when none is set or
+    // it runs interpreted.
+    std::function<CompiledInstance*()> gameInstanceCompiled;
     // References resolvable from any graph.
     std::function<Value()> getSelf;         // this instance
     std::function<Value()> getGameInstance; // the app-wide GameInstance (Ref 0 if none)

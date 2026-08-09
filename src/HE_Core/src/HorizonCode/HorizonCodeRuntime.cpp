@@ -75,7 +75,7 @@ void Runtime::remove(InstanceId id)
     // Its scheduled Delay continuations die with it (never resume a ghost).
     m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
         [&](const PendingResume& p){ return p.id == id; }), m_pending.end());
-    if (id == m_gameInstance) m_gameInstance = 0;
+    if (id == m_gameInstance) { m_gameInstance = 0; m_gameInstanceCompiled = nullptr; }
 }
 void Runtime::destroy(InstanceId id)
 {
@@ -96,12 +96,14 @@ void Runtime::clear()
     m_listeners.clear();
     m_pending.clear();
     m_gameInstance = 0;
+    m_gameInstanceCompiled = nullptr;
 }
 
 InstanceId Runtime::setGameInstance(Graph graph, HostBindings bindings)
 {
     if (m_gameInstance) remove(m_gameInstance);
     m_gameInstance = add(std::move(graph), std::move(bindings));
+    m_gameInstanceCompiled = nullptr;   // interpreted
     return m_gameInstance;
 }
 
@@ -110,6 +112,8 @@ InstanceId Runtime::setGameInstanceCompiled(CompiledPtr inst, HostBindings bindi
     if (!inst) return m_gameInstance; // don't drop a working GameInstance for a null one
     if (m_gameInstance) remove(m_gameInstance);
     m_gameInstance = addCompiled(std::move(inst), std::move(bindings));
+    const Inst* gi = find(m_gameInstance);
+    m_gameInstanceCompiled = gi ? gi->compiled.get() : nullptr;
     return m_gameInstance;
 }
 
@@ -317,6 +321,8 @@ Context Runtime::makeContext(InstanceId id)
     };
     ctx.getSelf = [id] { return Value::ofRef(id); };
     ctx.getGameInstance = [this] { return Value::ofRef(m_gameInstance); };
+    // No lookup for the one reference whose class is fixed at generation time.
+    ctx.gameInstanceCompiled = [this] { return m_gameInstanceCompiled; };
     // World-level services (shared by every instance) — forwarded through the
     // runtime at CALL time, never copied. A copy would freeze whatever was
     // bound at context creation: interpreted instances rebuild their Context

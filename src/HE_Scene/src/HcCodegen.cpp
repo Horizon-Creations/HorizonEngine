@@ -1051,7 +1051,8 @@ private:
     // class compiled to C++. Everything else stays on the Runtime's seam.
     struct TargetInfo
     {
-        bool                 self = false;
+        bool                 self = false;   // Get Self → this, nothing to resolve
+        bool                 gi   = false;   // Get Game Instance → the Runtime holds it
         const CompiledClass* cls  = nullptr;
     };
     TargetInfo targetOf(const Node& n, int dataIn) const
@@ -1062,11 +1063,25 @@ private:
         const Node* src = m_g.findNode(l->srcNode);
         if (!src) return t;
         if (src->type == NT::GetSelf) { t.self = true; return t; }
+        if (src->type == NT::GetGameInstance)
+        {
+            // Its class is fixed at generation time, and the Runtime keeps the
+            // object beside the id — so there is no handle to look up either.
+            if (const CompiledClass* c = m_ct.find("__game_instance__")) { t.gi = true; t.cls = c; }
+            return t;
+        }
         if (src->type == NT::GetVariable)
             if (const Variable* v = m_g.findVariable(src->s))
                 if (v->type == PT::Ref && !v->isArray && !v->className.empty())
                     t.cls = m_ct.find(v->className);
         return t;
+    }
+    // How the object is obtained on the fast path — the GameInstance is handed
+    // over directly, everything else goes through its handle.
+    static std::string resolveExpr(const TargetInfo& t, const std::string& refVar)
+    {
+        return t.gi ? "hc::gameInstanceAs<" + t.cls->cpp + ">(m_ctx)"
+                    : "hc::as<" + t.cls->cpp + ">(m_ctx, " + refVar + ")";
     }
     static const Node* entryOf(const Graph& g, const std::string& name)
     {
@@ -1245,6 +1260,18 @@ private:
                 // `this`: no handle to resolve, no class to check.
                 const std::string acc = selfVar(n.s, have);
                 return acc.empty() ? seam : convertExpr(acc + "()", have, want);
+            }
+            if (t.gi && t.cls)
+            {
+                const std::string acc = directVar(n.s, *t.cls, have);
+                if (!acc.empty())
+                    // No handle at all on the fast path; the id is only fetched
+                    // for the fallback, and reading it has no observable effect.
+                    return "([&]() -> " + cppType(want) + " {\n"
+                           "        if (" + t.cls->cpp + "* o__ = hc::gameInstanceAs<" + t.cls->cpp + ">(m_ctx)) return " +
+                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           "        return " + coerceCall("hc::getExternal(m_ctx, hc::gameInstance(m_ctx), " +
+                                                          strLit(n.s) + ")", want) + "; }())";
             }
             if (t.cls)
             {
@@ -1644,14 +1671,16 @@ private:
             }
             b.line("{");
             ++b.indent;
-            b.line("const uint32_t t" + std::to_string(n.id) + " = " + input(n, 0, fnCtx) + ";");
+            if (!t.gi)
+                b.line("const uint32_t t" + std::to_string(n.id) + " = " + input(n, 0, fnCtx) + ";");
             b.line("const " + cppType(vt) + " v" + std::to_string(n.id) + " = " + input(n, 1, fnCtx) + ";");
-            b.line("if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t" +
-                   std::to_string(n.id) + "))");
+            b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + std::to_string(n.id)) + ")");
             b.line("    o__->" + acc + "() = " +
                    convertExpr("v" + std::to_string(n.id), vt, have) + ";");
             b.line("else");
-            b.line("    hc::setExternal(m_ctx, t" + std::to_string(n.id) + ", " + strLit(n.s) + ", " +
+            b.line("    hc::setExternal(m_ctx, " +
+                   (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + std::to_string(n.id)) +
+                   ", " + strLit(n.s) + ", " +
                    toValueCall("v" + std::to_string(n.id), vt, m_opt.namespaceName) + ");");
             --b.indent;
             b.line("}");
@@ -1716,8 +1745,8 @@ private:
             }
             else
             {
-                b.line("const uint32_t t" + id + " = " + input(n, 0, fnCtx) + ";");
-                b.line("if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t" + id + "))");
+                if (!t.gi) b.line("const uint32_t t" + id + " = " + input(n, 0, fnCtx) + ";");
+                b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + id) + ")");
                 b.line("    o__->" + method + "(" + args + ");");
                 b.line("else");
                 b.line("{");
@@ -1730,7 +1759,8 @@ private:
                            toValueCall(argNames[i],
                                        trOf(n.params[i].type, n.params[i].isArray,
                                             n.params[i].typeName), m_opt.namespaceName) + ");");
-                b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, t" + id +
+                b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, " +
+                       (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + id) +
                        ", " + strLit(n.s) + ", " + av + ");");
                 for (size_t i = 0; i < resNames.size(); ++i)
                     b.line(resNames[i] + " = " +

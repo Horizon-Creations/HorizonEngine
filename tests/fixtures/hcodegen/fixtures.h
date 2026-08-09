@@ -227,6 +227,14 @@ struct Fx
         g.variables.push_back(std::move(v));
     }
 
+    HE::hccg::ClassSource doneKey(const std::string& key, const std::string& name)
+    {
+        HorizonCode::syncFunctionSignatures(g);
+        Graph rt;
+        must(HorizonCode::fromJson(HorizonCode::toJson(g), rt), "json round trip");
+        return { key, name, std::move(rt) };
+    }
+
     HE::hccg::ClassSource done(const std::string& name)
     {
         HorizonCode::syncFunctionSignatures(g);
@@ -1325,6 +1333,67 @@ inline HE::hccg::ClassSource fxStructs()
     return f.done("structs");
 }
 
+// 22 — the GameInstance: the one reference whose class is fixed at generation
+// time, so calls through Get Game Instance resolve without a handle lookup.
+inline HE::hccg::ClassSource fxGameInstance()
+{
+    Fx f;
+    f.var("score", PT::Float);
+    f.var("hidden", PT::Float, 0.0f, {}, /*access=*/1);
+
+    const int fn = f.fnEntry("AddScore", 0, { { "amount", PT::Float } },
+                                            { { "total", PT::Float } });
+    const int sAdd = f.setVar("score", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("score", PT::Float), 0, a, 0);
+      f.data(fn, 0, a, 1); f.data(a, 0, sAdd, 0); }
+    f.exec(fn, sAdd);
+    const int ret = f.fnReturn("AddScore");
+    HorizonCode::syncFunctionSignatures(f.g);
+    f.data(f.getVar("score", PT::Float), 0, ret, 0);
+    f.exec(sAdd, ret);
+    return f.doneKey("__game_instance__", "game_instance");
+}
+
+// 23 — reaching the GameInstance: public variable and public function, plus the
+// private ones that must stay on the Runtime's seam (warn paths).
+inline HE::hccg::ClassSource fxGiCaller()
+{
+    Fx f;
+    f.var("seen", PT::Float);
+    f.var("total", PT::Float);
+    f.var("sneak", PT::Float);
+
+    const int ev = f.event("Bump");
+    Node se; se.type = NT::SetExternal; se.s = "score"; se.propType = PT::Float;
+    se.pinDefaults[1] = Value::ofFloat(3.0f);
+    const int setSc = f.add(se);
+    f.data(f.op(NT::GetGameInstance), 0, setSc, 0);
+    f.exec(ev, setSc);
+    const int sSeen = f.setVar("seen", PT::Float);
+    { Node ge; ge.type = NT::GetExternal; ge.s = "score"; ge.propType = PT::Float;
+      const int getSc = f.add(ge);
+      f.data(f.op(NT::GetGameInstance), 0, getSc, 0);
+      f.data(getSc, 0, sSeen, 0); }
+    f.exec(setSc, sSeen);
+    Node ce; ce.type = NT::CallExternal; ce.s = "AddScore";
+    ce.params = { { "amount", PT::Float } }; ce.results = { { "total", PT::Float } };
+    ce.pinDefaults[1] = Value::ofFloat(10.0f);
+    const int call = f.add(ce);
+    f.data(f.op(NT::GetGameInstance), 0, call, 0);
+    f.exec(sSeen, call);
+    const int sTotal = f.setVar("total", PT::Float);
+    f.data(call, 0, sTotal, 0);
+    f.exec(call, sTotal);
+    // Private variable → the seam warns and yields zero, exactly as before.
+    const int sSneak = f.setVar("sneak", PT::Float);
+    { Node ge; ge.type = NT::GetExternal; ge.s = "hidden"; ge.propType = PT::Float;
+      const int getH = f.add(ge);
+      f.data(f.op(NT::GetGameInstance), 0, getH, 0);
+      f.data(getH, 0, sSneak, 0); }
+    f.exec(sTotal, sSneak);
+    return f.done("gi_caller");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1335,6 +1404,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxEnginePureMultiout(), fxEngineExecCached(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
+        fxGameInstance(), fxGiCaller(),
     };
 }
 
