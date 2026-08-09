@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <unordered_set>
 
@@ -357,9 +358,16 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		// Side effect: the TypeRegistry mirrors every loaded definition, so lazy
 		// pak loads keep it fresh too (same for EnumType below).
+		//
+		// The display name is the FILE STEM, not the name persisted in CHUNK_META
+		// (TypeRegistry's own contract, and what TypeAssetPanel writes back on
+		// save). Renaming an asset only renames the file — the META name keeps
+		// whatever it was created as, so trusting it showed every renamed type as
+		// "NewStruct"/"NewEnum" in the type dropdowns after the next project load.
 		{
 			HE::StructDef def;
-			def.name = assetName; def.assetPath = relativePath;
+			def.name = std::filesystem::path(relativePath).stem().string();
+			def.assetPath = relativePath;
 			if (HE::TypeRegistry::structFromJson(a.json, def))
 				HE::TypeRegistry::instance().registerStruct(std::move(def));
 		}
@@ -372,7 +380,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.json.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		{
 			HE::EnumDef def;
-			def.name = assetName; def.assetPath = relativePath;
+			def.name = std::filesystem::path(relativePath).stem().string();
+			def.assetPath = relativePath;
 			if (HE::TypeRegistry::enumFromJson(a.json, def))
 				HE::TypeRegistry::instance().registerEnum(std::move(def));
 		}

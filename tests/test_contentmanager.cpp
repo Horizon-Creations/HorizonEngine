@@ -5,6 +5,7 @@
 #include <ContentManager/HAsset.h>
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
+#include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -92,6 +93,45 @@ TEST_CASE("ContentManager static mesh save/load round-trip preserves UUID")
 
 		// Wrong-type lookup must not alias
 		CHECK(cm.getTexture(loadedId) == nullptr);
+	}
+}
+
+TEST_CASE("Struct/Enum assets register under their FILE name, not the stored one")
+{
+	TempContentDir dir;
+	// Created as "NewStruct"/"NewEnum" (the panel's defaults) and renamed on
+	// disk afterwards — which is all the Content Browser's rename does. The
+	// name persisted in CHUNK_META keeps the creation-time value, so trusting it
+	// showed every renamed type as "NewStruct"/"NewEnum" in the type dropdowns.
+	{
+		ContentManager cm(dir.path.string());
+		StructTypeAsset a;
+		a.type = HE::AssetType::StructType;
+		a.name = "NewStruct";
+		a.path = "PlayerStats.hasset";
+		a.json = R"({"fields":[{"name":"hp","type":1}]})";
+		REQUIRE(cm.saveAsset(a));
+
+		EnumTypeAsset e;
+		e.type = HE::AssetType::EnumType;
+		e.name = "NewEnum";
+		e.path = "Mood.hasset";
+		e.json = R"({"entries":[{"name":"Calm","value":0}]})";
+		REQUIRE(cm.saveAsset(e));
+	}
+	{
+		HE::TypeRegistry::instance().clear();
+		ContentManager cm(dir.path.string());
+		REQUIRE_FALSE(cm.loadAsset("PlayerStats.hasset") == HE::UUID{});
+		REQUIRE_FALSE(cm.loadAsset("Mood.hasset") == HE::UUID{});
+
+		HE::StructDef sd;
+		REQUIRE(HE::TypeRegistry::instance().getStruct("PlayerStats.hasset", sd));
+		CHECK(sd.name == "PlayerStats");
+		HE::EnumDef ed;
+		REQUIRE(HE::TypeRegistry::instance().getEnum("Mood.hasset", ed));
+		CHECK(ed.name == "Mood");
+		HE::TypeRegistry::instance().clear();
 	}
 }
 
