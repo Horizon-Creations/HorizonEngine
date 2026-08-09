@@ -1202,12 +1202,22 @@ ordinary "struct array through a ForEach" graph would never compile.
 
 ### 14.1 Struct assets become real C++ types
 
-A run's Struct definitions (closed over nested fields, dependency-ordered) are
-emitted ONCE into a shared **`hcgen_types.h`**: one plain aggregate per
-definition, plus `toValue`/`fromValue_*` converters and the four `hc::`
-specializations the generic helpers dispatch through (`zeroOf`, `raw`,
-`coerce`, `tagOf`). A struct field read in a graph therefore lowers to a member
-access, not to Value plumbing.
+A run's Struct definitions (closed over nested fields, dependency-ordered) each
+become **one `hcgen_type_<Name>.h`**: a plain aggregate, plus
+`toValue`/`fromValue_*` converters and the four `hc::` specializations the
+generic helpers dispatch through (`zeroOf`, `raw`, `coerce`, `tagOf`). A struct
+field read in a graph therefore lowers to a member access, not to Value
+plumbing. Enums get the same treatment (`enum class E_X : int`).
+
+**A header per definition, not one shared header.** A type header includes the
+headers of the definitions it embeds (struct or enum fields, arrays included),
+so including it is enough; a generated class includes only the definitions its
+graph names. `hcgen_types.h` still exists, but purely as the umbrella for
+hand-written C++ — nothing generated includes it. Sharing one types header
+would put every type asset in every class's dependency set, and editing one
+Struct would recompile the whole library (same argument as `hcgen.h` in
+§14.2c). One codegen test asserts the include lists directly, because a fat
+include compiles perfectly well and only shows up as a slow rebuild.
 
 - **Member zero == the interpreter's empty struct.** An unwired Struct pin is
   an *empty* `Value` in the interpreter, whose field reads all miss and yield
@@ -1333,12 +1343,13 @@ else { /* the seam, unchanged */ }
 - Which classes are callable directly is only known after trying to compile them
   all, so `generateInto` runs a **probe pass** first and emits for real second.
 - A generated `.cpp` includes **only** its own header plus the headers of the
-  classes it actually calls into — never `hcgen.h`. The umbrella is for YOUR
-  code, which wants the whole surface at once; using it here would make every
-  class header a dependency of every translation unit, so editing one graph
-  would recompile all of them. The export's build directory persists and the
-  sources are written only when their bytes change, so with per-class includes
-  a one-graph edit rebuilds one object file.
+  classes it actually calls into — never `hcgen.h`; a class header includes
+  only the type headers its graph names — never `hcgen_types.h`. The umbrellas
+  are for YOUR code, which wants the whole surface at once; using one here
+  would make every class and type header a dependency of every translation
+  unit, so editing one graph would recompile all of them. The export's build
+  directory persists and the sources are written only when their bytes change,
+  so with narrow includes a one-graph edit rebuilds one object file.
 
 What this removes per call: the name lookup, the access scan, and the two
 `std::vector<Value>` (arguments and results) — the heap traffic. What remains is
@@ -1465,10 +1476,11 @@ graph compiles to something that reads like hand-written C++:
 - **A header per class in the classic shape** — declarations in
   `hcgen_<Class>.h`, definitions in `hcgen_<Class>.cpp` — plus **`hcgen.h`, the
   whole library in one include**: every class and every user-defined type,
-  declared once. That is what a generated `.cpp` includes, so a graph can reach
-  into any other compiled class without per-file include bookkeeping, and two
-  classes that call each other cannot deadlock on one another's header. It is
-  also the single include hand-written C++ needs. The header is the point: other C++, generated or hand-written, can include it and
+  declared once. That is the single include hand-written C++ needs. The
+  generated files themselves include narrowly instead (§14.2c), so that a
+  changed graph or type asset rebuilds only what depends on it; two classes
+  that call each other still cannot deadlock on one another's header, because
+  a header declares and never defines. The header is the point: other C++, generated or hand-written, can include it and
   call the graph's events and functions **directly**, under the names they were
   authored with, instead of going through the Runtime's name-based seam. An
   event gets such a method when it is unambiguous (one node, no element filter);

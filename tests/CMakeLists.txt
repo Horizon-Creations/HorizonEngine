@@ -214,6 +214,11 @@ set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # too: deleting one has to re-run the generator, not fail the compile.
 set(HCGEN_HEADERS ${HCGEN_DIR}/hc_registry.h ${HCGEN_DIR}/hcgen_types.h
                   ${HCGEN_DIR}/hcgen.h)
+# One header per Struct/Enum the fixtures define (fixtures.h registerTypes) —
+# a class includes only the definitions it uses, not the umbrella.
+foreach(t E_FixMood E_FixDup S_FixInner S_FixStats)
+    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_type_${t}.h)
+endforeach()
 foreach(c ${HCGEN_CLASSES})
     list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)

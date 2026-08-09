@@ -58,11 +58,13 @@ struct Result
     // interpreted IS the answer. generate() never lets an exception escape; the
     // reason lands in `warnings`.
     bool ok = false;
-    // Per compiled class: hcgen_<Class>.h carries the whole class (bodies
-    // inline, so other C++ can include it and call the graph's events and
-    // functions directly) and hcgen_<Class>.cpp just its factory pair. Plus
-    // hc_registry.h/.cpp, and — when the project defines Structs the classes
-    // touch — the shared hcgen_types.h.
+    // Per compiled class: declarations in hcgen_<Class>.h (so other C++ can
+    // include it and call the graph's events and functions directly),
+    // definitions in hcgen_<Class>.cpp. Plus hc_registry.h/.cpp, hcgen.h (the
+    // whole library in one include, for YOUR code), and — per Struct/Enum
+    // definition the classes touch — one hcgen_type_<Name>.h, with
+    // hcgen_types.h as their umbrella. Generated files include each other
+    // narrowly: a changed graph or type rebuilds only what depends on it.
     std::vector<GeneratedFile> files;
     // node = the graph node the reason anchors to (0 = whole graph) — lets the
     // editor highlight the offending node ("compile error in the graph").

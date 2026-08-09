@@ -591,6 +591,79 @@ TEST_CASE("HcCodegen: a call into another compiled class is emitted direct")
     CHECK(callerCpp.find("->Secret(") == std::string::npos);
 }
 
+// Generated files include NARROWLY, and only compiling them cannot prove it:
+// a fat include compiles just as well, it only costs a rebuild of everything on
+// the next edit. So the emission itself is the assertion.
+TEST_CASE("HcCodegen: generated files include only what they use")
+{
+    TypeFixture fx;
+
+    // Two classes, each on its own type, plus one call from A into B.
+    Graph target;
+    {
+        Node fn; fn.type = NodeType::FunctionEntry; fn.s = "Ping"; fn.access = 0;
+        target.addNode(std::move(fn));
+        addTypedNode(target, NodeType::MakeStruct, kStats);   // uses the struct
+    }
+    Graph caller;
+    {
+        Variable obj; obj.name = "obj"; obj.type = PinType::Ref; obj.className = "target";
+        caller.variables.push_back(obj);
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        const int e = caller.addNode(ev);
+        Node get; get.type = NodeType::GetVariable; get.s = "obj"; get.propType = PinType::Ref;
+        const int gv = caller.addNode(std::move(get));
+        Node call; call.type = NodeType::CallExternal; call.s = "Ping";
+        const int cn = caller.addNode(std::move(call));
+        REQUIRE(caller.connect(e, 0, cn, 0));
+        REQUIRE(caller.connect(gv, 0, cn, 2));
+        addTypedNode(caller, NodeType::ConstEnum, kWeapon);   // uses the enum
+    }
+
+    HE::hccg::Options opt;
+    HE::hccg::Result r = HE::hccg::generate(
+        { { "target", "target", target }, { "caller", "caller", caller } }, opt);
+    REQUIRE(r.ok);
+    REQUIRE(r.fallbacks.empty());
+
+    auto file = [&r](const char* name)
+    {
+        for (const auto& f : r.files) if (f.name == name) return f.contents;
+        return std::string{};
+    };
+    const std::string callerH   = file("hcgen_C_caller.h");
+    const std::string callerCpp = file("hcgen_C_caller.cpp");
+    const std::string targetH   = file("hcgen_C_target.h");
+    REQUIRE_FALSE(callerH.empty());
+    REQUIRE_FALSE(callerCpp.empty());
+    REQUIRE_FALSE(targetH.empty());
+
+    // A class header names the definitions the GRAPH names, and no others. (The
+    // target's MakeStruct also names the struct's own enum FIELD, which is why
+    // only the caller side can assert the absence.)
+    CHECK(callerH.find("#include \"hcgen_type_E_Weapon.h\"") != std::string::npos);
+    CHECK(callerH.find("hcgen_type_S_PlayerStats.h") == std::string::npos);
+    CHECK(targetH.find("#include \"hcgen_type_S_PlayerStats.h\"") != std::string::npos);
+    // And a type header carries its own dependencies, so including the struct is
+    // enough to get the enum its field is declared with.
+    CHECK(file("hcgen_type_S_PlayerStats.h").find("#include \"hcgen_type_E_Weapon.h\"")
+          != std::string::npos);
+
+    // A .cpp names its own header plus the classes it calls into.
+    CHECK(callerCpp.find("#include \"hcgen_C_caller.h\"")  != std::string::npos);
+    CHECK(callerCpp.find("#include \"hcgen_C_target.h\"")  != std::string::npos);
+    CHECK(file("hcgen_C_target.cpp").find("hcgen_C_caller.h") == std::string::npos);
+
+    // Nothing generated goes through an umbrella: those exist for hand-written
+    // C++, and using them here would make every file depend on every other.
+    for (const auto& f : r.files)
+    {
+        if (f.name == "hcgen.h" || f.name == "hcgen_types.h") continue;
+        CHECK(f.contents.find("\"hcgen.h\"")       == std::string::npos);
+        CHECK(f.contents.find("\"hcgen_types.h\"") == std::string::npos);
+    }
+}
+
 TEST_CASE("HcCodegen: a duplicate function name is reported as dead code")
 {
     Graph g;
@@ -678,12 +751,12 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         HE::hccg::Result r = HE::hccg::generate({ { "enum_graph", "enum_graph", g } }, opt);
         REQUIRE(r.ok);
         CHECK(r.fallbacks.empty());
-        // The enum is a real C++ type in the shared header, and the switch
-        // routes on its enumerator — not on a bare 7 nobody can read.
+        // The enum is a real C++ type in its OWN header, and the switch routes
+        // on its enumerator — not on a bare 7 nobody can read.
         bool sawEnumType = false, sawCaseBow = false, sawStaff = false;
         for (const auto& f : r.files)
         {
-            if (f.name == "hcgen_types.h" &&
+            if (f.name == "hcgen_type_E_Weapon.h" &&
                 f.contents.find("enum class E_Weapon : int") != std::string::npos)
                 sawEnumType = true;
             if (f.contents.find("case E_Weapon::Bow:") != std::string::npos) sawCaseBow = true;
@@ -695,7 +768,7 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
     }
 
     // Struct graph: MakeStruct compiles into a real C++ aggregate, emitted once
-    // for the whole run into the shared hcgen_types.h.
+    // for the whole run into its own hcgen_type_S_PlayerStats.h.
     {
         Graph g;
         Node ev; ev.type = NodeType::Event; ev.s = "Go";
@@ -708,7 +781,7 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         bool sawTypes = false, sawStruct = false;
         for (const auto& f : r.files)
         {
-            if (f.name == "hcgen_types.h")
+            if (f.name == "hcgen_type_S_PlayerStats.h")
             {
                 sawTypes = true;
                 sawStruct = f.contents.find("struct S_PlayerStats") != std::string::npos;
