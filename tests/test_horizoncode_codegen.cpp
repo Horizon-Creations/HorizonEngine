@@ -224,6 +224,7 @@ namespace
 	struct ParityPair
 	{
 		World interp, comp;
+		CompiledInstance* compInst = nullptr;   // the compiled side, by pointer
 
 		explicit ParityPair(const std::string& key)
 		{
@@ -251,8 +252,9 @@ namespace
 
 			const CompiledClassEntry* entry = findCompiled(key);
 			REQUIRE(entry != nullptr);
-			comp.id = comp.rt.addCompiled(
-				CompiledPtr(entry->create(), CompiledDeleter{ entry->destroy }), comp.host());
+			CompiledPtr owned(entry->create(), CompiledDeleter{ entry->destroy });
+			compInst = owned.get();   // kept so a test can call its hooks directly
+			comp.id = comp.rt.addCompiled(std::move(owned), comp.host());
 			REQUIRE(comp.id != 0);
 		}
 
@@ -903,4 +905,48 @@ TEST_CASE("codegen parity: gi_caller (the GameInstance resolves without a lookup
 	CHECK(p.var("sneak").f == 0.0f);    // private one still refused, via the seam
 	p.fire("Bump");
 	CHECK(p.var("total").f == 13.0f);   // Set 3 again, then +10
+}
+
+TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
+{
+	// Step A of the native event route: a compiled class overrides the
+	// CompiledInstance hook for every engine event its graph handles. Nothing
+	// delivers through them yet (that is the engine's side), so this drives the
+	// interpreted world BY NAME and the compiled one THROUGH THE HOOK and
+	// demands the two stay indistinguishable — the precondition for switching
+	// the engine's call sites over.
+	ParityPair p("fix/engine_events");
+	REQUIRE(p.compInst != nullptr);
+
+	// Element 0 handler answers for every element; the element-2 one only for 2.
+	p.interp.rt.fireEvent(p.interp.id, "OnClicked", 1, {});
+	p.compInst->onClicked(1);
+	p.checkParity();
+	CHECK(p.var("trace").s == "a");
+
+	p.interp.rt.fireEvent(p.interp.id, "OnClicked", 2, {});
+	p.compInst->onClicked(2);
+	p.checkParity();
+	CHECK(p.var("trace").s == "aab");   // elem 0 handler runs too, then elem 2
+
+	// A typed argument arrives without ever being boxed by the caller.
+	p.interp.rt.fireEvent(p.interp.id, "OnTextChanged", 0, Value::ofString("hi"));
+	p.compInst->onTextChanged(0, "hi");
+	p.checkParity();
+	CHECK(p.var("text").s == "hi");
+
+	p.interp.rt.fireEvent(p.interp.id, "Tick", 0, Value::ofFloat(0.25f));
+	p.compInst->onTick(0.25f);
+	p.checkParity();
+	CHECK(p.var("sum").f == 0.25f);
+
+	p.interp.rt.fireEvent(p.interp.id, "Construct", 0, {});
+	p.compInst->onConstruct();
+	p.checkParity();
+	CHECK(p.var("built").f == 1.0f);
+
+	// An event the graph does not handle is reachable and silent, not a crash.
+	p.compInst->onShutdown();
+	p.compInst->onValueChanged(3, 1.0f);
+	p.checkParity();
 }

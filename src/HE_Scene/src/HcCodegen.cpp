@@ -726,6 +726,62 @@ struct ClassTable
     }
 };
 
+// ── the engine's own events ──────────────────────────────────────────────────
+// Names the engine spells out itself (WidgetManager, GameInstanceHost,
+// HorizonWorld, PlayerHost, Runtime::destroy). A graph handling one of them
+// gets a real override of the CompiledInstance hook, so the class documents its
+// contract and the engine can eventually call it without building a string.
+// `arg` is the type the engine sends (Exec = none); `elem` says whether the call
+// site carries an element id at all — where it does not, only handlers declared
+// for element 0 can ever match, exactly as fireEvent decides it.
+struct EngineEvent { const char* event; const char* hook; PinType arg; bool elem; };
+const EngineEvent kEngineEvents[] = {
+    { "Construct",          "onConstruct",         PT::Exec,   false },
+    { "Destruct",           "onDestruct",          PT::Exec,   false },
+    { "Tick",               "onTick",              PT::Float,  false },
+    { "BeginPlay",          "onBeginPlay",         PT::Exec,   false },
+    { "OnClicked",          "onClicked",           PT::Exec,   true  },
+    { "OnPressed",          "onPressed",           PT::Exec,   true  },
+    { "OnReleased",         "onReleased",          PT::Exec,   true  },
+    { "OnHovered",          "onHovered",           PT::Exec,   true  },
+    { "OnUnhovered",        "onUnhovered",         PT::Exec,   true  },
+    { "OnMouseEnter",       "onMouseEnter",        PT::Exec,   true  },
+    { "OnMouseLeave",       "onMouseLeave",        PT::Exec,   true  },
+    { "OnFocused",          "onFocused",           PT::Exec,   true  },
+    { "OnUnfocused",        "onUnfocused",         PT::Exec,   true  },
+    { "OnTextChanged",      "onTextChanged",       PT::String, true  },
+    { "OnTextCommitted",    "onTextCommitted",     PT::String, true  },
+    { "OnValueChanged",     "onValueChanged",      PT::Float,  true  },
+    { "OnCheckChanged",     "onCheckChanged",      PT::Bool,   true  },
+    { "OnSelectionChanged", "onSelectionChanged",  PT::Int,    true  },
+    { "OnInit",             "onInit",              PT::Exec,   false },
+    { "OnShutdown",         "onShutdown",          PT::Exec,   false },
+    { "OnWindowFocusChanged", "onWindowFocusChanged", PT::Bool, false },
+    { "OnLevelLoaded",      "onLevelLoaded",       PT::Exec,   false },
+    { "OnLevelUnloaded",    "onLevelUnloaded",     PT::Exec,   false },
+};
+const EngineEvent* engineEventFor(const std::string& name)
+{
+    for (const EngineEvent& e : kEngineEvents)
+        if (name == e.event) return &e;
+    return nullptr;
+}
+// The hook's parameter list, and how the typed argument reaches rs.eventArg.
+std::string hookParams(const EngineEvent& e, bool argUsed)
+{
+    std::string p;
+    if (e.elem) p = "int elem";
+    if (e.arg != PT::Exec)
+    {
+        const char* t = e.arg == PT::String ? "const std::string&"
+                      : e.arg == PT::Float  ? "float"
+                      : e.arg == PT::Bool   ? "bool" : "int";
+        if (!p.empty()) p += ", ";
+        p += std::string(t) + (argUsed ? " arg" : "");
+    }
+    return p;
+}
+
 // ── the per-class emitter ─────────────────────────────────────────────────────
 class ClassEmitter
 {
@@ -1004,8 +1060,9 @@ private:
         // unambiguous — several nodes on one name, or an element filter, is a
         // dispatch decision that no single method can stand for.
         for (const auto& [name, nodes] : eventGroups())
-            if (nodes.size() == 1 && nodes[0]->elem == 0)
-                m_publicEv[nodes[0]->id] = unique(cppIdent(name));
+            if (nodes.size() == 1 && nodes[0]->elem == 0 && !engineEventFor(name))
+                m_publicEv[nodes[0]->id] = unique(cppIdent(name));   // engine events
+                                                                     // get the hook instead
         for (const Node* fn : functionEntries())
             m_publicFn[fn->s] = unique(cppIdent(fn->s));
         // A public variable gets a typed accessor: it is how another compiled
@@ -2159,6 +2216,25 @@ private:
                     h += "    void " + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) + ");\n";
             h += "\n";
         }
+        {
+            // One override per engine event this graph handles. The ones it does
+            // not handle need nothing: CompiledInstance's empty default is the
+            // "leave it reachable but silent" case.
+            bool any = false;
+            for (const auto& [name, nodes] : groups)
+            {
+                const EngineEvent* e = engineEventFor(name);
+                if (!e) continue;
+                if (!any)
+                {
+                    h += "    // The engine events this graph handles (the rest keep the\n";
+                    h += "    // empty default from CompiledInstance).\n";
+                    any = true;
+                }
+                h += "    void " + std::string(e->hook) + "(" + hookParams(*e, true) + ") override;\n";
+            }
+            if (any) h += "\n";
+        }
         if (!m_publicVar.empty())
         {
             h += "    // Its public variables, by reference — read and write them directly.\n";
@@ -2308,6 +2384,44 @@ private:
                 }
                 c += "    }\n";
                 first = false;
+            }
+            c += "}\n\n";
+        }
+
+        // The engine-event overrides. Same bodies fireEvent reaches, entered
+        // without a name: one fresh RunState per call, the typed argument boxed
+        // straight into it, and the element filter applied exactly as fireEvent
+        // applies it (a handler on element 0 answers for every element).
+        for (const auto& [name, nodes] : groups)
+        {
+            const EngineEvent* e = engineEventFor(name);
+            if (!e) continue;
+            std::vector<const Node*> reachable;
+            for (const Node* n : nodes)
+                if (e->elem || n->elem == 0) reachable.push_back(n);   // no elem ⇒ only 0 matches
+            if (reachable.empty()) continue;
+            const bool usesArg = m_usesEventArg && e->arg != PT::Exec;
+            const bool usesElem = e->elem &&
+                std::any_of(reachable.begin(), reachable.end(),
+                            [](const Node* n) { return n->elem != 0; });
+            std::string params;
+            if (e->elem) params = usesElem ? "int elem" : "int";
+            if (e->arg != PT::Exec)
+            {
+                const char* t = e->arg == PT::String ? "const std::string&"
+                              : e->arg == PT::Float  ? "float"
+                              : e->arg == PT::Bool   ? "bool" : "int";
+                if (!params.empty()) params += ", ";
+                params += std::string(t) + (usesArg ? " arg" : "");
+            }
+            c += "void " + m_cls + "::" + e->hook + "(" + params + ")\n{\n";
+            if (rsOn) c += "    RunState rs;\n";
+            if (usesArg) c += "    rs.eventArg = hc::toValue(arg);\n";
+            for (const Node* n : reachable)
+            {
+                const std::string call = m_evName.at(n->id) + "(" + rsArg() + ");";
+                if (n->elem == 0) c += "    " + call + "\n";
+                else c += "    if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
             }
             c += "}\n\n";
         }

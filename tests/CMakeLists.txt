@@ -207,7 +207,7 @@ set(HCGEN_CLASSES
     functions_recursive foreach_arrays events_multi widget_props limits_smoke
     functions_locals engine_pure_multiout engine_exec_cached
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
-    latent_flow enums structs GameInstance gi_caller
+    latent_flow enums structs GameInstance gi_caller engine_events
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

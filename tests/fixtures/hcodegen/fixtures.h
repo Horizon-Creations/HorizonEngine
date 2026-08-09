@@ -1394,6 +1394,48 @@ inline HE::hccg::ClassSource fxGiCaller()
     return f.done("gi_caller");
 }
 
+// 24 — the engine's own events: element filters, typed arguments, and names the
+// engine spells out itself. Drives the CompiledInstance hooks.
+inline HE::hccg::ClassSource fxEngineEvents()
+{
+    Fx f;
+    f.var("trace", PT::String);
+    f.var("text", PT::String);
+    f.var("sum", PT::Float);
+    f.var("built", PT::Float);
+
+    auto append = [&f](int ev, const char* what) {
+        const int s = f.setVar("trace", PT::String);
+        const int cat = f.op(NT::Concat);
+        f.data(f.getVar("trace", PT::String), 0, cat, 0);
+        f.data(f.constS(what), 0, cat, 1);
+        f.data(cat, 0, s, 0);
+        f.exec(ev, s);
+    };
+    // Any element, then element 2 only — the same rule fireEvent applies.
+    append(f.event("OnClicked", 0), "a");
+    append(f.event("OnClicked", 2), "b");
+
+    // A typed argument straight from the engine.
+    const int evT = f.event("OnTextChanged", 0, true, PT::String);
+    const int sText = f.setVar("text", PT::String);
+    f.data(evT, 0, sText, 0);
+    f.exec(evT, sText);
+
+    const int evTick = f.event("Tick", 0, true, PT::Float);
+    const int sSum = f.setVar("sum", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("sum", PT::Float), 0, a, 0);
+      f.data(evTick, 0, a, 1); f.data(a, 0, sSum, 0); }
+    f.exec(evTick, sSum);
+
+    // An event with no argument at all.
+    const int evC = f.event("Construct");
+    const int sB = f.setVar("built", PT::Float);
+    f.g.findNode(sB)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(evC, sB);
+    return f.done("engine_events");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1404,7 +1446,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxEnginePureMultiout(), fxEngineExecCached(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
-        fxGameInstance(), fxGiCaller(),
+        fxGameInstance(), fxGiCaller(), fxEngineEvents(),
     };
 }
 

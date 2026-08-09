@@ -60,6 +60,51 @@ public:
     virtual const std::vector<CompiledEventInfo>& eventInfos() const
     { static const std::vector<CompiledEventInfo> kNone; return kNone; }
 
+    // ── the engine's own events, as methods ─────────────────────────────────
+    // These names are not data: each is a string LITERAL at exactly one place in
+    // the engine (WidgetManager, GameInstanceHost, HorizonWorld, PlayerHost,
+    // Runtime::destroy). A compiled class overrides the ones its graph handles;
+    // the rest keep the empty default, so a class costs nothing for an event it
+    // does not care about — and its header shows at a glance which ones it does.
+    //
+    // `elem` is the widget element the event happened on (0 = the widget
+    // itself); a handler declared for element 0 answers for every element, which
+    // is the same rule fireEvent applies. The typed argument is what the engine
+    // sends, so nothing has to be boxed into a Value to get here.
+    //
+    // NOTE: Construct/Destruct are ordinary hooks, NOT the C++ constructor and
+    // destructor. The Context is bound AFTER construction (Runtime::addCompiled)
+    // and the instance is still registered while Destruct runs — a C++ ctor/dtor
+    // sits outside both windows, and graph nodes that touch the world would
+    // silently do nothing there.
+    virtual void onConstruct() {}
+    virtual void onDestruct() {}
+    virtual void onTick(float dt) { (void)dt; }
+    virtual void onBeginPlay() {}
+    // Widget pointer/focus events.
+    virtual void onClicked(int elem)     { (void)elem; }
+    virtual void onPressed(int elem)     { (void)elem; }
+    virtual void onReleased(int elem)    { (void)elem; }
+    virtual void onHovered(int elem)     { (void)elem; }
+    virtual void onUnhovered(int elem)   { (void)elem; }
+    virtual void onMouseEnter(int elem)  { (void)elem; }
+    virtual void onMouseLeave(int elem)  { (void)elem; }
+    virtual void onFocused(int elem)     { (void)elem; }
+    virtual void onUnfocused(int elem)   { (void)elem; }
+    // Widget value events — the argument is the new value.
+    virtual void onTextChanged(int elem, const std::string& text)   { (void)elem; (void)text; }
+    virtual void onTextCommitted(int elem, const std::string& text) { (void)elem; (void)text; }
+    virtual void onValueChanged(int elem, float value)     { (void)elem; (void)value; }
+    virtual void onCheckChanged(int elem, bool checked)    { (void)elem; (void)checked; }
+    virtual void onSelectionChanged(int elem, int index)   { (void)elem; (void)index; }
+    // GameInstance lifecycle.
+    virtual void onInit() {}
+    virtual void onShutdown() {}
+    virtual void onWindowFocusChanged(bool focused) { (void)focused; }
+    // Level script lifecycle.
+    virtual void onLevelLoaded() {}
+    virtual void onLevelUnloaded() {}
+
     // ── execution (mirrors Runner's entry points) ───────────────────────────
     virtual void fireEvent(const std::string& name, int elem, const Value& arg)
     { (void)name; (void)elem; (void)arg; }
