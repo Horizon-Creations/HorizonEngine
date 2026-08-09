@@ -85,14 +85,22 @@ void DrawFooter(AppContext& ctx)
 	const std::string label = currentLabel(st);
 	const std::string count = countText(st);
 
+	// One shared line box for all three items. Every item's Y is set explicitly
+	// from this baseline rather than nudged relatively, because SameLine() does
+	// NOT continue from wherever the cursor happens to be: it snaps Y back to
+	// the START OF THE PREVIOUS ITEM'S LINE. So offsetting the cursor for the
+	// bar and then "undoing" it afterwards has no effect at all — the following
+	// SameLine re-applies the bar's own (lowered) line Y, which is what dragged
+	// the "n/m" count down out of alignment with the label next to it.
+	const float baseY = ImGui::GetCursorPosY();
+	// The bar is deliberately shorter than a text line (see kBarH), so it needs
+	// centring on that line; the text items already sit on it.
+	const float barY  = baseY + (ImGui::GetTextLineHeight() - kBarH) * 0.5f;
+
 	ImGui::TextUnformatted(label.c_str());
+
 	ImGui::SameLine(0.0f, kGap);
-
-	// Centre the short bar on the text's own line box so label, bar and count
-	// share one visual baseline instead of staggering.
-	const float yOffset = (ImGui::GetTextLineHeight() - kBarH) * 0.5f;
-	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + yOffset);
-
+	ImGui::SetCursorPosY(barY);
 	// A download whose size the server never reported has no meaningful
 	// fraction. ImGui renders a negative fraction as an indeterminate marquee,
 	// which is the honest answer — a bar frozen at 0% reads as "stuck".
@@ -103,9 +111,9 @@ void DrawFooter(AppContext& ctx)
 	ImGui::ProgressBar(known ? frac : -1.0f * static_cast<float>(ImGui::GetTime()),
 	                   ImVec2(kBarW, kBarH), "");
 	const bool barHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal);
-	ImGui::SetCursorPosY(ImGui::GetCursorPosY() - yOffset);
 
 	ImGui::SameLine(0.0f, kGap);
+	ImGui::SetCursorPosY(baseY);   // back onto the label's line, not the bar's
 	ImGui::TextDisabled("%s", count.c_str());
 
 	if (barHovered || ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
