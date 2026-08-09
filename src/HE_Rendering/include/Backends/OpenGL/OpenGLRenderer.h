@@ -332,6 +332,11 @@ private:
 	unsigned int GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
 	                                       const std::string& vertBody = {},
 	                                       const MaterialShaderVariant* precompiled = nullptr);
+	// Create the three UBOs every material program draws through (U / HeLighting /
+	// HeParams) unless they already exist. Called by BOTH material-program getters
+	// before they can return — including via a memo hit or the on-disk program
+	// cache, neither of which compiles anything (see the definition).
+	void         EnsureMaterialUBOs();
 	bool         resolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                   std::string& vertBody);
 	// Deferred G-buffer variant (customShaderGBufGlsl): false → the material has

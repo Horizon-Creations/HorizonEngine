@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
@@ -4100,6 +4101,33 @@ static std::string injectSkyFunc(const char* src)
 	return s;
 }
 
+// KHR_debug sink (see the HE_GL_DEBUG block in Initialize). Runs on the calling
+// thread while debug output is synchronous, so the message names the GL call that
+// produced it — the one thing the end-of-frame glGetError below can never say.
+static void APIENTRY HeGLDebugMessage(GLenum source, GLenum type, GLuint id, GLenum severity,
+                                      GLsizei /*length*/, const GLchar* message,
+                                      const void* /*userParam*/)
+{
+	const char* sev = severity == GL_DEBUG_SEVERITY_HIGH   ? "HIGH"
+	                : severity == GL_DEBUG_SEVERITY_MEDIUM ? "MEDIUM"
+	                : severity == GL_DEBUG_SEVERITY_LOW    ? "LOW"
+	                                                       : "NOTIFY";
+	char buf[1024];
+	std::snprintf(buf, sizeof(buf),
+	              "OpenGL debug [%s] source=0x%04X type=0x%04X id=%u: %s",
+	              sev, static_cast<unsigned>(source), static_cast<unsigned>(type),
+	              id, message ? message : "");
+	// Severity decides the LEVEL, so a real error stays findable. Drivers emit a
+	// steady LOW stream of hints (buffer usage, renderbuffer allocation, unbound
+	// texture units) that would otherwise bury the one message you turned this on
+	// for — those land at Info; only MEDIUM and above reach the warning stream.
+	const Logger::LogLevel level =
+		(type == GL_DEBUG_TYPE_ERROR || severity == GL_DEBUG_SEVERITY_HIGH) ? Logger::LogLevel::Error
+		: severity == GL_DEBUG_SEVERITY_MEDIUM                              ? Logger::LogLevel::Warning
+		                                                                    : Logger::LogLevel::Info;
+	Logger::LogTo(HE::Log::Cat::RHI, level, buf);
+}
+
 OpenGLRenderer::OpenGLRenderer()  = default;
 OpenGLRenderer::~OpenGLRenderer() = default;
 
@@ -4121,6 +4149,28 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s",
 	            m_giSupported ? "OpenGLRenderer: GL 4.3+ — GI (compute) supported"
 	                          : "OpenGLRenderer: GL < 4.3 — GI unavailable (CSM/AO fallback)");
+
+	// ── HE_GL_DEBUG=1: driver-reported GL errors, named at the offending call ──
+	// GL errors are otherwise silent until the one-shot glGetError at the end of
+	// DrawScene, which reports a single code for the whole frame and names no
+	// call — enough to know something broke, useless for finding what. KHR_debug
+	// (core in 4.3) hands over the driver's own message; SYNCHRONOUS keeps the
+	// callback on the calling thread, so a breakpoint in HeGLDebugMessage lands
+	// in the culprit's stack. Off by default: the synchronous mode serialises the
+	// driver. Primary context only — that is where the scene is drawn.
+	if (const char* gd = std::getenv("HE_GL_DEBUG");
+	    gd && *gd && GLAD_GL_VERSION_4_3 && glDebugMessageCallback)
+	{
+		glEnable(GL_DEBUG_OUTPUT);
+		glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+		glDebugMessageCallback(&HeGLDebugMessage, nullptr);
+		// Everything except the chatty NOTIFICATION stream (buffer-hint chatter).
+		glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+		glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION,
+		                      0, nullptr, GL_FALSE);
+		HE_LOG_INFO(RHI, "%s",
+			"OpenGLRenderer: HE_GL_DEBUG — KHR_debug output installed (synchronous)");
+	}
 
 	m_shaderManager = OpenGLShaderManager();
 
@@ -4343,10 +4393,36 @@ void glSaveCachedProgram(const std::filesystem::path& path, GLuint prog)
 }
 } // namespace
 
+// The three UBOs every material draw feeds through: per-object "U" (mvp/model/
+// colour/flags/pbr), the shared "HeLighting" block and "HeParams" (the graph's
+// exposed parameters). Created on demand — a session that never touches a graph
+// material never needs them — but NOT from any one build path: a program handed
+// back by the memo table or restored from the on-disk binary cache is as much a
+// user of these buffers as a freshly linked one. Left at 0 they poison every
+// material draw: glBufferSubData against the default buffer is a
+// GL_INVALID_OPERATION, glBindBufferBase pins block "U" to buffer 0, and the
+// draw runs with no MVP — the object is issued and lands nowhere on screen.
+void OpenGLRenderer::EnsureMaterialUBOs()
+{
+	if (m_matObjUBO) return;
+	glGenBuffers(1, &m_matObjUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
+	glBufferData(GL_UNIFORM_BUFFER, 176, nullptr, GL_DYNAMIC_DRAW); // mat4 mvp+model + 3×vec4
+	glGenBuffers(1, &m_matLightUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
+	glBufferData(GL_UNIFORM_BUFFER,
+		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
+	glGenBuffers(1, &m_matParamUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
+	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+}
+
 unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::string& fragGlsl,
                                                        const std::string& vertBody,
                                                        const MaterialShaderVariant* precompiled)
 {
+	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
 	if (auto it = m_materialPrograms.find(key); it != m_materialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
@@ -4469,22 +4545,6 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
 
-	// Lazily create the shared per-object + lighting UBOs on first material.
-	if (!m_matObjUBO)
-	{
-		glGenBuffers(1, &m_matObjUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-		glBufferData(GL_UNIFORM_BUFFER, 176, nullptr, GL_DYNAMIC_DRAW); // mat4 mvp+model + 3×vec4
-		glGenBuffers(1, &m_matLightUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
-		glBufferData(GL_UNIFORM_BUFFER,
-			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
-		glGenBuffers(1, &m_matParamUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-		glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
-		glBindBuffer(GL_UNIFORM_BUFFER, 0);
-	}
-
 	m_materialPrograms[key] = program; // cache success AND failure (0)
 	return program;
 }
@@ -4551,6 +4611,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	uint64_t key = 0; std::string fragGlsl, vertBody;
 	if (!resolveMaterialShader(materialId, key, fragGlsl, vertBody))
 		return 0; // no custom shader → solid-color quad
+	// A UI quad can be the first material user of the session; same "before every
+	// return, memo hit included" rule as the mesh path.
+	EnsureMaterialUBOs();
 	if (auto it = m_uiMaterialPrograms.find(key); it != m_uiMaterialPrograms.end()) return it->second;
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
@@ -4606,23 +4669,6 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 	else
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: UI material shader cross-compile failed\n") + v.log + f.log).c_str());
-
-	// Lazily create the shared per-object + lighting UBOs on first material (a UI
-	// quad can be the first material user of the session).
-	if (!m_matObjUBO)
-	{
-		glGenBuffers(1, &m_matObjUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
-		glBufferData(GL_UNIFORM_BUFFER, 176, nullptr, GL_DYNAMIC_DRAW); // mat4 mvp+model + 3×vec4
-		glGenBuffers(1, &m_matLightUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
-		glBufferData(GL_UNIFORM_BUFFER,
-			static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
-		glGenBuffers(1, &m_matParamUBO);
-		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-		glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
-		glBindBuffer(GL_UNIFORM_BUFFER, 0);
-	}
 
 	m_uiMaterialPrograms[key] = program; // cache success AND failure (0)
 	return program;
@@ -9992,10 +10038,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	{
 		s_checkedFirstFrame = true;
 		const GLenum err = glGetError();
-		Logger::LogTo(HE::Log::Cat::RHI, err == GL_NO_ERROR ? Logger::LogLevel::Info : Logger::LogLevel::Error,
-			("OpenGLRenderer: first scene frame drew "
-			 + std::to_string(m_renderWorld.objects.size()) + " object(s), glGetError=0x"
-			 + std::to_string(err)).c_str());
+		// Objects AND draws: an object that reaches the render world but issues no
+		// draw, and one that draws into nothing, are different defects. The error
+		// code is printed as real hex (it used to be decimal behind a literal "0x",
+		// so GL_INVALID_OPERATION read as the nonexistent "0x1282"). Set
+		// HE_GL_DEBUG=1 to have the driver name the call behind a non-zero code.
+		char msg[192];
+		std::snprintf(msg, sizeof(msg),
+			"OpenGLRenderer: first scene frame drew %zu object(s) in %u draw call(s), glGetError=0x%04X",
+			m_renderWorld.objects.size(), m_counters.draws, static_cast<unsigned>(err));
+		Logger::LogTo(HE::Log::Cat::RHI,
+			err == GL_NO_ERROR ? Logger::LogLevel::Info : Logger::LogLevel::Error, msg);
 	}
 }
 
