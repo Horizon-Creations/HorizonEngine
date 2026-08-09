@@ -40,16 +40,27 @@ class HE_API CompiledInstance
 public:
     virtual ~CompiledInstance();
 
+    // Everything below classKey has a default that says "this class has none of
+    // that", so a generated class only spells out what its graph actually
+    // contains — a graph with no functions carries no callFunction, one with no
+    // variables no variable reflection. An empty answer here is already the
+    // Runtime's "not mine" case, so the defaults are the same behaviour the
+    // emitted-but-empty overrides had.
+
     // ── class metadata ───────────────────────────────────────────────────────
     virtual const char* classKey() const = 0;   // canonical registry key
-    virtual const std::vector<CompiledVarInfo>&   varInfos()   const = 0;
-    virtual const std::vector<CompiledEventInfo>& eventInfos() const = 0;
+    virtual const std::vector<CompiledVarInfo>& varInfos() const
+    { static const std::vector<CompiledVarInfo> kNone; return kNone; }
+    virtual const std::vector<CompiledEventInfo>& eventInfos() const
+    { static const std::vector<CompiledEventInfo> kNone; return kNone; }
 
     // ── execution (mirrors Runner's entry points) ───────────────────────────
-    virtual void fireEvent(const std::string& name, int elem, const Value& arg) = 0;
+    virtual void fireEvent(const std::string& name, int elem, const Value& arg)
+    { (void)name; (void)elem; (void)arg; }
     virtual bool callFunction(const std::string& name, bool requirePublic,
                               const std::vector<Value>& args,
-                              std::vector<Value>* results) = 0;
+                              std::vector<Value>* results)
+    { (void)name; (void)requirePublic; (void)args; (void)results; return false; }
     // Resume the exec chain after a Delay node (Runner::resumeFrom's mirror,
     // called by the Runtime when the timer expires). Default no-op — only
     // classes containing Delay nodes override it.
@@ -59,12 +70,13 @@ public:
     // getVariable is only meaningful for declared names (see varInfos);
     // setVariable returns false for an unknown name so the Runtime can route it
     // to its per-instance overflow store (undeclared-Set semantics).
-    virtual Value getVariable(const std::string& name) const = 0;
-    virtual bool  setVariable(const std::string& name, const Value& v) = 0;
-    virtual void  reseedVariables() = 0;   // back to declared defaults
+    virtual Value getVariable(const std::string& name) const { (void)name; return Value{}; }
+    virtual bool  setVariable(const std::string& name, const Value& v)
+    { (void)name; (void)v; return false; }
+    virtual void  reseedVariables() {}   // back to declared defaults
     // Every live reference held in Ref-typed members (incl. Ref arrays) — the
     // compiled equivalent of the GC's var-store scan.
-    virtual void  collectRefs(std::vector<uint32_t>& out) const = 0;
+    virtual void  collectRefs(std::vector<uint32_t>& out) const { (void)out; }
 
     // ── wiring (Runtime calls this right after registration) ────────────────
     void bindContext(Context ctx) { m_ctx = std::move(ctx); }

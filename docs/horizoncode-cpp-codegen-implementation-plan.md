@@ -1275,13 +1275,30 @@ graph compiles to something that reads like hand-written C++:
   This is why bodies are translated BEFORE the class is assembled.
 - With no guard, no event arg and no exec-cache slots, **`RunState` itself
   disappears**, and with it the `rs` parameter on every body.
-- **No generated headers.** One `.cpp` per class, the class in an anonymous
-  namespace, and only the factory pair (`create_C_X`/`destroy_C_X`) visible;
-  `hc_registry.cpp` declares them. §5.4's `hcgen_Foo.h/.cpp` is superseded.
+- **A header per class, carrying the whole class** (bodies inline — a generated
+  class has no reason to spread a declaration and a definition over two files);
+  the `.cpp` holds only the factory pair `hc_registry.cpp` links against. The
+  header is the point: other C++, generated or hand-written, can include it and
+  call the graph's events and functions **directly**, under the names they were
+  authored with, instead of going through the Runtime's name-based seam. An
+  event gets such a method when it is unambiguous (one node, no element filter);
+  functions always do, with their authored parameter names.
+- Because the classes now have external linkage and live in headers, the
+  generated project builds with **hidden visibility** and exports only
+  `HE_HorizonCodeGenClasses`. Otherwise a host binary that compiled the same
+  headers would share the library's inline statics — and lose them on unload.
+- **The declared variables are ONE table** (`hc::VarSlot`, a member pointer
+  type-erased through `hc::slot<&C::v_x>`), which `varInfos`, `getVariable`,
+  `setVariable`, `reseedVariables` and `collectRefs` all read. The name-based
+  seam is the Runtime's ABI and cannot go away; spelling it out five times can.
+- `CompiledInstance`'s methods have defaults meaning "this class has none of
+  that", so a graph with no functions carries no `callFunction`, one with no
+  variables no variable reflection at all.
 - A parameter a body never touches loses its NAME rather than collecting a
   `(void)x;`.
 
-For the `dispatch_sink` fixture that is 122 lines across two files → 96 in one.
+For the `dispatch_sink` fixture: 122 lines across two files → 92, and the
+variable-heavy `variables` fixture 139 → 103.
 
 ## Related
 - `horizoncode-cpp-codegen-plan.md` — the design this implements (§ mapping:

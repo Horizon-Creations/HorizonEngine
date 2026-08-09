@@ -42,10 +42,11 @@ struct Result
     // a graph couldn't be compiled — that is a Fallback. generate() never lets an
     // exception escape; the reason lands in `warnings`.
     bool ok = false;
-    // One self-contained hcgen_<Class>.cpp per compiled class (the class itself
-    // is internal to it; only its factory pair is visible), hc_registry.h/.cpp,
-    // and — when the project defines Structs the classes touch — the shared
-    // hcgen_types.h. No per-class headers.
+    // Per compiled class: hcgen_<Class>.h carries the whole class (bodies
+    // inline, so other C++ can include it and call the graph's events and
+    // functions directly) and hcgen_<Class>.cpp just its factory pair. Plus
+    // hc_registry.h/.cpp, and — when the project defines Structs the classes
+    // touch — the shared hcgen_types.h.
     std::vector<GeneratedFile> files;
     // node = the graph node the reason anchors to (0 = whole graph) — lets the
     // editor highlight the offending node ("compile error in the graph").

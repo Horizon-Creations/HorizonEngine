@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include "HorizonCode.h"
+#include "HorizonCodeCompiled.h"   // VarSlot binds members of a CompiledInstance
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -295,6 +296,115 @@ inline void scheduleResume(const Context& c, int nodeId, float seconds)
 inline bool isValidRef(const Context& c, uint32_t target)
 { return c.isValid && c.isValid(target); }
 HE_API void print(const std::string& s);       // "[Widget] " + Logger Info, like Print
+
+// ── declared variables: one table instead of four name chains ───────────────
+// The Runtime reaches a compiled class's variables BY NAME (Get/SetExternal,
+// savegames, the GC's Ref scan, reseed) — that seam cannot go away. What can go
+// is spelling it out five times: a member pointer type-erased through
+// SlotAccess gives varInfos/getVariable/setVariable/reseedVariables/collectRefs
+// one table row per variable instead of a branch each.
+struct VarSlot
+{
+    const char* name;
+    PinType     type;
+    bool        isArray;
+    int         access;      // 0 public, 1 private — mirrors Variable::access
+    const char* typeName;    // Enum/Struct: the definition path, "" otherwise
+    Value       def;         // the declared default, re-assigned on reseed
+    Value (*get)(const HorizonCode::CompiledInstance*);
+    void  (*set)(HorizonCode::CompiledInstance*, const Value&);
+};
+
+// coerce<T> is a function template, so it cannot be partially specialized for
+// arrays — this class template can, which is what lets SlotAccess stay generic.
+template <typename T> struct CoerceTo
+{ static T from(const Value& v) { return coerce<T>(v); } };
+template <typename T> struct CoerceTo<Array<T>>
+{ static Array<T> from(const Value& v) { return coerceArray<T>(v); } };
+
+template <auto M> struct SlotAccess;
+template <class C, class T, T C::*M>
+struct SlotAccess<M>
+{
+    static Value get(const HorizonCode::CompiledInstance* s)
+    { return toValue(static_cast<const C*>(s)->*M); }          // ADL finds struct converters
+    static void set(HorizonCode::CompiledInstance* s, const Value& v)
+    { static_cast<C*>(s)->*M = CoerceTo<T>::from(v); }
+};
+
+template <auto M>
+inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
+                    const char* typeName, Value def)
+{
+    return VarSlot{ name, type, isArray, access, typeName, std::move(def),
+                    &SlotAccess<M>::get, &SlotAccess<M>::set };
+}
+
+// Enum members are plain ints in C++, so the Value coming back out has to be
+// re-stamped with the identity the declaration carries. Scalars get the
+// definition path; ARRAYS deliberately do not — the interpreter's own array
+// builders (variableDefaultValue, ArrayAdd) leave it empty too.
+inline Value slotRead(const VarSlot& s, const HorizonCode::CompiledInstance* self)
+{
+    Value v = s.get(self);
+    if (s.type != PinType::Enum) return v;
+    v.type = PinType::Enum;
+    if (v.isArray) for (Value& it : v.items) it.type = PinType::Enum;
+    else           v.typeName = s.typeName;
+    return v;
+}
+inline void slotWrite(const VarSlot& s, HorizonCode::CompiledInstance* self, const Value& v)
+{
+    // coerce(v, Enum) is NOT coerce(v, Int): a Bool converts into an int but not
+    // into an enum (§3.3). Normalize first, then the member's own coerce<int>
+    // passes the value straight through.
+    if (s.type == PinType::Enum && !s.isArray) s.set(self, Value::ofInt(coerceEnum(v)));
+    else                                       s.set(self, v);
+}
+
+using VarSlots = std::vector<VarSlot>;
+
+inline const VarSlot* findSlot(const VarSlots& slots, const std::string& name)
+{
+    for (const VarSlot& s : slots) if (name == s.name) return &s;
+    return nullptr;
+}
+inline Value getVar(const VarSlots& slots, const HorizonCode::CompiledInstance* self,
+                    const std::string& name)
+{
+    const VarSlot* s = findSlot(slots, name);
+    return s ? slotRead(*s, self) : Value{};
+}
+inline bool setVar(const VarSlots& slots, HorizonCode::CompiledInstance* self,
+                   const std::string& name, const Value& v)
+{
+    const VarSlot* s = findSlot(slots, name);
+    if (!s) return false;                      // unknown → the Runtime's overflow store
+    slotWrite(*s, self, v);
+    return true;
+}
+inline void reseedVars(const VarSlots& slots, HorizonCode::CompiledInstance* self)
+{ for (const VarSlot& s : slots) slotWrite(s, self, s.def); }
+// The GC marks Ref-TYPED entries only — it does not look inside structs, so
+// neither does this (Runtime::retainOnlyReachableFrom).
+inline void collectVarRefs(const VarSlots& slots, const HorizonCode::CompiledInstance* self,
+                           std::vector<uint32_t>& out)
+{
+    for (const VarSlot& s : slots)
+    {
+        if (s.type != PinType::Ref) continue;
+        const Value v = s.get(self);
+        if (!v.isArray) { if (v.ref != 0u) out.push_back(v.ref); }
+        else for (const Value& it : v.items) if (it.ref != 0u) out.push_back(it.ref);
+    }
+}
+inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slots)
+{
+    std::vector<HorizonCode::CompiledVarInfo> out;
+    out.reserve(slots.size());
+    for (const VarSlot& s : slots) out.push_back({ s.name, s.type, s.isArray, s.access });
+    return out;
+}
 
 // ── run guards (§3.6, sharpened) ─────────────────────────────────────────────
 HE_API void warnStepLimit();   // the interpreter's step-limit warning text

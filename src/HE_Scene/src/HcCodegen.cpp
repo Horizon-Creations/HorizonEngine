@@ -599,15 +599,19 @@ public:
                  const Options& opt, const TypeTable& tt, std::vector<std::string>& warnings)
         : m_src(src), m_g(src.graph), m_cls(className), m_opt(opt), m_tt(tt), m_warnings(warnings) {}
 
-    // One self-contained translation unit per class (plan §5.4). There is no
-    // generated header: the class is internal to its .cpp and the manifest only
-    // ever needs the two factory functions, declared in hc_registry.cpp.
-    void run(std::string& impl)
+    // A header carrying the whole class (its bodies inline — a generated class
+    // has no reason to spread a declaration and a definition over two files),
+    // and a .cpp holding just the factory pair the manifest links against.
+    // The header is what lets other C++ — generated or hand-written — include
+    // the class and call its events and functions directly, instead of through
+    // the Runtime's name-based seam.
+    void run(std::string& header, std::string& impl)
     {
         validate();
         buildNames();
         buildSlots();
-        emitImpl(impl);
+        emitClass(header);
+        emitFactory(impl);
     }
 
 private:
@@ -645,6 +649,8 @@ private:
     std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
     std::unordered_map<std::string, std::string> m_fnName;     // function → f_*
     std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
+    std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
+    std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
 
@@ -817,7 +823,15 @@ private:
     // ── name mangling (deterministic, collision-suffixed) ────────────────────
     void buildNames()
     {
-        std::unordered_set<std::string> used;
+        // ONE namespace for everything that lands in the class: members, bodies,
+        // and — new — the public methods named after the graph's own events and
+        // functions. Seeded with the CompiledInstance surface so an event called
+        // "fireEvent" cannot shadow the override it is dispatched from.
+        std::unordered_set<std::string> used = {
+            "classKey", "varInfos", "eventInfos", "fireEvent", "callFunction",
+            "getVariable", "setVariable", "reseedVariables", "collectRefs",
+            "resumeFrom", "bindContext", "slots", "RunState", "m_ctx",
+        };
         auto unique = [&used](const std::string& base) { return uniqueName(base, used); };
         for (const auto& v : m_g.variables)
         {
@@ -830,7 +844,17 @@ private:
                 m_fnName[n.s] = unique("f_" + sanitize(n.s));
             if (n.type == NT::Event)
                 m_evName[n.id] = unique("ev_" + sanitize(n.s) + "_" + std::to_string(n.id));
+            if (n.type == NT::DoOnce || n.type == NT::FlipFlop) used.insert(stateMember(n.id));
+            if (n.type == NT::Delay) used.insert("resume_" + std::to_string(n.id));
         }
+        // Public, authored-name methods. An event only gets one when it is
+        // unambiguous — several nodes on one name, or an element filter, is a
+        // dispatch decision that no single method can stand for.
+        for (const auto& [name, nodes] : eventGroups())
+            if (nodes.size() == 1 && nodes[0]->elem == 0)
+                m_publicEv[nodes[0]->id] = unique(cppIdent(name));
+        for (const Node* fn : functionEntries())
+            m_publicFn[fn->s] = unique(cppIdent(fn->s));
     }
 
     // ── RunState slots: one field per exec-cached data-out (plan §5.4) ───────
@@ -1554,6 +1578,13 @@ private:
         return sig;
     }
 
+    std::vector<std::pair<int, std::string>> sortedPublicEv() const
+    {
+        std::vector<std::pair<int, std::string>> evs(m_publicEv.begin(), m_publicEv.end());
+        std::sort(evs.begin(), evs.end());
+        return evs;
+    }
+
     std::vector<std::pair<int, std::string>> sortedEvNames() const
     {
         std::vector<std::pair<int, std::string>> evs(m_evName.begin(), m_evName.end());
@@ -1607,7 +1638,53 @@ private:
         return out;
     }
 
-    void emitImpl(std::string& c)
+    // The public, authored-name signature of a graph function: the same
+    // parameters, named as the graph names them, results by reference.
+    std::string publicFnParams(const Node& fn) const
+    {
+        std::string sig;
+        std::unordered_set<std::string> used;
+        auto add = [&](const std::string& type, const std::string& name)
+        { if (!sig.empty()) sig += ", "; sig += type + " " + uniqueName(cppIdent(name), used); };
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            add(cppType(trOf(fn.params[i].type, fn.params[i].isArray, fn.params[i].typeName)),
+                fn.params[i].name.empty() ? "p" + std::to_string(i) : fn.params[i].name);
+        for (size_t i = 0; i < fn.results.size(); ++i)
+            add(cppType(trOf(fn.results[i].type, fn.results[i].isArray, fn.results[i].typeName)) + "&",
+                fn.results[i].name.empty() ? "r" + std::to_string(i) : fn.results[i].name);
+        return sig;
+    }
+    // Its forwarding body: names in declaration order, straight into the
+    // internal body function.
+    std::string publicFnForward(const Node& fn) const
+    {
+        std::vector<std::string> names;
+        std::unordered_set<std::string> used;
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            names.push_back(uniqueName(cppIdent(fn.params[i].name.empty()
+                ? "p" + std::to_string(i) : fn.params[i].name), used));
+        for (size_t i = 0; i < fn.results.size(); ++i)
+            names.push_back(uniqueName(cppIdent(fn.results[i].name.empty()
+                ? "r" + std::to_string(i) : fn.results[i].name), used));
+        std::string call = m_fnName.at(fn.s) + "(" + rsArg();
+        for (size_t i = 0; i < names.size(); ++i)
+            call += (i || useRunState() ? ", " : "") + names[i];
+        return call + ");";
+    }
+
+    void emitFactory(std::string& c)
+    {
+        const std::string ns = m_opt.namespaceName;
+        c += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
+        c += "#include \"hcgen_" + m_cls + ".h\"\n\n";
+        c += "namespace " + ns + " {\n\n";
+        c += "// The manifest's factory pair (hc_registry.cpp links against these).\n";
+        c += "HorizonCode::CompiledInstance* create_" + m_cls + "() { return new " + m_cls + "(); }\n";
+        c += "void destroy_" + m_cls + "(HorizonCode::CompiledInstance* p) { delete p; }\n\n";
+        c += "} // namespace " + ns + "\n";
+    }
+
+    void emitClass(std::string& c)
     {
         const std::string ns = m_opt.namespaceName;
 
@@ -1653,6 +1730,7 @@ private:
 
         c += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
         c += "// Source: " + m_src.label + " (key " + m_src.key + ")\n";
+        c += "#pragma once\n";
         c += "#include <HorizonCode/HorizonCodeCompiled.h>\n";
         c += "#include <HorizonCode/HorizonCodeGenSupport.h>\n";
         {
@@ -1660,47 +1738,70 @@ private:
             collectStructPaths(m_g, used);
             if (!used.empty()) c += "#include \"hcgen_types.h\"\n";
         }
-        c += "\nnamespace " + ns + " {\nnamespace {\n\n";
+        c += "\nnamespace " + ns + " {\n\n";
         c += "class " + m_cls + " final : public HorizonCode::CompiledInstance\n{\npublic:\n";
+
+        // ── the graph's own surface, under the names it was authored with ──
+        if (!m_publicEv.empty() || !m_publicFn.empty())
+        {
+            c += "    // This graph's own events and functions — call these straight from C++.\n";
+            for (const auto& [id, name] : sortedPublicEv())
+                c += "    void " + name + "() { " + (rsOn ? "RunState rs; " : "") +
+                     m_evName.at(id) + "(" + rsArg() + "); }\n";
+            for (const Node* fn : fns)
+            {
+                if (!m_publicFn.count(fn->s)) continue;
+                c += "    void " + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) + ") { " +
+                     (rsOn ? "RunState rs; " : "") + publicFnForward(*fn) + " }\n";
+            }
+            c += "\n";
+        }
 
         c += "    const char* classKey() const override { return " + strLit(m_src.key) + "; }\n\n";
 
-        // varInfos: scope-0 declared variables only (locals are invisible, §13.1).
-        c += "    const std::vector<HorizonCode::CompiledVarInfo>& varInfos() const override\n    {\n";
-        c += "        static const std::vector<HorizonCode::CompiledVarInfo> kVars";
-        if (varCount == 0) c += ";\n";
-        else
+        // The declared variables, ONE table row each: the Runtime's five
+        // name-based entry points all read it instead of carrying a branch per
+        // variable (§4.1 — the seam stays, the repetition goes).
+        if (varCount)
         {
-            c += " = {\n";
-            for (const auto& v : m_g.variables)
-                if (v.scope == 0)
-                    c += "            { " + strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
-                         (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + " },\n";
-            c += "        };\n";
+        c += "    static const hc::VarSlots& slots()\n    {\n";
+        c += "        static const hc::VarSlots k = {\n";
+        for (const auto& v : m_g.variables)
+        {
+            if (v.scope != 0) continue;
+            const TypeRef tr = varType(v);
+            c += "            hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
+                 strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
+                 (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
+                 strLit(v.typeName) + ", " +
+                 toValueCall(memberDefault(v), tr, ns) + "),\n";
         }
-        c += "        return kVars;\n    }\n\n";
+        c += "        };\n        return k;\n    }\n\n";
+        }
 
-        c += "    const std::vector<HorizonCode::CompiledEventInfo>& eventInfos() const override\n    {\n";
-        c += "        static const std::vector<HorizonCode::CompiledEventInfo> kEvents";
-        if (groups.empty()) c += ";\n";
-        else
+        if (varCount)
         {
-            c += " = {\n";
+            c += "    const std::vector<HorizonCode::CompiledVarInfo>& varInfos() const override\n";
+            c += "    { static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
+        }
+
+        if (!groups.empty())
+        {
+            c += "    const std::vector<HorizonCode::CompiledEventInfo>& eventInfos() const override\n    {\n";
+            c += "        static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
             for (const Node& n : m_g.nodes)
                 if (n.type == NT::Event)
                     c += "            { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
-            c += "        };\n";
+            c += "        };\n        return kEvents;\n    }\n\n";
         }
-        c += "        return kEvents;\n    }\n\n";
 
         // ── fireEvent: fresh RunState per fire == the per-run cache clear (§3.1);
         //    every matching handler of one fire shares it, in graph order.
-        c += "    void fireEvent(" + p("const std::string&", "name", !groups.empty()) + ", " +
-             p("int", "elem", anyElemFilter) + ", " +
-             p("const hc::Value&", "arg", m_usesEventArg) + ") override\n";
-        if (groups.empty()) c += "    {\n    }\n\n";
-        else
+        if (!groups.empty())
         {
+            c += "    void fireEvent(const std::string& name, " +
+                 p("int", "elem", anyElemFilter) + ", " +
+                 p("const hc::Value&", "arg", m_usesEventArg) + ") override\n";
             c += "    {\n";
             if (rsOn) c += "        RunState rs;\n";
             if (m_usesEventArg) c += "        rs.eventArg = arg;\n";
@@ -1722,10 +1823,12 @@ private:
         }
 
         // ── callFunction: coerced args, typed default results (§3.1).
-        c += "    bool callFunction(" + p("const std::string&", "name", !fns.empty()) + ", " +
+        if (!fns.empty())
+        {
+        c += "    bool callFunction(const std::string& name, " +
              p("bool", "requirePublic", anyPrivateFn) + ",\n                      " +
              p("const std::vector<hc::Value>&", "args", anyFnParams) + ", " +
-             p("std::vector<hc::Value>*", "results", !fns.empty()) + ") override\n    {\n";
+             "std::vector<hc::Value>* results) override\n    {\n";
         for (const Node* fn : fns)
         {
             c += "        if (name == " + strLit(fn->s) + ")\n        {\n";
@@ -1761,49 +1864,29 @@ private:
             c += "            }\n            return true;\n        }\n";
         }
         c += "        return false;\n    }\n\n";
-
-        // ── variable reflection (declared instance vars only).
-        c += "    hc::Value getVariable(" + p("const std::string&", "name", varCount != 0) +
-             ") const override\n    {\n";
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0)
-                c += "        if (name == " + strLit(v.name) + ") return " +
-                     toValueCall(m_varMember.at(v.name), varType(v), ns) + ";\n";
-        c += "        return hc::Value{};\n    }\n\n";
-
-        c += "    bool setVariable(" + p("const std::string&", "name", varCount != 0) + ", " +
-             p("const hc::Value&", "v", varCount != 0) + ") override\n    {\n";
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0)
-                c += "        if (name == " + strLit(v.name) + ") { " + m_varMember.at(v.name) +
-                     " = " + coerceCall("v", varType(v)) + "; return true; }\n";
-        c += "        return false;\n    }\n\n";
-
-        c += "    void reseedVariables() override\n    {\n";
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0)
-                c += "        " + m_varMember.at(v.name) + " = " + memberDefault(v) + ";\n";
-        for (const int id : states)
-            c += "        " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
-        c += "    }\n\n";
-
-        c += "    void collectRefs(" + p("std::vector<uint32_t>&", "out", anyRefVar) +
-             ") const override\n    {\n";
-        // NOTE: Refs nested in Struct members are deliberately NOT collected —
-        // the interpreted GC scan (Runtime::retainOnlyReachableFrom) only marks
-        // Ref-TYPED store entries, so descending here would keep instances alive
-        // that the interpreted build collects.
-        for (const auto& v : m_g.variables)
-        {
-            if (v.scope != 0 || v.type != PT::Ref) continue;
-            if (v.isArray)
-                c += "        for (const uint32_t r__ : " + m_varMember.at(v.name) +
-                     ") if (r__ != 0u) out.push_back(r__);\n";
-            else
-                c += "        if (" + m_varMember.at(v.name) + " != 0u) out.push_back(" +
-                     m_varMember.at(v.name) + ");\n";
         }
-        c += "    }\n";
+
+        // ── variable reflection: all of it goes through the table above.
+        if (varCount)
+        {
+            c += "    hc::Value getVariable(const std::string& name) const override\n";
+            c += "    { return hc::getVar(slots(), this, name); }\n\n";
+            c += "    bool setVariable(const std::string& name, const hc::Value& v) override\n";
+            c += "    { return hc::setVar(slots(), this, name, v); }\n\n";
+            if (anyRefVar)
+            {
+                c += "    void collectRefs(std::vector<uint32_t>& out) const override\n";
+                c += "    { hc::collectVarRefs(slots(), this, out); }\n\n";
+            }
+        }
+        if (varCount || !states.empty())
+        {
+            c += "    void reseedVariables() override\n    {\n";
+            if (varCount) c += "        hc::reseedVars(slots(), this);\n";
+            for (const int id : states)
+                c += "        " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
+            c += "    }\n";
+        }
 
         if (!delays.empty())
         {
@@ -1857,11 +1940,6 @@ private:
             c += "    bool " + stateMember(id) + " = false;\n";
 
         c += "};\n\n";
-        c += "} // namespace\n\n";
-        // The manifest's factory pair — the only symbols hc_registry.cpp needs,
-        // which is why the class itself stays internal to this file.
-        c += "HorizonCode::CompiledInstance* create_" + m_cls + "() { return new " + m_cls + "(); }\n";
-        c += "void destroy_" + m_cls + "(HorizonCode::CompiledInstance* p) { delete p; }\n\n";
         c += "} // namespace " + ns + "\n";
     }
 
@@ -1927,8 +2005,9 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         try
         {
             ClassEmitter em(src, className, opt, types, res.warnings);
-            std::string impl;
-            em.run(impl);
+            std::string header, impl;
+            em.run(header, impl);
+            res.files.push_back({ "hcgen_" + className + ".h",   std::move(header) });
             res.files.push_back({ "hcgen_" + className + ".cpp", std::move(impl) });
             compiled.push_back({ src.key, className });
         }
@@ -1996,10 +2075,14 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     }
     rc += "const char* engineVersion() { return " + strLit(opt.engineVersion) + "; }\n\n";
     rc += "} // namespace " + ns + "\n\n";
-    rc += "// The C-ABI manifest export, only when building the shipped dylib.\n";
+    rc += "// The C-ABI manifest export, only when building the shipped dylib. It is\n";
+    rc += "// the ONLY symbol the library exports (the project builds with hidden\n";
+    rc += "// visibility): the generated classes live in headers, so leaving them\n";
+    rc += "// visible would let a host binary that compiled the same headers share\n";
+    rc += "// their inline statics with this library — and lose them on unload.\n";
     rc += "#if defined(HCGEN_BUILD_DYLIB)\n";
     rc += "extern \"C\"\n";
-    rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#endif\n";
+    rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n";
     rc += "const HorizonCode::CompiledClassEntry* HE_HorizonCodeGenClasses(int* count, const char** engineVersion)\n";
     rc += "{\n    if (engineVersion) *engineVersion = " + ns + "::engineVersion();\n";
     rc += "    return " + ns + "::classes(count);\n}\n";
@@ -2057,6 +2140,9 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     for (const auto& f : cppFiles) s += "    " + f + "\n";
     s += ")\n";
     s += "target_compile_definitions(HorizonCodeGen PRIVATE HCGEN_BUILD_DYLIB)\n";
+    s += "# Only HE_HorizonCodeGenClasses leaves this library — see hc_registry.cpp.\n";
+    s += "set_target_properties(HorizonCodeGen PROPERTIES\n";
+    s += "    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)\n";
     s += "target_include_directories(HorizonCodeGen PRIVATE ${HE_SDK_INCLUDE_DIRS})\n";
     s += "target_link_directories(HorizonCodeGen PRIVATE \"${HE_SDK_LIB_DIR}\")\n";
     s += "target_link_libraries(HorizonCodeGen PRIVATE HorizonCore)\n";

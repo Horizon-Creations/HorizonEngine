@@ -210,10 +210,14 @@ set(HCGEN_CLASSES
     latent_flow enums structs
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
+# The generated headers carry the classes themselves and are declared outputs
+# too: deleting one has to re-run the generator, not fail the compile.
+set(HCGEN_HEADERS ${HCGEN_DIR}/hc_registry.h ${HCGEN_DIR}/hcgen_types.h)
 foreach(c ${HCGEN_CLASSES})
     list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
+    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)
 endforeach()
-add_custom_command(OUTPUT ${HCGEN_SOURCES}
+add_custom_command(OUTPUT ${HCGEN_SOURCES} ${HCGEN_HEADERS}
     COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}
     DEPENDS hc_codegen ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen/fixtures.h
     COMMENT "hc_codegen: generating HorizonCode parity fixtures")
@@ -225,6 +229,12 @@ target_include_directories(he_tests PRIVATE ${HCGEN_DIR} fixtures/hcodegen)
 # CompiledClassTable, the exact path the shipped game takes (plan §10.4).
 add_library(test_hcgen SHARED ${HCGEN_SOURCES})
 target_compile_definitions(test_hcgen PRIVATE HCGEN_BUILD_DYLIB)
+# he_tests compiles the SAME generated headers, so without hidden visibility the
+# two binaries would coalesce their inline statics — and the loader test's
+# dlclose would pull them out from under the in-process parity tests. The shipped
+# project generateCMakeLists() writes does exactly this too.
+set_target_properties(test_hcgen PROPERTIES
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 target_link_libraries(test_hcgen PRIVATE HorizonCore)
 target_include_directories(test_hcgen PRIVATE ${HCGEN_DIR})
 add_dependencies(he_tests test_hcgen)
