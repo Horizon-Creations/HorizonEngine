@@ -59,8 +59,21 @@ jobs:
       # HE_PORTABLE_BUILD=ON on every job: these builds are uploaded as artifacts and
       # published as website releases, so nothing may be compiled for the runner's CPU
       # (-march=native in astcenc → SIGILL on an older user CPU during the texture cook).
+      #
+      # The HE_ENGINE_CONTENT_* environment variables carry the EngineContent SFTP
+      # endpoint into the build (src/HE_ContentSync/CMakeLists.txt reads them). They
+      # are repository secrets because this repository is public — a credential in a
+      # tracked file stays greppable in every clone and fork forever. Passing them as
+      # environment rather than -D keeps them out of the configure command line and
+      # out of CMakeCache.txt, and spares any quoting question about the password.
+      # Unset secrets are simply empty: the build then reports "not configured" and
+      # the Editor works as it did before the remote library existed.
       - name: Configure (macOS)
         if: runner.os == 'macOS'
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON
 
       # Linux: build a self-contained editor package like Windows — bundle cmake so a
@@ -68,6 +81,10 @@ jobs:
       # libcrypto/OpenSSL dependency, and deploy into the workspace for packaging.
       - name: Configure (Linux)
         if: runner.os == 'Linux'
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
@@ -75,6 +92,10 @@ jobs:
       # OpenSSL DLL dependency (a clean PC then needs only the C++ toolchain at build time).
       - name: Configure (Windows)
         if: runner.os == 'Windows'
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
       - name: Build

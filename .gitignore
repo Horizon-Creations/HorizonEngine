@@ -63,3 +63,8 @@ HorizonEditor-*.dmg
 
 # Editor runtime state written next to the exe during local runs.
 imgui.ini
+
+# The EngineContent SFTP endpoint for a LOCAL build (host/user/password). This
+# repository is public — these values never belong in a tracked file. CI gets
+# them from repository secrets instead; see src/HE_ContentSync/CMakeLists.txt.
+cmake/EngineContentCredentials.cmake

@@ -7,23 +7,32 @@
 
 // ─── EngineContent SFTP endpoint — the ONE place these live ───────────────────
 // Deliberate, explicit product decision (not an oversight): the EngineContent
-// sync account's password is hardcoded here rather than stored via an OS
-// keychain, a credential-helper, or an Editor settings dialog. The account is
-// dedicated to this one purpose (fetching/publishing the shared EngineContent
-// asset library), so the blast radius of the value leaking out of a built
-// Editor binary (it is trivially recoverable — a plain string in the binary) is
-// the EngineContent host, not any of the user's other systems.
+// sync account's credentials are baked into the Editor binary rather than
+// stored via an OS keychain, a credential-helper, or a settings dialog. The
+// account is dedicated to this one purpose (fetching/publishing the shared
+// EngineContent asset library), so the blast radius of the value leaking out of
+// a built Editor binary (it is trivially recoverable — a plain string in the
+// binary) is the EngineContent host, not any of the user's other systems.
+//
+// They are NOT in the source, though: this repository is public, and a value in
+// a tracked file is greppable forever, in every clone and every fork, whether
+// or not it is later rotated. They arrive as compile definitions instead —
+// src/HE_ContentSync/CMakeLists.txt documents the three ways in (a -D on the
+// configure line, which is how CI passes its repository secrets; a gitignored
+// cmake/EngineContentCredentials.cmake for a local build; or nothing, which
+// leaves the feature switched off).
 //
 // Practical mitigation that costs no code: keep this SFTP account restricted
 // (chrooted/scoped, if the host supports it) to only the EngineContent publish
 // path — never a general-purpose account.
 //
-// Rotation: change the four values below. Nothing else in the engine reads
-// these except SftpClient — there is no second copy anywhere to forget.
+// Rotation: change the secret at its source (repository secret / local cmake
+// file) and rebuild. Nothing else in the engine reads these except SftpClient —
+// there is no second copy anywhere to forget.
 //
-// NOTE: the values below are placeholders. Fill in the real host/port/username/
-// password/remote base path before the first sync attempt — SftpProbe reports a
-// clear "not configured" state rather than trying to connect to a placeholder.
+// A build with no credentials supplied is a normal, supported state: host and
+// username come out empty and SftpProbe reports "not configured" rather than
+// trying to reach a placeholder.
 namespace HE::Cs {
 
 struct SftpEndpoint
