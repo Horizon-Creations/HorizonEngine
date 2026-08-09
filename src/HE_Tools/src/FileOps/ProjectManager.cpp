@@ -558,9 +558,16 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 		HE::tools::projectScriptLanguageFromString(jsonString(j, "scriptLanguage"));
 	m_currentProject.defaultSaveTemplate = jsonString(j, "defaultSaveTemplate");
 
-	HE_LOG_INFO(Config, "Project '%s' loaded from '%s': language %s, %zu export profile(s), "
-	                    "startup scene '%s'",
+	// The id is in here because collaboration compares it and nothing else shows
+	// it. A joiner refused for "a different project" otherwise has no way to see
+	// what the two sides actually hold — and comparing the .heproj files by hand
+	// does not settle it, since an id minted in memory because the file was not
+	// writable differs from the one on disk.
+	HE_LOG_INFO(Config, "Project '%s' loaded from '%s': id %s%s, language %s, "
+	                    "%zu export profile(s), startup scene '%s'",
 	            m_currentProject.name.c_str(), projectPath.c_str(),
+	            m_currentProject.id.empty() ? "(none)" : m_currentProject.id.c_str(),
+	            mintedId ? " (freshly minted, NOT the value in the file)" : "",
 	            HE::tools::toString(m_currentProject.scriptLanguage),
 	            m_currentProject.exportProfiles.size(),
 	            m_currentProject.startupScene.empty() ? "(none)"
