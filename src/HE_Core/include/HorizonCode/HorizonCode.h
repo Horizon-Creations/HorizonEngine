@@ -391,6 +391,15 @@ using EventId = std::uint32_t;
 HE_API EventId            eventId(const std::string& name);
 HE_API const std::string& eventName(EventId id);
 
+// May a wire carry `from` into `to`? Equal types always; beyond that exactly the
+// conversions the interpreter's `coerce` performs and no others — Float/Int/Bool
+// among themselves, and Enum against Float/Int (it is int-backed). Deliberately
+// NOT String, whose coerce yields the zero value: allowing that at a wire would
+// look like a conversion and silently be a data loss. Arrays never convert —
+// coerce passes an array through untouched, so an element-wise reinterpretation
+// would read the wrong field of every item.
+HE_API bool canConvertPinType(PinType from, PinType to);
+
 HE_API void inferUserTypeNames(Graph& g);
 
 // Harvest the custom event names a graph already uses into its declaration list

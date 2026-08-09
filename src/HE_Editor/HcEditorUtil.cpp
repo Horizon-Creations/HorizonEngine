@@ -1201,15 +1201,19 @@ int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
 		if (srcIsInput) return eOut ? eIn : -1;   // feed the dragged exec-in ← first exec-out
 		return eIn ? 0 : -1;                       // dragged exec-out → first exec-in
 	}
+	// "Matching" is what Graph::connect accepts, which now includes the
+	// elementary conversions — a Float output does fit an Int input.
 	if (srcIsInput)                                // dragged data-in ← a matching data-out
 	{
 		for (size_t i = 0; i < s.dataOuts.size(); ++i)
-			if (s.dataOuts[i].type == dragType && s.dataOuts[i].isArray == dragArray)
+			if (HorizonCode::canConvertPinType(s.dataOuts[i].type, dragType) &&
+			    s.dataOuts[i].isArray == dragArray)
 				return eIn + eOut + dIn + (int)i;
 		return -1;
 	}
 	for (size_t i = 0; i < s.dataIns.size(); ++i)  // dragged data-out → a matching data-in
-		if (s.dataIns[i].type == dragType && s.dataIns[i].isArray == dragArray)
+		if (HorizonCode::canConvertPinType(dragType, s.dataIns[i].type) &&
+		    s.dataIns[i].isArray == dragArray)
 			return eIn + eOut + (int)i;
 	return -1;
 }

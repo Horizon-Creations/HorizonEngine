@@ -308,6 +308,7 @@ int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
 		HC::adoptForEachElementType(graph, c.linkNode, c.linkPin, id, pin);
 		graph.connect(c.linkNode, c.linkPin, id, pin);
 	}
+	HC::inferUserTypeNames(graph);   // the new node learns its definition from the wire
 	return id;
 }
 } // namespace
@@ -342,7 +343,12 @@ GraphEditor::Model buildModel(const Host& h)
 		// ForEach is generic until wired: adopt the source array's element type
 		// (Array/Element pins retype + recolor) before the typed connect.
 		HC::adoptForEachElementType(graph, oN, oP, iN, iP);
-		return graph.connect(oN, oP, iN, iP); };
+		if (!graph.connect(oN, oP, iN, iP)) return false;
+		// A user-defined type node that had no definition can learn it from what
+		// it was just wired to — an "Enum to String" hanging off a Mood output
+		// IS a Mood one, and asking the panel to pick would be asking twice.
+		HC::inferUserTypeNames(graph);
+		return true; };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
 	// Literal nodes edit their value inline on the node body.
@@ -670,7 +676,8 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		if (srcInput) { HC::adoptForEachElementType(graph, newId, pin, srcNode, srcPin);
 		                graph.connect(newId, pin, srcNode, srcPin); }
 		else          { HC::adoptForEachElementType(graph, srcNode, srcPin, newId, pin);
-		                graph.connect(srcNode, srcPin, newId, pin); } };
+		                graph.connect(srcNode, srcPin, newId, pin); }
+		HC::inferUserTypeNames(graph); };   // learns its definition from the wire
 
 	// ── Ref output: the target class's public members lead ────────────────
 	if (!isExecPin && !srcInput && dragType == PT::Ref && !dragArray)
@@ -722,6 +729,50 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		refItem("Set (Ref)",           NT::SetExternal);
 		refItem("Destroy Object",      NT::DestroyObject);
 		ImGui::Separator();
+	}
+
+	// ── A struct pin leads with its own FIELDS ─────────────────────────────
+	// "Get Struct Field" is a node you still have to bind afterwards; what you
+	// actually wanted is the field. Offer those first, already chosen.
+	if (!isExecPin && dp.type == PT::Struct && !dp.array && !dp.typeName.empty())
+	{
+		HE::StructDef def;
+		if (HE::TypeRegistry::instance().getStruct(dp.typeName, def) && !def.fields.empty())
+		{
+			const std::string stem = std::filesystem::path(dp.typeName).stem().string();
+			bool fh = false;
+			for (const auto& f : def.fields)
+			{
+				// Dragging OFF a struct output offers readers and writers (both
+				// take the struct as their first input); dragging backwards off a
+				// struct INPUT offers the ones that produce a struct.
+				const struct { const char* verb; NT t; bool wantsOutput; } ops[] = {
+					{ "Get", NT::GetStructField, false },
+					{ "Set", NT::SetStructField, true  },
+				};
+				for (const auto& op : ops)
+				{
+					if (srcInput && !op.wantsOutput) continue;   // Get produces the FIELD, not a struct
+					char lbl[320];
+					std::snprintf(lbl, sizeof lbl, "%s %s \xc2\xb7 %s",
+					              op.verb, stem.c_str(), f.name.c_str());
+					if (!matches(lbl)) continue;
+					if (!fh) { ImGui::TextDisabled("Fields"); fh = true; }
+					if (!HcEditorUtil::searchMenuItem(lbl)) continue;
+					const int id = addNode(graph, op.t, pos, h.currentGraph);
+					HC::Node* nn = graph.findNode(id);
+					nn->typeName = dp.typeName;
+					nn->params = { { f.name, f.type, f.isArray, f.typeName } };
+					HC::syncTypeSignatures(graph);
+					const PinRanges r = pinRanges(*graph.findNode(id));
+					// Wire the struct end: its data-in 0 either way, or — dragging
+					// backwards — Set's struct OUTPUT into the pin we came from.
+					wireAt(id, srcInput ? r.dataOut0 : r.dataIn0);
+					created = id; ImGui::CloseCurrentPopup();
+				}
+			}
+			if (fh) ImGui::Spacing();
+		}
 	}
 
 	// ── Generic nodes with a compatible pin ────────────────────────────────

@@ -881,7 +881,10 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
     if (srcIsDataOut && dstIsDataIn)
     {
         const int si = srcPin - sr.dataOut0, di = dstPin - dr.dataIn0;
-        if (dataPinType(*s, false, si) != dataPinType(*d, true, di) ||
+        // Elementary types convert on the wire: the reader coerces to ITS pin
+        // type (Runner::evalInput), and generated C++ emits the cast — so a
+        // Float output feeding an Int input needs no node in between.
+        if (!canConvertPinType(dataPinType(*s, false, si), dataPinType(*d, true, di)) ||
             dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
             return false;
         // User-defined types connect only to the SAME definition: a Struct pin
@@ -1443,6 +1446,18 @@ void inferEventDecls(Graph& g)
         if (n.type == NodeType::Event || n.type == NodeType::EmitEvent) declare(n);
 }
 
+bool canConvertPinType(PinType from, PinType to)
+{
+    if (from == to) return true;
+    auto numeric = [](PinType t)
+    { return t == P::Float || t == P::Int || t == P::Bool; };
+    if (numeric(from) && numeric(to)) return true;
+    // Enum is int-backed, so it reads as a number and a number can name one.
+    if (from == P::Enum && (to == P::Float || to == P::Int)) return true;
+    if (to == P::Enum && (from == P::Float || from == P::Int)) return true;
+    return false;
+}
+
 void inferUserTypeNames(Graph& g)
 {
     // Declared variables are authoritative for their own Get/Set nodes.
@@ -1991,7 +2006,11 @@ Value Runner::evalInput(const Node& n, int dataInIndex, int depth)
         if (l.dstNode != n.id || l.dstPin != pin) continue;
         const Node* src = m_graph.findNode(l.srcNode);
         if (!src) break;
-        return evalData(*src, l.srcPin - pinRanges(*src).dataOut0, depth);
+        // Coerce to THIS pin's type: equal types pass through untouched (the
+        // common case costs nothing), and a converting wire lands as the value
+        // the reader declared it wants.
+        return coerce(evalData(*src, l.srcPin - pinRanges(*src).dataOut0, depth),
+                      dataPinType(n, true, dataInIndex));
     }
     // Unwired: the pin's inline default (editor-authored) before the type's zero.
     if (auto it = n.pinDefaults.find(dataInIndex); it != n.pinDefaults.end())

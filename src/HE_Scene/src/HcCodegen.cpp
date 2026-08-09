@@ -1208,8 +1208,10 @@ private:
             if (src)
             {
                 const int outIdx = l->srcPin - pinRanges(*src).dataOut0;
-                // Wiring guarantees equal pin types (§3.3) → raw typed expression.
-                return expr(*src, outIdx, fnCtx);
+                // Elementary types convert on the wire (canConvertPinType), so
+                // the reader casts to ITS pin type — equal types, the common
+                // case, come back untouched.
+                return convertExpr(expr(*src, outIdx, fnCtx), dataOutType(*src, outIdx), want);
             }
         }
         // Unwired: the pin default constant-folded through coerce, else the zero.

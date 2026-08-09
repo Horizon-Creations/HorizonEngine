@@ -1119,3 +1119,46 @@ TEST_CASE("engine events are a closed list, separate from a class's own")
     CHECK(click->elem);
     CHECK(std::string(click->hook) == "onClicked");
 }
+
+// ── Converting wires ────────────────────────────────────────────────────────
+
+TEST_CASE("elementary types convert on the wire")
+{
+    // What connect() accepts is exactly what coerce() performs — no more.
+    CHECK(canConvertPinType(PinType::Float, PinType::Int));
+    CHECK(canConvertPinType(PinType::Int,   PinType::Bool));
+    CHECK(canConvertPinType(PinType::Bool,  PinType::Float));
+    CHECK(canConvertPinType(PinType::Enum,  PinType::Int));
+    CHECK(canConvertPinType(PinType::Int,   PinType::Enum));
+    CHECK(canConvertPinType(PinType::Vec2,  PinType::Vec2));
+    // String's coerce yields the zero value — that is a loss, not a conversion.
+    CHECK_FALSE(canConvertPinType(PinType::Float,  PinType::String));
+    CHECK_FALSE(canConvertPinType(PinType::String, PinType::Float));
+    CHECK_FALSE(canConvertPinType(PinType::Color,  PinType::Vec2));
+    CHECK_FALSE(canConvertPinType(PinType::Struct, PinType::Float));
+
+    Graph g;
+    Variable out; out.name = "out"; out.type = PinType::Int;
+    g.variables.push_back(out);
+    Node ev; ev.type = NodeType::Event; ev.s = "Go";
+    const int e = g.addNode(std::move(ev));
+    Node cf; cf.type = NodeType::ConstFloat; cf.f[0] = 3.9f;
+    const int c = g.addNode(std::move(cf));
+    Node sv; sv.type = NodeType::SetVariable; sv.s = "out"; sv.propType = PinType::Int;
+    const int s = g.addNode(std::move(sv));
+
+    // Float → Int used to be refused outright; now it connects and truncates.
+    REQUIRE(g.connect(c, 0, s, 2));
+    REQUIRE(g.connect(e, 0, s, 0));
+    // An array still never converts, and a String still refuses.
+    Node cs; cs.type = NodeType::ConstString; cs.s = "x";
+    const int str = g.addNode(std::move(cs));
+    CHECK_FALSE(g.connect(str, 0, s, 2));
+
+    Runtime rt;
+    const InstanceId id = rt.add(std::move(g));
+    rt.fireEvent(id, "Go", 0, {});
+    const Value v = rt.getVariable(id, "out");
+    CHECK(v.type == PinType::Int);
+    CHECK(v.i == 3);                      // (int)3.9, the interpreter's own rule
+}

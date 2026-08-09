@@ -1422,6 +1422,26 @@ typo bound to nothing and reported nothing. Now:
   project-wide two only run when the whole project is on the table — the
   editor's per-asset check passes one class.
 
+### 14.2f Elementary types convert on the wire
+
+`Graph::connect` used to demand exactly equal pin types, so a Float output
+needed a node in between to reach an Int input. It now accepts whatever
+`coerce` performs — `canConvertPinType`: Float/Int/Bool among themselves, and
+Enum against Float/Int (it is int-backed). The reader does the conversion:
+
+- interpreted, `Runner::evalInput` coerces to ITS pin type (equal types pass
+  through untouched, so the common case costs nothing);
+- compiled, `input()` wraps the source expression in `convertExpr`, which emits
+  the cast — `((int)(x))`, `((x) != 0)`, and so on.
+
+Both were already the semantics at every other coercion point (§3.3); the wire
+simply stopped being an exception.
+
+**Not** String, whose `coerce` yields the zero value rather than parsing — a
+wire that looks like a conversion and silently loses the data is worse than one
+that refuses. **Not** arrays either: `coerce` passes an array through untouched,
+so an element-wise reinterpretation would read the wrong field of every item.
+
 ### 14.3 Lean emission
 
 The per-run scaffolding is emitted only where it can be reached, so a small
