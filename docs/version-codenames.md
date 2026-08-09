@@ -17,6 +17,13 @@ zwei Stellen sichtbar:
 |-----------|-------------|--------------------------------------------------------------------------|-----------|
 | 0.2.0     | **Sunrise** | erste gebrandete Builds, DMG-Installer, Codename-System                   | `sunrise` |
 | **0.3.0** | **Aurora**  | Licht-Release: Deferred Renderer, Ray-Traced DDGI, Point-/Spot-Shadow-Maps, HBAO/GTAO | `aurora` |
+| **0.3.2** | **Aurora**  | Projekt-Typen (Struct/Enum), Save v2, HorizonCode→C++-Codegen             | `aurora` |
+
+Ein Patch behält den Codenamen seines Minor-Release — der Name gehört zu 0.3,
+nicht zu 0.3.x. Was ein Patch trotzdem braucht, ist der Versions-Bump selbst:
+0.3.1 wurde auf der Website ausgerufen, ohne dass `project()` mitzog, und der
+ausgelieferte Editor meldete danach eine Version, die es laut Devlog nicht mehr
+gab. Wenn die Website eine Nummer nennt, muss `CMakeLists.txt` sie auch tragen.
 
 **So bumpst du ein Release** — eine einzige Stelle, alles andere zieht nach:
 
