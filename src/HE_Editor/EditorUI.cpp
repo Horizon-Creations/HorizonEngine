@@ -1662,15 +1662,6 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 		if (SourceControlPanel::DrawFooterStatus(ctx))
 			revealFloatingWindow(s_showSourceControl, "Source Control");
 
-		// EngineContent SFTP download queue, immediately right of source control —
-		// same "ambient, draws nothing when idle" rule. Purely informational (no
-		// window to reveal), so no return value to act on.
-		if (EngineContentSyncBar::FooterWidth(ctx) > 0.0f)
-		{
-			ImGui::SameLine(0.0f, 14.0f);
-			EngineContentSyncBar::DrawFooter(ctx);
-		}
-
 		// Right — render resolution + FPS (drawn before SameLine so GetWindowWidth() is stable).
 		// The resolution is the actual viewport framebuffer size the scene renders at.
 		std::string fpsText = "FPS: " + std::to_string(static_cast<int>(ctx.smoothFps));
@@ -1685,11 +1676,26 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 
 		// Collaboration presence, immediately left of the counters — ambient by
 		// design: who else is in the scene, without a window open.
-		if (const float presenceW = CollabPresenceBar::FooterWidth(ctx); presenceW > 0.0f)
+		const float presenceW = CollabPresenceBar::FooterWidth(ctx);
+		if (presenceW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
 			CollabPresenceBar::DrawFooter(ctx);
+		}
+
+		// EngineContent SFTP download queue — right-aligned, left of the presence
+		// cluster. Deliberately part of the RIGHT group rather than growing
+		// rightwards from source control on the left: the label is an asset
+		// filename of unbounded length, and a left-anchored item that grows runs
+		// straight through the centred "Ready" text below. Right-aligning bounds
+		// it against a fixed edge instead. Draws nothing when idle.
+		if (const float syncW = EngineContentSyncBar::FooterWidth(ctx); syncW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW - syncW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (presenceW > 0.0f ? 16.0f : 0.0f));
+			EngineContentSyncBar::DrawFooter(ctx);
 		}
 
 		// Middle — status

@@ -7,6 +7,7 @@
 #endif
 #include <ContentManager/ContentManager.h>
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -30,14 +31,24 @@ struct RunOutcome { bool ok = false; std::string error; };
 static std::thread       s_thread;
 static std::mutex        s_logMutex;
 static std::string       s_log;
-static bool              s_running = false;
-static bool              s_finished = false;
-static bool              s_lastOk  = false;
-static bool              s_openRequested = false;
+// Written by the worker, read by the render thread every frame — atomics, not
+// plain bools. Nothing here is a lock-free algorithm; the point is simply that
+// a torn/never-observed read of a plain bool across threads is UB, and the
+// render thread polls these at frame rate.
+static std::atomic<bool> s_running{ false };
+static std::atomic<bool> s_finished{ false };
+static std::atomic<bool> s_lastOk{ false };
+// Set once when a run finishes SUCCESSFULLY; drained (exchange(false)) by
+// EditorApplication, which then re-fetches the manifest. Both operations
+// rewrite the server's manifest.json, so the Editor's in-memory copy is stale
+// the moment either one succeeds — without this the Content Browser keeps
+// showing the pre-publish catalogue until the next Editor restart.
+static std::atomic<bool> s_runSucceeded{ false };
+static bool              s_openRequested = false;   // render thread only
 // Both operations write manifest.json, so only one may run at a time (the
 // s_running guard already enforces that) — this just says which one, for the
 // title and so a stray double-open can't start the wrong worker mid-run.
-static std::string       s_title;
+static std::string       s_title;                   // render thread only
 
 static void appendLog(const std::string& line)
 {
@@ -68,12 +79,38 @@ static void startRun(const std::string& title, std::function<RunOutcome()> work)
 	{
 		const RunOutcome result = work();
 		if (!result.ok) appendLog("FAILED: " + result.error);
-		s_lastOk   = result.ok;
-		s_running  = false;
-		s_finished = true;
+		s_lastOk = result.ok;
+		if (result.ok) s_runSucceeded.store(true, std::memory_order_release);
+		// `finished` before `running`: the render thread treats "not running and
+		// not finished" as the idle state, so clearing running first would flash
+		// an idle dialog for one frame between the two stores.
+		s_finished.store(true,  std::memory_order_release);
+		s_running.store(false, std::memory_order_release);
 	});
 }
 #endif
+
+bool takeRunSucceeded()
+{
+#ifdef HE_HAVE_LIBSSH2
+	return s_runSucceeded.exchange(false, std::memory_order_acq_rel);
+#else
+	return false;
+#endif
+}
+
+void shutdown()
+{
+#ifdef HE_HAVE_LIBSSH2
+	// A joinable std::thread that reaches its destructor calls std::terminate.
+	// startRun only joins the PREVIOUS run's thread when a new run starts, so
+	// after the last publish/rebuild of a session the object sits joinable until
+	// static destruction — i.e. every editor session that used this dialog once
+	// aborted on quit. Same rule (and same fix) as EditorApplication's own probe
+	// threads; see the join block in OnDetach.
+	if (s_thread.joinable()) s_thread.join();
+#endif
+}
 
 void open(AppContext& ctx)
 {
@@ -120,20 +157,25 @@ void Draw(AppContext& ctx)
 	EditorWidgets::pinDialogToEditorWindow();
 	if (ImGui::BeginPopupModal("##engine_content_publish_popup", nullptr, ImGuiWindowFlags_NoTitleBar))
 	{
+		// One snapshot per frame: reading each atomic twice could otherwise show
+		// "running" in one branch and "finished" in the next within a single frame.
+		const bool running  = s_running.load(std::memory_order_acquire);
+		const bool finished = s_finished.load(std::memory_order_acquire);
+
 		ImGui::Text("%s", s_title.c_str());
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		if (s_running)
+		if (running)
 		{
-			ImGui::TextDisabled("Publishing...");
+			ImGui::TextDisabled("Working...");
 		}
-		else if (s_finished)
+		else if (finished)
 		{
-			if (s_lastOk)
-				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Publish complete.");
+			if (s_lastOk.load(std::memory_order_acquire))
+				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Finished.");
 			else
-				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.50f, 1.0f), "Publish failed — see log below.");
+				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.50f, 1.0f), "Failed — see log below.");
 		}
 
 		ImGui::Spacing();
@@ -145,7 +187,7 @@ void Draw(AppContext& ctx)
 		}
 		ImGui::Spacing();
 
-		if (!s_running)
+		if (!running)
 		{
 			if (EditorWidgets::primaryButton("Close", ImVec2(120, 0)))
 				ImGui::CloseCurrentPopup();

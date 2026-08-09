@@ -1744,19 +1744,16 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					{
 						// Worker thread — must not touch ctx/ImGui. GlobalState's own
 						// refresh is safe here (mutex-guarded, filesystem-only, same
-						// fact startSftpProbe's manifest refresh already relies on);
-						// it clears this asset's isRemoteOnly flag for the next frame.
+						// fact startSftpProbe's manifest refresh already relies on).
+						// The re-merge is what clears this asset's isRemoteOnly flag:
+						// mergeManifestInto now sees the freshly-downloaded file in the
+						// cache and emits a normal node instead of a remote placeholder.
 						// The tab-open request, which DOES need the main thread, goes
 						// through s_pendingOpenFullPaths (static storage, so this
 						// reference stays valid regardless of when the callback fires).
 						if (!success) return;
 						if (gs && !engineContentPath.empty())
-						{
-							std::vector<HE::RemoteEngineAsset> remoteOnly;
-							for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
-								remoteOnly.push_back(HE::RemoteEngineAsset{ e.relativePath, e.uuid });
-							gs->refreshEngineFolder(engineContentPath, projectContentRoot, remoteOnly);
-						}
+							gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 						std::lock_guard<std::mutex> lock(s_pendingOpenMutex);
 						s_pendingOpenFullPaths.push_back(fullPath);
 					});

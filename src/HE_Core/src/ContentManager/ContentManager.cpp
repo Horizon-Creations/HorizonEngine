@@ -768,6 +768,23 @@ std::string ContentManager::toContentRelativePath(const std::string& absolutePat
 		if (!ec && !rel.empty() && rel.native()[0] != '.')
 			return std::string(kEnginePrefix) + rel.generic_string();
 	}
+	// The SFTP download cache is a third EngineContent root (see
+	// resolveAbsolutePath), so a path inside it is an "Engine/..." path too.
+	// Without this branch anything opened from the cache — every asset the
+	// Content Browser just downloaded and auto-opened — produced an EMPTY
+	// relative path here, and an empty path loads nothing: the tab opened and
+	// stayed blank. Checked after the shipped default, mirroring the read-side
+	// precedence exactly.
+	ec.clear();
+	{
+		const fs::path cacheRoot = GlobalState::engineContentCacheDir();
+		if (!cacheRoot.empty())
+		{
+			const fs::path rel = fs::relative(absolutePath, cacheRoot, ec);
+			if (!ec && !rel.empty() && rel.native()[0] != '.')
+				return std::string(kEnginePrefix) + rel.generic_string();
+		}
+	}
 	ec.clear();
 	const fs::path rel = fs::relative(absolutePath, m_contentRoot, ec);
 	if (ec || rel.empty() || rel.native()[0] == '.') return std::string(); // outside both roots

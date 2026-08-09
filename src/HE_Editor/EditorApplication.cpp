@@ -13,6 +13,7 @@
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
 #include <ContentSync/EngineContentSync.h> // EngineContent manifest fetch, driven by the SFTP probe
+#include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
@@ -1290,20 +1291,43 @@ void EditorApplication::startSftpProbe()
 		m_sftpChecked.store(true, std::memory_order_release);
 
 		// Manifest fetch + Engine-tree re-merge run on this same worker thread —
-		// GlobalState::refreshEngineFolder only touches its own mutex-guarded
-		// tree and the filesystem, never ImGui, so it is safe off the main
-		// thread (the existing m_contentRefreshFuture async path already relies
-		// on the same fact).
+		// GlobalState's setters/refresh only touch their own mutex-guarded tree
+		// and the filesystem, never ImGui, so this is safe off the main thread
+		// (the existing m_contentRefreshFuture async path relies on the same fact).
 		if (probe.ready() && gs && !engineContentPath.empty() &&
 		    HE::Cs::EngineContentSync::instance().refreshManifestBlocking())
 		{
-			gs->refreshEngineFolder(engineContentPath, projectContentRoot,
-			                         engineManifestAsRemoteAssets());
+			gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
+			gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 			// ContentManager registration happens on the main thread — see
 			// OnRender's consumption of this flag and registerRemoteAsset()'s
 			// contract (this worker thread must never touch ContentManager).
 			m_sftpManifestReady.store(true, std::memory_order_release);
 		}
+	});
+}
+
+// Re-reads manifest.json from the server and re-merges the Engine tree. Called
+// after a Publish or "Rebuild Manifest from Server" run succeeds: both rewrite
+// the server-side manifest, so without this the Editor would keep serving the
+// catalogue it read at startup — showing assets the publish just removed, and
+// hiding ones it just added, until the next restart.
+void EditorApplication::refreshEngineContentManifest()
+{
+	if (m_sftpThread.joinable()) m_sftpThread.join();
+
+	GlobalState* gs                 = m_globalState;
+	std::string  engineContentPath  = contentManager().engineContentRoot();
+	std::string  projectContentRoot = contentManager().contentRoot();
+
+	m_sftpThread = std::thread([this, gs, engineContentPath, projectContentRoot]
+	{
+		if (!gs || engineContentPath.empty()) return;
+		if (!HE::Cs::EngineContentSync::instance().refreshManifestBlocking()) return;
+
+		gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
+		gs->refreshEngineFolder(engineContentPath, projectContentRoot);
+		m_sftpManifestReady.store(true, std::memory_order_release);
 	});
 }
 #endif
@@ -1572,17 +1596,37 @@ void EditorApplication::OnRender(float dt)
 			// UUID-keyed scene reference, which is the only thing this map serves.
 			if (e.uuid == HE::UUID{}) continue;
 
-			const HE::UUID    uuid         = e.uuid;
-			const std::string relativePath = e.relativePath;
-			contentManager().registerRemoteAsset(uuid, relativePath,
-				[relativePath, uuid](std::function<void(bool)> done)
+			const HE::UUID    uuid = e.uuid;
+			// TWO different spellings of the same file, and mixing them up breaks
+			// the load silently:
+			//   • remotePath — SFTP-relative ("Materials/Foo.hasset"). What the
+			//     manifest stores and what the server wants.
+			//   • enginePath — content-relative ("Engine/Materials/Foo.hasset").
+			//     What ContentManager keys its disk registry by, and the ONLY form
+			//     resolveAbsolutePath() will resolve against the EngineContent
+			//     roots (including the download cache — see the kEnginePrefix
+			//     branch there). Registering the unprefixed form made the load that
+			//     runs right after a SUCCESSFUL download look for the file under
+			//     "<project>/Content/Materials/Foo.hasset", fail, and leave the bad
+			//     key in m_diskRegistry for the rest of the session.
+			const std::string remotePath = e.relativePath;
+			const std::string enginePath = std::string("Engine/") + remotePath;
+			contentManager().registerRemoteAsset(uuid, enginePath,
+				[remotePath, uuid](std::function<void(bool)> done)
 				{
 					HE::Cs::EngineContentSync::instance().enqueueDownload(
-						relativePath, uuid, HE::Cs::DownloadTrigger::Passive,
+						remotePath, uuid, HE::Cs::DownloadTrigger::Passive,
 						[done](bool success) { done(success); });
 				});
 		}
 	}
+
+	// A Publish / "Rebuild Manifest from Server" run just rewrote the server's
+	// manifest.json — re-read it, or the Content Browser keeps showing the
+	// catalogue from startup (assets the publish removed stay listed, ones it
+	// added never appear) until the Editor is restarted.
+	if (EngineContentPublishDialog::takeRunSucceeded())
+		refreshEngineContentManifest();
 #endif
 
 	// ── Hot-reload: poll disk assets every ~1.5 s ────────────────────────────
@@ -4573,6 +4617,12 @@ void EditorApplication::OnShutdown()
 #ifdef HE_HAVE_LIBSSH2
 	// Bounded by sftpTestConnection's own connect timeout, so this cannot hang shutdown.
 	if (m_sftpThread.joinable()) m_sftpThread.join();
+	// The publish/rebuild worker is a file-static thread in the dialog, not a
+	// member here — but it is subject to the exact same rule as everything else
+	// in this block: a joinable std::thread reaching its destructor terminates
+	// the process. Nothing else joins it, so without this every session that ran
+	// a publish once aborted on quit.
+	EngineContentPublishDialog::shutdown();
 #endif
 	// The router probe waits on the network, so tell it to stop before waiting on
 	// it: it skips its remaining stages and returns whatever it already knows,
