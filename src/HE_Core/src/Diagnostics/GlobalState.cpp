@@ -615,8 +615,15 @@ static HE::Folder* walkOrCreateFolderPath(HE::Folder* root, const std::vector<st
 		if (!next)
 		{
 			std::unique_ptr<HE::Folder> owned(new HE::Folder());
-			owned->name     = seg;
-			owned->fullPath = cacheSoFar.string();
+			owned->name = seg;
+			// make_preferred: every OTHER node in this tree comes from
+			// populateFolder/mergeOverrideInto via directory_entry::path(), i.e.
+			// native separators. A manifest path is authored with '/', and on
+			// Windows fs::path keeps it verbatim — so without this the synthesized
+			// nodes would be the only ones spelled "C:\...\Meshes/Sub", and every
+			// string comparison against a natively-spelled path (tab lookup,
+			// selection, thumbnail cache key) would miss. No-op on POSIX.
+			owned->fullPath = cacheSoFar.make_preferred().string();
 			cur->subfolders.push_back(owned.get());
 			next = owned.release();
 		}
@@ -663,7 +670,10 @@ static void mergeManifestInto(HE::Folder* base, const std::vector<HE::RemoteEngi
 			if (f->name == leafName) { existsLocally = true; break; }
 		if (existsLocally) continue; // a real local/override file always wins
 
-		const fs::path cachePath = cacheRoot / relPath;
+		// make_preferred for the same reason as in walkOrCreateFolderPath above:
+		// this string is compared against natively-spelled paths elsewhere.
+		fs::path cachePath = cacheRoot / relPath;
+		cachePath.make_preferred();
 		std::error_code ec;
 		const bool cached = fs::is_regular_file(cachePath, ec);
 
