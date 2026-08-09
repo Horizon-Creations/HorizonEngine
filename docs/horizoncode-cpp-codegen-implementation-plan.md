@@ -1332,6 +1332,13 @@ else { /* the seam, unchanged */ }
   wrapper is what makes a fresh RunState.
 - Which classes are callable directly is only known after trying to compile them
   all, so `generateInto` runs a **probe pass** first and emits for real second.
+- A generated `.cpp` includes **only** its own header plus the headers of the
+  classes it actually calls into — never `hcgen.h`. The umbrella is for YOUR
+  code, which wants the whole surface at once; using it here would make every
+  class header a dependency of every translation unit, so editing one graph
+  would recompile all of them. The export's build directory persists and the
+  sources are written only when their bytes change, so with per-class includes
+  a one-graph edit rebuilds one object file.
 
 What this removes per call: the name lookup, the access scan, and the two
 `std::vector<Value>` (arguments and results) — the heap traffic. What remains is
