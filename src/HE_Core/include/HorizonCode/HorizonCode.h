@@ -461,6 +461,11 @@ struct Context
     // Reference-based delegation (bound by the Runtime). All optional.
     // emitEvent: broadcast an event from THIS instance to everyone bound to it.
     std::function<void(const std::string& event, const Value& arg)>        emitEvent;
+    // Same two, by interned id: generated code holds the id in a constant and
+    // never builds the string. Optional — an unbound one falls back to the
+    // name-taking pair above.
+    std::function<void(EventId event, const Value& arg)>        emitEventId;
+    std::function<void(uint32_t target, EventId event)>         bindEventId;
     // bindEvent: subscribe THIS instance to `event` on the `target` instance.
     std::function<void(uint32_t target, const std::string& event)>         bindEvent;
     // callExternal: call a public function on the `target` instance, passing

@@ -815,6 +815,7 @@ private:
     std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
     std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
     std::unordered_map<std::string, std::string> m_publicVar;  // public variable → accessor
+    std::unordered_map<std::string, std::string> m_evtConst;   // event name → EventId constant
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
 
@@ -1032,6 +1033,19 @@ private:
                                                                      // get the hook instead
         for (const Node* fn : functionEntries())
             m_publicFn[fn->s] = unique(cppIdent(fn->s));
+        // One EventId constant per event this class names in an Emit or a Bind.
+        // The constant carries the meaning, so the generated code has no magic
+        // numbers — and the id itself is interned at load, never baked.
+        {
+            std::unordered_set<std::string> evtUsed;
+            for (const auto& n : m_g.nodes)
+                if ((n.type == NT::EmitEvent || n.type == NT::BindEvent) && !n.s.empty())
+                    evtUsed.insert(n.s);
+            std::vector<std::string> sorted(evtUsed.begin(), evtUsed.end());
+            std::sort(sorted.begin(), sorted.end());
+            for (const std::string& e : sorted)
+                m_evtConst[e] = unique("kEvt_" + sanitize(e));
+        }
         // A public variable gets a typed accessor: it is how another compiled
         // class reads and writes it without going through the name seam.
         for (const auto& v : m_g.variables)
@@ -1723,14 +1737,18 @@ private:
             break;
         }
         case NT::BindEvent:
-            b.line("hc::bindEvent(m_ctx, " + input(n, 0, fnCtx) + ", " + strLit(n.s) + ");");
+            b.line("hc::bindEvent(m_ctx, " + input(n, 0, fnCtx) + ", " +
+                   (m_evtConst.count(n.s) ? m_evtConst.at(n.s) : strLit(n.s)) + ");");
             break;
         case NT::EmitEvent:
-            if (n.hasArg)
-                b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", " +
-                       toValueCall(input(n, 0, fnCtx), dataInType(n, 0), m_opt.namespaceName) + ");");
-            else
-                b.line("hc::emitEvent(m_ctx, " + strLit(n.s) + ", hc::Value{});");
+            {
+                const std::string ev = m_evtConst.count(n.s) ? m_evtConst.at(n.s) : strLit(n.s);
+                if (n.hasArg)
+                    b.line("hc::emitEvent(m_ctx, " + ev + ", " +
+                           toValueCall(input(n, 0, fnCtx), dataInType(n, 0), m_opt.namespaceName) + ");");
+                else
+                    b.line("hc::emitEvent(m_ctx, " + ev + ", hc::Value{});");
+            }
             break;
         case NT::CallExternal:
         {
@@ -2019,6 +2037,13 @@ private:
         return sig;
     }
 
+    std::vector<std::pair<std::string, std::string>> sortedEvtConsts() const
+    {
+        std::vector<std::pair<std::string, std::string>> v(m_evtConst.begin(), m_evtConst.end());
+        std::sort(v.begin(), v.end());
+        return v;
+    }
+
     std::vector<std::pair<int, std::string>> sortedPublicEv() const
     {
         std::vector<std::pair<int, std::string>> evs(m_publicEv.begin(), m_publicEv.end());
@@ -2298,6 +2323,19 @@ private:
                 c += cppType(varType(v)) + "& " + m_cls + "::" + m_publicVar.at(v.name) +
                      "() { return " + m_varMember.at(v.name) + "; }\n";
         if (!m_publicVar.empty()) c += "\n";
+
+        // The interned ids this class names. One constant per event, so the code
+        // below reads the event, not a number — the id is assigned at load and
+        // is nobody's business but the Runtime's.
+        if (!m_evtConst.empty())
+        {
+            c += "// Event ids, interned once on first use:\n";
+            for (const auto& [name, konst] : sortedEvtConsts())
+                c += "//   " + konst + " = " + strLit(name) + "\n";
+            for (const auto& [name, konst] : sortedEvtConsts())
+                c += "static const hc::EventId " + konst + " = hc::eventId(" + strLit(name) + ");\n";
+            c += "\n";
+        }
 
         c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n";
         c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";

@@ -1385,6 +1385,43 @@ comes from an Input Action asset), `Emit Event` to user-defined names, and
 `widget.callFunction(id, name)` — an engine call a graph can hand a string it
 computed itself.
 
+### 14.2e Declared events, dispatched by id
+
+An event used to be free text in three places — the `Event` node that handles
+it, the `Emit Event` that raises it, the `Bind Event` that subscribes — so a
+typo bound to nothing and reported nothing. Now:
+
+- **`Graph::events` declares them.** Name plus one optional typed argument, edited
+  in the panel beside Variables and Functions; the three nodes PICK from that
+  list. Renaming a declaration rewrites every node that used the old name, and
+  changing the argument shape re-types the nodes and drops the wires that no
+  longer typecheck. Graphs authored before this arrive with an interface anyway:
+  `inferEventDecls` harvests the names their nodes already use, as part of
+  `fromJson`. Engine events are excluded — every class may handle one, none
+  declares it.
+- **The name is still the format.** Renaming rewrites nodes, never the meaning of
+  bytes already on disk.
+- **Dispatch runs on interned ids.** `HorizonCode::eventId(name)` is a
+  process-global, append-only intern; `Runtime::m_listeners` is keyed by
+  `EventId`, and the engine's own events intern theirs once into a function-local
+  static. The name still travels alongside because the LISTENER's own handler is
+  reached by name.
+- **Generated code names one constant per event it uses**, never a number:
+  ```cpp
+  // Event ids, interned once on first use:
+  //   kEvt_Signal = "Signal"
+  static const hc::EventId kEvt_Signal = hc::eventId("Signal");
+  ...
+  hc::emitEvent(m_ctx, kEvt_Signal, hc::toValue(7.0f));
+  ```
+  A baked literal would be wrong — ids are assigned at load, not at generation —
+  and the constant reads better than one would anyway. `Context` gained
+  `emitEventId`/`bindEventId`; the name-taking pair remains as the fallback.
+- The export also reports wiring that goes nowhere: an `Emit` nothing handles, a
+  `Bind` whose own class has no handler, a `Bind` on an event nobody raises. The
+  project-wide two only run when the whole project is on the table — the
+  editor's per-asset check passes one class.
+
 ### 14.3 Lean emission
 
 The per-run scaffolding is emitted only where it can be reached, so a small

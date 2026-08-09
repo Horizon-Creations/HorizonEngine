@@ -802,3 +802,35 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         CHECK(r.fallbacks[0].reason.find("not registered") != std::string::npos);
     }
 }
+
+TEST_CASE("HcCodegen: events reach the Runtime as ids, under readable names")
+{
+    Graph g;
+    Node ev; ev.type = NodeType::Event; ev.s = "Signal";
+    const int e = g.addNode(std::move(ev));
+    Node em; em.type = NodeType::EmitEvent; em.s = "Signal";
+    const int emit = g.addNode(std::move(em));
+    Node bind; bind.type = NodeType::BindEvent; bind.s = "Signal";
+    const int bnd = g.addNode(std::move(bind));
+    REQUIRE(g.connect(e, 0, emit, 0));      // only wired nodes are emitted at all
+    REQUIRE(g.connect(emit, 1, bnd, 0));
+
+    HE::hccg::Options opt;
+    HE::hccg::Result r = HE::hccg::generate({ { "evt", "evt", g } }, opt);
+    REQUIRE(r.ok);
+    std::string cpp;
+    for (const auto& f : r.files)
+        if (f.name == "hcgen_C_evt.cpp") cpp = f.contents;
+    REQUIRE_FALSE(cpp.empty());
+
+    // One constant per event the class names, interned at load — no baked
+    // number, because the id is the Runtime's business and not stable on disk.
+    CHECK(cpp.find("static const hc::EventId kEvt_Signal = hc::eventId(\"Signal\");")
+          != std::string::npos);
+    // And the reader can see which is which without leaving the file.
+    CHECK(cpp.find("//   kEvt_Signal = \"Signal\"") != std::string::npos);
+    // Both ends go through the constant, not the string.
+    CHECK(cpp.find("hc::emitEvent(m_ctx, kEvt_Signal") != std::string::npos);
+    CHECK(cpp.find("hc::bindEvent(m_ctx, ") != std::string::npos);
+    CHECK(cpp.find("kEvt_Signal);") != std::string::npos);
+}

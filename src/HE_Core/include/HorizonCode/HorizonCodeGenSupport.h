@@ -284,6 +284,21 @@ inline void bindEvent(const Context& c, uint32_t target, const char* event)
 { if (c.bindEvent) c.bindEvent(target, event); }
 inline void emitEvent(const Context& c, const char* event, const Value& arg)
 { if (c.emitEvent) c.emitEvent(event, arg); }
+// By interned id: the generated class holds one constant per event it names, so
+// dispatch never hashes a string. The name-taking pair above stays as the
+// fallback for a Context that predates the id members.
+using HorizonCode::EventId;
+inline EventId eventId(const char* name) { return HorizonCode::eventId(name); }
+inline void bindEvent(const Context& c, uint32_t target, EventId event)
+{
+    if (c.bindEventId)    c.bindEventId(target, event);
+    else if (c.bindEvent) c.bindEvent(target, HorizonCode::eventName(event));
+}
+inline void emitEvent(const Context& c, EventId event, const Value& arg)
+{
+    if (c.emitEventId)    c.emitEventId(event, arg);
+    else if (c.emitEvent) c.emitEvent(HorizonCode::eventName(event), arg);
+}
 inline std::vector<Value> callExternal(const Context& c, uint32_t target, const char* fn,
                                        const std::vector<Value>& args)
 { return c.callExternal ? c.callExternal(target, fn, args) : std::vector<Value>{}; }

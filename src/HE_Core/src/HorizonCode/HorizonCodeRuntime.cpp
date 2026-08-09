@@ -262,6 +262,16 @@ Context Runtime::makeContext(InstanceId id)
     // Reference-based delegation.
     ctx.emitEvent = [this, id](const std::string& event, const Value& arg)
     { emitEvent(id, event, arg); };
+    ctx.emitEventId = [this, id](EventId ev, const Value& arg)
+    { dispatchToListeners(id, ev, eventName(ev), arg); };
+    ctx.bindEventId = [this, id](uint32_t target, EventId ev)
+    {
+        if (!find(target)) { hcError("null reference — Bind Event '" + eventName(ev) +
+                                     "' on a null/destroyed object"); return; }
+        if (!find(id)) return;
+        auto& vec = m_listeners[target][ev];
+        if (std::find(vec.begin(), vec.end(), id) == vec.end()) vec.push_back(id);
+    };
     ctx.bindEvent = [this, id](uint32_t target, const std::string& event)
     {
         if (!find(target)) { hcError("null reference — Bind Event '" + event + "' on a null/destroyed object"); return; }
@@ -399,20 +409,17 @@ void Runtime::update(float dt)
 // The listener pass is NOT optional: fireEvent reaches everyone bound to this
 // instance after the owner's own handlers (§3.5), and skipping it here would
 // break dispatcher patterns silently — nothing would report it.
-void Runtime::fireEngineEvent(InstanceId id, const char* name, int elem, const Value& arg,
-                              void (CompiledInstance::*hook)(int), int hookElem)
-{
-    Inst* i = find(id);
-    if (!i) return;
-    if (i->compiled) (i->compiled.get()->*hook)(hookElem);
-    else { Runner runner(i->graph, makeContext(id)); runner.fireEvent(name, elem, arg); }
-    dispatchToListeners(id, name, arg);
-}
-
 // The element-only pointer/focus events.
 #define HE_HC_POINTER_EVENT(fn, name, hookFn)                                   \
     void Runtime::fn(InstanceId id, int elem)                                   \
-    { fireEngineEvent(id, name, elem, {}, &CompiledInstance::hookFn, elem); }
+    {                                                                           \
+        Inst* i = find(id);                                                     \
+        if (!i) return;                                                         \
+        if (i->compiled) i->compiled->hookFn(elem);                             \
+        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, elem, {}); } \
+        static const EventId ev = eventId(name);                                \
+        dispatchToListeners(id, ev, name, {});                                  \
+    }
 HE_HC_POINTER_EVENT(fireOnClicked,    "OnClicked",    onClicked)
 HE_HC_POINTER_EVENT(fireOnPressed,    "OnPressed",    onPressed)
 HE_HC_POINTER_EVENT(fireOnReleased,   "OnReleased",   onReleased)
@@ -433,7 +440,8 @@ HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn();                                 \
         else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, 0, {}); } \
-        dispatchToListeners(id, name, {});                                      \
+        static const EventId ev = eventId(name);                                \
+        dispatchToListeners(id, ev, name, {});                                  \
     }
 HE_HC_PLAIN_EVENT(fireConstruct,       "Construct",       onConstruct)
 HE_HC_PLAIN_EVENT(fireDestruct,        "Destruct",        onDestruct)
@@ -452,7 +460,8 @@ HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookCall;                                 \
         else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, elem, boxed); } \
-        dispatchToListeners(id, name, boxed);                                   \
+        static const EventId ev = eventId(name);                                \
+        dispatchToListeners(id, ev, name, boxed);                               \
     }
 HE_HC_VALUE_EVENT(fireOnTextChanged,   "OnTextChanged",   const std::string&,
                   onTextChanged(elem, v),   Value::ofString(v))
@@ -472,7 +481,8 @@ void Runtime::fireTick(InstanceId id, float dt)
     if (!i) return;
     if (i->compiled) i->compiled->onTick(dt);
     else { Runner r(i->graph, makeContext(id)); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
-    dispatchToListeners(id, "Tick", Value::ofFloat(dt));
+    static const EventId ev = eventId("Tick");
+    dispatchToListeners(id, ev, "Tick", Value::ofFloat(dt));
 }
 
 void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
@@ -482,7 +492,8 @@ void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
     if (i->compiled) i->compiled->onWindowFocusChanged(focused);
     else { Runner r(i->graph, makeContext(id));
            r.fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
-    dispatchToListeners(id, "OnWindowFocusChanged", Value::ofBool(focused));
+    static const EventId ev = eventId("OnWindowFocusChanged");
+    dispatchToListeners(id, ev, "OnWindowFocusChanged", Value::ofBool(focused));
 }
 
 void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const Value& arg)
@@ -507,17 +518,21 @@ void Runtime::emitEvent(InstanceId owner, const std::string& event, const Value&
 void Runtime::bindEvent(InstanceId owner, const std::string& event, InstanceId listener)
 {
     if (!find(owner) || !find(listener)) return;
-    auto& vec = m_listeners[owner][event];
+    auto& vec = m_listeners[owner][eventId(event)];
     if (std::find(vec.begin(), vec.end(), listener) == vec.end())
         vec.push_back(listener);
 }
 
-void Runtime::dispatchToListeners(InstanceId owner, const std::string& event, const Value& arg)
+void Runtime::dispatchToListeners(InstanceId owner, const std::string& name, const Value& arg)
+{ dispatchToListeners(owner, eventId(name), name, arg); }
+
+void Runtime::dispatchToListeners(InstanceId owner, EventId ev, const std::string& event,
+                                  const Value& arg)
 {
     if (m_dispatchDepth >= 32) return; // guard cross-instance event cycles (DEPTH)
     auto oit = m_listeners.find(owner);
     if (oit == m_listeners.end()) { if (m_dispatchDepth == 0) m_dispatchFires = 0; return; }
-    auto eit = oit->second.find(event);
+    auto eit = oit->second.find(ev);
     if (eit == oit->second.end()) { if (m_dispatchDepth == 0) m_dispatchFires = 0; return; }
 
     const std::vector<InstanceId> listeners = eit->second; // copy: fireEvent may re-bind

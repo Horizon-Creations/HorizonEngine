@@ -140,8 +140,6 @@ public:
     // the caller never builds the string, and the compiled side never compares
     // one. The name still exists here, for the interpreted path and for the
     // listener list, which is keyed by it.
-    void fireEngineEvent(InstanceId id, const char* name, int elem, const Value& arg,
-                         void (CompiledInstance::*hook)(int), int hookElem);
     void fireOnClicked(InstanceId id, int elem);
     void fireOnPressed(InstanceId id, int elem);
     void fireOnReleased(InstanceId id, int elem);
@@ -222,11 +220,17 @@ private:
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.
     Context makeContext(InstanceId id);
     // Fire `event` on every listener bound to (owner, event). Bounded recursion.
-    void dispatchToListeners(InstanceId owner, const std::string& event, const Value& arg);
+    // The listener table is keyed by the interned id, not the name: dispatch
+    // then costs an integer hash instead of a string one, and the engine's own
+    // events intern theirs once into a static. `name` still travels along
+    // because the LISTENER's own handler is still reached by name.
+    void dispatchToListeners(InstanceId owner, EventId ev, const std::string& name,
+                             const Value& arg);
+    void dispatchToListeners(InstanceId owner, const std::string& name, const Value& arg);
 
     std::unordered_map<InstanceId, Inst> m_insts;
     // owner → event name → subscribed listener instances.
-    std::unordered_map<InstanceId, std::unordered_map<std::string, std::vector<InstanceId>>> m_listeners;
+    std::unordered_map<InstanceId, std::unordered_map<EventId, std::vector<InstanceId>>> m_listeners;
     InstanceId m_next         = 1;
     InstanceId m_gameInstance = 0;
     // The same instance as an object, when it is a compiled one. Kept beside the
