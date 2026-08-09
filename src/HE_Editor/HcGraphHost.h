@@ -143,6 +143,12 @@ void endAddMenu();
 // Adding a case here is only correct while every frontend wants it identically.
 bool drawCommonNodeDetails(const Host& h, HC::Node& n);
 
+// The event picker Emit/Bind Event share. Lists the graph's DECLARED events
+// (Graph::events) so a name is chosen, not typed — the three places that used to
+// spell the same string are now one list. Typing a new name declares it.
+// Returns true when the node changed.
+bool drawEventPicker(HC::Graph& g, HC::Node& n, const char* label);
+
 // A link dragged off a pin and released on empty canvas: a menu filtered to
 // everything that can take that pin, auto-wired on pick. Returns the new node
 // id (auto-selected), or 0. Wired into Model::drawPinDragMenu by buildModel.

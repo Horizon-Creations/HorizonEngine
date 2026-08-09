@@ -87,6 +87,7 @@ struct LSState
 	bool        focusSelected = false;
 	int         currentGraph = 0;   // visible sub-graph: 0 = event graph, else a FunctionEntry id
 	std::string selectedVar;        // variable selected in the left panel
+	std::string selectedEvent;      // declared event shown in the details pane
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
 	std::string evtNameEdit;        // scratch buffer for a custom Event name (uniqueness)
@@ -247,7 +248,48 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 	// switches which sub-graph the canvas shows (Blueprint-style).
 	ImGui::SeparatorText("Graphs");
 	if (ImGui::Selectable("Event Graph", g.currentGraph == 0))
-	{ g.currentGraph = 0; g.selectedNode = 0; g.selectedVar.clear(); }
+	{ g.currentGraph = 0; g.selectedNode = 0; g.selectedVar.clear(); g.selectedEvent.clear(); }
+
+	// ── Events this class raises ─────────────────────────────────────────────
+	// Declared once here, then PICKED in Emit/Bind/Event nodes instead of typed
+	// three times. Rename rewrites every node that used the old name, so the two
+	// halves of a binding cannot drift apart.
+	ImGui::SeparatorText("Events");
+	if (EditorWidgets::addButton("##evt", "Declare an event this class raises"))
+	{
+		std::string name = "NewEvent";
+		for (int i = 2; graph.findEvent(name); ++i) name = "NewEvent" + std::to_string(i);
+		HC::EventDecl d; d.name = name;
+		graph.events.push_back(std::move(d));
+		g.selectedEvent = name;
+		edited = true;
+	}
+	{
+		std::string removeEvent;
+		for (auto& e : graph.events)
+		{
+			ImGui::PushID(e.name.c_str());
+			const std::string label = e.name + (e.hasArg ? "  (1 arg)" : "");
+			if (ImGui::Selectable(label.c_str(), g.selectedEvent == e.name))
+			{ g.selectedEvent = e.name; g.selectedVar.clear(); g.selectedNode = 0; }
+			if (ImGui::BeginPopupContextItem())
+			{
+				if (EditorWidgets::dangerMenuItem("Delete")) removeEvent = e.name;
+				ImGui::EndPopup();
+			}
+			ImGui::PopID();
+		}
+		if (!removeEvent.empty())
+		{
+			// The nodes keep the name: deleting the declaration says "this is no
+			// longer part of the interface", not "rewrite the graph".
+			graph.events.erase(std::remove_if(graph.events.begin(), graph.events.end(),
+				[&](const HC::EventDecl& d) { return d.name == removeEvent; }),
+				graph.events.end());
+			if (g.selectedEvent == removeEvent) g.selectedEvent.clear();
+			edited = true;
+		}
+	}
 
 	ImGui::SeparatorText("Functions");
 	if (EditorWidgets::addButton("##fn", "Add a function"))
@@ -262,6 +304,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 		graph.findNode(retId)->s = fnName;        // bound to this function (results mirror on sync)
 		g.selectedNode = fnId;
 		g.selectedVar.clear();
+		g.selectedEvent.clear();
 		g.focusSelected = true;
 		edited = true;
 	}
@@ -282,6 +325,7 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 			g.currentGraph = n.id;                // open the function's sub-graph
 			g.selectedNode = n.id;
 			g.selectedVar.clear();
+			g.selectedEvent.clear();
 			g.focusSelected = true;
 		}
 		if (same > 1) ImGui::PopStyleColor();
@@ -299,6 +343,95 @@ void drawFunctions(HC::Graph& graph, bool& edited)
 // buffer belongs to, and the host's selected-variable name), and inventing
 // out-params for them would trade one duplication for a worse interface.
 // Fixing it properly means giving Host a small "selection" block first.
+// Every node bound to this event takes the declaration's argument shape: the
+// declaration is the interface, so an Emit that carried a Float and a handler
+// that read a String can no longer disagree.
+void syncEventNodes(HC::Graph& graph, const HC::EventDecl& e)
+{
+	for (auto& n : graph.nodes)
+	{
+		if (n.s != e.name) continue;
+		if (n.type != NT::Event && n.type != NT::EmitEvent) continue;
+		const bool shapeChanged = n.hasArg != e.hasArg || n.propType != e.argType ||
+		                          n.typeName != e.typeName;
+		n.hasArg   = e.hasArg;
+		n.propType = e.argType;
+		n.typeName = e.typeName;
+		if (shapeChanged)
+		{
+			// The value pin changed type (or vanished) — its wire no longer
+			// typechecks. Event has it as an OUTPUT, Emit as an INPUT.
+			const HGH::PinRanges r = HGH::pinRanges(n);
+			HGH::removePinLinks(graph, n.id, n.type == NT::Event ? r.dataOut0 : r.dataIn0);
+		}
+	}
+}
+
+// Detail editor for a declared event: its name and its one optional argument.
+// Renaming rewrites every node that used the old name — the declaration IS the
+// interface, so the nodes follow it rather than the other way round.
+void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
+{
+	HC::EventDecl* e = graph.findEvent(g.selectedEvent);
+	if (!e) { g.selectedEvent.clear(); return; }
+
+	ImGui::TextDisabled("Event");
+	static std::string s_nameEdit;
+	static std::string s_nameFor;
+	if (s_nameFor != e->name) { s_nameEdit = e->name; s_nameFor = e->name; }
+	ImGui::InputText("Name", &s_nameEdit);
+	if (ImGui::IsItemDeactivatedAfterEdit())
+	{
+		const std::string nn = s_nameEdit;
+		if (nn.empty() || nn == e->name) s_nameEdit = e->name;
+		else if (graph.findEvent(nn) || HC::findEngineEvent(nn))
+			s_nameEdit = e->name;      // taken, or an engine event — refuse
+		else
+		{
+			const std::string old = e->name;
+			e->name = nn;
+			for (auto& n : graph.nodes)
+				if ((n.type == NT::Event || n.type == NT::EmitEvent ||
+				     n.type == NT::BindEvent) && n.s == old)
+					n.s = nn;
+			g.selectedEvent = nn;
+			s_nameFor = nn;
+			edited = true;
+		}
+	}
+
+	bool hasArg = e->hasArg;
+	if (ImGui::Checkbox("Carries a value", &hasArg))
+	{
+		e->hasArg = hasArg;
+		syncEventNodes(graph, *e);
+		edited = true;
+	}
+	if (e->hasArg)
+	{
+		const PT oldType = e->argType;
+		const std::string oldTypeName = e->typeName;
+		if (HcEditorUtil::drawTypePicker("Value type", content, e->argType,
+		                                 nullptr, &e->typeName))
+		{
+			if (e->argType != oldType || e->typeName != oldTypeName) syncEventNodes(graph, *e);
+			edited = true;
+		}
+	}
+	ImGui::TextDisabled("Emit Event raises it; another class binds to it and\n"
+	                    "runs its own Event node of this name.");
+
+	ImGui::Spacing();
+	if (EditorWidgets::dangerButton("Delete Event"))
+	{
+		const std::string gone = e->name;
+		graph.events.erase(std::remove_if(graph.events.begin(), graph.events.end(),
+			[&](const HC::EventDecl& d) { return d.name == gone; }), graph.events.end());
+		g.selectedEvent.clear();
+		edited = true;
+	}
+}
+
 void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
@@ -441,6 +574,7 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 		graph.variables.erase(std::remove_if(graph.variables.begin(), graph.variables.end(),
 			[&](const HC::Variable& vv){ return vv.name == gone; }), graph.variables.end());
 		g.selectedVar.clear();
+		g.selectedEvent.clear();
 		edited = true;
 	}
 }
@@ -560,8 +694,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	// "widget's Event" where this one says "script's Event".
 	case NT::BindEvent:
 	case NT::EmitEvent:
-		ImGui::InputText("Event", &n->s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edited = true;
+		if (HGH::drawEventPicker(graph, *n, "Event")) edited = true;
 		ImGui::TextDisabled(n->type == NT::BindEvent
 			? "When Target fires this event, this\nscript's Event of the same name runs."
 			: "Broadcast to everyone bound to this\nscript's event of this name.");
@@ -694,9 +827,10 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	drawFunctions(graph, edited);
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (g.selectedNode != 0)          drawNodeDetails(graph, events, allowCustomEvents, content, edited);
-	else if (!g.selectedVar.empty())  drawVariableDetails(graph, content, edited);
-	else ImGui::TextDisabled("Select a node or variable.");
+	if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents, content, edited);
+	else if (!g.selectedVar.empty())   drawVariableDetails(graph, content, edited);
+	else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
+	else ImGui::TextDisabled("Select a node, variable or event.");
 	ImGui::EndChild();
 
 	ImGui::SameLine();

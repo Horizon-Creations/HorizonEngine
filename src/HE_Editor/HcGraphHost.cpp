@@ -873,6 +873,52 @@ bool drawDefinitionPicker(HC::Graph& g, HC::Node& n, bool isStruct,
 	return changed;
 }
 
+bool drawEventPicker(HC::Graph& g, HC::Node& n, const char* label)
+{
+	bool changed = false;
+	const std::string cur = n.s.empty() ? "(none)" : n.s;
+	if (ImGui::BeginCombo(label, cur.c_str()))
+	{
+		if (g.events.empty())
+			ImGui::TextDisabled("This class declares no events yet.");
+		for (const auto& e : g.events)
+			if (ImGui::Selectable(e.name.c_str(), n.s == e.name) && n.s != e.name)
+			{
+				n.s = e.name;
+				n.hasArg   = e.hasArg;      // keep the pin in step with the declaration
+				n.propType = e.argType;
+				n.typeName = e.typeName;
+				changed = true;
+			}
+		ImGui::EndCombo();
+	}
+	// A name that is not declared yet: typing it here declares it, so the two
+	// halves of a binding cannot drift apart by a typo.
+	static std::string s_newName;
+	static int s_newFor = 0;
+	if (s_newFor != n.id) { s_newName.clear(); s_newFor = n.id; }
+	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 96.0f);
+	ImGui::InputTextWithHint("##newevt", "New event name…", &s_newName);
+	ImGui::SameLine();
+	const bool canAdd = !s_newName.empty() && !g.findEvent(s_newName) &&
+	                    !HC::findEngineEvent(s_newName);
+	if (!canAdd) ImGui::BeginDisabled();
+	if (ImGui::Button("Declare"))
+	{
+		HC::EventDecl d;
+		d.name = s_newName;
+		g.events.push_back(d);
+		n.s = d.name; n.hasArg = false; n.propType = PT::Float; n.typeName.clear();
+		s_newName.clear();
+		changed = true;
+	}
+	if (!canAdd) ImGui::EndDisabled();
+	if (!s_newName.empty() && HC::findEngineEvent(s_newName))
+		ImGui::TextDisabled("\"%s\" is an engine event — every class can handle it,\n"
+		                    "none declares it.", s_newName.c_str());
+	return changed;
+}
+
 bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 {
 	if (!h.graph) return false;
