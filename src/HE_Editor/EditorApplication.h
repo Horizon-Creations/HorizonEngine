@@ -630,6 +630,10 @@ private:
 	std::atomic<bool>    m_sftpChecked{false};
 	HE::Cs::SftpProbeResult m_sftpProbe;
 	void startSftpProbe();
+	// Re-fetch manifest.json + re-merge the Engine tree, without re-probing.
+	// Reuses m_sftpThread (joined first), so only one of the two can be in
+	// flight — which is what we want: both write the same manifest state.
+	void refreshEngineContentManifest();
 	// Set by startSftpProbe()'s worker once a fresh manifest is available;
 	// consumed (exchanged back to false) once, on the main thread in OnRender,
 	// which is the only thread allowed to mutate ContentManager — see

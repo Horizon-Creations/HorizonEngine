@@ -114,16 +114,29 @@ public:
 	// (see ContentManager::resolveSavePath) are merged into the displayed
 	// tree, shadowing the default they override. Pass empty to skip merging
 	// (e.g. before any project is loaded).
-	// remoteOnly (optional): EngineContent assets known from the SFTP manifest
-	// (see HE::Cs::EngineContentManifest, HE_ContentSync) that are not present in
-	// EITHER the default tree or the project override — these are added as
-	// File nodes with isRemoteOnly=true so the Content Browser shows the full
-	// set of available defaults even before anything is downloaded. An entry
-	// whose path already resolves locally is skipped (a real, already-present
-	// file always wins over a remote placeholder).
+	// The remotely-available EngineContent set (see setEngineRemoteAssets) is
+	// merged in as well, so the Content Browser always shows the full catalogue
+	// of defaults — including ones not downloaded yet.
 	bool refreshEngineFolder(const std::string& engineContentAbsPath,
-	                          const std::string& projectContentRoot = std::string(),
-	                          const std::vector<HE::RemoteEngineAsset>& remoteOnly = {});
+	                          const std::string& projectContentRoot = std::string());
+
+	// EngineContent assets the SFTP manifest says exist (see
+	// HE::Cs::EngineContentManifest, HE_ContentSync). Stored HERE, as tree state,
+	// rather than passed to refreshEngineFolder per call — deliberately.
+	//
+	// It used to be a defaulted third parameter of refreshEngineFolder, which
+	// meant every caller that did not know about the feature silently REBUILT THE
+	// TREE WITHOUT THE CATALOGUE: the periodic content refresh (default every
+	// 60 s), project load, and every create/rename refresh all wiped it, so the
+	// remote assets vanished from the browser a minute after startup. A defaulted
+	// "and here is all the state you must remember to re-supply" argument is a
+	// trap; owning it is not.
+	//
+	// Callers pass the CURRENT manifest contents; each call replaces the previous
+	// set (pass an empty vector to clear it, e.g. when the endpoint is
+	// unreachable). Does not itself refresh the tree — call refreshEngineFolder
+	// afterwards.
+	void setEngineRemoteAssets(std::vector<HE::RemoteEngineAsset> assets);
 
 	std::atomic<uint64_t> engineFolderVersion{0};
 
@@ -157,6 +170,10 @@ private:
 
 	HE::Folder m_engineFolder;
 	mutable std::shared_mutex m_engineFolderMutex;
+	// Guarded by m_engineFolderMutex too: it is only ever read while building a
+	// fresh tree, which already takes that lock, and written by
+	// setEngineRemoteAssets — both off the frame thread (the SFTP worker).
+	std::vector<HE::RemoteEngineAsset> m_engineRemoteAssets;
 
 	HE::Folder m_sourceFolder;
 	mutable std::shared_mutex m_sourceFolderMutex;

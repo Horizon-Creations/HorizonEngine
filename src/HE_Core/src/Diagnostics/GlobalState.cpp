@@ -592,19 +592,38 @@ static void mergeOverrideInto(HE::Folder* base, const fs::path& overrideDir)
 // not exist locally — an existing folder is reused (by name, same rule
 // mergeOverrideInto uses), a missing one is created as an empty placeholder so the
 // tree still has somewhere to hang the remote-only leaf.
-static HE::Folder* walkOrCreateFolderPath(HE::Folder* root, const std::vector<std::string>& segments)
+// `cacheRoot` is where a synthesized folder's fullPath is rooted. It is NOT the
+// engine content root: a folder that exists only remotely has no directory under
+// the shipped defaults, and pointing it there would hand the Content Browser a
+// path that does not exist (every create/import/drop target resolves against a
+// folder's fullPath). The download cache is the location such a folder will
+// actually acquire once anything inside it is fetched, so that is the honest
+// answer. Folders that DO exist locally are found by name and keep their own
+// real path — only genuinely new levels are synthesized here.
+static HE::Folder* walkOrCreateFolderPath(HE::Folder* root, const std::vector<std::string>& segments,
+                                           const fs::path& cacheRoot)
 {
 	HE::Folder* cur = root;
+	fs::path    cacheSoFar = cacheRoot;
 	for (const std::string& seg : segments)
 	{
+		cacheSoFar /= seg;
+
 		HE::Folder* next = nullptr;
 		for (HE::Folder* s : cur->subfolders)
 			if (s->name == seg) { next = s; break; }
 		if (!next)
 		{
 			std::unique_ptr<HE::Folder> owned(new HE::Folder());
-			owned->name     = seg;
-			owned->fullPath = (fs::path(cur->fullPath) / seg).string();
+			owned->name = seg;
+			// make_preferred: every OTHER node in this tree comes from
+			// populateFolder/mergeOverrideInto via directory_entry::path(), i.e.
+			// native separators. A manifest path is authored with '/', and on
+			// Windows fs::path keeps it verbatim — so without this the synthesized
+			// nodes would be the only ones spelled "C:\...\Meshes/Sub", and every
+			// string comparison against a natively-spelled path (tab lookup,
+			// selection, thumbnail cache key) would miss. No-op on POSIX.
+			owned->fullPath = cacheSoFar.make_preferred().string();
 			cur->subfolders.push_back(owned.get());
 			next = owned.release();
 		}
@@ -613,15 +632,25 @@ static HE::Folder* walkOrCreateFolderPath(HE::Folder* root, const std::vector<st
 	return cur;
 }
 
-// Adds a File node (isRemoteOnly=true) for every manifest entry whose relative
-// path is not already resolvable in `base` (default tree + project override,
-// already merged in by the time this runs) — so the Content Browser's Engine
-// folder shows the full catalogue of available defaults, not just what happens
-// to be downloaded already. fullPath is the path the asset WILL occupy once
-// downloaded (GlobalState::engineContentCacheDir() / relativePath), not an
-// existing file — SftpClient::sftpGetFile writes there when a download completes.
+// Adds a File node for every manifest entry not already present in `base` (the
+// default tree + project override, both already merged in by the time this runs)
+// — so the Content Browser's Engine folder shows the full catalogue of available
+// defaults, not just what happens to be on this machine.
+//
+// Three outcomes per entry:
+//   • already in the tree (shipped default or project override)  → skipped
+//     entirely; a real local file always wins over anything remote.
+//   • present in the download cache from an earlier session      → added as a
+//     NORMAL node (isRemoteOnly=false) pointing at the cached file. Without this
+//     check a downloaded asset would keep its "on the server" badge forever and
+//     every double-click would re-ask to download a file already sitting on disk.
+//   • not present anywhere                                        → added as a
+//     remote-only placeholder whose fullPath is where the file WILL land once
+//     fetched (sftpGetFile writes exactly there).
 static void mergeManifestInto(HE::Folder* base, const std::vector<HE::RemoteEngineAsset>& remoteOnly)
 {
+	const fs::path cacheRoot = GlobalState::engineContentCacheDir();
+
 	for (const HE::RemoteEngineAsset& asset : remoteOnly)
 	{
 		if (asset.relativePath.empty()) continue;
@@ -634,28 +663,49 @@ static void mergeManifestInto(HE::Folder* base, const std::vector<HE::RemoteEngi
 		for (const auto& part : relPath.parent_path())
 			segments.push_back(part.string());
 
-		HE::Folder* parent = walkOrCreateFolderPath(base, segments);
+		HE::Folder* parent = walkOrCreateFolderPath(base, segments, cacheRoot);
 
 		bool existsLocally = false;
 		for (HE::File* f : parent->files)
 			if (f->name == leafName) { existsLocally = true; break; }
 		if (existsLocally) continue; // a real local/override file always wins
 
+		// make_preferred for the same reason as in walkOrCreateFolderPath above:
+		// this string is compared against natively-spelled paths elsewhere.
+		fs::path cachePath = cacheRoot / relPath;
+		cachePath.make_preferred();
+		std::error_code ec;
+		const bool cached = fs::is_regular_file(cachePath, ec);
+
 		std::unique_ptr<HE::File> file(new HE::File());
 		file->name         = leafName;
 		file->extension    = relPath.extension().string();
-		file->isRemoteOnly = true;
+		file->isRemoteOnly = !cached;
 		file->remoteUuid   = asset.uuid;
-		file->fullPath     = (GlobalState::engineContentCacheDir() / relPath).string();
+		file->fullPath     = cachePath.string();
 		parent->files.push_back(file.get());
 		file.release();
 	}
 }
 
-bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
-                                       const std::string& projectContentRoot,
-                                       const std::vector<HE::RemoteEngineAsset>& remoteOnly)
+void GlobalState::setEngineRemoteAssets(std::vector<HE::RemoteEngineAsset> assets)
 {
+	std::unique_lock lock(m_engineFolderMutex);
+	m_engineRemoteAssets = std::move(assets);
+}
+
+bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
+                                       const std::string& projectContentRoot)
+{
+	// Copied out under the lock rather than held across the tree build: building
+	// takes a while (a full recursive directory walk) and the SFTP worker may
+	// replace the set meanwhile — and the swap at the end needs this same lock.
+	std::vector<HE::RemoteEngineAsset> remoteOnly;
+	{
+		std::shared_lock lock(m_engineFolderMutex);
+		remoteOnly = m_engineRemoteAssets;
+	}
+
 	std::error_code ec;
 	fs::path enginePath = engineContentAbsPath;
 	if (!fs::is_directory(enginePath, ec))

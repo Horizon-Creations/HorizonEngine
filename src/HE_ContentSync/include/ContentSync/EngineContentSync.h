@@ -41,6 +41,25 @@ struct DownloadQueueStatus
 	std::string currentRelativePath;
 	std::size_t completedInBatch = 0; // finished since the queue was last empty
 	std::size_t totalInBatch     = 0; // completedInBatch + still queued (+ the one in flight)
+
+	// Byte progress of the file currently in flight. Without these a progress
+	// bar can only ever step per COMPLETED file — which for the common case of a
+	// single-file download means it sits at 0% for the whole transfer and then
+	// vanishes, never showing motion. currentBytesTotal is 0 when the server did
+	// not report a size (rare, but SFTP does not guarantee it): treat that as
+	// "indeterminate", not as "0% done".
+	std::uint64_t currentBytesDone  = 0;
+	std::uint64_t currentBytesTotal = 0;
+
+	// completedInBatch, plus the fraction of the in-flight file already on disk.
+	// This is what a progress bar should fill to; totalInBatch is the divisor.
+	double progressFiles() const
+	{
+		double p = static_cast<double>(completedInBatch);
+		if (active && currentBytesTotal > 0)
+			p += static_cast<double>(currentBytesDone) / static_cast<double>(currentBytesTotal);
+		return p;
+	}
 };
 
 class HE_CS_API EngineContentSync
@@ -60,9 +79,18 @@ public:
 	EngineContentManifest manifest() const;
 
 	// Queues a download of `relativePath` (also the SFTP-side relative path —
-	// the remote layout mirrors the local EngineContent structure 1:1) if it is
-	// not already queued or in flight. `uuid` is carried through only so
-	// callers can correlate; this function does not consult the manifest.
+	// the remote layout mirrors the local EngineContent structure 1:1). `uuid`
+	// is carried through only so callers can correlate; this function does not
+	// consult the manifest.
+	//
+	// EVERY caller's onComplete fires exactly once, including when the same path
+	// is already queued or already in flight — the new callback is appended to
+	// the existing job rather than dropped. This is load-bearing, not politeness:
+	// ContentManager marks a UUID as "materializing" before calling in here and
+	// only clears that mark when the completion callback fires, so one swallowed
+	// callback wedges that asset as permanently-pending for the rest of the
+	// session.
+	//
 	// onComplete fires on a WORKER thread, never the main/frame thread — a
 	// caller touching Editor/UI state from it must marshal back itself (the
 	// existing ContentManager pollAsyncResults main-thread-drain pattern is the
@@ -79,16 +107,22 @@ private:
 
 	struct Job
 	{
-		std::string                       relativePath;
-		HE::UUID                          uuid;
-		DownloadTrigger                   trigger = DownloadTrigger::Passive;
-		std::function<void(bool)>         onComplete;
+		std::string                            relativePath;
+		HE::UUID                               uuid;
+		DownloadTrigger                        trigger = DownloadTrigger::Passive;
+		// Plural: several callers can await the same file (a scene reference and
+		// a Content Browser double-click, say). All of them get their answer.
+		std::vector<std::function<void(bool)>> callbacks;
 	};
 
 	void drainQueue(); // runs on a worker thread; pops+downloads until empty
 
 	mutable std::mutex     m_mutex;
 	std::vector<Job>       m_pending;
+	// The job drainQueue is working on right now, so a late enqueue for the same
+	// path can attach its callback instead of being dropped. Empty relativePath
+	// means "nothing in flight".
+	Job                    m_current;
 	bool                   m_draining = false;
 	DownloadQueueStatus    m_status;
 

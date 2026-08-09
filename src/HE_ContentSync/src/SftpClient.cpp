@@ -206,8 +206,36 @@ void listRemoteDirRecursive(Session& s, const std::string& fullDirPath,
 		const std::string childFull = fullDirPath + "/" + name;
 		const std::string childRel  = relPrefix.empty() ? name : relPrefix + "/" + name;
 
-		const bool isDir = (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) &&
-		                    LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
+		// SFTP does not guarantee permission bits in a readdir result. When they
+		// are missing the entry's type is simply unknown — treating that as
+		// "regular file" (the old behaviour) would silently list a DIRECTORY as
+		// a content file and never descend into it, truncating the manifest to
+		// whatever happened to be at the top level. So fall back to an explicit
+		// stat, and only give up on the entry if that fails too.
+		bool haveType = (attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) != 0;
+		bool isDir    = haveType && LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
+		if (!haveType)
+		{
+			LIBSSH2_SFTP_ATTRIBUTES st;
+			std::memset(&st, 0, sizeof(st));
+			if (libssh2_sftp_stat_ex(s.sftp, childFull.c_str(),
+			                          static_cast<unsigned int>(childFull.size()),
+			                          LIBSSH2_SFTP_STAT, &st) == 0 &&
+			    (st.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS))
+			{
+				haveType = true;
+				isDir    = LIBSSH2_SFTP_S_ISDIR(st.permissions);
+				if (st.flags & LIBSSH2_SFTP_ATTR_SIZE)        attrs.filesize = st.filesize;
+				if (st.flags & LIBSSH2_SFTP_ATTR_ACMODTIME)   attrs.mtime    = st.mtime;
+				attrs.flags |= (st.flags & (LIBSSH2_SFTP_ATTR_SIZE | LIBSSH2_SFTP_ATTR_ACMODTIME));
+			}
+		}
+		if (!haveType)
+		{
+			HE_LOG_WARN(ContentSync, "Skipping '%s' — the server reports no type for it",
+			            childRel.c_str());
+			continue;
+		}
 		if (isDir)
 		{
 			listRemoteDirRecursive(s, childFull, childRel, out);
@@ -232,7 +260,8 @@ SftpResult sftpTestConnection(const SftpEndpoint& endpoint)
 	return { true, {} };
 }
 
-SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRelPath, const std::string& localPath)
+SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRelPath,
+                        const std::string& localPath, const SftpProgressFn& onProgress)
 {
 	Session s;
 	if (!s.open(endpoint)) return { false, s.error };
@@ -241,6 +270,17 @@ SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRe
 	LIBSSH2_SFTP_HANDLE* handle = libssh2_sftp_open(s.sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
 	if (!handle)
 		return { false, "Could not open remote file '" + remoteRelPath + "': " + s.lastSshError() };
+
+	// Total size for progress reporting. Not fatal if the server withholds it —
+	// 0 means "unknown" to every consumer, which is honest; a wrong number would
+	// not be.
+	std::uint64_t totalBytes = 0;
+	{
+		LIBSSH2_SFTP_ATTRIBUTES attrs;
+		std::memset(&attrs, 0, sizeof(attrs));
+		if (libssh2_sftp_fstat_ex(handle, &attrs, 0) == 0 && (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE))
+			totalBytes = attrs.filesize;
+	}
 
 	std::error_code ec;
 	fs::path local = localPath;
@@ -255,7 +295,10 @@ SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRe
 		return { false, "Could not create local file '" + tmpPath.string() + "'" };
 	}
 
+	if (onProgress) onProgress(0, totalBytes);
+
 	std::vector<char> buf(64 * 1024);
+	std::uint64_t doneBytes = 0;
 	bool failed = false;
 	for (;;)
 	{
@@ -272,6 +315,8 @@ SftpResult sftpGetFile(const SftpEndpoint& endpoint, const std::string& remoteRe
 			failed = true;
 			break;
 		}
+		doneBytes += static_cast<std::uint64_t>(n);
+		if (onProgress) onProgress(doneBytes, totalBytes);
 	}
 	const std::string readError = failed ? s.lastSshError() : std::string();
 	libssh2_sftp_close_handle(handle);
