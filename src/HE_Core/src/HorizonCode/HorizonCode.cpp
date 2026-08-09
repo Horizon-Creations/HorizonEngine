@@ -1262,6 +1262,53 @@ void syncFunctionSignatures(Graph& g)
     }
 }
 
+// Binding a definition to a node CHANGES ITS PIN LAYOUT — syncTypeSignatures
+// gives Make Struct one data-in per field, Switch on Enum one exec-out per
+// entry — while the persisted links still address the old, bare layout. Every
+// affected link end has to move with its pin, or a wire quietly lands somewhere
+// else: a Switch's Default exec-out would become its FIRST entry's branch, which
+// is a misroute nobody sees, not an error anybody reports.
+//
+// `nodes` are ones that just went from no definition to one, so their "before"
+// is always the bare shape — that is what makes the mapping closed.
+void remapLinksForMirror(Graph& g, const std::vector<int>& nodes)
+{
+    struct Shape { PinRanges before; NodeType type; size_t mirrored = 0; };
+    std::unordered_map<int, Shape> shapes;
+    for (const int id : nodes)
+        if (const Node* n = g.findNode(id))
+            shapes[id] = Shape{ pinRanges(*n), n->type, 0 };
+
+    syncTypeSignatures(g);   // the pins the definition implies
+
+    for (auto& [id, sh] : shapes)
+        if (const Node* n = g.findNode(id)) sh.mirrored = n->params.size();
+
+    auto remap = [&](int nodeId, int pin) -> int
+    {
+        const auto it = shapes.find(nodeId);
+        if (it == shapes.end()) return pin;
+        const Node* n = g.findNode(nodeId);
+        if (!n) return pin;
+        const Shape&    sh = it->second;
+        const PinRanges a  = sh.before, b = pinRanges(*n);
+        // Switch on Enum keeps Default LAST, so it slides past the entries that
+        // just appeared — the one place a pin moves WITHIN its own region.
+        if (sh.type == NodeType::SwitchOnEnum && pin >= a.execOut0 && pin < a.dataIn0)
+            return b.execOut0 + (int)sh.mirrored + (pin - a.execOut0);
+        if (pin < a.execOut0) return b.execIn0  + (pin - a.execIn0);
+        if (pin < a.dataIn0)  return b.execOut0 + (pin - a.execOut0);
+        if (pin < a.dataOut0) return b.dataIn0  + (pin - a.dataIn0);
+        return b.dataOut0 + (pin - a.dataOut0);
+    };
+
+    for (Link& l : g.links)
+    {
+        l.srcPin = remap(l.srcNode, l.srcPin);
+        l.dstPin = remap(l.dstNode, l.dstPin);
+    }
+}
+
 void inferUserTypeNames(Graph& g)
 {
     // Declared variables are authoritative for their own Get/Set nodes.
@@ -1271,35 +1318,51 @@ void inferUserTypeNames(Graph& g)
             if (const Variable* v = g.findVariable(n.s)) n.typeName = v->typeName;
 
     // Then propagate along wires until nothing new is learned (a chain of array
-    // ops picks its element definition up one hop at a time).
+    // ops picks its element definition up one hop at a time). Matched PER PIN,
+    // not per node: an array node advertises its element kind in propType, but
+    // Make/Break/Get/SetStructField and the enum nodes leave propType alone and
+    // put everything in typeName — the very nodes that report the definition as
+    // missing. Their Struct/Enum pins are what has to be looked at.
+    std::vector<int> repaired;
     for (bool changed = true; changed; )
     {
         changed = false;
         for (Node& n : g.nodes)
         {
             if (!n.typeName.empty()) continue;
-            if (n.propType != P::Struct && n.propType != P::Enum) continue;
+            const NodeSig  mine = signatureOf(n);
+            const PinRanges mr  = pinRanges(n);
             std::string found;
             bool ambiguous = false;
             for (const Link& l : g.links)
             {
                 const bool weAreSrc = l.srcNode == n.id;
                 if (!weAreSrc && l.dstNode != n.id) continue;
+                // Our end has to BE a user-defined-type pin.
+                const int ourPin = weAreSrc ? l.srcPin : l.dstPin;
+                const std::vector<PinDesc>& ours = weAreSrc ? mine.dataOuts : mine.dataIns;
+                const int ourIdx = ourPin - (weAreSrc ? mr.dataOut0 : mr.dataIn0);
+                if (ourIdx < 0 || ourIdx >= (int)ours.size()) continue;
+                const PinType want = ours[(size_t)ourIdx].type;
+                if (want != P::Enum && want != P::Struct) continue;
+
                 const Node* peer = g.findNode(weAreSrc ? l.dstNode : l.srcNode);
                 if (!peer || peer->id == n.id) continue;
                 const PinRanges pr = pinRanges(*peer);
                 const int idx = weAreSrc ? l.dstPin - pr.dataIn0 : l.srcPin - pr.dataOut0;
                 PinDesc pd{};
                 if (!dataPinDescOf(*peer, /*input=*/weAreSrc, idx, pd)) continue;
-                if (pd.type != n.propType || !pd.typeName || !*pd.typeName) continue;
+                if (pd.type != want || !pd.typeName || !*pd.typeName) continue;
                 if (found.empty())            found = pd.typeName;
                 else if (found != pd.typeName) { ambiguous = true; break; }
             }
             if (ambiguous || found.empty()) continue;
             n.typeName = found;
+            repaired.push_back(n.id);
             changed = true;
         }
     }
+    if (!repaired.empty()) remapLinksForMirror(g, repaired);
 }
 
 void syncTypeSignatures(Graph& g)

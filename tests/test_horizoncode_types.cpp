@@ -436,6 +436,73 @@ TEST_CASE("A loaded graph recovers Enum/Struct definitions its nodes never store
     CHECK(lone.nodes[0].typeName.empty());
 }
 
+TEST_CASE("Repairing a definition moves the links with the pins it creates")
+{
+    TypeFixture fx;
+    // The shape an older editor build persisted: user-type nodes that know their
+    // KIND but not their definition, so they carry none of the pins the
+    // definition implies — and the wires address that bare layout.
+    Graph g;
+    Variable hit; hit.name = "hit"; hit.type = PinType::String;
+    g.variables.push_back(hit);
+    Variable out; out.name = "out"; out.type = PinType::Struct; out.typeName = kStats;
+    g.variables.push_back(out);
+
+    Node ev; ev.type = NodeType::Event; ev.s = "Go";
+    const int e = g.addNode(ev);
+    // Via Int to Enum, not Const Enum: syncTypeSignatures clamps a Const Enum
+    // onto a live entry, so it could never reach the Default branch.
+    Node ci; ci.type = NodeType::ConstInt; ci.f[0] = 99.0f;
+    const int cint = g.addNode(std::move(ci));
+    Node ie; ie.type = NodeType::IntToEnum; ie.typeName = kWeapon;
+    const int cen = g.addNode(std::move(ie));
+    REQUIRE(g.connect(cint, 0, cen, 0));
+    Node sw; sw.type = NodeType::SwitchOnEnum;            // bare: execIn 0, Default 1, Value 2
+    const int swn = g.addNode(std::move(sw));
+    Node sv; sv.type = NodeType::SetVariable; sv.s = "hit"; sv.propType = PinType::String;
+    const int hitSet = g.addNode(std::move(sv));
+    g.findNode(hitSet)->pinDefaults[0] = Value::ofString("default");
+
+    REQUIRE(g.connect(e, 0, swn, 0));      // exec → Switch
+    REQUIRE(g.connect(cen, 1, swn, 2));    // enum out (after its Int in) → Value
+    REQUIRE(g.connect(swn, 1, hitSet, 0)); // Default → Set hit
+
+    Node mk; mk.type = NodeType::MakeStruct;              // bare: one Struct data-out at 0
+    const int mkn = g.addNode(std::move(mk));
+    Node so; so.type = NodeType::SetVariable; so.s = "out";
+    so.propType = PinType::Struct; so.typeName = kStats;
+    const int outSet = g.addNode(std::move(so));
+    REQUIRE(g.connect(mkn, 0, outSet, 2));
+    REQUIRE(g.connect(hitSet, 1, outSet, 0));             // chain the exec along
+
+    Graph loaded;
+    REQUIRE(fromJson(toJson(g), loaded));
+
+    // Both nodes learned their definition from the wire...
+    CHECK(loaded.findNode(swn)->typeName == kWeapon);
+    CHECK(loaded.findNode(mkn)->typeName == kStats);
+    // ...and the links moved with the pins that appeared. Switch keeps Default
+    // LAST, so it slid past the three entries: 1 → 4, and Value 2 → 5.
+    int defaultPin = -1, valuePin = -1, structOutPin = -1;
+    for (const Link& l : loaded.links)
+    {
+        if (l.srcNode == swn && l.dstNode == hitSet) defaultPin  = l.srcPin;
+        if (l.dstNode == swn)                        valuePin    = l.dstPin;
+        if (l.srcNode == mkn)                        structOutPin = l.srcPin;
+    }
+    CHECK(defaultPin == 4);       // 1 execIn + 3 entries → Default
+    CHECK(valuePin == 5);
+    CHECK(structOutPin == 3);     // 3 fields now precede the Struct out
+
+    // And it still behaves: 99 matches no entry, so Default runs.
+    VarStore store;
+    Runner r(loaded, store.ctx());
+    r.fireEvent("Go", 0, {});
+    CHECK(store.vars["hit"].s == "default");
+    REQUIRE(store.vars["out"].items.size() == 3);   // a real struct, not an empty Value
+    CHECK(store.vars["out"].items[0].f == doctest::Approx(100.0f));
+}
+
 TEST_CASE("adoptForEachElementType carries the element's definition, not just its kind")
 {
     TypeFixture fx;
