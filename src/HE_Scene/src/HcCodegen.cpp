@@ -2015,6 +2015,10 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         {
             usedNames.erase(className);   // name freed — the class ships interpreted
             res.fallbacks.push_back({ src.key, e.reason, e.node });
+            // Stop mode: a class that cannot be compiled is the build's problem,
+            // not something to paper over. Every one is still collected, so the
+            // author fixes them all in one pass instead of one per build.
+            if (opt.onFailure == OnFailure::Stop) res.ok = false;
         }
         catch (const std::exception& e)
         {

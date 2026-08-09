@@ -60,6 +60,7 @@ static std::string s_exportExcludes;               // one glob pattern per line
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
+static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 
@@ -301,6 +302,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportIncremental  = p.incremental;
 	s_exportAppBundle    = p.appBundle;
 	s_exportCompileHC    = p.compileHorizonCode;
+	s_exportHcStop       = p.hcStopOnFailure;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
@@ -324,6 +326,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.appBundle        = s_exportAppBundle;
 	p.shaderBackends   = s_exportShaderBackends;
 	p.compileHorizonCode = s_exportCompileHC;
+	p.hcStopOnFailure    = s_exportHcStop;
 }
 
 void open(AppContext& ctx)
@@ -565,6 +568,27 @@ void render(AppContext& ctx)
                                   "editor build. Graphs always ship too: anything that fails\n"
                                   "validation or compilation runs interpreted, per asset.\n"
                                   "Host platform only (cross-targets ship interpreted).");
+            // What an untranslatable graph means. The default keeps compiling an
+            // optimization; the other makes "everything is native" a build
+            // guarantee — which is also what lets calls between compiled classes
+            // skip the Runtime's name-based seam.
+            if (s_exportCompileHC)
+            {
+                ImGui::Indent();
+                int mode = s_exportHcStop ? 1 : 0;
+                if (ImGui::RadioButton("Interpret on failure", &mode, 0)) s_exportHcStop = false;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A graph that cannot be translated ships interpreted.\n"
+                                      "The build always succeeds; compiled and interpreted\n"
+                                      "instances interoperate.");
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Stop on failure", &mode, 1)) s_exportHcStop = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("A graph that cannot be translated FAILS the export,\n"
+                                      "naming every offending graph and node. Use this when\n"
+                                      "the packaged build must be fully native.");
+                ImGui::Unindent();
+            }
             if (!hcCompileOk) ImGui::EndDisabled();
             if (!hcCompileOk)
                 ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
@@ -992,11 +1016,14 @@ void render(AppContext& ctx)
                         // (graphs are packed regardless).
                         ExportSettings esEff = es;
                         std::string hcMsg;
+                        std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
                         {
                             buildStepBegin(0);
                             HE::hccg::Options opt;
                             opt.engineVersion = HE_VERSION_STRING;
+                            opt.onFailure = s_exportHcStop ? HE::hccg::OnFailure::Stop
+                                                           : HE::hccg::OnFailure::Interpret;
                             opt.onClass = [](const std::string& label, size_t idx, size_t count)
                             {
                                 buildLogLine(0, "[" + std::to_string(idx + 1) + "/" +
@@ -1011,12 +1038,30 @@ void render(AppContext& ctx)
                             }
                             for (const auto& fb : gen.fallbacks)
                             {
-                                buildLogLine(1, "INTERPRETED " + fb.key + " — " + fb.reason +
-                                                (fb.node ? " (node " + std::to_string(fb.node) + ")"
-                                                         : std::string()));
-                                HE_LOG_WARN(Editor, "%s",
-                                    ("HorizonCode codegen: '" + fb.key +
-                                     "' ships interpreted — " + fb.reason).c_str());
+                                const std::string where =
+                                    fb.node ? " (node " + std::to_string(fb.node) + ")" : std::string();
+                                buildLogLine(1, (s_exportHcStop ? "ERROR " : "INTERPRETED ") +
+                                                fb.key + " — " + fb.reason + where);
+                                if (s_exportHcStop)
+                                    HE_LOG_ERROR(Editor, "%s",
+                                        ("HorizonCode codegen: '" + fb.key +
+                                         "' cannot be compiled — " + fb.reason).c_str());
+                                else
+                                    HE_LOG_WARN(Editor, "%s",
+                                        ("HorizonCode codegen: '" + fb.key +
+                                         "' ships interpreted — " + fb.reason).c_str());
+                            }
+                            // Stop mode: the graphs are the build's problem. Say
+                            // which ones and stop before the toolchain runs —
+                            // there is nothing to salvage, the point of the mode
+                            // is that nothing falls back.
+                            if (s_exportHcStop && !gen.fallbacks.empty())
+                            {
+                                hcFatal = std::to_string(gen.fallbacks.size()) +
+                                    " HorizonCode graph(s) could not be compiled — "
+                                    "fix them, or switch to \"Interpret on failure\".";
+                                for (const auto& fb : gen.fallbacks)
+                                    hcFatal += "\n  " + fb.key + ": " + fb.reason;
                             }
                             buildLogLine(0, std::to_string(hcSources.size() - gen.fallbacks.size()) +
                                             " class(es) translated, " +
@@ -1057,7 +1102,13 @@ void render(AppContext& ctx)
                             const int total    = (int)hcSources.size();
                             const int fellBack = (int)gen.fallbacks.size();
                             std::string buildLine;
-                            if (!gen.ok || !wroteAll)
+                            if (!hcFatal.empty())
+                            {
+                                buildLogLine(2, hcFatal);
+                                std::lock_guard<std::mutex> lk(s_buildMutex);
+                                if (!s_buildSteps.empty()) s_buildSteps[0].state = 3;
+                            }
+                            else if (!gen.ok || !wroteAll)
                             {
                                 buildLogLine(2, "generation failed — shipping interpreted");
                                 {
@@ -1138,6 +1189,10 @@ void render(AppContext& ctx)
                             }
                         }
 
+                        // Stop mode said no: nothing gets packed. The worker's own
+                        // failure path reports it and finishes the step list.
+                        if (!hcFatal.empty()) throw std::runtime_error(hcFatal);
+
                         // The pack + runtime-copy step is the last one in the list.
                         {
                             std::lock_guard<std::mutex> lk(s_buildMutex);
@@ -1177,7 +1232,7 @@ void render(AppContext& ctx)
                     }
                     catch (const std::exception& e)
                     {
-                        msg = std::string("Error: export failed: ") + e.what();
+                        msg = std::string("Error: ") + e.what();
                         buildStepsFinish(false);
                     }
                     catch (...)

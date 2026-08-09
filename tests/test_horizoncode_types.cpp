@@ -624,6 +624,29 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         CHECK(r.fallbacks.empty());
     }
 
+    // OnFailure::Stop: the same graph is an ERROR instead of a fallback, and
+    // every offending class is still reported so they can be fixed in one pass.
+    {
+        Graph a, b;
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        a.addNode(ev); b.addNode(ev);
+        Node m1; m1.type = NodeType::MakeStruct; m1.typeName = "Content/Gone.hasset";
+        a.addNode(std::move(m1));
+        Node m2; m2.type = NodeType::ConstEnum; m2.typeName = "Content/AlsoGone.hasset";
+        b.addNode(std::move(m2));
+
+        HE::hccg::Options interp;             // the default: ship them interpreted
+        HE::hccg::Result r1 = HE::hccg::generate({ { "a", "a", a }, { "b", "b", b } }, interp);
+        CHECK(r1.ok);
+        CHECK(r1.fallbacks.size() == 2);
+
+        HE::hccg::Options stop;
+        stop.onFailure = HE::hccg::OnFailure::Stop;
+        HE::hccg::Result r2 = HE::hccg::generate({ { "a", "a", a }, { "b", "b", b } }, stop);
+        CHECK_FALSE(r2.ok);
+        CHECK(r2.fallbacks.size() == 2);      // both, not just the first
+    }
+
     // Struct node whose definition is missing → fallback, not a miscompile
     // (the emitter has no field list to resolve names against).
     {

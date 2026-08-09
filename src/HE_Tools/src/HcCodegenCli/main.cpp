@@ -2,6 +2,9 @@
 //
 //   hc_codegen --fixtures --out DIR          generate the parity-test fixtures
 //   hc_codegen --out DIR file.hcode.json...  generate from graph JSON files
+//   --require-all                            a graph that cannot be compiled is
+//                                            an error, not an interpreted
+//                                            fallback (the export's Stop mode)
 //
 // Used at build time to compile the test fixtures into he_tests, and handy for
 // eyeballing emission during development. The editor export worker calls the
@@ -39,11 +42,13 @@ int main(int argc, char** argv)
 {
     std::string outDir;
     bool fixtures = false;
+    bool requireAll = false;
     std::vector<std::string> inputs;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
         if (a == "--fixtures") fixtures = true;
+        else if (a == "--require-all") requireAll = true;
         else if (a == "--out" && i + 1 < argc) outDir = argv[++i];
         else inputs.push_back(a);
     }
@@ -71,14 +76,15 @@ int main(int argc, char** argv)
 
     HE::hccg::Options opt;
     opt.engineVersion = "dev";
+    // Fixtures must all compile — a fallback there has always been a build
+    // error, which is the same rule --require-all asks for everywhere else.
+    if (requireAll || fixtures) opt.onFailure = HE::hccg::OnFailure::Stop;
     const HE::hccg::Result res = HE::hccg::generate(sources, opt);
     for (const auto& w : res.warnings)
         std::fprintf(stderr, "hc_codegen: warning: %s\n", w.c_str());
     for (const auto& fb : res.fallbacks)
         std::fprintf(stderr, "hc_codegen: fallback: %s: %s\n", fb.key.c_str(), fb.reason.c_str());
     if (!res.ok) { std::fprintf(stderr, "hc_codegen: generation failed\n"); return 1; }
-    // Fixtures must all compile — a fallback there is a build error by design.
-    if (fixtures && !res.fallbacks.empty()) return 1;
 
     std::error_code ec;
     fs::create_directories(outDir, ec);

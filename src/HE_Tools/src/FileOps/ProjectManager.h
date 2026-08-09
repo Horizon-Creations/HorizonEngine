@@ -125,11 +125,14 @@ struct ExportProfile
 	// (bitmask of 1u << HE::RendererBackend). Default = Metal | OpenGL (the runtime-
 	// consumed backends). 0 → shaders cross-compile at runtime as before.
 	uint32_t shaderBackends = (1u << 4) | (1u << 0); // Metal | OpenGL
-	// Compile HorizonCode graphs to native C++ in the packaged build. NOT
-	// IMPLEMENTED YET (see docs/horizoncode-cpp-codegen-plan.md) — the toggle is
-	// plumbed so profiles can opt in ahead of time; today it logs a notice and
-	// the export ships the interpreter + the HorizonCode assets as usual.
+	// Compile HorizonCode graphs to native C++ in the packaged build (needs
+	// cmake + a C++ toolchain on the exporting machine).
 	bool compileHorizonCode = false;
+	// What a graph that cannot be compiled means. false (default) = ship it
+	// interpreted, so compiling is an optimization and never a gate. true = fail
+	// the export instead, for a build in which every class really is native —
+	// which is also what makes the direct cross-class call paths always hit.
+	bool hcStopOnFailure = false;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

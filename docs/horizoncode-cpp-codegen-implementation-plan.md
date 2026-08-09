@@ -1262,6 +1262,33 @@ definition. It is the one place the compiled backend knows more than the
 interpreter, and the extra information is the correct one. The parity harness
 compares enum `typeName` only when both sides name one.
 
+### 14.2b Failure policy: interpret, or stop
+
+`Options::onFailure` decides what a graph the generator cannot compile means,
+and the export exposes it under the Compile-HorizonCode checkbox:
+
+- **Interpret on failure** (default, and everything above assumes it): the class
+  ships interpreted. Compiling is an optimization, the build always succeeds,
+  and compiled and interpreted instances interoperate — that is what the
+  `CompiledInstance` seam is for.
+- **Stop on failure**: a fallback is an error. `generate()` returns `ok = false`
+  with EVERY offending class still listed in `fallbacks` (key + node, so the
+  editor can highlight them), and the export aborts before the toolchain runs.
+  The point is a build in which every class really is native — which is also the
+  precondition that lets calls between compiled classes skip the Runtime's
+  name-based seam.
+
+`hc_codegen --require-all` is the same switch for the CLI; the fixtures have
+always been generated under it (a fallback there was already a build error).
+
+**What Stop mode does NOT remove.** The Runtime owns instance lifetime, event
+delivery and the Ref graph, so these stay name-based no matter how much is
+compiled: widget/UI event delivery, Lua/Python interop, savegame variable I/O,
+the GC's Ref scan, and `bindEvent`/`emitEvent` listener dispatch (that is
+Runtime state — routing it statically would be wrong, not just hard). What it
+buys is the removal of per-call `Value` marshalling and name lookup *between
+compiled classes*, plus the guarantee that no graph silently ran interpreted.
+
 ### 14.3 Lean emission
 
 The per-run scaffolding is emitted only where it can be reached, so a small

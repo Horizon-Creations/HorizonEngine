@@ -25,8 +25,21 @@ struct ClassSource
     HorizonCode::Graph graph;   // post-fromJson (signatures synced, subgraphs assigned)
 };
 
+// What a graph the generator cannot compile means for the build.
+enum class OnFailure
+{
+    // Ship it interpreted (the per-asset hybrid): the packaged game carries both
+    // backends and they interoperate. Compiling is an optimization, never a gate.
+    Interpret,
+    // Fail the build instead. The point is a build in which EVERY class is
+    // native, so nothing silently falls back to the interpreter — which is also
+    // what makes the direct cross-class call paths always hit.
+    Stop,
+};
+
 struct Options
 {
+    OnFailure   onFailure = OnFailure::Interpret;
     bool        traceHooks = false;        // reserved (parity tracing; v1 records at the Context seam)
     std::string namespaceName = "hcgen";   // namespace of the generated classes + registry
     std::string engineVersion;             // baked into the manifest, checked at load
@@ -38,9 +51,12 @@ struct GeneratedFile { std::string name; std::string contents; };
 
 struct Result
 {
-    // false only on internal errors (emitter slip / out of memory), never because
-    // a graph couldn't be compiled — that is a Fallback. generate() never lets an
-    // exception escape; the reason lands in `warnings`.
+    // "The result is usable." False on an internal error (emitter slip / out of
+    // memory) and — with OnFailure::Stop — on any graph that could not be
+    // compiled, since the whole point of that mode is that none may fall back.
+    // With OnFailure::Interpret a fallback leaves ok true: shipping it
+    // interpreted IS the answer. generate() never lets an exception escape; the
+    // reason lands in `warnings`.
     bool ok = false;
     // Per compiled class: hcgen_<Class>.h carries the whole class (bodies
     // inline, so other C++ can include it and call the graph's events and
