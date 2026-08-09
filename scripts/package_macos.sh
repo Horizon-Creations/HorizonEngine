@@ -13,7 +13,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Version and sky-themed codename — single source of truth is CMakeLists.txt, so a
-# release bump is one edit there and never drifts from what the binary reports.
+#2 release bump is one edit there and never drifts from what the binary reports.
 # Shown in the macOS About panel as "Version <VERSION> (<CODENAME>)", e.g.
 # 0.3.0 (Aurora).
 CMAKE_VERSION="$(grep -oE 'project\(HorizonEngine VERSION [0-9]+\.[0-9]+\.[0-9]+' "$SOURCE_DIR/CMakeLists.txt" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
