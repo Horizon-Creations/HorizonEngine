@@ -10,6 +10,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -85,38 +86,68 @@ void DrawFooter(AppContext& ctx)
 	const std::string label = currentLabel(st);
 	const std::string count = countText(st);
 
-	// One shared line box for all three items. Every item's Y is set explicitly
-	// from this baseline rather than nudged relatively, because SameLine() does
-	// NOT continue from wherever the cursor happens to be: it snaps Y back to
-	// the START OF THE PREVIOUS ITEM'S LINE. So offsetting the cursor for the
-	// bar and then "undoing" it afterwards has no effect at all — the following
-	// SameLine re-applies the bar's own (lowered) line Y, which is what dragged
-	// the "n/m" count down out of alignment with the label next to it.
-	const float baseY = ImGui::GetCursorPosY();
-	// The bar is deliberately shorter than a text line (see kBarH), so it needs
-	// centring on that line; the text items already sit on it.
-	const float barY  = baseY + (ImGui::GetTextLineHeight() - kBarH) * 0.5f;
-
+	// ── Why the bar is drawn by hand instead of via ImGui::ProgressBar ──────
+	// All three items must sit on one line. That is only guaranteed when they
+	// are the same HEIGHT as a layout item: ImGui lays a line out from the item
+	// heights, and moving the cursor around a shorter/taller item to "centre"
+	// it perturbs the line box that every following item on that line inherits
+	// — which is what kept dragging the "n/m" count out of line with the label.
+	//
+	// So: reserve a slot of exactly one text line for the bar (Dummy), and paint
+	// the deliberately shorter bar centred INSIDE that slot with the draw list.
+	// Layout-wise the bar is then indistinguishable from a piece of text, no
+	// cursor is touched, and the alignment cannot depend on ImGui's line-box
+	// bookkeeping at all.
 	ImGui::TextUnformatted(label.c_str());
-
 	ImGui::SameLine(0.0f, kGap);
-	ImGui::SetCursorPosY(barY);
+
+	const float  lineH   = ImGui::GetTextLineHeight();
+	const ImVec2 slotPos = ImGui::GetCursorScreenPos();
+	ImGui::Dummy(ImVec2(kBarW, lineH));
+
+	const float  top = slotPos.y + (lineH - kBarH) * 0.5f;
+	const ImVec2 p0(slotPos.x, top);
+	const ImVec2 p1(slotPos.x + kBarW, top + kBarH);
+	const float  radius = kBarH * 0.5f;
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), radius);
+
 	// A download whose size the server never reported has no meaningful
-	// fraction. ImGui renders a negative fraction as an indeterminate marquee,
-	// which is the honest answer — a bar frozen at 0% reads as "stuck".
-	const bool  known = st.currentBytesTotal > 0 || st.completedInBatch > 0;
-	const float frac  = st.totalInBatch > 0
-		? static_cast<float>(std::clamp(st.progressFiles() / static_cast<double>(st.totalInBatch), 0.0, 1.0))
-		: 0.0f;
-	ImGui::ProgressBar(known ? frac : -1.0f * static_cast<float>(ImGui::GetTime()),
-	                   ImVec2(kBarW, kBarH), "");
-	const bool barHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal);
+	// fraction; a bar frozen at 0% would read as "stuck". Slide a short segment
+	// instead — the honest "working, length unknown".
+	const bool known = st.currentBytesTotal > 0 || st.completedInBatch > 0;
+	const ImU32 fillCol = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+	if (known)
+	{
+		const float frac = st.totalInBatch > 0
+			? static_cast<float>(std::clamp(st.progressFiles() / static_cast<double>(st.totalInBatch), 0.0, 1.0))
+			: 0.0f;
+		const float w = kBarW * frac;
+		if (w > 0.0f)
+			dl->AddRectFilled(p0, ImVec2(p0.x + w, p1.y), fillCol, std::min(radius, w * 0.5f));
+	}
+	else
+	{
+		constexpr float kSegW   = 0.3f;   // fraction of the bar
+		constexpr float kPeriod = 1.6f;   // seconds for one sweep
+		const float t     = static_cast<float>(std::fmod(ImGui::GetTime(), kPeriod)) / kPeriod;
+		const float x0    = p0.x + (kBarW * (1.0f + kSegW)) * t - kBarW * kSegW;
+		const float clipL = std::max(x0, p0.x);
+		const float clipR = std::min(x0 + kBarW * kSegW, p1.x);
+		if (clipR > clipL)
+			dl->AddRectFilled(ImVec2(clipL, p0.y), ImVec2(clipR, p1.y), fillCol,
+			                   std::min(radius, (clipR - clipL) * 0.5f));
+	}
 
 	ImGui::SameLine(0.0f, kGap);
-	ImGui::SetCursorPosY(baseY);   // back onto the label's line, not the bar's
 	ImGui::TextDisabled("%s", count.c_str());
 
-	if (barHovered || ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+	// Hover-tested against the painted rectangles rather than the last item, so
+	// the tooltip covers the whole cluster (label, bar and count) and does not
+	// depend on Dummy() carrying a hoverable id.
+	const ImVec2 clusterMax = ImGui::GetItemRectMax();
+	if (ImGui::IsMouseHoveringRect(ImVec2(slotPos.x - kGap, slotPos.y), clusterMax))
 		ImGui::SetTooltip("Downloading EngineContent from the server\n%s", st.currentRelativePath.c_str());
 #else
 	(void)ctx;
