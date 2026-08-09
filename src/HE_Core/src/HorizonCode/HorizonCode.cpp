@@ -826,9 +826,15 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
         return;
 
     const PinType elem = sd.type;
-    if (elem != dst->propType)
+    const std::string elemDef = sd.typeName ? sd.typeName : "";
+    if (elem != dst->propType || (!elemDef.empty() && elemDef != dst->typeName))
     {
         dst->propType = elem;
+        // Enum/Struct elements: carry the DEFINITION along, not just the kind —
+        // without it the Element pin is a user-defined type nobody can resolve
+        // (no field pins, "definition missing" in every panel that looks it up).
+        if (elem == PinType::Enum || elem == PinType::Struct) dst->typeName = elemDef;
+        else                                                  dst->typeName.clear();
         // The Element output changed type: drop its links (they no longer typecheck).
         g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
             [&](const Link& l){ return l.srcNode == dstNode && l.srcPin == 4; }),

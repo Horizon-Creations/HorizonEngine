@@ -27,7 +27,11 @@ bool listed(const std::vector<NT>& v, NT t)
 // What kind of pin a wire is being dragged off: exec vs data, and for a data pin
 // its value type + array-ness. Both the drag-off menu and the quick-spawn keys
 // need it to find a compatible pin on the node they are about to create.
-struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false; };
+// typeName: for an Enum/Struct pin, WHICH definition it is bound to. A node
+// spawned off such a pin has to inherit it, or it is born without a definition —
+// no field/entry pins, and every panel that resolves it says "definition
+// missing" (the add menu already gets this right by construction).
+struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false; std::string typeName; };
 
 DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 {
@@ -36,11 +40,32 @@ DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 	DragPin d;
 	d.isExec = srcPin < rr.dataIn0;
 	if (d.isExec) return d;
+	auto take = [&d](const HC::PinDesc& pd)
+	{ d.type = pd.type; d.array = pd.isArray; if (pd.typeName) d.typeName = pd.typeName; };
 	if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
-	{ const auto& pd = sig.dataOuts[srcPin - rr.dataOut0]; d.type = pd.type; d.array = pd.isArray; }
+		take(sig.dataOuts[srcPin - rr.dataOut0]);
 	else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
-	{ const auto& pd = sig.dataIns[srcPin - rr.dataIn0];  d.type = pd.type; d.array = pd.isArray; }
+		take(sig.dataIns[srcPin - rr.dataIn0]);
 	return d;
+}
+
+// Seed a freshly spawned node from the pin it was dragged off and re-mirror it.
+// Returns the pin to wire, recomputed on the REAL node: mirroring can add pins
+// (Make Struct grows one data-in per field), which shifts the index a probe of
+// an empty node reported.
+int seedSpawnedNode(HC::Graph& graph, int id, const DragPin& dp, bool srcInput)
+{
+	HC::Node* nn = graph.findNode(id);
+	if (!nn) return -1;
+	if (!dp.isExec)
+	{
+		nn->propType = dp.type;      // keep the matched signature
+		if (nn->typeName.empty() && (dp.type == PT::Enum || dp.type == PT::Struct))
+			nn->typeName = dp.typeName;
+	}
+	HC::syncTypeSignatures(graph);   // user-type nodes gain their field/entry pins
+	nn = graph.findNode(id);
+	return nn ? HcEditorUtil::dragMatchPinOn(*nn, dp.type, dp.array, srcInput, dp.isExec) : -1;
 }
 
 // 'B' → ImGuiKey_B. The letter keys are one contiguous run in ImGui's enum, so
@@ -265,10 +290,11 @@ int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
 	const HC::Node* sn = graph.findNode(c.linkNode);
 	if (!sn) return id;
 	const DragPin dp  = classifyDragPin(*sn, c.linkPin);
-	const int     pin = HcEditorUtil::dragMatchPin(type, dp.type, dp.array, c.linkInput, dp.isExec);
+	// Seed + mirror BEFORE matching: the pin index is only meaningful once the
+	// node has the pins its definition gives it.
+	const int     pin = seedSpawnedNode(graph, id, dp, c.linkInput);
 	if (pin < 0) return id;
 
-	if (!dp.isExec) nn->propType = dp.type;   // keep the matched signature
 	// adoptForEachElementType first: a ForEach on either end takes the array's
 	// element type before the typed connect (as in drawPinDragMenu).
 	if (c.linkInput)
@@ -685,9 +711,12 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (menuItemWithHint(HC::nodeDisplayName(t), HcGraphShortcuts::hintFor(t), &hov))
 			{
 				const int id = addNode(graph, t, pos, h.currentGraph);
-				HC::Node* nn = graph.findNode(id);
-				if (!isExecPin) nn->propType = dragType; // keep the matched signature
-				wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
+				// Seed + mirror, then wire the pin the REAL node has: a user-type
+				// node bound to a definition carries pins the listing probe above
+				// could not know about.
+				const int realPin = seedSpawnedNode(graph, id, dp, srcInput);
+				if (realPin >= 0) wireAt(id, realPin);
+				created = id; ImGui::CloseCurrentPopup();
 			}
 			if (hov) ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(t).c_str());
 		}

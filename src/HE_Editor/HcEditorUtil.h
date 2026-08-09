@@ -175,6 +175,10 @@ namespace HcEditorUtil
 	// the dragged pin is an exec pin (data type is ignored then).
 	int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
 	                 bool dragArray, bool srcIsInput, bool srcIsExec);
+	// Same match, but against a node that already EXISTS — its definition-bound
+	// pins are the real ones, which a bare template probe does not have.
+	int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
+	                   bool dragArray, bool srcIsInput, bool srcIsExec);
 	// Same for an HE::api registry entry (an EngineCall node built from it).
 	int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
 	                    bool dragArray, bool srcIsInput, bool srcIsExec);

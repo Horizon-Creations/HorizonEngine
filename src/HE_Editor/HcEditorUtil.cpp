@@ -1190,15 +1190,10 @@ bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
 	return changed;
 }
 
-int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
-                 bool dragArray, bool srcIsInput, bool srcIsExec)
+int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
+                   bool dragArray, bool srcIsInput, bool srcIsExec)
 {
-	// Probe a fresh node's signature. propType is seeded with the dragged type so
-	// type-parametric nodes (array ops, Print, …) match — the host seeds the real
-	// node the same way, keeping the computed pin index valid.
-	HorizonCode::Node tpl;
-	tpl.type = t; tpl.propType = dragType; tpl.isArray = dragArray;
-	const HorizonCode::NodeSig s = HorizonCode::signatureOf(tpl);
+	const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
 	const int eIn = (int)s.execIns.size(), eOut = (int)s.execOuts.size();
 	const int dIn = (int)s.dataIns.size();
 	if (srcIsExec)
@@ -1217,6 +1212,20 @@ int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
 		if (s.dataIns[i].type == dragType && s.dataIns[i].isArray == dragArray)
 			return eIn + eOut + (int)i;
 	return -1;
+}
+
+int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
+                 bool dragArray, bool srcIsInput, bool srcIsExec)
+{
+	// Probe a fresh node's signature: this answers "would this node TYPE fit at
+	// all", which is what the menu listing needs. propType is seeded with the
+	// dragged type so type-parametric nodes (array ops, Print, …) match. The
+	// index it returns is only valid for an equally bare node — a user-type node
+	// grows pins once it is bound to a definition, so the host wires through
+	// dragMatchPinOn on the spawned node instead.
+	HorizonCode::Node tpl;
+	tpl.type = t; tpl.propType = dragType; tpl.isArray = dragArray;
+	return dragMatchPinOn(tpl, dragType, dragArray, srcIsInput, srcIsExec);
 }
 
 int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,

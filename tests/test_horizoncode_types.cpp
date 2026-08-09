@@ -386,6 +386,45 @@ TEST_CASE("Struct variables seed from definition defaults; enum defaults resolve
     CHECK(variableDefaultValue(ev).i == 0);
 }
 
+// ── Pins of user-defined types carry WHICH definition ───────────────────────
+// Without it a Struct/Enum pin is an unresolvable type: no field pins, no entry
+// list, "definition missing" in every panel — and the codegen has no C++ type.
+
+TEST_CASE("Array/ForEach pins expose their element definition")
+{
+    TypeFixture fx;
+    Node arr; arr.type = NodeType::ArrayGet;
+    arr.propType = PinType::Struct; arr.typeName = kStats;
+    const NodeSig s = signatureOf(arr);
+    REQUIRE(s.dataIns.size() == 2);
+    REQUIRE(s.dataOuts.size() == 1);
+    CHECK(std::string(s.dataIns[0].typeName ? s.dataIns[0].typeName : "") == kStats);
+    CHECK(std::string(s.dataOuts[0].typeName ? s.dataOuts[0].typeName : "") == kStats);
+    // A built-in element type still reports null, as PinDesc documents.
+    Node plain; plain.type = NodeType::ArrayGet; plain.propType = PinType::Float;
+    CHECK(signatureOf(plain).dataOuts[0].typeName == nullptr);
+}
+
+TEST_CASE("adoptForEachElementType carries the element's definition, not just its kind")
+{
+    TypeFixture fx;
+    Graph g;
+    Variable v; v.name = "list"; v.type = PinType::Struct; v.typeName = kStats; v.isArray = true;
+    g.variables.push_back(v);
+
+    Node get; get.type = NodeType::GetVariable; get.s = "list";
+    get.propType = PinType::Struct; get.typeName = kStats; get.isArray = true;
+    const int gv = g.addNode(std::move(get));
+    Node fe; fe.type = NodeType::ForEach;   // born untyped, like the editor spawns it
+    const int each = g.addNode(std::move(fe));
+
+    // ForEach unified pins: execIn 0, Body 1, Done 2, Array-in 3, Element-out 4.
+    adoptForEachElementType(g, gv, /*srcPin=*/0, each, /*dstPin=*/3);
+    CHECK(g.findNode(each)->propType == PinType::Struct);
+    CHECK(g.findNode(each)->typeName == kStats);
+    CHECK(std::string(signatureOf(*g.findNode(each)).dataOuts[0].typeName) == kStats);
+}
+
 // ── Codegen: enums and structs both compile against their definitions ───────
 
 #include <HorizonScene/HcCodegen.h>
@@ -453,6 +492,38 @@ TEST_CASE("HcCodegen: enum + struct nodes compile against their definitions")
         }
         CHECK(sawTypes);
         CHECK(sawStruct);
+    }
+
+    // A struct ARRAY through a ForEach: the ForEach node has no definition of
+    // its own (nothing in the editor ever writes one), so codegen has to take it
+    // from the wire — otherwise every struct-array graph would ship interpreted.
+    {
+        Graph g;
+        Variable v; v.name = "list"; v.type = PinType::Struct; v.typeName = kStats; v.isArray = true;
+        g.variables.push_back(v);
+        Variable one; one.name = "cur"; one.type = PinType::Struct; one.typeName = kStats;
+        g.variables.push_back(one);
+
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        const int e = g.addNode(ev);
+        Node get; get.type = NodeType::GetVariable; get.s = "list";
+        get.propType = PinType::Struct; get.typeName = kStats; get.isArray = true;
+        const int gv = g.addNode(std::move(get));
+        Node fe; fe.type = NodeType::ForEach; fe.propType = PinType::Struct;   // NO typeName
+        const int each = g.addNode(std::move(fe));
+        Node sv; sv.type = NodeType::SetVariable; sv.s = "cur";
+        sv.propType = PinType::Struct; sv.typeName = kStats;
+        const int set = g.addNode(std::move(sv));
+
+        REQUIRE(g.connect(e, 0, each, 0));      // exec
+        REQUIRE(g.connect(gv, 0, each, 3));     // list → Array
+        REQUIRE(g.connect(each, 1, set, 0));    // Body → exec
+        REQUIRE(g.connect(each, 4, set, 2));    // Element → Value
+
+        HE::hccg::Options opt;
+        HE::hccg::Result r = HE::hccg::generate({ { "foreach_struct", "foreach_struct", g } }, opt);
+        REQUIRE(r.ok);
+        CHECK(r.fallbacks.empty());
     }
 
     // Struct node whose definition is missing → fallback, not a miscompile
