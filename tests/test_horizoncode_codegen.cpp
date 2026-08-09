@@ -409,6 +409,14 @@ TEST_CASE("codegen parity: functions_basic")
 	auto [ok4, r4] = p.call("Pick", true, { Value::ofFloat(-1) });
 	CHECK(ok4);
 	CHECK(r4[0].s == "neg");
+	// A Return inside a Sequence arm ends only ITS chain: arm 1 still runs (the
+	// side effect happens) and its own Return overwrites the result.
+	auto [okE, rE] = p.call("Early", true, { Value::ofFloat(0) });
+	CHECK(okE);
+	REQUIRE(rE.size() == 1);
+	CHECK(rE[0].f == 2.0f);               // arm 1's Return wins, not arm 0's
+	CHECK(p.var("sec").f == 7.0f);        // arm 1 ran at all
+
 	auto [okPriv, _] = p.call("Secret", true);    // private + requirePublic → refused
 	CHECK_FALSE(okPriv);
 	auto [okPriv2, __] = p.call("Secret", false);
@@ -827,6 +835,16 @@ TEST_CASE("codegen parity: structs")
 	CHECK(p.var("s").items[1].i == 3);    // everything else survives the copy
 	p.fire("Read");
 	CHECK(p.var("hp").f == 43.0f);
+
+	// An unwired Struct input re-seeds from the definition, it is not zeros.
+	p.fire("Fresh");
+	{
+		const Value sf = p.var("s");
+		REQUIRE(sf.items.size() == 6);
+		CHECK(sf.items[0].f == 5.0f);     // the written field
+		CHECK(sf.items[1].i == 3);        // definition default, NOT 0
+		CHECK(sf.items[4].items.size() == 2);
+	}
 
 	// Make Struct: unwired pins keep the DEFINITION's defaults, not zeros.
 	p.fire("Make");

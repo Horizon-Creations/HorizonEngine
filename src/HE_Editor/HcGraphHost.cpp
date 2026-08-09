@@ -731,6 +731,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				const int id = addNode(graph, get ? NT::GetVariable : NT::SetVariable, pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				const PinRanges r = pinRanges(*nn);
 				wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
 				created = id; ImGui::CloseCurrentPopup(); };
@@ -1082,6 +1083,7 @@ void drawQuickPickPopup(const Host& h)
 				                       s_pick.pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				selectNode(h, id);
 				h.onEdit(true);
 				ImGui::CloseCurrentPopup();

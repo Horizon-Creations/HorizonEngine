@@ -181,6 +181,16 @@ inline Value toEnumValueArray(const Array<int>& a)
     for (const int e : a) { Value it; it.type = PinType::Enum; it.i = e; v.items.push_back(it); }
     return v;
 }
+// Struct FIELDS are the exception: TypeRegistry::fieldDefault tags an array
+// field's Value AND its items with the field's definition path, so a generated
+// struct converter has to do the same to round-trip identically.
+inline Value tagArray(Value v, const char* typeName)
+{
+    if (!typeName || !*typeName) return v;
+    v.typeName = typeName;
+    for (Value& it : v.items) it.typeName = typeName;
+    return v;
+}
 // coerce(v, Enum) — deliberately NOT coerceInt: a Bool does NOT convert into an
 // enum (HorizonCode.cpp's `coerce`, case P::Enum, leaves r.i at 0).
 inline int coerceEnum(const Value& v)

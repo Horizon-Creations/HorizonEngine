@@ -345,6 +345,33 @@ std::string sanitize(const std::string& s)
     return out;
 }
 
+// Struct members are the only user-authored identifiers that reach the output
+// WITHOUT a prefix (variables get v_, functions f_, events ev_, classes C_,
+// struct types S_), because the generated struct is meant to be readable. Field
+// names are free text in the type panel, so a field called `class` or `int`
+// would otherwise emit a header that does not compile — those get a trailing _.
+bool isCppKeyword(const std::string& s)
+{
+    static const std::unordered_set<std::string> kKeywords = {
+        "alignas","alignof","and","and_eq","asm","auto","bitand","bitor","bool","break","case",
+        "catch","char","char8_t","char16_t","char32_t","class","compl","concept","const",
+        "consteval","constexpr","constinit","const_cast","continue","co_await","co_return",
+        "co_yield","decltype","default","delete","do","double","dynamic_cast","else","enum",
+        "explicit","export","extern","false","float","for","friend","goto","if","inline","int",
+        "long","mutable","namespace","new","noexcept","not","not_eq","nullptr","operator","or",
+        "or_eq","private","protected","public","register","reinterpret_cast","requires","return",
+        "short","signed","sizeof","static","static_assert","static_cast","struct","switch",
+        "template","this","thread_local","throw","true","try","typedef","typeid","typename",
+        "union","unsigned","using","virtual","void","volatile","wchar_t","while","xor","xor_eq",
+    };
+    return kKeywords.count(s) != 0;
+}
+std::string cppIdent(const std::string& raw)
+{
+    const std::string s = sanitize(raw);
+    return isCppKeyword(s) ? s + "_" : s;
+}
+
 // Claim `base` in `used`, suffixing _2, _3 … until it is free. Every generated
 // C++ identifier (member/local vars, functions, events, class names) goes through
 // this so name mangling stays deterministic and collision-free in one place.
@@ -444,7 +471,7 @@ TypeTable buildTypeTable(const std::vector<ClassSource>& sources)
         st.cpp = uniqueName("S_" + sanitize(st.def.name), usedNames);
         std::unordered_set<std::string> usedFields;
         for (const auto& f : st.def.fields)
-            st.members.push_back(uniqueName(sanitize(f.name), usedFields));
+            st.members.push_back(uniqueName(cppIdent(f.name), usedFields));
         tt.byPath.emplace(path, std::move(st));
     }
     return tt;
@@ -533,8 +560,13 @@ std::string emitTypesHeader(const TypeTable& tt, const std::string& ns)
         if (st.def.fields.empty()) h += "    (void)s;\n";
         else h += "    v.items.reserve(" + std::to_string(st.def.fields.size()) + ");\n";
         for (size_t i = 0; i < st.def.fields.size(); ++i)
-            h += "    v.items.push_back(" +
-                 toValueCall("s." + st.members[i], fieldType(st.def.fields[i]), ns) + ");\n";
+        {
+            const TypeRef ft = fieldType(st.def.fields[i]);
+            std::string boxed = toValueCall("s." + st.members[i], ft, ns);
+            if (ft.arr && !ft.typeName.empty())
+                boxed = "hc::tagArray(" + boxed + ", " + strLit(ft.typeName) + ")";
+            h += "    v.items.push_back(" + boxed + ");\n";
+        }
         h += "    return v;\n}\n";
 
         // ← Value: a non-struct Value reads as all-zero fields, exactly like the
@@ -649,9 +681,61 @@ private:
         return nullptr;
     }
 
+    // ── Stage A0: recover missing user-type definitions ─────────────────────
+    // Array/ForEach nodes carry their element type in `propType`, but nothing
+    // ever writes the DEFINITION path into their `typeName` — the editor's
+    // element-type picker offers built-ins only, and adoptForEachElementType
+    // copies just the type. Get/SetVariable have the same hole on two of their
+    // three spawn paths. Without the path a Struct pin has no C++ type, so the
+    // whole class would fall back for a perfectly ordinary struct-array graph.
+    // Recover it from what the node is wired to: Graph::connect only lets a
+    // definition-less pin join a typed one (the generic boundary), so a
+    // non-empty peer names THE definition. Peers that disagree leave the node
+    // untyped, and validate() then sends the class to the interpreter.
+    void inferTypeNames()
+    {
+        // Declared variables are authoritative for their own Get/Set nodes.
+        for (Node& n : m_g.nodes)
+            if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.typeName.empty())
+                if (const Variable* v = m_g.findVariable(n.s)) n.typeName = v->typeName;
+
+        // Then propagate along wires until nothing new is learned (a chain of
+        // array ops picks its element type up one hop at a time).
+        for (bool changed = true; changed; )
+        {
+            changed = false;
+            for (Node& n : m_g.nodes)
+            {
+                if (!n.typeName.empty()) continue;
+                if (n.propType != PT::Struct && n.propType != PT::Enum) continue;
+                std::string found;
+                bool ambiguous = false;
+                for (const Link& l : m_g.links)
+                {
+                    const bool weAreSrc = l.srcNode == n.id;
+                    if (!weAreSrc && l.dstNode != n.id) continue;
+                    const Node* peer = m_g.findNode(weAreSrc ? l.dstNode : l.srcNode);
+                    if (!peer || peer->id == n.id) continue;
+                    const PinRanges pr = pinRanges(*peer);
+                    const int idx = weAreSrc ? l.dstPin - pr.dataIn0 : l.srcPin - pr.dataOut0;
+                    HorizonCode::PinDesc pd{};
+                    if (!HorizonCode::dataPinDescOf(*peer, /*input=*/weAreSrc, idx, pd)) continue;
+                    if (pd.type != n.propType || !pd.typeName || !*pd.typeName) continue;
+                    if (found.empty()) found = pd.typeName;
+                    else if (found != pd.typeName) { ambiguous = true; break; }
+                }
+                if (ambiguous || found.empty()) continue;
+                n.typeName = found;
+                changed = true;
+            }
+        }
+    }
+
     // ── Stage A: validation (plan §5.2) ──────────────────────────────────────
     void validate()
     {
+        inferTypeNames();
+
         // 1. EngineCall nodes must resolve in the registry; the registry is
         //    authoritative for the pin mirror (stale assets re-mirror + warn).
         for (Node& n : m_g.nodes)
@@ -1068,7 +1152,17 @@ private:
             // the struct input is read before the value input (§3.4).
             const StructType* st = m_tt.find(n.typeName);
             const int fi = st && !n.params.empty() ? defFieldIndex(*st, n.params[0].name) : -1;
-            const std::string src = input(n, 0, fnCtx);
+            // §3.4: when the incoming Value is not a struct of THIS definition
+            // the interpreter throws it away and starts from makeDefaultValue —
+            // which is exactly what an UNWIRED Struct pin hits (its typeName is
+            // empty). A wired one can only be the same definition (connect), so
+            // that is the one case the copy below is a copy at all.
+            const bool seeded = dataLinkTo(n.id, pinRanges(n).dataIn0 + 0) != nullptr;
+            const std::string src =
+                seeded ? input(n, 0, fnCtx)
+                       : (st ? structLit(HE::TypeRegistry::instance().makeDefaultValue(n.typeName),
+                                         m_tt, out)
+                             : zeroLit(out));
             if (fi < 0) return src;   // field gone from the definition → unchanged copy
             const HE::StructField& f = st->def.fields[(size_t)fi];
             const TypeRef ft = trOf(f.type, f.isArray, f.typeName);
@@ -1361,7 +1455,15 @@ private:
                                        trOf(fn->results[i].type, fn->results[i].isArray,
                                             fn->results[i].typeName)) + ";");
             }
-            b.line("return;");
+            // NO `return;`. Return has no exec-out, so the interpreter ends only
+            // the chain it sits in (`runExecChain` finds no next link) — it does
+            // NOT unwind the caller: Sequence still runs its second arm and
+            // ForEach still runs its remaining iterations after one. Since
+            // Branch/Sequence/ForEach arms are emitted INLINE in the same C++
+            // function, a real `return` would leave all of them. Ending the
+            // emitted chain here (Return is terminal in chain()) is the exact
+            // mirror; a later Return simply overwrites the result slots, which
+            // is what the interpreter's frame does too.
             break;
         }
         case NT::EngineCall:
@@ -1555,6 +1657,7 @@ private:
         // Bodies FIRST: translating them is what reveals whether this class ever
         // reads the event argument, and that decides whether a RunState exists —
         // and with it the `rs` parameter every body would otherwise carry.
+        const size_t warningsBefore = m_warnings.size();
         std::vector<Fragment> frags = translateBodies();
         // The "no ForEach/FunctionCall ⇒ the step abort is unreachable" argument
         // rests on the emitted statement count staying under the limit. A graph
@@ -1563,6 +1666,7 @@ private:
         if (!m_guard && m_stmtCount > hc::kMaxSteps)
         {
             m_guard = true;
+            m_warnings.resize(warningsBefore);   // the second pass re-warns
             frags = translateBodies();
         }
 

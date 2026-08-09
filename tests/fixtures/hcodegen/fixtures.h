@@ -434,6 +434,22 @@ inline HE::hccg::ClassSource fxFunctionsBasic()
     f.exec(br, retP, 0);
     f.exec(br, retN, 1);
 
+    // Early(n) -> r: a Return inside a Sequence arm. Return has no exec-out, so
+    // it ends ONLY its own chain — arm 1 still runs, and its Return wins.
+    const int early = f.fnEntry("Early", 0, { { "n", PT::Float } }, { { "r", PT::Float } });
+    const int seqE = f.sequence();
+    f.exec(early, seqE);
+    const int retA = f.fnReturn("Early");
+    const int retB = f.fnReturn("Early");
+    HorizonCode::syncFunctionSignatures(f.g);
+    f.g.findNode(retA)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.g.findNode(retB)->pinDefaults[0] = Value::ofFloat(2.0f);
+    const int sideA = f.setVar("sec", PT::Float);
+    f.g.findNode(sideA)->pinDefaults[0] = Value::ofFloat(7.0f);
+    f.exec(seqE, retA, 0);
+    f.exec(seqE, sideA, 1);
+    f.exec(sideA, retB);
+
     // Secret() — private; sets sec = 1.
     const int secret = f.fnEntry("Secret", 1, {}, {});
     const int sSec = f.setVar("sec", PT::Float);
@@ -1246,6 +1262,16 @@ inline HE::hccg::ClassSource fxStructs()
       f.data(add, 0, set, 1);
       f.data(set, 0, sS, 0); }
     f.exec(evB, sS);
+
+    // An UNWIRED struct input is not "the zero struct": the interpreter sees a
+    // Value that is not of this definition and re-seeds from makeDefaultValue
+    // before writing the field (§3.4).
+    const int evU = f.event("Fresh");
+    const int sU = f.setVarT("s", PT::Struct, kStatsType);
+    { const int set = f.fieldOp(NT::SetStructField, kStatsType, "hp");
+      f.g.findNode(set)->pinDefaults[1] = Value::ofFloat(5.0f);
+      f.data(set, 0, sU, 0); }
+    f.exec(evU, sU);
 
     // Make: one wired field, every other at the DEFINITION's default (not zero).
     const int evM = f.event("Make");
