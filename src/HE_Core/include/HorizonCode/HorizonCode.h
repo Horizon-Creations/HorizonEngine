@@ -342,6 +342,14 @@ HE_API void syncFunctionSignatures(Graph& g);
 // loaded graph is repaired; idempotent, and never overwrites an existing name.
 HE_API void inferUserTypeNames(Graph& g);
 
+// Bind-a-definition's other half: re-mirror `nodes` (syncTypeSignatures) and
+// carry their links over to the pins that appear. Binding a definition CHANGES
+// the pin layout — Make Struct gains one data-in per field, Switch on Enum one
+// exec-out per entry — and the existing links still address the old one, so
+// without this a wire quietly lands on a different pin. Callers pass nodes whose
+// definition was just set (their "before" is the bare shape).
+HE_API void remapLinksForMirror(Graph& g, const std::vector<int>& nodes);
+
 HE_API void syncTypeSignatures(Graph& g);
 
 // Partition a flat (pre-sub-graph) graph in place: assign every function-body

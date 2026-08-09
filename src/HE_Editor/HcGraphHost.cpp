@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 
 namespace HcGraphHost
 {
@@ -558,6 +559,17 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 			HC::syncTypeSignatures(graph);
 			created = id; ImGui::CloseCurrentPopup();
 		};
+		// Get/Set for ONE field, pre-picked: the plain "Get X Field" row drops a
+		// node you still have to bind in the details panel, which is a detour
+		// when you already know the field you want.
+		auto spawnField = [&](NT t, const std::string& typeName, const HE::StructField& f) {
+			const int id = addNode(graph, t, drop, h.currentGraph);
+			HC::Node* nn = graph.findNode(id);
+			nn->typeName = typeName;
+			nn->params = { { f.name, f.type, f.isArray, f.typeName } };
+			HC::syncTypeSignatures(graph);   // revalidates the choice against the def
+			created = id; ImGui::CloseCurrentPopup();
+		};
 		bool sh = false;
 		for (const auto& d : reg.structs())
 		{
@@ -581,6 +593,22 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 					ImGui::SetTooltip("%s", HcEditorUtil::nodeTooltipText(probe).c_str());
 				}
 				if (picked) spawn(r.t, d.assetPath);
+			}
+			// One Get/Set row per field of this struct.
+			for (const auto& f : d.fields)
+			{
+				const struct { const char* verb; NT t; } fops[] = {
+					{ "Get", NT::GetStructField }, { "Set", NT::SetStructField },
+				};
+				for (const auto& op : fops)
+				{
+					char lbl[320];
+					std::snprintf(lbl, sizeof lbl, "%s %s \xc2\xb7 %s",
+					              op.verb, d.name.c_str(), f.name.c_str());
+					if (!matches(lbl, "Structs")) continue;
+					if (!sh) { ImGui::TextDisabled("Structs"); sh = true; }
+					if (HcEditorUtil::searchMenuItem(lbl)) spawnField(op.t, d.assetPath, f);
+				}
 			}
 		}
 		if (sh) ImGui::Spacing();
@@ -808,6 +836,43 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 // See the header for exactly which node types this covers and which ones each
 // frontend still draws itself.
 
+// A definition combo for the user-defined-type nodes. Nodes can end up unbound —
+// an older editor build spawned them that way off a pin drag, and a node with no
+// wires has nothing for inferUserTypeNames to learn from — and until now the
+// panel just reported that and dead-ended. Rebinding re-mirrors the pins and
+// carries the links over, because the layout changes with the definition.
+bool drawDefinitionPicker(HC::Graph& g, HC::Node& n, bool isStruct,
+                          const std::function<void(bool)>& edit)
+{
+	auto& reg = HE::TypeRegistry::instance();
+	const bool bound = isStruct ? reg.hasStruct(n.typeName) : reg.hasEnum(n.typeName);
+	const std::string cur = n.typeName.empty()
+		? std::string("(pick a definition)")
+		: std::filesystem::path(n.typeName).stem().string() + (bound ? "" : "  (missing!)");
+	bool changed = false;
+	if (ImGui::BeginCombo(isStruct ? "Struct" : "Enum", cur.c_str()))
+	{
+		if (isStruct)
+			for (const auto& d : reg.structs())
+			{ if (ImGui::Selectable(d.name.c_str(), n.typeName == d.assetPath) &&
+				  n.typeName != d.assetPath) { n.typeName = d.assetPath; changed = true; } }
+		else
+			for (const auto& d : reg.enums())
+			{ if (ImGui::Selectable(d.name.c_str(), n.typeName == d.assetPath) &&
+				  n.typeName != d.assetPath) { n.typeName = d.assetPath; changed = true; } }
+		ImGui::EndCombo();
+	}
+	if (changed)
+	{
+		n.params.clear();                      // the old definition's mirror
+		HC::remapLinksForMirror(g, { n.id });  // re-mirror + move the links along
+		edit(true);
+	}
+	if (!bound && !n.typeName.empty())
+		ImGui::TextDisabled("Not in this project:\n%s", n.typeName.c_str());
+	return changed;
+}
+
 bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 {
 	if (!h.graph) return false;
@@ -880,9 +945,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	// ── User-defined types ───────────────────────────────────────────────────
 	case NT::ConstEnum:
 	{
+		drawDefinitionPicker(g, n, /*isStruct=*/false, edit);
 		HE::EnumDef def;
-		if (!HE::TypeRegistry::instance().getEnum(n.typeName, def))
-		{ ImGui::TextDisabled("Enum definition missing:\n%s", n.typeName.c_str()); return true; }
+		if (!HE::TypeRegistry::instance().getEnum(n.typeName, def)) return true;
 		const HE::EnumEntry* cur = def.findValue((int)n.f[0]);
 		if (ImGui::BeginCombo("Value", cur ? cur->name.c_str() : "(pick)"))
 		{
@@ -897,9 +962,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::SetStructField:
 	{
 		const bool isGet = n.type == NT::GetStructField;
+		drawDefinitionPicker(g, n, /*isStruct=*/true, edit);
 		HE::StructDef def;
-		if (!HE::TypeRegistry::instance().getStruct(n.typeName, def))
-		{ ImGui::TextDisabled("Struct definition missing:\n%s", n.typeName.c_str()); return true; }
+		if (!HE::TypeRegistry::instance().getStruct(n.typeName, def)) return true;
 		const std::string cur = n.params.empty() ? "(pick a field)" : n.params[0].name;
 		if (ImGui::BeginCombo("Field", cur.c_str()))
 		{
@@ -922,22 +987,14 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	}
 	case NT::MakeStruct:
 	case NT::BreakStruct:
-	{
-		ImGui::TextDisabled("%s", std::filesystem::path(n.typeName).stem().string().c_str());
-		if (!HE::TypeRegistry::instance().hasStruct(n.typeName))
-			ImGui::TextDisabled("Struct definition missing:\n%s", n.typeName.c_str());
+		drawDefinitionPicker(g, n, /*isStruct=*/true, edit);
 		return true;
-	}
 	case NT::SwitchOnEnum:
 	case NT::EnumToInt:
 	case NT::IntToEnum:
 	case NT::EnumToString:
-	{
-		ImGui::TextDisabled("%s", std::filesystem::path(n.typeName).stem().string().c_str());
-		if (!HE::TypeRegistry::instance().hasEnum(n.typeName))
-			ImGui::TextDisabled("Enum definition missing:\n%s", n.typeName.c_str());
+		drawDefinitionPicker(g, n, /*isStruct=*/false, edit);
 		return true;
-	}
 
 	case NT::GetVariable:
 	case NT::SetVariable:
