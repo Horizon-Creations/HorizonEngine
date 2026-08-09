@@ -1690,13 +1690,25 @@ void EditorApplication::OnRender(float dt)
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
 			gr.intensity    = m_editorConfig.GIReflIntensity;
 			gr.maxRoughness = m_editorConfig.GIReflMaxRoughness;
-		// HE_DUMP_GIREFLBLUR: headless A/B of the blur without touching config.
-		gr.blur         = m_editorConfig.GIReflBlur;
-		if (const char* b = std::getenv("HE_DUMP_GIREFLBLUR"); b && *b)
-			gr.blur = std::atof(b) > 0.5;
 			gr.blur         = m_editorConfig.GIReflBlur;
 			gr.quality      = m_editorConfig.GIReflQuality;
 			gr.bounces      = m_editorConfig.GIReflBounces;
+			// The HE_DUMP_GIREFL* overrides have to be applied AFTER the config
+			// read and on every frame, not once: this push runs each frame, so an
+			// override written before it would be back to the config value on the
+			// next one. That is what makes them usable in an interactive session —
+			// the headless capture takes a different route entirely (OnInit →
+			// dumpFrameHeadless → r->Render(), which OnRender never sees).
+			// getenv is cached in statics; this is a per-frame path and the
+			// environment does not change under us.
+			static const char* s_grEnOv   = std::getenv("HE_DUMP_GIREFL");
+			static const char* s_grBlurOv = std::getenv("HE_DUMP_GIREFLBLUR");
+			static const char* s_grQualOv = std::getenv("HE_DUMP_GIREFLQUALITY");
+			static const char* s_grBncOv  = std::getenv("HE_DUMP_GIREFLBOUNCES");
+			if (s_grEnOv   && *s_grEnOv)   gr.enabled = std::atof(s_grEnOv) > 0.5;
+			if (s_grBlurOv && *s_grBlurOv) gr.blur    = std::atof(s_grBlurOv) > 0.5;
+			if (s_grQualOv && *s_grQualOv) gr.quality = std::atoi(s_grQualOv);
+			if (s_grBncOv  && *s_grBncOv)  gr.bounces = std::atoi(s_grBncOv);
 			renderer()->SetGIReflectionSettings(gr);
 		}
 		// Render path (Forward | Deferred) — gated on the backend capability so an
