@@ -399,7 +399,27 @@ bool soapCall(const IgdDevice& igd, const std::string& action,
     return soapCallTo(igd.controlUrl, igd.serviceType, action, args, outBody);
 }
 
+// The last UPnP error code, kept beside the result enum. Two failures that both
+// read as RequestFailed can need opposite responses — 725 ("permanent leases
+// only") is a request to ask again differently, everything else is not — and
+// widening the enum for one router quirk would push it into every caller.
+// Thread-local because mapping runs on a worker while nothing stops a second.
+std::string& lastUpnpErrorSlot() {
+    thread_local std::string slot;
+    return slot;
+}
+void setLastUpnpError(std::string code) { lastUpnpErrorSlot() = std::move(code); }
+
+// Two hours, the same figure NAT-PMP and PCP ask for below. Long enough that no
+// ordinary session outlives it, short enough that an entry left behind by a
+// crash is gone by the next day rather than sitting in the table forever.
+constexpr std::uint32_t kMappingLeaseSeconds = 7200;
+
 } // namespace
+
+// Free function rather than a member: it belongs to the UPnP conversation, not
+// to the mapper's public surface.
+static const std::string& lastUpnpError() { return lastUpnpErrorSlot(); }
 
 PortMapResult PortMapper::addMapping(const IgdDevice& igd,
                                      std::uint16_t externalPort,
@@ -434,16 +454,20 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
     }, body);
 
     if (!ok) {
+        // Kept for the caller: the numeric code carries the one distinction the
+        // result enum cannot, and 725 in particular is answerable rather than fatal.
+        setLastUpnpError(extractXmlValue(body, "errorCode"));
         // 606 is "Action not authorized": the router understood the request and
         // declined it. Reported apart from a generic failure so the user is sent
         // to the setting instead of being told their router lacks the feature.
-        if (extractXmlValue(body, "errorCode") == "606") {
+        if (lastUpnpError() == "606") {
             HE_LOG_WARN(Net, "UPnP: the router refuses port forwarding for this device "
                              "(error 606, not authorized)");
             return PortMapResult::Refused;
         }
         return PortMapResult::RequestFailed;
     }
+    setLastUpnpError({});
 
     out.externalPort = externalPort;
     out.internalPort = internalPort;
@@ -1068,7 +1092,25 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     IgdDevice igd;
     if (discover(igd, 3000) == PortMapResult::Ok)
     {
-        const PortMapResult r = addMapping(igd, port, port, description, outInfo);
+        // A FINITE lease, for the same reason NAT-PMP and PCP below get one: a
+        // client that crashes, is killed, or picks a fresh port every session
+        // must not leave an entry the router keeps forever. This used to take
+        // addMapping's default of 0 — permanent — and on one FRITZ!Box that had
+        // silently accumulated 418 entries named after this engine, all pointing
+        // at the same machine. A saturated table then makes the router refuse
+        // EVERY new request, from every device, with the same "not authorized"
+        // code it uses for a device that lacks permission. Diagnosing that from
+        // the refusal alone is impossible, so the fix belongs at the source.
+        PortMapResult r = addMapping(igd, port, port, description, outInfo, {},
+                                     kMappingLeaseSeconds);
+        // 725 is "OnlyPermanentLeasesSupported": the router understood and wants
+        // 0. Honouring that is required by the spec — the cleanup pass is what
+        // keeps those bounded instead of the lease.
+        if (r == PortMapResult::RequestFailed && lastUpnpError() == "725")
+        {
+            HE_LOG_DEBUG(Net, "UPnP: router accepts permanent leases only — retrying with 0");
+            r = addMapping(igd, port, port, description, outInfo);
+        }
         refused = refused || r == PortMapResult::Refused;
         if (r == PortMapResult::Ok)
         {
