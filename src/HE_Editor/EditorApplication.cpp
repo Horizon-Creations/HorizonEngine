@@ -4607,6 +4607,14 @@ void EditorApplication::newScene()
 
 void EditorApplication::OnShutdown()
 {
+	// Give the network back what a session took, FIRST and synchronously: the
+	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
+	// while hosting never presses "leave", and none of those clean themselves up
+	// — a forward requested without a lease stays in the router until someone
+	// deletes it by hand. Ahead of everything else here because it is the only
+	// item in this function that outlives the process if it is skipped.
+	m_collab.shutdown();
+
 	// A project export may still be packing on its worker thread — wait for it
 	// (destroying a joinable std::thread would terminate the process).
 	EditorUI::joinPendingExport();

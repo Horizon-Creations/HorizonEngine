@@ -20,8 +20,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <thread>
+#include <vector>
 
 #include <HorizonScene/Components/EntityIdComponent.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -126,7 +128,11 @@ private:
 CollabController::CollabController()
 	: m_provider(std::make_unique<SceneStateProvider>(*this)) {}
 
-CollabController::~CollabController() { teardown(); }
+// The backstop, not the plan: OnShutdown calls shutdown() while the editor is
+// still a healthy process. Reaching here with a session still open means that
+// did not happen (an unusual exit path, a test), and giving the resources back
+// late is better than not at all — shutdown() is a no-op once they are gone.
+CollabController::~CollabController() { shutdown(); }
 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -936,38 +942,67 @@ void CollabController::wireCallbacks()
 	});
 }
 
-void CollabController::leave()
+void CollabController::releaseNetworkResources(bool blocking)
 {
 	// Take the forward back down. Leaving it in place would hold a hole open in
 	// the user's firewall long after the session ended — the "clear it again"
 	// half that makes automatic forwarding acceptable in the first place.
+	//
+	// Every call below carries its own timeout, which is what makes waiting for
+	// them a bounded thing to do at exit rather than a hang.
+	std::vector<std::thread> pending;
+	auto run = [&pending, blocking](std::function<void()> work) {
+		if (blocking) { work(); return; }
+		pending.emplace_back(std::move(work));
+	};
+
 	if (m_portMapped)
 	{
-		std::thread([handle = m_mapping] {
-			// Torn down the same way it was put up — the handle remembers which
-			// protocol won.
-			HE::Net::PortMapper::unmapPort(handle);
-		}).detach();
+		// Torn down the same way it was put up — the handle remembers which
+		// protocol won.
+		run([handle = m_mapping] { HE::Net::PortMapper::unmapPort(handle); });
 	}
 	if (m_pinholeOpen)
 	{
-		std::thread([handle = m_pinhole] {
-			HE::Net::PortMapper::closePinhole(handle);
-		}).detach();
+		run([handle = m_pinhole] { HE::Net::PortMapper::closePinhole(handle); });
 	}
 
-	// Remove the directory entry so peers stop being handed a dead endpoint.
-	// Detached because leaving must feel instant; if it fails the entry simply
-	// expires on its TTL instead.
+	// Remove the directory entry so peers stop being handed a dead endpoint. If
+	// it fails the entry simply expires on its TTL instead.
 	if (m_isHost && !m_directoryToken.empty() && !m_sessionId.empty())
 	{
-		std::thread([endpoint = directoryEndpoint(), sid = m_sessionId,
-		             token = m_directoryToken] {
+		run([endpoint = directoryEndpoint(), sid = m_sessionId,
+		     token = m_directoryToken] {
 			SessionDirectory dir(endpoint);
 			dir.unregisterSession(sid, token);
-		}).detach();
+		});
 	}
 
+	// Detached only in the interactive case: closing a session must feel instant,
+	// and the editor stays alive to see the work through.
+	for (std::thread& t : pending) t.detach();
+}
+
+void CollabController::leave()
+{
+	releaseNetworkResources(/*blocking=*/false);
+	teardown();
+	m_status = Status::Idle;
+	m_error.clear();
+}
+
+void CollabController::shutdown()
+{
+	// Nothing to give back if no session ever opened — and no reason to make
+	// quitting the editor wait on a network call in that case.
+	if (!m_portMapped && !m_pinholeOpen && m_directoryToken.empty())
+	{
+		teardown();
+		m_status = Status::Idle;
+		return;
+	}
+	HE_LOG_INFO(Editor, "%s", "Collab: releasing the port forward and directory entry");
+	releaseNetworkResources(/*blocking=*/true);
 	teardown();
 	m_status = Status::Idle;
 	m_error.clear();

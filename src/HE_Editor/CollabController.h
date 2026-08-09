@@ -95,6 +95,17 @@ public:
 	                 const std::string& joinCode, const std::string& displayName);
 	void leave();
 
+	// Same cleanup as leave(), but it WAITS for it. Call once while the editor
+	// is still a running process — from OnShutdown, not from a destructor that
+	// runs on the way out.
+	//
+	// leave() detaches its router and directory calls because closing a session
+	// has to feel instant. At process exit that is exactly wrong: a detached
+	// thread has no guarantee of finishing before the process goes, so the port
+	// forward, the IPv6 pinhole and the directory entry would all outlive the
+	// editor. That is how one router accumulated 418 stale forwards.
+	void shutdown();
+
 	// Directory endpoint. Defaults to the public one; override with the
 	// HE_COLLAB_DIRECTORY environment variable when testing against another.
 	static std::string directoryEndpoint();
@@ -451,6 +462,11 @@ public:
 
 private:
 	void teardown();
+	// Give the router and the directory back what this session took: the port
+	// forward, the IPv6 pinhole, the directory entry. `blocking` decides whether
+	// the calls are waited for (process exit) or detached (the user closed a
+	// session and wants the UI back now). Safe to call when nothing was taken.
+	void releaseNetworkResources(bool blocking);
 	void wireCallbacks();
 	// Copy the persisted name/picture/client key into a session config. Called
 	// on every host and join, so the identity the user just edited is the one
