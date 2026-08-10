@@ -125,9 +125,10 @@ static void retargetReferences(AppContext& ctx, const std::string& oldAbs,
 // that empty string as "no session", quietly turning a C++ class's create and
 // delete into local-only operations while its edits travelled normally. The
 // editor owns the mapping (EditorApplication::collabSyncKey); this reaches it.
-static std::string collabKeyFor(AppContext& ctx, const std::string& absPath)
+static std::string collabKeyFor(AppContext& ctx, const std::string& absPath,
+                                bool isFolder = false)
 {
-	if (ctx.collabKeyForPath) return ctx.collabKeyForPath(absPath);
+	if (ctx.collabKeyForPath) return ctx.collabKeyForPath(absPath, isFolder);
 	// No editor behind the context (tests, tooling): fall back to the content
 	// form, which is right for everything except the Source tree.
 	return ctx.contentManager ? ctx.contentManager->toContentRelativePath(absPath)
@@ -983,8 +984,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// holds everywhere rather than being learned per panel.
 			if (ctx.collab && ctx.collab->inSession() && ctx.contentManager && file)
 			{
-				const std::string rel =
-					ctx.contentManager->toContentRelativePath(file->fullPath);
+				// The same key the tab and the lock table use — a C++ class has
+				// no content-relative form, so deriving it that way meant the
+				// one file kind whose tile most needs a padlock never got one.
+				const std::string rel = collabKeyFor(ctx, file->fullPath);
 				const HE::Net::LockInfo* lock =
 					rel.empty() ? nullptr : ctx.collab->assetLockInfo(rel);
 				if (lock && lock->owner != ctx.collab->localParticipant())
@@ -1591,8 +1594,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (!s_ctxMenuIsFolder && ctx.collab && ctx.collab->inSession() &&
 			    ctx.contentManager)
 			{
-				const std::string rel =
-					ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
+				const std::string rel = collabKeyFor(ctx, s_ctxMenuItem);
 				if (!rel.empty() && ctx.collab->assetLockedByOther(rel))
 				{
 					const HE::Net::LockInfo* lock = ctx.collab->assetLockInfo(rel);
@@ -1658,9 +1660,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// has to REPLICATE though: this shortcut skipped the dialog
 					// and with it the whole session path, so an empty folder was
 					// the one deletion that only ever happened locally.
-					const std::string rel = ctx.contentManager
-						? ctx.contentManager->toContentRelativePath(s_deleteFolderTarget)
-						: std::string();
+					const std::string rel =
+						collabKeyFor(ctx, s_deleteFolderTarget, /*isFolder=*/true);
 					if (!(ctx.collab && !rel.empty() &&
 					      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
 					{
@@ -1923,15 +1924,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// is free and hands it on.
 			if (ctx.collab && ctx.contentManager)
 			{
-				// collabKeyForPath, not toContentRelativePath: a C++ class lives
-				// under Source, which the content root does not contain, so the
-				// content-relative form is empty for it and the create never
-				// left this machine. A FOLDER is only ever a content folder,
-				// and the key function judges assets — so it keeps the plain
-				// content-relative form.
-				const std::string rel = s_pendingCreateIsFolder
-					? ctx.contentManager->toContentRelativePath(s_pendingCreatePublish)
-					: collabKeyFor(ctx, s_pendingCreatePublish);
+				// collabKeyFor, not toContentRelativePath: anything under Source
+				// — a C++ class OR a folder in that tree — has no
+				// content-relative form, and the empty string read as "no
+				// session" meant the create never left this machine.
+				const std::string rel =
+					collabKeyFor(ctx, s_pendingCreatePublish, s_pendingCreateIsFolder);
 				if (rel.empty()) { /* nothing a session carries */ }
 				else if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
 				else ctx.collab->publishAssetCreate(rel, s_pendingCreatePublish);
@@ -2067,9 +2065,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (EditorWidgets::dangerButton(folderNeedsApproval ? "Ask the host" : "Delete",
 			                                ImVec2(210, 0)))
 			{
-				const std::string rel = ctx.contentManager
-					? ctx.contentManager->toContentRelativePath(s_deleteFolderTarget)
-					: std::string();
+				const std::string rel =
+					collabKeyFor(ctx, s_deleteFolderTarget, /*isFolder=*/true);
 				if (!(ctx.collab && !rel.empty() &&
 				      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
 				{

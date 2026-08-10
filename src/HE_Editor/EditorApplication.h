@@ -415,7 +415,7 @@ struct AppContext
 	// Content, so the content root does not contain it), and using the
 	// content-relative form there silently made every create and delete of a
 	// C++ class a local-only one — in a session that says the file travels.
-	std::function<std::string(const std::string&)> collabKeyForPath;
+	std::function<std::string(const std::string&, bool /*isFolder*/)> collabKeyForPath;
 };
 
 class EditorApplication : public HE::Application
@@ -531,7 +531,11 @@ private:
 	// The reserved prefixes are the existing virtual TAB paths, so a tab is its
 	// own key and nothing has to be mapped. A bare content-relative path stays the
 	// wire format it already was.
-	std::string collabSyncKey(const std::string& tabPath);
+	// `isFolder` is passed, not sniffed with is_directory: the path exists at
+	// every call site today, but a caller naming a destination that does not
+	// exist yet would be misclassified in silence — and every other folder/file
+	// distinction in this code travels as an explicit flag for the same reason.
+	std::string collabSyncKey(const std::string& tabPath, bool isFolder = false);
 	// Where a key lives locally; empty for a document that has no file of its own.
 	std::string collabLocalPath(const std::string& key);
 	// The project directory (currentProject().path may name the .heproj itself).

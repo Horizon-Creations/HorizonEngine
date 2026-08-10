@@ -3868,7 +3868,7 @@ std::string EditorApplication::projectRoot()
 	return p.string();
 }
 
-std::string EditorApplication::collabSyncKey(const std::string& tabPath)
+std::string EditorApplication::collabSyncKey(const std::string& tabPath, bool isFolder)
 {
 	if (tabPath.empty()) return {};
 
@@ -3879,6 +3879,22 @@ std::string EditorApplication::collabSyncKey(const std::string& tabPath)
 	if (tabPath == LevelScriptPanel::kTabPath ||
 	    tabPath == GameInstancePanel::kTabPath)
 		return tabPath;
+
+	// A folder is named the same way but judged by neither of the asset gates
+	// below: it has no extension for isSyncableAsset to look at (which would
+	// reject every folder) and no header to sniff. What matters is only which
+	// root it belongs to.
+	if (isFolder)
+	{
+		if (const std::string root = projectRoot(); !root.empty())
+		{
+			const std::string rel =
+				CollabController::projectRelativeAssetPath(tabPath, root + "/Source");
+			if (!rel.empty()) return kSourceKeyPrefix + rel;
+		}
+		return CollabController::projectRelativeAssetPath(
+			tabPath, contentManager().contentRoot());
+	}
 
 	// C++ classes live under <project>/Source, a sibling of Content, so the
 	// content-relative form cannot name them. The prefix also keeps them out of
@@ -4348,7 +4364,9 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.collabUndo          = &m_collabUndo,
-		.collabKeyForPath    = [this](const std::string& p) { return collabSyncKey(p); },
+		.collabKeyForPath    = [this](const std::string& p, bool folder) {
+			return collabSyncKey(p, folder);
+		},
 	};
 }
 

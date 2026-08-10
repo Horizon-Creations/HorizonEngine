@@ -1937,8 +1937,23 @@ constexpr float kAssetLockBannerH = 38.0f;
         bool tabReadOnly = false;
         if (ctx.collab && ctx.collab->inSession() && ctx.contentManager)
         {
-            const std::string rel = CollabController::projectRelativeAssetPath(
-                tabPath, ctx.contentManager->contentRoot());
+            // THE session key, not a content-relative path. Two things were
+            // wrong with deriving it here:
+            //
+            //   * a C++ class is under Source, which the content root does not
+            //     contain, so this was empty and the tab was never read-only —
+            //     two people could type into one file with nothing arbitrating.
+            //   * a mesh or texture tab got a NON-empty path but is not a kind
+            //     that syncs, so nothing ever asked the host about it and
+            //     assetEditState stayed Unknown for good: a permanent
+            //     "Checking with the host…" over a tab that never came back.
+            //
+            // The key function answers both — empty means "nothing a session
+            // carries", which is exactly the Editable case.
+            const std::string rel = ctx.collabKeyForPath
+                ? ctx.collabKeyForPath(tabPath, /*isFolder=*/false)
+                : CollabController::projectRelativeAssetPath(
+                      tabPath, ctx.contentManager->contentRoot());
             using EditState = CollabController::AssetEditState;
             const EditState edit = rel.empty() ? EditState::Editable
                                                : ctx.collab->assetEditState(rel);
