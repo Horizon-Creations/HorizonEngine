@@ -1701,38 +1701,11 @@ bool CollabController::isSyncableAsset(const std::string& relativePath)
 
 bool CollabController::isSyncableAssetType(HE::AssetType type)
 {
-	switch (type)
-	{
-		// Authored in an editor, small, and edited during a session — the whole
-		// point of collaborating.
-		case HE::AssetType::Material:
-		case HE::AssetType::MaterialFunction:
-		case HE::AssetType::Widget:
-		case HE::AssetType::HorizonCodeClass:
-		case HE::AssetType::ParticleSystem:
-		case HE::AssetType::AnimatorStateMachine:
-		case HE::AssetType::InputAction:
-		case HE::AssetType::InputMappingContext:
-		case HE::AssetType::Script:
-		case HE::AssetType::Scene:
-		case HE::AssetType::Prefab:
-			return true;
-
-		// Imported binaries. Excluded by size, not by importance — source control
-		// carries these. Font and the animation clips are here for the same
-		// reason: they are baked data, not something two people edit live.
-		case HE::AssetType::StaticMesh:
-		case HE::AssetType::SkeletalMesh:
-		case HE::AssetType::Texture:
-		case HE::AssetType::Audio:
-		case HE::AssetType::Font:
-		case HE::AssetType::Shader:
-		case HE::AssetType::AnimationClip:
-		case HE::AssetType::PropertyAnimClip:
-		case HE::AssetType::Unknown:
-			return false;
-	}
-	return false;
+	// The answer lives beside the enum (Types/Enums.h) so this layer and the
+	// wire cannot drift apart. This copy used to BE the answer, and drifted:
+	// three type kinds were added to AssetType afterwards, fell through to
+	// false, and never replicated.
+	return HE::isCollabSyncableAssetType(type);
 }
 
 void CollabController::publishAsset(const std::string& relativePath,

@@ -4,6 +4,7 @@
 #include "../src/HE_Editor/CollabDocSync.h"
 
 #include <HorizonCode/HorizonCode.h>
+#include <Platform/PathSafety.h>
 #include <UIWidget/UIWidgetTree.h>
 
 #include <HorizonScene/HorizonWorld.h>
@@ -1123,6 +1124,15 @@ TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")
     CHECK(CollabController::isSyncableAssetType(T::InputMappingContext));
     CHECK(CollabController::isSyncableAssetType(T::Script));
 
+    // The three project-type assets. They were added to AssetType after this
+    // switch was first written, fell through to false, and therefore never
+    // replicated — not even on an ordinary save. The compiler had been saying so
+    // all along (-Wswitch on the editor's copy); the answer now lives beside the
+    // enum with no default label, so the next addition cannot repeat it.
+    CHECK(CollabController::isSyncableAssetType(T::StructType));
+    CHECK(CollabController::isSyncableAssetType(T::EnumType));
+    CHECK(CollabController::isSyncableAssetType(T::SaveGameTemplate));
+
     CHECK_FALSE(CollabController::isSyncableAssetType(T::StaticMesh));
     CHECK_FALSE(CollabController::isSyncableAssetType(T::SkeletalMesh));
     CHECK_FALSE(CollabController::isSyncableAssetType(T::Texture));
@@ -1131,9 +1141,54 @@ TEST_CASE("isSyncableAssetType is what actually keeps the big binaries out")
     CHECK_FALSE(CollabController::isSyncableAssetType(T::Unknown));
     CHECK_FALSE(CollabController::isSyncableAsset("Content/Audio/Music.wav"));
 
+    // The editor's entry point and the shared one are the same answer, which is
+    // the whole reason the shared one exists.
+    CHECK(CollabController::isSyncableAssetType(T::Material) ==
+          HE::isCollabSyncableAssetType(T::Material));
+    CHECK(CollabController::isSyncableAssetType(T::StaticMesh) ==
+          HE::isCollabSyncableAssetType(T::StaticMesh));
+
     // Degenerate input must not be treated as a match.
     CHECK_FALSE(CollabController::isSyncableAsset("Content/NoExtension"));
     CHECK_FALSE(CollabController::isSyncableAsset(""));
+}
+
+TEST_CASE("A path off the wire cannot point outside the tree it claims to be in")
+{
+    namespace fs = std::filesystem;
+
+    // The traversal this exists to stop. Every one of these concatenates onto a
+    // root perfectly well and lands somewhere it must not.
+    CHECK_FALSE(HE::isRelativePathContained("../secrets.txt"));
+    CHECK_FALSE(HE::isRelativePathContained("Materials/../../../.ssh/authorized_keys"));
+    CHECK_FALSE(HE::isRelativePathContained("a/b/../../.."));
+#ifdef _WIN32
+    CHECK_FALSE(HE::isRelativePathContained("C:/Windows/System32/drivers/etc/hosts"));
+    CHECK_FALSE(HE::isRelativePathContained("C:foo"));       // relative, but to another drive
+#else
+    CHECK_FALSE(HE::isRelativePathContained("/etc/passwd"));
+#endif
+    CHECK_FALSE(HE::isRelativePathContained(""));
+
+    // Ordinary paths, including ".." that stays inside — refusing those would
+    // break legitimate names for no gain.
+    CHECK(HE::isRelativePathContained("Materials/Stone.hasset"));
+    CHECK(HE::isRelativePathContained("a/b/../c.hasset"));
+    CHECK(HE::isRelativePathContained("./Widgets/HUD.hasset"));
+
+    // Component-wise, not string-prefix: a sibling directory whose name merely
+    // begins with the root's is NOT inside it. A prefix comparison passes this
+    // and is the classic way to get the check wrong.
+    CHECK(HE::isPathWithin("/proj/Content", "/proj/Content/Materials/Stone.hasset"));
+    CHECK(HE::isPathWithin("/proj/Content", "/proj/Content"));
+    CHECK_FALSE(HE::isPathWithin("/proj/Content", "/proj/Content-backup/Stone.hasset"));
+    CHECK_FALSE(HE::isPathWithin("/proj/Content", "/proj"));
+    CHECK_FALSE(HE::isPathWithin("/proj/Content", "/proj/Other/Stone.hasset"));
+
+    // Normalised before comparing, so a path that wanders back in is accepted
+    // and one that wanders out is not — whatever it looks like textually.
+    CHECK(HE::isPathWithin("/proj/Content", "/proj/Content/x/../y.hasset"));
+    CHECK_FALSE(HE::isPathWithin("/proj/Content", "/proj/Content/../../etc/passwd"));
 }
 
 // ─── Profile pictures ────────────────────────────────────────────────────────

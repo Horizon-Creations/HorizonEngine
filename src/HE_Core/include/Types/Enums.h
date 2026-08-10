@@ -103,6 +103,57 @@ namespace HE
         SaveGameTemplate  // savegame field schema (typed fields + defaults), consumed by HE::api::save
     };
 
+    // Does this kind of asset travel over a collaboration session?
+    //
+    // Authored data — graphs, materials, UI, type definitions — yes: it is small,
+    // and two people editing it at once is the entire point. Imported binary
+    // media — meshes, textures, audio, fonts — no: it is large, it is not edited
+    // during a session, and keeping it in step is source control's job.
+    //
+    // It lives HERE, beside the enum, because more than one layer asks the
+    // question and a second copy would eventually answer differently. There is
+    // NO default label on purpose: a new AssetType then has to be classified
+    // deliberately, and forgetting shows up as a warning on this switch instead
+    // of as an asset that silently refuses to replicate. Not hypothetical —
+    // StructType, EnumType and SaveGameTemplate were added after the editor's
+    // copy of this switch was written, fell through to false, and never
+    // replicated at all, warning and everything.
+    inline constexpr bool isCollabSyncableAssetType(AssetType t)
+    {
+        switch (t)
+        {
+            case AssetType::Material:
+            case AssetType::MaterialFunction:
+            case AssetType::Widget:
+            case AssetType::HorizonCodeClass:
+            case AssetType::ParticleSystem:
+            case AssetType::AnimatorStateMachine:
+            case AssetType::InputAction:
+            case AssetType::InputMappingContext:
+            case AssetType::Script:
+            case AssetType::Scene:
+            case AssetType::Prefab:
+            case AssetType::StructType:
+            case AssetType::EnumType:
+            case AssetType::SaveGameTemplate:
+                return true;
+
+            case AssetType::StaticMesh:
+            case AssetType::SkeletalMesh:
+            case AssetType::Texture:
+            case AssetType::Audio:
+            case AssetType::Font:
+            case AssetType::Shader:
+            case AssetType::AnimationClip:
+            case AssetType::PropertyAnimClip:
+            case AssetType::Unknown:
+                return false;
+        }
+        // Only reachable through a cast from an out-of-range value. Refusing is
+        // the safe answer: an unrecognised kind does not go on the wire.
+        return false;
+    }
+
     enum class TextureFormat : uint32_t
     {
         RGBA8 = 0,

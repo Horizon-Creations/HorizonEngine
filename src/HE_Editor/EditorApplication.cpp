@@ -9,6 +9,7 @@
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
+#include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
 #include <Platform/Process.h>       // git config for the identity fix
 #include <Diagnostics/Log.h>
 #ifdef HE_HAVE_LIBSSH2
@@ -3717,12 +3718,31 @@ std::string EditorApplication::collabLocalPath(const std::string& key)
 	if (key == LevelScriptPanel::kTabPath) return {};   // lives in the world
 	if (key == GameInstancePanel::kTabPath) return gameInstancePath();
 
+	// This key can come off the wire, so it is not trusted to stay where it says
+	// it is: "Materials/../../../../.ssh/authorized_keys" concatenates as
+	// happily as any other name, and the caller writes the bytes wherever this
+	// points. Both branches below are plain concatenation, so the check belongs
+	// here — one place, before either of them can produce a path.
 	const std::string prefix = kSourceKeyPrefix;
-	if (key.rfind(prefix, 0) == 0)
+	const bool  isSource = key.rfind(prefix, 0) == 0;
+	const std::string rel = isSource ? key.substr(prefix.size()) : key;
+	if (!HE::isRelativePathContained(rel))
+	{
+		HE_LOG_WARN(Editor, "Collab: refusing an asset path that leaves the project: '%s'",
+		            key.c_str());
+		return {};
+	}
+
+	if (isSource)
 	{
 		const std::string root = projectRoot();
 		if (root.empty()) return {};
-		return root + "/Source/" + key.substr(prefix.size());
+		const std::string full = root + "/Source/" + rel;
+		// Belt and braces: the containment check above is about the relative
+		// part, this one is about the result. They disagree only if the root
+		// itself is odd, and then this one is right.
+		if (!HE::isPathWithin(std::filesystem::path(root) / "Source", full)) return {};
+		return full;
 	}
 	return contentManager().resolveSavePath(key);
 }
