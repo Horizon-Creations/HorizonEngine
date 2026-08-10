@@ -445,6 +445,10 @@ public:
         // Permissive like any other create — it destroys nothing, so there is
         // nothing for the host to weigh, and it is broadcast without asking.
         Create = 2,
+        // "May I edit this?" — the only op whose answer is not the host's. It
+        // interrupts the HOLDER's work, so the holder decides; the host merely
+        // knows who that is and forwards it.
+        Edit   = 3,
     };
 
     // Why the host would not take a create. Spelled out because the creator has
@@ -524,9 +528,14 @@ public:
     // `folder` is not folded into the op because deleting a folder IS a delete —
     // same decision, same row in the host's queue, same wording. It differs only
     // in what gets removed, which is exactly what a flag is for.
+    // `subject` is the same opaque id the locks use — the editor derives it
+    // from the path and this layer never could. Only Edit needs it (to find the
+    // holder), but it rides along on every op rather than being a special case
+    // the caller has to remember for one of four.
     std::uint32_t requestAssetOp(AssetOp op, const std::string& path,
                                  const std::string& newPath = {},
-                                 bool folder = false);
+                                 bool folder = false,
+                                 std::uint64_t subject = 0);
 
     // Host: somebody wants something done. Queue it and answer later.
     void onAssetOpRequested(
@@ -559,6 +568,19 @@ public:
                            const std::string& newPath, bool folder)> fn) {
         m_onOpApply = std::move(fn);
     }
+
+    // ── Asking the holder for an asset ──
+    // Somebody wants what WE are holding. The host routed it here because we
+    // have the lock; answering yes releases it and hands it to them.
+    void onAssetEditRequested(
+        std::function<void(ParticipantId from, std::uint32_t requestId,
+                           const std::string& path)> fn) {
+        m_onEditRequested = std::move(fn);
+    }
+    // The holder's answer, back to the host, which grants the lock on a yes.
+    void sendAssetEditAnswer(ParticipantId requester, std::uint32_t requestId,
+                             const std::string& path, bool allowed,
+                             std::uint64_t subject);
 
     // ── Document deltas ──────────────────────────────────────────────────────
     // AssetUpdate replicates a whole authored file; this replicates ONE ITEM
@@ -798,6 +820,14 @@ private:
     void handleAssetOpRequest(ConnectionId conn, BitReader& r);    // host
     void handleAssetOpVerdict(BitReader& r);                       // client
     void handleAssetOpApply(BitReader& r);                         // client
+    void handleAssetEditRequest(BitReader& r);                     // the holder
+    void handleAssetEditAnswer(ConnectionId conn, BitReader& r);   // host
+    // Host: route an edit request to whoever holds the lock. True when it went
+    // somewhere; false means nobody holds it and the caller can just grant it.
+    bool routeEditRequest(ParticipantId from, std::uint32_t requestId,
+                          const std::string& path, std::uint64_t subject);
+    // Release and grant as ONE step — see the body for why the gap matters.
+    void handOverLock(std::uint64_t subject, ParticipantId to);
     // Host: run the policy and answer the creator. True = go ahead and relay.
     bool arbitrateCreate(ConnectionId conn, const AssetUpdate& a);
     void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
@@ -885,6 +915,8 @@ private:
     std::function<void(std::uint32_t, bool)>                    m_onOpVerdict;
     std::function<void(ParticipantId, AssetOp, const std::string&,
                        const std::string&, bool)>               m_onOpApply;
+    std::function<void(ParticipantId, std::uint32_t, const std::string&)>
+                                                                m_onEditRequested;
     // Ids are per-CLIENT and only ever paired with that client's own requests,
     // so a plain counter is enough — two peers may both hold request 3 and the
     // host never confuses them, because it also knows which connection asked.

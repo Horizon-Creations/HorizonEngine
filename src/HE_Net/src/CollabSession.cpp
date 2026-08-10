@@ -57,6 +57,14 @@ constexpr MessageId kMsgAssetCreateResult = kFirstUserMessage + 31;  // host →
 constexpr MessageId kMsgAssetOpRequest    = kFirstUserMessage + 32;  // client → host
 constexpr MessageId kMsgAssetOpVerdict    = kFirstUserMessage + 33;  // host → one client
 constexpr MessageId kMsgAssetOpApply      = kFirstUserMessage + 34;  // host → clients
+// ── "may I have this one?" ──
+// Addressed to the HOLDER, not the host: the host knows who that is and does
+// the routing, but the decision is not its to make — it is the holder's work
+// that would be interrupted. Two ids rather than reusing the pair above,
+// because the audiences run the other way: this travels host → holder, and the
+// answer comes back holder → host.
+constexpr MessageId kMsgAssetEditRequest  = kFirstUserMessage + 35;  // host → the holder
+constexpr MessageId kMsgAssetEditAnswer   = kFirstUserMessage + 36;  // holder → host
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -161,6 +169,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgAssetOpRequest, [this](ConnectionId conn, BitReader& r) {
             handleAssetOpRequest(conn, r);
         });
+        m_net->on(kMsgAssetEditAnswer, [this](ConnectionId conn, BitReader& r) {
+            handleAssetEditAnswer(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -185,6 +196,9 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgAssetOpApply, [this](ConnectionId, BitReader& r) {
             handleAssetOpApply(r);
+        });
+        m_net->on(kMsgAssetEditRequest, [this](ConnectionId, BitReader& r) {
+            handleAssetEditRequest(r);
         });
         m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
             handleStructuralRelay(r);
@@ -1620,7 +1634,7 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
 
 std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
                                             const std::string& newPath,
-                                            bool folder) {
+                                            bool folder, std::uint64_t subject) {
     if (!m_net || !m_joined || path.empty()) return 0;
     // The host does not ask itself. It has the queue, the disk and the decision;
     // routing its own delete through a request would mean answering a dialog it
@@ -1635,6 +1649,7 @@ std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
     w.writeString(path);
     w.writeString(newPath);
     w.writeByte(folder ? 1 : 0);
+    w.writeUInt64(subject);
     m_net->send(m_net->connections().front(), kMsgAssetOpRequest, w);
     return id;
 }
@@ -1647,15 +1662,119 @@ void CollabSession::handleAssetOpRequest(ConnectionId conn, BitReader& r) {
 
     std::uint32_t id = 0;
     std::uint8_t  op = 0, folder = 0;
+    std::uint64_t subject = 0;
     std::string   path, newPath;
     if (!r.readUInt32(id) || !r.readByte(op) ||
-        !r.readString(path) || !r.readString(newPath) || !r.readByte(folder)) {
+        !r.readString(path) || !r.readString(newPath) || !r.readByte(folder) ||
+        !r.readUInt64(subject)) {
         return;
     }
-    if (op > static_cast<std::uint8_t>(AssetOp::Create)) return;
+    if (op > static_cast<std::uint8_t>(AssetOp::Edit)) return;
     if (path.empty()) return;
+
+    // "May I edit this?" is the one op the host does not answer. It goes to
+    // whoever holds the lock, because it is their work being interrupted; the
+    // host only knows who that is. Nobody holding it means there is nothing to
+    // ask about, so it is granted on the spot.
+    if (static_cast<AssetOp>(op) == AssetOp::Edit) {
+        if (!routeEditRequest(who, id, path, subject))
+            sendAssetOpVerdict(who, id, true);
+        return;
+    }
+
     if (m_onOpRequested)
         m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath, folder != 0);
+}
+
+bool CollabSession::routeEditRequest(ParticipantId from, std::uint32_t requestId,
+                                     const std::string& path,
+                                     std::uint64_t subject) {
+    if (m_role != NetRole::Host) return false;
+    const LockInfo* lock = lockFor(subject);
+    if (!lock || lock->owner == from) return false;   // free, or already theirs
+
+    // The host holding it answers like anybody else: same queue, same buttons.
+    // Routing it to itself over the network would be a message to nowhere.
+    if (lock->owner == m_localId) {
+        if (m_onEditRequested) m_onEditRequested(from, requestId, path);
+        return true;
+    }
+
+    ConnectionId conn = kInvalidConnection;
+    for (const auto& [c, pid] : m_connToParticipant) {
+        if (pid == lock->owner) { conn = c; break; }
+    }
+    if (conn == kInvalidConnection) return false;   // holder vanished — treat as free
+
+    BitWriter w;
+    w.writeUInt32(from);
+    w.writeUInt32(requestId);
+    w.writeString(path);
+    m_net->send(conn, kMsgAssetEditRequest, w);
+    return true;
+}
+
+void CollabSession::handleAssetEditRequest(BitReader& r) {
+    std::uint32_t from = 0, requestId = 0;
+    std::string   path;
+    if (!r.readUInt32(from) || !r.readUInt32(requestId) || !r.readString(path)) return;
+    if (m_onEditRequested) m_onEditRequested(from, requestId, path);
+}
+
+void CollabSession::handOverLock(std::uint64_t subject, ParticipantId to) {
+    // Released and granted in ONE step. Releasing first and letting the asker
+    // request it again leaves a gap in which anyone else can take it — and the
+    // whole point of asking was to be the one who gets it.
+    const Participant* p = findParticipant(to);
+    grantLock(subject, to, p ? p->name : std::string{});
+    broadcastLock(subject, true, kInvalidConnection);
+    if (m_onLockChanged) m_onLockChanged(*lockFor(subject), true);
+}
+
+void CollabSession::sendAssetEditAnswer(ParticipantId requester,
+                                        std::uint32_t requestId,
+                                        const std::string& path, bool allowed,
+                                        std::uint64_t subject) {
+    if (!m_net || !m_joined) return;
+    if (m_role == NetRole::Host) {
+        // We ARE the host and we were the holder: no round trip to make, just
+        // do what the answer means. handOverLock does the release-and-grant in
+        // one step for the same reason it does over the wire.
+        if (allowed) handOverLock(subject, requester);
+        sendAssetOpVerdict(requester, requestId, allowed);
+        return;
+    }
+    if (m_net->connections().empty()) return;
+    BitWriter w;
+    w.writeUInt32(requester);
+    w.writeUInt32(requestId);
+    w.writeUInt64(subject);
+    w.writeString(path);
+    w.writeByte(allowed ? 1 : 0);
+    m_net->send(m_net->connections().front(), kMsgAssetEditAnswer, w);
+}
+
+void CollabSession::handleAssetEditAnswer(ConnectionId conn, BitReader& r) {
+    // Host side. The answer is only worth anything from the peer that actually
+    // holds the lock — otherwise a third party could hand away someone's work.
+    const ParticipantId sender = participantForConnection(conn);
+    if (sender == kInvalidParticipant) return;
+
+    std::uint32_t requester = 0, requestId = 0;
+    std::uint64_t subject = 0;
+    std::uint8_t  allowed = 0;
+    std::string   path;
+    if (!r.readUInt32(requester) || !r.readUInt32(requestId) ||
+        !r.readUInt64(subject) || !r.readString(path) || !r.readByte(allowed)) {
+        return;
+    }
+    // Only worth anything from the peer that actually holds it — otherwise a
+    // third party could hand away somebody else's work.
+    const LockInfo* lock = lockFor(subject);
+    if (!lock || lock->owner != sender) return;
+
+    if (allowed) handOverLock(subject, requester);
+    sendAssetOpVerdict(requester, requestId, allowed != 0);
 }
 
 void CollabSession::sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId,
