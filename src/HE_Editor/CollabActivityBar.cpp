@@ -99,6 +99,25 @@ namespace
 		}
 	}
 
+	// The host's in-tray, as one line. Does NOT fade and cannot be dismissed:
+	// it is a count of things waiting for a decision, and it goes away by being
+	// decided. A client sees the mirror of it — what it is waiting for.
+	std::string queueText(AppContext& ctx)
+	{
+		if (!ctx.collab || !ctx.collab->inSession()) return {};
+		if (ctx.collab->isHost())
+		{
+			const std::size_t n = ctx.collab->pendingAssetOps().size();
+			if (n == 0) return {};
+			return n == 1 ? std::string("1 request waiting")
+			              : std::to_string(n) + " requests waiting";
+		}
+		const std::size_t n = ctx.collab->pendingRequestsOfOurs();
+		if (n == 0) return {};
+		return n == 1 ? std::string("1 request pending")
+		              : std::to_string(n) + " requests pending";
+	}
+
 	// 1 while fresh, falling to 0 across the last second. Returns 0 once expired,
 	// which is also the signal to drop the entry.
 	float alphaFor(double since, double lifetime)
@@ -121,8 +140,14 @@ float FooterWidth(AppContext& ctx)
 	if (s_batch.count > 0 && alphaFor(s_batch.since, kNewsSeconds) <= 0.0f)
 		s_batch = {};
 
-	// The personal notice wins the space when both are up: it is the one the
-	// user cannot find out any other way.
+	// Requests outrank both. They are the only item here that is WORK rather
+	// than news, and unlike the other two they do not fade — a queue that
+	// quietly disappeared would be a queue nobody answers.
+	if (const std::string q = queueText(ctx); !q.empty())
+		return ImGui::CalcTextSize(q.c_str()).x;
+
+	// The personal notice wins the rest: it is the one the user cannot find out
+	// any other way.
 	const std::string text = !s_personal.empty() ? elide(s_personal) : batchText();
 	if (text.empty()) return 0.0f;
 	return ImGui::CalcTextSize(text.c_str()).x;
@@ -135,7 +160,21 @@ float FooterWidth(AppContext& ctx)
 bool DrawFooter(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
-	(void)ctx;
+	// Requests first, and in amber whether they are yours to answer or somebody
+	// else's to answer for you — either way it is unfinished business.
+	if (const std::string q = queueText(ctx); !q.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.72f, 0.35f, 1.0f));
+		ImGui::TextUnformatted(q.c_str());
+		ImGui::PopStyleColor();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(ctx.collab && ctx.collab->isHost()
+				? "Someone is waiting for you to approve a delete or rename.\n"
+				  "Click to open Collaboration."
+				: "Waiting for the host to answer. Click to open Collaboration.");
+		return ImGui::IsItemClicked();
+	}
+
 	const bool  personal = !s_personal.empty();
 	const std::string text = personal ? elide(s_personal) : batchText();
 	if (text.empty()) return false;

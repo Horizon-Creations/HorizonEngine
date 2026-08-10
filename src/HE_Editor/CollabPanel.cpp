@@ -485,6 +485,97 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		// so the two cannot end up offering different buttons.
 		CollabPresenceBar::DrawRoster(ctx);
 
+		// ── Requests waiting on you ───────────────────────────────────────
+		// A list, deliberately, and not a dialog: with several participants a
+		// modal per request would turn hosting into clicking things away. Rows
+		// accumulate, they wait as long as they have to, and none of them takes
+		// the keyboard.
+		if (collab->isHost() && !collab->pendingAssetOps().empty())
+		{
+			const auto& ops = collab->pendingAssetOps();
+			ImGui::Spacing();
+			const std::string title = ops.size() == 1
+				? std::string("1 request")
+				: std::to_string(ops.size()) + " requests";
+			ImGui::SeparatorText(title.c_str());
+			ImGui::TextDisabled("Nothing happens to these until you say so.");
+			ImGui::Spacing();
+
+			// Answered AFTER the loop: approving mutates the vector being drawn.
+			int approveIdx = -1, denyIdx = -1;
+			for (std::size_t i = 0; i < ops.size(); ++i)
+			{
+				const auto& op = ops[i];
+				ImGui::PushID(static_cast<int>(i));
+
+				const std::string name =
+					std::filesystem::path(op.path).filename().string();
+				const bool isDelete =
+					op.op == HE::Net::CollabSession::AssetOp::Delete;
+				ImGui::TextColored(isDelete ? ImVec4(1.00f, 0.55f, 0.45f, 1.0f)
+				                            : ImVec4(1.00f, 0.80f, 0.45f, 1.0f),
+				                   isDelete ? "Delete" : "Rename");
+				ImGui::SameLine();
+				ImGui::TextUnformatted(name.c_str());
+				if (!isDelete && !op.newPath.empty())
+				{
+					ImGui::SameLine();
+					ImGui::TextDisabled("\xE2\x86\x92 %s",
+						std::filesystem::path(op.newPath).filename().string().c_str());
+				}
+				// The age, so a request that has been sitting there looks like it
+				// has, instead of looking freshly arrived every time you glance.
+				if (op.firstAskedMs > 0 && collab->nowMs() > op.firstAskedMs)
+				{
+					const unsigned long long secs =
+						(collab->nowMs() - op.firstAskedMs) / 1000ull;
+					ImGui::SameLine();
+					if (secs < 60) ImGui::TextDisabled("(%llus)", secs);
+					else           ImGui::TextDisabled("(%llum)", secs / 60ull);
+				}
+
+				// Who asked, as faces. A name is a string; a face is the person
+				// you can go and ask about it. Drawn with the roster's own
+				// helper, so a request shows the same picture the participant
+				// list does rather than a second rendering of it.
+				for (const auto& rq : op.requesters)
+				{
+					for (const HE::Net::Participant& p : collab->participants())
+					{
+						if (p.id != rq.id) continue;
+						CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("%s asked for this", p.name.c_str());
+						ImGui::SameLine();
+						break;
+					}
+				}
+				// The faces were all drawn with SameLine after them; close the row.
+				ImGui::NewLine();
+
+				if (EditorWidgets::primaryButton("Approve", ImVec2(110, 0)))
+					approveIdx = static_cast<int>(i);
+				ImGui::SameLine();
+				if (EditorWidgets::cancelButton("Deny", ImVec2(110, 0)))
+					denyIdx = static_cast<int>(i);
+
+				ImGui::PopID();
+				if (i + 1 < ops.size()) ImGui::Separator();
+			}
+			if (approveIdx >= 0)   collab->approveAssetOp(static_cast<std::size_t>(approveIdx));
+			else if (denyIdx >= 0) collab->denyAssetOp(static_cast<std::size_t>(denyIdx));
+		}
+		// The other side of the same exchange: what WE are waiting for.
+		else if (!collab->isHost() && collab->hasPendingRequestOfOurs())
+		{
+			ImGui::Spacing();
+			if (collab->pendingRequestsOfOurs() == 1)
+				ImGui::TextDisabled("1 request is waiting for the host.");
+			else
+				ImGui::TextDisabled("%zu requests are waiting for the host.",
+				                    collab->pendingRequestsOfOurs());
+		}
+
 		ImGui::Spacing();
 		ImGui::Separator();
 		if (ImGui::Button("Leave session", ImVec2(170, 0))) collab->leave();

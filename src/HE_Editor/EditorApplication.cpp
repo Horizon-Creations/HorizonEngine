@@ -450,6 +450,51 @@ void EditorApplication::OnInit()
 		return collabLocalPath(key);
 	});
 
+	// An approved delete or rename. Fires on every peer INCLUDING the host, so
+	// there is one implementation of "this happened" rather than two that have
+	// to agree.
+	m_collab.onRemoteAssetOp([this](bool isDelete, const std::string& relPath,
+	                                const std::string& newRelPath) {
+		const std::string full = collabLocalPath(relPath);
+		if (full.empty()) return;      // refused by the containment check
+		std::error_code ec;
+		if (isDelete)
+		{
+			std::filesystem::remove(full, ec);
+			EditorAssetTypeCache::invalidate(full);
+			AssetThumbnailCache::invalidate(full);
+			// The tab is showing a file that no longer exists. Closing it is the
+			// honest outcome — leaving it open invites a save that would write
+			// the asset back and undo the deletion everyone just agreed to.
+			m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
+				[&full](const AppContext::EditorTab& t){ return t.assetPath == full; }),
+				m_tabs.end());
+		}
+		else
+		{
+			const std::string newFull = collabLocalPath(newRelPath);
+			if (newFull.empty()) return;
+			std::filesystem::create_directories(
+				std::filesystem::path(newFull).parent_path(), ec);
+			std::filesystem::rename(full, newFull, ec);
+			if (ec) return;
+			EditorAssetTypeCache::invalidate(full);
+			EditorAssetTypeCache::invalidate(newFull);
+			AssetThumbnailCache::invalidate(full);
+			AssetThumbnailCache::invalidate(newFull);
+			// An open tab follows its asset rather than being closed: the file
+			// still exists, it just lives somewhere else, and closing it would
+			// throw away unsaved work for a move the user did not make.
+			for (AppContext::EditorTab& t : m_tabs)
+			{
+				if (t.assetPath != full) continue;
+				t.assetPath = newFull;
+				t.label     = std::filesystem::path(newFull).stem().string();
+			}
+		}
+		m_contentRefreshPending = true;
+	});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
 		applyAssetBytes(relPath, bytes);

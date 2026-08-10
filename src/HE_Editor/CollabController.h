@@ -400,6 +400,25 @@ public:
 	// its own request is still waiting.
 	bool hasPendingRequestOfOurs() const { return !m_ourPendingOps.empty(); }
 	std::size_t pendingRequestsOfOurs() const { return m_ourPendingOps.size(); }
+	// The clock the queue's timestamps are on. Exposed so the panel measures an
+	// age against the same one that recorded it, rather than a second clock that
+	// happens to be nearby.
+	std::uint64_t nowMs() const { return m_lastUpdateMs; }
+
+	// Ask for an asset to go, or — as host — make it go. FALSE means there is no
+	// session and the caller should do it locally, exactly as it always did.
+	// That return value is the whole interface: no caller needs to know whether
+	// it is hosting, joining, or working alone.
+	bool requestAssetDelete(const std::string& relPath)
+	{
+		return requestOrPerformAssetOp(
+			HE::Net::CollabSession::AssetOp::Delete, relPath, {});
+	}
+	bool requestAssetRename(const std::string& relPath, const std::string& newRelPath)
+	{
+		return requestOrPerformAssetOp(
+			HE::Net::CollabSession::AssetOp::Rename, relPath, newRelPath);
+	}
 
 	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
 	// the file and reloads — CollabController does not touch the ContentManager.

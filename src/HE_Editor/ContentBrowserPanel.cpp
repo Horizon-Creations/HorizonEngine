@@ -1738,9 +1738,29 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
 			ImGui::Spacing();
 
-			if (EditorWidgets::dangerButton("Delete", ImVec2(210, 0)))
+			// In a session this is a REQUEST, not a deletion — for everyone but
+			// the host, who has just answered the only question a request asks.
+			const bool needsApproval = ctx.collab && ctx.collab->inSession() &&
+			                           !ctx.collab->isHost();
+			if (needsApproval)
 			{
-				deleteAssetNow(s_deleteAssetTarget, s_deleteAssetIsSource);
+				ImGui::Spacing();
+				ImGui::TextDisabled("The host has to approve this before it happens.");
+				ImGui::Spacing();
+			}
+			if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
+			                                ImVec2(210, 0)))
+			{
+				const std::string rel = ctx.contentManager
+					? ctx.contentManager->toContentRelativePath(s_deleteAssetTarget)
+					: std::string();
+				// requestOrPerformAssetOp answers false when there is no session,
+				// which is the ordinary case and means: just delete it.
+				if (!(ctx.collab && !rel.empty() &&
+				      ctx.collab->requestAssetDelete(rel)))
+				{
+					deleteAssetNow(s_deleteAssetTarget, s_deleteAssetIsSource);
+				}
 				s_deleteAssetTarget.clear();
 				ImGui::CloseCurrentPopup();
 			}
