@@ -179,6 +179,26 @@ public:
 	                               const std::string& newRelativePath,
 	                               bool folder = false);
 
+	// The same work, split in two, because the halves have different costs and
+	// different threading rules — and a collaboration session needs them apart:
+	// every peer has to retarget an approved rename, and doing the whole thing
+	// inline would stop a frame for as long as it takes to walk a large project.
+	//
+	// ON DISK: rewrite every referencing file under the content root and the
+	// project manifest. Touches no member state, reads only the content root, so
+	// it is safe on a worker thread — and it is the expensive half.
+	size_t retargetAssetReferencesOnDisk(const std::string& oldRelativePath,
+	                                     const std::string& newRelativePath,
+	                                     bool folder = false) const;
+	// IN MEMORY: re-key the path indices and the `path` every loaded asset
+	// carries. Cheap, and MAIN THREAD ONLY — these maps have no lock and the
+	// rest of the editor reads them every frame. Call it first: until it has
+	// run, loadAsset() of the new path would register a second copy of the same
+	// UUID and saveAsset() would write back to the vacated location.
+	void retargetAssetReferencesInMemory(const std::string& oldRelativePath,
+	                                     const std::string& newRelativePath,
+	                                     bool folder = false);
+
 	// Check all disk-backed assets for file changes and reload any that have
 	// been modified since the last load. Returns the UUIDs of reloaded assets
 	// (same UUIDs — existing references remain valid). Virtual mem:// paths are

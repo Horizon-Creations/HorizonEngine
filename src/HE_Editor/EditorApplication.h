@@ -755,6 +755,13 @@ private:
 	int                                m_activeTab = 0;
 #endif
 
+	// Reference retargeting for a rename that arrived from the session, kept off
+	// the frame. Futures rather than raw threads on purpose: a std::async future
+	// BLOCKS in its destructor until the work finishes, so quitting cannot leave
+	// a half-rewritten content tree behind, and nothing has to remember to join
+	// them. Pruned each frame so the vector does not grow with the session.
+	std::vector<std::future<void>> m_retargetJobs;
+
 	AppContext makeContext();
 };
 

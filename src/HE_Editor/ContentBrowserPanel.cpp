@@ -1601,9 +1601,37 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						newPath = oldPath.parent_path() / newName;
 					else
 						newPath = oldPath.parent_path() / (newName + oldPath.extension().string());
+
+					// Renaming an existing asset in a session is a REQUEST, the
+					// same as deleting one: it breaks every reference to the old
+					// name, which is as much somebody else's problem as ours.
+					// Naming a freshly created asset is not — nothing refers to
+					// it yet, and it is announced under its final name anyway.
+					//
+					// NOT an early return, however tempting: this popup sits
+					// inside the panel's own Begin/End, and leaving from here
+					// would skip the End and unbalance the ImGui window stack —
+					// which nothing but a runtime assertion would ever tell us.
+					bool requested = false;
+					if (!s_renameIsCreate && !s_renameIsFolder && ctx.collab &&
+					    ctx.contentManager && ctx.collab->inSession() &&
+					    !ctx.collab->isHost())
+					{
+						const std::string relOld =
+							ctx.contentManager->toContentRelativePath(oldPath.string());
+						const std::string relNew =
+							ctx.contentManager->toContentRelativePath(newPath.string());
+						requested = !relOld.empty() && !relNew.empty() &&
+						            ctx.collab->requestAssetRename(relOld, relNew);
+					}
+
+					// Nothing moves locally when it was asked for. It moves when
+					// the host says so, on every machine at once — renaming here
+					// first would leave us out of step until the answer, and out
+					// of step for good if the answer is no.
 					std::error_code ec;
-					std::filesystem::rename(oldPath, newPath, ec);
-					if (!ec)
+					if (!requested) std::filesystem::rename(oldPath, newPath, ec);
+					if (!requested && !ec)
 					{
 						// Carry every stored reference to the old path (or, for a
 						// folder, to anything under it) over to the new one — an

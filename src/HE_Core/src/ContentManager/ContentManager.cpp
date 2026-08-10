@@ -1894,6 +1894,16 @@ size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
                                                 const std::string& newRel,
                                                 bool folder)
 {
+	// Both halves, in the order they must happen. Kept as one call for every
+	// caller that is not a collaboration session and can afford to wait.
+	retargetAssetReferencesInMemory(oldRel, newRel, folder);
+	return retargetAssetReferencesOnDisk(oldRel, newRel, folder);
+}
+
+size_t ContentManager::retargetAssetReferencesOnDisk(const std::string& oldRel,
+                                                     const std::string& newRel,
+                                                     bool folder) const
+{
 	namespace fs = std::filesystem;
 	if (m_contentRoot.empty() || oldRel.empty() || newRel.empty() || oldRel == newRel)
 		return 0;
@@ -1932,6 +1942,26 @@ size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
 			if (o) ++rewritten;
 		}
 	}
+
+	if (rewritten > 0)
+		HE_LOG_INFO(Asset, "%s",
+			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
+			 oldRel + "' to '" + newRel + "'").c_str());
+	return rewritten;
+}
+
+void ContentManager::retargetAssetReferencesInMemory(const std::string& oldRel,
+                                                     const std::string& newRel,
+                                                     bool folder)
+{
+	namespace fs = std::filesystem;
+	if (m_contentRoot.empty() || oldRel.empty() || newRel.empty() || oldRel == newRel)
+		return;
+
+	const std::string contentDir = fs::path(m_contentRoot).filename().generic_string();
+	const std::vector<HE::AssetRefs::Rule> rules =
+		HE::AssetRefs::moveRules(oldRel, newRel, folder, contentDir);
+	if (rules.empty()) return;
 
 	// Re-key the in-memory indices: every one of them is keyed by (or holds) the
 	// path the file no longer has. Without this, loadAsset() of the new path would
@@ -1974,12 +2004,6 @@ size_t ContentManager::retargetAssetReferences(const std::string& oldRel,
 	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
 	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
 	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
-
-	if (rewritten > 0)
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
-			 oldRel + "' to '" + newRel + "'").c_str());
-	return rewritten;
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────

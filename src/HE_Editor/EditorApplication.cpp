@@ -491,6 +491,23 @@ void EditorApplication::OnInit()
 				t.assetPath = newFull;
 				t.label     = std::filesystem::path(newFull).stem().string();
 			}
+
+			// Every peer retargets, not just the one who asked. The rules follow
+			// from (oldPath, newPath) alone, so identical inputs give identical
+			// rewrites and the peers converge; a peer that gets it wrong is
+			// caught by the next source-control sync, which is a far cheaper
+			// backstop than shipping dozens of rewritten files over the wire.
+			//
+			// Split by cost: the in-memory re-key runs NOW, because until it has
+			// the ContentManager still believes the asset is at the old path and
+			// the very next save would write it back there. The tree walk goes
+			// to a worker — on a large project it is far too slow for a frame,
+			// and it touches nothing but files.
+			contentManager().retargetAssetReferencesInMemory(relPath, newRelPath, false);
+			m_retargetJobs.push_back(std::async(std::launch::async,
+				[cm = &contentManager(), relPath, newRelPath] {
+					cm->retargetAssetReferencesOnDisk(relPath, newRelPath, false);
+				}));
 		}
 		m_contentRefreshPending = true;
 	});
@@ -2236,6 +2253,16 @@ void EditorApplication::OnRender(float dt)
 		// compared against a project this editor no longer has open.
 		m_collab.setProjectIdentity(m_projectManager.currentProject().id,
 		                            m_projectManager.currentProject().name);
+		// Drop finished retarget jobs. Not strictly required — their destructors
+		// would wait at shutdown — but a session with many renames would
+		// otherwise hold a future per rename for its whole length.
+		m_retargetJobs.erase(
+			std::remove_if(m_retargetJobs.begin(), m_retargetJobs.end(),
+				[](const std::future<void>& f) {
+					return f.valid() &&
+					       f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+				}),
+			m_retargetJobs.end());
 		const auto nowMs = static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now().time_since_epoch()).count());
