@@ -955,6 +955,18 @@ void CollabController::wireCallbacks()
 					return;
 				}
 			}
+			// A queue nobody could ever work through is not a queue. Repeat
+			// asks for one asset already fold into the row above, so getting
+			// here this often means a peer is naming hundreds of DIFFERENT
+			// files — a runaway client rather than a person, and no host is
+			// going to answer that list anyway. Refused at the door, so what
+			// the host does see stays readable.
+			constexpr std::size_t kMaxPendingOps = 128;
+			if (m_pendingOps.size() >= kMaxPendingOps)
+			{
+				m_collab->sendAssetOpVerdict(who, requestId, false);
+				return;
+			}
 			PendingAssetOp p;
 			p.op      = op;
 			p.path    = path;
@@ -986,6 +998,16 @@ void CollabController::wireCallbacks()
 			for (EditRequest& e : m_editRequests)
 			{
 				if (e.id == from && e.path == path) { e.requestId = requestId; return; }
+			}
+			// Bounded for the same reason the host's tray is: you can only hold
+			// so many assets, so a list longer than this is a peer misbehaving,
+			// and a refusal it can retry beats a queue that grows for ever.
+			constexpr std::size_t kMaxEditRequests = 64;
+			if (m_editRequests.size() >= kMaxEditRequests)
+			{
+				m_collab->sendAssetEditAnswer(from, requestId, path, false,
+				                              assetSubject(path));
+				return;
 			}
 			m_editRequests.push_back({ from, requestId, path, m_lastUpdateMs });
 		});
