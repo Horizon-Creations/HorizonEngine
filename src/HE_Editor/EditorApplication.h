@@ -407,6 +407,15 @@ struct AppContext
 	// Per-user undo/redo used INSTEAD of the snapshot stack while a session is
 	// running — see CollabUndo.h for why snapshots cannot work there.
 	CollabUndo* collabUndo = nullptr;
+
+	// An absolute path → the key a session addresses it by, or empty when it is
+	// nothing a session carries. EditorApplication::collabSyncKey behind a
+	// function, because panels need the same answer and cannot reach it: a
+	// content-relative path cannot name a C++ class (Source is a SIBLING of
+	// Content, so the content root does not contain it), and using the
+	// content-relative form there silently made every create and delete of a
+	// C++ class a local-only one — in a session that says the file travels.
+	std::function<std::string(const std::string&)> collabKeyForPath;
 };
 
 class EditorApplication : public HE::Application

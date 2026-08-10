@@ -508,6 +508,25 @@ void EditorApplication::OnInit()
 			std::filesystem::remove(full, ec);
 			EditorAssetTypeCache::invalidate(full);
 			AssetThumbnailCache::invalidate(full);
+			// A C++ class is ONE item in the browser and two files on disk. The
+			// request names one of them, so removing only that one would leave a
+			// .cpp behind whose header is gone — which does not compile, and
+			// which nobody asked for. The local delete takes both; so does this.
+			if (relPath.rfind(kSourceKeyPrefix, 0) == 0)
+			{
+				const std::filesystem::path p(full);
+				const std::string           stem = p.stem().string();
+				const std::filesystem::path dir  = p.parent_path();
+				for (const char* e : { ".h", ".hpp", ".hh", ".hxx",
+				                       ".cpp", ".cc", ".cxx", ".c" })
+				{
+					const std::filesystem::path sib = dir / (stem + e);
+					if (sib == p) continue;
+					std::error_code e2;
+					std::filesystem::remove(sib, e2);
+					EditorAssetTypeCache::invalidate(sib.string());
+				}
+			}
 			// The tab is showing a file that no longer exists. Closing it is the
 			// honest outcome — leaving it open invites a save that would write
 			// the asset back and undo the deletion everyone just agreed to.
@@ -4329,6 +4348,7 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.collabUndo          = &m_collabUndo,
+		.collabKeyForPath    = [this](const std::string& p) { return collabSyncKey(p); },
 	};
 }
 

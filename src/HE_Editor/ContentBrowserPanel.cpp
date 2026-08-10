@@ -116,6 +116,24 @@ static void retargetReferences(AppContext& ctx, const std::string& oldAbs,
 	ctx.contentManager->retargetAssetReferences(oldRel, newRel, folder);
 }
 
+// The key a collaboration session addresses this file by, or empty when it is
+// nothing a session carries.
+//
+// This exists because "content-relative path" is NOT that key for every file the
+// browser shows. A C++ class lives under <project>/Source, a SIBLING of Content,
+// so toContentRelativePath returns empty for it — and every caller here read
+// that empty string as "no session", quietly turning a C++ class's create and
+// delete into local-only operations while its edits travelled normally. The
+// editor owns the mapping (EditorApplication::collabSyncKey); this reaches it.
+static std::string collabKeyFor(AppContext& ctx, const std::string& absPath)
+{
+	if (ctx.collabKeyForPath) return ctx.collabKeyForPath(absPath);
+	// No editor behind the context (tests, tooling): fall back to the content
+	// form, which is right for everything except the Source tree.
+	return ctx.contentManager ? ctx.contentManager->toContentRelativePath(absPath)
+	                          : std::string();
+}
+
 // Is `path` inside `folder`? Both are absolute disk paths, but they are not
 // built the same way everywhere in the panel (the folder scan uses the native
 // separator, the create handlers append '/'), so the boundary character is
@@ -1905,9 +1923,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// is free and hands it on.
 			if (ctx.collab && ctx.contentManager)
 			{
-				const std::string rel =
-					ctx.contentManager->toContentRelativePath(s_pendingCreatePublish);
-				if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
+				// collabKeyForPath, not toContentRelativePath: a C++ class lives
+				// under Source, which the content root does not contain, so the
+				// content-relative form is empty for it and the create never
+				// left this machine. A FOLDER is only ever a content folder,
+				// and the key function judges assets — so it keeps the plain
+				// content-relative form.
+				const std::string rel = s_pendingCreateIsFolder
+					? ctx.contentManager->toContentRelativePath(s_pendingCreatePublish)
+					: collabKeyFor(ctx, s_pendingCreatePublish);
+				if (rel.empty()) { /* nothing a session carries */ }
+				else if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
 				else ctx.collab->publishAssetCreate(rel, s_pendingCreatePublish);
 			}
 			s_pendingCreatePublish.clear();
@@ -1956,9 +1982,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
 			                                ImVec2(210, 0)))
 			{
-				const std::string rel = ctx.contentManager
-					? ctx.contentManager->toContentRelativePath(s_deleteAssetTarget)
-					: std::string();
+				// collabKeyFor, not toContentRelativePath: a C++ class is not
+				// under the content root, and reading its empty content-relative
+				// path as "no session" deleted it here and nowhere else.
+				const std::string rel = collabKeyFor(ctx, s_deleteAssetTarget);
 				// requestOrPerformAssetOp answers false when there is no session,
 				// which is the ordinary case and means: just delete it.
 				if (!(ctx.collab && !rel.empty() &&
