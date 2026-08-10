@@ -28,6 +28,7 @@
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
+#include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
@@ -1690,12 +1691,28 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
 		// filename of unbounded length, and a left-anchored item that grows runs
 		// straight through the centred "Ready" text below. Right-aligning bounds
 		// it against a fixed edge instead. Draws nothing when idle.
-		if (const float syncW = EngineContentSyncBar::FooterWidth(ctx); syncW > 0.0f)
+		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
+		if (syncW > 0.0f)
 		{
 			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW - syncW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
 			                - (presenceW > 0.0f ? 16.0f : 0.0f));
 			EngineContentSyncBar::DrawFooter(ctx);
+		}
+
+		// What the session just did to the project: assets other participants
+		// created, and the host's answer to one of ours. Left of the download
+		// queue, in the same right-anchored group and for the same reason — the
+		// text is a sentence of unbounded length, and only a fixed edge keeps it
+		// out of the centred status label.
+		if (const float actW = CollabActivityBar::FooterWidth(ctx); actW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW - syncW - actW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (presenceW > 0.0f ? 16.0f : 0.0f)
+			                - (syncW > 0.0f ? 16.0f : 0.0f));
+			if (CollabActivityBar::DrawFooter(ctx))
+				revealFloatingWindow(s_showCollab, "Collaboration");
 		}
 
 		// Middle — status

@@ -1064,6 +1064,12 @@ void CollabController::teardown()
 	// stale "held by X" would resurface the moment a new one started.
 	m_assetAnswers.clear();
 	m_assetSubjectPaths.clear();
+	// Nothing here outlives the session it describes: the author of a create is
+	// gone, and a refusal we never surfaced belongs to a conversation that ended.
+	m_createdNotices.clear();
+	m_assetNotice.clear();
+	m_pendingCreateFull.clear();
+	m_createRetried = false;
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
