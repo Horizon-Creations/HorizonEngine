@@ -929,9 +929,20 @@ void CollabController::wireCallbacks()
 			{
 				if (p.op == op && p.path == path && p.newPath == newPath)
 				{
-					for (const auto& rq : p.requesters)
-						if (rq.id == who) return;         // asked twice — once is enough
-					p.requesters.push_back({ who, requestId });
+					// Asked twice — one row, but the NEWER request id. A verdict
+					// is addressed to a REQUEST, and the first one is no longer
+					// what the asker is waiting on: keeping it answered a
+					// request they had already replaced and left the live one
+					// hanging for good.
+					bool known = false;
+					for (auto& rq : p.requesters)
+					{
+						if (rq.id != who) continue;
+						rq.requestId = requestId;
+						known = true;
+						break;
+					}
+					if (!known) p.requesters.push_back({ who, requestId });
 					return;
 				}
 			}

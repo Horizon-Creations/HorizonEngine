@@ -46,6 +46,13 @@ public:
 	// panel was actually holding the path.
 	static bool reloadAssetTabFromDisk(const std::string& assetPath);
 
+	// Drop every panel's cached state for an asset, UNSAVED EDITS INCLUDED.
+	// Closing a tab deliberately keeps those (reopening restores them); this is
+	// for an asset that is GONE — deleted here, or by a peer whose deletion the
+	// host approved. Keeping the edits there would let the next Save All write
+	// the file back out and undo a deletion everybody agreed to.
+	static void discardPanelState(AppContext& ctx, const std::string& assetPath);
+
 	// The live documents behind an open tab, for collaboration's item-level sync
 	// (CollabDocSync). Same dispatch as the three above. Empty for tabs with no
 	// syncable document. The adapters are views: they must not outlive the frame,

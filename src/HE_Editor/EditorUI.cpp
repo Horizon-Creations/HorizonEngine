@@ -621,6 +621,31 @@ CollabDocSync::DocBindings EditorUI::collabDocsFor(const std::string& assetPath)
 	return {};
 }
 
+// Every panel's cached state for one asset, dropped without asking whether it
+// is dirty. The tab-close path (see forgetTabState in renderEditor) keeps a
+// dirty panel deliberately, so reopening a tab restores what was typed into it.
+// This is the other case: the asset does not exist any more. Its "unsaved
+// edits" are edits to nothing, and leaving them would let Save All write the
+// file back and quietly undo a deletion — which in a session is a deletion
+// everybody already agreed to.
+void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
+{
+	if (assetPath.empty()) return;
+	MaterialEditorPanel::releasePreviewAssets(ctx, assetPath);
+	ScriptEditorPanel::forget(assetPath);
+	CppClassEditorPanel::forget(assetPath);
+	MaterialEditorPanel::forget(assetPath);
+	UIEditorPanel::forget(assetPath);
+	HorizonCodeClassPanel::forget(assetPath);
+	InputAssetPanel::forget(assetPath);
+	TypeAssetPanel::forget(assetPath);
+	ParticleGraphEditorPanel::forget(assetPath);
+	AnimatorStateMachineEditorPanel::forget(assetPath);
+	StaticMeshEditorPanel::forget(assetPath);
+	SkeletalMeshEditorPanel::forget(assetPath);
+	AudioEditorPanel::forget(assetPath);
+}
+
 // The read half of saveAsset's dispatch: ask every panel; whichever holds the
 // path refreshes. Same "no path→panel map" argument as over there.
 bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
@@ -1801,18 +1826,9 @@ constexpr float kAssetLockBannerH = 38.0f;
                 // anything the scene or another tab still uses alone.
                 MaterialEditorPanel::releasePreviewAssets(ctx, t.assetPath);
                 if (tabHasUnsavedEdits(t.assetPath)) return;
-                ScriptEditorPanel::forget(t.assetPath);
-                CppClassEditorPanel::forget(t.assetPath);
-                MaterialEditorPanel::forget(t.assetPath);
-                UIEditorPanel::forget(t.assetPath);
-                HorizonCodeClassPanel::forget(t.assetPath);
-                InputAssetPanel::forget(t.assetPath);
-                TypeAssetPanel::forget(t.assetPath);
-                ParticleGraphEditorPanel::forget(t.assetPath);
-                AnimatorStateMachineEditorPanel::forget(t.assetPath);
-                StaticMeshEditorPanel::forget(t.assetPath);      // view-only, never dirty
-                SkeletalMeshEditorPanel::forget(t.assetPath);    // view-only, never dirty
-                AudioEditorPanel::forget(t.assetPath);           // also silences the preview
+                // The panel list itself lives in discardPanelState — one place
+                // to add a new panel to, rather than two that drift apart.
+                discardPanelState(ctx, t.assetPath);
             };
 
             for (int i = 0; i < static_cast<int>(s_tabs.size()); )

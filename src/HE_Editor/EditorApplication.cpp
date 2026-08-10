@@ -481,6 +481,17 @@ void EditorApplication::OnInit()
 			// whose name merely starts the same way, so deleting "Mat" would
 			// close every tab under "Materials".
 			const std::string prefix = full + "/";
+			// Closing the tab is not enough: the PANEL keeps its state, dirty
+			// flag included, and a closed dirty tab is still saved by Save All —
+			// which would write the file back and undo the deletion.
+			{
+				AppContext ctx = makeContext();
+				for (const AppContext::EditorTab& t : m_tabs)
+				{
+					if (!t.assetPath.empty() && t.assetPath.rfind(prefix, 0) == 0)
+						EditorUI::discardPanelState(ctx, t.assetPath);
+				}
+			}
 			m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
 				[&prefix](const AppContext::EditorTab& t) {
 					return !t.assetPath.empty() &&
@@ -497,6 +508,14 @@ void EditorApplication::OnInit()
 			// The tab is showing a file that no longer exists. Closing it is the
 			// honest outcome — leaving it open invites a save that would write
 			// the asset back and undo the deletion everyone just agreed to.
+			//
+			// And closing it is not enough on its own: the panel holding the
+			// asset keeps its cached state past the tab, dirty flag and all, and
+			// Save All works off THAT — so the file came back anyway.
+			{
+				AppContext ctx = makeContext();
+				EditorUI::discardPanelState(ctx, full);
+			}
 			m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
 				[&full](const AppContext::EditorTab& t){ return t.assetPath == full; }),
 				m_tabs.end());

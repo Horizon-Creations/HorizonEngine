@@ -5,6 +5,7 @@
 #include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
+#include "EditorUI.h"                    // discardPanelState on delete
 #include "ScriptEditorPanel.h"
 #include "CppClassEditorPanel.h"
 #include "MaterialEditorPanel.h"
@@ -1341,6 +1342,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 			}
 			if (s_selectedItem == assetAbs) s_selectedItem.clear();
+			// A tab still open on it is showing a file that is gone, and the
+			// panel behind that tab outlives it — dirty flag and all. Save All
+			// works off the panel, so leaving it would write the asset straight
+			// back. Both go.
+			for (auto& t : ctx.tabs)
+				if (t.closable && t.assetPath == assetAbs) t.open = false;
+			EditorUI::discardPanelState(ctx, assetAbs);
 			ctx.contentRefreshPending = true;
 		};
 
@@ -1365,10 +1373,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			// An editor tab still open on one of those assets would write the file
 			// back into the folder that was just deleted on its next Save, so close
-			// them here; EditorUI erases them (and forgets their state) next frame.
+			// them here; EditorUI erases them next frame.
+			//
+			// Closing is only half of it: EditorUI deliberately KEEPS a dirty
+			// panel's state when a tab closes, so reopening restores what was
+			// typed — and Save All saves from the panel, not the tab. For an
+			// asset that no longer exists that is exactly wrong, so the state
+			// goes with the file.
 			for (auto& t : ctx.tabs)
-				if (t.closable && !t.assetPath.empty() && isUnderFolder(t.assetPath, folderAbs))
-					t.open = false;
+			{
+				if (!t.closable || t.assetPath.empty()) continue;
+				if (!isUnderFolder(t.assetPath, folderAbs)) continue;
+				t.open = false;
+				EditorUI::discardPanelState(ctx, t.assetPath);
+			}
 
 			if (s_selectedItem == folderAbs || isUnderFolder(s_selectedItem, folderAbs))
 				s_selectedItem.clear();
