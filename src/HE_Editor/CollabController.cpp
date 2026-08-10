@@ -945,20 +945,66 @@ void CollabController::wireCallbacks()
 			m_pendingOps.push_back(std::move(p));
 		});
 
+	// ── Somebody wants what WE are holding ──
+	m_collab->onAssetEditRequested(
+		[this](HE::Net::ParticipantId from, std::uint32_t requestId,
+		       const std::string& path) {
+			// Not ours any more — we let go between the host routing this and it
+			// arriving. Answering no is what tells the host to look again and
+			// give the asker the truthful current answer; a row asking us to
+			// hand over something we do not have has no meaningful button.
+			if (!ownsAssetLock(path))
+			{
+				if (m_collab)
+					m_collab->sendAssetEditAnswer(from, requestId, path, false,
+					                              assetSubject(path));
+				return;
+			}
+			// Asked twice — one row, and the NEWER request id, because that is
+			// the one still waiting for an answer. Keeping the first would leave
+			// the second ask hanging forever.
+			for (EditRequest& e : m_editRequests)
+			{
+				if (e.id == from && e.path == path) { e.requestId = requestId; return; }
+			}
+			m_editRequests.push_back({ from, requestId, path, m_lastUpdateMs });
+		});
+
 	m_collab->onAssetOpVerdict([this](std::uint32_t requestId, bool approved) {
 		for (std::size_t i = 0; i < m_ourPendingOps.size(); ++i)
 		{
 			if (m_ourPendingOps[i].requestId != requestId) continue;
-			const std::string name =
-				std::filesystem::path(m_ourPendingOps[i].path).filename().string();
+			const auto        op   = m_ourPendingOps[i].op;
+			const std::string path = m_ourPendingOps[i].path;
+			const std::string name = std::filesystem::path(path).filename().string();
+			m_ourPendingOps.erase(m_ourPendingOps.begin() +
+			                      static_cast<std::ptrdiff_t>(i));
+
+			if (op == HE::Net::CollabSession::AssetOp::Edit)
+			{
+				// Yes means it is ours: either the holder handed it over, or
+				// nobody held it and there was nobody to ask. Both need saying —
+				// unlike a delete, an approved edit request produces no visible
+				// change by itself, so silence would read as no answer at all.
+				if (approved)
+				{
+					// The handover already granted it; this covers the "was
+					// free" case and, either way, records the lock so closing
+					// the tab releases it.
+					requestAssetLock(path);
+					m_assetNotice = "\"" + name + "\" is yours to edit.";
+				}
+				else
+					m_assetNotice = "\"" + name + "\" stays with whoever is editing it.";
+				return;
+			}
+
 			// Only the refusal needs saying. An approval is followed immediately
 			// by the change itself, which is its own confirmation.
 			if (!approved)
 				m_assetNotice = "The host did not approve that \"" + name + "\" be " +
-					(m_ourPendingOps[i].op == HE::Net::CollabSession::AssetOp::Delete
+					(op == HE::Net::CollabSession::AssetOp::Delete
 						? "deleted." : "renamed.");
-			m_ourPendingOps.erase(m_ourPendingOps.begin() +
-			                      static_cast<std::ptrdiff_t>(i));
 			return;
 		}
 	});
@@ -1016,6 +1062,31 @@ void CollabController::wireCallbacks()
 		// it), forget it so the next selection re-requests cleanly.
 		if (!acquired && l.subject == m_heldSubject && l.owner == m_collab->localId())
 			m_heldSubject = 0;
+
+		// ── An asset lock that changed hands ──
+		// Until handovers existed a lock only ever went free → granted, so
+		// m_heldAssetLocks was maintained at the two places that asked for one
+		// and gave it back. A handover moves it owner → owner without either
+		// side calling those, and requestAssetLock() returns early when the
+		// lock is already ours — BEFORE it records the path. Left alone, the
+		// new holder would hold a lock it has no record of and never release
+		// it. This is the one place that sees the transition from both sides.
+		if (!acquired) return;
+		const auto it = m_assetSubjectPaths.find(l.subject);
+		if (it == m_assetSubjectPaths.end()) return;   // an entity, or not ours to track
+		const std::string& path = it->second;
+		if (l.owner == m_collab->localId())
+		{
+			if (std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path)
+			    == m_heldAssetLocks.end())
+				m_heldAssetLocks.push_back(path);
+		}
+		else
+		{
+			m_heldAssetLocks.erase(
+				std::remove(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path),
+				m_heldAssetLocks.end());
+		}
 	});
 
 	m_collab->onLockDenied([this](std::uint64_t subject, LockDenyReason reason) {
@@ -1154,9 +1225,18 @@ void CollabController::teardown()
 			 " unanswered request(s) — all treated as refused").c_str());
 		m_pendingOps.clear();
 	}
+	// Same for asks pointed at us. Nothing was handed over, so the asker keeps
+	// nothing and we keep everything — which is exactly what a refusal means.
+	m_editRequests.clear();
 	if (!m_ourPendingOps.empty())
 	{
-		m_assetNotice = "The session ended before the host answered your request.";
+		// An edit request waits on the HOLDER, everything else on the host —
+		// so the sentence has to say which, or it names the wrong person.
+		const bool edit = m_ourPendingOps.front().op ==
+			HE::Net::CollabSession::AssetOp::Edit;
+		m_assetNotice = edit
+			? "The session ended before that asset was handed over."
+			: "The session ended before the host answered your request.";
 		m_ourPendingOps.clear();
 	}
 	else m_assetNotice.clear();
@@ -1932,6 +2012,61 @@ bool CollabController::requestOrPerformAssetOp(
 		: std::string("Asked the host to rename \"")) +
 		std::filesystem::path(relPath).filename().string() + "\".";
 	return true;
+}
+
+bool CollabController::hasAskedToEdit(const std::string& relPath) const
+{
+	for (const OurOp& o : m_ourPendingOps)
+	{
+		if (o.op == HE::Net::CollabSession::AssetOp::Edit && o.path == relPath)
+			return true;
+	}
+	return false;
+}
+
+bool CollabController::requestAssetEdit(const std::string& relPath)
+{
+	if (!m_collab || !inSession() || relPath.empty()) return false;
+	if (ownsAssetLock(relPath))  return false;   // already ours; nothing to ask
+	if (hasAskedToEdit(relPath)) return false;   // asked once; asking again is noise
+
+	// Deliberately NOT routed through requestOrPerformAssetOp: that function's
+	// rule is "the host does it instead of asking", and here the host is an
+	// asker like everyone else. The holder decides.
+	const std::uint64_t subject = assetSubject(relPath);
+	m_assetSubjectPaths[subject] = relPath;   // so the answer maps back to a path
+	const std::uint32_t id = m_collab->requestAssetOp(
+		HE::Net::CollabSession::AssetOp::Edit, relPath, {}, false, subject);
+
+	if (id == 0)
+	{
+		// Nobody is holding it — there is nobody to ask. As host that is known
+		// for certain; as client the host says so by granting. Either way the
+		// lock is claimed the ordinary way rather than reported as a failure.
+		requestAssetLock(relPath);
+		return true;
+	}
+
+	m_ourPendingOps.push_back({ id, HE::Net::CollabSession::AssetOp::Edit, relPath });
+	const HE::Net::LockInfo* l = assetLockInfo(relPath);
+	m_assetNotice = "Asked " +
+		(l && !l->ownerName.empty() ? l->ownerName : std::string("the person editing it")) +
+		" for \"" + std::filesystem::path(relPath).filename().string() + "\".";
+	return true;
+}
+
+void CollabController::answerEditRequest(std::size_t index, bool allowed)
+{
+	if (!m_collab || index >= m_editRequests.size()) return;
+	const EditRequest e = m_editRequests[index];
+	m_editRequests.erase(m_editRequests.begin() + static_cast<std::ptrdiff_t>(index));
+
+	// The lock moves inside sendAssetEditAnswer (host) or on the host's side of
+	// it (client) — released and granted together, so no third peer can slip
+	// into the gap. Our own m_heldAssetLocks entry is dropped by the lock
+	// broadcast that comes back, which is the same signal every other peer gets.
+	m_collab->sendAssetEditAnswer(e.id, e.requestId, e.path, allowed,
+	                              assetSubject(e.path));
 }
 
 void CollabController::approveAssetOp(std::size_t index)

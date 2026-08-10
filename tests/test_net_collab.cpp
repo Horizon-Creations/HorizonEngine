@@ -2383,3 +2383,186 @@ TEST_CASE("CollabSession: a freed colour becomes available again")
     CHECK(colorOf(host, "Cleo").g == kParticipantPalette[3].g);
     CHECK(colorOf(host, "Cleo").r == kParticipantPalette[3].r);
 }
+
+// ─── Asking the holder for an asset ──────────────────────────────────────────
+// The one request the host does not answer: it interrupts somebody's work, so
+// the person being interrupted decides. The host only knows who that is.
+
+namespace {
+// Bob's participant id, as the host knows it.
+ParticipantId clientIdOf(const CollabSession& host) {
+    for (const auto& p : host.participants()) if (!p.isHost) return p.id;
+    return kInvalidParticipant;
+}
+constexpr std::uint64_t kAssetSubject = 0x8000'0000'0000'1234ull;
+} // namespace
+
+TEST_CASE("CollabSession: the holding host hands an asset to the client that asked")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    // Anna (the host) is editing it.
+    p->host->requestLock(kAssetSubject);
+    p->pump();
+    REQUIRE(p->host->ownsLock(kAssetSubject));
+
+    ParticipantId  asker = kInvalidParticipant;
+    std::uint32_t  reqId = 0;
+    std::string    askedPath;
+    p->host->onAssetEditRequested([&](ParticipantId from, std::uint32_t id,
+                                      const std::string& path) {
+        asker = from; reqId = id; askedPath = path;
+    });
+    bool verdict = false, answered = false;
+    p->client->onAssetOpVerdict([&](std::uint32_t, bool ok) {
+        answered = true; verdict = ok;
+    });
+
+    REQUIRE(p->client->requestAssetOp(CollabSession::AssetOp::Edit,
+                                      "Content/Foo.hasset", {}, false,
+                                      kAssetSubject) != 0);
+    p->pump();
+
+    // It reached the holder, not the host's delete/rename queue.
+    CHECK(asker == clientIdOf(*p->host));
+    CHECK(askedPath == "Content/Foo.hasset");
+
+    p->host->sendAssetEditAnswer(asker, reqId, askedPath, true, kAssetSubject);
+    p->pump();
+
+    CHECK(answered);
+    CHECK(verdict);
+    // Handed over, not merely released: it is Bob's now, and it was never free
+    // in between for a third peer to take.
+    CHECK(p->client->ownsLock(kAssetSubject));
+    CHECK_FALSE(p->host->ownsLock(kAssetSubject));
+    REQUIRE(p->host->lockFor(kAssetSubject) != nullptr);
+    CHECK(p->host->lockFor(kAssetSubject)->owner == clientIdOf(*p->host));
+}
+
+TEST_CASE("CollabSession: the host asks a client for the asset it is holding")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->client->requestLock(kAssetSubject);
+    p->pump();
+    REQUIRE(p->client->ownsLock(kAssetSubject));
+
+    ParticipantId asker = kInvalidParticipant;
+    std::uint32_t reqId = 0;
+    std::string   askedPath;
+    p->client->onAssetEditRequested([&](ParticipantId from, std::uint32_t id,
+                                        const std::string& path) {
+        asker = from; reqId = id; askedPath = path;
+    });
+    // The host is the one waiting this time. There is no connection to send its
+    // own verdict down, so the callback is the delivery.
+    bool answered = false, verdict = false;
+    p->host->onAssetOpVerdict([&](std::uint32_t, bool ok) {
+        answered = true; verdict = ok;
+    });
+
+    REQUIRE(p->host->requestAssetOp(CollabSession::AssetOp::Edit,
+                                    "Content/Bar.hasset", {}, false,
+                                    kAssetSubject) != 0);
+    p->pump();
+    CHECK(asker == p->host->localId());
+
+    p->client->sendAssetEditAnswer(asker, reqId, askedPath, true, kAssetSubject);
+    p->pump();
+
+    CHECK(answered);
+    CHECK(verdict);
+    CHECK(p->host->ownsLock(kAssetSubject));
+    CHECK_FALSE(p->client->ownsLock(kAssetSubject));
+}
+
+TEST_CASE("CollabSession: a refused asset stays with the one holding it")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    p->host->requestLock(kAssetSubject);
+    p->pump();
+
+    ParticipantId asker = kInvalidParticipant;
+    std::uint32_t reqId = 0;
+    p->host->onAssetEditRequested([&](ParticipantId from, std::uint32_t id,
+                                      const std::string&) { asker = from; reqId = id; });
+    bool answered = false, verdict = true;
+    p->client->onAssetOpVerdict([&](std::uint32_t, bool ok) {
+        answered = true; verdict = ok;
+    });
+
+    p->client->requestAssetOp(CollabSession::AssetOp::Edit, "Content/Foo.hasset",
+                              {}, false, kAssetSubject);
+    p->pump();
+    p->host->sendAssetEditAnswer(asker, reqId, "Content/Foo.hasset", false,
+                                 kAssetSubject);
+    p->pump();
+
+    // A no is an answer, and it travels the same way a yes does.
+    CHECK(answered);
+    CHECK_FALSE(verdict);
+    CHECK(p->host->ownsLock(kAssetSubject));
+    CHECK_FALSE(p->client->ownsLock(kAssetSubject));
+}
+
+TEST_CASE("CollabSession: asking for an asset nobody holds is granted at once")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    bool asked = false;
+    p->host->onAssetEditRequested([&](ParticipantId, std::uint32_t,
+                                      const std::string&) { asked = true; });
+    bool answered = false, verdict = false;
+    p->client->onAssetOpVerdict([&](std::uint32_t, bool ok) {
+        answered = true; verdict = ok;
+    });
+
+    p->client->requestAssetOp(CollabSession::AssetOp::Edit, "Content/Free.hasset",
+                              {}, false, kAssetSubject);
+    p->pump();
+
+    // Nobody is being interrupted, so nobody is asked — and the asker is not
+    // left waiting for an answer that has no one to come from.
+    CHECK_FALSE(asked);
+    CHECK(answered);
+    CHECK(verdict);
+}
+
+TEST_CASE("CollabSession: an answer from someone who is not holding it still answers")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    // Anna holds it. Bob answers anyway — a stale answer sent after letting go,
+    // or a peer that never held it at all.
+    p->host->requestLock(kAssetSubject);
+    p->pump();
+
+    bool answered = false, verdict = true;
+    p->host->onAssetOpVerdict([&](std::uint32_t id, bool ok) {
+        if (id == 77) { answered = true; verdict = ok; }
+    });
+
+    p->client->sendAssetEditAnswer(p->host->localId(), 77, "Content/Foo.hasset",
+                                   true, kAssetSubject);
+    p->pump();
+
+    // Nothing changes hands on a non-holder's word — but the requester is told
+    // what is actually true, instead of waiting forever for an answer the host
+    // dropped on the floor.
+    CHECK(answered);
+    CHECK_FALSE(verdict);
+    CHECK(p->host->ownsLock(kAssetSubject));
+    CHECK_FALSE(p->client->ownsLock(kAssetSubject));
+}

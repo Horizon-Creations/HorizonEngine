@@ -105,17 +105,25 @@ namespace
 	std::string queueText(AppContext& ctx)
 	{
 		if (!ctx.collab || !ctx.collab->inSession()) return {};
-		if (ctx.collab->isHost())
+
+		// Waiting on US, from two directions that are one thing to the reader:
+		// deletes and renames the host answers, and assets someone is asking us
+		// to hand over. Both are a decision nobody else can make, so they are
+		// counted together rather than as two competing lines — and the edit
+		// half reaches everyone, host or not.
+		std::size_t n = ctx.collab->pendingEditRequests().size();
+		if (ctx.collab->isHost()) n += ctx.collab->pendingAssetOps().size();
+		if (n > 0)
 		{
-			const std::size_t n = ctx.collab->pendingAssetOps().size();
-			if (n == 0) return {};
 			return n == 1 ? std::string("1 request waiting")
 			              : std::to_string(n) + " requests waiting";
 		}
-		const std::size_t n = ctx.collab->pendingRequestsOfOurs();
-		if (n == 0) return {};
-		return n == 1 ? std::string("1 request pending")
-		              : std::to_string(n) + " requests pending";
+
+		// Nothing to decide — then what we are waiting for, if anything.
+		const std::size_t ours = ctx.collab->pendingRequestsOfOurs();
+		if (ours == 0) return {};
+		return ours == 1 ? std::string("1 request pending")
+		                 : std::to_string(ours) + " requests pending";
 	}
 
 	// 1 while fresh, falling to 0 across the last second. Returns 0 once expired,

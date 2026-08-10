@@ -408,6 +408,38 @@ public:
 	// happens to be nearby.
 	std::uint64_t nowMs() const { return m_lastUpdateMs; }
 
+	// ── "May I edit this?" ───────────────────────────────────────────────────
+	// The one request the HOST does not answer. Deleting and renaming destroy
+	// work, and the host decides those; asking to edit interrupts work, and the
+	// person being interrupted decides that. The host only knows who is holding
+	// it and passes the question along.
+	//
+	// Ask whoever holds `relPath` to hand it over. False = no session, we hold
+	// it already, or we have an unanswered ask for it out. Nobody holding it is
+	// NOT a failure: the lock is claimed on the spot and this returns true.
+	bool requestAssetEdit(const std::string& relPath);
+	// True while our own ask for this asset is unanswered, so the banner can say
+	// "asked" rather than offering the button again.
+	bool hasAskedToEdit(const std::string& relPath) const;
+
+	// The other side: somebody wants what we are holding. Same shape as the
+	// host's in-tray and shown the same way — a row that waits, not a dialog
+	// that interrupts. Unlike that queue this one reaches ANYONE: holding a lock
+	// is not a role.
+	struct EditRequest
+	{
+		HE::Net::ParticipantId id = 0;         // who is asking
+		std::uint32_t          requestId = 0;
+		std::string            path;           // project-relative
+		std::uint64_t          askedMs = 0;
+	};
+	const std::vector<EditRequest>& pendingEditRequests() const
+	{ return m_editRequests; }
+	// Yes hands the lock over in one step (the net layer releases and grants
+	// together, so there is no window for a third peer to take it); no leaves
+	// everything as it is. Both drop the row.
+	void answerEditRequest(std::size_t index, bool allowed);
+
 	// Ask for an asset to go, or — as host — make it go. FALSE means there is no
 	// session and the caller should do it locally, exactly as it always did.
 	// That return value is the whole interface: no caller needs to know whether
@@ -585,6 +617,9 @@ private:
 	                   HE::Net::CollabSession::AssetOp::Delete;
 	               std::string path; };
 	std::vector<OurOp>              m_ourPendingOps;
+	// Asks pointed at us because we hold the asset. Anyone can accumulate these,
+	// host or not.
+	std::vector<EditRequest>        m_editRequests;
 
 	// Ask for it, or — when we are the host — simply do it. Returns false when
 	// there is no session, in which case the caller acts locally as before.

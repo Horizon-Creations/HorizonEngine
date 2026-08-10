@@ -575,14 +575,85 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			if (approveIdx >= 0)   collab->approveAssetOp(static_cast<std::size_t>(approveIdx));
 			else if (denyIdx >= 0) collab->denyAssetOp(static_cast<std::size_t>(denyIdx));
 		}
-		// The other side of the same exchange: what WE are waiting for.
-		else if (!collab->isHost() && collab->hasPendingRequestOfOurs())
+		// ── Assets someone wants from you ────────────────────────────────
+		// Not gated on being host: this queue belongs to whoever HOLDS the
+		// asset, and holding a lock is not a role. The host answers deletes
+		// and renames because they destroy work; an edit request interrupts
+		// work, so it goes to the person being interrupted.
+		if (!collab->pendingEditRequests().empty())
+		{
+			const auto& reqs = collab->pendingEditRequests();
+			ImGui::Spacing();
+			const std::string reqTitle = reqs.size() == 1
+				? std::string("1 asset request")
+				: std::to_string(reqs.size()) + " asset requests";
+			ImGui::SeparatorText(reqTitle.c_str());
+			ImGui::TextDisabled("You are editing these. Nothing changes hands "
+			                    "unless you say so.");
+			ImGui::Spacing();
+
+			int allowIdx = -1, refuseIdx = -1;
+			for (std::size_t i = 0; i < reqs.size(); ++i)
+			{
+				const auto& rq = reqs[i];
+				ImGui::PushID(static_cast<int>(1000 + i));
+
+				bool drewAsker = false;
+				for (const HE::Net::Participant& p : collab->participants())
+				{
+					if (p.id != rq.id) continue;
+					CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+					ImGui::SameLine();
+					ImGui::TextUnformatted(p.name.c_str());
+					ImGui::SameLine();
+					drewAsker = true;
+					break;
+				}
+				// Left the session between asking and now. The row stays: the
+				// request is still answerable, and an unlabelled one would read
+				// as a bug rather than as somebody who stepped away.
+				if (!drewAsker) { ImGui::TextDisabled("Someone"); ImGui::SameLine(); }
+				ImGui::TextDisabled("wants");
+				ImGui::SameLine();
+				ImGui::TextUnformatted(
+					std::filesystem::path(rq.path).filename().string().c_str());
+				if (rq.askedMs > 0 && collab->nowMs() > rq.askedMs)
+				{
+					const unsigned long long secs =
+						(collab->nowMs() - rq.askedMs) / 1000ull;
+					ImGui::SameLine();
+					if (secs < 60) ImGui::TextDisabled("(%llus)", secs);
+					else           ImGui::TextDisabled("(%llum)", secs / 60ull);
+				}
+
+				// "Hand over", not "Approve": saying yes here gives the asset
+				// away, and the button should say what it does.
+				if (EditorWidgets::primaryButton("Hand over", ImVec2(110, 0)))
+					allowIdx = static_cast<int>(i);
+				ImGui::SameLine();
+				if (EditorWidgets::cancelButton("Keep it", ImVec2(110, 0)))
+					refuseIdx = static_cast<int>(i);
+
+				ImGui::PopID();
+				if (i + 1 < reqs.size()) ImGui::Separator();
+			}
+			if (allowIdx >= 0)
+				collab->answerEditRequest(static_cast<std::size_t>(allowIdx), true);
+			else if (refuseIdx >= 0)
+				collab->answerEditRequest(static_cast<std::size_t>(refuseIdx), false);
+		}
+
+		// The other side of the same exchange: what WE are waiting for. The
+		// host can be waiting too now — it asks the holder for an asset like
+		// anyone else — so this is no longer a client-only line, and it must
+		// not name the host as the one deciding.
+		if (collab->hasPendingRequestOfOurs())
 		{
 			ImGui::Spacing();
 			if (collab->pendingRequestsOfOurs() == 1)
-				ImGui::TextDisabled("1 request is waiting for the host.");
+				ImGui::TextDisabled("1 request of yours is waiting for an answer.");
 			else
-				ImGui::TextDisabled("%zu requests are waiting for the host.",
+				ImGui::TextDisabled("%zu requests of yours are waiting for an answer.",
 				                    collab->pendingRequestsOfOurs());
 		}
 

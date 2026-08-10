@@ -1639,7 +1639,17 @@ std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
     // The host does not ask itself. It has the queue, the disk and the decision;
     // routing its own delete through a request would mean answering a dialog it
     // raised for itself.
-    if (m_role == NetRole::Host) return 0;
+    //
+    // Edit is the exception, because it is the one op the host does not decide:
+    // the holder does, and the holder can be a client. So the host routes its
+    // own ask exactly like anyone else's, straight to whoever is holding it.
+    if (m_role == NetRole::Host) {
+        if (op != AssetOp::Edit) return 0;
+        const std::uint32_t id = m_nextOpRequestId++;
+        // False means nobody holds it — there is nobody to ask, and the caller
+        // takes the lock the ordinary way.
+        return routeEditRequest(m_localId, id, path, subject) ? id : 0;
+    }
     if (m_net->connections().empty()) return 0;
 
     const std::uint32_t id = m_nextOpRequestId++;
@@ -1768,10 +1778,18 @@ void CollabSession::handleAssetEditAnswer(ConnectionId conn, BitReader& r) {
         !r.readUInt64(subject) || !r.readString(path) || !r.readByte(allowed)) {
         return;
     }
-    // Only worth anything from the peer that actually holds it — otherwise a
-    // third party could hand away somebody else's work.
+    // Handing the lock over is only worth anything from the peer that actually
+    // holds it — otherwise a third party could give away somebody else's work.
     const LockInfo* lock = lockFor(subject);
-    if (!lock || lock->owner != sender) return;
+    if (!lock || lock->owner != sender) {
+        // Not (or no longer) the holder: nothing changes hands. But the
+        // REQUESTER is still sitting there waiting, and an answer that never
+        // arrives leaves them waiting forever — worse than being told no. So
+        // they are told what is true right now: free means take it, held by
+        // someone else means no.
+        sendAssetOpVerdict(requester, requestId, lock == nullptr);
+        return;
+    }
 
     if (allowed) handOverLock(subject, requester);
     sendAssetOpVerdict(requester, requestId, allowed != 0);
@@ -1780,6 +1798,17 @@ void CollabSession::handleAssetEditAnswer(ConnectionId conn, BitReader& r) {
 void CollabSession::sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId,
                                        bool approved) {
     if (!m_net || m_role != NetRole::Host) return;
+
+    // The host can be the one waiting. It never asks itself for a delete or a
+    // rename — it decides those — but "may I edit this?" is answered by whoever
+    // HOLDS the asset, and that can be a client while the host is the asker.
+    // There is no connection to send that answer down; the callback is the
+    // delivery.
+    if (to == m_localId) {
+        if (m_onOpVerdict) m_onOpVerdict(requestId, approved);
+        return;
+    }
+
     ConnectionId conn = kInvalidConnection;
     for (const auto& [c, pid] : m_connToParticipant) {
         if (pid == to) { conn = c; break; }

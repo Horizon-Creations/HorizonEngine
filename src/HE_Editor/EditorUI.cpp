@@ -1574,7 +1574,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     static constexpr float kFooterH  = 24.0f;
     static constexpr float kTabBarH  = 28.0f;
-constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a locked asset tab
+// Collab read-only banner above a locked asset tab. Tall enough for a real
+// button ("Ask to edit") rather than text alone: one frame height plus the
+// window's padding above and below it, which at this style is ~38.
+constexpr float kAssetLockBannerH = 38.0f;
 
     // ── Footer bar ────────────────────────────────────────────────────────────
     // Must be rendered BEFORE the DockSpace window so ImGui processes it first
@@ -1947,12 +1950,34 @@ constexpr float kAssetLockBannerH = 30.0f;   // collab read-only banner above a 
                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar))
                 {
+                    ImGui::AlignTextToFramePadding();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
                     ImGui::TextUnformatted(lock && !lock->ownerName.empty()
                         ? (lock->ownerName + " is editing this asset — it is read-only "
                            "for you until they are done. Their changes appear here live.").c_str()
                         : "Someone else is editing this asset — it is read-only for you.");
                     ImGui::PopStyleColor();
+
+                    // The way out of read-only. Deliberately here and not in a
+                    // menu: this banner is where the user is at the moment they
+                    // want the asset, and the answer comes from the person the
+                    // banner just named. Drawn BEFORE BeginDisabled below — the
+                    // tab is inert, this is not.
+                    ImGui::SameLine(ImGui::GetContentRegionMax().x - 140.0f);
+                    if (ctx.collab->hasAskedToEdit(rel))
+                    {
+                        ImGui::TextDisabled("waiting for an answer\xE2\x80\xA6");
+                    }
+                    else
+                    {
+                        if (ImGui::Button("Ask to edit", ImVec2(130, 0)))
+                            ctx.collab->requestAssetEdit(rel);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip(
+                                "Asks %s to hand this asset over. They decide.",
+                                lock && !lock->ownerName.empty()
+                                    ? lock->ownerName.c_str() : "whoever is editing it");
+                    }
                 }
                 ImGui::End();
                 ImGui::PopStyleColor();

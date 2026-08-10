@@ -1542,6 +1542,38 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 			}
 
+			// ── Someone else is editing this: ask them for it ────────────────
+			// The tile already carries a padlock badge saying so; this is what
+			// you can DO about it, in the place you right-clicked to act. Same
+			// path derivation as the badge, so the entry appears exactly where
+			// the padlock does and never on a tile without one.
+			if (!s_ctxMenuIsFolder && ctx.collab && ctx.collab->inSession() &&
+			    ctx.contentManager)
+			{
+				const std::string rel =
+					ctx.contentManager->toContentRelativePath(s_ctxMenuItem);
+				if (!rel.empty() && ctx.collab->assetLockedByOther(rel))
+				{
+					const HE::Net::LockInfo* lock = ctx.collab->assetLockInfo(rel);
+					const std::string who = lock && !lock->ownerName.empty()
+						? lock->ownerName : std::string("whoever is editing it");
+					if (ctx.collab->hasAskedToEdit(rel))
+					{
+						ImGui::TextDisabled("waiting for %s to answer\xE2\x80\xA6",
+						                    who.c_str());
+					}
+					else if (ImGui::MenuItem("Ask to Edit"))
+					{
+						ctx.collab->requestAssetEdit(rel);
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s is editing this. Asking hands the "
+						                  "decision to them.", who.c_str());
+					ImGui::Separator();
+				}
+			}
+
 			// In the Source root a C++ class is a .h/.cpp pair; renaming it means
 			// renaming both files AND rewriting the class name/registration inside —
 			// a refactor best left to the user's C++ toolchain, so Rename is hidden.
