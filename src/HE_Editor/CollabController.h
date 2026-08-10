@@ -592,12 +592,17 @@ private:
 	                             const std::string& relPath,
 	                             const std::string& newRelPath,
 	                             bool folder);
-	// The absolute path of the create we are waiting on an answer for, and
-	// whether we already retried it once. One retry only: a name that is taken
-	// twice running means somebody is creating in a loop, and answering that
-	// with another attempt would join them.
-	std::string m_pendingCreateFull;
-	bool        m_createRetried = false;
+	// Creates awaiting a verdict, BY KEY. Not one slot: more than one can be in
+	// flight — a C++ class publishes its header and its source in the same frame
+	// — and the answers arrive one at a time. A single slot meant the first
+	// verdict was applied to the last file published, which renamed and
+	// republished the wrong one.
+	//
+	// `retried` is per create, not global: one retry each. A name taken twice
+	// running means somebody is creating in a loop, and another attempt would
+	// join them.
+	struct PendingCreate { std::string fullPath; bool retried = false; };
+	std::unordered_map<std::string, PendingCreate> m_pendingCreates;
 
 	void teardown();
 	// Give the router and the directory back what this session took: the port

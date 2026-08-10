@@ -1616,10 +1616,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// inside the panel's own Begin/End, and leaving from here
 					// would skip the End and unbalance the ImGui window stack —
 					// which nothing but a runtime assertion would ever tell us.
+					// NOT gated on being a client. requestAssetRename answers the
+					// host by broadcasting it — that branch is the whole reason
+					// it exists — and excluding the host here meant a host's
+					// rename went to its own disk and nowhere else: peers kept
+					// the old path, and the next scene save handed them a
+					// reference to a file they did not have. The delete paths
+					// call unconditionally for exactly this reason; this one now
+					// matches them.
 					bool requested = false;
 					if (!s_renameIsCreate && ctx.collab &&
-					    ctx.contentManager && ctx.collab->inSession() &&
-					    !ctx.collab->isHost())
+					    ctx.contentManager && ctx.collab->inSession())
 					{
 						const std::string relOld =
 							ctx.contentManager->toContentRelativePath(oldPath.string());

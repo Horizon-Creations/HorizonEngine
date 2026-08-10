@@ -761,6 +761,13 @@ private:
 	// a half-rewritten content tree behind, and nothing has to remember to join
 	// them. Pruned each frame so the vector does not grow with the session.
 	std::vector<std::future<void>> m_retargetJobs;
+	// Serialised, not parallel: the walk is a read-modify-write over every
+	// referencing file, so two of them racing lose one rename's rewrites and
+	// leave those references broken. One worker drains this queue.
+	struct RetargetJob { std::string oldRel, newRel; bool folder = false; };
+	std::vector<RetargetJob> m_retargetQueue;
+	std::mutex               m_retargetMutex;
+	bool                     m_retargetRunning = false;
 
 	AppContext makeContext();
 };

@@ -1149,8 +1149,7 @@ void CollabController::teardown()
 		m_ourPendingOps.clear();
 	}
 	else m_assetNotice.clear();
-	m_pendingCreateFull.clear();
-	m_createRetried = false;
+	m_pendingCreates.clear();
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
@@ -1987,32 +1986,46 @@ void CollabController::onOwnCreateAnswered(
 	const std::string& suggestedPath)
 {
 	using Reason = HE::Net::CollabSession::AssetRejectReason;
-	if (accepted)
-	{
-		m_pendingCreateFull.clear();
-		m_createRetried = false;
-		return;
-	}
+
+	// WHICH create is this the answer to? More than one can be in flight — a C++
+	// class publishes its .h and its .cpp in the same frame — and the verdicts
+	// come back one at a time. Keyed lookup, because a single "the pending one"
+	// slot answered the first verdict by renaming the second one's file: the
+	// .cpp ended up called Foo2.h, holding implementation text, while Foo.h
+	// still declared a class with nothing behind it.
+	const auto it = m_pendingCreates.find(path);
+	if (it == m_pendingCreates.end()) return;   // not ours, or already settled
+	const std::string fullPath = it->second.fullPath;
+	const bool        retried  = it->second.retried;
+	m_pendingCreates.erase(it);
+
+	if (accepted) return;
 
 	// The asset exists on this machine either way — the file was written before
 	// it was ever announced. What differs is whether anyone else will see it.
 	if (reason == Reason::NameTaken && !suggestedPath.empty() &&
-	    !m_createRetried && !m_pendingCreateFull.empty() && m_localPathForKey)
+	    !retried && !fullPath.empty() && m_localPathForKey)
 	{
 		const std::string newFull = m_localPathForKey(suggestedPath);
 		std::error_code ec;
 		if (!newFull.empty() && !std::filesystem::exists(newFull, ec))
 		{
-			std::filesystem::rename(m_pendingCreateFull, newFull, ec);
+			std::filesystem::rename(fullPath, newFull, ec);
 			if (!ec)
 			{
-				m_createRetried = true;
 				Logger::Log(Logger::LogLevel::Info,
 					("Collab: that name was taken — the asset is now \"" +
 					 suggestedPath + "\"").c_str());
 				m_assetNotice = "That name was already taken. Your asset is now \"" +
 				                suggestedPath + "\".";
 				publishAssetCreate(suggestedPath, newFull);
+				// Carried onto the retry, so a name that is taken twice running
+				// stops here instead of chasing free names in a loop.
+				if (const auto n = m_pendingCreates.find(suggestedPath);
+				    n != m_pendingCreates.end())
+				{
+					n->second.retried = true;
+				}
 				return;
 			}
 		}
@@ -2027,8 +2040,6 @@ void CollabController::onOwnCreateAnswered(
 		reason == Reason::NotPermitted? "the host did not permit it" : "the host refused it";
 	m_assetNotice = std::string("Your new asset stays local: ") + why + ".";
 	Logger::Log(Logger::LogLevel::Warning, ("Collab: create refused — " + m_assetNotice).c_str());
-	m_pendingCreateFull.clear();
-	m_createRetried = false;
 }
 
 void CollabController::noteAssetCreated(HE::Net::ParticipantId who,
@@ -2077,10 +2088,11 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 	// an asset that does not exist yet, and asking for one would race every
 	// other peer creating at the same path. The host settles the name instead,
 	// and grants the lock as part of accepting.
-	// Remembered so the host's answer can be acted on: a refusal because the
-	// name was taken comes back with a free one, and renaming the file we just
-	// wrote is only possible if we still know where it is.
-	m_pendingCreateFull = fullPath;
+	// Remembered UNDER ITS KEY so the host's answer can be matched to the right
+	// file: a refusal because the name was taken comes back with a free one, and
+	// renaming the file we just wrote is only possible if we know which one the
+	// verdict is about.
+	m_pendingCreates[rel].fullPath = fullPath;
 
 	HE::Net::CollabSession::AssetUpdate a;
 	a.subject = assetSubject(rel);
@@ -2089,13 +2101,10 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 	a.intent  = HE::Net::CollabSession::AssetIntent::Create;
 	m_collab->sendAsset(a);
 
-	// The host answers its OWN create immediately — there is no round trip to
-	// wait for, and leaving the retry armed would misfire on the next one.
-	if (isHost())
-	{
-		m_pendingCreateFull.clear();
-		m_createRetried = false;
-	}
+	// The host answers its OWN create immediately — no round trip, so nothing is
+	// pending and an entry left behind would only wait for a verdict that is
+	// never sent.
+	if (isHost()) m_pendingCreates.erase(rel);
 }
 
 // ─── Locks ───────────────────────────────────────────────────────────────────

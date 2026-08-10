@@ -477,10 +477,14 @@ void EditorApplication::OnInit()
 			EditorAssetTypeCache::invalidateAll();
 			AssetThumbnailCache::clear();
 			// Any tab under the folder is showing a file that no longer exists.
+			// The separator matters: a bare prefix test also matches a SIBLING
+			// whose name merely starts the same way, so deleting "Mat" would
+			// close every tab under "Materials".
+			const std::string prefix = full + "/";
 			m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
-				[&full](const AppContext::EditorTab& t) {
+				[&prefix](const AppContext::EditorTab& t) {
 					return !t.assetPath.empty() &&
-					       t.assetPath.rfind(full, 0) == 0;
+					       t.assetPath.rfind(prefix, 0) == 0;
 				}), m_tabs.end());
 			m_contentRefreshPending = true;
 			return;
@@ -531,10 +535,32 @@ void EditorApplication::OnInit()
 			// to a worker — on a large project it is far too slow for a frame,
 			// and it touches nothing but files.
 			contentManager().retargetAssetReferencesInMemory(relPath, newRelPath, folder);
-			m_retargetJobs.push_back(std::async(std::launch::async,
-				[cm = &contentManager(), relPath, newRelPath, folder] {
-					cm->retargetAssetReferencesOnDisk(relPath, newRelPath, folder);
-				}));
+			// ONE AT A TIME. The walk reads each referencing file whole, rewrites
+			// it in memory and writes it back truncated — two of those over the
+			// same file lose one rename's rewrites entirely, and the loser's
+			// references stay broken with nothing to show for it. Two renames in
+			// quick succession is not exotic: approving a queue of them is one
+			// click each.
+			{
+				std::lock_guard<std::mutex> lk(m_retargetMutex);
+				m_retargetQueue.push_back({ relPath, newRelPath, folder });
+				if (m_retargetRunning) return;   // the running job will drain it
+				m_retargetRunning = true;
+			}
+			m_retargetJobs.push_back(std::async(std::launch::async, [this] {
+				for (;;)
+				{
+					RetargetJob job;
+					{
+						std::lock_guard<std::mutex> lk(m_retargetMutex);
+						if (m_retargetQueue.empty()) { m_retargetRunning = false; return; }
+						job = m_retargetQueue.front();
+						m_retargetQueue.erase(m_retargetQueue.begin());
+					}
+					contentManager().retargetAssetReferencesOnDisk(
+						job.oldRel, job.newRel, job.folder);
+				}
+			}));
 		}
 		m_contentRefreshPending = true;
 	});

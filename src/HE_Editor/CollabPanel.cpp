@@ -512,11 +512,21 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					std::filesystem::path(op.path).filename().string();
 				const bool isDelete =
 					op.op == HE::Net::CollabSession::AssetOp::Delete;
+				// "Delete folder" is a different decision from "Delete" and has
+				// to read like one: approving it removes everything underneath,
+				// with no trash and no undo. The row said neither until a review
+				// pointed out that the flag was carried and never shown.
 				ImGui::TextColored(isDelete ? ImVec4(1.00f, 0.55f, 0.45f, 1.0f)
 				                            : ImVec4(1.00f, 0.80f, 0.45f, 1.0f),
-				                   isDelete ? "Delete" : "Rename");
+				                   isDelete ? (op.folder ? "Delete folder" : "Delete")
+				                            : (op.folder ? "Rename folder" : "Rename"));
 				ImGui::SameLine();
 				ImGui::TextUnformatted(name.c_str());
+				if (op.folder && isDelete)
+				{
+					ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+						"    and everything inside it");
+				}
 				if (!isDelete && !op.newPath.empty())
 				{
 					ImGui::SameLine();
