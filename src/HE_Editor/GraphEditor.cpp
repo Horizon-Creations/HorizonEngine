@@ -109,7 +109,17 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // STARTED on empty canvas is in progress — so panning keeps working even as
     // the cursor sweeps over nodes mid-drag.
     const bool canvasHeld = ImGui::IsItemActive();
+    // Hover that survives a disabled scope. The whole tab renders inside
+    // BeginDisabled while a collaboration peer holds the asset's lock, and a
+    // disabled item is neither hovered nor active — so `hovered` and
+    // `canvasHeld` above both go false and the canvas became impossible to move
+    // around. Editing is what the lock forbids; LOOKING is not, and a graph you
+    // cannot pan is one you cannot read.
+    const bool hoveredEvenIfInert =
+        ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     const ImVec2 mouse = ImGui::GetMousePos();
+
+    st.liveEdit = false;   // set below if a gesture is mid-flight
 
     // Host chrome that must interact before the nodes (e.g. comment boxes). It
     // returns true to consume the mouse for this frame.
@@ -288,12 +298,23 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             st.pan.y = mouse.y - origin.y - before.y * st.zoom;
         }
     }
-    // ── Pan (right / middle drag). Latched to the canvas button so it keeps
-    // panning as the cursor moves over nodes; not gated on `interact` so a
-    // node-body widget being active elsewhere doesn't freeze the drag.
-    if ((canvasHeld || (hovered && !st.suppressInteraction)) &&
-        (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
-         ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
+    // ── Pan (right / middle drag) ────────────────────────────────────────────
+    // Latched, so it keeps panning as the cursor sweeps over nodes; not gated
+    // on `interact` so a node-body widget being active elsewhere doesn't freeze
+    // the drag.
+    //
+    // The latch is our own rather than the canvas button's active state: a tab
+    // a peer holds renders disabled, and then the button is never active and
+    // never hovered. hoveredEvenIfInert is what keeps navigation alive there —
+    // the disabled flag stops edits, and panning is not one.
+    const bool panDrag = ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
+                         ImGui::IsMouseDragging(ImGuiMouseButton_Right);
+    if (!panDrag)
+        st.panning = false;
+    else if (!st.panning &&
+             (canvasHeld || ((hovered || hoveredEvenIfInert) && !st.suppressInteraction)))
+        st.panning = true;
+    if (st.panning)
     {
         st.pan.x += ImGui::GetIO().MouseDelta.x;
         st.pan.y += ImGui::GetIO().MouseDelta.y;
@@ -623,6 +644,12 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         const float dx = (mouse.x - st.dragStartMouse.x) / st.zoom;
         const float dy = (mouse.y - st.dragStartMouse.y) / st.zoom;
         if (std::fabs(dx) > 0.5f || std::fabs(dy) > 0.5f) st.dragMoved = true;
+        // Moving, button still down. The document has changed — it is unsaved
+        // work from this instant, and for a collaborated graph it is what a
+        // peer should be seeing right now. The RETURN value still waits for the
+        // release, because that is what pushes an undo snapshot and a drag is
+        // one step, not sixty.
+        if (st.dragMoved) st.liveEdit = true;
         // Delta from the primary node's start; apply to all selected.
         float px = 0, py = 0; model.getPos(st.dragNode, px, py);
         const float ndx = (st.dragStartPos.x + dx) - px;

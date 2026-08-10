@@ -1253,6 +1253,10 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
 	const bool changed = GraphEditor::draw("##mat_graphcanvas", m, st.geState, avail);
 	if (changed) structuralEdit = true; // add / connect / delete / move → snapshot
+	// Mid-drag the node has already moved. Kept OUT of structuralEdit on
+	// purpose: that means "take a snapshot and recompile", and neither belongs
+	// on every frame of a drag. Dirty alone is what a peer's live view needs.
+	else if (st.geState.liveEdit) st.dirty = true;
 
 	// Per-node preview toggle (deferred out of the context-menu lambda).
 	if (togglePreviewNode != 0)

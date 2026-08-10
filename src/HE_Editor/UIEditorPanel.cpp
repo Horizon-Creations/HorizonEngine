@@ -1799,6 +1799,10 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	const bool changed = GraphEditor::draw("##hc_graphcanvas", m, st.geState, avail);
 	st.selectedGraphNode = st.geState.selected;
 	if (changed) commitEdit(st, ctx);
+	// Mid-drag: the node has moved, so the document is dirty and a peer should
+	// be seeing it. Not commitEdit — that pushes an undo step, and a drag is one
+	// step, not one per frame.
+	else if (st.geState.liveEdit) st.dirty = true;
 
 	HGH::handleGraphKeys(host, canvasOrigin, avail);
 

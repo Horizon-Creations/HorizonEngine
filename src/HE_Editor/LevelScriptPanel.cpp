@@ -795,7 +795,11 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	};
 
 	const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
-	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail)) edited = true;
+	// liveEdit is the mid-drag half of the same answer: a node being moved has
+	// already changed the document, and waiting for the mouse to come up is what
+	// made a collaborating peer see the move as a jump instead of a movement.
+	if (GraphEditor::draw("##ls_canvas", m, g.ge, avail) || g.ge.liveEdit)
+		edited = true;
 	g.selectedNode = g.ge.selected;
 
 	HGH::handleGraphKeys(host, canvasOrigin, avail);

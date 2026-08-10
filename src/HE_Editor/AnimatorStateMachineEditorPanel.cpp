@@ -315,7 +315,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		};
 
 		const bool changed = GraphEditor::draw("##asm_graphcanvas", m, st.geState, avail);
-		if (changed) structuralEdit = true;
+		// liveEdit is the same answer mid-gesture: a node being dragged has
+		// already moved. Folded in here because structuralEdit only marks the
+		// graph dirty — no undo snapshot to spam.
+		if (changed || st.geState.liveEdit) structuralEdit = true;
 	}
 	ImGui::EndChild();
 

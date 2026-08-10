@@ -112,6 +112,23 @@ struct State
     // frames the selection): this remembers whether the current F press already
     // spawned something, so the release only frames when it did not.
     bool   fSpawned = false;
+    // A right/middle drag that began on the canvas is panning. Latched here
+    // rather than read from the canvas button's active state, because that goes
+    // dead when the tab renders disabled — which is exactly when someone is
+    // reading a graph a peer holds, and reading one still means moving around
+    // it. See the pan block in draw().
+    bool   panning = false;
+
+    // ── Set by draw(), read by the host ──
+    // The document changed THIS FRAME in the middle of a gesture — a node drag
+    // that is moving something but whose button is still down. Deliberately not
+    // reported through draw()'s return value: hosts push an undo snapshot on
+    // that, and one snapshot per drag is right where one per frame is not.
+    //
+    // Hosts should fold this into their dirty flag. It is unsaved work either
+    // way, and for a collaborated graph it is what makes a peer see the node
+    // move as it moves instead of jumping when the mouse comes up.
+    bool   liveEdit = false;
 };
 
 // The host bridges its graph to the canvas through these callbacks. Required

@@ -471,6 +471,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		st.dirty = true;
 		if (ctx.undoSys) ctx.undoSys->snapshotNow();
 	}
+	// A node still under the mouse has already moved: unsaved from this instant,
+	// and for a collaborated graph it is what a peer should be seeing. NOT
+	// folded into structuralEdit — that takes an undo snapshot with it, and a
+	// drag is one step rather than one per frame.
+	else if (st.geState.liveEdit) st.dirty = true;
 
 	ImGui::End();
 }
