@@ -576,6 +576,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static std::string              s_deleteFolderTarget;
 		static std::vector<std::string> s_deleteFolderFiles;
 		static bool                     s_openDeleteFolderPopup = false;
+		// A single asset used to go on one click of a red menu item — no dialog,
+		// no undo, and nothing on screen afterwards to say what had been there.
+		// Same STRING-not-pointer rule as the folder case: this outlives the
+		// frame the popup is opened on.
+		static std::string              s_deleteAssetTarget;
+		static bool                     s_deleteAssetIsSource = false;   // .h/.cpp pair
+		static bool                     s_openDeleteAssetPopup = false;
 #ifdef HE_HAVE_LIBSSH2
 		// Remote-download confirmation: same "outlives the popup's opening frame,
 		// so keep it as plain data, never a File*" reasoning as the delete-folder
@@ -1235,6 +1242,45 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
 		};
 
+		// ── Delete one asset ──────────────────────────────────────────────
+		// Split out from the menu item so the confirmation dialog and the actual
+		// deletion are separate things — the menu item now only asks.
+		auto deleteAssetNow = [&](const std::string& assetAbs, bool isSourceClass)
+		{
+			std::error_code ec;
+			std::filesystem::remove(assetAbs, ec);
+			if (ec)
+			{
+				HE_LOG_ERROR(Editor, "%s",
+					("Editor: could not delete '" + assetAbs + "': " + ec.message()).c_str());
+				return;
+			}
+			// The path is free again: a NEW asset of a different type may be created
+			// there next, and the panels' cached header sniff would still name the
+			// deleted asset's type (→ double-click opens the wrong editor).
+			EditorAssetTypeCache::invalidate(assetAbs);
+			AssetThumbnailCache::invalidate(assetAbs); // + its cached tile
+			// In the Source root, delete BOTH halves of the class's .h/.cpp pair.
+			if (isSourceClass)
+			{
+				const std::filesystem::path p(assetAbs);
+				const std::string stem = p.stem().string();
+				const std::filesystem::path dir = p.parent_path();
+				for (const char* e : { ".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".c" })
+				{
+					std::filesystem::path sib = dir / (stem + e);
+					if (sib != p)
+					{
+						std::error_code e2;
+						std::filesystem::remove(sib, e2);
+						EditorAssetTypeCache::invalidate(sib.string());
+					}
+				}
+			}
+			if (s_selectedItem == assetAbs) s_selectedItem.clear();
+			ctx.contentRefreshPending = true;
+		};
+
 		// ── Delete a folder and everything under it ───────────────────────
 		// Shared by the two ways in: a folder with nothing in it goes straight
 		// away, one holding assets only gets here after the confirmation dialog.
@@ -1450,36 +1496,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_openRenamePopup = true;
 				ImGui::CloseCurrentPopup();
 			}
+			// Deleting an asset asks first. It used to happen on this click, and
+			// a red menu item is not a confirmation: the pointer is already over
+			// Delete when the menu opens under it, the file has no undo, and
+			// afterwards nothing on screen says which one is gone. The dialog
+			// names it, which is the whole point.
 			if (!engineLocked && !s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem("Delete"))
 			{
-				std::error_code ec;
-				std::filesystem::remove(s_ctxMenuItem, ec);
-				// The path is free again: a NEW asset of a different type may be created
-				// there next, and the panels' cached header sniff would still name the
-				// deleted asset's type (→ double-click opens the wrong editor).
-				EditorAssetTypeCache::invalidate(s_ctxMenuItem);
-				AssetThumbnailCache::invalidate(s_ctxMenuItem); // + its cached tile
-				// In the Source root, delete BOTH halves of the class's .h/.cpp pair.
-				if (s_selectedRootKind == 2)
-				{
-					const std::filesystem::path p(s_ctxMenuItem);
-					const std::string stem = p.stem().string();
-					const std::filesystem::path dir = p.parent_path();
-					for (const char* e : { ".h", ".hpp", ".hh", ".hxx", ".cpp", ".cc", ".cxx", ".c" })
-					{
-						std::filesystem::path sib = dir / (stem + e);
-						if (sib != p)
-						{
-							std::error_code e2;
-							std::filesystem::remove(sib, e2);
-							EditorAssetTypeCache::invalidate(sib.string());
-						}
-					}
-				}
-				if (s_selectedItem == s_ctxMenuItem)
-					s_selectedItem.clear();
+				s_deleteAssetTarget   = s_ctxMenuItem;
+				s_deleteAssetIsSource = s_selectedRootKind == 2;
+				s_openDeleteAssetPopup = true;
 				s_ctxMenuItem.clear();
-				ctx.contentRefreshPending = true;
 				ImGui::CloseCurrentPopup();
 			}
 
@@ -1643,6 +1670,55 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			ImGui::EndPopup();
 		}
+
+		// ── Delete-asset confirmation ─────────────────────────────────────
+		// Opened here rather than from the context menu for the same reason as
+		// the two below: a modal cannot be opened from inside the context
+		// popup's ID stack.
+		if (s_openDeleteAssetPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_delete_asset_popup");
+			s_openDeleteAssetPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_delete_asset_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			const std::string assetName =
+				std::filesystem::path(s_deleteAssetTarget).filename().string();
+
+			ImGui::Text("Delete \"%s\"", assetName.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			// Two facts the user cannot get back afterwards, so they belong here
+			// rather than in a log line nobody reads.
+			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
+				"This deletes the file. It does not go to the trash and cannot be undone.");
+			ImGui::TextDisabled("Anything still referencing it keeps a broken reference.");
+			if (s_deleteAssetIsSource)
+				ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
+			ImGui::Spacing();
+
+			if (EditorWidgets::dangerButton("Delete", ImVec2(210, 0)))
+			{
+				deleteAssetNow(s_deleteAssetTarget, s_deleteAssetIsSource);
+				s_deleteAssetTarget.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+			{
+				s_deleteAssetTarget.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+		// Escape closes a modal without running either branch, and a target left
+		// behind would be deleted by the NEXT confirmation. Same stale-state trap
+		// the create/rename popup has (see the note there).
+		else if (!s_deleteAssetTarget.empty() && !s_openDeleteAssetPopup)
+			s_deleteAssetTarget.clear();
 
 		// ── Delete-folder confirmation ────────────────────────────────────
 		// Raised from the item context menu, opened here for the same reason the
