@@ -1535,8 +1535,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (s_deleteFolderFiles.empty())
 				{
 					// Nothing to lose (an empty folder, or one holding only empty
-					// sub-folders) — no dialog worth the interruption.
-					deleteFolderNow(s_deleteFolderTarget);
+					// sub-folders) — no dialog worth the interruption. It still
+					// has to REPLICATE though: this shortcut skipped the dialog
+					// and with it the whole session path, so an empty folder was
+					// the one deletion that only ever happened locally.
+					const std::string rel = ctx.contentManager
+						? ctx.contentManager->toContentRelativePath(s_deleteFolderTarget)
+						: std::string();
+					if (!(ctx.collab && !rel.empty() &&
+					      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
+					{
+						deleteFolderNow(s_deleteFolderTarget);
+					}
 					s_deleteFolderTarget.clear();
 				}
 				else
