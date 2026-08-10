@@ -65,7 +65,11 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // read it as the subject's top byte and then address a lock nobody holds —
 // silently, on every asset transfer. Hence a version rather than a tolerated
 // difference.
-inline constexpr std::uint16_t kCollabProtocolVersion = 7;
+// v8: delete and rename say whether they mean a FOLDER, and folder creation
+// travels as an op of its own. A v7 peer stops reading one byte early, so every
+// request would look malformed to it and be dropped — the requester would sit
+// waiting for a verdict nobody is going to give.
+inline constexpr std::uint16_t kCollabProtocolVersion = 8;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -431,6 +435,11 @@ public:
     enum class AssetOp : std::uint8_t {
         Delete = 0,
         Rename = 1,
+        // Creating a FOLDER. Assets are created through the AssetUpdate path,
+        // which carries their bytes; a folder has none, so it travels here.
+        // Permissive like any other create — it destroys nothing, so there is
+        // nothing for the host to weigh, and it is broadcast without asking.
+        Create = 2,
     };
 
     // Why the host would not take a create. Spelled out because the creator has
@@ -501,13 +510,18 @@ public:
     //
     // Client → host. Returns the request id, or 0 outside a session. The host
     // calling this gets 0 too: it does not ask itself.
+    // `folder` is not folded into the op because deleting a folder IS a delete —
+    // same decision, same row in the host's queue, same wording. It differs only
+    // in what gets removed, which is exactly what a flag is for.
     std::uint32_t requestAssetOp(AssetOp op, const std::string& path,
-                                 const std::string& newPath = {});
+                                 const std::string& newPath = {},
+                                 bool folder = false);
 
     // Host: somebody wants something done. Queue it and answer later.
     void onAssetOpRequested(
         std::function<void(ParticipantId, std::uint32_t requestId, AssetOp,
-                           const std::string& path, const std::string& newPath)> fn) {
+                           const std::string& path, const std::string& newPath,
+                           bool folder)> fn) {
         m_onOpRequested = std::move(fn);
     }
 
@@ -518,7 +532,8 @@ public:
     // Host: it happened; everyone applies it. Sent after the verdict, and only
     // on approval.
     void broadcastAssetOpApply(AssetOp op, const std::string& path,
-                               const std::string& newPath, ParticipantId by);
+                               const std::string& newPath, ParticipantId by,
+                               bool folder = false);
 
     // Client: the answer to something we asked for.
     void onAssetOpVerdict(
@@ -530,7 +545,7 @@ public:
     // code path applies it everywhere.
     void onAssetOpApply(
         std::function<void(ParticipantId by, AssetOp, const std::string& path,
-                           const std::string& newPath)> fn) {
+                           const std::string& newPath, bool folder)> fn) {
         m_onOpApply = std::move(fn);
     }
 
@@ -844,10 +859,10 @@ private:
     std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
                                                                m_onCreateResult;
     std::function<void(ParticipantId, std::uint32_t, AssetOp,
-                       const std::string&, const std::string&)> m_onOpRequested;
+                       const std::string&, const std::string&, bool)> m_onOpRequested;
     std::function<void(std::uint32_t, bool)>                    m_onOpVerdict;
     std::function<void(ParticipantId, AssetOp, const std::string&,
-                       const std::string&)>                     m_onOpApply;
+                       const std::string&, bool)>               m_onOpApply;
     // Ids are per-CLIENT and only ever paired with that client's own requests,
     // so a plain counter is enough — two peers may both hold request 3 and the
     // host never confuses them, because it also knows which connection asked.

@@ -575,6 +575,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// Holds the path from the write until the dialog resolves, whichever way
 		// it resolves.
 		static std::string s_pendingCreatePublish;
+		// A folder travels a different way — it has no bytes — so the announcing
+		// block has to know which of the two it is holding.
+		static bool        s_pendingCreateIsFolder = false;
 		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
 		static bool        s_rightClickOnItem = false;
 		// Delete-folder confirmation: the dialog outlives the frame its context
@@ -1180,7 +1183,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_renameIsFolder  = false;
 				s_renameIsCreate  = true;
 				// Announced once the dialog below settles on the final name.
-				s_pendingCreatePublish = path;
+				s_pendingCreatePublish  = path;
+				s_pendingCreateIsFolder = false;
 				// A script is born in the project's fixed language (Lua or Python) —
 				// no per-asset language picker, so this stays -1 (combo hidden).
 				s_renameScriptLang = -1;
@@ -1613,7 +1617,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// would skip the End and unbalance the ImGui window stack —
 					// which nothing but a runtime assertion would ever tell us.
 					bool requested = false;
-					if (!s_renameIsCreate && !s_renameIsFolder && ctx.collab &&
+					if (!s_renameIsCreate && ctx.collab &&
 					    ctx.contentManager && ctx.collab->inSession() &&
 					    !ctx.collab->isHost())
 					{
@@ -1621,8 +1625,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							ctx.contentManager->toContentRelativePath(oldPath.string());
 						const std::string relNew =
 							ctx.contentManager->toContentRelativePath(newPath.string());
+						// Folders included: renaming one moves every asset under
+						// it, so it breaks references on a far larger scale than
+						// renaming a single file does.
 						requested = !relOld.empty() && !relNew.empty() &&
-						            ctx.collab->requestAssetRename(relOld, relNew);
+						            ctx.collab->requestAssetRename(relOld, relNew,
+						                                          s_renameIsFolder);
 					}
 
 					// Nothing moves locally when it was asked for. It moves when
@@ -1731,10 +1739,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// hold and nothing to retarget — the host decides whether the name
 			// is free and hands it on.
 			if (ctx.collab && ctx.contentManager)
-				ctx.collab->publishAssetCreate(
-					ctx.contentManager->toContentRelativePath(s_pendingCreatePublish),
-					s_pendingCreatePublish);
+			{
+				const std::string rel =
+					ctx.contentManager->toContentRelativePath(s_pendingCreatePublish);
+				if (s_pendingCreateIsFolder) ctx.collab->publishFolderCreate(rel);
+				else ctx.collab->publishAssetCreate(rel, s_pendingCreatePublish);
+			}
 			s_pendingCreatePublish.clear();
+			s_pendingCreateIsFolder = false;
 		}
 
 		// ── Delete-asset confirmation ─────────────────────────────────────
@@ -1851,9 +1863,26 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::EndChild();
 			ImGui::Spacing();
 
-			if (EditorWidgets::dangerButton("Delete", ImVec2(210, 0)))
+			// A folder is the biggest yes in this panel — everything under it
+			// goes — so in a session it is asked for like any other deletion.
+			const bool folderNeedsApproval =
+				ctx.collab && ctx.collab->inSession() && !ctx.collab->isHost();
+			if (folderNeedsApproval)
 			{
-				deleteFolderNow(s_deleteFolderTarget);
+				ImGui::TextDisabled("The host has to approve this before it happens.");
+				ImGui::Spacing();
+			}
+			if (EditorWidgets::dangerButton(folderNeedsApproval ? "Ask the host" : "Delete",
+			                                ImVec2(210, 0)))
+			{
+				const std::string rel = ctx.contentManager
+					? ctx.contentManager->toContentRelativePath(s_deleteFolderTarget)
+					: std::string();
+				if (!(ctx.collab && !rel.empty() &&
+				      ctx.collab->requestAssetDelete(rel, /*folder=*/true)))
+				{
+					deleteFolderNow(s_deleteFolderTarget);
+				}
 				s_deleteFolderTarget.clear();
 				s_deleteFolderFiles.clear();
 				ImGui::CloseCurrentPopup();
@@ -1968,8 +1997,30 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
 				std::string created;
 				if (writeCppClass(projRoot.string(), s_cppClassName, &created))
+				{
 					HE_LOG_INFO(Editor, "%s",
 						("Editor: created C++ class at " + created).c_str());
+					// BOTH halves. A class is a .h and a .cpp, and a peer that
+					// received only the header would have a declaration with
+					// nothing behind it — which compiles right up until it does
+					// not. They travel under the reserved ::Source:: key, since
+					// they live beside Content rather than inside it.
+					if (ctx.collab && ctx.collab->inSession())
+					{
+						const std::string srcRoot = projRoot.string() + "/Source";
+						const std::filesystem::path h(created);
+						for (const char* ext : { ".h", ".cpp" })
+						{
+							const std::filesystem::path f =
+								h.parent_path() / (h.stem().string() + ext);
+							if (!std::filesystem::exists(f)) continue;
+							const std::string rel =
+								CollabController::projectRelativeAssetPath(f.string(), srcRoot);
+							if (rel.empty()) continue;
+							ctx.collab->publishAssetCreate("::Source::" + rel, f.string());
+						}
+					}
+				}
 				else
 					HE_LOG_ERROR(Editor, "%s", "Editor: failed to create C++ class");
 				ImGui::CloseCurrentPopup();
@@ -2046,6 +2097,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					const std::string folderName = std::filesystem::path(dir).filename().string();
 					s_selectedItem    = dir;
 					s_renameTarget    = dir;
+					// Same choke point as an asset: announced when the name is
+					// final, not when the directory appears.
+					s_pendingCreatePublish  = dir;
+					s_pendingCreateIsFolder = true;
 					s_renameIsFolder  = true;
 					s_renameIsCreate  = true;
 					std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);

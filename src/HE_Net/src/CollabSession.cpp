@@ -1599,7 +1599,8 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
 }
 
 std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
-                                            const std::string& newPath) {
+                                            const std::string& newPath,
+                                            bool folder) {
     if (!m_net || !m_joined || path.empty()) return 0;
     // The host does not ask itself. It has the queue, the disk and the decision;
     // routing its own delete through a request would mean answering a dialog it
@@ -1613,6 +1614,7 @@ std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
     w.writeByte(static_cast<std::uint8_t>(op));
     w.writeString(path);
     w.writeString(newPath);
+    w.writeByte(folder ? 1 : 0);
     m_net->send(m_net->connections().front(), kMsgAssetOpRequest, w);
     return id;
 }
@@ -1624,16 +1626,16 @@ void CollabSession::handleAssetOpRequest(ConnectionId conn, BitReader& r) {
     if (who == kInvalidParticipant) return;
 
     std::uint32_t id = 0;
-    std::uint8_t  op = 0;
+    std::uint8_t  op = 0, folder = 0;
     std::string   path, newPath;
     if (!r.readUInt32(id) || !r.readByte(op) ||
-        !r.readString(path) || !r.readString(newPath)) {
+        !r.readString(path) || !r.readString(newPath) || !r.readByte(folder)) {
         return;
     }
-    if (op > static_cast<std::uint8_t>(AssetOp::Rename)) return;
+    if (op > static_cast<std::uint8_t>(AssetOp::Create)) return;
     if (path.empty()) return;
     if (m_onOpRequested)
-        m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath);
+        m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath, folder != 0);
 }
 
 void CollabSession::sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId,
@@ -1655,18 +1657,19 @@ void CollabSession::sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId
 
 void CollabSession::broadcastAssetOpApply(AssetOp op, const std::string& path,
                                           const std::string& newPath,
-                                          ParticipantId by) {
+                                          ParticipantId by, bool folder) {
     if (!m_net || m_role != NetRole::Host) return;
     BitWriter w;
     w.writeUInt32(by);
     w.writeByte(static_cast<std::uint8_t>(op));
     w.writeString(path);
     w.writeString(newPath);
+    w.writeByte(folder ? 1 : 0);
     for (const ConnectionId c : m_net->connections())
         m_net->send(c, kMsgAssetOpApply, w);
     // The host applies through the same callback as everyone else, so there is
     // one code path for "this happened" rather than two that must agree.
-    if (m_onOpApply) m_onOpApply(by, op, path, newPath);
+    if (m_onOpApply) m_onOpApply(by, op, path, newPath, folder);
 }
 
 void CollabSession::handleAssetOpVerdict(BitReader& r) {
@@ -1678,14 +1681,15 @@ void CollabSession::handleAssetOpVerdict(BitReader& r) {
 
 void CollabSession::handleAssetOpApply(BitReader& r) {
     std::uint32_t by = 0;
-    std::uint8_t  op = 0;
+    std::uint8_t  op = 0, folder = 0;
     std::string   path, newPath;
     if (!r.readUInt32(by) || !r.readByte(op) ||
-        !r.readString(path) || !r.readString(newPath)) {
+        !r.readString(path) || !r.readString(newPath) || !r.readByte(folder)) {
         return;
     }
-    if (op > static_cast<std::uint8_t>(AssetOp::Rename)) return;
-    if (m_onOpApply) m_onOpApply(by, static_cast<AssetOp>(op), path, newPath);
+    if (op > static_cast<std::uint8_t>(AssetOp::Create)) return;
+    if (m_onOpApply)
+        m_onOpApply(by, static_cast<AssetOp>(op), path, newPath, folder != 0);
 }
 
 bool CollabSession::arbitrateCreate(ConnectionId conn, const AssetUpdate& a) {

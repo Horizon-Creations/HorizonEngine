@@ -453,11 +453,38 @@ void EditorApplication::OnInit()
 	// An approved delete or rename. Fires on every peer INCLUDING the host, so
 	// there is one implementation of "this happened" rather than two that have
 	// to agree.
-	m_collab.onRemoteAssetOp([this](bool isDelete, const std::string& relPath,
-	                                const std::string& newRelPath) {
+	m_collab.onRemoteAssetOp([this](HE::Net::CollabSession::AssetOp op,
+	                                const std::string& relPath,
+	                                const std::string& newRelPath, bool folder) {
+		using Op = HE::Net::CollabSession::AssetOp;
 		const std::string full = collabLocalPath(relPath);
 		if (full.empty()) return;      // refused by the containment check
 		std::error_code ec;
+		if (op == Op::Create)
+		{
+			// Folders only — an asset arrives with its bytes down the other path.
+			std::filesystem::create_directories(full, ec);
+			m_contentRefreshPending = true;
+			return;
+		}
+		const bool isDelete = op == Op::Delete;
+		if (isDelete && folder)
+		{
+			// Everything under it goes, which is what the host approved. The
+			// type and thumbnail caches are keyed by path and every one of them
+			// is now stale, so both go wholesale rather than being walked.
+			std::filesystem::remove_all(full, ec);
+			EditorAssetTypeCache::invalidateAll();
+			AssetThumbnailCache::clear();
+			// Any tab under the folder is showing a file that no longer exists.
+			m_tabs.erase(std::remove_if(m_tabs.begin(), m_tabs.end(),
+				[&full](const AppContext::EditorTab& t) {
+					return !t.assetPath.empty() &&
+					       t.assetPath.rfind(full, 0) == 0;
+				}), m_tabs.end());
+			m_contentRefreshPending = true;
+			return;
+		}
 		if (isDelete)
 		{
 			std::filesystem::remove(full, ec);
@@ -503,10 +530,10 @@ void EditorApplication::OnInit()
 			// the very next save would write it back there. The tree walk goes
 			// to a worker — on a large project it is far too slow for a frame,
 			// and it touches nothing but files.
-			contentManager().retargetAssetReferencesInMemory(relPath, newRelPath, false);
+			contentManager().retargetAssetReferencesInMemory(relPath, newRelPath, folder);
 			m_retargetJobs.push_back(std::async(std::launch::async,
-				[cm = &contentManager(), relPath, newRelPath] {
-					cm->retargetAssetReferencesOnDisk(relPath, newRelPath, false);
+				[cm = &contentManager(), relPath, newRelPath, folder] {
+					cm->retargetAssetReferencesOnDisk(relPath, newRelPath, folder);
 				}));
 		}
 		m_contentRefreshPending = true;

@@ -904,7 +904,16 @@ void CollabController::wireCallbacks()
 	m_collab->onAssetOpRequested(
 		[this](HE::Net::ParticipantId who, std::uint32_t requestId,
 		       HE::Net::CollabSession::AssetOp op,
-		       const std::string& path, const std::string& newPath) {
+		       const std::string& path, const std::string& newPath, bool folder) {
+			// A folder create needs no answer — it is relayed as it arrives.
+			// Queueing it would put a row in front of the host that has no
+			// decision in it.
+			if (op == HE::Net::CollabSession::AssetOp::Create)
+			{
+				if (m_collab)
+					m_collab->broadcastAssetOpApply(op, path, newPath, who, folder);
+				return;
+			}
 			// Folded into the existing row when the same asset is already
 			// waiting: three people wanting one file gone is one decision.
 			for (PendingAssetOp& p : m_pendingOps)
@@ -921,6 +930,7 @@ void CollabController::wireCallbacks()
 			p.op      = op;
 			p.path    = path;
 			p.newPath = newPath;
+			p.folder  = folder;
 			p.requesters.push_back({ who, requestId });
 			p.firstAskedMs = m_lastUpdateMs;
 			m_pendingOps.push_back(std::move(p));
@@ -946,12 +956,12 @@ void CollabController::wireCallbacks()
 
 	m_collab->onAssetOpApply(
 		[this](HE::Net::ParticipantId, HE::Net::CollabSession::AssetOp op,
-		       const std::string& path, const std::string& newPath) {
+		       const std::string& path, const std::string& newPath, bool folder) {
 			if (!m_onRemoteAssetOp) return;
 			// Same guard as an arriving save: applying this touches the content
 			// tree, and the notification would otherwise come straight back.
 			m_applyingRemoteAsset = true;
-			m_onRemoteAssetOp(op == HE::Net::CollabSession::AssetOp::Delete, path, newPath);
+			m_onRemoteAssetOp(op, path, newPath, folder);
 			m_applyingRemoteAsset = false;
 		});
 
@@ -1846,20 +1856,31 @@ void CollabController::publishAsset(const std::string& relativePath,
 
 bool CollabController::requestOrPerformAssetOp(
 	HE::Net::CollabSession::AssetOp op,
-	const std::string& relPath, const std::string& newRelPath)
+	const std::string& relPath, const std::string& newRelPath, bool folder)
 {
 	if (!m_collab || !inSession() || relPath.empty()) return false;
+
+	// Creating a folder asks nobody, whoever does it: it destroys nothing, so
+	// there is no decision to weigh. A client's create still travels via the
+	// host, which is what keeps everyone's order of events the same.
+	const bool needsApproval = op != HE::Net::CollabSession::AssetOp::Create;
 
 	// The host does it. It already answered the question a request exists to
 	// ask — its own confirmation dialog — and asking itself again would be a
 	// second dialog for one decision.
 	if (isHost())
 	{
-		m_collab->broadcastAssetOpApply(op, relPath, newRelPath, localParticipant());
+		m_collab->broadcastAssetOpApply(op, relPath, newRelPath, localParticipant(), folder);
 		return true;
 	}
 
-	const std::uint32_t id = m_collab->requestAssetOp(op, relPath, newRelPath);
+	const std::uint32_t id = m_collab->requestAssetOp(op, relPath, newRelPath, folder);
+	if (!needsApproval)
+	{
+		// Sent, but not something we wait on: there is no verdict coming, and
+		// putting it in the pending list would leave a count that never falls.
+		return id != 0;
+	}
 	if (id == 0) return false;
 	m_ourPendingOps.push_back({ id, op, relPath });
 	m_assetNotice = (op == HE::Net::CollabSession::AssetOp::Delete
@@ -1883,7 +1904,8 @@ void CollabController::approveAssetOp(std::size_t index)
 	// "this happened", rather than a local branch that has to stay in step.
 	m_collab->broadcastAssetOpApply(op.op, op.path, op.newPath,
 	                                op.requesters.empty() ? localParticipant()
-	                                                      : op.requesters.front().id);
+	                                                      : op.requesters.front().id,
+	                                op.folder);
 }
 
 void CollabController::denyAssetOp(std::size_t index)
@@ -2039,9 +2061,11 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 
 	const std::string& rel = relativePath;
 	if (rel.empty() || !isSyncableAsset(rel)) return;
-	// Same type gate as a save, for the same reason: `.hasset` is equally the
-	// container around an imported mesh, and those must not travel this channel.
-	if (!isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
+	// Same type gate as a save, and with the same exception: a C++ source is raw
+	// text with no HAsset header, so sniffing it reads Unknown and would drop
+	// it. Its own key prefix is the admission ticket.
+	if (rel.rfind("::Source::", 0) != 0 &&
+	    !isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	std::ifstream f(fullPath, std::ios::binary);
 	if (!f) return;

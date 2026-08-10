@@ -384,6 +384,9 @@ public:
 			HE::Net::CollabSession::AssetOp::Delete;
 		std::string path;        // project-relative, the asset in question
 		std::string newPath;     // rename only
+		// A folder takes everything under it with it, which is why the queue row
+		// says so — approving one is a much bigger yes than approving a file.
+		bool        folder = false;
 		// Who asked, in the order they asked. The panel draws their profile
 		// pictures — a name is a string, a face is the person you can go and
 		// talk to about it.
@@ -409,15 +412,23 @@ public:
 	// session and the caller should do it locally, exactly as it always did.
 	// That return value is the whole interface: no caller needs to know whether
 	// it is hosting, joining, or working alone.
-	bool requestAssetDelete(const std::string& relPath)
+	bool requestAssetDelete(const std::string& relPath, bool folder = false)
 	{
 		return requestOrPerformAssetOp(
-			HE::Net::CollabSession::AssetOp::Delete, relPath, {});
+			HE::Net::CollabSession::AssetOp::Delete, relPath, {}, folder);
 	}
-	bool requestAssetRename(const std::string& relPath, const std::string& newRelPath)
+	bool requestAssetRename(const std::string& relPath, const std::string& newRelPath,
+	                        bool folder = false)
 	{
 		return requestOrPerformAssetOp(
-			HE::Net::CollabSession::AssetOp::Rename, relPath, newRelPath);
+			HE::Net::CollabSession::AssetOp::Rename, relPath, newRelPath, folder);
+	}
+	// Creating a folder needs nobody's permission — it destroys nothing — so it
+	// goes straight out. Returns false when there is no session.
+	bool publishFolderCreate(const std::string& relPath)
+	{
+		return requestOrPerformAssetOp(
+			HE::Net::CollabSession::AssetOp::Create, relPath, {}, true);
 	}
 
 	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
@@ -432,8 +443,8 @@ public:
 	// which; on a rename `newPath` is where it goes. Fires on every peer
 	// including the host, so there is one implementation rather than two.
 	void onRemoteAssetOp(
-		std::function<void(bool isDelete, const std::string& path,
-		                   const std::string& newPath)> fn)
+		std::function<void(HE::Net::CollabSession::AssetOp, const std::string& path,
+		                   const std::string& newPath, bool folder)> fn)
 	{
 		m_onRemoteAssetOp = std::move(fn);
 	}
@@ -579,7 +590,8 @@ private:
 	// there is no session, in which case the caller acts locally as before.
 	bool requestOrPerformAssetOp(HE::Net::CollabSession::AssetOp op,
 	                             const std::string& relPath,
-	                             const std::string& newRelPath);
+	                             const std::string& newRelPath,
+	                             bool folder);
 	// The absolute path of the create we are waiting on an answer for, and
 	// whether we already retried it once. One retry only: a name that is taken
 	// twice running means somebody is creating in a loop, and answering that
@@ -705,7 +717,8 @@ private:
 	std::string   m_lockNotice;
 	std::string   m_assetNotice;
 	std::function<std::string(const std::string&)> m_localPathForKey;
-	std::function<void(bool, const std::string&, const std::string&)> m_onRemoteAssetOp;
+	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
+	                   const std::string&, bool)> m_onRemoteAssetOp;
 	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same
