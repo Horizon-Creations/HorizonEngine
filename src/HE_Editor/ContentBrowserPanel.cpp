@@ -567,6 +567,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static char        s_renameBuf[256]   = {};
 		static bool        s_openRenamePopup  = false;
 		static bool        s_renameIsCreate   = false; // naming a freshly created item
+	// Why the last OK was refused (empty = nothing to say). Shown under the
+	// field, because a dialog that simply ignores the button reads as broken.
+	static std::string s_renameError;
 		// A created asset is announced to the session when its name is FINAL,
 		// not when the file appears. tryCreate writes "NewMaterial.hasset" and
 		// then opens the naming dialog; publishing at the write would put the
@@ -1672,11 +1675,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::Spacing();
 
 			// Focus the field as the dialog opens so the user can type at once.
+			// The error goes with it: Escape closes a modal without running
+			// either button's branch, so clearing it on the way IN is the one
+			// place that catches every way out.
 			if (ImGui::IsWindowAppearing())
+			{
+				s_renameError.clear();
 				ImGui::SetKeyboardFocusHere();
+			}
 			ImGui::SetNextItemWidth(-1.0f);
 			bool confirm = ImGui::InputText("##rename_input", s_renameBuf, sizeof(s_renameBuf),
 				ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+			// Why the last OK did nothing. Cleared on every keystroke, so the
+			// message belongs to the name in the box and not to one two edits ago.
+			if (ImGui::IsItemEdited()) s_renameError.clear();
+			if (!s_renameError.empty())
+			{
+				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s",
+				                   s_renameError.c_str());
+			}
 			ImGui::Spacing();
 
 			// (A script's language is fixed by the project, chosen in the New
@@ -1685,7 +1702,33 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (EditorWidgets::primaryButton("OK", ImVec2(140, 0)) || confirm)
 			{
 				std::string newName(s_renameBuf);
-				if (!newName.empty() && !s_renameTarget.empty())
+
+				// Would this land on something that is already there?
+				// std::filesystem::rename REPLACES an existing destination
+				// without a word — so "rename Foo to Bar" silently destroyed
+				// Bar, and in a session it destroyed Bar on every machine at
+				// once. Checked here, before anything is asked for or moved.
+				bool blocked = newName.empty() || s_renameTarget.empty();
+				if (!blocked)
+				{
+					const std::filesystem::path oldP(s_renameTarget);
+					const std::filesystem::path newP = s_renameIsFolder
+						? oldP.parent_path() / newName
+						: oldP.parent_path() / (newName + oldP.extension().string());
+					std::error_code exEc;
+					// equivalent(), not a path comparison: on a case-insensitive
+					// disk "foo" and "Foo" ARE the same file, and refusing to
+					// change a name's capitalisation would be wrong.
+					if (std::filesystem::exists(newP, exEc) &&
+					    !std::filesystem::equivalent(oldP, newP, exEc))
+					{
+						s_renameError = "\"" + newP.filename().string() +
+						                "\" already exists here.";
+						blocked = true;
+					}
+				}
+
+				if (!blocked)
 				{
 					std::filesystem::path oldPath(s_renameTarget);
 					std::filesystem::path newPath;
@@ -1797,10 +1840,16 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						}
 					}
 				}
-				s_renameTarget.clear();
-				s_renameIsCreate = false;
-				s_renameScriptLang = -1;
-				ImGui::CloseCurrentPopup();
+				// Left open when the name was refused: the dialog is where the
+				// reason is, and closing it would look like the rename worked.
+				if (!blocked)
+				{
+					s_renameTarget.clear();
+					s_renameIsCreate = false;
+					s_renameScriptLang = -1;
+					s_renameError.clear();
+					ImGui::CloseCurrentPopup();
+				}
 			}
 			ImGui::SameLine();
 			if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
@@ -1810,6 +1859,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_renameTarget.clear();
 				s_renameIsCreate = false;
 				s_renameScriptLang = -1;
+				s_renameError.clear();
 				ImGui::CloseCurrentPopup();
 			}
 

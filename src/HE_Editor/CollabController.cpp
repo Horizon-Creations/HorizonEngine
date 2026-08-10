@@ -2073,6 +2073,30 @@ void CollabController::approveAssetOp(std::size_t index)
 {
 	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
 	const PendingAssetOp op = m_pendingOps[index];
+
+	// A rename onto a name that is already taken HERE. The host's disk is the
+	// arbiter for creates for the same reason it is for this: approving would
+	// broadcast a rename that replaces a file — on every machine at once, with
+	// no undo behind it. Refused rather than applied, and the requester is told
+	// the same way any refusal reaches them.
+	if (op.op == HE::Net::CollabSession::AssetOp::Rename && m_localPathForKey &&
+	    !op.newPath.empty())
+	{
+		const std::string from = m_localPathForKey(op.path);
+		const std::string to   = m_localPathForKey(op.newPath);
+		std::error_code   ec;
+		if (to.empty() ||
+		    (std::filesystem::exists(to, ec) &&
+		     !(!from.empty() && std::filesystem::equivalent(from, to, ec))))
+		{
+			denyAssetOp(index);
+			m_assetNotice = "\"" +
+				std::filesystem::path(op.newPath).filename().string() +
+				"\" already exists — the rename was refused.";
+			return;
+		}
+	}
+
 	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
 
 	// Everyone who asked hears yes — including the ones who asked second, whose

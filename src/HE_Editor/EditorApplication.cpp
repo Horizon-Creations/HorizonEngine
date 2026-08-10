@@ -505,6 +505,21 @@ void EditorApplication::OnInit()
 		{
 			const std::string newFull = collabLocalPath(newRelPath);
 			if (newFull.empty()) return;
+			// Something is already sitting there on THIS machine. The host
+			// approved the rename against its own disk, so ours differs — and
+			// std::filesystem::rename would replace the file without a word.
+			// Refusing leaves this peer out of step, which the next source
+			// control sync reconciles; overwriting would destroy work that no
+			// sync can bring back.
+			if (std::error_code exEc;
+			    std::filesystem::exists(newFull, exEc) &&
+			    !std::filesystem::equivalent(full, newFull, exEc))
+			{
+				HE_LOG_ERROR(Editor, "%s",
+					("Collab: not renaming '" + relPath + "' to '" + newRelPath +
+					 "' — something already exists there on this machine").c_str());
+				return;
+			}
 			std::filesystem::create_directories(
 				std::filesystem::path(newFull).parent_path(), ec);
 			std::filesystem::rename(full, newFull, ec);
