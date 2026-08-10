@@ -1385,8 +1385,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (!t.closable || t.assetPath.empty()) continue;
 				if (!isUnderFolder(t.assetPath, folderAbs)) continue;
 				t.open = false;
-				EditorUI::discardPanelState(ctx, t.assetPath);
 			}
+			// Covers the tabs above AND the assets that have no tab left to
+			// close — a tab closed while dirty keeps its panel state behind.
+			EditorUI::discardPanelStateUnder(ctx, folderAbs);
 
 			if (s_selectedItem == folderAbs || isUnderFolder(s_selectedItem, folderAbs))
 				s_selectedItem.clear();

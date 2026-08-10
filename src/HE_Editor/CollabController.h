@@ -637,6 +637,26 @@ private:
 	// running means somebody is creating in a loop, and another attempt would
 	// join them.
 	struct PendingCreate { std::string fullPath; bool retried = false; };
+
+	// A peer's create for a path we are ALSO creating, held back until our own
+	// create has been answered.
+	//
+	// Two people naming a new asset the same thing in the same second: the host
+	// picks one, and the loser is told "NameTaken" and moves their file to a
+	// free name. But the winner's bytes are broadcast independently of that
+	// answer, and applying them writes THAT path — truncating the loser's file
+	// before it has been moved out of the way. The loser then renamed the
+	// winner's bytes to the suggested name and their own work was simply gone.
+	struct DeferredCreate
+	{
+		std::string               path;
+		std::vector<std::uint8_t> bytes;
+		HE::Net::ParticipantId    who = 0;
+	};
+	std::vector<DeferredCreate> m_deferredCreates;
+	// Apply (and clear) anything held back for this path. Called once our own
+	// create for it has been settled, whichever way it went.
+	void flushDeferredCreate(const std::string& path);
 	std::unordered_map<std::string, PendingCreate> m_pendingCreates;
 
 	void teardown();

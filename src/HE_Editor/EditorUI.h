@@ -52,6 +52,11 @@ public:
 	// host approved. Keeping the edits there would let the next Save All write
 	// the file back out and undo a deletion everybody agreed to.
 	static void discardPanelState(AppContext& ctx, const std::string& assetPath);
+	// The same for everything under a folder that is going away. Walking the
+	// open tabs is NOT enough: a closed dirty tab keeps its panel state but
+	// leaves ctx.tabs (see unsavedAssetPaths above), and those are exactly the
+	// assets Save All would write back into a folder that no longer exists.
+	static void discardPanelStateUnder(AppContext& ctx, const std::string& folderPath);
 
 	// The live documents behind an open tab, for collaboration's item-level sync
 	// (CollabDocSync). Same dispatch as the three above. Empty for tabs with no

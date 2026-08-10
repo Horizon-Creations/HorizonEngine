@@ -646,6 +646,22 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	AudioEditorPanel::forget(assetPath);
 }
 
+void EditorUI::discardPanelStateUnder(AppContext& ctx, const std::string& folderPath)
+{
+	if (folderPath.empty()) return;
+	// The separator matters: a bare prefix test also matches a SIBLING whose
+	// name merely starts the same way, so deleting "Mat" would take the panel
+	// state of everything under "Materials" with it.
+	const std::string prefix = folderPath + "/";
+	// unsavedAssetPaths, not ctx.tabs: an asset whose tab was closed while dirty
+	// still has panel state and no tab, and that is precisely the one Save All
+	// would write back into the folder that just went away.
+	for (const std::string& p : unsavedAssetPaths())
+	{
+		if (p.rfind(prefix, 0) == 0) discardPanelState(ctx, p);
+	}
+}
+
 // The read half of saveAsset's dispatch: ask every panel; whichever holds the
 // path refreshes. Same "no path→panel map" argument as over there.
 bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)

@@ -483,9 +483,12 @@ void EditorApplication::OnInit()
 			const std::string prefix = full + "/";
 			// Closing the tab is not enough: the PANEL keeps its state, dirty
 			// flag included, and a closed dirty tab is still saved by Save All —
-			// which would write the file back and undo the deletion.
+			// which would write the file back and undo the deletion. Driven off
+			// the dirty panels rather than the tab list for that very reason: a
+			// tab closed while dirty left the list and kept its state.
 			{
 				AppContext ctx = makeContext();
+				EditorUI::discardPanelStateUnder(ctx, full);
 				for (const AppContext::EditorTab& t : m_tabs)
 				{
 					if (!t.assetPath.empty() && t.assetPath.rfind(prefix, 0) == 0)

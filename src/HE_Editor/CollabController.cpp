@@ -881,6 +881,15 @@ void CollabController::wireCallbacks()
 		{
 			return;
 		}
+		// A create landing on a path WE are still creating. Writing it now would
+		// truncate our file before the host's answer has told us to move it
+		// aside — see DeferredCreate. Held until our own create is settled.
+		if (a.intent == HE::Net::CollabSession::AssetIntent::Create &&
+		    m_pendingCreates.count(a.path))
+		{
+			m_deferredCreates.push_back({ a.path, a.bytes, who });
+			return;
+		}
 		// Guard the write: applying it hits ContentManager::saveAsset, whose
 		// notification would otherwise publish the same bytes straight back.
 		m_applyingRemoteAsset = true;
@@ -1252,6 +1261,10 @@ void CollabController::teardown()
 	}
 	else m_assetNotice.clear();
 	m_pendingCreates.clear();
+	// Bytes held back for an answer that is never coming. Dropped rather than
+	// written: nobody is left to agree that this file belongs here, and our own
+	// create at that path was never moved aside.
+	m_deferredCreates.clear();
 	m_portMapped    = false;
 	m_portMapStatus.clear();
 	m_advice.clear();
@@ -2017,7 +2030,20 @@ bool CollabController::requestOrPerformAssetOp(
 		return id != 0;
 	}
 	if (id == 0) return false;
-	m_ourPendingOps.push_back({ id, op, relPath });
+	// Asking a second time for the same thing REPLACES our record of the first.
+	// The host folds repeat asks into one row and keeps the newest request id,
+	// so only one verdict is ever coming — a second entry here would wait for an
+	// answer addressed to a request that no longer exists, and "1 request
+	// pending" would sit in the footer for the rest of the session.
+	bool replaced = false;
+	for (OurOp& o : m_ourPendingOps)
+	{
+		if (o.op != op || o.path != relPath) continue;
+		o.requestId = id;
+		replaced = true;
+		break;
+	}
+	if (!replaced) m_ourPendingOps.push_back({ id, op, relPath });
 	m_assetNotice = (op == HE::Net::CollabSession::AssetOp::Delete
 		? std::string("Asked the host to delete \"")
 		: std::string("Asked the host to rename \"")) +
@@ -2214,6 +2240,17 @@ void CollabController::onOwnCreateAnswered(
 	const bool        retried  = it->second.retried;
 	m_pendingCreates.erase(it);
 
+	// A peer's create for this same path has been held back waiting for exactly
+	// this answer. Every exit below IS the answer, including the one in the
+	// middle of the retry — so it is released on the way out rather than at
+	// three separate returns that a fourth would quietly not join.
+	struct FlushOnExit
+	{
+		CollabController*  self;
+		const std::string& path;
+		~FlushOnExit() { self->flushDeferredCreate(path); }
+	} flushOnExit{ this, path };
+
 	if (accepted) return;
 
 	// The asset exists on this machine either way — the file was written before
@@ -2255,6 +2292,25 @@ void CollabController::onOwnCreateAnswered(
 		reason == Reason::NotPermitted? "the host did not permit it" : "the host refused it";
 	m_assetNotice = std::string("Your new asset stays local: ") + why + ".";
 	Logger::Log(Logger::LogLevel::Warning, ("Collab: create refused — " + m_assetNotice).c_str());
+}
+
+void CollabController::flushDeferredCreate(const std::string& path)
+{
+	for (auto it = m_deferredCreates.begin(); it != m_deferredCreates.end(); )
+	{
+		if (it->path != path) { ++it; continue; }
+		const DeferredCreate d = std::move(*it);
+		it = m_deferredCreates.erase(it);
+		if (!m_onRemoteAsset) continue;
+		// By now our own create for this path has been answered: either we lost
+		// and moved our file to the suggested name, or it was refused and the
+		// path is not ours to keep. Writing the winner's bytes here no longer
+		// destroys anything.
+		m_applyingRemoteAsset = true;
+		m_onRemoteAsset(d.path, d.bytes);
+		m_applyingRemoteAsset = false;
+		noteAssetCreated(d.who, d.path);
+	}
 }
 
 void CollabController::noteAssetCreated(HE::Net::ParticipantId who,
