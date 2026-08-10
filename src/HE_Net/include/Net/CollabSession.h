@@ -59,7 +59,13 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // v6: participants choose their own colour, and the host assigns the final one.
 // A v5 peer neither states a preference nor reads the answer, so it would draw
 // everyone in a colour nobody else agrees with — the one thing a colour is for.
-inline constexpr std::uint16_t kCollabProtocolVersion = 6;
+// v7: an asset frame says whether it CREATES the asset or updates one that
+// already exists, and the host can refuse a create or arbitrate a delete or a
+// rename. The intent is one byte in front of the subject, so a v6 peer would
+// read it as the subject's top byte and then address a lock nobody holds —
+// silently, on every asset transfer. Hence a version rather than a tolerated
+// difference.
+inline constexpr std::uint16_t kCollabProtocolVersion = 7;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -411,15 +417,49 @@ public:
     //
     // The subject is the same opaque 64-bit id used for locks, so an asset and
     // an entity are arbitrated by exactly the same table.
+    // What an asset frame is doing. Carried on the wire rather than inferred
+    // from `fs::exists` at the receiver: the two answers differ during a race,
+    // and the sender is the only side that knows which it meant.
+    enum class AssetIntent : std::uint8_t {
+        Update = 0,   // the asset exists on both sides; these are its new bytes
+        Create = 1,   // it does not exist yet — the host arbitrates the name
+    };
+
+    // What a participant wants done to an asset that already exists. Unlike a
+    // create, neither can be settled by a rule: they destroy or move someone
+    // else's work, so the host is ASKED and a human answers.
+    enum class AssetOp : std::uint8_t {
+        Delete = 0,
+        Rename = 1,
+    };
+
+    // Why the host would not take a create. Spelled out because the creator has
+    // the file on their disk either way and has to be told which it was — a
+    // refusal that only says "no" leaves them with a local asset nobody else
+    // will ever see.
+    enum class AssetRejectReason : std::uint8_t {
+        None        = 0,
+        NameTaken   = 1,   // something already lives at that path
+        NotSyncable = 2,   // an asset kind that does not travel (mesh, audio, …)
+        TooLarge    = 3,
+        BadPath     = 4,   // leaves the project — see HE::isRelativePathContained
+        RateLimited = 5,
+        NotPermitted = 6,
+    };
+
     struct AssetUpdate {
         std::uint64_t             subject = 0;
         std::string               path;      // project-relative
         std::vector<std::uint8_t> bytes;
+        AssetIntent               intent = AssetIntent::Update;
     };
 
     // Publish a saved asset. Ignored unless we hold the lock on `subject`.
     bool sendAsset(std::uint64_t subject, const std::string& path,
                    const std::vector<std::uint8_t>& bytes);
+    // The same, for a frame that is not an ordinary save — the caller fills in
+    // the intent. The three-argument form above is this one with Update.
+    bool sendAsset(const AssetUpdate& a);
 
     // A remote peer saved an asset — the editor writes it and reloads.
     void onAssetUpdated(std::function<void(ParticipantId, const AssetUpdate&)> fn) {
@@ -713,6 +753,9 @@ private:
         std::string               path;
         std::vector<std::uint8_t> bytes;
         std::uint32_t             expected = 0;
+        // Carried from the Begin frame to the End frame: the receiver has to
+        // know what it was told when the last chunk lands, not re-guess then.
+        AssetIntent               intent = AssetIntent::Update;
     };
     std::vector<AssetAssembly> m_assetAssembly;
 

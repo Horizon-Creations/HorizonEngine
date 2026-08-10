@@ -44,6 +44,19 @@ constexpr MessageId kMsgDocDeltasRelay    = kFirstUserMessage + 25;  // host →
 constexpr MessageId kMsgLockQuery         = kFirstUserMessage + 26;  // client → host
 constexpr MessageId kMsgLockQueryResult   = kFirstUserMessage + 27;  // host → one client
 constexpr MessageId kMsgRemoved           = kFirstUserMessage + 28;  // host → one client
+// ── Asset creation and the two operations that need a human ──
+// A create is small enough to travel whole (an authored stub is bytes, not
+// megabytes), so it does NOT use the Begin/Chunk/End machinery — that exists
+// for a saved asset which can be any size.
+constexpr MessageId kMsgAssetCreate       = kFirstUserMessage + 29;  // client → host
+constexpr MessageId kMsgAssetCreateRelay  = kFirstUserMessage + 30;  // host → clients
+constexpr MessageId kMsgAssetCreateResult = kFirstUserMessage + 31;  // host → one client
+// Delete and rename are REQUESTS. Three ids because the three steps have three
+// different audiences: one asks, the host answers that one, and only then does
+// everybody hear what happened.
+constexpr MessageId kMsgAssetOpRequest    = kFirstUserMessage + 32;  // client → host
+constexpr MessageId kMsgAssetOpVerdict    = kFirstUserMessage + 33;  // host → one client
+constexpr MessageId kMsgAssetOpApply      = kFirstUserMessage + 34;  // host → clients
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -1427,28 +1440,36 @@ void CollabSession::handleStructuralRelay(BitReader& r) {
 
 bool CollabSession::sendAsset(std::uint64_t subject, const std::string& path,
                               const std::vector<std::uint8_t>& bytes) {
-    if (!m_net || !m_joined) return false;
-    // Same authority rule as transforms: you may only publish what you hold.
-    if (!ownsLock(subject)) {
-        // The everyday cause of "my change did not show up for the others":
-        // the asset was saved without holding its lock.
-        HE_LOG_WARN(Net, "Not sending asset \"%s\": we do not hold lock 0x%016llx",
-                    path.c_str(), static_cast<unsigned long long>(subject));
-        return false;
-    }
-    if (bytes.size() > m_cfg.maxSnapshotBytes) {
-        HE_LOG_ERROR(Net, "Not sending asset \"%s\": %s exceeds the %s limit",
-                     path.c_str(), detail::logBytes(bytes.size()).c_str(),
-                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
-        return false;
-    }
-    HE_LOG_INFO(Net, "Sending asset \"%s\" (%s)", path.c_str(),
-                detail::logBytes(bytes.size()).c_str());
-
     AssetUpdate a;
     a.subject = subject;
     a.path    = path;
     a.bytes   = bytes;
+    a.intent  = AssetIntent::Update;   // a save, which is what this form is for
+    return sendAsset(a);
+}
+
+bool CollabSession::sendAsset(const AssetUpdate& a) {
+    const std::string& path = a.path;
+    if (!m_net || !m_joined) return false;
+    // Same authority rule as transforms: you may only publish what you hold.
+    // A CREATE is the exception and says so: nobody can hold the lock on an
+    // asset that does not exist yet, and the host arbitrates it instead.
+    if (a.intent != AssetIntent::Create && !ownsLock(a.subject)) {
+        // The everyday cause of "my change did not show up for the others":
+        // the asset was saved without holding its lock.
+        HE_LOG_WARN(Net, "Not sending asset \"%s\": we do not hold lock 0x%016llx",
+                    path.c_str(), static_cast<unsigned long long>(a.subject));
+        return false;
+    }
+    if (a.bytes.size() > m_cfg.maxSnapshotBytes) {
+        HE_LOG_ERROR(Net, "Not sending asset \"%s\": %s exceeds the %s limit",
+                     path.c_str(), detail::logBytes(a.bytes.size()).c_str(),
+                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
+        return false;
+    }
+    HE_LOG_INFO(Net, "Sending asset \"%s\" (%s%s)", path.c_str(),
+                detail::logBytes(a.bytes.size()).c_str(),
+                a.intent == AssetIntent::Create ? ", new" : "");
 
     if (m_role == NetRole::Host) {
         for (const ConnectionId c : m_net->connections()) sendAssetChunks(c, m_localId, a);
@@ -1472,6 +1493,9 @@ void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
 
     BitWriter begin;
     if (stamped) begin.writeUInt32(from);
+    // Ahead of the subject, and the reason v7 exists: a v6 reader would take
+    // this byte for the subject's most significant one.
+    begin.writeByte(static_cast<std::uint8_t>(a.intent));
     begin.writeUInt64(a.subject);
     begin.writeString(a.path);
     begin.writeUInt32(total);
@@ -1528,6 +1552,7 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
     asm_.sender   = sender;
     asm_.subject  = header.subject;
     asm_.path     = header.path;
+    asm_.intent   = header.intent;
     asm_.expected = total;
     asm_.bytes.reserve(total);
 
@@ -1543,6 +1568,12 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
 bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
                                     std::uint32_t& outTotal,
                                     std::uint32_t& outChunks) const {
+    std::uint8_t intent = 0;
+    if (!r.readByte(intent)) return false;
+    // An unknown intent is refused rather than treated as Update: a future
+    // version may add one whose bytes must NOT be written as an ordinary save.
+    if (intent > static_cast<std::uint8_t>(AssetIntent::Create)) return false;
+    out.intent = static_cast<AssetIntent>(intent);
     return r.readUInt64(out.subject) && r.readString(out.path) &&
            r.readUInt32(outTotal) && r.readUInt32(outChunks);
 }
@@ -1563,6 +1594,7 @@ void CollabSession::handleAssetRelay(BitReader& r) {
     asm_.sender   = sender;
     asm_.subject  = header.subject;
     asm_.path     = header.path;
+    asm_.intent   = header.intent;
     asm_.expected = total;
     asm_.bytes.reserve(total);
 
@@ -1626,6 +1658,9 @@ void CollabSession::installAssetChunkHandlers() {
                 up.subject = a.subject;
                 up.path    = a.path;
                 up.bytes   = a.bytes;
+                // Forwarded as it arrived, so the relay the host sends on says
+                // the same thing the original did.
+                up.intent  = a.intent;
 
                 if (m_onAsset) m_onAsset(a.sender, up);
 

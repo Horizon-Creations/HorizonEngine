@@ -999,6 +999,46 @@ TEST_CASE("CollabSession: a saved asset reaches the other side intact")
     CHECK(got.subject == kAsset);
     CHECK(got.path == "Content/Materials/Steel.hmat");
     CHECK(got.bytes == payload);   // byte-for-byte, or the asset would be corrupt
+    // An ordinary save says so on the wire (v7). It matters that this is the
+    // DEFAULT and not merely the common case: a receiver acts differently on a
+    // create, and a frame that forgot to say would be taken for one.
+    CHECK(got.intent == CollabSession::AssetIntent::Update);
+}
+
+TEST_CASE("v7: the asset header's intent survives the round trip, and a bad one is refused")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'4321ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    // The byte sits IN FRONT of the subject, which is exactly why v6 and v7
+    // cannot talk: a v6 reader would fold it into the subject's top byte and
+    // then arbitrate a lock nobody holds. Here it simply has to survive.
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a;
+        arrived = true;
+    });
+
+    const auto payload = makeBlob(64);
+    CollabSession::AssetUpdate out;
+    out.subject = kAsset;
+    out.path    = "Content/Materials/New.hasset";
+    out.bytes   = payload;
+    out.intent  = CollabSession::AssetIntent::Create;
+    REQUIRE(p->client->sendAsset(out));
+    p->pump(6);
+
+    REQUIRE(arrived);
+    CHECK(got.intent == CollabSession::AssetIntent::Create);
+    CHECK(got.subject == kAsset);
+    CHECK(got.bytes == payload);
 }
 
 TEST_CASE("CollabSession: a large asset survives chunking")
