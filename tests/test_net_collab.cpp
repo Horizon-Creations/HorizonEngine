@@ -1378,7 +1378,7 @@ TEST_CASE("CollabSession: a document delta batch reaches the other side intact")
     std::uint64_t gotSubject = 0;
     std::string   gotPath;
     p->host->onDocDeltas([&](ParticipantId, std::uint64_t s, const std::string& path,
-                             const std::vector<CollabSession::DocDelta>& batch) {
+                             const std::vector<CollabSession::DocDelta>& batch, std::uint32_t) {
         gotSubject = s; gotPath = path; got = batch;
     });
 
@@ -1390,7 +1390,7 @@ TEST_CASE("CollabSession: a document delta batch reaches the other side intact")
     batch.push_back(rm);
     batch[1].scope = 1;                          // the widget's logic graph
 
-    REQUIRE(p->client->sendDocDeltas(kAsset, "Content/UI/Menu.hasset", batch));
+    REQUIRE(p->client->sendDocDeltas(kAsset, "Content/UI/Menu.hasset", batch, 1));
     p->pump(6);
 
     REQUIRE(got.size() == 3);
@@ -1418,12 +1418,12 @@ TEST_CASE("CollabSession: editing a document you do not hold is refused")
 
     bool arrived = false;
     p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
-                             const std::vector<CollabSession::DocDelta>&) {
+                             const std::vector<CollabSession::DocDelta>&, std::uint32_t) {
         arrived = true;
     });
 
     std::vector<CollabSession::DocDelta> batch{ upsert(0, 1, "{}") };
-    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch, 1));
     p->pump(6);
     CHECK_FALSE(arrived);
 }
@@ -1440,7 +1440,7 @@ TEST_CASE("CollabSession: a forged document delta is rejected by the host, not m
 
     bool hostSaw = false;
     p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
-                             const std::vector<CollabSession::DocDelta>&) {
+                             const std::vector<CollabSession::DocDelta>&, std::uint32_t) {
         hostSaw = true;
     });
 
@@ -1471,7 +1471,7 @@ TEST_CASE("CollabSession: a truncated document delta frame is rejected whole")
 
     bool hostSaw = false;
     p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
-                             const std::vector<CollabSession::DocDelta>&) {
+                             const std::vector<CollabSession::DocDelta>&, std::uint32_t) {
         hostSaw = true;
     });
 
@@ -1502,7 +1502,7 @@ TEST_CASE("CollabSession: an oversized item is refused rather than truncated")
 
     bool arrived = false;
     p->host->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
-                             const std::vector<CollabSession::DocDelta>&) {
+                             const std::vector<CollabSession::DocDelta>&, std::uint32_t) {
         arrived = true;
     });
 
@@ -1511,7 +1511,7 @@ TEST_CASE("CollabSession: an oversized item is refused rather than truncated")
     // its whole-file fallback instead.
     std::vector<CollabSession::DocDelta> batch{
         upsert(0, 1, std::string(200 * 1024, 'x')) };
-    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    CHECK_FALSE(p->client->sendDocDeltas(kAsset, "Content/M.hasset", batch, 1));
     p->pump(4);
     CHECK_FALSE(arrived);
 }
@@ -1528,14 +1528,62 @@ TEST_CASE("CollabSession: the host's own document edit reaches clients")
 
     std::vector<CollabSession::DocDelta> got;
     p->client->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
-                               const std::vector<CollabSession::DocDelta>& b) { got = b; });
+                               const std::vector<CollabSession::DocDelta>& b, std::uint32_t) { got = b; });
 
     std::vector<CollabSession::DocDelta> batch{ upsert(0, 42, R"({"id":42})") };
-    REQUIRE(p->host->sendDocDeltas(kAsset, "Content/M.hasset", batch));
+    REQUIRE(p->host->sendDocDeltas(kAsset, "Content/M.hasset", batch, 1));
     p->pump(6);
 
     REQUIRE(got.size() == 1);
     CHECK(got[0].itemId == 42);
+}
+
+TEST_CASE("v9: the revision travels with a delta and with a whole file")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'2007ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    // Both channels carry the same document, so both have to carry the same
+    // number — that is the only thing that lets a receiver order them against
+    // each other. This is the wire half; REFUSING the older one is the editor's
+    // job (CollabController::acceptRevision), and that is where "applied for a
+    // moment, then snapped back" actually happened.
+    std::uint32_t deltaRev = 0;
+    p->client->onDocDeltas([&](ParticipantId, std::uint64_t, const std::string&,
+                               const std::vector<CollabSession::DocDelta>&,
+                               std::uint32_t rev) { deltaRev = rev; });
+
+    std::vector<CollabSession::DocDelta> batch{ upsert(0, 7, R"({"id":7})") };
+    REQUIRE(p->host->sendDocDeltas(kAsset, "Content/M.hasset", batch, 12));
+    p->pump(6);
+    CHECK(deltaRev == 12);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->client->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a; arrived = true;
+    });
+
+    CollabSession::AssetUpdate out;
+    out.subject  = kAsset;
+    out.path     = "Content/M.hasset";
+    out.bytes    = makeBlob(128);
+    out.revision = 11;          // an OLDER statement about the same document
+    REQUIRE(p->host->sendAsset(out));
+    p->pump(6);
+
+    REQUIRE(arrived);
+    CHECK(got.revision == 11);
+    // The wire delivers it faithfully — deciding what is stale is not the
+    // transport's place. It is the pair of numbers that makes the decision
+    // possible at all, and before v9 neither frame carried one.
+    CHECK(got.revision < deltaRev);
 }
 
 // ─── Lock query ──────────────────────────────────────────────────────────────

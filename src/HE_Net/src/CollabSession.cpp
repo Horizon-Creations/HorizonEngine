@@ -1185,9 +1185,16 @@ void CollabSession::handleComponentsRelay(BitReader& r) {
 
 void CollabSession::writeDocDeltaBody(BitWriter& w, std::uint64_t subject,
                                       const std::string& path,
-                                      const std::vector<DocDelta>& batch) const {
+                                      const std::vector<DocDelta>& batch,
+                                      std::uint32_t revision) const {
     w.writeUInt64(subject);
     w.writeString(path);
+    // The holder's revision of this document. The same field sits on the asset
+    // frame, in the same relation to the path: the two channels carry the same
+    // document and had no way of being ordered against one another, so a whole
+    // file arriving late silently undid newer deltas — "applied for a moment,
+    // then snapped back".
+    w.writeUInt32(revision);
     w.writeUInt16(static_cast<std::uint16_t>(batch.size()));
     for (const DocDelta& d : batch) {
         w.writeByte(d.scope);
@@ -1200,9 +1207,11 @@ void CollabSession::writeDocDeltaBody(BitWriter& w, std::uint64_t subject,
 
 bool CollabSession::readDocDeltaBody(BitReader& r, std::uint64_t& subject,
                                      std::string& path,
-                                     std::vector<DocDelta>& out) const {
+                                     std::vector<DocDelta>& out,
+                                     std::uint32_t& revision) const {
     if (!r.readUInt64(subject)) return false;
     if (!r.readString(path)) return false;
+    if (!r.readUInt32(revision)) return false;
     std::uint16_t count = 0;
     if (!r.readUInt16(count)) return false;
     if (count > m_cfg.maxDocDeltas) return false;   // bounds what a peer can make us build
@@ -1223,7 +1232,8 @@ bool CollabSession::readDocDeltaBody(BitReader& r, std::uint64_t& subject,
 }
 
 bool CollabSession::sendDocDeltas(std::uint64_t subject, const std::string& path,
-                                  const std::vector<DocDelta>& batch) {
+                                  const std::vector<DocDelta>& batch,
+                                  std::uint32_t revision) {
     if (!m_net || !m_joined || batch.empty()) return false;
     // Same rule the transform and asset paths use: the lock is what makes an
     // overwrite safe, because it guarantees nobody else is editing this document.
@@ -1244,14 +1254,14 @@ bool CollabSession::sendDocDeltas(std::uint64_t subject, const std::string& path
     if (m_role == NetRole::Host) {
         BitWriter w;
         w.writeUInt32(m_localId);
-        writeDocDeltaBody(w, subject, path, batch);
+        writeDocDeltaBody(w, subject, path, batch, revision);
         m_net->broadcast(kMsgDocDeltasRelay, w);
         return true;
     }
     if (m_net->connections().empty()) return false;
 
     BitWriter w;
-    writeDocDeltaBody(w, subject, path, batch);   // no id — the host stamps it
+    writeDocDeltaBody(w, subject, path, batch, revision);   // no id — the host stamps it
     m_net->send(m_net->connections().front(), kMsgDocDeltasUpdate, w);
     return true;
 }
@@ -1263,7 +1273,8 @@ void CollabSession::handleDocDeltasUpdate(ConnectionId conn, BitReader& r) {
     std::uint64_t subject = 0;
     std::string   path;
     std::vector<DocDelta> batch;
-    if (!readDocDeltaBody(r, subject, path, batch)) return;
+    std::uint32_t revision = 0;
+    if (!readDocDeltaBody(r, subject, path, batch, revision)) return;
 
     // Re-check authority on arrival rather than trusting the sender — a client
     // that lost the lock (or never had it) must not be able to rewrite a
@@ -1271,11 +1282,14 @@ void CollabSession::handleDocDeltasUpdate(ConnectionId conn, BitReader& r) {
     const LockInfo* lock = lockFor(subject);
     if (!lock || lock->owner != sender) return;
 
-    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch);
+    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch, revision);
 
     BitWriter w;
     w.writeUInt32(sender);
-    writeDocDeltaBody(w, subject, path, batch);
+    // Relayed with the ORIGINATOR's revision, untouched: the host is a courier
+    // here, not an author, and renumbering would make every peer's ordering
+    // depend on which of them the host told first.
+    writeDocDeltaBody(w, subject, path, batch, revision);
     for (const ConnectionId other : m_net->connections()) {
         if (other != conn) m_net->send(other, kMsgDocDeltasRelay, w);
     }
@@ -1289,8 +1303,9 @@ void CollabSession::handleDocDeltasRelay(BitReader& r) {
     std::uint64_t subject = 0;
     std::string   path;
     std::vector<DocDelta> batch;
-    if (!readDocDeltaBody(r, subject, path, batch)) return;
-    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch);
+    std::uint32_t revision = 0;
+    if (!readDocDeltaBody(r, subject, path, batch, revision)) return;
+    if (m_onDocDeltas) m_onDocDeltas(sender, subject, path, batch, revision);
 }
 
 // ─── Lock query ──────────────────────────────────────────────────────────────
@@ -1512,6 +1527,9 @@ void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
     begin.writeByte(static_cast<std::uint8_t>(a.intent));
     begin.writeUInt64(a.subject);
     begin.writeString(a.path);
+    // Directly after the path, exactly where a delta frame carries it — the two
+    // have to be comparable, so they sit in the same relation to what they name.
+    begin.writeUInt32(a.revision);
     begin.writeUInt32(total);
     begin.writeUInt32(chunks);
     m_net->send(conn, kMsgAssetBegin, begin);
@@ -1573,6 +1591,7 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
     asm_.subject  = header.subject;
     asm_.path     = header.path;
     asm_.intent   = header.intent;
+    asm_.revision = header.revision;
     asm_.expected = total;
     asm_.bytes.reserve(total);
 
@@ -1595,6 +1614,7 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
     if (intent > static_cast<std::uint8_t>(AssetIntent::Create)) return false;
     out.intent = static_cast<AssetIntent>(intent);
     return r.readUInt64(out.subject) && r.readString(out.path) &&
+           r.readUInt32(out.revision) &&
            r.readUInt32(outTotal) && r.readUInt32(outChunks);
 }
 
@@ -1754,6 +1774,7 @@ void CollabSession::handleAssetRelay(BitReader& r) {
     asm_.subject  = header.subject;
     asm_.path     = header.path;
     asm_.intent   = header.intent;
+    asm_.revision = header.revision;
     asm_.expected = total;
     asm_.bytes.reserve(total);
 
@@ -1820,6 +1841,7 @@ void CollabSession::installAssetChunkHandlers() {
                 // Forwarded as it arrived, so the relay the host sends on says
                 // the same thing the original did.
                 up.intent  = a.intent;
+                up.revision = a.revision;
 
                 // A create is the one frame the host may refuse. Asked BEFORE
                 // anything is applied or forwarded: half the session having

@@ -721,6 +721,20 @@ private:
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
 	std::string   m_lockNotice;
 	std::string   m_assetNotice;
+	// One counter per document, used from both sides. As holder we increment it
+	// on every publish — deltas and whole files alike, since they describe the
+	// same document and have to be ordered against each other. As receiver we
+	// remember the highest we have applied and refuse anything at or below it.
+	//
+	// One map, not two: when a lock changes hands the new holder has been
+	// RECEIVING all along, so its number is already at least the old holder's
+	// and its first publish continues the sequence instead of restarting it —
+	// which would make every peer discard the new holder's work as stale.
+	std::unordered_map<std::string, std::uint32_t> m_docRevision;
+	// True when this frame is newer than everything applied for that document,
+	// and records it. False means drop it — which is the ordinary fate of a
+	// whole file that arrived behind newer deltas.
+	bool acceptRevision(const std::string& relativePath, std::uint32_t revision);
 	std::function<std::string(const std::string&)> m_localPathForKey;
 	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
 	                   const std::string&, bool)> m_onRemoteAssetOp;

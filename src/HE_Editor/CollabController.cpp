@@ -872,6 +872,15 @@ void CollabController::wireCallbacks()
 	m_collab->onAssetUpdated([this](HE::Net::ParticipantId who,
 	                                const HE::Net::CollabSession::AssetUpdate& a) {
 		if (!m_onRemoteAsset) return;
+		// THE fix for "applied for a moment, then snapped back". A whole file is
+		// a coarser statement about a document we may already have newer deltas
+		// for; applying it then would undo them. A create is exempt: it is the
+		// document's first version, so there is nothing it could be older than.
+		if (a.intent != HE::Net::CollabSession::AssetIntent::Create &&
+		    !acceptRevision(a.path, a.revision))
+		{
+			return;
+		}
 		// Guard the write: applying it hits ContentManager::saveAsset, whose
 		// notification would otherwise publish the same bytes straight back.
 		m_applyingRemoteAsset = true;
@@ -967,7 +976,9 @@ void CollabController::wireCallbacks()
 
 	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
 	                             const std::string& path,
-	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch) {
+	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch,
+	                             std::uint32_t revision) {
+		if (!acceptRevision(path, revision)) return;
 		// Straight through to the editor, which routes by path to whichever panel
 		// holds that asset. Deliberately NOT written to disk: the point of a delta
 		// is that the receiving panel patches the document it is already showing,
@@ -1737,12 +1748,36 @@ void CollabController::forgetAssetEditSession(const std::string& relativePath)
 	m_assetSubjectPaths.erase(assetSubject(relativePath));
 }
 
+bool CollabController::acceptRevision(const std::string& relativePath,
+                                      std::uint32_t revision)
+{
+	if (relativePath.empty()) return false;
+
+	// Revision 0 means "unversioned" — a create, or a frame from a peer that
+	// does not number them. Applied, but it never lowers what we have seen: a
+	// zero must not be able to reopen the door for older frames behind it.
+	if (revision == 0) return true;
+
+	std::uint32_t& seen = m_docRevision[relativePath];
+	if (revision <= seen)
+	{
+		// Not an error, and deliberately not a warning: with two channels for
+		// one document, a late whole file arriving behind newer deltas is the
+		// ORDINARY case. Refusing it quietly is the entire mechanism.
+		return false;
+	}
+	seen = revision;
+	return true;
+}
+
 bool CollabController::publishDocDeltas(
 	const std::string& relativePath,
 	const std::vector<HE::Net::CollabSession::DocDelta>& batch)
 {
 	if (!m_collab || !inSession() || batch.empty()) return false;
-	return m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch);
+	// One step per publish, whichever channel it goes out on.
+	const std::uint32_t rev = ++m_docRevision[relativePath];
+	return m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch, rev);
 }
 
 std::string CollabController::projectRelativeAssetPath(const std::string& absolutePath,
@@ -1850,7 +1885,17 @@ void CollabController::publishAsset(const std::string& relativePath,
 		if (!m_collab->ownsLock(subject)) return; // a client must await the grant
 	}
 
-	m_collab->sendAsset(subject, relativePath, bytes);
+	// The same counter the deltas use. A whole file is simply a coarser
+	// statement about the same document, so it takes the next number rather
+	// than a numbering of its own — that is what lets the receiver order the two
+	// against each other at all.
+	HE::Net::CollabSession::AssetUpdate up;
+	up.subject  = subject;
+	up.path     = relativePath;
+	up.bytes    = bytes;
+	up.intent   = HE::Net::CollabSession::AssetIntent::Update;
+	up.revision = ++m_docRevision[relativePath];
+	m_collab->sendAsset(up);
 }
 
 bool CollabController::requestOrPerformAssetOp(

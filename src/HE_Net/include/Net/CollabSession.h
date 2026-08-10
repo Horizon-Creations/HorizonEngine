@@ -69,7 +69,12 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // travels as an op of its own. A v7 peer stops reading one byte early, so every
 // request would look malformed to it and be dropped — the requester would sit
 // waiting for a verdict nobody is going to give.
-inline constexpr std::uint16_t kCollabProtocolVersion = 8;
+// v9: asset frames and document deltas carry the holder's REVISION, and a
+// receiver refuses anything it has already moved past. Without it the two
+// channels for one document had no order between them: a whole file arriving
+// after newer deltas overwrote them, so a peer's edit appeared for a moment and
+// then snapped back. A v8 peer writes neither number and misreads both frames.
+inline constexpr std::uint16_t kCollabProtocolVersion = 9;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -461,6 +466,12 @@ public:
         std::string               path;      // project-relative
         std::vector<std::uint8_t> bytes;
         AssetIntent               intent = AssetIntent::Update;
+        // The holder's revision, the same counter the document deltas carry.
+        // These are two channels for one document with no ordering between
+        // them: a whole file that arrived after newer deltas used to overwrite
+        // them, and the peer's edit appeared for a moment and then snapped back.
+        // The receiver refuses anything at or below what it has already applied.
+        std::uint32_t             revision = 0;
     };
 
     // Publish a saved asset. Ignored unless we hold the lock on `subject`.
@@ -579,12 +590,21 @@ public:
     // to the whole-file AssetUpdate path: a coarser update is fine, a truncated
     // one is not (BitWriter::writeString silently cuts at 65535 bytes, which
     // would land as corrupt JSON on the peer).
+    // `revision` is the SENDER's count for this document — it holds the lock, so
+    // it is the single source of truth and its numbering is the only one. See
+    // onDocDeltas for what the receiver does with it.
     bool sendDocDeltas(std::uint64_t subject, const std::string& path,
-                       const std::vector<DocDelta>& batch);
+                       const std::vector<DocDelta>& batch, std::uint32_t revision);
 
+    // The revision comes through so the receiver can refuse anything it has
+    // already moved past. Deltas and whole files are two channels carrying one
+    // document with no ordering between them: without this a file that arrived
+    // late overwrote newer deltas, and the edit appeared for a moment and then
+    // snapped back.
     void onDocDeltas(std::function<void(ParticipantId, std::uint64_t subject,
                                         const std::string& path,
-                                        const std::vector<DocDelta>&)> fn) {
+                                        const std::vector<DocDelta>&,
+                                        std::uint32_t revision)> fn) {
         m_onDocDeltas = std::move(fn);
     }
 
@@ -762,9 +782,10 @@ private:
     void handleDocDeltasUpdate(ConnectionId conn, BitReader& r);   // host
     void handleDocDeltasRelay(BitReader& r);                       // client
     void writeDocDeltaBody(BitWriter& w, std::uint64_t subject, const std::string& path,
-                           const std::vector<DocDelta>& batch) const;
+                           const std::vector<DocDelta>& batch,
+                           std::uint32_t revision) const;
     bool readDocDeltaBody(BitReader& r, std::uint64_t& subject, std::string& path,
-                          std::vector<DocDelta>& out) const;
+                          std::vector<DocDelta>& out, std::uint32_t& revision) const;
 
     // Lock query
     void handleLockQuery(ConnectionId conn, BitReader& r);         // host
@@ -845,11 +866,12 @@ private:
         // Carried from the Begin frame to the End frame: the receiver has to
         // know what it was told when the last chunk lands, not re-guess then.
         AssetIntent               intent = AssetIntent::Update;
+        std::uint32_t             revision = 0;
     };
     std::vector<AssetAssembly> m_assetAssembly;
 
     std::function<void(ParticipantId, std::uint64_t, const std::string&,
-                       const std::vector<DocDelta>&)>          m_onDocDeltas;
+                       const std::vector<DocDelta>&, std::uint32_t)> m_onDocDeltas;
     std::function<void(std::uint64_t, bool, ParticipantId, const std::string&)>
                                                                 m_onLockQuery;
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
