@@ -466,6 +466,32 @@ public:
         m_onAsset = std::move(fn);
     }
 
+    // ── Host: may this create go ahead? ──
+    // HorizonNet cannot answer this itself — whether a name is free, whether the
+    // kind of asset travels at all, whether the path stays inside the project
+    // are all questions about the editor's filesystem and asset types, and this
+    // layer knows none of them. So it asks, once, before applying or relaying.
+    //
+    // Return false to refuse: fill `reason`, and `suggestedPath` when there is a
+    // sensible alternative (a free name next to the taken one). The creator is
+    // told either way — they have the file locally regardless, and a silent
+    // refusal would leave them with an asset nobody else will ever see.
+    //
+    // Not installed = everything is accepted, which is what a host that does not
+    // care should get rather than a session where creates vanish.
+    using CreatePolicy = std::function<bool(const AssetUpdate&,
+                                            AssetRejectReason& reason,
+                                            std::string& suggestedPath)>;
+    void setCreatePolicy(CreatePolicy fn) { m_createPolicy = std::move(fn); }
+
+    // The creator's side of the same exchange. `accepted` false means the asset
+    // exists on this machine and nowhere else.
+    void onAssetCreateResult(
+        std::function<void(const std::string& path, bool accepted,
+                           AssetRejectReason, const std::string& suggestedPath)> fn) {
+        m_onCreateResult = std::move(fn);
+    }
+
     // ── Document deltas ──────────────────────────────────────────────────────
     // AssetUpdate replicates a whole authored file; this replicates ONE ITEM
     // inside one — a graph node, a link, a UI element. That is what makes an
@@ -690,6 +716,9 @@ private:
     // Assets
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
     void handleAssetRelay(BitReader& r);                           // client
+    void handleAssetCreateResult(BitReader& r);                    // client
+    // Host: run the policy and answer the creator. True = go ahead and relay.
+    bool arbitrateCreate(ConnectionId conn, const AssetUpdate& a);
     void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
     void installAssetChunkHandlers();
     bool readAssetHeader(BitReader& r, AssetUpdate& out, std::uint32_t& outTotal,
@@ -766,6 +795,9 @@ private:
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
+    CreatePolicy                                               m_createPolicy;
+    std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
+                                                               m_onCreateResult;
     std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;
     std::function<void(const LockInfo&, bool)>         m_onLockChanged;
     std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;

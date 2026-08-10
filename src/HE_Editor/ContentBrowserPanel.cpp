@@ -567,6 +567,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static char        s_renameBuf[256]   = {};
 		static bool        s_openRenamePopup  = false;
 		static bool        s_renameIsCreate   = false; // naming a freshly created item
+		// A created asset is announced to the session when its name is FINAL,
+		// not when the file appears. tryCreate writes "NewMaterial.hasset" and
+		// then opens the naming dialog; publishing at the write would put the
+		// placeholder on every peer and, a second later, a rename — two events
+		// for one user action, and the rename half needs the host's approval.
+		// Holds the path from the write until the dialog resolves, whichever way
+		// it resolves.
+		static std::string s_pendingCreatePublish;
 		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
 		static bool        s_rightClickOnItem = false;
 		// Delete-folder confirmation: the dialog outlives the frame its context
@@ -1171,6 +1179,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_renameTarget    = path;
 				s_renameIsFolder  = false;
 				s_renameIsCreate  = true;
+				// Announced once the dialog below settles on the final name.
+				s_pendingCreatePublish = path;
 				// A script is born in the project's fixed language (Lua or Python) —
 				// no per-asset language picker, so this stays -1 (combo hidden).
 				s_renameScriptLang = -1;
@@ -1625,6 +1635,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						}
 						if (s_selectedItem == s_renameTarget)
 							s_selectedItem = newPath.string();
+						// The name the session will hear about. Only meaningful on
+						// create; on a rename this is empty and stays so.
+						if (s_renameIsCreate && !s_pendingCreatePublish.empty())
+							s_pendingCreatePublish = newPath.string();
 						if (!s_renameIsFolder)
 						{
 							for (auto& t : ctx.tabs)
@@ -1669,6 +1683,30 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 
 			ImGui::EndPopup();
+		}
+		// ── The created asset is announced HERE ───────────────────────────
+		// After the popup block, so it runs however the dialog ended: OK with a
+		// new name, Cancel keeping the default, or Escape — which closes a modal
+		// without running either branch and used to leave s_renameTarget and
+		// s_renameIsCreate standing. Waiting for it to be closed AND not merely
+		// waiting to open (the content-refresh gate can hold it back a frame) is
+		// what keeps this from firing on the frame between the two.
+		else if (!s_pendingCreatePublish.empty() && !s_openRenamePopup)
+		{
+			if (s_renameIsCreate)   // Escape: neither branch cleared this
+			{
+				s_renameTarget.clear();
+				s_renameIsCreate   = false;
+				s_renameScriptLang = -1;
+			}
+			// A new asset has no referrers and no lock, so there is nothing to
+			// hold and nothing to retarget — the host decides whether the name
+			// is free and hands it on.
+			if (ctx.collab && ctx.contentManager)
+				ctx.collab->publishAssetCreate(
+					ctx.contentManager->toContentRelativePath(s_pendingCreatePublish),
+					s_pendingCreatePublish);
+			s_pendingCreatePublish.clear();
 		}
 
 		// ── Delete-asset confirmation ─────────────────────────────────────

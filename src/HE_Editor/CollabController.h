@@ -353,6 +353,25 @@ public:
 	// saving does not silently do nothing just because the user never selected
 	// the asset in a way that took a lock.
 	void publishAsset(const std::string& relativePath, const std::string& fullPath);
+	// Announce a NEWLY created asset — same two arguments as publishAsset, and
+	// called at the moment the naming dialog closes, which is when the path is
+	// final. No-op outside a session, for an excluded type, or while a remote
+	// create is being applied.
+	void publishAssetCreate(const std::string& relativePath, const std::string& fullPath);
+
+	// ── New assets that arrived from the session ──
+	// Collected rather than announced one at a time: Save All is a single user
+	// action that can produce a dozen, and a dozen notices for one keystroke is
+	// what makes people stop reading them. The UI drains this.
+	struct CreatedAssetNotice
+	{
+		std::string   path;        // project-relative
+		std::string   byName;      // who made it, for the line of text
+		std::uint64_t atMs = 0;
+	};
+	const std::vector<CreatedAssetNotice>& createdAssetNotices() const
+	{ return m_createdNotices; }
+	void clearCreatedAssetNotices() { m_createdNotices.clear(); }
 
 	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
 	// the file and reloads — CollabController does not touch the ContentManager.
@@ -361,6 +380,21 @@ public:
 	{
 		m_onRemoteAsset = std::move(fn);
 	}
+
+	// Session key → local absolute path, or empty if it resolves to nothing that
+	// belongs to this project. Installed by the editor, which owns the content
+	// root and the Source tree; arbitrating a create needs to ask the disk
+	// whether a name is free, and this controller has no other way to look.
+	void setLocalPathResolver(std::function<std::string(const std::string&)> fn)
+	{
+		m_localPathForKey = std::move(fn);
+	}
+
+	// One line about the last thing that happened to an asset of OURS — a create
+	// the host refused, or a name it changed. Read and cleared by the UI, same
+	// as lockNotice.
+	const std::string& assetNotice() const { return m_assetNotice; }
+	void clearAssetNotice() { m_assetNotice.clear(); }
 
 	// ── Locks ──
 	bool requestLock(std::uint64_t subject);
@@ -461,6 +495,27 @@ public:
 	HE::Net::ParticipantId        localParticipant() const;
 
 private:
+	// Host side of a create: the questions HorizonNet cannot answer — is the
+	// name free, does this kind of asset travel, does the path stay inside the
+	// project. False refuses, and fills `reason` (plus a free name when there
+	// is one, so the creator can retry instead of losing the asset).
+	bool acceptRemoteCreate(const HE::Net::CollabSession::AssetUpdate& a,
+	                        HE::Net::CollabSession::AssetRejectReason& reason,
+	                        std::string& suggestedPath);
+	// Creator side: the host's answer to something we made.
+	void onOwnCreateAnswered(const std::string& path, bool accepted,
+	                         HE::Net::CollabSession::AssetRejectReason reason,
+	                         const std::string& suggestedPath);
+	void noteAssetCreated(HE::Net::ParticipantId who, const std::string& path);
+
+	std::vector<CreatedAssetNotice> m_createdNotices;
+	// The absolute path of the create we are waiting on an answer for, and
+	// whether we already retried it once. One retry only: a name that is taken
+	// twice running means somebody is creating in a loop, and answering that
+	// with another attempt would join them.
+	std::string m_pendingCreateFull;
+	bool        m_createRetried = false;
+
 	void teardown();
 	// Give the router and the directory back what this session took: the port
 	// forward, the IPv6 pinhole, the directory entry. `blocking` decides whether
@@ -574,6 +629,8 @@ private:
 
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
 	std::string   m_lockNotice;
+	std::string   m_assetNotice;
+	std::function<std::string(const std::string&)> m_localPathForKey;
 	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same

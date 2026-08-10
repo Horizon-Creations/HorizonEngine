@@ -12,6 +12,7 @@
 #include <Net/SessionDirectory.h>
 #include <Net/Socket.h>
 #include <Net/TcpTransport.h>
+#include <Platform/PathSafety.h>   // a create's path must stay in the project
 
 #include <algorithm>
 #include <cctype>
@@ -868,7 +869,7 @@ void CollabController::wireCallbacks()
 		}
 	});
 
-	m_collab->onAssetUpdated([this](HE::Net::ParticipantId,
+	m_collab->onAssetUpdated([this](HE::Net::ParticipantId who,
 	                                const HE::Net::CollabSession::AssetUpdate& a) {
 		if (!m_onRemoteAsset) return;
 		// Guard the write: applying it hits ContentManager::saveAsset, whose
@@ -876,7 +877,28 @@ void CollabController::wireCallbacks()
 		m_applyingRemoteAsset = true;
 		m_onRemoteAsset(a.path, a.bytes);
 		m_applyingRemoteAsset = false;
+		// A create is news; a save is not. Collected rather than announced one
+		// by one — Save All is one action and would otherwise be a burst.
+		if (a.intent == HE::Net::CollabSession::AssetIntent::Create)
+			noteAssetCreated(who, a.path);
 	});
+
+	// ── Host: is this create allowed? ──
+	// Installed unconditionally: a client never gets asked, and a host that
+	// later becomes one would otherwise have no policy at all.
+	m_collab->setCreatePolicy(
+		[this](const HE::Net::CollabSession::AssetUpdate& a,
+		       HE::Net::CollabSession::AssetRejectReason& reason,
+		       std::string& suggested) {
+			return acceptRemoteCreate(a, reason, suggested);
+		});
+
+	m_collab->onAssetCreateResult(
+		[this](const std::string& path, bool accepted,
+		       HE::Net::CollabSession::AssetRejectReason reason,
+		       const std::string& suggested) {
+			onOwnCreateAnswered(path, accepted, reason, suggested);
+		});
 
 	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
 	                             const std::string& path,
@@ -1741,6 +1763,183 @@ void CollabController::publishAsset(const std::string& relativePath,
 	}
 
 	m_collab->sendAsset(subject, relativePath, bytes);
+}
+
+bool CollabController::acceptRemoteCreate(
+	const HE::Net::CollabSession::AssetUpdate& a,
+	HE::Net::CollabSession::AssetRejectReason& reason,
+	std::string& suggestedPath)
+{
+	using Reason = HE::Net::CollabSession::AssetRejectReason;
+
+	// 1. Does it stay in the project? Checked first because it is the only one
+	//    whose failure would already have done damage by the time we noticed.
+	if (a.path.empty() || !HE::isRelativePathContained(a.path))
+	{
+		reason = Reason::BadPath;
+		return false;
+	}
+	// 2. Is this a kind of asset that travels at all? The sender checked too;
+	//    the host checks again because the sender is not the authority.
+	if (!isSyncableAsset(a.path))
+	{
+		reason = Reason::NotSyncable;
+		return false;
+	}
+	// 3. Is the name free HERE? The host's disk is the arbiter — that is the
+	//    whole reason creates are arbitrated rather than simply relayed.
+	if (!m_localPathForKey)
+	{
+		// No way to resolve the path means no way to check, and accepting on a
+		// question we did not ask would be the wrong kind of optimism.
+		reason = Reason::NotPermitted;
+		return false;
+	}
+	const std::string full = m_localPathForKey(a.path);
+	if (full.empty())
+	{
+		reason = Reason::BadPath;
+		return false;
+	}
+	std::error_code ec;
+	if (std::filesystem::exists(full, ec))
+	{
+		reason = Reason::NameTaken;
+		// Offer the next free name rather than only refusing: two people
+		// creating a material at the same moment both get one, instead of the
+		// slower of them losing theirs.
+		const std::filesystem::path p(a.path);
+		const std::string stem = p.stem().string();
+		const std::string ext  = p.extension().string();
+		const std::filesystem::path dir = p.parent_path();
+		for (int n = 2; n < 1000; ++n)
+		{
+			const std::filesystem::path cand = dir / (stem + std::to_string(n) + ext);
+			const std::string candFull = m_localPathForKey(cand.generic_string());
+			if (!candFull.empty() && !std::filesystem::exists(candFull, ec))
+			{
+				suggestedPath = cand.generic_string();
+				break;
+			}
+		}
+		return false;
+	}
+	return true;
+}
+
+void CollabController::onOwnCreateAnswered(
+	const std::string& path, bool accepted,
+	HE::Net::CollabSession::AssetRejectReason reason,
+	const std::string& suggestedPath)
+{
+	using Reason = HE::Net::CollabSession::AssetRejectReason;
+	if (accepted)
+	{
+		m_pendingCreateFull.clear();
+		m_createRetried = false;
+		return;
+	}
+
+	// The asset exists on this machine either way — the file was written before
+	// it was ever announced. What differs is whether anyone else will see it.
+	if (reason == Reason::NameTaken && !suggestedPath.empty() &&
+	    !m_createRetried && !m_pendingCreateFull.empty() && m_localPathForKey)
+	{
+		const std::string newFull = m_localPathForKey(suggestedPath);
+		std::error_code ec;
+		if (!newFull.empty() && !std::filesystem::exists(newFull, ec))
+		{
+			std::filesystem::rename(m_pendingCreateFull, newFull, ec);
+			if (!ec)
+			{
+				m_createRetried = true;
+				Logger::Log(Logger::LogLevel::Info,
+					("Collab: that name was taken — the asset is now \"" +
+					 suggestedPath + "\"").c_str());
+				m_assetNotice = "That name was already taken. Your asset is now \"" +
+				                suggestedPath + "\".";
+				publishAssetCreate(suggestedPath, newFull);
+				return;
+			}
+		}
+	}
+
+	const char* why =
+		reason == Reason::NameTaken   ? "the name is already taken" :
+		reason == Reason::NotSyncable ? "that kind of asset is not shared in a session" :
+		reason == Reason::TooLarge    ? "it is too large to send" :
+		reason == Reason::BadPath     ? "its path is not inside the project" :
+		reason == Reason::RateLimited ? "too many were created at once" :
+		reason == Reason::NotPermitted? "the host did not permit it" : "the host refused it";
+	m_assetNotice = std::string("Your new asset stays local: ") + why + ".";
+	Logger::Log(Logger::LogLevel::Warning, ("Collab: create refused — " + m_assetNotice).c_str());
+	m_pendingCreateFull.clear();
+	m_createRetried = false;
+}
+
+void CollabController::noteAssetCreated(HE::Net::ParticipantId who,
+                                        const std::string& path)
+{
+	CreatedAssetNotice n;
+	n.path = path;
+	for (const HE::Net::Participant& p : participants())
+		if (p.id == who) { n.byName = p.name; break; }
+	n.atMs = 0;   // stamped by the UI, which owns the clock this is drawn against
+	m_createdNotices.push_back(std::move(n));
+	// A burst is a burst — keep the newest and drop the tail rather than let a
+	// runaway peer grow this without bound.
+	constexpr std::size_t kMax = 64;
+	if (m_createdNotices.size() > kMax)
+		m_createdNotices.erase(m_createdNotices.begin(),
+		                       m_createdNotices.begin() +
+		                       static_cast<std::ptrdiff_t>(m_createdNotices.size() - kMax));
+}
+
+void CollabController::publishAssetCreate(const std::string& relativePath,
+                                          const std::string& fullPath)
+{
+	if (!m_collab || !inSession()) return;
+	// A create that ARRIVED must not be announced back out. Same guard as
+	// publishAsset, and it matters more here: a create bounces to everyone, so
+	// an echo would multiply instead of merely repeating.
+	if (m_applyingRemoteAsset) return;
+	if (fullPath.empty()) return;
+
+	const std::string& rel = relativePath;
+	if (rel.empty() || !isSyncableAsset(rel)) return;
+	// Same type gate as a save, for the same reason: `.hasset` is equally the
+	// container around an imported mesh, and those must not travel this channel.
+	if (!isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
+
+	std::ifstream f(fullPath, std::ios::binary);
+	if (!f) return;
+	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+	                                 std::istreambuf_iterator<char>());
+	if (bytes.empty()) return;
+
+	// Deliberately NO lock dance, unlike publishAsset: nobody can hold a lock on
+	// an asset that does not exist yet, and asking for one would race every
+	// other peer creating at the same path. The host settles the name instead,
+	// and grants the lock as part of accepting.
+	// Remembered so the host's answer can be acted on: a refusal because the
+	// name was taken comes back with a free one, and renaming the file we just
+	// wrote is only possible if we still know where it is.
+	m_pendingCreateFull = fullPath;
+
+	HE::Net::CollabSession::AssetUpdate a;
+	a.subject = assetSubject(rel);
+	a.path    = rel;
+	a.bytes   = std::move(bytes);
+	a.intent  = HE::Net::CollabSession::AssetIntent::Create;
+	m_collab->sendAsset(a);
+
+	// The host answers its OWN create immediately — there is no round trip to
+	// wait for, and leaving the retry armed would misfire on the next one.
+	if (isHost())
+	{
+		m_pendingCreateFull.clear();
+		m_createRetried = false;
+	}
 }
 
 // ─── Locks ───────────────────────────────────────────────────────────────────

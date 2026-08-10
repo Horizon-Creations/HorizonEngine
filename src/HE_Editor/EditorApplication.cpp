@@ -441,6 +441,15 @@ void EditorApplication::OnInit()
 			applyRemoteDocDeltas(relPath, batch);
 		});
 
+	// Arbitrating a create means asking the disk whether a name is free, and the
+	// controller has no idea where the content root or the Source tree are. Same
+	// resolution applyAssetBytes uses, containment check included — so a path
+	// that would leave the project resolves to nothing here too, and the host
+	// refuses the create instead of testing some stray name against the disk.
+	m_collab.setLocalPathResolver([this](const std::string& key) {
+		return collabLocalPath(key);
+	});
+
 	m_collab.onRemoteAsset([this](const std::string& relPath,
 	                              const std::vector<std::uint8_t>& bytes) {
 		applyAssetBytes(relPath, bytes);

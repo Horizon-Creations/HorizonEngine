@@ -1041,6 +1041,98 @@ TEST_CASE("v7: the asset header's intent survives the round trip, and a bad one 
     CHECK(got.bytes == payload);
 }
 
+TEST_CASE("A create the host refuses is not applied, and the creator is told why")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    // The host says the name is taken and offers a free one. This is the whole
+    // reason a create is arbitrated instead of relayed: only the host can
+    // answer "is this name free", and the answer has to reach the creator.
+    p->host->setCreatePolicy([](const CollabSession::AssetUpdate& a,
+                                CollabSession::AssetRejectReason& reason,
+                                std::string& suggested) {
+        if (a.path == "Content/Materials/Taken.hasset") {
+            reason    = CollabSession::AssetRejectReason::NameTaken;
+            suggested = "Content/Materials/Taken2.hasset";
+            return false;
+        }
+        return true;
+    });
+
+    bool applied = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        applied = true;
+    });
+
+    std::string  gotPath, gotSuggested;
+    bool         gotAccepted = true;
+    auto         gotReason = CollabSession::AssetRejectReason::None;
+    bool         answered = false;
+    p->client->onAssetCreateResult([&](const std::string& path, bool accepted,
+                                       CollabSession::AssetRejectReason reason,
+                                       const std::string& suggested) {
+        gotPath = path; gotAccepted = accepted; gotReason = reason;
+        gotSuggested = suggested; answered = true;
+    });
+
+    CollabSession::AssetUpdate out;
+    out.subject = 0x8000'0000'0000'9999ull;
+    out.path    = "Content/Materials/Taken.hasset";
+    out.bytes   = makeBlob(32);
+    out.intent  = CollabSession::AssetIntent::Create;
+    REQUIRE(p->client->sendAsset(out));
+    p->pump(6);
+
+    REQUIRE(answered);
+    CHECK_FALSE(gotAccepted);
+    CHECK(gotReason == CollabSession::AssetRejectReason::NameTaken);
+    CHECK(gotSuggested == "Content/Materials/Taken2.hasset");
+    CHECK(gotPath == "Content/Materials/Taken.hasset");
+    // And nothing was written anywhere. Half the session holding a file the
+    // other half refused is the state this ordering exists to prevent.
+    CHECK_FALSE(applied);
+}
+
+TEST_CASE("An accepted create reaches everyone and the creator hears that it did")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    // No policy installed at all: a host with no opinion accepts, rather than
+    // silently swallowing every create.
+    bool applied = false;
+    CollabSession::AssetUpdate seen;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        seen = a; applied = true;
+    });
+
+    bool accepted = false, answered = false;
+    p->client->onAssetCreateResult([&](const std::string&, bool ok,
+                                       CollabSession::AssetRejectReason,
+                                       const std::string&) {
+        accepted = ok; answered = true;
+    });
+
+    CollabSession::AssetUpdate out;
+    out.subject = 0x8000'0000'0000'aaaaull;
+    out.path    = "Content/Materials/Fresh.hasset";
+    out.bytes   = makeBlob(48);
+    out.intent  = CollabSession::AssetIntent::Create;
+    REQUIRE(p->client->sendAsset(out));
+    p->pump(6);
+
+    REQUIRE(applied);
+    CHECK(seen.intent == CollabSession::AssetIntent::Create);
+    CHECK(seen.path == "Content/Materials/Fresh.hasset");
+    REQUIRE(answered);
+    CHECK(accepted);
+}
+
 TEST_CASE("CollabSession: a large asset survives chunking")
 {
     auto p = makePair();

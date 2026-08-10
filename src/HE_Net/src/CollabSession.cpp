@@ -172,6 +172,11 @@ void CollabSession::installHandlers() {
             handleTransformRelay(r);
         });
         m_net->on(kMsgAssetBegin, [this](ConnectionId, BitReader& r) { handleAssetRelay(r); });
+        // Only the peer that asked hears this — the others learn about the
+        // create from the relay above, or never, if it was refused.
+        m_net->on(kMsgAssetCreateResult, [this](ConnectionId, BitReader& r) {
+            handleAssetCreateResult(r);
+        });
         m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
             handleStructuralRelay(r);
         });
@@ -1526,14 +1531,20 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
     std::uint32_t total = 0, chunks = 0;
     if (!readAssetHeader(r, header, total, chunks)) return;
 
-    // Re-check authority on arrival rather than trusting the sender.
-    const LockInfo* lock = lockFor(header.subject);
-    if (!lock || lock->owner != sender) {
-        HE_LOG_WARN(Net, "Refusing asset \"%s\" from participant %u — it does not hold "
-                         "lock 0x%016llx",
-                    header.path.c_str(), static_cast<unsigned>(sender),
-                    static_cast<unsigned long long>(header.subject));
-        return;
+    // Re-check authority on arrival rather than trusting the sender. A CREATE is
+    // exempt for the same reason the sender skips it: the asset does not exist
+    // yet, so no lock over it can exist either, and demanding one would refuse
+    // every create there has ever been. Authority for a create is the policy
+    // below, which is a stronger check than a lock — it asks the host's disk.
+    if (header.intent != AssetIntent::Create) {
+        const LockInfo* lock = lockFor(header.subject);
+        if (!lock || lock->owner != sender) {
+            HE_LOG_WARN(Net, "Refusing asset \"%s\" from participant %u — it does not hold "
+                             "lock 0x%016llx",
+                        header.path.c_str(), static_cast<unsigned>(sender),
+                        static_cast<unsigned long long>(header.subject));
+            return;
+        }
     }
     if (total > m_cfg.maxSnapshotBytes) {
         HE_LOG_ERROR(Net, "Refusing asset \"%s\" from participant %u — announced %s, over "
@@ -1576,6 +1587,51 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
     out.intent = static_cast<AssetIntent>(intent);
     return r.readUInt64(out.subject) && r.readString(out.path) &&
            r.readUInt32(outTotal) && r.readUInt32(outChunks);
+}
+
+bool CollabSession::arbitrateCreate(ConnectionId conn, const AssetUpdate& a) {
+    AssetRejectReason reason = AssetRejectReason::None;
+    std::string       suggested;
+
+    // No policy = accept. A host that installed none is not expressing "refuse
+    // everything"; it simply has no opinion, and swallowing creates would be the
+    // surprising reading.
+    const bool ok = !m_createPolicy || m_createPolicy(a, reason, suggested);
+    if (ok) return true;
+
+    HE_LOG_INFO(Net, "Collab: refusing create \"%s\" (reason %u%s%s)",
+                a.path.c_str(), static_cast<unsigned>(reason),
+                suggested.empty() ? "" : ", suggesting ", suggested.c_str());
+
+    BitWriter w;
+    w.writeString(a.path);
+    w.writeByte(0);   // not accepted
+    w.writeByte(static_cast<std::uint8_t>(reason));
+    // May be empty. When it is not, the creator can rename locally and try
+    // again — which is what turns "two people created the same name" from a
+    // lost asset into two assets.
+    w.writeString(suggested);
+    m_net->send(conn, kMsgAssetCreateResult, w);
+    return false;
+}
+
+void CollabSession::handleAssetCreateResult(BitReader& r) {
+    std::string  path;
+    std::uint8_t accepted = 0, reason = 0;
+    std::string  suggested;
+    if (!r.readString(path) || !r.readByte(accepted) || !r.readByte(reason) ||
+        !r.readString(suggested)) {
+        return;
+    }
+    if (reason > static_cast<std::uint8_t>(AssetRejectReason::NotPermitted)) {
+        // An unknown reason from a newer host: the verdict still stands, only
+        // its explanation is one we cannot name.
+        reason = static_cast<std::uint8_t>(AssetRejectReason::None);
+    }
+    if (m_onCreateResult) {
+        m_onCreateResult(path, accepted != 0,
+                         static_cast<AssetRejectReason>(reason), suggested);
+    }
 }
 
 void CollabSession::handleAssetRelay(BitReader& r) {
@@ -1662,12 +1718,33 @@ void CollabSession::installAssetChunkHandlers() {
                 // the same thing the original did.
                 up.intent  = a.intent;
 
+                // A create is the one frame the host may refuse. Asked BEFORE
+                // anything is applied or forwarded: half the session having
+                // written a file the other half rejected is not a state worth
+                // being able to reach.
+                if (host && up.intent == AssetIntent::Create &&
+                    !arbitrateCreate(conn, up)) {
+                    m_assetAssembly.erase(m_assetAssembly.begin() +
+                                          static_cast<std::ptrdiff_t>(i));
+                    return;
+                }
+
                 if (m_onAsset) m_onAsset(a.sender, up);
 
                 // Host also fans it out to everyone else.
                 if (host) {
                     for (const ConnectionId other : m_net->connections()) {
                         if (other != conn) sendAssetChunks(other, a.sender, up);
+                    }
+                    // …and tells the creator it went through, so their side can
+                    // stop treating the asset as merely local.
+                    if (up.intent == AssetIntent::Create) {
+                        BitWriter ok;
+                        ok.writeString(up.path);
+                        ok.writeByte(1);   // accepted
+                        ok.writeByte(static_cast<std::uint8_t>(AssetRejectReason::None));
+                        ok.writeString("");
+                        m_net->send(conn, kMsgAssetCreateResult, ok);
                     }
                 }
             }
