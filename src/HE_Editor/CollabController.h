@@ -373,12 +373,50 @@ public:
 	{ return m_createdNotices; }
 	void clearCreatedAssetNotices() { m_createdNotices.clear(); }
 
+	// ── The host's in-tray ──
+	// Deleting or renaming an asset destroys or moves work that is not the
+	// requester's, so it is asked for and the host answers. Collected PER ASSET
+	// rather than per request: three people wanting the same file gone is one
+	// decision, not three, and one Approve settles it for all of them.
+	struct PendingAssetOp
+	{
+		HE::Net::CollabSession::AssetOp op =
+			HE::Net::CollabSession::AssetOp::Delete;
+		std::string path;        // project-relative, the asset in question
+		std::string newPath;     // rename only
+		// Who asked, in the order they asked. The panel draws their profile
+		// pictures — a name is a string, a face is the person you can go and
+		// talk to about it.
+		struct Requester { HE::Net::ParticipantId id = 0; std::uint32_t requestId = 0; };
+		std::vector<Requester> requesters;
+		std::uint64_t firstAskedMs = 0;   // for the "4m" age column
+	};
+	const std::vector<PendingAssetOp>& pendingAssetOps() const { return m_pendingOps; }
+	// Answer one. Approving applies it everywhere, including here; denying tells
+	// every requester and changes nothing. Both drop the row.
+	void approveAssetOp(std::size_t index);
+	void denyAssetOp(std::size_t index);
+	// What a participant asked for, if anything — so a peer can be shown that
+	// its own request is still waiting.
+	bool hasPendingRequestOfOurs() const { return !m_ourPendingOps.empty(); }
+	std::size_t pendingRequestsOfOurs() const { return m_ourPendingOps.size(); }
+
 	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
 	// the file and reloads — CollabController does not touch the ContentManager.
 	void onRemoteAsset(
 		std::function<void(const std::string&, const std::vector<std::uint8_t>&)> fn)
 	{
 		m_onRemoteAsset = std::move(fn);
+	}
+
+	// An approved delete or rename, to be carried out here. isDelete decides
+	// which; on a rename `newPath` is where it goes. Fires on every peer
+	// including the host, so there is one implementation rather than two.
+	void onRemoteAssetOp(
+		std::function<void(bool isDelete, const std::string& path,
+		                   const std::string& newPath)> fn)
+	{
+		m_onRemoteAssetOp = std::move(fn);
 	}
 
 	// Session key → local absolute path, or empty if it resolves to nothing that
@@ -509,6 +547,20 @@ private:
 	void noteAssetCreated(HE::Net::ParticipantId who, const std::string& path);
 
 	std::vector<CreatedAssetNotice> m_createdNotices;
+	std::vector<PendingAssetOp>     m_pendingOps;     // host only
+	// Requests WE are waiting on, so the footer can say "1 request pending" and
+	// the verdict can be matched back to what it answers.
+	struct OurOp { std::uint32_t requestId = 0;
+	               HE::Net::CollabSession::AssetOp op =
+	                   HE::Net::CollabSession::AssetOp::Delete;
+	               std::string path; };
+	std::vector<OurOp>              m_ourPendingOps;
+
+	// Ask for it, or — when we are the host — simply do it. Returns false when
+	// there is no session, in which case the caller acts locally as before.
+	bool requestOrPerformAssetOp(HE::Net::CollabSession::AssetOp op,
+	                             const std::string& relPath,
+	                             const std::string& newRelPath);
 	// The absolute path of the create we are waiting on an answer for, and
 	// whether we already retried it once. One retry only: a name that is taken
 	// twice running means somebody is creating in a loop, and answering that
@@ -619,6 +671,9 @@ private:
 	bool          m_reachable          = false;
 	bool          m_reachabilityKnown  = false;
 	std::uint64_t m_lastHeartbeatMs    = 0;
+	// The frame clock, kept because a request arrives on the network and has no
+	// clock of its own — the queue's age column reads from this.
+	std::uint64_t m_lastUpdateMs       = 0;
 	// Held while a lookup is in flight, so the connect can be made once the
 	// address arrives.
 	std::string   m_pendingJoinCode;
@@ -631,6 +686,7 @@ private:
 	std::string   m_lockNotice;
 	std::string   m_assetNotice;
 	std::function<std::string(const std::string&)> m_localPathForKey;
+	std::function<void(bool, const std::string&, const std::string&)> m_onRemoteAssetOp;
 	std::string   m_removalNotice;   // set when the host kicked or banned us
 
 	// Last transform we published, so an unmoved object sends nothing. Same

@@ -900,6 +900,61 @@ void CollabController::wireCallbacks()
 			onOwnCreateAnswered(path, accepted, reason, suggested);
 		});
 
+	// ── Host: somebody wants an asset deleted or renamed ──
+	m_collab->onAssetOpRequested(
+		[this](HE::Net::ParticipantId who, std::uint32_t requestId,
+		       HE::Net::CollabSession::AssetOp op,
+		       const std::string& path, const std::string& newPath) {
+			// Folded into the existing row when the same asset is already
+			// waiting: three people wanting one file gone is one decision.
+			for (PendingAssetOp& p : m_pendingOps)
+			{
+				if (p.op == op && p.path == path && p.newPath == newPath)
+				{
+					for (const auto& rq : p.requesters)
+						if (rq.id == who) return;         // asked twice — once is enough
+					p.requesters.push_back({ who, requestId });
+					return;
+				}
+			}
+			PendingAssetOp p;
+			p.op      = op;
+			p.path    = path;
+			p.newPath = newPath;
+			p.requesters.push_back({ who, requestId });
+			p.firstAskedMs = m_lastUpdateMs;
+			m_pendingOps.push_back(std::move(p));
+		});
+
+	m_collab->onAssetOpVerdict([this](std::uint32_t requestId, bool approved) {
+		for (std::size_t i = 0; i < m_ourPendingOps.size(); ++i)
+		{
+			if (m_ourPendingOps[i].requestId != requestId) continue;
+			const std::string name =
+				std::filesystem::path(m_ourPendingOps[i].path).filename().string();
+			// Only the refusal needs saying. An approval is followed immediately
+			// by the change itself, which is its own confirmation.
+			if (!approved)
+				m_assetNotice = "The host did not approve that \"" + name + "\" be " +
+					(m_ourPendingOps[i].op == HE::Net::CollabSession::AssetOp::Delete
+						? "deleted." : "renamed.");
+			m_ourPendingOps.erase(m_ourPendingOps.begin() +
+			                      static_cast<std::ptrdiff_t>(i));
+			return;
+		}
+	});
+
+	m_collab->onAssetOpApply(
+		[this](HE::Net::ParticipantId, HE::Net::CollabSession::AssetOp op,
+		       const std::string& path, const std::string& newPath) {
+			if (!m_onRemoteAssetOp) return;
+			// Same guard as an arriving save: applying this touches the content
+			// tree, and the notification would otherwise come straight back.
+			m_applyingRemoteAsset = true;
+			m_onRemoteAssetOp(op == HE::Net::CollabSession::AssetOp::Delete, path, newPath);
+			m_applyingRemoteAsset = false;
+		});
+
 	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
 	                             const std::string& path,
 	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch) {
@@ -1067,7 +1122,23 @@ void CollabController::teardown()
 	// Nothing here outlives the session it describes: the author of a create is
 	// gone, and a refusal we never surfaced belongs to a conversation that ended.
 	m_createdNotices.clear();
-	m_assetNotice.clear();
+	// Open requests die with the session and count as refused. There is nobody
+	// to hand them to — clients do not know each other, so no one can take over
+	// as host — and nothing was applied, so nothing needs undoing. A requester
+	// whose editor is still up learns it from the disconnect.
+	if (!m_pendingOps.empty())
+	{
+		Logger::Log(Logger::LogLevel::Info,
+			("Collab: the session ended with " + std::to_string(m_pendingOps.size()) +
+			 " unanswered request(s) — all treated as refused").c_str());
+		m_pendingOps.clear();
+	}
+	if (!m_ourPendingOps.empty())
+	{
+		m_assetNotice = "The session ended before the host answered your request.";
+		m_ourPendingOps.clear();
+	}
+	else m_assetNotice.clear();
 	m_pendingCreateFull.clear();
 	m_createRetried = false;
 	m_portMapped    = false;
@@ -1093,6 +1164,8 @@ void CollabController::teardown()
 
 void CollabController::update(std::uint64_t nowMs)
 {
+	m_lastUpdateMs = nowMs;
+
 	// Before the early-out: while a session id is being looked up there is no
 	// transport yet, and that is exactly when the lookup result has to be
 	// collected.
@@ -1769,6 +1842,59 @@ void CollabController::publishAsset(const std::string& relativePath,
 	}
 
 	m_collab->sendAsset(subject, relativePath, bytes);
+}
+
+bool CollabController::requestOrPerformAssetOp(
+	HE::Net::CollabSession::AssetOp op,
+	const std::string& relPath, const std::string& newRelPath)
+{
+	if (!m_collab || !inSession() || relPath.empty()) return false;
+
+	// The host does it. It already answered the question a request exists to
+	// ask — its own confirmation dialog — and asking itself again would be a
+	// second dialog for one decision.
+	if (isHost())
+	{
+		m_collab->broadcastAssetOpApply(op, relPath, newRelPath, localParticipant());
+		return true;
+	}
+
+	const std::uint32_t id = m_collab->requestAssetOp(op, relPath, newRelPath);
+	if (id == 0) return false;
+	m_ourPendingOps.push_back({ id, op, relPath });
+	m_assetNotice = (op == HE::Net::CollabSession::AssetOp::Delete
+		? std::string("Asked the host to delete \"")
+		: std::string("Asked the host to rename \"")) +
+		std::filesystem::path(relPath).filename().string() + "\".";
+	return true;
+}
+
+void CollabController::approveAssetOp(std::size_t index)
+{
+	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
+	const PendingAssetOp op = m_pendingOps[index];
+	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
+
+	// Everyone who asked hears yes — including the ones who asked second, whose
+	// request is answered by this same decision.
+	for (const auto& rq : op.requesters)
+		m_collab->sendAssetOpVerdict(rq.id, rq.requestId, true);
+	// Applied through the broadcast, which also fires locally: one path for
+	// "this happened", rather than a local branch that has to stay in step.
+	m_collab->broadcastAssetOpApply(op.op, op.path, op.newPath,
+	                                op.requesters.empty() ? localParticipant()
+	                                                      : op.requesters.front().id);
+}
+
+void CollabController::denyAssetOp(std::size_t index)
+{
+	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
+	const PendingAssetOp op = m_pendingOps[index];
+	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
+	// Told, not silently dropped: a request that simply vanishes reads as a bug,
+	// and the requester would ask again.
+	for (const auto& rq : op.requesters)
+		m_collab->sendAssetOpVerdict(rq.id, rq.requestId, false);
 }
 
 bool CollabController::acceptRemoteCreate(

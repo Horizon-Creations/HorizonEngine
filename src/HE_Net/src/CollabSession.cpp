@@ -158,6 +158,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgLockQuery, [this](ConnectionId conn, BitReader& r) {
             handleLockQuery(conn, r);
         });
+        m_net->on(kMsgAssetOpRequest, [this](ConnectionId conn, BitReader& r) {
+            handleAssetOpRequest(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -176,6 +179,12 @@ void CollabSession::installHandlers() {
         // create from the relay above, or never, if it was refused.
         m_net->on(kMsgAssetCreateResult, [this](ConnectionId, BitReader& r) {
             handleAssetCreateResult(r);
+        });
+        m_net->on(kMsgAssetOpVerdict, [this](ConnectionId, BitReader& r) {
+            handleAssetOpVerdict(r);
+        });
+        m_net->on(kMsgAssetOpApply, [this](ConnectionId, BitReader& r) {
+            handleAssetOpApply(r);
         });
         m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
             handleStructuralRelay(r);
@@ -1587,6 +1596,96 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
     out.intent = static_cast<AssetIntent>(intent);
     return r.readUInt64(out.subject) && r.readString(out.path) &&
            r.readUInt32(outTotal) && r.readUInt32(outChunks);
+}
+
+std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
+                                            const std::string& newPath) {
+    if (!m_net || !m_joined || path.empty()) return 0;
+    // The host does not ask itself. It has the queue, the disk and the decision;
+    // routing its own delete through a request would mean answering a dialog it
+    // raised for itself.
+    if (m_role == NetRole::Host) return 0;
+    if (m_net->connections().empty()) return 0;
+
+    const std::uint32_t id = m_nextOpRequestId++;
+    BitWriter w;
+    w.writeUInt32(id);
+    w.writeByte(static_cast<std::uint8_t>(op));
+    w.writeString(path);
+    w.writeString(newPath);
+    m_net->send(m_net->connections().front(), kMsgAssetOpRequest, w);
+    return id;
+}
+
+void CollabSession::handleAssetOpRequest(ConnectionId conn, BitReader& r) {
+    // Host side. Identity from the connection, as everywhere: a client may not
+    // ask on somebody else's behalf.
+    const ParticipantId who = participantForConnection(conn);
+    if (who == kInvalidParticipant) return;
+
+    std::uint32_t id = 0;
+    std::uint8_t  op = 0;
+    std::string   path, newPath;
+    if (!r.readUInt32(id) || !r.readByte(op) ||
+        !r.readString(path) || !r.readString(newPath)) {
+        return;
+    }
+    if (op > static_cast<std::uint8_t>(AssetOp::Rename)) return;
+    if (path.empty()) return;
+    if (m_onOpRequested)
+        m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath);
+}
+
+void CollabSession::sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId,
+                                       bool approved) {
+    if (!m_net || m_role != NetRole::Host) return;
+    ConnectionId conn = kInvalidConnection;
+    for (const auto& [c, pid] : m_connToParticipant) {
+        if (pid == to) { conn = c; break; }
+    }
+    // Gone before the host got round to answering. Nothing to do: they took
+    // their pending requests with them.
+    if (conn == kInvalidConnection) return;
+
+    BitWriter w;
+    w.writeUInt32(requestId);
+    w.writeByte(approved ? 1 : 0);
+    m_net->send(conn, kMsgAssetOpVerdict, w);
+}
+
+void CollabSession::broadcastAssetOpApply(AssetOp op, const std::string& path,
+                                          const std::string& newPath,
+                                          ParticipantId by) {
+    if (!m_net || m_role != NetRole::Host) return;
+    BitWriter w;
+    w.writeUInt32(by);
+    w.writeByte(static_cast<std::uint8_t>(op));
+    w.writeString(path);
+    w.writeString(newPath);
+    for (const ConnectionId c : m_net->connections())
+        m_net->send(c, kMsgAssetOpApply, w);
+    // The host applies through the same callback as everyone else, so there is
+    // one code path for "this happened" rather than two that must agree.
+    if (m_onOpApply) m_onOpApply(by, op, path, newPath);
+}
+
+void CollabSession::handleAssetOpVerdict(BitReader& r) {
+    std::uint32_t id = 0;
+    std::uint8_t  approved = 0;
+    if (!r.readUInt32(id) || !r.readByte(approved)) return;
+    if (m_onOpVerdict) m_onOpVerdict(id, approved != 0);
+}
+
+void CollabSession::handleAssetOpApply(BitReader& r) {
+    std::uint32_t by = 0;
+    std::uint8_t  op = 0;
+    std::string   path, newPath;
+    if (!r.readUInt32(by) || !r.readByte(op) ||
+        !r.readString(path) || !r.readString(newPath)) {
+        return;
+    }
+    if (op > static_cast<std::uint8_t>(AssetOp::Rename)) return;
+    if (m_onOpApply) m_onOpApply(by, static_cast<AssetOp>(op), path, newPath);
 }
 
 bool CollabSession::arbitrateCreate(ConnectionId conn, const AssetUpdate& a) {

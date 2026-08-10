@@ -492,6 +492,48 @@ public:
         m_onCreateResult = std::move(fn);
     }
 
+    // ── Delete and rename: asked for, not done ──
+    // Unlike everything else here, these are not replicated as they happen —
+    // they destroy or move work that is not the requester's, so the host is
+    // asked and a person answers. This layer only carries the exchange: the
+    // QUEUE lives in the editor, because answering it needs a surface, and a
+    // network session is the wrong place to keep something a human must read.
+    //
+    // Client → host. Returns the request id, or 0 outside a session. The host
+    // calling this gets 0 too: it does not ask itself.
+    std::uint32_t requestAssetOp(AssetOp op, const std::string& path,
+                                 const std::string& newPath = {});
+
+    // Host: somebody wants something done. Queue it and answer later.
+    void onAssetOpRequested(
+        std::function<void(ParticipantId, std::uint32_t requestId, AssetOp,
+                           const std::string& path, const std::string& newPath)> fn) {
+        m_onOpRequested = std::move(fn);
+    }
+
+    // Host: the answer, to the one who asked. Denying is not a failure state —
+    // it is the feature — so it travels the same way as approval.
+    void sendAssetOpVerdict(ParticipantId to, std::uint32_t requestId, bool approved);
+
+    // Host: it happened; everyone applies it. Sent after the verdict, and only
+    // on approval.
+    void broadcastAssetOpApply(AssetOp op, const std::string& path,
+                               const std::string& newPath, ParticipantId by);
+
+    // Client: the answer to something we asked for.
+    void onAssetOpVerdict(
+        std::function<void(std::uint32_t requestId, bool approved)> fn) {
+        m_onOpVerdict = std::move(fn);
+    }
+
+    // Everyone: it was approved — do it locally. Also fires on the host, so one
+    // code path applies it everywhere.
+    void onAssetOpApply(
+        std::function<void(ParticipantId by, AssetOp, const std::string& path,
+                           const std::string& newPath)> fn) {
+        m_onOpApply = std::move(fn);
+    }
+
     // ── Document deltas ──────────────────────────────────────────────────────
     // AssetUpdate replicates a whole authored file; this replicates ONE ITEM
     // inside one — a graph node, a link, a UI element. That is what makes an
@@ -717,6 +759,9 @@ private:
     void handleAssetUpdate(ConnectionId conn, BitReader& r);       // host
     void handleAssetRelay(BitReader& r);                           // client
     void handleAssetCreateResult(BitReader& r);                    // client
+    void handleAssetOpRequest(ConnectionId conn, BitReader& r);    // host
+    void handleAssetOpVerdict(BitReader& r);                       // client
+    void handleAssetOpApply(BitReader& r);                         // client
     // Host: run the policy and answer the creator. True = go ahead and relay.
     bool arbitrateCreate(ConnectionId conn, const AssetUpdate& a);
     void sendAssetChunks(ConnectionId conn, ParticipantId from, const AssetUpdate& a);
@@ -798,6 +843,15 @@ private:
     CreatePolicy                                               m_createPolicy;
     std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
                                                                m_onCreateResult;
+    std::function<void(ParticipantId, std::uint32_t, AssetOp,
+                       const std::string&, const std::string&)> m_onOpRequested;
+    std::function<void(std::uint32_t, bool)>                    m_onOpVerdict;
+    std::function<void(ParticipantId, AssetOp, const std::string&,
+                       const std::string&)>                     m_onOpApply;
+    // Ids are per-CLIENT and only ever paired with that client's own requests,
+    // so a plain counter is enough — two peers may both hold request 3 and the
+    // host never confuses them, because it also knows which connection asked.
+    std::uint32_t                                               m_nextOpRequestId = 1;
     std::function<void(ParticipantId, const TransformDelta&)> m_onTransform;
     std::function<void(const LockInfo&, bool)>         m_onLockChanged;
     std::function<void(std::uint64_t, LockDenyReason)> m_onLockDenied;
