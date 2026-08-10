@@ -950,6 +950,52 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 			}
 
+			// ── Somebody is editing this asset right now ──────────────────
+			// The lock table already knows; until now it only showed up once
+			// you had opened the asset and found the tab read-only. On the tile
+			// it is worth something else entirely: you see it BEFORE you invest
+			// in opening it, and you can go and ask them instead.
+			//
+			// Drawn in the holder's own colour — the same one their cursor,
+			// their presence dot and the outliner use, so "orange means Anna"
+			// holds everywhere rather than being learned per panel.
+			if (ctx.collab && ctx.collab->inSession() && ctx.contentManager && file)
+			{
+				const std::string rel =
+					ctx.contentManager->toContentRelativePath(file->fullPath);
+				const HE::Net::LockInfo* lock =
+					rel.empty() ? nullptr : ctx.collab->assetLockInfo(rel);
+				if (lock && lock->owner != ctx.collab->localParticipant())
+				{
+					float rgb[3] = { 1.0f, 0.75f, 0.3f };
+					ctx.collab->colorFor(lock->owner, rgb);
+					const ImU32 col = IM_COL32(int(rgb[0] * 255), int(rgb[1] * 255),
+					                           int(rgb[2] * 255), 255);
+					const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					// Top-right, clear of the git dot at the bottom-left and the
+					// download badge at the top-left: three different facts about
+					// one file, three corners, none of them hiding another.
+					const float r = 8.0f;
+					const ImVec2 c(mx.x - r - 3.0f, mn.y + r + 3.0f);
+					dl->AddCircleFilled(c, r, IM_COL32(20, 20, 22, 230));
+					dl->AddCircle(c, r, col, 0, 1.5f);
+					// A padlock as two shapes rather than a glyph: the font's
+					// glyph ranges are not guaranteed to carry one, and a missing
+					// glyph would draw an empty box that means nothing.
+					dl->AddRectFilled(ImVec2(c.x - 3.5f, c.y - 0.5f),
+					                  ImVec2(c.x + 3.5f, c.y + 4.0f), col, 1.0f);
+					constexpr float kPi = 3.14159265f;   // IM_PI is imgui_internal
+					dl->PathArcTo(ImVec2(c.x, c.y - 0.5f), 2.6f, kPi, kPi * 2.0f, 12);
+					dl->PathStroke(col, 0, 1.4f);
+
+					if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					{
+						ImGui::SetTooltip("%s is editing this — it is read-only for you.",
+							lock->ownerName.empty() ? "Someone" : lock->ownerName.c_str());
+					}
+				}
+			}
 
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
