@@ -5,6 +5,7 @@
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
 #include <SDL3/SDL.h>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -39,7 +40,15 @@ namespace HE
 			HE::Log::logStartupBanner("HorizonEngine", 1, argv0);
 		}
 		m_globalState->readConfig();
-		auto contentPath = startupPath + "Content";
+		// parent_path(), not string concatenation: startupPath is argv[0], the
+		// EXECUTABLE, so appending "Content" produced ".../HorizonEditor.exeContent"
+		// — a directory that cannot exist. It went unnoticed because the editor
+		// replaces this root the moment a project loads, so only the window
+		// between construction and that load ever saw it; the log line printed
+		// the nonsense every run and nobody read it. GameApplication has always
+		// built the same path correctly.
+		const std::string contentPath =
+			(std::filesystem::path(startupPath).parent_path() / "Content").string();
 		m_contentManager.setContentRoot(contentPath);
 		HE_LOG_INFO(Core, "Content root: %s", contentPath.c_str());
 	}
