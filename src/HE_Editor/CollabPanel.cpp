@@ -37,6 +37,12 @@ namespace
 	// than by list position: the list re-sorts itself as beacons arrive and
 	// expire, so an index would move under the selection.
 	std::uint64_t s_lanPicked = 0;
+	// Its own buffer, NOT s_joinCode. Both are on screen at once, and sharing
+	// one made each field echo into the other — and, worse, could arm the
+	// by-ID "Join" button with a code typed for a session on this network while
+	// a stale session ID sat in the field above it, sending the user somewhere
+	// they never chose.
+	char s_lanJoinCode[80] = "";
 
 	// Why the last picture could not be used, shown until the next attempt.
 	std::string s_avatarError;
@@ -371,7 +377,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			// to the config, which the editor pushes into the controller.
 			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
 			if (ImGui::Checkbox("Look for sessions on this network", &lanOn))
+			{
 				ctx.editorConfig.CollabLanDiscovery = lanOn;
+				// The list is gone either way; a selection into it is not worth
+				// carrying across the switch.
+				s_lanPicked = 0;
+			}
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -453,16 +464,26 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					{
 						ImGui::Spacing();
 						ImGui::SetNextItemWidth(220);
-						ImGui::InputText("Join code##lan", s_joinCode, sizeof(s_joinCode));
-						ImGui::BeginDisabled(s_joinCode[0] == '\0');
+						ImGui::InputText("Join code##lan", s_lanJoinCode,
+						                 sizeof(s_lanJoinCode));
+						ImGui::BeginDisabled(s_lanJoinCode[0] == '\0');
 						if (EditorWidgets::primaryButton("Join this session", ImVec2(190, 0)))
 						{
 							collab->joinSession(picked->address, picked->port,
-							                    s_joinCode, s_displayName);
+							                    s_lanJoinCode, s_displayName);
 						}
 						ImGui::EndDisabled();
-						if (s_joinCode[0] == '\0')
+						if (s_lanJoinCode[0] == '\0')
 							ImGui::TextDisabled("Ask the host for the join code.");
+					}
+					else if (s_lanPicked != 0)
+					{
+						// It expired or said goodbye while the code was being
+						// typed. The field and the button disappearing without
+						// a word looks like the editor ate the input.
+						ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+							"That session is no longer being announced.");
+						s_lanPicked = 0;
 					}
 				}
 			}

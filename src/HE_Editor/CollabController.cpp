@@ -1397,8 +1397,11 @@ void CollabController::setLanDiscoveryEnabled(bool on)
 	{
 		m_lanAnnouncer.stop();
 		m_lanBrowser.stop();
-		m_lanBlocked = false;
 	}
+	// Cleared in BOTH directions, so switching off and on again is the retry
+	// after granting the local-network permission — otherwise the latch below
+	// would keep refusing for the rest of the run.
+	m_lanBlocked = false;
 	// Turning it on starts nothing here — updateLanDiscovery does that on the
 	// next frame, from the one place that knows whether we host, browse or
 	// neither.
@@ -1412,6 +1415,12 @@ void CollabController::updateLanDiscovery(std::uint64_t nowMs)
 		if (m_lanBrowser.running())   m_lanBrowser.stop();
 		return;
 	}
+
+	// Refused once, refused every frame: creating and failing a socket sixty
+	// times a second changes nothing and hides the real event in the log. The
+	// latch clears only when the user turns discovery off and on again, which
+	// is also the natural thing to do after granting the permission.
+	if (m_lanBlocked) return;
 
 	// ── Hosting: say we are here ──
 	if (m_isHost && m_status == Status::Hosting && m_port != 0)
