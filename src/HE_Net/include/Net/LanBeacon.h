@@ -90,12 +90,26 @@ public:
 
     void update(std::uint64_t nowMs);
 
+    // ── Was anything actually said? ──
+    // A send that the operating system refuses returns an error and NOTHING
+    // else happens: no exception, no callback, no trace. On macOS a missing
+    // Local Network permission refuses every one of them while the internet
+    // keeps working, which reads as "the other machine is broken" rather than
+    // as a permission. These two counters are the only place that distinguishes
+    // "we are not speaking" from "nobody is listening", and the panel shows
+    // them for exactly that reason.
+    std::uint32_t sentCount()   const { return m_sent; }
+    std::uint32_t failedCount() const { return m_failed; }
+
 private:
     void send(const Announcement& a);
 
     SocketHandle  m_sock = kInvalidSocket;
     Announcement  m_what;
     std::uint64_t m_lastMs = 0;
+    std::uint32_t m_sent   = 0;
+    std::uint32_t m_failed = 0;
+    bool          m_wasFailing = false;   // logs the change, not every tick
 };
 
 // ─── Guest side ──────────────────────────────────────────────────────────────
@@ -130,9 +144,16 @@ public:
 
     const std::vector<Session>& sessions() const { return m_sessions; }
 
+    // Datagrams that were ours and parsed. Zero while sessions() is also empty
+    // says "nothing reaches this machine" — a firewall or a missing permission
+    // — which is a different problem from "heard it, but it was not joinable",
+    // and the two are indistinguishable from an empty list alone.
+    std::uint32_t heardCount() const { return m_heard; }
+
 private:
     SocketHandle         m_sock = kInvalidSocket;
     std::vector<Session> m_sessions;
+    std::uint32_t        m_heard = 0;
 };
 
 } // namespace HE::Net::LanBeacon

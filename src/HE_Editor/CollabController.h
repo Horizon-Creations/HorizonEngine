@@ -118,6 +118,18 @@ public:
 	// empty list would otherwise be indistinguishable from "nobody is hosting".
 	bool lanBlocked() const { return m_lanBlocked; }
 
+	// Enough to tell the two sides of "it does not work" apart WITHOUT a packet
+	// capture: announcements we got out, announcements the system refused, and
+	// beacons we heard. Nothing sent = this machine is muted (permission,
+	// firewall); sent but nothing heard = we speak and they do not reach us, or
+	// nobody is there. Guessing between those cost a whole evening once.
+	struct LanStats { std::uint32_t sent = 0, failed = 0, heard = 0; };
+	LanStats lanStats() const
+	{
+		return { m_lanAnnouncer.sentCount(), m_lanAnnouncer.failedCount(),
+		         m_lanBrowser.heardCount() };
+	}
+
 	// Is this session id one we can hear announcing itself here? Returns its
 	// announced endpoint, or null.
 	//

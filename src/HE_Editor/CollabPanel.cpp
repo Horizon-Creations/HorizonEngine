@@ -357,6 +357,27 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
 			if (ImGui::Checkbox("Announce this session on the local network", &lanOn))
 				ctx.editorConfig.CollabLanDiscovery = lanOn;
+
+			// Whether anything is actually leaving this machine. Without it,
+			// "they cannot see me" is unanswerable from here: a refused send
+			// looks exactly like a send nobody happened to hear.
+			if (lanOn)
+			{
+				const auto st = collab->lanStats();
+				if (st.failed > 0 && st.sent == 0)
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f),
+						"The system is refusing to send them (%u attempts).", st.failed);
+					ImGui::TextWrapped("On macOS this is the Local Network permission: "
+					                   "allow it under Privacy & Security > Local Network. "
+					                   "Otherwise it is a firewall.");
+				}
+				else if (st.sent > 0)
+				{
+					ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+						"Announced %u time%s.", st.sent, st.sent == 1 ? "" : "s");
+				}
+			}
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -408,6 +429,19 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					// speak every couple of seconds, so "nothing yet" is the
 					// normal first impression.
 					ImGui::TextDisabled("No sessions found on this network yet.");
+					// But an empty list has two very different causes, and only
+					// this number tells them apart: nothing reaching us at all
+					// (a firewall, or macOS's Local Network permission) is a
+					// different problem from nobody hosting.
+					const auto st = collab->lanStats();
+					if (st.heard == 0)
+					{
+						ImGui::TextDisabled(
+							"Nothing at all has reached this machine on port %u. If someone "
+							"IS hosting nearby, this is a firewall or, on macOS, the Local "
+							"Network permission — not the session.",
+							unsigned(HE::Net::LanBeacon::kPort));
+					}
 				}
 				else
 				{

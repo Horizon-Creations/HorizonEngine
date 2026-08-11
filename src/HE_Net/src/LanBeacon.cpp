@@ -88,12 +88,23 @@ bool Announcer::start(const Announcement& what) {
     socketSetMulticastTtl(m_sock, 1);   // this segment only, never routed onward
 
     // Leave by the interface that reaches the network, not by whichever one the
-    // routing table picks for a multicast group — on a machine with Hyper-V, WSL
-    // or a VPN that is a coin toss, and the failure is silent (the send
-    // succeeds, nothing ever hears it).
-    if (const std::string local = socketLocalAddress(); !local.empty())
+    // routing table picks — on a machine with Hyper-V, WSL or a VPN that is a
+    // coin toss, and the failure is silent (the send succeeds, nothing ever
+    // hears it).
+    //
+    // BINDING the socket to that address matters as much as the multicast
+    // option: the limited broadcast 255.255.255.255 is not routed, so on a
+    // multi-homed host the kernel has to choose an exit for it, and an unbound
+    // socket lets it choose wrong. Bound, both destinations leave the same way.
+    const std::string local = socketLocalAddress();
+    if (!local.empty())
+    {
         socketSetMulticastInterface(m_sock, local);
+        socketBindUdpTo(m_sock, local, 0);   // port 0 — only the interface matters
+    }
 
+    m_sent = m_failed = 0;
+    m_wasFailing = false;
     m_lastMs = 0;   // speak on the first update rather than after a full interval
     // Abbreviated, like everywhere else: a full session id in a pasted log is a
     // working invitation. The join code is not here at all, by design.
@@ -119,8 +130,32 @@ void Announcer::send(const Announcement& a) {
     if (m_sock == kInvalidSocket) return;
     const std::vector<std::uint8_t> bytes = encode(a);
     std::size_t sent = 0;
-    socketSendTo(m_sock, bytes.data(), bytes.size(), kMulticastGroup, kPort, sent);
-    socketSendTo(m_sock, bytes.data(), bytes.size(), kBroadcast,      kPort, sent);
+
+    // Both destinations are tried and BOTH are allowed to fail: on any given
+    // network one of the two is usually filtered. It only counts as a failure
+    // when neither got out.
+    const bool mc = socketSendTo(m_sock, bytes.data(), bytes.size(),
+                                 kMulticastGroup, kPort, sent) == SocketResult::Ok;
+    const bool bc = socketSendTo(m_sock, bytes.data(), bytes.size(),
+                                 kBroadcast, kPort, sent) == SocketResult::Ok;
+    if (mc || bc) ++m_sent; else ++m_failed;
+
+    // Logged on the CHANGE, never per tick: this runs every two seconds
+    // forever, and a line each time would bury the moment it started or
+    // stopped working under thousands of identical ones.
+    const bool failing = !mc && !bc;
+    if (failing != m_wasFailing) {
+        m_wasFailing = failing;
+        if (failing) {
+            HE_LOG_WARN(Net, "%s",
+                "LAN: the system refused to send an announcement to both the "
+                "multicast group and the broadcast address. On macOS this is what "
+                "a missing Local Network permission looks like — internet traffic "
+                "keeps working while everything local is rejected.");
+        } else {
+            HE_LOG_INFO(Net, "%s", "LAN: announcements are going out again");
+        }
+    }
 }
 
 void Announcer::update(std::uint64_t nowMs) {
@@ -147,8 +182,16 @@ bool Browser::start() {
         return false;
     }
     const std::string local = socketLocalAddress();
-    socketJoinMulticastGroup(m_sock, kMulticastGroup, local);
-    HE_LOG_INFO(Net, "LAN: listening for sessions on port %u", unsigned(kPort));
+    const bool joined = socketJoinMulticastGroup(m_sock, kMulticastGroup, local);
+    m_heard = 0;
+    // Which interface was joined on is worth a line: joining the wrong one on a
+    // machine with a VPN or a hypervisor adapter is silent and looks exactly
+    // like nobody announcing anything. A failed join is not fatal — the
+    // broadcast half of every beacon still arrives.
+    HE_LOG_INFO(Net, "LAN: listening on port %u, multicast group %s via %s (%s)",
+                unsigned(kPort), kMulticastGroup,
+                local.empty() ? "default route" : local.c_str(),
+                joined ? "joined" : "JOIN FAILED — broadcast only");
     return true;
 }
 
@@ -164,6 +207,7 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
                      std::size_t len, std::uint64_t nowMs) {
     Announcement a;
     if (!decode(data, len, a)) return;
+    ++m_heard;   // it was ours and it parsed — see heardCount()
 
     // Identity is the INSTANCE, not the session id: the same beacon arrives
     // twice within milliseconds (once multicast, once broadcast), and a host
