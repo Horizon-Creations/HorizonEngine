@@ -207,7 +207,18 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
                      std::size_t len, std::uint64_t nowMs) {
     Announcement a;
     if (!decode(data, len, a)) return;
-    ++m_heard;   // it was ours and it parsed — see heardCount()
+
+    // Our own beacon, coming straight back off the segment. Counted — it proves
+    // the socket works — but never listed: a host must not find itself.
+    const bool self = (m_self != 0 && a.instance == m_self);
+    if (m_heard == 0 && !self) {
+        // The first one only. It is the moment "nothing reaches this machine"
+        // stops being a possibility, and it is worth exactly one line.
+        HE_LOG_INFO(Net, "LAN: heard the first announcement, from %s",
+                    fromHost.c_str());
+    }
+    ++m_heard;
+    if (self) return;
 
     // Identity is the INSTANCE, not the session id: the same beacon arrives
     // twice within milliseconds (once multicast, once broadcast), and a host
@@ -216,7 +227,10 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
         [&](const Session& s) { return s.instance == a.instance; });
 
     if (a.closing) {
-        if (it != m_sessions.end()) m_sessions.erase(it);
+        if (it != m_sessions.end()) {
+            HE_LOG_INFO(Net, "LAN: %s closed their session", fromHost.c_str());
+            m_sessions.erase(it);
+        }
         return;
     }
 
@@ -227,6 +241,11 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
         // Bounded: a peer forging announcements must not be able to grow this
         // without limit or push a real session off the end of the list.
         if (m_sessions.size() >= kMaxSessions) return;
+        // Appearing and disappearing are rare and interesting; the beacons in
+        // between are neither, and logging those would bury these.
+        HE_LOG_INFO(Net, "LAN: found a session at %s:%u (\"%s\", protocol %u)",
+                    fromHost.c_str(), unsigned(a.port),
+                    a.hostName.c_str(), unsigned(a.protocol));
         m_sessions.push_back({});
         s = &m_sessions.back();
     }
@@ -265,12 +284,14 @@ void Browser::update(std::uint64_t nowMs) {
 
     // A host that stopped talking — crashed, closed the lid, walked out of Wi-Fi
     // range — never sends a goodbye, so silence has to be enough.
-    m_sessions.erase(
-        std::remove_if(m_sessions.begin(), m_sessions.end(),
-            [&](const Session& s) {
-                return nowMs > s.lastSeenMs && nowMs - s.lastSeenMs > kExpiryMs;
-            }),
-        m_sessions.end());
+    const auto gone = std::remove_if(m_sessions.begin(), m_sessions.end(),
+        [&](const Session& s) {
+            return nowMs > s.lastSeenMs && nowMs - s.lastSeenMs > kExpiryMs;
+        });
+    for (auto it = gone; it != m_sessions.end(); ++it)
+        HE_LOG_INFO(Net, "LAN: lost the session at %s (stopped announcing)",
+                    it->address.c_str());
+    m_sessions.erase(gone, m_sessions.end());
 }
 
 } // namespace HE::Net::LanBeacon

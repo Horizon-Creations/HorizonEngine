@@ -133,6 +133,12 @@ public:
     void stop();
     bool running() const { return m_sock != kInvalidSocket; }
 
+    // Our own announcing instance, so we do not list ourselves. Needed because
+    // the browser keeps running while we host: our own broadcast comes straight
+    // back to this port, and without this the host's own session would appear
+    // as somebody else's.
+    void setSelfInstance(std::uint64_t id) { m_self = id; }
+
     // Drains the socket and drops anything not heard from for kExpiryMs.
     void update(std::uint64_t nowMs);
 
@@ -154,6 +160,7 @@ private:
     SocketHandle         m_sock = kInvalidSocket;
     std::vector<Session> m_sessions;
     std::uint32_t        m_heard = 0;
+    std::uint64_t        m_self  = 0;
 };
 
 } // namespace HE::Net::LanBeacon

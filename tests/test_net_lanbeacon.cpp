@@ -129,6 +129,24 @@ TEST_CASE("LanBeacon: the same host heard twice is one entry")
     CHECK(b.sessions().size() == 2);
 }
 
+TEST_CASE("LanBeacon: a host does not find itself")
+{
+    // The browser keeps running while we host, so our own broadcast comes
+    // straight back to this port. It counts as proof the socket works, and it
+    // must never become a row: joining yourself is not a thing.
+    Browser b;
+    const Announcement mine = sample();
+    b.setSelfInstance(mine.instance);
+    feed(b, "192.168.1.50", mine, 1000);
+    CHECK(b.sessions().empty());
+    CHECK(b.heardCount() == 1);
+
+    Announcement theirs = mine;
+    theirs.instance = mine.instance + 1;
+    feed(b, "192.168.1.51", theirs, 1001);
+    CHECK(b.sessions().size() == 1);
+}
+
 TEST_CASE("LanBeacon: a session that stops talking disappears")
 {
     Browser b;

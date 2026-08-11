@@ -376,6 +376,16 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				{
 					ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
 						"Announced %u time%s.", st.sent, st.sent == 1 ? "" : "s");
+					// The other direction, which says whether the two machines
+					// can hear each other at all — answerable now without
+					// giving up this session to go and look.
+					const std::size_t others = collab->lanSessions().size();
+					if (others > 0)
+						ImGui::TextDisabled("%zu other session%s audible from here.",
+						                    others, others == 1 ? "" : "s");
+					else if (st.heard > 0)
+						ImGui::TextDisabled("Announcements from this machine come "
+						                    "back to it, so the network carries them.");
 				}
 			}
 			if (ImGui::IsItemHovered())

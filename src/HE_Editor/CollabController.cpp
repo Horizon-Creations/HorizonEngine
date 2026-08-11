@@ -1497,22 +1497,23 @@ void CollabController::updateLanDiscovery(std::uint64_t nowMs)
 		m_lanAnnouncer.stop();   // session ended — say goodbye rather than fade out
 	}
 
-	// ── Not in a session: listen ──
-	// Only then, because the list is what the join panel offers and there is no
-	// join panel once you are in.
-	if (!active())
+	// ── Listen, always ──
+	// Deliberately NOT only while idle, though the join list is the only thing
+	// that consumes it. Two reasons, both learned the hard way: hosting used to
+	// switch the ear off, so the obvious way to test — host on both machines and
+	// look — could never work by construction, and there was no way to answer
+	// "can these two even see each other?" without giving up one of the
+	// sessions. A drained socket costs nothing on a frame where nobody spoke.
+	//
+	// Our own beacon comes straight back off the segment, so the browser is told
+	// which instance is us and leaves it out of the list.
+	m_lanBrowser.setSelfInstance(m_lanInstance);
+	if (!m_lanBrowser.running())
 	{
-		if (!m_lanBrowser.running())
-		{
-			if (!m_lanBrowser.start()) { m_lanBlocked = true; return; }
-			m_lanBlocked = false;
-		}
-		m_lanBrowser.update(nowMs);
+		if (!m_lanBrowser.start()) { m_lanBlocked = true; return; }
+		m_lanBlocked = false;
 	}
-	else if (m_lanBrowser.running())
-	{
-		m_lanBrowser.stop();
-	}
+	m_lanBrowser.update(nowMs);
 }
 
 // ─── Session directory ───────────────────────────────────────────────────────
