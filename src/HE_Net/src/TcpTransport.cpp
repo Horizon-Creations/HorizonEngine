@@ -3,6 +3,7 @@
 #include "NetLog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 namespace HE::Net {
