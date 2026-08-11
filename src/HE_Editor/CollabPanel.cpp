@@ -514,6 +514,26 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	{
 		ImGui::SeparatorText("Hosting");
 
+		// WHERE this session actually is. It was never shown, and without it the
+		// only way to answer "which port is the host on?" is to read a socket
+		// list — where the discovery socket (UDP 47823) sits next to the session
+		// listener and looks just as much like the answer. They are different
+		// sockets on different protocols, and confusing them sends you looking
+		// for a bug in the wrong place.
+		ImGui::Text("Listening on %s:%u",
+		            collab->localAddress().empty() ? "this machine"
+		                                           : collab->localAddress().c_str(),
+		            unsigned(collab->port()));
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip(
+				"This is the session itself (TCP), and the port guests connect to.\n"
+				"Local-network discovery is a separate UDP socket on port %u —\n"
+				"it only carries the \"a session exists here\" announcements.",
+				unsigned(HE::Net::LanBeacon::kPort));
+		}
+		ImGui::Spacing();
+
 		if (collab->directoryBusy())
 		{
 			ImGui::TextDisabled("Publishing session...");
