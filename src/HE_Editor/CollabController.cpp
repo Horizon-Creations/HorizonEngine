@@ -1408,9 +1408,18 @@ void CollabController::update(std::uint64_t nowMs)
 					"otherwise the host's port is not actually forwarded.";
 			}
 			m_directoryStatus.clear();
+			Logger::Log(Logger::LogLevel::Warning, ("Collab: " + m_error).c_str());
+
+			// Give the attempt up for real. Leaving the socket pending meant the
+			// kernel kept dialling long after the editor had stopped waiting —
+			// on macOS a further 55 seconds — and then reported the single most
+			// diagnostic fact of the whole exchange (ETIMEDOUT: dropped, versus
+			// ECONNREFUSED: no listener) into a log nobody had a reason to open
+			// any more. Tearing down now ends the attempt where the message
+			// says it ended.
+			teardown();
 			m_status            = Status::Failed;
 			m_connectDeadlineMs = 0;
-			Logger::Log(Logger::LogLevel::Warning, ("Collab: " + m_error).c_str());
 			return;
 		}
 	}

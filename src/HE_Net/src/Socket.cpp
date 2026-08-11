@@ -396,13 +396,48 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
         // Clearing IPV6_V6ONLY makes one socket serve both families: IPv4 peers
         // show up as v4-mapped addresses. Windows and some BSDs default it to
         // ON, so it must be cleared explicitly.
+        //
+        // The result is CHECKED, and then read back, because failing here is
+        // invisible and devastating in the same breath: the listener binds, the
+        // log says the host is up, and every IPv4 peer's SYN arrives at what is
+        // — to them — a closed port. A closed port behind a firewall is DROPPED
+        // rather than reset, so the peer waits out its full kernel timeout and
+        // reports "no answer". Nothing anywhere says the listener only ever
+        // spoke IPv6. Read back rather than trusting the setsockopt return,
+        // because a silently ignored option is exactly the failure being
+        // guarded against.
         const int off = 0;
+        int       readBack = 1;
 #ifdef _WIN32
         ::setsockopt(static_cast<SOCKET>(h), IPPROTO_IPV6, IPV6_V6ONLY,
                      reinterpret_cast<const char*>(&off), sizeof(off));
+        int rbLen = static_cast<int>(sizeof(readBack));
+        if (::getsockopt(static_cast<SOCKET>(h), IPPROTO_IPV6, IPV6_V6ONLY,
+                         reinterpret_cast<char*>(&readBack), &rbLen) != 0) {
+            readBack = 1;   // could not tell — assume the worse of the two
+        }
 #else
         ::setsockopt(static_cast<int>(h), IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+        socklen_t rbLen = sizeof(readBack);
+        if (::getsockopt(static_cast<int>(h), IPPROTO_IPV6, IPV6_V6ONLY,
+                         &readBack, &rbLen) != 0) {
+            readBack = 1;
+        }
 #endif
+        if (readBack != 0) {
+            // An IPv4-only listener is far better than one that quietly takes
+            // no IPv4 peer at all: on a local network every peer is IPv4.
+            // Closing here falls through to the v4 path below.
+            HE_LOG_WARN(Net, "%s",
+                "This system will not let one socket serve both IP families "
+                "(IPV6_V6ONLY could not be cleared) — listening on IPv4 only. "
+                "A dual-stack listener here would have accepted no IPv4 peer at "
+                "all, and their connections would have timed out with nothing to "
+                "say why.");
+            socketClose(h);
+        }
+        else {
+
         socketSetNonBlocking(h, true);
         socketSetNoDelay(h, true);
         socketSetReuseAddr(h, true);
@@ -422,7 +457,12 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
                         && ::listen(static_cast<int>(h), backlog) == 0;
 #endif
         if (bound) {
-            HE_LOG_DEBUG(Net, "Listener is dual-stack (IPv6 socket serving both families)");
+            // INFO, not DEBUG: "which families does this listener actually
+            // take?" is the first question when a peer cannot get in, and at
+            // the default filter the answer was not in the log at all.
+            HE_LOG_INFO(Net, "Listener is dual-stack (one IPv6 socket serving "
+                             "both families) on port %u",
+                        static_cast<unsigned>(port));
             return h;
         }
         // Worth a line: after this the host is reachable over IPv4 only, and
@@ -430,6 +470,7 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
         HE_LOG_WARN(Net, "IPv6 listener on port %u failed (%s) — falling back to IPv4 only",
                     static_cast<unsigned>(port), errText(lastError()).c_str());
         socketClose(h);
+        }
     } else {
         HE_LOG_WARN(Net, "No IPv6 stack available — listening on IPv4 only");
     }
@@ -683,6 +724,8 @@ bool socketBindUdpTo(SocketHandle h, const std::string& localAddress, std::uint1
                   reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
 #endif
 }
+
+std::string socketErrorText() { return errText(lastError()); }
 
 bool socketSetBroadcast(SocketHandle h, bool enable) {
     if (h == kInvalidSocket) return false;

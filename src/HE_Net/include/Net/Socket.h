@@ -147,6 +147,15 @@ HE_NET_API bool         socketBindUdpTo(SocketHandle h, const std::string& local
 // Announcing a collaboration session on the LAN so peers can find it without
 // an address. All three of these exist only for that.
 
+// The last socket error on this thread, as text, with its numeric code.
+//
+// Layer 0 is where the truth about a failure lives: everything above only sees
+// SocketResult::Error, and that collapses "connection refused" (nothing is
+// listening) and "operation timed out" (the packets are being dropped) into one
+// indistinguishable symptom — which is precisely the distinction that decides
+// where to go looking. Callers must read it immediately after the failing call.
+HE_NET_API std::string  socketErrorText();
+
 // Permit sending to the limited broadcast address (255.255.255.255).
 HE_NET_API bool         socketSetBroadcast(SocketHandle h, bool enable);
 

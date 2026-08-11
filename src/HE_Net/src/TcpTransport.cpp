@@ -120,7 +120,27 @@ void TcpTransport::acceptPending() {
     for (;;) {
         SocketHandle accepted = kInvalidSocket;
         const SocketResult rc = socketAccept(m_listener, accepted);
-        if (rc != SocketResult::Ok) break;   // WouldBlock (empty) or Error
+        if (rc == SocketResult::WouldBlock) break;   // nobody knocked; the normal case
+        if (rc != SocketResult::Ok) {
+            // A listener that is alive but cannot accept used to be
+            // indistinguishable from one nobody has knocked on — both simply
+            // left this loop. That is the difference between "no guests came"
+            // and "guests came and the door is broken", and a host debugging
+            // why nobody gets in deserves to be told which.
+            //
+            // Rate-limited: accept errors can repeat every frame, and sixty
+            // identical lines a second would drown the log they belong in.
+            static std::uint64_t s_lastAcceptErrLog = 0;
+            const auto nowMs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+            if (nowMs - s_lastAcceptErrLog > 5'000) {
+                s_lastAcceptErrLog = nowMs;
+                HE_LOG_WARN(Net, "TCP accept failed on the listening socket — %s",
+                            socketErrorText().c_str());
+            }
+            break;
+        }
 
         const ConnectionId id = m_nextId++;
         Conn c;
