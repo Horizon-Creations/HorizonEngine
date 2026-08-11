@@ -26,6 +26,8 @@ namespace EditorSettingsPanel
 		Appearance, Viewport, ContentBrowser,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
+		// Collaboration
+		CollabGeneral,
 		// Source Control
 		Repository, GitSetup,
 		// Tools

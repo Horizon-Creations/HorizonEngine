@@ -1104,6 +1104,9 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::GlobalIllumination, "Global Illumination" },
 	{ Page::Effects,            "Effects" },
 };
+constexpr NavItem kCollaborationItems[] = {
+	{ Page::CollabGeneral, "Sessions" },
+};
 constexpr NavItem kSourceControlItems[] = {
 	{ Page::Repository, "Repository" },
 	{ Page::GitSetup,   "Git Setup" },
@@ -1115,6 +1118,7 @@ constexpr NavItem kToolsItems[] = {
 constexpr NavGroup kNavGroups[] = {
 	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
 	{ "Rendering",      kRenderingItems,     IM_ARRAYSIZE(kRenderingItems) },
+	{ "Collaboration",  kCollaborationItems, IM_ARRAYSIZE(kCollaborationItems) },
 	{ "Source Control", kSourceControlItems, IM_ARRAYSIZE(kSourceControlItems) },
 	{ "Tools",          kToolsItems,         IM_ARRAYSIZE(kToolsItems) },
 };
@@ -1132,6 +1136,7 @@ const char* catalogCategory(Page p)
 	case Page::PostProcessing:     return "Post-Processing";
 	case Page::GlobalIllumination: return "Global Illumination";
 	case Page::Effects:            return "Effects";
+	case Page::CollabGeneral:      return "Collaboration";
 	default:                       return nullptr;
 	}
 }
@@ -1245,6 +1250,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.SSAOIntensity     = 1.0f;
 			cfg.SSAOMethod        = 0;
 			cfg.GpuParticles      = true;
+			cfg.CollabLanDiscovery = true;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();
