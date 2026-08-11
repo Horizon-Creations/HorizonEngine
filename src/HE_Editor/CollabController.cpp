@@ -675,6 +675,10 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 	// the user's side "nothing is happening" is the same either way.
 	m_connectDeadlineMs  = 0;   // set on the first update(), which knows the clock
 	m_connectTarget.clear();
+	// A directory lookup is by definition not a LAN address; beginLink sets this
+	// truthfully once an address exists. Cleared here so a previous LAN attempt
+	// cannot label this one.
+	m_connectIsLan = false;
 
 	const std::string endpoint = directoryEndpoint();
 	const std::string sid      = sessionId;
@@ -765,6 +769,15 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	m_isHost        = false;
 	m_status        = Status::Connecting;
 	m_connectTarget = host;
+	// Is this an address we HEARD rather than looked up? Derived here rather
+	// than passed in, so it is true however the join was started — the list, the
+	// session id, or a hand-typed address that happens to be a machine
+	// announcing itself. What it changes is which cause a silent failure names.
+	m_connectIsLan = false;
+	for (const auto& s : m_lanBrowser.sessions())
+	{
+		if (s.address == host && s.port == port) { m_connectIsLan = true; break; }
+	}
 	// The project key goes in the line: it is what the host compares the join
 	// against, and a refusal is otherwise only diagnosable from the HOST's log.
 	Logger::Log(Logger::LogLevel::Info,
@@ -1355,19 +1368,45 @@ void CollabController::update(std::uint64_t nowMs)
 	if (m_status == Status::Connecting)
 	{
 		if (m_connectDeadlineMs == 0)
-			m_connectDeadlineMs = nowMs + kConnectTimeoutMs;
+		{
+			m_connectDeadlineMs =
+				nowMs + (m_connectIsLan ? kLanConnectTimeoutMs : kConnectTimeoutMs);
+		}
 		else if (nowMs > m_connectDeadlineMs)
 		{
-			// Name the address. It is the one thing that tells the two causes
-			// apart — an IPv6 address here and a guest without IPv6 is a
-			// different problem from an address that simply does not answer.
-			m_error = m_connectTarget.empty()
-				? std::string("The session could not be looked up in time. Check the "
-				              "session ID, and that you are online.")
-				: ("No answer from " + m_connectTarget + ":" + std::to_string(m_port) +
-				   " after 20 seconds. The host is published but nothing there accepted "
-				   "the connection — if that address is IPv6, your network may not have "
-				   "a route to it; otherwise the host's port is not actually forwarded.");
+			// Name the address, and name the RIGHT cause for it.
+			//
+			// A machine we can hear announcing itself on this network is not
+			// "not forwarded" — forwarding has nothing to do with two computers
+			// on one subnet, and saying so sent people into their router while
+			// the actual block sat on the host's own machine. The signature is
+			// unmistakable once you look for it: a reachable host with nothing
+			// listening answers with a reset, and the connect fails INSTANTLY.
+			// A wait that runs to the deadline means the packets are being
+			// dropped in silence, which is what a host firewall does.
+			if (m_connectTarget.empty())
+			{
+				m_error = "The session could not be looked up in time. Check the "
+				          "session ID, and that you are online.";
+			}
+			else if (m_connectIsLan)
+			{
+				m_error = "No answer from " + m_connectTarget + ":" +
+					std::to_string(m_port) + ", although that machine is announcing "
+					"the session on this network. Nothing was refused — the "
+					"connection was dropped in silence, which is what a firewall on "
+					"the HOST's machine does to a program it has not been allowed to "
+					"accept connections for. On Windows, allow the editor through "
+					"Windows Defender Firewall for private networks.";
+			}
+			else
+			{
+				m_error = "No answer from " + m_connectTarget + ":" +
+					std::to_string(m_port) + " after 20 seconds. The host is "
+					"published but nothing there accepted the connection — if that "
+					"address is IPv6, your network may not have a route to it; "
+					"otherwise the host's port is not actually forwarded.";
+			}
 			m_directoryStatus.clear();
 			m_status            = Status::Failed;
 			m_connectDeadlineMs = 0;

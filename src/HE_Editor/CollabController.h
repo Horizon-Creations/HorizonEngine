@@ -792,8 +792,19 @@ private:
 	// rather than refuses) leaves the join pending with nothing to report it.
 	// Without a deadline the UI says "Connecting…" until the user gives up.
 	static constexpr std::uint64_t kConnectTimeoutMs = 20'000;
+	// A machine on our own segment either answers or is being blocked; waiting
+	// the full twenty seconds for that verdict only delays a message the user
+	// needs. The address came from a beacon we heard seconds ago, so "it might
+	// still be routing" is not a live possibility here.
+	static constexpr std::uint64_t kLanConnectTimeoutMs = 6'000;
 	std::uint64_t m_connectDeadlineMs = 0;   // 0 = not connecting
 	std::string   m_connectTarget;           // address being dialled, for the message
+	// Whether that address came from a LAN announcement. It changes what a
+	// silent failure MEANS: for a directory address, an unforwarded port is the
+	// likely cause; for a machine that is announcing itself two metres away,
+	// port forwarding is irrelevant and the host's own firewall is the answer.
+	// Naming the wrong cause sends people to the wrong settings page.
+	bool          m_connectIsLan = false;
 
 	// Directory state
 	std::future<RegisterResult> m_registerFuture;
