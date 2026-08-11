@@ -65,6 +65,13 @@ struct EditorConfig
 	// Content browser tree-panel width (-1 = auto on first frame)
 	float CbTreeWidth = -1.0f;
 
+	// Collaboration: announce a hosted session on the local network, and listen
+	// for other people's. On by default — it is the only route that works when
+	// the router will not forward a port, and it carries no secret (the join
+	// code is never announced). Off is for networks you would rather not be
+	// visible on at all.
+	bool CollabLanDiscovery = true;
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second

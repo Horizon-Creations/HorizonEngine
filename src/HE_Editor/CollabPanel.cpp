@@ -33,6 +33,10 @@ namespace
 	int  s_hostPort         = 7777;
 	char s_joinSessionId[80] = "";
 	char s_joinCode[80]      = "";
+	// Which discovered session the user clicked, by announcing-instance rather
+	// than by list position: the list re-sorts itself as beacons arrive and
+	// expire, so an index would move under the selection.
+	std::uint64_t s_lanPicked = 0;
 
 	// Why the last picture could not be used, shown until the next attempt.
 	std::string s_avatarError;
@@ -326,10 +330,146 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
 					"Your connection is behind carrier-grade NAT — port forwarding cannot "
 					"help here.");
+
+			// The way out of every warning above. Said HERE, next to the bad
+			// news, because "guests will not reach this machine" is exactly the
+			// moment someone needs to know that people in the same room still
+			// can.
+			if (!r.portForwardingAvailable() || r.carrierNat)
+			{
+				ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+					"Anyone on this network can still find and join the session.");
+			}
+		}
+
+		// One switch for both halves of discovery — announcing when you host,
+		// listening when you do not. It is one feature to the person using it.
+		{
+			// The config is the one that is written, never the controller: the
+			// editor pushes it down every frame, so this both takes effect
+			// immediately and survives a restart.
+			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
+			if (ImGui::Checkbox("Announce this session on the local network", &lanOn))
+				ctx.editorConfig.CollabLanDiscovery = lanOn;
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"People on the same network see your session in their list and\n"
+					"join without an address. Your join code is NOT announced.\n"
+					"Turn this off on a network you do not want to be seen on.");
+			}
 		}
 
 		// ── Join ──
 		ImGui::SeparatorText("Join a session");
+
+		// ── Sessions on this network ──
+		// Above the manual fields on purpose: when it works it is the answer,
+		// and the session id exists for the case where it does not.
+		{
+			// Same switch as the host side's — one feature, one setting. Written
+			// to the config, which the editor pushes into the controller.
+			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
+			if (ImGui::Checkbox("Look for sessions on this network", &lanOn))
+				ctx.editorConfig.CollabLanDiscovery = lanOn;
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"Hosts announce themselves on the local network, so a session\n"
+					"here needs no address and no session ID. The join code is\n"
+					"never announced — you still get that from the host.");
+			}
+
+			if (lanOn)
+			{
+				const auto& found = collab->lanSessions();
+				if (collab->lanBlocked())
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1.0f),
+						"This application may not use the local network.");
+					ImGui::TextWrapped("On macOS, allow it under Privacy & Security > "
+					                   "Local Network. Until then, sessions here cannot "
+					                   "be found — the session ID below still works.");
+				}
+				else if (found.empty())
+				{
+					// Said plainly, because an empty box reads as broken. Hosts
+					// speak every couple of seconds, so "nothing yet" is the
+					// normal first impression.
+					ImGui::TextDisabled("No sessions found on this network yet.");
+				}
+				else
+				{
+					for (std::size_t i = 0; i < found.size(); ++i)
+					{
+						const auto& s = found[i];
+						ImGui::PushID(static_cast<int>(2000 + i));
+
+						const bool sameProject =
+							s.projectKey.empty() || collab->projectId().empty() ||
+							s.projectKey == collab->projectId();
+						const bool sameProtocol =
+							s.protocol == HE::Net::kCollabProtocolVersion;
+						const bool joinable = sameProject && sameProtocol;
+
+						ImGui::BeginDisabled(!joinable);
+						// One click fills the address in; the code is still
+						// typed, because it is the only thing keeping strangers
+						// on this network out.
+						if (ImGui::Selectable(
+								(s.hostName.empty() ? std::string("Someone") : s.hostName).c_str(),
+								s_lanPicked == s.instance, 0, ImVec2(0, 0)))
+						{
+							s_lanPicked = s.instance;
+						}
+						ImGui::EndDisabled();
+
+						ImGui::SameLine();
+						ImGui::TextDisabled("%s  ·  %u %s",
+							s.projectLabel.empty() ? "unnamed project" : s.projectLabel.c_str(),
+							unsigned(s.participants),
+							s.participants == 1 ? "person" : "people");
+
+						// Why a row cannot be clicked, said on the row. A
+						// session that is simply missing sends people to ask
+						// each other what is wrong.
+						if (!sameProtocol)
+						{
+							ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+								"    different engine version — one of you needs to update");
+						}
+						else if (!sameProject)
+						{
+							ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+								"    a different project");
+						}
+						ImGui::PopID();
+					}
+
+					// The picked row, joined with the code typed below it.
+					const auto picked = std::find_if(found.begin(), found.end(),
+						[](const auto& s) { return s.instance == s_lanPicked; });
+					if (picked != found.end())
+					{
+						ImGui::Spacing();
+						ImGui::SetNextItemWidth(220);
+						ImGui::InputText("Join code##lan", s_joinCode, sizeof(s_joinCode));
+						ImGui::BeginDisabled(s_joinCode[0] == '\0');
+						if (EditorWidgets::primaryButton("Join this session", ImVec2(190, 0)))
+						{
+							collab->joinSession(picked->address, picked->port,
+							                    s_joinCode, s_displayName);
+						}
+						ImGui::EndDisabled();
+						if (s_joinCode[0] == '\0')
+							ImGui::TextDisabled("Ask the host for the join code.");
+					}
+				}
+			}
+		}
+
+		ImGui::Spacing();
+		ImGui::TextDisabled("Or join by ID:");
 		ImGui::InputText("Session ID", s_joinSessionId, sizeof(s_joinSessionId));
 		ImGui::InputText("Join code",  s_joinCode,      sizeof(s_joinCode));
 

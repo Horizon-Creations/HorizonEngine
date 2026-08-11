@@ -15,6 +15,7 @@
 // happens at all.
 
 #include <Net/CollabSession.h>
+#include <Net/LanBeacon.h>
 #include <Net/PortMapper.h>
 #include <Types/Enums.h>   // HE::AssetType — the .hasset header's real type
 
@@ -71,6 +72,9 @@ public:
 		m_projectId    = std::move(id);
 		m_projectLabel = std::move(label);
 	}
+	// What a discovered session is compared against, so the join panel can say
+	// "a different project" before someone tries and is refused.
+	const std::string& projectId() const { return m_projectId; }
 
 	// Fires after a received snapshot replaced the world. The editor must drop
 	// its selection and undo history here — both refer to entity handles that no
@@ -93,6 +97,26 @@ public:
 	// when the directory is unreachable.
 	bool joinSession(const std::string& host, std::uint16_t port,
 	                 const std::string& joinCode, const std::string& displayName);
+
+	// ── Sessions on this network ─────────────────────────────────────────────
+	// The directory route needs the host to be reachable FROM THE INTERNET, and
+	// behind carrier NAT or a router that will not forward, it is not — two
+	// people on one Wi-Fi were told to use a relay that does not exist. On one
+	// network none of that is needed: hosts announce themselves, guests listen,
+	// and joining is a click plus the code (which is never announced — see
+	// LanBeacon.h).
+	//
+	// Both halves follow ONE switch, because "find sessions near me" is one
+	// feature to a user even though it is two sockets to us.
+	void setLanDiscoveryEnabled(bool on);
+	bool lanDiscoveryEnabled() const { return m_lanEnabled; }
+	// What the browser currently hears. Empty while disabled, and empty for the
+	// first couple of seconds after enabling — hosts speak on a timer.
+	const std::vector<HE::Net::LanBeacon::Browser::Session>& lanSessions() const;
+	// True when the local network is unavailable to this process at all (on
+	// macOS: the Local Network permission). Discovery cannot work then, and an
+	// empty list would otherwise be indistinguishable from "nobody is hosting".
+	bool lanBlocked() const { return m_lanBlocked; }
 	void leave();
 
 	// Same cleanup as leave(), but it WAITS for it. Call once while the editor
@@ -769,6 +793,20 @@ private:
 	// address arrives.
 	std::string   m_pendingJoinCode;
 	std::string   m_pendingDisplayName;
+
+	// ── LAN discovery ──
+	// The announcer only exists while hosting; the browser runs whenever
+	// discovery is on and we are not in a session — that is the only time its
+	// list is of any use, and a socket nobody reads is one nobody has to think
+	// about.
+	HE::Net::LanBeacon::Announcer m_lanAnnouncer;
+	HE::Net::LanBeacon::Browser   m_lanBrowser;
+	bool          m_lanEnabled = true;    // user setting; persisted by the editor
+	bool          m_lanBlocked = false;   // the local network refused us outright
+	// This editor run, so the two copies of one beacon (multicast + broadcast)
+	// collapse to one row and a restarted session is a new one.
+	std::uint64_t m_lanInstance = 0;
+	void updateLanDiscovery(std::uint64_t nowMs);
 
 	std::uint32_t m_snapshotGot   = 0;
 	std::uint32_t m_snapshotTotal = 0;

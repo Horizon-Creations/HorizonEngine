@@ -17,6 +17,7 @@ add_library(HorizonNet SHARED
 	src/PortMapper.cpp
 	src/RouterProbe.cpp
 	src/SessionDirectory.cpp
+	src/LanBeacon.cpp
 	src/CollabSession.cpp
 	src/NetSession.cpp
 )

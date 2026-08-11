@@ -74,6 +74,7 @@ add_executable(he_tests
     test_net_secure.cpp
     test_net_discovery.cpp
     test_net_directory.cpp
+    test_net_lanbeacon.cpp
     test_net_collab.cpp
     test_collab_controller.cpp
     test_collab_undo.cpp

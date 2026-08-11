@@ -1226,6 +1226,15 @@ void CollabController::shutdown()
 
 void CollabController::teardown()
 {
+	// Say goodbye on the way out, from the one place EVERY exit from a session
+	// passes through — leaving, being kicked, the link dying, the editor
+	// quitting. Relying on the next update() to notice would work for all of
+	// those except the last, and quitting is precisely when nobody is left to
+	// notice: the session would sit in every browser's list until it expired,
+	// and the first thing the next person did would be to click a corpse.
+	m_lanAnnouncer.stop();
+	m_lanInstance = 0;
+
 	// Destruction order matters: CollabSession and NetSession hold raw pointers
 	// into the transport, so they must go first.
 	m_collab.reset();
@@ -1317,6 +1326,11 @@ void CollabController::update(std::uint64_t nowMs)
 	// collected.
 	pumpDirectory(nowMs);
 
+	// Same reason, more so: the browser's whole job is to have a list ready
+	// BEFORE there is a session. Behind the transport early-out it would only
+	// ever run once joining had already happened.
+	updateLanDiscovery(nowMs);
+
 	// ── Joining has to be able to fail ──
 	// The socket is non-blocking, so a SYN that nothing answers — no route to
 	// the host's address family, a firewall that drops instead of refusing —
@@ -1361,6 +1375,104 @@ void CollabController::update(std::uint64_t nowMs)
 	{
 		m_error  = "The connection to the host was lost.";
 		m_status = Status::Failed;
+	}
+}
+
+// ─── Sessions on this network ────────────────────────────────────────────────
+
+const std::vector<HE::Net::LanBeacon::Browser::Session>&
+CollabController::lanSessions() const
+{
+	return m_lanBrowser.sessions();
+}
+
+void CollabController::setLanDiscoveryEnabled(bool on)
+{
+	if (m_lanEnabled == on) return;
+	m_lanEnabled = on;
+	// Takes effect NOW rather than on the next restart: switching it off while
+	// hosting has to actually stop the announcing, which is the entire reason
+	// somebody would switch it off. stop() sends the goodbye on the way out.
+	if (!on)
+	{
+		m_lanAnnouncer.stop();
+		m_lanBrowser.stop();
+		m_lanBlocked = false;
+	}
+	// Turning it on starts nothing here — updateLanDiscovery does that on the
+	// next frame, from the one place that knows whether we host, browse or
+	// neither.
+}
+
+void CollabController::updateLanDiscovery(std::uint64_t nowMs)
+{
+	if (!m_lanEnabled)
+	{
+		if (m_lanAnnouncer.running()) m_lanAnnouncer.stop();
+		if (m_lanBrowser.running())   m_lanBrowser.stop();
+		return;
+	}
+
+	// ── Hosting: say we are here ──
+	if (m_isHost && m_status == Status::Hosting && m_port != 0)
+	{
+		if (!m_lanAnnouncer.running())
+		{
+			// Derived from the session id, which is CSPRNG-minted per session:
+			// the two copies of one beacon (multicast and broadcast) collapse to
+			// one row, and a host that reopens a session reads as a new one
+			// because it gets a new id. FNV-1a, because all this has to be is
+			// stable within a run and different between them.
+			std::uint64_t h = 1469598103934665603ull;
+			for (const unsigned char c : m_sessionId)
+				{ h ^= c; h *= 1099511628211ull; }
+			m_lanInstance = h ? h : 1;
+
+			HE::Net::LanBeacon::Announcement a;
+			a.protocol     = HE::Net::kCollabProtocolVersion;
+			a.instance     = m_lanInstance;
+			a.sessionId    = m_sessionId;
+			a.port         = m_port;
+			a.projectLabel = m_projectLabel;
+			a.projectKey   = m_projectId;
+			for (const HE::Net::Participant& p : participants())
+				if (p.isHost) { a.hostName = p.name; break; }
+			// No join code. See LanBeacon.h — announcing it would let anyone on
+			// the segment walk straight in.
+			if (!m_lanAnnouncer.start(a))
+			{
+				// macOS refuses local-network traffic to an app that was not
+				// granted it, and there is nothing about that to retry every
+				// frame. The setting stays on; only this attempt failed.
+				m_lanBlocked = true;
+				return;
+			}
+			m_lanBlocked = false;
+		}
+		m_lanAnnouncer.setParticipants(
+			static_cast<std::uint8_t>(std::min<std::size_t>(participants().size(), 255)));
+		m_lanAnnouncer.update(nowMs);
+	}
+	else if (m_lanAnnouncer.running())
+	{
+		m_lanAnnouncer.stop();   // session ended — say goodbye rather than fade out
+	}
+
+	// ── Not in a session: listen ──
+	// Only then, because the list is what the join panel offers and there is no
+	// join panel once you are in.
+	if (!active())
+	{
+		if (!m_lanBrowser.running())
+		{
+			if (!m_lanBrowser.start()) { m_lanBlocked = true; return; }
+			m_lanBlocked = false;
+		}
+		m_lanBrowser.update(nowMs);
+	}
+	else if (m_lanBrowser.running())
+	{
+		m_lanBrowser.stop();
 	}
 }
 

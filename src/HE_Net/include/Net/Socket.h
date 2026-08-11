@@ -143,6 +143,31 @@ HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
 HE_NET_API bool         socketBindUdpTo(SocketHandle h, const std::string& localAddress,
                                         std::uint16_t port);
 
+// ─── Local-network discovery ─────────────────────────────────────────────────
+// Announcing a collaboration session on the LAN so peers can find it without
+// an address. All three of these exist only for that.
+
+// Permit sending to the limited broadcast address (255.255.255.255).
+HE_NET_API bool         socketSetBroadcast(SocketHandle h, bool enable);
+
+// Receive a multicast group on this socket. `localAddress` picks the interface
+// to join on — empty means the default route. The interface matters as much
+// here as it does for SENDING (see socketSetMulticastInterface): a machine with
+// Hyper-V, WSL or a VPN adapter has several, and joining on the wrong one looks
+// exactly like nobody announcing anything.
+HE_NET_API bool         socketJoinMulticastGroup(SocketHandle h, const std::string& group,
+                                                 const std::string& localAddress = {});
+
+// Bind a UDP port that OTHER PROCESSES may bind too.
+//
+// The TCP side deliberately refuses this on Windows, where SO_REUSEADDR lets a
+// second process take over a listening port outright — see socketSetReuseAddr.
+// That danger is about a port someone connects TO and trusts. A discovery port
+// carries world-readable announcements and no secrets, and two editors on one
+// machine BOTH needing to hear them is the ordinary case (a second instance to
+// test a session with yourself). Sharing it steals nothing.
+HE_NET_API bool         socketBindUdpShared(SocketHandle h, std::uint16_t port);
+
 // Choose which interface multicast leaves by.
 //
 // Without this the kernel picks the route for the multicast group, which is a

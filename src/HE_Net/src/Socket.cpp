@@ -684,6 +684,69 @@ bool socketBindUdpTo(SocketHandle h, const std::string& localAddress, std::uint1
 #endif
 }
 
+bool socketSetBroadcast(SocketHandle h, bool enable) {
+    if (h == kInvalidSocket) return false;
+    const int v = enable ? 1 : 0;
+#ifdef _WIN32
+    return ::setsockopt(static_cast<SOCKET>(h), SOL_SOCKET, SO_BROADCAST,
+                        reinterpret_cast<const char*>(&v), sizeof(v)) == 0;
+#else
+    return ::setsockopt(static_cast<int>(h), SOL_SOCKET, SO_BROADCAST,
+                        &v, sizeof(v)) == 0;
+#endif
+}
+
+bool socketJoinMulticastGroup(SocketHandle h, const std::string& group,
+                              const std::string& localAddress) {
+    if (h == kInvalidSocket) return false;
+    ip_mreq mreq{};
+    if (::inet_pton(AF_INET, group.c_str(), &mreq.imr_multiaddr) != 1) return false;
+    // INADDR_ANY = "whichever interface the routing table picks". Naming one is
+    // better whenever the caller knows it, for the same reason the send side
+    // does: the wrong adapter is silent, not an error.
+    mreq.imr_interface.s_addr = INADDR_ANY;
+    if (!localAddress.empty())
+        ::inet_pton(AF_INET, localAddress.c_str(), &mreq.imr_interface);
+#ifdef _WIN32
+    return ::setsockopt(static_cast<SOCKET>(h), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                        reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0;
+#else
+    return ::setsockopt(static_cast<int>(h), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                        &mreq, sizeof(mreq)) == 0;
+#endif
+}
+
+bool socketBindUdpShared(SocketHandle h, std::uint16_t port) {
+    if (h == kInvalidSocket) return false;
+
+    // Unlike socketSetReuseAddr, this DOES set SO_REUSEADDR on Windows — see the
+    // header for why that is safe on a discovery port and nowhere else.
+    const int one = 1;
+#ifdef _WIN32
+    ::setsockopt(static_cast<SOCKET>(h), SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+    ::setsockopt(static_cast<int>(h), SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#ifdef SO_REUSEPORT
+    // BSD/macOS want this one as well before two sockets may share a bound UDP
+    // port; SO_REUSEADDR alone only covers multicast there.
+    ::setsockopt(static_cast<int>(h), SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+#endif
+#endif
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(port);
+#ifdef _WIN32
+    return ::bind(static_cast<SOCKET>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#else
+    return ::bind(static_cast<int>(h),
+                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#endif
+}
+
 bool socketSetMulticastInterface(SocketHandle h, const std::string& localAddress) {
     if (h == kInvalidSocket) return false;
     in_addr iface{};

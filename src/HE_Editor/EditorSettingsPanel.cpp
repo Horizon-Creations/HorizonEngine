@@ -314,6 +314,16 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("Simulate rain/snow on the GPU (transform feedback).");
 	});
 
+	row("landiscovery", "Collaboration", [&]{
+		ImGui::Checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
+		hint("Hosts announce a session on the local network and guests see it in "
+		     "a list, so nobody has to exchange an address or a session ID. This "
+		     "is also the only route that works when the router will not forward "
+		     "a port. The join code is never announced — a guest still needs it "
+		     "from the host. Turn this off on a network you would rather not be "
+		     "visible on.");
+	});
+
 	row("camspeed", "Viewport", [&]{
 		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
