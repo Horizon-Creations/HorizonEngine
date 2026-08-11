@@ -117,6 +117,20 @@ public:
 	// macOS: the Local Network permission). Discovery cannot work then, and an
 	// empty list would otherwise be indistinguishable from "nobody is hosting".
 	bool lanBlocked() const { return m_lanBlocked; }
+
+	// Is this session id one we can hear announcing itself here? Returns its
+	// announced endpoint, or null.
+	//
+	// A free-standing rule rather than a few lines inside joinBySessionId,
+	// because it decides something worth pinning down: a session we can hear
+	// on this network is reached by its LOCAL address, never by the public one
+	// the directory would hand back. Most routers refuse to let a machine
+	// reach its own network through its public address, so the directory route
+	// can fail between two people in the same room — and blame the port
+	// forward while doing it.
+	static const HE::Net::LanBeacon::Browser::Session* lanEndpointFor(
+		const std::vector<HE::Net::LanBeacon::Browser::Session>& sessions,
+		const std::string& sessionId);
 	void leave();
 
 	// Same cleanup as leave(), but it WAITS for it. Call once while the editor

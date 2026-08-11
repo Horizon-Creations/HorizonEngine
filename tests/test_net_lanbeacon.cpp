@@ -2,7 +2,9 @@
 
 #include <Net/LanBeacon.h>
 #include <Net/CollabSession.h>
+#include "../src/HE_Editor/CollabController.h"
 #include <string>
+#include <vector>
 
 using namespace HE::Net;
 using namespace HE::Net::LanBeacon;
@@ -188,6 +190,47 @@ TEST_CASE("LanBeacon: an absurd name still fits in a datagram")
     REQUIRE(decode(bytes.data(), bytes.size(), out));
     CHECK(out.hostName.size()     <= kMaxStringLen);
     CHECK(out.projectLabel.size() <= kMaxStringLen);
+}
+
+TEST_CASE("LanBeacon: a session heard here is reached by its local address")
+{
+    // The rule that makes joining by ID work between two people in the same
+    // room: the directory would answer with the host's PUBLIC address, and most
+    // routers refuse to let a machine reach its own network that way. If we can
+    // hear the session locally, the local address wins.
+    Browser b;
+    Announcement a = sample();
+    a.sessionId = "sess-here";
+    a.port      = 7777;
+    feed(b, "192.168.1.50", a, 1000);
+
+    const auto* found =
+        CollabController::lanEndpointFor(b.sessions(), "sess-here");
+    REQUIRE(found != nullptr);
+    CHECK(found->address == "192.168.1.50");
+    CHECK(found->port    == 7777);
+
+    // A session we cannot hear falls through to the directory, as before.
+    CHECK(CollabController::lanEndpointFor(b.sessions(), "sess-elsewhere") == nullptr);
+    CHECK(CollabController::lanEndpointFor(b.sessions(), "") == nullptr);
+}
+
+TEST_CASE("LanBeacon: an entry with nowhere to connect never wins")
+{
+    // It would take precedence over the directory and then fail — worse than
+    // not having heard the session at all.
+    std::vector<Browser::Session> sessions(1);
+    sessions[0].sessionId = "sess-1";
+    sessions[0].address   = "";
+    sessions[0].port      = 7777;
+    CHECK(CollabController::lanEndpointFor(sessions, "sess-1") == nullptr);
+
+    sessions[0].address = "192.168.1.50";
+    sessions[0].port    = 0;
+    CHECK(CollabController::lanEndpointFor(sessions, "sess-1") == nullptr);
+
+    sessions[0].port = 7777;
+    CHECK(CollabController::lanEndpointFor(sessions, "sess-1") != nullptr);
 }
 
 TEST_CASE("LanBeacon: a peer on another protocol is kept, not hidden")

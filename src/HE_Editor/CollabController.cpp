@@ -643,6 +643,20 @@ bool CollabController::joinBySessionId(const std::string& sessionId,
 		m_status = Status::Failed;
 		return false;
 	}
+
+	// ── Is that session right here? ──
+	// Then use the address and port it announced, and never ask the directory.
+	// See lanEndpointFor for why this is a correctness fix and not a shortcut.
+	if (const auto* near = lanEndpointFor(m_lanBrowser.sessions(), sessionId))
+	{
+		Logger::Log(Logger::LogLevel::Info,
+			("Collab: that session is on this network — connecting directly to " +
+			 near->address + ":" + std::to_string(near->port) +
+			 " instead of asking the directory").c_str());
+		m_sessionId = sessionId;
+		return beginLink(near->address, near->port, joinCode, displayName);
+	}
+
 	if (!HE::Net::httpsAvailable())
 	{
 		m_error  = "This build has no HTTPS support, so a session ID cannot be resolved.";
@@ -1384,6 +1398,22 @@ const std::vector<HE::Net::LanBeacon::Browser::Session>&
 CollabController::lanSessions() const
 {
 	return m_lanBrowser.sessions();
+}
+
+const HE::Net::LanBeacon::Browser::Session* CollabController::lanEndpointFor(
+	const std::vector<HE::Net::LanBeacon::Browser::Session>& sessions,
+	const std::string& sessionId)
+{
+	if (sessionId.empty()) return nullptr;
+	for (const auto& s : sessions)
+	{
+		if (s.sessionId != sessionId) continue;
+		// An entry without somewhere to connect to is worse than no entry: it
+		// would take precedence over the directory and then fail.
+		if (s.address.empty() || s.port == 0) continue;
+		return &s;
+	}
+	return nullptr;
 }
 
 void CollabController::setLanDiscoveryEnabled(bool on)

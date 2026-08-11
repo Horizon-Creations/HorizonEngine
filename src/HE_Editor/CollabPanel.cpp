@@ -432,6 +432,15 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 								s_lanPicked == s.instance, 0, ImVec2(0, 0)))
 						{
 							s_lanPicked = s.instance;
+							// The ID goes into the field below too, so the two
+							// ways in are visibly ONE session rather than two
+							// unrelated forms — and whichever button gets
+							// pressed does the same thing, because joining by
+							// ID now notices that this session is on the
+							// network and takes the announced address.
+							std::strncpy(s_joinSessionId, s.sessionId.c_str(),
+							             sizeof(s_joinSessionId) - 1);
+							s_joinSessionId[sizeof(s_joinSessionId) - 1] = '\0';
 						}
 						ImGui::EndDisabled();
 
