@@ -60,19 +60,45 @@ target_compile_definitions(HorizonContentSync
 #      variable of the same name. CI uses the environment form, so a password
 #      never has to survive a shell quoting round-trip — one containing a $ or
 #      a backtick would not — and nothing lands in CMakeCache.txt on the runner.
+#      PORT is deliberately not on the environment route: its cache default (22)
+#      is never empty, so the "only fill in what is still empty" test below can
+#      never fire for it. A non-default port goes in the local file or a -D.
 #   3. Nothing. Host and username stay empty, SftpProbe reports "not configured"
 #      and the Editor behaves exactly as it did before the remote library
 #      existed. This is what anyone cloning the repo gets, and it is fine.
-if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/EngineContentCredentials.cmake")
-	include("${CMAKE_SOURCE_DIR}/cmake/EngineContentCredentials.cmake")
-endif()
-# The cache entries are where a -D lands; they also give cmake-gui a knob. A
-# normal variable from the local file above shadows them from here on.
+#
+# The cache entries are declared BEFORE the local file is included, and that
+# order is load-bearing. A set(<var> <value> CACHE …) that actually writes its
+# entry — i.e. the first configure in a build directory — ALSO deletes a normal
+# variable of the same name from the current scope. That is CMP0126's OLD
+# behaviour, which the root CMakeLists' cmake_minimum_required(VERSION 3.20)
+# selects for the whole project. With the include() above the cache block, a
+# fresh build directory therefore read the local file and threw its values away
+# five lines later: empty definitions, "not configured", no warning. Only a
+# SECOND configure of the same directory kept them (entries already there → no
+# write → no deletion), which is exactly why that order looked verified.
+# Declared first, the plain set()s in the local file shadow the cache entries
+# for the rest of this directory, on every configure, fresh or not.
 set(HE_ENGINE_CONTENT_HOST     ""   CACHE STRING "SFTP host for the shared EngineContent library (empty = feature off)")
 set(HE_ENGINE_CONTENT_PORT     "22" CACHE STRING "SFTP port for the EngineContent library")
 set(HE_ENGINE_CONTENT_USER     ""   CACHE STRING "SFTP username for the EngineContent library")
 set(HE_ENGINE_CONTENT_PASSWORD ""   CACHE STRING "SFTP password for the EngineContent library")
 set(HE_ENGINE_CONTENT_BASEPATH ""   CACHE STRING "Remote base path ('' = the SFTP account's own root)")
+
+# A GLOB rather than an if(EXISTS), for the file's ARRIVAL. CMake re-runs the
+# configure step for files it knows about, and a file that did not exist at
+# configure time is not one of them — so copying the template into place and
+# hitting Build would produce an incremental build that never re-reads anything,
+# the same silent "I filled it in and nothing happened" this feature has already
+# produced once. CONFIGURE_DEPENDS re-checks the glob at build time and triggers
+# a reconfigure when the file appears (or is deleted again). Later EDITS to it
+# are covered by the include() itself: an included file is a configure
+# dependency automatically.
+file(GLOB _hecs_local_credentials CONFIGURE_DEPENDS
+	"${CMAKE_SOURCE_DIR}/cmake/EngineContentCredentials.cmake")
+if(_hecs_local_credentials)
+	include("${_hecs_local_credentials}")
+endif()
 
 # The environment form — for whatever the two routes above left empty.
 foreach(_hecs_var HOST USER PASSWORD BASEPATH)
@@ -80,21 +106,49 @@ foreach(_hecs_var HOST USER PASSWORD BASEPATH)
 		set(HE_ENGINE_CONTENT_${_hecs_var} "$ENV{HE_ENGINE_CONTENT_${_hecs_var}}")
 	endif()
 endforeach()
+
+# Escaped once, here, because these end up inside a C string literal. A hoster
+# generates the password, and nothing stops it containing a backslash or a
+# double quote — both of which would reach the compiler verbatim and break
+# SftpCredentials.cpp with a syntax error pointing at a line that looks fine.
+foreach(_hecs_var HOST USER PASSWORD BASEPATH)
+	set(_hecs_val "${HE_ENGINE_CONTENT_${_hecs_var}}")
+	string(REPLACE "\\" "\\\\" _hecs_val "${_hecs_val}")
+	string(REPLACE "\"" "\\\"" _hecs_val "${_hecs_val}")
+	set(_hecs_esc_${_hecs_var} "${_hecs_val}")
+endforeach()
 unset(_hecs_var)
+unset(_hecs_val)
 
 target_compile_definitions(HorizonContentSync PRIVATE
-	HE_ENGINE_CONTENT_HOST="${HE_ENGINE_CONTENT_HOST}"
+	HE_ENGINE_CONTENT_HOST="${_hecs_esc_HOST}"
 	HE_ENGINE_CONTENT_PORT=${HE_ENGINE_CONTENT_PORT}
-	HE_ENGINE_CONTENT_USER="${HE_ENGINE_CONTENT_USER}"
-	HE_ENGINE_CONTENT_PASSWORD="${HE_ENGINE_CONTENT_PASSWORD}"
-	HE_ENGINE_CONTENT_BASEPATH="${HE_ENGINE_CONTENT_BASEPATH}"
+	HE_ENGINE_CONTENT_USER="${_hecs_esc_USER}"
+	HE_ENGINE_CONTENT_PASSWORD="${_hecs_esc_PASSWORD}"
+	HE_ENGINE_CONTENT_BASEPATH="${_hecs_esc_BASEPATH}"
 )
+foreach(_hecs_var HOST USER PASSWORD BASEPATH)
+	unset(_hecs_esc_${_hecs_var})
+endforeach()
+unset(_hecs_var)
 
+# What this reports is the ONLY place the state is visible at build time, and
+# an Editor whose Engine folder just stays local-only is not a symptom anyone
+# traces back on their own — so each way of being half-configured says which
+# one it is, instead of one flat "not configured" for all of them.
 if(HE_ENGINE_CONTENT_HOST STREQUAL "" OR HE_ENGINE_CONTENT_USER STREQUAL "")
 	message(STATUS "HorizonContentSync: EngineContent endpoint not configured — the remote library stays off")
+	if(_hecs_local_credentials)
+		message(WARNING "cmake/EngineContentCredentials.cmake exists but leaves HE_ENGINE_CONTENT_HOST and/or _USER empty — the EngineContent library stays off.")
+	else()
+		message(STATUS "  → to switch it on: copy cmake/EngineContentCredentials.cmake.template to cmake/EngineContentCredentials.cmake and fill it in")
+	endif()
+elseif(HE_ENGINE_CONTENT_PASSWORD STREQUAL "")
+	message(WARNING "HorizonContentSync: EngineContent host and user are set but the password is empty — every connection will fail authentication.")
 else()
 	# Host and user only — the password is never echoed, not even into a local log.
-	message(STATUS "HorizonContentSync: EngineContent endpoint ${HE_ENGINE_CONTENT_USER}@${HE_ENGINE_CONTENT_HOST}")
+	message(STATUS "HorizonContentSync: EngineContent endpoint ${HE_ENGINE_CONTENT_USER}@${HE_ENGINE_CONTENT_HOST}:${HE_ENGINE_CONTENT_PORT}")
 endif()
+unset(_hecs_local_credentials)
 
 he_deploy_dll(HorizonContentSync)
