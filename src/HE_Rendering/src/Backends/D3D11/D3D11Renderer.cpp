@@ -1632,9 +1632,10 @@ struct D3D11RendererImpl
         giBlasDirty     = false;
     }
 
-    // Lazily builds the GI pipelines on the first GI-active frame. A compile
-    // failure logs + disables GI for the session (blind-port safety), exactly
-    // like the GL port.
+    // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
+    // and any failure land before the first frame and before GetCapabilities() is
+    // read); the call in runGiShadow remains as an idempotent safety net. A compile
+    // failure logs + disables GI for the session (blind-port safety), like GL.
     void createGiPipelines()
     {
         if (giPipelinesBuilt) return;
@@ -2456,6 +2457,12 @@ struct D3D11RendererImpl
         createSkinnedPipeline();
         createUIPipeline();
         createMaterialResources(); // A4: node-graph material CBs + sampler (no-op w/o HE_HAVE_SHADERC)
+        // GI up front rather than on the first GI draw. Two reasons: the shader
+        // compile is the expensive part and belongs in init, not in a frame; and
+        // a compile failure here clears giSupported BEFORE GetCapabilities() is
+        // first read, so the editor's GI toggle reflects reality from the start.
+        // Idempotent (giPipelinesBuilt), so the lazy call in runGiShadow is a no-op.
+        createGiPipelines();
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 

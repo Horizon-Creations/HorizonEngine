@@ -316,3 +316,28 @@ if(HE_VULKAN_ENABLED)
 endif()
 
 he_deploy_dll(HorizonRendering)
+
+# ─── Embedded-shader validation ────────────────────────────────────────────────
+# The D3D and GL backends hold most of their shaders as string literals compiled at
+# RUNTIME (D3DCompile / glCompileShader), so the C++ build never type-checks them.
+# Worse, both backends answer a compile failure by logging once and disabling the
+# feature for the session — a broken shader reads as "the toggle does nothing".
+# That is how a non-compiling GI kernel silently killed the whole GI stack on both
+# D3D backends, DXR included (docs/backend-parity-plan.md §1.1).
+#
+# This target extracts those strings, reassembles them exactly as the call sites do
+# and runs fxc / glslangValidator over them (~3 s for 75 shaders). The script skips
+# whichever half has no compiler installed, so a checkout without the Windows or
+# Vulkan SDK still configures and builds.
+option(HE_VALIDATE_SHADERS "Compile-check the runtime-compiled shader strings" ON)
+if(HE_VALIDATE_SHADERS AND Python3_Interpreter_FOUND)
+    add_custom_target(HeValidateShaders ALL
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/scripts/validate_embedded_shaders.py"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Validating runtime-compiled shader strings (fxc / glslangValidator)"
+        VERBATIM)
+    message(STATUS "HorizonRendering: embedded-shader validation enabled")
+elseif(HE_VALIDATE_SHADERS)
+    message(STATUS "HorizonRendering: no Python3 interpreter — embedded-shader validation skipped")
+endif()

@@ -2952,6 +2952,13 @@ struct D3D12RendererImpl
         // rings once (no-op when HE_HAVE_SHADERC is off). Failure leaves m_matReady false,
         // so the draw path silently stays on the built-in PBR path.
         createMaterialResources();
+        // GI up front rather than on the first GI draw — same reasoning as D3D11:
+        // the shader compile belongs in init, and a failure must clear giSupported
+        // before GetCapabilities() is first read. This is also what makes the
+        // optional DXR 1.1 upgrade (createGiHwPipelines, at the tail of
+        // createGiPipelines) run at init instead of mid-frame.
+        // Idempotent (giPipelinesBuilt), so the lazy call in runGiShadow is a no-op.
+        createGiPipelines();
         return rootSig && pso;
     }
 
@@ -3924,9 +3931,10 @@ struct D3D12RendererImpl
         giBlasDirty     = false;
     }
 
-    // Lazily builds the GI pipelines on the first GI-active frame. Any failure
-    // logs + disables GI for the session (blind-port safety), exactly like the
-    // GL/D3D11 ports.
+    // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
+    // and any failure land before the first frame and before GetCapabilities() is
+    // read); the call in runGiShadow remains as an idempotent safety net. Any
+    // failure logs + disables GI for the session (blind-port safety), like GL/D3D11.
     void createGiPipelines()
     {
         if (giPipelinesBuilt) return;

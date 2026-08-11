@@ -591,6 +591,21 @@ float3 giConeSample(float3 L, float angleRad, float2 xi)
     return normalize(L + T * (r * cos(phi)) + B * (r * sin(phi)));
 }
 
+// Visibility toward ONE local light. Must be called with a LITERAL idx: that keeps
+// uLocalPosRange[idx] statically addressable, and returning a scalar avoids writing
+// a dynamically indexed vector component. Both are hard FXC/SM5.0 limits — see the
+// call site below for why this is a function instead of a loop body.
+float giLocalVisOne(int idx, float3 P, float3 N)
+{
+    float3 toL   = uLocalPosRange[idx].xyz - P;
+    float  distL = length(toL);
+    if (distL <= 0.05) return 1.0;                  // on top of the light → lit
+    if (distL >= uLocalPosRange[idx].w) return 1.0; // outside the attenuation radius → no contribution, skip the ray
+    float3 dirL = toL / distL;
+    if (dot(N, dirL) <= 0.0) return 0.0;            // back-facing to this light
+    return giSceneAnyHit(P + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)) ? 0.0 : 1.0;
+}
+
 [numthreads(8, 8, 1)]
 void GiShadowCS(uint3 gid : SV_DispatchThreadID)
 {
@@ -625,20 +640,15 @@ void GiShadowCS(uint3 gid : SV_DispatchThreadID)
     // indexes by its local-light counter.
     float4 localVis = float4(1.0, 1.0, 1.0, 1.0);
     int localCount = clamp(int(uLocalExtra.x), 0, 4);
-    // Fixed-trip unrolled loop (i is a literal per iteration) so the dynamic
-    // vector-component write localVis[i] stays FXC/SM5.0-safe.
-    [unroll] for (int i = 0; i < 4; ++i)
-    {
-        if (i >= localCount) break;
-        float3 toL   = uLocalPosRange[i].xyz - pv.xyz;
-        float  distL = length(toL);
-        if (distL <= 0.05) continue; // on top of the light → lit
-        if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
-        float3 dirL = toL / distL;
-        if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
-        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
-            localVis[i] = 0.0;
-    }
+    // Written out per light rather than as a `[unroll] for` loop. The loop form
+    // does NOT compile under cs_5_0: `break`/`continue` defeat the forced unroll
+    // (X3511), and localVis[i] is then a dynamically indexed l-value (X3500).
+    // A failed compile here disables GI for the entire session on BOTH D3D
+    // backends, so keep the indices literal.
+    if (localCount > 0) localVis.x = giLocalVisOne(0, pv.xyz, N);
+    if (localCount > 1) localVis.y = giLocalVisOne(1, pv.xyz, N);
+    if (localCount > 2) localVis.z = giLocalVisOne(2, pv.xyz, N);
+    if (localCount > 3) localVis.w = giLocalVisOne(3, pv.xyz, N);
     uOutLocal[gid.xy] = localVis;
 }
 )HLSL";
