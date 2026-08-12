@@ -1864,11 +1864,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// copy with none of the bookkeeping a re-download needs). It is read-only
 			// ground for the same reason a shipped default is — "Remove Local Copy"
 			// below is the one thing that may happen to it.
+			//
+			// The test is "does this path live in the download cache", not "is it a
+			// file": the Engine tree also SYNTHESIZES folders for manifest entries
+			// that exist only on the server (walkOrCreateFolderPath roots those at
+			// the cache too). Such a folder is neither an override nor a default
+			// either, so it fell through as ordinary content — offering Delete
+			// (remove_all over the machine-wide cache, with none of the bookkeeping
+			// below), Rename, and a Create Asset submenu that would write project
+			// assets into the cache directory.
+			const bool isCacheRooted    = !engineRelativePath(s_ctxMenuItem).empty();
 			const bool isCacheCopy      = !s_ctxMenuIsFolder && s_ctxMenuIsCacheCopy;
 			const bool engineLocked     = ((isEngineOverride || isEngineDefault) &&
-			                               !ContentManager::isEngineContentDevMode()) || isCacheCopy;
+			                               !ContentManager::isEngineContentDevMode()) || isCacheRooted;
 			if (engineLocked)
-				ImGui::TextDisabled(isCacheCopy    ? "downloaded engine asset (shared local copy)"
+				ImGui::TextDisabled(isCacheCopy      ? "downloaded engine asset (shared local copy)"
+				                  : isCacheRooted    ? "EngineContent from the server"
 				                  : isEngineOverride ? "project override of an engine default"
 				                                     : "engine default asset (read-only)");
 			ImGui::Separator();
@@ -2699,6 +2710,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
+		}
+		// The same Escape trap the two delete dialogs guard against: a target left
+		// behind would be removed by the NEXT confirmation, and the scan would keep
+		// walking a whole project for a dialog that is gone.
+		else if (!s_removeCacheFullPath.empty() && !s_openRemoveCachePopup)
+		{
+			s_removeCacheFullPath.clear();
+			s_removeCacheRelPath.clear();
+			s_removeCacheUuid    = HE::UUID{};
+			s_removeCacheScanGen = 0;
+			cancelReferenceScan();
 		}
 #endif
 

@@ -598,3 +598,113 @@ TEST_CASE("LIMITATION: a pack-time baked POD uuid in a binary chunk is invisible
 	CHECK(fileContains(dir.path / "Cube.hasset", std::string(1, static_cast<char>(kMatId.hi & 0xFF))));
 	CHECK_FALSE(fileContains(dir.path / "Cube.hasset", std::to_string(kMatId.hi)));
 }
+
+// ─── What the first review pass got wrong ────────────────────────────────────
+// Each case below pins a behaviour the scan shipped INCORRECTLY in its first
+// version. They are the cheapest possible insurance: every one of the three was
+// a plausible-looking implementation that a refactor could plausibly restore.
+
+TEST_CASE("a folder target matches what is under it, never the bare folder name")
+{
+	TempContentDir dir("he_test_refscan_foldername");
+
+	// The trap: a folder called "Player" and a scene with an entity of the same
+	// name. The first version compared stored values against the folder path with
+	// an EXACT match as well as a prefix one, so every scene holding an entity,
+	// variable or label spelled like the folder was reported as referencing the
+	// entire subtree — on the dialog that deletes it.
+	writeAsset(dir.path, "Player/Skin.hasset", HE::AssetType::Texture, kTexId);
+	writeTextFile(dir.path / "Level.hescene",
+		R"({"version":1,"entities":[{"uuid":[111,222],"name":"Player","parent":null,)"
+		R"("children":[],"components":{"transform":{"position":[0,0,0]}}}]})");
+	// A real reference into the folder, so the case is not vacuously empty.
+	writeAsset(dir.path, "Mats/Skin.hasset", HE::AssetType::Material, kMatId,
+	           { { HAsset::CHUNK_MTRL, materialChunk({ "Player/Skin.hasset" }) } });
+
+	HE::AssetRefs::ScanTargets targets;
+	targets.pathPrefixes.push_back("Player");
+	const HE::AssetRefs::ScanResult res =
+		HE::AssetRefs::findReferrers(targets, requestFor(dir));
+
+	CHECK(findRef(res, "Mats/Skin.hasset") != nullptr);
+	CHECK(findRef(res, "Level.hescene") == nullptr);
+	// Not vacuous: the scene really does spell the folder's name.
+	CHECK(fileContains(dir.path / "Level.hescene", "\"Player\""));
+	CHECK(res.referrers.size() == 1);
+}
+
+TEST_CASE("a candidate that cannot be read is reported as unchecked, never as unreferenced")
+{
+	TempContentDir dir("he_test_refscan_unreadable");
+
+	// A file that mentions the target but is not a valid .hasset — truncated by a
+	// crash, or caught mid-write. The first version answered "holds no reference"
+	// for it, with `incomplete` left false, so the dialog stated flatly that
+	// nothing referenced an asset it had never managed to parse.
+	writeAsset(dir.path, "Mats/Good.hasset", HE::AssetType::Material, kMatId,
+	           { { HAsset::CHUNK_MTRL, materialChunk({ "Tex/Rock.hasset" }) } });
+
+	std::vector<uint8_t> truncated;
+	{
+		HAsset::Writer w;
+		const std::vector<uint8_t> mtrl = materialChunk({ "Tex/Rock.hasset" });
+		w.addChunk(HAsset::CHUNK_MTRL, mtrl.data(), mtrl.size());
+		// A trailing chunk to cut into, so the reference text itself SURVIVES the
+		// truncation — otherwise the file no longer mentions the target at all and
+		// the case would pass for the wrong reason (nothing to check, rather than
+		// something that could not be checked).
+		const std::vector<uint8_t> filler(64, 0x5A);
+		w.addChunk(HAsset::CHUNK_PIXL, filler.data(), filler.size());
+		truncated = w.toBytes(static_cast<uint16_t>(HE::AssetType::Material));
+	}
+	REQUIRE(truncated.size() > 96);
+	truncated.resize(truncated.size() - 32);   // the last chunk now overruns the file
+	{
+		fs::create_directories(dir.path / "Mats");
+		std::ofstream f(dir.path / "Mats" / "Torn.hasset", std::ios::binary | std::ios::trunc);
+		REQUIRE(f.is_open());
+		f.write(reinterpret_cast<const char*>(truncated.data()),
+		        static_cast<std::streamsize>(truncated.size()));
+	}
+
+	HE::AssetRefs::ScanTargets targets;
+	targets.paths.push_back("Tex/Rock.hasset");
+	const HE::AssetRefs::ScanResult res =
+		HE::AssetRefs::findReferrers(targets, requestFor(dir));
+
+	CHECK(findRef(res, "Mats/Good.hasset") != nullptr);
+	// The whole point: the answer admits it is a lower bound.
+	CHECK(res.incomplete);
+	CHECK(fileContains(dir.path / "Mats" / "Torn.hasset", "Tex/Rock.hasset"));
+}
+
+TEST_CASE("a cancelled scan stops early and says so")
+{
+	TempContentDir dir("he_test_refscan_cancel");
+
+	for (int i = 0; i < 12; ++i)
+		writeAsset(dir.path, "Mats/M" + std::to_string(i) + ".hasset",
+		           HE::AssetType::Material, HE::UUID::generate(),
+		           { { HAsset::CHUNK_MTRL, materialChunk({ "Tex/Rock.hasset" }) } });
+
+	HE::AssetRefs::ScanTargets targets;
+	targets.paths.push_back("Tex/Rock.hasset");
+
+	SUBCASE("cancelled from the first poll")
+	{
+		HE::AssetRefs::ScanRequest req = requestFor(dir);
+		req.isCancelled = []{ return true; };
+		const HE::AssetRefs::ScanResult res = HE::AssetRefs::findReferrers(targets, req);
+		CHECK(res.referrers.empty());
+		// An empty list from a cancelled walk must never read as "nothing
+		// references it" — that is the one sentence a delete dialog must earn.
+		CHECK(res.incomplete);
+	}
+	SUBCASE("not cancelled — the same tree answers in full")
+	{
+		const HE::AssetRefs::ScanResult res =
+			HE::AssetRefs::findReferrers(targets, requestFor(dir));
+		CHECK(res.referrers.size() == 12);
+		CHECK_FALSE(res.incomplete);
+	}
+}
