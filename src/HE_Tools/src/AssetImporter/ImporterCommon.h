@@ -134,6 +134,10 @@ namespace Importer
 	// `outputs.material` / `outputs.texture` redirect the two sidecars onto files
 	// that already exist (a re-import of a mesh whose sidecars were renamed);
 	// `outputs.asset` is not read here — it belongs to the mesh itself.
+	// A redirected MATERIAL that exists is returned untouched rather than rewritten:
+	// the material generated here carries a shader path and one texture, so writing it
+	// over one the artist has authored in the Material Editor would silently replace
+	// its graph, params, parent and blend mode. The texture is refreshed either way.
 	std::string importBaseColorMaterial(const cgltf_data*            data,
 	                                    const std::filesystem::path& sourcePath,
 	                                    const std::filesystem::path& contentRoot,

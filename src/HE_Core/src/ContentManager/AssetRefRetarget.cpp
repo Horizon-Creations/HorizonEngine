@@ -278,11 +278,35 @@ size_t retargetTree(const std::string& root, const std::vector<Rule>& rules)
 		}
 		if (blob.empty() || !retargetBlob(blob, rules)) continue;
 
-		std::ofstream o(it->path(), std::ios::binary | std::ios::trunc);
-		if (!o) continue;
-		o.write(reinterpret_cast<const char*>(blob.data()),
-		        static_cast<std::streamsize>(blob.size()));
-		if (!o) continue;
+		// Temp + rename, the same way HAsset::Writer::write commits an asset: one
+		// rename touches EVERY referring asset in the tree, and truncating each in
+		// place made every one of them a window in which a crash leaves a
+		// half-written file whose META — the UUID scenes point at — is gone.
+		const fs::path tmpPath = it->path().string() + ".tmp";
+		{
+			std::ofstream o(tmpPath, std::ios::binary | std::ios::trunc);
+			if (!o) continue;
+			o.write(reinterpret_cast<const char*>(blob.data()),
+			        static_cast<std::streamsize>(blob.size()));
+			// Closed and checked here rather than after the scope: the destructor
+			// flushes, so `if (!o)` before it would pass for a write the disk has
+			// yet to reject.
+			o.close();
+			if (!o)
+			{
+				std::error_code rec;
+				fs::remove(tmpPath, rec);
+				continue;
+			}
+		}
+		std::error_code rnec;
+		fs::rename(tmpPath, it->path(), rnec);
+		if (rnec)
+		{
+			std::error_code rec;
+			fs::remove(tmpPath, rec);
+			continue;
+		}
 		++rewritten;
 		HE_LOG_INFO(Asset, "%s",
 			("AssetRefs: retargeted references in " + it->path().filename().string()).c_str());

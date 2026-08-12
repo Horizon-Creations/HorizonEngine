@@ -174,6 +174,14 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     if (settings.importMaterials)
         mesh->materialPath = Importer::importBaseColorMaterial(
             data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+    // Nothing resolved — importMaterials is off, or the glTF's base-colour image is
+    // gone from next to it. MREF is written unconditionally from this freshly built
+    // asset, so an empty field here BLANKS the material reference of every scene that
+    // uses the character; meshSidecarAssets would then return nothing, leaving no way
+    // for a later re-import to find the sidecar again. outputs.material is that same
+    // reference, read off the mesh by reimport() before it ran.
+    if (mesh->materialPath.empty())
+        mesh->materialPath = outputs.material;
 
     cgltf_free(data);
 

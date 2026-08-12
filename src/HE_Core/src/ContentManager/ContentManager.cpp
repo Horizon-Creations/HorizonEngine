@@ -69,11 +69,17 @@ static void ensureMeshUVs(StaticMeshAsset& m)
 // Meshes/?" delete query would substring-match it and name an innocent asset.
 //
 // Appending is safe for the four readers outside this function that parse META by
-// hand (Importer::existingUUID, AssetRefScan::uuidOfHassetFile,
+// hand (Importer::existingUUID, AssetRefScan::assetUuidOfFile,
 // HpakWriter::metaFromHasset, EngineContentPublish::readAssetUuid): every one of
 // them reads a prefix and stops. Nothing rebuilds META from parsed fields — the
 // move/rename rewrite (AssetRefRetarget::retargetBlob) copies each chunk through
 // whole — so the tail survives the operations that touch an asset in place.
+//
+// One place drops it ON PURPOSE: the packer (HpakWriter's stripImportSourceForPack)
+// blanks sourcePath in every packed asset. It is an absolute path on the author's
+// machine, it means nothing on a player's, and shipping it hands out their user
+// name and directory layout. Only editor Reimport ever reads the field, so a
+// packed asset that carries an empty one loses nothing.
 static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
 {
     std::vector<uint8_t> buf;
@@ -2004,10 +2010,34 @@ size_t ContentManager::retargetAssetReferencesOnDisk(const std::string& oldRel,
 				text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 			}
 			if (!HE::AssetRefs::retargetJsonText(text, rules)) continue;
-			std::ofstream o(e.path(), std::ios::binary | std::ios::trunc);
-			if (!o) continue;
-			o.write(text.data(), static_cast<std::streamsize>(text.size()));
-			if (o) ++rewritten;
+			// Temp + rename, like ProjectManager's own save of this very file: the
+			// .heproj is the project — truncating it in place means a failed write
+			// leaves a manifest that no longer opens, in exchange for a startup
+			// scene path. Closed and checked BEFORE the rename, because the
+			// destructor's flush happens after any `if (o)` written here would
+			// have already reported success.
+			const fs::path tmpPath = e.path().string() + ".tmp";
+			{
+				std::ofstream o(tmpPath, std::ios::binary | std::ios::trunc);
+				if (!o) continue;
+				o.write(text.data(), static_cast<std::streamsize>(text.size()));
+				o.close();
+				if (!o)
+				{
+					std::error_code rec;
+					fs::remove(tmpPath, rec);
+					continue;
+				}
+			}
+			std::error_code rnec;
+			fs::rename(tmpPath, e.path(), rnec);
+			if (rnec)
+			{
+				std::error_code rec;
+				fs::remove(tmpPath, rec);
+				continue;
+			}
+			++rewritten;
 		}
 	}
 

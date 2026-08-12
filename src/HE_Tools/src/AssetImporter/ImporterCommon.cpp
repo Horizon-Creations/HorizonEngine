@@ -382,10 +382,38 @@ std::string importBaseColorMaterial(const cgltf_data*            data,
                                     const std::string&           meshStem,
                                     const OutputTargets&         outputs)
 {
+	// The texture is refreshed either way: it is derived data with nothing
+	// authorable in it, and on a re-import `outputs.texture` pins it onto the very
+	// asset the existing material already references — so the new image bytes reach
+	// the renderer even when the material below is left alone.
 	const std::string texPath = importBaseColorTexture(
 		data, sourcePath, contentRoot, relativeOutputDir, meshStem, outputs.texture);
 	if (texPath.empty())
 		return {};
+
+	// A re-import pins `outputs.material` onto the material sidecar the mesh already
+	// names — and everything below builds a BRAND NEW MaterialAsset: one shader path,
+	// one texture, defaults for all the rest. Writing that over a material the artist
+	// has since opened in the Material Editor destroys its content while looking
+	// perfectly healthy: writeAsset keeps the file's UUID, so nothing dangles, and the
+	// editor only refreshes the folder afterwards (it does not reload an already
+	// resident MaterialAsset), so the viewport keeps rendering the authored graph from
+	// memory and the loss first surfaces on the NEXT project load — the node graph, the
+	// generated shaders, the param values and their name/group/tooltip tables, a
+	// material INSTANCE's parentMaterialPath, the blend mode, the WPO body and the GI
+	// approximation, all gone. So a material that is already on disk is left exactly as
+	// it is.
+	// A first import is unaffected (the file does not exist yet), and a sidecar the user
+	// DELETED is regenerated, same as importOutputsUpToDate treats a missing sidecar.
+	// The same clobber is still reachable by importing the source a second time through
+	// the menu instead of Reimport: that path passes no outputs at all and is then
+	// indistinguishable here from the asset compiler's rebuild, which MUST rewrite the
+	// material (its mtime is what importOutputsUpToDate measures — never refreshing it
+	// makes every compiler run re-import every mesh, forever).
+	std::error_code matEc;
+	if (!outputs.material.empty()
+	    && std::filesystem::is_regular_file(contentRoot / outputs.material, matEc))
+		return outputs.material;
 
 	const ResolvedOutput out =
 		resolveOutput(outputs.material, relativeOutputDir, meshStem + "_mat");

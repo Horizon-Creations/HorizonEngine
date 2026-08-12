@@ -1,8 +1,10 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,31 +199,68 @@ public:
 			appendString(buf, s);
 	}
 
+	// Writes through a sibling temp file and renames it over the target, so the
+	// existing asset is either replaced whole or left exactly as it was. Opening
+	// the target with ios::trunc destroyed it before the first byte was written:
+	// a full disk, a crash or a pulled cable partway through left a half-written
+	// .hasset — and since the asset's UUID lives ONLY in that file, what was lost
+	// was not its bytes but the identity every scene references it by. That was a
+	// rare hazard while assets were saved by hand; Reimport rewrites live,
+	// referenced assets on one click, so it is now a routine one.
+	//
+	// The temp file is a SIBLING of the target, not a file in $TMPDIR: rename is
+	// only atomic — and only a metadata operation — within a single filesystem.
 	bool write(const std::string& filePath, uint16_t assetType) const
 	{
-		std::ofstream f(filePath, std::ios::binary | std::ios::trunc);
-		if (!f.is_open())
-			return false;
-
-		FileHeader hdr{};
-		std::memcpy(hdr.magic, k_magic, 4);
-		hdr.version     = k_version;
-		hdr.asset_type  = assetType;
-		hdr.chunk_count = static_cast<uint32_t>(m_chunks.size());
-		hdr.flags       = 0;
-		f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
-
-		for (const auto& chunk : m_chunks)
+		const std::string tmpPath = filePath + ".tmp";
 		{
-			ChunkHeader ch{};
-			ch.id   = chunk.id;
-			ch.size = chunk.data.size();
-			f.write(reinterpret_cast<const char*>(&ch), sizeof(ch));
-			if (ch.size > 0)
-				f.write(reinterpret_cast<const char*>(chunk.data.data()),
-						static_cast<std::streamsize>(ch.size));
+			std::ofstream f(tmpPath, std::ios::binary | std::ios::trunc);
+			// Unwritable directory (or a stale directory sitting on the temp name):
+			// nothing was touched, and the original stays where it is.
+			if (!f.is_open())
+				return false;
+
+			FileHeader hdr{};
+			std::memcpy(hdr.magic, k_magic, 4);
+			hdr.version     = k_version;
+			hdr.asset_type  = assetType;
+			hdr.chunk_count = static_cast<uint32_t>(m_chunks.size());
+			hdr.flags       = 0;
+			f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+
+			for (const auto& chunk : m_chunks)
+			{
+				ChunkHeader ch{};
+				ch.id   = chunk.id;
+				ch.size = chunk.data.size();
+				f.write(reinterpret_cast<const char*>(&ch), sizeof(ch));
+				if (ch.size > 0)
+					f.write(reinterpret_cast<const char*>(chunk.data.data()),
+							static_cast<std::streamsize>(ch.size));
+			}
+
+			// Close BEFORE judging the stream. The old `return f.good()` was read
+			// while the last block was still in the stream buffer — the destructor
+			// flushed it afterwards, so a write that a full disk rejected had
+			// already been reported as a success.
+			f.close();
+			if (!f.good())
+			{
+				std::error_code ec;
+				std::filesystem::remove(tmpPath, ec);
+				return false;
+			}
 		}
-		return f.good();
+
+		std::error_code ec;
+		std::filesystem::rename(tmpPath, filePath, ec);
+		if (ec)
+		{
+			std::error_code rec;
+			std::filesystem::remove(tmpPath, rec);
+			return false;
+		}
+		return true;
 	}
 
 	// Serialize to an in-memory buffer (same layout as write(), no disk I/O).

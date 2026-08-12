@@ -138,6 +138,15 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (settings.importMaterials)
 		mesh->materialPath = Importer::importBaseColorMaterial(
 			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+	// No material resolved — importMaterials is off, or the glTF's base-colour image
+	// is no longer on disk next to it. saveAsset writes chunk MREF unconditionally
+	// from this freshly built asset, so leaving the field empty BLANKS the reference
+	// every scene using the mesh resolves its material through; meshSidecarAssets
+	// would afterwards return nothing, so not even the next re-import could find the
+	// sidecar again and the link would be gone for good. outputs.material is that
+	// very reference, read back off the mesh by reimport() before it ran.
+	if (mesh->materialPath.empty())
+		mesh->materialPath = outputs.material;
 
 	cgltf_free(data);
 

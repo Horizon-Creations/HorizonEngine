@@ -516,6 +516,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static bool        s_pendingCollapseDragged = false;
 		auto isSelected = [&](const std::string& p)
 		{ return std::find(s_selection.begin(), s_selection.end(), p) != s_selection.end(); };
+		// Leaving a root behind invalidates the whole selection: the paths stay
+		// valid strings but name things the grid no longer shows, and the next
+		// Ctrl-click would silently extend the set ACROSS roots — which is how an
+		// engine default ends up in the same delete as a project asset. Every place
+		// that changes root goes through this, so there is one answer to "when does
+		// a selection end" instead of six.
+		auto clearSelection = [&]
+		{
+			s_selection.clear();
+			s_selectedItem.clear();
+			s_selectedIsFolder  = false;
+			s_pendingCollapseTo.clear();
+			s_pendingCollapseDragged = false;
+		};
 
 		// Read-only ground, asked PER PATH. The context menu computes its own
 		// version of this for the item under the pointer, and that was enough while
@@ -610,13 +624,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedTreeFolder = folder;
 				s_selectedRootKind   = rootKind;
-				// A selection made in one root means nothing in another: it survives
-				// the navigation as a set of paths the grid no longer shows, and the
-				// next Ctrl-click would silently extend it across roots. Deleting
-				// THAT set is how a shipped engine default ends up in the same
-				// operation as a project asset.
-				s_selection.clear();
-				s_selectedItem.clear();
+				clearSelection();
 			}
 			// Right-click reaches the same menu the grid tiles raise. Until now the
 			// tree had no menu at all: renaming or deleting a folder meant first
@@ -660,6 +668,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedTreeFolder = nullptr; // back to root
 				s_selectedRootKind   = 0;
+				clearSelection();
 			}
 			if (rootOpen)
 			{
@@ -681,6 +690,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedTreeFolder = nullptr; // back to engine root
 				s_selectedRootKind   = 1;
+				clearSelection();
 			}
 			if (rootOpen)
 			{
@@ -702,6 +712,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedTreeFolder = nullptr; // back to source root
 				s_selectedRootKind   = 2;
+				clearSelection();
 			}
 			if (rootOpen)
 			{
@@ -1272,6 +1283,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_gridFolder         = sub;
 				s_selectedTreeFolder = sub;
+				// The folder you just entered stays selected otherwise, and a
+				// Ctrl-click on an asset inside then builds a set holding BOTH — one
+				// that "delete the selection" cannot mean anything sensible about,
+				// since a folder and an asset are removed by different operations
+				// with different confirmations.
+				clearSelection();
 			}
 			// Right click → select only, open menu after loop
 			if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
@@ -1360,12 +1377,21 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			static std::string  s_cachedNeedle;
 			static int          s_cachedType    = -1;
 			static std::string  s_cachedFolder;
-			static std::uint64_t s_cachedVersion = ~0ull;
+			// The three counters are compared SEPARATELY. Folding them into one
+			// number (an XOR of shifted values, say) is not a freshness key: three
+			// independent counters can move in a way that leaves the fold unchanged,
+			// and the cache then hands back File* into a folder tree the refresh has
+			// already freed. Nothing else in this panel folds them either — the
+			// re-resolution block at the top compares all three, for the same reason.
+			static std::uint64_t s_cachedTreeVersion   = ~0ull;
+			static std::uint64_t s_cachedEngineVersion = ~0ull;
+			static std::uint64_t s_cachedSourceVersion = ~0ull;
 			static std::vector<const HE::File*> s_cachedHits;
 			static std::unordered_map<const HE::File*, std::string> s_cachedFoundIn;
-			const std::uint64_t inputVersion = treeVersion ^ (engineVersion << 1) ^ (sourceVersion << 2);
 			if (s_cachedNeedle == s_searchText && s_cachedType == s_typeFilter &&
-			    s_cachedFolder == displayFolder->fullPath && s_cachedVersion == inputVersion)
+			    s_cachedFolder == displayFolder->fullPath &&
+			    s_cachedTreeVersion == treeVersion && s_cachedEngineVersion == engineVersion &&
+			    s_cachedSourceVersion == sourceVersion)
 			{
 				gridFiles = s_cachedHits;
 				foundIn   = s_cachedFoundIn;
@@ -1402,12 +1428,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			};
 			collect(displayFolder, std::string{});
 
-			s_cachedNeedle  = s_searchText;
-			s_cachedType    = s_typeFilter;
-			s_cachedFolder  = displayFolder->fullPath;
-			s_cachedVersion = inputVersion;
-			s_cachedHits    = gridFiles;
-			s_cachedFoundIn = foundIn;
+			s_cachedNeedle        = s_searchText;
+			s_cachedType          = s_typeFilter;
+			s_cachedFolder        = displayFolder->fullPath;
+			s_cachedTreeVersion   = treeVersion;
+			s_cachedEngineVersion = engineVersion;
+			s_cachedSourceVersion = sourceVersion;
+			s_cachedHits          = gridFiles;
+			s_cachedFoundIn       = foundIn;
 			}
 		}
 
@@ -1937,9 +1965,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				return;
 			}
 
-			// Show it now and let the user name it straight away.
+			// Show it now and let the user name it straight away. Same reasoning as
+			// the asset case: the selection follows, or F2 renames something else.
 			const std::string folderName = std::filesystem::path(dir).filename().string();
-			s_selectedItem    = dir;
+			s_selectedItem     = dir;
+			s_selectedIsFolder = true;
+			s_selection.assign(1, dir);
 			s_renameTarget    = dir;
 			// Same choke point as an asset: announced when the name is
 			// final, not when the directory appears.
@@ -2050,7 +2081,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 				// Show it now (don't wait for the next auto-refresh) and let the
 				// user name it straight away via the rename/name dialog.
+				//
+				// The SET moves with the anchor, not just the anchor: leaving the
+				// previous selection standing meant the highlighted tiles and the
+				// thing F2 or Delete would act on were two different assets.
 				s_selectedItem    = path;
+				s_selectedIsFolder = false;
+				s_selection.assign(1, path);
 				s_renameTarget    = path;
 				s_renameIsFolder  = false;
 				s_renameIsCreate  = true;
@@ -2540,7 +2577,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 
 				// ── Add a StaticMesh .hasset to the scene ─────────────────
+				// Offered only for the ONE type it can actually place. It used to
+				// appear on every .hasset and, for all the others, do nothing at all
+				// except write a line into a log nobody has open — a menu item that
+				// silently no-ops reads as a broken editor. The type is already known
+				// per tile from the cached header sniff, so asking costs nothing.
 				if (ext == ".hasset" && ctx.world && ctx.contentManager &&
+				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
 				    ImGui::MenuItem("Add to Scene"))
 				{
 					std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
@@ -2645,7 +2688,16 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const std::vector<std::string>& src = isSelected(s_ctxMenuItem)
 					? s_selection : std::vector<std::string>{ s_ctxMenuItem };
 				for (const std::string& p : src)
-					if (!isReadOnlyGround(p)) out.push_back(p);
+				{
+					if (isReadOnlyGround(p)) continue;
+					// A directory that slipped into the set is not an asset: this
+					// dialog's confirmation says "the file", deleteAssetNow calls
+					// fs::remove (which refuses a non-empty directory anyway), and the
+					// folder path has its own dialog that lists what goes with it.
+					std::error_code dirEc;
+					if (std::filesystem::is_directory(p, dirEc)) continue;
+					out.push_back(p);
+				}
 				return out;
 			}();
 			const int selectedAssetCount = static_cast<int>(deletableSelection.size());
@@ -2771,6 +2823,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Bar, and in a session it destroyed Bar on every machine at
 				// once. Checked here, before anything is asked for or moved.
 				bool blocked = newName.empty() || s_renameTarget.empty();
+				// A NAME, not a path. The field took anything, and the result was
+				// pasted straight onto the parent directory — so typing "../Foo" or
+				// "sub/Foo" moved the asset somewhere the browser never showed it,
+				// and "../../../Foo" moved it out of the project entirely, taking its
+				// retargeted references with it. Refused here rather than sanitised,
+				// because silently changing what someone typed is its own surprise.
+				if (!blocked && (newName.find('/') != std::string::npos ||
+				                 newName.find('\\') != std::string::npos ||
+				                 newName == "." || newName == ".."))
+				{
+					s_renameError = "A name cannot contain a path.";
+					blocked = true;
+				}
 				if (!blocked)
 				{
 					const std::filesystem::path oldP(s_renameTarget);
@@ -2839,6 +2904,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// of step for good if the answer is no.
 					std::error_code ec;
 					if (!requested) std::filesystem::rename(oldPath, newPath, ec);
+					// A rename that FAILS used to close the dialog and say nothing —
+					// no message, no log line — so a name the filesystem refuses
+					// (permissions, a lock, a case-only change on a case-insensitive
+					// volume) looked exactly like one that worked, until the tile came
+					// back under its old name. The dialog already keeps itself open
+					// with a reason for the failures IT detects; one from the
+					// filesystem deserves the same.
+					if (!requested && ec)
+					{
+						s_renameError = "Could not rename: " + ec.message();
+						HE_LOG_ERROR(Editor, "%s",
+							("Editor: rename of '" + s_renameTarget + "' failed: " + ec.message()).c_str());
+					}
 					if (!requested && !ec)
 					{
 						// Carry every stored reference to the old path (or, for a

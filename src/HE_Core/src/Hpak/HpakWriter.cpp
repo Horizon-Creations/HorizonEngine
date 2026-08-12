@@ -134,7 +134,11 @@ static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t 
 #endif
 
 // Extract the asset UUID + embedded path from a raw .hasset blob's META chunk.
-// META layout: uint16_t type, uint64_t hi, uint64_t lo, string name, string path.
+// META layout: uint16_t type, uint64_t hi, uint64_t lo, string name, string path,
+// and — appended, optional — string sourcePath (the import source; see
+// ContentManager's buildMetaChunk). This reader stops before the tail, which is
+// what makes appending to META safe; stripImportSourceForPack below is the one
+// place that cares the field exists at all.
 static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::string& path)
 {
     HAsset::Reader r;
@@ -148,6 +152,68 @@ static bool metaFromHasset(const std::vector<uint8_t>& data, HE::UUID& id, std::
     if (!HAsset::Reader::readString(meta->data, off, name)) return false;
     if (!HAsset::Reader::readString(meta->data, off, path)) return false;
     return true;
+}
+
+// Blank the import SOURCE path in an asset about to be packed. The editor records
+// where an asset was imported from (/Users/<name>/Art/Meshes/rock.fbx) so Reimport
+// can find the file again — an absolute path on the AUTHOR's machine. It resolves
+// to nothing on a player's, and shipping it verbatim inside every packed asset
+// hands the author's user name and directory layout to anyone who opens the .hpak.
+// So it is dropped here, exactly the way rewriteRefsForPack drops shaderPath and
+// texturePaths: a packed asset carries what the runtime reads and nothing else.
+//
+// The field is BLANKED (length prefix zeroed, characters removed), not cut off at
+// the end of the chunk. META's tail is append-only by design, and truncating would
+// silently delete any field appended AFTER sourcePath later on — a corruption that
+// could only ever show up in packaged builds.
+//
+// A byte splice rather than a Reader→Writer round-trip: this runs for every asset
+// in the pack, hundred-megabyte meshes included, and copying one of those twice to
+// shorten a string in its first chunk buys nothing. A blob that is truncated, not
+// an .hasset, or carries no source tail is left exactly as it is.
+static void stripImportSourceForPack(std::vector<uint8_t>& blob)
+{
+    if (blob.size() < sizeof(HAsset::FileHeader)) return;
+    HAsset::FileHeader hdr{};
+    std::memcpy(&hdr, blob.data(), sizeof(hdr));
+    if (std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0) return;
+
+    size_t off = sizeof(HAsset::FileHeader);
+    for (uint32_t i = 0; i < hdr.chunk_count; ++i)
+    {
+        if (off + sizeof(HAsset::ChunkHeader) > blob.size()) return;
+        HAsset::ChunkHeader ch{};
+        std::memcpy(&ch, blob.data() + off, sizeof(ch));
+        const size_t payload = off + sizeof(HAsset::ChunkHeader);
+        // Bounded against the REMAINDER, never as payload + size: the size is a
+        // file value, so the sum can wrap and let a corrupt chunk past.
+        if (ch.size > blob.size() - payload) return;
+        const size_t chunkBytes = static_cast<size_t>(ch.size);
+        if (ch.id != HAsset::CHUNK_META) { off = payload + chunkBytes; continue; }
+
+        const std::vector<uint8_t> meta(blob.begin() + payload,
+                                        blob.begin() + payload + chunkBytes);
+        size_t      o = sizeof(uint16_t) + 2 * sizeof(uint64_t); // asset type + UUID
+        std::string s;
+        if (o > meta.size()) return;
+        if (!HAsset::Reader::readString(meta, o, s)) return;  // name
+        if (!HAsset::Reader::readString(meta, o, s)) return;  // path
+        const size_t sourceAt = o;
+        // Written before the tail existed → the read runs out of bytes here, and
+        // there is nothing to strip.
+        if (!HAsset::Reader::readString(meta, o, s)) return;
+        if (s.empty()) return;
+
+        // [sourceAt, sourceAt + 4) is the length prefix, [sourceAt + 4, o) the
+        // characters; the prefix stays and reads as an empty string.
+        blob.erase(blob.begin() + payload + sourceAt + sizeof(uint32_t),
+                   blob.begin() + payload + o);
+        const uint32_t emptyLen = 0;
+        std::memcpy(blob.data() + payload + sourceAt, &emptyLen, sizeof(emptyLen));
+        ch.size = chunkBytes - s.size();
+        std::memcpy(blob.data() + off, &ch, sizeof(ch));
+        return;
+    }
 }
 
 // Skim a raw material .hasset just far enough for the pack-time approx re-fold
@@ -893,6 +959,11 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         if (progress) progress(count, total, pe.relPath);
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath);
         if (settings.cook) blob = cookForPack(blob, settings.textureCompression);
+        // After every rewrite above (each of which copies META through verbatim)
+        // and BEFORE the hash below: the incremental cache keys on these bytes, so
+        // stripping later would leave entries packed by an older build matching
+        // their old hash and carrying the author's paths into the new archive.
+        stripImportSourceForPack(blob);
         // Hash the final (cooked) blob: incremental reuse keys on exactly the
         // bytes that get stored, so a cook change re-packs the entry.
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());

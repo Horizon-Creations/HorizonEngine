@@ -2194,3 +2194,237 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 	CHECK_FALSE(Importer::isImportableSource("Art/Rock.hasset")); // already an asset
 	CHECK_FALSE(Importer::isImportableSource("Art/Rock"));        // no extension at all
 }
+
+// ─── Reimport keeps what the import cannot rebuild ───────────────────────────
+
+namespace
+{
+	// The three files a textured mesh import reads: a 1x1 PNG, the 66-byte vertex
+	// buffer and the .gltf tying them together. `v1x` is the second vertex's x, so
+	// "the artist moved a vertex and re-exported" is one more call; with
+	// `withBaseColorTexture` false the SAME mesh is written without material,
+	// texture and image — the re-export that loses its texture, which is what makes
+	// an import produce no material at all.
+	void writeGltfSource(const fs::path& dir, const std::string& stem,
+	                     float v1x = 1.0f, bool withBaseColorTexture = true)
+	{
+		std::error_code ec;
+		fs::create_directories(dir, ec);
+
+		// 1x1 truecolor red — the smallest image stb_image decodes.
+		static const uint8_t kPng1x1[] = {
+			0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+			0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+			0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+			0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+			0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
+			0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+		};
+		if (withBaseColorTexture)
+		{
+			std::ofstream png(dir / (stem + "_tex.png"), std::ios::binary | std::ios::trunc);
+			REQUIRE(png);
+			png.write(reinterpret_cast<const char*>(kPng1x1),
+			          static_cast<std::streamsize>(sizeof(kPng1x1)));
+		}
+		{
+			std::vector<uint8_t> buf(66, 0);
+			const float pos[9] = { 0,0,0,  v1x,0,0,  0,1,0 };
+			std::memcpy(buf.data() + 0, pos, sizeof(pos));
+			const float uv[6] = { 0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f };
+			std::memcpy(buf.data() + 36, uv, sizeof(uv));
+			const uint16_t idx[3] = { 0, 1, 2 };
+			std::memcpy(buf.data() + 60, idx, sizeof(idx));
+			std::ofstream bin(dir / (stem + ".bin"), std::ios::binary | std::ios::trunc);
+			REQUIRE(bin);
+			bin.write(reinterpret_cast<const char*>(buf.data()),
+			          static_cast<std::streamsize>(buf.size()));
+		}
+		{
+			std::ofstream f(dir / (stem + ".gltf"), std::ios::trunc);
+			REQUIRE(f);
+			f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [ {
+      "attributes": { "POSITION": 0, "TEXCOORD_0": 1 },
+      "indices": 2)" << (withBaseColorTexture ? ", \"material\": 0" : "") << " } ] } ],\n";
+			if (withBaseColorTexture)
+				f << "  \"materials\": [ { \"pbrMetallicRoughness\": "
+				     "{ \"baseColorTexture\": { \"index\": 0 } } } ],\n"
+				     "  \"textures\":  [ { \"source\": 0 } ],\n"
+				     "  \"images\":    [ { \"uri\": \"" << stem << "_tex.png\" } ],\n";
+			f << "  \"buffers\": [ { \"uri\": \"" << stem << ".bin\", \"byteLength\": 66 } ],"
+			  << R"(
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 24 },
+    { "buffer": 0, "byteOffset": 60, "byteLength": 6 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [0,0,0], "max": [1,1,0] },
+    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" },
+    { "bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ]
+})";
+		}
+	}
+
+	// The whole file as bytes — the only probe that answers "was this rewritten?"
+	// rather than "does it still parse the same": a rewrite that happens to
+	// reproduce the fields one thinks to compare passes every field-wise check.
+	std::vector<uint8_t> fileBytes(const fs::path& file)
+	{
+		std::ifstream f(file, std::ios::binary | std::ios::ate);
+		if (!f) return {};
+		const std::streamoff size = f.tellg();
+		f.seekg(0, std::ios::beg);
+		std::vector<uint8_t> bytes(static_cast<size_t>(size));
+		if (size > 0)
+			f.read(reinterpret_cast<char*>(bytes.data()),
+			       static_cast<std::streamsize>(size));
+		return f ? bytes : std::vector<uint8_t>{};
+	}
+}
+
+TEST_CASE("Importer::reimport leaves an authored material sidecar alone")
+{
+	// The generated sidecar is where an artist STARTS a material: they open it in the
+	// Material Editor and give it a node graph, params, a parent. A re-import of the
+	// mesh then rewrote that file with a freshly built MaterialAsset — shader path,
+	// one texture, defaults for everything else — and looked healthy doing it:
+	// writeAsset keeps the file's uuid, so nothing dangles, and the editor never
+	// reloads an already resident material, so the viewport kept rendering the
+	// authored graph from memory. The loss only surfaced on the next project load.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_reimport_authored_src");
+	writeGltfSource(srcDir.path, "prop");
+
+	const fs::path source = srcDir.path / "prop.gltf";
+	REQUIRE(Importer::importSource(source, dir.path, "Meshes"));
+
+	const fs::path meshFile = dir.path / "Meshes" / "prop.hasset";
+	const fs::path matFile  = dir.path / "Meshes" / "prop_mat.hasset";
+	REQUIRE(fs::exists(meshFile));
+	REQUIRE(fs::exists(matFile));
+
+	// The material this instance points at — a real file, so the load below takes
+	// the same instance path the editor does instead of a missing-parent shortcut.
+	{
+		MaterialAsset master;
+		master.type = HE::AssetType::Material;
+		master.name = "Master";
+		master.path = "Meshes/Master.hasset";
+		master.shaderPath = "builtin/unlit";
+		REQUIRE(Importer::writeAsset(master, dir.path));
+	}
+
+	// …and now the authoring itself, over the sidecar the import wrote.
+	HE::UUID matId;
+	{
+		MaterialAsset mat;
+		mat.type       = HE::AssetType::Material;
+		mat.name       = "prop_mat";
+		mat.path       = "Meshes/prop_mat.hasset";
+		mat.shaderPath = "builtin/unlit";
+		mat.texturePaths.push_back("Meshes/prop_tex.hasset");
+		mat.nodeGraphJson      = R"({"nodes":[{"id":1,"type":"Output"}]})";
+		mat.parentMaterialPath = "Meshes/Master.hasset";
+		mat.instanceOverriddenParams = { "Tint" };
+		mat.shaderParamData = { 0.25f, 0.5f, 0.75f, 1.0f };
+		mat.graphParamNames = { "Tint" };
+		mat.graphParamTypes = { static_cast<uint8_t>(HE::MatParamKind::Color) };
+		mat.graphParamGroups = { "Surface" };
+		mat.blendMode = 2;                 // translucent
+		mat.roughness = 0.125f;
+		// No id of its own: writeAsset recovers the sidecar's, exactly as the editor's
+		// save does — so this is the same file, not a replacement of it.
+		REQUIRE(Importer::writeAsset(mat, dir.path));
+		matId = mat.id;
+	}
+	REQUIRE(matId != HE::UUID{});
+	const std::vector<uint8_t> authored = fileBytes(matFile);
+	REQUIRE_FALSE(authored.empty());
+
+	// The artist moves a vertex in the DCC and hits Reimport on the mesh.
+	writeGltfSource(srcDir.path, "prop", /*v1x=*/2.0f);
+	REQUIRE(Importer::reimport(meshFile, dir.path));
+
+	// Byte for byte the same file: the material was not rewritten at all.
+	CHECK(fileBytes(matFile) == authored);
+
+	ContentManager cm(dir.path.string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset("Meshes/prop_mat.hasset"));
+	REQUIRE(m != nullptr);
+	CHECK(m->id == matId);
+	CHECK(m->nodeGraphJson == R"({"nodes":[{"id":1,"type":"Output"}]})");
+	CHECK(m->parentMaterialPath == "Meshes/Master.hasset");   // still an INSTANCE
+	// Only the two fields load reads back verbatim are checked here: an instance's
+	// param table is re-derived from its parent on every load (syncMaterialInstance),
+	// so a loaded value would say nothing about what is in the file. The byte compare
+	// above is the assertion of record for everything else the editor authored.
+
+	// …while the geometry edit the re-import was FOR did land, and the mesh still
+	// names the sidecar.
+	const StaticMeshAsset* mesh = cm.getStaticMesh(cm.loadAsset("Meshes/prop.hasset"));
+	REQUIRE(mesh != nullptr);
+	CHECK(mesh->materialPath == "Meshes/prop_mat.hasset");
+	REQUIRE(mesh->vertices.size() == 9);
+	CHECK(mesh->vertices[3] == doctest::Approx(2.0f));        // v1.x was 1
+}
+
+TEST_CASE("Importer::reimport without a resolvable material keeps the mesh's material link")
+{
+	// saveAsset writes chunk MREF unconditionally out of the freshly built mesh, so
+	// an import that produces no material blanked the reference every scene resolves
+	// its material through — and meshSidecarAssets then found nothing, so the next
+	// re-import had nothing left to redirect either: the link was gone for good.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_reimport_nomat_src");
+	writeGltfSource(srcDir.path, "crate");
+
+	const fs::path source   = srcDir.path / "crate.gltf";
+	const fs::path meshFile = dir.path / "Meshes" / "crate.hasset";
+	REQUIRE(Importer::importSource(source, dir.path, "Meshes"));
+	{
+		const auto sidecars = Importer::meshSidecarAssets(meshFile, dir.path);
+		REQUIRE(sidecars.size() == 2);
+		REQUIRE(sidecars[0] == "Meshes/crate_mat.hasset");
+	}
+
+	// The base-colour image is gone from next to the .gltf — the usual cause is a
+	// DCC that wrote an absolute texture path only its own machine ever resolved.
+	// The glTF itself still parses, so the re-import runs; it just cannot produce a
+	// material this time.
+	std::error_code ec;
+	fs::remove(srcDir.path / "crate_tex.png", ec);
+	REQUIRE_FALSE(ec);
+	REQUIRE(Importer::reimport(meshFile, dir.path));
+
+	{
+		ContentManager cm(dir.path.string());
+		const StaticMeshAsset* mesh = cm.getStaticMesh(cm.loadAsset("Meshes/crate.hasset"));
+		REQUIRE(mesh != nullptr);
+		CHECK(mesh->materialPath == "Meshes/crate_mat.hasset");
+	}
+	// Still findable off the mesh, which is what lets the NEXT re-import redirect
+	// onto it rather than writing a second material beside it.
+	const auto after = Importer::meshSidecarAssets(meshFile, dir.path);
+	REQUIRE_FALSE(after.empty());
+	CHECK(after[0] == "Meshes/crate_mat.hasset");
+
+	// The other way to end up here: the source is re-exported without its material
+	// at all, so there is not even a texture to look for.
+	writeGltfSource(srcDir.path, "crate", /*v1x=*/3.0f, /*withBaseColorTexture=*/false);
+	REQUIRE(Importer::reimport(meshFile, dir.path));
+
+	ContentManager cm(dir.path.string());
+	const StaticMeshAsset* mesh = cm.getStaticMesh(cm.loadAsset("Meshes/crate.hasset"));
+	REQUIRE(mesh != nullptr);
+	CHECK(mesh->materialPath == "Meshes/crate_mat.hasset");
+	REQUIRE(mesh->vertices.size() == 9);
+	CHECK(mesh->vertices[3] == doctest::Approx(3.0f));   // the re-import did run
+}

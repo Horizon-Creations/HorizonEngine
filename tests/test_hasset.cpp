@@ -401,3 +401,144 @@ TEST_CASE("HAsset readAssetTypeFromFile matches Reader::open without loading chu
     std::remove(file.c_str());
     std::remove(junk.c_str());
 }
+
+// ── Committing a write ────────────────────────────────────────────────────────
+// Included down here so the block above stays untouched: these cases need the
+// packer, which the format header itself has no business knowing about.
+#include "TestFsUtil.h"
+#include <Hpak/HpakReader.h>
+#include <Hpak/HpakWriter.h>
+
+// write() used to open the TARGET with ios::trunc: the existing asset was gone
+// before the first byte of the new one was written, so anything that interrupted
+// the write left a stump. Losing the bytes is the small half — an .hasset carries
+// its own UUID in META, and that UUID is what every scene in the project stores,
+// so a stump is an asset the whole project has lost track of. It now writes a
+// sibling temp file and renames it over the target.
+TEST_CASE("HAsset write leaves the original intact when it cannot be committed")
+{
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_hasset_atomic";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path file = dir / "Rock.hasset";
+
+    // An asset that already exists, and is deliberately BIGGER than its
+    // replacement: a truncating write that dies partway leaves a prefix, which a
+    // size check alone would not catch.
+    {
+        HAsset::Writer w;
+        const std::vector<uint8_t> payload(4096, 0x5A);
+        w.addChunk(HAsset::CHUNK_META, payload.data(), payload.size());
+        REQUIRE(w.write(file.string(), 3));
+    }
+    std::vector<uint8_t> before;
+    {
+        std::ifstream f(file, std::ios::binary);
+        before.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    REQUIRE_FALSE(before.empty());
+
+    // Block the commit by parking a DIRECTORY on the temp name — the one failure
+    // that behaves the same on every platform this ships to (a read-only
+    // directory is ignored by Windows and by a root-running CI container).
+    const std::filesystem::path blocker = file.string() + ".tmp";
+    std::filesystem::create_directories(blocker);
+
+    HAsset::Writer w2;
+    const std::vector<uint8_t> small(8, 0x11);
+    w2.addChunk(HAsset::CHUNK_VERT, small.data(), small.size());
+    CHECK_FALSE(w2.write(file.string(), 3));
+
+    std::vector<uint8_t> after;
+    {
+        std::ifstream f(file, std::ios::binary);
+        after.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    CHECK(after == before);                       // byte-identical, not merely present
+
+    // With the blocker gone the same write commits — and leaves no temp file
+    // beside the asset for the Content Browser to trip over.
+    he_test::removeAllQuiet(blocker);
+    CHECK(w2.write(file.string(), 3));
+    CHECK_FALSE(std::filesystem::exists(blocker));
+
+    HAsset::Reader r;
+    REQUIRE(r.open(file.string()));
+    CHECK(r.header().chunk_count == 1);
+    REQUIRE(r.findChunk(HAsset::CHUNK_VERT) != nullptr);
+    CHECK(r.findChunk(HAsset::CHUNK_VERT)->data.size() == 8);
+    CHECK(r.findChunk(HAsset::CHUNK_META) == nullptr); // fully replaced, no old tail
+
+    he_test::removeAllQuiet(dir);
+}
+
+// The import source in META is an absolute path on the AUTHOR's machine. It is
+// what Reimport needs and what a player must never receive: packed verbatim it
+// ships the author's user name and directory layout inside the .hpak. The packer
+// blanks it; everything else about the asset stays.
+TEST_CASE("packing blanks the import source path out of META")
+{
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_hasset_srcstrip";
+    const std::filesystem::path pak = std::filesystem::temp_directory_path() / "he_hasset_srcstrip.hpak";
+    he_test::removeAllQuiet(dir);
+    he_test::removeQuiet(pak);
+    std::filesystem::create_directories(dir);
+
+    const HE::UUID    id{ 0x51, 0x52 };
+    const std::string source = "/Users/authorname/Art/Meshes/rock.fbx";
+    {
+        std::vector<uint8_t> meta;
+        HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Texture));
+        HAsset::Writer::appendPOD(meta, id.hi);
+        HAsset::Writer::appendPOD(meta, id.lo);
+        HAsset::Writer::appendString(meta, "Rock");
+        HAsset::Writer::appendString(meta, "Rock.hasset");
+        HAsset::Writer::appendString(meta, source);   // the appended import-source tail
+        HAsset::Writer w;
+        w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+        REQUIRE(w.write((dir / "Rock.hasset").string(),
+                        static_cast<uint16_t>(HE::AssetType::Texture)));
+    }
+
+    HpakWriter packer;
+    Hpak::PackSettings settings;                  // Store, unencrypted: bytes ship verbatim
+    REQUIRE(packer.addDirectory(dir, settings) == 1);
+    REQUIRE(packer.write(pak.string()));
+
+    // Nowhere in the archive — not in the entry, and not in the file either.
+    std::string archive;
+    {
+        std::ifstream f(pak, std::ios::binary);
+        archive.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    CHECK(archive.find(source) == std::string::npos);
+    CHECK(archive.find("authorname") == std::string::npos);
+
+    HpakReader reader;
+    REQUIRE(reader.open(pak.string()));
+    const std::vector<uint8_t> entry = reader.readEntry(id);
+    REQUIRE_FALSE(entry.empty());
+
+    HAsset::Reader r;
+    REQUIRE(r.openData(entry));
+    const auto* meta = r.findChunk(HAsset::CHUNK_META);
+    REQUIRE(meta != nullptr);
+    size_t   off = sizeof(uint16_t);
+    HE::UUID packedId{};
+    std::string name, path, packedSource;
+    REQUIRE(HAsset::Reader::readPOD(meta->data, off, packedId.hi));
+    REQUIRE(HAsset::Reader::readPOD(meta->data, off, packedId.lo));
+    REQUIRE(HAsset::Reader::readString(meta->data, off, name));
+    REQUIRE(HAsset::Reader::readString(meta->data, off, path));
+    CHECK(packedId == id);                        // identity survives …
+    CHECK(name == "Rock");                        // … and so does everything the
+    CHECK(path == "Rock.hasset");                 //     runtime actually reads
+    // The field itself is still THERE, just empty — the tail is append-only, and
+    // cutting it off would silently drop any field appended after it later.
+    REQUIRE(HAsset::Reader::readString(meta->data, off, packedSource));
+    CHECK(packedSource.empty());
+    CHECK(off == meta->data.size());
+
+    he_test::removeAllQuiet(dir);
+    he_test::removeQuiet(pak);
+}

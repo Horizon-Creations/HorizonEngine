@@ -633,7 +633,11 @@ HE::UUID assetUuidOfFile(const std::string& absolutePath, bool* unreadable)
 			offset += ch.size;
 			continue;
 		}
-		// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name, path.
+		// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name,
+		// path, and — since the import-provenance change — a trailing source path.
+		// Only the first three are read here, and reading a PREFIX is what makes
+		// that safe: the chunk may grow a seventh field tomorrow, and an asset
+		// written before the sixth existed still parses.
 		if (ch.size < sizeof(uint16_t) + 2 * sizeof(uint64_t)) return fail();
 		std::vector<uint8_t> meta(static_cast<std::size_t>(ch.size));
 		f.read(reinterpret_cast<char*>(meta.data()), static_cast<std::streamsize>(ch.size));
