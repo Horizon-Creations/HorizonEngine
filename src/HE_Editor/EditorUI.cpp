@@ -412,10 +412,15 @@ void EditorUI::render(AppContext& ctx, float dt)
         if (ImGui::BeginPopupModal("##ContentRefresh", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
         {
+            // One literal for both the measurement and the draw. They were two
+            // copies of the same string, so editing the wording in one place left
+            // the label centred against the length of the OTHER wording.
+            constexpr const char* k_refreshLabel = "Updating project data...";
+
             float textY = (100.0f - ImGui::GetTextLineHeightWithSpacing() * 2.0f) * 0.5f;
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + textY);
-            ImGui::SetCursorPosX((360.0f - ImGui::CalcTextSize("Projektdaten werden aktualisiert...").x) * 0.5f);
-            ImGui::TextUnformatted("Projektdaten werden aktualisiert...");
+            ImGui::SetCursorPosX((360.0f - ImGui::CalcTextSize(k_refreshLabel).x) * 0.5f);
+            ImGui::TextUnformatted(k_refreshLabel);
 
             if (ctx.contentRefreshPending)
             {
@@ -474,6 +479,44 @@ void EditorUI::render(AppContext& ctx, float dt)
             s_typeCacheContentVersion = contentV;
             s_typeCacheEngineVersion  = engineV;
             EditorAssetTypeCache::invalidateAll();
+        }
+    }
+
+    // ── Re-index UUID → path whenever the content tree changed ────────────────
+    // ContentManager::scanContentDirectory() builds the disk registry a scene uses
+    // to resolve its component references (mesh/material UUIDs). It used to run
+    // exactly once, in the project-open path — so every asset that arrived AFTER
+    // that (a git pull, a branch switch, a file copied in via Finder, a teammate's
+    // push) appeared in the Content Browser, because the folder refresh saw it, but
+    // its UUID never entered the registry: a scene referencing it fell back to the
+    // default cube until the project was reopened, with nothing logged to explain
+    // why. Riding the same version counters as the block above makes the registry
+    // follow every refresh there is — the modal, the quiet create/rename refresh,
+    // EditorApplication's periodic async poll, and the SFTP manifest re-merge.
+    //
+    // Placement matters twice over. This is the main thread: scanContentDirectory
+    // mutates ContentManager's maps and must never be called from the periodic
+    // poll's std::async worker, which is why the worker only bumps the counter and
+    // the rescan happens here. And it is not a per-frame cost — the counters change
+    // only when a refresh actually rebuilt a tree. That distinction is the whole
+    // design: the scan is a full three-root walk with a header sniff per .hasset,
+    // measured at ~9 ms warm for a ~3000-entry tree, which is nothing once a minute
+    // and more than half a frame budget every frame.
+    if (ctx.globalState && ctx.contentManager)
+    {
+        // Source/ is deliberately not watched: it holds .h/.cpp, never a .hasset,
+        // so a refresh there cannot change the registry.
+        static uint64_t s_registryContentVersion = ~0ull;
+        static uint64_t s_registryEngineVersion  = ~0ull;
+        const uint64_t contentV =
+            ctx.globalState->contentFolderVersion.load(std::memory_order_acquire);
+        const uint64_t engineV =
+            ctx.globalState->engineFolderVersion.load(std::memory_order_acquire);
+        if (contentV != s_registryContentVersion || engineV != s_registryEngineVersion)
+        {
+            s_registryContentVersion = contentV;
+            s_registryEngineVersion  = engineV;
+            ctx.contentManager->scanContentDirectory();
         }
     }
 

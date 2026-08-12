@@ -2,6 +2,7 @@
 #include "Diagnostics/Log.h"
 #include "Diagnostics/Logger.h"
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -384,6 +385,60 @@ namespace
 	};
 }
 
+// Orders two sibling entries by name, case-insensitively. The case folding is so
+// "armor.hasset" and "Armor.hasset" end up next to each other instead of in two
+// ASCII-separated blocks — a user reads a folder by name, not by capitalisation.
+//
+// The exact-byte tie-break at the end is what makes this a TOTAL order, and it is
+// load-bearing: two names differing only in case would otherwise compare equal, and
+// equal elements fall back to whatever order the directory walk produced — which is
+// precisely the nondeterminism this sorting exists to remove. With the tie-break in
+// place a plain std::sort is enough; no stability requirement is left to honour.
+static bool folderEntryNameLess(const std::string& a, const std::string& b)
+{
+	const size_t n = std::min(a.size(), b.size());
+	for (size_t i = 0; i < n; ++i)
+	{
+		// unsigned char: handing tolower a negative char (any byte >= 0x80, i.e. any
+		// non-ASCII UTF-8 filename) is undefined behaviour.
+		const int la = std::tolower(static_cast<unsigned char>(a[i]));
+		const int lb = std::tolower(static_cast<unsigned char>(b[i]));
+		if (la != lb)
+			return la < lb;
+	}
+	if (a.size() != b.size())
+		return a.size() < b.size();
+	return a < b;
+}
+
+// Sorts one folder's children. std::filesystem::directory_iterator hands entries
+// back in an UNSPECIFIED order — on APFS that is hash order, so the Content Browser
+// listed a folder's assets arbitrarily AND reshuffled them whenever a neighbouring
+// file was added or removed. Ordering each level as it is built makes the displayed
+// tree a function of the names alone.
+//
+// No folders-first comparator is needed here: folders and files live in separate
+// vectors and the Content Browser draws every subfolder before the first file, so
+// each vector only has to be internally ordered.
+static void sortFolderLevel(HE::Folder* folder)
+{
+	std::sort(folder->subfolders.begin(), folder->subfolders.end(),
+	          [](const HE::Folder* a, const HE::Folder* b) { return folderEntryNameLess(a->name, b->name); });
+	std::sort(folder->files.begin(), folder->files.end(),
+	          [](const HE::File* a, const HE::File* b) { return folderEntryNameLess(a->name, b->name); });
+}
+
+// Recursive variant, for a tree that was assembled in more than one pass. See
+// refreshEngineFolder: its override and manifest merges append into levels that
+// populateFolder had already sorted, so without a second pass those late arrivals
+// would sit in an arbitrary tail behind the ordered ones.
+static void sortFolderTree(HE::Folder* folder)
+{
+	sortFolderLevel(folder);
+	for (HE::Folder* sub : folder->subfolders)
+		sortFolderTree(sub);
+}
+
 static void populateFolder(HE::Folder* folder, const fs::path& path)
 {
 	// error_code overloads throughout: the throwing directory_iterator raises
@@ -401,8 +456,12 @@ static void populateFolder(HE::Folder* folder, const fs::path& path)
 	const fs::directory_iterator end;
 	for (; it != end; it.increment(ec))
 	{
+		// break, not return: iteration broke down (unreadable dir) and we keep what
+		// we have — but that partial level still has to leave here sorted, or a
+		// directory that fails to enumerate halfway would be the one folder in the
+		// tree displayed in raw filesystem order.
 		if (ec)
-			return; // iteration broke down (unreadable dir) — keep what we have
+			break;
 
 		const fs::directory_entry& entry = *it;
 
@@ -436,6 +495,11 @@ static void populateFolder(HE::Folder* folder, const fs::path& path)
 			file.release();
 		}
 	}
+
+	// Once per level, and because this function recurses the whole subtree below
+	// `folder` is ordered by the time the outermost call returns — which is all
+	// refreshContentFolder()/refreshSourceFolder() need.
+	sortFolderLevel(folder);
 }
 
 bool GlobalState::refreshContentFolder()
@@ -740,6 +804,14 @@ bool GlobalState::refreshEngineFolder(const std::string& engineContentAbsPath,
 	// one is correctly skipped rather than shown as a redundant "remote" copy.
 	if (!remoteOnly.empty())
 		mergeManifestInto(&fresh, remoteOnly);
+
+	// After BOTH merges, not inside them: each one appends to levels populateFolder
+	// already sorted (an override with no shipped default, a remote-only placeholder,
+	// a synthesized folder for a manifest path that exists nowhere locally), so
+	// without this pass those entries would trail the sorted ones in manifest /
+	// directory-walk order. Re-sorting the levels that did not change is a few
+	// microseconds against the recursive directory walk that just ran.
+	sortFolderTree(&fresh);
 
 	{
 		std::unique_lock lock(m_engineFolderMutex);

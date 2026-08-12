@@ -123,6 +123,9 @@ inline constexpr uint32_t CHUNK_FNTI = makeChunkId('F','N','T','I'); // font met
 inline constexpr uint32_t CHUNK_SCNE = makeChunkId('S','C','N','E'); // object path list
 inline constexpr uint32_t CHUNK_SCNU = makeChunkId('S','C','N','U'); // object UUIDs (pack-time baked)
 
+// Prefab
+inline constexpr uint32_t CHUNK_PFAB = makeChunkId('P','F','A','B'); // entity-subtree snapshot (CBOR, SceneSerializer::serializeSubtree)
+
 // Animation
 inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration + channels
 

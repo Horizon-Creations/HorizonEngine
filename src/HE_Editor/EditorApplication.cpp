@@ -1750,6 +1750,13 @@ void EditorApplication::OnRender(float dt)
 				GlobalState* gs = m_globalState;
 				std::string engineContentPath = contentManager().engineContentRoot();
 				std::string projectContentRoot = contentManager().contentRoot();
+				// Folder trees only. ContentManager's UUID → path registry has to be
+				// re-indexed too when this poll picks up assets that arrived outside
+				// the editor, but scanContentDirectory() mutates ContentManager's maps
+				// and is main-thread only — calling it from here would race every
+				// loadAsset on the main thread. The refreshes below bump the folder
+				// version counters, and EditorUI's counter watch does the rescan on
+				// the main thread next frame; see the comment there.
 				m_contentRefreshFuture = std::async(std::launch::async, [gs, engineContentPath, projectContentRoot]()
 				{
 					gs->refreshContentFolder();

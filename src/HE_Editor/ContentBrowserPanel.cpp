@@ -51,6 +51,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -472,6 +473,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// fall back to Content so the grid never shows a stale/empty Source view.
 		if (s_selectedRootKind == 2 && !cbShowSource) { s_selectedRootKind = 0; s_selectedTreeFolder = nullptr; }
 
+		// ── Selection + context-menu target ──────────────────────────────
+		// Declared up here because BOTH panes write them: the grid tiles below and
+		// the folder tree, which raises the same context menu rather than having
+		// one of its own.
+		static std::string s_selectedItem;
+		static bool        s_selectedIsFolder = false;
+		static std::string s_ctxMenuItem;
+		static bool        s_ctxMenuIsFolder  = false;
+		// A downloaded EngineContent asset, i.e. one whose only local existence is a
+		// copy in the shared per-machine download cache. Captured where the File*
+		// is still in scope: the context menu only remembers a path, and the
+		// cache's manifest uuid cannot be re-derived from that alone.
+		static bool        s_ctxMenuIsCacheCopy = false;
+		static HE::UUID    s_ctxMenuRemoteUuid;
+		static bool        s_rightClickOnItem = false;
+
 		// Drag-to-move: an asset dragged from the grid ("HE_ASSET_PATH") and
 		// dropped onto a folder — a grid folder item or a tree node — records
 		// the request here. It executes AFTER the draw loops (below the file
@@ -496,6 +513,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 									 | ImGuiTreeNodeFlags_SpanAvailWidth;
 			if (folder->subfolders.empty())
 				flags |= ImGuiTreeNodeFlags_Leaf;
+			// The tree and the grid used to disagree about where you are: the panel
+			// knew perfectly well which folder was on screen, and showed it only in
+			// the breadcrumb. Marking the node is the whole fix.
+			if (folder == s_selectedTreeFolder && rootKind == s_selectedRootKind)
+				flags |= ImGuiTreeNodeFlags_Selected;
 
 			// ID by full path: sibling subtrees may repeat folder names, and the
 			// drop target below must land on THIS node, not a same-named twin.
@@ -512,11 +534,30 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			}
 			folderDropTarget(folder->fullPath); // move dragged assets into this folder
 
-			// Double-click anywhere on the item → navigate grid to this folder
-			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			// A single click navigates. It used to take a double-click, which is the
+			// gesture for "open" everywhere else — in a tree, clicking a folder IS
+			// the request to look inside it. OpenOnArrow keeps the two apart: the
+			// arrow still expands without moving the grid, so the tree can be
+			// explored and navigated independently, which is exactly what the flag
+			// is for.
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
 			{
 				s_selectedTreeFolder = folder;
 				s_selectedRootKind   = rootKind;
+			}
+			// Right-click reaches the same menu the grid tiles raise. Until now the
+			// tree had no menu at all: renaming or deleting a folder meant first
+			// navigating into its parent so the folder appeared as a tile.
+			if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+			{
+				s_selectedItem       = folder->fullPath;
+				s_selectedIsFolder   = true;
+				s_ctxMenuItem        = folder->fullPath;
+				s_ctxMenuIsFolder    = true;
+				s_ctxMenuIsCacheCopy = false;
+				s_ctxMenuRemoteUuid  = HE::UUID{};
+				s_selectedRootKind   = rootKind;
+				s_rightClickOnItem   = true;
 			}
 
 			if (open)
@@ -723,6 +764,81 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			bar.endGroup();
 		}
 
+		// ── Find it ───────────────────────────────────────────────────────
+		// The browser could show assets but not FIND them: with a couple of
+		// thousand of them the only way to reach one was to remember which folder
+		// it was in and click down to it. The row is deliberately separate from
+		// the breadcrumb above — that one says where you ARE, this one says what
+		// you are LOOKING FOR, and the two answer different questions.
+		//
+		// Typing searches the whole subtree under the folder on screen, not just
+		// its top level. A search that only looks in the folder you already opened
+		// is worth nothing: you would have to know the answer to ask the question.
+		static std::string s_searchText;
+		static int         s_typeFilter = 0;
+
+		// The types worth narrowing to, in the order the Create menu offers them —
+		// so the two lists read the same way round. Unknown is the "all" entry.
+		struct TypeFilter { const char* label; HE::AssetType type; };
+		static const TypeFilter kTypeFilters[] = {
+			{ "All types",         HE::AssetType::Unknown },
+			{ "Scene",             HE::AssetType::Scene },
+			{ "Material",          HE::AssetType::Material },
+			{ "Material Function", HE::AssetType::MaterialFunction },
+			{ "Static Mesh",       HE::AssetType::StaticMesh },
+			{ "Skeletal Mesh",     HE::AssetType::SkeletalMesh },
+			{ "Texture",           HE::AssetType::Texture },
+			{ "Prefab",            HE::AssetType::Prefab },
+			{ "Script",            HE::AssetType::Script },
+			{ "HorizonCode Class", HE::AssetType::HorizonCodeClass },
+			{ "UI Widget",         HE::AssetType::Widget },
+			{ "Particle System",   HE::AssetType::ParticleSystem },
+			{ "Animator",          HE::AssetType::AnimatorStateMachine },
+			{ "Animation Clip",    HE::AssetType::AnimationClip },
+			{ "Input Action",      HE::AssetType::InputAction },
+			{ "Input Mapping",     HE::AssetType::InputMappingContext },
+			{ "Audio",             HE::AssetType::Audio },
+			{ "Font",              HE::AssetType::Font },
+			{ "Shader",            HE::AssetType::Shader },
+			{ "Struct",            HE::AssetType::StructType },
+			{ "Enum",              HE::AssetType::EnumType },
+			{ "SaveGame Template", HE::AssetType::SaveGameTemplate },
+		};
+		constexpr int kTypeFilterCount = static_cast<int>(sizeof(kTypeFilters) / sizeof(kTypeFilters[0]));
+		if (s_typeFilter < 0 || s_typeFilter >= kTypeFilterCount) s_typeFilter = 0;
+
+		{
+			const float comboW = 150.0f;
+			const float clearW = ImGui::GetFrameHeight();
+			const float avail  = ImGui::GetContentRegionAvail().x;
+			ImGui::SetNextItemWidth(std::max(80.0f, avail - comboW - clearW -
+			                                 ImGui::GetStyle().ItemSpacing.x * 2.0f));
+			ImGui::InputTextWithHint("##cb_search", "Search this folder and everything under it",
+			                         &s_searchText);
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(comboW);
+			if (ImGui::BeginCombo("##cb_type", kTypeFilters[s_typeFilter].label))
+			{
+				for (int i = 0; i < kTypeFilterCount; ++i)
+					if (ImGui::Selectable(kTypeFilters[i].label, i == s_typeFilter))
+						s_typeFilter = i;
+				ImGui::EndCombo();
+			}
+			ImGui::SameLine();
+			// One click back to "everything", because clearing two controls by hand
+			// to undo one search is the kind of friction that stops people using it.
+			const bool anyFilter = !s_searchText.empty() || s_typeFilter != 0;
+			ImGui::BeginDisabled(!anyFilter);
+			if (ImGui::Button("\xC3\x97##cb_clear_filter", ImVec2(clearW, 0.0f)))
+			{
+				s_searchText.clear();
+				s_typeFilter = 0;
+			}
+			ImGui::EndDisabled();
+			if (anyFilter && ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the search and the filter");
+		}
+		const bool filterActive = !s_searchText.empty() || s_typeFilter != 0;
+
 		// ── Grid ──────────────────────────────────────────────────────────
 		constexpr float k_cellSize    = 72.0f;
 		constexpr float k_iconPad     = 6.0f;   // padding inside ImageButton
@@ -820,16 +936,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		int col = 0;
 
 		// ── Shared selection/rename/context state ────────────────────────
-		static std::string s_selectedItem;
-		static bool        s_selectedIsFolder = false;
-		static std::string s_ctxMenuItem;
-		static bool        s_ctxMenuIsFolder  = false;
-		// A downloaded EngineContent asset, i.e. one whose only local existence is a
-		// copy in the shared per-machine download cache. Captured HERE, where the
-		// File* is still in scope: the context menu only remembers a path, and the
-		// cache's manifest uuid cannot be re-derived from that alone.
-		static bool        s_ctxMenuIsCacheCopy = false;
-		static HE::UUID    s_ctxMenuRemoteUuid;
+		// (The four above are declared before the tree, which raises the same
+		// context menu the grid does.)
 		static std::string s_renameTarget;
 		static bool        s_renameIsFolder   = false;
 		static char        s_renameBuf[256]   = {};
@@ -850,7 +958,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// block has to know which of the two it is holding.
 		static bool        s_pendingCreateIsFolder = false;
 		static int         s_renameScriptLang = -1;    // creating a script: 0=Lua 1=Python; -1=not a script
-		static bool        s_rightClickOnItem = false;
 		// Delete-folder confirmation: the dialog outlives the frame its context
 		// menu closed in, so the target and the list of files that go with it are
 		// kept as STRINGS — a Folder* would dangle across the content refresh
@@ -870,6 +977,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// built) — the section is simply omitted then.
 		static std::uint64_t            s_deleteAssetScanGen  = 0;
 		static std::uint64_t            s_deleteFolderScanGen = 0;
+		// The same scan, asked as a question rather than as a step on the way to
+		// deleting something.
+		static std::string              s_referencesTarget;
+		static bool                     s_referencesIsFolder  = false;
+		static std::uint64_t            s_referencesScanGen   = 0;
+		static bool                     s_openReferencesPopup = false;
 #ifdef HE_HAVE_LIBSSH2
 		// "Remove Local Copy" confirmation — the inverse of the download popup, and
 		// the same plain-data rule: the tree is rebuilt underneath this dialog.
@@ -989,7 +1102,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static char        s_cppClassName[128] = "GameplayClass";
 
 		// ── Folders first ─────────────────────────────────────────────────
-		for (auto* sub : displayFolder->subfolders)
+		// Hidden while a search is running: the answer to "where is Rock_Cliff" is
+		// a list of assets, and folders in the middle of it are noise you have to
+		// read past. The breadcrumb still says which subtree is being searched.
+		static const std::vector<HE::Folder*> kNoFolders;
+		for (auto* sub : filterActive ? kNoFolders : displayFolder->subfolders)
 		{
 			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
@@ -1103,20 +1220,72 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		auto cbIsHeaderExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".h"||s==".hpp"||s==".hh"||s==".hxx"; };
 		auto cbIsSourceExt = [&](const std::string& e){ std::string s=cbLowerExt(e); return s==".cpp"||s==".cc"||s==".cxx"||s==".c"; };
 		std::vector<const HE::File*> gridFiles;
-		gridFiles.reserve(displayFolder->files.size());
-		for (auto* f : displayFolder->files)
+		// A file is dropped when its own .h sits beside it — the pair is one item.
+		// Takes the containing folder rather than reading displayFolder, because a
+		// search walks folders the grid is not standing in.
+		auto cbCollapsedIntoHeader = [&](const HE::Folder* owner, const HE::File* f)
 		{
-			if (s_selectedRootKind == 2 && cbIsSourceExt(f->extension))
+			if (s_selectedRootKind != 2 || !cbIsSourceExt(f->extension)) return false;
+			const std::string stem = std::filesystem::path(f->name).stem().string();
+			for (auto* g : owner->files)
+				if (cbIsHeaderExt(g->extension) &&
+				    std::filesystem::path(g->name).stem().string() == stem)
+					return true;
+			return false;
+		};
+
+		// Where a search hit actually lives, relative to the folder on screen —
+		// without it a flat list of twelve "Rock" tiles says nothing about which
+		// one you want.
+		std::unordered_map<const HE::File*, std::string> foundIn;
+
+		if (!filterActive)
+		{
+			gridFiles.reserve(displayFolder->files.size());
+			for (auto* f : displayFolder->files)
+				if (!cbCollapsedIntoHeader(displayFolder, f)) gridFiles.push_back(f);
+		}
+		else
+		{
+			// Case-insensitive substring, which is what people expect from a box
+			// that says "search" — not a prefix match and not a glob.
+			std::string needle = s_searchText;
+			for (char& c : needle) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+			const HE::AssetType wantType = kTypeFilters[s_typeFilter].type;
+
+			std::function<void(const HE::Folder*, const std::string&)> collect =
+				[&](const HE::Folder* folder, const std::string& rel)
 			{
-				const std::string stem = std::filesystem::path(f->name).stem().string();
-				bool headerSibling = false;
-				for (auto* g : displayFolder->files)
-					if (cbIsHeaderExt(g->extension) &&
-					    std::filesystem::path(g->name).stem().string() == stem)
-					{ headerSibling = true; break; }
-				if (headerSibling) continue; // collapsed into its header item
-			}
-			gridFiles.push_back(f);
+				for (auto* f : folder->files)
+				{
+					if (cbCollapsedIntoHeader(folder, f)) continue;
+					if (!needle.empty())
+					{
+						std::string name = f->name;
+						for (char& c : name) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+						if (name.find(needle) == std::string::npos) continue;
+					}
+					// The type sniff is cached per path, so filtering a large tree
+					// costs one header read per asset ONCE, not once per frame.
+					if (wantType != HE::AssetType::Unknown &&
+					    EditorAssetTypeCache::assetTypeOf(f->fullPath) != wantType) continue;
+					gridFiles.push_back(f);
+					if (!rel.empty()) foundIn[f] = rel;
+				}
+				for (auto* sub : folder->subfolders)
+					collect(sub, rel.empty() ? sub->name : rel + "/" + sub->name);
+			};
+			collect(displayFolder, std::string{});
+		}
+
+		if (filterActive)
+		{
+			const int hits = static_cast<int>(gridFiles.size());
+			if (hits == 0)
+				ImGui::TextDisabled("Nothing here matches. The search covers this folder and everything under it.");
+			else
+				ImGui::TextDisabled("%d match%s", hits, hits == 1 ? "" : "es");
+			ImGui::Spacing();
 		}
 
 		for (auto* file : gridFiles)
@@ -1306,11 +1475,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					                           int(rgb[2] * 255), 255);
 					const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
 					ImDrawList* dl = ImGui::GetWindowDrawList();
-					// Top-right, clear of the git dot at the bottom-left and the
-					// download badge at the top-left: three different facts about
-					// one file, three corners, none of them hiding another.
+					// Bottom-RIGHT, which is the last free corner: the git dot owns
+					// the bottom-left, the download/cache badge the top-left, and the
+					// material-function "f" the top-right — and that last one drew in
+					// exactly this spot, so a locked material function showed one
+					// badge on top of the other and neither was readable.
 					const float r = 8.0f;
-					const ImVec2 c(mx.x - r - 3.0f, mn.y + r + 3.0f);
+					const ImVec2 c(mx.x - r - 3.0f, mx.y - r - 3.0f);
 					dl->AddCircleFilled(c, r, IM_COL32(20, 20, 22, 230));
 					dl->AddCircle(c, r, col, 0, 1.5f);
 					// A padlock as two shapes rather than a glyph: the font's
@@ -1392,7 +1563,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			// Centered label (stem only, truncated)
 			const float labelW = k_cellSize;
-			std::string label  = std::filesystem::path(file->name).stem().string();
+			const std::string fullLabel = std::filesystem::path(file->name).stem().string();
+			std::string label  = fullLabel;
 			if (ImGui::CalcTextSize(label.c_str()).x > labelW)
 			{
 				while (!label.empty() &&
@@ -1406,6 +1578,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s", label.c_str());
 			else
 				ImGui::TextUnformatted(label.c_str());
+			// A 72px tile truncates almost every real asset name to about ten
+			// characters, and until now there was nowhere at all to read the rest —
+			// two assets differing in their suffix looked identical. The search
+			// makes it worse, since a hit can come from any depth, so the folder it
+			// was found in belongs here too.
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+			{
+				const auto whereIt = foundIn.find(file);
+				if (whereIt != foundIn.end())
+					ImGui::SetTooltip("%s\nin %s", fullLabel.c_str(), whereIt->second.c_str());
+				else if (label != fullLabel)
+					ImGui::SetTooltip("%s", fullLabel.c_str());
+			}
 
 			ImGui::EndGroup();
 			++col;
@@ -1506,6 +1691,41 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// Used by BOTH the background right-click popup and the item context
 		// menu's Create submenu, so creating an asset works wherever the user
 		// right-clicks in the Content Browser.
+		// Making a folder, from wherever it was asked for. It used to live inline in
+		// the background right-click menu, which is why the item context menu could
+		// not offer it — the code was not reachable from there.
+		auto createFolderIn = [&](const std::string& targetFolder)
+		{
+			std::string base = targetFolder + "/NewFolder";
+			std::string dir  = base;
+			int counter = 1;
+			while (std::filesystem::exists(dir))
+				dir = base + std::to_string(counter++);
+			std::error_code mkEc;
+			std::filesystem::create_directory(dir, mkEc);
+			if (mkEc)
+			{
+				HE_LOG_ERROR(Editor, "%s",
+					("Editor: could not create folder '" + dir + "': " + mkEc.message()).c_str());
+				return;
+			}
+
+			// Show it now and let the user name it straight away.
+			const std::string folderName = std::filesystem::path(dir).filename().string();
+			s_selectedItem    = dir;
+			s_renameTarget    = dir;
+			// Same choke point as an asset: announced when the name is
+			// final, not when the directory appears.
+			s_pendingCreatePublish  = dir;
+			s_pendingCreateIsFolder = true;
+			s_renameIsFolder  = true;
+			s_renameIsCreate  = true;
+			std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);
+			s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+			s_openRenamePopup = true;
+			s_quietContentRefresh = true;
+		};
+
 		auto drawCreateAssetItems = [&](const std::string& targetFolder)
 		{
 			auto tryCreate = [&](const char* defaultName, const char* ext, HE::AssetType type,
@@ -1633,9 +1853,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (ImGui::MenuItem("Struct"))       tryCreate("NewStruct",    ".hasset",  HE::AssetType::StructType);
 			if (ImGui::MenuItem("Enum"))         tryCreate("NewEnum",      ".hasset",  HE::AssetType::EnumType);
 			if (ImGui::MenuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
-			if (ImGui::MenuItem("Texture"))      tryCreate("NewTexture",  ".hasset",  HE::AssetType::Texture);
-			if (ImGui::MenuItem("Static Mesh"))  tryCreate("NewMesh",     ".hasset",  HE::AssetType::StaticMesh);
-			if (ImGui::MenuItem("Skeletal Mesh"))tryCreate("NewSkelMesh", ".hasset",  HE::AssetType::SkeletalMesh);
 
 			// ── Gameplay logic — restricted to the project's chosen language ──────
 			// The project's scriptLanguage (picked in the New Project wizard) is
@@ -1676,9 +1893,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				break;
 			}
 
-			if (ImGui::MenuItem("Shader"))       tryCreate("NewShader",   ".hasset",  HE::AssetType::Shader);
-			if (ImGui::MenuItem("Audio"))        tryCreate("NewAudio",    ".hasset",  HE::AssetType::Audio);
-			if (ImGui::MenuItem("Font"))         tryCreate("NewFont",     ".hasset",  HE::AssetType::Font);
+			// A folder belongs in the list of things you can make here. It used to
+			// exist ONLY in the background right-click menu, so right-clicking a
+			// folder could create a Material inside it but not another folder —
+			// you had to navigate into it first and then click the empty space.
+			ImGui::Separator();
+			if (ImGui::MenuItem("Folder")) createFolderIn(targetFolder);
+
+			// Texture, Static Mesh, Skeletal Mesh, Shader, Audio and Font used to
+			// stand here too, and every one of them wrote a file that could never
+			// hold anything: nothing in the editor authors those types, so the stub
+			// stayed empty forever, opened nothing on double-click (or reported a
+			// load failure), and had to be deleted again. They arrive by import, so
+			// that is what the menu says now.
+			ImGui::Separator();
+			ImGui::TextDisabled("Meshes, textures, audio and fonts");
+			ImGui::TextDisabled("arrive via Assets \xE2\x96\xB8 Import Asset.");
 		};
 
 		// ── Delete one asset ──────────────────────────────────────────────
@@ -2133,6 +2363,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 			}
 
+			// ── What points at this? ─────────────────────────────────────
+			// The scan behind the delete dialogs answers a question people ask far
+			// more often than "may I delete this": before renaming, before moving,
+			// before changing a material everything shares. It was reachable only by
+			// starting a deletion and then backing out — so the safe way to ask was
+			// to pretend to do the dangerous thing.
+			if (ImGui::MenuItem("Find References"))
+			{
+				s_referencesTarget    = s_ctxMenuItem;
+				s_referencesIsFolder  = s_ctxMenuIsFolder;
+				s_referencesScanGen   = beginScanFor(s_ctxMenuItem, s_ctxMenuIsFolder);
+				s_openReferencesPopup = true;
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::Separator();
+
 			// In the Source root a C++ class is a .h/.cpp pair; renaming it means
 			// renaming both files AND rewriting the class name/registration inside —
 			// a refactor best left to the user's C++ toolchain, so Rename is hidden.
@@ -2416,8 +2662,35 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::SameLine();
 			if (EditorWidgets::cancelButton("Cancel", ImVec2(140, 0)))
 			{
-				// On create, Cancel just keeps the default name — the file already
-				// exists on disk; nothing to undo.
+				// Cancel means cancel. The asset is written BEFORE this dialog opens
+				// (the name is the only thing still missing), so leaving it there
+				// turned "no, never mind" into a NewMaterial.hasset the user then had
+				// to hunt down and delete through the confirmation dialog — more work
+				// than going through with the creation would have been.
+				//
+				// Only for a CREATE: cancelling a rename must obviously not delete
+				// the asset being renamed.
+				if (s_renameIsCreate && !s_renameTarget.empty())
+				{
+					std::error_code rmEc;
+					if (s_renameIsFolder) std::filesystem::remove_all(s_renameTarget, rmEc);
+					else                  std::filesystem::remove(s_renameTarget, rmEc);
+					if (rmEc)
+						HE_LOG_WARN(Editor, "%s",
+							("Editor: cancelled create left '" + s_renameTarget + "' behind: " +
+							 rmEc.message()).c_str());
+					else
+					{
+						EditorAssetTypeCache::invalidate(s_renameTarget);
+						AssetThumbnailCache::invalidate(s_renameTarget);
+						if (s_selectedItem == s_renameTarget) s_selectedItem.clear();
+						s_quietContentRefresh = true;
+					}
+					// Nothing was created after all, so nothing may be announced to
+					// the session — the publish below fires on whatever this holds.
+					s_pendingCreatePublish.clear();
+					s_pendingCreateIsFolder = false;
+				}
 				s_renameTarget.clear();
 				s_renameIsCreate = false;
 				s_renameScriptLang = -1;
@@ -2541,6 +2814,47 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		{
 			s_deleteAssetTarget.clear();
 			s_deleteAssetScanGen = 0;
+			cancelReferenceScan();
+		}
+
+		// ── "Find References" result ──────────────────────────────────────
+		// Not a confirmation: nothing is about to happen, so there is one way out
+		// and no red button. Opened out here for the same ID-stack reason as the
+		// dialogs around it.
+		if (s_openReferencesPopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_references_popup");
+			s_openReferencesPopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_references_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			const std::string name = s_referencesIsFolder
+				? std::filesystem::path(s_referencesTarget).filename().string()
+				: std::filesystem::path(s_referencesTarget).stem().string();
+			ImGui::Text(s_referencesIsFolder ? "What uses anything in \"%s\"?" : "What uses \"%s\"?",
+			            name.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			drawReferenceSection(s_referencesScanGen,
+				s_referencesIsFolder ? "Renaming or moving the folder carries these along."
+				                     : "Renaming or moving it carries these along; deleting it breaks them.");
+			ImGui::Spacing();
+			if (EditorWidgets::primaryButton("Close", ImVec2(210, 0)))
+			{
+				s_referencesTarget.clear();
+				s_referencesScanGen = 0;
+				cancelReferenceScan();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+		else if (!s_referencesTarget.empty() && !s_openReferencesPopup)
+		{
+			s_referencesTarget.clear();
+			s_referencesScanGen = 0;
 			cancelReferenceScan();
 		}
 
@@ -2903,31 +3217,6 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const std::string targetFolder = displayFolder ? displayFolder->fullPath
 															   : contentFolder.fullPath;
 				drawCreateAssetItems(targetFolder);
-				if (ImGui::MenuItem("Folder"))
-				{
-					std::string base = targetFolder + "/NewFolder";
-					std::string dir  = base;
-					int counter = 1;
-					while (std::filesystem::exists(dir))
-						dir = base + std::to_string(counter++);
-					std::filesystem::create_directory(dir);
-
-					// Show it now and let the user name it straight away.
-					const std::string folderName = std::filesystem::path(dir).filename().string();
-					s_selectedItem    = dir;
-					s_renameTarget    = dir;
-					// Same choke point as an asset: announced when the name is
-					// final, not when the directory appears.
-					s_pendingCreatePublish  = dir;
-					s_pendingCreateIsFolder = true;
-					s_renameIsFolder  = true;
-					s_renameIsCreate  = true;
-					std::strncpy(s_renameBuf, folderName.c_str(), sizeof(s_renameBuf) - 1);
-					s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
-					s_openRenamePopup = true;
-					s_quietContentRefresh = true;
-					ImGui::CloseCurrentPopup();
-				}
 			}
 
 			ImGui::EndPopup();

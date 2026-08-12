@@ -441,14 +441,14 @@ void render(AppContext& ctx, float dt)
 					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
 					                    camOverride.active ? &camOverride : nullptr);
 
-				// ── Spawn a mesh dropped onto the viewport ──────────────────
+				// ── Spawn a mesh or prefab dropped onto the viewport ────────
 				// A collision probe decides where: the drop ray is traced against
 				// the scene's actual geometry and the asset lands on the nearest
 				// surface under the cursor (terrain, floor, another mesh), resting
 				// on it rather than intersecting it. With nothing under the cursor
 				// the ground plane (Y=0) takes over, and if the ray points away
 				// from that too (looking up), a fixed distance in front of the
-				// camera. Non-mesh assets are ignored.
+				// camera. Everything else is ignored.
 				if (!s_viewportDropPath.empty())
 				{
 					if (ctx.world && ctx.contentManager)
@@ -456,7 +456,11 @@ void render(AppContext& ctx, float dt)
 						const std::string rel = ctx.contentManager->toContentRelativePath(s_viewportDropPath);
 						const HE::UUID id = rel.empty() ? HE::UUID{} : ctx.contentManager->loadAsset(rel);
 						const StaticMeshAsset* mesh = (id != HE::UUID{}) ? ctx.contentManager->getStaticMesh(id) : nullptr;
-						if (mesh)
+						// Only asked when the mesh lookup came up empty — one UUID is
+						// never both, and the SlotMap's stored-id check makes the
+						// cross-type probe safe rather than an alias.
+						const PrefabAsset* prefab = (!mesh && id != HE::UUID{}) ? ctx.contentManager->getPrefab(id) : nullptr;
+						if (mesh || prefab)
 						{
 							glm::vec3 spawnPos(0.0f);
 							bool placed = false;
@@ -483,7 +487,10 @@ void render(AppContext& ctx, float dt)
 							// Rest the mesh ON the surface: its own bounds decide how
 							// far its origin sits above the contact point, so a model
 							// whose pivot is at its centre doesn't sink in halfway.
-							if (placed)
+							// A prefab has no single mesh to measure — its subtree can
+							// hold many, or none — so its root simply lands on the
+							// contact point and keeps whatever offset it was authored with.
+							if (placed && mesh)
 								if (const HE::AABB* box = meshBounds(*ctx.contentManager, id))
 									spawnPos.y -= box->min.y;
 							if (!placed && ctx.editorCamera)
@@ -496,18 +503,50 @@ void render(AppContext& ctx, float dt)
 							}
 
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							Entity e = ctx.world->createEntity(mesh->name);
-							TransformComponent tc; tc.position = spawnPos;
-							ctx.world->addComponent(e, tc);
-							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
-							ctx.world->markHierarchyDirty();
-							ctx.selectedEntity = e; // select the freshly spawned mesh
-							HE_LOG_INFO(Editor, "%s",
-								("Editor: spawned '" + mesh->name + "' into the scene via drag-drop").c_str());
+							if (mesh)
+							{
+								Entity e = ctx.world->createEntity(mesh->name);
+								TransformComponent tc; tc.position = spawnPos;
+								ctx.world->addComponent(e, tc);
+								ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
+								ctx.world->markHierarchyDirty();
+								ctx.selectedEntity = e; // select the freshly spawned mesh
+								HE_LOG_INFO(Editor, "%s",
+									("Editor: spawned '" + mesh->name + "' into the scene via drag-drop").c_str());
+							}
+							else
+							{
+								// preserveIds stays false: the blob carries the entity
+								// uuids of the subtree it was captured from, and reusing
+								// them would make two drops of the same prefab claim one
+								// identity (see SceneSerializer::instantiatePrefab).
+								SceneSerializer ser;
+								const Entity root = ser.instantiatePrefab(*ctx.world, prefab->data);
+								if (root != entt::null)
+								{
+									// Only the position is overwritten — the prefab's own
+									// rotation and scale are part of what was saved, and
+									// resetting them would silently un-author it.
+									if (auto* t = ctx.world->registry().try_get<TransformComponent>(root))
+										t->position = spawnPos;
+									else
+									{
+										TransformComponent tc; tc.position = spawnPos;
+										ctx.world->addComponent(root, tc);
+									}
+									ctx.world->markHierarchyDirty();
+									ctx.selectedEntity = root;
+									HE_LOG_INFO(Editor, "%s",
+										("Editor: instantiated prefab '" + prefab->name + "' into the scene via drag-drop").c_str());
+								}
+								else
+									HE_LOG_ERROR(Editor, "%s",
+										("Editor: prefab '" + prefab->name + "' could not be instantiated — its payload is not a readable subtree").c_str());
+							}
 						}
 						else
 							HE_LOG_INFO(Editor, "%s",
-								"Editor: dropped asset is not a static mesh — nothing spawned");
+								"Editor: dropped asset is not a static mesh or prefab — nothing spawned");
 					}
 					s_viewportDropPath.clear();
 				}

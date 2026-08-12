@@ -442,14 +442,14 @@ void render(AppContext& ctx)
             if (ctx.hubRemoveIndex >= 0 && ctx.hubRemoveIndex < static_cast<int>(known.size()))
             {
                 std::filesystem::path rp(known[ctx.hubRemoveIndex]);
-                ImGui::Text("Projekt aus der Liste entfernen?");
+                ImGui::Text("Remove this project from the list?");
                 ImGui::Spacing();
                 ImGui::TextDisabled("%s", rp.stem().string().c_str());
                 ImGui::TextDisabled("%s", known[ctx.hubRemoveIndex].c_str());
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                if (ImGui::Button("Entfernen", ImVec2(120, 0)))
+                if (ImGui::Button("Remove", ImVec2(120, 0)))
                 {
                     ctx.globalState->removeKnownProject(known[ctx.hubRemoveIndex]);
                     ctx.globalState->writeConfig();
@@ -457,7 +457,7 @@ void render(AppContext& ctx)
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Abbrechen", ImVec2(120, 0)))
+                if (ImGui::Button("Cancel", ImVec2(120, 0)))
                 {
                     ctx.hubRemoveIndex = -1;
                     ImGui::CloseCurrentPopup();

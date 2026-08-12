@@ -416,6 +416,16 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.sourceCode.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_shaderAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::Prefab:
+	{
+		// The CBOR subtree is opaque here on purpose: decoding it needs the
+		// component types, which live in HE_Scene — a layer HE_Core must not
+		// depend on. SceneSerializer::instantiatePrefab is the only thing that
+		// ever looks inside, and it is handed these bytes verbatim.
+		PrefabAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PFAB)) a.data = c->data;
+		handle = m_prefabAssets.insert(std::move(a)); break;
+	}
 	case HE::AssetType::AnimationClip:
 	{
 		AnimationClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
@@ -1472,6 +1482,16 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<ShaderAsset&>(asset);
 		w.addChunk(HAsset::CHUNK_SRC, a.sourceCode.data(), a.sourceCode.size());
+		break;
+	}
+	case HE::AssetType::Prefab:
+	{
+		// Written unconditionally, like Audio's PCMD: a prefab whose blob went
+		// missing is not a smaller prefab, it is an entity subtree that spawns
+		// nothing — and an empty chunk says so on the next load instead of the
+		// file quietly keeping whatever bytes it had before.
+		auto& a = static_cast<PrefabAsset&>(asset);
+		w.addChunk(HAsset::CHUNK_PFAB, a.data.data(), a.data.size());
 		break;
 	}
 	case HE::AssetType::AnimationClip:

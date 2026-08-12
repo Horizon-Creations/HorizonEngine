@@ -5,7 +5,9 @@
 #include <Diagnostics/Logger.h>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -199,12 +201,52 @@ void render(AppContext& ctx)
                 }
                 if (!isRoot && ImGui::MenuItem("Save as Prefab") && ctx.contentManager)
                 {
+                    // Entity names are free text, and a '/' in one would reach
+                    // saveAsset's create_directories: "Arm/Left" would silently
+                    // land in Content/Prefabs/Arm instead of where the user is
+                    // looking for it.
+                    std::string base = node.name;
+                    for (char& c : base)
+                        if (c == '/' || c == '\\') c = '_';
+                    if (base.empty()) base = "Prefab";
+
+                    // Unique "<Name>.hasset" under Content/Prefabs — the folder
+                    // ProjectManager seeds for exactly this. Without the counter
+                    // a second "Save as Prefab" on a same-named entity would
+                    // overwrite the first one with no warning.
+                    const std::string dirAbs = ctx.contentManager->contentRoot() + "/Prefabs";
+                    std::error_code ec;
+                    std::filesystem::create_directories(dirAbs, ec);
+                    std::string name = base;
+                    for (int n = 1; std::filesystem::exists(dirAbs + "/" + name + ".hasset", ec); ++n)
+                        name = base + std::to_string(n);
+
                     SceneSerializer ser;
-                    auto data = ser.serializeSubtree(*ctx.world, node.entity);
                     PrefabAsset prefab;
-                    prefab.name = node.name;
-                    prefab.data = std::move(data);
-                    ctx.contentManager->registerPrefab(std::move(prefab));
+                    prefab.type = HE::AssetType::Prefab;
+                    prefab.name = name;
+                    prefab.path = "Prefabs/" + name + ".hasset";
+                    prefab.data = ser.serializeSubtree(*ctx.world, node.entity);
+
+                    // Write the file BEFORE registering it. Registering alone is
+                    // what this menu item used to do, and an asset that lives only
+                    // in the SlotMap never reaches the Content Browser and is gone
+                    // at shutdown — the save looked like it worked and wasn't.
+                    const std::string relPath = prefab.path;
+                    if (ctx.contentManager->saveAsset(prefab))
+                    {
+                        // Registering the in-memory copy keeps the UUID that was
+                        // just written to disk (registerRuntimeAsset only mints one
+                        // when there is none), so the path→UUID entry it adds and
+                        // the file agree — a later drop of this prefab resolves it
+                        // without re-reading it. The refresh flag is what makes the
+                        // new file appear in the Content Browser.
+                        ctx.contentManager->registerPrefab(std::move(prefab));
+                        ctx.contentRefreshPending = true;
+                        HE_LOG_INFO(Editor, "%s", ("Editor: saved prefab " + relPath).c_str());
+                    }
+                    else
+                        HE_LOG_ERROR(Editor, "%s", ("Editor: failed to save prefab " + relPath).c_str());
                 }
                 if (!isRoot && EditorWidgets::dangerMenuItem("Delete"))
                 {

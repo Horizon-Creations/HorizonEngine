@@ -1630,3 +1630,86 @@ TEST_CASE("Engine default mesh survives a scene save/reload round-trip")
 		CHECK(b->indices.size() == 6);          // the real mesh, not the 36-index cube
 	}
 }
+
+TEST_CASE("ContentManager prefab round-trip preserves the CBOR payload and the UUID")
+{
+	// "Save as Prefab" used to only registerPrefab() — nothing hit disk, so the
+	// asset was gone at shutdown. This is the contract that made it real: the
+	// blob comes back byte-for-byte (SceneSerializer::instantiatePrefab reads it
+	// verbatim, so a single dropped byte spawns nothing) under the same UUID a
+	// scene reference would have stored.
+	TempContentDir dir;
+
+	// Stand-in for a serializeSubtree blob — HE_Core never decodes it, and the
+	// test must not depend on HE_Scene to prove the bytes survive. Deliberately
+	// includes 0x00 so a length-losing string round-trip would truncate it.
+	const std::vector<uint8_t> payload = { 0xA1, 0x00, 0x64, 0x74, 0x65, 0x73, 0x74, 0xFF, 0x00, 0x01 };
+
+	HE::UUID savedId;
+	{
+		ContentManager cm(dir.path.string());
+		PrefabAsset p;
+		p.type = HE::AssetType::Prefab;
+		p.name = "Turret";
+		p.path = "Prefabs/Turret.hasset";
+		p.data = payload;
+		REQUIRE(cm.saveAsset(p));
+		savedId = p.id;
+		REQUIRE_FALSE(savedId == HE::UUID{});
+	}
+
+	// Fresh manager — simulates an engine restart
+	{
+		ContentManager cm(dir.path.string());
+		const HE::UUID loadedId = cm.loadAsset("Prefabs/Turret.hasset");
+		CHECK(loadedId == savedId);
+
+		const PrefabAsset* p = cm.getPrefab(loadedId);
+		REQUIRE(p != nullptr);
+		CHECK(p->name == "Turret");
+		CHECK(p->path == "Prefabs/Turret.hasset");
+		CHECK(p->type == HE::AssetType::Prefab);
+		CHECK(p->data == payload);
+		CHECK(cm.assetType(loadedId) == HE::AssetType::Prefab);
+
+		// Wrong-type lookups must not alias (the SlotHandle can be valid in
+		// another map — lookupAsset's stored-id check is what stops it).
+		CHECK(cm.getStaticMesh(loadedId) == nullptr);
+		CHECK(cm.getWidget(loadedId) == nullptr);
+
+		// Prefabs must evict like any other type, or hot reload (unload, then
+		// reload) silently does nothing for them.
+		CHECK(cm.unloadAsset(loadedId));
+		CHECK_FALSE(cm.isLoaded(loadedId));
+		CHECK(cm.getPrefab(loadedId) == nullptr);
+		CHECK_FALSE(cm.isLoaded("Prefabs/Turret.hasset"));
+
+		// …and come straight back from the same file, under the same identity.
+		CHECK(cm.loadAsset("Prefabs/Turret.hasset") == savedId);
+	}
+}
+
+TEST_CASE("ContentManager prefab with an empty payload still round-trips")
+{
+	// A subtree that serialized to nothing must not read back as "no prefab at
+	// all": saveAsset writes the PFAB chunk unconditionally, so the asset still
+	// registers and the Content Browser still shows it.
+	TempContentDir dir;
+	HE::UUID savedId;
+	{
+		ContentManager cm(dir.path.string());
+		PrefabAsset p;
+		p.type = HE::AssetType::Prefab;
+		p.name = "Empty";
+		p.path = "Prefabs/Empty.hasset";
+		REQUIRE(cm.saveAsset(p));
+		savedId = p.id;
+	}
+	{
+		ContentManager cm(dir.path.string());
+		const PrefabAsset* p = cm.getPrefab(cm.loadAsset("Prefabs/Empty.hasset"));
+		REQUIRE(p != nullptr);
+		CHECK(p->id == savedId);
+		CHECK(p->data.empty());
+	}
+}
