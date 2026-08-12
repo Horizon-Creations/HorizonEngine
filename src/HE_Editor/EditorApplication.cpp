@@ -328,6 +328,12 @@ void EditorApplication::OnInit()
 	// A received collaboration snapshot replaces the whole world. Selection and
 	// undo history still hold entity handles from the world that just went away,
 	// so acting on them afterwards would touch freed storage.
+	// Everything the session learns that the user did not ask for — a peer that
+	// could not apply a delete, a denied request, an asset nobody answered about
+	// before the session ended — goes to the one editor-wide channel rather than
+	// into a log line nobody has open. Set before any callback below can fire.
+	m_collab.setNotifications(&m_notifications);
+
 	// ── Structural replication ───────────────────────────────────────────────
 	// The editor creates and deletes entities from many places (outliner menus,
 	// drag & drop, prefab drops, terrain tools). Rather than hooking every one of
@@ -597,26 +603,7 @@ void EditorApplication::OnInit()
 			// references stay broken with nothing to show for it. Two renames in
 			// quick succession is not exotic: approving a queue of them is one
 			// click each.
-			{
-				std::lock_guard<std::mutex> lk(m_retargetMutex);
-				m_retargetQueue.push_back({ relPath, newRelPath, folder });
-				if (m_retargetRunning) return;   // the running job will drain it
-				m_retargetRunning = true;
-			}
-			m_retargetJobs.push_back(std::async(std::launch::async, [this] {
-				for (;;)
-				{
-					RetargetJob job;
-					{
-						std::lock_guard<std::mutex> lk(m_retargetMutex);
-						if (m_retargetQueue.empty()) { m_retargetRunning = false; return; }
-						job = m_retargetQueue.front();
-						m_retargetQueue.erase(m_retargetQueue.begin());
-					}
-					contentManager().retargetAssetReferencesOnDisk(
-						job.oldRel, job.newRel, job.folder);
-				}
-			}));
+			enqueueRetargetOnDisk(relPath, newRelPath, folder);
 		}
 		m_contentRefreshPending = true;
 	});
@@ -4387,6 +4374,9 @@ AppContext EditorApplication::makeContext()
 		.dialogBridge        = &m_sdlDialogBridge,
 #endif
 		.collab              = &m_collab,
+		.notifications       = &m_notifications,
+		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
+		                              bool folder) { enqueueRetargetOnDisk(oldRel, newRel, folder); },
 		.collabUndo          = &m_collabUndo,
 		.collabKeyForPath    = [this](const std::string& p, bool folder) {
 			return collabSyncKey(p, folder);
@@ -4749,6 +4739,68 @@ void EditorApplication::restoreOpenTabs()
 }
 
 // ─── Scene file management ──────────────────────────────────────────────────────
+// ─── enqueueRetargetOnDisk ───────────────────────────────────────────────────
+// Every on-disk reference rewrite in the editor funnels through here, from the
+// collaboration path and from the Content Browser's own moves alike. See the
+// declaration for why one queue rather than two.
+void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
+                                              const std::string& newRel, bool folder)
+{
+	if (oldRel.empty() || newRel.empty() || oldRel == newRel) return;
+	{
+		std::lock_guard<std::mutex> lk(m_retargetMutex);
+		m_retargetQueue.push_back({ oldRel, newRel, folder });
+		if (m_retargetRunning) return;   // the running job will drain it
+		m_retargetRunning = true;
+	}
+	m_retargetJobs.push_back(std::async(std::launch::async, [this] {
+		for (;;)
+		{
+			// Everything queued that can safely share ONE walk. The walk is the
+			// expensive part — it reads every asset in the project that mentions
+			// any of the paths — and dragging forty assets into a folder used to
+			// mean forty of them over the same files. The rewrite already takes a
+			// LIST of substitutions, so only the walking was repeated.
+			std::vector<ContentManager::MoveSpec> batch;
+			{
+				std::lock_guard<std::mutex> lk(m_retargetMutex);
+				if (m_retargetQueue.empty()) { m_retargetRunning = false; return; }
+
+				// A CHAINED pair (A→B queued with B→C) is not equivalent to running
+				// the two in order: the substitution takes the first rule that
+				// matches a stored value, so a reference to A would land on B and
+				// stop, never reaching C. Independent moves — which is what a
+				// multi-drag produces — have no such pair, so the batch simply ends
+				// where a chain begins and the next pass picks it up.
+				auto chains = [](const ContentManager::MoveSpec& a, const RetargetJob& b)
+				{
+					auto touches = [](const std::string& x, const std::string& y)
+					{
+						return x == y ||
+						       (y.size() > x.size() && y.compare(0, x.size(), x) == 0 && y[x.size()] == '/') ||
+						       (x.size() > y.size() && x.compare(0, y.size(), y) == 0 && x[y.size()] == '/');
+					};
+					return touches(a.newRelativePath, b.oldRel) ||
+					       touches(a.oldRelativePath, b.newRel);
+				};
+
+				while (!m_retargetQueue.empty())
+				{
+					const RetargetJob& next = m_retargetQueue.front();
+					bool conflicts = false;
+					for (const auto& taken : batch)
+						if (chains(taken, next)) { conflicts = true; break; }
+					if (conflicts && !batch.empty()) break;
+					batch.push_back(ContentManager::MoveSpec{ next.oldRel, next.newRel, next.folder });
+					m_retargetQueue.erase(m_retargetQueue.begin());
+				}
+			}
+			if (!batch.empty())
+				contentManager().retargetAssetReferencesOnDisk(batch);
+		}
+	}));
+}
+
 void EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return;

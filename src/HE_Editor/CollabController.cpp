@@ -949,11 +949,15 @@ void CollabController::wireCallbacks()
 	m_collab->onAssetOpRequested(
 		[this](HE::Net::ParticipantId who, std::uint32_t requestId,
 		       HE::Net::CollabSession::AssetOp op,
-		       const std::string& path, const std::string& newPath, bool folder) {
+		       const std::string& path, const std::string& newPath, bool folder,
+		       std::uint32_t batch) {
 			// A folder create needs no answer — it is relayed as it arrives.
 			// Queueing it would put a row in front of the host that has no
-			// decision in it.
-			if (op == HE::Net::CollabSession::AssetOp::Create)
+			// decision in it. A reimport notice is the same shape: it announces
+			// something that has already happened on the requester's disk, and
+			// there is nothing for the host to weigh or to refuse.
+			if (op == HE::Net::CollabSession::AssetOp::Create ||
+			    op == HE::Net::CollabSession::AssetOp::Reimport)
 			{
 				if (m_collab)
 					m_collab->broadcastAssetOpApply(op, path, newPath, who, folder);
@@ -979,6 +983,19 @@ void CollabController::wireCallbacks()
 						break;
 					}
 					if (!known) p.requesters.push_back({ who, requestId });
+					// A row asked for on its own, now also asked for as part of
+					// a selection, JOINS that selection. The alternative is a
+					// file that quietly drops out of the bundle it was selected
+					// in and is left sitting in the tray alone after the bundle
+					// has been answered — which reads as a bug in the delete,
+					// not as an artefact of who asked first. A row that already
+					// belongs to a batch keeps it: coalescing is per asset, and
+					// the first batch to name it owns it.
+					if (!p.inBatch() && batch != 0)
+					{
+						p.batchOwner = who;
+						p.batchId    = batch;
+					}
 					return;
 				}
 			}
@@ -1001,6 +1018,8 @@ void CollabController::wireCallbacks()
 			p.folder  = folder;
 			p.requesters.push_back({ who, requestId });
 			p.firstAskedMs = m_lastUpdateMs;
+			p.batchOwner   = batch != 0 ? who : 0;
+			p.batchId      = batch;
 			m_pendingOps.push_back(std::move(p));
 		});
 
@@ -1071,22 +1090,55 @@ void CollabController::wireCallbacks()
 			// Only the refusal needs saying. An approval is followed immediately
 			// by the change itself, which is its own confirmation.
 			if (!approved)
-				m_assetNotice = "The host did not approve that \"" + name + "\" be " +
-					(op == HE::Net::CollabSession::AssetOp::Delete
-						? "deleted." : "renamed.");
+			{
+				const bool del = op == HE::Net::CollabSession::AssetOp::Delete;
+				m_assetNotice = "The host did not approve that \"" + name +
+					"\" be " + (del ? "deleted." : "renamed.");
+				// Also to the store, because the footer line it just wrote is
+				// gone the moment anything else happens — and a refusal is
+				// exactly the answer somebody comes back looking for after
+				// wondering why the file is still there. Warning, not Problem:
+				// nothing is out of step, the host simply said no.
+				postNote(HE::Ed::NoteLevel::Warning,
+				         std::string("The host did not approve ") +
+				             (del ? "deleting \"" : "renaming \"") + name + "\".",
+				         {}, path);
+			}
 			return;
 		}
 	});
 
 	m_collab->onAssetOpApply(
-		[this](HE::Net::ParticipantId, HE::Net::CollabSession::AssetOp op,
+		[this](HE::Net::ParticipantId by, HE::Net::CollabSession::AssetOp op,
 		       const std::string& path, const std::string& newPath, bool folder) {
+			// A reimport announces a change we deliberately did NOT send the
+			// bytes for, so there is nothing to apply — and it must not reach
+			// the editor's apply handler, which reads anything that is not a
+			// delete or a folder create as a rename and would try to move the
+			// asset to an empty path. Saying so IS the whole message.
+			if (op == HE::Net::CollabSession::AssetOp::Reimport)
+			{
+				if (by == localParticipant()) return;   // we are the one who did it
+				noteRemoteReimport(by, path);
+				return;
+			}
 			if (!m_onRemoteAssetOp) return;
 			// Same guard as an arriving save: applying this touches the content
 			// tree, and the notification would otherwise come straight back.
 			m_applyingRemoteAsset = true;
 			m_onRemoteAssetOp(op, path, newPath, folder);
 			m_applyingRemoteAsset = false;
+			// ── Did it actually happen? ──
+			// The handler that carries this out takes a std::error_code from
+			// every filesystem call it makes and looks at none of them, so a
+			// delete that removed nothing and a delete that worked were the same
+			// event: silence. That is how peers drift apart without anyone
+			// finding out until the next source-control sync contradicts them.
+			// The disk is asked instead of the ec, which also catches the two
+			// refusals the handler makes on purpose (a rename onto an occupied
+			// name, a path that resolves outside the project) — those return
+			// early and never set an ec at all.
+			verifyAppliedAssetOp(op, path, newPath);
 		});
 
 	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
@@ -1164,9 +1216,16 @@ void CollabController::wireCallbacks()
 		if (reason == LockDenyReason::HeldByOther)
 		{
 			const LockInfo* l = m_collab->lockFor(subject);
-			m_lockNotice = l && !l->ownerName.empty()
-				? (l->ownerName + " is editing this — it is read-only for you.")
-				: std::string("Someone else is editing this — it is read-only for you.");
+			// This used to be written to a string nothing read. It goes where
+			// the user can actually find it now — and it names the path when we
+			// know one, so the row points at the thing that went read-only
+			// rather than at "this".
+			const auto it = m_assetSubjectPaths.find(subject);
+			postNote(HE::Ed::NoteLevel::Warning,
+			         (l && !l->ownerName.empty() ? l->ownerName
+			                                     : std::string("Someone else")) +
+			             " is editing this — it is read-only for you.",
+			         {}, it != m_assetSubjectPaths.end() ? it->second : std::string{});
 		}
 		// We do not hold it, so do not pretend we do.
 		if (subject == m_heldSubject) m_heldSubject = 0;
@@ -1280,7 +1339,6 @@ void CollabController::teardown()
 	m_snapshotGot   = 0;
 	m_snapshotTotal = 0;
 	m_heldSubject   = 0;
-	m_lockNotice.clear();
 	m_netIds.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
@@ -1301,8 +1359,20 @@ void CollabController::teardown()
 		Logger::Log(Logger::LogLevel::Info,
 			("Collab: the session ended with " + std::to_string(m_pendingOps.size()) +
 			 " unanswered request(s) — all treated as refused").c_str());
+		// The people who asked are gone with the session, but the person who was
+		// going to answer is still sitting here, and their queue has just
+		// emptied itself. Said once with a count rather than once per row: the
+		// interesting fact is that a decision was never made, not which files it
+		// was about.
+		postNote(HE::Ed::NoteLevel::Warning,
+		         m_pendingOps.size() == 1
+		             ? "A request was still waiting when the session ended."
+		             : std::to_string(m_pendingOps.size()) +
+		                   " requests were still waiting when the session ended.",
+		         "Nothing was applied — they count as refused.");
 		m_pendingOps.clear();
 	}
+	m_openBatch = 0;
 	// Same for asks pointed at us. Nothing was handed over, so the asker keeps
 	// nothing and we keep everything — which is exactly what a refusal means.
 	m_editRequests.clear();
@@ -1315,6 +1385,20 @@ void CollabController::teardown()
 		m_assetNotice = edit
 			? "The session ended before that asset was handed over."
 			: "The session ended before the host answered your request.";
+		// One row per unanswered ask here, unlike the host's queue above: this
+		// side asked for specific files and is still looking at them, so which
+		// ones went unanswered is the whole point.
+		for (const OurOp& o : m_ourPendingOps)
+		{
+			postNote(HE::Ed::NoteLevel::Warning,
+			         "Nobody answered your request for \"" +
+			             std::filesystem::path(o.path).filename().string() +
+			             "\" before the session ended.",
+			         o.op == HE::Net::CollabSession::AssetOp::Edit
+			             ? "It stayed with whoever was editing it."
+			             : "Nothing was changed.",
+			         o.path);
+		}
 		m_ourPendingOps.clear();
 	}
 	else m_assetNotice.clear();
@@ -2224,6 +2308,178 @@ void CollabController::publishAsset(const std::string& relativePath,
 	m_collab->sendAsset(up);
 }
 
+// ─── Reimport ────────────────────────────────────────────────────────────────
+
+bool CollabController::assetWritableNow(const std::string& relPath)
+{
+	// Outside a session everything is writable — that is the whole point of the
+	// question being asked at all rather than assumed.
+	if (!m_collab || !inSession() || relPath.empty()) return true;
+	const std::uint64_t      subject = assetSubject(relPath);
+	const HE::Net::LockInfo* l       = m_collab->lockFor(subject);
+	// The REPLICATED table, deliberately, not a queryLock round trip: this
+	// answers a background operation that is about to write a file, and it has
+	// to answer now. The table is up to one round trip stale, which costs us the
+	// case where somebody took the lock in the last few milliseconds — and that
+	// case is caught anyway, because their lock is what the wire refuses next.
+	return !l || l->owner == m_collab->localId();
+}
+
+bool CollabController::beginBackgroundWrite(const std::string& relPath)
+{
+	if (assetWritableNow(relPath)) return true;
+
+	// Refused, and the user has to be told why — this is a menu item that simply
+	// would not happen otherwise, and "nothing happened" is the one outcome a
+	// user cannot act on. Naming the holder is what makes it actionable: the fix
+	// is to go and ask that person, not to click again.
+	const HE::Net::LockInfo* l    = assetLockInfo(relPath);
+	const std::string        name = std::filesystem::path(relPath).filename().string();
+	const std::string        who  = l && !l->ownerName.empty() ? l->ownerName
+	                                                           : std::string("Someone else");
+	postNote(HE::Ed::NoteLevel::Problem,
+	         who + " is editing \"" + name + "\" — it was not reimported.",
+	         "Reimporting would have rewritten the file underneath them, and the "
+	         "new bytes do not travel over the session.",
+	         relPath);
+	m_assetNotice = who + " is editing \"" + name + "\" — it was not reimported.";
+	return false;
+}
+
+void CollabController::publishReimport(const std::string& relPath,
+                                       const std::string& fullPath)
+{
+	if (!m_collab || !inSession() || relPath.empty()) return;
+
+	// An authored asset that travels anyway: its new bytes ARE the message, and
+	// they go out through the ordinary save path. Nothing about a reimport makes
+	// it a different kind of change once the file is on the wire.
+	//
+	// The lock condition is not decoration. publishAsset claims the lock when it
+	// is free and then RETURNS EMPTY-HANDED on a client, because the grant is a
+	// round trip away and it has nothing to wait on — which is fine for a save
+	// (the next one carries the file) and useless here, where there is no next
+	// one. A reimport happens once. So a client that does not already hold the
+	// asset takes the notice branch instead: "go and pull it" is a truthful
+	// downgrade, and silence — peers keeping the old bytes for ever with nothing
+	// to say so — is the exact failure this function exists to end.
+	// "Will publishAsset actually send?" spelled out, rather than trusted: we
+	// hold it, or we are the host and it is free (the host's own claim is
+	// granted inline, with no round trip to lose).
+	const bool canSendBytes = ownsAssetLock(relPath) ||
+	                          (isHost() && assetLockInfo(relPath) == nullptr);
+	if (canSendBytes && isSyncableAsset(relPath) &&
+	    (relPath.rfind("::Source::", 0) == 0 ||
+	     isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))))
+	{
+		publishAsset(relPath, fullPath);
+		return;
+	}
+
+	// Everything else — and that is MOST of what reimport touches: meshes,
+	// textures, audio, fonts. Those are deliberately outside the sync set (see
+	// isCollabSyncableAssetType) because they are large and source control is
+	// what carries them. A reimport does not change that: widening the set for
+	// one menu item would push tens of megabytes down a link built for graphs,
+	// and it would do it silently. So the fact travels instead of the file, and
+	// each peer is told to pull it.
+	requestOrPerformAssetOp(HE::Net::CollabSession::AssetOp::Reimport,
+	                        relPath, {}, /*folder=*/false);
+}
+
+void CollabController::noteRemoteReimport(HE::Net::ParticipantId by,
+                                          const std::string& relPath)
+{
+	std::string who;
+	for (const HE::Net::Participant& p : participants())
+	{
+		if (p.id != by) continue;
+		who = p.name;
+		break;
+	}
+	if (who.empty()) who = "Someone";
+	const std::string name = std::filesystem::path(relPath).filename().string();
+	// Info, not Warning: nothing here is broken. The asset on this machine is
+	// simply older than the one they now have, and the sentence says what to do
+	// about it — which is the only reason to send this at all.
+	postNote(HE::Ed::NoteLevel::Info,
+	         who + " reimported \"" + name + "\" — pull it from source control.",
+	         "Meshes, textures and audio do not travel over the session.",
+	         relPath);
+}
+
+// ─── Did the peers actually converge? ────────────────────────────────────────
+
+void CollabController::verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
+                                            const std::string& relPath,
+                                            const std::string& newRelPath)
+{
+	using Op = HE::Net::CollabSession::AssetOp;
+	if (op != Op::Delete && op != Op::Rename) return;
+	// No resolver means no way to look, and inventing an answer would be worse
+	// than the silence this replaces. (Tests that care install one.)
+	if (!m_localPathForKey) return;
+	const std::string full = m_localPathForKey(relPath);
+	if (full.empty()) return;   // not ours to reason about — outside the project
+
+	std::error_code ec;
+	// One test for both ops: the source path must be GONE. A delete that left it
+	// there did nothing, and a rename that left it there did not move it — in
+	// either case this machine now holds a file the rest of the session believes
+	// is not there, and every later reference to it disagrees with everyone.
+	if (!std::filesystem::exists(full, ec)) return;
+
+	// Except when "gone" is not what a successful rename looks like. On a
+	// case-insensitive filesystem — APFS and Windows, so most of them —
+	// renaming Rock.hasset to rock.hasset leaves the OLD path resolving to the
+	// file that was just moved, and a plain existence test would report the one
+	// rename that certainly worked as drift. Two paths that name one file are
+	// not a divergence; `equivalent` is the same guard the editor's own rename
+	// handler uses one layer up, for the same reason.
+	if (op == Op::Rename && !newRelPath.empty())
+	{
+		const std::string newFull = m_localPathForKey(newRelPath);
+		if (!newFull.empty() && std::filesystem::exists(newFull, ec) &&
+		    std::filesystem::equivalent(full, newFull, ec))
+			return;
+	}
+
+	const std::string name = std::filesystem::path(relPath).filename().string();
+	if (op == Op::Delete)
+	{
+		postNote(HE::Ed::NoteLevel::Problem,
+		         "\"" + name + "\" was deleted in the session but is still here.",
+		         "Everyone else no longer has it. Remove it by hand, or the next "
+		         "source-control sync will disagree.",
+		         relPath);
+		return;
+	}
+	postNote(HE::Ed::NoteLevel::Problem,
+	         "\"" + name + "\" was renamed in the session but not on this machine.",
+	         newRelPath.empty()
+	             ? std::string("The file is still under its old name here.")
+	             : "Something is already at \"" +
+	                   std::filesystem::path(newRelPath).filename().string() +
+	                   "\" here, so the move was refused.",
+	         relPath);
+}
+
+void CollabController::postNote(HE::Ed::NoteLevel level, std::string text,
+                                std::string detail, const std::string& relPath)
+{
+	if (!m_notes) return;   // headless, or a test that never set one
+	// Absolute where we can: the flyout offers to reveal what a row is about,
+	// and a project-relative key is not something the OS can open. Falls back to
+	// the key itself, which at least names the asset.
+	std::string path;
+	if (!relPath.empty())
+	{
+		if (m_localPathForKey) path = m_localPathForKey(relPath);
+		if (path.empty()) path = relPath;
+	}
+	m_notes->post(level, std::move(text), std::move(detail), std::move(path));
+}
+
 bool CollabController::requestOrPerformAssetOp(
 	HE::Net::CollabSession::AssetOp op,
 	const std::string& relPath, const std::string& newRelPath, bool folder)
@@ -2232,8 +2488,11 @@ bool CollabController::requestOrPerformAssetOp(
 
 	// Creating a folder asks nobody, whoever does it: it destroys nothing, so
 	// there is no decision to weigh. A client's create still travels via the
-	// host, which is what keeps everyone's order of events the same.
-	const bool needsApproval = op != HE::Net::CollabSession::AssetOp::Create;
+	// host, which is what keeps everyone's order of events the same. A reimport
+	// notice is the same: it reports something that has already happened here,
+	// and there is no verdict that could undo it.
+	const bool needsApproval = op != HE::Net::CollabSession::AssetOp::Create &&
+	                           op != HE::Net::CollabSession::AssetOp::Reimport;
 
 	// The host does it. It already answered the question a request exists to
 	// ask — its own confirmation dialog — and asking itself again would be a
@@ -2244,7 +2503,11 @@ bool CollabController::requestOrPerformAssetOp(
 		return true;
 	}
 
-	const std::uint32_t id = m_collab->requestAssetOp(op, relPath, newRelPath, folder);
+	// The open batch rides along, so a caller that wrapped its loop in
+	// beginAssetOpBatch needs to change nothing else — and one that did not
+	// sends 0, which is what a request on its own has always meant.
+	const std::uint32_t id = m_collab->requestAssetOp(op, relPath, newRelPath, folder,
+	                                                  /*subject=*/0, m_openBatch);
 	if (!needsApproval)
 	{
 		// Sent, but not something we wait on: there is no verdict coming, and
@@ -2328,16 +2591,19 @@ void CollabController::answerEditRequest(std::size_t index, bool allowed)
 	                              assetSubject(e.path));
 }
 
-void CollabController::approveAssetOp(std::size_t index)
+void CollabController::approveOne(const PendingAssetOp& op)
 {
-	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
-	const PendingAssetOp op = m_pendingOps[index];
+	if (!m_collab || !isHost()) return;
 
 	// A rename onto a name that is already taken HERE. The host's disk is the
 	// arbiter for creates for the same reason it is for this: approving would
 	// broadcast a rename that replaces a file — on every machine at once, with
 	// no undo behind it. Refused rather than applied, and the requester is told
 	// the same way any refusal reaches them.
+	//
+	// Inside approveOne rather than at the button, so it also catches a rename
+	// that was approved as part of a bundle: a whole-selection yes must not be
+	// able to do what the same yes on one row refuses to.
 	if (op.op == HE::Net::CollabSession::AssetOp::Rename && m_localPathForKey &&
 	    !op.newPath.empty())
 	{
@@ -2348,15 +2614,18 @@ void CollabController::approveAssetOp(std::size_t index)
 		    (std::filesystem::exists(to, ec) &&
 		     !(!from.empty() && std::filesystem::equivalent(from, to, ec))))
 		{
-			denyAssetOp(index);
+			denyOne(op);
 			m_assetNotice = "\"" +
 				std::filesystem::path(op.newPath).filename().string() +
 				"\" already exists — the rename was refused.";
+			postNote(HE::Ed::NoteLevel::Warning,
+			         "\"" + std::filesystem::path(op.newPath).filename().string() +
+			             "\" already exists here — the rename was refused.",
+			         "Approving it would have replaced that file on every machine.",
+			         op.newPath);
 			return;
 		}
 	}
-
-	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
 
 	// Everyone who asked hears yes — including the ones who asked second, whose
 	// request is answered by this same decision.
@@ -2370,15 +2639,81 @@ void CollabController::approveAssetOp(std::size_t index)
 	                                op.folder);
 }
 
+void CollabController::denyOne(const PendingAssetOp& op)
+{
+	if (!m_collab || !isHost()) return;
+	// Told, not silently dropped: a request that simply vanishes reads as a bug,
+	// and the requester would ask again.
+	for (const auto& rq : op.requesters)
+		m_collab->sendAssetOpVerdict(rq.id, rq.requestId, false);
+}
+
+void CollabController::approveAssetOp(std::size_t index)
+{
+	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
+	// Copied and erased BEFORE it is answered: approving broadcasts the apply,
+	// which fires our own callbacks, and a row still sitting in the vector while
+	// that happens is a row that can be drawn or answered twice.
+	const PendingAssetOp op = m_pendingOps[index];
+	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
+	approveOne(op);
+}
+
 void CollabController::denyAssetOp(std::size_t index)
 {
 	if (!m_collab || !isHost() || index >= m_pendingOps.size()) return;
 	const PendingAssetOp op = m_pendingOps[index];
 	m_pendingOps.erase(m_pendingOps.begin() + static_cast<std::ptrdiff_t>(index));
-	// Told, not silently dropped: a request that simply vanishes reads as a bug,
-	// and the requester would ask again.
-	for (const auto& rq : op.requesters)
-		m_collab->sendAssetOpVerdict(rq.id, rq.requestId, false);
+	denyOne(op);
+}
+
+std::size_t CollabController::approveAssetOpBatch(HE::Net::ParticipantId owner,
+                                                  std::uint32_t batch)
+{
+	if (!m_collab || !isHost() || batch == 0) return 0;
+	// Taken out whole first, then answered. Answering row by row through the
+	// index-based calls would work on a vector that each answer shortens, so
+	// every index after the first names a different row than the caller meant —
+	// and approving twenty deletes would delete the wrong files.
+	std::vector<PendingAssetOp> taken;
+	for (auto it = m_pendingOps.begin(); it != m_pendingOps.end();)
+	{
+		if (it->batchId == batch && it->batchOwner == owner)
+		{
+			taken.push_back(*it);
+			it = m_pendingOps.erase(it);
+		}
+		else ++it;
+	}
+	for (const PendingAssetOp& op : taken) approveOne(op);
+	return taken.size();
+}
+
+std::size_t CollabController::denyAssetOpBatch(HE::Net::ParticipantId owner,
+                                               std::uint32_t batch)
+{
+	if (!m_collab || !isHost() || batch == 0) return 0;
+	std::vector<PendingAssetOp> taken;
+	for (auto it = m_pendingOps.begin(); it != m_pendingOps.end();)
+	{
+		if (it->batchId == batch && it->batchOwner == owner)
+		{
+			taken.push_back(*it);
+			it = m_pendingOps.erase(it);
+		}
+		else ++it;
+	}
+	for (const PendingAssetOp& op : taken) denyOne(op);
+	return taken.size();
+}
+
+std::uint32_t CollabController::beginAssetOpBatch()
+{
+	// Never 0 even after four billion batches: 0 is the "on its own" marker, and
+	// wrapping onto it would silently take a selection apart into single rows.
+	if (m_nextBatchId == 0) m_nextBatchId = 1;
+	m_openBatch = m_nextBatchId++;
+	return m_openBatch;
 }
 
 bool CollabController::acceptRemoteCreate(

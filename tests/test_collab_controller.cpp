@@ -2,6 +2,10 @@
 
 #include "../src/HE_Editor/CollabController.h"
 #include "../src/HE_Editor/CollabDocSync.h"
+#include "../src/HE_Editor/EditorAssetTypeCache.h"
+#include "../src/HE_Editor/NotificationStore.h"
+
+#include <ContentManager/HAsset.h>
 
 #include <HorizonCode/HorizonCode.h>
 #include <Platform/PathSafety.h>
@@ -984,6 +988,572 @@ TEST_CASE("Live sync: the designer and the logic graph of one widget travel sepa
     // what keep one from landing in the other's document.
     CHECK(clientTree.find(btn) != nullptr);
     CHECK(clientGraph.nodes[0].elem == btn);
+}
+
+// ─── One user action, one bundle ─────────────────────────────────────────────
+// A multi-select delete of twenty assets used to reach the host as twenty
+// unrelated rows: the same decision, twenty clicks, and nothing on screen
+// saying they came from one keystroke. These drive the real thing — a client
+// opening a batch around its loop, a host answering the bundle — over TCP.
+
+namespace {
+
+// Three-way pump, for the tests that need two clients. The two-argument version
+// above cannot be reused: every session in the exchange has to be given a turn,
+// and a client nobody pumps never even completes its join.
+template <typename Fn>
+bool pumpUntil3(CollabController& host, CollabController& c1, CollabController& c2,
+                Fn done, std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::uint64_t now = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        host.update(now); c1.update(now); c2.update(now);
+        if (done()) return true;
+        now += 16;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    host.update(now); c1.update(now); c2.update(now);
+    return done();
+}
+
+} // namespace
+
+TEST_CASE("Collab: a multi-select delete reaches the host as ONE bundle")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    // What the content browser's multi-delete loop does, unchanged except for
+    // the two calls around it.
+    const std::vector<std::string> sel = {
+        "Content/A.hasset", "Content/B.hasset", "Content/C.hasset"
+    };
+    const std::uint32_t batch = client.beginAssetOpBatch();
+    CHECK(batch != 0);
+    CHECK(client.openAssetOpBatch() == batch);
+    for (const std::string& rel : sel) CHECK(client.requestAssetDelete(rel));
+    client.endAssetOpBatch();
+    CHECK(client.openAssetOpBatch() == 0);
+
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.pendingAssetOps().size() == 3;
+    }));
+
+    // Three rows, ONE decision: same batch, same owner, and the owner is the
+    // participant that asked rather than whatever the host calls itself.
+    const auto& ops = host.pendingAssetOps();
+    const HE::Net::ParticipantId asker = ops[0].batchOwner;
+    CHECK(asker != 0);
+    CHECK(asker != host.localParticipant());
+    for (const auto& op : ops) {
+        CHECK(op.inBatch());
+        CHECK(op.batchId == ops[0].batchId);
+        CHECK(op.batchOwner == asker);
+    }
+
+    // A request made outside the batch is its own row and joins no bundle —
+    // otherwise every later delete would be swallowed by the last selection.
+    CHECK(client.requestAssetDelete("Content/Lonely.hasset"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.pendingAssetOps().size() == 4;
+    }));
+    CHECK_FALSE(host.pendingAssetOps()[3].inBatch());
+
+    // ── One approved, one denied, the rest as a bundle ──
+    std::vector<std::string> appliedOnClient;
+    client.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp op,
+                               const std::string& path, const std::string&, bool) {
+        if (op == HE::Net::CollabSession::AssetOp::Delete)
+            appliedOnClient.push_back(path);
+    });
+
+    host.approveAssetOp(0);                    // A: yes
+    REQUIRE(pumpUntil(host, client, [&] { return appliedOnClient.size() == 1; }));
+    CHECK(appliedOnClient[0] == "Content/A.hasset");
+
+    host.denyAssetOp(0);                       // B: no — index 0 again, A has gone
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.pendingAssetOps().size() == 2;
+    }));
+
+    // What is left of the bundle is answered as the bundle: C goes, and the
+    // stray row that was never part of it stays.
+    CHECK(host.approveAssetOpBatch(asker, batch) == 1);
+    REQUIRE(pumpUntil(host, client, [&] { return appliedOnClient.size() == 2; }));
+    CHECK(appliedOnClient[1] == "Content/C.hasset");
+    REQUIRE(host.pendingAssetOps().size() == 1);
+    CHECK(host.pendingAssetOps()[0].path == "Content/Lonely.hasset");
+
+    // Every verdict got home, the denial included — three of the four asks are
+    // settled, and the one still waiting is the row nobody answered rather than
+    // an answer that went missing.
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.pendingRequestsOfOurs() == 1;
+    }));
+    CHECK(host.pendingAssetOps().size() == 1);
+}
+
+TEST_CASE("Collab: a bundle survives the requester walking out mid-batch")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    client.beginAssetOpBatch();
+    CHECK(client.requestAssetDelete("Content/A.hasset"));
+    CHECK(client.requestAssetDelete("Content/B.hasset"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.pendingAssetOps().size() == 2;
+    }));
+    const HE::Net::ParticipantId asker = host.pendingAssetOps()[0].batchOwner;
+    const std::uint32_t          batch = host.pendingAssetOps()[0].batchId;
+
+    // They leave with the batch still open and both rows unanswered.
+    client.leave();
+    REQUIRE(pumpUntil(host, client, [&] { return host.participants().size() == 1; }));
+
+    // The rows stay: the host was asked, and the decision is still the host's
+    // to make — the panel already draws an absent asker as "Someone". Answering
+    // them must reach the verdict for a connection that is gone without going
+    // anywhere near it.
+    REQUIRE(host.pendingAssetOps().size() == 2);
+    CHECK(host.approveAssetOpBatch(asker, batch) == 2);
+    CHECK(host.pendingAssetOps().empty());
+
+    // And the batch is not answerable twice.
+    CHECK(host.approveAssetOpBatch(asker, batch) == 0);
+
+    host.leave();
+}
+
+TEST_CASE("Collab: two batches wanting the same asset stay ONE row")
+{
+    // The per-asset coalescing predates batches — "three people wanting the
+    // same file gone is one decision" — and a bundle must not break it: the
+    // file that both selections contain has to keep being one row with two
+    // requesters, or approving one bundle would leave the other's requester
+    // waiting for a verdict about a file that is already gone.
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld w1, w2;
+    CollabController bob, cara;
+    bob.setWorld(&w1);   bob.onWorldReplaced([&]  { bob.seedNetIds(); });
+    cara.setWorld(&w2);  cara.onWorldReplaced([&] { cara.seedNetIds(); });
+
+    REQUIRE(bob.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(cara.joinSession("127.0.0.1", host.port(), host.joinCode(), "Cara"));
+    REQUIRE(pumpUntil3(host, bob, cara, [&] {
+        return bob.status()  == CollabController::Status::Joined &&
+               cara.status() == CollabController::Status::Joined;
+    }));
+
+    // Bob selects A and Shared; Cara selects Shared and C.
+    bob.beginAssetOpBatch();
+    CHECK(bob.requestAssetDelete("Content/A.hasset"));
+    CHECK(bob.requestAssetDelete("Content/Shared.hasset"));
+    bob.endAssetOpBatch();
+    REQUIRE(pumpUntil3(host, bob, cara, [&] {
+        return host.pendingAssetOps().size() == 2;
+    }));
+
+    cara.beginAssetOpBatch();
+    CHECK(cara.requestAssetDelete("Content/Shared.hasset"));
+    CHECK(cara.requestAssetDelete("Content/C.hasset"));
+    cara.endAssetOpBatch();
+    REQUIRE(pumpUntil3(host, bob, cara, [&] {
+        return host.pendingAssetOps().size() == 3;
+    }));
+
+    // Three rows, not four: Shared folded, and it belongs to the batch that
+    // named it first — the second batch does not steal a row it shares.
+    const auto& ops = host.pendingAssetOps();
+    const HE::Net::ParticipantId bobId = ops[0].batchOwner;
+    std::size_t sharedRows = 0;
+    for (const auto& op : ops) {
+        if (op.path != "Content/Shared.hasset") continue;
+        ++sharedRows;
+        CHECK(op.requesters.size() == 2);          // both, one decision
+        CHECK(op.batchOwner == bobId);
+    }
+    CHECK(sharedRows == 1);
+
+    // Approving Bob's bundle settles A and Shared and leaves Cara's C — and
+    // Cara hears yes about Shared, because her request was answered by the same
+    // decision rather than left hanging.
+    std::vector<std::string> caraApplied;
+    cara.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp,
+                             const std::string& path, const std::string&, bool) {
+        caraApplied.push_back(path);
+    });
+    CHECK(host.approveAssetOpBatch(bobId, ops[0].batchId) == 2);
+    REQUIRE(pumpUntil3(host, bob, cara, [&] { return caraApplied.size() == 2; }));
+    // Cara asked for two files and one of them was in Bob's bundle: that one is
+    // answered, and only her own unbundled C is still waiting.
+    REQUIRE(pumpUntil3(host, bob, cara, [&] {
+        return cara.pendingRequestsOfOurs() == 1;
+    }));
+
+    REQUIRE(host.pendingAssetOps().size() == 1);
+    CHECK(host.pendingAssetOps()[0].path == "Content/C.hasset");
+
+    bob.leave();
+    cara.leave();
+    host.leave();
+}
+
+// ─── Reimport, and the things that used to happen in silence ─────────────────
+
+namespace {
+
+// A minimal but REAL .hasset of a given kind, because the syncable/not decision
+// is made by sniffing the file header — a made-up file would answer Unknown and
+// the test would pass for the wrong reason.
+std::filesystem::path writeHAsset(const std::string& filename, HE::AssetType type,
+                                  const std::string& body) {
+    std::vector<std::uint8_t> meta(body.begin(), body.end());
+    HAsset::Writer w;
+    w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+    const std::vector<std::uint8_t> bytes = w.toBytes(static_cast<std::uint16_t>(type));
+    const std::filesystem::path p = fs::temp_directory_path() / filename;
+    std::ofstream f(p, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    f.close();
+    EditorAssetTypeCache::invalidate(p.string());   // the sniff is cached per path
+    return p;
+}
+
+// A host and a joined client, for the tests below that all need one.
+struct Session {
+    HorizonWorld     hostWorld, clientWorld;
+    CollabController host, client;
+};
+
+bool openSession(Session& s) {
+    s.hostWorld.createEntity("Cube");
+    s.host.setWorld(&s.hostWorld);
+    if (!s.host.startHosting(0, "Anna")) return false;
+    s.client.setWorld(&s.clientWorld);
+    s.client.onWorldReplaced([&s] { s.client.seedNetIds(); });
+    if (!s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"))
+        return false;
+    return pumpUntil(s.host, s.client, [&s] {
+        return s.client.status() == CollabController::Status::Joined;
+    });
+}
+
+// The one notification whose text contains `needle`, or an empty one.
+HE::Ed::Notification findNote(const HE::Ed::NotificationStore& store,
+                              const std::string& needle) {
+    for (const HE::Ed::Notification& n : store.snapshot()) {
+        if (n.text.find(needle) != std::string::npos) return n;
+    }
+    return {};
+}
+
+} // namespace
+
+TEST_CASE("Reimport: refused while somebody else is holding the asset")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    const std::string asset = "Content/Meshes/Rock.hasset";
+
+    // Free: a background write may go ahead, and asking does not post anything —
+    // a menu item asks this every frame to decide whether to grey itself out.
+    CHECK(s.client.assetWritableNow(asset));
+    CHECK(s.client.beginBackgroundWrite(asset));
+    CHECK(notes.snapshot().empty());
+
+    // Anna starts editing it. The lock reaches Bob's replicated table, which is
+    // what makes this answerable without a round trip.
+    s.host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.host.ownsAssetLock(asset); }));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.assetLockedByOther(asset); }));
+
+    CHECK_FALSE(s.client.assetWritableNow(asset));
+    // The gate refuses BEFORE the local write. Rewriting it here would fork the
+    // file with nothing to tell anyone — the bytes of a mesh never travel.
+    CHECK_FALSE(s.client.beginBackgroundWrite(asset));
+
+    const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    // Naming the holder is what makes it actionable: the fix is to go and ask
+    // Anna, not to click the menu item again.
+    CHECK(n.text.find("Anna") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Reimport: a mesh does not travel — everyone is told to pull it instead")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    bool bytesArrived = false;
+    s.client.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    const std::string key  = "Content/Meshes/Rock.hasset";
+    const fs::path    file = writeHAsset("he_collab_rock.hasset",
+                                         HE::AssetType::StaticMesh, "rock-v2");
+    s.host.setLocalPathResolver([&](const std::string& k) {
+        return k == key ? file.string() : std::string{};
+    });
+
+    s.host.publishReimport(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return !clientNotes.snapshot().empty();
+    }));
+
+    const HE::Ed::Notification n = findNote(clientNotes, "Rock.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Info);
+    CHECK(n.text.find("Anna") != std::string::npos);
+    CHECK(n.text.find("source control") != std::string::npos);
+    // The whole point: forty megabytes of mesh did NOT go down a link built for
+    // graphs just because somebody re-read it from disk.
+    CHECK_FALSE(bytesArrived);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Reimport: an authored asset re-transmits like any other save")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    std::vector<std::uint8_t> got;
+    std::string               gotPath;
+    s.client.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>& b) {
+        gotPath = p; got = b;
+    });
+
+    const std::string key  = "Content/Materials/Brick.hasset";
+    const fs::path    file = writeHAsset("he_collab_brick.hasset",
+                                         HE::AssetType::Material, "brick-v2");
+
+    s.host.requestAssetLock(key);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.host.ownsAssetLock(key); }));
+
+    s.host.publishReimport(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !got.empty(); }));
+
+    CHECK(gotPath == key);
+    // A kind that travels sends its BYTES — telling a peer to go and pull a
+    // material it could simply have been handed would be the wrong half.
+    CHECK(std::string(got.begin(), got.end()).find("brick-v2") != std::string::npos);
+    CHECK(clientNotes.snapshot().empty());
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Reimport: a client holding no lock still tells everyone something")
+{
+    // The half that used to vanish. publishAsset claims a free lock and then
+    // returns empty-handed on a client, because the grant is a round trip away
+    // and it has nothing to wait on — harmless for a save, which the next save
+    // repeats, and silence for a reimport, which happens once. Either the bytes
+    // arrive or the notice does; never neither.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore hostNotes;
+    s.host.setNotifications(&hostNotes);
+
+    bool bytesArrived = false;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    const std::string key  = "Content/Materials/Tile.hasset";
+    const fs::path    file = writeHAsset("he_collab_tile.hasset",
+                                         HE::AssetType::Material, "tile-v2");
+
+    // Bob reimports something he never opened, so he holds no lock — the
+    // ordinary case for a context-menu action in the content browser.
+    REQUIRE_FALSE(s.client.ownsAssetLock(key));
+    s.client.publishReimport(key, file.string());
+
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return bytesArrived || !hostNotes.snapshot().empty();
+    }));
+    if (!bytesArrived) {
+        const HE::Ed::Notification n = findNote(hostNotes, "Tile.hasset");
+        CHECK(n.level == HE::Ed::NoteLevel::Info);
+        CHECK(n.text.find("Bob") != std::string::npos);
+    }
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Collab: a denied request and an unanswered one both reach the user")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    CHECK(s.client.requestAssetDelete("Content/Doomed.hasset"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.host.pendingAssetOps().size() == 1;
+    }));
+    s.host.denyAssetOp(0);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
+
+    const HE::Ed::Notification denied = findNote(notes, "Doomed.hasset");
+    CHECK(denied.level == HE::Ed::NoteLevel::Warning);
+    CHECK(denied.text.find("did not approve") != std::string::npos);
+
+    // And the other silence: an ask that was never answered at all. The session
+    // ending is the moment that stops being a wait and becomes a refusal.
+    CHECK(s.client.requestAssetDelete("Content/Forgotten.hasset"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.host.pendingAssetOps().size() == 1;
+    }));
+
+    HE::Ed::NotificationStore hostNotes;
+    s.host.setNotifications(&hostNotes);
+
+    s.client.leave();
+    const HE::Ed::Notification stranded = findNote(notes, "Forgotten.hasset");
+    CHECK(stranded.level == HE::Ed::NoteLevel::Warning);
+    CHECK(stranded.text.find("Nobody answered") != std::string::npos);
+
+    // The host had a decision in front of it that it never made, and its queue
+    // has just emptied itself — said once, with a count.
+    s.host.leave();
+    const HE::Ed::Notification unmade = findNote(hostNotes, "still waiting");
+    CHECK(unmade.level == HE::Ed::NoteLevel::Warning);
+}
+
+TEST_CASE("Collab: a delete that did not happen here stops being silent")
+{
+    // The apply handler takes a std::error_code from every filesystem call it
+    // makes and looks at none of them, so a delete that removed nothing and one
+    // that worked were the same event: silence, and two peers that disagree
+    // about what exists until source control contradicts them.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    const std::string key  = "Content/Stubborn.hasset";
+    const fs::path    file = writeHAsset("he_collab_stubborn.hasset",
+                                         HE::AssetType::Material, "still-here");
+    s.client.setLocalPathResolver([&](const std::string& k) {
+        return k == key ? file.string() : std::string{};
+    });
+    // An apply handler that does nothing at all — which is what a delete that
+    // hits nothing amounts to, and what the editor's own handler does when it
+    // refuses the operation and returns early without ever setting an ec.
+    s.client.onRemoteAssetOp([](HE::Net::CollabSession::AssetOp, const std::string&,
+                                const std::string&, bool) {});
+
+    CHECK(s.host.requestAssetDelete(key));   // host: applied straight away
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !notes.snapshot().empty(); }));
+
+    const HE::Ed::Notification n = findNote(notes, "Stubborn.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.text.find("still here") != std::string::npos);
+    // The row points at something the user can actually open.
+    CHECK(n.assetPath == file.string());
+
+    // And the ordinary case stays quiet: the file gone means the peers agree,
+    // which is the whole condition being tested.
+    notes.clear();
+    he_test::removeQuiet(file);
+    CHECK(s.host.requestAssetDelete(key));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return false; },
+                      std::chrono::milliseconds(400)) == false);
+    CHECK(notes.snapshot().empty());
+
+    // ── A rename that only changed the case of the name ──
+    // On APFS and on Windows the OLD path still resolves after such a rename —
+    // to the very file that was just moved. A bare existence test calls the one
+    // rename that certainly worked a divergence, on every peer at once, which
+    // is worse than the silence it replaced: a channel that cries wolf is one
+    // people switch off.
+    const fs::path lower = fs::temp_directory_path() / "he_collab_case.hasset";
+    const fs::path upper = fs::temp_directory_path() / "he_collab_CASE.hasset";
+    he_test::removeQuiet(lower);
+    he_test::removeQuiet(upper);
+    const fs::path made = writeHAsset("he_collab_case.hasset",
+                                      HE::AssetType::Material, "same-file");
+    const std::string fromKey = "Content/case.hasset";
+    const std::string toKey   = "Content/CASE.hasset";
+    s.client.setLocalPathResolver([&](const std::string& k) {
+        if (k == fromKey) return lower.string();
+        if (k == toKey)   return upper.string();
+        return std::string{};
+    });
+    s.client.onRemoteAssetOp([&](HE::Net::CollabSession::AssetOp,
+                                 const std::string&, const std::string&, bool) {
+        // What the editor's handler does, minus everything that is not the move.
+        std::error_code rc;
+        fs::rename(lower, upper, rc);
+    });
+    notes.clear();
+    CHECK(s.host.requestAssetRename(fromKey, toKey));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return false; },
+                      std::chrono::milliseconds(400)) == false);
+    CHECK(notes.snapshot().empty());
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(made);
+    he_test::removeQuiet(upper);
 }
 
 TEST_CASE("projectRelativeAssetPath: normalises separators and rejects outsiders")

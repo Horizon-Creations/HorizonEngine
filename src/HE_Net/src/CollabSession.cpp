@@ -1634,7 +1634,8 @@ bool CollabSession::readAssetHeader(BitReader& r, AssetUpdate& out,
 
 std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
                                             const std::string& newPath,
-                                            bool folder, std::uint64_t subject) {
+                                            bool folder, std::uint64_t subject,
+                                            std::uint32_t batch) {
     if (!m_net || !m_joined || path.empty()) return 0;
     // The host does not ask itself. It has the queue, the disk and the decision;
     // routing its own delete through a request would mean answering a dialog it
@@ -1660,6 +1661,7 @@ std::uint32_t CollabSession::requestAssetOp(AssetOp op, const std::string& path,
     w.writeString(newPath);
     w.writeByte(folder ? 1 : 0);
     w.writeUInt64(subject);
+    w.writeUInt32(batch);
     m_net->send(m_net->connections().front(), kMsgAssetOpRequest, w);
     return id;
 }
@@ -1670,16 +1672,16 @@ void CollabSession::handleAssetOpRequest(ConnectionId conn, BitReader& r) {
     const ParticipantId who = participantForConnection(conn);
     if (who == kInvalidParticipant) return;
 
-    std::uint32_t id = 0;
+    std::uint32_t id = 0, batch = 0;
     std::uint8_t  op = 0, folder = 0;
     std::uint64_t subject = 0;
     std::string   path, newPath;
     if (!r.readUInt32(id) || !r.readByte(op) ||
         !r.readString(path) || !r.readString(newPath) || !r.readByte(folder) ||
-        !r.readUInt64(subject)) {
+        !r.readUInt64(subject) || !r.readUInt32(batch)) {
         return;
     }
-    if (op > static_cast<std::uint8_t>(AssetOp::Edit)) return;
+    if (op > static_cast<std::uint8_t>(AssetOp::Reimport)) return;
     if (path.empty()) return;
 
     // "May I edit this?" is the one op the host does not answer. It goes to
@@ -1693,7 +1695,8 @@ void CollabSession::handleAssetOpRequest(ConnectionId conn, BitReader& r) {
     }
 
     if (m_onOpRequested)
-        m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath, folder != 0);
+        m_onOpRequested(who, id, static_cast<AssetOp>(op), path, newPath,
+                        folder != 0, batch);
 }
 
 bool CollabSession::routeEditRequest(ParticipantId from, std::uint32_t requestId,
@@ -1855,7 +1858,14 @@ void CollabSession::handleAssetOpApply(BitReader& r) {
         !r.readString(path) || !r.readString(newPath) || !r.readByte(folder)) {
         return;
     }
-    if (op > static_cast<std::uint8_t>(AssetOp::Create)) return;
+    if (op > static_cast<std::uint8_t>(AssetOp::Reimport)) return;
+    // Edit is the one op that is never broadcast: its answer is a verdict to the
+    // one who asked and a lock that changes hands, and there is nothing for the
+    // rest of the session to apply. The bound above cannot express that — it
+    // sits in the middle of the range — so it is refused by name. Letting it
+    // through would hand every peer an "op" whose newPath is empty, which the
+    // editor's apply reads as a rename to nowhere.
+    if (static_cast<AssetOp>(op) == AssetOp::Edit) return;
     if (m_onOpApply)
         m_onOpApply(by, static_cast<AssetOp>(op), path, newPath, folder != 0);
 }

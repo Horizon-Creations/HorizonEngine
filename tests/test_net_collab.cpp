@@ -2566,3 +2566,139 @@ TEST_CASE("CollabSession: an answer from someone who is not holding it still ans
     CHECK(p->host->ownsLock(kAssetSubject));
     CHECK_FALSE(p->client->ownsLock(kAssetSubject));
 }
+
+// ─── v10: one user action, one bundle ────────────────────────────────────────
+
+TEST_CASE("v10: the batch a request belongs to reaches the host")
+{
+    auto p = makePair();
+    p->pump();
+
+    struct Seen { std::uint32_t requestId, batch; std::string path; };
+    std::vector<Seen> seen;
+    p->host->onAssetOpRequested([&](ParticipantId, std::uint32_t id,
+                                    CollabSession::AssetOp, const std::string& path,
+                                    const std::string&, bool, std::uint32_t batch) {
+        seen.push_back({ id, batch, path });
+    });
+
+    // Three files from one selection, and one asked for on its own afterwards.
+    for (const char* f : { "Content/A.hasset", "Content/B.hasset", "Content/C.hasset" }) {
+        REQUIRE(p->client->requestAssetOp(CollabSession::AssetOp::Delete, f, {},
+                                          false, 0, /*batch=*/7) != 0);
+    }
+    REQUIRE(p->client->requestAssetOp(CollabSession::AssetOp::Delete,
+                                      "Content/Lonely.hasset") != 0);
+    p->pump();
+
+    REQUIRE(seen.size() == 4);
+    for (int i = 0; i < 3; ++i) CHECK(seen[i].batch == 7);
+    // The default is 0 — "on its own" — so every existing caller keeps meaning
+    // exactly what it always meant.
+    CHECK(seen[3].batch == 0);
+    // Request ids stay per-request: a bundle is drawn together and answered
+    // file by file, which only works while each file keeps its own id.
+    CHECK(seen[0].requestId != seen[1].requestId);
+}
+
+TEST_CASE("v10: a reimport notice survives BOTH bounds — request and apply")
+{
+    // Two separate range checks stand between a new op and the peers, and they
+    // were three apart: requests accepted up to Edit, applies only up to
+    // Create. An op that passed one and not the other would be dropped in
+    // silence on every peer — the failure this test exists to catch.
+    auto p = makePair();
+    p->pump();
+
+    CollabSession::AssetOp askedOp = CollabSession::AssetOp::Delete;
+    std::string            askedPath;
+    p->host->onAssetOpRequested([&](ParticipantId, std::uint32_t,
+                                    CollabSession::AssetOp op, const std::string& path,
+                                    const std::string&, bool, std::uint32_t) {
+        askedOp = op; askedPath = path;
+    });
+    CollabSession::AssetOp appliedOp = CollabSession::AssetOp::Delete;
+    std::string            appliedPath;
+    p->client->onAssetOpApply([&](ParticipantId, CollabSession::AssetOp op,
+                                  const std::string& path, const std::string&, bool) {
+        appliedOp = op; appliedPath = path;
+    });
+
+    REQUIRE(p->client->requestAssetOp(CollabSession::AssetOp::Reimport,
+                                      "Content/Rock.hasset") != 0);
+    p->pump();
+    CHECK(askedOp == CollabSession::AssetOp::Reimport);
+    CHECK(askedPath == "Content/Rock.hasset");
+
+    p->host->broadcastAssetOpApply(CollabSession::AssetOp::Reimport,
+                                   "Content/Rock.hasset", {}, clientIdOf(*p->host));
+    p->pump();
+    CHECK(appliedOp == CollabSession::AssetOp::Reimport);
+    CHECK(appliedPath == "Content/Rock.hasset");
+}
+
+TEST_CASE("v10: an Edit can be requested but never arrives as an apply")
+{
+    // Edit sits in the middle of the enum, so widening the apply bound for
+    // Reimport would have let it through — and a peer reading an Edit as an
+    // apply sees an op with an empty newPath, which the editor's handler treats
+    // as a rename to nowhere.
+    auto p = makePair();
+    p->pump();
+
+    bool applied = false;
+    p->client->onAssetOpApply([&](ParticipantId, CollabSession::AssetOp,
+                                  const std::string&, const std::string&, bool) {
+        applied = true;
+    });
+
+    BitWriter w;
+    w.writeUInt32(1);                                                   // by
+    w.writeByte(static_cast<std::uint8_t>(CollabSession::AssetOp::Edit));
+    w.writeString("Content/Foo.hasset");
+    w.writeString("");
+    w.writeByte(0);
+    p->hostNet->send(LoopbackTransport::kPeer, kFirstUserMessage + 34, w);
+    p->pump();
+
+    CHECK_FALSE(applied);
+}
+
+TEST_CASE("v10: the version before this one is still refused at the door")
+{
+    // The generic "+99" test above proves an unknown version is refused; this
+    // one pins the version we just left behind, which is the peer that actually
+    // exists in the wild. A v9 request stops one uint32 short of the batch id,
+    // so a v10 host would drop every request it sent and the requester would
+    // wait for a verdict nobody is going to give.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    FakeState hostState;
+    CollabSession host(&hostNet, NetRole::Host);
+    host.setStateProvider(&hostState);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    clientNet.on(kFirstUserMessage + 2, [&](ConnectionId, BitReader& r) {
+        std::uint8_t code = 0;
+        r.readByte(code);
+        reason = static_cast<JoinRejectReason>(code);
+    });
+
+    a->update(); b->update();
+    hostNet.pump(); clientNet.pump();
+
+    BitWriter w;
+    w.writeUInt16(9);              // the protocol before the batch id existed
+    w.writeString("Yesterday");
+    clientNet.send(LoopbackTransport::kPeer, kFirstUserMessage + 0, w);
+
+    for (int i = 0; i < 6; ++i) {
+        a->update(); b->update();
+        hostNet.pump(); clientNet.pump();
+    }
+
+    CHECK(reason == JoinRejectReason::VersionMismatch);
+    CHECK(host.participants().size() == 1);
+}

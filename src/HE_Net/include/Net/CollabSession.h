@@ -74,7 +74,15 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // channels for one document had no order between them: a whole file arriving
 // after newer deltas overwrote them, so a peer's edit appeared for a moment and
 // then snapped back. A v8 peer writes neither number and misreads both frames.
-inline constexpr std::uint16_t kCollabProtocolVersion = 9;
+// v10: an asset-op request ends in the BATCH it belongs to, and Reimport joins
+// the op enum. Selecting twenty assets and pressing Delete is ONE decision, and
+// the host was shown twenty rows to click through; the batch id is what lets it
+// be drawn and answered as one. A v10 host reading a v9 request runs out of
+// bytes at the batch id and drops the frame — the requester then waits for a
+// verdict that is never coming, which is precisely the failure a refused join
+// prevents. Reimport travels the same channel because it is the one thing that
+// changes an asset's bytes without those bytes ever going on the wire.
+inline constexpr std::uint16_t kCollabProtocolVersion = 10;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -449,6 +457,15 @@ public:
         // interrupts the HOLDER's work, so the holder decides; the host merely
         // knows who that is and forwards it.
         Edit   = 3,
+        // "The bytes behind this asset changed and they are NOT coming down this
+        // wire." A reimport rewrites an asset in place from its source file, and
+        // for the kinds reimport actually touches — meshes, textures, audio —
+        // the bytes deliberately do not travel (see the scope note above). Peers
+        // used to keep the old asset for ever with nothing to tell them, so this
+        // carries the one thing that is left to say: go and pull it. Permissive
+        // like Create — it asks for nothing and destroys nothing, so it is
+        // relayed rather than queued in front of a human.
+        Reimport = 4,
     };
 
     // Why the host would not take a create. Spelled out because the creator has
@@ -532,16 +549,29 @@ public:
     // from the path and this layer never could. Only Edit needs it (to find the
     // holder), but it rides along on every op rather than being a special case
     // the caller has to remember for one of four.
+    //
+    // `batch` names the USER ACTION this request is part of, 0 meaning "on its
+    // own". Selecting twenty assets and pressing Delete is one decision, and it
+    // used to arrive as twenty unrelated rows the host had to click through one
+    // by one. The id is minted by the requester and is only ever unique within
+    // it, so the host keys a bundle on (requester, batch) — two clients that
+    // both happen to call their batch 1 are still two bundles.
+    //
+    // Deliberately NOT a count: the host cannot be told up front how many are
+    // coming, because the requests arrive over several frames and a header that
+    // promised twenty would be wrong for as long as nineteen had landed. The
+    // bundle is simply the rows that share the key, whatever they are right now.
     std::uint32_t requestAssetOp(AssetOp op, const std::string& path,
                                  const std::string& newPath = {},
                                  bool folder = false,
-                                 std::uint64_t subject = 0);
+                                 std::uint64_t subject = 0,
+                                 std::uint32_t batch = 0);
 
     // Host: somebody wants something done. Queue it and answer later.
     void onAssetOpRequested(
         std::function<void(ParticipantId, std::uint32_t requestId, AssetOp,
                            const std::string& path, const std::string& newPath,
-                           bool folder)> fn) {
+                           bool folder, std::uint32_t batch)> fn) {
         m_onOpRequested = std::move(fn);
     }
 
@@ -911,7 +941,8 @@ private:
     std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
                                                                m_onCreateResult;
     std::function<void(ParticipantId, std::uint32_t, AssetOp,
-                       const std::string&, const std::string&, bool)> m_onOpRequested;
+                       const std::string&, const std::string&, bool,
+                       std::uint32_t)>                          m_onOpRequested;
     std::function<void(std::uint32_t, bool)>                    m_onOpVerdict;
     std::function<void(ParticipantId, AssetOp, const std::string&,
                        const std::string&, bool)>               m_onOpApply;

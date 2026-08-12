@@ -379,7 +379,21 @@ static void retargetReferences(AppContext& ctx, const std::string& oldAbs,
 	const std::string oldRel = ctx.contentManager->toContentRelativePath(oldAbs);
 	const std::string newRel = ctx.contentManager->toContentRelativePath(newAbs);
 	if (oldRel.empty() || newRel.empty()) return;
-	ctx.contentManager->retargetAssetReferences(oldRel, newRel, folder);
+
+	// The two halves go to two different places, and that is the whole point.
+	//
+	// IN MEMORY, here and now: until it has run, the content manager still
+	// believes the asset lives at the old path, and the very next save would
+	// write it back there. It touches unguarded maps the frame reads, so it
+	// cannot go anywhere else.
+	ctx.contentManager->retargetAssetReferencesInMemory(oldRel, newRel, folder);
+	// ON DISK, on the editor's single retarget queue. This used to run inline,
+	// which was both a stall (a full walk of the project, per moved asset) and a
+	// race: the collaboration path already rewrites the same files from a worker,
+	// and two walks over one file lose one of the two rewrites outright. The
+	// queue serialises every writer and batches independent moves into one walk.
+	if (ctx.enqueueRetarget) ctx.enqueueRetarget(oldRel, newRel, folder);
+	else                     ctx.contentManager->retargetAssetReferencesOnDisk(oldRel, newRel, folder);
 }
 
 // The key a collaboration session addresses this file by, or empty when it is
@@ -2529,10 +2543,28 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					const std::string recordedSource = Importer::sourceFileOf(s_ctxMenuItem);
 					if (!recordedSource.empty() && ImGui::MenuItem("Reimport"))
 					{
-						if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
-							HE_LOG_ERROR(Editor, "%s",
-								("Editor: reimport failed for " + s_ctxMenuItem).c_str());
-						ctx.contentRefreshPending = true;
+						// A reimport REPLACES a file everyone in the session shares,
+						// without anybody asking for it — so the lock is checked
+						// BEFORE the local write, not before the send. Checking it on
+						// the way out would mean clobbering a colleague's asset here
+						// and only then discovering we were not allowed to.
+						const std::string collabKey = collabKeyFor(ctx, s_ctxMenuItem);
+						const bool blocked = ctx.collab && !collabKey.empty() &&
+						                     !ctx.collab->beginBackgroundWrite(collabKey);
+						if (!blocked)
+						{
+							if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
+								HE_LOG_ERROR(Editor, "%s",
+									("Editor: reimport failed for " + s_ctxMenuItem).c_str());
+							// The new bytes have to reach the others, or every peer
+							// keeps the old asset with no sign that it changed. What
+							// actually travels depends on the type: authored assets go
+							// over the wire, imported binary media is announced instead
+							// (source control carries those — see publishReimport).
+							else if (ctx.collab && !collabKey.empty())
+								ctx.collab->publishReimport(collabKey, s_ctxMenuItem);
+							ctx.contentRefreshPending = true;
+						}
 						ImGui::CloseCurrentPopup();
 					}
 					else if (!recordedSource.empty() && ImGui::IsItemHovered())
@@ -3131,9 +3163,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
 			                                ImVec2(210, 0)))
 			{
-				// One confirmation, N deletions — each still going through the same
-				// session gate as a single one, so a peer sees N ordinary requests
-				// rather than one bulk operation the protocol has no word for.
+				// One confirmation, N deletions — and, in a session, ONE thing for
+				// the host to answer. The requests still travel individually (each
+				// keeps its own id, which is what lets the host approve nine of
+				// twelve), but they carry a shared batch id, so the in-tray shows a
+				// single "Delete 12 assets" row that opens into the list instead of
+				// twelve rows to click through.
+				if (ctx.collab) ctx.collab->beginAssetOpBatch();
 				for (const std::string& target : s_deleteAssetTargets)
 				{
 					// Asked again per path, not trusted from the frame the dialog was
@@ -3156,6 +3192,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						deleteAssetNow(target, isSourceClass);
 					}
 				}
+				if (ctx.collab) ctx.collab->endAssetOpBatch();
 				s_deleteAssetTargets.clear();
 				s_selection.clear();
 				s_deleteAssetScanGen = 0;

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace CollabPanel
 {
@@ -737,8 +738,30 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 			// Answered AFTER the loop: approving mutates the vector being drawn.
 			int approveIdx = -1, denyIdx = -1;
-			for (std::size_t i = 0; i < ops.size(); ++i)
-			{
+			// The same, for a whole bundle. Kept as (owner, batch) rather than as
+			// a list of indices for the reason approveAssetOpBatch exists: every
+			// answer erases a row and shifts the ones behind it.
+			HE::Net::ParticipantId batchOwner = 0;
+			std::uint32_t          batchId    = 0;
+			bool                   batchApprove = false;
+
+			// ── One user action, one row ──────────────────────────────────
+			// Twenty assets selected and deleted at once used to arrive as
+			// twenty rows: the same decision, twenty clicks, and nothing on
+			// screen saying they belonged together. Rows that share a batch are
+			// drawn as ONE collapsible row with its own Approve all / Deny all,
+			// openable into the files — where each still has its own buttons,
+			// because "all but that one" is a real answer and the queue would be
+			// worse for making it impossible.
+			//
+			// A bundle of one is not a bundle: it is drawn exactly like a row
+			// that was asked for on its own, which is what it is to the person
+			// looking at it.
+			std::vector<char> drawn(ops.size(), 0);   // rows a bundle already took
+
+			// Per-file row, shared by the two shapes so a file inside a bundle
+			// reads the same as a file on its own.
+			auto drawOpRow = [&](std::size_t i) {
 				const auto& op = ops[i];
 				ImGui::PushID(static_cast<int>(i));
 
@@ -804,10 +827,111 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 					denyIdx = static_cast<int>(i);
 
 				ImGui::PopID();
+			};
+
+			for (std::size_t i = 0; i < ops.size(); ++i)
+			{
+				if (drawn[i]) continue;
+				const auto& op = ops[i];
+
+				// Everything else in this bundle. Collected first so the header
+				// can say how many there are before any of them is drawn.
+				std::vector<std::size_t> group;
+				group.push_back(i);
+				if (op.inBatch())
+				{
+					for (std::size_t j = i + 1; j < ops.size(); ++j)
+					{
+						if (ops[j].batchId != op.batchId ||
+						    ops[j].batchOwner != op.batchOwner) continue;
+						group.push_back(j);
+						drawn[j] = 1;
+					}
+				}
+
+				if (group.size() == 1)
+				{
+					drawOpRow(i);
+					if (i + 1 < ops.size()) ImGui::Separator();
+					continue;
+				}
+
+				// All deletes, all renames, or a mixture — the header has to say
+				// what is being agreed to, and "20 requests" says the least of
+				// the three.
+				bool allDelete = true, allRename = true;
+				for (const std::size_t k : group)
+				{
+					if (ops[k].op == HE::Net::CollabSession::AssetOp::Delete)
+						allRename = false;
+					else
+						allDelete = false;
+				}
+				// Verb first, like the single rows above it, and never the bare
+				// count on its own: "20 requests" is the one phrasing that does
+				// not say what agreeing to it would do.
+				const std::string headline =
+					(allDelete ? "Delete " : allRename ? "Rename " : "Answer ") +
+					std::to_string(group.size()) + " assets";
+
+				ImGui::PushID(static_cast<int>(2000 + i));
+				const bool open = ImGui::TreeNodeEx(
+					headline.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth);
+				// Who asked, once for the bundle: every row in it came from the
+				// same person by construction (the batch id is theirs), so
+				// repeating the face on each file would be twenty copies of one
+				// fact.
+				for (const HE::Net::Participant& p : collab->participants())
+				{
+					if (p.id != op.batchOwner) continue;
+					ImGui::SameLine();
+					CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("%s asked for all of these", p.name.c_str());
+					break;
+				}
+				// On the header's own line, not under it: an open node has
+				// already indented everything that follows, so buttons drawn
+				// below would sit somewhere different depending on whether the
+				// bundle happens to be open — and they answer it either way.
+				ImGui::SameLine();
+				if (EditorWidgets::primaryButton("Approve all", ImVec2(110, 0)))
+				{
+					batchOwner   = op.batchOwner;
+					batchId      = op.batchId;
+					batchApprove = true;
+				}
+				ImGui::SameLine();
+				if (EditorWidgets::cancelButton("Deny all", ImVec2(110, 0)))
+				{
+					batchOwner   = op.batchOwner;
+					batchId      = op.batchId;
+					batchApprove = false;
+				}
+				if (open)
+				{
+					for (std::size_t k = 0; k < group.size(); ++k)
+					{
+						drawOpRow(group[k]);
+						if (k + 1 < group.size()) ImGui::Separator();
+					}
+					ImGui::TreePop();
+				}
+				ImGui::PopID();
 				if (i + 1 < ops.size()) ImGui::Separator();
 			}
-			if (approveIdx >= 0)   collab->approveAssetOp(static_cast<std::size_t>(approveIdx));
-			else if (denyIdx >= 0) collab->denyAssetOp(static_cast<std::size_t>(denyIdx));
+			// ONE answer per frame, bundle answers included: each of these
+			// rewrites the vector the loop above just walked, and a second
+			// answer would be aimed at rows that have moved.
+			if (batchId != 0)
+			{
+				if (batchApprove) collab->approveAssetOpBatch(batchOwner, batchId);
+				else              collab->denyAssetOpBatch(batchOwner, batchId);
+			}
+			else if (approveIdx >= 0)
+				collab->approveAssetOp(static_cast<std::size_t>(approveIdx));
+			else if (denyIdx >= 0)
+				collab->denyAssetOp(static_cast<std::size_t>(denyIdx));
 		}
 		// ── Assets someone wants from you ────────────────────────────────
 		// Not gated on being host: this queue belongs to whoever HOLDS the

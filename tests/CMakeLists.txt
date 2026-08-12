@@ -105,6 +105,10 @@ add_executable(he_tests
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
+    # CollabController posts to it (a refused request, a peer that could not
+    # apply a delete), so the tests cannot link without it — and asserting what
+    # lands in it is how those posts are covered at all.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp

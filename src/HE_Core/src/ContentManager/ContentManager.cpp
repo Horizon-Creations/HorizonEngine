@@ -1978,15 +1978,32 @@ size_t ContentManager::retargetAssetReferencesOnDisk(const std::string& oldRel,
                                                      const std::string& newRel,
                                                      bool folder) const
 {
+	// One move is the degenerate batch. Kept as its own entry point because most
+	// callers have exactly one and should not have to build a vector to say so.
+	return retargetAssetReferencesOnDisk(
+		std::vector<MoveSpec>{ MoveSpec{ oldRel, newRel, folder } });
+}
+
+size_t ContentManager::retargetAssetReferencesOnDisk(const std::vector<MoveSpec>& moves) const
+{
 	namespace fs = std::filesystem;
-	if (m_contentRoot.empty() || oldRel.empty() || newRel.empty() || oldRel == newRel)
-		return 0;
+	if (m_contentRoot.empty() || moves.empty()) return 0;
 
 	// Scene references are project-relative ("Content/Level.hescene"), so the
 	// rules need the content directory's own name as their second form.
 	const std::string contentDir = fs::path(m_contentRoot).filename().generic_string();
-	const std::vector<HE::AssetRefs::Rule> rules =
-		HE::AssetRefs::moveRules(oldRel, newRel, folder, contentDir);
+	std::vector<HE::AssetRefs::Rule> rules;
+	std::string firstOld, lastNew;
+	for (const MoveSpec& m : moves)
+	{
+		if (m.oldRelativePath.empty() || m.newRelativePath.empty() ||
+		    m.oldRelativePath == m.newRelativePath) continue;
+		const std::vector<HE::AssetRefs::Rule> one =
+			HE::AssetRefs::moveRules(m.oldRelativePath, m.newRelativePath, m.folder, contentDir);
+		rules.insert(rules.end(), one.begin(), one.end());
+		if (firstOld.empty()) firstOld = m.oldRelativePath;
+		lastNew = m.newRelativePath;
+	}
 	if (rules.empty()) return 0;
 
 	// Engine DEFAULTS are read-only ground and never move; their project-local
@@ -2042,9 +2059,14 @@ size_t ContentManager::retargetAssetReferencesOnDisk(const std::string& oldRel,
 	}
 
 	if (rewritten > 0)
+	{
+		const std::string what = moves.size() == 1
+			? ("'" + firstOld + "' to '" + lastNew + "'")
+			: (std::to_string(moves.size()) + " moved paths");
 		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: retargeted " + std::to_string(rewritten) + " file(s) from '" +
-			 oldRel + "' to '" + newRel + "'").c_str());
+			("ContentManager: retargeted " + std::to_string(rewritten) +
+			 " file(s) for " + what).c_str());
+	}
 	return rewritten;
 }
 

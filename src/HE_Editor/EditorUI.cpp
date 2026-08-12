@@ -30,6 +30,7 @@
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
+#include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
@@ -1798,13 +1799,37 @@ constexpr float kAssetLockBannerH = 38.0f;
 		ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - ImGui::GetStyle().WindowPadding.x);
 		ImGui::Text("%s", fpsText.c_str());
 
+		// ── The right-anchored group ──────────────────────────────────────────
+		// Everything below is placed by subtracting the width of everything to
+		// its right, plus a 16px gap for each neighbour that is actually there.
+		// The chain is hand-maintained: inserting a widget here means editing
+		// EVERY block to its left as well, or the two overlap silently. Right to
+		// left the order is: FPS, notification bell, presence, download queue,
+		// session activity.
+
+		// The notification bell, immediately left of the counters. It sits at the
+		// right-hand end of the group rather than the left because it is the only
+		// item here that is not transient — presence, the download queue and the
+		// activity line all come and go, so a bell placed left of them would move
+		// across half the footer depending on what else happened to be running,
+		// and the one control the user is meant to reach for when something went
+		// wrong must be in the same corner every time.
+		const float bellW = NotificationBar::FooterWidth(ctx);
+		if (bellW > 0.0f)
+		{
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+			NotificationBar::DrawFooter(ctx);
+		}
+
 		// Collaboration presence, immediately left of the counters — ambient by
 		// design: who else is in the scene, without a window open.
 		const float presenceW = CollabPresenceBar::FooterWidth(ctx);
 		if (presenceW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW
-			                - ImGui::GetStyle().WindowPadding.x - 16.0f);
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW
+			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f));
 			CollabPresenceBar::DrawFooter(ctx);
 		}
 
@@ -1817,8 +1842,9 @@ constexpr float kAssetLockBannerH = 38.0f;
 		const float syncW = EngineContentSyncBar::FooterWidth(ctx);
 		if (syncW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW - syncW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f));
 			EngineContentSyncBar::DrawFooter(ctx);
 		}
@@ -1830,8 +1856,9 @@ constexpr float kAssetLockBannerH = 38.0f;
 		// out of the centred status label.
 		if (const float actW = CollabActivityBar::FooterWidth(ctx); actW > 0.0f)
 		{
-			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - presenceW - syncW - actW
+			ImGui::SameLine(ImGui::GetWindowWidth() - fpsW - bellW - presenceW - syncW - actW
 			                - ImGui::GetStyle().WindowPadding.x - 16.0f
+			                - (bellW > 0.0f ? 16.0f : 0.0f)
 			                - (presenceW > 0.0f ? 16.0f : 0.0f)
 			                - (syncW > 0.0f ? 16.0f : 0.0f));
 			if (CollabActivityBar::DrawFooter(ctx))
@@ -2316,9 +2343,11 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// and a window closed by its own X has already cleared its flag.
 	updatePanelVisibility(ctx);
 
-    // Last of all, so the participant menu that hangs off the footer cluster
-    // cannot end up underneath a docked panel or a floating tool window.
+    // Last of all, so the menus that hang off the footer clusters cannot end up
+    // underneath a docked panel or a floating tool window. Both of these draw
+    // nothing unless their own footer half ran this frame.
     CollabPresenceBar::DrawOverlay(ctx);
+    NotificationBar::DrawOverlay(ctx);
 
     TutorialPanel::UiFlags tutFlags;
     tutFlags.profilerOpen      = s_showProfiler;

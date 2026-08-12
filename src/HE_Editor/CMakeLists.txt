@@ -117,6 +117,8 @@ add_executable(HorizonEditor WIN32
 	EditorInput.cpp
 	ExportDialogPanel.cpp
 	ContentBrowserPanel.cpp
+	NotificationStore.cpp
+	NotificationBar.cpp
 	InspectorPanel.cpp
 	TerrainTools.cpp
 	ViewportPanel.cpp

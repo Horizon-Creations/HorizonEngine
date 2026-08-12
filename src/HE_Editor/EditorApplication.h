@@ -9,6 +9,7 @@
 #include "CollabController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "NotificationStore.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
 #include <HorizonScene/PhysicsWorld.h>
@@ -411,6 +412,24 @@ struct AppContext
 	// has constructed it; the panel treats that as "not available".
 	CollabController* collab = nullptr;
 
+	// Things that happened without the user asking — a peer that could not apply
+	// a delete, a scan that could not read a file, an asset nobody answered
+	// about. Posted from ANY thread (see NotificationStore), drawn by the footer
+	// bell and its flyout. Null in a headless/test context, so every caller has
+	// to check — which is also why posting goes through the helper below rather
+	// than being written out at forty call sites.
+	HE::Ed::NotificationStore* notifications = nullptr;
+
+	// Hand an ON-DISK reference rewrite to the editor's single retarget queue
+	// (EditorApplication::enqueueRetargetOnDisk). Panels must not run one
+	// themselves: the walk rewrites every referencing file, and two of them over
+	// the same file — a local move and an approved remote rename, say — lose one
+	// rewrite entirely. It is also far too slow for a frame on a real project.
+	// The IN-MEMORY half stays with the caller and stays on the main thread.
+	// Null in tests/headless: callers fall back to doing it inline.
+	std::function<void(const std::string& oldRel, const std::string& newRel, bool folder)>
+		enqueueRetarget;
+
 	// Per-user undo/redo used INSTEAD of the snapshot stack while a session is
 	// running — see CollabUndo.h for why snapshots cannot work there.
 	CollabUndo* collabUndo = nullptr;
@@ -508,6 +527,11 @@ private:
 
 	// Live collaboration. Poll-driven: pumped once per frame from OnRender.
 	CollabController m_collab;
+	// Editor-wide "something happened" channel — see NotificationStore.h. Owned
+	// here and handed to the UI through AppContext, the same shape m_collab and
+	// m_git use, except that this one is written from worker threads too and
+	// therefore carries its own mutex.
+	HE::Ed::NotificationStore m_notifications;
 	GitController    m_git;
 	CollabUndo       m_collabUndo;
 	// Entities the session already knows about. Diffed each frame so every
@@ -788,6 +812,18 @@ private:
 	std::vector<RetargetJob> m_retargetQueue;
 	std::mutex               m_retargetMutex;
 	bool                     m_retargetRunning = false;
+	// THE one place an on-disk retarget may be started from. It began as the
+	// collaboration path's private queue, and stayed private while the Content
+	// Browser did its own retarget inline on the frame thread — which is a data
+	// race, not just a stall: the walk reads each referencing file whole and
+	// writes it back, so a local drag-move and an approved remote rename
+	// rewriting the same file at the same time lose one of the two rewrites
+	// entirely. One queue is what makes "one at a time" true for everybody.
+	//
+	// The in-memory half is NOT here: it mutates ContentManager's unguarded maps
+	// and stays on the main thread, before the call.
+	void enqueueRetargetOnDisk(const std::string& oldRel, const std::string& newRel,
+	                           bool folder);
 
 	AppContext makeContext();
 };

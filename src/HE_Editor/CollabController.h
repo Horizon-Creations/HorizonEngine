@@ -14,6 +14,8 @@
 // Everything is poll-driven: update() must be called once per frame or nothing
 // happens at all.
 
+#include "NotificationStore.h"
+
 #include <Net/CollabSession.h>
 #include <Net/LanBeacon.h>
 #include <Net/PortMapper.h>
@@ -56,6 +58,17 @@ public:
 	// The world that is captured for joiners and replaced on join. Must outlive
 	// any active session.
 	void setWorld(HorizonWorld* world) { m_world = world; }
+
+	// Where "something happened that you did not do" goes — a peer that could
+	// not apply a delete, a request the host refused, a reimport somebody else's
+	// lock blocked. Owned by EditorApplication and set once at startup; null in
+	// tests and headless runs, which every post checks for.
+	//
+	// A session is exactly the kind of thing this store exists for: almost
+	// everything in here is caused by SOMEBODY ELSE, and until this pointer
+	// existed the only places to say so were a footer line destroyed by the next
+	// click and a log file nobody has open.
+	void setNotifications(HE::Ed::NotificationStore* store) { m_notes = store; }
 
 	// Which project this editor has open. Compared on join and refused when the
 	// two sides differ, because everything a session sends — scene entities,
@@ -443,12 +456,33 @@ public:
 		struct Requester { HE::Net::ParticipantId id = 0; std::uint32_t requestId = 0; };
 		std::vector<Requester> requesters;
 		std::uint64_t firstAskedMs = 0;   // for the "4m" age column
+		// The user action this row came out of — see requestAssetOp's `batch`.
+		// Twenty rows sharing a key are ONE thing the host decides, drawn as one
+		// collapsible row instead of twenty to click through.
+		//
+		// Set by whichever request CREATED the row and never overwritten
+		// afterwards, except that a batched ask adopts a row that has no batch
+		// yet: the alternative is a file that silently drops out of the bundle
+		// it was selected in, and then sits in the tray on its own after the
+		// bundle has been answered. Two batches wanting the same file stay one
+		// row (that is the per-asset coalescing) and it belongs to the first.
+		HE::Net::ParticipantId batchOwner = 0;
+		std::uint32_t          batchId    = 0;   // 0 = asked for on its own
+		bool inBatch() const { return batchId != 0; }
 	};
 	const std::vector<PendingAssetOp>& pendingAssetOps() const { return m_pendingOps; }
 	// Answer one. Approving applies it everywhere, including here; denying tells
 	// every requester and changes nothing. Both drop the row.
 	void approveAssetOp(std::size_t index);
 	void denyAssetOp(std::size_t index);
+	// Answer a whole bundle in one pass. Deliberately keyed on (owner, batch)
+	// rather than taking a list of indices: approving a row erases it, so every
+	// index behind it shifts, and a caller looping over indices would answer the
+	// wrong rows from the second one on. Everything matching is copied out and
+	// removed FIRST, then answered — so nothing being answered can be moving.
+	// Returns how many rows it settled.
+	std::size_t approveAssetOpBatch(HE::Net::ParticipantId owner, std::uint32_t batch);
+	std::size_t denyAssetOpBatch(HE::Net::ParticipantId owner, std::uint32_t batch);
 	// What a participant asked for, if anything — so a peer can be shown that
 	// its own request is still waiting.
 	bool hasPendingRequestOfOurs() const { return !m_ourPendingOps.empty(); }
@@ -512,6 +546,58 @@ public:
 		return requestOrPerformAssetOp(
 			HE::Net::CollabSession::AssetOp::Create, relPath, {}, true);
 	}
+
+	// ── One user action, one decision ────────────────────────────────────────
+	// Wrap a LOOP of the calls above and everything it asks for arrives at the
+	// host as one bundle: one row saying "Delete 20 assets", openable into the
+	// files, with Approve all / Deny all as well as per-file buttons. Without it
+	// a multi-select delete of twenty put twenty unrelated rows in front of the
+	// host — the same decision, twenty clicks, and no way to see that they came
+	// from one keystroke.
+	//
+	//     collab.beginAssetOpBatch();
+	//     for (const std::string& rel : selection) collab.requestAssetDelete(rel);
+	//     collab.endAssetOpBatch();
+	//
+	// Safe to call with no session (it does nothing), safe to leave a batch open
+	// across frames, and every existing single-asset call site keeps working
+	// unchanged — outside a batch the id is 0, which means "on its own".
+	// Batches do not nest: a second begin starts a new one.
+	std::uint32_t beginAssetOpBatch();
+	void          endAssetOpBatch() { m_openBatch = 0; }
+	// The batch currently open, or 0. For a caller that wants to know whether it
+	// is already inside one before opening its own.
+	std::uint32_t openAssetOpBatch() const { return m_openBatch; }
+
+	// ── Rewriting an asset in place (reimport) ───────────────────────────────
+	// Reimport re-reads an asset from the source file it remembers and writes it
+	// back over itself, keeping its uuid. Two things follow from that in a
+	// session, and both used to be missing.
+	//
+	// May we write to this asset RIGHT NOW? A non-interactive answer for a
+	// background operation — no dialog, no waiting for a round trip, no lock
+	// claimed. True when there is no session, when the asset is free, or when we
+	// already hold it. This is a QUERY: it posts nothing, so a menu item can ask
+	// every frame to decide whether to grey itself out.
+	bool assetWritableNow(const std::string& relPath);
+
+	// The gate the reimport itself goes through, BEFORE the local write. False
+	// means somebody else is holding the asset and the write must not happen:
+	// rewriting it here would fork the file locally and the session would never
+	// see the divergence, because the bytes of an imported mesh do not travel.
+	// The user is told who is holding it (a Problem in the notification store) —
+	// the caller only has to obey the answer.
+	bool beginBackgroundWrite(const std::string& relPath);
+
+	// After the reimport wrote the file. What this does depends on the asset:
+	//  · a kind that TRAVELS (see isSyncableAssetType) is re-transmitted whole,
+	//    exactly like a save — peers get the new bytes and are done;
+	//  · a kind that does not (mesh, texture, audio, font — which is most of
+	//    what reimport touches) is NOT widened into the sync set just because it
+	//    changed. Those are large, and source control carries them by design.
+	//    Peers are told it happened instead, so they know to pull it, rather
+	//    than keeping the old bytes for ever with nothing to say so.
+	void publishReimport(const std::string& relPath, const std::string& fullPath);
 
 	// Fires when a peer saved an asset: (relativePath, bytes). The editor writes
 	// the file and reloads — CollabController does not touch the ContentManager.
@@ -634,9 +720,10 @@ public:
 	static std::string projectRelativeAssetPath(const std::string& absolutePath,
 	                                            const std::string& contentRoot);
 
-	// Set when a lock request was refused, for a transient UI notice.
-	const std::string& lockNotice() const { return m_lockNotice; }
-	void clearLockNotice() { m_lockNotice.clear(); }
+	// A lock request that was refused used to be written to a `lockNotice`
+	// string here that NOTHING in the editor ever read — a channel with a writer
+	// and no reader, which is the same as silence. It goes to the notification
+	// store now, where the rest of "somebody else did something to you" lives.
 
 	// ── Presence ──
 	void setLocalPresence(const float cameraPos[3], const float cameraRot[4],
@@ -658,8 +745,35 @@ private:
 	                         const std::string& suggestedPath);
 	void noteAssetCreated(HE::Net::ParticipantId who, const std::string& path);
 
+	// One post, with the null check in ONE place: the store is absent in tests
+	// and in any headless run, and forty call sites each remembering to ask
+	// would be forty chances to forget.
+	void postNote(HE::Ed::NoteLevel level, std::string text,
+	              std::string detail = {}, const std::string& relPath = {});
+	// Settle one row, the row itself rather than an index into a vector that the
+	// settling mutates. Shared by the single-row and the whole-bundle paths so
+	// the two cannot answer differently — approving a rename onto a name that is
+	// taken on the host's disk, in particular, turns into a denial in here and
+	// must do so wherever it was approved from.
+	void approveOne(const PendingAssetOp& op);
+	void denyOne(const PendingAssetOp& op);
+	// After an approved op was carried out here: is the disk in the state the
+	// session just agreed on? Posts a Problem when it is not. See the call site
+	// for why the disk is asked rather than the apply handler's error codes.
+	void verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
+	                          const std::string& relPath,
+	                          const std::string& newRelPath);
+	// Somebody else reimported an asset whose bytes do not travel.
+	void noteRemoteReimport(HE::Net::ParticipantId by, const std::string& relPath);
+
+	HE::Ed::NotificationStore*      m_notes = nullptr;
 	std::vector<CreatedAssetNotice> m_createdNotices;
 	std::vector<PendingAssetOp>     m_pendingOps;     // host only
+	// The batch ids WE mint, and the one currently open. Per-controller, so two
+	// clients hand out the same numbers — which is why the host keys a bundle on
+	// (requester, batch) and never on the id alone.
+	std::uint32_t                   m_nextBatchId = 1;
+	std::uint32_t                   m_openBatch   = 0;
 	// Requests WE are waiting on, so the footer can say "1 request pending" and
 	// the verdict can be matched back to what it answers.
 	struct OurOp { std::uint32_t requestId = 0;
@@ -849,7 +963,6 @@ private:
 	std::uint32_t m_snapshotTotal = 0;
 
 	std::uint64_t m_heldSubject = 0;   // the one entity we currently hold
-	std::string   m_lockNotice;
 	std::string   m_assetNotice;
 	// One counter per document, used from both sides. As holder we increment it
 	// on every publish — deltas and whole files alike, since they describe the

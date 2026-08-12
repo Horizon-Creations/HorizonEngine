@@ -190,6 +190,26 @@ public:
 	size_t retargetAssetReferencesOnDisk(const std::string& oldRelativePath,
 	                                     const std::string& newRelativePath,
 	                                     bool folder = false) const;
+
+	// One move, for the batch below.
+	struct MoveSpec
+	{
+		std::string oldRelativePath;
+		std::string newRelativePath;
+		bool        folder = false;
+	};
+	// SEVERAL moves in ONE walk. The single-pair version above walks the entire
+	// content tree, reading every asset that mentions the path — so dragging
+	// forty assets into a folder used to mean forty full walks of the same tree,
+	// each one re-reading the same files. The rewrite machinery already takes a
+	// LIST of substitutions (HE::AssetRefs::Rule), so the walk is the only thing
+	// that was being repeated.
+	//
+	// First-match-wins per stored value, which is what independent moves need.
+	// CHAINED moves (A→B and B→C in the same batch) are therefore NOT equivalent
+	// to applying them in order, and the caller must not batch those together —
+	// see the guard in the editor's retarget queue.
+	size_t retargetAssetReferencesOnDisk(const std::vector<MoveSpec>& moves) const;
 	// IN MEMORY: re-key the path indices and the `path` every loaded asset
 	// carries. Cheap, and MAIN THREAD ONLY — these maps have no lock and the
 	// rest of the editor reads them every frame. Call it first: until it has
