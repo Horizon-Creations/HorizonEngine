@@ -38,6 +38,16 @@ namespace HE
 		// back up in the manifest when a download is requested.
 		bool     isRemoteOnly = false;
 		HE::UUID remoteUuid;
+
+		// The other half of the same story: this IS a manifest entry, and the file
+		// at `fullPath` is the shared download cache's copy of it — fetched once,
+		// usable by every project on this machine, and removable without losing
+		// anything (the server still has it). Only the manifest merge can know
+		// this; the directory walk that produces every other node cannot, because
+		// the cache is not one of the roots it walks. Mutually exclusive with
+		// isRemoteOnly: one says "not here yet", the other "here, but only as a
+		// copy".
+		bool     isLocalCacheCopy = false;
 	};
 
 	struct Folder

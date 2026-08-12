@@ -1147,6 +1147,12 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 	m_remoteAssets[id]  = std::move(entry);
 }
 
+// ─── forgetDiskAsset ─────────────────────────────────────────────────────────
+bool ContentManager::forgetDiskAsset(HE::UUID id)
+{
+	return m_diskRegistry.erase(id) > 0;
+}
+
 // ─── streamMountedAssets ──────────────────────────────────────────────────────
 size_t ContentManager::streamMountedAssets(const std::unordered_set<HE::UUID>& exclude)
 {

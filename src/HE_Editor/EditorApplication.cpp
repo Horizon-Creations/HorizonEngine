@@ -1476,8 +1476,18 @@ void EditorApplication::startSftpProbe()
 		// GlobalState's setters/refresh only touch their own mutex-guarded tree
 		// and the filesystem, never ImGui, so this is safe off the main thread
 		// (the existing m_contentRefreshFuture async path relies on the same fact).
-		if (probe.ready() && gs && !engineContentPath.empty() &&
-		    HE::Cs::EngineContentSync::instance().refreshManifestBlocking())
+		bool haveManifest = probe.ready() &&
+		                    HE::Cs::EngineContentSync::instance().refreshManifestBlocking();
+		// No server this session — fall back to the catalogue the last successful
+		// refresh wrote beside the downloads. Without it an offline editor shows
+		// NO EngineContent at all: not the assets that are still on the server,
+		// and not even the ones already downloaded, because a cached file only
+		// ever reaches the Content Browser through this manifest merge (the tree
+		// walk covers the shipped root and the project, never the cache).
+		if (!haveManifest)
+			haveManifest = HE::Cs::EngineContentSync::instance().loadCachedManifest();
+
+		if (haveManifest && gs && !engineContentPath.empty())
 		{
 			gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
 			gs->refreshEngineFolder(engineContentPath, projectContentRoot);

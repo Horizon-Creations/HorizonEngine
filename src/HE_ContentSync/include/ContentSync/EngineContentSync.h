@@ -78,6 +78,30 @@ public:
 	// configured.
 	EngineContentManifest manifest() const;
 
+	// ── The manifest, offline ─────────────────────────────────────────────────
+	// Every successful refresh also writes the catalogue next to the downloads it
+	// describes (engineContentCacheDir()/manifest.json), and this reads it back.
+	// Without it the Content Browser's Engine tree is empty of EngineContent the
+	// moment the server is unreachable — not just of the assets that are still
+	// remote, but of the ones ALREADY DOWNLOADED: they only ever reach the tree
+	// through the manifest merge (GlobalState::mergeManifestInto), never through
+	// the directory walk. So a user working offline could neither see nor manage
+	// their own local copies.
+	//
+	// Returns true when a cached manifest was read and adopted. Never overwrites a
+	// manifest that was fetched from the server this session — a live catalogue
+	// always wins over yesterday's copy.
+	bool loadCachedManifest();
+
+	// Record that the local copy of `relativePath` is gone, so the catalogue keeps
+	// describing it as available-on-the-server rather than forgetting it exists.
+	// Called by the Editor's "Remove Local Copy": the entry is what turns the tile
+	// back into a remote-only placeholder instead of making it vanish, and it has
+	// to survive a restart, so the cached manifest is rewritten too. Adds the
+	// entry when the manifest does not have one (a copy downloaded by an older
+	// build, or a catalogue that was never fetched this session).
+	void noteLocalCopyRemoved(const std::string& relativePath, HE::UUID uuid);
+
 	// Queues a download of `relativePath` (also the SFTP-side relative path —
 	// the remote layout mirrors the local EngineContent structure 1:1). `uuid`
 	// is carried through only so callers can correlate; this function does not
@@ -128,6 +152,10 @@ private:
 
 	mutable std::mutex     m_manifestMutex;
 	EngineContentManifest  m_manifest;
+	// True once the server answered this session. Guards loadCachedManifest()
+	// against replacing a live catalogue with the stale one on disk — the probe
+	// and a manual refresh can both land after startup restored the cache.
+	bool                   m_manifestIsLive = false;
 };
 
 } // namespace HE::Cs

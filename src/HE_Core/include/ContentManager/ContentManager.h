@@ -300,6 +300,18 @@ public:
 	void registerRemoteAsset(HE::UUID id, std::string relativePath,
 	                          std::function<void(std::function<void(bool)>)> materialize);
 
+	// Forget that a UUID is backed by a file on disk. The counterpart to the
+	// download side of registerRemoteAsset(): when the local copy of an
+	// EngineContent asset is REMOVED, the disk registry still maps its UUID to
+	// the (now missing) relative path, and every resolution route consults that
+	// registry FIRST — so ensureResident() would keep trying to load a file that
+	// is gone and registerRemoteAsset() would refuse to restore the download
+	// route ("already resolvable some other way"). Returns true when an entry was
+	// removed. Cheap and targeted: the alternative is scanContentDirectory(),
+	// which rebuilds all three roots to drop one key. Main thread only, like the
+	// rest of the registry.
+	bool forgetDiskAsset(HE::UUID id);
+
 	// Kick off async background loads for every mounted-but-not-yet-resident asset
 	// (stream a whole pak without blocking startup). Drain via pollAsyncResults().
 	// UUIDs in `exclude` are skipped (e.g. the packed startup scene, which is not a

@@ -16,6 +16,49 @@ namespace HE::Cs {
 
 namespace {
 constexpr const char* kManifestRemoteName = "manifest.json";
+
+// The on-disk copy of the catalogue, kept beside the downloads it describes so
+// both are equally per-machine and equally survivable.
+fs::path cachedManifestPath()
+{
+	return GlobalState::engineContentCacheDir() / kManifestRemoteName;
+}
+
+// Written temp-then-rename: a manifest half-overwritten by a crash or a full disk
+// would make every EngineContent asset invisible on the next launch, which is a
+// far worse failure than simply keeping the previous one.
+bool writeCachedManifest(const EngineContentManifest& manifest)
+{
+	const fs::path finalPath = cachedManifestPath();
+	const fs::path tmpPath   = finalPath.string() + ".tmp";
+	{
+		std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+		if (!out) return false;
+		const std::string text = serializeManifest(manifest);
+		out.write(text.data(), static_cast<std::streamsize>(text.size()));
+		// Checked AFTER the flush, not after the write: write() only fills the
+		// stream buffer, so a full disk shows up when the buffer is drained — and
+		// the destructor swallows that failure silently. Renaming an unflushed
+		// temp file over the real one is how a truncated manifest gets promoted,
+		// which would make every EngineContent asset invisible on the next launch.
+		out.flush();
+		if (!out.good())
+		{
+			out.close();
+			std::error_code rmEc;
+			fs::remove(tmpPath, rmEc);
+			return false;
+		}
+	}
+	std::error_code ec;
+	fs::rename(tmpPath, finalPath, ec);
+	if (ec)
+	{
+		fs::remove(tmpPath, ec);
+		return false;
+	}
+	return true;
+}
 }
 
 EngineContentSync& EngineContentSync::instance()
@@ -56,12 +99,66 @@ bool EngineContentSync::refreshManifestBlocking()
 		return false;
 	}
 
+	size_t entryCount = 0;
 	{
 		std::lock_guard<std::mutex> lock(m_manifestMutex);
-		m_manifest = std::move(parsed);
+		m_manifest   = std::move(parsed);
+		m_manifestIsLive = true;
+		entryCount   = m_manifest.entries.size();
+		// Persisted under the same lock as the adoption, so a concurrent
+		// noteLocalCopyRemoved() can never interleave and write a manifest that
+		// contradicts the one in memory.
+		if (!writeCachedManifest(m_manifest))
+			HE_LOG_WARN(ContentSync, "%s", "Could not cache the EngineContent manifest for offline use");
 	}
-	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", m_manifest.entries.size());
+	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", entryCount);
 	return true;
+}
+
+bool EngineContentSync::loadCachedManifest()
+{
+	std::lock_guard<std::mutex> lock(m_manifestMutex);
+	if (m_manifestIsLive) return false;   // this session already has the real thing
+
+	std::ifstream in(cachedManifestPath(), std::ios::binary);
+	if (!in) return false;
+	std::ostringstream ss;
+	ss << in.rdbuf();
+
+	EngineContentManifest parsed;
+	if (!parseManifest(ss.str(), parsed)) return false;
+
+	m_manifest = std::move(parsed);
+	HE_LOG_INFO(ContentSync, "EngineContent manifest loaded from the local cache (%zu entries)",
+	            m_manifest.entries.size());
+	return true;
+}
+
+void EngineContentSync::noteLocalCopyRemoved(const std::string& relativePath, HE::UUID uuid)
+{
+	if (relativePath.empty()) return;
+	std::lock_guard<std::mutex> lock(m_manifestMutex);
+
+	EngineContentManifestEntry* existing = nullptr;
+	for (auto& e : m_manifest.entries)
+		if (e.relativePath == relativePath) { existing = &e; break; }
+
+	if (!existing)
+	{
+		// The file was downloaded, so the server has it — the catalogue simply does
+		// not say so right now (no refresh this session, or an older build fetched
+		// it). Recording it is what keeps the asset visible as remote-only instead
+		// of disappearing from the tree along with its local copy.
+		EngineContentManifestEntry entry;
+		entry.relativePath = relativePath;
+		entry.uuid         = uuid;
+		m_manifest.entries.push_back(std::move(entry));
+	}
+	else if (existing->uuid == HE::UUID{} && uuid != HE::UUID{})
+		existing->uuid = uuid;
+
+	if (!writeCachedManifest(m_manifest))
+		HE_LOG_WARN(ContentSync, "%s", "Could not update the cached EngineContent manifest");
 }
 
 EngineContentManifest EngineContentSync::manifest() const

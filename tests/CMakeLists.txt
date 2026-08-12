@@ -4,6 +4,7 @@ add_executable(he_tests
     test_hasset.cpp
     test_contentmanager.cpp
     test_asset_ref_retarget.cpp
+    test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
     test_particle_graph.cpp

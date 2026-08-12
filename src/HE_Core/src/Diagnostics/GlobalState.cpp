@@ -678,11 +678,16 @@ static void mergeManifestInto(HE::Folder* base, const std::vector<HE::RemoteEngi
 		const bool cached = fs::is_regular_file(cachePath, ec);
 
 		std::unique_ptr<HE::File> file(new HE::File());
-		file->name         = leafName;
-		file->extension    = relPath.extension().string();
-		file->isRemoteOnly = !cached;
-		file->remoteUuid   = asset.uuid;
-		file->fullPath     = cachePath.string();
+		file->name              = leafName;
+		file->extension         = relPath.extension().string();
+		file->isRemoteOnly      = !cached;
+		// The counterpart flag, set in the one place that can know it: this node
+		// exists because the manifest lists it AND the download landed. Nothing
+		// downstream can re-derive that from the path alone without stat-ing the
+		// file again, which the Content Browser would then do per tile per frame.
+		file->isLocalCacheCopy  = cached;
+		file->remoteUuid        = asset.uuid;
+		file->fullPath          = cachePath.string();
 		parent->files.push_back(file.get());
 		file.release();
 	}

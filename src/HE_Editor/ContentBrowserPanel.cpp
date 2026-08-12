@@ -1,6 +1,7 @@
 #include "ContentBrowserPanel.h"
 #include "EditorToolbar.h"   // shared toolbar strip
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include "EditorApplication.h"           // AppContext, GlobalState folders, ProjectManager
@@ -26,7 +27,9 @@
 #endif
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
+#include <ContentManager/AssetRefScan.h>    // "what still points at this?" for the delete dialogs
 #include <ContentManager/Assets.h>
+#include <JobSystem/JobSystem.h>            // globalPool — the reference scan runs off the frame thread
 #include <UIWidget/UIWidgetTree.h>       // starter tree for freshly created UI widgets
 #include <HorizonCode/HorizonCode.h>     // starter graph for freshly created HorizonCode classes
 #include <Types/Enums.h>
@@ -63,24 +66,241 @@ namespace ContentBrowserPanel
 
 static bool s_quietContentRefresh = false;
 
-#ifdef HE_HAVE_LIBSSH2
 // The inverse of mergeManifestInto's fullPath synthesis (GlobalState.cpp):
 // a remote-only File's fullPath is always engineContentCacheDir()/relativePath,
 // so this recovers the SFTP-side relative path (== the manifest's own "path"
 // field, and — per the deployment's remote layout — the same string EngineContent
 // sync downloads from) straight back out of it.
+//
+// Empty for anything that is NOT under the cache. fs::relative does not say so on
+// its own — it happily answers "../../EditorDeps/EngineContent/Meshes/Cube.hasset"
+// for a shipped default — so the leading-".." check is what makes this a
+// containment test rather than just a subtraction. It used to be called only on
+// nodes already known to be cache-rooted; the cache-copy predicate below asks it
+// about arbitrary files.
 static std::string engineRelativePath(const std::string& fullPath)
 {
 	std::error_code ec;
 	const fs::path rel = fs::relative(fullPath, GlobalState::engineContentCacheDir(), ec);
-	return ec ? std::string() : rel.generic_string();
+	if (ec || rel.empty() || rel.native()[0] == '.') return std::string();
+	return rel.generic_string();
 }
-#endif
+
+// Is this file the shared download cache's copy of an EngineContent asset — the
+// one kind of "engine" file a project may legitimately remove?
+//
+// The three EngineContent tiers are disjoint directories and a File node carries
+// exactly one path, so the tier IS the path: a shipped default lives under the
+// engine root, a project override under <contentRoot>/Engine, and everything else
+// that resolves as "Engine/…" is a download. Ordered like
+// ContentManager::resolveAbsolutePath's own precedence so the two can never
+// disagree about which file is meant.
+static bool isEngineCacheCopy(const ContentManager* cm, const std::string& fullPath)
+{
+	if (!cm || fullPath.empty()) return false;
+	if (cm->isEngineDefaultPath(fullPath) || cm->isEngineOverridePath(fullPath)) return false;
+	if (engineRelativePath(fullPath).empty()) return false;
+	std::error_code ec;
+	return fs::is_regular_file(fullPath, ec);   // a remote-only placeholder has nothing to remove
+}
 
 // Which root the tree/grid is showing: 0=Content, 1=Engine, 2=Source. At
 // namespace scope rather than inside render() only so browsedRootKind() can read
 // it — everything that writes it still lives in render().
 static int s_selectedRootKind = 0;
+
+// ─── "What still points at this?" ────────────────────────────────────────────
+// The delete dialogs used to state, flatly, that anything referencing the asset
+// would keep a broken reference — true, and unanswerable from where the user is
+// standing. This runs the actual scan (HE::AssetRefs::findReferrers) so the
+// dialog can name the files instead.
+//
+// It reads every candidate file's bytes, which on a real project is far too much
+// for the frame it was clicked in: the dialog opens IMMEDIATELY saying it is
+// looking, a worker fills the answer in, and the generation counter drops results
+// that arrive for a dialog the user already closed (or for a different asset they
+// right-clicked meanwhile). Same producer/consumer split as the download queue's
+// tab-open handoff below, one mutex, no engine state touched off-thread.
+namespace
+{
+	struct RefScanState
+	{
+		std::mutex                  mutex;
+		// Atomic because the WORKER reads it too: a scan whose generation is no
+		// longer the current one has nobody waiting for its answer, and polling
+		// this is how it stops walking instead of grinding to the end of a large
+		// project (or holding up editor shutdown, which joins the pool).
+		std::atomic<std::uint64_t>  requested{0};
+		std::uint64_t               completed = 0;   // worker: the generation `result` belongs to
+		HE::AssetRefs::ScanResult   result;
+	};
+	RefScanState s_refScan;
+
+	// Everything the worker needs, by value — it must never read ctx or the
+	// content manager live (both belong to the frame thread).
+	struct RefScanJob
+	{
+		std::string contentRoot;
+		std::string projectRoot;
+		std::string contentDirName;
+		std::string targetAbs;
+		std::string targetRel;      // content-relative, "Engine/…" included
+		bool        isFolder = false;
+	};
+
+	// The UUIDs of every asset under `folderAbs` — what a folder delete takes with
+	// it, and therefore what scenes may still address by id. Reading each file's
+	// META is why this runs on the worker and not at menu time.
+	std::vector<HE::UUID> containedAssetUuids(const std::string& folderAbs)
+	{
+		std::vector<HE::UUID> out;
+		std::error_code ec;
+		fs::recursive_directory_iterator it(
+			folderAbs, fs::directory_options::skip_permission_denied, ec);
+		const fs::recursive_directory_iterator end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			std::error_code fec;
+			if (!it->is_regular_file(fec) || fec) { fec.clear(); continue; }
+			if (it->path().extension() != ".hasset" && it->path().extension() != ".hescene") continue;
+			const HE::UUID id = HE::AssetRefs::assetUuidOfFile(it->path().string());
+			if (!(id == HE::UUID{})) out.push_back(id);
+		}
+		return out;
+	}
+
+	std::uint64_t startReferenceScan(RefScanJob job)
+	{
+		const std::uint64_t generation =
+			s_refScan.requested.fetch_add(1, std::memory_order_acq_rel) + 1;
+		// Fire-and-forget: the pool job may outlive the dialog, so it captures the
+		// job by value and publishes only through the file-scope state above.
+		globalPool().submit([job = std::move(job), generation]
+		{
+			HE::AssetRefs::ScanTargets targets;
+			HE::AssetRefs::ScanRequest request;
+			request.contentRoot    = job.contentRoot;
+			request.projectRoot    = job.projectRoot;
+			request.contentDirName = job.contentDirName;
+			// Superseded means abandoned: closing the dialog and asking about
+			// something else bumps the counter, and this walk stops at the next
+			// file rather than reading a whole project for nobody.
+			request.isCancelled    = [generation]
+			{
+				return s_refScan.requested.load(std::memory_order_acquire) != generation;
+			};
+
+			if (job.isFolder)
+			{
+				if (!job.targetRel.empty()) targets.pathPrefixes.push_back(job.targetRel);
+				targets.uuids = containedAssetUuids(job.targetAbs);
+				// A folder's own assets referencing each other says nothing about
+				// what breaks OUTSIDE it — they are going away together.
+				request.excludeUnder.push_back(job.targetAbs);
+			}
+			else
+			{
+				if (!job.targetRel.empty()) targets.paths.push_back(job.targetRel);
+				const HE::UUID id = HE::AssetRefs::assetUuidOfFile(job.targetAbs);
+				if (!(id == HE::UUID{})) targets.uuids.push_back(id);
+				request.excludeFiles.push_back(job.targetAbs);
+			}
+
+			HE::AssetRefs::ScanResult result = HE::AssetRefs::findReferrers(targets, request);
+
+			// A newer dialog already asked something else — this answer is about a
+			// question nobody is looking at any more (and, having been cancelled, it
+			// is a partial one).
+			if (s_refScan.requested.load(std::memory_order_acquire) != generation) return;
+			std::lock_guard<std::mutex> lock(s_refScan.mutex);
+			if (generation < s_refScan.completed) return;
+			s_refScan.completed = generation;
+			s_refScan.result    = std::move(result);
+		});
+		return generation;
+	}
+
+	// The dialog is gone: nothing is waiting for the answer any more, so let the
+	// walk stop where it is. (Bumping the counter is all it takes — the worker
+	// polls it.)
+	void cancelReferenceScan()
+	{
+		s_refScan.requested.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	// The dialog's view of the scan it started. False while the worker is still
+	// walking — the caller says so rather than showing an empty list, which would
+	// read as "nothing references this".
+	bool referenceScanReady(std::uint64_t generation, HE::AssetRefs::ScanResult& out)
+	{
+		std::lock_guard<std::mutex> lock(s_refScan.mutex);
+		if (generation == 0 || s_refScan.completed != generation) return false;
+		out = s_refScan.result;
+		return true;
+	}
+
+#ifdef HE_IMGUI_ENABLED
+	// The reference section every delete-ish dialog shows. `consequence` is what
+	// happens to those referrers if the user goes ahead — which is NOT the same
+	// sentence for a deletion (they break) and for a cache eviction (they cause a
+	// re-download), so the caller supplies it.
+	void drawReferenceSection(std::uint64_t generation, const char* consequence)
+	{
+		// No scan was startable — a C++ class under Source/, or a path outside every
+		// known root. Saying so is the point: an empty section here would read as
+		// "checked, found nothing", which is a stronger claim than the old flat
+		// warning this replaced.
+		if (generation == 0)
+		{
+			ImGui::TextDisabled("References were not checked for this file.");
+			return;
+		}
+
+		HE::AssetRefs::ScanResult scan;
+		if (!referenceScanReady(generation, scan))
+		{
+			// Three dots that move, so a slow scan on a big project reads as
+			// "working" rather than "stuck".
+			static const char* kDots[] = { "", ".", "..", "..." };
+			const int phase = static_cast<int>(ImGui::GetTime() * 3.0) & 3;
+			ImGui::TextDisabled("Checking what references it%s", kDots[phase]);
+			return;
+		}
+
+		if (scan.referrers.empty())
+		{
+			if (scan.incomplete)
+				ImGui::TextDisabled("Some files could not be checked — there may be references.");
+			else
+				ImGui::TextDisabled("Nothing else references it.");
+			return;
+		}
+
+		const int n = static_cast<int>(scan.referrers.size());
+		ImGui::TextColored(ImVec4(1.00f, 0.80f, 0.35f, 1.0f),
+			"%d file%s reference%s it%s", n, n == 1 ? "" : "s", n == 1 ? "s" : "",
+			scan.truncated ? " (first matches shown)" : "");
+		if (consequence && *consequence) ImGui::TextDisabled("%s", consequence);
+
+		const float lineH = ImGui::GetTextLineHeightWithSpacing();
+		const float listH = std::clamp(lineH * static_cast<float>(n) + 8.0f, lineH, 140.0f);
+		ImGui::BeginChild("##cb_ref_list", ImVec2(-1.0f, listH), true,
+			ImGuiWindowFlags_HorizontalScrollbar);
+		for (const HE::AssetRefs::Referrer& r : scan.referrers)
+		{
+			ImGui::TextUnformatted(r.displayPath.c_str());
+			// How it points at the asset decides whether a rename could have saved
+			// it: a stored path can be retargeted, a scene's asset id cannot be
+			// anything but dangling once the asset is gone.
+			ImGui::SameLine();
+			ImGui::TextDisabled(r.kind == HE::AssetRefs::RefKind::Uuid ? "(asset id)" : "(path)");
+		}
+		ImGui::EndChild();
+		if (scan.incomplete)
+			ImGui::TextDisabled("Some files could not be checked — there may be more.");
+	}
+#endif
+}
 
 bool quietRefreshRequested()  { return s_quietContentRefresh; }
 void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
@@ -582,6 +802,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static bool        s_selectedIsFolder = false;
 		static std::string s_ctxMenuItem;
 		static bool        s_ctxMenuIsFolder  = false;
+		// A downloaded EngineContent asset, i.e. one whose only local existence is a
+		// copy in the shared per-machine download cache. Captured HERE, where the
+		// File* is still in scope: the context menu only remembers a path, and the
+		// cache's manifest uuid cannot be re-derived from that alone.
+		static bool        s_ctxMenuIsCacheCopy = false;
+		static HE::UUID    s_ctxMenuRemoteUuid;
 		static std::string s_renameTarget;
 		static bool        s_renameIsFolder   = false;
 		static char        s_renameBuf[256]   = {};
@@ -617,6 +843,44 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static std::string              s_deleteAssetTarget;
 		static bool                     s_deleteAssetIsSource = false;   // .h/.cpp pair
 		static bool                     s_openDeleteAssetPopup = false;
+		// Which reference scan each dialog is showing. 0 = none started (a C++
+		// class, which holds no asset references, or a scan that could not be
+		// built) — the section is simply omitted then.
+		static std::uint64_t            s_deleteAssetScanGen  = 0;
+		static std::uint64_t            s_deleteFolderScanGen = 0;
+#ifdef HE_HAVE_LIBSSH2
+		// "Remove Local Copy" confirmation — the inverse of the download popup, and
+		// the same plain-data rule: the tree is rebuilt underneath this dialog.
+		static std::string   s_removeCacheFullPath;
+		static std::string   s_removeCacheRelPath;   // cache/SFTP-relative, the manifest's own spelling
+		static HE::UUID      s_removeCacheUuid;
+		static bool          s_openRemoveCachePopup = false;
+		static std::uint64_t s_removeCacheScanGen   = 0;
+#endif
+
+		// Everything the scan needs about WHERE to look, filled from the content
+		// manager on the frame thread and then owned by the worker.
+		auto makeScanJob = [&](const std::string& targetAbs, bool isFolder) -> RefScanJob
+		{
+			RefScanJob job;
+			if (!ctx.contentManager) return job;
+			job.contentRoot    = ctx.contentManager->contentRoot();
+			job.projectRoot    = fs::path(job.contentRoot).parent_path().string();
+			job.contentDirName = fs::path(job.contentRoot).filename().generic_string();
+			job.targetAbs      = targetAbs;
+			job.targetRel      = ctx.contentManager->toContentRelativePath(targetAbs);
+			job.isFolder       = isFolder;
+			return job;
+		};
+		// A target with neither a content-relative path nor (for a folder) a tree to
+		// walk is nothing the scan can look for — the Source root's C++ classes are
+		// the real case. Returns 0, which the dialog reads as "no section".
+		auto beginScanFor = [&](const std::string& targetAbs, bool isFolder) -> std::uint64_t
+		{
+			RefScanJob job = makeScanJob(targetAbs, isFolder);
+			if (job.contentRoot.empty() || job.targetRel.empty()) return 0;
+			return startReferenceScan(std::move(job));
+		};
 #ifdef HE_HAVE_LIBSSH2
 		// Remote-download confirmation: same "outlives the popup's opening frame,
 		// so keep it as plain data, never a File*" reasoning as the delete-folder
@@ -776,6 +1040,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_selectedIsFolder = true;
 				s_ctxMenuItem      = sub->fullPath;
 				s_ctxMenuIsFolder  = true;
+				// A folder is never a single cache copy — clearing this is what keeps
+				// the previous right-click's answer from leaking into this menu.
+				s_ctxMenuIsCacheCopy = false;
+				s_ctxMenuRemoteUuid  = HE::UUID{};
 				s_rightClickOnItem = true;
 			}
 
@@ -909,6 +1177,24 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					IM_COL32(150, 195, 240, 255));
 				if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
 					ImGui::SetTooltip("On the EngineContent server — double-click to download");
+			}
+			// The same corner, the opposite state: this one HAS been downloaded, and
+			// is therefore the only kind of engine asset a project may remove again.
+			// Without a mark of its own a downloaded asset looked exactly like a
+			// shipped default, so "Remove Local Copy" appeared on some engine tiles
+			// and not others with nothing on screen explaining the difference. Drawn
+			// as an outline rather than a filled triangle — present, not incoming.
+			else if (file->isLocalCacheCopy)
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				const float r = 9.0f;
+				const ImVec2 c(mn.x + r + 3.0f, mn.y + r + 3.0f);
+				dl->AddCircleFilled(c, r, IM_COL32(24, 30, 26, 225));
+				dl->AddCircle(c, r, IM_COL32(120, 200, 160, 235), 0, 1.5f);
+				dl->AddCircleFilled(c, 3.0f, IM_COL32(150, 225, 190, 255));
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					ImGui::SetTooltip("Downloaded to this machine's shared EngineContent cache");
 			}
 
 			// Source-control status, drawn in the BOTTOM-left so it cannot collide
@@ -1069,6 +1355,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_selectedIsFolder = false;
 				s_ctxMenuItem      = file->fullPath;
 				s_ctxMenuIsFolder  = false;
+				// The manifest uuid travels with the path: the context menu keeps
+				// only a string, and a cache copy's uuid is not recoverable from the
+				// file alone for raw (non-.hasset) entries. The path predicate is
+				// asked as well, so a stale tree node (the file removed behind the
+				// editor's back) cannot offer to remove something that is gone.
+				s_ctxMenuIsCacheCopy = file->isLocalCacheCopy &&
+				                       isEngineCacheCopy(ctx.contentManager, file->fullPath);
+				s_ctxMenuRemoteUuid  = file->remoteUuid;
 				s_rightClickOnItem = true;
 			}
 
@@ -1373,6 +1667,125 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ctx.contentRefreshPending = true;
 		};
 
+#ifdef HE_HAVE_LIBSSH2
+		// ── Give a downloaded EngineContent copy back to the server ───────
+		// Not a deletion: the file exists on the SFTP endpoint, this only drops the
+		// machine-wide cached copy of it. Getting that to actually mean "downloads
+		// again next time" takes more than unlink, because a materialized asset has
+		// MOVED from the remote map into the disk registry — and every resolution
+		// route consults the registry first. Leaving the stale entry there gives the
+		// worst of both worlds: the file is gone AND the UUID never re-downloads,
+		// it just stops resolving.
+		auto removeCachedCopyNow = [&](const std::string& absPath,
+		                               const std::string& cacheRel, HE::UUID uuid) -> bool
+		{
+			if (!ctx.contentManager || cacheRel.empty()) return false;
+
+			// A download landing right after the unlink would recreate the file and
+			// leave the tree claiming it is gone. Only the in-flight job is
+			// observable, which covers the case a user can actually see happening.
+			const HE::Cs::DownloadQueueStatus dl = HE::Cs::EngineContentSync::instance().status();
+			if (dl.active && dl.currentRelativePath == cacheRel)
+			{
+				HE_LOG_WARN(Editor, "%s",
+					("Editor: '" + cacheRel + "' is downloading right now — not removing it").c_str());
+				return false;
+			}
+
+			const std::string rel = std::string("Engine/") + cacheRel;
+			// The manifest's uuid for raw (non-.hasset) entries is null by design;
+			// the file's own META is the fallback, and a null id after both simply
+			// means "nothing was ever registered under an id", which is fine.
+			if (uuid == HE::UUID{}) uuid = HE::AssetRefs::assetUuidOfFile(absPath);
+
+			// The file goes first: on Windows a removal can fail (a sharing
+			// violation while something still reads it), and unwinding the
+			// bookkeeping afterwards is harder than not having done it yet.
+			std::error_code ec;
+			std::filesystem::remove(absPath, ec);
+			if (ec)
+			{
+				HE_LOG_ERROR(Editor, "%s",
+					("Editor: could not remove the local copy of '" + cacheRel + "': " + ec.message()).c_str());
+				return false;
+			}
+
+			EditorAssetTypeCache::invalidate(absPath);
+			AssetThumbnailCache::invalidate(absPath);
+
+			// An open tab would write the asset back on its next Save — and for an
+			// "Engine/…" path a save does NOT go to the cache, it creates a project
+			// override, which then shadows the server copy permanently. That would
+			// turn "remove my local copy" into "fork it into this project", so the
+			// tab and its panel state go with the file.
+			for (auto& t : ctx.tabs)
+				if (t.closable && t.assetPath == absPath) t.open = false;
+			EditorUI::discardPanelState(ctx, absPath);
+			if (s_selectedItem == absPath) s_selectedItem.clear();
+
+			if (!(uuid == HE::UUID{}))
+			{
+				// unloadAsset answers false for two unrelated reasons — the asset is
+				// pinned, and the asset was never loaded at all — so the "still in
+				// use" note is only true when it WAS loaded. The ordinary case for
+				// this command is an asset nobody has touched, and reporting that as
+				// in-use contradicts the dialog the user just confirmed.
+				const bool wasLoaded = ctx.contentManager->isLoaded(uuid);
+				if (!ctx.contentManager->unloadAsset(uuid) && wasLoaded)
+					HE_LOG_INFO(Editor, "%s",
+						("Editor: '" + rel + "' is still in use — its loaded copy stays until the next reload").c_str());
+				// Both halves matter: forgetting the disk entry is what lets
+				// registerRemoteAsset take the route back (it refuses while the UUID
+				// still looks resolvable from disk).
+				ctx.contentManager->forgetDiskAsset(uuid);
+
+				const std::string remotePath = cacheRel;
+				const HE::UUID    id         = uuid;
+				ctx.contentManager->registerRemoteAsset(id, rel,
+					[remotePath, id](std::function<void(bool)> done)
+					{
+						HE::Cs::EngineContentSync::instance().enqueueDownload(
+							remotePath, id, HE::Cs::DownloadTrigger::Passive,
+							[done](bool success) { done(success); });
+					});
+			}
+
+			// The catalogue has to keep listing the asset, or the tile does not turn
+			// back into a remote-only placeholder — it VANISHES, and an asset you
+			// cannot see is one you cannot get back. Writing the cached manifest is
+			// what makes that survive a restart and an offline session.
+			//
+			// ALL OF IT ON A WORKER, and not because it is slow. Both
+			// setEngineRemoteAssets and refreshEngineFolder take the engine-folder
+			// mutex EXCLUSIVELY, and this code runs inside ContentBrowserPanel::render,
+			// which holds that same (non-recursive) shared_mutex for its entire body:
+			// calling either one from here deadlocks the frame thread against itself.
+			// The download-completion callback right below already refreshes from a
+			// worker for the same reason — the worker simply waits out the frame.
+			GlobalState* gs = ctx.globalState;
+			const std::string engineRoot  = ctx.contentManager->engineContentRoot();
+			const std::string contentRoot = ctx.contentManager->contentRoot();
+			const std::string relPathCopy = cacheRel;
+			const HE::UUID    uuidCopy    = uuid;
+			globalPool().submit([gs, engineRoot, contentRoot, relPathCopy, uuidCopy]
+			{
+				HE::Cs::EngineContentSync::instance().noteLocalCopyRemoved(relPathCopy, uuidCopy);
+				if (!gs || engineRoot.empty()) return;
+				std::vector<HE::RemoteEngineAsset> remote;
+				for (const auto& e : HE::Cs::EngineContentSync::instance().manifest().entries)
+					remote.push_back(HE::RemoteEngineAsset{ e.relativePath, e.uuid });
+				gs->setEngineRemoteAssets(std::move(remote));
+				// Bumps the engine-folder version, which is what makes the panel
+				// re-resolve its nodes and show the placeholder.
+				gs->refreshEngineFolder(engineRoot, contentRoot);
+			});
+
+			HE_LOG_INFO(Editor, "%s",
+				("Editor: removed the local copy of '" + cacheRel + "' — it will download again when needed").c_str());
+			return true;
+		};
+#endif
+
 		// ── Delete a folder and everything under it ───────────────────────
 		// Shared by the two ways in: a folder with nothing in it goes straight
 		// away, one holding assets only gets here after the confirmation dialog.
@@ -1444,9 +1857,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// ContentManager::saveAsset's redirect, not through this menu.
 			const bool isEngineOverride = ctx.contentManager && ctx.contentManager->isEngineOverridePath(s_ctxMenuItem);
 			const bool isEngineDefault  = ctx.contentManager && ctx.contentManager->isEngineDefaultPath(s_ctxMenuItem);
-			const bool engineLocked     = (isEngineOverride || isEngineDefault) && !ContentManager::isEngineContentDevMode();
+			// A downloaded copy is neither of those two, so it used to fall through
+			// as ordinary project content: the menu offered Rename (which moves the
+			// file inside the cache, so the manifest path stops resolving to it and
+			// the orphan stays forever) and Delete (which destroys the machine-wide
+			// copy with none of the bookkeeping a re-download needs). It is read-only
+			// ground for the same reason a shipped default is — "Remove Local Copy"
+			// below is the one thing that may happen to it.
+			const bool isCacheCopy      = !s_ctxMenuIsFolder && s_ctxMenuIsCacheCopy;
+			const bool engineLocked     = ((isEngineOverride || isEngineDefault) &&
+			                               !ContentManager::isEngineContentDevMode()) || isCacheCopy;
 			if (engineLocked)
-				ImGui::TextDisabled(isEngineOverride ? "project override of an engine default" : "engine default asset (read-only)");
+				ImGui::TextDisabled(isCacheCopy    ? "downloaded engine asset (shared local copy)"
+				                  : isEngineOverride ? "project override of an engine default"
+				                                     : "engine default asset (read-only)");
 			ImGui::Separator();
 
 			if (isEngineOverride && !ContentManager::isEngineContentDevMode() && !s_ctxMenuIsFolder &&
@@ -1475,6 +1899,27 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 				ImGui::CloseCurrentPopup();
 			}
+
+#ifdef HE_HAVE_LIBSSH2
+			// ── Remove a downloaded EngineContent copy ───────────────────
+			// Deliberately not spelled "Delete": nothing is lost. The asset goes
+			// on existing on the server, the tile turns back into the remote-only
+			// placeholder it was before, and the next use fetches it again. What
+			// this reclaims is disk — the cache is shared by every project on the
+			// machine, so it only ever grows.
+			if (isCacheCopy && EditorWidgets::dangerMenuItem("Remove Local Copy"))
+			{
+				s_removeCacheFullPath = s_ctxMenuItem;
+				s_removeCacheRelPath  = engineRelativePath(s_ctxMenuItem);
+				s_removeCacheUuid     = s_ctxMenuRemoteUuid;
+				s_removeCacheScanGen  = beginScanFor(s_removeCacheFullPath, /*isFolder=*/false);
+				s_openRemoveCachePopup = true;
+				ImGui::CloseCurrentPopup();
+			}
+			if (isCacheCopy && ImGui::IsItemHovered())
+				ImGui::SetTooltip("Frees the disk space. The asset stays on the server "
+				                  "and downloads again when something needs it.");
+#endif
 
 			// ── Import source file → .hasset ─────────────────────────────
 			if (!s_ctxMenuIsFolder)
@@ -1640,6 +2085,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_deleteAssetTarget   = s_ctxMenuItem;
 				s_deleteAssetIsSource = s_selectedRootKind == 2;
+				// Started here rather than in the dialog body: the dialog runs every
+				// frame it is open, and starting from there would launch a scan per
+				// frame. The answer arrives while the user is still reading.
+				s_deleteAssetScanGen  = beginScanFor(s_deleteAssetTarget, /*isFolder=*/false);
 				s_openDeleteAssetPopup = true;
 				s_ctxMenuItem.clear();
 				ImGui::CloseCurrentPopup();
@@ -1670,7 +2119,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					s_deleteFolderTarget.clear();
 				}
 				else
+				{
+					s_deleteFolderScanGen = beginScanFor(s_deleteFolderTarget, /*isFolder=*/true);
 					s_openDeleteFolderPopup = true;
+				}
 				ImGui::CloseCurrentPopup();
 			}
 
@@ -1962,9 +2414,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// rather than in a log line nobody reads.
 			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
 				"This deletes the file. It does not go to the trash and cannot be undone.");
-			ImGui::TextDisabled("Anything still referencing it keeps a broken reference.");
 			if (s_deleteAssetIsSource)
 				ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
+			ImGui::Spacing();
+			// Which files break, by name — the question the old flat "anything still
+			// referencing it keeps a broken reference" line raised and left hanging.
+			drawReferenceSection(s_deleteAssetScanGen,
+				"They keep a reference to something that is no longer there.");
 			ImGui::Spacing();
 
 			// In a session this is a REQUEST, not a deletion — for everyone but
@@ -1992,21 +2448,30 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					deleteAssetNow(s_deleteAssetTarget, s_deleteAssetIsSource);
 				}
 				s_deleteAssetTarget.clear();
+				s_deleteAssetScanGen = 0;
+				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
 			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
 			{
 				s_deleteAssetTarget.clear();
+				s_deleteAssetScanGen = 0;
+				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
 		}
 		// Escape closes a modal without running either branch, and a target left
 		// behind would be deleted by the NEXT confirmation. Same stale-state trap
-		// the create/rename popup has (see the note there).
+		// the create/rename popup has (see the note there) — and the scan the
+		// dialog started has nobody left to answer, so it is called off too.
 		else if (!s_deleteAssetTarget.empty() && !s_openDeleteAssetPopup)
+		{
 			s_deleteAssetTarget.clear();
+			s_deleteAssetScanGen = 0;
+			cancelReferenceScan();
+		}
 
 		// ── Delete-folder confirmation ────────────────────────────────────
 		// Raised from the item context menu, opened here for the same reason the
@@ -2033,7 +2498,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
 				"This deletes the folder and the %d asset%s inside it.",
 				fileCount, fileCount == 1 ? "" : "s");
-			ImGui::TextDisabled("Anything still referencing them keeps a broken reference.");
+			ImGui::Spacing();
+			// Scanned for the whole subtree at once — every asset under the folder is
+			// a target, and referrers INSIDE the folder are left out: they are going
+			// away with it, so they say nothing about what breaks.
+			drawReferenceSection(s_deleteFolderScanGen,
+				"They keep references to assets that are no longer there.");
 			ImGui::Spacing();
 
 			// The list is what makes the warning worth reading, so it is shown in
@@ -2074,6 +2544,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 				s_deleteFolderTarget.clear();
 				s_deleteFolderFiles.clear();
+				s_deleteFolderScanGen = 0;
+				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -2081,9 +2553,21 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_deleteFolderTarget.clear();
 				s_deleteFolderFiles.clear();
+				s_deleteFolderScanGen = 0;
+				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
+		}
+		// Same Escape trap as the asset dialog above: the folder target survives a
+		// dismissal that ran neither branch, and the scan keeps walking for a
+		// dialog nobody is looking at.
+		else if (!s_deleteFolderTarget.empty() && !s_openDeleteFolderPopup)
+		{
+			s_deleteFolderTarget.clear();
+			s_deleteFolderFiles.clear();
+			s_deleteFolderScanGen = 0;
+			cancelReferenceScan();
 		}
 
 #ifdef HE_HAVE_LIBSSH2
@@ -2148,6 +2632,70 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_remoteDownloadRelativePath.clear();
 				s_remoteDownloadTabLabel.clear();
 				s_remoteDownloadFullPath.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		// ── "Remove Local Copy" confirmation ──────────────────────────────
+		// The mirror image of the download dialog above, and worded as such: this
+		// asks about DISK, not about the asset. Nothing here is destructive in the
+		// way the two delete dialogs are, so it says what will happen next (a
+		// re-download) rather than what will be lost.
+		if (s_openRemoveCachePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_remove_cache_popup");
+			s_openRemoveCachePopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_remove_cache_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			const std::string assetName =
+				std::filesystem::path(s_removeCacheFullPath).filename().string();
+
+			ImGui::Text("Remove the local copy of \"%s\"?", assetName.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"This deletes the downloaded file from the shared EngineContent cache "
+				"on this machine — every project here loses its local copy. The asset "
+				"itself stays on the server and is downloaded again the next time "
+				"something needs it.");
+			ImGui::Spacing();
+			// Same scan the delete dialogs run, different conclusion: these files do
+			// not break, they simply trigger the download again.
+			drawReferenceSection(s_removeCacheScanGen,
+				"They keep working — the asset downloads again when they need it.");
+			ImGui::Spacing();
+			// Honest about the half that a file removal cannot undo: an asset that is
+			// live in the open scene stays in memory until it is reloaded.
+			if (ctx.contentManager && !(s_removeCacheUuid == HE::UUID{}) &&
+			    ctx.contentManager->isLoaded(s_removeCacheUuid))
+			{
+				ImGui::TextDisabled("It is loaded right now — the copy in memory stays until the scene is reloaded.");
+				ImGui::Spacing();
+			}
+
+			if (EditorWidgets::dangerButton("Remove Local Copy", ImVec2(210, 0)))
+			{
+				removeCachedCopyNow(s_removeCacheFullPath, s_removeCacheRelPath, s_removeCacheUuid);
+				s_removeCacheFullPath.clear();
+				s_removeCacheRelPath.clear();
+				s_removeCacheUuid   = HE::UUID{};
+				s_removeCacheScanGen = 0;
+				cancelReferenceScan();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+			{
+				s_removeCacheFullPath.clear();
+				s_removeCacheRelPath.clear();
+				s_removeCacheUuid   = HE::UUID{};
+				s_removeCacheScanGen = 0;
+				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
