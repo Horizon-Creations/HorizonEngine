@@ -144,8 +144,11 @@ namespace
 		std::string contentRoot;
 		std::string projectRoot;
 		std::string contentDirName;
-		std::string targetAbs;
-		std::string targetRel;      // content-relative, "Engine/…" included
+		// Plural: a multi-asset delete asks ONE question — "what breaks if all of
+		// these go" — and answering it per asset would run N tree walks and leave
+		// the user to work out the union of N lists themselves.
+		std::vector<std::string> targetsAbs;
+		std::vector<std::string> targetsRel;   // content-relative, "Engine/…" included
 		bool        isFolder = false;
 	};
 
@@ -212,20 +215,34 @@ namespace
 			// The result has to admit that, or the dialog states the strongest thing
 			// it can say — "nothing references it" — about a question it never asked.
 			bool lostTarget = false;
-			if (job.isFolder)
+			for (std::size_t ti = 0; ti < job.targetsAbs.size(); ++ti)
 			{
-				if (!job.targetRel.empty()) targets.pathPrefixes.push_back(job.targetRel);
-				targets.uuids = containedAssetUuids(job.targetAbs, request.isCancelled, lostTarget);
-				// A folder's own assets referencing each other says nothing about
-				// what breaks OUTSIDE it — they are going away together.
-				request.excludeUnder.push_back(job.targetAbs);
-			}
-			else
-			{
-				if (!job.targetRel.empty()) targets.paths.push_back(job.targetRel);
-				const HE::UUID id = HE::AssetRefs::assetUuidOfFile(job.targetAbs, &lostTarget);
-				if (!(id == HE::UUID{})) targets.uuids.push_back(id);
-				request.excludeFiles.push_back(job.targetAbs);
+				const std::string& abs = job.targetsAbs[ti];
+				const std::string  rel = ti < job.targetsRel.size() ? job.targetsRel[ti] : std::string{};
+				if (job.isFolder)
+				{
+					if (!rel.empty()) targets.pathPrefixes.push_back(rel);
+					bool lostHere = false;
+					const std::vector<HE::UUID> inside =
+						containedAssetUuids(abs, request.isCancelled, lostHere);
+					targets.uuids.insert(targets.uuids.end(), inside.begin(), inside.end());
+					if (lostHere) lostTarget = true;
+					// A folder's own assets referencing each other says nothing about
+					// what breaks OUTSIDE it — they are going away together.
+					request.excludeUnder.push_back(abs);
+				}
+				else
+				{
+					if (!rel.empty()) targets.paths.push_back(rel);
+					bool lostHere = false;
+					const HE::UUID id = HE::AssetRefs::assetUuidOfFile(abs, &lostHere);
+					if (!(id == HE::UUID{})) targets.uuids.push_back(id);
+					if (lostHere) lostTarget = true;
+					// Assets in the same selection reference each other all the time
+					// (a mesh and the material it names): those are going together, so
+					// they are not what "this still breaks" means.
+					request.excludeFiles.push_back(abs);
+				}
 			}
 
 			HE::AssetRefs::ScanResult result = HE::AssetRefs::findReferrers(targets, request);
@@ -325,9 +342,15 @@ namespace
 #endif
 }
 
+// A mirror of the grid's current folder, kept at namespace scope purely so
+// browsedFolderPath() can reach it — everything that WRITES it still lives in
+// render(), next to the state it is derived from.
+static std::string s_browsedFolderPath;
+
 bool quietRefreshRequested()  { return s_quietContentRefresh; }
 void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
 int  browsedRootKind()          { return s_selectedRootKind; }
+std::string browsedFolderPath() { return s_browsedFolderPath; }
 
 // Starter template for a freshly created script, by language (0 = Lua, 1 = Python).
 static const char* scriptStarterTemplate(int lang)
@@ -479,6 +502,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// one of its own.
 		static std::string s_selectedItem;
 		static bool        s_selectedIsFolder = false;
+		// Everything selected, s_selectedItem included — that one stays the ANCHOR
+		// (what a rename targets, where a Shift-range starts) so every single-item
+		// path keeps working unchanged. Deleting and moving read the whole set.
+		//
+		// Paths, not File*: the tree is rebuilt and freed on every content refresh,
+		// and a selection outlives that by design.
+		static std::vector<std::string> s_selection;
+		auto isSelected = [&](const std::string& p)
+		{ return std::find(s_selection.begin(), s_selection.end(), p) != s_selection.end(); };
 		static std::string s_ctxMenuItem;
 		static bool        s_ctxMenuIsFolder  = false;
 		// A downloaded EngineContent asset, i.e. one whose only local existence is a
@@ -494,14 +526,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// the request here. It executes AFTER the draw loops (below the file
 		// grid), so the folder tree is never mutated mid-iteration and the
 		// Folder* pointers stay valid for the whole frame.
-		static std::string s_pendingMoveSrc; // absolute path of the dragged asset
-		static std::string s_pendingMoveDst; // absolute path of the target folder
+		// Plural, because a drag can carry a whole selection. The PAYLOAD stays one
+		// path on purpose: every other drop target in the editor — the material
+		// slot in the Inspector, the mesh slot, the viewport — wants exactly one
+		// asset, and widening the payload would break all of them. Only the folder
+		// target, whose meaning is "move these", consults the selection.
+		static std::vector<std::string> s_pendingMoveSrcs;
+		static std::string s_pendingMoveDst;   // absolute path of the target folder
 		auto folderDropTarget = [&](const std::string& folderAbs)
 		{
 			if (!ImGui::BeginDragDropTarget()) return;
 			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_ASSET_PATH"))
 			{
-				s_pendingMoveSrc.assign(static_cast<const char*>(p->Data));
+				const std::string dragged(static_cast<const char*>(p->Data));
+				// Dragging one OF the selected items moves all of them; dragging
+				// something outside the selection moves just that one.
+				if (isSelected(dragged) && s_selection.size() > 1)
+					s_pendingMoveSrcs = s_selection;
+				else
+					s_pendingMoveSrcs.assign(1, dragged);
 				s_pendingMoveDst = folderAbs;
 			}
 			ImGui::EndDragDropTarget();
@@ -708,6 +751,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		const HE::Folder* displayFolder = s_gridFolder ? s_gridFolder : &cbRootFolder(s_selectedRootKind);
 		s_gridFolderPath = s_gridFolder ? s_gridFolder->fullPath : std::string{};
+		// Published for browsedFolderPath(). The FULL path of what is on screen,
+		// root included — an import needs somewhere to write, and "" at a root would
+		// make every caller re-derive which root that was.
+		s_browsedFolderPath = displayFolder->fullPath;
 
 		// ── Toolbar: where you are ────────────────────────────────────────
 		// A breadcrumb, not a row of tools — so it keeps its own semantics and
@@ -969,7 +1016,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// no undo, and nothing on screen afterwards to say what had been there.
 		// Same STRING-not-pointer rule as the folder case: this outlives the
 		// frame the popup is opened on.
-		static std::string              s_deleteAssetTarget;
+		static std::vector<std::string> s_deleteAssetTargets;
 		static bool                     s_deleteAssetIsSource = false;   // .h/.cpp pair
 		static bool                     s_openDeleteAssetPopup = false;
 		// Which reference scan each dialog is showing. 0 = none started (a C++
@@ -995,26 +1042,39 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 		// Everything the scan needs about WHERE to look, filled from the content
 		// manager on the frame thread and then owned by the worker.
-		auto makeScanJob = [&](const std::string& targetAbs, bool isFolder) -> RefScanJob
+		auto makeScanJob = [&](const std::vector<std::string>& targetsAbs, bool isFolder) -> RefScanJob
 		{
 			RefScanJob job;
 			if (!ctx.contentManager) return job;
 			job.contentRoot    = ctx.contentManager->contentRoot();
 			job.projectRoot    = fs::path(job.contentRoot).parent_path().string();
 			job.contentDirName = fs::path(job.contentRoot).filename().generic_string();
-			job.targetAbs      = targetAbs;
-			job.targetRel      = ctx.contentManager->toContentRelativePath(targetAbs);
 			job.isFolder       = isFolder;
+			for (const std::string& abs : targetsAbs)
+			{
+				const std::string rel = ctx.contentManager->toContentRelativePath(abs);
+				// A target with no content-relative path is nothing the scan can look
+				// for — the Source root's C++ classes are the real case. Dropped here
+				// rather than refused wholesale, so one such file in a mixed selection
+				// does not cost the answer for all the others.
+				if (rel.empty()) continue;
+				job.targetsAbs.push_back(abs);
+				job.targetsRel.push_back(rel);
+			}
 			return job;
 		};
-		// A target with neither a content-relative path nor (for a folder) a tree to
-		// walk is nothing the scan can look for — the Source root's C++ classes are
-		// the real case. Returns 0, which the dialog reads as "no section".
+		// Returns 0 when there is nothing to look for, which the dialog reads as
+		// "no section" rather than as "nothing references it".
+		auto beginScanForMany = [&](const std::vector<std::string>& targetsAbs,
+		                            bool isFolder) -> std::uint64_t
+		{
+			RefScanJob job = makeScanJob(targetsAbs, isFolder);
+			if (job.contentRoot.empty() || job.targetsAbs.empty()) return 0;
+			return startReferenceScan(std::move(job));
+		};
 		auto beginScanFor = [&](const std::string& targetAbs, bool isFolder) -> std::uint64_t
 		{
-			RefScanJob job = makeScanJob(targetAbs, isFolder);
-			if (job.contentRoot.empty() || job.targetRel.empty()) return 0;
-			return startReferenceScan(std::move(job));
+			return beginScanForMany(std::vector<std::string>{ targetAbs }, isFolder);
 		};
 #ifdef HE_HAVE_LIBSSH2
 		// Remote-download confirmation: same "outlives the popup's opening frame,
@@ -1111,7 +1171,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
 
-			const bool isSel = (s_selectedItem == sub->fullPath);
+			const bool isSel = isSelected(sub->fullPath);
 
 			ImGui::BeginGroup();
 			ImGui::PushID(sub->fullPath.c_str());
@@ -1160,11 +1220,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			folderDropTarget(sub->fullPath); // move dragged assets into this folder
 
-			// Left click → select
+			// Left click → select. A folder is always a selection of one: the
+			// multi-select gestures below operate on assets, and mixing a folder
+			// into that set would make "delete the selection" mean two very
+			// different scopes at once.
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 			{
 				s_selectedItem     = sub->fullPath;
 				s_selectedIsFolder = true;
+				s_selection.assign(1, sub->fullPath);
 			}
 			// Double-click → navigate into folder
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -1293,7 +1357,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (col > 0 && col < columns) ImGui::SameLine();
 			if (col >= columns) col = 0;
 
-			const bool isSel = (s_selectedItem == file->fullPath);
+			const bool isSel = isSelected(file->fullPath);
 
 			ImGui::BeginGroup();
 			ImGui::PushID(file->fullPath.c_str());
@@ -1517,11 +1581,64 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::EndDragDropSource();
 			}
 
-			// Left click → select
+			// Left click → select. Ctrl/Cmd adds or removes one, Shift takes the
+			// run from the anchor to here — the two gestures every file manager
+			// uses, so nobody has to be told. A plain click still replaces the
+			// selection, which is what makes them safe to reach for.
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 			{
-				s_selectedItem     = file->fullPath;
-				s_selectedIsFolder = false;
+				const ImGuiIO& io = ImGui::GetIO();
+				const bool additive = io.KeyCtrl || io.KeySuper;
+				const bool ranged   = io.KeyShift;
+				if (additive)
+				{
+					auto it = std::find(s_selection.begin(), s_selection.end(), file->fullPath);
+					if (it != s_selection.end())
+					{
+						s_selection.erase(it);
+						// The anchor cannot be a file that is no longer selected: the
+						// next Shift-click would range from something invisible.
+						if (s_selectedItem == file->fullPath)
+							s_selectedItem = s_selection.empty() ? std::string{} : s_selection.back();
+					}
+					else
+					{
+						s_selection.push_back(file->fullPath);
+						s_selectedItem = file->fullPath;
+					}
+					s_selectedIsFolder = false;
+				}
+				else if (ranged && !s_selectedItem.empty())
+				{
+					// The run is taken over the list AS DRAWN, so a Shift-click after
+					// a search selects what the user can see, not what the folder
+					// happens to hold.
+					int from = -1, to = -1;
+					for (int gi = 0; gi < static_cast<int>(gridFiles.size()); ++gi)
+					{
+						if (gridFiles[gi]->fullPath == s_selectedItem) from = gi;
+						if (gridFiles[gi]->fullPath == file->fullPath)  to   = gi;
+					}
+					if (from >= 0 && to >= 0)
+					{
+						if (from > to) std::swap(from, to);
+						s_selection.clear();
+						for (int gi = from; gi <= to; ++gi)
+							s_selection.push_back(gridFiles[gi]->fullPath);
+					}
+					else
+					{
+						s_selection.assign(1, file->fullPath);
+						s_selectedItem = file->fullPath;
+					}
+					s_selectedIsFolder = false;
+				}
+				else
+				{
+					s_selectedItem     = file->fullPath;
+					s_selectedIsFolder = false;
+					s_selection.assign(1, file->fullPath);
+				}
 			}
 			// Double-click → open tab (or, for an EngineContent asset that only
 			// exists on the SFTP server so far, ask before downloading it — see
@@ -1544,6 +1661,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// Right click → select only, open menu after loop
 			if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
 			{
+				// Right-clicking INSIDE the selection keeps it — that is the whole
+				// point of having selected twelve things before reaching for the
+				// menu. Right-clicking outside it selects just that one, the way a
+				// left click would.
+				if (!isSelected(file->fullPath))
+					s_selection.assign(1, file->fullPath);
 				s_selectedItem     = file->fullPath;
 				s_selectedIsFolder = false;
 				s_ctxMenuItem      = file->fullPath;
@@ -1603,9 +1726,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// within one folder): plain disk rename + selection/tab fixups + a
 		// quiet content refresh. Skipped when the drop lands on the asset's
 		// own folder or the name already exists in the target.
-		if (!s_pendingMoveSrc.empty() && !s_pendingMoveDst.empty())
+		for (const std::string& moveSrc : s_pendingMoveDst.empty()
+		                                 ? std::vector<std::string>{} : s_pendingMoveSrcs)
 		{
-			const std::filesystem::path src(s_pendingMoveSrc);
+			const std::filesystem::path src(moveSrc);
 			const std::filesystem::path dst =
 				std::filesystem::path(s_pendingMoveDst) / src.filename();
 			std::error_code ec;
@@ -1653,9 +1777,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				return false;
 			};
 			const bool engineLocked =
-				isDownloadCacheGround(s_pendingMoveSrc) || isDownloadCacheGround(s_pendingMoveDst) ||
+				isDownloadCacheGround(moveSrc) || isDownloadCacheGround(s_pendingMoveDst) ||
 				(!ContentManager::isEngineContentDevMode() &&
-				 (engineReadOnlyGround(s_pendingMoveSrc) || engineReadOnlyGround(s_pendingMoveDst)));
+				 (engineReadOnlyGround(moveSrc) || engineReadOnlyGround(s_pendingMoveDst)));
 			if (!engineLocked && !sameFolder && std::filesystem::exists(src) &&
 			    !std::filesystem::exists(dst))
 			{
@@ -1665,24 +1789,31 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				{
 					// Everything that pointed at the old path — other assets' stored
 					// references and the asset's own embedded path — follows it here.
-					retargetReferences(ctx, s_pendingMoveSrc, dst.string(), /*folder=*/false);
+					retargetReferences(ctx, moveSrc, dst.string(), /*folder=*/false);
 					// Same reasoning as the rename popup: the asset left one path and
 					// landed on another, so both cached type sniffs are now lies.
-					EditorAssetTypeCache::invalidate(s_pendingMoveSrc);
+					EditorAssetTypeCache::invalidate(moveSrc);
 					EditorAssetTypeCache::invalidate(dst.string());
 					// The thumbnail is keyed by the asset's path, so the old key would
 					// keep a .hthumb nobody can reach again.
-					AssetThumbnailCache::invalidate(s_pendingMoveSrc);
+					AssetThumbnailCache::invalidate(moveSrc);
 					AssetThumbnailCache::invalidate(dst.string());
-					if (s_selectedItem == s_pendingMoveSrc)
-						s_selectedItem = dst.string();
+					if (s_selectedItem == moveSrc) s_selectedItem = dst.string();
+					// The selection follows the move: dragging twelve assets into a
+					// folder and finding nothing selected afterwards (or, worse, the
+					// twelve paths they no longer live at) is a broken gesture.
+					for (std::string& sel : s_selection)
+						if (sel == moveSrc) sel = dst.string();
 					for (auto& t : ctx.tabs)
-						if (t.assetPath == s_pendingMoveSrc)
+						if (t.assetPath == moveSrc)
 							t.assetPath = dst.string();
 					s_quietContentRefresh = true;
 				}
 			}
-			s_pendingMoveSrc.clear();
+		}
+		if (!s_pendingMoveSrcs.empty() || !s_pendingMoveDst.empty())
+		{
+			s_pendingMoveSrcs.clear();
 			s_pendingMoveDst.clear();
 		}
 
@@ -2226,17 +2357,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (!s_ctxMenuIsFolder)
 			{
 				const std::filesystem::path srcPath(s_ctxMenuItem);
-				std::string ext = srcPath.extension().string();
-				for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+				const std::string ext = std::filesystem::path(s_ctxMenuItem).extension().string();
 
-				const bool isMeshSrc    = (ext == ".gltf" || ext == ".glb");
-				const bool isTextureSrc = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
-				                           ext == ".tga" || ext == ".bmp" || ext == ".hdr");
-				const bool isAudioSrc   = (ext == ".wav");
-				const bool isMatSrc     = (ext == ".hmat");
-				const bool isFontSrc    = (ext == ".ttf" || ext == ".otf");
-
-				if (!engineLocked && (isMeshSrc || isTextureSrc || isAudioSrc || isMatSrc || isFontSrc) &&
+				// Which extensions can be imported, and which importer each one
+				// belongs to, is asked ONCE for the whole editor now
+				// (Importer::isImportableSource / importSource). It used to be
+				// spelled out here AND in the File ▸ Import Asset handler, and the
+				// two had already drifted: fonts imported from this menu and not
+				// from that one.
+				if (!engineLocked && Importer::isImportableSource(srcPath) &&
 				    ImGui::MenuItem("Import"))
 				{
 					// The item being imported lives in whichever root is currently
@@ -2247,26 +2376,34 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						std::filesystem::relative(srcPath.parent_path(), root, ec);
 					if (ec || relDir == ".") relDir.clear();
 
-					bool ok = false;
-					if (isMeshSrc && Importer::gltfHasSkin(srcPath))
-					{
-						// Same routing as File ▸ Import Asset: a skinned glTF must not
-						// go through MeshImporter, which discards the skeleton and the
-						// JOINTS_0/WEIGHTS_0 attributes.
-						ok = SkeletalMeshImporter::import(srcPath, root, relDir) != nullptr;
-						if (ok) AnimationClipImporter::importAndWrite(srcPath, root, relDir);
-					}
-					else if (isMeshSrc)    ok = MeshImporter::import(srcPath, root, relDir)     != nullptr;
-					else if (isTextureSrc) ok = TextureImporter::import(srcPath, root, relDir)  != nullptr;
-					else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root, relDir)    != nullptr;
-					else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root, relDir) != nullptr;
-					else if (isFontSrc)    ok = FontImporter::import(srcPath, root, relDir)     != nullptr;
-
-					if (!ok)
+					if (!Importer::importSource(srcPath, root, relDir))
 						HE_LOG_ERROR(Editor, "%s",
 							("Editor: import failed for " + srcPath.string()).c_str());
 					ctx.contentRefreshPending = true;
 					ImGui::CloseCurrentPopup();
+				}
+
+				// ── Reimport ─────────────────────────────────────────────
+				// An asset now records the file it was imported FROM, which is what
+				// makes this possible at all. Before it, updating a mesh meant
+				// finding the source in the OS dialog again — and, since that path
+				// wrote to the content root, ending up with a SECOND asset carrying
+				// a new uuid while every scene still referenced the old one.
+				// Reimport writes back into the asset's own folder and keeps its
+				// uuid, so references survive.
+				if (!engineLocked && ext == ".hasset" && ctx.contentManager)
+				{
+					const std::string recordedSource = Importer::sourceFileOf(s_ctxMenuItem);
+					if (!recordedSource.empty() && ImGui::MenuItem("Reimport"))
+					{
+						if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
+							HE_LOG_ERROR(Editor, "%s",
+								("Editor: reimport failed for " + s_ctxMenuItem).c_str());
+						ctx.contentRefreshPending = true;
+						ImGui::CloseCurrentPopup();
+					}
+					else if (!recordedSource.empty() && ImGui::IsItemHovered())
+						ImGui::SetTooltip("Re-read %s", recordedSource.c_str());
 				}
 
 				// ── Material → create a child INSTANCE (params/switches only) ──
@@ -2398,14 +2535,23 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// Delete when the menu opens under it, the file has no undo, and
 			// afterwards nothing on screen says which one is gone. The dialog
 			// names it, which is the whole point.
-			if (!engineLocked && !s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem("Delete"))
+			//
+			// The whole selection goes, not just the item under the pointer: the
+			// menu was raised on one OF the selected tiles, and deleting only that
+			// one would silently ignore the eleven the user had just picked out.
+			const int selectedAssetCount = (!s_ctxMenuIsFolder && isSelected(s_ctxMenuItem))
+				? static_cast<int>(s_selection.size()) : 1;
+			const std::string deleteLabel = selectedAssetCount > 1
+				? "Delete " + std::to_string(selectedAssetCount) + " Assets" : std::string("Delete");
+			if (!engineLocked && !s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem(deleteLabel.c_str()))
 			{
-				s_deleteAssetTarget   = s_ctxMenuItem;
+				s_deleteAssetTargets = (selectedAssetCount > 1)
+					? s_selection : std::vector<std::string>{ s_ctxMenuItem };
 				s_deleteAssetIsSource = s_selectedRootKind == 2;
 				// Started here rather than in the dialog body: the dialog runs every
 				// frame it is open, and starting from there would launch a scan per
 				// frame. The answer arrives while the user is still reading.
-				s_deleteAssetScanGen  = beginScanFor(s_deleteAssetTarget, /*isFolder=*/false);
+				s_deleteAssetScanGen  = beginScanForMany(s_deleteAssetTargets, /*isFolder=*/false);
 				s_openDeleteAssetPopup = true;
 				s_ctxMenuItem.clear();
 				ImGui::CloseCurrentPopup();
@@ -2748,18 +2894,37 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::BeginPopupModal("##cb_delete_asset_popup", nullptr,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
-			const std::string assetName =
-				std::filesystem::path(s_deleteAssetTarget).filename().string();
-
-			ImGui::Text("Delete \"%s\"", assetName.c_str());
+			const int assetCount = static_cast<int>(s_deleteAssetTargets.size());
+			if (assetCount == 1)
+				ImGui::Text("Delete \"%s\"",
+					std::filesystem::path(s_deleteAssetTargets.front()).filename().string().c_str());
+			else
+				ImGui::Text("Delete %d assets", assetCount);
 			ImGui::Separator();
 			ImGui::Spacing();
 			// Two facts the user cannot get back afterwards, so they belong here
 			// rather than in a log line nobody reads.
 			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f),
-				"This deletes the file. It does not go to the trash and cannot be undone.");
+				assetCount == 1
+					? "This deletes the file. It does not go to the trash and cannot be undone."
+					: "This deletes the files. They do not go to the trash and cannot be undone.");
 			if (s_deleteAssetIsSource)
 				ImGui::TextDisabled("Both halves of the class (.h and .cpp) are deleted.");
+			// Naming them is the point of a confirmation for a SET: "delete 12
+			// assets" is not something anyone can check, and the selection may have
+			// been built with a Shift-click over a run nobody read.
+			if (assetCount > 1)
+			{
+				const float lineH = ImGui::GetTextLineHeightWithSpacing();
+				const float listH = std::clamp(lineH * static_cast<float>(assetCount) + 8.0f,
+				                               lineH, 140.0f);
+				ImGui::Spacing();
+				ImGui::BeginChild("##cb_delete_asset_list", ImVec2(-1.0f, listH), true,
+					ImGuiWindowFlags_HorizontalScrollbar);
+				for (const std::string& p : s_deleteAssetTargets)
+					ImGui::TextUnformatted(std::filesystem::path(p).filename().string().c_str());
+				ImGui::EndChild();
+			}
 			ImGui::Spacing();
 			// Which files break, by name — the question the old flat "anything still
 			// referencing it keeps a broken reference" line raised and left hanging.
@@ -2780,18 +2945,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (EditorWidgets::dangerButton(needsApproval ? "Ask the host" : "Delete",
 			                                ImVec2(210, 0)))
 			{
-				// collabKeyFor, not toContentRelativePath: a C++ class is not
-				// under the content root, and reading its empty content-relative
-				// path as "no session" deleted it here and nowhere else.
-				const std::string rel = collabKeyFor(ctx, s_deleteAssetTarget);
-				// requestOrPerformAssetOp answers false when there is no session,
-				// which is the ordinary case and means: just delete it.
-				if (!(ctx.collab && !rel.empty() &&
-				      ctx.collab->requestAssetDelete(rel)))
+				// One confirmation, N deletions — each still going through the same
+				// session gate as a single one, so a peer sees N ordinary requests
+				// rather than one bulk operation the protocol has no word for.
+				for (const std::string& target : s_deleteAssetTargets)
 				{
-					deleteAssetNow(s_deleteAssetTarget, s_deleteAssetIsSource);
+					// collabKeyFor, not toContentRelativePath: a C++ class is not
+					// under the content root, and reading its empty content-relative
+					// path as "no session" deleted it here and nowhere else.
+					const std::string rel = collabKeyFor(ctx, target);
+					// requestOrPerformAssetOp answers false when there is no session,
+					// which is the ordinary case and means: just delete it.
+					if (!(ctx.collab && !rel.empty() &&
+					      ctx.collab->requestAssetDelete(rel)))
+					{
+						deleteAssetNow(target, s_deleteAssetIsSource);
+					}
 				}
-				s_deleteAssetTarget.clear();
+				s_deleteAssetTargets.clear();
+				s_selection.clear();
 				s_deleteAssetScanGen = 0;
 				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
@@ -2799,7 +2971,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::SameLine();
 			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
 			{
-				s_deleteAssetTarget.clear();
+				s_deleteAssetTargets.clear();
 				s_deleteAssetScanGen = 0;
 				cancelReferenceScan();
 				ImGui::CloseCurrentPopup();
@@ -2810,9 +2982,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// behind would be deleted by the NEXT confirmation. Same stale-state trap
 		// the create/rename popup has (see the note there) — and the scan the
 		// dialog started has nobody left to answer, so it is called off too.
-		else if (!s_deleteAssetTarget.empty() && !s_openDeleteAssetPopup)
+		else if (!s_deleteAssetTargets.empty() && !s_openDeleteAssetPopup)
 		{
-			s_deleteAssetTarget.clear();
+			s_deleteAssetTargets.clear();
 			s_deleteAssetScanGen = 0;
 			cancelReferenceScan();
 		}
@@ -3170,6 +3342,78 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			!ImGui::IsAnyItemHovered())
 		{
 			s_selectedItem.clear();
+			s_selection.clear();
+		}
+
+		// ── Keyboard ──────────────────────────────────────────────────────
+		// The panel answered no key at all: Delete did nothing, F2 did nothing,
+		// Enter did nothing. Every one of those is muscle memory from the file
+		// manager the user came from, and a browser that ignores them reads as
+		// half-finished.
+		//
+		// Gated on IsAnyItemActive so the search box keeps its own keys — typing
+		// "Delete" into it must not delete the selection. A modal takes focus away
+		// from this window, so an open dialog swallows these already.
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+		    !ImGui::IsAnyItemActive() && !s_selection.empty())
+		{
+			const bool onEngineGround = ctx.contentManager &&
+				!ContentManager::isEngineContentDevMode() &&
+				(ctx.contentManager->isEngineDefaultPath(s_selectedItem) ||
+				 ctx.contentManager->isEngineOverridePath(s_selectedItem) ||
+				 !engineRelativePath(s_selectedItem).empty());
+
+			if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !onEngineGround)
+			{
+				// Same route as the menu item, dialog included — a keystroke must not
+				// be the one path that destroys work without asking.
+				if (s_selectedIsFolder)
+				{
+					s_deleteFolderTarget = s_selectedItem;
+					s_deleteFolderFiles  = collectFolderContents(s_selectedItem);
+					if (!s_deleteFolderFiles.empty())
+					{
+						s_deleteFolderScanGen   = beginScanFor(s_deleteFolderTarget, /*isFolder=*/true);
+						s_openDeleteFolderPopup = true;
+					}
+					else s_deleteFolderTarget.clear();
+				}
+				else
+				{
+					s_deleteAssetTargets  = s_selection;
+					s_deleteAssetIsSource = s_selectedRootKind == 2;
+					s_deleteAssetScanGen  = beginScanForMany(s_deleteAssetTargets, /*isFolder=*/false);
+					s_openDeleteAssetPopup = true;
+				}
+			}
+			// Rename and open are single-item gestures by nature, so they act on the
+			// anchor rather than on the whole selection.
+			if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && !onEngineGround &&
+			    s_selectedRootKind != 2 && !s_selectedItem.empty())
+			{
+				s_renameTarget     = s_selectedItem;
+				s_renameIsFolder   = s_selectedIsFolder;
+				s_renameIsCreate   = false;
+				s_renameScriptLang = -1;
+				const std::string shown = s_selectedIsFolder
+					? std::filesystem::path(s_selectedItem).filename().string()
+					: std::filesystem::path(s_selectedItem).stem().string();
+				std::strncpy(s_renameBuf, shown.c_str(), sizeof(s_renameBuf) - 1);
+				s_renameBuf[sizeof(s_renameBuf) - 1] = '\0';
+				s_openRenamePopup = true;
+			}
+			if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) && !s_selectedItem.empty())
+			{
+				if (s_selectedIsFolder)
+				{
+					// Enter on a folder means "go in", which is the same thing the
+					// tree and a double-click do.
+					for (auto* sub : displayFolder->subfolders)
+						if (sub->fullPath == s_selectedItem)
+						{ s_gridFolder = sub; s_selectedTreeFolder = sub; break; }
+				}
+				else openAssetTab(s_selectedItem);
+			}
 		}
 
 		// ── Background right-click context menu

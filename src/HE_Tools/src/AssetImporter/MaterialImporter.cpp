@@ -42,7 +42,7 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 	asset->roughness = j.value("roughness", asset->roughness);
 	asset->opacity   = j.value("opacity",   asset->opacity);
 
-	if (!Importer::writeAsset(*asset, contentRoot))
+	if (!Importer::writeAsset(*asset, contentRoot, sourcePath))
 		return nullptr;
 
 	HE_LOG_INFO(Tool, "%s",

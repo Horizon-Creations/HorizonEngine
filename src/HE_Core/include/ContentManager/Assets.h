@@ -56,6 +56,20 @@ struct ContentAsset
 	std::string   name;
 	std::string   path;
 	HE::AssetType type = HE::AssetType::Unknown;
+
+	// ABSOLUTE path of the file this asset was imported FROM (.gltf / .png /
+	// .wav / .ttf …), empty for assets authored in the editor. Written by
+	// Importer::writeAsset and persisted in the META chunk's optional tail.
+	//
+	// Without it a re-import means finding the file in the OS dialog again, and
+	// the result lands wherever that dialog started rather than next to the asset
+	// it should replace — a SECOND asset with a new UUID, while every scene still
+	// references the old one. Absolute on purpose: sources usually live outside
+	// the content tree (a DCC scratch folder), so there is no root to be relative
+	// to. That also means it does not survive moving the project to another
+	// machine — a stale source is reported as "source is gone", never followed
+	// blindly.
+	std::string   sourcePath;
 };
 
 struct RuntimeAsset : public ContentAsset {};

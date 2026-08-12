@@ -47,14 +47,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <ContentManager/ContentManager.h>
 #include <Types/Enums.h>
-#include "MeshImporter.h"
-#include "SkeletalMeshImporter.h"
-#include "AnimationClipImporter.h"
-#include "TextureImporter.h"
-#include "MaterialImporter.h"
-#include "AudioImporter.h"
-#include "FontImporter.h"
-#include "ImporterCommon.h"   // Importer::gltfHasSkin — static vs. skeletal routing
+#include "ImporterCommon.h"   // Importer::importSource — extension → importer routing
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -768,6 +761,24 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		auto* b = static_cast<SDLDialogBridge*>(userdata);
 		if (filelist && filelist[0]) { *b->pendingFileResult = filelist[0]; *b->pendingFileReady = true; }
 	};
+	// Every path the IMPORT dialog returned — that one is multi-select, and the
+	// bridge's single-string slot cannot carry 140 textures. A function-local
+	// static rather than a bridge field: a lambda may name a static without
+	// capturing it, so the callback stays convertible to the plain function
+	// pointer SDL takes. Written from SDL's dialog callback with no lock, exactly
+	// like pendingFileResult next door.
+	static std::vector<std::string> s_pendingImportPaths;
+	auto importDialogCb = [](void* userdata, const char* const* filelist, int)
+	{
+		auto* b = static_cast<SDLDialogBridge*>(userdata);
+		if (!filelist || !filelist[0]) return;   // null = error, empty = cancelled
+		for (const char* const* p = filelist; *p; ++p)
+			s_pendingImportPaths.emplace_back(*p);
+		// The shared handler's "ready ⇒ a path was chosen" invariant still holds
+		// for anything that only looks at pendingFileResult.
+		*b->pendingFileResult = filelist[0];
+		*b->pendingFileReady  = true;
+	};
 	auto triggerOpenScene = [&]()
 	{
 		s_pendingFileOp = PendingFileOp::OpenScene;
@@ -851,6 +862,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
 			filters, 1, nullptr, false);
 	};
+	// Where a menu-driven import should land: the folder the Content Browser is
+	// SHOWING, as a path relative to the content root ("" = the root itself).
+	// File ▸ Import Asset used to pass nothing here, so every import written from
+	// the menu appeared at the content root and the user dragged it into place —
+	// on every import, while the Content Browser's own right-click Import had
+	// always got this right.
+	//
+	// Only the Content root is a destination. The Engine root is read-only ground
+	// (shared engine defaults; writing there would shadow them project-wide from a
+	// gesture that never said so) and Source holds the C++ tree, which has no
+	// business receiving a .hasset — both fall back to the content root.
+	auto importTargetDir = [&]() -> std::filesystem::path
+	{
+		if (!ctx.contentManager) return {};
+		if (ContentBrowserPanel::browsedRootKind() != 0) return {};
+		const std::string browsed = ContentBrowserPanel::browsedFolderPath();
+		if (browsed.empty()) return {};
+		std::error_code ec;
+		std::filesystem::path rel =
+			std::filesystem::relative(browsed, ctx.contentManager->contentRoot(), ec);
+		if (ec || rel == ".") return {};
+		// A browsed path that is not under the content root at all yields
+		// "../…" — following it would write the import outside the project.
+		if (!rel.empty() && *rel.begin() == "..") return {};
+		return rel;
+	};
 	auto triggerImportAsset = [&]()
 	{
 		if (!ctx.projectLoaded || !ctx.contentManager) return;
@@ -859,19 +896,27 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// (and cancelling it must still count — the step teaches where it lives).
 		++s_importDialogOpens;
 		s_pendingFileOp = PendingFileOp::ImportAsset;
+		// Cancelling never fires the callback, so last run's selection would still
+		// be sitting here when the NEXT dialog returns.
+		s_pendingImportPaths.clear();
 		SDL_DialogFileFilter filters[] = {
-			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat" },
+			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat;ttf;otf" },
 			{ "3D Models",            "gltf;glb" },
 			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
 			{ "Audio",                "wav" },
 			{ "Materials",            "hmat" },
+			{ "Fonts",                "ttf;otf" },
 		};
-		const std::string root = ctx.contentManager->contentRoot();
-		SDL_ShowOpenFileDialog(fileDialogCb, ctx.dialogBridge,
+		// Open where the browser is standing, so the dialog's own "recent folder"
+		// is not the only thing that decides what the user is looking at.
+		const std::filesystem::path root(ctx.contentManager->contentRoot());
+		const std::string dir = root.empty() ? std::string{}
+		                                     : (root / importTargetDir()).string();
+		SDL_ShowOpenFileDialog(importDialogCb, ctx.dialogBridge,
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
-			filters, 5,
-			root.empty() ? nullptr : root.c_str(),
-			false);
+			filters, 6,
+			dir.empty() ? nullptr : dir.c_str(),
+			/*allow_many=*/true);
 	};
 	auto doCloseProject = [&]()
 	{
@@ -1390,42 +1435,33 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         else if (s_pendingFileOp == PendingFileOp::ImportAsset)
         {
-            if (!chosen.empty() && ctx.contentManager)
+            if (!s_pendingImportPaths.empty() && ctx.contentManager)
             {
-                const std::filesystem::path srcPath(chosen);
-                std::string ext = srcPath.extension().string();
-                for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-
-                const bool isMeshSrc    = (ext == ".gltf" || ext == ".glb");
-                const bool isTextureSrc = (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
-                                           ext == ".tga"  || ext == ".bmp" || ext == ".hdr");
-                const bool isAudioSrc   = (ext == ".wav");
-                const bool isMatSrc     = (ext == ".hmat");
-                const bool isFontSrc    = (ext == ".ttf" || ext == ".otf");
-
+                // Extension → importer routing lives in Importer::importSource, not
+                // here: this handler and the Content Browser's right-click Import
+                // each kept their own copy of the list, and they had already drifted
+                // (fonts imported from one and not the other).
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
-                bool ok = false;
-                if (isMeshSrc && Importer::gltfHasSkin(srcPath))
-                {
-                    // Rigged source: MeshImporter would drop the skeleton and the
-                    // per-vertex joints/weights and register bind-pose geometry as a
-                    // StaticMesh, so the mesh could never be picked as a SkeletalMesh.
-                    ok = SkeletalMeshImporter::import(srcPath, root) != nullptr;
-                    // Animations usually live in the same glTF and become their own
-                    // assets (referenced by the AnimatorStateMachine).
-                    if (ok) AnimationClipImporter::importAndWrite(srcPath, root);
-                }
-                else if (isMeshSrc)    ok = MeshImporter::import(srcPath, root)     != nullptr;
-                else if (isTextureSrc) ok = TextureImporter::import(srcPath, root)  != nullptr;
-                else if (isAudioSrc)   ok = AudioImporter::import(srcPath, root)    != nullptr;
-                else if (isMatSrc)     ok = MaterialImporter::import(srcPath, root) != nullptr;
-                else if (isFontSrc)    ok = FontImporter::import(srcPath, root)     != nullptr;
+                const std::filesystem::path relDir = importTargetDir();
 
-                if (!ok)
-                    HE_LOG_ERROR(Editor, "%s",
-                        ("Editor: import failed for " + srcPath.string()).c_str());
+                size_t imported = 0;
+                for (const std::string& src : s_pendingImportPaths)
+                {
+                    if (Importer::importSource(src, root, relDir)) ++imported;
+                    else HE_LOG_ERROR(Editor, "%s",
+                        ("Editor: import failed for " + src).c_str());
+                }
+                // One line for the whole batch, one refresh at the end: a hundred
+                // textures must not mean a hundred progress modals or a hundred
+                // rescans of the content tree.
+                HE_LOG_INFO(Editor, "%s",
+                    ("Editor: imported " + std::to_string(imported) + " of "
+                     + std::to_string(s_pendingImportPaths.size()) + " file(s) into "
+                     + (relDir.empty() ? std::string("the content root")
+                                       : relDir.generic_string())).c_str());
                 ctx.contentRefreshPending = true;
             }
+            s_pendingImportPaths.clear();
         }
         else // OpenProject
         {

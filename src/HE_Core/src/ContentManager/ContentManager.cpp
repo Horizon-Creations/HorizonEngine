@@ -56,6 +56,24 @@ static void ensureMeshUVs(StaticMeshAsset& m)
     }
 }
 
+// META layout: uint16 type, uint64 id.hi, uint64 id.lo, string name, string path,
+// and — appended, optional — string sourcePath.
+//
+// The import source lives in META rather than in a chunk of its own because it is
+// the same KIND of fact as name and path: what this asset is, not what it points
+// at. That distinction is already load-bearing elsewhere —
+// AssetRefScan::hassetHoldsRef skips META wholesale ("the asset's OWN name and
+// path") so that a query for a folder does not report every asset inside it as a
+// referrer of itself. A source like /Users/me/Art/Meshes/rock.fbx sitting in any
+// OTHER chunk would be scanned as reference text, and a "who still uses
+// Meshes/?" delete query would substring-match it and name an innocent asset.
+//
+// Appending is safe for the four readers outside this function that parse META by
+// hand (Importer::existingUUID, AssetRefScan::uuidOfHassetFile,
+// HpakWriter::metaFromHasset, EngineContentPublish::readAssetUuid): every one of
+// them reads a prefix and stops. Nothing rebuilds META from parsed fields — the
+// move/rename rewrite (AssetRefRetarget::retargetBlob) copies each chunk through
+// whole — so the tail survives the operations that touch an asset in place.
 static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
 {
     std::vector<uint8_t> buf;
@@ -64,13 +82,22 @@ static std::vector<uint8_t> buildMetaChunk(const RuntimeAsset& a)
     HAsset::Writer::appendPOD(buf, a.id.lo);
     HAsset::Writer::appendString(buf, a.name);
     HAsset::Writer::appendString(buf, a.path);
+    HAsset::Writer::appendString(buf, a.sourcePath);
     return buf;
 }
 
 // fileVersion: v1 META has no UUID — idOut stays invalid and the caller
 // must generate (and ideally persist) a fresh one.
+//
+// sourceOut is an append-only TAIL, not a new format version: every asset written
+// before it existed simply runs out of bytes there, and the bounds-checked
+// readString leaves the string empty instead of failing the whole parse. Treating
+// a missing tail as a parse failure would make every pre-existing .hasset in
+// every project unloadable. Same idiom the MTRL chunk has used for its own
+// growing tail.
 static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
-                          HE::UUID& idOut, std::string& nameOut, std::string& pathOut)
+                          HE::UUID& idOut, std::string& nameOut, std::string& pathOut,
+                          std::string* sourceOut = nullptr)
 {
     size_t off = sizeof(uint16_t); // type already known from file header
     if (fileVersion >= 2)
@@ -80,6 +107,8 @@ static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
     }
     if (!HAsset::Reader::readString(c.data, off, nameOut)) return false;
     if (!HAsset::Reader::readString(c.data, off, pathOut)) return false;
+    if (sourceOut && !HAsset::Reader::readString(c.data, off, *sourceOut))
+        sourceOut->clear();
     return true;
 }
 
@@ -111,8 +140,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	if (!metaChunk) return HE::UUID();
 
 	HE::UUID    id;
-	std::string assetName, assetPath;
-	if (!readMetaChunk(*metaChunk, reader.header().version, id, assetName, assetPath))
+	std::string assetName, assetPath, assetSource;
+	if (!readMetaChunk(*metaChunk, reader.header().version, id, assetName, assetPath, &assetSource))
 		return HE::UUID();
 
 	if (id == HE::UUID{})
@@ -124,11 +153,18 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 
 	SlotHandle handle{};
 
+	// assetSource is carried into the seven types an importer can produce, and only
+	// those: everything else here (scenes, scripts, widgets, graphs, type
+	// definitions…) is authored in the editor and can never have a source file.
+	// Carrying it is not cosmetic — saveAsset rebuilds META from the in-memory
+	// asset, so a material imported from a .hmat and then edited in the Material
+	// Editor would lose the source it came from on the next save.
 	switch (type)
 	{
 	case HE::AssetType::StaticMesh:
 	{
 		StaticMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_INDX)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.indices); }
@@ -168,6 +204,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::SkeletalMesh:
 	{
 		SkeletalMeshAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MREF)) { size_t o=0; HAsset::Reader::readString(c->data,o,a.materialPath); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MRFU)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.materialId.hi); HAsset::Reader::readPOD(c->data,o,a.materialId.lo); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_VERT)) { size_t o=0; HAsset::Reader::readVec(c->data,o,a.vertices); }
@@ -193,6 +230,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::Texture:
 	{
 		TextureAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXMI))
 		{
 			size_t o=0;
@@ -211,6 +249,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::Material:
 	{
 		MaterialAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTRL))
 		{
 			size_t o=0;
@@ -397,6 +436,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::Audio:
 	{
 		AudioAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUMI))
 		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.sampleRate); HAsset::Reader::readPOD(c->data,o,a.channels); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD)) a.audioData = c->data;
@@ -405,6 +445,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::Font:
 	{
 		FontAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_FNTI)) { size_t o=0; HAsset::Reader::readPOD(c->data,o,a.size); }
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_FNTD)) a.fontData = c->data;
 		handle = m_fontAssets.insert(std::move(a)); break;
@@ -429,6 +470,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 	case HE::AssetType::AnimationClip:
 	{
 		AnimationClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ANIM))
 		{
 			size_t o = 0;

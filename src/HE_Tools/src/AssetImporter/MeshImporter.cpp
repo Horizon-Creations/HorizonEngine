@@ -133,7 +133,7 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 
 	cgltf_free(data);
 
-	if (!Importer::writeAsset(*mesh, contentRoot))
+	if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
 		return nullptr;
 
 	HE_LOG_INFO(Tool, "%s",

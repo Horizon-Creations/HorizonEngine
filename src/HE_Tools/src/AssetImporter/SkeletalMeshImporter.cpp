@@ -163,7 +163,7 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
 
     // ── Write asset ─────────────────────────────────────────────────────────────
     mesh->path = Importer::toAssetPath(relativeOutputDir / (stem + "_skeletal.hasset"));
-    if (!Importer::writeAsset(*mesh, contentRoot))
+    if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
         return nullptr;
 
     return mesh;

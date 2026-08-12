@@ -3,6 +3,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
+#include "ImporterCommon.h"   // import provenance: writeAsset / sourceFileOf / reimport
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
@@ -1712,4 +1713,191 @@ TEST_CASE("ContentManager prefab with an empty payload still round-trips")
 		CHECK(p->id == savedId);
 		CHECK(p->data.empty());
 	}
+}
+
+// ─── Import provenance (META's optional source tail) ─────────────────────────
+
+TEST_CASE("Importer::writeAsset records the source file and it round-trips through META")
+{
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_import_src");
+	const fs::path srcFile = srcDir.path / "Rock.png";
+	{ std::ofstream f(srcFile, std::ios::binary); f << "not really a png"; }
+
+	// Handed a path with a "./" hop in it: the asset compiler is driven from a
+	// command line whose working directory nothing later remembers, so what gets
+	// stored has to be the resolved absolute path, not the caller's spelling.
+	const fs::path asGiven  = srcDir.path / "." / "Rock.png";
+	const std::string want  = fs::weakly_canonical(srcFile).generic_string();
+
+	TextureAsset tex;
+	tex.type   = HE::AssetType::Texture;
+	tex.name   = "Rock";
+	tex.path   = "Textures/Rock.hasset";
+	tex.width  = 1;
+	tex.height = 1;
+	REQUIRE(Importer::writeAsset(tex, dir.path, asGiven));
+	CHECK(tex.sourcePath == want);
+
+	// Readable without loading the asset — this is what a Reimport menu item asks
+	// to decide whether it can offer itself at all.
+	CHECK(Importer::sourceFileOf(dir.path / "Textures" / "Rock.hasset") == want);
+
+	// …and it survives the trip through the .hasset into a loaded asset.
+	ContentManager cm(dir.path.string());
+	const TextureAsset* loaded = cm.getTexture(cm.loadAsset("Textures/Rock.hasset"));
+	REQUIRE(loaded != nullptr);
+	CHECK(loaded->sourcePath == want);
+	CHECK(loaded->id == tex.id);
+}
+
+TEST_CASE("Re-saving an imported asset from an editor keeps its source path")
+{
+	// saveAsset rebuilds META from the in-memory asset, so a material imported
+	// from a .hmat and then edited in the Material Editor would lose the source it
+	// came from unless the load path carries the field back in.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_import_src2");
+	const fs::path srcFile = srcDir.path / "Brick.hmat";
+	{ std::ofstream f(srcFile); f << "{}"; }
+	const std::string want = fs::weakly_canonical(srcFile).generic_string();
+
+	MaterialAsset mat;
+	mat.type       = HE::AssetType::Material;
+	mat.name       = "Brick";
+	mat.path       = "Materials/Brick.hasset";
+	mat.shaderPath = "builtin/unlit";
+	REQUIRE(Importer::writeAsset(mat, dir.path, srcFile));
+
+	{
+		ContentManager cm(dir.path.string());
+		const HE::UUID id = cm.loadAsset("Materials/Brick.hasset");
+		const MaterialAsset* m = cm.getMaterial(id);
+		REQUIRE(m != nullptr);
+		REQUIRE(m->sourcePath == want);
+
+		MaterialAsset edited = *m;   // what an editor panel writes back
+		edited.roughness = 0.25f;
+		REQUIRE(cm.saveAsset(edited));
+	}
+
+	ContentManager fresh(dir.path.string());
+	const MaterialAsset* m = fresh.getMaterial(fresh.loadAsset("Materials/Brick.hasset"));
+	REQUIRE(m != nullptr);
+	CHECK(m->roughness == doctest::Approx(0.25f));
+	CHECK(m->sourcePath == want);
+}
+
+TEST_CASE("An asset written before META had a source tail still loads")
+{
+	// Exactly the bytes an older build wrote: type, uuid, name, path — and then
+	// the chunk ends. Treating the missing tail as a parse failure would make
+	// every .hasset in every existing project unloadable.
+	TempContentDir dir;
+	fs::create_directories(dir.path / "Textures");
+
+	const HE::UUID oldId{0x5011, 0x5012};
+	{
+		std::vector<uint8_t> meta;
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Texture));
+		HAsset::Writer::appendPOD(meta, oldId.hi);
+		HAsset::Writer::appendPOD(meta, oldId.lo);
+		HAsset::Writer::appendString(meta, "Legacy");
+		HAsset::Writer::appendString(meta, "Textures/Legacy.hasset");
+		// No source string appended — that is the whole point of this case.
+
+		std::vector<uint8_t> txmi;
+		HAsset::Writer::appendPOD(txmi, static_cast<uint32_t>(2));
+		HAsset::Writer::appendPOD(txmi, static_cast<uint32_t>(2));
+		HAsset::Writer::appendPOD(txmi, static_cast<uint32_t>(4));
+
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		w.addChunk(HAsset::CHUNK_TXMI, txmi.data(), txmi.size());
+		REQUIRE(w.write((dir.path / "Textures" / "Legacy.hasset").string(),
+		                static_cast<uint16_t>(HE::AssetType::Texture)));
+	}
+
+	ContentManager cm(dir.path.string());
+	const HE::UUID id = cm.loadAsset("Textures/Legacy.hasset");
+	CHECK(id == oldId);                       // identity intact, not regenerated
+	const TextureAsset* t = cm.getTexture(id);
+	REQUIRE(t != nullptr);
+	CHECK(t->name == "Legacy");
+	CHECK(t->width == 2);
+	CHECK(t->sourcePath.empty());             // "no recorded source", not garbage
+	CHECK(Importer::sourceFileOf(dir.path / "Textures" / "Legacy.hasset").empty());
+}
+
+TEST_CASE("A rewrite with no source of its own does not erase the recorded one")
+{
+	// Sidecar writes go through writeAsset too (a mesh's generated material, an
+	// animation clip). Letting them pass "no source" as "clear the source" would
+	// blank out the provenance of an asset the user imported directly.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_import_src3");
+	const fs::path srcFile = srcDir.path / "Hit.wav";
+	{ std::ofstream f(srcFile, std::ios::binary); f << "RIFF"; }
+	const std::string want = fs::weakly_canonical(srcFile).generic_string();
+
+	AudioAsset first;
+	first.type = HE::AssetType::Audio;
+	first.name = "Hit";
+	first.path = "Audio/Hit.hasset";
+	REQUIRE(Importer::writeAsset(first, dir.path, srcFile));
+
+	AudioAsset again;                       // a fresh struct, as an importer builds
+	again.type = HE::AssetType::Audio;
+	again.name = "Hit";
+	again.path = "Audio/Hit.hasset";
+	REQUIRE(Importer::writeAsset(again, dir.path));
+	CHECK(again.sourcePath == want);
+	CHECK(again.id == first.id);            // same recovery as the UUID
+	CHECK(Importer::sourceFileOf(dir.path / "Audio" / "Hit.hasset") == want);
+}
+
+TEST_CASE("Importer::reimport refuses what it cannot re-run")
+{
+	TempContentDir dir;
+
+	// Authored in the editor: no source recorded, so there is nothing to re-run.
+	{
+		ContentManager cm(dir.path.string());
+		ScriptAsset s;
+		s.type = HE::AssetType::Script;
+		s.name = "Spawner";
+		s.path = "Scripts/Spawner.hasset";
+		REQUIRE(cm.saveAsset(s));
+	}
+	CHECK_FALSE(Importer::reimport(dir.path / "Scripts" / "Spawner.hasset", dir.path));
+
+	// Imported on another machine: the recorded absolute path resolves to nothing
+	// here. Answering false (and logging) beats importing silence.
+	{
+		TextureAsset t;
+		t.type = HE::AssetType::Texture;
+		t.name = "Gone";
+		t.path = "Textures/Gone.hasset";
+		REQUIRE(Importer::writeAsset(t, dir.path, dir.path / "nowhere" / "Gone.png"));
+	}
+	CHECK_FALSE(Importer::reimport(dir.path / "Textures" / "Gone.hasset", dir.path));
+}
+
+TEST_CASE("Importer::isImportableSource covers every extension the editor offers")
+{
+	// The menu's file-dialog filter, the Content Browser's right-click Import and
+	// the asset compiler each used to carry their own copy of this list, and they
+	// had drifted: fonts were importable from the browser but absent from the
+	// dialog. This is the list they now share.
+	for (const char* ext : { ".gltf", ".glb", ".png", ".jpg", ".jpeg", ".tga",
+	                         ".bmp", ".hdr", ".wav", ".hmat", ".ttf", ".otf" })
+		CHECK(Importer::isImportableSource(fs::path("Some/File") += ext));
+
+	// Case is not part of the answer — Windows hands back "TEXTURE.PNG".
+	CHECK(Importer::isImportableSource("Art/TEXTURE.PNG"));
+	CHECK(Importer::isImportableSource("Art/Hero.GLB"));
+
+	CHECK_FALSE(Importer::isImportableSource("Art/notes.txt"));
+	CHECK_FALSE(Importer::isImportableSource("Art/Rock.hasset")); // already an asset
+	CHECK_FALSE(Importer::isImportableSource("Art/Rock"));        // no extension at all
 }

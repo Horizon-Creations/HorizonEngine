@@ -30,4 +30,15 @@ namespace ContentBrowserPanel
 	// 1 Engine, 2 Source. Read by the guided tour's "look at the Engine root" step
 	// — the panel's own state is file-static, so this is the only way to see it.
 	int browsedRootKind();
+
+	// The absolute path of the folder on screen — the ROOT's own path while the
+	// grid is at a root, and empty only before the first frame has drawn. Callers
+	// still have to ask browsedRootKind(): an Engine or Source folder is not a
+	// valid destination for anything the user creates or imports. This exists so
+	// an import started from the MENU can land
+	// where the user is standing: File ▸ Import Asset always wrote into the content
+	// root, so importing into Meshes/Props meant importing and then dragging the
+	// result there — every time. The panel's folder state is file-static, so this
+	// is the only way out of it.
+	std::string browsedFolderPath();
 }

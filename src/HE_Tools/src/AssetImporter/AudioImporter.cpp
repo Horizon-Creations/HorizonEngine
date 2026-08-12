@@ -51,7 +51,7 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	const unsigned int sampleRate = static_cast<unsigned int>(asset->sampleRate);
 	const unsigned int channels   = static_cast<unsigned int>(asset->channels);
 
-	if (!Importer::writeAsset(*asset, contentRoot))
+	if (!Importer::writeAsset(*asset, contentRoot, sourcePath))
 		return nullptr;
 
 	HE_LOG_INFO(Tool, "%s",

@@ -36,7 +36,7 @@ std::unique_ptr<FontAsset> FontImporter::import(
 	asset->fontData = std::move(bytes);
 	asset->size     = bakeSize > 0 ? bakeSize : 48;
 
-	if (!Importer::writeAsset(*asset, contentRoot))
+	if (!Importer::writeAsset(*asset, contentRoot, sourcePath))
 		return nullptr;
 
 	HE_LOG_INFO(Tool, "%s",

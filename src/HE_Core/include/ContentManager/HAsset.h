@@ -21,6 +21,13 @@ namespace HAsset
 // ── Magic & version ───────────────────────────────────────────────────────────
 inline constexpr char     k_magic[4]  = { 'H', 'A', 'S', 'T' };
 // v2: META chunk carries the asset UUID (16 bytes) between type and name.
+//
+// Still 2 after META gained its optional import-source tail: that field is
+// APPENDED, so every reader of the older layout stops before it and every older
+// file simply ends where the tail would start. A version bump is for a change
+// that breaks one of those two properties (v1→v2 inserted the UUID in the
+// MIDDLE); spending one on an append-only tail would only make old files look
+// unreadable to code that gates on the number.
 inline constexpr uint16_t k_version   = 2;
 
 // ── File header (32 bytes) ────────────────────────────────────────────────────

@@ -59,7 +59,7 @@ std::unique_ptr<TextureAsset> TextureImporter::import(
 	asset->name = sourcePath.stem().string();
 	asset->path = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
 
-	if (!Importer::writeAsset(*asset, contentRoot))
+	if (!Importer::writeAsset(*asset, contentRoot, sourcePath))
 		return nullptr;
 
 	HE_LOG_INFO(Tool, "%s",

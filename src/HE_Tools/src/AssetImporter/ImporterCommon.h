@@ -25,7 +25,15 @@ namespace Importer
 	// Writes <contentRoot>/<asset.path> as a .hasset file, creating parent
 	// directories as needed. If the target file already exists, its META UUID
 	// is reused so scene/asset references survive a re-import.
-	bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot);
+	//
+	// `sourceFile` is the file the asset was imported FROM; it is stored
+	// (absolute) on the asset so a later re-import knows what to read without
+	// asking the user again. Passing none is not the same as clearing it: an
+	// asset already on disk keeps the source it recorded, so a rewrite that has
+	// no source of its own (an animation clip, a generated material) cannot
+	// silently erase one.
+	bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
+	                const std::filesystem::path& sourceFile = {});
 
 	// Normalises a relative path to forward slashes (asset reference form).
 	std::string toAssetPath(const std::filesystem::path& relativePath);
@@ -95,7 +103,44 @@ namespace Importer
 	                                    const std::filesystem::path& relativeOutputDir,
 	                                    const std::string&           meshStem);
 
+	// ─── Source routing ───────────────────────────────────────────────────────
+
+	// True when `sourcePath`'s extension is one this namespace can import.
+	// The editor asks this instead of keeping its own extension list: the menu
+	// import and the Content Browser's right-click Import had drifted apart
+	// (fonts were importable from one and not the other), and a list that lives
+	// next to the routing below cannot drift from it at all.
+	bool isImportableSource(const std::filesystem::path& sourcePath);
+
+	// Imports one source file into <contentRoot>/<relativeOutputDir>, picking the
+	// importer from the extension — including the skinned-glTF split, which is
+	// not a detail a caller may re-derive: a rigged mesh sent to MeshImporter
+	// imports as bind-pose geometry registered as a StaticMesh, successfully and
+	// unusably. False when the extension is not importable or the import failed
+	// (the importer has already logged why).
+	bool importSource(const std::filesystem::path& sourcePath,
+	                  const std::filesystem::path& contentRoot,
+	                  const std::filesystem::path& relativeOutputDir = {});
+
 	// ─── Re-import bookkeeping ────────────────────────────────────────────────
+
+	// The absolute path recorded in `assetFile`'s META when it was imported, or
+	// empty when it records none (authored in the editor, or written by a build
+	// from before the field existed). Reads the file's header and META chunk
+	// only. Callers use "empty" to disable a Reimport affordance rather than
+	// offering one that cannot work.
+	std::string sourceFileOf(const std::filesystem::path& assetFile);
+
+	// Re-runs the import that produced `assetFile`, back over `assetFile` itself:
+	// the output directory is the asset's CURRENT folder, not wherever the source
+	// happens to live, and writeAsset recovers the existing UUID — so the asset
+	// every scene already references is the one that gets updated, instead of a
+	// second copy appearing at the content root.
+	// False (with a log) when the asset records no source, when that source is
+	// gone from disk, when the asset does not live under `contentRoot`, or when
+	// the import itself failed.
+	bool reimport(const std::filesystem::path& assetFile,
+	              const std::filesystem::path& contentRoot);
 
 	// The sidecar assets that were written alongside an already-imported mesh: the
 	// material its MREF chunk names, plus that material's textures. Paths are

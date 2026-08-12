@@ -1,9 +1,19 @@
 #include "ImporterCommon.h"
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
+// The whole importer set, because importSource() below is the one place that
+// decides which of them a given file belongs to.
+#include "AnimationClipImporter.h"
+#include "AudioImporter.h"
+#include "FontImporter.h"
+#include "MaterialImporter.h"
+#include "MeshImporter.h"
+#include "SkeletalMeshImporter.h"
 #include "TextureImporter.h"
 
 // Declarations only — CGLTF_IMPLEMENTATION is defined exactly once, in
@@ -54,7 +64,33 @@ static HE::UUID existingUUID(const std::filesystem::path& file)
 	return id;
 }
 
-bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot)
+// Field order mirrors ContentManager's buildMetaChunk (type, hi, lo, name, path,
+// source) — the same hand-rolled prefix walk existingUUID above does, carried two
+// strings further. The source is an optional tail: an asset written before the
+// field existed runs out of bytes there and answers "" rather than failing.
+std::string sourceFileOf(const std::filesystem::path& assetFile)
+{
+	HAsset::Reader reader;
+	if (!reader.open(assetFile.string()))
+		return {};
+
+	const auto* meta = reader.findChunk(HAsset::CHUNK_META);
+	if (!meta || reader.header().version < 2)
+		return {};
+
+	HE::UUID    id;
+	std::string name, path, source;
+	size_t      off = sizeof(uint16_t); // skip asset type
+	if (!HAsset::Reader::readPOD(meta->data, off, id.hi))     return {};
+	if (!HAsset::Reader::readPOD(meta->data, off, id.lo))     return {};
+	if (!HAsset::Reader::readString(meta->data, off, name))   return {};
+	if (!HAsset::Reader::readString(meta->data, off, path))   return {};
+	if (!HAsset::Reader::readString(meta->data, off, source)) return {};
+	return source;
+}
+
+bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
+                const std::filesystem::path& sourceFile)
 {
 	const std::filesystem::path target = contentRoot / asset.path;
 
@@ -64,6 +100,30 @@ bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot)
 	// Re-import: keep the identity the asset already has on disk.
 	if (asset.id == HE::UUID{})
 		asset.id = existingUUID(target);
+
+	if (!sourceFile.empty())
+	{
+		// Absolute, and with any "../" collapsed: the asset compiler is handed
+		// relative paths from a command line whose working directory nothing later
+		// remembers, so storing them verbatim records a source that resolves to a
+		// different file — or to none — the next time anyone reads it.
+		std::error_code srcEc;
+		std::filesystem::path abs = std::filesystem::weakly_canonical(sourceFile, srcEc);
+		if (srcEc || abs.empty())
+		{
+			abs = std::filesystem::absolute(sourceFile, srcEc);
+			if (srcEc) abs = sourceFile;
+		}
+		asset.sourcePath = abs.generic_string();
+	}
+	else if (asset.sourcePath.empty())
+	{
+		// A rewrite with no source of its own must not erase the one already on
+		// disk — sidecar writes (a mesh's generated material, an animation clip)
+		// go through here too, and they would otherwise blank out the provenance
+		// of an asset the user had imported directly.
+		asset.sourcePath = sourceFileOf(target);
+	}
 
 	ContentManager cm(contentRoot.string());
 	if (!cm.saveAsset(asset))
@@ -253,6 +313,117 @@ std::string importBaseColorMaterial(const cgltf_data*            data,
 	if (!Importer::writeAsset(mat, contentRoot))
 		return {};
 	return mat.path;
+}
+
+// ─── Source routing ──────────────────────────────────────────────────────────
+
+namespace
+{
+enum class SourceKind { None, Mesh, Texture, Audio, Material, Font };
+
+SourceKind classifySource(const std::filesystem::path& sourcePath)
+{
+	std::string ext = sourcePath.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+	if (ext == ".gltf" || ext == ".glb")                      return SourceKind::Mesh;
+	if (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
+	    ext == ".tga"  || ext == ".bmp" || ext == ".hdr")     return SourceKind::Texture;
+	if (ext == ".wav")                                        return SourceKind::Audio;
+	if (ext == ".hmat")                                       return SourceKind::Material;
+	if (ext == ".ttf"  || ext == ".otf")                      return SourceKind::Font;
+	return SourceKind::None;
+}
+} // namespace
+
+bool isImportableSource(const std::filesystem::path& sourcePath)
+{
+	return classifySource(sourcePath) != SourceKind::None;
+}
+
+bool importSource(const std::filesystem::path& sourcePath,
+                  const std::filesystem::path& contentRoot,
+                  const std::filesystem::path& relativeOutputDir)
+{
+	switch (classifySource(sourcePath))
+	{
+	case SourceKind::Mesh:
+		if (gltfHasSkin(sourcePath))
+		{
+			// Rigged source: MeshImporter drops the skeleton and the JOINTS_0 /
+			// WEIGHTS_0 attributes and registers bind-pose geometry as a StaticMesh,
+			// so the mesh could never afterwards be picked as a SkeletalMesh.
+			if (!SkeletalMeshImporter::import(sourcePath, contentRoot, relativeOutputDir))
+				return false;
+			// The animations usually live in the same glTF and become their own
+			// assets (referenced by the AnimatorStateMachine).
+			AnimationClipImporter::importAndWrite(sourcePath, contentRoot, relativeOutputDir);
+			return true;
+		}
+		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir)     != nullptr;
+	case SourceKind::Texture:
+		return TextureImporter::import(sourcePath, contentRoot, relativeOutputDir)  != nullptr;
+	case SourceKind::Audio:
+		return AudioImporter::import(sourcePath, contentRoot, relativeOutputDir)    != nullptr;
+	case SourceKind::Material:
+		return MaterialImporter::import(sourcePath, contentRoot, relativeOutputDir) != nullptr;
+	case SourceKind::Font:
+		return FontImporter::import(sourcePath, contentRoot, relativeOutputDir)     != nullptr;
+	case SourceKind::None:
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: no importer for " + sourcePath.string()).c_str());
+		return false;
+	}
+	return false;
+}
+
+bool reimport(const std::filesystem::path& assetFile,
+              const std::filesystem::path& contentRoot)
+{
+	const std::string source = sourceFileOf(assetFile);
+	if (source.empty())
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: " + assetFile.string() + " records no import source").c_str());
+		return false;
+	}
+
+	std::error_code ec;
+	if (!std::filesystem::is_regular_file(source, ec) || ec)
+	{
+		// The usual cause is a project opened on a different machine: the recorded
+		// path is absolute and points into someone else's DCC folder. Saying so
+		// beats silently importing nothing.
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: source file is gone: " + source).c_str());
+		return false;
+	}
+
+	// The re-import writes back into the folder the asset lives in TODAY. Deriving
+	// it from the source instead would recreate the asset wherever the source
+	// happens to sit — a second copy with a second UUID, while every scene keeps
+	// pointing at the first.
+	std::filesystem::path relDir =
+		std::filesystem::relative(assetFile.parent_path(), contentRoot, ec);
+	if (ec)
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: cannot place " + assetFile.string() + " relative to " +
+			 contentRoot.string() + ": " + ec.message()).c_str());
+		return false;
+	}
+	if (relDir == ".") relDir.clear();
+	// An asset outside the content root yields a "../.."-shaped relative path, and
+	// following it would write the re-imported asset outside the project entirely.
+	if (!relDir.empty() && *relDir.begin() == "..")
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: " + assetFile.string() + " is not inside " + contentRoot.string()).c_str());
+		return false;
+	}
+
+	return importSource(source, contentRoot, relDir);
 }
 
 // ─── Re-import bookkeeping ───────────────────────────────────────────────────
