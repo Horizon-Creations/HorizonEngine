@@ -110,8 +110,15 @@ struct ScanResult
 HE_API ScanResult findReferrers(const ScanTargets& targets, const ScanRequest& request);
 
 // The asset id a loose .hasset persists in its META chunk, or a null id when the
-// file is not a readable .hasset. Used to turn "this file is being deleted" into
-// a UUID the scene scan can look for.
-HE_API HE::UUID assetUuidOfFile(const std::string& absolutePath);
+// file carries none. Used to turn "this file is being deleted" into a UUID the
+// scene scan can look for.
+//
+// `unreadable` separates the two ways of getting a null id back, and a caller
+// that is about to state "nothing references this" MUST pass it. A file that
+// simply has no id (a JSON .hescene, a pre-v2 asset) is a legitimate null; a
+// file that could not be OPENED or whose header did not parse is a target the
+// scan will now silently fail to look for — and scenes reference meshes and
+// materials by id alone, so the answer would come back empty and confident.
+HE_API HE::UUID assetUuidOfFile(const std::string& absolutePath, bool* unreadable = nullptr);
 
 } // namespace HE::AssetRefs

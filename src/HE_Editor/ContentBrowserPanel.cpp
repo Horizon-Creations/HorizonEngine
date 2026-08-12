@@ -151,21 +151,38 @@ namespace
 	// The UUIDs of every asset under `folderAbs` — what a folder delete takes with
 	// it, and therefore what scenes may still address by id. Reading each file's
 	// META is why this runs on the worker and not at menu time.
-	std::vector<HE::UUID> containedAssetUuids(const std::string& folderAbs)
+	//
+	// `lost` is the load-bearing part. A target whose id could not be read is a
+	// target the scan will not look for, and scene components reference meshes and
+	// materials by id ALONE — so dropping one silently turns a scene full of live
+	// references into "Nothing else references it". The flag turns that into "some
+	// files could not be checked" instead.
+	std::vector<HE::UUID> containedAssetUuids(const std::string& folderAbs,
+	                                          const std::function<bool()>& cancelled,
+	                                          bool& lost)
 	{
 		std::vector<HE::UUID> out;
 		std::error_code ec;
 		fs::recursive_directory_iterator it(
 			folderAbs, fs::directory_options::skip_permission_denied, ec);
 		const fs::recursive_directory_iterator end;
+		if (ec) { lost = true; return out; }
 		for (; !ec && it != end; it.increment(ec))
 		{
+			// Polled here too, not only inside findReferrers: for a folder target
+			// this walk runs FIRST, so a scan cancelled during it would otherwise
+			// read the whole subtree before noticing — including while the editor is
+			// shutting down and joining the pool.
+			if (cancelled && cancelled()) { lost = true; return out; }
 			std::error_code fec;
 			if (!it->is_regular_file(fec) || fec) { fec.clear(); continue; }
 			if (it->path().extension() != ".hasset" && it->path().extension() != ".hescene") continue;
-			const HE::UUID id = HE::AssetRefs::assetUuidOfFile(it->path().string());
+			bool unreadable = false;
+			const HE::UUID id = HE::AssetRefs::assetUuidOfFile(it->path().string(), &unreadable);
+			if (unreadable) lost = true;
 			if (!(id == HE::UUID{})) out.push_back(id);
 		}
+		if (ec) lost = true;   // the walk broke off — the target set is incomplete
 		return out;
 	}
 
@@ -190,10 +207,14 @@ namespace
 				return s_refScan.requested.load(std::memory_order_acquire) != generation;
 			};
 
+			// A target whose id could not be read is one the scan cannot look for.
+			// The result has to admit that, or the dialog states the strongest thing
+			// it can say — "nothing references it" — about a question it never asked.
+			bool lostTarget = false;
 			if (job.isFolder)
 			{
 				if (!job.targetRel.empty()) targets.pathPrefixes.push_back(job.targetRel);
-				targets.uuids = containedAssetUuids(job.targetAbs);
+				targets.uuids = containedAssetUuids(job.targetAbs, request.isCancelled, lostTarget);
 				// A folder's own assets referencing each other says nothing about
 				// what breaks OUTSIDE it — they are going away together.
 				request.excludeUnder.push_back(job.targetAbs);
@@ -201,12 +222,13 @@ namespace
 			else
 			{
 				if (!job.targetRel.empty()) targets.paths.push_back(job.targetRel);
-				const HE::UUID id = HE::AssetRefs::assetUuidOfFile(job.targetAbs);
+				const HE::UUID id = HE::AssetRefs::assetUuidOfFile(job.targetAbs, &lostTarget);
 				if (!(id == HE::UUID{})) targets.uuids.push_back(id);
 				request.excludeFiles.push_back(job.targetAbs);
 			}
 
 			HE::AssetRefs::ScanResult result = HE::AssetRefs::findReferrers(targets, request);
+			if (lostTarget) result.incomplete = true;
 
 			// A newer dialog already asked something else — this answer is about a
 			// question nobody is looking at any more (and, having been cancelled, it
@@ -1406,11 +1428,38 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				std::filesystem::equivalent(src.parent_path(), s_pendingMoveDst, ec);
 			// Engine defaults/overrides don't move via drag in normal mode —
 			// same "read-only ground" rule as create/rename/delete above.
-			const bool engineLocked = ctx.contentManager && !ContentManager::isEngineContentDevMode() &&
-				(ctx.contentManager->isEngineDefaultPath(s_pendingMoveSrc)  ||
-				 ctx.contentManager->isEngineOverridePath(s_pendingMoveSrc) ||
-				 ctx.contentManager->isEngineDefaultPath(s_pendingMoveDst)  ||
-				 ctx.contentManager->isEngineOverridePath(s_pendingMoveDst));
+			//
+			// The two path predicates alone are NOT that rule, and the gap is
+			// reachable in three directions. (1) Neither answers true for a file in
+			// the EngineContent download cache, so a downloaded asset could be
+			// dragged OUT of the machine-wide cache into the project: every other
+			// project on the machine loses its copy, the references are rewritten to
+			// point at the moved file, and none of removeCachedCopyNow's bookkeeping
+			// runs. (2) The same in reverse — a project asset dragged INTO a
+			// materialized cache folder leaves the project tree entirely (out of
+			// source control, out of the packaged build). (3) Both predicates are
+			// containment tests built on fs::relative, which answers "." for a path
+			// compared with itself and is then rejected by their leading-dot check —
+			// so the engine root and <contentRoot>/Engine, as drop targets
+			// THEMSELVES, were never covered by either.
+			auto engineReadOnlyGround = [&](const std::string& p)
+			{
+				if (!ctx.contentManager) return false;
+				if (ctx.contentManager->isEngineDefaultPath(p))  return true;
+				if (ctx.contentManager->isEngineOverridePath(p)) return true;
+				if (!engineRelativePath(p).empty())              return true;   // the download cache
+				std::error_code cmpEc;
+				const std::string engineRoot   = ctx.contentManager->engineContentRoot();
+				const std::string overrideRoot = ctx.contentManager->contentRoot() + "/Engine";
+				if (!engineRoot.empty() && std::filesystem::exists(p, cmpEc) &&
+				    std::filesystem::equivalent(p, engineRoot, cmpEc) && !cmpEc) return true;
+				cmpEc.clear();
+				if (std::filesystem::exists(overrideRoot, cmpEc) && std::filesystem::exists(p, cmpEc) &&
+				    std::filesystem::equivalent(p, overrideRoot, cmpEc) && !cmpEc) return true;
+				return std::filesystem::path(GlobalState::engineContentCacheDir()) == std::filesystem::path(p);
+			};
+			const bool engineLocked = !ContentManager::isEngineContentDevMode() &&
+				(engineReadOnlyGround(s_pendingMoveSrc) || engineReadOnlyGround(s_pendingMoveDst));
 			if (!engineLocked && !sameFolder && std::filesystem::exists(src) &&
 			    !std::filesystem::exists(dst))
 			{

@@ -287,10 +287,17 @@ bool textHoldsRef(std::string_view hay, const Query& q)
 // in a region with no '{' at all (a zeroed or pure-text buffer) it would
 // otherwise walk back over the whole chunk once per hit.
 bool enclosingJsonAt(const std::vector<uint8_t>& data, std::size_t at,
-                     std::size_t& begin, uint32_t& len)
+                     std::size_t& begin, uint32_t& len, bool& gaveUpAtCap)
 {
-	constexpr std::size_t kMaxLookback = 1u * 1024u * 1024u;
-	const std::size_t floorPos = (at > kMaxLookback) ? at - kMaxLookback : sizeof(uint32_t);
+	// Generous enough for any real material node graph — the cap exists to bound
+	// pathological input (a region with no '{' at all, walked once per hit), not
+	// to limit legitimate documents. A hit further back than this is NOT reported
+	// as "no reference": the caller marks the result incomplete, because a
+	// Material Function call lives only inside that graph JSON and has no other
+	// on-disk spelling to fall back on.
+	constexpr std::size_t kMaxLookback = 16u * 1024u * 1024u;
+	const bool capped = at > kMaxLookback + sizeof(uint32_t);
+	const std::size_t floorPos = capped ? at - kMaxLookback : sizeof(uint32_t);
 	for (std::size_t q = at; q-- > floorPos; )
 	{
 		if (data[q] != '{') continue;
@@ -303,6 +310,9 @@ bool enclosingJsonAt(const std::vector<uint8_t>& data, std::size_t at,
 		len   = n;
 		return true;
 	}
+	// Ran out of lookback rather than out of chunk: the document may well be
+	// there, we just stopped looking.
+	if (capped) gaveUpAtCap = true;
 	return false;
 }
 
@@ -328,7 +338,8 @@ std::size_t nextHit(std::string_view hay, std::size_t start, const Query& q)
 	return best;
 }
 
-bool binaryChunkHoldsRef(const std::vector<uint8_t>& data, const Query& q, RefKind& kindOut)
+bool binaryChunkHoldsRef(const std::vector<uint8_t>& data, const Query& q,
+                         RefKind& kindOut, bool& unreadable)
 {
 	if (q.empty()) return false;
 	const std::string_view hay(reinterpret_cast<const char*>(data.data()), data.size());
@@ -357,13 +368,17 @@ bool binaryChunkHoldsRef(const std::vector<uint8_t>& data, const Query& q, RefKi
 
 		std::size_t jsonBegin = 0;
 		uint32_t    jsonLen   = 0;
-		if (enclosingJsonAt(data, hit, jsonBegin, jsonLen))
+		bool        gaveUp    = false;
+		if (enclosingJsonAt(data, hit, jsonBegin, jsonLen, gaveUp))
 		{
 			const std::string_view doc(reinterpret_cast<const char*>(data.data() + jsonBegin), jsonLen);
 			bool parsed = false;
 			if (jsonTextHoldsRef(doc, q, /*insideComponents=*/false, kindOut, parsed)) return true;
+			if (!parsed) unreadable = true;
 			from = jsonBegin + jsonLen;   // never re-enter a document already examined
 		}
+		else if (gaveUp)
+			unreadable = true;
 	}
 	return false;
 }
@@ -412,7 +427,7 @@ bool hassetHoldsRef(const std::vector<uint8_t>& blob, const Query& q,
 			if (textHoldsRef(text, q)) { kindOut = RefKind::Path; return true; }
 			continue;
 		}
-		if (binaryChunkHoldsRef(c.data, q, kindOut)) return true;
+		if (binaryChunkHoldsRef(c.data, q, kindOut, unreadable)) return true;
 	}
 	return false;
 }
@@ -471,45 +486,75 @@ bool isUnder(const std::string& path, const std::string& dir)
 
 } // namespace
 
-HE::UUID assetUuidOfFile(const std::string& absolutePath)
+HE::UUID assetUuidOfFile(const std::string& absolutePath, bool* unreadable)
 {
+	if (unreadable) *unreadable = false;   // owned by this call, not by the caller's last one
+	auto fail = [&]() -> HE::UUID { if (unreadable) *unreadable = true; return HE::UUID{}; };
+
 	// Streamed rather than HAsset::Reader::open'd: this is called for every asset
 	// under a folder about to be deleted, and Reader::open reads EVERY chunk
 	// payload into memory — gigabytes of vertex and pixel data to reach 16 bytes
 	// of header. Same shape as ContentManager::scanDirInto, which streams past
 	// each payload for exactly this reason.
-	std::ifstream f(absolutePath, std::ios::binary);
-	if (!f.is_open()) return HE::UUID{};
+	//
+	// Opened at the end so the real size is known up front: every declared size in
+	// the file is untrusted and has to be bounded against it before a single byte
+	// is allocated. Both HAsset readers carry that check with a comment saying a
+	// corrupt size would otherwise resize() to gigabytes; the streaming shape kept
+	// the seek-past-payload idea and has to keep the bound with it.
+	std::ifstream f(absolutePath, std::ios::binary | std::ios::ate);
+	if (!f.is_open()) return fail();
+	const std::streamoff fileEnd = f.tellg();
+	const std::uint64_t fileSize = static_cast<std::uint64_t>(fileEnd < 0 ? 0 : fileEnd);
+	f.seekg(0, std::ios::beg);
+
+	// The magic decides which kind of null this is, so it is read BEFORE the size
+	// is judged: a 27-byte JSON scene is shorter than an .hasset header, and
+	// calling that "could not be read" would flag every folder delete as
+	// unchecked — the warning stops meaning anything the moment it always fires.
+	char magic[4] = {};
+	f.read(magic, sizeof(magic));
+	if (!f || std::memcmp(magic, HAsset::k_magic, 4) != 0) return HE::UUID{};
+	// It IS an .hasset, so from here on short or malformed means unreadable.
+	if (fileSize < sizeof(HAsset::FileHeader)) return fail();
+	f.seekg(0, std::ios::beg);
 
 	HAsset::FileHeader hdr{};
 	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0) return HE::UUID{};
-	// Pre-v2 files persist no id at all — reported as null, which callers read as
-	// "no UUID to look for", never as "matches everything".
+	if (!f) return fail();
+	// Pre-v2 files persist no id either — also a real answer, not a failure.
 	if (hdr.version < 2) return HE::UUID{};
 
+	std::uint64_t offset = sizeof(HAsset::FileHeader);
 	for (uint32_t i = 0; i < hdr.chunk_count; ++i)
 	{
+		if (offset + sizeof(HAsset::ChunkHeader) > fileSize) return fail();
 		HAsset::ChunkHeader ch{};
 		f.read(reinterpret_cast<char*>(&ch), sizeof(ch));
-		if (!f) return HE::UUID{};
+		if (!f) return fail();
+		offset += sizeof(HAsset::ChunkHeader);
+		// Compared against the REMAINDER, never as offset + size, which can wrap.
+		if (ch.size > fileSize - offset) return fail();
+
 		if (ch.id != HAsset::CHUNK_META)
 		{
 			f.seekg(static_cast<std::streamoff>(ch.size), std::ios::cur);
-			if (!f) return HE::UUID{};
+			if (!f) return fail();
+			offset += ch.size;
 			continue;
 		}
 		// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name, path.
-		if (ch.size < sizeof(uint16_t) + 2 * sizeof(uint64_t)) return HE::UUID{};
-		std::vector<uint8_t> meta(ch.size);
+		if (ch.size < sizeof(uint16_t) + 2 * sizeof(uint64_t)) return fail();
+		std::vector<uint8_t> meta(static_cast<std::size_t>(ch.size));
 		f.read(reinterpret_cast<char*>(meta.data()), static_cast<std::streamsize>(ch.size));
-		if (!f) return HE::UUID{};
+		if (!f) return fail();
 		std::size_t off = sizeof(uint16_t);
 		HE::UUID id;
-		if (!HAsset::Reader::readPOD(meta, off, id.hi)) return HE::UUID{};
-		if (!HAsset::Reader::readPOD(meta, off, id.lo)) return HE::UUID{};
+		if (!HAsset::Reader::readPOD(meta, off, id.hi)) return fail();
+		if (!HAsset::Reader::readPOD(meta, off, id.lo)) return fail();
 		return id;
 	}
+	// A well-formed file with no META chunk: nothing to look for, nothing wrong.
 	return HE::UUID{};
 }
 

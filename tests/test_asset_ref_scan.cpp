@@ -708,3 +708,68 @@ TEST_CASE("a cancelled scan stops early and says so")
 		CHECK_FALSE(res.incomplete);
 	}
 }
+
+TEST_CASE("assetUuidOfFile separates 'has no id' from 'could not be read'")
+{
+	TempContentDir dir("he_test_refscan_uuid_tristate");
+
+	// Both answers are a null UUID, and the difference decides whether a folder
+	// delete quietly stops looking for a target. A scene addresses meshes and
+	// materials by id ALONE, so a dropped id turns a scene full of live
+	// references into "Nothing else references it".
+	writeAsset(dir.path, "Mesh.hasset", HE::AssetType::StaticMesh, kTexId);
+	writeTextFile(dir.path / "Level.hescene", R"({"version":1,"entities":[]})");
+
+	SUBCASE("a real asset yields its id and reports no trouble")
+	{
+		bool unreadable = true;   // must be cleared, not merely left alone
+		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Mesh.hasset").string(), &unreadable) == kTexId);
+		CHECK_FALSE(unreadable);
+	}
+	SUBCASE("a file that legitimately carries no id is not a failure")
+	{
+		// The folder collector feeds .hescene files in on purpose; answering
+		// "unreadable" for every scene would make every folder delete claim it
+		// could not be checked, which trains the user to ignore the warning.
+		bool unreadable = false;
+		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Level.hescene").string(), &unreadable) == HE::UUID{});
+		CHECK_FALSE(unreadable);
+	}
+	SUBCASE("a file that cannot be read says so")
+	{
+		bool unreadable = false;
+		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Nope.hasset").string(), &unreadable) == HE::UUID{});
+		CHECK(unreadable);
+
+		// Truncated mid-header: an .hasset by its magic, unusable in fact.
+		writeTextFile(dir.path / "Torn.hasset", "HAST\x02\x00");
+		unreadable = false;
+		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Torn.hasset").string(), &unreadable) == HE::UUID{});
+		CHECK(unreadable);
+	}
+	SUBCASE("a corrupt chunk size is rejected instead of allocated")
+	{
+		// A bit flip in a chunk header used to be handed straight to
+		// std::vector's constructor: the allocation throws out of the worker, and
+		// the dialog spins on "Checking what references it" forever because the
+		// result is never published.
+		std::vector<uint8_t> bytes;
+		{
+			std::ifstream f(dir.path / "Mesh.hasset", std::ios::binary);
+			bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+		}
+		REQUIRE(bytes.size() > sizeof(HAsset::FileHeader) + sizeof(HAsset::ChunkHeader));
+		const std::uint64_t huge = 0x0000400000000000ull;   // 64 TB, plausible as a bit flip
+		std::memcpy(bytes.data() + sizeof(HAsset::FileHeader) + sizeof(uint32_t), &huge, sizeof(huge));
+		{
+			std::ofstream f(dir.path / "Bomb.hasset", std::ios::binary | std::ios::trunc);
+			REQUIRE(f.is_open());
+			f.write(reinterpret_cast<const char*>(bytes.data()),
+			        static_cast<std::streamsize>(bytes.size()));
+		}
+
+		bool unreadable = false;
+		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Bomb.hasset").string(), &unreadable) == HE::UUID{});
+		CHECK(unreadable);
+	}
+}
