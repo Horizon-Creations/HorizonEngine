@@ -49,10 +49,11 @@ static int32_t findParent(const cgltf_skin& skin, cgltf_size jointIdx,
 } // namespace
 
 std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
-    const std::filesystem::path& sourcePath,
-    const std::filesystem::path& contentRoot,
-    const std::filesystem::path& relativeOutputDir,
-    const ImportSettings&        settings)
+    const std::filesystem::path&   sourcePath,
+    const std::filesystem::path&   contentRoot,
+    const std::filesystem::path&   relativeOutputDir,
+    const ImportSettings&          settings,
+    const Importer::OutputTargets& outputs)
 {
     cgltf_options options{};
     cgltf_data*   data = nullptr;
@@ -74,7 +75,17 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     auto mesh = std::make_unique<SkeletalMeshAsset>();
     mesh->type = HE::AssetType::SkeletalMesh;
     const std::string stem = sourcePath.stem().string();
-    mesh->name = stem;
+    // The file this lands in: a re-import of an asset the user renamed has to hit
+    // that file, not one freshly named after the source.
+    const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir,
+                                             stem + "_skeletal");
+    // The name follows the file only where a re-import pinned one — otherwise
+    // putting the source's stem back into the META of a renamed asset would leave
+    // file and name disagreeing about what it is called. A FIRST import keeps the
+    // historical name, the glTF's stem without the "_skeletal" the file name
+    // carries: taking it from the file here would rename every already-imported
+    // character in every picker that shows the asset's name rather than its file.
+    mesh->name = outputs.asset.empty() ? stem : out.name;
 
     // ── Geometry ────────────────────────────────────────────────────────────────
     for (cgltf_size ni = 0; ni < data->nodes_count; ++ni)
@@ -155,14 +166,19 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     // the base-color TEXTURE path directly, so the lookup always came back empty
     // and skinned meshes rendered untextured; import the same texture+material
     // pair the static MeshImporter writes instead.
+    //
+    // The names the two sidecars fall back to stay derived from the SOURCE stem,
+    // never from the mesh's own (possibly renamed) name — a re-import redirects
+    // them through outputs.material / outputs.texture instead, so ordinary imports
+    // keep writing exactly the file names they always have.
     if (settings.importMaterials)
         mesh->materialPath = Importer::importBaseColorMaterial(
-            data, sourcePath, contentRoot, relativeOutputDir, stem);
+            data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
 
     cgltf_free(data);
 
     // ── Write asset ─────────────────────────────────────────────────────────────
-    mesh->path = Importer::toAssetPath(relativeOutputDir / (stem + "_skeletal.hasset"));
+    mesh->path = out.path;
     if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
         return nullptr;
 

@@ -40,6 +40,7 @@
 #include "HorizonScene/EngineApi.h"   // HE_ENV_FIELDS_* — the EnvironmentComponent field list
 #include <Diagnostics/Log.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <fstream>
 #include <cstring>
 #include <cstdint>
@@ -1523,6 +1524,41 @@ namespace
 		if (prefabRoot == entt::null) return entt::null;
 
 		rebuildHierarchy(registry, scene, idMap);
+
+		// createEntity() writes BOTH sides of the root link — the new entity's
+		// `parent` and the root's `children` entry. rebuildHierarchy then re-points
+		// `parent` at the authored parent, but it never touches the root's list,
+		// because the World root is not one of the blob's records and so never turns
+		// up in idMap. A full scene load has no such gap: there the parentless record
+		// maps ONTO world.rootEntity(), whose child list is cleared and restored like
+		// any other parent's.
+		//
+		// Left alone, every non-root prefab entity stays listed under the root as well
+		// as under its real parent: it shows up twice in the Outliner, the renderer
+		// walks it through a transform chain the author never built, and the double
+		// link is written into the .hescene on the next save. So drop the stale
+		// entries — the ones this call created that no longer call the root their
+		// parent. Anything that kept the root as its parent (the prefab root itself, a
+		// child whose authored link a damaged blob failed to restore) stays put, so
+		// nothing is ever orphaned into a list-less limbo.
+		std::vector<Entity> stale;
+		for (const auto& [key, e] : idMap)
+		{
+			(void)key;
+			const auto* h = registry.try_get<HierarchyComponent>(e);
+			if (h && h->parent != world.rootEntity())
+				stale.push_back(e);
+		}
+		if (!stale.empty())
+			if (auto* rootHier = registry.try_get<HierarchyComponent>(world.rootEntity()))
+			{
+				auto& rc = rootHier->children;
+				rc.erase(std::remove_if(rc.begin(), rc.end(), [&stale](Entity e)
+				         {
+				             return std::find(stale.begin(), stale.end(), e) != stale.end();
+				         }),
+				         rc.end());
+			}
 
 		Entity targetParent = (prefabParent != entt::null) ? prefabParent : world.rootEntity();
 		world.reparentEntity(prefabRoot, targetParent);

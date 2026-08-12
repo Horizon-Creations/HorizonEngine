@@ -202,3 +202,129 @@ TEST_CASE("HorizonWorld: un-parent a child back to the World root")
     auto& rch = reg.get<HierarchyComponent>(world.rootEntity()).children;
     CHECK(std::find(rch.begin(), rch.end(), child) != rch.end());        // now under the root
 }
+
+// ─── Prefab: nothing is left double-parented to the World root ───────────────
+// createEntity() hangs every new entity off the World root, and prefab
+// instantiation builds the authored links on top of that. It used to leave the
+// root's own child list alone, so every prefab CHILD stayed listed under the root
+// as well as under its real parent: it appeared twice in the Outliner, rendered
+// through a transform chain nobody authored, and the double link went straight
+// into the .hescene on the next save. A full scene load never had the problem —
+// there the root is one of the serialised records, so its child list is cleared
+// and restored like any other parent's.
+
+namespace
+{
+    // How OFTEN an entity is listed under the World root. A plain "is it there"
+    // check cannot see the bug this guards: the stale entry sits next to the
+    // legitimate one, and for a prefab child the count has to be zero, not one.
+    size_t rootChildCount(HorizonWorld& world, Entity e)
+    {
+        const auto& rc =
+            world.registry().get<HierarchyComponent>(world.rootEntity()).children;
+        return static_cast<size_t>(std::count(rc.begin(), rc.end(), e));
+    }
+
+    // A "Turret" with a "Barrel" and a "Base" under it — the smallest prefab that
+    // has both a root and non-root entities.
+    std::vector<uint8_t> makeTurretPrefab(HorizonWorld& world, SceneSerializer& ser)
+    {
+        Entity turret = world.createEntity("Turret");
+        Entity barrel = world.createEntity("Barrel");
+        Entity base   = world.createEntity("Base");
+        REQUIRE(world.reparentEntity(barrel, turret));
+        REQUIRE(world.reparentEntity(base,   turret));
+        return ser.serializeSubtree(world, turret);
+    }
+}
+
+TEST_CASE("Prefab: instantiation attaches only the prefab root to the World root")
+{
+    HorizonWorld world;
+    SceneSerializer ser;
+    auto data = makeTurretPrefab(world, ser);
+
+    Entity instRoot = ser.instantiatePrefab(world, data);
+
+    auto& reg = world.registry();
+    REQUIRE(reg.valid(instRoot));
+    CHECK(reg.get<NameComponent>(instRoot).name == "Turret");
+
+    // The instance root is the one and only thing the drop adds at the top level…
+    CHECK(reg.get<HierarchyComponent>(instRoot).parent == world.rootEntity());
+    CHECK(rootChildCount(world, instRoot) == 1);
+
+    // …and the children hang off it exclusively, in the authored order.
+    auto& kids = reg.get<HierarchyComponent>(instRoot).children;
+    REQUIRE(kids.size() == 2);
+    CHECK(reg.get<NameComponent>(kids[0]).name == "Barrel");
+    CHECK(reg.get<NameComponent>(kids[1]).name == "Base");
+    for (Entity child : kids)
+    {
+        CHECK(reg.get<HierarchyComponent>(child).parent == instRoot);
+        CHECK(rootChildCount(world, child) == 0);
+    }
+}
+
+TEST_CASE("Prefab: dropping onto a parent leaves nothing under the World root")
+{
+    // The viewport drop handler passes the entity under the cursor as the parent;
+    // this is the path where a leftover root link is most visible, because the
+    // whole instance is supposed to be somewhere else entirely.
+    HorizonWorld world;
+    SceneSerializer ser;
+    auto data = makeTurretPrefab(world, ser);
+
+    Entity mount = world.createEntity("Mount");
+    Entity instRoot = ser.instantiatePrefab(world, data, mount);
+
+    auto& reg = world.registry();
+    REQUIRE(reg.valid(instRoot));
+    CHECK(reg.get<HierarchyComponent>(instRoot).parent == mount);
+    CHECK(rootChildCount(world, instRoot) == 0);
+
+    auto& mountKids = reg.get<HierarchyComponent>(mount).children;
+    CHECK(std::count(mountKids.begin(), mountKids.end(), instRoot) == 1);
+
+    for (Entity child : reg.get<HierarchyComponent>(instRoot).children)
+        CHECK(rootChildCount(world, child) == 0);
+}
+
+TEST_CASE("Prefab: instantiating twice produces two independent subtrees")
+{
+    HorizonWorld world;
+    SceneSerializer ser;
+    auto data = makeTurretPrefab(world, ser);
+
+    // Explicitly parented to the root — that is how the Content Browser drop and
+    // the collaboration replay call it, and it takes a different branch inside
+    // reparentEntity than the default (the entity is already there).
+    Entity first  = ser.instantiatePrefab(world, data, world.rootEntity());
+    Entity second = ser.instantiatePrefab(world, data, world.rootEntity());
+
+    auto& reg = world.registry();
+    REQUIRE(reg.valid(first));
+    REQUIRE(reg.valid(second));
+    CHECK(first != second);
+
+    CHECK(rootChildCount(world, first)  == 1);
+    CHECK(rootChildCount(world, second) == 1);
+
+    auto& firstKids  = reg.get<HierarchyComponent>(first).children;
+    auto& secondKids = reg.get<HierarchyComponent>(second).children;
+    REQUIRE(firstKids.size()  == 2);
+    REQUIRE(secondKids.size() == 2);
+
+    // Two subtrees, not one subtree shared by two roots.
+    for (Entity child : firstKids)
+    {
+        CHECK(reg.get<HierarchyComponent>(child).parent == first);
+        CHECK(rootChildCount(world, child) == 0);
+        CHECK(std::find(secondKids.begin(), secondKids.end(), child) == secondKids.end());
+    }
+    for (Entity child : secondKids)
+    {
+        CHECK(reg.get<HierarchyComponent>(child).parent == second);
+        CHECK(rootChildCount(world, child) == 0);
+    }
+}

@@ -4,6 +4,7 @@
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>
 #include <Types/UUID.h>
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -107,6 +108,51 @@ namespace
 	std::vector<uint8_t> rawChunk(const std::string& text)
 	{
 		return std::vector<uint8_t>(text.begin(), text.end());
+	}
+
+	// A prefab payload in the shape SceneSerializer::buildSubtreeJson writes it,
+	// CBOR-encoded exactly as serializeSubtree does: a "version"/"entities"
+	// document whose entity ids are PLAIN sequential integers (0..n-1) with
+	// parent/children spelled in those same integers — the [hi,lo] pair a scene
+	// uses for entity identity does not occur here at all.
+	//
+	// The root gets two children on purpose: `"children":[1,2]` is a two-element
+	// array of unsigned numbers, i.e. the exact shape an asset id has, and it must
+	// not be mistaken for one.
+	std::vector<uint8_t> prefabChunk(const nlohmann::json& rootComponents)
+	{
+		nlohmann::json root;
+		root["id"]         = 0;
+		root["name"]       = "Root";
+		root["children"]   = nlohmann::json::array({ 1, 2 });
+		root["components"] = rootComponents;
+
+		nlohmann::json scene;
+		scene["version"]  = "1.1";
+		scene["entities"] = nlohmann::json::array({ root });
+		for (int child = 1; child <= 2; ++child)
+		{
+			nlohmann::json e;
+			e["id"]         = child;
+			e["name"]       = "Child" + std::to_string(child);
+			e["parent"]     = 0;
+			e["components"] = nlohmann::json::object();
+			scene["entities"].push_back(e);
+		}
+
+		const std::vector<uint8_t> cbor = nlohmann::json::to_cbor(scene);
+		return cbor;
+	}
+
+	// How CBOR spells a uint64: a 0x1B tag followed by eight RAW big-endian bytes.
+	// Used to prove the negative — that the id really is in the file, in a form
+	// with no decimal text anywhere for the needle gate to find.
+	std::string cborU64Bytes(uint64_t v)
+	{
+		std::string s(1, static_cast<char>(0x1B));
+		for (int i = 7; i >= 0; --i)
+			s.push_back(static_cast<char>((v >> (i * 8)) & 0xFFu));
+		return s;
 	}
 
 	void writeTextFile(const fs::path& abs, const std::string& text)
@@ -772,4 +818,90 @@ TEST_CASE("assetUuidOfFile separates 'has no id' from 'could not be read'")
 		CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Bomb.hasset").string(), &unreadable) == HE::UUID{});
 		CHECK(unreadable);
 	}
+}
+
+// ─── Prefabs: the third payload encoding ─────────────────────────────────────
+// A prefab is a real file now (Content/Prefabs/*.hasset), and its payload is
+// neither of the two shapes the scan started with: it is CBOR, where an asset id
+// is eight raw big-endian bytes and a path is a text string with no uint32
+// length prefix in front of it. Both were invisible — the dialog said "Nothing
+// else references it" about a texture a prefab was built around.
+
+TEST_CASE("An asset used only by a prefab is found, by the id inside its CBOR payload")
+{
+	TempContentDir dir("he_test_refscan_prefab_uuid");
+
+	writeAsset(dir.path, "Tex/Rock.hasset", HE::AssetType::Texture, kTexId,
+	           { { HAsset::CHUNK_PIXL, { 1, 2, 3, 4 } } });
+
+	// The reference: a component field addressing the texture by id, exactly as a
+	// scene spells it — only inside a prefab subtree, and CBOR-encoded.
+	nlohmann::json comps;
+	comps["mesh"]["asset"] = nlohmann::json::array({ kTexId.hi, kTexId.lo });
+	writeAsset(dir.path, "Prefabs/Rock.hasset", HE::AssetType::Prefab, HE::UUID::generate(),
+	           { { HAsset::CHUNK_PFAB, prefabChunk(comps) } });
+
+	// Negatives — a prefab pointing at a different asset, and one that references
+	// nothing at all (an entity subtree with no component data).
+	nlohmann::json other;
+	other["mesh"]["asset"] = nlohmann::json::array({ kMatId.hi, kMatId.lo });
+	writeAsset(dir.path, "Prefabs/Other.hasset", HE::AssetType::Prefab, HE::UUID::generate(),
+	           { { HAsset::CHUNK_PFAB, prefabChunk(other) } });
+	writeAsset(dir.path, "Prefabs/Bare.hasset", HE::AssetType::Prefab, HE::UUID::generate(),
+	           { { HAsset::CHUNK_PFAB, prefabChunk(nlohmann::json::object()) } });
+
+	// Not vacuous, and the reason the cheap gate had to change: the id IS in the
+	// file, as eight raw big-endian bytes, and its decimal text — the only form
+	// the needle scan can find — appears nowhere in it.
+	CHECK(fileContains(dir.path / "Prefabs" / "Rock.hasset", cborU64Bytes(kTexId.hi)));
+	CHECK_FALSE(fileContains(dir.path / "Prefabs" / "Rock.hasset", std::to_string(kTexId.hi)));
+
+	HE::AssetRefs::ScanTargets targets;
+	targets.uuids.push_back(kTexId);
+	const HE::AssetRefs::ScanResult res =
+		HE::AssetRefs::findReferrers(targets, requestFor(dir));
+
+	CHECK_FALSE(res.incomplete);
+	CHECK(res.referrers.size() == 1);
+	const HE::AssetRefs::Referrer* r = findRef(res, "Prefabs/Rock.hasset");
+	REQUIRE(r != nullptr);
+	CHECK(r->kind == HE::AssetRefs::RefKind::Uuid);
+	CHECK(findRef(res, "Prefabs/Other.hasset") == nullptr);
+	// A prefab whose entity ids are 0/1/2 and whose root lists `children:[1,2]` —
+	// a two-element array of unsigned numbers, the same shape as an asset id. It
+	// is not one, and reporting it would make every prefab a referrer of
+	// everything.
+	CHECK(findRef(res, "Prefabs/Bare.hasset") == nullptr);
+}
+
+TEST_CASE("A path stored inside a prefab payload is a reference too")
+{
+	TempContentDir dir("he_test_refscan_prefab_path");
+
+	writeAsset(dir.path, "Scripts/Player.hasset", HE::AssetType::Script, HE::UUID::generate(),
+	           { { HAsset::CHUNK_SRC, rawChunk("function init() end\n") } });
+
+	nlohmann::json comps;
+	comps["script"]["path"] = "Scripts/Player.hasset";
+	writeAsset(dir.path, "Prefabs/Actor.hasset", HE::AssetType::Prefab, HE::UUID::generate(),
+	           { { HAsset::CHUNK_PFAB, prefabChunk(comps) } });
+
+	// The path survives CBOR as plain UTF-8, so the file passes the needle gate on
+	// its own — what used to fail is the chunk walk, which looked for a uint32
+	// length prefix that CBOR does not write.
+	CHECK(fileContains(dir.path / "Prefabs" / "Actor.hasset", "Scripts/Player.hasset"));
+
+	HE::AssetRefs::ScanTargets targets;
+	targets.paths.push_back("Scripts/Player.hasset");
+
+	HE::AssetRefs::ScanRequest req = requestFor(dir);
+	req.excludeFiles.push_back((dir.path / "Scripts" / "Player.hasset").string());
+
+	const HE::AssetRefs::ScanResult res = HE::AssetRefs::findReferrers(targets, req);
+
+	CHECK_FALSE(res.incomplete);
+	CHECK(res.referrers.size() == 1);
+	const HE::AssetRefs::Referrer* r = findRef(res, "Prefabs/Actor.hasset");
+	REQUIRE(r != nullptr);
+	CHECK(r->kind == HE::AssetRefs::RefKind::Path);
 }

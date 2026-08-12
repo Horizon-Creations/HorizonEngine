@@ -1,5 +1,6 @@
 #include "ContentManager/AssetRefScan.h"
 #include "ContentManager/HAsset.h"
+#include "Types/Enums.h"
 
 #include <nlohmann/json.hpp>
 
@@ -41,6 +42,33 @@ bool isJsonPayloadChunk(uint32_t id)
 bool isTextPayloadChunk(uint32_t id)
 {
 	return id == HAsset::CHUNK_SRC || id == HAsset::CHUNK_HCBC;
+}
+
+// Chunks whose entire payload is one CBOR document — the same JSON model the
+// chunks above hold, binary-encoded. Prefabs only, today
+// (SceneSerializer::serializeSubtree writes json::to_cbor of an entity subtree).
+//
+// It needs a treatment of its own because NEITHER of the other two can see
+// anything in it: an asset id is eight RAW big-endian bytes with no decimal text
+// to match, and a stored path is a CBOR text string with no uint32 length prefix
+// in front of it, which is the only thing the binary walk recognises. Prefabs
+// were therefore invisible in both encodings, and an asset a prefab was built
+// around answered "Nothing else references it" on the dialog that deletes it.
+bool isCborPayloadChunk(uint32_t id)
+{
+	return id == HAsset::CHUNK_PFAB;
+}
+
+// Is this blob an .hasset holding an entity subtree? Read from the first bytes
+// the gate has already streamed in, so asking costs no extra open. See the gate
+// below for why a prefab is treated differently from every other asset.
+bool isPrefabHeader(const char* data, std::size_t size)
+{
+	if (size < sizeof(HAsset::FileHeader)) return false;
+	if (std::memcmp(data, HAsset::k_magic, 4) != 0) return false;
+	HAsset::FileHeader hdr{};
+	std::memcpy(&hdr, data, sizeof(hdr));
+	return hdr.asset_type == static_cast<uint16_t>(HE::AssetType::Prefab);
 }
 
 uint32_t readU32(const uint8_t* p) { uint32_t v = 0; std::memcpy(&v, p, sizeof(v)); return v; }
@@ -183,11 +211,31 @@ Gate gateFile(const fs::path& file, const Query& q)
 	const std::size_t overlap = q.longestNeedle;   // a needle split across two blocks
 	std::string buf(kBlock + overlap, '\0');
 	std::size_t carry = 0;
+	bool        first = true;
 	while (f)
 	{
 		f.read(buf.data() + carry, static_cast<std::streamsize>(kBlock));
 		const std::size_t got = carry + static_cast<std::size_t>(f.gcount());
 		if (got == 0) break;
+
+		// The one file the needle scan cannot rule out. A prefab's payload is CBOR,
+		// where an asset id is eight raw big-endian bytes — the decimal text this
+		// gate looks for is nowhere in the file, so a prefab that really is built
+		// around the asset would be gated out and never reach the chunk walk. There
+		// is no cheaper honest test than reading it, so it is let through on its
+		// header alone.
+		//
+		// Only when the query carries ids at all: a PATH inside CBOR is still plain
+		// UTF-8 and the needles do see it, so a path-only query loses nothing by
+		// leaving prefabs to the normal gate. The cost of the unconditional pass is
+		// bounded by what a prefab IS — one entity subtree, kilobytes, never
+		// geometry — and paid once per prefab in the project, not once per asset.
+		if (first)
+		{
+			first = false;
+			if (!q.uuids.empty() && isPrefabHeader(buf.data(), got)) return Gate::Hit;
+		}
+
 		if (blockMentions(std::string_view(buf.data(), got), q)) return Gate::Hit;
 		carry = (std::min)(got, overlap);
 		std::memmove(buf.data(), buf.data() + got - carry, carry);
@@ -254,6 +302,41 @@ bool jsonTextHoldsRef(std::string_view text, const Query& q, bool insideComponen
 	parsed = !doc.is_discarded();
 	if (!parsed) return false;
 	return jsonHoldsRef(doc, q, insideComponents, kindOut);
+}
+
+// The CBOR twin of the above, decoded into the very same document model and
+// walked by the very same matcher — a prefab payload IS scene-shaped
+// ("version" + "entities", each entity carrying a "components" object), it is
+// merely written in binary.
+//
+// `insideComponents` starts TRUE here, which no other caller does. In a
+// .hescene the guard exists because the [hi,lo] shape at ENTITY level spells an
+// entity's identity and its parent/child links; a prefab has no such shape to
+// protect. buildSubtreeJson normalises the subtree's entity ids to plain
+// sequential integers (0..n-1) and writes parent/children as those same
+// integers, so a [hi,lo] pair in a prefab can only be an asset id. Guarding
+// anyway would buy nothing and would silently drop any reference a later prefab
+// field stores outside the "components" block — and the silent miss is exactly
+// the failure this scan exists to prevent.
+//
+// The one lookalike is a root with two children, whose `children` array is two
+// unsigned numbers. It cannot collide: those entries are subtree indices, while
+// HE::UUID::generate() always sets the RFC-4122 version bit in `hi` (so every
+// real asset id has hi >= 0x4000), and compile() drops the null id outright.
+bool cborHoldsRef(const std::vector<uint8_t>& data, const Query& q,
+                  RefKind& kindOut, bool& parsed)
+{
+	// An empty payload is a legitimate on-disk state, not corruption: the prefab
+	// chunk is written unconditionally (ContentManager::saveAsset), so a subtree
+	// that serialised to nothing lands here as zero bytes. Calling that
+	// "unreadable" would flag every scan in a project holding one as incomplete,
+	// and a warning that always fires stops being read.
+	if (data.empty()) { parsed = true; return false; }
+
+	const json doc = json::from_cbor(data, /*strict=*/true, /*allow_exceptions=*/false);
+	parsed = !doc.is_discarded();
+	if (!parsed) return false;
+	return jsonHoldsRef(doc, q, /*insideComponents=*/true, kindOut);
 }
 
 bool textHoldsRef(std::string_view hay, const Query& q)
@@ -425,6 +508,13 @@ bool hassetHoldsRef(const std::vector<uint8_t>& blob, const Query& q,
 		if (isTextPayloadChunk(c.id))
 		{
 			if (textHoldsRef(text, q)) { kindOut = RefKind::Path; return true; }
+			continue;
+		}
+		if (isCborPayloadChunk(c.id))
+		{
+			bool parsed = false;
+			if (cborHoldsRef(c.data, q, kindOut, parsed)) return true;
+			if (!parsed) unreadable = true;
 			continue;
 		}
 		if (binaryChunkHoldsRef(c.data, q, kindOut, unreadable)) return true;

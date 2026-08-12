@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include "ContentManager/Assets.h"
+#include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports WAV into an AudioAsset (PCM data is stored as interleaved int16).
 // OGG/MP3 support can be added later via stb_vorbis / dr_mp3.
@@ -25,11 +26,14 @@ public:
 	static bool decode(const std::filesystem::path& sourcePath, AudioAsset& out);
 
 	// Returns the imported asset (already written to disk) or nullptr.
+	// `outputs.asset` pins the output onto a file that already exists (a re-import
+	// of an asset the user renamed); empty means "named after the source".
 	static std::unique_ptr<AudioAsset> import(
-		const std::filesystem::path& sourcePath,
-		const std::filesystem::path& contentRoot,
-		const std::filesystem::path& relativeOutputDir,
-		const ImportSettings&        settings);
+		const std::filesystem::path&   sourcePath,
+		const std::filesystem::path&   contentRoot,
+		const std::filesystem::path&   relativeOutputDir,
+		const ImportSettings&          settings,
+		const Importer::OutputTargets& outputs = {});
 
 	static std::unique_ptr<AudioAsset> import(
 		const std::filesystem::path& sourcePath,

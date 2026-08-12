@@ -69,10 +69,11 @@ void generateNormals(StaticMeshAsset& mesh)
 } // namespace
 
 std::unique_ptr<StaticMeshAsset> MeshImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir,
-	const ImportSettings&        settings)
+	const std::filesystem::path&   sourcePath,
+	const std::filesystem::path&   contentRoot,
+	const std::filesystem::path&   relativeOutputDir,
+	const ImportSettings&          settings,
+	const Importer::OutputTargets& outputs)
 {
 	cgltf_options options{};
 	cgltf_data*   data = nullptr;
@@ -92,10 +93,13 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 		return nullptr;
 	}
 
+	const std::string stem = sourcePath.stem().string();
+	const auto        out  = Importer::resolveOutput(outputs.asset, relativeOutputDir, stem);
+
 	auto mesh = std::make_unique<StaticMeshAsset>();
 	mesh->type = HE::AssetType::StaticMesh;
-	mesh->name = sourcePath.stem().string();
-	mesh->path = Importer::toAssetPath(relativeOutputDir / (mesh->name + ".hasset"));
+	mesh->name = out.name;
+	mesh->path = out.path;
 
 	// Bake every mesh-bearing node with its world transform
 	for (cgltf_size n = 0; n < data->nodes_count; ++n)
@@ -126,10 +130,14 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (settings.generateNormals && hasMissingNormals(*mesh))
 		generateNormals(*mesh);
 
-	// Material + base color texture
+	// Material + base color texture. The names the two sidecars fall back to stay
+	// derived from the SOURCE stem, never from the mesh's (possibly re-imported and
+	// renamed) own name — a re-import redirects them through outputs.material /
+	// outputs.texture instead, so that ordinary imports keep writing exactly the
+	// file names the asset compiler's up-to-date probe already expects.
 	if (settings.importMaterials)
 		mesh->materialPath = Importer::importBaseColorMaterial(
-			data, sourcePath, contentRoot, relativeOutputDir, mesh->name);
+			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
 
 	cgltf_free(data);
 

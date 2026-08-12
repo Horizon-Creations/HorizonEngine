@@ -39,10 +39,11 @@ std::unique_ptr<TextureAsset> TextureImporter::decodeFromMemory(
 }
 
 std::unique_ptr<TextureAsset> TextureImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir,
-	const ImportSettings&        settings)
+	const std::filesystem::path&   sourcePath,
+	const std::filesystem::path&   contentRoot,
+	const std::filesystem::path&   relativeOutputDir,
+	const ImportSettings&          settings,
+	const Importer::OutputTargets& outputs)
 {
 	stbi_set_flip_vertically_on_load(settings.flipVertically ? 1 : 0);
 	int w = 0, h = 0, comp = 0;
@@ -56,8 +57,10 @@ std::unique_ptr<TextureAsset> TextureImporter::import(
 		return nullptr;
 	}
 
-	asset->name = sourcePath.stem().string();
-	asset->path = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
+	const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir,
+	                                         sourcePath.stem().string());
+	asset->name = out.name;
+	asset->path = out.path;
 
 	if (!Importer::writeAsset(*asset, contentRoot, sourcePath))
 		return nullptr;

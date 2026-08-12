@@ -34,6 +34,22 @@ std::string toAssetPath(const std::filesystem::path& relativePath)
 	return s;
 }
 
+ResolvedOutput resolveOutput(const std::string&           explicitPath,
+                             const std::filesystem::path& relativeOutputDir,
+                             const std::string&           derivedStem)
+{
+	ResolvedOutput out;
+	out.path = explicitPath.empty()
+		? toAssetPath(relativeOutputDir / (derivedStem + ".hasset"))
+		: explicitPath;
+	// The name is read back OFF the resolved path, not taken from derivedStem: a
+	// re-import of a renamed asset would otherwise write the source's stem into
+	// the META of a file called something else, and that name is what the engine
+	// reports the asset as wherever the file name is not what is shown.
+	out.name = std::filesystem::path(out.path).stem().string();
+	return out;
+}
+
 bool gltfHasSkin(const std::filesystem::path& sourcePath)
 {
 	cgltf_options options{};
@@ -47,46 +63,105 @@ bool gltfHasSkin(const std::filesystem::path& sourcePath)
 	return skinned;
 }
 
+namespace
+{
+// What one .hasset's META chunk says about itself. Everything is optional in the
+// sense that a file which does not carry it leaves the field at its default —
+// this is an answer ("no id", "no recorded source"), never an error.
+struct MetaFields
+{
+	HE::UUID    id;
+	std::string name;
+	std::string path;
+	std::string source;
+};
+
+// Reads META WITHOUT pulling the rest of the file into memory: HAsset::Reader::open
+// materialises every chunk payload, so asking a mesh for its 16-byte id used to
+// read its whole vertex buffer — and sourceFileOf() below is called once per FRAME
+// by the Content Browser while a context menu is open, i.e. that whole payload was
+// re-read every frame the user hovered a large asset. Same streaming shape as
+// HE::AssetRefs::assetUuidOfFile, which exists for exactly this reason.
+//
+// Opened at the end so the real file size is known up front: every declared size in
+// the file is untrusted and has to be bounded against it before a byte is
+// allocated. Both HAsset readers carry that check with a comment saying a corrupt
+// size would otherwise resize() to gigabytes; keeping the seek-past-payload shape
+// means keeping the bound with it.
+//
+// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name, path,
+// source. The source is an append-only TAIL — an asset written before the field
+// existed simply runs out of bytes there, which leaves `source` empty rather than
+// failing the parse and making every existing .hasset look unreadable.
+bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
+{
+	std::ifstream f(file, std::ios::binary | std::ios::ate);
+	if (!f.is_open()) return false;
+
+	const std::streamoff fileEnd = f.tellg();
+	if (fileEnd < static_cast<std::streamoff>(sizeof(HAsset::FileHeader))) return false;
+	const uint64_t fileSize = static_cast<uint64_t>(fileEnd);
+	f.seekg(0, std::ios::beg);
+
+	HAsset::FileHeader hdr{};
+	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
+	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0) return false;
+	// Pre-v2 META has no UUID, so its name/path sit where the id would be — reading
+	// it with this layout would hand back garbage rather than "nothing recorded".
+	if (hdr.version < 2) return false;
+
+	uint64_t offset = sizeof(HAsset::FileHeader);
+	for (uint32_t i = 0; i < hdr.chunk_count; ++i)
+	{
+		if (offset + sizeof(HAsset::ChunkHeader) > fileSize) return false;
+		HAsset::ChunkHeader ch{};
+		f.read(reinterpret_cast<char*>(&ch), sizeof(ch));
+		if (!f) return false;
+		offset += sizeof(HAsset::ChunkHeader);
+		// Compared against the REMAINDER, never as offset + size, which can wrap:
+		// size is an untrusted uint64 straight out of the file.
+		if (ch.size > fileSize - offset) return false;
+
+		if (ch.id != HAsset::CHUNK_META)
+		{
+			f.seekg(static_cast<std::streamoff>(ch.size), std::ios::cur);
+			if (!f) return false;
+			offset += ch.size;
+			continue;
+		}
+
+		std::vector<uint8_t> meta(static_cast<size_t>(ch.size));
+		if (ch.size > 0)
+			f.read(reinterpret_cast<char*>(meta.data()),
+			       static_cast<std::streamsize>(ch.size));
+		if (!f) return false;
+
+		size_t off = sizeof(uint16_t); // skip asset type
+		if (!HAsset::Reader::readPOD(meta, off, out.id.hi))   return false;
+		if (!HAsset::Reader::readPOD(meta, off, out.id.lo))   return false;
+		if (!HAsset::Reader::readString(meta, off, out.name)) return false;
+		if (!HAsset::Reader::readString(meta, off, out.path)) return false;
+		HAsset::Reader::readString(meta, off, out.source);    // optional tail
+		return true;
+	}
+	return false;   // a well-formed file with no META: nothing recorded
+}
+} // namespace
+
 static HE::UUID existingUUID(const std::filesystem::path& file)
 {
-	HAsset::Reader reader;
-	if (!reader.open(file.string()))
+	MetaFields meta;
+	if (!readMetaFields(file, meta))
 		return HE::UUID{};
-
-	const auto* meta = reader.findChunk(HAsset::CHUNK_META);
-	if (!meta || reader.header().version < 2)
-		return HE::UUID{};
-
-	HE::UUID id;
-	size_t   off = sizeof(uint16_t); // skip asset type
-	if (!HAsset::Reader::readPOD(meta->data, off, id.hi)) return HE::UUID{};
-	if (!HAsset::Reader::readPOD(meta->data, off, id.lo)) return HE::UUID{};
-	return id;
+	return meta.id;
 }
 
-// Field order mirrors ContentManager's buildMetaChunk (type, hi, lo, name, path,
-// source) — the same hand-rolled prefix walk existingUUID above does, carried two
-// strings further. The source is an optional tail: an asset written before the
-// field existed runs out of bytes there and answers "" rather than failing.
 std::string sourceFileOf(const std::filesystem::path& assetFile)
 {
-	HAsset::Reader reader;
-	if (!reader.open(assetFile.string()))
+	MetaFields meta;
+	if (!readMetaFields(assetFile, meta))
 		return {};
-
-	const auto* meta = reader.findChunk(HAsset::CHUNK_META);
-	if (!meta || reader.header().version < 2)
-		return {};
-
-	HE::UUID    id;
-	std::string name, path, source;
-	size_t      off = sizeof(uint16_t); // skip asset type
-	if (!HAsset::Reader::readPOD(meta->data, off, id.hi))     return {};
-	if (!HAsset::Reader::readPOD(meta->data, off, id.lo))     return {};
-	if (!HAsset::Reader::readString(meta->data, off, name))   return {};
-	if (!HAsset::Reader::readString(meta->data, off, path))   return {};
-	if (!HAsset::Reader::readString(meta->data, off, source)) return {};
-	return source;
+	return meta.source;
 }
 
 bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
@@ -242,12 +317,14 @@ void appendSkinning(const GltfPrimitiveAttributes& attrs,
 namespace
 {
 // Finds the first base-color texture in the glTF and imports it. Returns the
-// asset path of the written texture, or empty.
+// asset path of the written texture, or empty. `explicitPath` (from
+// OutputTargets::texture) pins the output onto a file that already exists.
 std::string importBaseColorTexture(const cgltf_data* data,
                                    const std::filesystem::path& sourcePath,
                                    const std::filesystem::path& contentRoot,
                                    const std::filesystem::path& relativeOutputDir,
-                                   const std::string& meshStem)
+                                   const std::string& meshStem,
+                                   const std::string& explicitPath)
 {
 	const cgltf_texture* texture = nullptr;
 	for (cgltf_size m = 0; m < data->materials_count && !texture; ++m)
@@ -260,17 +337,20 @@ std::string importBaseColorTexture(const cgltf_data* data,
 		return {};
 
 	const cgltf_image* img = texture->image;
-	const std::string texName = meshStem + "_basecolor";
 
 	if (img->uri && std::strncmp(img->uri, "data:", 5) != 0)
 	{
-		// External file referenced relative to the glTF
+		// External file referenced relative to the glTF. Its asset is named after
+		// the IMAGE file, not the mesh — so the redirect has to go through
+		// TextureImporter rather than being applied to the result here.
 		char decoded[1024];
 		std::strncpy(decoded, img->uri, sizeof(decoded) - 1);
 		decoded[sizeof(decoded) - 1] = '\0';
 		cgltf_decode_uri(decoded);
 		const std::filesystem::path texFile = sourcePath.parent_path() / decoded;
-		auto tex = TextureImporter::import(texFile, contentRoot, relativeOutputDir);
+		auto tex = TextureImporter::import(texFile, contentRoot, relativeOutputDir,
+		                                   TextureImporter::ImportSettings{},
+		                                   OutputTargets{ explicitPath, {}, {} });
 		return tex ? tex->path : std::string{};
 	}
 
@@ -282,9 +362,11 @@ std::string importBaseColorTexture(const cgltf_data* data,
 		auto tex = TextureImporter::decodeFromMemory(bytes, img->buffer_view->size);
 		if (!tex)
 			return {};
+		const ResolvedOutput out =
+			resolveOutput(explicitPath, relativeOutputDir, meshStem + "_basecolor");
 		tex->type = HE::AssetType::Texture;
-		tex->name = texName;
-		tex->path = Importer::toAssetPath(relativeOutputDir / (texName + ".hasset"));
+		tex->name = out.name;
+		tex->path = out.path;
 		if (!Importer::writeAsset(*tex, contentRoot))
 			return {};
 		return tex->path;
@@ -297,17 +379,21 @@ std::string importBaseColorMaterial(const cgltf_data*            data,
                                     const std::filesystem::path& sourcePath,
                                     const std::filesystem::path& contentRoot,
                                     const std::filesystem::path& relativeOutputDir,
-                                    const std::string&           meshStem)
+                                    const std::string&           meshStem,
+                                    const OutputTargets&         outputs)
 {
 	const std::string texPath = importBaseColorTexture(
-		data, sourcePath, contentRoot, relativeOutputDir, meshStem);
+		data, sourcePath, contentRoot, relativeOutputDir, meshStem, outputs.texture);
 	if (texPath.empty())
 		return {};
 
+	const ResolvedOutput out =
+		resolveOutput(outputs.material, relativeOutputDir, meshStem + "_mat");
+
 	MaterialAsset mat;
 	mat.type       = HE::AssetType::Material;
-	mat.name       = meshStem + "_mat";
-	mat.path       = Importer::toAssetPath(relativeOutputDir / (mat.name + ".hasset"));
+	mat.name       = out.name;
+	mat.path       = out.path;
 	mat.shaderPath = "builtin/unlit";
 	mat.texturePaths.push_back(texPath);
 	if (!Importer::writeAsset(mat, contentRoot))
@@ -344,7 +430,8 @@ bool isImportableSource(const std::filesystem::path& sourcePath)
 
 bool importSource(const std::filesystem::path& sourcePath,
                   const std::filesystem::path& contentRoot,
-                  const std::filesystem::path& relativeOutputDir)
+                  const std::filesystem::path& relativeOutputDir,
+                  const OutputTargets&         outputs)
 {
 	switch (classifySource(sourcePath))
 	{
@@ -354,22 +441,32 @@ bool importSource(const std::filesystem::path& sourcePath,
 			// Rigged source: MeshImporter drops the skeleton and the JOINTS_0 /
 			// WEIGHTS_0 attributes and registers bind-pose geometry as a StaticMesh,
 			// so the mesh could never afterwards be picked as a SkeletalMesh.
-			if (!SkeletalMeshImporter::import(sourcePath, contentRoot, relativeOutputDir))
+			if (!SkeletalMeshImporter::import(sourcePath, contentRoot, relativeOutputDir,
+			                                  SkeletalMeshImporter::ImportSettings{}, outputs))
 				return false;
 			// The animations usually live in the same glTF and become their own
-			// assets (referenced by the AnimatorStateMachine).
+			// assets (referenced by the AnimatorStateMachine). They are NOT sidecars
+			// of the mesh: nothing on the mesh names them, so a re-import cannot
+			// redirect them the way it redirects the material — see reimport().
 			AnimationClipImporter::importAndWrite(sourcePath, contentRoot, relativeOutputDir);
 			return true;
 		}
-		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir)     != nullptr;
+		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir,
+		                            MeshImporter::ImportSettings{}, outputs)     != nullptr;
 	case SourceKind::Texture:
-		return TextureImporter::import(sourcePath, contentRoot, relativeOutputDir)  != nullptr;
+		return TextureImporter::import(sourcePath, contentRoot, relativeOutputDir,
+		                               TextureImporter::ImportSettings{}, outputs) != nullptr;
 	case SourceKind::Audio:
-		return AudioImporter::import(sourcePath, contentRoot, relativeOutputDir)    != nullptr;
+		return AudioImporter::import(sourcePath, contentRoot, relativeOutputDir,
+		                             AudioImporter::ImportSettings{}, outputs)    != nullptr;
 	case SourceKind::Material:
-		return MaterialImporter::import(sourcePath, contentRoot, relativeOutputDir) != nullptr;
+		return MaterialImporter::import(sourcePath, contentRoot, relativeOutputDir,
+		                                outputs)                                  != nullptr;
 	case SourceKind::Font:
-		return FontImporter::import(sourcePath, contentRoot, relativeOutputDir)     != nullptr;
+		// 0 = "whatever FontImporter bakes at by default" — spelling the number out
+		// here is how the two would drift apart.
+		return FontImporter::import(sourcePath, contentRoot, relativeOutputDir,
+		                            /*bakeSize=*/0, outputs)                      != nullptr;
 	case SourceKind::None:
 		HE_LOG_ERROR(Tool, "%s",
 			("Importer: no importer for " + sourcePath.string()).c_str());
@@ -423,7 +520,68 @@ bool reimport(const std::filesystem::path& assetFile,
 		return false;
 	}
 
-	return importSource(source, contentRoot, relDir);
+	// The folder alone is not enough. Every importer names its output after the
+	// SOURCE stem, so re-importing an asset the user renamed after importing it
+	// (rock_v1.hasset → Rock.hasset) wrote a brand-new rock_v1.hasset with a new
+	// uuid beside it and left Rock.hasset — the file every scene references —
+	// untouched, while still reporting success. The asset that was clicked is the
+	// one that has to be written, so its own path is handed down.
+	OutputTargets outputs;
+	outputs.asset = toAssetPath(std::filesystem::relative(assetFile, contentRoot, ec));
+	if (ec || outputs.asset.empty())
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: cannot place " + assetFile.string() + " relative to " +
+			 contentRoot.string()).c_str());
+		return false;
+	}
+
+	// The same trap one level down: a mesh import also writes a material and a
+	// base-colour texture named after the source. Both are read back OFF the mesh
+	// (MREF → MTRL, kept current by the rename retarget) instead of re-derived, so
+	// a renamed sidecar is overwritten in place rather than duplicated. An empty
+	// list is not a failure — it means this asset has no sidecars yet, e.g. a glTF
+	// that has only NOW gained a base-colour texture, and those outputs are
+	// legitimately new files under source-derived names.
+	const std::vector<std::string> sidecars = meshSidecarAssets(assetFile, contentRoot);
+	if (sidecars.size() > 0) outputs.material = sidecars[0];
+	if (sidecars.size() > 1) outputs.texture  = sidecars[1];
+
+	// A rigged glTF also produces its animation clips. Those are NOT sidecars —
+	// no chunk on the mesh names them, and the clips record no source of their
+	// own — so there is nothing to redirect them by, and a clip the user renamed
+	// comes back under its old name as a second asset. That case cannot be told
+	// apart from the legitimate one (the artist added an animation to the glTF),
+	// so it is reported rather than refused: failing here would make Reimport
+	// unusable for the ordinary "the source grew" workflow.
+	std::vector<std::string> clipsBefore;
+	if (classifySource(source) == SourceKind::Mesh && gltfHasSkin(source))
+		for (const std::string& rel : AnimationClipImporter::outputPaths(source, relDir))
+			if (std::filesystem::exists(contentRoot / rel, ec))
+				clipsBefore.push_back(rel);
+
+	// Re-importing a static mesh whose source has since been rigged rewrites it as
+	// a SkeletalMesh in place, under the same file and the same uuid. That is the
+	// intended outcome — the alternative is a second asset again — but it does
+	// change what every reference to it resolves to.
+	if (!importSource(source, contentRoot, relDir, outputs))
+		return false;
+
+	if (classifySource(source) == SourceKind::Mesh && gltfHasSkin(source))
+	{
+		for (const std::string& rel : AnimationClipImporter::outputPaths(source, relDir))
+		{
+			if (std::find(clipsBefore.begin(), clipsBefore.end(), rel) != clipsBefore.end())
+				continue;
+			if (!std::filesystem::exists(contentRoot / rel, ec))
+				continue;
+			HE_LOG_WARN(Tool, "%s",
+				("Importer: reimport of " + assetFile.filename().string()
+				 + " created a new animation clip " + rel
+				 + " — if you renamed that clip, the renamed one is now stale").c_str());
+		}
+	}
+	return true;
 }
 
 // ─── Re-import bookkeeping ───────────────────────────────────────────────────

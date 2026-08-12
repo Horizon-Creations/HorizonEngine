@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <memory>
 #include "ContentManager/Assets.h"
+#include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports glTF 2.0 (.gltf / .glb) into a StaticMeshAsset. All primitives of
 // all scene nodes are baked into one mesh (the engine has no submesh concept
@@ -19,11 +20,15 @@ public:
     };
 
     // Returns the imported mesh (already written to disk) or nullptr.
+    // `outputs` pins the mesh and its two sidecars onto files that already exist
+    // (a re-import of assets the user renamed); empty fields are named after the
+    // source, which is what a first import does.
     static std::unique_ptr<StaticMeshAsset> import(
-        const std::filesystem::path& sourcePath,
-        const std::filesystem::path& contentRoot,
-        const std::filesystem::path& relativeOutputDir,
-        const ImportSettings&        settings);
+        const std::filesystem::path&   sourcePath,
+        const std::filesystem::path&   contentRoot,
+        const std::filesystem::path&   relativeOutputDir,
+        const ImportSettings&          settings,
+        const Importer::OutputTargets& outputs = {});
 
     static std::unique_ptr<StaticMeshAsset> import(
         const std::filesystem::path& sourcePath,

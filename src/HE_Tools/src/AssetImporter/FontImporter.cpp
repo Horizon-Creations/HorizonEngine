@@ -6,10 +6,11 @@
 #include <fstream>
 
 std::unique_ptr<FontAsset> FontImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir,
-	int bakeSize)
+	const std::filesystem::path&   sourcePath,
+	const std::filesystem::path&   contentRoot,
+	const std::filesystem::path&   relativeOutputDir,
+	int                            bakeSize,
+	const Importer::OutputTargets& outputs)
 {
 	std::ifstream in(sourcePath, std::ios::binary | std::ios::ate);
 	if (!in)
@@ -29,10 +30,13 @@ std::unique_ptr<FontAsset> FontImporter::import(
 		return nullptr;
 	}
 
+	const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir,
+	                                         sourcePath.stem().string());
+
 	auto asset = std::make_unique<FontAsset>();
 	asset->type     = HE::AssetType::Font;
-	asset->name     = sourcePath.stem().string();
-	asset->path     = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
+	asset->name     = out.name;
+	asset->path     = out.path;
 	asset->fontData = std::move(bytes);
 	asset->size     = bakeSize > 0 ? bakeSize : 48;
 

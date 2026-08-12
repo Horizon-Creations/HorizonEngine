@@ -509,8 +509,31 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// Paths, not File*: the tree is rebuilt and freed on every content refresh,
 		// and a selection outlives that by design.
 		static std::vector<std::string> s_selection;
+		// Set when a press lands on an already-selected tile: the collapse to that
+		// one item is deferred to the release, so a drag can still carry the set.
+		// Empty means nothing is pending.
+		static std::string s_pendingCollapseTo;
+		static bool        s_pendingCollapseDragged = false;
 		auto isSelected = [&](const std::string& p)
 		{ return std::find(s_selection.begin(), s_selection.end(), p) != s_selection.end(); };
+
+		// Read-only ground, asked PER PATH. The context menu computes its own
+		// version of this for the item under the pointer, and that was enough while
+		// every operation acted on that one item. It stopped being enough the moment
+		// a whole selection could be deleted: the selection survives navigation
+		// between roots, so a Ctrl-click could put a shipped engine default (or a
+		// download-cache copy) in the same set as an ordinary project asset, and the
+		// anchor's answer would wave the whole set through — deleting a file out of
+		// the shared engine install that every project on the machine reads.
+		auto isReadOnlyGround = [&](const std::string& p)
+		{
+			if (p.empty()) return false;
+			if (!engineRelativePath(p).empty()) return true;    // the download cache
+			if (!ctx.contentManager) return false;
+			if (ContentManager::isEngineContentDevMode()) return false;
+			return ctx.contentManager->isEngineDefaultPath(p) ||
+			       ctx.contentManager->isEngineOverridePath(p);
+		};
 		static std::string s_ctxMenuItem;
 		static bool        s_ctxMenuIsFolder  = false;
 		// A downloaded EngineContent asset, i.e. one whose only local existence is a
@@ -587,6 +610,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedTreeFolder = folder;
 				s_selectedRootKind   = rootKind;
+				// A selection made in one root means nothing in another: it survives
+				// the navigation as a set of paths the grid no longer shows, and the
+				// next Ctrl-click would silently extend it across roots. Deleting
+				// THAT set is how a shipped engine default ends up in the same
+				// operation as a project asset.
+				s_selection.clear();
+				s_selectedItem.clear();
 			}
 			// Right-click reaches the same menu the grid tiles raise. Until now the
 			// tree had no menu at all: renaming or deleting a folder meant first
@@ -595,10 +625,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				s_selectedItem       = folder->fullPath;
 				s_selectedIsFolder   = true;
+				s_selection.assign(1, folder->fullPath);
 				s_ctxMenuItem        = folder->fullPath;
 				s_ctxMenuIsFolder    = true;
 				s_ctxMenuIsCacheCopy = false;
 				s_ctxMenuRemoteUuid  = HE::UUID{};
+				// The GRID has to follow, not just the root tag: setting the tag
+				// alone left the panel claiming to be in the Engine root while still
+				// drawing Content, and every path derived from "the current root"
+				// (create, import, the read-only gate) then answered for the wrong
+				// one.
+				s_selectedTreeFolder = folder;
 				s_selectedRootKind   = rootKind;
 				s_rightClickOnItem   = true;
 			}
@@ -1311,6 +1348,30 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		}
 		else
 		{
+			// A search walks the whole subtree and lowercases every name it looks
+			// at. Doing that per frame is an allocation per asset per frame — on a
+			// project with a couple of thousand of them, the panel would spend the
+			// frame budget re-deriving an answer that only changes when the query,
+			// the folder, or the content itself does. So it is derived once and kept
+			// until one of those four inputs moves.
+			//
+			// The cached vector holds File* into the folder tree, which a refresh
+			// FREES — that is exactly why the tree version is part of the key.
+			static std::string  s_cachedNeedle;
+			static int          s_cachedType    = -1;
+			static std::string  s_cachedFolder;
+			static std::uint64_t s_cachedVersion = ~0ull;
+			static std::vector<const HE::File*> s_cachedHits;
+			static std::unordered_map<const HE::File*, std::string> s_cachedFoundIn;
+			const std::uint64_t inputVersion = treeVersion ^ (engineVersion << 1) ^ (sourceVersion << 2);
+			if (s_cachedNeedle == s_searchText && s_cachedType == s_typeFilter &&
+			    s_cachedFolder == displayFolder->fullPath && s_cachedVersion == inputVersion)
+			{
+				gridFiles = s_cachedHits;
+				foundIn   = s_cachedFoundIn;
+			}
+			else
+			{
 			// Case-insensitive substring, which is what people expect from a box
 			// that says "search" — not a prefix match and not a glob.
 			std::string needle = s_searchText;
@@ -1340,6 +1401,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					collect(sub, rel.empty() ? sub->name : rel + "/" + sub->name);
 			};
 			collect(displayFolder, std::string{});
+
+			s_cachedNeedle  = s_searchText;
+			s_cachedType    = s_typeFilter;
+			s_cachedFolder  = displayFolder->fullPath;
+			s_cachedVersion = inputVersion;
+			s_cachedHits    = gridFiles;
+			s_cachedFoundIn = foundIn;
+			}
 		}
 
 		if (filterActive)
@@ -1574,10 +1643,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// the one file would orphan its sibling.
 			if (s_selectedRootKind != 2 && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
 			{
+				// The press that started this deferred its "collapse to just me"
+				// (see the click handler): a drag DID happen, so the selection
+				// stands. Recorded here because this is the one place that knows,
+				// and by the time the button comes up the drag is already over.
+				s_pendingCollapseDragged = true;
 				ImGui::SetDragDropPayload("HE_ASSET_PATH",
 					file->fullPath.c_str(), file->fullPath.size() + 1);
-				ImGui::TextUnformatted(
-					std::filesystem::path(file->name).stem().string().c_str());
+				// A drag carrying a whole selection should say so, or the user has
+				// to remember what they picked while the tiles are under a cursor.
+				const std::string dragLabel =
+					(isSelected(file->fullPath) && s_selection.size() > 1)
+						? std::to_string(s_selection.size()) + " assets"
+						: std::filesystem::path(file->name).stem().string();
+				ImGui::TextUnformatted(dragLabel.c_str());
 				ImGui::EndDragDropSource();
 			}
 
@@ -1632,6 +1711,23 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						s_selectedItem = file->fullPath;
 					}
 					s_selectedIsFolder = false;
+				}
+				else if (isSelected(file->fullPath) && s_selection.size() > 1)
+				{
+					// Pressing on something that is ALREADY selected does not collapse
+					// the selection yet — that is what makes dragging a set possible at
+					// all. ImGui cannot start a drag on the press frame (it needs the
+					// mouse to travel past the drag threshold first), so collapsing
+					// here reduced the selection to one before BeginDragDropSource
+					// ever activated: the documented "drag the selection onto a
+					// folder" gesture could never move more than a single asset.
+					//
+					// The collapse still happens — on RELEASE, and only if no drag
+					// started. That is the file-manager rule, and it keeps a plain
+					// click on one of many selected items meaning "now just this one".
+					s_pendingCollapseTo = file->fullPath;
+					s_selectedItem      = file->fullPath;
+					s_selectedIsFolder  = false;
 				}
 				else
 				{
@@ -2539,14 +2635,26 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// The whole selection goes, not just the item under the pointer: the
 			// menu was raised on one OF the selected tiles, and deleting only that
 			// one would silently ignore the eleven the user had just picked out.
-			const int selectedAssetCount = (!s_ctxMenuIsFolder && isSelected(s_ctxMenuItem))
-				? static_cast<int>(s_selection.size()) : 1;
+			// Built HERE rather than in the dialog, and filtered per path: a
+			// selection can hold assets from a root the grid is no longer showing,
+			// and the anchor's read-only answer says nothing about theirs.
+			const std::vector<std::string> deletableSelection = [&]
+			{
+				std::vector<std::string> out;
+				if (s_ctxMenuIsFolder) return out;
+				const std::vector<std::string>& src = isSelected(s_ctxMenuItem)
+					? s_selection : std::vector<std::string>{ s_ctxMenuItem };
+				for (const std::string& p : src)
+					if (!isReadOnlyGround(p)) out.push_back(p);
+				return out;
+			}();
+			const int selectedAssetCount = static_cast<int>(deletableSelection.size());
 			const std::string deleteLabel = selectedAssetCount > 1
 				? "Delete " + std::to_string(selectedAssetCount) + " Assets" : std::string("Delete");
-			if (!engineLocked && !s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem(deleteLabel.c_str()))
+			if (!engineLocked && !s_ctxMenuIsFolder && selectedAssetCount > 0 &&
+			    EditorWidgets::dangerMenuItem(deleteLabel.c_str()))
 			{
-				s_deleteAssetTargets = (selectedAssetCount > 1)
-					? s_selection : std::vector<std::string>{ s_ctxMenuItem };
+				s_deleteAssetTargets  = deletableSelection;
 				s_deleteAssetIsSource = s_selectedRootKind == 2;
 				// Started here rather than in the dialog body: the dialog runs every
 				// frame it is open, and starting from there would launch a scan per
@@ -2950,6 +3058,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// rather than one bulk operation the protocol has no word for.
 				for (const std::string& target : s_deleteAssetTargets)
 				{
+					// Asked again per path, not trusted from the frame the dialog was
+					// opened on: the browser can refresh underneath an open modal.
+					if (isReadOnlyGround(target)) continue;
+					// "Is this a C++ class?" is a property of the FILE, not of the
+					// root the grid happened to be showing. One flag for a whole set
+					// either orphans the .cpp half of a class or runs the sibling
+					// sweep next to a plain .hasset.
+					const bool isSourceClass = isUnderFolder(target, sourceFolder.fullPath);
 					// collabKeyFor, not toContentRelativePath: a C++ class is not
 					// under the content root, and reading its empty content-relative
 					// path as "no session" deleted it here and nowhere else.
@@ -2959,7 +3075,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					if (!(ctx.collab && !rel.empty() &&
 					      ctx.collab->requestAssetDelete(rel)))
 					{
-						deleteAssetNow(target, s_deleteAssetIsSource);
+						deleteAssetNow(target, isSourceClass);
 					}
 				}
 				s_deleteAssetTargets.clear();
@@ -3345,6 +3461,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			s_selection.clear();
 		}
 
+		// ── Resolve a deferred collapse ───────────────────────────────────
+		// The press on an already-selected tile parked its "just this one" here.
+		// A drag consumed the gesture instead, so the set stands; otherwise the
+		// click meant what a click means.
+		if (!s_pendingCollapseTo.empty() && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+		{
+			if (!s_pendingCollapseDragged)
+				s_selection.assign(1, s_pendingCollapseTo);
+			s_pendingCollapseTo.clear();
+			s_pendingCollapseDragged = false;
+		}
+		// A press that ended anywhere else (the drag landed, focus moved, the panel
+		// was rebuilt) must not leave the decision hanging for the next click.
+		else if (!s_pendingCollapseTo.empty() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+		{
+			s_pendingCollapseTo.clear();
+			s_pendingCollapseDragged = false;
+		}
+
 		// ── Keyboard ──────────────────────────────────────────────────────
 		// The panel answered no key at all: Delete did nothing, F2 did nothing,
 		// Enter did nothing. Every one of those is muscle memory from the file
@@ -3357,11 +3492,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
 		    !ImGui::IsAnyItemActive() && !s_selection.empty())
 		{
-			const bool onEngineGround = ctx.contentManager &&
-				!ContentManager::isEngineContentDevMode() &&
-				(ctx.contentManager->isEngineDefaultPath(s_selectedItem) ||
-				 ctx.contentManager->isEngineOverridePath(s_selectedItem) ||
-				 !engineRelativePath(s_selectedItem).empty());
+			const bool onEngineGround = isReadOnlyGround(s_selectedItem);
 
 			if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !onEngineGround)
 			{
@@ -3380,10 +3511,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 				else
 				{
-					s_deleteAssetTargets  = s_selection;
-					s_deleteAssetIsSource = s_selectedRootKind == 2;
-					s_deleteAssetScanGen  = beginScanForMany(s_deleteAssetTargets, /*isFolder=*/false);
-					s_openDeleteAssetPopup = true;
+					// Same per-path filter the menu applies — a keystroke must not be
+					// the one route that reaches read-only ground.
+					s_deleteAssetTargets.clear();
+					for (const std::string& p : s_selection)
+						if (!isReadOnlyGround(p)) s_deleteAssetTargets.push_back(p);
+					if (!s_deleteAssetTargets.empty())
+					{
+						s_deleteAssetIsSource  = s_selectedRootKind == 2;
+						s_deleteAssetScanGen   = beginScanForMany(s_deleteAssetTargets, /*isFolder=*/false);
+						s_openDeleteAssetPopup = true;
+					}
 				}
 			}
 			// Rename and open are single-item gestures by nature, so they act on the

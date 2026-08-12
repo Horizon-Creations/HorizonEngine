@@ -2,9 +2,11 @@
 #include <filesystem>
 #include <memory>
 #include "ContentManager/Assets.h"
+#include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports PNG/JPG/TGA/BMP/… (anything stb_image reads) into a TextureAsset
-// and writes it as <contentRoot>/<relativeOutputDir>/<stem>.hasset.
+// and writes it as <contentRoot>/<relativeOutputDir>/<stem>.hasset — or onto the
+// file `outputs.asset` names, when a re-import has one to hit.
 class TextureImporter {
 public:
 	struct ImportSettings {
@@ -13,10 +15,11 @@ public:
 
 	// Returns the imported asset (already written to disk) or nullptr.
 	static std::unique_ptr<TextureAsset> import(
-		const std::filesystem::path& sourcePath,
-		const std::filesystem::path& contentRoot,
-		const std::filesystem::path& relativeOutputDir,
-		const ImportSettings&        settings);
+		const std::filesystem::path&   sourcePath,
+		const std::filesystem::path&   contentRoot,
+		const std::filesystem::path&   relativeOutputDir,
+		const ImportSettings&          settings,
+		const Importer::OutputTargets& outputs = {});
 
 	static std::unique_ptr<TextureAsset> import(
 		const std::filesystem::path& sourcePath,

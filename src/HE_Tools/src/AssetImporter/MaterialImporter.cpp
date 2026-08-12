@@ -5,9 +5,10 @@
 #include <fstream>
 
 std::unique_ptr<MaterialAsset> MaterialImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir)
+	const std::filesystem::path&   sourcePath,
+	const std::filesystem::path&   contentRoot,
+	const std::filesystem::path&   relativeOutputDir,
+	const Importer::OutputTargets& outputs)
 {
 	std::ifstream f(sourcePath);
 	if (!f.is_open())
@@ -25,10 +26,13 @@ std::unique_ptr<MaterialAsset> MaterialImporter::import(
 		return nullptr;
 	}
 
+	const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir,
+	                                         sourcePath.stem().string());
+
 	auto asset = std::make_unique<MaterialAsset>();
 	asset->type       = HE::AssetType::Material;
-	asset->name       = sourcePath.stem().string();
-	asset->path       = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
+	asset->name       = out.name;
+	asset->path       = out.path;
 	asset->shaderPath = j.value("shader", std::string{"builtin/unlit"});
 	for (const auto& t : j.value("textures", nlohmann::json::array()))
 		if (t.is_string())

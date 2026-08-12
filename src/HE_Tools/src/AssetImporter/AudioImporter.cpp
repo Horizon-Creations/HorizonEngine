@@ -33,10 +33,11 @@ bool AudioImporter::decode(const std::filesystem::path& sourcePath, AudioAsset& 
 }
 
 std::unique_ptr<AudioAsset> AudioImporter::import(
-	const std::filesystem::path& sourcePath,
-	const std::filesystem::path& contentRoot,
-	const std::filesystem::path& relativeOutputDir,
-	const ImportSettings&        settings)
+	const std::filesystem::path&   sourcePath,
+	const std::filesystem::path&   contentRoot,
+	const std::filesystem::path&   relativeOutputDir,
+	const ImportSettings&          settings,
+	const Importer::OutputTargets& outputs)
 {
 	(void)settings; // resampling not implemented yet
 
@@ -45,8 +46,11 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 		return nullptr;
 
 	// decode() fills name/rate/channels/PCM; only the on-disk location is the
-	// importer's business.
-	asset->path = Importer::toAssetPath(relativeOutputDir / (asset->name + ".hasset"));
+	// importer's business — and the name goes with it, because a re-import that
+	// lands on a renamed file must not write the source's stem into its META.
+	const auto out = Importer::resolveOutput(outputs.asset, relativeOutputDir, asset->name);
+	asset->name = out.name;
+	asset->path = out.path;
 
 	const unsigned int sampleRate = static_cast<unsigned int>(asset->sampleRate);
 	const unsigned int channels   = static_cast<unsigned int>(asset->channels);

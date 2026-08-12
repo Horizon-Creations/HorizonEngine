@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <memory>
 #include "ContentManager/Assets.h"
+#include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports a skinned/skeletal glTF 2.0 mesh (.gltf / .glb) into a SkeletalMeshAsset.
 // Parses the first skin found: joint hierarchy, inverse bind matrices,
@@ -19,11 +20,16 @@ public:
         bool  importMaterials = true;
     };
 
+    // `outputs` pins the mesh and its two sidecars onto files that already exist
+    // (a re-import of assets the user renamed); empty fields are named after the
+    // source, which is what a first import does. Note the primary output is
+    // "<stem>_skeletal.hasset", so outputs.asset is a whole path, not a stem.
     static std::unique_ptr<SkeletalMeshAsset> import(
-        const std::filesystem::path& sourcePath,
-        const std::filesystem::path& contentRoot,
-        const std::filesystem::path& relativeOutputDir,
-        const ImportSettings&        settings);
+        const std::filesystem::path&   sourcePath,
+        const std::filesystem::path&   contentRoot,
+        const std::filesystem::path&   relativeOutputDir,
+        const ImportSettings&          settings,
+        const Importer::OutputTargets& outputs = {});
 
     static std::unique_ptr<SkeletalMeshAsset> import(
         const std::filesystem::path& sourcePath,

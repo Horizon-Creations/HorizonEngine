@@ -27,6 +27,13 @@
 //      [hi, lo] pairs, and inside the two graph chunks that store asset ids as
 //      {"hi":…,"lo":…} objects (ASMG clip ids, PTGR mesh/material ids).
 //
+//  Both spellings also occur BINARY-ENCODED, in a prefab's CBOR payload (PFAB,
+//  SceneSerializer::serializeSubtree): an entity subtree with components, where
+//  an id is eight raw big-endian bytes and a path is a length-tagged CBOR
+//  string. Neither has a text form, so the payload is decoded and walked as the
+//  JSON document it is — see isCborPayloadChunk in the .cpp, and the gate that
+//  has to let prefabs through because no needle can rule one out.
+//
 //  Deliberately NOT built on retargetBlob(): that one answers a bool for a whole
 //  file, cannot tell a genuine referrer from the asset's own META path (every
 //  asset stores its own path, so every asset would report itself), and pays a

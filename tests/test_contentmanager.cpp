@@ -1,5 +1,7 @@
 #include "doctest.h"
 #include "TestFsUtil.h"
+#include <ContentManager/AssetRefRetarget.h>  // the rename half the editor does after fs::rename
+#include <ContentManager/AssetRefScan.h>      // assetUuidOfFile — identity across a reimport
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
@@ -7,10 +9,15 @@
 #include <Diagnostics/GlobalState.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -1881,6 +1888,292 @@ TEST_CASE("Importer::reimport refuses what it cannot re-run")
 		REQUIRE(Importer::writeAsset(t, dir.path, dir.path / "nowhere" / "Gone.png"));
 	}
 	CHECK_FALSE(Importer::reimport(dir.path / "Textures" / "Gone.hasset", dir.path));
+
+	// Outside the content root: following the "../.." this yields would write the
+	// re-imported asset outside the project entirely.
+	{
+		TempContentDir outside("he_test_reimport_outside");
+		TextureAsset t;
+		t.type = HE::AssetType::Texture;
+		t.name = "Stray";
+		t.path = "Stray.hasset";
+		REQUIRE(Importer::writeAsset(t, outside.path, dir.path / "nowhere" / "Stray.png"));
+		CHECK_FALSE(Importer::reimport(outside.path / "Stray.hasset", dir.path));
+	}
+}
+
+// ─── Reimport lands on the asset that was clicked ────────────────────────────
+
+namespace
+{
+	// A real RIFF/WAVE file: 44-byte header plus `frames` mono int16 samples. Hand
+	// written rather than fixtured because the point of these cases is that the
+	// SOURCE changes between the import and the re-import, which needs a decodable
+	// file both times — and a WAV has no checksums to keep in step.
+	bool writeWav(const fs::path& file, uint32_t frames, uint32_t sampleRate = 8000)
+	{
+		const uint16_t channels = 1, bits = 16;
+		const uint32_t dataSize = frames * channels * (bits / 8);
+
+		std::vector<uint8_t> buf;
+		auto put32 = [&buf](uint32_t v) {
+			buf.push_back(static_cast<uint8_t>(v));         buf.push_back(static_cast<uint8_t>(v >> 8));
+			buf.push_back(static_cast<uint8_t>(v >> 16));   buf.push_back(static_cast<uint8_t>(v >> 24));
+		};
+		auto put16 = [&buf](uint16_t v) {
+			buf.push_back(static_cast<uint8_t>(v));         buf.push_back(static_cast<uint8_t>(v >> 8));
+		};
+		auto putTag = [&buf](const char* t) { for (int i = 0; i < 4; ++i) buf.push_back(static_cast<uint8_t>(t[i])); };
+
+		putTag("RIFF"); put32(36 + dataSize); putTag("WAVE");
+		putTag("fmt "); put32(16); put16(1 /*PCM*/); put16(channels);
+		put32(sampleRate); put32(sampleRate * channels * (bits / 8));
+		put16(static_cast<uint16_t>(channels * (bits / 8))); put16(bits);
+		putTag("data"); put32(dataSize);
+		for (uint32_t i = 0; i < frames; ++i)
+			put16(static_cast<uint16_t>(static_cast<int16_t>(i * 100)));
+
+		std::error_code ec;
+		fs::create_directories(file.parent_path(), ec);
+		std::ofstream f(file, std::ios::binary | std::ios::trunc);
+		if (!f) return false;
+		f.write(reinterpret_cast<const char*>(buf.data()),
+		        static_cast<std::streamsize>(buf.size()));
+		return static_cast<bool>(f);
+	}
+
+	// Every file name directly in `dir`, sorted — the "did a second asset appear?"
+	// probe. Comparing the whole listing catches a duplicate under ANY name, which
+	// checking one expected path would not.
+	std::vector<std::string> fileNamesIn(const fs::path& dir)
+	{
+		std::vector<std::string> names;
+		std::error_code ec;
+		for (const auto& e : fs::directory_iterator(dir, ec))
+			names.push_back(e.path().filename().string());
+		std::sort(names.begin(), names.end());
+		return names;
+	}
+
+	// What the Content Browser's Rename does, both halves: move the file, then
+	// carry every stored reference to it over to the new path. Renaming without
+	// the retarget is a state the editor never leaves a project in, and testing
+	// against it would test the wrong thing.
+	void renameAssetLikeTheEditor(const fs::path& contentRoot,
+	                              const std::string& oldRel, const std::string& newRel)
+	{
+		std::error_code ec;
+		fs::rename(contentRoot / oldRel, contentRoot / newRel, ec);
+		REQUIRE_FALSE(ec);
+		HE::AssetRefs::retargetTree(
+			contentRoot.string(),
+			HE::AssetRefs::moveRules(oldRel, newRel, /*folder=*/false, "Content"));
+	}
+}
+
+TEST_CASE("Importer::reimport writes the asset that was renamed, not one named after the source")
+{
+	// The bug this pins down: every importer derives its output name from the
+	// SOURCE stem, and writeAsset only recovers a uuid when that path already holds
+	// an asset. So re-importing an asset that had been renamed since wrote a SECOND
+	// .hasset, under the source's name and with a fresh uuid, left the one every
+	// scene references untouched — and still answered true, so nothing was logged
+	// and the user saw a Reimport that had silently done nothing.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_reimport_src");
+	const fs::path srcFile = srcDir.path / "hit.wav";
+	REQUIRE(writeWav(srcFile, /*frames=*/4));
+
+	REQUIRE(Importer::importSource(srcFile, dir.path, "Audio"));
+	const fs::path imported = dir.path / "Audio" / "hit.hasset";
+	REQUIRE(fs::exists(imported));
+	const HE::UUID originalId = HE::AssetRefs::assetUuidOfFile(imported.string());
+	REQUIRE(originalId != HE::UUID{});
+
+	// The user renames it in the Content Browser: references retarget, uuid stays.
+	renameAssetLikeTheEditor(dir.path, "Audio/hit.hasset", "Audio/Impact.hasset");
+	const fs::path renamed = dir.path / "Audio" / "Impact.hasset";
+	REQUIRE(fs::exists(renamed));
+	const std::vector<std::string> before = fileNamesIn(dir.path / "Audio");
+
+	// …then edits the source and hits Reimport on THAT asset.
+	REQUIRE(writeWav(srcFile, /*frames=*/12));
+	REQUIRE(Importer::reimport(renamed, dir.path));
+
+	// The clicked file carries the new audio, under the identity it already had.
+	CHECK(HE::AssetRefs::assetUuidOfFile(renamed.string()) == originalId);
+	{
+		ContentManager cm(dir.path.string());
+		const AudioAsset* a = cm.getAudio(cm.loadAsset("Audio/Impact.hasset"));
+		REQUIRE(a != nullptr);
+		CHECK(a->audioData.size() == 12 * sizeof(int16_t));
+		// The name follows the FILE — writing "hit" into a file called Impact is
+		// how the asset ends up named one thing and displayed as another.
+		CHECK(a->name == "Impact");
+		CHECK(a->sourcePath == fs::weakly_canonical(srcFile).generic_string());
+	}
+
+	// And nothing else appeared: no second asset, under any name.
+	CHECK(fileNamesIn(dir.path / "Audio") == before);
+	CHECK_FALSE(fs::exists(dir.path / "Audio" / "hit.hasset"));
+}
+
+TEST_CASE("Importer::reimport of an asset that was never renamed still updates it in place")
+{
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_reimport_src2");
+	const fs::path srcFile = srcDir.path / "hit.wav";
+	REQUIRE(writeWav(srcFile, /*frames=*/4));
+
+	REQUIRE(Importer::importSource(srcFile, dir.path, "Audio"));
+	const fs::path imported = dir.path / "Audio" / "hit.hasset";
+	const HE::UUID originalId = HE::AssetRefs::assetUuidOfFile(imported.string());
+	REQUIRE(originalId != HE::UUID{});
+	const std::vector<std::string> before = fileNamesIn(dir.path / "Audio");
+
+	REQUIRE(writeWav(srcFile, /*frames=*/20));
+	REQUIRE(Importer::reimport(imported, dir.path));
+
+	CHECK(HE::AssetRefs::assetUuidOfFile(imported.string()) == originalId);
+	ContentManager cm(dir.path.string());
+	const AudioAsset* a = cm.getAudio(cm.loadAsset("Audio/hit.hasset"));
+	REQUIRE(a != nullptr);
+	CHECK(a->audioData.size() == 20 * sizeof(int16_t));
+	CHECK(a->name == "hit");
+	CHECK(fileNamesIn(dir.path / "Audio") == before);
+}
+
+TEST_CASE("Importer::reimport of a renamed mesh lands on its renamed sidecars too")
+{
+	// A mesh import writes three assets, all named after the source: the mesh, the
+	// material it references and that material's base-colour texture. Only the mesh
+	// can be redirected from the file that was clicked — the other two are read back
+	// off the mesh's own MREF → MTRL chain, which the rename retarget keeps current.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_reimport_mesh_src");
+
+	// A 1x1 red PNG (truecolor, 8 bit) — the smallest image stb_image decodes, so
+	// the glTF below can reference a real base-colour texture on disk.
+	static const uint8_t kPng1x1[] = {
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+		0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+		0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
+		0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+	};
+	{
+		std::ofstream png(srcDir.path / "tex1x1.png", std::ios::binary);
+		REQUIRE(png);
+		png.write(reinterpret_cast<const char*>(kPng1x1),
+		          static_cast<std::streamsize>(sizeof(kPng1x1)));
+	}
+	// One triangle: POSITION + TEXCOORD_0 + indices, 66 bytes of buffer.
+	{
+		std::vector<uint8_t> buf(66, 0);
+		const float pos[9] = { 0,0,0,  1,0,0,  0,1,0 };
+		std::memcpy(buf.data() + 0, pos, sizeof(pos));
+		const float uv[6] = { 0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f };
+		std::memcpy(buf.data() + 36, uv, sizeof(uv));
+		const uint16_t idx[3] = { 0, 1, 2 };
+		std::memcpy(buf.data() + 60, idx, sizeof(idx));
+		std::ofstream bin(srcDir.path / "uv.bin", std::ios::binary);
+		REQUIRE(bin);
+		bin.write(reinterpret_cast<const char*>(buf.data()),
+		          static_cast<std::streamsize>(buf.size()));
+	}
+	{
+		std::ofstream f(srcDir.path / "textured.gltf");
+		REQUIRE(f);
+		f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [ {
+      "attributes": { "POSITION": 0, "TEXCOORD_0": 1 },
+      "indices": 2, "material": 0 } ] } ],
+  "materials": [ { "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } } } ],
+  "textures":  [ { "source": 0 } ],
+  "images":    [ { "uri": "tex1x1.png" } ],
+  "buffers":    [ { "uri": "uv.bin", "byteLength": 66 } ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 24 },
+    { "buffer": 0, "byteOffset": 60, "byteLength": 6 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [0,0,0], "max": [1,1,0] },
+    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" },
+    { "bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ]
+})";
+	}
+
+	const fs::path source = srcDir.path / "textured.gltf";
+	REQUIRE(Importer::importSource(source, dir.path, "Meshes"));
+
+	const fs::path meshFile = dir.path / "Meshes" / "textured.hasset";
+	REQUIRE(fs::exists(meshFile));
+	const auto sidecars = Importer::meshSidecarAssets(meshFile, dir.path);
+	REQUIRE(sidecars.size() == 2);
+	CHECK(sidecars[0] == "Meshes/textured_mat.hasset");
+	CHECK(sidecars[1] == "Meshes/tex1x1.hasset");
+
+	const HE::UUID meshId = HE::AssetRefs::assetUuidOfFile(meshFile.string());
+	const HE::UUID matId  = HE::AssetRefs::assetUuidOfFile((dir.path / sidecars[0]).string());
+	const HE::UUID texId  = HE::AssetRefs::assetUuidOfFile((dir.path / sidecars[1]).string());
+	REQUIRE(meshId != HE::UUID{});
+	REQUIRE(matId  != HE::UUID{});
+	REQUIRE(texId  != HE::UUID{});
+
+	// All three renamed — nothing in a project has to keep the name a DCC file
+	// happened to have.
+	renameAssetLikeTheEditor(dir.path, "Meshes/textured.hasset",     "Meshes/Rock.hasset");
+	renameAssetLikeTheEditor(dir.path, "Meshes/textured_mat.hasset", "Meshes/RockMat.hasset");
+	renameAssetLikeTheEditor(dir.path, "Meshes/tex1x1.hasset",       "Meshes/RockTex.hasset");
+
+	const fs::path renamedMesh = dir.path / "Meshes" / "Rock.hasset";
+	const std::vector<std::string> before = fileNamesIn(dir.path / "Meshes");
+
+	// The artist moves a vertex and hits Reimport — something that has to show up
+	// in the RENAMED file, not in a fresh textured.hasset next to it.
+	{
+		std::vector<uint8_t> buf(66, 0);
+		const float pos[9] = { 0,0,0,  2,0,0,  0,1,0 };   // v1.x was 1
+		std::memcpy(buf.data() + 0, pos, sizeof(pos));
+		const float uv[6] = { 0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f };
+		std::memcpy(buf.data() + 36, uv, sizeof(uv));
+		const uint16_t idx[3] = { 0, 1, 2 };
+		std::memcpy(buf.data() + 60, idx, sizeof(idx));
+		std::ofstream bin(srcDir.path / "uv.bin", std::ios::binary | std::ios::trunc);
+		REQUIRE(bin);
+		bin.write(reinterpret_cast<const char*>(buf.data()),
+		          static_cast<std::streamsize>(buf.size()));
+	}
+	REQUIRE(Importer::reimport(renamedMesh, dir.path));
+
+	// Every one of the three kept its identity, and no fourth/fifth/sixth file
+	// under the source's names appeared beside them.
+	CHECK(HE::AssetRefs::assetUuidOfFile(renamedMesh.string()) == meshId);
+	CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Meshes" / "RockMat.hasset").string()) == matId);
+	CHECK(HE::AssetRefs::assetUuidOfFile((dir.path / "Meshes" / "RockTex.hasset").string()) == texId);
+	CHECK(fileNamesIn(dir.path / "Meshes") == before);
+
+	// …and the mesh still points at the renamed pair rather than at the two files
+	// a source-derived re-import would have written.
+	const auto after = Importer::meshSidecarAssets(renamedMesh, dir.path);
+	REQUIRE(after.size() == 2);
+	CHECK(after[0] == "Meshes/RockMat.hasset");
+	CHECK(after[1] == "Meshes/RockTex.hasset");
+
+	ContentManager cm(dir.path.string());
+	const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("Meshes/Rock.hasset"));
+	REQUIRE(m != nullptr);
+	CHECK(m->name == "Rock");
+	CHECK(m->materialPath == "Meshes/RockMat.hasset");
+	CHECK(m->vertices.size() == 9);
 }
 
 TEST_CASE("Importer::isImportableSource covers every extension the editor offers")
