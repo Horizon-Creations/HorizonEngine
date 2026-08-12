@@ -1442,12 +1442,21 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// compared with itself and is then rejected by their leading-dot check —
 			// so the engine root and <contentRoot>/Engine, as drop targets
 			// THEMSELVES, were never covered by either.
+			//
+			// The cache half is deliberately OUTSIDE the dev-mode escape hatch, the
+			// same way the context menu has it: HE_ENGINE_CONTENT_EDITABLE=1 exists
+			// so engine authors can edit the shared DEFAULTS in place, and even they
+			// never author into a per-machine download mirror.
+			auto isDownloadCacheGround = [&](const std::string& p)
+			{
+				if (!engineRelativePath(p).empty()) return true;
+				return fs::path(GlobalState::engineContentCacheDir()) == fs::path(p);
+			};
 			auto engineReadOnlyGround = [&](const std::string& p)
 			{
 				if (!ctx.contentManager) return false;
 				if (ctx.contentManager->isEngineDefaultPath(p))  return true;
 				if (ctx.contentManager->isEngineOverridePath(p)) return true;
-				if (!engineRelativePath(p).empty())              return true;   // the download cache
 				std::error_code cmpEc;
 				const std::string engineRoot   = ctx.contentManager->engineContentRoot();
 				const std::string overrideRoot = ctx.contentManager->contentRoot() + "/Engine";
@@ -1456,10 +1465,12 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				cmpEc.clear();
 				if (std::filesystem::exists(overrideRoot, cmpEc) && std::filesystem::exists(p, cmpEc) &&
 				    std::filesystem::equivalent(p, overrideRoot, cmpEc) && !cmpEc) return true;
-				return std::filesystem::path(GlobalState::engineContentCacheDir()) == std::filesystem::path(p);
+				return false;
 			};
-			const bool engineLocked = !ContentManager::isEngineContentDevMode() &&
-				(engineReadOnlyGround(s_pendingMoveSrc) || engineReadOnlyGround(s_pendingMoveDst));
+			const bool engineLocked =
+				isDownloadCacheGround(s_pendingMoveSrc) || isDownloadCacheGround(s_pendingMoveDst) ||
+				(!ContentManager::isEngineContentDevMode() &&
+				 (engineReadOnlyGround(s_pendingMoveSrc) || engineReadOnlyGround(s_pendingMoveDst)));
 			if (!engineLocked && !sameFolder && std::filesystem::exists(src) &&
 			    !std::filesystem::exists(dst))
 			{
