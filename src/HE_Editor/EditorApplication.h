@@ -563,6 +563,13 @@ private:
 	// Entities the session already knows about. Diffed each frame so every
 	// creation and deletion path is covered without hooking any of them.
 	std::unordered_set<Entity> m_structureKnown;
+	// New subtrees whose create the session refused, and for how many frames.
+	// Separate from m_structureKnown because "we tried and it did not go" is not
+	// "the peers have it" — recording the two as one is what let an oversize or
+	// mid-hiccup subtree exist on this machine alone, with nothing retrying and
+	// nothing said. Entries leave on the first success or when the retries run
+	// out; see syncStructuralChanges for why there is a limit at all.
+	std::unordered_map<Entity, int> m_structureUnsendable;
 	void syncStructuralChanges();
 	// Asset-level collaboration. Two layers, doing different jobs: item-level
 	// DOCUMENT DELTAS make an open graph / UI editor live (the peer patches the

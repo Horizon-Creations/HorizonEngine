@@ -1345,7 +1345,8 @@ private:
 	{
 		std::uint64_t windowStartMs = 0;
 		int           posted        = 0;   // shown so far in this window
-		// Whether the "…was not shown" row has already gone out for THIS window.
+		// Whether the "…is sending more messages than this list can show" row has
+		// already gone out for THIS window.
 		// One summary per peer per window, not one per dropped message: the store
 		// collapses only against its LAST row, so two peers over budget at once
 		// produce alternating texts that never collapse and the summary rebuilds

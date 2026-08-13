@@ -190,22 +190,52 @@ void raiseDetachedModals(SDL_Window* mainWindow);
 // nobody performs in a tool window. Both are the same bug wearing different
 // clothes, and the answer to both is to wrap.
 //
-// Construct one right after a successful ImGui::Begin() (or BeginChild) and it
-// holds for that window's contents. Scoped rather than a bare
-// PushTextWrapPos/PopTextWrapPos pair because a panel with an early return
-// between the two unbalances ImGui's stack, and the only thing that would tell
-// us is an assertion in a build nobody runs with assertions on.
+// Construct one inside the window whose contents should wrap. Scoped rather
+// than a bare PushTextWrapPos/PopTextWrapPos pair because a panel with an early
+// return between the two unbalances ImGui's stack, and the only thing that would
+// tell us is an assertion in a build nobody runs with assertions on.
+//
+// ── The scope rule, which is not optional ────────────────────────────────────
+// PopTextWrapPos acts on g.CurrentWindow, and ImGui::End() sets that to the
+// PARENT window — for a top-level panel, to none at all. So a guard whose
+// destructor runs AFTER the matching End() pops the wrong window's stack, or
+// dereferences null. "Declare it right after Begin()" is therefore the wrong
+// advice whenever the End() sits at the same scope level, which is the usual
+// shape of a panel:
+//
+//     void render(AppContext& ctx)
+//     {
+//         ImGui::Begin("Details");
+//         {                                   // <- a block that closes first
+//             EditorWidgets::WrapText wrap;
+//             ...
+//         }
+//         ImGui::End();
+//     }
+//
+// An `if (ImGui::Begin(...)) { ... }` body, a BeginChild/EndChild block, a
+// BeginPopupModal body and a per-section block all close before their End and
+// are safe as they stand.
 //
 // Deliberately NOT applied to the whole frame from one place: the wrap position
-// lives on the window, so it has to be pushed inside each one. And it is not
-// wanted everywhere — see wrapAt(), which takes an explicit position for the few
-// places (a table cell, a fixed-width column) where wrapping at the window edge
-// is not what the layout means.
+// lives on the window, so it has to be pushed inside each one.
 struct WrapText
 {
 	// 0.0f = wrap at the window's content-region right edge, which is what a
-	// docked panel wants. A positive value is an absolute x in window space; a
-	// negative one is "this far in from the right edge".
+	// docked panel wants. A positive value is an absolute x in WINDOW space, for
+	// the cases where the window edge is not the right column: a fixed-width
+	// auto-resizing popup (wrapping at the edge of a window that sizes itself to
+	// its widest line feeds back into itself and the dialog shrinks frame over
+	// frame), a table cell, or a row that must leave room for a button.
+	//
+	// A NEGATIVE value disables wrapping entirely — that is ImGui's rule, not a
+	// convention this could change: CalcWrapWidthForPos returns 0 for a negative
+	// position, and a wrap width of 0 means "do not wrap". It is spelled out here
+	// because the -FLT_MIN "this far in from the right" idiom is right next door
+	// in PushItemWidth/SetNextItemWidth, and borrowing it produces a guard that
+	// looks correct and does nothing. To keep an N-pixel gutter, pass an absolute
+	// column instead:
+	//     ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - N
 	explicit WrapText(float wrapPosX = 0.0f) { ImGui::PushTextWrapPos(wrapPosX); }
 	~WrapText() { ImGui::PopTextWrapPos(); }
 

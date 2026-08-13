@@ -3031,7 +3031,11 @@ TEST_CASE("Notifications: what the user did themselves is never rate-limited")
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
     CHECK(n.level == HE::Ed::NoteLevel::Problem);
     CHECK(n.count == tries);
-    CHECK(findNote(notes, "was not shown").text.empty());
+    // And no summary row, because nothing was dropped. The needle has to be the
+    // one the limiter actually writes: this said "was not shown", which was the
+    // wording before the summary was rewritten to one row per burst, so it
+    // matched nothing and passed no matter what the limiter did.
+    CHECK(findNote(notes, "more messages than").text.empty());
 
     s.client.leave();
     s.host.leave();

@@ -4205,19 +4205,76 @@ void EditorApplication::syncStructuralChanges()
 	// tested — this application object is not in the test binary, and the rule is
 	// the half that was wrong.
 	const HE::Ed::LocalOnlyFn localOnlyFn = [&](Entity e) { return isLocalOnly(e); };
+	// Outside a session there is nobody to tell, and "not sent" is the correct and
+	// permanent answer — so the bookkeeping still runs and the entity is never
+	// looked at again. Asked once for the whole pass rather than inferred from
+	// publishCreate's false, which conflates "no session" with "the send failed".
+	const bool inSession = m_collab.inSession();
 	for (const Entity e : HE::Ed::newSubtreeRoots(reg, current, m_structureKnown))
 	{
 		SceneSerializer serializer;
 		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
-		if (!blob.empty())
+		bool sent = true;
+		if (!blob.empty() && inSession)
 		{
 			const Entity parent = HE::Ed::structParentOf(reg, e);
 			const std::uint32_t parentHandle =
 				parent == entt::null ? 0u
 				                     : static_cast<std::uint32_t>(entt::to_integral(parent));
-			m_collab.publishCreate(
+			sent = m_collab.publishCreate(
 				static_cast<std::uint32_t>(entt::to_integral(e)), parentHandle, blob);
 		}
+
+		// ── A create that did NOT go out must not be recorded as one ──
+		// This used to mark the subtree known unconditionally, and the return
+		// value was discarded. sendStructural refuses a blob over maxSnapshotBytes
+		// (64 MB) and, on a client, refuses while the connection list is
+		// momentarily empty — and once marked, newSubtreeRoots skips the subtree
+		// for good while publishDestroy later no-ops on entities that were never
+		// announced. The subtree then exists here, exists for nobody else, and
+		// nothing retries or says a word. That is not hypothetical: a sculpted and
+		// painted Landscape carries its heightmap and layer weights as base64 in
+		// the component, so one Landscape created during a session is a
+		// tens-of-megabytes blob.
+		//
+		// The asymmetry was the giveaway. publishAsset hits the same class of
+		// ceiling and posts a Problem about it, because "a 200 MB mesh vanishing
+		// without a word is precisely what makes people stop believing a setting
+		// does anything" — the structural path had the identical ceiling and said
+		// nothing at all.
+		if (!sent)
+		{
+			// Two different failures wear the same false, and they want opposite
+			// treatment. A connection list that was empty for a moment will not be
+			// a moment later, so retrying is exactly right and costs nothing. A
+			// blob over the ceiling will never fit, and retrying it means
+			// re-serialising tens of megabytes on every frame for the rest of the
+			// session — trading a silent divergence for a frozen editor.
+			//
+			// Neither is distinguishable from here, so this gives up after a
+			// second's worth of frames: long enough that a transport hiccup heals
+			// unnoticed, short enough that the hopeless case stops early. Then the
+			// subtree is marked known — not because it was sent, but because there
+			// is nothing further to try — and the user is told once, by name, that
+			// this entity is on their machine only.
+			constexpr int kSendRetryFrames = 60;
+			if (++m_structureUnsendable[e] < kSendRetryFrames) continue;
+			m_structureUnsendable.erase(e);
+
+			const std::string name =
+				reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name
+				                             : std::string("An entity");
+			m_notifications.post(HE::Ed::NoteLevel::Problem,
+				"\"" + name + "\" could not be sent to the others.",
+				"It is too large for one message, or the connection dropped while it was "
+				"being created. It exists on this machine only, and nothing will retry. "
+				"Commit it through source control, or delete it and make it again once "
+				"the session is stable.");
+			HE::Ed::markSubtreeKnown(reg, e, localOnlyFn, m_structureKnown);
+			continue;
+		}
+		m_structureUnsendable.erase(e);
+
 		// Everything that went out inside that blob is known now. Marking only
 		// the root would leave the descendants looking new on the very next
 		// frame, and they would be published all over again — the same
