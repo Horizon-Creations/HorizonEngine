@@ -2929,27 +2929,65 @@ TEST_CASE("Notifications: one peer's flood is capped and summarised, another's i
                                          /*wasCreate=*/false);
     }
 
-    int rows = 0, dropped = 0;
+    int rows = 0, summaryRows = 0;
     for (const HE::Ed::Notification& n : notes.snapshot()) {
         if (n.text.find("could not accept") != std::string::npos) ++rows;
-        if (n.text.find("was not shown") != std::string::npos)    dropped = n.count;
+        if (n.text.find("more messages than") != std::string::npos) ++summaryRows;
     }
     // The budget is what gets through, and the rest are accounted for rather
     // than swallowed: a limiter that goes quiet loses the one message that
     // mattered along with the noise.
     CHECK(rows == CollabController::kRemoteNoteBudget);
-    CHECK(dropped == storm - CollabController::kRemoteNoteBudget);
-    const HE::Ed::Notification summary = findNote(notes, "was not shown");
+    // ONE summary for the whole burst — not one per dropped message. Posting
+    // per drop only looked bounded because the store collapses a repeat of the
+    // row behind it; with a second source alternating, nothing collapses and the
+    // summary becomes the flood it replaced.
+    CHECK(summaryRows == 1);
+    const HE::Ed::Notification summary = findNote(notes, "more messages than");
     CHECK(summary.level == HE::Ed::NoteLevel::Warning);
     CHECK(summary.text.find("Anna") != std::string::npos);
 
-    // Somebody else, in the same breath. The budget is per participant for
-    // exactly this reason: a noisy peer must not be able to silence a quiet one,
-    // which would hand any peer a way to hide what the others are saying.
+    // Somebody else, in the same breath. The budget is per bucket for exactly
+    // this reason: a noisy peer must not be able to silence a quiet one, which
+    // would hand any peer a way to hide what the others are saying. Anna's
+    // window is spent; this one is not.
     s.client.debugInjectAssetRefused(/*refuser=*/4242, "Content/Meshes/Pebble.hasset",
                                      8u * 1024u * 1024u, 1u * 1024u * 1024u,
                                      /*wasCreate=*/false);
     CHECK_FALSE(findNote(notes, "Pebble.hasset").text.empty());
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Notifications: an id that is in no roster cannot buy a fresh budget")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    // Two of the paths that feed the limiter read the actor out of the PAYLOAD
+    // rather than off the connection, so a peer can put whatever it likes there.
+    // If the budget were keyed on the raw value, every invented id would arrive
+    // with a full budget of its own and the limit would not exist. They share
+    // one bucket instead.
+    const int storm = CollabController::kRemoteNoteBudget * 4;
+    for (int i = 0; i < storm; ++i) {
+        s.client.debugInjectAssetRefused(/*refuser=*/9000u + static_cast<std::uint32_t>(i),
+                                         "Content/Meshes/Scrap" + std::to_string(i) + ".hasset",
+                                         8u * 1024u * 1024u, 1u * 1024u * 1024u,
+                                         /*wasCreate=*/false);
+    }
+
+    int rows = 0, summaryRows = 0;
+    for (const HE::Ed::Notification& n : notes.snapshot()) {
+        if (n.text.find("could not accept") != std::string::npos) ++rows;
+        if (n.text.find("more messages than") != std::string::npos) ++summaryRows;
+    }
+    CHECK(rows == CollabController::kRemoteNoteBudget);
+    CHECK(summaryRows == 1);
 
     s.client.leave();
     s.host.leave();

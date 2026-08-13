@@ -998,11 +998,18 @@ private:
 	                    const std::string& relPath = {});
 	// Has `from` any budget left in the current window? Consumes one when it
 	// has. Thread-safe on its own account — see m_noteBudgetMutex.
-	bool allowRemoteNote(HE::Net::ParticipantId from);
+	bool allowRemoteNote(HE::Net::ParticipantId rawFrom);
+	// The bucket an id is charged against. Anything the roster does not know is
+	// folded into one shared bucket, because two of the feeding paths take the
+	// actor from the payload rather than from the connection — see the definition.
+	HE::Net::ParticipantId noteBudgetKey(HE::Net::ParticipantId from) const;
+	// True only for the first drop of a peer's window, so the summary below is
+	// posted once per burst rather than once per dropped message.
+	bool claimRemoteNoteSummary(HE::Net::ParticipantId rawFrom);
 	// The one thing a limiter must never do is go quiet. This is the row that
-	// says a peer is producing more than can be shown, posted once per dropped
-	// message and worded so the store's collapse turns it into a single row with
-	// the count on it.
+	// says a peer is producing more than can be shown — at most one per peer per
+	// window, because the store's collapse only reaches the row directly behind
+	// it and two peers at once would otherwise alternate forever.
 	void noteRemoteNotesDropped(HE::Net::ParticipantId from);
 	// Settle one row, the row itself rather than an index into a vector that the
 	// settling mutates. Shared by the single-row and the whole-bundle paths so
@@ -1314,6 +1321,13 @@ private:
 	{
 		std::uint64_t windowStartMs = 0;
 		int           posted        = 0;   // shown so far in this window
+		// Whether the "…was not shown" row has already gone out for THIS window.
+		// One summary per peer per window, not one per dropped message: the store
+		// collapses only against its LAST row, so two peers over budget at once
+		// produce alternating texts that never collapse and the summary rebuilds
+		// the exact flood it is supposed to replace — with rows that carry no
+		// information at all. Bounded here instead, at the source.
+		bool          summarised    = false;
 	};
 	std::unordered_map<HE::Net::ParticipantId, RemoteNoteBudget> m_noteBudgets;
 	// Today every one of these callbacks runs on the frame thread: HorizonNet is

@@ -1344,7 +1344,26 @@ void CollabController::wireCallbacks()
 			const bool wantedAgain =
 				std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path) !=
 				m_heldAssetLocks.end();
-			noteBackgroundWriteRaced(path, subject);
+			// Only HeldByOther means somebody took it. The host also answers
+			// NotInSession when it cannot map the connection to a participant —
+			// a host that restarted its session state, or an eviction while the
+			// socket is still up — and that deny arrives here too. Saying
+			// "somebody took it a moment after you started writing, ask them what
+			// they have" about a lock nobody holds sends the user off to chase a
+			// colleague who never touched the file, over a divergence that did not
+			// happen. The claim is equally dead either way, so the entry goes
+			// regardless; only the sentence is conditional.
+			if (reason == LockDenyReason::HeldByOther)
+				noteBackgroundWriteRaced(path, subject);
+			else
+				postNote(HE::Ed::NoteLevel::Problem,
+				         "The session refused the claim on \"" +
+				             std::filesystem::path(path).filename().string() +
+				             "\" after it had already been rewritten here.",
+				         "This machine is no longer recognised by the session, so the "
+				         "reimport was never arbitrated. Nobody else holds the file — "
+				         "rejoin, and check it against source control.",
+				         path);
 			if (!wantedAgain) return;
 			break;
 		}
@@ -1359,19 +1378,35 @@ void CollabController::wireCallbacks()
 			// know one, so the row points at the thing that went read-only
 			// rather than at "this".
 			const auto it = m_assetSubjectPaths.find(subject);
-			// Attributed to the holder and rate-limited with the rest of their
-			// traffic: nothing here checks that we ever asked for this subject, so
-			// a host that simply sent denies in a loop could otherwise write this
-			// row two hundred times and empty the list of everything else. Keyed
-			// on the holder rather than on the sender because that is who the
-			// sentence is about — and when the table has forgotten them, on 0,
-			// which is a bucket of its own rather than a way past the limit.
-			postRemoteNote(l ? l->owner : HE::Net::kInvalidParticipant,
-			               HE::Ed::NoteLevel::Warning,
-			               (l && !l->ownerName.empty() ? l->ownerName
-			                                           : std::string("Someone else")) +
-			                   " is editing this — it is read-only for you.",
-			               {}, it != m_assetSubjectPaths.end() ? it->second : std::string{});
+			const std::string text =
+				(l && !l->ownerName.empty() ? l->ownerName : std::string("Someone else")) +
+				" is editing this — it is read-only for you.";
+			const std::string path =
+				it != m_assetSubjectPaths.end() ? it->second : std::string{};
+
+			// Did WE ask for this? requestAssetLock returns early without sending
+			// when the replicated table already shows another owner, so a deny that
+			// comes back is nearly always the answer to a click the local user just
+			// made in the race window — and it is the loop below, the one that
+			// reloads the tab from disk and throws that user's race-window edits
+			// away, that this row explains. Throttling it would leave them with a
+			// tab that silently reverted and a summary row naming a peer, which is
+			// precisely the "swallow the answer somebody is standing there waiting
+			// for" case the limiter promises to exclude.
+			//
+			// Unsolicited denies — a host sending them in a loop, which is what the
+			// limiter is actually defending against — still go through the budget,
+			// keyed on the holder rather than the sender because that is who the
+			// sentence is about.
+			const bool weAsked =
+				!path.empty() &&
+				std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path) !=
+					m_heldAssetLocks.end();
+			if (weAsked)
+				postNote(HE::Ed::NoteLevel::Warning, text, {}, path);
+			else
+				postRemoteNote(l ? l->owner : HE::Net::kInvalidParticipant,
+				               HE::Ed::NoteLevel::Warning, text, {}, path);
 		}
 		// We do not hold it, so do not pretend we do.
 		if (subject == m_heldSubject) m_heldSubject = 0;
@@ -3137,8 +3172,25 @@ void CollabController::postRemoteNote(HE::Net::ParticipantId from,
 	postNote(level, std::move(text), std::move(detail), relPath);
 }
 
-bool CollabController::allowRemoteNote(HE::Net::ParticipantId from)
+// An id we can charge a budget against. Two of the paths that feed this read the
+// participant straight out of the payload (CollabSession::handleAssetOpApply and
+// handleAssetRefused both take the actor from the frame, not from the connection
+// it arrived on), so an unknown id is not a theoretical case: a peer that varies
+// the field gets a fresh 10-message budget every single message, which is the
+// limit bypassed completely — and one permanent map entry per value it invents.
+// Everything the roster does not know shares the one invalid-id bucket, the same
+// bucket the lock-deny site already uses when the table has forgotten a holder.
+HE::Net::ParticipantId CollabController::noteBudgetKey(HE::Net::ParticipantId from) const
 {
+	if (from == HE::Net::kInvalidParticipant) return HE::Net::kInvalidParticipant;
+	for (const HE::Net::Participant& p : participants())
+		if (p.id == from) return from;
+	return HE::Net::kInvalidParticipant;
+}
+
+bool CollabController::allowRemoteNote(HE::Net::ParticipantId rawFrom)
+{
+	const HE::Net::ParticipantId from = noteBudgetKey(rawFrom);
 	// The store's own clock: steady, monotonic, in milliseconds, and the same one
 	// the rows are stamped with. Not ImGui's — this can be reached from a
 	// callback and ImGui's time is only meaningful inside a frame — and not a
@@ -3152,15 +3204,40 @@ bool CollabController::allowRemoteNote(HE::Net::ParticipantId from)
 	{
 		b.windowStartMs = now;
 		b.posted        = 0;
+		b.summarised    = false;   // a new window earns a new summary row
 	}
 	if (b.posted >= kRemoteNoteBudget) return false;
 	++b.posted;
 	return true;
 }
 
+// True the FIRST time this peer goes over budget in the current window, false
+// for every drop after it. Separate from allowRemoteNote so the decision to
+// speak is made under the same lock as the decision to drop — asking twice
+// would let two callbacks both believe they were the first.
+bool CollabController::claimRemoteNoteSummary(HE::Net::ParticipantId rawFrom)
+{
+	const HE::Net::ParticipantId from = noteBudgetKey(rawFrom);
+	std::lock_guard<std::mutex> lock(m_noteBudgetMutex);
+	RemoteNoteBudget& b = m_noteBudgets[from];
+	if (b.summarised) return false;
+	b.summarised = true;
+	return true;
+}
+
 void CollabController::noteRemoteNotesDropped(HE::Net::ParticipantId from)
 {
-	std::string who = "a peer";
+	// At most ONE summary row per peer per window. The first shape of this posted
+	// once per dropped message and leaned on the store to collapse them — but the
+	// store compares a new row only against its LAST one, so the moment two peers
+	// are over budget in the same window their differently-named rows alternate,
+	// nothing collapses, and the list fills at exactly the rate the peers are
+	// producing messages. That is the flood this limiter exists to stop, rebuilt
+	// out of rows that say nothing. Bounding it here is the only place it can be
+	// bounded, because only here is it known whose window this is.
+	if (!claimRemoteNoteSummary(from)) return;
+
+	std::string who = "A peer";
 	for (const HE::Net::Participant& p : participants())
 	{
 		if (p.id != from) continue;
@@ -3168,23 +3245,21 @@ void CollabController::noteRemoteNotesDropped(HE::Net::ParticipantId from)
 		break;
 	}
 
-	// One post per DROPPED message, with identical text on purpose: the store
-	// collapses consecutive identical rows into one and counts them, so this
-	// becomes a single row that reads "A further message from Anna was not
-	// shown.  x37" — the count is literally how many were dropped, and it keeps
-	// counting up for as long as the peer keeps going. Writing the number into
-	// the sentence instead would produce a new row per message and rebuild the
-	// flood this exists to stop.
-	//
 	// Warning rather than Info: what was dropped may well have included a
 	// Problem, and a row people skim past is the same as no row. Not a Problem
 	// itself, because nothing on this machine is out of step — a peer is merely
 	// talking faster than the list can carry.
+	//
+	// The name is in the SENTENCE and not only in the detail because the detail
+	// is what the store keeps from the first of a collapsed run, and a row that
+	// named the wrong peer would be worse than one that named none. Two peers
+	// therefore produce two rows in a window rather than one — two is a bound,
+	// which is the whole point.
 	postNote(HE::Ed::NoteLevel::Warning,
-	         "A further message from " + who + " was not shown.",
-	         who + " is producing more notices than this list can carry, so the rest "
-	         "are being dropped to keep it readable. The count on this row is how "
-	         "many; it stops when they do.");
+	         who + " is sending more messages than this list can show.",
+	         "Some of them are being dropped to keep it readable. This row appears "
+	         "once per burst, not once per dropped message — if it keeps coming "
+	         "back, that machine is still going.");
 }
 
 bool CollabController::requestOrPerformAssetOp(
