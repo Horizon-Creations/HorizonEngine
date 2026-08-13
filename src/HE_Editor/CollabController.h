@@ -319,6 +319,18 @@ public:
 	                                            m_status == Status::Connecting ||
 	                                            m_status == Status::Joined; }
 	bool               isHost() const { return m_isHost; }
+
+	// ── Test seams ──
+	// Deliver a refusal as though it had arrived from `refuser`, and ask whether
+	// a create is still outstanding. Both exist so the "a peer's refusal is not a
+	// verdict" rule can be tested for what it GUARDS rather than only for the
+	// happy path — the alternative is a third editor in the test just to produce
+	// one frame.
+	void debugInjectAssetRefused(HE::Net::ParticipantId refuser, const std::string& relPath,
+	                             std::uint32_t bytes, std::uint32_t theirLimit, bool wasCreate)
+	{ applyAssetRefusedByPeer(refuser, relPath, bytes, theirLimit, wasCreate); }
+	bool debugHasPendingCreate(const std::string& relPath) const
+	{ return m_pendingCreates.find(relPath) != m_pendingCreates.end(); }
 	// Fully in a session and able to see other participants. A host qualifies as
 	// soon as it is listening; a client only once its snapshot has been applied,
 	// since before that it does not share the scene the others are looking at.
@@ -844,6 +856,12 @@ private:
 	// `wasCreate` decides one clause and it is not cosmetic: after a refused save
 	// they still have the older file, and after a refused create they have no such
 	// asset at all — "they still have the old one" would be a plain untruth.
+	// What a refusal carried back from the far end changes here — the pending
+	// create it may settle, and the notice. Split out of the callback so a test
+	// can deliver one without standing up a third machine.
+	void applyAssetRefusedByPeer(HE::Net::ParticipantId who, const std::string& relPath,
+	                             std::uint32_t bytes, std::uint32_t theirLimit,
+	                             bool wasCreate);
 	void noteAssetRefusedByPeer(HE::Net::ParticipantId who, const std::string& relPath,
 	                            std::size_t bytes, std::size_t theirLimitBytes,
 	                            bool wasCreate);

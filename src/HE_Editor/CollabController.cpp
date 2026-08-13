@@ -1006,33 +1006,10 @@ void CollabController::wireCallbacks()
 	                                      const std::string& path, std::uint32_t bytes,
 	                                      std::uint32_t theirLimit,
 	                                      HE::Net::CollabSession::AssetIntent intent) {
-		const bool wasCreate = (intent == HE::Net::CollabSession::AssetIntent::Create);
-
-		// A CREATE that never got past their ceiling gets no verdict, and that
-		// leaves worse behind than a missing notification. publishAssetCreate
-		// parks an entry under this key to match the host's answer to the right
-		// file — and for a create refused on ARRIVAL there is no answer: the host
-		// drops the frame before the bytes are assembled, so arbitrateCreate,
-		// which is what would have sent one, is never reached. The entry then
-		// waits for ever, and while it waits the deferred-create branch in
-		// onAssetUpdated parks every peer's create for this same path behind it.
-		// One user's oversized file would quietly stop that path from ever being
-		// created by anyone. The refusal IS the verdict; settle on it.
-		if (wasCreate)
-		{
-			const auto it = m_pendingCreates.find(path);
-			if (it != m_pendingCreates.end())
-			{
-				m_pendingCreates.erase(it);
-				// Whatever was held back waiting for our answer is released here
-				// for the same reason onOwnCreateAnswered releases it: this is
-				// the answer, and it is not going to be followed by another.
-				flushDeferredCreate(path);
-			}
-		}
-
-		noteAssetRefusedByPeer(who, path, bytes, theirLimit, wasCreate);
+		applyAssetRefusedByPeer(who, path, bytes, theirLimit,
+		                        intent == HE::Net::CollabSession::AssetIntent::Create);
 	});
+
 
 	// ── Host: is this create allowed? ──
 	// Installed unconditionally: a client never gets asked, and a host that
@@ -2567,6 +2544,61 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	             "Collaboration and ask them to save it again, or pull it from source "
 	             "control. Nothing was written here, so the file you have is the old one.",
 	         relPath);
+}
+
+// ─── applyAssetRefusedByPeer ─────────────────────────────────────────────────
+// What a refusal that travelled back from the far end does here. Split out of
+// the callback so a test can deliver one without a third machine — the routing
+// is covered by its own cases, this is the part with the state in it.
+void CollabController::applyAssetRefusedByPeer(HE::Net::ParticipantId who,
+                                               const std::string& path,
+                                               std::uint32_t bytes,
+                                               std::uint32_t theirLimit,
+                                               bool wasCreate)
+{
+	// A CREATE that never got past their ceiling gets no verdict, and that
+	// leaves worse behind than a missing notification. publishAssetCreate
+	// parks an entry under this key to match the host's answer to the right
+	// file — and for a create refused on ARRIVAL there is no answer: the host
+	// drops the frame before the bytes are assembled, so arbitrateCreate,
+	// which is what would have sent one, is never reached. The entry then
+	// waits for ever, and while it waits the deferred-create branch in
+	// onAssetUpdated parks every peer's create for this same path behind it.
+	// One user's oversized file would quietly stop that path from ever being
+	// created by anyone. The refusal IS the verdict; settle on it.
+	//
+	// ONLY FROM THE HOST, though, and the distinction is not pedantry. The
+	// host's refusal happens on ARRIVAL, before arbitrateCreate — that is the
+	// case with no verdict coming. A PEER's refusal is something else
+	// entirely: a peer only ever sees a create the host already accepted and
+	// relayed, so a verdict for it exists and is on its way here.
+	//
+	// Settling on a peer's refusal would therefore throw away our own real
+	// answer (onOwnCreateAnswered drops what it no longer has an entry for),
+	// so a NameTaken would never rename the file and never say so — and any
+	// create held back for this path would be flushed OVER the file we just
+	// wrote, which is the exact overwrite the deferred-create machinery
+	// exists to prevent. The refuser id is stamped by the host from the
+	// connection and cannot be forged, so asking who it was is a sound gate:
+	// without it, any joined peer could hand any other peer a create verdict
+	// in the host's name, for any path.
+	bool fromHost = false;
+	for (const HE::Net::Participant& p : participants())
+		if (p.id == who) { fromHost = p.isHost; break; }
+	if (wasCreate && fromHost)
+	{
+		const auto it = m_pendingCreates.find(path);
+		if (it != m_pendingCreates.end())
+		{
+		m_pendingCreates.erase(it);
+		// Whatever was held back waiting for our answer is released here
+		// for the same reason onOwnCreateAnswered releases it: this is
+		// the answer, and it is not going to be followed by another.
+		flushDeferredCreate(path);
+		}
+	}
+
+	noteAssetRefusedByPeer(who, path, bytes, theirLimit, wasCreate);
 }
 
 void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,

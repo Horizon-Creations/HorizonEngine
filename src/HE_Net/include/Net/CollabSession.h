@@ -108,12 +108,13 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // not been written was the one that refused it. The two machines then held
 // different files with nobody on the sending side any the wiser — which is the
 // very failure the refusal notice was added to end, solved for one of the two
-// people it happens to. Nothing on the wire forces this bump: an id a peer does
-// not know is throttle-logged and dropped (NetSession::pump), never fatal. What
-// forces it is the ANSWER, exactly as in v12 — a v12 host drops a v13 client's
-// report without a word, so the refusal it was carrying evaporates in the one
-// hop that could have delivered it and the sender is told nothing. That is the
-// same silence as before, now produced by a session that looks like it works.
+// people it happens to. The bump is forced by the handshake and by nothing
+// subtler: handleJoinRequest compares versions for EQUALITY, so any change to
+// the frame set is a bump by construction and two builds that disagree simply
+// refuse each other at the join. (An id a peer does not know is throttle-logged
+// and dropped rather than fatal — but that only means a stray frame between two
+// builds of the SAME version is harmless. It is not a licence to skip a bump:
+// there is no mixed-version session for the frame to be dropped in.)
 inline constexpr std::uint16_t kCollabProtocolVersion = 13;
 
 enum class JoinRejectReason : std::uint8_t {

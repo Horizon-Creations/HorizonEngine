@@ -2612,3 +2612,60 @@ TEST_CASE("Transfer ceiling: a file everyone can take produces no notice anywher
     s.host.leave();
     he_test::removeQuiet(file);
 }
+
+TEST_CASE("Transfer ceiling: a PEER's refusal is not a verdict, so a pending create survives it")
+{
+    // The gate the review found missing. A create refused by the HOST arrives
+    // before arbitration and genuinely has no verdict coming, so settling on it
+    // is right. A refusal from a PEER is the opposite case: a peer only ever
+    // sees a create the host already accepted and relayed, so our verdict exists
+    // and is on its way. Settling on that one throws it away — onOwnCreateAnswered
+    // drops what it no longer has an entry for, so a NameTaken would never rename
+    // the file and never say so — and it releases anything held back for the path
+    // OVER the file we just wrote, which is the exact overwrite the deferred-create
+    // machinery exists to prevent.
+    //
+    // Since the refuser id is stamped by the host from the connection, this is
+    // also what stops any joined peer from handing another peer a create verdict
+    // in the host's name.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    const fs::path dir = fs::temp_directory_path();
+    s.host.setLocalPathResolver([&dir](const std::string& key) {
+        return (dir / ("he_anna_" + fs::path(key).filename().string())).string();
+    });
+    s.client.setLocalPathResolver([&dir](const std::string& key) {
+        return (dir / ("he_bob_" + fs::path(key).filename().string())).string();
+    });
+
+    const std::string key = "Content/Materials/Peer.hasset";
+    const fs::path    file = writeHAsset("he_collab_peer_create.hasset",
+                                         HE::AssetType::Material, "peer-v1");
+
+    // Bob creates. Nobody refuses it on the way in — the ceilings are wide open —
+    // so the host arbitrates and Bob's entry is waiting for THAT answer.
+    s.client.publishAssetCreate(key, file.string());
+
+    // Checked WITHOUT pumping in between, and that is the whole shape of the
+    // test: over loopback the host arbitrates within a pump or two and settles
+    // the entry legitimately, so a refusal delivered after one would prove
+    // nothing about what the refusal itself did.
+    REQUIRE(s.client.debugHasPendingCreate(key));
+
+    // A peer's refusal for the same key, from someone who is not the host: it
+    // must change nothing about Bob's outstanding create.
+    s.client.debugInjectAssetRefused(/*refuser=*/9999, key, /*bytes=*/8u * 1024u * 1024u,
+                                     /*theirLimit=*/1u * 1024u * 1024u, /*wasCreate=*/true);
+    CHECK(s.client.debugHasPendingCreate(key));
+
+    // Told about it, though — the notification is the honest half and stays.
+    CHECK(findNote(clientNotes, "Peer.hasset").level == HE::Ed::NoteLevel::Problem);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
