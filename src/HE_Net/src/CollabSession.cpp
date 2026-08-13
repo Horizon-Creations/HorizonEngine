@@ -1555,10 +1555,10 @@ bool CollabSession::sendAsset(const AssetUpdate& a) {
                     path.c_str(), static_cast<unsigned long long>(a.subject));
         return false;
     }
-    if (a.bytes.size() > m_cfg.maxSnapshotBytes) {
-        HE_LOG_ERROR(Net, "Not sending asset \"%s\": %s exceeds the %s limit",
+    if (a.bytes.size() > m_cfg.maxAssetBytes) {
+        HE_LOG_ERROR(Net, "Not sending asset \"%s\": %s exceeds the %s transfer limit",
                      path.c_str(), detail::logBytes(a.bytes.size()).c_str(),
-                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
+                     detail::logBytes(m_cfg.maxAssetBytes).c_str());
         return false;
     }
     HE_LOG_INFO(Net, "Sending asset \"%s\" (%s%s)", path.c_str(),
@@ -1638,12 +1638,18 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
             return;
         }
     }
-    if (total > m_cfg.maxSnapshotBytes) {
+    // Refused on the ANNOUNCED size, before a byte of it is read — the reserve
+    // below is what a peer would otherwise be able to make this process allocate
+    // just by claiming a number.
+    if (total > m_cfg.maxAssetBytes) {
         HE_LOG_ERROR(Net, "Refusing asset \"%s\" from participant %u — announced %s, over "
-                          "the %s limit",
+                          "the %s transfer limit",
                      header.path.c_str(), static_cast<unsigned>(sender),
                      detail::logBytes(total).c_str(),
-                     detail::logBytes(m_cfg.maxSnapshotBytes).c_str());
+                     detail::logBytes(m_cfg.maxAssetBytes).c_str());
+        // Their side thinks this save went out. Ours is the only one that knows
+        // otherwise, so it is the only one that can say so.
+        if (m_onAssetRefused) m_onAssetRefused(sender, header.path, total);
         return;
     }
     HE_LOG_INFO(Net, "Receiving asset \"%s\" from participant %u (%s in %u chunk(s))",
@@ -1975,7 +1981,19 @@ void CollabSession::handleAssetRelay(BitReader& r) {
     AssetUpdate header;
     std::uint32_t total = 0, chunks = 0;
     if (!readAssetHeader(r, header, total, chunks)) return;
-    if (total > m_cfg.maxSnapshotBytes) return;
+    // The client's own ceiling, enforced exactly as the host enforces its own on
+    // the way in. It is deliberately not the host's: the two are set on two
+    // machines by two people, and the whole point of checking here is that this
+    // process decides what it is willing to hold.
+    if (total > m_cfg.maxAssetBytes) {
+        HE_LOG_ERROR(Net, "Refusing asset \"%s\" from participant %u — announced %s, over "
+                          "the %s transfer limit",
+                     header.path.c_str(), static_cast<unsigned>(sender),
+                     detail::logBytes(total).c_str(),
+                     detail::logBytes(m_cfg.maxAssetBytes).c_str());
+        if (m_onAssetRefused) m_onAssetRefused(sender, header.path, total);
+        return;
+    }
 
     AssetAssembly asm_;
     asm_.from     = kInvalidConnection;

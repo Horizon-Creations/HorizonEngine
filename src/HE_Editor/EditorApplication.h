@@ -86,6 +86,19 @@ struct EditorConfig
 	// with another is a set of peers that quietly hold different files.
 	bool CollabSyncLargeAssets = false;
 
+	// The biggest single asset this editor will send or accept over a session,
+	// in megabytes. It was a hard 64 shared with the session snapshot, which is
+	// the wrong number to be fixed: with large-asset sync on, a 90 MB cooked
+	// mesh is an ordinary file and simply never arrived — refused, not
+	// truncated, and only a log line said so.
+	//
+	// Raising it is not free, which is why the setting explains itself rather
+	// than just offering a number: a transfer is held WHOLE in memory on both
+	// ends and queued a second time on the sender, and while it is going out it
+	// is ahead of everything else the session wants to say. The cap is also the
+	// only thing bounding what one peer can make another allocate.
+	int CollabMaxAssetMB = 64;
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second

@@ -39,6 +39,10 @@ std::vector<std::uint8_t> encode(const Announcement& a) {
     w.writeString(capped(a.projectKey));
     w.writeByte(a.participants);
     w.writeByte(a.closing ? 1 : 0);
+    // Appended, never inserted — see the growth rule in the header. A peer built
+    // before this field stops reading above and throws the byte away, which is
+    // what keeps it visible in an older browser instead of vanishing from it.
+    w.writeByte(a.syncsLargeAssets ? 1 : 0);
     return w.data();
 }
 
@@ -65,6 +69,24 @@ bool decode(const std::uint8_t* data, std::size_t len, Announcement& out) {
     if (!r.readByte(participants) || !r.readByte(closing)) return false;
     out.participants = participants;
     out.closing      = closing != 0;
+
+    // Everything above is what a pre-v12 announcer sent, and it is still a whole
+    // announcement: read the large-asset flag only when the datagram actually
+    // carries it. Refusing a shorter one instead would delete every older peer
+    // from the list — the same silence this feature was built to replace — and
+    // demanding it would make the format impossible to extend again.
+    //
+    // Absent means false, and a false that was never stated is a lie the panel
+    // could show. It is harmless only because the flag landed together with a
+    // protocol bump: an announcement without it carries a protocol this build
+    // refuses to join, so the row is greyed either way and nobody can act on the
+    // wrong answer. Any future field must earn its default the same way.
+    out.syncsLargeAssets = false;
+    if (r.bitsRemaining() >= 8) {
+        std::uint8_t large = 0;
+        if (!r.readByte(large)) return false;
+        out.syncsLargeAssets = large != 0;
+    }
 
     // A port of zero cannot be connected to, so an announcement carrying one is
     // malformed however well-formed the rest looks.
@@ -261,6 +283,7 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
     s->protocol     = a.protocol;
     s->participants = a.participants;
     s->instance     = a.instance;
+    s->syncsLargeAssets = a.syncsLargeAssets;
     s->lastSeenMs   = nowMs;
 }
 

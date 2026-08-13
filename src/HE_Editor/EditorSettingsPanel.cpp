@@ -359,6 +359,40 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			     "holding different files. Leave the session to change it.");
 	});
 
+	row("collabmaxasset", "Collaboration", [&]{
+		// NOT locked during a session, unlike the checkbox above it. That one is
+		// a promise made to the other peers at the join; this is a bound on what
+		// this machine will read, hold and hand out, and a bound you cannot
+		// tighten while the thing you are worried about is happening would be a
+		// strange kind of guard.
+		Row::inputInt("Largest Asset to Transfer (MB)", &cfg.CollabMaxAssetMB);
+		// Clamped after the edit, the way the refresh interval next door is —
+		// and clamped to the CONTROLLER's constants, not to a second pair of
+		// numbers here. A panel that lets you type 1024 while every refusal
+		// quotes 512 is worse than one that refuses the keystroke.
+		cfg.CollabMaxAssetMB = std::clamp(cfg.CollabMaxAssetMB,
+		                                  CollabController::kMinAssetMB,
+		                                  CollabController::kMaxAssetMB);
+		hint("The largest single file a session will carry. Raising it is not "
+		     "free: a file that travels is held WHOLE in memory on both machines "
+		     "— read into one buffer here, queued a second time in the outgoing "
+		     "connection buffer, and assembled into one more buffer at the far "
+		     "end before it hits disk. It also goes out ahead of everything the "
+		     "session still has to say, so a big file on a slow connection makes "
+		     "editing together feel frozen until it is through. And this number "
+		     "is the only thing standing between another peer and an allocation "
+		     "of that size on this machine: an announced transfer larger than "
+		     "this is refused before a byte of it is kept.");
+		hint("Lowering it does not shrink anything — assets over the limit are "
+		     "refused whole, never truncated, so they simply never arrive and "
+		     "everyone else keeps the older file. When this editor is the one "
+		     "refusing to send, a notification says which file and how big, so it "
+		     "can go through source control instead. Each peer applies its own "
+		     "number, though: when the far end refuses because THAT editor is set "
+		     "lower, the person there is told and you are not — your save looked "
+		     "as though it went through.");
+	});
+
 	row("camspeed", "Viewport", [&]{
 		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
@@ -1293,6 +1327,11 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			// is greyed out to avoid. Outside a session it resets like everything
 			// else — off, because the big media is opt-in.
 			if (!(ctx.collab && ctx.collab->largeAssetSyncLocked())) cfg.CollabSyncLargeAssets = false;
+			// The ceiling has no such lock — it is a local bound, not a rule the
+			// peers joined under — so it resets unconditionally, to the same 64 MB
+			// the session config carries as its own default (Config::maxAssetBytes,
+			// which is the asset ceiling now — the join snapshot keeps its own).
+			cfg.CollabMaxAssetMB  = 64;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

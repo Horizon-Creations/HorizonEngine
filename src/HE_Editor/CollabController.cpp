@@ -80,6 +80,28 @@ std::string remedyFor(std::uint16_t port)
 	return buf;
 }
 
+constexpr std::size_t kMiB = 1024u * 1024u;
+
+// The megabytes the user chose, as the byte count the session enforces. One
+// conversion, in one place, because the number is set from the config, read back
+// for the panel and quoted in two notification texts — four spellings of the
+// same arithmetic is how a limit ends up being described as one thing and
+// applied as another.
+std::uint32_t assetCeilingBytes(int mb)
+{
+	const int clamped = std::clamp(mb, CollabController::kMinAssetMB,
+	                                   CollabController::kMaxAssetMB);
+	return static_cast<std::uint32_t>(static_cast<std::size_t>(clamped) * kMiB);
+}
+
+// Bytes as whole megabytes, rounded UP: a 1.2 MB file described as "1 MB" next
+// to a 1 MB limit reads as a contradiction, and the number in a refusal only
+// has to be big enough to explain the refusal.
+std::size_t asMB(std::size_t bytes)
+{
+	return (bytes + kMiB - 1) / kMiB;
+}
+
 } // namespace
 
 // ─── Scene ↔ session state ───────────────────────────────────────────────────
@@ -179,6 +201,9 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	// here for as long as the session lives — see setSyncLargeAssets for why it
 	// cannot be moved afterwards.
 	cfg.syncLargeAssets = m_syncLargeAssets;
+	// The ceiling, by contrast, is only ours and stays adjustable — this is the
+	// starting value, not a rule anybody else is bound by.
+	cfg.maxAssetBytes = assetCeilingBytes(m_maxAssetMB);
 	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Host, cfg);
 	m_collab->setStateProvider(m_provider.get());
@@ -766,6 +791,10 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	// carries the big assets will have us at all. What actually travels once we
 	// are in is the session's answer, which arrives in the accept.
 	cfg.syncLargeAssets = m_syncLargeAssets;
+	// Ours alone, and not part of what the host is asked to agree to: a guest
+	// with a low ceiling simply does not accept the biggest files, and finds out
+	// per file rather than at the door.
+	cfg.maxAssetBytes = assetCeilingBytes(m_maxAssetMB);
 	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Client, cfg);
 	m_collab->setStateProvider(m_provider.get());
@@ -956,6 +985,21 @@ void CollabController::wireCallbacks()
 		// by one — Save All is one action and would otherwise be a burst.
 		if (a.intent == HE::Net::CollabSession::AssetIntent::Create)
 			noteAssetCreated(who, a.path);
+	});
+
+	m_collab->onAssetRefused([this](HE::Net::ParticipantId who, const std::string& path,
+	                                std::uint32_t bytes) {
+		// The far end believes this save went out — its own ceiling let it past,
+		// so nothing over there failed. This machine is the only one that knows
+		// the file is not coming, which makes it the only one that can say so.
+		std::string name;
+		for (const HE::Net::Participant& p : participants())
+		{
+			if (p.id != who) continue;
+			name = p.name;
+			break;
+		}
+		noteAssetTooLarge(path, bytes, /*sending=*/false, name);
 	});
 
 	// ── Host: is this create allowed? ──
@@ -1626,6 +1670,25 @@ void CollabController::setSyncLargeAssets(bool on)
 	m_syncLargeAssets = on;
 }
 
+void CollabController::setMaxAssetMB(int mb)
+{
+	// Clamped rather than refused: this comes from a config file that a user can
+	// edit by hand, and a 4000 in there must not become a session that will
+	// cheerfully try to hold four gigabytes because somebody typed a number. The
+	// bounds and the reasoning behind them live in the header, beside the
+	// constants, so the panel is reading the same justification it shows.
+	const int clamped = std::clamp(mb, kMinAssetMB, kMaxAssetMB);
+	if (clamped == m_maxAssetMB) return;   // the editor pushes its config every frame
+	m_maxAssetMB = clamped;
+
+	// Straight into a running session, and deliberately so. This binds nothing
+	// but our own memory and our own link — there is no agreement between peers
+	// for a mid-session change to break, the way there is for the large-asset
+	// switch — so somebody told "raise the limit in Preferences" can do it and
+	// have the next save go through, rather than being told to leave first.
+	if (m_collab) m_collab->setMaxAssetBytes(assetCeilingBytes(m_maxAssetMB));
+}
+
 bool CollabController::retryJoinWithLargeAssets()
 {
 	if (!m_lastJoin.valid) return false;
@@ -1709,6 +1772,14 @@ void CollabController::updateLanDiscovery(std::uint64_t nowMs)
 			a.port         = m_port;
 			a.projectLabel = m_projectLabel;
 			a.projectKey   = m_projectId;
+			// Read from the SESSION, not from m_syncLargeAssets: this is the same
+			// value the handshake answers a joiner with, so the row in someone
+			// else's list cannot promise one thing while the join enforces the
+			// other. Announced once and never revised, which is safe for exactly
+			// as long as setSyncLargeAssets keeps refusing to change it during a
+			// session — if that ever softens, this has to be pushed on every tick
+			// like the participant count below.
+			a.syncsLargeAssets = sessionSyncsLargeAssets();
 			for (const HE::Net::Participant& p : participants())
 				if (p.isHost) { a.hostName = p.name; break; }
 			// No join code. See LanBeacon.h — announcing it would let anyone on
@@ -2420,19 +2491,50 @@ void CollabController::publishAsset(const std::string& relativePath,
 	//
 	// The ceiling, though, is what a user walks straight into the day they turn
 	// large-asset sync on: nothing truncates, the frame is simply never emitted
-	// (CollabSession::sendAsset, and again on the receiving host), and until now
+	// (CollabSession::sendAsset, and again on the receiving side), and until now
 	// the only trace was a log line. A 200 MB mesh vanishing without a word is
 	// precisely what makes people stop believing a setting does anything.
 	if (size <= m_collab->maxAssetBytes()) return;
-	constexpr std::size_t kMiB = 1024u * 1024u;
+	noteAssetTooLarge(relativePath, size, /*sending=*/true);
+}
+
+void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t bytes,
+                                         bool sending, const std::string& who)
+{
+	const std::string name = std::filesystem::path(relPath).filename().string();
+	const std::size_t mb   = asMB(bytes);
+	// Read off the live session rather than off m_maxAssetMB, so the number in
+	// the sentence is the one that actually refused the file even if the setting
+	// has moved since — the reader is being told why THIS did not go through.
+	const std::size_t limit = m_collab ? (m_collab->maxAssetBytes() / kMiB)
+	                                   : static_cast<std::size_t>(m_maxAssetMB);
+
+	if (sending)
+	{
+		postNote(HE::Ed::NoteLevel::Problem,
+		         "\"" + name + "\" was not sent to the others.",
+		         "It is " + std::to_string(mb) + " MB and this machine will not send "
+		             "more than " + std::to_string(limit) + " MB in one file. Raise "
+		             "\"Largest asset to transfer\" in Preferences ▸ Collaboration, or "
+		             "leave this one to source control — the others still have the "
+		             "older file.",
+		         relPath);
+		return;
+	}
+
+	// The other end's ceiling was high enough or it would never have started, so
+	// theirs is the higher of the two and ours is what stopped it. Saying that
+	// plainly is what makes the notice actionable: the fix is on THIS machine,
+	// and the person who saved the file cannot make it happen.
+	const std::string sender = who.empty() ? std::string("Someone") : who;
 	postNote(HE::Ed::NoteLevel::Problem,
-	         "\"" + std::filesystem::path(relativePath).filename().string() +
-	             "\" was not sent to the others.",
-	         "It is " + std::to_string((size + kMiB - 1) / kMiB) + " MB, and a session "
-	             "refuses anything over " + std::to_string(m_collab->maxAssetBytes() / kMiB) +
-	             " MB. The others still have the older file — pull this one from "
-	             "source control.",
-	         relativePath);
+	         sender + " sent \"" + name + "\", and this machine refused it.",
+	         "It is " + std::to_string(mb) + " MB and this machine accepts at most " +
+	             std::to_string(limit) + " MB in one file — their limit is higher than "
+	             "yours. Raise \"Largest asset to transfer\" in Preferences ▸ "
+	             "Collaboration and ask them to save it again, or pull it from source "
+	             "control. Nothing was written here, so the file you have is the old one.",
+	         relPath);
 }
 
 // ─── Reimport ────────────────────────────────────────────────────────────────
@@ -3074,9 +3176,24 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 	HE::Net::CollabSession::AssetUpdate a;
 	a.subject = assetSubject(rel);
 	a.path    = rel;
+	const std::size_t size = bytes.size();
 	a.bytes   = std::move(bytes);
 	a.intent  = HE::Net::CollabSession::AssetIntent::Create;
-	m_collab->sendAsset(a);
+	// The same ceiling refuses a create, and a create is the worse one to lose
+	// quietly: a save that does not travel leaves the others with an older
+	// version of something they have, while this leaves them with no asset at all
+	// and nothing on screen to suggest one was ever made.
+	if (!m_collab->sendAsset(a))
+	{
+		if (size > m_collab->maxAssetBytes())
+			noteAssetTooLarge(rel, size, /*sending=*/true);
+		// Nothing went out, so no verdict is coming. Left behind, the entry waits
+		// for an answer for ever AND holds back any create the others make on the
+		// same path — see the deferred-create branch in wireCallbacks, which
+		// parks a remote create precisely while one of ours is still open.
+		m_pendingCreates.erase(rel);
+		return;
+	}
 
 	// The host answers its OWN create immediately — no round trip, so nothing is
 	// pending and an entry left behind would only wait for a verdict that is

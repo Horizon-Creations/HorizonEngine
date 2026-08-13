@@ -91,7 +91,17 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // nonsense. In the other direction a v10 request makes a v11 host log "malformed
 // join request" instead of the version mismatch it actually is, which is the one
 // verdict a user can act on.
-inline constexpr std::uint16_t kCollabProtocolVersion = 11;
+// v12: the LAN announcement carries the same flag, so a session found on this
+// network can say what it costs before anyone clicks it. The datagram itself
+// tolerates the older shape — the field is appended and read only when it is
+// there (LanBeacon.h) — so nothing on the wire forces this bump. What forces it
+// is the ANSWER a missing field produces: a v11 host with the setting on would
+// be listed as "does not transfer large assets" and still be joinable, which is
+// the list advertising one thing while the handshake enforces another. Bumped,
+// the two sets coincide: an announcement that cannot state the flag comes from a
+// build this one refuses to join anyway, so the wrong answer is never one a user
+// can act on.
+inline constexpr std::uint16_t kCollabProtocolVersion = 12;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -281,6 +291,18 @@ public:
         // Upper bound on an accepted snapshot. Guards against a hostile or buggy
         // host announcing a size that would exhaust memory.
         std::uint32_t maxSnapshotBytes = 64u * 1024u * 1024u;
+        // Upper bound on ONE asset transfer, which used to be the same number.
+        // They are separate because they are bounded by different things: a
+        // snapshot is the scene, it happens once per join, and its size is not
+        // anybody's choice. An asset transfer is a file a user picked, it happens
+        // on every save, and in a session that carries meshes and textures it is
+        // the number that decides whether their work travels at all. Tying the
+        // two meant raising the ceiling for a 200 MB mesh also raised what a peer
+        // could make us hold for a scene we never asked for.
+        //
+        // Same default, so a session that nobody has configured behaves exactly
+        // as it did before this was split out.
+        std::uint32_t maxAssetBytes    = 64u * 1024u * 1024u;
         std::uint32_t chunkBytes       = 256u * 1024u;
 
         // Presence is sent at most this often. A gizmo drag produces one change
@@ -550,6 +572,21 @@ public:
         m_onAsset = std::move(fn);
     }
 
+    // An incoming asset THIS side would not take: it announced more bytes than
+    // maxAssetBytes, so not one of them was read and the file will never appear
+    // here. (path, announced size.)
+    //
+    // It exists because the two ceilings are set independently and the lower one
+    // wins without either user being party to the decision. The sender's own
+    // ceiling let this through, so from here the refusal is always ours — and on
+    // their machine the save simply looked as though it worked. Somebody has to
+    // be told, and this side is the only one that knows; a log line would leave
+    // both of them believing the file travelled.
+    void onAssetRefused(std::function<void(ParticipantId, const std::string& path,
+                                           std::uint32_t bytes)> fn) {
+        m_onAssetRefused = std::move(fn);
+    }
+
     // ── Host: may this create go ahead? ──
     // HorizonNet cannot answer this itself — whether a name is free, whether the
     // kind of asset travels at all, whether the path stays inside the project
@@ -807,12 +844,22 @@ public:
     bool sessionSyncsLargeAssets() const { return m_sessionLargeAssets; }
 
     // The ceiling on ONE asset transfer, in bytes. sendAsset refuses anything
-    // over it and the receiving host refuses it again — nothing is truncated,
+    // over it and the receiving side refuses it again — nothing is truncated,
     // the frame is simply never emitted. Exposed because the editor has to be
     // able to TELL the user which of the two things happened when a save does
     // not travel, and repeating the number there would let the two drift apart.
-    // Shared with the snapshot for now; splitting it is a separate decision.
-    std::uint32_t maxAssetBytes() const { return m_cfg.maxSnapshotBytes; }
+    std::uint32_t maxAssetBytes() const { return m_cfg.maxAssetBytes; }
+
+    // The user moved the setting. Allowed WHILE A SESSION IS UP, unlike the
+    // large-asset rule next to it in the same panel, and the difference is not an
+    // oversight: that one is an agreement between peers, and half a session
+    // running each way is a group that silently holds different files. This one
+    // binds nothing but this machine's own memory and its own link. Two peers are
+    // expected to disagree about it — the lower of the two is simply what gets
+    // through — so there is no shared state for a mid-session change to break,
+    // and the refusal notice can tell someone to raise it and mean "now",
+    // instead of "leave the session first".
+    void setMaxAssetBytes(std::uint32_t bytes) { m_cfg.maxAssetBytes = bytes; }
 
 private:
     void installHandlers();
@@ -1002,6 +1049,8 @@ private:
     std::function<void(ParticipantId, const ComponentUpdate&)>  m_onComponents;
     std::function<void(ParticipantId, const StructuralChange&)> m_onStructural;
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
+    std::function<void(ParticipantId, const std::string&, std::uint32_t)>
+                                                               m_onAssetRefused;
     CreatePolicy                                               m_createPolicy;
     std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
                                                                m_onCreateResult;

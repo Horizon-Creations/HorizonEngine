@@ -152,6 +152,32 @@ public:
 	// way rather than a false "no" that depends on when it asked.
 	bool sessionSyncsLargeAssets() const;
 
+	// ── How big a file may travel ────────────────────────────────────────────
+	// The ceiling on ONE asset transfer, in megabytes, and it is per MACHINE
+	// rather than per session: each side refuses what it will not hold, so two
+	// peers may disagree and the lower of the two is what actually gets through.
+	// That is also why this may be changed while a session is up when the
+	// large-asset switch above may not — see CollabSession::setMaxAssetBytes.
+	//
+	// The bounds are here, and public, so the panel's slider and this clamp
+	// cannot drift apart: a UI that offered 2 GB while this quietly capped at 512
+	// would leave a user certain they had raised a limit that had not moved.
+	//
+	// The maximum is not a round number picked for looks. The ceiling is what a
+	// peer can make this process allocate — the receiving side reserves the
+	// ANNOUNCED size before a byte arrives — and during one send the same file is
+	// resident about three times over: the sender's copy, the frames queued in
+	// the transport's out-buffer, and the receiver's assembly. 512 MiB is already
+	// a gigabyte and a half of that, which is as far as this is willing to go on
+	// somebody else's say-so. The minimum is 1 MiB because below it ordinary
+	// authored assets — a scene, a widget with embedded art — stop travelling,
+	// and a session where saves silently do not arrive is worse than no ceiling
+	// control at all.
+	static constexpr int kMinAssetMB = 1;
+	static constexpr int kMaxAssetMB = 512;
+	void setMaxAssetMB(int mb);
+	int  maxAssetMB() const { return m_maxAssetMB; }
+
 	// The one answer to "does an asset of this kind travel". Everything that
 	// used to ask isSyncableAssetType asks this instead: the static predicate is
 	// still the type rule, and this is that rule OR the session's decision to
@@ -797,6 +823,16 @@ private:
 	                         HE::Net::CollabSession::AssetRejectReason reason,
 	                         const std::string& suggestedPath);
 	void noteAssetCreated(HE::Net::ParticipantId who, const std::string& path);
+	// A file that did not travel because of the size ceiling, from whichever end
+	// noticed. It is THIS machine's ceiling either way — when we send, ours
+	// refused our own file; when we receive, ours refused a file whose sender was
+	// evidently willing to send it, which means their limit is the higher of the
+	// two. What changes with `sending` is only which of those two sentences is
+	// true, and both of them have to name the file, its size, whose limit stopped
+	// it and where that limit is changed. Anything less leaves the reader with a
+	// file that simply did not arrive.
+	void noteAssetTooLarge(const std::string& relPath, std::size_t bytes,
+	                       bool sending, const std::string& who = {});
 
 	// One post, with the null check in ONE place: the store is absent in tests
 	// and in any headless run, and forty call sites each remembering to ask
@@ -1004,6 +1040,10 @@ private:
 	// of the session: from then on the SESSION's answer is what counts, and on a
 	// client the two deliberately differ (the host decides).
 	bool          m_syncLargeAssets = false;
+	// The transfer ceiling in megabytes, clamped on the way in. Unlike the flag
+	// above this IS read again mid-session — setMaxAssetMB pushes it straight
+	// into the live session, because it binds nothing but this machine.
+	int           m_maxAssetMB = 64;
 	// A host turned us away because we had not agreed. Held until the panel has
 	// asked the user, because it is a question and not a failure.
 	bool          m_largeAssetsPrompt = false;

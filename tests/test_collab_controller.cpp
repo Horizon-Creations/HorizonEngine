@@ -2259,3 +2259,114 @@ TEST_CASE("Larger assets: outside a session the local setting is the answer")
     // about the asset kind, and it has callers outside the editor.
     CHECK_FALSE(CollabController::isSyncableAssetType(HE::AssetType::StaticMesh));
 }
+
+// ─── How big a file may travel ───────────────────────────────────────────────
+// The ceiling is the user's to set, and the two ends set it separately. What
+// these check is the half a user never sees coming: whose limit refused a file,
+// and whether anybody was told.
+
+TEST_CASE("Transfer ceiling: a hand-edited config cannot ask for more than the cap")
+{
+    // This value comes out of config.json, which is a text file somebody can put
+    // a 4000 in. Clamped rather than refused, because a refusal would leave the
+    // editor running on a number it had already rejected.
+    CollabController c;
+    CHECK(c.maxAssetMB() == 64);   // the default, and what an untouched config says
+
+    c.setMaxAssetMB(4000);
+    CHECK(c.maxAssetMB() == CollabController::kMaxAssetMB);
+    c.setMaxAssetMB(0);
+    CHECK(c.maxAssetMB() == CollabController::kMinAssetMB);
+    c.setMaxAssetMB(-1);
+    CHECK(c.maxAssetMB() == CollabController::kMinAssetMB);
+
+    c.setMaxAssetMB(128);
+    CHECK(c.maxAssetMB() == 128);
+}
+
+TEST_CASE("Transfer ceiling: a file over this machine's limit is not sent, and the notice says where the limit is")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore hostNotes;
+    s.host.setNotifications(&hostNotes);
+
+    bool bytesArrived = false;
+    s.client.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    // A material, so nothing about the large-asset rule is involved: this is
+    // purely the size ceiling refusing a file of a kind that always travels.
+    s.host.setMaxAssetMB(1);
+    const std::string key  = "Content/Materials/Marble.hasset";
+    // Half a megabyte over the ceiling, so the rounded-up "2 MB" in the sentence
+    // is the file and not the header that HAsset::Writer puts in front of it.
+    const fs::path    file = writeHAsset("he_collab_marble.hasset",
+                                         HE::AssetType::Material,
+                                         std::string(3u * 512u * 1024u, 'm'));
+
+    s.host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !hostNotes.snapshot().empty(); }));
+
+    CHECK_FALSE(bytesArrived);
+    const HE::Ed::Notification n = findNote(hostNotes, "Marble.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.text.find("was not sent") != std::string::npos);
+    // The three things a reader needs and cannot work out: how big it was, what
+    // the limit is, and where that limit is changed. Without the last one this is
+    // a complaint rather than something anyone can act on.
+    CHECK(n.detail.find("2 MB") != std::string::npos);
+    CHECK(n.detail.find("1 MB") != std::string::npos);
+    CHECK(n.detail.find("Preferences") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Transfer ceiling: the receiving machine refuses a file its sender was happy to send")
+{
+    // The asymmetry that makes this worth a notification at all. Anna's ceiling
+    // let the file go, so on her machine the save simply worked and nothing will
+    // ever say otherwise. Bob's is the lower one, and his editor is the only
+    // place in the session that knows the file is not coming.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    bool bytesArrived = false;
+    s.client.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    // Set INSIDE the session, which is also the test that it reaches the live
+    // one: the notice tells people to raise this and try again, and that advice
+    // is a lie if the new number only takes effect on the next join.
+    s.client.setMaxAssetMB(1);
+
+    const std::string key  = "Content/Materials/Granite.hasset";
+    const fs::path    file = writeHAsset("he_collab_granite.hasset",
+                                         HE::AssetType::Material,
+                                         std::string(3u * 512u * 1024u, 'g'));
+
+    s.host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !clientNotes.snapshot().empty(); }));
+
+    // Nothing was written here, so what is on this disk is still the old file —
+    // and the notice has to say so, or the reader assumes a partial one landed.
+    CHECK_FALSE(bytesArrived);
+    const HE::Ed::Notification n = findNote(clientNotes, "Granite.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.text.find("Anna") != std::string::npos);          // who sent it
+    CHECK(n.text.find("refused") != std::string::npos);
+    CHECK(n.detail.find("their limit is higher") != std::string::npos);
+    CHECK(n.detail.find("Preferences") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}

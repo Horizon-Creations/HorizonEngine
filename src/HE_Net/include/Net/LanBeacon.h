@@ -61,11 +61,36 @@ struct Announcement {
     std::string   projectKey;       // compared, so a mismatch is visible BEFORE joining
     std::uint8_t  participants = 0;
     bool          closing    = false;  // the session is ending; drop it now
+    // Does this session also carry the big imported media — meshes, textures,
+    // audio, fonts — instead of leaving them to source control? Announced so the
+    // LIST can say it BEFORE anyone clicks: it is the one property of a session
+    // that costs the guest something, and until now the only place it was ever
+    // stated was the refusal at the handshake, which arrives after the join has
+    // already failed.
+    //
+    // THE HANDSHAKE STAYS THE AUTHORITY. Nothing in this datagram is
+    // authenticated — anyone who can reach the port can forge one, and a beacon
+    // that is two seconds stale describes a session that has since been reopened
+    // — so this may inform a decision and must never make one. What actually
+    // decides is the host's answer on the wire
+    // (JoinRejectReason::LargeAssetsRequired), which is the same value this
+    // field is filled from and is checked against the session that is really
+    // there rather than against a claim about it.
+    bool          syncsLargeAssets = false;
 };
 
 // Encode/decode are pure and separately testable, which is the whole reason they
 // are not buried in the socket loop: multicast in a test environment is a
 // coin toss, and the parsing is where the bugs are.
+//
+// HOW THIS FORMAT GROWS: a new field goes on the END, and the decoder reads it
+// only when the datagram is long enough to carry it. Both halves matter, because
+// two builds share a segment for as long as it takes everyone to update: an
+// older peer stops reading after the last field it knows and ignores whatever
+// follows, and we take its shorter datagram as the defaults rather than
+// discarding it. A field inserted anywhere else, or a bumped kMagic, turns every
+// peer on the other build into a row that is missing or wrong — which is exactly
+// the "my friend's session does not show up" this whole mechanism exists to end.
 HE_NET_API std::vector<std::uint8_t> encode(const Announcement& a);
 // False when the datagram is not ours, is truncated, or carries an implausible
 // length — every string is capped, because this is unauthenticated input from
@@ -126,6 +151,11 @@ public:
         std::uint8_t  participants = 0;
         std::uint64_t instance     = 0;
         std::uint64_t lastSeenMs   = 0;
+        // What the panel puts on the row before anyone clicks. False also when
+        // the announcer is too old to have said — which is safe only because a
+        // peer on another protocol cannot be joined by this build at all, so a
+        // row that could not answer is never a row somebody acts on.
+        bool          syncsLargeAssets = false;
     };
 
     ~Browser();

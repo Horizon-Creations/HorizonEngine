@@ -76,6 +76,25 @@ namespace
 		if (ImGui::SmallButton(id)) ImGui::SetClipboardText(value.c_str());
 	}
 
+	// ── Does THAT session carry the big media? ───────────────────────────────
+	// Straight from the host's own announcement, which publishes the same value
+	// the handshake will answer a joiner from.
+	//
+	// It must NEVER fall back to ctx.editorConfig.CollabSyncLargeAssets. That is
+	// what THIS editor agreed to, and painting it onto a stranger's row would
+	// tell a guest with the setting on that every session on the network carries
+	// meshes — including the ones that do not — which is worse than saying
+	// nothing, because it is a claim about somebody else's session.
+	//
+	// And it is a HINT, not a gate: the datagram is unauthenticated and can be
+	// stale or forged, so the join still decides. A row from an older peer reads
+	// false because that build could not say — which is harmless here, because
+	// the list refuses to join a mismatched protocol anyway.
+	bool SessionAnnouncesLargeAssets(const HE::Net::LanBeacon::Browser::Session& s)
+	{
+		return s.syncsLargeAssets;
+	}
+
 	// ── Colour ───────────────────────────────────────────────────────────────
 	// The colour this user is drawn in throughout the session: viewport marker,
 	// selection highlight, lock badges, footer avatar. Presets first because they
@@ -630,6 +649,46 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						{
 							ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
 								"    a different project");
+						}
+
+						// What this session will cost you, on the row, before the
+						// click. Only for the sessions that say so — a notice on
+						// every row is a notice nobody reads, and the ones that
+						// leave the big media to source control have nothing to
+						// warn about.
+						//
+						// A tinted block rather than another column: this window
+						// is narrow, and the sentence does not fit beside a
+						// project name and a head count.
+						if (joinable && SessionAnnouncesLargeAssets(s))
+						{
+							// The list's own amber, at an alpha that reads as a
+							// tint behind text rather than as a second selection
+							// highlight — a row already has one of those.
+							const ImVec4 amber(1.0f, 0.78f, 0.35f, 1.0f);
+							ImGui::PushStyleColor(ImGuiCol_ChildBg,
+							                      ImVec4(amber.x, amber.y, amber.z, 0.12f));
+							// AutoResizeY, because the text wraps: a fixed height
+							// clips the second line on a narrow window, which is
+							// exactly the window this panel is usually docked in.
+							ImGui::BeginChild("##bigassets", ImVec2(0, 0),
+							                  ImGuiChildFlags_AutoResizeY |
+							                  ImGuiChildFlags_AlwaysUseWindowPadding);
+							ImGui::PushStyleColor(ImGuiCol_Text, amber);
+							// The last clause is only true while the setting is
+							// off — that is when joining raises the question and
+							// turns it on. Saying it to someone who already has
+							// it on would promise a dialog that never comes.
+							ImGui::TextWrapped(
+								ctx.editorConfig.CollabSyncLargeAssets
+									? "Also transfers meshes, textures and audio — this "
+									  "session can use considerably more data."
+									: "Also transfers meshes, textures and audio — this "
+									  "session can use considerably more data. Joining "
+									  "turns that on for you too.");
+							ImGui::PopStyleColor();
+							ImGui::EndChild();
+							ImGui::PopStyleColor();
 						}
 						ImGui::PopID();
 					}

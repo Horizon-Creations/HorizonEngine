@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include <Net/CollabSession.h>
+#include <Net/LanBeacon.h>
 #include <Net/LoopbackTransport.h>
 #include <Net/NetSession.h>
 
@@ -2838,4 +2839,315 @@ TEST_CASE("CollabSession: the version is still checked before the large-asset ru
 
     CHECK(reason == JoinRejectReason::VersionMismatch);
     CHECK(host.participants().size() == 1);
+}
+
+// ─── The transfer ceiling ────────────────────────────────────────────────────
+// One number per MACHINE, not per session, and the two sides are expected to
+// disagree: each refuses what it is not willing to hold, so the lower of the two
+// is what gets through in practice. Both halves are tested because having only
+// one is the interesting failure — a sender that trusts the receiver's ceiling
+// lets a peer make it allocate whatever it announces, and a receiver that trusts
+// the sender's has no bound at all.
+
+TEST_CASE("CollabSession: a client's asset under its ceiling arrives and one over it never leaves")
+{
+    CollabSession::Config small;
+    small.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", small);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AA01ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a; arrived = true;
+    });
+
+    const auto fits = makeBlob(4000);
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Meshes/Small.hasset", fits));
+    p->pump(6);
+    REQUIRE(arrived);
+    CHECK(got.bytes == fits);
+
+    // Over the ceiling: refused by the SENDER, before a byte reaches the wire.
+    // The false is the whole contract — nothing is truncated and nothing is
+    // half-sent, so the caller is in a position to say so to the user.
+    arrived = false;
+    const auto tooBig = makeBlob(4097);
+    CHECK_FALSE(p->client->sendAsset(kAsset, "Content/Meshes/Big.hasset", tooBig));
+    p->pump(6);
+    CHECK_FALSE(arrived);
+}
+
+TEST_CASE("CollabSession: the host's own ceiling stops its own oversized save just the same")
+{
+    // The same rule from the other end. A host enforcing this only on what
+    // arrives would be a host that can flood every client in the session.
+    CollabSession::Config small;
+    small.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", {}, small);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AA02ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    bool arrived = false;
+    p->client->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        arrived = true;
+    });
+
+    REQUIRE(p->host->sendAsset(kAsset, "Content/Textures/Fine.hasset", makeBlob(4096)));
+    p->pump(6);
+    CHECK(arrived);
+
+    arrived = false;
+    CHECK_FALSE(p->host->sendAsset(kAsset, "Content/Textures/Huge.hasset", makeBlob(9000)));
+    p->pump(6);
+    CHECK_FALSE(arrived);
+}
+
+TEST_CASE("CollabSession: a host refuses an asset over ITS ceiling and says which file it was")
+{
+    // The case the sender cannot see: their own ceiling let the file go, ours did
+    // not. Nobody over there failed at anything, so nothing over there will ever
+    // mention it — which is why the refusal has to be announced on this side.
+    CollabSession::Config tightHost;
+    tightHost.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", {}, tightHost);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AA03ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    bool applied = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        applied = true;
+    });
+    std::string   refusedPath;
+    std::uint32_t refusedBytes = 0;
+    ParticipantId refusedFrom  = kInvalidParticipant;
+    p->host->onAssetRefused([&](ParticipantId who, const std::string& path,
+                                std::uint32_t bytes) {
+        refusedFrom  = who;
+        refusedPath  = path;
+        refusedBytes = bytes;
+    });
+
+    // The client's own ceiling is the default, so it sends this happily.
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Meshes/Statue.hasset", makeBlob(20000)));
+    p->pump(8);
+
+    CHECK_FALSE(applied);
+    CHECK(refusedPath == "Content/Meshes/Statue.hasset");
+    // The ANNOUNCED size, which is what the refusal was made on: not one byte of
+    // the file was read, so this is the only number this side ever has.
+    CHECK(refusedBytes == 20000);
+    CHECK(refusedFrom != kInvalidParticipant);
+}
+
+TEST_CASE("CollabSession: a client refuses an asset over ITS ceiling too")
+{
+    CollabSession::Config tightClient;
+    tightClient.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", tightClient);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AA04ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    bool applied = false;
+    p->client->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        applied = true;
+    });
+    std::string refusedPath;
+    p->client->onAssetRefused([&](ParticipantId, const std::string& path, std::uint32_t) {
+        refusedPath = path;
+    });
+
+    REQUIRE(p->host->sendAsset(kAsset, "Content/Audio/Score.hasset", makeBlob(30000)));
+    p->pump(8);
+
+    // Being the guest is not being obliged: the host decides what the session
+    // CARRIES, never how much memory this machine will put behind one file.
+    CHECK_FALSE(applied);
+    CHECK(refusedPath == "Content/Audio/Score.hasset");
+}
+
+TEST_CASE("CollabSession: raising the ceiling lets the same file through, without a rejoin")
+{
+    // What the notification tells the user to do has to actually work from where
+    // they are — which is inside the session, watching a file fail to arrive.
+    CollabSession::Config tight;
+    tight.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", tight, tight);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AA05ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    CollabSession::AssetUpdate got;
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate& a) {
+        got = a; arrived = true;
+    });
+
+    const auto payload = makeBlob(50000);
+    CHECK_FALSE(p->client->sendAsset(kAsset, "Content/Meshes/Terrain.hasset", payload));
+    p->pump(6);
+    REQUIRE_FALSE(arrived);
+
+    // Both ends, because either one alone still refuses — that IS the design,
+    // and a test that raised only the sender's would pass for the wrong reason.
+    p->client->setMaxAssetBytes(1024u * 1024u);
+    p->host->setMaxAssetBytes(1024u * 1024u);
+
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Meshes/Terrain.hasset", payload));
+    p->pump(8);
+    REQUIRE(arrived);
+    CHECK(got.bytes == payload);
+}
+
+TEST_CASE("CollabSession: the snapshot keeps a ceiling of its own")
+{
+    // The two used to be one number, so raising the asset limit for a 200 MB mesh
+    // silently raised what a host could make a joiner hold for a scene nobody
+    // asked about. Splitting them is only true if each still answers for itself.
+    CollabSession::Config cfg;
+    cfg.maxAssetBytes    = 4096;                  // assets: barely anything
+    cfg.maxSnapshotBytes = 64u * 1024u * 1024u;   // the scene: untouched
+    auto p = makePair("Anna", "Bob", cfg);
+
+    p->hostState.data = makeBlob(700 * 1024);
+    p->pump(30);
+
+    REQUIRE(p->client->isJoined());
+    CHECK(p->clientState.data == p->hostState.data);
+
+    // And the reverse: a client that would take any asset still refuses a
+    // snapshot over the snapshot limit.
+    CollabSession::Config other;
+    other.maxSnapshotBytes = 1024;
+    other.maxAssetBytes    = 64u * 1024u * 1024u;
+    auto q = makePair("Anna", "Bob", other);
+    q->hostState.data = makeBlob(64 * 1024);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    q->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+    q->pump(20);
+    CHECK_FALSE(q->client->isJoined());
+    CHECK(reason == JoinRejectReason::SnapshotFailed);
+}
+
+// ─── What a LAN announcement says about the session ──────────────────────────
+// Their natural home is test_net_lanbeacon.cpp; they are here because that file
+// belongs to another part of this same change.
+
+TEST_CASE("LanBeacon: the large-asset flag survives the round trip")
+{
+    LanBeacon::Announcement a;
+    a.protocol         = kCollabProtocolVersion;
+    a.instance         = 0x1234'5678'9ABC'DEF0ull;
+    a.sessionId        = "sess-large";
+    a.port             = 7777;
+    a.hostName         = "Anna";
+    a.projectLabel     = "Catania";
+    a.projectKey       = "proj-1";
+    a.participants     = 2;
+    a.syncsLargeAssets = true;
+
+    const std::vector<std::uint8_t> bytes = LanBeacon::encode(a);
+    LanBeacon::Announcement out;
+    REQUIRE(LanBeacon::decode(bytes.data(), bytes.size(), out));
+    CHECK(out.syncsLargeAssets);
+    // Nothing in front of it moved. The field was appended precisely so this
+    // stays true for a peer that has never heard of it.
+    CHECK(out.sessionId    == "sess-large");
+    CHECK(out.port         == 7777);
+    CHECK(out.projectKey   == "proj-1");
+    CHECK(out.participants == 2);
+
+    a.syncsLargeAssets = false;
+    const std::vector<std::uint8_t> off = LanBeacon::encode(a);
+    LanBeacon::Announcement out2;
+    REQUIRE(LanBeacon::decode(off.data(), off.size(), out2));
+    CHECK_FALSE(out2.syncsLargeAssets);
+}
+
+TEST_CASE("LanBeacon: an announcement from a peer that never heard of the flag still decodes")
+{
+    // Hand-written in the pre-v12 field order rather than produced by encode()
+    // and truncated: what is under test is that the OLD shape is still a valid
+    // announcement, and a datagram built from the current writer would stop
+    // testing that the moment the writer changes again.
+    BitWriter w;
+    w.writeUInt32(LanBeacon::kMagic);
+    w.writeUInt16(kCollabProtocolVersion - 1);   // the build before this field
+    w.writeUInt64(0xFEED'FACE'0000'0001ull);
+    w.writeString("sess-old");
+    w.writeUInt16(7788);
+    w.writeString("Yesterday");
+    w.writeString("Old Project");
+    w.writeString("proj-old");
+    w.writeByte(3);      // participants
+    w.writeByte(0);      // closing
+    // ...and that is where an older announcement ends. No flag.
+    const std::vector<std::uint8_t> bytes = w.data();
+
+    LanBeacon::Announcement out;
+    REQUIRE(LanBeacon::decode(bytes.data(), bytes.size(), out));
+    CHECK(out.sessionId    == "sess-old");
+    CHECK(out.port         == 7788);
+    CHECK(out.hostName     == "Yesterday");
+    CHECK(out.participants == 3);
+    // Defaulted, not guessed. It is safe to show only because the row is
+    // un-joinable anyway — the protocol was bumped WITH the field, so a peer that
+    // cannot state it is a peer this build refuses at the handshake.
+    CHECK_FALSE(out.syncsLargeAssets);
+    CHECK(out.protocol != kCollabProtocolVersion);
+
+    // And it is still a row, not a discarded datagram: dropping older peers would
+    // be the "my friend's session never shows up" discovery exists to end.
+    LanBeacon::Browser b;
+    b.ingest("192.168.1.60", bytes.data(), bytes.size(), 1000);
+    REQUIRE(b.sessions().size() == 1);
+    CHECK_FALSE(b.sessions()[0].syncsLargeAssets);
+}
+
+TEST_CASE("LanBeacon: the browser carries the flag through to the row the panel draws")
+{
+    LanBeacon::Announcement a;
+    a.protocol         = kCollabProtocolVersion;
+    a.instance         = 99;
+    a.sessionId        = "sess-heavy";
+    a.port             = 7777;
+    a.hostName         = "Anna";
+    a.syncsLargeAssets = true;
+
+    const std::vector<std::uint8_t> bytes = LanBeacon::encode(a);
+    LanBeacon::Browser b;
+    b.ingest("192.168.1.61", bytes.data(), bytes.size(), 1000);
+
+    REQUIRE(b.sessions().size() == 1);
+    // What the list shows before anybody clicks. A hint and never a verdict: the
+    // handshake is what admits or refuses a guest, and this datagram is
+    // unauthenticated — anyone on the segment can write one.
+    CHECK(b.sessions()[0].syncsLargeAssets);
+    CHECK(b.sessions()[0].address == "192.168.1.61");
 }
