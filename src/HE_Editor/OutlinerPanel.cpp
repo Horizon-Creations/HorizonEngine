@@ -241,8 +241,23 @@ void render(AppContext& ctx)
                         // the file agree — a later drop of this prefab resolves it
                         // without re-reading it. The refresh flag is what makes the
                         // new file appear in the Content Browser.
+                        const std::string fullPath = dirAbs + "/" + name + ".hasset";
                         ctx.contentManager->registerPrefab(std::move(prefab));
                         ctx.contentRefreshPending = true;
+                        // Announce it as a CREATE, which is what it is. Without
+                        // this the file reached the others only through the
+                        // ordinary whole-file save path — as an UPDATE to an
+                        // asset they had never heard of, and with no name
+                        // arbitration at all. The uniquifier above only ever
+                        // consults this machine's disk, so two people saving an
+                        // entity called "Arm" at the same moment both pick
+                        // Prefabs/Arm.hasset, and whichever update lands second
+                        // silently replaces the first person's prefab. The
+                        // create path is where the host settles a taken name and
+                        // tells the loser their asset was renamed; the content
+                        // browser has gone through it since creates began
+                        // replicating, and this menu item never did.
+                        if (ctx.collab) ctx.collab->publishAssetCreate(relPath, fullPath);
                         HE_LOG_INFO(Editor, "%s", ("Editor: saved prefab " + relPath).c_str());
                     }
                     else

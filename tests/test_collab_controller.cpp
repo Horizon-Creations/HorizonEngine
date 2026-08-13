@@ -4,6 +4,7 @@
 #include "../src/HE_Editor/CollabDocSync.h"
 #include "../src/HE_Editor/EditorAssetTypeCache.h"
 #include "../src/HE_Editor/NotificationStore.h"
+#include "../src/HE_Editor/StructuralSync.h"
 
 #include <ContentManager/HAsset.h>
 
@@ -3025,4 +3026,85 @@ TEST_CASE("Notifications: what the user did themselves is never rate-limited")
 
     s.client.leave();
     s.host.leave();
+}
+
+// ─── Which new entities get a create message ─────────────────────────────────
+// The rule EditorApplication::syncStructuralChanges applies, extracted so it can
+// be driven directly (the application object is not in this binary).
+
+TEST_CASE("Structural sync: a new subtree is ONE create, not one per entity")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("PrefabRoot");
+    const Entity armL  = world.createEntity("ArmL");
+    const Entity armR  = world.createEntity("ArmR");
+    const Entity handL = world.createEntity("HandL");
+    REQUIRE(world.reparentEntity(armL,  root));
+    REQUIRE(world.reparentEntity(armR,  root));
+    REQUIRE(world.reparentEntity(handL, armL));
+
+    auto& reg = world.registry();
+    HE::Ed::StructEntitySet current;
+    reg.view<entt::entity>().each([&](auto e) { current.insert(e); });
+
+    // Nothing published yet — the world root included, because it exists before
+    // any of this and the caller's set is simply "everything".
+    HE::Ed::StructEntitySet known;
+    known.insert(world.rootEntity());
+
+    const std::vector<Entity> roots = HE::Ed::newSubtreeRoots(reg, current, known);
+    // Exactly one message. serializeSubtree carries the descendants, so a
+    // message per entity would make the receiver — which preserves uuids and
+    // does not dedupe — build ArmL, ArmR and HandL a second time.
+    REQUIRE(roots.size() == 1);
+    CHECK(roots[0] == root);
+
+    // And after it goes out, the whole subtree counts as published: leaving the
+    // children unmarked sends them again on the very next pass.
+    HE::Ed::markSubtreeKnown(reg, root, {}, known);
+    CHECK(known.count(armL) == 1);
+    CHECK(known.count(armR) == 1);
+    CHECK(known.count(handL) == 1);
+    CHECK(HE::Ed::newSubtreeRoots(reg, current, known).empty());
+}
+
+TEST_CASE("Structural sync: a child added to a KNOWN parent is its own create")
+{
+    HorizonWorld world;
+    const Entity parent = world.createEntity("Rig");
+
+    auto& reg = world.registry();
+    HE::Ed::StructEntitySet known;
+    known.insert(world.rootEntity());
+    known.insert(parent);
+
+    // The other half of the rule. Suppressing a create because the entity has a
+    // parent would be the opposite bug: a peer would never hear about anything
+    // added under an entity it already has.
+    const Entity added = world.createEntity("Prop");
+    REQUIRE(world.reparentEntity(added, parent));
+
+    HE::Ed::StructEntitySet current;
+    reg.view<entt::entity>().each([&](auto e) { current.insert(e); });
+
+    const std::vector<Entity> roots = HE::Ed::newSubtreeRoots(reg, current, known);
+    REQUIRE(roots.size() == 1);
+    CHECK(roots[0] == added);
+}
+
+TEST_CASE("Structural sync: local-only entities are never recorded as published")
+{
+    HorizonWorld world;
+    const Entity land  = world.createEntity("Landscape");
+    const Entity chunk = world.createEntity("Chunk");
+    REQUIRE(world.reparentEntity(chunk, land));
+
+    auto& reg = world.registry();
+    HE::Ed::StructEntitySet known;
+    // Every peer regenerates these itself, so they are absent from the caller's
+    // "everything that exists" set. Recording one would make the very next pass
+    // read it as destroyed and publish a destroy for an entity no peer had.
+    HE::Ed::markSubtreeKnown(reg, land, [&](Entity e) { return e == chunk; }, known);
+    CHECK(known.count(land)  == 1);
+    CHECK(known.count(chunk) == 0);
 }

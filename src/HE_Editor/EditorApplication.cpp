@@ -7,6 +7,7 @@
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
+#include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
@@ -354,7 +355,16 @@ void EditorApplication::OnInit()
 		// The fresh handle is recorded by CollabController against the sender's
 		// network id — which is what makes handle-stable instantiation
 		// unnecessary in the first place.
-		m_structureKnown.insert(created);
+		//
+		// The whole subtree, not just the root. instantiatePrefab returns one
+		// entity but may have created a dozen, and every one it created that is
+		// not recorded here looks brand new to syncStructuralChanges on the very
+		// next frame — so this editor would publish the sender's own children
+		// straight back at them as creates of its own, and the sender, which
+		// instantiates with preserveIds and does not dedupe by uuid, would build
+		// a second copy of them. One dropped prefab, echoing.
+		HE::Ed::markSubtreeKnown(m_editorWorld->registry(), created,
+		                         /*isLocalOnly=*/{}, m_structureKnown);
 		return static_cast<std::uint32_t>(entt::to_integral(created));
 	});
 
@@ -4181,24 +4191,38 @@ void EditorApplication::syncStructuralChanges()
 	});
 
 	// ── Created ──
-	for (const Entity e : current)
+	// One message per new SUBTREE, not per new entity. serializeSubtree carries
+	// the whole subtree below `e`, so dropping a prefab of three entities used to
+	// send three overlapping blobs — the root's (all three), then one for each
+	// child on its own — and the receiver, which instantiates with preserveIds,
+	// created the children a second time under their own uuid. A prefab drop came
+	// out the other side duplicated, and applyPrefabJson's promise that the
+	// preserveIds path "cannot collide, the subtree exists on the wire exactly
+	// once" was false precisely because of this loop.
+	//
+	// Whether an entity is the TOP of a new subtree is the question, and its
+	// parent answers it. The rule itself lives in StructuralSync.h so it can be
+	// tested — this application object is not in the test binary, and the rule is
+	// the half that was wrong.
+	const HE::Ed::LocalOnlyFn localOnlyFn = [&](Entity e) { return isLocalOnly(e); };
+	for (const Entity e : HE::Ed::newSubtreeRoots(reg, current, m_structureKnown))
 	{
-		if (m_structureKnown.count(e)) continue;
-
 		SceneSerializer serializer;
 		const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, e);
 		if (!blob.empty())
 		{
-			std::uint32_t parentHandle = 0;
-			if (auto* hier = reg.try_get<HierarchyComponent>(e);
-			    hier && reg.valid(hier->parent))
-			{
-				parentHandle = static_cast<std::uint32_t>(entt::to_integral(hier->parent));
-			}
+			const Entity parent = HE::Ed::structParentOf(reg, e);
+			const std::uint32_t parentHandle =
+				parent == entt::null ? 0u
+				                     : static_cast<std::uint32_t>(entt::to_integral(parent));
 			m_collab.publishCreate(
 				static_cast<std::uint32_t>(entt::to_integral(e)), parentHandle, blob);
 		}
-		m_structureKnown.insert(e);
+		// Everything that went out inside that blob is known now. Marking only
+		// the root would leave the descendants looking new on the very next
+		// frame, and they would be published all over again — the same
+		// duplication by a slower route.
+		HE::Ed::markSubtreeKnown(reg, e, localOnlyFn, m_structureKnown);
 	}
 
 	// ── Destroyed ──
