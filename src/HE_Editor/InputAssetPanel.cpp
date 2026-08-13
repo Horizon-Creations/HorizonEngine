@@ -127,11 +127,21 @@ void helpMarker(const char* desc)
 	ImGui::TextDisabled("(?)");
 	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
 	{
-		ImGui::BeginTooltip();
-		ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
-		ImGui::TextUnformatted(desc);
-		ImGui::PopTextWrapPos();
-		ImGui::EndTooltip();
+		// BeginTooltip is asked as a question here and at every other hand-written
+		// tooltip in the editor, because imgui.h spells the contract out: EndTooltip
+		// is only to be called when BeginTooltip returned true. The vendored
+		// BeginTooltipEx currently ends in a hard `return true`, so calling it bare
+		// happens to work — which is precisely why the unguarded shape survives
+		// review right up until the frame that return value starts meaning
+		// something, and every bare site then ends a window it never began.
+		if (ImGui::BeginTooltip())
+		{
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				ImGui::TextUnformatted(desc);
+			}
+			ImGui::EndTooltip();
+		}
 	}
 }
 
@@ -176,13 +186,16 @@ void keyBindCells(const char* id, const char* hintText, std::string& value, bool
 			// wrap column is spelled out rather than left at the window edge because
 			// a tooltip auto-sizes to its content: "the right edge" is a measurement
 			// of the frame that has not been laid out yet.
-			ImGui::BeginTooltip();
+			// Asked as a question for the reason spelled out at helpMarker above.
+			if (ImGui::BeginTooltip())
 			{
-				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				ImGui::Text("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
-				            "anything at runtime. Click Bind and press the key instead.", value.c_str());
+				{
+					EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+					ImGui::Text("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
+					            "anything at runtime. Click Bind and press the key instead.", value.c_str());
+				}
+				ImGui::EndTooltip();
 			}
-			ImGui::EndTooltip();
 		}
 	}
 

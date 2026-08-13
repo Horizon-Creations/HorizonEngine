@@ -696,27 +696,71 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	}
 
 	// ── Body ──────────────────────────────────────────────────────────────────
+	const bool isReadCard = step->check == tut::Check::ReadAck;
+
+	// The status line is the only place the tour explains itself, so it has to
+	// name the *reason* a step is still open — "waiting" on its own is what makes
+	// a gated tutorial feel broken. Which means it says whole sentences, and a
+	// sentence that is cut off at the window's edge explains nothing: the reason
+	// is always at the end of it ("...add one with View - Environment"). It is
+	// wrapped where it is drawn, further down, and therefore has to be DECIDED up
+	// here: the body child below can only reserve room for a line it has already
+	// seen. Deciding it here and drawing this same string later is what keeps the
+	// reservation and the drawing in step — measuring one sentence and then
+	// printing a different one is the same bug as reserving a constant.
+	std::string statusLine;
+	if (s_stepDone)
+		statusLine = "Done.";
+	else if (isReadCard)
+		statusLine = s_readToEnd ? "Ready when you are."
+		                         : "Scroll to the end of the card to continue.";
+	else if (step->check == tut::Check::TimeOfDayChanged && !now.skyPresent)
+		// The one step whose subject can be missing from the scene. Say so instead
+		// of leaving the user waiting on a slider that is not there.
+		statusLine = "This scene has no Sky entity - add one with View - Environment.";
+	else if (tut::wantsWindowOpened(step->check) && tut::windowOpenIn(step->check, s_base))
+		// It was already open when the step began, so "open it" cannot fire. Ask
+		// for the close-and-open rather than letting the step look stuck.
+		statusLine = "Already open - close it and open it again.";
+	else if (step->check == tut::Check::SceneSaved && !s_base.sceneUnsaved)
+		// Nothing to save when the step opened, so Ctrl+S is a no-op and the check
+		// cannot fire. Point at the way forward instead of at the keyboard shortcut.
+		statusLine = "Nothing to save yet - change something first.";
+	else if (step->check == tut::Check::ContentRootShown &&
+	         now.contentRootKind == s_base.contentRootKind)
+		statusLine = "Use the root buttons at the top of the Content Browser.";
+	else if (step->check == tut::Check::PanelsVisited)
+	{
+		const int n = tut::listEntryCount(step->arg);
+		int visited = 0;
+		for (int i = 0; i < n; ++i)
+			if (tut::listEntryVisited(step->arg, i, now.visitedPanels)) ++visited;
+		statusLine = std::to_string(visited) + " of " + std::to_string(n) + " panels visited.";
+	}
+	else
+		statusLine = "Waiting for you to do it.";
+
 	// Reserve room for the action line, the status line and the button row so the
-	// body text scrolls instead of pushing the controls off the bottom. The action
-	// line is MEASURED rather than assumed to be one line — several of them wrap to
-	// two or three at a narrow window width, and a fixed reservation put the
-	// buttons out of reach exactly there.
+	// body text scrolls instead of pushing the controls off the bottom. Both lines
+	// are MEASURED rather than assumed to be one line each — several action lines
+	// wrap to two or three at a narrow window width, and a fixed reservation put
+	// the buttons out of reach exactly there. Measuring cuts the other way too: a
+	// blanket "two lines for the status" is paid at every dock width, and the line
+	// it buys stays empty at all but the narrowest — the body card is then one line
+	// shorter than it needs to be with a grey strip under it, and a card that used
+	// to fit starts demanding a scroll before "Got it" unlocks.
 	const std::string actionLine = std::string("> ") + step->action;
 	const float availW  = ImGui::GetContentRegionAvail().x;
 	const float actionH = step->action[0] != '\0'
 		? ImGui::CalcTextSize(actionLine.c_str(), nullptr, false, availW).y +
 		  ImGui::GetStyle().ItemSpacing.y
 		: 0.0f;
-	// Two lines for the status line, not one: it is a sentence now that it wraps
-	// ("This scene has no Sky entity - add one with View - Environment.") and at
-	// the 340-point minimum width it takes two of them. Reserving one line puts
-	// the button row that much below the bottom of the window, which is the same
-	// failure the measured action line above already documents — with the twist
-	// that Next is the control the user needs to get out of the step.
-	const float footerH = ImGui::GetFrameHeightWithSpacing()          // button row
-	                    + ImGui::GetTextLineHeightWithSpacing() * 2.0f // status line (may wrap)
+	const float statusH = ImGui::CalcTextSize(statusLine.c_str(), nullptr, false, availW).y +
+	                      ImGui::GetStyle().ItemSpacing.y;
+	const float footerH = ImGui::GetFrameHeightWithSpacing()      // button row
+	                    + statusH
 	                    + actionH
-	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;     // separator + padding
+	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f; // separator + padding
 	ImGui::BeginChild("##tutBody", ImVec2(0.0f, -footerH), ImGuiChildFlags_None);
 	{
 		EditorWidgets::WrapText wrap;
@@ -729,8 +773,6 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	ImGui::EndChild();
 
 	// ── What to do ────────────────────────────────────────────────────────────
-	const bool isReadCard = step->check == tut::Check::ReadAck;
-
 	ImGui::Separator();
 	if (step->action[0] != '\0')
 	{
@@ -739,59 +781,24 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		ImGui::PopStyleColor();
 	}
 
-	// The status line is the only place the tour explains itself, so it has to
-	// name the *reason* a step is still open — "waiting" on its own is what makes
-	// a gated tutorial feel broken. Which means it says whole sentences, and a
-	// sentence that is cut off at the window's edge explains nothing: the reason
-	// is always at the end of it ("...add one with View - Environment"). Wrapped,
-	// with the footer reservation above raised to two lines to hold it.
+	// The sentence itself was decided above the body child, which is where the room
+	// for it is reserved; here it is only wrapped and coloured. One consequence
+	// worth knowing: a card whose body has just been scrolled to its end sets
+	// s_readToEnd inside the child, i.e. after this string was chosen, so for a
+	// single frame the button unlocks while the line still says "scroll to the
+	// end". A frame of that is cheaper than a status line whose height nobody
+	// measured.
 	{
 		EditorWidgets::WrapText wrap;
 		if (s_stepDone)
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.90f, 0.55f, 1.0f));
-			ImGui::TextUnformatted("Done.");
+			ImGui::TextUnformatted(statusLine.c_str());
 			ImGui::PopStyleColor();
-		}
-		else if (isReadCard)
-		{
-			ImGui::TextDisabled(s_readToEnd ? "Ready when you are."
-			                                : "Scroll to the end of the card to continue.");
-		}
-		else if (step->check == tut::Check::TimeOfDayChanged && !now.skyPresent)
-		{
-			// The one step whose subject can be missing from the scene. Say so instead
-			// of leaving the user waiting on a slider that is not there.
-			ImGui::TextDisabled("This scene has no Sky entity - add one with View - Environment.");
-		}
-		else if (tut::wantsWindowOpened(step->check) && tut::windowOpenIn(step->check, s_base))
-		{
-			// It was already open when the step began, so "open it" cannot fire. Ask
-			// for the close-and-open rather than letting the step look stuck.
-			ImGui::TextDisabled("Already open - close it and open it again.");
-		}
-		else if (step->check == tut::Check::SceneSaved && !s_base.sceneUnsaved)
-		{
-			// Nothing to save when the step opened, so Ctrl+S is a no-op and the check
-			// cannot fire. Point at the way forward instead of at the keyboard shortcut.
-			ImGui::TextDisabled("Nothing to save yet - change something first.");
-		}
-		else if (step->check == tut::Check::ContentRootShown &&
-		         now.contentRootKind == s_base.contentRootKind)
-		{
-			ImGui::TextDisabled("Use the root buttons at the top of the Content Browser.");
-		}
-		else if (step->check == tut::Check::PanelsVisited)
-		{
-			const int n = tut::listEntryCount(step->arg);
-			int left = 0;
-			for (int i = 0; i < n; ++i)
-				if (!tut::listEntryVisited(step->arg, i, now.visitedPanels)) ++left;
-			ImGui::TextDisabled("%d of %d panels visited.", n - left, n);
 		}
 		else
 		{
-			ImGui::TextDisabled("Waiting for you to do it.");
+			ImGui::TextDisabled("%s", statusLine.c_str());
 		}
 	}
 

@@ -510,6 +510,17 @@ void render(AppContext& ctx)
             {
                 // Live feedback: show the runtime bundle this export would ship,
                 // or a warning when none is found (data-only exports can't run).
+                //
+                // Both lines below end in an absolute path, which is longer than
+                // this dialog is wide — unwrapped, the user reads "Game runtime:
+                // /Users/…/Horizon" and the part that says WHICH build is about to
+                // ship is clipped off the right edge. Wrapped at an absolute column
+                // rather than at the window edge: the popup is AlwaysAutoResize and
+                // only the SetNextWindowSize above keeps its width from following
+                // its own content, so a wrap at "the current width" is one dropped
+                // line away from shrinking the dialog frame over frame. 550 = the
+                // 560 the dialog is pinned to, minus the window padding.
+                EditorWidgets::WrapText wrap(550.0f);
                 const std::filesystem::path base =
                     SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
                                       : std::filesystem::path{};
@@ -591,7 +602,15 @@ void render(AppContext& ctx)
             }
             if (!hcCompileOk) ImGui::EndDisabled();
             if (!hcCompileOk)
+            {
+                // The dialog's width is pinned (SetNextWindowSize above), so this
+                // conditional line cannot widen it — the only thing it can do when
+                // it does not fit is lose its tail, and the tail is the half that
+                // says the export still works ("will ship interpreted"). Same
+                // absolute column as the rest.
+                EditorWidgets::WrapText wrap(550.0f);
                 ImGui::TextDisabled("Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
+            }
 
             if (exportAppBundleApplicable(s_exportPlatform))
             {
@@ -656,29 +675,41 @@ void render(AppContext& ctx)
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
             // ── Progress (while running) / result (after) ─────────────────────
-            if (running)
+            // Both the live filename and the result line carry an absolute path —
+            // the result line ends in the output directory, and its failure form is
+            // a whole sentence ("Error: startup scene could not be loaded: /Users/…").
+            // Clipped at the dialog's edge, a failed export looked like a success
+            // with a truncated path. Same absolute column as above, and its own
+            // scope so PopTextWrapPos runs long before the EndPopup() at the bottom
+            // of this body: EndPopup hands ImGui's current window back to whatever
+            // is under this popup — here the implicit debug window — and popping
+            // the wrap position after that pops a stack that was never pushed.
             {
-                const int done  = s_exportDone.load();
-                const int total = s_exportTotal.load();
-                std::string current;
+                EditorWidgets::WrapText wrap(550.0f);
+                if (running)
                 {
-                    std::lock_guard<std::mutex> lk(s_exportMutex);
-                    current = s_exportCurrentFile;
+                    const int done  = s_exportDone.load();
+                    const int total = s_exportTotal.load();
+                    std::string current;
+                    {
+                        std::lock_guard<std::mutex> lk(s_exportMutex);
+                        current = s_exportCurrentFile;
+                    }
+                    char overlay[64];
+                    std::snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
+                    ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total)
+                                                 : 0.0f,
+                                       ImVec2(-1.0f, 0.0f), overlay);
+                    ImGui::TextDisabled("%s", current.empty() ? "Working..." : current.c_str());
+                    ImGui::Spacing();
                 }
-                char overlay[64];
-                std::snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
-                ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total)
-                                             : 0.0f,
-                                   ImVec2(-1.0f, 0.0f), overlay);
-                ImGui::TextDisabled("%s", current.empty() ? "Working..." : current.c_str());
-                ImGui::Spacing();
-            }
-            else if (!s_exportResult.empty())
-            {
-                const bool ok = s_exportResult.rfind("OK:", 0) == 0;
-                if (ok) ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.f), "%s", s_exportResult.c_str());
-                else    ImGui::TextColored(ImVec4(1.f,  0.3f, 0.3f, 1.f), "%s", s_exportResult.c_str());
-                ImGui::Spacing();
+                else if (!s_exportResult.empty())
+                {
+                    const bool ok = s_exportResult.rfind("OK:", 0) == 0;
+                    if (ok) ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.f), "%s", s_exportResult.c_str());
+                    else    ImGui::TextColored(ImVec4(1.f,  0.3f, 0.3f, 1.f), "%s", s_exportResult.c_str());
+                    ImGui::Spacing();
+                }
             }
 
             // ── Build output: the step list + live log of the current/last export.

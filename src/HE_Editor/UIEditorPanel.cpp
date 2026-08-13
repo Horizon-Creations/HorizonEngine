@@ -2120,14 +2120,24 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// ═══ Graph: variables + functions | node canvas | node details ═══
 		ImGui::BeginChild("##uiw_gleft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 		{
-			// 230 px against element names, variable names and the line explaining
-			// what dragging one does. Unwrapped, ImGui draws those past the right
-			// edge and clips them, so a row reads as half a name with nothing to
-			// say the rest was there. The guard goes on the child rather than the
-			// tab window because a wrap position belongs to the window that pushed
-			// it — it cannot reach in here, and it must not reach the node canvas
-			// beside us, whose contents are placed by hand.
-			EditorWidgets::WrapText wrap;
+			// No wrap guard on this pane, and the reason is worth writing down
+			// because the obvious reading of "230 px against long element and
+			// variable names" says there should be one. Those names are drawn with
+			// Selectable, and Selectable does not consult the wrap position at all:
+			// it measures with CalcTextSize(wrap_width = -1) and renders through
+			// RenderTextClipped, so it clips whether one is pushed or not. The one
+			// line here that IS a sentence — "Drag an element onto the graph…" —
+			// uses TextWrapped, which wraps itself.
+			//
+			// What a pushed wrap position DID reach was the trailing TextDisabled
+			// after each row: the variable's type ("Struct InventoryItem") and a
+			// function's "public"/"private", both placed with SameLine after a
+			// name of unknown length. Whatever the name leaves over is all they
+			// have to wrap in, so a long name pushed the type onto a second line — and
+			// with a truly long one, ImGui's one-pixel minimum wrap width puts a
+			// couple of characters per line and the row becomes a column. The type
+			// is in the row's hover tooltip as well, so clipping it costs the
+			// reader nothing the pane was not already offering.
 			drawGraphVariables(st, ctx);
 		}
 		ImGui::EndChild();

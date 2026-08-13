@@ -331,8 +331,17 @@ namespace
 		// the current window. Left to the end of the function it would run after
 		// EndPopup(), and pop the wrap position off whichever window is current by
 		// then — which, for a dialog raised from outside any window, is none.
+		//
+		// An absolute column and NOT the window edge, because this popup is
+		// AlwaysAutoResize and its SetNextWindowSize is only ImGuiCond_Appearing.
+		// Wrapping at the edge of a window that sizes itself to its widest line is
+		// a feedback loop: each frame the text refits to the current width, the
+		// window refits to the text, and the dialog visibly narrows toward ImGui's
+		// minimum — while the user is being asked to read it. A window-space
+		// constant reaches its fixed point on the first frame instead.
 		{
-			EditorWidgets::WrapText wrap;
+			constexpr float kPopupW = 430.0f;   // the SetNextWindowSize above
+			EditorWidgets::WrapText wrap(kPopupW - ImGui::GetStyle().WindowPadding.x);
 
 			ImGui::TextWrapped("This session also transfers larger assets — meshes, "
 			                   "textures and audio — instead of leaving them to source "

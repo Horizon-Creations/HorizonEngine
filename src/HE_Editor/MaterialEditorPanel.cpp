@@ -781,14 +781,23 @@ bool drawParamConstPanel(MaterialGraph& graph)
 					// EndTooltip and it pops the panel's stack instead of the
 					// tooltip's — one window loses a wrap it never pushed, another
 					// underflows. Every guard below is placed with the same rule.
+					// BeginTooltip is asked as a question — here and at every other
+					// hand-written tooltip in the editor — because imgui.h says
+					// EndTooltip is only to be called when BeginTooltip returned true.
+					// The vendored BeginTooltipEx ends in a hard `return true` today,
+					// so a bare call happens to work; that is what lets the unguarded
+					// shape survive review until the day the return value means
+					// something and every one of them ends a window it never began.
 					if (ImGui::IsItemHovered())
 					{
-						ImGui::BeginTooltip();
+						if (ImGui::BeginTooltip())
 						{
-							EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-							ImGui::TextUnformatted(n->tooltip.c_str());
+							{
+								EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+								ImGui::TextUnformatted(n->tooltip.c_str());
+							}
+							ImGui::EndTooltip();
 						}
-						ImGui::EndTooltip();
 					}
 				}
 				if (ImGui::BeginPopup("##pmeta"))
@@ -1818,15 +1827,18 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 				ImGui::SameLine();
 				ImGui::TextDisabled("(?)");
 				// Same author-written sentence as on the master's parameter rows,
-				// and the same fixed wrap column, so the two read alike.
+				// the same fixed wrap column and the same asked-as-a-question
+				// BeginTooltip, so the two read alike in every respect.
 				if (ImGui::IsItemHovered())
 				{
-					ImGui::BeginTooltip();
+					if (ImGui::BeginTooltip())
 					{
-						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-						ImGui::TextUnformatted(inst.graphParamTooltips[i].c_str());
+						{
+							EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+							ImGui::TextUnformatted(inst.graphParamTooltips[i].c_str());
+						}
+						ImGui::EndTooltip();
 					}
-					ImGui::EndTooltip();
 				}
 			}
 			ImGui::PopID();
@@ -2334,14 +2346,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 		// width, so the whole log ends up smeared across the display while the
 		// short lines that actually name the error sit alone at the far left.
 		// Wrapped at a fixed column it stays a block of text one can read.
+		// IsWindowHovered rather than IsItemHovered because the banner's text is not
+		// a hoverable item; it is still an exclusive gate — exactly one window is the
+		// hovered one, and it reports false while a popup blocks it — so this tooltip
+		// cannot be the second one submitted in a frame and APPEND into another.
+		// BeginTooltip asked as a question, same contract as everywhere else.
 		if (ImGui::IsWindowHovered())
 		{
-			ImGui::BeginTooltip();
+			if (ImGui::BeginTooltip())
 			{
-				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
-				ImGui::TextUnformatted(st.compileLog.c_str());
+				{
+					EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+					ImGui::TextUnformatted(st.compileLog.c_str());
+				}
+				ImGui::EndTooltip();
 			}
-			ImGui::EndTooltip();
 		}
 		ImGui::EndChild();
 		ImGui::PopStyleColor();

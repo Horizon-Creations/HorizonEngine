@@ -76,16 +76,37 @@ void DrawToolchainDialog(AppContext& ctx)
 			return;
 		}
 
+		// The column the whole dialog wraps at. Absolute, not the window edge: this
+		// popup is AlwaysAutoResize and its SetNextWindowSize is only
+		// ImGuiCond_Appearing, so from the second frame its width follows its
+		// content. Wrapping at that width refits the text to the window and the
+		// window to the text, a little narrower every frame, while the user is
+		// trying to read it. The 520 this dialog is laid out for puts its content
+		// edge at 510.
+		//
+		// Applied to the two paragraphs below and not once at the top of this body
+		// because EndPopup() is the LAST STATEMENT INSIDE this body: a guard
+		// declared here would be destroyed after it, and pop the wrap position off
+		// whatever window is current by then. Each block below closes first.
+		//
+		// These two paragraphs are what actually drive the width. The probe detail
+		// has its own guard, but it sits inside a TreeNode that is collapsed by
+		// default, so on its own it never gets the chance to matter.
+		constexpr float kContentW = 510.0f;
+
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
 		ImGui::TextUnformatted("C++ Toolchain Not Found");
 		ImGui::PopStyleColor();
 		ImGui::Separator();
 		ImGui::Spacing();
 
-		ImGui::TextWrapped(
-			"HorizonCode C++ export codegen and native C++ GameLogic projects need "
-			"cmake and a C++ compiler on this machine. Without them, those features "
-			"fall back to interpreted execution or are unavailable.");
+		{
+			EditorWidgets::WrapText wrap(kContentW);
+			ImGui::TextWrapped(
+				"HorizonCode C++ export codegen and native C++ GameLogic projects need "
+				"cmake and a C++ compiler on this machine. Without them, those features "
+				"fall back to interpreted execution or are unavailable.");
+		}
 		ImGui::Spacing();
 
 		if (!s_last.cmakeFound)
@@ -98,6 +119,12 @@ void DrawToolchainDialog(AppContext& ctx)
 			ImGui::BulletText("No working C++ compiler was detected.");
 			if (!s_last.detail.empty() && ImGui::TreeNode("Details"))
 			{
+				// The raw probe output — compiler paths, the xcrun error that
+				// explains WHY no compiler was found. Long single lines, and this
+				// is the one string the user opened a disclosure triangle
+				// specifically to read, so it must not run off the right edge.
+				// Same column as the paragraphs above, for the same reason.
+				EditorWidgets::WrapText wrap(kContentW);
 				ImGui::TextUnformatted(s_last.detail.c_str());
 				ImGui::TreePop();
 			}
@@ -112,17 +139,20 @@ void DrawToolchainDialog(AppContext& ctx)
 		const bool installing   = ctx.toolchainInstalling;
 
 		// ── Auto-install (primary path) ──────────────────────────────────────
-		ImGui::TextWrapped(
-			"The engine can install these for you using this system's package manager "
+		{
+			EditorWidgets::WrapText wrap(kContentW);
+			ImGui::TextWrapped(
+				"The engine can install these for you using this system's package manager "
 #if defined(__APPLE__)
-			"(Homebrew for cmake — installed for you in Terminal if missing — and the "
-			"Xcode Command Line Tools for the compiler). "
+				"(Homebrew for cmake — installed for you in Terminal if missing — and the "
+				"Xcode Command Line Tools for the compiler). "
 #elif defined(_WIN32)
-			"(winget: CMake + the Visual Studio C++ Build Tools). "
+				"(winget: CMake + the Visual Studio C++ Build Tools). "
 #else
-			"(pkexec + apt/dnf/pacman). You may be prompted for your password. "
+				"(pkexec + apt/dnf/pacman). You may be prompted for your password. "
 #endif
-			"A download of several hundred MB can take a few minutes.");
+				"A download of several hundred MB can take a few minutes.");
+		}
 		ImGui::Spacing();
 
 		if (installing) ImGui::BeginDisabled();

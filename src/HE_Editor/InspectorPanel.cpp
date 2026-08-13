@@ -1222,7 +1222,15 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("LOD", true, removed))
 		{
-			EditorWidgets::WrapText wrap;
+			// No wrap guard in this section, deliberately. Every line here is a
+			// row assembled with SameLine — "LOD 0", an 80 px distance field, the
+			// mesh id, a Remove button — and none of it is a sentence. With a wrap
+			// position pushed, the trailing id was left with whatever the field and
+			// the two gaps had not used, so below roughly 280 px of content width it
+			// dropped onto a line of its own and every LOD level became two rows of a
+			// list whose whole point is to be scanned at a glance. The id is a
+			// diagnostic; clipped at the panel edge it costs the reader nothing they
+			// were reading the list for.
 			ImGui::Text("Levels: %zu   Active: %u", lod->levels.size(), lod->current);
 			ImGui::Spacing();
 			for (int li = 0; li < static_cast<int>(lod->levels.size()); ++li)

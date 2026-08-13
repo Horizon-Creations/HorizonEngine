@@ -840,6 +840,13 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		// is a scope guard rather than a bare Push/Pop pair because the pop must
 		// happen while this child is still the current window — after EndChild it
 		// would pop the parent's stack instead.
+		//
+		// It reaches into everything the detail editors below draw, including the
+		// shared ones — and a wrap position is wrong for a row that places its
+		// second column with SameLine at a fixed offset, because that column then
+		// wraps in whatever few pixels are left of 220. Those tables opt out for
+		// themselves: HcEditorUtil::drawStructDefaultEditor does it and says why.
+		// Anything added here that lays out by hand has to do the same.
 		EditorWidgets::WrapText wrap;
 
 		ImGui::TextUnformatted(title);

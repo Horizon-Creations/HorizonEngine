@@ -1280,13 +1280,21 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             const std::string sceneName = ctx.currentScenePath.empty()
                 ? std::string("Untitled")
                 : std::filesystem::path(ctx.currentScenePath).stem().string();
-            if (ctx.sceneDirty)
-                ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
-            else if (!dirtyTabs.empty())
-                ImGui::Text("%d editor tab(s) have unsaved changes.",
-                            static_cast<int>(dirtyTabs.size()));
-            else
-                ImGui::TextUnformatted("Everything is saved.");
+            {
+                // The scene name is whatever the author called their file, so this
+                // is the one line in the dialog with no length bound. Wrapped at an
+                // absolute column rather than the window edge, and in its own block
+                // so the pop lands while this popup is still current — EndPopup()
+                // sits at the foot of this same body.
+                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 30.0f);
+                if (ctx.sceneDirty)
+                    ImGui::Text("Save changes to \"%s\" before continuing?", sceneName.c_str());
+                else if (!dirtyTabs.empty())
+                    ImGui::Text("%d editor tab(s) have unsaved changes.",
+                                static_cast<int>(dirtyTabs.size()));
+                else
+                    ImGui::TextUnformatted("Everything is saved.");
+            }
             if (!dirtyTabs.empty())
             {
                 ImGui::Spacing();
@@ -1311,7 +1319,29 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     }
                     ImGui::SameLine();
                     ImGui::TextUnformatted(label.c_str());
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
+                    if (ImGui::IsItemHovered())
+                    {
+                        // The row shows the asset's short label; the tooltip is
+                        // where the user finds out WHICH of two same-named assets
+                        // this is — so it holds the absolute path, the one string
+                        // here that is reliably wider than the screen. Spelled out
+                        // as BeginTooltip/EndTooltip because SetTooltip has nowhere
+                        // to put the wrap guard. The column is absolute: a tooltip
+                        // is an auto-resizing window, so wrapping at its own edge
+                        // would make it narrower every frame until only the last
+                        // path component is left. The extra brace pair is the
+                        // guard's scope: EndTooltip() hands ImGui's current window
+                        // back to the modal underneath, and popping the wrap
+                        // position after that would pop the modal's stack.
+                        if (ImGui::BeginTooltip())   // false = nothing to end
+                        {
+                            {
+                                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+                                ImGui::TextUnformatted(path.c_str());
+                            }
+                            ImGui::EndTooltip();
+                        }
+                    }
                     ImGui::PopID();
                 }
                 if (scroll) ImGui::EndChild();
@@ -1506,14 +1536,29 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         if (ImGui::BeginPopupModal("##EditorOpenError", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-            ImGui::TextUnformatted(ctx.hubOpenError.c_str());
-            ImGui::PopStyleColor();
-            ImGui::Spacing();
-            if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
+            // hubOpenError is whatever went wrong opening a project, and it
+            // normally names the file it failed on — an absolute path. Two things
+            // follow. It has to wrap, or the dialog is one line as wide as the path
+            // and the sentence ends off-screen. And the column has to be absolute:
+            // this popup sizes itself to its content, so wrapping at its own right
+            // edge is a feedback loop — every frame it fits the wrapped text and
+            // every frame the text wraps tighter, down to ImGui's minimum.
+            //
+            // The guard lives in its own scope because EndPopup() below hands
+            // ImGui's current window back to whatever is under this popup — here
+            // the implicit debug window — and popping the wrap position after that
+            // pops a stack that was never pushed.
             {
-                ctx.hubOpenError.clear();
-                ImGui::CloseCurrentPopup();
+                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 30.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ImGui::TextUnformatted(ctx.hubOpenError.c_str());
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
+                if (EditorWidgets::primaryButton("OK", ImVec2(120, 0)))
+                {
+                    ctx.hubOpenError.clear();
+                    ImGui::CloseCurrentPopup();
+                }
             }
             ImGui::EndPopup();
         }
@@ -1696,9 +1741,24 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     static constexpr float kFooterH  = 24.0f;
     static constexpr float kTabBarH  = 28.0f;
 // Collab read-only banner above a locked asset tab. Tall enough for a real
-// button ("Ask to edit") rather than text alone: one frame height plus the
-// window's padding above and below it, which at this style is ~38.
-constexpr float kAssetLockBannerH = 38.0f;
+// button ("Ask to edit") rather than text alone, AND for the sentence next to it
+// to take two lines: that sentence is ~100 characters and only gets the tab
+// width minus the button's 140px, so at any normal tab width it wraps. At one
+// line's worth of height (the old 38) the second line fell outside a banner that
+// has no scrollbar, and the clause it took with it — "Their changes appear here
+// live" — is the one that stops the user closing a tab they think is frozen.
+// MEASURED, not a constant. Two text lines plus the frame-padding baseline
+// offset plus the window's padding above and below — the arithmetic that gives
+// 52 at the default font, which is exactly why writing 52 down would be wrong.
+// The editor's font scale is a user setting (Preferences, 0.5×–3×) and it scales
+// the line height while WindowPadding and FramePadding are not rescaled with it,
+// so a height tuned at 1× puts the second line back outside the banner — and the
+// banner has no scrollbar — for anyone who enlarged the UI. Which is to say: for
+// exactly the people who enlarged it because they were having trouble reading.
+    const float kAssetLockBannerH =
+        ImGui::GetTextLineHeight() * 2.0f +
+        ImGui::GetStyle().FramePadding.y +
+        ImGui::GetStyle().WindowPadding.y * 2.0f + 6.0f;
 
     // ── Footer bar ────────────────────────────────────────────────────────────
     // Must be rendered BEFORE the DockSpace window so ImGui processes it first
@@ -2079,6 +2139,13 @@ constexpr float kAssetLockBannerH = 38.0f;
                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar))
                 {
+                    // Wrapped at the banner's own right edge — a narrow tab (a
+                    // docked asset editor can be half the window) would otherwise
+                    // cut the sentence off mid-word, and this banner has no
+                    // scrollbar to reveal the rest. Safe at 0.0f: the banner is a
+                    // fixed-size window (SetNextWindowSize above), so wrapping to
+                    // its width cannot feed back into its width.
+                    EditorWidgets::WrapText wrap;
                     ImGui::TextDisabled("Checking with the host whether anyone is "
                                         "editing this asset…");
                 }
@@ -2104,12 +2171,33 @@ constexpr float kAssetLockBannerH = 38.0f;
                         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar))
                 {
                     ImGui::AlignTextToFramePadding();
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
-                    ImGui::TextUnformatted(lock && !lock->ownerName.empty()
-                        ? (lock->ownerName + " is editing this asset — it is read-only "
-                           "for you until they are done. Their changes appear here live.").c_str()
-                        : "Someone else is editing this asset — it is read-only for you.");
-                    ImGui::PopStyleColor();
+                    {
+                        // The sentence has to stop where the "Ask to edit" button
+                        // starts (SameLine below puts it 140px in from the right).
+                        // Without that reservation it ran straight under the button
+                        // and was cut off there — and what got cut was the tail,
+                        // "Their changes appear here live", i.e. the half that says
+                        // the tab is not frozen and does not need closing.
+                        //
+                        // Two things about the column itself. It is scoped to this
+                        // sentence and not to the whole banner, because at the
+                        // SameLine below the cursor sits PAST it, and ImGui clamps
+                        // a wrap column left of the cursor to a 1px width — the
+                        // "waiting for an answer…" line would come out one
+                        // character per line. And it is floored so it can never go
+                        // negative on a tab docked narrower than the button: a
+                        // negative wrap position is not "wrap tightly", it is
+                        // ImGui's way of spelling "do not wrap at all".
+                        EditorWidgets::WrapText wrap(std::max(
+                            ImGui::GetContentRegionMax().x - 148.0f,
+                            ImGui::GetFontSize() * 8.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+                        ImGui::TextUnformatted(lock && !lock->ownerName.empty()
+                            ? (lock->ownerName + " is editing this asset — it is read-only "
+                               "for you until they are done. Their changes appear here live.").c_str()
+                            : "Someone else is editing this asset — it is read-only for you.");
+                        ImGui::PopStyleColor();
+                    }
 
                     // The way out of read-only. Deliberately here and not in a
                     // menu: this banner is where the user is at the moment they

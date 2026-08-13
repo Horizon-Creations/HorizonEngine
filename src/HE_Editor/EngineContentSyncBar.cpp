@@ -147,8 +147,24 @@ void DrawFooter(AppContext& ctx)
 	// Hover-tested against the painted rectangles rather than the last item, so
 	// the tooltip covers the whole cluster (label, bar and count) and does not
 	// depend on Dummy() carrying a hoverable id.
+	//
+	// IsWindowHovered() is the second half of that test and not decoration.
+	// IsMouseHoveringRect answers "is the pointer over this rectangle", full stop:
+	// it clips to the window's clip rect but never asks whether this window is the
+	// one under the pointer. The footer is drawn with NoBringToFrontOnFocus, so a
+	// floating panel is free to lie across it — and then hovering an item on THAT
+	// panel raises its tooltip while these coordinates still say "hovered" and this
+	// one is submitted too. Two tooltips in a frame do not replace each other: only
+	// SetTooltip passes ImGuiTooltipFlags_OverridePrevious (imgui_internal.h, which
+	// this file has no other reason to pull in), a plain BeginTooltip APPENDS into
+	// the tooltip already open. The download path would show up glued to the bottom
+	// of somebody else's hint. Asking whether this window is the hovered one is the
+	// same exclusivity an IsItemHovered gate gives every other tooltip here, without
+	// the internal header: exactly one window is hovered, and none is while a popup
+	// blocks it.
 	const ImVec2 clusterMax = ImGui::GetItemRectMax();
-	if (ImGui::IsMouseHoveringRect(ImVec2(slotPos.x - kGap, slotPos.y), clusterMax))
+	if (ImGui::IsWindowHovered() &&
+	    ImGui::IsMouseHoveringRect(ImVec2(slotPos.x - kGap, slotPos.y), clusterMax))
 	{
 		// Spelled out instead of SetTooltip (which is exactly this, minus the wrap)
 		// because the second line is a content-relative path, and a tooltip has no

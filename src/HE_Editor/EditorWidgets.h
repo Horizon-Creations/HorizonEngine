@@ -196,26 +196,40 @@ void raiseDetachedModals(SDL_Window* mainWindow);
 // tell us is an assertion in a build nobody runs with assertions on.
 //
 // ── The scope rule, which is not optional ────────────────────────────────────
-// PopTextWrapPos acts on g.CurrentWindow, and ImGui::End() sets that to the
-// PARENT window — for a top-level panel, to none at all. So a guard whose
-// destructor runs AFTER the matching End() pops the wrong window's stack, or
-// dereferences null. "Declare it right after Begin()" is therefore the wrong
-// advice whenever the End() sits at the same scope level, which is the usual
-// shape of a panel:
+// PopTextWrapPos acts on g.CurrentWindow, and ImGui::End() has by then switched
+// that to the PARENT window — for a top-level panel, to the implicit debug
+// window, whose wrap stack was never pushed. So a guard whose destructor runs
+// AFTER the matching End() pops somebody else's stack, or underflows one.
 //
-//     void render(AppContext& ctx)
-//     {
-//         ImGui::Begin("Details");
-//         {                                   // <- a block that closes first
-//             EditorWidgets::WrapText wrap;
-//             ...
-//         }
-//         ImGui::End();
-//     }
+// The question is never "which Begin am I under", it is "does my destructor run
+// before the End". Read the call site and check, because the three ImGui pairs
+// answer differently:
 //
-// An `if (ImGui::Begin(...)) { ... }` body, a BeginChild/EndChild block, a
-// BeginPopupModal body and a per-section block all close before their End and
-// are safe as they stand.
+//     ImGui::Begin("Details");            // End() is unconditional, at THIS level
+//     { EditorWidgets::WrapText wrap;     // -> needs its own block
+//       ... }
+//     ImGui::End();
+//
+//     if (ImGui::Begin("Details", &open)) // End() is still outside the body,
+//     { EditorWidgets::WrapText wrap;     // so the body itself is enough
+//       ... }
+//     ImGui::End();
+//
+//     if (ImGui::BeginPopupModal(...))    // EndPopup() is INSIDE the body —
+//     { ...                               // a guard at the top of it would
+//       { EditorWidgets::WrapText wrap;   // outlive the popup, so it needs
+//         ... }                           // its own block anyway
+//       ImGui::EndPopup(); }
+//
+//     ImGui::BeginChild("##list", ...);   // EndChild() is at THIS level too:
+//     { EditorWidgets::WrapText wrap;     // same as the first case
+//       ... }
+//     ImGui::EndChild();
+//
+// Only the `if (ImGui::Begin(...)) { }` form is safe with a bare guard at the
+// top of the body. Everything else needs the extra braces. This paragraph got
+// it wrong twice while the editor-wide pass was being written; if you are about
+// to relax it, check imgui.cpp first.
 //
 // Deliberately NOT applied to the whole frame from one place: the wrap position
 // lives on the window, so it has to be pushed inside each one.

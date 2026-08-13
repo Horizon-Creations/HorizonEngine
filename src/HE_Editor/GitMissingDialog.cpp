@@ -134,7 +134,11 @@ void DrawGitMissingDialog(AppContext& ctx)
 	// would flash "git missing" during every startup.
 	if (!s_haveLast) return;
 
-	ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Appearing);
+	// The width this dialog is written for: two of its lines are an absolute path
+	// and a "name <address>" identity, and it reads as a paragraph, not a form.
+	constexpr float kDialogWidth = 560.0f;
+
+	ImGui::SetNextWindowSize(ImVec2(kDialogWidth, 0.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow();
 	if (!ImGui::BeginPopupModal("##SourceControlUnavailable", nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
@@ -148,7 +152,7 @@ void DrawGitMissingDialog(AppContext& ctx)
 		return;
 	}
 
-	// ── Everything below wraps at the dialog's right edge ────────────────────
+	// ── Everything below wraps at the dialog's design width ──────────────────
 	// This dialog's entire job is to say what is missing and where, and almost
 	// every line it draws ends in the part that answers "where": the path git was
 	// found at, the version string, the address in the identity. Those are the
@@ -163,8 +167,27 @@ void DrawGitMissingDialog(AppContext& ctx)
 	// current one. Popped after EndPopup() it would land on whatever window is
 	// current then — and this dialog is raised from outside any window, so that is
 	// none at all.
+	//
+	// Wrapped at a FIXED column, not at the window edge, because this popup is
+	// AlwaysAutoResize: an auto-sized window fits itself to its widest line, so
+	// wrapping at that same edge makes the width its own input. The first version
+	// of this guard did exactly that, and since it also replaced the unwrapped
+	// BulletText lines — the long ones that were holding the dialog open — nothing
+	// was left to push back: every frame the text re-wrapped a little narrower, the
+	// window fitted to it, and the dialog visibly walked down toward ImGui's
+	// minimum size. A column measured in window space breaks the loop, because it
+	// does not depend on how wide the window currently is; the auto-fit then simply
+	// settles at the width this dialog was written for. TextWrapped() below inherits
+	// it rather than pushing its own 0.0f (it only pushes when nothing is set), so
+	// the hand-wrapped paragraphs land on the same column.
+	//
+	// The alternative — a width FLOOR — would have to be routed through
+	// pinDialogToEditorWindow's minSize, since the pin issues its own
+	// SetNextWindowSizeConstraints right after any the caller sets. That treats the
+	// symptom (the window may no longer shrink) and leaves the wrap width still
+	// chasing the window width, so one mechanism, and it is this one.
 	{
-		EditorWidgets::WrapText wrap;
+		EditorWidgets::WrapText wrap(kDialogWidth - ImGui::GetStyle().WindowPadding.x);
 
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
 		ImGui::TextUnformatted("Source Control Not Ready");

@@ -879,6 +879,27 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 
 	ImGui::TextDisabled("Per-field defaults for THIS graph's variable.");
 	ImGui::TextDisabled("Untouched fields follow the struct's own defaults.");
+
+	// The two lines above are prose and wrap with whatever the host pane pushed —
+	// which is right for them and wrong for everything below. What follows is a
+	// two-column table: the field name, then SameLine(140.0f), then the field's
+	// editor or a parenthetical saying why there isn't one. Both hosts (the Level
+	// Script / Game Instance sidebar at 220 px, the widget graph's details pane)
+	// push a wrap position on their whole pane for their explanatory text, and it
+	// reaches in here: from x = 140 in a 220 px sidebar the note "(array — seeds
+	// from the field's own default)" had some 60 px to wrap in and came out as a
+	// five-line ragged sliver, so one field occupied five rows of a table that is
+	// read by scanning the left column.
+	//
+	// So the table opts out for its whole length. The column is positive rather
+	// than the negative value ImGui reads as "never wrap": negative is also how
+	// SetNextItemWidth's "N pixels in from the right" is spelled, and a guard
+	// carrying one cannot be told apart from that idiom pasted in by mistake —
+	// which is a guard that silently does nothing. A column past any pane this is
+	// drawn in says the same thing and can only mean it.
+	constexpr float kNoWrapColumn = 1.0e6f;
+	EditorWidgets::WrapText rowsClipRatherThanWrap(kNoWrapColumn);
+
 	bool changed = false;
 	for (const HE::StructField& f : def.fields)
 	{

@@ -155,18 +155,20 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
         // ── Overview: live HUD + frame-time graph ───────────────────────────
         if (ImGui::BeginTabItem("Overview"))
         {
-            // The counter line ("draws … tris … objects …") is longer than this
-            // panel is wide as soon as it is docked into a side column, and the
-            // number that got cut off is the one somebody opened the profiler
-            // for. Pushed per tab rather than once for the window: the Frame
-            // Detail tab lays its rows out with SameLine at fixed offsets and
-            // must NOT wrap (see DrawFrameDetail).
-            EditorWidgets::WrapText wrap;
             const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
             if (live.empty())
                 ImGui::TextDisabled("Collecting live data…");
             else
             {
+                // The four numbers below are a hand-built 2x2 readout, not prose:
+                // the second value on each line is placed with SameLine(120), so
+                // it has whatever is left of the panel to fit in. Wrapping it is
+                // the mistake DrawFrameDetail already refuses to make one tab
+                // over — in a narrow dock "GPU 14.27 ms" would break after "GPU"
+                // and the grid would grow a row per number. They are short by
+                // construction (a millisecond figure, not a sentence), so there
+                // is nothing to gain here and an unreadable grid to lose. No
+                // guard over these four lines.
                 const ProfLiveFrame& cur = live.back();
                 const double fps = cur.deltaMs > 0.0 ? 1000.0 / cur.deltaMs : 0.0;
                 ImGui::Text("%.1f FPS", fps);
@@ -175,6 +177,14 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
                 ImGui::SameLine(120);
                 if (cur.gpuFrameMs >= 0.0) ImGui::Text("GPU %.2f ms", cur.gpuFrameMs);
                 else                       ImGui::TextDisabled("GPU n/a");
+
+                // From here down the tab is single-column text: the counter line
+                // ("draws … tris … objects …") is longer than this panel is wide
+                // as soon as it is docked into a side column, and the number that
+                // got cut off is the one somebody opened the profiler for. Same
+                // for the two graph captions. Nothing below places anything with
+                // SameLine, so wrapping costs nothing.
+                EditorWidgets::WrapText wrap;
                 ImGui::Text("draws %u  ·  tris %u  ·  objects %u/%u",
                             cur.draws, cur.triangles, cur.visible, cur.total);
 

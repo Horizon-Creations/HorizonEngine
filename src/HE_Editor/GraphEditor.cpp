@@ -1,5 +1,6 @@
 #include "GraphEditor.h"
 #include "EditorInput.h" // pointer-device grammar (trackpad swipe pans, modifier-scroll zooms)
+#include "EditorWidgets.h" // WrapText — header-only, so the test binary needs no extra link
 #include <cstdint>
 #include <algorithm>
 #include <unordered_set>
@@ -629,9 +630,29 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 const std::string tip = model.nodeTooltip(hoverNodeNow);
                 if (!tip.empty())
                 {
-                    ImGui::BeginTooltip();
-                    ImGui::TextUnformatted(tip.c_str());
-                    ImGui::EndTooltip();
+                    // The one tooltip in the editor that is a paragraph rather
+                    // than a label: for an engine-API node this is the call's
+                    // category and registry id, its documentation, and a line per
+                    // parameter. Unwrapped, a tooltip sizes itself to its widest
+                    // line, so that became a bar running off the side of a laptop
+                    // screen with the parameter semantics — the reason anyone
+                    // hovers a node — past the edge and unreachable.
+                    //
+                    // An absolute column because a tooltip window has no width of
+                    // its own to wrap at, and the inner block so the pop happens
+                    // while the tooltip is still the current window: EndTooltip()
+                    // below would otherwise have moved on. The `if` is imgui.h's
+                    // rule — EndTooltip is only valid when BeginTooltip returned
+                    // true, which today it always does and one upgrade from now
+                    // may not.
+                    if (ImGui::BeginTooltip())
+                    {
+                        {
+                            EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+                            ImGui::TextUnformatted(tip.c_str());
+                        }
+                        ImGui::EndTooltip();
+                    }
                 }
             }
         }

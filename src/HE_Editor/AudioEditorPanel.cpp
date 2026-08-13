@@ -828,39 +828,63 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SameLine();
 	ImGui::BeginChild("##audioWave", ImVec2(0.0f, 0.0f), true);
 	{
-		// Room for TWO lines under the canvas, not one. The hint at the end of the
-		// footer row is a sentence and it wraps now instead of running off the
-		// edge, so in a narrow tab it becomes two lines — and a canvas sized as if
-		// it were still one would push that second line past the bottom of this
-		// child, which answers a clipped sentence with a scrollbar.
-		const float  footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeight();
 		const ImVec2 avail   = ImGui::GetContentRegionAvail();
 		// Captured before the footer is drawn: the "visible" readout describes the
 		// CANVAS, and asking for the region again after a SameLine would measure
 		// what is left of the footer row instead.
 		const float  canvasW = avail.x;
+
+		// The footer row is composed up here, above the canvas it sits under,
+		// because the canvas can only be sized once the row's height is known — and
+		// the only height that is ever right is the one measured from the very
+		// strings that will be drawn. The state they read (playhead, framesPerPx)
+		// is the state before drawWaveform consumes this frame's scrub and zoom
+		// input, so during a drag the numbers are one frame behind; that is
+		// invisible, whereas a row whose height was guessed is not.
+		char nowBuf[32], totalBuf[32];
+		formatTime(static_cast<double>(st.playhead) / rate, nowBuf, sizeof(nowBuf));
+		formatTime(an.durationSec, totalBuf, sizeof(totalBuf));
+		const std::string timeText = std::string(nowBuf) + " / " + totalBuf;
+
+		// framesPerPx is still zero the first time a clip is opened — drawWaveform
+		// fits the whole clip to the canvas below. Anticipate that fit rather than
+		// flashing "0 s visible" for a frame.
+		const double fpp = st.framesPerPx > 0.0
+			? st.framesPerPx
+			: static_cast<double>(frames) / static_cast<double>(std::max(64.0f, canvasW));
+		char hint[192];
+		std::snprintf(hint, sizeof(hint), EditorInput::trackpadPointer(ctx)
+			? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
+			: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
+			fpp * canvasW / rate);
+
+		// The hint is the item that wraps, so it decides the row's height: measured
+		// from where SameLine will put it to the right edge of this child. Only the
+		// lines BEYOND the first are added to the reservation — the first one lives
+		// in GetFrameHeightWithSpacing() already. An unconditional second line looks
+		// harmless and is not: at any comfortable tab width it is never used, and
+		// the waveform is permanently a text line shorter with a blank strip under
+		// it, which is a worse trade than the narrow-tab scrollbar it avoids.
+		const float hintX   = ImGui::CalcTextSize(timeText.c_str()).x + ImGui::GetStyle().ItemSpacing.x;
+		const float hintH   = ImGui::CalcTextSize(hint, nullptr, false,
+		                                          std::max(1.0f, canvasW - hintX)).y;
+		const float footerH = ImGui::GetFrameHeightWithSpacing()
+		                    + std::max(0.0f, hintH - ImGui::GetTextLineHeight());
 		drawWaveform(ctx, *clip, st, ImVec2(canvasW, std::max(80.0f, avail.y - footerH)));
 
-		char now[32], total[32];
-		formatTime(static_cast<double>(st.playhead) / rate, now, sizeof(now));
-		formatTime(an.durationSec, total, sizeof(total));
 		{
 			// The tail of this row is where the pointer grammar is written down —
 			// middle-drag to pan, Cmd/Ctrl+scroll to zoom — and it is the last
 			// thing on the line, so it is the first thing to go over the right
 			// edge. Clipped, the row still looks finished: it just stops after
 			// "wheel to zoom," and the gesture nobody discovered is the one that
-			// was cut. Wrapping it is why footerH above reserves a second line.
+			// was cut. Wrapping it is what footerH above measured.
 			// The scope is closed before EndChild(): the wrap must come off this
 			// child's stack, not off whatever window follows it.
 			EditorWidgets::WrapText wrap;
-			ImGui::Text("%s / %s", now, total);
+			ImGui::TextUnformatted(timeText.c_str());
 			ImGui::SameLine();
-			const double visibleSec = st.framesPerPx * canvasW / rate;
-			ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
-				? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
-				: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
-				visibleSec);
+			ImGui::TextDisabled("%s", hint);
 		}
 	}
 	ImGui::EndChild();
