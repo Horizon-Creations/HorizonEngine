@@ -2816,15 +2816,24 @@ TEST_CASE("Reimport: a client's claim that lands late is handed straight back")
     }
 
     // The host grants it, and it comes back within the same breath.
+    //
+    // The client's own view is part of the wait, not an assertion after it. It
+    // reads the REPLICATED table, which is a relay behind the host's by
+    // construction: the host clears its entry the moment the release lands and
+    // only then broadcasts the update, so a loop that stops at the host's state
+    // stops exactly one hop before the client has heard. On loopback the two
+    // usually happen inside one pump and the shortcut passes; on a loaded CI
+    // machine they do not, which is what made this fail there and nowhere else.
+    // Waiting on both is not weaker — pumpUntil times out and REQUIRE fails if
+    // the lock is never handed back, which is the regression this guards.
     bool sawTheClaim = false;
     REQUIRE(pumpUntil(s.host, s.client, [&] {
         const HE::Net::LockInfo* l = s.host.assetLockInfo(asset);
         if (l) sawTheClaim = true;
-        return sawTheClaim && l == nullptr;
+        return sawTheClaim && l == nullptr &&
+               !s.client.ownsAssetLock(asset) && !recordsLock(s.client, asset);
     }));
     CHECK(sawTheClaim);
-    CHECK_FALSE(s.client.ownsAssetLock(asset));
-    CHECK_FALSE(recordsLock(s.client, asset));
     // Free for the next person, which is the only thing anyone else can observe.
     CHECK(s.host.assetWritableNow(asset));
 
