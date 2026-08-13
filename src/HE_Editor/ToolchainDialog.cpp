@@ -167,9 +167,15 @@ void DrawToolchainDialog(AppContext& ctx)
 			if (!log.empty())
 			{
 				ImGui::Spacing();
-				ImGui::BeginChild("##installlog", ImVec2(0.0f, 150.0f), true,
-					ImGuiWindowFlags_HorizontalScrollbar);
+				ImGui::BeginChild("##installlog", ImVec2(0.0f, 150.0f), true);
+				// Wrapped, not scrolled sideways. Homebrew and the platform
+				// installers emit long single-line messages, and the sentence that
+				// says WHY an install stopped is at the end of one of them — off
+				// the right edge, behind a scrollbar, in the dialog the user is
+				// stuck in.
+				ImGui::PushTextWrapPos(0.0f);
 				ImGui::TextUnformatted(log.c_str());
+				ImGui::PopTextWrapPos();
 				if (installing) ImGui::SetScrollHereY(1.0f); // autoscroll while running
 				ImGui::EndChild();
 			}

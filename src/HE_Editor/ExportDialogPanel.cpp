@@ -716,8 +716,13 @@ void render(AppContext& ctx)
                         ImGui::SetClipboardText(all.c_str());
                     }
                     ImGui::BeginChild("##build_output", ImVec2(0.0f, 180.0f),
-                                      ImGuiChildFlags_Borders,
-                                      ImGuiWindowFlags_HorizontalScrollbar);
+                                      ImGuiChildFlags_Borders);
+                    // Wrapped, not scrolled sideways. A compiler diagnostic puts
+                    // the part that matters — the message — after a long absolute
+                    // path, so the horizontal scrollbar hid precisely the words
+                    // the user opened this box to read. Copy is right above for
+                    // anyone who wants the raw line.
+                    ImGui::PushTextWrapPos(0.0f);
                     for (const auto& l : s_buildLog)
                     {
                         if (l.severity == 2)
@@ -727,6 +732,7 @@ void render(AppContext& ctx)
                         else
                             ImGui::TextUnformatted(l.text.c_str());
                     }
+                    ImGui::PopTextWrapPos();
                     // Follow the tail while the user hasn't scrolled back up.
                     if (running && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
                         ImGui::SetScrollHereY(1.0f);

@@ -322,10 +322,20 @@ namespace
 			scan.truncated ? " (first matches shown)" : "");
 		if (consequence && *consequence) ImGui::TextDisabled("%s", consequence);
 
+		// Two lines' worth at minimum: a path that wraps in a box sized for one
+		// line is a path with its tail cut off, which is the opposite of what a
+		// list of referrers is for.
 		const float lineH = ImGui::GetTextLineHeightWithSpacing();
-		const float listH = std::clamp(lineH * static_cast<float>(n) + 8.0f, lineH, 140.0f);
-		ImGui::BeginChild("##cb_ref_list", ImVec2(-1.0f, listH), true,
-			ImGuiWindowFlags_HorizontalScrollbar);
+		const float listH = std::clamp(lineH * static_cast<float>(n) + 8.0f,
+		                               lineH * 2.0f, 140.0f);
+		ImGui::BeginChild("##cb_ref_list", ImVec2(-1.0f, listH), true);
+		// Wrapped, not scrolled sideways. A content path is long enough to need
+		// one or the other, and a horizontal scrollbar hides the end of every row
+		// behind a gesture nobody makes — the reader sees a truncated list and no
+		// sign that it is truncated. Set once for the whole child, so the dimmed
+		// kind tag below wraps with the path instead of being clipped off the
+		// right edge.
+		ImGui::PushTextWrapPos(0.0f);
 		for (const HE::AssetRefs::Referrer& r : scan.referrers)
 		{
 			ImGui::TextUnformatted(r.displayPath.c_str());
@@ -335,6 +345,7 @@ namespace
 			ImGui::SameLine();
 			ImGui::TextDisabled(r.kind == HE::AssetRefs::RefKind::Uuid ? "(asset id)" : "(path)");
 		}
+		ImGui::PopTextWrapPos();
 		ImGui::EndChild();
 		if (scan.incomplete)
 			ImGui::TextDisabled("Some files could not be checked — there may be more.");
@@ -3234,12 +3245,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{
 				const float lineH = ImGui::GetTextLineHeightWithSpacing();
 				const float listH = std::clamp(lineH * static_cast<float>(assetCount) + 8.0f,
-				                               lineH, 140.0f);
+				                               lineH * 2.0f, 140.0f);
 				ImGui::Spacing();
-				ImGui::BeginChild("##cb_delete_asset_list", ImVec2(-1.0f, listH), true,
-					ImGuiWindowFlags_HorizontalScrollbar);
+				ImGui::BeginChild("##cb_delete_asset_list", ImVec2(-1.0f, listH), true);
+				// Wrapped rather than scrolled sideways — see the referrer list.
+				// This is the list somebody reads to decide whether to destroy
+				// twelve files, and a name whose end is off-screen is a name they
+				// cannot check.
+				ImGui::PushTextWrapPos(0.0f);
 				for (const std::string& p : s_deleteAssetTargets)
 					ImGui::TextUnformatted(std::filesystem::path(p).filename().string().c_str());
+				ImGui::PopTextWrapPos();
 				ImGui::EndChild();
 			}
 			ImGui::Spacing();
@@ -3420,9 +3436,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// worth seeing.
 			const float lineH = ImGui::GetTextLineHeightWithSpacing();
 			const float listH = std::clamp(lineH * static_cast<float>(s_patternTargets.size()) + 8.0f,
-			                               lineH, 200.0f);
-			ImGui::BeginChild("##pat_preview", ImVec2(-1.0f, listH), true,
-				ImGuiWindowFlags_HorizontalScrollbar);
+			                               lineH * 2.0f, 200.0f);
+			ImGui::BeginChild("##pat_preview", ImVec2(-1.0f, listH), true);
+			// Wrapped, not scrolled sideways. The whole value of this preview is
+			// reading the NEW name before committing to it, and that is the half
+			// that sits furthest right — exactly the half a horizontal scrollbar
+			// hides. The wrap position covers the arrow and both names, so a long
+			// pair breaks onto a second line instead of running off the edge.
+			ImGui::PushTextWrapPos(0.0f);
 			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
 			{
 				const std::filesystem::path old(s_patternTargets[i]);
@@ -3439,6 +3460,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					ImGui::TextUnformatted(newStem.c_str());
 				}
 			}
+			ImGui::PopTextWrapPos();
 			ImGui::EndChild();
 
 			int changed = 0;
@@ -3589,13 +3611,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			constexpr int k_maxListed = 200;
 			const int listed = (std::min)(fileCount, k_maxListed);
 			const float lineH  = ImGui::GetTextLineHeightWithSpacing();
-			const float listH  = std::clamp(lineH * static_cast<float>(listed) + 8.0f, lineH, 220.0f);
-			ImGui::BeginChild("##cb_delete_folder_list", ImVec2(-1.0f, listH), true,
-				ImGuiWindowFlags_HorizontalScrollbar);
+			const float listH  = std::clamp(lineH * static_cast<float>(listed) + 8.0f,
+			                                lineH * 2.0f, 220.0f);
+			ImGui::BeginChild("##cb_delete_folder_list", ImVec2(-1.0f, listH), true);
+			// Wrapped, not scrolled sideways. These are paths relative to the
+			// content root and several folders deep, so this is the list that
+			// overflowed worst — and it is the one attached to the biggest yes in
+			// the panel.
+			ImGui::PushTextWrapPos(0.0f);
 			for (int i = 0; i < listed; ++i)
 				ImGui::TextUnformatted(s_deleteFolderFiles[static_cast<size_t>(i)].c_str());
 			if (fileCount > listed)
 				ImGui::TextDisabled("... and %d more", fileCount - listed);
+			ImGui::PopTextWrapPos();
 			ImGui::EndChild();
 			ImGui::Spacing();
 
