@@ -397,14 +397,22 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "is the only thing standing between another peer and an allocation "
 		     "of that size on this machine: an announced transfer larger than "
 		     "this is refused before a byte of it is kept.");
+		// The last sentence used to end "the person there is told and you are not
+		// — your save looked as though it went through". That was true, and it is
+		// the failure protocol v13 was added to end: a refusal now travels back to
+		// whoever sent the file. Leaving the old wording here would have this page
+		// telling the user to expect a silence the engine no longer produces —
+		// which is worse than saying nothing, because they would stop trusting the
+		// notice that does arrive.
 		hint("Lowering it does not shrink anything — assets over the limit are "
 		     "refused whole, never truncated, so they simply never arrive and "
 		     "everyone else keeps the older file. When this editor is the one "
 		     "refusing to send, a notification says which file and how big, so it "
 		     "can go through source control instead. Each peer applies its own "
 		     "number, though: when the far end refuses because THAT editor is set "
-		     "lower, the person there is told and you are not — your save looked "
-		     "as though it went through.");
+		     "lower, the refusal travels back and you are told whose limit stopped "
+		     "it — otherwise the obvious response, saving again, would produce the "
+		     "same silence.");
 	});
 
 	row("camspeed", "Viewport", [&]{
