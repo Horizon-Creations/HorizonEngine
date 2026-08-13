@@ -1873,6 +1873,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// within one folder): plain disk rename + selection/tab fixups + a
 		// quiet content refresh. Skipped when the drop lands on the asset's
 		// own folder or the name already exists in the target.
+		//
+		// And in a session it goes through the host, exactly as a rename does.
+		// It used to be the ONE operation that did not: create, rename and delete
+		// all ask, while dragging a file into another folder happened here and
+		// nowhere else — so every peer kept the old path, and the next scene save
+		// handed them a reference to a file they did not have. That is the same
+		// failure the rename path was fixed for; the drag is a rename whose new
+		// name happens to sit in a different folder, and the protocol already has
+		// the message for it.
+		//
+		// One batch for the whole drop, so twelve dragged assets are one row in
+		// the host's in-tray rather than twelve.
+		if (!s_pendingMoveSrcs.empty() && !s_pendingMoveDst.empty() && ctx.collab)
+			ctx.collab->beginAssetOpBatch();
 		for (const std::string& moveSrc : s_pendingMoveDst.empty()
 		                                 ? std::vector<std::string>{} : s_pendingMoveSrcs)
 		{
@@ -1927,8 +1941,37 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				isDownloadCacheGround(moveSrc) || isDownloadCacheGround(s_pendingMoveDst) ||
 				(!ContentManager::isEngineContentDevMode() &&
 				 (engineReadOnlyGround(moveSrc) || engineReadOnlyGround(s_pendingMoveDst)));
-			if (!engineLocked && !sameFolder && std::filesystem::exists(src) &&
-			    !std::filesystem::exists(dst))
+			const bool moveIsAllowed =
+				!engineLocked && !sameFolder && std::filesystem::exists(src) &&
+				!std::filesystem::exists(dst);
+
+			// Ask the host — the same call the rename dialog makes, for the same
+			// reason, and deliberately NOT gated on being a client: as host,
+			// requestAssetRename broadcasts the move instead of asking, so leaving
+			// the host out would move the file here and nowhere else.
+			//
+			// folder=false is not laziness. A folder can never be in this loop: the
+			// drag source sits on file tiles only, and selecting a folder assigns a
+			// one-element selection, so a multi-drag is files by construction.
+			//
+			// The engine/read-only and collision checks run BEFORE the ask, not
+			// after: a drop the host would have to undo anyway should never reach
+			// the host's in-tray, and a request whose local half we then refuse to
+			// perform would desync us from the peers who did perform it.
+			bool requested = false;
+			if (moveIsAllowed && ctx.collab && ctx.contentManager &&
+			    ctx.collab->inSession())
+			{
+				const std::string relOld = ctx.contentManager->toContentRelativePath(moveSrc);
+				const std::string relNew =
+					ctx.contentManager->toContentRelativePath(dst.string());
+				requested = !relOld.empty() && !relNew.empty() &&
+				            ctx.collab->requestAssetRename(relOld, relNew, /*folder=*/false);
+			}
+
+			// Nothing moves locally when it was asked for; it moves when the host
+			// says so, on every machine at once.
+			if (moveIsAllowed && !requested)
 			{
 				ec.clear();
 				std::filesystem::rename(src, dst, ec);
@@ -1958,6 +2001,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				}
 			}
 		}
+		if (!s_pendingMoveSrcs.empty() && !s_pendingMoveDst.empty() && ctx.collab)
+			ctx.collab->endAssetOpBatch();
 		if (!s_pendingMoveSrcs.empty() || !s_pendingMoveDst.empty())
 		{
 			s_pendingMoveSrcs.clear();
