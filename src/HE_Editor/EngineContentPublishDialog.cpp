@@ -157,40 +157,54 @@ void Draw(AppContext& ctx)
 	EditorWidgets::pinDialogToEditorWindow();
 	if (ImGui::BeginPopupModal("##engine_content_publish_popup", nullptr, ImGuiWindowFlags_NoTitleBar))
 	{
-		// One snapshot per frame: reading each atomic twice could otherwise show
-		// "running" in one branch and "finished" in the next within a single frame.
-		const bool running  = s_running.load(std::memory_order_acquire);
-		const bool finished = s_finished.load(std::memory_order_acquire);
-
-		ImGui::Text("%s", s_title.c_str());
-		ImGui::Separator();
-		ImGui::Spacing();
-
-		if (running)
+		// Wrapped, not clipped — and the scope closes before EndPopup, because the
+		// wrap position is pushed onto the popup's window and has to come off
+		// again while that window is still the current one.
+		//
+		// What this dialog says is short until something goes wrong, and then it
+		// is a sentence naming a host, a remote path or an ssh error. The title
+		// line is the same: "Rebuild Manifest from Server" already fills a good
+		// part of a 520px dialog that the editor may have shrunk to fit its own
+		// window. A modal the user cannot resize is the last place to hand
+		// somebody half a sentence.
 		{
-			ImGui::TextDisabled("Working...");
-		}
-		else if (finished)
-		{
-			if (s_lastOk.load(std::memory_order_acquire))
-				ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Finished.");
-			else
-				ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.50f, 1.0f), "Failed — see log below.");
-		}
+			EditorWidgets::WrapText wrap;
 
-		ImGui::Spacing();
-		{
-			std::lock_guard<std::mutex> lock(s_logMutex);
-			ImGui::InputTextMultiline("##engine_content_publish_log",
-				const_cast<char*>(s_log.c_str()), s_log.size() + 1,
-				ImVec2(-1.0f, 240.0f), ImGuiInputTextFlags_ReadOnly);
-		}
-		ImGui::Spacing();
+			// One snapshot per frame: reading each atomic twice could otherwise show
+			// "running" in one branch and "finished" in the next within a single frame.
+			const bool running  = s_running.load(std::memory_order_acquire);
+			const bool finished = s_finished.load(std::memory_order_acquire);
 
-		if (!running)
-		{
-			if (EditorWidgets::primaryButton("Close", ImVec2(120, 0)))
-				ImGui::CloseCurrentPopup();
+			ImGui::Text("%s", s_title.c_str());
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			if (running)
+			{
+				ImGui::TextDisabled("Working...");
+			}
+			else if (finished)
+			{
+				if (s_lastOk.load(std::memory_order_acquire))
+					ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Finished.");
+				else
+					ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.50f, 1.0f), "Failed — see log below.");
+			}
+
+			ImGui::Spacing();
+			{
+				std::lock_guard<std::mutex> lock(s_logMutex);
+				ImGui::InputTextMultiline("##engine_content_publish_log",
+					const_cast<char*>(s_log.c_str()), s_log.size() + 1,
+					ImVec2(-1.0f, 240.0f), ImGuiInputTextFlags_ReadOnly);
+			}
+			ImGui::Spacing();
+
+			if (!running)
+			{
+				if (EditorWidgets::primaryButton("Close", ImVec2(120, 0)))
+					ImGui::CloseCurrentPopup();
+			}
 		}
 		ImGui::EndPopup();
 	}

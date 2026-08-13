@@ -3,7 +3,7 @@
 
 #include <cstdio>
 #include "EditorApplication.h"           // AppContext
-#include "EditorWidgets.h"               // shared Content-Browser asset drop slot
+#include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonRendering/RenderWorld.h>
@@ -451,6 +451,21 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 void renderPanel(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    // This panel is docked into a narrow column and it explains itself in full
+    // sentences — "Green grid in the viewport previews the result", "Flattens
+    // toward the height where the drag began", "Ctrl+click a field to type a
+    // value". Without a wrap position ImGui lays each of those out on one line
+    // and clips it at the panel's right edge, so the user reads "Flattens toward
+    // the hei" and has no way of knowing a second half exists; the instruction
+    // that would have told them what the armed brush actually does is simply not
+    // on screen. One push covers the whole body, because the caller
+    // (EditorUI.cpp, the "Landscape###Quick Settings" window) brackets this
+    // function with its Begin/End — so the guard is released while that window is
+    // still the current one. The Sculpt/Paint and brush wells above are unaffected
+    // either way: EditorToolbar paints its cells through the draw list, which
+    // never consults the wrap position.
+    EditorWidgets::WrapText wrapPanel;
+
     // ── Check for an existing terrain entity ─────────────────────────────
     auto& reg = ctx.world->registry();
     auto terrainView = reg.view<TerrainComponent>();

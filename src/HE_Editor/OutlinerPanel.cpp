@@ -28,6 +28,18 @@ void render(AppContext& ctx)
 
     if (ctx.world)
     {
+        // Text this panel writes beside the tree — above all a collaborator's name
+        // on a locked row — wraps to the panel instead of running off its right
+        // edge. The Outliner is one of the narrowest docks in the editor, and a
+        // name that is merely cut off tells the reader nothing about WHO holds the
+        // lock, which is the only reason that badge exists. The guard lives inside
+        // this block on purpose: it has to be popped before the ImGui::End() below,
+        // and a PopTextWrapPos after End() would land on whatever window is current
+        // by then — for a top-level panel, none at all. Tree labels themselves are
+        // drawn by RenderText, which ignores the wrap position, so entity names are
+        // unaffected either way.
+        EditorWidgets::WrapText wrap;
+
         // ── Cached hierarchy snapshot ─────────────────────────────────────
         struct OutlinerNode
         {
@@ -233,6 +245,12 @@ void render(AppContext& ctx)
                     // in the SlotMap never reaches the Content Browser and is gone
                     // at shutdown — the save looked like it worked and wasn't.
                     const std::string relPath = prefab.path;
+                    // The save hook publishes an UPDATE for anything written
+                    // through saveAsset, and this file is a create — held across
+                    // the write so the create below is the only announcement, and
+                    // so the update's lock claim never lands on a path the host
+                    // may be about to rename out from under us.
+                    const CollabController::CreatingAsset creating(ctx.collab, relPath);
                     if (ctx.contentManager->saveAsset(prefab))
                     {
                         // Registering the in-memory copy keeps the UUID that was

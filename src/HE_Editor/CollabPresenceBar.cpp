@@ -386,6 +386,18 @@ namespace
 		                 ImGuiWindowFlags_NoFocusOnAppearing |
 		                 ImGuiWindowFlags_AlwaysAutoResize))
 		{
+			// The menu is 320 px wide and its rows carry names people chose for
+			// themselves — which are as long as they like, and a name that runs
+			// out of the window is a name you cannot read to the end of. Wrapping
+			// here rather than eliding, because half a name is still worth more
+			// than an ellipsis, and the row below it says what that person is
+			// doing in a full sentence.
+			//
+			// Scoped inside the Begin, because ImGui::End() is below it: a wrap
+			// position popped after End() would be popped off whichever window is
+			// current then, not off this one.
+			EditorWidgets::WrapText wrap;
+
 			hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup |
 			                                 ImGuiHoveredFlags_ChildWindows);
 			ImGui::TextDisabled("%zu in this session", collab.participants().size());
@@ -420,32 +432,41 @@ namespace
 			return false;
 		}
 
-		ImGui::TextWrapped("Remove %s from this session and refuse them if they try to "
-		                   "rejoin?", s_banCandidateName.c_str());
-		ImGui::Spacing();
-		ImGui::TextDisabled("The block lasts until you close this session. It does not "
-		                    "affect a session you open later, and you can lift it again "
-		                    "from the participant menu.");
-		ImGui::Spacing();
-		ImGui::Separator();
-		ImGui::Spacing();
+		// The dimmed paragraph is the whole reason this dialog is not just a
+		// yes/no: it is what tells the host that a block is not permanent. Left
+		// unwrapped it ran off the right edge, so the reassurance was the part
+		// that got cut — leaving a red button and a question that reads as
+		// irreversible. Ends before EndPopup(), which is what the scope is for.
+		{
+			EditorWidgets::WrapText wrap;
 
-		if (EditorWidgets::cancelButton("Cancel", ImVec2(110.0f, 0.0f)))
-		{
-			s_banCandidate = HE::Net::kInvalidParticipant;
-			s_pinned       = false;
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::SameLine();
-		if (EditorWidgets::dangerButton("Block", ImVec2(110.0f, 0.0f)))
-		{
-			// They may have left while the question was on screen —
-			// banParticipant says so by returning false, and there is nothing
-			// left to do about it either way.
-			collab.banParticipant(s_banCandidate);
-			s_banCandidate = HE::Net::kInvalidParticipant;
-			s_pinned       = false;
-			ImGui::CloseCurrentPopup();
+			ImGui::TextWrapped("Remove %s from this session and refuse them if they try to "
+			                   "rejoin?", s_banCandidateName.c_str());
+			ImGui::Spacing();
+			ImGui::TextDisabled("The block lasts until you close this session. It does not "
+			                    "affect a session you open later, and you can lift it again "
+			                    "from the participant menu.");
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(110.0f, 0.0f)))
+			{
+				s_banCandidate = HE::Net::kInvalidParticipant;
+				s_pinned       = false;
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (EditorWidgets::dangerButton("Block", ImVec2(110.0f, 0.0f)))
+			{
+				// They may have left while the question was on screen —
+				// banParticipant says so by returning false, and there is nothing
+				// left to do about it either way.
+				collab.banParticipant(s_banCandidate);
+				s_banCandidate = HE::Net::kInvalidParticipant;
+				s_pinned       = false;
+				ImGui::CloseCurrentPopup();
+			}
 		}
 		ImGui::EndPopup();
 		return true;

@@ -755,7 +755,25 @@ void DrawReportIssueDialog(AppContext& ctx)
 		                    static_cast<int>(chosenLogLines().size()),
 		                    static_cast<int>(s_logAll.size()));
 		if (s_problemsOnly && s_logProblems.empty())
+		{
+			// Wrapped, not clipped. This dialog is where a user goes when
+			// something is already wrong, and every explanatory line in it is a
+			// whole sentence — the one below explains why the attachment they
+			// just chose is empty. Clipped at the right edge it reads as a
+			// shorter, different sentence, with nothing to say that more was
+			// meant; the dialog is pinned to the editor window and capped to its
+			// work area (pinDialogToEditorWindow), so on a small display it is
+			// genuinely narrower than these sentences are long.
+			//
+			// Pushed in small scopes like this one rather than once around the
+			// whole dialog: the body has two exits, each with its own EndPopup,
+			// and a guard living across either of them would pop the wrap off the
+			// PARENT window. The hand-written PushTextWrapPos/PopTextWrapPos pairs
+			// elsewhere in this function already do the same job and are left as
+			// they are — this only fills in the lines that had none.
+			EditorWidgets::WrapText wrap;
 			ImGui::TextDisabled("Nothing was logged as a warning or an error this run.");
+		}
 
 		// The two routes attach genuinely different amounts, and which one the
 		// user is about to take changes what "attach the log" means — worth
@@ -773,7 +791,13 @@ void DrawReportIssueDialog(AppContext& ctx)
 			ImGui::SameLine();
 			if (ImGui::SmallButton("Copy Log Path")) ImGui::SetClipboardText(s_logPath.c_str());
 			ImGui::SameLine();
-			ImGui::TextDisabled("%s", s_logPath.c_str());
+			// An absolute log path never fits after two buttons. It wraps onto
+			// further lines rather than being cut at the edge — the tail of a path
+			// (the file name) is the part that identifies it.
+			{
+				EditorWidgets::WrapText wrap;
+				ImGui::TextDisabled("%s", s_logPath.c_str());
+			}
 		}
 		ImGui::Unindent();
 	}
@@ -783,11 +807,14 @@ void DrawReportIssueDialog(AppContext& ctx)
 	{
 		const Preview& p = preview();
 		// Only the browser route is length-bound; filing directly sends all of it.
-		ImGui::TextDisabled(
-			"Filing directly sends all of this. Through the browser %d of %d log "
-			"lines fit into the link (%d of %d characters).",
-			p.linesKept, static_cast<int>(s_includeLog ? chosenLogLines().size() : 0),
-			static_cast<int>(p.url.size()), static_cast<int>(kMaxUrlLength));
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled(
+				"Filing directly sends all of this. Through the browser %d of %d log "
+				"lines fit into the link (%d of %d characters).",
+				p.linesKept, static_cast<int>(s_includeLog ? chosenLogLines().size() : 0),
+				static_cast<int>(p.url.size()), static_cast<int>(kMaxUrlLength));
+		}
 		std::string body = p.body;   // ReadOnly, but the widget wants a mutable target
 		ImGui::InputTextMultiline("##ri_preview", &body, ImVec2(-1.0f, 200.0f),
 		                          ImGuiInputTextFlags_ReadOnly);
@@ -807,7 +834,12 @@ void DrawReportIssueDialog(AppContext& ctx)
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 0.45f, 1.0f));
 		ImGui::TextUnformatted("The issue has been filed.");
 		ImGui::PopStyleColor();
-		ImGui::TextDisabled("%s", w.issueUrl.c_str());
+		// The address of the report that was just filed — the one line here worth
+		// reading in full even though "Copy Link" sits right below it.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled("%s", w.issueUrl.c_str());
+		}
 		if (!w.gistNote.empty())
 		{
 			ImGui::PushTextWrapPos(0.0f);
@@ -834,12 +866,17 @@ void DrawReportIssueDialog(AppContext& ctx)
 
 	if (busy)
 	{
+		// The step text is a sentence ("Looking for a stored GitHub sign-in…"),
+		// and it is the only feedback there is while a submit is in flight.
+		EditorWidgets::WrapText wrap;
 		ImGui::TextUnformatted(w.step.empty() ? "Working…" : w.step.c_str());
 	}
 	else if (!w.login.empty())
 	{
 		// Named explicitly: this posts publicly under the user's own account, and
-		// they should see whose before they press anything.
+		// they should see whose before they press anything — which is precisely
+		// the sentence that must not lose its second half to the window edge.
+		EditorWidgets::WrapText wrap;
 		ImGui::Text("Signed in to GitHub as %s.", w.login.c_str());
 		ImGui::TextDisabled("Filing directly posts the issue under that account.");
 	}

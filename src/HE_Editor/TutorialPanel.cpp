@@ -471,39 +471,55 @@ void renderWelcome(AppContext& ctx)
 		return;
 	}
 
-	if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-	ImGui::TextUnformatted("Welcome to Horizon Engine " HE_VERSION_STRING);
-	if (ctx.fontSubheading) ImGui::PopFont();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	ImGui::TextWrapped(
-		"First time here? The interactive tutorial walks once through the whole "
-		"editor — scenes and entities, assets and materials, terrain, physics, "
-		"particles, animation, UI, gameplay logic, playing and packaging — in a "
-		"sandbox project it creates for you.");
-	ImGui::Spacing();
-	ImGui::TextWrapped(
-		"It is an ordinary project: everything you build while following along is "
-		"yours to keep. You can leave and resume at any point.");
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	ImGui::TextUnformatted("Project Name");
-	ImGui::SetNextItemWidth(-1);
-	ImGui::InputText("##twName", &s_name);
-	ImGui::Spacing();
-	ImGui::TextUnformatted("Created in");
-	ImGui::SetNextItemWidth(-1);
-	ImGui::InputText("##twDir", &s_dir);
-
-	if (!s_error.empty())
 	{
+		// This card asked for 560 points and does not necessarily get them:
+		// pinDialogToEditorWindow caps it to the editor's work area, so on a small
+		// editor window it is narrower than it was written for. Anything not
+		// wrapped is then simply cut off at the right edge — the heading loses its
+		// version, the error loses the half that says what to do about it — with a
+		// horizontal scrollbar as the only alternative, which is no alternative at
+		// all in a modal the user is trying to answer.
+		//
+		// Wrapped in its own scope, here and in the tour below, because the wrap
+		// position belongs to the window it was pushed on: popping it after
+		// EndPopup/End would take a wrap position off whatever window is beneath
+		// this one, and that window did not push it.
+		EditorWidgets::WrapText wrap;
+
+		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+		ImGui::TextUnformatted("Welcome to Horizon Engine " HE_VERSION_STRING);
+		if (ctx.fontSubheading) ImGui::PopFont();
+		ImGui::Separator();
 		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-		ImGui::TextWrapped("%s", s_error.c_str());
-		ImGui::PopStyleColor();
+
+		ImGui::TextWrapped(
+			"First time here? The interactive tutorial walks once through the whole "
+			"editor — scenes and entities, assets and materials, terrain, physics, "
+			"particles, animation, UI, gameplay logic, playing and packaging — in a "
+			"sandbox project it creates for you.");
+		ImGui::Spacing();
+		ImGui::TextWrapped(
+			"It is an ordinary project: everything you build while following along is "
+			"yours to keep. You can leave and resume at any point.");
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+
+		ImGui::TextUnformatted("Project Name");
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputText("##twName", &s_name);
+		ImGui::Spacing();
+		ImGui::TextUnformatted("Created in");
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputText("##twDir", &s_dir);
+
+		if (!s_error.empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+			ImGui::TextWrapped("%s", s_error.c_str());
+			ImGui::PopStyleColor();
+		}
 	}
 
 	ImGui::Spacing();
@@ -558,7 +574,10 @@ void renderWelcome(AppContext& ctx)
 		ImGui::CloseCurrentPopup();
 	}
 	ImGui::Spacing();
-	ImGui::TextDisabled("You can start it later from Help - Interactive Tutorial.");
+	{
+		EditorWidgets::WrapText wrap;
+		ImGui::TextDisabled("You can start it later from Help - Interactive Tutorial.");
+	}
 
 	ImGui::EndPopup();
 #else
@@ -637,17 +656,20 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	if (!step || !chap)
 	{
 		// Finished.
-		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-		ImGui::TextUnformatted("Tour complete");
-		if (ctx.fontSubheading) ImGui::PopFont();
-		ImGui::Separator();
-		ImGui::Spacing();
-		ImGui::TextWrapped(
-			"You have been through every chapter. Help - Interactive Tutorial starts "
-			"it again from the top whenever you want a refresher.");
-		ImGui::Spacing();
-		if (ImGui::Button("Start over", ImVec2(-1.0f, 30.0f)))
-			gotoCursor(tut::Cursor{ 0, 0 }, ctx.globalState);
+		{
+			EditorWidgets::WrapText wrap;
+			if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+			ImGui::TextUnformatted("Tour complete");
+			if (ctx.fontSubheading) ImGui::PopFont();
+			ImGui::Separator();
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"You have been through every chapter. Help - Interactive Tutorial starts "
+				"it again from the top whenever you want a refresher.");
+			ImGui::Spacing();
+			if (ImGui::Button("Start over", ImVec2(-1.0f, 30.0f)))
+				gotoCursor(tut::Cursor{ 0, 0 }, ctx.globalState);
+		}
 		ImGui::End();
 		if (!open) s_open = false;
 		return;
@@ -656,16 +678,22 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	// ── Header: chapter + progress ────────────────────────────────────────────
 	const int done  = tut::flatIndex(s_cursor);
 	const int total = tut::totalSteps();
-	ImGui::TextDisabled("Chapter %d/%d  -  %s",
-		s_cursor.chapter + 1, tut::chapterCount(), chap->title);
-	ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.0f,
-		ImVec2(-1.0f, 6.0f), "");
-	ImGui::Spacing();
+	{
+		// The tour window can be dragged down to 340 points wide, and a chapter
+		// line is "Chapter 7/9  -  " plus a title written for a card, not for a
+		// column. Clipped, it reads as a chapter with no name.
+		EditorWidgets::WrapText wrap;
+		ImGui::TextDisabled("Chapter %d/%d  -  %s",
+			s_cursor.chapter + 1, tut::chapterCount(), chap->title);
+		ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total) : 0.0f,
+			ImVec2(-1.0f, 6.0f), "");
+		ImGui::Spacing();
 
-	if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
-	ImGui::TextWrapped("%s", step->title);
-	if (ctx.fontSubheading) ImGui::PopFont();
-	ImGui::Spacing();
+		if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+		ImGui::TextWrapped("%s", step->title);
+		if (ctx.fontSubheading) ImGui::PopFont();
+		ImGui::Spacing();
+	}
 
 	// ── Body ──────────────────────────────────────────────────────────────────
 	// Reserve room for the action line, the status line and the button row so the
@@ -679,16 +707,25 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 		? ImGui::CalcTextSize(actionLine.c_str(), nullptr, false, availW).y +
 		  ImGui::GetStyle().ItemSpacing.y
 		: 0.0f;
-	const float footerH = ImGui::GetFrameHeightWithSpacing()        // button row
-	                    + ImGui::GetTextLineHeightWithSpacing()     // status line
+	// Two lines for the status line, not one: it is a sentence now that it wraps
+	// ("This scene has no Sky entity - add one with View - Environment.") and at
+	// the 340-point minimum width it takes two of them. Reserving one line puts
+	// the button row that much below the bottom of the window, which is the same
+	// failure the measured action line above already documents — with the twist
+	// that Next is the control the user needs to get out of the step.
+	const float footerH = ImGui::GetFrameHeightWithSpacing()          // button row
+	                    + ImGui::GetTextLineHeightWithSpacing() * 2.0f // status line (may wrap)
 	                    + actionH
-	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;   // separator + padding
+	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;     // separator + padding
 	ImGui::BeginChild("##tutBody", ImVec2(0.0f, -footerH), ImGuiChildFlags_None);
-	drawParagraphs(step->body);
-	// A prose card unlocks its button once the body has actually been read to the
-	// end. A body that fits without scrolling has MaxY == 0 and counts as read
-	// immediately — there is nothing to scroll past.
-	if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) s_readToEnd = true;
+	{
+		EditorWidgets::WrapText wrap;
+		drawParagraphs(step->body);
+		// A prose card unlocks its button once the body has actually been read to
+		// the end. A body that fits without scrolling has MaxY == 0 and counts as
+		// read immediately — there is nothing to scroll past.
+		if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) s_readToEnd = true;
+	}
 	ImGui::EndChild();
 
 	// ── What to do ────────────────────────────────────────────────────────────
@@ -704,52 +741,58 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 
 	// The status line is the only place the tour explains itself, so it has to
 	// name the *reason* a step is still open — "waiting" on its own is what makes
-	// a gated tutorial feel broken.
-	if (s_stepDone)
+	// a gated tutorial feel broken. Which means it says whole sentences, and a
+	// sentence that is cut off at the window's edge explains nothing: the reason
+	// is always at the end of it ("...add one with View - Environment"). Wrapped,
+	// with the footer reservation above raised to two lines to hold it.
 	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.90f, 0.55f, 1.0f));
-		ImGui::TextUnformatted("Done.");
-		ImGui::PopStyleColor();
-	}
-	else if (isReadCard)
-	{
-		ImGui::TextDisabled(s_readToEnd ? "Ready when you are."
-		                                : "Scroll to the end of the card to continue.");
-	}
-	else if (step->check == tut::Check::TimeOfDayChanged && !now.skyPresent)
-	{
-		// The one step whose subject can be missing from the scene. Say so instead
-		// of leaving the user waiting on a slider that is not there.
-		ImGui::TextDisabled("This scene has no Sky entity - add one with View - Environment.");
-	}
-	else if (tut::wantsWindowOpened(step->check) && tut::windowOpenIn(step->check, s_base))
-	{
-		// It was already open when the step began, so "open it" cannot fire. Ask
-		// for the close-and-open rather than letting the step look stuck.
-		ImGui::TextDisabled("Already open - close it and open it again.");
-	}
-	else if (step->check == tut::Check::SceneSaved && !s_base.sceneUnsaved)
-	{
-		// Nothing to save when the step opened, so Ctrl+S is a no-op and the check
-		// cannot fire. Point at the way forward instead of at the keyboard shortcut.
-		ImGui::TextDisabled("Nothing to save yet - change something first.");
-	}
-	else if (step->check == tut::Check::ContentRootShown &&
-	         now.contentRootKind == s_base.contentRootKind)
-	{
-		ImGui::TextDisabled("Use the root buttons at the top of the Content Browser.");
-	}
-	else if (step->check == tut::Check::PanelsVisited)
-	{
-		const int n = tut::listEntryCount(step->arg);
-		int left = 0;
-		for (int i = 0; i < n; ++i)
-			if (!tut::listEntryVisited(step->arg, i, now.visitedPanels)) ++left;
-		ImGui::TextDisabled("%d of %d panels visited.", n - left, n);
-	}
-	else
-	{
-		ImGui::TextDisabled("Waiting for you to do it.");
+		EditorWidgets::WrapText wrap;
+		if (s_stepDone)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.90f, 0.55f, 1.0f));
+			ImGui::TextUnformatted("Done.");
+			ImGui::PopStyleColor();
+		}
+		else if (isReadCard)
+		{
+			ImGui::TextDisabled(s_readToEnd ? "Ready when you are."
+			                                : "Scroll to the end of the card to continue.");
+		}
+		else if (step->check == tut::Check::TimeOfDayChanged && !now.skyPresent)
+		{
+			// The one step whose subject can be missing from the scene. Say so instead
+			// of leaving the user waiting on a slider that is not there.
+			ImGui::TextDisabled("This scene has no Sky entity - add one with View - Environment.");
+		}
+		else if (tut::wantsWindowOpened(step->check) && tut::windowOpenIn(step->check, s_base))
+		{
+			// It was already open when the step began, so "open it" cannot fire. Ask
+			// for the close-and-open rather than letting the step look stuck.
+			ImGui::TextDisabled("Already open - close it and open it again.");
+		}
+		else if (step->check == tut::Check::SceneSaved && !s_base.sceneUnsaved)
+		{
+			// Nothing to save when the step opened, so Ctrl+S is a no-op and the check
+			// cannot fire. Point at the way forward instead of at the keyboard shortcut.
+			ImGui::TextDisabled("Nothing to save yet - change something first.");
+		}
+		else if (step->check == tut::Check::ContentRootShown &&
+		         now.contentRootKind == s_base.contentRootKind)
+		{
+			ImGui::TextDisabled("Use the root buttons at the top of the Content Browser.");
+		}
+		else if (step->check == tut::Check::PanelsVisited)
+		{
+			const int n = tut::listEntryCount(step->arg);
+			int left = 0;
+			for (int i = 0; i < n; ++i)
+				if (!tut::listEntryVisited(step->arg, i, now.visitedPanels)) ++left;
+			ImGui::TextDisabled("%d of %d panels visited.", n - left, n);
+		}
+		else
+		{
+			ImGui::TextDisabled("Waiting for you to do it.");
+		}
 	}
 
 	// ── Navigation ────────────────────────────────────────────────────────────

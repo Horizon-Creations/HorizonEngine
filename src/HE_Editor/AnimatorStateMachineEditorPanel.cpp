@@ -330,6 +330,18 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	// original flat Inspector UI already used).
 	ImGui::BeginChild("##asmSide", ImVec2(rightW - 8.0f, 0), ImGuiChildFlags_Borders);
 	{
+		// This column is 312 px wide and full of things that are longer than that:
+		// a transition reads "SomeLongStateName -> SomeOtherLongStateName" and the
+		// note under the start-state field is a whole sentence. Without a wrap
+		// position ImGui draws them straight past the right edge and clips them, so
+		// the reader gets "SomeLongStateName -> SomeOth" and no sign that anything
+		// was cut — the same defect as a sideways scrollbar, only quieter. The guard
+		// is pushed HERE and not on the tab window because the wrap position lives on
+		// the window it was pushed in: it would never reach into this child, and it
+		// must never reach into the canvas child next door, where node bodies are
+		// placed at computed positions and a wrap would shred the layout.
+		EditorWidgets::WrapText wrap;
+
 		ImGui::TextDisabled("Start State");
 		char startBuf[64];
 		std::snprintf(startBuf, sizeof(startBuf), "%s", st.graph.startState.c_str());

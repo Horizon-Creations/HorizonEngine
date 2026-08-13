@@ -7,6 +7,7 @@
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
+#include "EditorWidgets.h"               // WrapText
 #include <imgui.h>
 #endif
 
@@ -76,9 +77,26 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
         if (anyExact && f.gpuFrameMs > 0.0)
         {
             if (!detailed && sumExact > f.gpuFrameMs * 1.05)
+            {
+                // ── Wrapped, not clipped ────────────────────────────────────
+                // This one sentence is the entire warning: it says the column
+                // above must NOT be added up. Drawn unwrapped in a docked
+                // profiler the reader gets "Σ spans 4.21 ms = 3.1x GPU frame —
+                // spans OVE" and no reason at all to distrust the numbers they
+                // were about to sum, which is worse than not printing it.
+                //
+                // The wrap is pushed around the PROSE in this panel only, never
+                // around the pass and scope rows: those place their millisecond
+                // column and their bar with SameLine(210) / SameLine(300), so a
+                // name that wrapped would leave its own number stranded beside
+                // the second line. Pass and scope names are short by
+                // construction — a pass is called "Shadow", not a sentence — so
+                // there is nothing to win there and a broken table to lose.
+                EditorWidgets::WrapText wrap;
                 ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f),
                     "\xCE\xA3 spans %.2f ms = %.1fx GPU frame — spans OVERLAP, not exclusive; do not sum.",
                     sumExact, sumExact / f.gpuFrameMs);
+            }
             else
             {
                 ImGui::Text("\xCE\xA3 passes %.3f ms", sumExact);
@@ -86,13 +104,19 @@ static void DrawFrameDetail(const ProfFrameRecord& f)
                 ImGui::TextDisabled("untimed %.3f ms", f.gpuFrameMs - sumExact);
             }
         }
-        if (!detailed)
-            ImGui::TextDisabled("Per-encoder spans overlap on TBDR — enable 'Detailed GPU' for exclusive per-pass.");
-        else if (gpuMode == "detailed")
-            ImGui::TextDisabled("Note: the FIRST pass (Shadow) absorbs GPU queue/present latency in a single\n"
-                                "serialized frame — it can read high here. Trust the Overview median, not one frame.");
-        else // gl-timer: exact, exclusive per-pass GPU time — no serialization caveat.
-            ImGui::TextDisabled("GL timer queries: exact per-pass GPU time; \xCE\xA3 passes + untimed = GPU frame.");
+        {
+            // Same reasoning as the overlap warning above: these are sentences
+            // that qualify every number in the list, and half a caveat reads as
+            // no caveat.
+            EditorWidgets::WrapText wrap;
+            if (!detailed)
+                ImGui::TextDisabled("Per-encoder spans overlap on TBDR — enable 'Detailed GPU' for exclusive per-pass.");
+            else if (gpuMode == "detailed")
+                ImGui::TextDisabled("Note: the FIRST pass (Shadow) absorbs GPU queue/present latency in a single\n"
+                                    "serialized frame — it can read high here. Trust the Overview median, not one frame.");
+            else // gl-timer: exact, exclusive per-pass GPU time — no serialization caveat.
+                ImGui::TextDisabled("GL timer queries: exact per-pass GPU time; \xCE\xA3 passes + untimed = GPU frame.");
+        }
     }
 
     // ── CPU scopes (nested) ─────────────────────────────────────────────────
@@ -131,6 +155,13 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
         // ── Overview: live HUD + frame-time graph ───────────────────────────
         if (ImGui::BeginTabItem("Overview"))
         {
+            // The counter line ("draws … tris … objects …") is longer than this
+            // panel is wide as soon as it is docked into a side column, and the
+            // number that got cut off is the one somebody opened the profiler
+            // for. Pushed per tab rather than once for the window: the Frame
+            // Detail tab lays its rows out with SameLine at fixed offsets and
+            // must NOT wrap (see DrawFrameDetail).
+            EditorWidgets::WrapText wrap;
             const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
             if (live.empty())
                 ImGui::TextDisabled("Collecting live data…");
@@ -186,6 +217,11 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
         // ── Capture controls ────────────────────────────────────────────────
         if (ImGui::BeginTabItem("Capture"))
         {
+            // Every dimmed line in this tab is a full sentence, and the last one
+            // is an absolute path to the dumps folder — the thing the user came
+            // here to read before hunting for the JSON on disk. Unwrapped it is
+            // cut off somewhere in the middle of the home directory.
+            EditorWidgets::WrapText wrap;
             const bool recording = prof.isRecordingOrPending();
             if (recording)
             {
@@ -255,7 +291,13 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             else if (last) ImGui::TextDisabled("Source: last benchmark frame");
             ImGui::Separator();
             if (f) DrawFrameDetail(*f);
-            else   ImGui::TextDisabled("No frame yet — use 'Capture Single Frame' or run a benchmark.");
+            else
+            {
+                // The empty state names the two buttons that fill it; clipped, it
+                // names one and a half.
+                EditorWidgets::WrapText wrap;
+                ImGui::TextDisabled("No frame yet — use 'Capture Single Frame' or run a benchmark.");
+            }
             ImGui::EndTabItem();
         }
 

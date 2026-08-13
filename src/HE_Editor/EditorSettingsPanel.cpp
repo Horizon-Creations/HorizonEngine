@@ -103,6 +103,20 @@ struct SubGroup
 // logical setting group; `widget` draws its control(s).
 void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* categoryFilter)
 {
+	// Wrapped for the whole catalog, and pushed here rather than in render(): the
+	// wrap position lives on the window, this runs inside two different ones (the
+	// Preferences body and the docked Quick Settings panel), and a docked panel is
+	// as narrow as the user drags it. Everything below is prose — the hints are
+	// paragraphs, the "not available on this backend" lines are sentences — and an
+	// unwrapped line is not shortened, it is cut off at the panel's edge with no
+	// mark to say so, which is the same defect as a sideways scrollbar minus the
+	// scrollbar. A page function is the right scope because it opens no window of
+	// its own: the pop lands on the window the push came from even when a page
+	// returns early. 0.0f rather than an absolute column so the pin table below
+	// keeps working — ImGui resolves it per table cell, so a setting wraps at its
+	// own column's edge and not at the window's, which would run it under the pin.
+	EditorWidgets::WrapText wrap;
+
 	EditorConfig& cfg = ctx.editorConfig;
 	const char* lastCat = nullptr;
 	int shown = 0;
@@ -533,6 +547,10 @@ void drawGitMessages(GitController* git)
 // this page is the one-time setup, that window is the daily driver.
 void drawRepositoryPage(AppContext& ctx)
 {
+	// Every explanation on this page is a sentence, and one of the things it
+	// prints is a remote URL that nobody typed by hand ("origin: https://…").
+	EditorWidgets::WrapText wrap;
+
 	s_scPageFrame = ImGui::GetFrameCount();
 
 	GitController* git = ctx.git;
@@ -798,6 +816,10 @@ void drawRepositoryPage(AppContext& ctx)
 // permanent page with a Recheck.
 void drawGitSetupPage(AppContext& ctx)
 {
+	// The bullets here interpolate an absolute path ("git 2.39.5 found at
+	// /usr/bin/git") and an identity, neither of which has a known length.
+	EditorWidgets::WrapText wrap;
+
 	s_scPageFrame = ImGui::GetFrameCount();
 
 	if (!ctx.gitProbe)
@@ -818,9 +840,17 @@ void drawGitSetupPage(AppContext& ctx)
 	}
 	else
 	{
-		ImGui::BulletText("git %s found%s.",
-		                  p.gitVersion.empty() ? "(unknown version)" : p.gitVersion.c_str(),
-		                  p.gitPath.empty() ? "" : (" at " + p.gitPath.string()).c_str());
+		// Bullet() + TextWrapped rather than BulletText: ImGui draws a bullet's
+		// text in one unwrapped run whatever wrap position is pushed, and this
+		// line ends in an absolute path — "/usr/local/Cellar/git/2.39.5/bin/git"
+		// is longer than the page is wide, and the part that gets cut off is the
+		// part that answers "which git is it using?". The two render at the same
+		// offsets, so only the wrapping changes. The bullets around this one carry
+		// fixed sentences that fit, and stay as they are.
+		ImGui::Bullet();
+		ImGui::TextWrapped("git %s found%s.",
+		                   p.gitVersion.empty() ? "(unknown version)" : p.gitVersion.c_str(),
+		                   p.gitPath.empty() ? "" : (" at " + p.gitPath.string()).c_str());
 	}
 
 	// ── git-lfs ──────────────────────────────────────────────────────────────
@@ -853,7 +883,10 @@ void drawGitSetupPage(AppContext& ctx)
 		}
 		if (p.identityConfigured)
 		{
-			ImGui::BulletText("Identity: %s <%s>", p.userName.c_str(), p.userEmail.c_str());
+			// Same reason as the git bullet above: a name and an address, neither
+			// of which this panel gets to choose the length of.
+			ImGui::Bullet();
+			ImGui::TextWrapped("Identity: %s <%s>", p.userName.c_str(), p.userEmail.c_str());
 		}
 		else
 		{
@@ -958,6 +991,14 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 
 void drawStatusPage(AppContext& ctx)
 {
+	// Safe over the table below because ImGui resolves a 0.0f wrap position
+	// against the current cell's column, not the window — so a Detail cell wraps
+	// inside its own column and the fixed Tool/State/Fix columns are unaffected.
+	// The router probe log at the foot needs it most: that is raw multi-line
+	// output from a device on the network, and its longest line is nobody's
+	// business but the router's.
+	EditorWidgets::WrapText wrap;
+
 	ImGui::TextWrapped("Everything the editor needs from outside itself. Checked in "
 	                   "the background at startup; nothing here changes any setting.");
 	ImGui::Spacing();
@@ -1133,6 +1174,10 @@ void drawStatusPage(AppContext& ctx)
 
 void drawToolchainPage(AppContext& ctx)
 {
+	// The "Not found" line is one long sentence and the "OK" line carries a
+	// compiler id string that the toolchain probe read off the machine.
+	EditorWidgets::WrapText wrap;
+
 	ImGui::TextWrapped("cmake and a C++ compiler are needed for HorizonCode C++ "
 	                   "export codegen and C++ GameLogic projects.");
 	ImGui::Spacing();

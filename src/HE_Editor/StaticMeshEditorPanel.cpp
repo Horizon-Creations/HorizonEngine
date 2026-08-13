@@ -5,6 +5,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h" // shared per-tab state map + lazy asset open
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
+#include "EditorWidgets.h"          // WrapText — text wraps at the pane edge, never runs off it
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
@@ -244,7 +245,21 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		? ctx.contentManager->getStaticMesh(st.meshId) : nullptr;
 	if (!mesh)
 	{
-		ImGui::TextDisabled("Could not load '%s' as a static mesh.", st.name.c_str());
+		// Almost everything this tab writes is longer than the room it gets — a
+		// content path, a material path, a mesh name an importer lifted out of a
+		// DCC file — and this line is the worst of them. Unwrapped, ImGui runs it
+		// straight past the right edge and cuts it there, so "Could not load
+		// 'Characters/Hero/Meshes/body.hasset' as a static mesh" arrives as
+		// "Could not load 'Characters/Her": the half that names the file, which
+		// is the only half worth reading, silently gone. The wrap position lives
+		// on the window, so it has to be pushed inside each one — hence a scope
+		// here and one in each of the two panes below, and none around the
+		// toolbar, which paints its cells straight into the draw list and never
+		// consults the wrap position at all.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled("Could not load '%s' as a static mesh.", st.name.c_str());
+		}
 		ImGui::End();
 		return;
 	}
@@ -287,58 +302,69 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 	// ── Left: stats + UV health ──────────────────────────────────────────────
 	ImGui::BeginChild("##smInfo", ImVec2(280.0f, 0.0f), true);
-	const size_t verts = vertexCount(*mesh);
-	ImGui::SeparatorText("Geometry");
-	ImGui::Text("Vertices  %zu", verts);
-	ImGui::Text("Triangles %zu", mesh->indices.size() / 3);
-	ImGui::Text("Format    %s", mesh->cooked ? "cooked (interleaved)" : "loose (SoA)");
-	ImGui::Text("Bounds X  %.3f .. %.3f", mesh->boundsMin[0], mesh->boundsMax[0]);
-	ImGui::Text("       Y  %.3f .. %.3f", mesh->boundsMin[1], mesh->boundsMax[1]);
-	ImGui::Text("       Z  %.3f .. %.3f", mesh->boundsMin[2], mesh->boundsMax[2]);
-	if (!mesh->materialPath.empty())
-		ImGui::TextWrapped("Material  %s", mesh->materialPath.c_str());
+	{
+		// 280 px of column with a material path and four full sentences in it.
+		EditorWidgets::WrapText wrap;
 
-	ImGui::SeparatorText("UVs");
-	if (!st.stats.haveUVs)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No texture coordinates.");
-		ImGui::TextWrapped("Every texture sample collapses to one texel. Loose meshes get "
-		                   "box-projected UVs on import; this one has none at all.");
-	}
-	else if (st.stats.allZero)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "All UVs are (0,0).");
-		ImGui::TextWrapped("The mesh carries a UV set but it is unwrapped to a single point — "
-		                   "textures will show one flat colour.");
-	}
-	else
-	{
-		ImGui::Text("Range U   %.3f .. %.3f", st.stats.minU, st.stats.maxU);
-		ImGui::Text("Range V   %.3f .. %.3f", st.stats.minV, st.stats.maxV);
-		if (st.stats.outsideTile > 0)
+		const size_t verts = vertexCount(*mesh);
+		ImGui::SeparatorText("Geometry");
+		ImGui::Text("Vertices  %zu", verts);
+		ImGui::Text("Triangles %zu", mesh->indices.size() / 3);
+		ImGui::Text("Format    %s", mesh->cooked ? "cooked (interleaved)" : "loose (SoA)");
+		ImGui::Text("Bounds X  %.3f .. %.3f", mesh->boundsMin[0], mesh->boundsMax[0]);
+		ImGui::Text("       Y  %.3f .. %.3f", mesh->boundsMin[1], mesh->boundsMax[1]);
+		ImGui::Text("       Z  %.3f .. %.3f", mesh->boundsMin[2], mesh->boundsMax[2]);
+		if (!mesh->materialPath.empty())
+			ImGui::TextWrapped("Material  %s", mesh->materialPath.c_str());
+
+		ImGui::SeparatorText("UVs");
+		if (!st.stats.haveUVs)
 		{
-			ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f),
-			                   "%zu verts outside the 0..1 tile", st.stats.outsideTile);
-			ImGui::TextWrapped("That is fine for a tiling texture — the pattern repeats — "
-			                   "but not for an atlas.");
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "No texture coordinates.");
+			ImGui::TextWrapped("Every texture sample collapses to one texel. Loose meshes get "
+			                   "box-projected UVs on import; this one has none at all.");
+		}
+		else if (st.stats.allZero)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "All UVs are (0,0).");
+			ImGui::TextWrapped("The mesh carries a UV set but it is unwrapped to a single point — "
+			                   "textures will show one flat colour.");
 		}
 		else
-			ImGui::TextDisabled("Fully inside the 0..1 tile.");
-	}
+		{
+			ImGui::Text("Range U   %.3f .. %.3f", st.stats.minU, st.stats.maxU);
+			ImGui::Text("Range V   %.3f .. %.3f", st.stats.minV, st.stats.maxV);
+			if (st.stats.outsideTile > 0)
+			{
+				ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f),
+				                   "%zu verts outside the 0..1 tile", st.stats.outsideTile);
+				ImGui::TextWrapped("That is fine for a tiling texture — the pattern repeats — "
+				                   "but not for an atlas.");
+			}
+			else
+				ImGui::TextDisabled("Fully inside the 0..1 tile.");
+		}
 
-	// Tile grid, Flip V and Reset live on the toolbar now — one place for the
-	// controls, and this pane keeps the readouts it alone can give.
-	ImGui::SeparatorText("View");
-	ImGui::Text("Zoom %.2fx", st.uvZoom);
-	ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
-		? "Drag or two-finger swipe to pan,\nCmd/Ctrl+scroll to zoom."
-		: "Drag to pan, wheel to zoom.");
+		// Tile grid, Flip V and Reset live on the toolbar now — one place for the
+		// controls, and this pane keeps the readouts it alone can give.
+		ImGui::SeparatorText("View");
+		ImGui::Text("Zoom %.2fx", st.uvZoom);
+		ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+			? "Drag or two-finger swipe to pan,\nCmd/Ctrl+scroll to zoom."
+			: "Drag to pan, wheel to zoom.");
+	}
 	ImGui::EndChild();
 
 	// ── Right: the UV wireframe ──────────────────────────────────────────────
 	ImGui::SameLine();
 	ImGui::BeginChild("##smUv", ImVec2(0.0f, 0.0f), true);
-	drawUvView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
+	{
+		// The unwrap itself is immune — every edge goes through the draw list at a
+		// computed position, which no wrap position can reach. What this scope is
+		// for is the one sentence drawUvView emits when it truncates.
+		EditorWidgets::WrapText wrap;
+		drawUvView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
+	}
 	ImGui::EndChild();
 
 	ImGui::End();

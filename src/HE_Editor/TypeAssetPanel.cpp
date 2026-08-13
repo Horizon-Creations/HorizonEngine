@@ -315,8 +315,18 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	if (st.isEnum)
 	{
 		// ── Enum: one row per entry (name + value) ──────────────────────────
-		ImGui::TextDisabled("Named constants backed by an Int. Scripts read them as");
-		ImGui::TextDisabled("horizon.enums.%s.<Entry>; graphs get a dropdown.", st.name.c_str());
+		// The second line ends in a symbol the reader is meant to type — and it
+		// carries the type's own name, so its length is the user's, not ours. Left
+		// unwrapped it runs past the right edge of a docked tab and is clipped
+		// mid-identifier, which is worse than useless: a half-read symbol still
+		// looks like a whole one. Each of these scopes is closed before the End()
+		// that follows it; the enum branch returns early, and a wrap position still
+		// pushed at that point would be popped off the wrong window's stack.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled("Named constants backed by an Int. Scripts read them as");
+			ImGui::TextDisabled("horizon.enums.%s.<Entry>; graphs get a dropdown.", st.name.c_str());
+		}
 		ImGui::Spacing();
 
 		int removeAt = -1;
@@ -374,6 +384,11 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	// ── Struct / SaveGame Template: one card per field ──────────────────────
 	if (st.isTemplate)
 	{
+		// Held for the whole branch rather than for the two lines below: every
+		// piece of text in here is prose, including the green "Project default"
+		// note further down, and the only widget between them is a button with an
+		// explicit size, which a wrap column cannot disturb.
+		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("The fields a save of this template carries. save.create()");
 		ImGui::TextDisabled("seeds them from the defaults; get/set validate against them.");
 		if (ctx.projectManager)
@@ -395,6 +410,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 	else
 	{
+		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Named, typed fields with defaults. Scripts build one with");
 		ImGui::TextDisabled("horizon.structs.%s(); graphs get Make/Break nodes.", st.name.c_str());
 	}
@@ -474,7 +490,13 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				st.dirty = true;
 		}
 		else if (f.type == PinType::Struct)
+		{
+			// A whole clause, not a label, and it sits inside a field card that is
+			// narrower than the panel again — the tail of it is the first thing to
+			// go over the edge when the tab is docked to one side.
+			EditorWidgets::WrapText wrap;
 			ImGui::TextDisabled("Default: the struct's own field defaults");
+		}
 		else
 		{
 			ImGui::AlignTextToFramePadding();

@@ -4,6 +4,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include "EditorWidgets.h"   // WrapText — everything a notification shows is a sentence
 #endif
 
 #include <algorithm>
@@ -308,6 +309,18 @@ namespace
 			hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup |
 			                                 ImGuiHoveredFlags_ChildWindows);
 
+			// Nothing in this window was composed with a 400px column in mind: the
+			// text of a notification is whatever the worker thread that posted it
+			// had to say, and the header carries a count that grows. Without a wrap
+			// position ImGui draws such a line straight past the right edge and
+			// clips it there, which hands the reader the first half of a sentence
+			// and no sign that there is a second half. The wrap position lives on
+			// the window, so the list child and the flyout each need their own —
+			// this one covers the header line and the footer row; the rows inside
+			// the child push a narrower one of their own, because they also have to
+			// leave the age at the right edge somewhere to sit.
+			EditorWidgets::WrapText wrap;
+
 			ImGui::TextUnformatted("Notifications");
 			ImGui::SameLine();
 			if (c.unseen > 0) ImGui::TextDisabled("%zu unread", c.unseen);
@@ -392,8 +405,22 @@ namespace
 						if (ImGui::IsItemHovered())
 						{
 							ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-							ImGui::SetTooltip("%s\n\nClick to copy this path.",
-							                  n.assetPath.c_str());
+							// A tooltip has no width of its own — it grows to its
+							// widest line — and the whole point of this one is to
+							// show the path in full, unelided. On a deep content
+							// tree that is a strip of text straight across the
+							// screen, which is the same complaint as a panel that
+							// cannot hold its own text, only louder. Bounded to a
+							// readable column and wrapped inside it instead.
+							if (ImGui::BeginTooltip())
+							{
+								{
+									EditorWidgets::WrapText tipWrap(ImGui::GetFontSize() * 30.0f);
+									ImGui::Text("%s\n\nClick to copy this path.",
+									            n.assetPath.c_str());
+								}
+								ImGui::EndTooltip();
+							}
 						}
 						if (ImGui::IsItemClicked())
 						{

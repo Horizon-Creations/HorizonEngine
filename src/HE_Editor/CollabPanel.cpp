@@ -317,54 +317,72 @@ namespace
 			return;
 		}
 
-		ImGui::TextWrapped("This session also transfers larger assets — meshes, "
-		                   "textures and audio — instead of leaving them to source "
-		                   "control.");
-		ImGui::Spacing();
-		// The sentence the user is actually deciding on, and the reason the
-		// setting exists at all. Coloured because it is the cost, not the
-		// description: somebody on a phone hotspot has to be able to see it
-		// without reading the paragraph above.
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-		ImGui::TextWrapped("It can use considerably more data than an ordinary "
-		                   "session. On a metered or slow connection, that is worth "
-		                   "thinking about before you agree.");
-		ImGui::PopStyleColor();
-		ImGui::Spacing();
-		ImGui::TextDisabled("The setting is remembered, and applies to every session "
-		                    "you host or join from now on. You can turn it off again "
-		                    "in Preferences while you are not in a session.");
-		ImGui::Spacing();
+		// ── Everything in this window wraps at its right edge ────────────────
+		// This dialog asks the user to agree to a cost, and it says so in whole
+		// sentences. A sentence whose second half runs off the edge is worse than
+		// no sentence at all: the reader is being asked to agree to something they
+		// can only see the beginning of. TextWrapped covers the two paragraphs,
+		// but not the dimmed line about the setting being remembered — and that is
+		// the line that says the choice outlives this join. One wrap position for
+		// the whole popup covers both, and covers whatever is added here later.
+		//
+		// In a scope of its own on purpose, and the same is true of every other
+		// WrapText in this file: the pop has to happen while this popup is still
+		// the current window. Left to the end of the function it would run after
+		// EndPopup(), and pop the wrap position off whichever window is current by
+		// then — which, for a dialog raised from outside any window, is none.
+		{
+			EditorWidgets::WrapText wrap;
 
-		if (EditorWidgets::primaryButton("Enable and join", ImVec2(150, 0)))
-		{
-			// Two writes, because they answer two different questions. The
-			// config is the persisted setting (the editor writes it out and
-			// reads it back on the next launch) and it is what the Preferences
-			// checkbox shows; the controller is what actually goes on the wire
-			// for the retry, which happens now and cannot wait for the editor to
-			// push its config down on the next frame.
-			ctx.editorConfig.CollabSyncLargeAssets = true;
-			collab->setSyncLargeAssets(true);
-			if (!collab->retryJoinWithLargeAssets())
+			ImGui::TextWrapped("This session also transfers larger assets — meshes, "
+			                   "textures and audio — instead of leaving them to source "
+			                   "control.");
+			ImGui::Spacing();
+			// The sentence the user is actually deciding on, and the reason the
+			// setting exists at all. Coloured because it is the cost, not the
+			// description: somebody on a phone hotspot has to be able to see it
+			// without reading the paragraph above.
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+			ImGui::TextWrapped("It can use considerably more data than an ordinary "
+			                   "session. On a metered or slow connection, that is worth "
+			                   "thinking about before you agree.");
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+			ImGui::TextDisabled("The setting is remembered, and applies to every session "
+			                    "you host or join from now on. You can turn it off again "
+			                    "in Preferences while you are not in a session.");
+			ImGui::Spacing();
+
+			if (EditorWidgets::primaryButton("Enable and join", ImVec2(150, 0)))
 			{
-				// Nothing remembered to dial — the join was never begun through
-				// this controller. The setting is on regardless, so joining
-				// again by hand now works; saying nothing would look like the
-				// button did nothing at all.
-				s_joinRetryHint = "The setting is on. Join the session again.";
+				// Two writes, because they answer two different questions. The
+				// config is the persisted setting (the editor writes it out and
+				// reads it back on the next launch) and it is what the Preferences
+				// checkbox shows; the controller is what actually goes on the wire
+				// for the retry, which happens now and cannot wait for the editor to
+				// push its config down on the next frame.
+				ctx.editorConfig.CollabSyncLargeAssets = true;
+				collab->setSyncLargeAssets(true);
+				if (!collab->retryJoinWithLargeAssets())
+				{
+					// Nothing remembered to dial — the join was never begun through
+					// this controller. The setting is on regardless, so joining
+					// again by hand now works; saying nothing would look like the
+					// button did nothing at all.
+					s_joinRetryHint = "The setting is on. Join the session again.";
+				}
+				collab->clearLargeAssetsPrompt();
+				ImGui::CloseCurrentPopup();
 			}
-			collab->clearLargeAssetsPrompt();
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::SameLine();
-		if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)))
-		{
-			// Refusing is a real answer, not a failure to answer: nothing is
-			// turned on, no join is retried, and the panel goes back to the join
-			// form with the session's own refusal text still in the error line.
-			collab->clearLargeAssetsPrompt();
-			ImGui::CloseCurrentPopup();
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)))
+			{
+				// Refusing is a real answer, not a failure to answer: nothing is
+				// turned on, no join is retried, and the panel goes back to the join
+				// form with the session's own refusal text still in the error line.
+				collab->clearLargeAssetsPrompt();
+				ImGui::CloseCurrentPopup();
+			}
 		}
 
 		ImGui::EndPopup();
@@ -417,6 +435,16 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 	if (!collab->active())
 	{
+		// One wrap position per branch of this window rather than one for the
+		// window itself: the panel's own ImGui::End() sits at the bottom of the
+		// function, so a guard opened next to Begin() would pop after it. Each
+		// branch is a closed block, which is exactly the lifetime that is wanted —
+		// and between them they cover everything this window draws. Without one,
+		// every unwrapped line here (the row under a discovered session, the
+		// router's verdict, the "both fields are required" note) is cut off at the
+		// panel's edge, and this panel is docked narrow by default.
+		EditorWidgets::WrapText wrap;
+
 		ImGui::TextWrapped("Work on the same scene together. The host opens a session "
 		                   "and shares its ID and join code; that is all a guest needs.");
 
@@ -765,6 +793,8 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	}
 	else if (collab->isHost())
 	{
+		EditorWidgets::WrapText wrap;
+
 		ImGui::SeparatorText("Hosting");
 
 		// WHERE this session actually is. It was never shown, and without it the
@@ -874,6 +904,8 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	}
 	else
 	{
+		EditorWidgets::WrapText wrap;
+
 		ImGui::SeparatorText("Joining");
 
 		if (collab->directoryBusy())
@@ -900,6 +932,8 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 	if (collab->active())
 	{
+		EditorWidgets::WrapText wrap;
+
 		// Identical on every participant's screen, so a mismatch means someone is
 		// not in the session they think they are.
 		if (const std::string fp = collab->sessionFingerprint(); !fp.empty())
@@ -1241,6 +1275,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	// which would otherwise be the only thing on screen.
 	if (!collab->removalNotice().empty())
 	{
+		EditorWidgets::WrapText wrap;
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
 		ImGui::TextWrapped("%s", collab->removalNotice().c_str());
@@ -1251,6 +1286,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	if (collab->status() == CollabController::Status::Failed &&
 	    !collab->lastError().empty())
 	{
+		EditorWidgets::WrapText wrap;
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
 		ImGui::TextWrapped("%s", collab->lastError().c_str());

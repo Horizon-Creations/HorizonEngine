@@ -765,7 +765,31 @@ bool drawParamConstPanel(MaterialGraph& graph)
 				{
 					ImGui::SameLine();
 					ImGui::TextDisabled("(?)");
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", n->tooltip.c_str());
+					// The author of the material wrote this hint, so it is a sentence
+					// of unknown length, and a tooltip window sizes itself to its
+					// widest line. SetTooltip on such a string produces a strip of
+					// text stretched across the whole screen — legible in the sense
+					// that nothing is cut off, and cheap-looking in exactly the way a
+					// horizontal scrollbar is. Wrapping at a fixed column instead
+					// gives it the shape of a paragraph. The column has to be an
+					// absolute x: a tooltip auto-fits its width to its contents, so
+					// wrapping "at the window's right edge" would be asking the text
+					// to wrap at a position the text itself decides.
+					// The inner scope is not decoration: the guard pops the wrap
+					// position in its destructor, and that has to happen while the
+					// tooltip window is still the current one. Let it run after
+					// EndTooltip and it pops the panel's stack instead of the
+					// tooltip's — one window loses a wrap it never pushed, another
+					// underflows. Every guard below is placed with the same rule.
+					if (ImGui::IsItemHovered())
+					{
+						ImGui::BeginTooltip();
+						{
+							EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+							ImGui::TextUnformatted(n->tooltip.c_str());
+						}
+						ImGui::EndTooltip();
+					}
 				}
 				if (ImGui::BeginPopup("##pmeta"))
 				{
@@ -1601,23 +1625,35 @@ void drawHeavyMeshConfirm(State& st, AppContext& ctx)
 	constexpr const char* kId = "Load heavy mesh?";
 	if (!ImGui::IsPopupOpen(kId)) ImGui::OpenPopup(kId);
 	if (!ImGui::BeginPopupModal(kId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-	ImGui::Text("\"%s\" is %s on disk.", st.confirmMeshLabel.c_str(),
-	            formatBytes(st.confirmMeshBytes).c_str());
-	ImGui::TextDisabled("Loading it keeps the whole mesh in memory and uploads it to the GPU.\n"
-	                    "The editor stays responsive — the read runs in the background and the\n"
-	                    "preview shows its progress.");
-	ImGui::Spacing();
-	if (EditorWidgets::primaryButton("Load"))
 	{
-		startPreviewMeshLoad(st, ctx, st.confirmMeshPath, st.confirmMeshLabel);
-		st.confirmMeshPath.clear();
-		ImGui::CloseCurrentPopup();
-	}
-	ImGui::SameLine();
-	if (EditorWidgets::cancelButton("Cancel"))
-	{
-		st.confirmMeshPath.clear();
-		ImGui::CloseCurrentPopup();
+		// The first line quotes a mesh NAME, and asset names are as long as whoever
+		// exported them felt like making them. This dialog auto-resizes, so an
+		// unwrapped name does not get clipped — it drags the whole dialog out to the
+		// width of the name, buttons stranded at the bottom left of a banner. The
+		// wrap column is absolute for the same reason it cannot be the window edge:
+		// in an auto-fitting window "the right edge" is decided by the very text
+		// being measured. The column sits wide of the three hand-broken lines below,
+		// so those keep the breaks they were written with.
+		EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 45.0f);
+
+		ImGui::Text("\"%s\" is %s on disk.", st.confirmMeshLabel.c_str(),
+		            formatBytes(st.confirmMeshBytes).c_str());
+		ImGui::TextDisabled("Loading it keeps the whole mesh in memory and uploads it to the GPU.\n"
+		                    "The editor stays responsive — the read runs in the background and the\n"
+		                    "preview shows its progress.");
+		ImGui::Spacing();
+		if (EditorWidgets::primaryButton("Load"))
+		{
+			startPreviewMeshLoad(st, ctx, st.confirmMeshPath, st.confirmMeshLabel);
+			st.confirmMeshPath.clear();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel"))
+		{
+			st.confirmMeshPath.clear();
+			ImGui::CloseCurrentPopup();
+		}
 	}
 	ImGui::EndPopup();
 }
@@ -1781,7 +1817,17 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			{
 				ImGui::SameLine();
 				ImGui::TextDisabled("(?)");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", inst.graphParamTooltips[i].c_str());
+				// Same author-written sentence as on the master's parameter rows,
+				// and the same fixed wrap column, so the two read alike.
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::BeginTooltip();
+					{
+						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+						ImGui::TextUnformatted(inst.graphParamTooltips[i].c_str());
+					}
+					ImGui::EndTooltip();
+				}
 			}
 			ImGui::PopID();
 		}
@@ -1975,6 +2021,16 @@ void render(AppContext& ctx, const std::string& assetPath,
 	const float leftW = 300.0f;
 	ImGui::BeginChild("##matLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
+		// 300 px of column, and what it shows are node names ("Previewing: Landscape
+		// Layer Blend") and section notes — lines that are routinely wider than the
+		// column. Clipped, the reader gets "Previewing: Landscape La" with nothing
+		// to say a word was lost, which is the same defect as the sideways scrollbar
+		// and only harder to notice. The guard sits on the child and not on the tab
+		// window because the wrap position belongs to whichever window pushed it: it
+		// does not reach into a child, which is also what keeps it away from the
+		// node canvas on the right, where wrapping would wreck the node layout.
+		EditorWidgets::WrapText wrap;
+
 		// Adopt a mesh that finished streaming (and pump the loader) before anything
 		// below reads previewMeshId.
 		tickPreviewMeshLoad(st, ctx);
@@ -2212,13 +2268,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::Spacing();
 		ImGui::TextDisabled(st.isFunction ? "Interface" : "Properties");
 		ImGui::BeginChild("##matProps", ImVec2(0, 0), ImGuiChildFlags_Borders);
-		if (st.isInstance)
-			ImGui::TextDisabled("(instance — edit overrides on the right)");
-		else if (!st.isFunction)
-			panelEdit = drawParamConstPanel(st.graph);
-		else
-			// Functions: edit the interface (named, typed inputs/outputs) centrally.
-			panelEdit = drawFunctionInterfacePanel(st.graph);
+		{
+			// Its own window, so it needs its own guard — the one above stops at
+			// this child's border. The captions it prints are full phrases
+			// ("Parameters (runtime-settable uniforms)") in a column narrower than
+			// they are.
+			EditorWidgets::WrapText wrapProps;
+
+			if (st.isInstance)
+				ImGui::TextDisabled("(instance — edit overrides on the right)");
+			else if (!st.isFunction)
+				panelEdit = drawParamConstPanel(st.graph);
+			else
+				// Functions: edit the interface (named, typed inputs/outputs) centrally.
+				panelEdit = drawFunctionInterfacePanel(st.graph);
+		}
 		ImGui::EndChild();
 	}
 	ImGui::EndChild();
@@ -2231,6 +2295,12 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		// Instance tabs replace the canvas with the override panel; edits are applied
 		// straight to the live asset (no graph → no regenerate/undo machinery here).
+		// This branch is the only content of ##matRight that is prose — parameter
+		// names, the "(checked = …)" note, the static-switch explanation — so the
+		// wrap guard lives here rather than on the child: the other two branches are
+		// the shader viewer (its own scrolling text box) and the node canvas, and
+		// wrapping either would be wrong.
+		EditorWidgets::WrapText wrap;
 		if (mat && drawInstanceOverridePanel(ctx, st, *mat))
 			st.previewDirty = true;
 	}
@@ -2258,8 +2328,21 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::BeginChild("##shaderErr", ImVec2(0, 26), ImGuiChildFlags_None);
 		ImGui::SetCursorPos(ImVec2(8, 5));
 		ImGui::TextUnformatted("Shader compile error — hover for details");
+		// A shader compiler's log is the worst case an auto-sized tooltip can be
+		// handed: several lines, one of them quoting the offending source line and
+		// hundreds of characters long. That single line decides the tooltip's
+		// width, so the whole log ends up smeared across the display while the
+		// short lines that actually name the error sit alone at the far left.
+		// Wrapped at a fixed column it stays a block of text one can read.
 		if (ImGui::IsWindowHovered())
-			ImGui::SetTooltip("%s", st.compileLog.c_str());
+		{
+			ImGui::BeginTooltip();
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				ImGui::TextUnformatted(st.compileLog.c_str());
+			}
+			ImGui::EndTooltip();
+		}
 		ImGui::EndChild();
 		ImGui::PopStyleColor();
 	}

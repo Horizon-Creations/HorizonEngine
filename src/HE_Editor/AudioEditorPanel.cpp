@@ -4,6 +4,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map + lazy asset open
 #include "EditorInput.h"          // pointer-device grammar (trackpad swipe vs mouse wheel)
+#include "EditorWidgets.h"        // WrapText
 #include "AudioImporter.h"        // raw .wav decode + the Import button
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -600,10 +601,20 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	// without one is a broken asset rather than a case to render around.
 	if (!clip || clip->channels <= 0 || clip->sampleRate <= 0 || frameCountOf(*clip) == 0)
 	{
-		ImGui::TextDisabled(st.decodeFailed
-			? "Could not decode '%s'. Only uncompressed WAV is supported "
-			  "(mp3/ogg/flac have no decoder linked in)."
-			: "Could not load '%s' as an audio clip.", st.name.c_str());
+		// The whole content of the panel in this state is one sentence, and it is
+		// the sentence that says WHY there is nothing to look at — the parenthesis
+		// naming the formats we cannot decode is at the very end of it, which is
+		// precisely the part that runs off the right edge of a docked tab and gets
+		// clipped. The scope closes before the End() below: a wrap position still
+		// pushed at that point would be popped off a window that has already been
+		// ended, which is an assertion in a build nobody runs with assertions on.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled(st.decodeFailed
+				? "Could not decode '%s'. Only uncompressed WAV is supported "
+				  "(mp3/ogg/flac have no decoder linked in)."
+				: "Could not load '%s' as an audio clip.", st.name.c_str());
+		}
 		ImGui::End();
 		return;
 	}
@@ -684,117 +695,131 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 	// ── Left: format, levels, loop ───────────────────────────────────────────
 	ImGui::BeginChild("##audioInfo", ImVec2(290.0f, 0.0f), true);
-	char buf[64];
-
-	ImGui::SeparatorText("Format");
-	formatTime(an.durationSec, buf, sizeof(buf));
-	ImGui::Text("Duration    %s", buf);
-	ImGui::Text("Sample rate %d Hz", clip->sampleRate);
-	ImGui::Text("Channels    %d%s", clip->channels,
-	            clip->channels == 1 ? " (mono)" : clip->channels == 2 ? " (stereo)" : "");
-	ImGui::Text("Frames      %zu", frames);
-	formatBytes(clip->audioData.size(), buf, sizeof(buf));
-	ImGui::Text("PCM in RAM  %s (int16)", buf);
-
-	ImGui::SeparatorText("Levels");
-	ImGui::Text("Peak        %.1f dBFS", an.peakDb);
-	ImGui::Text("RMS         %.1f dBFS", an.rmsDb);
-	if (an.clipped > 0)
-		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%zu clipped samples", an.clipped);
-	else
-		ImGui::TextDisabled("No clipping.");
-	if (std::fabs(an.dcOffset) > 0.005f)
 	{
-		ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "DC offset %.3f", an.dcOffset);
-		ImGui::TextWrapped("The waveform sits off centre. It wastes headroom and can thump "
-		                   "when the sound starts or stops.");
-	}
-	if (an.peakDb < -12.0f)
-		ImGui::TextWrapped("Quiet master — %.1f dB of headroom is left unused.", -an.peakDb);
+		// This column is pinned to 290 px, which makes it the narrowest thing in
+		// the tab, and nearly everything in it is a sentence about the clip: what
+		// a DC offset will do to the mix, where an import will write, which
+		// formats have no decoder linked in. Unwrapped, each of those runs under
+		// the waveform pane and is clipped there — the reader is told "The asset
+		// stores decoded int16 PCM (4.1 MB) and ships with" and nothing on screen
+		// admits a word went missing. Held for the whole child rather than per
+		// line so the next readout somebody adds here inherits it, and safely so:
+		// nothing in this column is laid out from the width of the text it prints
+		// (SeparatorText measures its own label, the sliders and the button are
+		// sized by ImGui), so a wrap column has nothing here to disturb.
+		EditorWidgets::WrapText wrap;
+		char buf[64];
 
-	ImGui::SeparatorText("Silence");
-	if (an.leadSilenceSec > 0.01 || an.tailSilenceSec > 0.01)
-	{
-		ImGui::Text("Head        %.2f s", an.leadSilenceSec);
-		ImGui::Text("Tail        %.2f s", an.tailSilenceSec);
-		ImGui::TextWrapped("Padding below %.0f dBFS. Harmless for a one-shot, but it is a "
-		                   "gap in a loop.", kSilenceDb);
-	}
-	else
-		ImGui::TextDisabled("None at either end.");
+		ImGui::SeparatorText("Format");
+		formatTime(an.durationSec, buf, sizeof(buf));
+		ImGui::Text("Duration    %s", buf);
+		ImGui::Text("Sample rate %d Hz", clip->sampleRate);
+		ImGui::Text("Channels    %d%s", clip->channels,
+		            clip->channels == 1 ? " (mono)" : clip->channels == 2 ? " (stereo)" : "");
+		ImGui::Text("Frames      %zu", frames);
+		formatBytes(clip->audioData.size(), buf, sizeof(buf));
+		ImGui::Text("PCM in RAM  %s (int16)", buf);
 
-	ImGui::SeparatorText("Loop seam");
-	// What matters for the ambience beds this tab was built for: what the wrap
-	// from the last frame back to the first actually sounds like.
-	if (an.seamStepDb > -30.0f)
-		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Step  %.1f dBFS — audible click", an.seamStepDb);
-	else if (an.seamStepDb > -50.0f)
-		ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "Step  %.1f dBFS — faint tick", an.seamStepDb);
-	else
-		ImGui::Text("Step  %.1f dBFS — clean", an.seamStepDb);
-	ImGui::Text("Level %+.1f dB head vs tail", an.seamLevelDb);
-	if (std::fabs(an.seamLevelDb) > 3.0f)
-		ImGui::TextWrapped("The two ends sit at different loudness — the loop will breathe "
-		                   "even without a click. A crossfade fixes both.");
-
-	ImGui::SeparatorText("Preview");
-	if (!audioReady)
-		ImGui::TextDisabled("No audio device.");
-	if (ImGui::SliderFloat("Volume", &st.volume, 0.0f, 2.0f, "%.2f") && st.handle)
-		st.audio->setSoundVolume(st.handle, st.volume);
-	if (ImGui::SliderFloat("Pitch", &st.pitch, 0.25f, 2.0f, "%.2f") && st.handle)
-		st.audio->setSoundPitch(st.handle, st.pitch);
-	ImGui::TextDisabled("Preview only — an Audio Source component\ncarries its own volume and pitch.");
-
-	// ── Import, for a raw .wav ───────────────────────────────────────────────
-	if (st.isRawWav && ctx.contentManager)
-	{
-		ImGui::SeparatorText("Import");
-		const std::filesystem::path src(assetPath);
-		const bool engineLocked = ctx.contentManager->isEngineDefaultPath(assetPath) &&
-		                          !ContentManager::isEngineContentDevMode();
-
-		// Where the .hasset lands. Normally next to the source; for a locked engine
-		// .wav there is no writable spot beside it, so it goes to the project's own
-		// Content/Audio — which is somewhere the project can actually reference.
-		std::filesystem::path root, relDir;
-		if (engineLocked)
+		ImGui::SeparatorText("Levels");
+		ImGui::Text("Peak        %.1f dBFS", an.peakDb);
+		ImGui::Text("RMS         %.1f dBFS", an.rmsDb);
+		if (an.clipped > 0)
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%zu clipped samples", an.clipped);
+		else
+			ImGui::TextDisabled("No clipping.");
+		if (std::fabs(an.dcOffset) > 0.005f)
 		{
-			root   = ctx.contentManager->contentRoot();
-			relDir = "Audio";
+			ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "DC offset %.3f", an.dcOffset);
+			ImGui::TextWrapped("The waveform sits off centre. It wastes headroom and can thump "
+			                   "when the sound starts or stops.");
+		}
+		if (an.peakDb < -12.0f)
+			ImGui::TextWrapped("Quiet master — %.1f dB of headroom is left unused.", -an.peakDb);
+
+		ImGui::SeparatorText("Silence");
+		if (an.leadSilenceSec > 0.01 || an.tailSilenceSec > 0.01)
+		{
+			ImGui::Text("Head        %.2f s", an.leadSilenceSec);
+			ImGui::Text("Tail        %.2f s", an.tailSilenceSec);
+			ImGui::TextWrapped("Padding below %.0f dBFS. Harmless for a one-shot, but it is a "
+			                   "gap in a loop.", kSilenceDb);
 		}
 		else
-		{
-			root = ctx.contentManager->isEngineDefaultPath(assetPath)
-				? std::filesystem::path(ctx.contentManager->engineContentRoot())
-				: std::filesystem::path(ctx.contentManager->contentRoot());
-			std::error_code ec;
-			relDir = std::filesystem::relative(src.parent_path(), root, ec);
-			if (ec || relDir == ".") relDir.clear();
-		}
+			ImGui::TextDisabled("None at either end.");
 
-		const std::string target =
-			(relDir.empty() ? src.stem().string() : (relDir / src.stem()).string()) + ".hasset";
-
-		if (root.empty())
-			ImGui::TextDisabled("Open a project to import.");
+		ImGui::SeparatorText("Loop seam");
+		// What matters for the ambience beds this tab was built for: what the wrap
+		// from the last frame back to the first actually sounds like.
+		if (an.seamStepDb > -30.0f)
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Step  %.1f dBFS — audible click", an.seamStepDb);
+		else if (an.seamStepDb > -50.0f)
+			ImGui::TextColored(ImVec4(0.9f, 0.85f, 0.4f, 1.0f), "Step  %.1f dBFS — faint tick", an.seamStepDb);
 		else
+			ImGui::Text("Step  %.1f dBFS — clean", an.seamStepDb);
+		ImGui::Text("Level %+.1f dB head vs tail", an.seamLevelDb);
+		if (std::fabs(an.seamLevelDb) > 3.0f)
+			ImGui::TextWrapped("The two ends sit at different loudness — the loop will breathe "
+			                   "even without a click. A crossfade fixes both.");
+
+		ImGui::SeparatorText("Preview");
+		if (!audioReady)
+			ImGui::TextDisabled("No audio device.");
+		if (ImGui::SliderFloat("Volume", &st.volume, 0.0f, 2.0f, "%.2f") && st.handle)
+			st.audio->setSoundVolume(st.handle, st.volume);
+		if (ImGui::SliderFloat("Pitch", &st.pitch, 0.25f, 2.0f, "%.2f") && st.handle)
+			st.audio->setSoundPitch(st.handle, st.pitch);
+		ImGui::TextDisabled("Preview only — an Audio Source component\ncarries its own volume and pitch.");
+
+		// ── Import, for a raw .wav ───────────────────────────────────────────
+		if (st.isRawWav && ctx.contentManager)
 		{
-			if (ImGui::Button("Import as Audio Asset", ImVec2(-FLT_MIN, 0.0f)))
-			{
-				if (AudioImporter::import(src, root, relDir))
-					ctx.contentRefreshPending = true;
-				else
-					HE_LOG_ERROR(Editor, "%s", ("Editor: audio import failed for " + assetPath).c_str());
-			}
-			ImGui::TextWrapped("Writes %s", target.c_str());
+			ImGui::SeparatorText("Import");
+			const std::filesystem::path src(assetPath);
+			const bool engineLocked = ctx.contentManager->isEngineDefaultPath(assetPath) &&
+			                          !ContentManager::isEngineContentDevMode();
+
+			// Where the .hasset lands. Normally next to the source; for a locked engine
+			// .wav there is no writable spot beside it, so it goes to the project's own
+			// Content/Audio — which is somewhere the project can actually reference.
+			std::filesystem::path root, relDir;
 			if (engineLocked)
-				ImGui::TextWrapped("Engine content is read-only, so this goes to the project "
-				                   "instead. Set HE_ENGINE_CONTENT_EDITABLE=1 to import into "
-				                   "the engine library itself.");
-			formatBytes(clip->audioData.size(), buf, sizeof(buf));
-			ImGui::TextDisabled("The asset stores decoded int16 PCM (%s) and ships with every "
-			                    "packaged build.", buf);
+			{
+				root   = ctx.contentManager->contentRoot();
+				relDir = "Audio";
+			}
+			else
+			{
+				root = ctx.contentManager->isEngineDefaultPath(assetPath)
+					? std::filesystem::path(ctx.contentManager->engineContentRoot())
+					: std::filesystem::path(ctx.contentManager->contentRoot());
+				std::error_code ec;
+				relDir = std::filesystem::relative(src.parent_path(), root, ec);
+				if (ec || relDir == ".") relDir.clear();
+			}
+
+			const std::string target =
+				(relDir.empty() ? src.stem().string() : (relDir / src.stem()).string()) + ".hasset";
+
+			if (root.empty())
+				ImGui::TextDisabled("Open a project to import.");
+			else
+			{
+				if (ImGui::Button("Import as Audio Asset", ImVec2(-FLT_MIN, 0.0f)))
+				{
+					if (AudioImporter::import(src, root, relDir))
+						ctx.contentRefreshPending = true;
+					else
+						HE_LOG_ERROR(Editor, "%s", ("Editor: audio import failed for " + assetPath).c_str());
+				}
+				ImGui::TextWrapped("Writes %s", target.c_str());
+				if (engineLocked)
+					ImGui::TextWrapped("Engine content is read-only, so this goes to the project "
+					                   "instead. Set HE_ENGINE_CONTENT_EDITABLE=1 to import into "
+					                   "the engine library itself.");
+				formatBytes(clip->audioData.size(), buf, sizeof(buf));
+				ImGui::TextDisabled("The asset stores decoded int16 PCM (%s) and ships with every "
+				                    "packaged build.", buf);
+			}
 		}
 	}
 	ImGui::EndChild();
@@ -803,7 +828,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	ImGui::SameLine();
 	ImGui::BeginChild("##audioWave", ImVec2(0.0f, 0.0f), true);
 	{
-		const float  footerH = ImGui::GetFrameHeightWithSpacing();
+		// Room for TWO lines under the canvas, not one. The hint at the end of the
+		// footer row is a sentence and it wraps now instead of running off the
+		// edge, so in a narrow tab it becomes two lines — and a canvas sized as if
+		// it were still one would push that second line past the bottom of this
+		// child, which answers a clipped sentence with a scrollbar.
+		const float  footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeight();
 		const ImVec2 avail   = ImGui::GetContentRegionAvail();
 		// Captured before the footer is drawn: the "visible" readout describes the
 		// CANVAS, and asking for the region again after a SameLine would measure
@@ -814,13 +844,24 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		char now[32], total[32];
 		formatTime(static_cast<double>(st.playhead) / rate, now, sizeof(now));
 		formatTime(an.durationSec, total, sizeof(total));
-		ImGui::Text("%s / %s", now, total);
-		ImGui::SameLine();
-		const double visibleSec = st.framesPerPx * canvasW / rate;
-		ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
-			? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
-			: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
-			visibleSec);
+		{
+			// The tail of this row is where the pointer grammar is written down —
+			// middle-drag to pan, Cmd/Ctrl+scroll to zoom — and it is the last
+			// thing on the line, so it is the first thing to go over the right
+			// edge. Clipped, the row still looks finished: it just stops after
+			// "wheel to zoom," and the gesture nobody discovered is the one that
+			// was cut. Wrapping it is why footerH above reserves a second line.
+			// The scope is closed before EndChild(): the wrap must come off this
+			// child's stack, not off whatever window follows it.
+			EditorWidgets::WrapText wrap;
+			ImGui::Text("%s / %s", now, total);
+			ImGui::SameLine();
+			const double visibleSec = st.framesPerPx * canvasW / rate;
+			ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+				? "   |   %.3g s visible   |   drag to scrub, swipe to pan, Cmd/Ctrl+scroll to zoom"
+				: "   |   %.3g s visible   |   drag to scrub, wheel to zoom, middle-drag to pan",
+				visibleSec);
+		}
 	}
 	ImGui::EndChild();
 

@@ -162,60 +162,70 @@ void render(AppContext& ctx)
 
     if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
-    ImGui::SetCursorPosX(padding);
-    ImGui::Text("Template");
-    ImGui::SetCursorPosX(padding);
-    ImGui::PushItemWidth(panelW - padding * 2.0f);
-    ImGui::ListBox("##Presets", &ctx.hubSelectedPreset,
-        kPresetNames, kPresetCount, 5);
-    ImGui::PopItemWidth();
-
-    ImGui::SetCursorPosX(padding);
-    ImGui::PushTextWrapPos(padding + (panelW - padding * 2.0f));
-    ImGui::TextDisabled("%s", kPresetDescs[ctx.hubSelectedPreset]);
-    ImGui::PopTextWrapPos();
-
-    ImGui::Spacing();
-    ImGui::SetCursorPosX(padding);
-    ImGui::Text("Scripting Language");
-
-    // A C++ project is useless without cmake + a working compiler, so drop it from the
-    // picker when the startup probe couldn't find them. A null probe = it hasn't
-    // finished yet → don't hide prematurely. Index 3 == Cpp (matches kLangNames /
-    // ProjectScriptLanguage). See DrawToolchainDialog / HcCodegen::probeToolchain.
-    const bool cppToolchainOk =
-        !ctx.toolchainProbe ||
-        (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
-    if (!cppToolchainOk && ctx.hubSelectedLang == 3)
-        ctx.hubSelectedLang = 0; // C++ no longer offered — fall back to HorizonCode
-
-    ImGui::SetCursorPosX(padding);
-    ImGui::PushItemWidth(panelW - padding * 2.0f);
-    if (ImGui::BeginCombo("##HubLang", kLangNames[ctx.hubSelectedLang]))
     {
-        for (int i = 0; i < static_cast<int>(kLangNames.size()); ++i)
-        {
-            if (i == 3 && !cppToolchainOk) continue; // hide C++ when no toolchain
-            const bool sel = (ctx.hubSelectedLang == i);
-            if (ImGui::Selectable(kLangNames[i], sel)) ctx.hubSelectedLang = i;
-            if (sel) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::PopItemWidth();
-    ImGui::SetCursorPosX(padding);
-    ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
-    if (!cppToolchainOk)
-    {
+        // Every line in this block is a full sentence describing a choice, and the
+        // column it has to live in is a third of the window — the language
+        // descriptions and the "no toolchain" note are both longer than that on a
+        // 1280-wide screen. Without a wrap position ImGui runs them straight past
+        // the panel's right edge and clips them there, so the reader is told
+        // "CPython scripting (needs a Python install on dev" and left to guess.
+        // The wrap sits at panelW - padding rather than at the window edge so the
+        // text keeps the same margin on the right that every control here has on
+        // the left; that is also what the two hand-rolled PushTextWrapPos pairs
+        // that used to stand here computed, one setting at a time.
+        EditorWidgets::WrapText wrap(panelW - padding);
+
         ImGui::SetCursorPosX(padding);
-        ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
+        ImGui::Text("Template");
+        ImGui::SetCursorPosX(padding);
+        ImGui::PushItemWidth(panelW - padding * 2.0f);
+        ImGui::ListBox("##Presets", &ctx.hubSelectedPreset,
+            kPresetNames, kPresetCount, 5);
+        ImGui::PopItemWidth();
+
+        ImGui::SetCursorPosX(padding);
+        ImGui::TextDisabled("%s", kPresetDescs[ctx.hubSelectedPreset]);
+
+        ImGui::Spacing();
+        ImGui::SetCursorPosX(padding);
+        ImGui::Text("Scripting Language");
+
+        // A C++ project is useless without cmake + a working compiler, so drop it from the
+        // picker when the startup probe couldn't find them. A null probe = it hasn't
+        // finished yet → don't hide prematurely. Index 3 == Cpp (matches kLangNames /
+        // ProjectScriptLanguage). See DrawToolchainDialog / HcCodegen::probeToolchain.
+        const bool cppToolchainOk =
+            !ctx.toolchainProbe ||
+            (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
+        if (!cppToolchainOk && ctx.hubSelectedLang == 3)
+            ctx.hubSelectedLang = 0; // C++ no longer offered — fall back to HorizonCode
+
+        ImGui::SetCursorPosX(padding);
+        ImGui::PushItemWidth(panelW - padding * 2.0f);
+        if (ImGui::BeginCombo("##HubLang", kLangNames[ctx.hubSelectedLang]))
+        {
+            for (int i = 0; i < static_cast<int>(kLangNames.size()); ++i)
+            {
+                if (i == 3 && !cppToolchainOk) continue; // hide C++ when no toolchain
+                const bool sel = (ctx.hubSelectedLang == i);
+                if (ImGui::Selectable(kLangNames[i], sel)) ctx.hubSelectedLang = i;
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        ImGui::SetCursorPosX(padding);
+        ImGui::TextDisabled("%s", kLangDesc[ctx.hubSelectedLang]);
+        if (!cppToolchainOk)
+        {
+            ImGui::SetCursorPosX(padding);
+            ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
+        }
+        ImGui::SetCursorPosX(padding);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
+        ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
+        ImGui::PopStyleColor();
     }
-    ImGui::SetCursorPosX(padding);
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
-    ImGui::PushTextWrapPos(padding + (panelW - padding * 2.0f));
-    ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
-    ImGui::PopTextWrapPos();
-    ImGui::PopStyleColor();
 
     ImGui::Spacing();
     ImGui::SetCursorPosX(padding);
@@ -307,6 +317,7 @@ void render(AppContext& ctx)
     ImGui::Spacing();
     if (!ctx.hubCreateError.empty())
     {
+        EditorWidgets::WrapText wrap(panelW - padding);
         ImGui::SetCursorPosX(padding);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
         ImGui::TextWrapped("%s", ctx.hubCreateError.c_str());
@@ -439,34 +450,47 @@ void render(AppContext& ctx)
         if (ImGui::BeginPopupModal("##ConfirmRemove", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
         {
-            if (ctx.hubRemoveIndex >= 0 && ctx.hubRemoveIndex < static_cast<int>(known.size()))
+            // The dialog auto-sizes to its widest line and one of its lines is a
+            // full project path, so without a wrap it is as wide as the path is
+            // long — a dialog stretched across the whole editor to ask a one-line
+            // yes/no question. An absolute wrap column rather than 0.0f: on an
+            // auto-resizing window "the content region's right edge" is derived
+            // from the size the content asked for last frame, which is the thing
+            // being decided here. The scope closes before EndPopup — the wrap
+            // position belongs to this popup's window, and popping it after the
+            // window is gone would take a wrap off whatever window is underneath.
             {
-                std::filesystem::path rp(known[ctx.hubRemoveIndex]);
-                ImGui::Text("Remove this project from the list?");
-                ImGui::Spacing();
-                ImGui::TextDisabled("%s", rp.stem().string().c_str());
-                ImGui::TextDisabled("%s", known[ctx.hubRemoveIndex].c_str());
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-                if (ImGui::Button("Remove", ImVec2(120, 0)))
+                EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 28.0f);
+
+                if (ctx.hubRemoveIndex >= 0 && ctx.hubRemoveIndex < static_cast<int>(known.size()))
                 {
-                    ctx.globalState->removeKnownProject(known[ctx.hubRemoveIndex]);
-                    ctx.globalState->writeConfig();
+                    std::filesystem::path rp(known[ctx.hubRemoveIndex]);
+                    ImGui::Text("Remove this project from the list?");
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("%s", rp.stem().string().c_str());
+                    ImGui::TextDisabled("%s", known[ctx.hubRemoveIndex].c_str());
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    if (ImGui::Button("Remove", ImVec2(120, 0)))
+                    {
+                        ctx.globalState->removeKnownProject(known[ctx.hubRemoveIndex]);
+                        ctx.globalState->writeConfig();
+                        ctx.hubRemoveIndex = -1;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(120, 0)))
+                    {
+                        ctx.hubRemoveIndex = -1;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+                else
+                {
                     ctx.hubRemoveIndex = -1;
                     ImGui::CloseCurrentPopup();
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel", ImVec2(120, 0)))
-                {
-                    ctx.hubRemoveIndex = -1;
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            else
-            {
-                ctx.hubRemoveIndex = -1;
-                ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
         }
@@ -495,19 +519,26 @@ void render(AppContext& ctx)
 
     if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
-    ImGui::SetCursorPosX(padding);
-    ImGui::TextWrapped(
-        "Select an existing HorizonEngine project file (.heproj) "
-        "to open it in the editor.");
-    ImGui::Spacing();
-
-    if (!ctx.hubOpenError.empty())
     {
+        // Same wrap column as the Create panel: these two lines are indented by
+        // `padding` on the left, and a bare TextWrapped would run them right up
+        // against the panel's border on the other side.
+        EditorWidgets::WrapText wrap(panelW - padding);
+
         ImGui::SetCursorPosX(padding);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-        ImGui::TextWrapped("%s", ctx.hubOpenError.c_str());
-        ImGui::PopStyleColor();
+        ImGui::TextWrapped(
+            "Select an existing HorizonEngine project file (.heproj) "
+            "to open it in the editor.");
         ImGui::Spacing();
+
+        if (!ctx.hubOpenError.empty())
+        {
+            ImGui::SetCursorPosX(padding);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+            ImGui::TextWrapped("%s", ctx.hubOpenError.c_str());
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
     }
 
     ImGui::SetCursorPosX(padding);

@@ -219,6 +219,17 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	const float leftW = 280.0f;
 	ImGui::BeginChild("##ptLeft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
 	{
+		// 280 px of column against readouts that are wider than that — the emit
+		// line alone is "Emit 240.0/s  Life 0.75-2.50s  Max 4096". Without a wrap
+		// position ImGui runs such a line past the right edge and clips it, and the
+		// reader is given the first half of a sentence with nothing to say the rest
+		// exists. Pushed on the child rather than on the tab window because the wrap
+		// position belongs to the window it was pushed in — it would not reach in
+		// here from outside, and it must not reach the node canvas beside us, where
+		// every node body is drawn at a computed position and wrapping would tear
+		// the layout apart.
+		EditorWidgets::WrapText wrap;
+
 		// The transport lives in the toolbar now — one place for "is this
 		// running", the same place the Scene bar keeps it.
 		ImGui::TextDisabled("Preview");
@@ -239,6 +250,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		ImGui::BeginChild("##ptPreview", ImVec2(0, 240), ImGuiChildFlags_Borders);
 		{
+			// Its own window, so it needs its own guard: the "no preview on this
+			// backend" line is the one thing this pane ever says in words, and it
+			// is longer than the pane is wide.
+			EditorWidgets::WrapText wrapPreview;
+
 			const ImVec2 org = ImGui::GetCursorScreenPos();
 			const ImVec2 av  = ImGui::GetContentRegionAvail();
 			const float  px  = std::max(64.0f, std::min(av.x, av.y));

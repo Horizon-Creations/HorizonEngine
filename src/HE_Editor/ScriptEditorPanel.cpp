@@ -149,6 +149,15 @@ namespace ScriptEditorPanel
 		if (doSave || saveKey) saveToDisk(st, path);
 
 		// ── Code editor fills the remaining area (monospace font for alignment) ──
+		// This window gets no text-wrap scope, and that is a decision rather than an
+		// oversight: the two things it draws are the toolbar strip, whose cells are
+		// measured from the width of their own labels — wrap them and the strip
+		// reflows around a measurement taken before the wrap — and the code editor,
+		// which paints every glyph into the draw list at a position it computed from
+		// a line and a column. A wrap position would be ignored by the second and
+		// would corrupt the first. Source lines are the editor's own business; it
+		// scrolls them, and the column arithmetic that puts the caret where the user
+		// clicked assumes one screen row per source line.
 		if (ctx.codeFont) ImGui::PushFont(ctx.codeFont);
 		// aSize = (0,0) fills the remaining content region below the header.
 		st.editor.Render("##code",

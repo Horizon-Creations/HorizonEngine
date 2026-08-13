@@ -180,4 +180,37 @@ void clampCurrentWindowToEditorWindow(float margin = 8.0f);
 // ordinary floating panel would steal the focus the user just gave the editor.
 void raiseDetachedModals(SDL_Window* mainWindow);
 
+// ── Text that wraps instead of running off the edge ──────────────────────────
+// Editor panels are narrow and docked, and almost everything they display is a
+// content path, an asset name, an error from a compiler or a sentence explaining
+// a setting — all of them longer than the column they sit in. Without a wrap
+// position ImGui draws such a line straight past the right edge and clips it, so
+// the reader gets the beginning of a message and no indication that there is
+// more; with a horizontal scrollbar they get the same thing behind a gesture
+// nobody performs in a tool window. Both are the same bug wearing different
+// clothes, and the answer to both is to wrap.
+//
+// Construct one right after a successful ImGui::Begin() (or BeginChild) and it
+// holds for that window's contents. Scoped rather than a bare
+// PushTextWrapPos/PopTextWrapPos pair because a panel with an early return
+// between the two unbalances ImGui's stack, and the only thing that would tell
+// us is an assertion in a build nobody runs with assertions on.
+//
+// Deliberately NOT applied to the whole frame from one place: the wrap position
+// lives on the window, so it has to be pushed inside each one. And it is not
+// wanted everywhere — see wrapAt(), which takes an explicit position for the few
+// places (a table cell, a fixed-width column) where wrapping at the window edge
+// is not what the layout means.
+struct WrapText
+{
+	// 0.0f = wrap at the window's content-region right edge, which is what a
+	// docked panel wants. A positive value is an absolute x in window space; a
+	// negative one is "this far in from the right edge".
+	explicit WrapText(float wrapPosX = 0.0f) { ImGui::PushTextWrapPos(wrapPosX); }
+	~WrapText() { ImGui::PopTextWrapPos(); }
+
+	WrapText(const WrapText&)            = delete;
+	WrapText& operator=(const WrapText&) = delete;
+};
+
 } // namespace EditorWidgets

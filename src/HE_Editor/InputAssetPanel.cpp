@@ -169,8 +169,21 @@ void keyBindCells(const char* id, const char* hintText, std::string& value, bool
 			ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(220, 70, 70, 255),
 			ImGui::GetStyle().FrameRounding);
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
-			                   "anything at runtime. Click Bind and press the key instead.", value.c_str());
+		{
+			// The "%s" is whatever the user typed into the field, so left to itself
+			// this tooltip is as wide as their worst paste — a bar stretched across
+			// the screen, which is exactly the cheap look a clipped line has. The
+			// wrap column is spelled out rather than left at the window edge because
+			// a tooltip auto-sizes to its content: "the right edge" is a measurement
+			// of the frame that has not been laid out yet.
+			ImGui::BeginTooltip();
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				ImGui::Text("\"%s\" isn't a recognized SDL key name — it won't bind to\n"
+				            "anything at runtime. Click Bind and press the key instead.", value.c_str());
+			}
+			ImGui::EndTooltip();
+		}
 	}
 
 	ImGui::TableNextColumn();
@@ -306,8 +319,18 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	if (!st.isMapping)
 	{
 		// ── Input Action: just the value type ──────────────────────────────
-		ImGui::TextDisabled("A Button action fires Pressed/Released events; an Axis");
-		ImGui::TextDisabled("action fires a per-frame Axis event with a Float value.");
+		// The sentence that explains what the two radio buttons below actually
+		// choose between, in a tab whose width is whatever the user left it. With
+		// no wrap position ImGui runs each line past the right edge and clips it,
+		// so the explanation stops at "an Axis" and nothing on screen says a word
+		// was cut. Scoped tightly rather than opened once for the whole window on
+		// purpose: this branch ends in its own ImGui::End(), and a wrap still
+		// pushed at that point would be popped off a window that no longer exists.
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled("A Button action fires Pressed/Released events; an Axis");
+			ImGui::TextDisabled("action fires a per-frame Axis event with a Float value.");
+		}
 		ImGui::Spacing();
 		int vt = st.isAxis ? 1 : 0;
 		if (ImGui::RadioButton("Button", &vt, 0)) { st.isAxis = false; st.dirty = true; }

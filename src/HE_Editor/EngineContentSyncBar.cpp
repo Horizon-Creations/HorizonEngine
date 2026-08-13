@@ -6,6 +6,7 @@
 #endif
 
 #ifdef HE_IMGUI_ENABLED
+#include "EditorWidgets.h"   // WrapText
 #include <imgui.h>
 #endif
 
@@ -148,7 +149,26 @@ void DrawFooter(AppContext& ctx)
 	// depend on Dummy() carrying a hoverable id.
 	const ImVec2 clusterMax = ImGui::GetItemRectMax();
 	if (ImGui::IsMouseHoveringRect(ImVec2(slotPos.x - kGap, slotPos.y), clusterMax))
-		ImGui::SetTooltip("Downloading EngineContent from the server\n%s", st.currentRelativePath.c_str());
+	{
+		// Spelled out instead of SetTooltip (which is exactly this, minus the wrap)
+		// because the second line is a content-relative path, and a tooltip has no
+		// width of its own: it grows to whatever it is given. An unwrapped deep
+		// path therefore paints a single strip of text across the entire screen,
+		// which is the "cheap" look a sideways scrollbar has — the same failure
+		// without the scrollbar. The wrap column is given explicitly rather than
+		// as 0.0f: a tooltip auto-sizes to its contents, so wrapping "at the
+		// window edge" would be wrapping at the width the last frame happened to
+		// produce, and the box would breathe in and out while it is hovered.
+		if (ImGui::BeginTooltip())   // EndTooltip only on true — same contract SetTooltip honours
+		{
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				ImGui::Text("Downloading EngineContent from the server\n%s",
+				            st.currentRelativePath.c_str());
+			}
+			ImGui::EndTooltip();
+		}
+	}
 #else
 	(void)ctx;
 #endif

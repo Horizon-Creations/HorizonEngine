@@ -331,6 +331,26 @@ void render(AppContext& ctx)
 			inertEnvironmentNote(entity == ctx.world->weatherEntity(), "Weather");
 			if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen))
 			{
+				// The Details dock is narrow, and a good deal of what the sections
+				// below print is prose or a path rather than a label: "Transitioning
+				// Overcast -> Snow", a material's full content path, a skeletal
+				// mesh's asset name. Without a wrap position ImGui draws such a line
+				// straight past the right edge and clips it, so the reader gets its
+				// beginning and no sign that there is more — the same defect as a
+				// sideways scrollbar, only without the scrollbar to admit it.
+				//
+				// Pushed per SECTION rather than once for the whole panel, which is
+				// the usual place: the wrap must be popped before this window's
+				// ImGui::End(), and here that End() sits 1000 lines down, with a
+				// second one in the early return at the top. A guard spanning the
+				// body would be destroyed AFTER End() and pop on whatever window is
+				// current by then — for a top-level panel, none at all. Every
+				// component section is already a scope that closes in time, so the
+				// guards live in the ones that actually print text. Sections built
+				// purely from Row:: controls and checkboxes get none: those labels
+				// are drawn by RenderText, which ignores the wrap position.
+				EditorWidgets::WrapText wrap;
+
 				const char* kinds[] = { "Clear","Cloudy","Overcast","Foggy","Rain","Storm","Snow" };
 				int target = static_cast<int>(w->targetKind);
 				if (Row::combo("Preset", &target, kinds, IM_ARRAYSIZE(kinds)))
@@ -451,6 +471,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Skeletal Mesh", true, removed))
 		{
+			EditorWidgets::WrapText wrap;   // asset names outgrow this dock easily
 			if (sm->meshAssetId == HE::UUID{})
 				ImGui::TextDisabled("Asset: (none)");
 			else if (ctx.contentManager)
@@ -479,6 +500,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Animator", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			// Clip asset slot
 			EditorWidgets::assetDropSlot(ctx, "Clip", an->clipAssetId,
 				HE::AssetType::AnimationClip, "animslot");
@@ -532,6 +554,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Animator State Machine", true, removed))
 		{
+			EditorWidgets::WrapText wrap;   // state names are authored free text
 			// Both assigning and clearing re-resolve the state machine's config.
 			// Slot id "asmslot", not "smslot": the Skeletal Mesh section above uses
 			// that one, and an entity with both components would put two items with
@@ -561,6 +584,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Property Animator", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			// Clip drag-drop slot
 			EditorWidgets::assetDropSlot(ctx, "Clip", pa->clipId,
 				HE::AssetType::PropertyAnimClip, "pac");
@@ -587,6 +611,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Nav Mesh", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			Row::dragFloat("Cell Size##nm",       &nmc->config.cellSize,      0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
 			Row::dragFloat("Cell Height##nm",     &nmc->config.cellHeight,    0.01f, 0.05f, 2.0f,   "%.2f"); trackEdit();
 			Row::dragFloat("Walk Height##nm",     &nmc->config.walkableHeight,0.1f,  0.5f,  5.0f,   "%.2f"); trackEdit();
@@ -615,6 +640,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Nav Agent", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			Row::dragFloat3("Target##na",     glm::value_ptr(na->targetPos), 0.1f); trackEdit();
 			Row::dragFloat("Speed##na",       &na->speed,        0.1f, 0.0f, 20.0f, "%.1f m/s"); trackEdit();
 			Row::dragFloat("Stop Dist##na",   &na->stoppingDist, 0.01f,0.0f, 2.0f,  "%.2f m"); trackEdit();
@@ -636,6 +662,10 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Material", true, removed))
 		{
+			// The worst offender in this panel: the assigned material's full
+			// content path is printed below, and "Materials/Environment/Rock/
+			// WetGranite.hasset" is longer than this dock has ever been.
+			EditorWidgets::WrapText wrap;
 			// ── Material asset slot — drop a material .hasset here ────────────
 			// Assigning also drops the renderer's cached pipeline for the NEW
 			// material; clearing only needs the component re-resolved.
@@ -1114,6 +1144,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Audio Source", true, removed))
 		{
+			EditorWidgets::WrapText wrap;   // the 128-bit asset id needs two lines here
 			char buf[64];
 			snprintf(buf, sizeof(buf), "%llu:%llu", (unsigned long long)a->assetId.hi,
 			         (unsigned long long)a->assetId.lo);
@@ -1155,6 +1186,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Particle System", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			// Both assigning and clearing re-resolve the emitter config.
 			if (EditorWidgets::assetDropSlot(ctx, "Asset", ps->particleAssetId,
 					HE::AssetType::ParticleSystem, "psslot",
@@ -1173,6 +1205,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			Row::dragFloat("Density##fol",       &fol->density,      0.01f, 0.001f, 10.f); if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Draw Distance##fol", &fol->drawDistance, 1.0f,  1.0f,  500.f); trackEdit();
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
@@ -1189,6 +1222,7 @@ void render(AppContext& ctx)
 	{
 		if (componentHeader("LOD", true, removed))
 		{
+			EditorWidgets::WrapText wrap;
 			ImGui::Text("Levels: %zu   Active: %u", lod->levels.size(), lod->current);
 			ImGui::Spacing();
 			for (int li = 0; li < static_cast<int>(lod->levels.size()); ++li)

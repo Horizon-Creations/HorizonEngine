@@ -148,133 +148,166 @@ void DrawGitMissingDialog(AppContext& ctx)
 		return;
 	}
 
-	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-	ImGui::TextUnformatted("Source Control Not Ready");
-	ImGui::PopStyleColor();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	ImGui::TextWrapped(
-		"Syncing this project with GitHub, GitLab, Azure DevOps or any other git "
-		"remote needs a few things this machine is missing. The editor works "
-		"normally without them — only source control is unavailable.");
-	ImGui::Spacing();
-
-	// ── git ──────────────────────────────────────────────────────────────────
-	if (!s_last.gitFound)
+	// ── Everything below wraps at the dialog's right edge ────────────────────
+	// This dialog's entire job is to say what is missing and where, and almost
+	// every line it draws ends in the part that answers "where": the path git was
+	// found at, the version string, the address in the identity. Those are the
+	// halves that fell off the right edge, so the dialog said "git found" and
+	// nothing about which git — the one thing the user opened it to learn. The
+	// paragraphs were wrapped by hand already; this covers the lines that were not,
+	// and the probe's raw detail text under "Details", which is a machine's output
+	// and respects no width at all.
+	//
+	// Scoped, and the scope closes before EndPopup(): the wrap position belongs to
+	// this popup's window, so it has to be popped while that window is still the
+	// current one. Popped after EndPopup() it would land on whatever window is
+	// current then — and this dialog is raised from outside any window, so that is
+	// none at all.
 	{
-		ImGui::BulletText("git was not found.");
-		ImGui::Indent();
-		drawGitInstallRemedy();
-		ImGui::Unindent();
+		EditorWidgets::WrapText wrap;
+
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+		ImGui::TextUnformatted("Source Control Not Ready");
+		ImGui::PopStyleColor();
+		ImGui::Separator();
 		ImGui::Spacing();
-	}
-	else
-	{
-		ImGui::BulletText("git %s found%s.",
-		                  s_last.gitVersion.empty() ? "(unknown version)" : s_last.gitVersion.c_str(),
-		                  s_last.gitPath.empty() ? "" : (" at " + s_last.gitPath.string()).c_str());
-	}
 
-	// ── git-lfs ──────────────────────────────────────────────────────────────
-	if (s_last.gitFound && !s_last.lfsFound)
-	{
-		ImGui::BulletText("Git LFS was not found.");
-		ImGui::Indent();
-		// Said plainly, because "an optional extension is missing" badly
-		// understates it: LFS is what carries meshes, textures and audio, which
-		// are the files source control is needed for in the first place.
 		ImGui::TextWrapped(
-			"Git LFS stores large binary files — meshes, textures, audio. Without "
-			"it those would be committed straight into the repository, which most "
-			"hosts reject above 100 MB per file and which makes every clone "
-			"download the entire history of every asset.");
-		drawLfsInstallRemedy();
-		ImGui::Unindent();
-		ImGui::Spacing();
-	}
-	else if (s_last.lfsFound)
-	{
-		ImGui::BulletText("Git LFS %s found.", s_last.lfsVersion.c_str());
-	}
-
-	// ── identity ─────────────────────────────────────────────────────────────
-	if (s_last.gitFound && !s_last.identityConfigured)
-	{
-		ImGui::BulletText("Your name and email are not set in git.");
-		ImGui::Indent();
-		ImGui::TextWrapped("git records who made each change and refuses to commit "
-		                   "without them. This is set once, for all your projects.");
+			"Syncing this project with GitHub, GitLab, Azure DevOps or any other git "
+			"remote needs a few things this machine is missing. The editor works "
+			"normally without them — only source control is unavailable.");
 		ImGui::Spacing();
 
-		const bool applying = ctx.gitIdentityApplying;
-		if (applying) ImGui::BeginDisabled();
-		ImGui::SetNextItemWidth(260.0f);
-		ImGui::InputTextWithHint("##scname",  "Your Name",        s_name,  sizeof(s_name));
-		ImGui::SetNextItemWidth(260.0f);
-		ImGui::InputTextWithHint("##scemail", "you@example.com",  s_email, sizeof(s_email));
-
-		const bool usable = s_name[0] != '\0' && s_email[0] != '\0';
-		if (!usable) ImGui::BeginDisabled();
-		if (EditorWidgets::primaryButton("Save Identity") && ctx.setGitIdentity)
-			ctx.setGitIdentity(s_name, s_email);
-		if (!usable) ImGui::EndDisabled();
-		if (applying) ImGui::EndDisabled();
-
-		if (applying) { ImGui::SameLine(); ImGui::TextDisabled("Saving…"); }
-		ImGui::Unindent();
-		ImGui::Spacing();
-	}
-	else if (s_last.identityConfigured)
-	{
-		ImGui::BulletText("Identity: %s <%s>", s_last.userName.c_str(), s_last.userEmail.c_str());
-	}
-
-	// ── credential helper ────────────────────────────────────────────────────
-	// Informational only. Missing it does not block committing, and the panel
-	// deals with it when a token is first needed — raising it here would make the
-	// dialog look more alarming than the situation is.
-	if (s_last.gitFound && s_last.credentialHelper.empty())
-	{
-		ImGui::BulletText("No credential helper is configured.");
-		ImGui::Indent();
-		ImGui::TextDisabled("Only needed to push. Source control will offer to set "
-		                    "this up when you sign in.");
-		ImGui::Unindent();
-	}
-
-	if (!s_last.detail.empty())
-	{
-		ImGui::Spacing();
-		if (ImGui::TreeNode("Details"))
+		// ── git ──────────────────────────────────────────────────────────────
+		if (!s_last.gitFound)
 		{
-			ImGui::TextUnformatted(s_last.detail.c_str());
-			ImGui::TreePop();
+			ImGui::BulletText("git was not found.");
+			ImGui::Indent();
+			drawGitInstallRemedy();
+			ImGui::Unindent();
+			ImGui::Spacing();
 		}
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Checkbox("Don't show this again", &s_dontShowAgain);
-	ImGui::Spacing();
-
-	if (s_checking) ImGui::BeginDisabled();
-	if (ImGui::Button("Recheck") && ctx.recheckGit) ctx.recheckGit();
-	if (s_checking) ImGui::EndDisabled();
-	ImGui::SameLine();
-
-	if (s_checking)
-	{
-		ImGui::TextDisabled("Rechecking…");
-	}
-	else if (ImGui::Button("Close"))
-	{
-		if (s_dontShowAgain && ctx.globalState)
+		else
 		{
-			ctx.globalState->setCustomConfigEntry("SuppressSourceControlWarning", true);
-			ctx.globalState->writeConfig();
+			// Bullet + Text, not BulletText: BulletText measures with plain
+			// CalcTextSize and draws through RenderText, and neither of those
+			// consults a wrap position — so this line, the one carrying an
+			// absolute path, would have been the one line in the dialog still
+			// running off the edge. Same strings, same order, drawn through the
+			// path that wraps. The same is true of the two bullets below that
+			// carry a version or an address; the short fixed ones can stay.
+			//
+			// No SameLine of our own: Bullet() ends by keeping the cursor on the
+			// line, and at exactly the gap BulletText used — so the line lands
+			// where it always did.
+			ImGui::Bullet();
+			ImGui::Text("git %s found%s.",
+			            s_last.gitVersion.empty() ? "(unknown version)" : s_last.gitVersion.c_str(),
+			            s_last.gitPath.empty() ? "" : (" at " + s_last.gitPath.string()).c_str());
 		}
-		ImGui::CloseCurrentPopup();
+
+		// ── git-lfs ──────────────────────────────────────────────────────────
+		if (s_last.gitFound && !s_last.lfsFound)
+		{
+			ImGui::BulletText("Git LFS was not found.");
+			ImGui::Indent();
+			// Said plainly, because "an optional extension is missing" badly
+			// understates it: LFS is what carries meshes, textures and audio, which
+			// are the files source control is needed for in the first place.
+			ImGui::TextWrapped(
+				"Git LFS stores large binary files — meshes, textures, audio. Without "
+				"it those would be committed straight into the repository, which most "
+				"hosts reject above 100 MB per file and which makes every clone "
+				"download the entire history of every asset.");
+			drawLfsInstallRemedy();
+			ImGui::Unindent();
+			ImGui::Spacing();
+		}
+		else if (s_last.lfsFound)
+		{
+			ImGui::Bullet();
+			ImGui::Text("Git LFS %s found.", s_last.lfsVersion.c_str());
+		}
+
+		// ── identity ─────────────────────────────────────────────────────────
+		if (s_last.gitFound && !s_last.identityConfigured)
+		{
+			ImGui::BulletText("Your name and email are not set in git.");
+			ImGui::Indent();
+			ImGui::TextWrapped("git records who made each change and refuses to commit "
+			                   "without them. This is set once, for all your projects.");
+			ImGui::Spacing();
+
+			const bool applying = ctx.gitIdentityApplying;
+			if (applying) ImGui::BeginDisabled();
+			ImGui::SetNextItemWidth(260.0f);
+			ImGui::InputTextWithHint("##scname",  "Your Name",        s_name,  sizeof(s_name));
+			ImGui::SetNextItemWidth(260.0f);
+			ImGui::InputTextWithHint("##scemail", "you@example.com",  s_email, sizeof(s_email));
+
+			const bool usable = s_name[0] != '\0' && s_email[0] != '\0';
+			if (!usable) ImGui::BeginDisabled();
+			if (EditorWidgets::primaryButton("Save Identity") && ctx.setGitIdentity)
+				ctx.setGitIdentity(s_name, s_email);
+			if (!usable) ImGui::EndDisabled();
+			if (applying) ImGui::EndDisabled();
+
+			if (applying) { ImGui::SameLine(); ImGui::TextDisabled("Saving…"); }
+			ImGui::Unindent();
+			ImGui::Spacing();
+		}
+		else if (s_last.identityConfigured)
+		{
+			ImGui::Bullet();
+			ImGui::Text("Identity: %s <%s>", s_last.userName.c_str(), s_last.userEmail.c_str());
+		}
+
+		// ── credential helper ────────────────────────────────────────────────
+		// Informational only. Missing it does not block committing, and the panel
+		// deals with it when a token is first needed — raising it here would make the
+		// dialog look more alarming than the situation is.
+		if (s_last.gitFound && s_last.credentialHelper.empty())
+		{
+			ImGui::BulletText("No credential helper is configured.");
+			ImGui::Indent();
+			ImGui::TextDisabled("Only needed to push. Source control will offer to set "
+			                    "this up when you sign in.");
+			ImGui::Unindent();
+		}
+
+		if (!s_last.detail.empty())
+		{
+			ImGui::Spacing();
+			if (ImGui::TreeNode("Details"))
+			{
+				ImGui::TextUnformatted(s_last.detail.c_str());
+				ImGui::TreePop();
+			}
+		}
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Checkbox("Don't show this again", &s_dontShowAgain);
+		ImGui::Spacing();
+
+		if (s_checking) ImGui::BeginDisabled();
+		if (ImGui::Button("Recheck") && ctx.recheckGit) ctx.recheckGit();
+		if (s_checking) ImGui::EndDisabled();
+		ImGui::SameLine();
+
+		if (s_checking)
+		{
+			ImGui::TextDisabled("Rechecking…");
+		}
+		else if (ImGui::Button("Close"))
+		{
+			if (s_dontShowAgain && ctx.globalState)
+			{
+				ctx.globalState->setCustomConfigEntry("SuppressSourceControlWarning", true);
+				ctx.globalState->writeConfig();
+			}
+			ImGui::CloseCurrentPopup();
+		}
 	}
 
 	ImGui::EndPopup();

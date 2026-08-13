@@ -159,11 +159,26 @@ void drawFileRow(const Row& r, bool useIndexState, const char* label)
 	ImGui::TextUnformatted(label);
 	if (ImGui::IsItemHovered())
 	{
-		if (!r.entry->origPath.empty())
-			ImGui::SetTooltip("%s\nrenamed from %s", r.path->c_str(),
-			                  r.entry->origPath.c_str());
-		else
-			ImGui::SetTooltip("%s", r.path->c_str());
+		// The tooltip that answers "which file is this really" — so it is a full
+		// path, and for a rename, two of them. Left to SetTooltip that is one
+		// unbroken line, and a tooltip is as wide as its longest line: a box
+		// reaching across the editor to say one path, which is the look this pass
+		// is here to stop. Wrapped at a fixed column because a tooltip has no
+		// width of its own to wrap against — it is whatever its contents made it.
+		// Asked as a question, because imgui.h says so in as many words: EndTooltip
+		// is only to be called when BeginTooltip returned true.
+		if (ImGui::BeginTooltip())
+		{
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				if (!r.entry->origPath.empty())
+					ImGui::Text("%s\nrenamed from %s", r.path->c_str(),
+					            r.entry->origPath.c_str());
+				else
+					ImGui::TextUnformatted(r.path->c_str());
+			}
+			ImGui::EndTooltip();
+		}
 	}
 }
 
@@ -325,6 +340,18 @@ void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 
 void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 {
+	// Wrapped at a fixed column rather than at the window edge, which is the one
+	// case where the panel-wide rule does not apply: a popup sizes itself to its
+	// contents, so "wrap where the window ends" is circular — the window ends
+	// wherever the longest line put it. A remote URL is one unbroken run of
+	// eighty characters, and the popup grew to fit it, right across the editor.
+	// Twenty-six ems is the same measure the dialogs in this file are pinned to,
+	// so the two look like they belong to one program.
+	//
+	// The scope is the function body, which ends before the caller's EndPopup() —
+	// the pop has to happen while this popup is still the current window.
+	EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 26.0f);
+
 	ImGui::TextDisabled("Changes");
 	ImGui::Separator();
 	if (ImGui::MenuItem("Tree view", nullptr, s_treeView))
@@ -644,6 +671,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	// grew and shrank as things happened and the change list moved with it.
 	if (git->blockedByCollabSession())
 	{
+		EditorWidgets::WrapText wrap;
 		// Explained rather than silently absent: a user who cannot find the
 		// commit button should learn why, not conclude the feature is broken.
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.80f, 1.0f, 1.0f));
@@ -660,6 +688,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	}
 	else if (!git->lastInfo().empty())
 	{
+		// The one line here that was not already wrapped, and it is a whole
+		// sentence from git ("Fetched: 3 new commits on origin/main") in a panel
+		// docked at 420 px.
+		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("%s", git->lastInfo().c_str());
 	}
 
@@ -668,6 +700,13 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	// allowed, it is writing and moving HEAD that would desync the session.
 	if (!git->blockedByCollabSession())
 	{
+		// One wrap position per block rather than one for the window: this
+		// panel's ImGui::End() is at the bottom of the function, and a guard
+		// opened next to Begin() would pop after it — onto whichever window is
+		// current by then. A block is the lifetime that matches, and between them
+		// these guards cover everything the panel draws below the header bar.
+		EditorWidgets::WrapText wrap;
+
 		const bool identityOk = !ctx.gitProbe || ctx.gitProbe->identityConfigured;
 		if (!identityOk)
 		{
@@ -723,6 +762,14 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		: ImGui::GetFrameHeightWithSpacing();
 	if (ImGui::BeginChild("##changes", ImVec2(0.0f, -historyH), false))
 	{
+		// The list this panel exists for, and every row in it is a path. In the
+		// flat view that path is the full one from the project root, which is
+		// longer than the panel every time — and it is the END that identifies
+		// the file. Cut off at the right edge, three assets in the same folder
+		// read as three copies of the same row. A child is its own window, so it
+		// needs its own wrap position; this one ends before EndChild() below.
+		EditorWidgets::WrapText wrap;
+
 		if (st.dirtyCount() == 0)
 			ImGui::TextDisabled("Nothing has changed.");
 		else
@@ -739,6 +786,8 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	{
 		if (ImGui::BeginChild("##history", ImVec2(0.0f, 0.0f), false))
 		{
+			EditorWidgets::WrapText wrap;
+
 			const auto& commits = git->recentCommits();
 			if (commits.empty())
 			{
@@ -791,8 +840,19 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 					}
 					ImGui::EndDisabled();
 					if (st.dirtyCount() != 0)
+					{
+						// Wrapped at a column, not at the window edge: a popup is
+						// as wide as its widest line, so wrapping "where the
+						// window ends" would be asking the sentence where it
+						// ends. This is the only prose in a menu of two entries,
+						// and unwrapped it stretched the menu to twice their
+						// width. Ends before EndPopup(), like every other guard.
+						// Named apart from the history child's guard it sits
+						// inside, so neither reads as the other one.
+						EditorWidgets::WrapText menuWrap(ImGui::GetFontSize() * 26.0f);
 						ImGui::TextDisabled("Restoring needs a clean project — commit or "
 						                    "discard your changes first.");
+					}
 					ImGui::EndPopup();
 				}
 				ImGui::PopID();
@@ -806,68 +866,77 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	beginModalSizing();
 	if (ImGui::BeginPopupModal("Create branch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
-		if (s_branchFromOid.empty())
+		// beginModalSizing() pinned the width, so wrapping at the window edge means
+		// something here — and the two lines that were not already wrapped are the
+		// ones that matter: the commit subject this branch starts from, and the
+		// note about a dirty project, which was hand-broken at a column that stops
+		// being right the moment the editor font is scaled.
 		{
-			ImGui::TextWrapped("New branch from the current state (%s).",
-			                   st.branch.empty() ? "no branch" : st.branch.c_str());
-		}
-		else
-		{
-			ImGui::TextWrapped("New branch starting at:");
-			// One wrapped run, not TextDisabled + SameLine + TextWrapped: at a
-			// fixed dialog width the second half would wrap back under the
-			// first and read as two unrelated lines.
-			ImGui::TextWrapped("%s  %s", s_branchFromOid.c_str(),
-			                   s_branchFromSubject.c_str());
-		}
-		ImGui::Spacing();
+			EditorWidgets::WrapText wrap;
 
-		ImGui::SetNextItemWidth(-FLT_MIN);   // fill the (now fixed) width
-		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-		ImGui::InputTextWithHint("##branchname", "feature/new-lighting",
-		                         s_branchName, sizeof(s_branchName));
+			if (s_branchFromOid.empty())
+			{
+				ImGui::TextWrapped("New branch from the current state (%s).",
+				                   st.branch.empty() ? "no branch" : st.branch.c_str());
+			}
+			else
+			{
+				ImGui::TextWrapped("New branch starting at:");
+				// One wrapped run, not TextDisabled + SameLine + TextWrapped: at a
+				// fixed dialog width the second half would wrap back under the
+				// first and read as two unrelated lines.
+				ImGui::TextWrapped("%s  %s", s_branchFromOid.c_str(),
+				                   s_branchFromSubject.c_str());
+			}
+			ImGui::Spacing();
 
-		// Validate while typing: git's own rules, asked of git, so the answer
-		// cannot drift from what the command will accept.
-		const bool empty = s_branchName[0] == '\0';
-		bool nameOk = false, taken = false;
-		if (!empty && !git->projectRoot().empty())
-		{
-			nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
-			taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
-		}
-		if (!empty && !nameOk)
-			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
-			                   "Not a usable branch name.");
-		else if (taken)
-			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
-			                   "A branch with this name already exists.");
+			ImGui::SetNextItemWidth(-FLT_MIN);   // fill the (now fixed) width
+			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+			ImGui::InputTextWithHint("##branchname", "feature/new-lighting",
+			                         s_branchName, sizeof(s_branchName));
 
-		const bool dirty = st.dirtyCount() != 0;
-		ImGui::BeginDisabled(dirty);
-		ImGui::Checkbox("Switch to it right away", &s_branchCheckout);
-		ImGui::EndDisabled();
-		if (dirty)
-		{
-			// Creating the ref is still fine — it touches nothing on disk — so
-			// the useful half stays available and only the switch is blocked.
-			s_branchCheckout = false;
-			ImGui::TextDisabled("Switching needs a clean project; the branch is created\n"
-			                    "anyway and you can switch to it once you have committed.");
-		}
+			// Validate while typing: git's own rules, asked of git, so the answer
+			// cannot drift from what the command will accept.
+			const bool empty = s_branchName[0] == '\0';
+			bool nameOk = false, taken = false;
+			if (!empty && !git->projectRoot().empty())
+			{
+				nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
+				taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
+			}
+			if (!empty && !nameOk)
+				ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
+				                   "Not a usable branch name.");
+			else if (taken)
+				ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
+				                   "A branch with this name already exists.");
 
-		ImGui::Spacing();
-		bool cancelled = false;
-		const bool create = modalButtonRow(
-			"Create", "Cancel", empty || !nameOk || taken || git->busy(), cancelled);
-		if (create)
-			git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
-		if (create || cancelled)
-		{
-			s_branchDialog = false;
-			s_branchFromOid.clear();
-			s_branchFromSubject.clear();
-			ImGui::CloseCurrentPopup();
+			const bool dirty = st.dirtyCount() != 0;
+			ImGui::BeginDisabled(dirty);
+			ImGui::Checkbox("Switch to it right away", &s_branchCheckout);
+			ImGui::EndDisabled();
+			if (dirty)
+			{
+				// Creating the ref is still fine — it touches nothing on disk — so
+				// the useful half stays available and only the switch is blocked.
+				s_branchCheckout = false;
+				ImGui::TextDisabled("Switching needs a clean project; the branch is created\n"
+				                    "anyway and you can switch to it once you have committed.");
+			}
+
+			ImGui::Spacing();
+			bool cancelled = false;
+			const bool create = modalButtonRow(
+				"Create", "Cancel", empty || !nameOk || taken || git->busy(), cancelled);
+			if (create)
+				git->requestCreateBranch(s_branchName, s_branchFromOid, s_branchCheckout);
+			if (create || cancelled)
+			{
+				s_branchDialog = false;
+				s_branchFromOid.clear();
+				s_branchFromSubject.clear();
+				ImGui::CloseCurrentPopup();
+			}
 		}
 		ImGui::EndPopup();
 	}
@@ -881,35 +950,43 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 	if (ImGui::BeginPopupModal("Restore project?", nullptr,
 	                           ImGuiWindowFlags_AlwaysAutoResize))
 	{
-		ImGui::TextWrapped("Every file in the project folder will be put back to how "
-		                   "it was at this commit:");
-		ImGui::Spacing();
-		ImGui::TextWrapped("%s  %s", s_restoreOid.c_str(), s_restoreSubject.c_str());
-		ImGui::Spacing();
-		ImGui::TextWrapped("Files added since are removed, changed files are reverted, "
-		                   "deleted files come back.");
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
-		ImGui::TextWrapped("Your history is kept: this is recorded as a new commit, so "
-		                   "you can undo it by restoring to a later one.");
-		ImGui::PopStyleColor();
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-		ImGui::TextWrapped("Save and close what you are working on first — open scenes "
-		                   "and assets in the editor still hold the old contents and "
-		                   "would write them back.");
-		ImGui::PopStyleColor();
-		ImGui::Spacing();
-
-		bool cancelled = false;
-		const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled,
-		                                    /*danger=*/true);
-		if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
-		if (restore || cancelled)
+		// Every paragraph here is already wrapped by hand; the guard is for the
+		// next line somebody adds to this dialog, which will be a TextDisabled or
+		// a TextColored and will otherwise be the one sentence that runs off the
+		// edge — in the dialog that spells out an irreversible-looking change.
 		{
-			s_restoreOid.clear();
-			s_restoreSubject.clear();
-			ImGui::CloseCurrentPopup();
+			EditorWidgets::WrapText wrap;
+
+			ImGui::TextWrapped("Every file in the project folder will be put back to how "
+			                   "it was at this commit:");
+			ImGui::Spacing();
+			ImGui::TextWrapped("%s  %s", s_restoreOid.c_str(), s_restoreSubject.c_str());
+			ImGui::Spacing();
+			ImGui::TextWrapped("Files added since are removed, changed files are reverted, "
+			                   "deleted files come back.");
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
+			ImGui::TextWrapped("Your history is kept: this is recorded as a new commit, so "
+			                   "you can undo it by restoring to a later one.");
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+			ImGui::TextWrapped("Save and close what you are working on first — open scenes "
+			                   "and assets in the editor still hold the old contents and "
+			                   "would write them back.");
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+
+			bool cancelled = false;
+			const bool restore = modalButtonRow("Restore", "Cancel", git->busy(), cancelled,
+			                                    /*danger=*/true);
+			if (restore) git->requestRestoreTo(s_restoreOid, s_restoreOid);
+			if (restore || cancelled)
+			{
+				s_restoreOid.clear();
+				s_restoreSubject.clear();
+				ImGui::CloseCurrentPopup();
+			}
 		}
 		ImGui::EndPopup();
 	}
@@ -1020,7 +1097,26 @@ bool DrawFooterStatus(AppContext& ctx)
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor(4);
 
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip.c_str());
+	// Spelled out rather than SetTooltip, because this tooltip carries git's own
+	// error text when there is one, and a git error is a full line of prose with
+	// a path in it. A tooltip is sized by its longest line, so that one line
+	// stretched the box across the whole screen — the panel's other lines then sat
+	// alone on a strip of grey, which is the "cheap" look this pass is about. A
+	// fixed column instead of the window edge for the reason a tooltip cannot be
+	// asked where its edge is: it is wherever its contents put it.
+	if (ImGui::IsItemHovered())
+	{
+		// Asked as a question for the reason imgui.h gives: EndTooltip belongs to a
+		// BeginTooltip that returned true.
+		if (ImGui::BeginTooltip())
+		{
+			{
+				EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+				ImGui::TextUnformatted(tip.c_str());
+			}
+			ImGui::EndTooltip();
+		}
+	}
 	return clicked;
 #else
 	(void)ctx;

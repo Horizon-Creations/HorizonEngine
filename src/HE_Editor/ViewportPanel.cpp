@@ -5,6 +5,7 @@
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
+#include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -748,7 +749,22 @@ void render(AppContext& ctx, float dt)
 					rectMin.x, rectMin.y, rectMax.x, rectMax.y);
 			}
 			else
+			{
+				// The one and only piece of window text the Scene window submits,
+				// and the whole reason this file needs a wrap at all: everything
+				// else here — the toolbar strip, the gizmo, the landscape brush
+				// ring, the collaborators' name tags — is painted straight into
+				// the draw list at coordinates it computed itself, which no wrap
+				// position can reach or disturb. This line is a sentence, it is
+				// the only thing on screen when a backend cannot present the
+				// viewport, and in a narrowly docked Scene panel it would
+				// otherwise be cut off mid-word with no hint that it continued.
+				// Scoped tightly rather than pushed right after Begin() because
+				// the guard has to release before ImGui::End() closes the window
+				// it was pushed on.
+				EditorWidgets::WrapText wrap;
 				ImGui::TextDisabled("  Viewport not available on this backend yet.");
+			}
 		}
 		ImGui::End();
 	}

@@ -333,7 +333,26 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 			}
 		ImGui::EndCombo();
 	}
-	if (ImGui::IsItemHovered() && !path.empty()) ImGui::SetTooltip("%s", path.c_str());
+	// The tooltip exists because the combo shows only the file STEM — the whole
+	// content-relative path is what the hover is for, and paths are the longest
+	// single strings this editor ever prints. A tooltip window sizes itself to its
+	// widest line, so an unwrapped one turns into a ribbon stretched across the
+	// display: nothing is cut off, and it looks as cheap as a sideways scrollbar.
+	// The wrap column is given as an absolute x because a tooltip auto-fits its
+	// width to its contents — asking it to wrap "at the window's right edge" is
+	// asking the text to wrap where the text itself decided to end.
+	if (ImGui::IsItemHovered() && !path.empty())
+	{
+		ImGui::BeginTooltip();
+		{
+			// The guard must pop while the tooltip is still the current window;
+			// running the destructor after EndTooltip would pop the panel's stack
+			// instead. Same rule at every guard in this file.
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+			ImGui::TextUnformatted(path.c_str());
+		}
+		ImGui::EndTooltip();
+	}
 	// Path-valued slot: the widget's own undo (committed by the caller) covers it,
 	// so only the drop resolution is shared.
 	if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, wantType))
@@ -2100,7 +2119,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 	{
 		// ═══ Graph: variables + functions | node canvas | node details ═══
 		ImGui::BeginChild("##uiw_gleft", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
-		drawGraphVariables(st, ctx);
+		{
+			// 230 px against element names, variable names and the line explaining
+			// what dragging one does. Unwrapped, ImGui draws those past the right
+			// edge and clips them, so a row reads as half a name with nothing to
+			// say the rest was there. The guard goes on the child rather than the
+			// tab window because a wrap position belongs to the window that pushed
+			// it — it cannot reach in here, and it must not reach the node canvas
+			// beside us, whose contents are placed by hand.
+			EditorWidgets::WrapText wrap;
+			drawGraphVariables(st, ctx);
+		}
 		ImGui::EndChild();
 
 		ImGui::SameLine();
@@ -2201,7 +2230,15 @@ void render(AppContext& ctx, const std::string& assetPath,
 		ImGui::SameLine();
 
 		ImGui::BeginChild("##uiw_gdetails", ImVec2(rightW, 0), ImGuiChildFlags_Borders);
-		drawGraphNodeDetails(st, ctx);
+		{
+			// Almost everything this pane prints under its widgets is a sentence —
+			// "Fires when the bound element raises this event.", "Callable from
+			// scripts via horizon.callWidgetFunction()." — and none of them fit in
+			// 300 px. Clipped they lose their last words silently, which is worse
+			// than not showing them at all.
+			EditorWidgets::WrapText wrap;
+			drawGraphNodeDetails(st, ctx);
+		}
 		ImGui::EndChild();
 	}
 

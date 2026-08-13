@@ -823,18 +823,38 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	}
 
 	ImGui::BeginChild("##ls_side", ImVec2(220.0f, 0.0f), true);
-	ImGui::TextUnformatted(title);
-	ImGui::TextDisabled("%s", subtitle);
-	ImGui::Spacing();
-	drawVariables(graph, edited);
-	ImGui::Spacing();
-	drawFunctions(graph, edited);
-	ImGui::Spacing();
-	ImGui::Separator();
-	if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents, content, edited);
-	else if (!g.selectedVar.empty())   drawVariableDetails(graph, content, edited);
-	else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
-	else ImGui::TextDisabled("Select a node, variable or event.");
+	{
+		// 220 px of sidebar, and nearly everything it prints is a sentence: the
+		// subtitle under the title, the hint under every detail row ("public
+		// functions are callable from Lua/Python."), the "select something" line.
+		// Without a wrap position ImGui lays each of those out on one line straight
+		// past the right edge and clips whatever hangs over, so the reader is handed
+		// the first two thirds of an explanation with nothing to indicate a third is
+		// missing — the same defect as a horizontal scrollbar, minus the scrollbar
+		// that would at least admit it.
+		//
+		// It has to be pushed on THIS window: a wrap position lives on the window it
+		// was pushed in and does not reach into a child, which is also what keeps it
+		// off the canvas next door, where the graph places node bodies, pins and
+		// links at computed positions and a wrap would take the layout apart. And it
+		// is a scope guard rather than a bare Push/Pop pair because the pop must
+		// happen while this child is still the current window — after EndChild it
+		// would pop the parent's stack instead.
+		EditorWidgets::WrapText wrap;
+
+		ImGui::TextUnformatted(title);
+		ImGui::TextDisabled("%s", subtitle);
+		ImGui::Spacing();
+		drawVariables(graph, edited);
+		ImGui::Spacing();
+		drawFunctions(graph, edited);
+		ImGui::Spacing();
+		ImGui::Separator();
+		if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents, content, edited);
+		else if (!g.selectedVar.empty())   drawVariableDetails(graph, content, edited);
+		else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
+		else ImGui::TextDisabled("Select a node, variable or event.");
+	}
 	ImGui::EndChild();
 
 	ImGui::SameLine();
@@ -955,38 +975,50 @@ void beginTabWindow(const char* id, const ImVec2& pos, const ImVec2& size)
 void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
 	beginTabWindow("##levelscript_tab", pos, size);
+	// The "no scene" line is the one thing this panel ever draws at window scope,
+	// and it is a full sentence — in a narrow tab it would be clipped mid-word.
+	// The early return became an else so the guard's destructor runs before
+	// ImGui::End(): popping a wrap position after the window is closed would take
+	// it off whatever window happens to be current instead.
 	if (!ctx.world)
 	{
+		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Open a scene to edit its level script.");
-		ImGui::End();
-		return;
 	}
-	static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
-	bool edited = false;
-	drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
-	              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
-	// snapshotNow() bumps the undo revision so the level script saves with the
-	// scene; self-contained so it doesn't disturb the entity undo.
-	if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
+	else
+	{
+		static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
+		bool edited = false;
+		drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
+		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
+		// snapshotNow() bumps the undo revision so the level script saves with the
+		// scene; self-contained so it doesn't disturb the entity undo.
+		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
+	}
 	ImGui::End();
 }
 
 void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
 	beginTabWindow("##gameinstance_tab", pos, size);
+	// Same shape as the Level Script tab above, and for the same two reasons: the
+	// "no project" sentence is drawn at window scope, and the guard has to close
+	// before ImGui::End().
 	if (!ctx.gameInstanceGraph)
 	{
+		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Open a project to edit its Game Instance.");
-		ImGui::End();
-		return;
 	}
-	static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
-	bool edited = false;
-	drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
-	              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);
-	// The GameInstance graph isn't part of a scene — re-register it in the app
-	// runtime and persist it via the host callback.
-	if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
+	else
+	{
+		static const std::vector<std::string> kEvents = { "OnInit", "OnShutdown", "OnWindowFocusChanged" };
+		bool edited = false;
+		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
+		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);
+		// The GameInstance graph isn't part of a scene — re-register it in the app
+		// runtime and persist it via the host callback.
+		if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
+	}
 	ImGui::End();
 }
 

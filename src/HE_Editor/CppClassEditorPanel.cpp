@@ -2,6 +2,7 @@
 #include "EditorToolbar.h"   // shared toolbar strip
 #include "EditorApplication.h"                 // AppContext
 #include "EditorPanelState.h"                  // shared per-tab state map
+#include "EditorWidgets.h"                     // WrapText
 #include "TextEditor.h"                        // ImGuiColorTextEdit (vendored, MIT)
 #include <imgui_internal.h>                    // ImGuiContext::PlatformImeData (text-input activation)
 #include <algorithm>
@@ -219,6 +220,17 @@ namespace CppClassEditorPanel
 		// ── The active half fills the rest (monospace for alignment) ──────────
 		if (!curExists)
 		{
+			// The one sentence this panel ever prints, in a window that is only as
+			// wide as the tab area happens to be — docked next to a Details panel
+			// that is a few hundred pixels. Without a wrap position ImGui draws the
+			// line straight past the right edge and clips it, so the reader is told
+			// "This class has no" and has to guess which half is missing; that is
+			// the same failure as a sideways scrollbar, minus even the hint that
+			// something was cut off. The scope is deliberately this branch and not
+			// the whole window: the toolbar sizes its cells from the width of their
+			// own labels, and the code editor below paints into the draw list at
+			// positions it computed itself, so neither wants a wrap column.
+			EditorWidgets::WrapText wrap;
 			ImGui::TextDisabled("This class has no %s file.", st.active == 1 ? ".cpp" : ".h");
 		}
 		else
