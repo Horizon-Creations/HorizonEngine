@@ -2598,14 +2598,29 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					if (!recordedSource.empty() && ImGui::MenuItem("Reimport"))
 					{
 						// A reimport REPLACES a file everyone in the session shares,
-						// without anybody asking for it — so the lock is checked
-						// BEFORE the local write, not before the send. Checking it on
-						// the way out would mean clobbering a colleague's asset here
-						// and only then discovering we were not allowed to.
+						// without anybody asking for it — so the lock is taken BEFORE
+						// the local write, not before the send. Checking it on the way
+						// out would mean clobbering a colleague's asset here and only
+						// then discovering we were not allowed to.
+						//
+						// A named lease, not `if (!collab->beginBackgroundWrite(k))`.
+						// A temporary dies at the end of its own expression, which
+						// would give the lock back before the import has read a single
+						// byte and restore precisely the check-then-write gap this
+						// exists to close. It lives until the end of this block, so it
+						// still covers publishReimport — the send is part of the write,
+						// and handing the asset over between writing it and announcing
+						// it would let the next holder's version arrive first.
+						//
+						// The static two-argument form is the null-safe door: no
+						// controller and no key both mean "nothing to arbitrate", which
+						// has to PERMIT the write, and a lease built by hand for that
+						// case would default to refusing and silently kill reimport
+						// everywhere outside a session.
 						const std::string collabKey = collabKeyFor(ctx, s_ctxMenuItem);
-						const bool blocked = ctx.collab && !collabKey.empty() &&
-						                     !ctx.collab->beginBackgroundWrite(collabKey);
-						if (!blocked)
+						CollabController::AssetWriteLease lease =
+							CollabController::beginBackgroundWrite(ctx.collab, collabKey);
+						if (lease)
 						{
 							if (!Importer::reimport(s_ctxMenuItem, ctx.contentManager->contentRoot()))
 								HE_LOG_ERROR(Editor, "%s",

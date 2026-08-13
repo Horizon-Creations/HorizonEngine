@@ -2831,6 +2831,56 @@ TEST_CASE("Reimport: a client's claim that lands late is handed straight back")
     s.host.leave();
 }
 
+TEST_CASE("Reimport: a claim that lost the race says so instead of diverging quietly")
+{
+    // The honest half of the optimistic client claim. The gate answers off the
+    // replicated lock table, which is up to one round trip stale — so a lock
+    // taken on the host a moment ago is invisible here, the write goes ahead,
+    // and the deny arrives afterwards. Silence at that point is precisely the
+    // silent fork this whole mechanism exists to prevent, one layer further out.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    const std::string asset = "Content/Meshes/Column.hasset";
+
+    // Anna takes it — granted inline on the host, and deliberately NOT pumped,
+    // so Bob's table still says the asset is free. That IS the window.
+    s.host.requestAssetLock(asset);
+    REQUIRE(s.host.ownsAssetLock(asset));
+    REQUIRE_FALSE(s.client.assetLockedByOther(asset));
+
+    {
+        const CollabController::AssetWriteLease write = s.client.beginBackgroundWrite(asset);
+        // Bob is allowed and writes the file. Nothing on this machine can know
+        // yet that the claim behind it is already lost.
+        REQUIRE(write.allowed());
+        CHECK(write.pending());
+    }
+
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return !findNote(notes, "Column.hasset").text.empty();
+    }));
+    const HE::Ed::Notification n = findNote(notes, "Column.hasset");
+    // A Problem, because two copies of that file may now differ and nothing else
+    // in the editor will ever mention it — and it names who took it, because the
+    // only way out is to go and ask them.
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.text.find("Anna") != std::string::npos);
+    CHECK(n.text.find("reimported") != std::string::npos);
+
+    // And Bob is left holding nothing: a lost race must not leave a claim behind
+    // any more than a won one does.
+    CHECK_FALSE(s.client.ownsAssetLock(asset));
+    CHECK_FALSE(recordsLock(s.client, asset));
+    CHECK(s.host.ownsAssetLock(asset));
+
+    s.client.leave();
+    s.host.leave();
+}
+
 TEST_CASE("Reimport: with no session the gate is a no-op that always succeeds")
 {
     CollabController solo;   // never hosted, never joined
