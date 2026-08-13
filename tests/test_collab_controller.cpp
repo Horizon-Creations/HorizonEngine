@@ -1298,7 +1298,23 @@ TEST_CASE("Reimport: refused while somebody else is holding the asset")
     // Free: a background write may go ahead, and asking does not post anything —
     // a menu item asks this every frame to decide whether to grey itself out.
     CHECK(s.client.assetWritableNow(asset));
-    CHECK(s.client.beginBackgroundWrite(asset));
+    {
+        // The gate hands back a lease now, and the lease IS the claim: it lives
+        // for as long as the write does and gives the lock back at the closing
+        // brace.
+        const CollabController::AssetWriteLease write = s.client.beginBackgroundWrite(asset);
+        CHECK(write.allowed());
+    }
+    // Bob's claim was still in flight when the lease gave it back — a client
+    // cannot release what it has not been granted yet. Let the round trip finish
+    // so the lock Anna takes below is uncontested; that it comes back at all is
+    // the subject of its own case further down.
+    bool sawBobsClaim = false;
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        const HE::Net::LockInfo* l = s.host.assetLockInfo(asset);
+        if (l) sawBobsClaim = true;
+        return sawBobsClaim && l == nullptr;
+    }));
     CHECK(notes.snapshot().empty());
 
     // Anna starts editing it. The lock reaches Bob's replicated table, which is
@@ -1310,7 +1326,12 @@ TEST_CASE("Reimport: refused while somebody else is holding the asset")
     CHECK_FALSE(s.client.assetWritableNow(asset));
     // The gate refuses BEFORE the local write. Rewriting it here would fork the
     // file with nothing to tell anyone — the bytes of a mesh never travel.
-    CHECK_FALSE(s.client.beginBackgroundWrite(asset));
+    const CollabController::AssetWriteLease refused = s.client.beginBackgroundWrite(asset);
+    CHECK_FALSE(refused.allowed());
+    // And a refusal claims NOTHING. A gate that took the lock on its way to
+    // saying no would leave Bob holding a claim behind Anna's back.
+    CHECK_FALSE(refused.holdsLock());
+    CHECK(s.host.ownsAssetLock(asset));
 
     const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
     CHECK(n.level == HE::Ed::NoteLevel::Problem);
@@ -2668,4 +2689,252 @@ TEST_CASE("Transfer ceiling: a PEER's refusal is not a verdict, so a pending cre
     s.client.leave();
     s.host.leave();
     he_test::removeQuiet(file);
+}
+
+// ─── The claim a reimport holds ──────────────────────────────────────────────
+// Asking whether an asset is free and then writing it are two moments, and the
+// gate used to do only the first. These cover what the lease does with the
+// second one — and, as much as anything, what it must NOT do: give back a lock
+// that was never its to give.
+
+namespace {
+
+// Is this path in the list of asset locks we hold or have asked for? The list
+// is what the editor's own sweeper releases from, so a path left in it (or
+// wrongly taken out of it) is a lock that outlives its reason.
+bool recordsLock(const CollabController& c, const std::string& path) {
+    for (const std::string& held : c.heldAssetLocks()) {
+        if (held == path) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("Reimport: the lock is held for the whole write and given back after")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    const std::string asset = "Content/Meshes/Boulder.hasset";
+    REQUIRE_FALSE(s.host.ownsAssetLock(asset));
+
+    {
+        const CollabController::AssetWriteLease write = s.host.beginBackgroundWrite(asset);
+        REQUIRE(write.allowed());
+        // It CLAIMED something — that is the whole difference from the gate that
+        // only asked. A host grants itself inline, so there is no window at all
+        // here: the lock is genuinely ours before the first byte is written.
+        CHECK(write.holdsLock());
+        CHECK_FALSE(write.pending());
+        CHECK(s.host.ownsAssetLock(asset));
+
+        // And the peer can see it, which is what actually stops them: Bob's own
+        // gate reads this table.
+        REQUIRE(pumpUntil(s.host, s.client, [&] {
+            return s.client.assetLockedByOther(asset);
+        }));
+        CHECK_FALSE(s.client.assetWritableNow(asset));
+    }
+
+    // Out of scope, so out of the lock table. A reimport that kept the asset
+    // locked afterwards would be indistinguishable from a colleague who walked
+    // away with a file open.
+    CHECK_FALSE(s.host.ownsAssetLock(asset));
+    CHECK_FALSE(recordsLock(s.host, asset));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return !s.client.assetLockedByOther(asset);
+    }));
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Reimport: a lock we were already holding is not given away by the write")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    const std::string asset = "Content/Materials/Wall.hasset";
+
+    // Anna has it open in a tab and holds the lock.
+    s.host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.host.ownsAssetLock(asset); }));
+
+    {
+        const CollabController::AssetWriteLease write = s.host.beginBackgroundWrite(asset);
+        // Allowed — it is the same user, and the lock says so.
+        REQUIRE(write.allowed());
+        // But this lease claimed NOTHING, so it has nothing to give back. The
+        // bug it is avoiding: the tab is still open when the import finishes,
+        // and dropping the lock here would flip the user's own editor to
+        // read-only for a peer to walk into, with nothing of theirs behind it.
+        CHECK_FALSE(write.holdsLock());
+    }
+
+    CHECK(s.host.ownsAssetLock(asset));
+    CHECK(recordsLock(s.host, asset));
+
+    // The same rule for a lock that has only been ASKED for. On a client the
+    // grant is a round trip away, so a tab that started editing a moment ago is
+    // in exactly this state — and it wants the lock just as much.
+    const std::string other = "Content/Materials/Floor.hasset";
+    s.client.requestAssetLock(other);          // deliberately not pumped
+    REQUIRE(recordsLock(s.client, other));
+    {
+        const CollabController::AssetWriteLease write = s.client.beginBackgroundWrite(other);
+        REQUIRE(write.allowed());
+        CHECK_FALSE(write.holdsLock());
+    }
+    CHECK(recordsLock(s.client, other));
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Reimport: a client's claim that lands late is handed straight back")
+{
+    // The leak this closes: a client cannot release a lock it has not been
+    // granted, and a background write is always faster than the round trip. The
+    // grant therefore arrives at a machine that has already finished — and
+    // without the deferred release it would sit there for the rest of the
+    // session, held by nobody, with the asset read-only for everyone else.
+    Session s;
+    REQUIRE(openSession(s));
+
+    const std::string asset = "Content/Meshes/Pillar.hasset";
+
+    {
+        const CollabController::AssetWriteLease write = s.client.beginBackgroundWrite(asset);
+        REQUIRE(write.allowed());
+        CHECK(write.holdsLock());
+        // Honest about what it has: the request is on the wire, the answer is
+        // not back, and nothing in this call stack can wait for it.
+        CHECK(write.pending());
+        CHECK_FALSE(s.client.ownsAssetLock(asset));
+    }
+
+    // The host grants it, and it comes back within the same breath.
+    bool sawTheClaim = false;
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        const HE::Net::LockInfo* l = s.host.assetLockInfo(asset);
+        if (l) sawTheClaim = true;
+        return sawTheClaim && l == nullptr;
+    }));
+    CHECK(sawTheClaim);
+    CHECK_FALSE(s.client.ownsAssetLock(asset));
+    CHECK_FALSE(recordsLock(s.client, asset));
+    // Free for the next person, which is the only thing anyone else can observe.
+    CHECK(s.host.assetWritableNow(asset));
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Reimport: with no session the gate is a no-op that always succeeds")
+{
+    CollabController solo;   // never hosted, never joined
+    const std::string asset = "Content/Meshes/Rock.hasset";
+
+    const CollabController::AssetWriteLease write = solo.beginBackgroundWrite(asset);
+    CHECK(write.allowed());
+    // Nothing to arbitrate means nothing to claim and nothing to release — a
+    // reimport outside a session must behave exactly as it did before any of
+    // this existed.
+    CHECK_FALSE(write.holdsLock());
+    CHECK_FALSE(write.pending());
+
+    // The two ways the content browser reaches this with nothing behind it: no
+    // controller (a panel drawn by tooling), and an asset that resolves to no
+    // session key at all. Both permit the write — a lease built by hand would
+    // default to refusing, which is why they go through this door.
+    CHECK(CollabController::beginBackgroundWrite(nullptr, asset).allowed());
+    CHECK(CollabController::beginBackgroundWrite(&solo, "").allowed());
+}
+
+// ─── How much of the notification list a peer may have ───────────────────────
+
+TEST_CASE("Notifications: one peer's flood is capped and summarised, another's is not")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    HE::Net::ParticipantId anna = 0;
+    for (const HE::Net::Participant& p : s.client.participants()) {
+        if (p.isHost) { anna = p.id; break; }
+    }
+    REQUIRE(anna != 0);
+
+    // A refusal storm: every one names a DIFFERENT file, so the store's
+    // collapse-identical-rows rule does nothing for it. That is the case the
+    // rate limit exists for — the store bounds memory, not noise.
+    const int storm = CollabController::kRemoteNoteBudget * 4;
+    for (int i = 0; i < storm; ++i) {
+        s.client.debugInjectAssetRefused(anna,
+                                         "Content/Meshes/Rock" + std::to_string(i) + ".hasset",
+                                         8u * 1024u * 1024u, 1u * 1024u * 1024u,
+                                         /*wasCreate=*/false);
+    }
+
+    int rows = 0, dropped = 0;
+    for (const HE::Ed::Notification& n : notes.snapshot()) {
+        if (n.text.find("could not accept") != std::string::npos) ++rows;
+        if (n.text.find("was not shown") != std::string::npos)    dropped = n.count;
+    }
+    // The budget is what gets through, and the rest are accounted for rather
+    // than swallowed: a limiter that goes quiet loses the one message that
+    // mattered along with the noise.
+    CHECK(rows == CollabController::kRemoteNoteBudget);
+    CHECK(dropped == storm - CollabController::kRemoteNoteBudget);
+    const HE::Ed::Notification summary = findNote(notes, "was not shown");
+    CHECK(summary.level == HE::Ed::NoteLevel::Warning);
+    CHECK(summary.text.find("Anna") != std::string::npos);
+
+    // Somebody else, in the same breath. The budget is per participant for
+    // exactly this reason: a noisy peer must not be able to silence a quiet one,
+    // which would hand any peer a way to hide what the others are saying.
+    s.client.debugInjectAssetRefused(/*refuser=*/4242, "Content/Meshes/Pebble.hasset",
+                                     8u * 1024u * 1024u, 1u * 1024u * 1024u,
+                                     /*wasCreate=*/false);
+    CHECK_FALSE(findNote(notes, "Pebble.hasset").text.empty());
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Notifications: what the user did themselves is never rate-limited")
+{
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore notes;
+    s.client.setNotifications(&notes);
+
+    const std::string asset = "Content/Meshes/Rock.hasset";
+    s.host.requestAssetLock(asset);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.assetLockedByOther(asset); }));
+
+    // Bob clicks Reimport far more often than any budget would allow. Every one
+    // of these is the answer to something HE just did — throttling them would
+    // leave a menu item that silently does nothing, which is the exact outcome
+    // this notice exists to prevent.
+    const int tries = CollabController::kRemoteNoteBudget * 4;
+    for (int i = 0; i < tries; ++i) {
+        const CollabController::AssetWriteLease write = s.client.beginBackgroundWrite(asset);
+        CHECK_FALSE(write.allowed());
+    }
+
+    // One ROW, because the store collapses a repeat of the same sentence — but
+    // it counted every single one. A throttled message would have stopped
+    // counting at the budget.
+    const HE::Ed::Notification n = findNote(notes, "Rock.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.count == tries);
+    CHECK(findNote(notes, "was not shown").text.empty());
+
+    s.client.leave();
+    s.host.leave();
 }

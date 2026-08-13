@@ -999,7 +999,7 @@ void CollabController::wireCallbacks()
 			name = p.name;
 			break;
 		}
-		noteAssetTooLarge(path, bytes, /*sending=*/false, name);
+		noteAssetTooLarge(path, bytes, /*sending=*/false, name, who);
 	});
 
 	m_collab->onAssetRefusedByPeer([this](HE::Net::ParticipantId who,
@@ -1221,7 +1221,7 @@ void CollabController::wireCallbacks()
 			// refusals the handler makes on purpose (a rename onto an occupied
 			// name, a path that resolves outside the project) — those return
 			// early and never set an ec at all.
-			verifyAppliedAssetOp(op, path, newPath);
+			verifyAppliedAssetOp(op, path, newPath, by);
 		});
 
 	m_collab->onDocDeltas([this](HE::Net::ParticipantId, std::uint64_t,
@@ -1276,6 +1276,36 @@ void CollabController::wireCallbacks()
 		// new holder would hold a lock it has no record of and never release
 		// it. This is the one place that sees the transition from both sides.
 		if (!acquired) return;
+
+		// ── A grant nobody wants any more ──
+		// The lock we asked for during a background write, given back before the
+		// answer arrived (see releaseAssetLock). It is ours now, and it is ours
+		// for good unless this hands it straight back — no tab holds it, so
+		// nothing else ever will. Handled before the bookkeeping below and with a
+		// return, so the branch that re-records held locks cannot put it back
+		// into m_heldAssetLocks a line after we released it.
+		if (l.owner == m_collab->localId())
+		{
+			for (auto p = m_pendingLockReleases.begin();
+			     p != m_pendingLockReleases.end(); ++p)
+			{
+				if (assetSubject(*p) != l.subject) continue;
+				const std::string path = *p;
+				m_pendingLockReleases.erase(p);
+				// Unless somebody HERE wants it again. A tab opened between the
+				// background write finishing and this grant arriving asks for the
+				// same lock, and the host answers both asks with this one grant —
+				// handing it back now would leave that tab certain it holds a lock
+				// that is in fact free, which is the one state the whole table
+				// exists to make impossible.
+				if (std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path) !=
+				    m_heldAssetLocks.end())
+					return;
+				m_collab->releaseLock(l.subject);
+				return;
+			}
+		}
+
 		const auto it = m_assetSubjectPaths.find(l.subject);
 		if (it == m_assetSubjectPaths.end()) return;   // an entity, or not ours to track
 		const std::string& path = it->second;
@@ -1294,6 +1324,31 @@ void CollabController::wireCallbacks()
 	});
 
 	m_collab->onLockDenied([this](std::uint64_t subject, LockDenyReason reason) {
+		// ── The background write that lost its race ──
+		// A claim we had already given back, refused: the only way to be in
+		// m_pendingLockReleases is to have asked for this lock and stopped
+		// wanting it before the answer came, which is what a reimport does. It
+		// gets its own message and returns, because the generic sentence below —
+		// "it is read-only for you" — is simply untrue about a write that has
+		// already happened, and two rows for one event is the other way to say
+		// nothing useful twice.
+		for (auto p = m_pendingLockReleases.begin(); p != m_pendingLockReleases.end(); ++p)
+		{
+			if (assetSubject(*p) != subject) continue;
+			const std::string path = *p;
+			m_pendingLockReleases.erase(p);
+			// Unless a tab here has asked for it since (same case as the grant
+			// branch in onLockChanged): then this deny answers that tab as well,
+			// and it needs the reload the ordinary path below performs — so say
+			// our piece about the race and let it through rather than returning.
+			const bool wantedAgain =
+				std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), path) !=
+				m_heldAssetLocks.end();
+			noteBackgroundWriteRaced(path, subject);
+			if (!wantedAgain) return;
+			break;
+		}
+
 		// Refused means someone else is already editing it. Say who, so the user
 		// knows to ask rather than wonder why nothing responds.
 		if (reason == LockDenyReason::HeldByOther)
@@ -1304,11 +1359,19 @@ void CollabController::wireCallbacks()
 			// know one, so the row points at the thing that went read-only
 			// rather than at "this".
 			const auto it = m_assetSubjectPaths.find(subject);
-			postNote(HE::Ed::NoteLevel::Warning,
-			         (l && !l->ownerName.empty() ? l->ownerName
-			                                     : std::string("Someone else")) +
-			             " is editing this — it is read-only for you.",
-			         {}, it != m_assetSubjectPaths.end() ? it->second : std::string{});
+			// Attributed to the holder and rate-limited with the rest of their
+			// traffic: nothing here checks that we ever asked for this subject, so
+			// a host that simply sent denies in a loop could otherwise write this
+			// row two hundred times and empty the list of everything else. Keyed
+			// on the holder rather than on the sender because that is who the
+			// sentence is about — and when the table has forgotten them, on 0,
+			// which is a bucket of its own rather than a way past the limit.
+			postRemoteNote(l ? l->owner : HE::Net::kInvalidParticipant,
+			               HE::Ed::NoteLevel::Warning,
+			               (l && !l->ownerName.empty() ? l->ownerName
+			                                           : std::string("Someone else")) +
+			                   " is editing this — it is read-only for you.",
+			               {}, it != m_assetSubjectPaths.end() ? it->second : std::string{});
 		}
 		// We do not hold it, so do not pretend we do.
 		if (subject == m_heldSubject) m_heldSubject = 0;
@@ -1429,6 +1492,19 @@ void CollabController::teardown()
 	m_netIds.clear();
 	m_lastComponentHashes.clear();
 	m_heldAssetLocks.clear();
+	// Locks whose grant we were still waiting on to release. There is no session
+	// left to release them into, and the host has dropped everything we held the
+	// moment we disconnected — keeping these would only mean the next session's
+	// first grant for a path with the same name gets handed straight back.
+	m_pendingLockReleases.clear();
+	// Participant ids are minted per session and reused across them, so a budget
+	// left behind here would be spent by whoever inherits that number next time:
+	// a peer arriving into a full window would be throttled from their first
+	// message on, for something a stranger did in a session that is over.
+	{
+		std::lock_guard<std::mutex> lock(m_noteBudgetMutex);
+		m_noteBudgets.clear();
+	}
 	// Leaving these behind would keep every open tab read-only after the session
 	// ends: assetEditState short-circuits to Editable without a session, but a
 	// stale "held by X" would resurface the moment a new one started.
@@ -2264,6 +2340,25 @@ void CollabController::releaseAssetLock(const std::string& relativePath)
 	{
 		const std::uint64_t subject = assetSubject(relativePath);
 		if (m_collab->ownsLock(subject)) m_collab->releaseLock(subject);
+		else if (std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(),
+		                   relativePath) != m_heldAssetLocks.end())
+		{
+			// We ASKED for this one and the grant has not arrived. Releasing it
+			// sends nothing (there is nothing to give back yet) — but the request
+			// is already at the host, so the grant is coming to a machine that has
+			// just forgotten it ever wanted the lock. Nothing would then ever
+			// release it: the editor's sweeper only releases what is in
+			// m_heldAssetLocks, and the line below has just taken it out. The
+			// asset would sit read-only for every other peer for the rest of the
+			// session, held by a claim with no tab and no user behind it.
+			//
+			// Reachable at all because a background write claims, writes and gives
+			// the lock back inside a single frame — always faster than the round
+			// trip — and a tab closed quickly enough does the same.
+			if (std::find(m_pendingLockReleases.begin(), m_pendingLockReleases.end(),
+			              relativePath) == m_pendingLockReleases.end())
+				m_pendingLockReleases.push_back(relativePath);
+		}
 	}
 	m_heldAssetLocks.erase(
 		std::remove(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), relativePath),
@@ -2508,7 +2603,8 @@ void CollabController::publishAsset(const std::string& relativePath,
 }
 
 void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t bytes,
-                                         bool sending, const std::string& who)
+                                         bool sending, const std::string& who,
+                                         HE::Net::ParticipantId from)
 {
 	const std::string name = std::filesystem::path(relPath).filename().string();
 	const std::size_t mb   = asMB(bytes);
@@ -2520,6 +2616,8 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 
 	if (sending)
 	{
+		// OUR save, refused by OUR ceiling. Nothing a peer can repeat, and it is
+		// the answer to something the user just did — postNote, never the limit.
 		postNote(HE::Ed::NoteLevel::Problem,
 		         "\"" + name + "\" was not sent to the others.",
 		         "It is " + std::to_string(mb) + " MB and this machine will not send "
@@ -2535,8 +2633,12 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	// theirs is the higher of the two and ours is what stopped it. Saying that
 	// plainly is what makes the notice actionable: the fix is on THIS machine,
 	// and the person who saved the file cannot make it happen.
+	//
+	// Their save, our refusal — which makes it theirs to repeat: a peer saving
+	// one oversized file in a loop lands here once per save, so this is rate
+	// limited under the sender.
 	const std::string sender = who.empty() ? std::string("Someone") : who;
-	postNote(HE::Ed::NoteLevel::Problem,
+	postRemoteNote(from, HE::Ed::NoteLevel::Problem,
 	         sender + " sent \"" + name + "\", and this machine refused it.",
 	         "It is " + std::to_string(mb) + " MB and this machine accepts at most " +
 	             std::to_string(limit) + " MB in one file — their limit is higher than "
@@ -2637,7 +2739,11 @@ void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
 		: std::string("It was not written there, so what they have is still the "
 		              "older version.");
 
-	postNote(HE::Ed::NoteLevel::Problem,
+	// Theirs, and theirs to repeat: a peer whose ceiling is lower than ours
+	// refuses every save of a file this size, so a colleague working on one
+	// oversized asset produces one of these per save. Rate limited under the
+	// refuser, which is also who the sentence names.
+	postRemoteNote(who, HE::Ed::NoteLevel::Problem,
 	         peer + " could not accept \"" + name + "\".",
 	         "It is " + std::to_string(mb) + " MB and " + peer + " accepts at most " +
 	             std::to_string(limit) + " MB in one file — their limit is lower than "
@@ -2665,14 +2771,151 @@ bool CollabController::assetWritableNow(const std::string& relPath)
 	return !l || l->owner == m_collab->localId();
 }
 
-bool CollabController::beginBackgroundWrite(const std::string& relPath)
-{
-	if (assetWritableNow(relPath)) return true;
+// ─── The lease ───────────────────────────────────────────────────────────────
 
-	// Refused, and the user has to be told why — this is a menu item that simply
-	// would not happen otherwise, and "nothing happened" is the one outcome a
-	// user cannot act on. Naming the holder is what makes it actionable: the fix
-	// is to go and ask that person, not to click again.
+CollabController::AssetWriteLease&
+CollabController::AssetWriteLease::operator=(AssetWriteLease&& other) noexcept
+{
+	if (this == &other) return *this;
+	// Whatever this lease was already holding goes back first. Moving onto a
+	// live lease is how a caller reassigns one (the content browser builds an
+	// empty one and assigns the real one into it), and without this the old
+	// claim would simply be forgotten — a lock held by nobody until the session
+	// ends, which is the exact failure m_pendingLockReleases exists to prevent
+	// one layer down.
+	release();
+	m_owner   = other.m_owner;
+	m_path    = std::move(other.m_path);
+	m_allowed = other.m_allowed;
+	m_pending = other.m_pending;
+	other.m_owner   = nullptr;
+	other.m_path.clear();
+	other.m_allowed = false;
+	other.m_pending = false;
+	return *this;
+}
+
+void CollabController::AssetWriteLease::release()
+{
+	if (m_owner && !m_path.empty()) m_owner->endBackgroundWrite(m_path);
+	m_owner = nullptr;
+	m_path.clear();
+	// A spent lease permits nothing. Keeping `allowed` true after the lock has
+	// gone back would leave a caller that released early — or moved the lease
+	// away — holding an object that still says yes to a question it can no
+	// longer answer.
+	m_allowed = false;
+	m_pending = false;
+}
+
+void CollabController::endBackgroundWrite(const std::string& relPath)
+{
+	// Deliberately the ordinary release path rather than a private one: a lock
+	// taken for a background write is the same lock a tab takes, and it has to
+	// leave m_heldAssetLocks the same way or the editor's own sweeper (which
+	// releases locks whose tab has closed) would trip over an entry with no tab
+	// behind it for the rest of the session.
+	releaseAssetLock(relPath);
+}
+
+CollabController::AssetWriteLease
+CollabController::beginBackgroundWrite(CollabController* collab, const std::string& relPath)
+{
+	AssetWriteLease lease;
+	// No controller and no key both mean the same thing: there is nobody to
+	// arbitrate with, so the write goes ahead and there is nothing to give back.
+	// This case has to be spelled out HERE rather than left to each caller,
+	// because a hand-built lease defaults to refusing — and a content browser
+	// that quietly stopped reimporting outside a session would be a far worse
+	// bug than the one this whole mechanism is about.
+	if (!collab || relPath.empty())
+	{
+		lease.m_allowed = true;
+		return lease;
+	}
+	return collab->beginBackgroundWrite(relPath);
+}
+
+CollabController::AssetWriteLease
+CollabController::beginBackgroundWrite(const std::string& relPath)
+{
+	AssetWriteLease lease;
+
+	// ── No session at all ──
+	// The whole mechanism is about arbitrating between peers and there are none,
+	// so this always succeeds and holds nothing.
+	if (!m_collab || !inSession() || relPath.empty())
+	{
+		lease.m_allowed = true;
+		return lease;
+	}
+
+	if (assetWritableNow(relPath))
+	{
+		lease.m_allowed = true;
+
+		// ── We are already holding it ──
+		// The asset is open in a tab here, or a tab asked for it a moment ago and
+		// the grant is still in flight. The reimport is allowed — it is the same
+		// user — but this lease must NOT release afterwards: the lock belongs to
+		// that tab, the user still wants it when the import is over, and taking
+		// it away because a background write finished would flip their own editor
+		// to read-only with no action of theirs behind it. Snapshotted BEFORE the
+		// claim below, because requestAssetLock records the path itself and would
+		// otherwise make every claim look pre-existing.
+		const bool alreadyOurs =
+			ownsAssetLock(relPath) ||
+			std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(), relPath) !=
+				m_heldAssetLocks.end();
+		if (alreadyOurs) return lease;   // claims nothing, so it releases nothing
+
+		// ── Nobody holds it: claim, write, release ──
+		// This is the point of the exercise. Asking and then writing left a window
+		// between the two in which a peer could take the lock and start editing
+		// the file we were about to overwrite; the claim closes it by making the
+		// lock table say so for the duration of the write.
+		requestAssetLock(relPath);
+		lease.m_owner = this;
+		lease.m_path  = relPath;
+
+		// ── What a CLIENT actually has here, honestly ──
+		// On the host the claim above is already granted (CollabSession::requestLock
+		// answers itself), so the window is genuinely shut. On a client the request
+		// is on the wire and the grant is a round trip away — it cannot arrive
+		// while this call stack runs, because the network is only pumped from the
+		// frame loop, so this returns "go ahead" on a claim that is not settled.
+		//
+		// That is a smaller window than the one it replaces, not a closed one, and
+		// it is worth being exact about what it buys: the request is at the host
+		// BEFORE the first byte is written, so the host — the only authority there
+		// is — serialises us against every other claimant, and whoever asked first
+		// wins. What we give up is certainty for one round trip, and if we lose
+		// that race the deny is not swallowed: it comes back as a Problem naming
+		// the file (see the onLockDenied handler), which is the difference between
+		// two copies quietly diverging and somebody being told to go and check.
+		//
+		// Waiting for the grant here was considered and rejected. There is no way
+		// to wait except to pump the session — and pumping it from inside a
+		// content-browser menu handler re-enters onAssetUpdated, which writes
+		// arriving assets through ContentManager::saveAsset while the panel is
+		// halfway through iterating the very folder it is drawing. Trading a
+		// one-RTT race for a re-entrancy crash is not a trade.
+		lease.m_pending = !m_collab->ownsLock(assetSubject(relPath));
+		return lease;
+	}
+
+	// ── Somebody else holds it ──
+	// Refused, nothing claimed, and the user has to be told why — this is a menu
+	// item that simply would not happen otherwise, and "nothing happened" is the
+	// one outcome a user cannot act on. Naming the holder is what makes it
+	// actionable: the fix is to go and ask that person, not to click again.
+	//
+	// Posted through postNote and NOT through the per-peer rate limit: the user
+	// clicked Reimport a moment ago and is looking straight at the menu, so this
+	// is the answer to something THEY did. A peer holding a lock cannot drive it
+	// — nothing arrives to make this fire, it only happens when a person here
+	// clicks — and throttling it would hide the one message somebody is waiting
+	// for.
 	const HE::Net::LockInfo* l    = assetLockInfo(relPath);
 	const std::string        name = std::filesystem::path(relPath).filename().string();
 	const std::string        who  = l && !l->ownerName.empty() ? l->ownerName
@@ -2691,7 +2934,32 @@ bool CollabController::beginBackgroundWrite(const std::string& relPath)
 	                           "them, and the new bytes do not travel over the session."),
 	         relPath);
 	m_assetNotice = who + " is editing \"" + name + "\" — it was not reimported.";
-	return false;
+	return lease;   // allowed = false, and nothing was claimed
+}
+
+void CollabController::noteBackgroundWriteRaced(const std::string& relPath,
+                                                std::uint64_t subject)
+{
+	const HE::Net::LockInfo* l = m_collab ? m_collab->lockFor(subject) : nullptr;
+	const std::string who  = l && !l->ownerName.empty() ? l->ownerName
+	                                                    : std::string("Somebody else");
+	const std::string name = std::filesystem::path(relPath).filename().string();
+	// The honest end of the optimistic claim. The file on this disk has already
+	// been rewritten — that happened inside the menu handler, one round trip
+	// before this answer came back — so there is nothing left to prevent and
+	// nothing to undo; what there is, is a divergence the user does not know
+	// about yet, and telling them is the only thing that separates this from the
+	// silent fork the whole gate exists to stop.
+	//
+	// Not rate-limited, although a deny is something another machine sends: it
+	// can only ever follow a background write somebody started HERE, so it is
+	// bounded by this user's own clicks and not by anything a peer can repeat.
+	postNote(HE::Ed::NoteLevel::Problem,
+	         who + " took \"" + name + "\" while it was being reimported here.",
+	         "The lock went to them a moment after this machine started writing, so "
+	         "the two copies may differ now. Ask them what they have, or take the "
+	         "file from source control.",
+	         relPath);
 }
 
 void CollabController::publishReimport(const std::string& relPath,
@@ -2759,7 +3027,10 @@ void CollabController::noteRemoteReimport(HE::Net::ParticipantId by,
 	// goes stale: in a session that carries the big files, "meshes, textures and
 	// audio do not travel" contradicts what the user was told when they agreed
 	// to it, and the honest thing to say is that this particular one did not.
-	postNote(HE::Ed::NoteLevel::Info,
+	// Purely somebody else's doing, and the easiest of the lot to produce in
+	// bulk — reimport is a menu item, and a peer looping on one broken source
+	// file announces it every time. Rate limited under whoever did it.
+	postRemoteNote(by, HE::Ed::NoteLevel::Info,
 	         who + " reimported \"" + name + "\" — pull it from source control.",
 	         sessionSyncsLargeAssets()
 	             ? std::string("Its new bytes were not sent — they were too large, or "
@@ -2772,7 +3043,8 @@ void CollabController::noteRemoteReimport(HE::Net::ParticipantId by,
 
 void CollabController::verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
                                             const std::string& relPath,
-                                            const std::string& newRelPath)
+                                            const std::string& newRelPath,
+                                            HE::Net::ParticipantId by)
 {
 	using Op = HE::Net::CollabSession::AssetOp;
 	if (op != Op::Delete && op != Op::Rename) return;
@@ -2804,17 +3076,23 @@ void CollabController::verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
 			return;
 	}
 
+	// Attributed to whoever the session says performed the op, and limited with
+	// the rest of their traffic: an apply is a broadcast, so a peer sending them
+	// in a loop for a file that cannot be deleted here would produce one of these
+	// per broadcast. Our own applies pass through untouched — postRemoteNote
+	// exempts our id, and a delete WE asked for that did not take is exactly the
+	// message that must never be swallowed.
 	const std::string name = std::filesystem::path(relPath).filename().string();
 	if (op == Op::Delete)
 	{
-		postNote(HE::Ed::NoteLevel::Problem,
+		postRemoteNote(by, HE::Ed::NoteLevel::Problem,
 		         "\"" + name + "\" was deleted in the session but is still here.",
 		         "Everyone else no longer has it. Remove it by hand, or the next "
 		         "source-control sync will disagree.",
 		         relPath);
 		return;
 	}
-	postNote(HE::Ed::NoteLevel::Problem,
+	postRemoteNote(by, HE::Ed::NoteLevel::Problem,
 	         "\"" + name + "\" was renamed in the session but not on this machine.",
 	         newRelPath.empty()
 	             ? std::string("The file is still under its old name here.")
@@ -2838,6 +3116,75 @@ void CollabController::postNote(HE::Ed::NoteLevel level, std::string text,
 		if (path.empty()) path = relPath;
 	}
 	m_notes->post(level, std::move(text), std::move(detail), std::move(path));
+}
+
+// ─── Notices another machine caused ──────────────────────────────────────────
+
+void CollabController::postRemoteNote(HE::Net::ParticipantId from,
+                                      HE::Ed::NoteLevel level, std::string text,
+                                      std::string detail, const std::string& relPath)
+{
+	// Our own doing goes straight through. The host is a participant like any
+	// other here, and its own applies come back through the same callbacks as
+	// everyone else's — without this test a host would spend a budget on its own
+	// actions and end up throttling itself.
+	const bool fromUs = from != HE::Net::kInvalidParticipant && from == localParticipant();
+	if (!fromUs && !allowRemoteNote(from))
+	{
+		noteRemoteNotesDropped(from);
+		return;
+	}
+	postNote(level, std::move(text), std::move(detail), relPath);
+}
+
+bool CollabController::allowRemoteNote(HE::Net::ParticipantId from)
+{
+	// The store's own clock: steady, monotonic, in milliseconds, and the same one
+	// the rows are stamped with. Not ImGui's — this can be reached from a
+	// callback and ImGui's time is only meaningful inside a frame — and not a
+	// wall clock, which a daylight-saving jump or an NTP correction can move
+	// backwards, handing a peer an unbounded window or freezing one shut.
+	const std::uint64_t now = HE::Ed::NotificationStore::nowMs();
+
+	std::lock_guard<std::mutex> lock(m_noteBudgetMutex);
+	RemoteNoteBudget& b = m_noteBudgets[from];
+	if (b.windowStartMs == 0 || now - b.windowStartMs >= kRemoteNoteWindowMs)
+	{
+		b.windowStartMs = now;
+		b.posted        = 0;
+	}
+	if (b.posted >= kRemoteNoteBudget) return false;
+	++b.posted;
+	return true;
+}
+
+void CollabController::noteRemoteNotesDropped(HE::Net::ParticipantId from)
+{
+	std::string who = "a peer";
+	for (const HE::Net::Participant& p : participants())
+	{
+		if (p.id != from) continue;
+		if (!p.name.empty()) who = p.name;
+		break;
+	}
+
+	// One post per DROPPED message, with identical text on purpose: the store
+	// collapses consecutive identical rows into one and counts them, so this
+	// becomes a single row that reads "A further message from Anna was not
+	// shown.  x37" — the count is literally how many were dropped, and it keeps
+	// counting up for as long as the peer keeps going. Writing the number into
+	// the sentence instead would produce a new row per message and rebuild the
+	// flood this exists to stop.
+	//
+	// Warning rather than Info: what was dropped may well have included a
+	// Problem, and a row people skim past is the same as no row. Not a Problem
+	// itself, because nothing on this machine is out of step — a peer is merely
+	// talking faster than the list can carry.
+	postNote(HE::Ed::NoteLevel::Warning,
+	         "A further message from " + who + " was not shown.",
+	         who + " is producing more notices than this list can carry, so the rest "
+	         "are being dropped to keep it readable. The count on this row is how "
+	         "many; it stops when they do.");
 }
 
 bool CollabController::requestOrPerformAssetOp(

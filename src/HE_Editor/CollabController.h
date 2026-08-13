@@ -25,8 +25,10 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class HorizonWorld;
@@ -69,6 +71,27 @@ public:
 	// existed the only places to say so were a footer line destroyed by the next
 	// click and a log file nobody has open.
 	void setNotifications(HE::Ed::NotificationStore* store) { m_notes = store; }
+
+	// ── How much of that store one PEER may fill ─────────────────────────────
+	// Notices caused by another machine are rate-limited per participant (see
+	// postRemoteNote). Public, and for the same reason kMinAssetMB is: the test
+	// that proves the limit holds has to assert against the number the limit
+	// actually uses, or the two drift and the test starts proving nothing.
+	//
+	// Ten per ten seconds, per peer. The number is picked against what an
+	// ordinary busy session produces, which is far less than people expect:
+	// saves, deltas, transforms and lock changes post NOTHING at all — the
+	// remote-triggered notices are the exceptional events (a peer reimported
+	// something whose bytes do not travel, a file one side refused as too large,
+	// a lock we were denied, an approved delete that did not take here), and a
+	// busy hour of three people editing produces a handful each. The largest
+	// legitimate burst I can construct is somebody reimporting a folder of
+	// meshes one after another, and ten of those still get through with the rest
+	// named in the summary row. A peer looping on a bad file, meanwhile, is
+	// clipped from thousands to ten — and told about, which is the half that
+	// makes a limiter honest rather than a silencer.
+	static constexpr std::uint64_t kRemoteNoteWindowMs = 10'000;
+	static constexpr int           kRemoteNoteBudget   = 10;
 
 	// Which project this editor has open. Compared on join and refused when the
 	// two sides differ, because everything a session sends — scene entities,
@@ -672,13 +695,95 @@ public:
 	// every frame to decide whether to grey itself out.
 	bool assetWritableNow(const std::string& relPath);
 
-	// The gate the reimport itself goes through, BEFORE the local write. False
-	// means somebody else is holding the asset and the write must not happen:
-	// rewriting it here would fork the file locally and the session would never
-	// see the divergence, because the bytes of an imported mesh do not travel.
-	// The user is told who is holding it (a Problem in the notification store) —
-	// the caller only has to obey the answer.
-	bool beginBackgroundWrite(const std::string& relPath);
+	// ── The claim a background write holds while it writes ───────────────────
+	// What beginBackgroundWrite hands back. Asking whether an asset is free and
+	// then writing it are two moments, and between them a peer can take the lock
+	// — the time-of-check/time-of-use gap the gate existed to close and did not,
+	// because it only ever asked. This object is the claim itself: it is taken
+	// before the write and given back when the object dies, so the release
+	// cannot be forgotten by an early return, an exception, or a menu handler
+	// that grew a branch six months from now.
+	//
+	// A default-constructed lease permits NOTHING. That is the safe direction to
+	// be wrong in: the only way to obtain a lease that permits a write is to ask
+	// a controller for one, and a controller never permits a path somebody else
+	// is holding. (The "there is no session at all" case still has to succeed —
+	// see the two-argument beginBackgroundWrite below, which is the null-safe
+	// door into this and the one the content browser uses.)
+	//
+	// Keep it alive for as long as the write lasts, and not one moment longer
+	// than the controller: it holds a bare pointer back, which is safe for the
+	// stack local inside a menu handler it is meant to be and nothing else. A
+	// lease that dies at the end of the expression that created it —
+	// `if (!collab->beginBackgroundWrite(p))` — releases immediately and leaves
+	// exactly the gap described above; it is still permitted to compile so the
+	// callers can be migrated one at a time, but it is not the shape to write.
+	class AssetWriteLease
+	{
+	public:
+		AssetWriteLease() = default;
+		~AssetWriteLease() { release(); }
+
+		// Movable so it can be returned and stored; NOT copyable, because two
+		// copies would each release on destruction and the second release would
+		// drop a lock that by then may belong to a tab the user has open.
+		AssetWriteLease(AssetWriteLease&& other) noexcept { *this = std::move(other); }
+		AssetWriteLease& operator=(AssetWriteLease&& other) noexcept;
+		AssetWriteLease(const AssetWriteLease&)            = delete;
+		AssetWriteLease& operator=(const AssetWriteLease&) = delete;
+
+		// May the write go ahead? The whole answer for the caller.
+		bool allowed() const { return m_allowed; }
+		explicit operator bool() const { return m_allowed; }
+
+		// Did THIS lease claim the lock — i.e. will it give something back? False
+		// for the two cases where there is nothing to give back: no session, and
+		// "we were already holding it before this write started". The second is
+		// the one that matters: the asset is open in a tab here, the user still
+		// wants it when the reimport is over, and releasing it because a
+		// background write finished would take it out from under them.
+		bool holdsLock() const { return m_owner != nullptr; }
+
+		// True on a CLIENT that has just asked for the lock: the grant is a host
+		// round trip away and cannot arrive while this call stack is running, so
+		// the write proceeds on a claim that is in flight rather than settled.
+		// See beginBackgroundWrite's implementation for why waiting for it is not
+		// an option, and what this does buy.
+		bool pending() const { return m_pending; }
+
+		// Give the claim back early. Idempotent, and a spent lease permits
+		// nothing — releasing and then writing is the misuse this exists to
+		// prevent, so it must not still answer "allowed" afterwards.
+		void release();
+
+	private:
+		friend class CollabController;
+		CollabController* m_owner   = nullptr;   // set only when we claimed
+		std::string       m_path;
+		bool              m_allowed = false;
+		bool              m_pending = false;
+	};
+
+	// The gate the reimport itself goes through, BEFORE the local write. A lease
+	// that answers false means somebody else is holding the asset and the write
+	// must not happen: rewriting it here would fork the file locally and the
+	// session would never see the divergence, because the bytes of an imported
+	// mesh do not travel. The user is told who is holding it (a Problem in the
+	// notification store) — the caller only has to obey the answer.
+	//
+	// When it answers true the lock is CLAIMED, and stays claimed until the
+	// returned lease goes out of scope.
+	[[nodiscard]] AssetWriteLease beginBackgroundWrite(const std::string& relPath);
+
+	// The same gate for a caller that may not have a controller or a session key
+	// at all — the content browser draws in contexts with no editor behind it
+	// (tests, tooling), and there `ctx.collab` is null and the key is empty.
+	// Both mean "nothing to arbitrate", which must PERMIT the write: a lease
+	// built by hand for that case would default to refusing and silently kill
+	// reimport everywhere outside a session. One door, so that cannot be got
+	// wrong at the call site.
+	[[nodiscard]] static AssetWriteLease beginBackgroundWrite(CollabController* collab,
+	                                                          const std::string& relPath);
 
 	// After the reimport wrote the file. What this does depends on the asset:
 	//  · a kind that TRAVELS (see isSyncableAssetType) is re-transmitted whole,
@@ -844,7 +949,8 @@ private:
 	// it and where that limit is changed. Anything less leaves the reader with a
 	// file that simply did not arrive.
 	void noteAssetTooLarge(const std::string& relPath, std::size_t bytes,
-	                       bool sending, const std::string& who = {});
+	                       bool sending, const std::string& who = {},
+	                       HE::Net::ParticipantId from = HE::Net::kInvalidParticipant);
 	// The third case, and the only one where the machine being told is not the
 	// machine that can fix it: THEY refused OUR file, because their ceiling is
 	// lower than ours. Kept apart from the two above rather than folded into the
@@ -871,6 +977,33 @@ private:
 	// would be forty chances to forget.
 	void postNote(HE::Ed::NoteLevel level, std::string text,
 	              std::string detail = {}, const std::string& relPath = {});
+
+	// ── A notice ANOTHER MACHINE caused ──────────────────────────────────────
+	// Same post, through the rate limit below. Everything that reaches the store
+	// because of something a peer did goes through here instead of postNote, and
+	// nothing else does: a peer — hostile, or merely looping on a file it cannot
+	// read — otherwise decides how much of this editor's notification list is
+	// theirs. The store already collapses CONSECUTIVE identical rows, which
+	// bounds a repeated message and nothing else: two messages posted
+	// alternately never collapse at all, and 200 rows of them push everything
+	// the user was actually looking at out of the list.
+	//
+	// The limit lives here rather than in the store because the store also
+	// carries notices the user caused themselves — a reimport they blocked, a
+	// save of theirs that was too large — and throttling those would swallow the
+	// answer somebody is standing there waiting for. `from` is what separates
+	// the two: our own id (or none) posts unthrottled.
+	void postRemoteNote(HE::Net::ParticipantId from, HE::Ed::NoteLevel level,
+	                    std::string text, std::string detail = {},
+	                    const std::string& relPath = {});
+	// Has `from` any budget left in the current window? Consumes one when it
+	// has. Thread-safe on its own account — see m_noteBudgetMutex.
+	bool allowRemoteNote(HE::Net::ParticipantId from);
+	// The one thing a limiter must never do is go quiet. This is the row that
+	// says a peer is producing more than can be shown, posted once per dropped
+	// message and worded so the store's collapse turns it into a single row with
+	// the count on it.
+	void noteRemoteNotesDropped(HE::Net::ParticipantId from);
 	// Settle one row, the row itself rather than an index into a vector that the
 	// settling mutates. Shared by the single-row and the whole-bundle paths so
 	// the two cannot answer differently — approving a rename onto a name that is
@@ -881,9 +1014,14 @@ private:
 	// After an approved op was carried out here: is the disk in the state the
 	// session just agreed on? Posts a Problem when it is not. See the call site
 	// for why the disk is asked rather than the apply handler's error codes.
+	// `by` is who the session says performed it, so the notice this may post is
+	// attributed to the machine that caused it and rate-limited with the rest of
+	// their traffic — an apply broadcast in a loop would otherwise be a way to
+	// fill the list one failed verification at a time.
 	void verifyAppliedAssetOp(HE::Net::CollabSession::AssetOp op,
 	                          const std::string& relPath,
-	                          const std::string& newRelPath);
+	                          const std::string& newRelPath,
+	                          HE::Net::ParticipantId by);
 	// Somebody else reimported an asset whose bytes do not travel.
 	void noteRemoteReimport(HE::Net::ParticipantId by, const std::string& relPath);
 
@@ -1147,7 +1285,46 @@ private:
 	// simply absent from it.
 	std::vector<std::pair<std::uint64_t, std::uint32_t>> m_netIds;
 	std::vector<std::string> m_heldAssetLocks;
+	// Asset locks we asked for and no longer want, whose grant has not arrived
+	// yet. Only a client can be in this state, and only because releasing a lock
+	// it does not hold yet sends nothing: the request is already at the host, so
+	// the grant comes back regardless and lands on a machine that has forgotten
+	// it ever asked. Left alone that is a lock held for the rest of the session
+	// by nobody — the asset goes read-only for every other peer and no tab
+	// exists here to release it. Whatever is in here is released the moment it
+	// is granted.
+	//
+	// Background writes are what made this reachable: a reimport claims, writes
+	// and gives the lock back inside one frame, which is always faster than the
+	// round trip. A tab does it too, if it is closed quickly enough.
+	std::vector<std::string> m_pendingLockReleases;
+	// Give back the claim a lease took, from the lease's destructor.
+	void endBackgroundWrite(const std::string& relPath);
+	// Our background write's claim lost the race after the file had already been
+	// rewritten here. The one honest thing left to say — see the call site.
+	void noteBackgroundWriteRaced(const std::string& relPath, std::uint64_t subject);
 	std::function<void(const std::string&)> m_onAssetLockDenied;
+
+	// ── The per-peer notification budget ─────────────────────────────────────
+	// One window per participant, so a peer flooding the list cannot spend
+	// anybody else's budget — the failure that would make this worse than no
+	// limit at all, because the one machine with something urgent to say would
+	// be the one silenced by the noisy one.
+	struct RemoteNoteBudget
+	{
+		std::uint64_t windowStartMs = 0;
+		int           posted        = 0;   // shown so far in this window
+	};
+	std::unordered_map<HE::Net::ParticipantId, RemoteNoteBudget> m_noteBudgets;
+	// Today every one of these callbacks runs on the frame thread: HorizonNet is
+	// poll-driven end to end (CollabController::update → SecureTransport::update
+	// → NetSession::pump → CollabSession::update), and there is not a single
+	// thread in the whole stack. The lock is here anyway because the thing this
+	// sits in front of — NotificationStore::post — promises to be callable from
+	// ANY thread, and the editor already posts to it from workers. A limiter
+	// that quietly narrowed that promise would turn the first background poster
+	// into a data race on this map rather than an obvious compile-time change.
+	std::mutex m_noteBudgetMutex;
 
 	// What the host last told us about an asset, keyed by project-relative path.
 	// Absent = never asked. This is the open-time answer, kept separate from the
