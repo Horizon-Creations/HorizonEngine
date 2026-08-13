@@ -146,6 +146,38 @@ ParticipantColor colorOf(const CollabSession& s, const std::string& name) {
 
 constexpr MessageId kIdJoinRequest  = kFirstUserMessage + 0;
 constexpr MessageId kIdJoinRejected = kFirstUserMessage + 2;
+// Written by hand below, the way a buggy or hostile client would: the host's
+// handling of a report it should not act on cannot be provoked through the
+// client session object, which only ever reports what it actually refused.
+constexpr MessageId kIdAssetRefusedReport = kFirstUserMessage + 37;
+
+// One refusal as it came home to the peer that sent the file. Collected in a
+// struct because every assertion about it is about the WHOLE sentence — who,
+// which file, how big, and whose limit — and checking those one at a time is how
+// a notice that names the right file and the wrong number gets through a test.
+struct RefusalNote {
+    ParticipantId              by      = kInvalidParticipant;
+    std::string                path;
+    std::uint32_t              bytes   = 0;
+    std::uint32_t              limit   = 0;
+    CollabSession::AssetIntent intent  = CollabSession::AssetIntent::Update;
+    int                        count   = 0;
+};
+
+// Record every refusal `s` is told about. Returned by reference so the test can
+// read it after pumping.
+void collectRefusals(CollabSession& s, RefusalNote& into) {
+    s.onAssetRefusedByPeer([&into](ParticipantId by, const std::string& path,
+                                   std::uint32_t bytes, std::uint32_t limit,
+                                   CollabSession::AssetIntent intent) {
+        into.by     = by;
+        into.path   = path;
+        into.bytes  = bytes;
+        into.limit  = limit;
+        into.intent = intent;
+        ++into.count;
+    });
+}
 
 } // namespace
 
@@ -3053,6 +3085,251 @@ TEST_CASE("CollabSession: the snapshot keeps a ceiling of its own")
     q->pump(20);
     CHECK_FALSE(q->client->isJoined());
     CHECK(reason == JoinRejectReason::SnapshotFailed);
+}
+
+// ─── The refusal on its way home ─────────────────────────────────────────────
+// The ceiling is per machine, so the LOWER of two ends decides — and until this
+// existed, only that end was told. The sender's own limit had let the bytes go,
+// so nothing on its side failed and nothing on its side said a word: two editors
+// held different files and neither user had a reason to look. What follows is
+// that verdict travelling back, along both of the routes it can take.
+
+TEST_CASE("CollabSession: a host's refusal travels back to the client that sent the file")
+{
+    // The short route. The host holds the connection the asset arrived on, so it
+    // answers straight down it — no routing, no third party.
+    CollabSession::Config tightHost;
+    tightHost.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", {}, tightHost);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AB01ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    RefusalNote told;
+    collectRefusals(*p->client, told);
+
+    // Bob's own ceiling is the default, so from here this save simply worked.
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Meshes/Statue.hasset", makeBlob(20000)));
+    p->pump(8);
+
+    REQUIRE(told.count == 1);
+    CHECK(told.path  == "Content/Meshes/Statue.hasset");
+    CHECK(told.by    == p->host->localId());
+    // The announced size and THEIR ceiling. Both are needed for a sentence
+    // anybody can act on: without the second, "it was too big" names no number
+    // the reader could raise, and quoting our own would name the limit that let
+    // the file through in the first place.
+    CHECK(told.bytes == 20000);
+    CHECK(told.limit == 4096);
+    CHECK(told.intent == CollabSession::AssetIntent::Update);
+}
+
+TEST_CASE("CollabSession: a client's refusal of a relay reaches the peer that authored it")
+{
+    // The long route, and the reason there are two messages rather than one. The
+    // refuser is a client and cannot address the author at all — everything goes
+    // through the host. Here the author IS the host, so the last hop is a
+    // callback rather than a send; the three-participant case, where the host has
+    // to forward it to a third editor, is over real TCP in test_collab_controller.
+    CollabSession::Config tightClient;
+    tightClient.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", tightClient);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AB02ull;
+    REQUIRE(p->host->requestLock(kAsset));
+    p->pump(4);
+
+    RefusalNote told;
+    collectRefusals(*p->host, told);
+
+    REQUIRE(p->host->sendAsset(kAsset, "Content/Audio/Score.hasset", makeBlob(30000)));
+    p->pump(10);
+
+    REQUIRE(told.count == 1);
+    CHECK(told.path  == "Content/Audio/Score.hasset");
+    CHECK(told.by    == p->client->localId());
+    CHECK(told.bytes == 30000);
+    CHECK(told.limit == 4096);
+}
+
+TEST_CASE("CollabSession: a refused CREATE says which it was, because the two leave different things behind")
+{
+    // Not decoration. After a refused save the peer still holds the older file;
+    // after a refused create they hold nothing at all, and there is no asset on
+    // their disk for anyone to notice is stale. Only the frame knows which, so
+    // the intent rides home with the refusal.
+    CollabSession::Config tightHost;
+    tightHost.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", {}, tightHost);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    RefusalNote told;
+    collectRefusals(*p->client, told);
+
+    CollabSession::AssetUpdate a;
+    a.subject = 0x8000'0000'0000'AB03ull;
+    a.path    = "Content/Materials/Brand.hasset";
+    a.bytes   = makeBlob(9000);
+    // A create needs no lock — nobody can hold one on an asset that does not
+    // exist — which is also why it reaches the host's ceiling check at all.
+    a.intent  = CollabSession::AssetIntent::Create;
+    REQUIRE(p->client->sendAsset(a));
+    p->pump(8);
+
+    REQUIRE(told.count == 1);
+    CHECK(told.intent == CollabSession::AssetIntent::Create);
+    CHECK(told.path   == "Content/Materials/Brand.hasset");
+    CHECK(told.limit  == 4096);
+}
+
+TEST_CASE("CollabSession: a transfer that fits refuses nothing and reports nothing")
+{
+    // The case that must stay silent. A refusal path that fires on an ordinary
+    // save would put a Problem in front of a user for every file that worked,
+    // which is a worse failure than the silence it replaced.
+    auto p = makePair("Anna", "Bob");
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AB04ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    RefusalNote clientTold, hostTold;
+    collectRefusals(*p->client, clientTold);
+    collectRefusals(*p->host, hostTold);
+
+    bool arrived = false;
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        arrived = true;
+    });
+
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Materials/Fine.hasset", makeBlob(4000)));
+    p->pump(8);
+
+    CHECK(arrived);
+    CHECK(clientTold.count == 0);
+    CHECK(hostTold.count   == 0);
+}
+
+TEST_CASE("CollabSession: a refusal is never relayed on as an asset, and cannot be refused in turn")
+{
+    // The foot-gun this design has to be immune to. A refusal that travelled the
+    // asset path would be fanned out to the whole session, and — being a frame
+    // like any other — could itself be refused, which is a loop with a
+    // notification at every turn of it.
+    CollabSession::Config tightHost;
+    tightHost.maxAssetBytes = 4096;
+    auto p = makePair("Anna", "Bob", {}, tightHost);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'AB05ull;
+    REQUIRE(p->client->requestLock(kAsset));
+    p->pump(4);
+
+    RefusalNote clientTold, hostTold;
+    collectRefusals(*p->client, clientTold);
+    collectRefusals(*p->host, hostTold);
+
+    bool clientGotAsset = false, hostGotAsset = false;
+    p->client->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        clientGotAsset = true;
+    });
+    p->host->onAssetUpdated([&](ParticipantId, const CollabSession::AssetUpdate&) {
+        hostGotAsset = true;
+    });
+    // The RECEIVING-side notice, the one that says "this machine refused it".
+    // If the refusal were being read back as an asset frame anywhere, this is
+    // where it would show up.
+    int clientRefusedIncoming = 0;
+    p->client->onAssetRefused([&](ParticipantId, const std::string&, std::uint32_t) {
+        ++clientRefusedIncoming;
+    });
+
+    REQUIRE(p->client->sendAsset(kAsset, "Content/Meshes/Colossus.hasset", makeBlob(50000)));
+    p->pump(16);   // long enough for a loop to have gone round several times
+
+    // Exactly one refusal reached the sender, and nothing came back the other way.
+    CHECK(clientTold.count == 1);
+    CHECK(hostTold.count   == 0);
+    CHECK_FALSE(clientGotAsset);
+    CHECK_FALSE(hostGotAsset);
+    CHECK(clientRefusedIncoming == 0);
+}
+
+TEST_CASE("CollabSession: the host drops a refusal report that does not describe a refusal")
+{
+    // Hand-written frames, because a CollabSession client only ever reports what
+    // it genuinely refused — and the host must not take a peer's word for any of
+    // it. Each of these would otherwise put a Problem in front of a user about a
+    // file that was never in trouble.
+    auto p = makePair("Anna", "Bob");
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    RefusalNote hostTold, clientTold;
+    collectRefusals(*p->host, hostTold);
+    collectRefusals(*p->client, clientTold);
+
+    const ParticipantId hostId   = p->host->localId();
+    const ParticipantId clientId = p->client->localId();
+    const ConnectionId  toHost   = p->clientNet->connections().front();
+
+    // Same frame throughout; only the thing being lied about changes.
+    auto report = [&](ParticipantId author, std::uint8_t intent, const std::string& path,
+                      std::uint32_t bytes, std::uint32_t limit) {
+        BitWriter w;
+        w.writeUInt32(author);
+        w.writeByte(intent);
+        w.writeString(path);
+        w.writeUInt32(bytes);
+        w.writeUInt32(limit);
+        p->clientNet->send(toHost, kIdAssetRefusedReport, w);
+        p->pump(6);
+    };
+
+    // A size the stated ceiling would have accepted. Nothing refused this.
+    report(hostId, 0, "Content/Fine.hasset", 100, 4096);
+    CHECK(hostTold.count == 0);
+
+    // Naming ourselves as the author: the host would be handing a peer its own
+    // refusal back, which is the first turn of a loop.
+    report(clientId, 0, "Content/Self.hasset", 20000, 4096);
+    CHECK(clientTold.count == 0);
+    CHECK(hostTold.count   == 0);
+
+    // An author who is not in this session.
+    report(4242, 0, "Content/Ghost.hasset", 20000, 4096);
+    CHECK(hostTold.count == 0);
+
+    // An intent from a build this one does not speak.
+    report(hostId, 99, "Content/Future.hasset", 20000, 4096);
+    CHECK(hostTold.count == 0);
+
+    // An empty path, which names no file and so cannot be told to anybody.
+    report(hostId, 0, "", 20000, 4096);
+    CHECK(hostTold.count == 0);
+
+    // And the same shape, correct: the harness is capable of getting through,
+    // so every silence above is the host's judgement and not a broken frame.
+    report(hostId, 0, "Content/Real.hasset", 20000, 4096);
+    REQUIRE(hostTold.count == 1);
+    CHECK(hostTold.path  == "Content/Real.hasset");
+    CHECK(hostTold.by    == clientId);   // stamped from the connection, not the payload
+    CHECK(hostTold.limit == 4096);
 }
 
 // ─── What a LAN announcement says about the session ──────────────────────────

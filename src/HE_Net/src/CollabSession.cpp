@@ -65,6 +65,19 @@ constexpr MessageId kMsgAssetOpApply      = kFirstUserMessage + 34;  // host →
 // answer comes back holder → host.
 constexpr MessageId kMsgAssetEditRequest  = kFirstUserMessage + 35;  // host → the holder
 constexpr MessageId kMsgAssetEditAnswer   = kFirstUserMessage + 36;  // holder → host
+// ── "I would not take that file" ──
+// The size ceiling is per machine, so the lower of two ends refuses what the
+// other was happy to send — and the sender's save looked as though it worked.
+// These carry that verdict home. Two ids because it takes two hops whenever the
+// refuser is a client and the author is another client: no client can address
+// another, so the refusal is REPORTED to the host and the host DELIVERS it.
+//
+// Neither of them ever re-enters the asset path: they are their own ids, they
+// allocate nothing, and no handler below answers one by sending another. So a
+// refusal cannot be relayed onward as an asset, and a refusal of a refusal has
+// nothing it could be made out of.
+constexpr MessageId kMsgAssetRefusedReport = kFirstUserMessage + 37;  // refuser → host
+constexpr MessageId kMsgAssetRefused       = kFirstUserMessage + 38;  // host → the sender
 
 // Quaternion components are always in [-1, 1], so 16 bits each is ~3e-5 of
 // angular resolution — far finer than a camera gizmo can show, at a quarter the
@@ -177,6 +190,9 @@ void CollabSession::installHandlers() {
         m_net->on(kMsgAssetEditAnswer, [this](ConnectionId conn, BitReader& r) {
             handleAssetEditAnswer(conn, r);
         });
+        m_net->on(kMsgAssetRefusedReport, [this](ConnectionId conn, BitReader& r) {
+            handleAssetRefusedReport(conn, r);
+        });
     } else {
         m_net->on(kMsgJoinAccepted, [this](ConnectionId, BitReader& r) { handleJoinAccepted(r); });
         m_net->on(kMsgJoinRejected, [this](ConnectionId, BitReader& r) { handleJoinRejected(r); });
@@ -204,6 +220,12 @@ void CollabSession::installHandlers() {
         });
         m_net->on(kMsgAssetEditRequest, [this](ConnectionId, BitReader& r) {
             handleAssetEditRequest(r);
+        });
+        // Only ever addressed to the peer whose file it was, exactly like a
+        // create result: the rest of the session has no business being told
+        // which files did not fit through somebody else's link.
+        m_net->on(kMsgAssetRefused, [this](ConnectionId, BitReader& r) {
+            handleAssetRefused(r);
         });
         m_net->on(kMsgStructuralRelay, [this](ConnectionId, BitReader& r) {
             handleStructuralRelay(r);
@@ -1648,8 +1670,15 @@ void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
                      detail::logBytes(total).c_str(),
                      detail::logBytes(m_cfg.maxAssetBytes).c_str());
         // Their side thinks this save went out. Ours is the only one that knows
-        // otherwise, so it is the only one that can say so.
+        // otherwise, so it is the only one that can say so — to the user here,
+        // whose ceiling did the refusing, and to the peer, who is otherwise left
+        // believing a file travelled that never will.
         if (m_onAssetRefused) m_onAssetRefused(sender, header.path, total);
+        // Straight back down the connection it came in on: the host knows exactly
+        // who sent this, so this half needs no routing at all. It is the client
+        // refusing a RELAY that has to go the long way round.
+        sendAssetRefusalTo(sender, m_localId, header.intent, header.path, total,
+                           m_cfg.maxAssetBytes);
         return;
     }
     HE_LOG_INFO(Net, "Receiving asset \"%s\" from participant %u (%s in %u chunk(s))",
@@ -1992,6 +2021,13 @@ void CollabSession::handleAssetRelay(BitReader& r) {
                      detail::logBytes(total).c_str(),
                      detail::logBytes(m_cfg.maxAssetBytes).c_str());
         if (m_onAssetRefused) m_onAssetRefused(sender, header.path, total);
+        // `sender` is the ORIGINAL author, stamped onto the relay by the host
+        // (see the fan-out in the End handler) — which is the whole reason this
+        // side can name whose file it just dropped. Without that stamp the host
+        // would have to correlate a bare path back to a transfer that finished
+        // frames ago, and two peers saving the same asset would make that guess
+        // wrong. It is already on the wire, so nothing has to grow to carry it.
+        reportAssetRefusal(sender, header.intent, header.path, total);
         return;
     }
 
@@ -2010,6 +2046,129 @@ void CollabSession::handleAssetRelay(BitReader& r) {
                        [sender](const AssetAssembly& e) { return e.sender == sender; }),
         m_assetAssembly.end());
     m_assetAssembly.push_back(std::move(asm_));
+}
+
+// ─── Carrying a refusal back to whoever sent the file ────────────────────────
+// The topology is not symmetric, and that is the whole shape of this section. A
+// host that refuses an incoming asset already holds the connection it arrived
+// on and answers down it. A CLIENT that refuses a relayed asset cannot reach the
+// peer that authored it — clients never address each other — so it reports to
+// the host, and the host does the delivery. Two functions rather than one for
+// exactly that reason: they are the two halves of one journey, not two ways of
+// doing the same thing.
+
+void CollabSession::reportAssetRefusal(ParticipantId author, AssetIntent intent,
+                                       const std::string& path,
+                                       std::uint32_t bytes) {
+    // Client side only. A host has no one to report to — it IS the delivery.
+    if (!m_net || m_role == NetRole::Host || !m_joined) return;
+    // Nobody to tell, or the author is us. The second cannot happen through the
+    // relay (our own frames are dropped before the ceiling is ever consulted),
+    // and it is checked anyway because the consequence of being wrong is a
+    // machine reporting a refusal of its own file to itself, for ever.
+    if (author == kInvalidParticipant || author == m_localId) return;
+    if (m_net->connections().empty()) return;
+
+    BitWriter w;
+    w.writeUInt32(author);
+    w.writeByte(static_cast<std::uint8_t>(intent));
+    w.writeString(path);
+    w.writeUInt32(bytes);
+    // OUR ceiling, because the sentence this ends up in has to name the limit
+    // that actually stopped the file. The author's own is higher by definition —
+    // it let the bytes onto the wire — so quoting it there would tell the reader
+    // a number that explains nothing.
+    w.writeUInt32(m_cfg.maxAssetBytes);
+    // Deliberately not the refuser's own id: the host stamps that from the
+    // connection, the same rule that keeps a client from moving an entity in
+    // somebody else's name.
+    m_net->send(m_net->connections().front(), kMsgAssetRefusedReport, w);
+}
+
+void CollabSession::handleAssetRefusedReport(ConnectionId conn, BitReader& r) {
+    // Host side. Identity from the connection, never the payload.
+    const ParticipantId refuser = participantForConnection(conn);
+    if (refuser == kInvalidParticipant) return;
+
+    std::uint32_t author = 0, bytes = 0, limit = 0;
+    std::uint8_t  intent = 0;
+    std::string   path;
+    if (!r.readUInt32(author) || !r.readByte(intent) || !r.readString(path) ||
+        !r.readUInt32(bytes) || !r.readUInt32(limit)) {
+        return;
+    }
+    // Same bound readAssetHeader applies, and for the same reason: an intent this
+    // build cannot name must not be forwarded as one it can, because the sentence
+    // the receiver builds out of it says different things about what they are
+    // left holding.
+    if (intent > static_cast<std::uint8_t>(AssetIntent::Create)) return;
+    if (path.empty()) return;
+    // Numbers that do not describe a refusal. A size at or under the ceiling was
+    // never refused for being too large, so this frame is garbled or invented —
+    // and forwarding it would put a Problem in front of a user about a file that
+    // arrived perfectly well.
+    if (bytes <= limit) return;
+    // A peer naming ITSELF as the author would have the host hand it back its own
+    // refusal, which it would have no reason to answer — but the loop is closed
+    // here rather than trusted not to form.
+    if (author == refuser) return;
+    // Gone before we got round to forwarding it, or never here at all. Nothing to
+    // do, exactly as with a verdict for a participant who has left.
+    if (!findParticipant(author)) return;
+
+    sendAssetRefusalTo(author, refuser, static_cast<AssetIntent>(intent), path,
+                       bytes, limit);
+}
+
+void CollabSession::sendAssetRefusalTo(ParticipantId author, ParticipantId refuser,
+                                       AssetIntent intent, const std::string& path,
+                                       std::uint32_t bytes, std::uint32_t limit) {
+    if (!m_net || m_role != NetRole::Host) return;
+
+    // The host can be the author — it publishes into its own session — and a
+    // client is perfectly able to refuse what the host sent. There is no
+    // connection to carry that answer down, so the callback IS the delivery, the
+    // same arrangement sendAssetOpVerdict makes for a host waiting on a verdict.
+    if (author == m_localId) {
+        if (m_onAssetRefusedByPeer)
+            m_onAssetRefusedByPeer(refuser, path, bytes, limit, intent);
+        return;
+    }
+
+    ConnectionId conn = kInvalidConnection;
+    for (const auto& [c, pid] : m_connToParticipant) {
+        if (pid == author) { conn = c; break; }
+    }
+    if (conn == kInvalidConnection) return;
+
+    BitWriter w;
+    w.writeUInt32(refuser);
+    w.writeByte(static_cast<std::uint8_t>(intent));
+    w.writeString(path);
+    w.writeUInt32(bytes);
+    w.writeUInt32(limit);
+    m_net->send(conn, kMsgAssetRefused, w);
+}
+
+void CollabSession::handleAssetRefused(BitReader& r) {
+    std::uint32_t refuser = 0, bytes = 0, limit = 0;
+    std::uint8_t  intent = 0;
+    std::string   path;
+    if (!r.readUInt32(refuser) || !r.readByte(intent) || !r.readString(path) ||
+        !r.readUInt32(bytes) || !r.readUInt32(limit)) {
+        return;
+    }
+    if (intent > static_cast<std::uint8_t>(AssetIntent::Create)) return;
+    if (path.empty()) return;
+
+    HE_LOG_WARN(Net, "Collab: participant %u refused our asset \"%s\" — %s, over their "
+                     "%s transfer limit",
+                static_cast<unsigned>(refuser), path.c_str(),
+                detail::logBytes(bytes).c_str(), detail::logBytes(limit).c_str());
+    if (m_onAssetRefusedByPeer) {
+        m_onAssetRefusedByPeer(refuser, path, bytes, limit,
+                               static_cast<AssetIntent>(intent));
+    }
 }
 
 namespace {

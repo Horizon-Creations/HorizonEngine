@@ -101,7 +101,20 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // the two sets coincide: an announcement that cannot state the flag comes from a
 // build this one refuses to join anyway, so the wrong answer is never one a user
 // can act on.
-inline constexpr std::uint16_t kCollabProtocolVersion = 12;
+// v13: a refusal travels BACK to whoever sent the file. The two ceilings are set
+// on two machines by two people, and until now the lower one won in silence: the
+// sender's own limit let the bytes go, so nothing on its side failed and nothing
+// on its side ever said otherwise, while the only editor that knew the file had
+// not been written was the one that refused it. The two machines then held
+// different files with nobody on the sending side any the wiser — which is the
+// very failure the refusal notice was added to end, solved for one of the two
+// people it happens to. Nothing on the wire forces this bump: an id a peer does
+// not know is throttle-logged and dropped (NetSession::pump), never fatal. What
+// forces it is the ANSWER, exactly as in v12 — a v12 host drops a v13 client's
+// report without a word, so the refusal it was carrying evaporates in the one
+// hop that could have delivered it and the sender is told nothing. That is the
+// same silence as before, now produced by a session that looks like it works.
+inline constexpr std::uint16_t kCollabProtocolVersion = 13;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -587,6 +600,28 @@ public:
         m_onAssetRefused = std::move(fn);
     }
 
+    // The other half of the same event, on the machine that SENT the file: a peer
+    // would not take what we published, because their ceiling is lower than ours.
+    // (who refused it, path, the size we announced, THEIR ceiling in bytes, and
+    // what the frame was doing.)
+    //
+    // The ceiling is theirs and so the number has to come off the wire: this
+    // process has no way to know it, and quoting our own would tell the reader the
+    // limit that let the file through. The intent is here for the same reason —
+    // "they still have the older file" is true of a save and false of a create,
+    // where they have no asset at all, and only the frame knows which it was.
+    //
+    // Nothing on this side failed, which is exactly why this exists: without it a
+    // save that was refused two hops away is indistinguishable from one that
+    // worked, and the two machines part company over a file neither user has been
+    // given any reason to look at.
+    void onAssetRefusedByPeer(
+        std::function<void(ParticipantId refusedBy, const std::string& path,
+                           std::uint32_t bytes, std::uint32_t theirLimit,
+                           AssetIntent intent)> fn) {
+        m_onAssetRefusedByPeer = std::move(fn);
+    }
+
     // ── Host: may this create go ahead? ──
     // HorizonNet cannot answer this itself — whether a name is free, whether the
     // kind of asset travels at all, whether the path stays inside the project
@@ -959,6 +994,21 @@ private:
     void handleAssetOpApply(BitReader& r);                         // client
     void handleAssetEditRequest(BitReader& r);                     // the holder
     void handleAssetEditAnswer(ConnectionId conn, BitReader& r);   // host
+    // A refusal on its way home. Two hops, because a client never talks to
+    // another client: the refuser tells the host, and the host is the only side
+    // that can reach the peer whose file it was.
+    void handleAssetRefusedReport(ConnectionId conn, BitReader& r);  // host
+    void handleAssetRefused(BitReader& r);                           // the sender
+    // Host: hand a refusal to `author`, wherever they are — over the wire, or
+    // straight to the callback when the author is the host itself. `refuser` is
+    // always stamped by the host from the connection it heard the refusal on, so
+    // no peer can put a refusal in somebody else's mouth.
+    void sendAssetRefusalTo(ParticipantId author, ParticipantId refuser,
+                            AssetIntent intent, const std::string& path,
+                            std::uint32_t bytes, std::uint32_t limit);
+    // Client: "the file you relayed to me from `author` was over my ceiling."
+    void reportAssetRefusal(ParticipantId author, AssetIntent intent,
+                            const std::string& path, std::uint32_t bytes);
     // Host: route an edit request to whoever holds the lock. True when it went
     // somewhere; false means nobody holds it and the caller can just grant it.
     bool routeEditRequest(ParticipantId from, std::uint32_t requestId,
@@ -1051,6 +1101,8 @@ private:
     std::function<void(ParticipantId, const AssetUpdate&)>     m_onAsset;
     std::function<void(ParticipantId, const std::string&, std::uint32_t)>
                                                                m_onAssetRefused;
+    std::function<void(ParticipantId, const std::string&, std::uint32_t,
+                       std::uint32_t, AssetIntent)>            m_onAssetRefusedByPeer;
     CreatePolicy                                               m_createPolicy;
     std::function<void(const std::string&, bool, AssetRejectReason, const std::string&)>
                                                                m_onCreateResult;

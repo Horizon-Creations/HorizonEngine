@@ -2370,3 +2370,245 @@ TEST_CASE("Transfer ceiling: the receiving machine refuses a file its sender was
     s.host.leave();
     he_test::removeQuiet(file);
 }
+
+TEST_CASE("Transfer ceiling: the sender is told when the far end would not take the file")
+{
+    // The half that used to be missing entirely. Bob's ceiling let the file go,
+    // so nothing on Bob's machine failed and nothing on Bob's machine would ever
+    // have said a word; Anna's is the lower one and hers was the only editor that
+    // knew. Two people then held different files, and the one who could act — the
+    // one still looking at the file — was the one nobody told.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    bool bytesArrived = false;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    // Anna (the host) will not take more than a megabyte; Bob is at the default
+    // and has no reason to think anything is wrong.
+    s.host.setMaxAssetMB(1);
+
+    const std::string key  = "Content/Materials/Basalt.hasset";
+    const fs::path    file = writeHAsset("he_collab_basalt.hasset",
+                                         HE::AssetType::Material,
+                                         std::string(3u * 512u * 1024u, 'b'));
+
+    s.client.requestAssetLock(key);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.ownsAssetLock(key); }));
+
+    s.client.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !clientNotes.snapshot().empty(); }));
+
+    CHECK_FALSE(bytesArrived);
+    const HE::Ed::Notification n = findNote(clientNotes, "Basalt.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    CHECK(n.text.find("Anna") != std::string::npos);           // who refused it
+    CHECK(n.text.find("could not accept") != std::string::npos);
+    CHECK(n.detail.find("2 MB") != std::string::npos);          // how big it was
+    // THEIR ceiling, which this machine has no other way of learning — and the
+    // direction of the asymmetry, because the reader's own limit is fine and
+    // raising it would achieve precisely nothing.
+    CHECK(n.detail.find("1 MB") != std::string::npos);
+    CHECK(n.detail.find("their limit is lower") != std::string::npos);
+    // A save, so they still hold the older file — and the one channel that does
+    // carry a file this size.
+    CHECK(n.detail.find("older version") != std::string::npos);
+    CHECK(n.detail.find("source control") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Transfer ceiling: a third editor's refusal is carried back through the host to the sender")
+{
+    // The route two participants cannot exercise. Bob saves, Anna (host) takes it
+    // happily, and Cara will not — and Cara cannot say so to Bob, because clients
+    // never address one another. The refusal goes to Anna, who is the only peer
+    // that can reach Bob, and Anna forwards it. Bob is left with a file that
+    // reached one collaborator and not the other, which is precisely the state
+    // nobody was being told about.
+    HorizonWorld annaWorld, bobWorld, caraWorld;
+    annaWorld.createEntity("Cube");
+
+    CollabController anna, bob, cara;
+    anna.setWorld(&annaWorld);
+    REQUIRE(anna.startHosting(0, "Anna"));
+
+    bob.setWorld(&bobWorld);
+    bob.onWorldReplaced([&bob] { bob.seedNetIds(); });
+    cara.setWorld(&caraWorld);
+    cara.onWorldReplaced([&cara] { cara.seedNetIds(); });
+
+    REQUIRE(bob.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Bob"));
+    REQUIRE(cara.joinSession("127.0.0.1", anna.port(), anna.joinCode(), "Cara"));
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] {
+        return bob.status()  == CollabController::Status::Joined &&
+               cara.status() == CollabController::Status::Joined &&
+               anna.participants().size() == 3;
+    }));
+
+    HE::Ed::NotificationStore bobNotes, annaNotes, caraNotes;
+    bob.setNotifications(&bobNotes);
+    anna.setNotifications(&annaNotes);
+    cara.setNotifications(&caraNotes);
+
+    int annaGot = 0, caraGot = 0;
+    anna.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) { ++annaGot; });
+    cara.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) { ++caraGot; });
+
+    // Only Cara is tight. Bob and Anna are at the default, so from both of their
+    // points of view this save is entirely ordinary.
+    cara.setMaxAssetMB(1);
+
+    const std::string key  = "Content/Materials/Slate.hasset";
+    const fs::path    file = writeHAsset("he_collab_slate.hasset",
+                                         HE::AssetType::Material,
+                                         std::string(3u * 512u * 1024u, 's'));
+
+    bob.requestAssetLock(key);
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] { return bob.ownsAssetLock(key); }));
+
+    bob.publishAsset(key, file.string());
+    REQUIRE(pumpUntil3(anna, bob, cara, [&] { return !bobNotes.snapshot().empty(); }));
+
+    // It really did reach one of them and not the other — the split this notice
+    // exists to describe.
+    CHECK(annaGot == 1);
+    CHECK(caraGot == 0);
+
+    const HE::Ed::Notification n = findNote(bobNotes, "Slate.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    // Named, and named correctly: the refusal came from Cara and was merely
+    // carried by Anna. A message that blamed the messenger would send Bob to ask
+    // the wrong person to change a setting.
+    CHECK(n.text.find("Cara") != std::string::npos);
+    CHECK(n.text.find("Anna") == std::string::npos);
+    CHECK(n.detail.find("2 MB") != std::string::npos);
+    CHECK(n.detail.find("1 MB") != std::string::npos);
+
+    // Anna forwarded it and was not herself refused anything, so she has nothing
+    // to be told. A refusal that fanned out like an asset would have landed here.
+    CHECK(annaNotes.snapshot().empty());
+
+    // Cara still gets her own side of it: her machine refused a file, and that is
+    // a different sentence with a different fix from the one Bob is reading.
+    const HE::Ed::Notification c = findNote(caraNotes, "Slate.hasset");
+    CHECK(c.level == HE::Ed::NoteLevel::Problem);
+    CHECK(c.text.find("refused") != std::string::npos);
+
+    // And exactly one notice each: a refusal that could be refused in turn, or
+    // that travelled the asset path, would still be going round.
+    CHECK(bobNotes.snapshot().size()  == 1);
+    CHECK(caraNotes.snapshot().size() == 1);
+
+    cara.leave();
+    bob.leave();
+    anna.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Transfer ceiling: a refused CREATE is settled by the refusal, not left waiting for ever")
+{
+    // The state a refusal used to leave behind, and the reason this is not just a
+    // missing notification. A create is remembered under its key until the host's
+    // verdict comes back — but a create refused on ARRIVAL never reaches the
+    // arbitration that would send one, because the host drops the frame on its
+    // size before a byte is assembled. The entry then waits for an answer that
+    // was never going to be sent, and while it waits it parks every OTHER peer's
+    // create for that same path. One oversized file would quietly stop anybody in
+    // the session from ever creating that asset. The refusal is the verdict.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    // Two resolvers pointing at two different names, because both editors are on
+    // this one machine: sharing a path would have the host find its own copy of
+    // the file and call the name taken.
+    const fs::path dir = fs::temp_directory_path();
+    s.host.setLocalPathResolver([&dir](const std::string& key) {
+        return (dir / ("he_anna_" + fs::path(key).filename().string())).string();
+    });
+    s.client.setLocalPathResolver([&dir](const std::string& key) {
+        return (dir / ("he_bob_" + fs::path(key).filename().string())).string();
+    });
+
+    s.host.setMaxAssetMB(1);
+
+    const std::string key = "Content/Materials/Fresh.hasset";
+    const fs::path    big = writeHAsset("he_collab_fresh_big.hasset",
+                                        HE::AssetType::Material,
+                                        std::string(3u * 512u * 1024u, 'f'));
+
+    s.client.publishAssetCreate(key, big.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !clientNotes.snapshot().empty(); }));
+
+    const HE::Ed::Notification n = findNote(clientNotes, "Fresh.hasset");
+    CHECK(n.level == HE::Ed::NoteLevel::Problem);
+    // A create, so the clause about what they are left holding is the other one:
+    // there is no older version over there to fall back on.
+    CHECK(n.detail.find("does not exist at all") != std::string::npos);
+    CHECK(n.detail.find("older version") == std::string::npos);
+
+    // And now the part that proves the entry is gone. Anna creates something at
+    // the SAME key; Bob has no create of his own outstanding any more, so the
+    // bytes are applied instead of being held back behind one. With the entry
+    // still dangling this callback never fires at all.
+    std::string applied;
+    s.client.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>&) {
+        applied = p;
+    });
+
+    const fs::path small = writeHAsset("he_collab_fresh_small.hasset",
+                                       HE::AssetType::Material, "fresh-v1");
+    s.host.publishAssetCreate(key, small.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !applied.empty(); }));
+    CHECK(applied == key);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(big);
+    he_test::removeQuiet(small);
+}
+
+TEST_CASE("Transfer ceiling: a file everyone can take produces no notice anywhere")
+{
+    // The silence that has to survive all of this. A refusal path that fired on
+    // an ordinary save would put a Problem in front of every collaborator for
+    // every file that worked — worse than the silence it was built to end.
+    Session s;
+    REQUIRE(openSession(s));
+
+    HE::Ed::NotificationStore hostNotes, clientNotes;
+    s.host.setNotifications(&hostNotes);
+    s.client.setNotifications(&clientNotes);
+
+    bool bytesArrived = false;
+    s.client.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    const std::string key  = "Content/Materials/Chalk.hasset";
+    const fs::path    file = writeHAsset("he_collab_chalk.hasset",
+                                         HE::AssetType::Material, "chalk-v1");
+
+    s.host.requestAssetLock(key);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.host.ownsAssetLock(key); }));
+
+    s.host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return bytesArrived; }));
+
+    CHECK(hostNotes.snapshot().empty());
+    CHECK(clientNotes.snapshot().empty());
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}

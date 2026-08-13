@@ -1002,6 +1002,38 @@ void CollabController::wireCallbacks()
 		noteAssetTooLarge(path, bytes, /*sending=*/false, name);
 	});
 
+	m_collab->onAssetRefusedByPeer([this](HE::Net::ParticipantId who,
+	                                      const std::string& path, std::uint32_t bytes,
+	                                      std::uint32_t theirLimit,
+	                                      HE::Net::CollabSession::AssetIntent intent) {
+		const bool wasCreate = (intent == HE::Net::CollabSession::AssetIntent::Create);
+
+		// A CREATE that never got past their ceiling gets no verdict, and that
+		// leaves worse behind than a missing notification. publishAssetCreate
+		// parks an entry under this key to match the host's answer to the right
+		// file — and for a create refused on ARRIVAL there is no answer: the host
+		// drops the frame before the bytes are assembled, so arbitrateCreate,
+		// which is what would have sent one, is never reached. The entry then
+		// waits for ever, and while it waits the deferred-create branch in
+		// onAssetUpdated parks every peer's create for this same path behind it.
+		// One user's oversized file would quietly stop that path from ever being
+		// created by anyone. The refusal IS the verdict; settle on it.
+		if (wasCreate)
+		{
+			const auto it = m_pendingCreates.find(path);
+			if (it != m_pendingCreates.end())
+			{
+				m_pendingCreates.erase(it);
+				// Whatever was held back waiting for our answer is released here
+				// for the same reason onOwnCreateAnswered releases it: this is
+				// the answer, and it is not going to be followed by another.
+				flushDeferredCreate(path);
+			}
+		}
+
+		noteAssetRefusedByPeer(who, path, bytes, theirLimit, wasCreate);
+	});
+
 	// ── Host: is this create allowed? ──
 	// Installed unconditionally: a client never gets asked, and a host that
 	// later becomes one would otherwise have no policy at all.
@@ -2534,6 +2566,53 @@ void CollabController::noteAssetTooLarge(const std::string& relPath, std::size_t
 	             "yours. Raise \"Largest asset to transfer\" in Preferences ▸ "
 	             "Collaboration and ask them to save it again, or pull it from source "
 	             "control. Nothing was written here, so the file you have is the old one.",
+	         relPath);
+}
+
+void CollabController::noteAssetRefusedByPeer(HE::Net::ParticipantId who,
+                                              const std::string& relPath,
+                                              std::size_t bytes,
+                                              std::size_t theirLimitBytes,
+                                              bool wasCreate)
+{
+	const std::string name = std::filesystem::path(relPath).filename().string();
+	const std::size_t mb   = asMB(bytes);
+	// THEIR number, off the wire. Ours is no use in this sentence — it is the
+	// limit that let the file go — and there is no other way to learn it: the
+	// ceiling is a local setting on a machine this one cannot ask.
+	const std::size_t limit = theirLimitBytes / kMiB;
+
+	// Resolved from the live roster, which may no longer have them: a refusal is
+	// forwarded by the host and can land after its author has left. "Someone" is
+	// the same fallback the receiving-side notice uses, and it is better than a
+	// blank where a name belongs.
+	std::string peer = "Someone";
+	for (const HE::Net::Participant& p : participants())
+	{
+		if (p.id != who) continue;
+		if (!p.name.empty()) peer = p.name;
+		break;
+	}
+
+	// The part that makes this actionable rather than merely true. Nothing here
+	// failed, so the reader's instinct — save it again — produces exactly the same
+	// silence a second time. The way through is the one channel that does carry
+	// files this size, and the fix to the session itself is on THEIR machine, not
+	// on this one, so the sentence has to say whose limit it was.
+	const std::string left = wasCreate
+		? std::string("They never received it, so on their machine that asset does "
+		              "not exist at all.")
+		: std::string("It was not written there, so what they have is still the "
+		              "older version.");
+
+	postNote(HE::Ed::NoteLevel::Problem,
+	         peer + " could not accept \"" + name + "\".",
+	         "It is " + std::to_string(mb) + " MB and " + peer + " accepts at most " +
+	             std::to_string(limit) + " MB in one file — their limit is lower than "
+	             "yours, which is why nothing on this machine reported a problem. " +
+	             left + " Ask them to raise \"Largest asset to transfer\" in "
+	             "Preferences ▸ Collaboration and save it again, or put this file "
+	             "through source control.",
 	         relPath);
 }
 

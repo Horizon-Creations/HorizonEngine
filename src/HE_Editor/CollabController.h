@@ -833,6 +833,20 @@ private:
 	// file that simply did not arrive.
 	void noteAssetTooLarge(const std::string& relPath, std::size_t bytes,
 	                       bool sending, const std::string& who = {});
+	// The third case, and the only one where the machine being told is not the
+	// machine that can fix it: THEY refused OUR file, because their ceiling is
+	// lower than ours. Kept apart from the two above rather than folded into the
+	// `sending` bool, because the advice is the opposite one — raising the limit
+	// here would change nothing, the number to quote is theirs and comes off the
+	// wire, and the reader has to be told the file is not on their machine so they
+	// go and put it through source control instead of assuming it landed.
+	//
+	// `wasCreate` decides one clause and it is not cosmetic: after a refused save
+	// they still have the older file, and after a refused create they have no such
+	// asset at all — "they still have the old one" would be a plain untruth.
+	void noteAssetRefusedByPeer(HE::Net::ParticipantId who, const std::string& relPath,
+	                            std::size_t bytes, std::size_t theirLimitBytes,
+	                            bool wasCreate);
 
 	// One post, with the null check in ONE place: the store is absent in tests
 	// and in any headless run, and forty call sites each remembering to ask
