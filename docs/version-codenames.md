@@ -20,6 +20,7 @@ zwei Stellen sichtbar:
 | **0.3.2** | **Aurora**  | Projekt-Typen (Struct/Enum), Save v2, HorizonCode→C++-Codegen             | `aurora` |
 | **0.3.3** | **Aurora**  | Collab-Protokoll v7, Aufräumen der Portfreigabe, Lösch-Rückfrage         | `aurora` |
 | **0.3.4** | **Aurora**  | Assets anlegen/löschen/umbenennen über die Collab-Sitzung (Protokoll v8) | `aurora` |
+| **0.3.5** | **Aurora**  | Content-Management (Suche, Mehrfachauswahl, Referenz-Scan), grosse Assets in der Sitzung, Benachrichtigungen (Protokoll v13) | `aurora` |
 
 Ein Patch behält den Codenamen seines Minor-Release — der Name gehört zu 0.3,
 nicht zu 0.3.x. Was ein Patch trotzdem braucht, ist der Versions-Bump selbst:

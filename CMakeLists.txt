@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.3.4 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.3.5 LANGUAGES CXX)
 
 # ─── Architecture guard ──────────────────────────────────────────────────────
 # This engine is built and shipped as x64. If CMake is configured from an x86
