@@ -1070,6 +1070,7 @@ void EditorApplication::OnInit()
 		globalstate.getCustomConfigBool("KeepCPUAssetsInfoAcknowledged", legacyKeepCPUAssetsAck);
 	m_editorConfig.CbTreeWidth                 = globalstate.getCustomConfigFloat("CbTreeWidth", m_editorConfig.CbTreeWidth);
 	m_editorConfig.CollabLanDiscovery           = globalstate.getCustomConfigBool("CollabLanDiscovery", m_editorConfig.CollabLanDiscovery);
+	m_editorConfig.CollabSyncLargeAssets        = globalstate.getCustomConfigBool("CollabSyncLargeAssets", m_editorConfig.CollabSyncLargeAssets);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
@@ -2386,6 +2387,12 @@ void EditorApplication::OnRender(float dt)
 		// whether discovery is on. setLanDiscoveryEnabled ignores a value that
 		// has not changed, so this costs nothing.
 		m_collab.setLanDiscoveryEnabled(m_editorConfig.CollabLanDiscovery);
+		// Pushed the same way and for the same reason: Preferences then only ever
+		// writes the config, and there is one direction of travel rather than two
+		// places that can disagree about what this editor has agreed to carry.
+		// The controller refuses the change while a session is running, which is
+		// what keeps the peers from ending up under two different rules.
+		m_collab.setSyncLargeAssets(m_editorConfig.CollabSyncLargeAssets);
 		m_collab.update(nowMs);
 	// Not gated on a project being loaded: a close still has to be drained.
 	m_git.update(nowMs);
@@ -5063,6 +5070,7 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
+	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

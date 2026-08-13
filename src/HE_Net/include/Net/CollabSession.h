@@ -82,7 +82,16 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // verdict that is never coming, which is precisely the failure a refused join
 // prevents. Reimport travels the same channel because it is the one thing that
 // changes an asset's bytes without those bytes ever going on the wire.
-inline constexpr std::uint16_t kCollabProtocolVersion = 10;
+// v11: the join handshake carries "does this session also send the BIG assets"
+// — a bool at the end of the request and one in the accept. Both directions
+// misparse without the bump, and neither failure is quiet: a v10 host stops
+// reading before the joiner's answer and admits somebody who will never publish
+// a mesh, while a v11 client reading a v10 accept takes the roster count's first
+// byte for the flag and shears every field behind it, so the roster it builds is
+// nonsense. In the other direction a v10 request makes a v11 host log "malformed
+// join request" instead of the version mismatch it actually is, which is the one
+// verdict a user can act on.
+inline constexpr std::uint16_t kCollabProtocolVersion = 11;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -97,6 +106,16 @@ enum class JoinRejectReason : std::uint8_t {
     // The host banned this client earlier in this session. The refusal is
     // automatic: the whole point of a ban is that the host is not asked again.
     Banned          = 5,
+    // This session also carries the BIG assets — meshes, textures, audio — and
+    // the joiner has not agreed to that. It is a rejection rather than a silent
+    // demotion because the cost falls on the joiner's connection, not the
+    // host's: somebody on a metered or slow link has to be able to say no, and
+    // the only moment they can still say it is before the transfer starts.
+    //
+    // It is its OWN reason and not folded into a generic refusal precisely so
+    // the client can tell it apart and ASK, rather than reporting a dead end to
+    // a user who would happily have agreed. See the prompt in CollabPanel.
+    LargeAssetsRequired = 6,
 };
 
 // Why a participant stopped being in the session, as told to the participant
@@ -286,6 +305,20 @@ public:
         // joiner can be told WHICH project to open rather than just "no".
         std::string projectLabel;
 
+        // Does this session also carry the assets that are normally left out —
+        // meshes, textures, audio, fonts? See isCollabSyncableAssetType for the
+        // set and why it is drawn where it is.
+        //
+        // The meaning depends on the role, and deliberately so. On a HOST this
+        // IS the session's rule, because the host is the one thing every peer
+        // shares. On a CLIENT it is only a statement of consent: "I am willing
+        // to receive them." A client that says no to a host that says yes is
+        // refused (LargeAssetsRequired) so it can be asked; a client that says
+        // yes to a host that says no simply follows the session and sends
+        // nothing large, because the host decides and there is nobody for the
+        // client's preference to bind.
+        bool syncLargeAssets = false;
+
         // ── Document-delta bounds ──
         // One item's JSON has to fit a length-prefixed string, which BitStream
         // caps at 65535 and TRUNCATES silently — a truncated payload would land
@@ -428,9 +461,12 @@ public:
     // and animator graphs, scenes — is an HAsset file, so one blob transfer
     // covers all of them without a single line of per-type code.
     //
-    // Binary media (meshes, textures, audio) deliberately does NOT travel this
-    // way: those are large, rarely edited in-session, and are source control's
-    // job. See the scope boundary in the design document.
+    // Binary media (meshes, textures, audio) does not normally travel this way:
+    // it is large, rarely edited in-session, and is source control's job. See
+    // the scope boundary in the design document. A HOST may decide otherwise for
+    // its session (Config::syncLargeAssets), and then the same blob transfer
+    // carries those too — the message never cared which kind it was, and the
+    // decision has always lived a layer up in the editor.
     //
     // The subject is the same opaque 64-bit id used for locks, so an asset and
     // an entity are arbitrated by exactly the same table.
@@ -460,11 +496,18 @@ public:
         // "The bytes behind this asset changed and they are NOT coming down this
         // wire." A reimport rewrites an asset in place from its source file, and
         // for the kinds reimport actually touches — meshes, textures, audio —
-        // the bytes deliberately do not travel (see the scope note above). Peers
-        // used to keep the old asset for ever with nothing to tell them, so this
+        // the bytes usually do not travel (see the scope note above). Peers used
+        // to keep the old asset for ever with nothing to tell them, so this
         // carries the one thing that is left to say: go and pull it. Permissive
         // like Create — it asks for nothing and destroys nothing, so it is
         // relayed rather than queued in front of a human.
+        //
+        // In a session that DOES carry the big assets (Config::syncLargeAssets)
+        // this op simply stops being reached for those kinds: the new bytes go
+        // out through the ordinary AssetUpdate path instead, which is the whole
+        // difference the setting makes. It still exists for that session — a
+        // reimport whose file is too large, or whose lock is held elsewhere,
+        // lands here exactly as before.
         Reimport = 4,
     };
 
@@ -754,6 +797,23 @@ public:
     // now so adding them later is not a protocol break.
     std::uint64_t stateSequence() const { return m_sequence; }
 
+    // Does THIS SESSION carry the big assets? The host's answer, which is the
+    // only one that means anything: a client learns it in the accept and
+    // publishes by it for the rest of the session, whatever its own Config said.
+    //
+    // A client answers false until it has been accepted. That is not a guess
+    // standing in for the real value — before the accept there is no session to
+    // publish into, so nothing can consult this and be wrong.
+    bool sessionSyncsLargeAssets() const { return m_sessionLargeAssets; }
+
+    // The ceiling on ONE asset transfer, in bytes. sendAsset refuses anything
+    // over it and the receiving host refuses it again — nothing is truncated,
+    // the frame is simply never emitted. Exposed because the editor has to be
+    // able to TELL the user which of the two things happened when a save does
+    // not travel, and repeating the number there would let the two drift apart.
+    // Shared with the snapshot for now; splitting it is a separate decision.
+    std::uint32_t maxAssetBytes() const { return m_cfg.maxSnapshotBytes; }
+
 private:
     void installHandlers();
 
@@ -881,6 +941,11 @@ private:
     bool                     m_joined    = false;
     bool                     m_joinSent  = false;  // client: request already sent
     std::uint64_t            m_sequence  = 0;
+    // The session's rule about big assets, as opposed to Config::syncLargeAssets
+    // which is only this peer's wish. Set from the config on a host (it IS the
+    // authority) and from the accept on a client, and cleared when a client's
+    // link drops — a stale "yes" would outlive the session that granted it.
+    bool                     m_sessionLargeAssets = false;
 
     // Host: which connection belongs to which participant.
     std::vector<std::pair<ConnectionId, ParticipantId>> m_connToParticipant;

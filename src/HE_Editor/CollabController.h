@@ -123,6 +123,53 @@ public:
 	// feature to a user even though it is two sockets to us.
 	void setLanDiscoveryEnabled(bool on);
 	bool lanDiscoveryEnabled() const { return m_lanEnabled; }
+
+	// ── Bigger assets ────────────────────────────────────────────────────────
+	// Whether this editor is willing to put meshes, textures, audio and fonts
+	// through a session instead of leaving them to source control. The pair
+	// below is what the Preferences checkbox drives; EditorConfig owns the
+	// persisted value and pushes it down here.
+	//
+	// It is REFUSED while a session is up, and silently — the caller is the
+	// editor pushing its config down every frame, so returning a failure would
+	// only be logged sixty times a second. Half a session running one rule and
+	// half the other is a set of peers that quietly hold different files, which
+	// is the failure the lock is for. The panel greys the box out and says why;
+	// this is the backstop that makes that true rather than merely displayed.
+	void setSyncLargeAssets(bool on);
+	// What the user has agreed to, independent of any session. This is the value
+	// the checkbox reflects.
+	bool syncLargeAssetsSetting() const { return m_syncLargeAssets; }
+	// Why the checkbox is greyed out. Deliberately active() and not inSession():
+	// a join that is still connecting has ALREADY put the answer on the wire in
+	// its join request, so the window in which the setting is settled closes
+	// when the connect starts, not when the snapshot lands.
+	bool largeAssetSyncLocked() const { return active(); }
+
+	// What THIS SESSION carries — the host's rule, which is the only one that
+	// decides anything. Outside a session it falls back to the local setting, so
+	// a caller asking "would this asset travel" gets a truthful answer either
+	// way rather than a false "no" that depends on when it asked.
+	bool sessionSyncsLargeAssets() const;
+
+	// The one answer to "does an asset of this kind travel". Everything that
+	// used to ask isSyncableAssetType asks this instead: the static predicate is
+	// still the type rule, and this is that rule OR the session's decision to
+	// carry everything. Combined here rather than at each call site because
+	// there were four of them and they must not be able to disagree.
+	bool assetTypeTravels(HE::AssetType type) const;
+
+	// ── The joiner was refused for not having agreed ─────────────────────────
+	// Set when a host turned us away with JoinRejectReason::LargeAssetsRequired.
+	// It is not an error to report and forget: the user can say yes, and the
+	// whole reason that reason exists on the wire is so they get asked. The
+	// panel raises a dialog on this and calls one of the two below.
+	bool largeAssetsPrompt() const { return m_largeAssetsPrompt; }
+	void clearLargeAssetsPrompt() { m_largeAssetsPrompt = false; }
+	// Agree, and dial the same host again. The setting must be turned on (and
+	// persisted) by the caller first — this controller does not own the config
+	// file. False when there is nothing remembered to retry.
+	bool retryJoinWithLargeAssets();
 	// What the browser currently hears. Empty while disabled, and empty for the
 	// first couple of seconds after enabling — hosts speak on a timer.
 	const std::vector<HE::Net::LanBeacon::Browser::Session>& lanSessions() const;
@@ -409,6 +456,12 @@ public:
 	// applied by the caller once it has sniffed the header. Deciding on the
 	// extension alone is what silently disabled asset collaboration entirely —
 	// see the comment on the list in the .cpp.
+	//
+	// isSyncableAssetType is the TYPE rule and nothing else, which is why it can
+	// stay static. It is no longer the whole answer: a host may open a session
+	// that carries the big assets too, and that is a property of the session,
+	// not of the type. Call assetTypeTravels() unless you specifically want the
+	// type rule on its own.
 	static bool isSyncableAsset(const std::string& relativePath);
 	static bool isSyncableAssetType(HE::AssetType type);
 
@@ -944,6 +997,28 @@ private:
 	// address arrives.
 	std::string   m_pendingJoinCode;
 	std::string   m_pendingDisplayName;
+
+	// ── Bigger assets ──
+	// The persisted user setting, pushed down by the editor. Copied into the
+	// session Config at startHosting/beginLink and not read again for the rest
+	// of the session: from then on the SESSION's answer is what counts, and on a
+	// client the two deliberately differ (the host decides).
+	bool          m_syncLargeAssets = false;
+	// A host turned us away because we had not agreed. Held until the panel has
+	// asked the user, because it is a question and not a failure.
+	bool          m_largeAssetsPrompt = false;
+	// Enough to dial the same host again after the user says yes. Kept as its
+	// own copy rather than reused from m_localAddress/m_joinCode: teardown()
+	// runs at the top of every join and clears those, so a retry that read them
+	// afterwards would connect to nothing.
+	struct LastJoin {
+		std::string   host;
+		std::uint16_t port = 0;
+		std::string   joinCode;
+		std::string   displayName;
+		bool          valid = false;
+	};
+	LastJoin      m_lastJoin;
 
 	// ── LAN discovery ──
 	// The announcer only exists while hosting; the browser runs whenever

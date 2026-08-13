@@ -1088,6 +1088,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		static std::uint64_t            s_deleteFolderScanGen = 0;
 		// The same scan, asked as a question rather than as a step on the way to
 		// deleting something.
+		// Pattern rename over a selection: the rule, and what it applies to.
+		static std::vector<std::string> s_patternTargets;
+		static char                     s_patternFind[128]    = {};
+		static char                     s_patternReplace[128] = {};
+		static char                     s_patternPrefix[64]   = {};
+		static char                     s_patternSuffix[64]   = {};
+		static bool                     s_patternNumber = false;
+		static int                      s_patternStart  = 1;
+		static bool                     s_openPatternRenamePopup = false;
 		static std::string              s_referencesTarget;
 		static bool                     s_referencesIsFolder  = false;
 		static std::uint64_t            s_referencesScanGen   = 0;
@@ -2701,6 +2710,36 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_openRenamePopup = true;
 				ImGui::CloseCurrentPopup();
 			}
+			// ── Renaming MANY ────────────────────────────────────────────
+			// One name for twelve files is meaningless, which is why plain Rename
+			// stays single. What a set actually needs is a RULE — add a prefix,
+			// strip a suffix, replace a word, number them — which is what every
+			// DCC tool offers and what the batched retarget makes cheap: N pairs,
+			// one walk of the project.
+			if (!engineLocked && s_selectedRootKind != 2 && !s_ctxMenuIsFolder &&
+			    isSelected(s_ctxMenuItem) && s_selection.size() > 1)
+			{
+				const std::string label =
+					"Rename " + std::to_string(s_selection.size()) + " Assets\xE2\x80\xA6";
+				if (ImGui::MenuItem(label.c_str()))
+				{
+					s_patternTargets.clear();
+					for (const std::string& p : s_selection)
+						if (!isReadOnlyGround(p))
+						{
+							std::error_code dirEc;
+							if (!std::filesystem::is_directory(p, dirEc)) s_patternTargets.push_back(p);
+						}
+					s_patternFind[0] = '\0';
+					s_patternReplace[0] = '\0';
+					s_patternPrefix[0] = '\0';
+					s_patternSuffix[0] = '\0';
+					s_patternNumber = false;
+					s_patternStart  = 1;
+					s_openPatternRenamePopup = !s_patternTargets.empty();
+					ImGui::CloseCurrentPopup();
+				}
+			}
 			// Deleting an asset asks first. It used to happen on this click, and
 			// a red menu item is not a confirmation: the pointer is already over
 			// Delete when the menu opens under it, the file has no undo, and
@@ -3219,6 +3258,195 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			s_deleteAssetScanGen = 0;
 			cancelReferenceScan();
 		}
+
+		// ── Pattern rename ────────────────────────────────────────────────
+		// A rule, applied to a set, with the result on screen BEFORE anything
+		// happens. The preview is not a nicety: a find-and-replace over twelve
+		// files is exactly the operation where "I meant the other Rock" is only
+		// visible once you see the twelve new names next to the old ones — and
+		// afterwards it is twelve renames to undo by hand.
+		if (s_openPatternRenamePopup && !ctx.contentRefreshPending && !ctx.contentRefreshDone)
+		{
+			ImGui::OpenPopup("##cb_pattern_rename_popup");
+			s_openPatternRenamePopup = false;
+		}
+		ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
+		EditorWidgets::pinDialogToEditorWindow();
+		if (ImGui::BeginPopupModal("##cb_pattern_rename_popup", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		{
+			ImGui::Text("Rename %d assets", static_cast<int>(s_patternTargets.size()));
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			ImGui::SetNextItemWidth(180.0f);
+			ImGui::InputTextWithHint("##pat_find", "find", s_patternFind, sizeof(s_patternFind));
+			ImGui::SameLine();
+			ImGui::TextDisabled("\xE2\x86\x92");
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(180.0f);
+			ImGui::InputTextWithHint("##pat_repl", "replace with",
+			                         s_patternReplace, sizeof(s_patternReplace));
+
+			ImGui::SetNextItemWidth(180.0f);
+			ImGui::InputTextWithHint("##pat_pre", "prefix", s_patternPrefix, sizeof(s_patternPrefix));
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(180.0f);
+			ImGui::InputTextWithHint("##pat_suf", "suffix", s_patternSuffix, sizeof(s_patternSuffix));
+
+			ImGui::Checkbox("Number them", &s_patternNumber);
+			if (s_patternNumber)
+			{
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(90.0f);
+				ImGui::InputInt("starting at", &s_patternStart);
+				if (s_patternStart < 0) s_patternStart = 0;
+			}
+			ImGui::Spacing();
+
+			// The rule, in one place, so the preview and the commit below cannot
+			// drift into meaning two different things.
+			auto newStemFor = [&](const std::string& absPath, int index) -> std::string
+			{
+				std::string stem = std::filesystem::path(absPath).stem().string();
+				const std::string find(s_patternFind);
+				if (!find.empty())
+				{
+					const std::string repl(s_patternReplace);
+					std::string out;
+					out.reserve(stem.size());
+					for (std::size_t i = 0; i < stem.size(); )
+					{
+						if (stem.compare(i, find.size(), find) == 0)
+						{ out += repl; i += find.size(); }
+						else out += stem[i++];
+					}
+					stem = out;
+				}
+				stem = std::string(s_patternPrefix) + stem + std::string(s_patternSuffix);
+				if (s_patternNumber) stem += std::to_string(s_patternStart + index);
+				return stem;
+			};
+
+			// Refused for the same reasons a single rename is, plus the one a set
+			// adds: two rules can collapse two names onto one, and the second
+			// rename would then silently replace the first one's file.
+			std::string blockReason;
+			std::vector<std::pair<std::string, std::string>> plan;   // abs -> new abs
+			{
+				std::unordered_map<std::string, int> seen;
+				for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+				{
+					const std::filesystem::path old(s_patternTargets[i]);
+					const std::string stem = newStemFor(s_patternTargets[i], static_cast<int>(i));
+					if (stem.empty())
+					{ blockReason = "That leaves at least one asset with no name."; break; }
+					if (stem.find('/') != std::string::npos || stem.find('\\') != std::string::npos)
+					{ blockReason = "A name cannot contain a path."; break; }
+					const std::filesystem::path dst =
+						old.parent_path() / (stem + old.extension().string());
+					if (++seen[dst.string()] > 1)
+					{ blockReason = "Two assets would end up with the same name."; break; }
+					std::error_code exEc;
+					if (std::filesystem::exists(dst, exEc) &&
+					    !std::filesystem::equivalent(old, dst, exEc))
+					{ blockReason = "\"" + dst.filename().string() + "\" already exists here."; break; }
+					plan.emplace_back(s_patternTargets[i], dst.string());
+				}
+			}
+
+			// Old → new, for as many as fit. Unchanged rows are dimmed: with a
+			// rule that only matches half the selection, which half is the thing
+			// worth seeing.
+			const float lineH = ImGui::GetTextLineHeightWithSpacing();
+			const float listH = std::clamp(lineH * static_cast<float>(s_patternTargets.size()) + 8.0f,
+			                               lineH, 200.0f);
+			ImGui::BeginChild("##pat_preview", ImVec2(-1.0f, listH), true,
+				ImGuiWindowFlags_HorizontalScrollbar);
+			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+			{
+				const std::filesystem::path old(s_patternTargets[i]);
+				const std::string oldStem = old.stem().string();
+				const std::string newStem = newStemFor(s_patternTargets[i], static_cast<int>(i));
+				if (oldStem == newStem)
+					ImGui::TextDisabled("%s  (unchanged)", oldStem.c_str());
+				else
+				{
+					ImGui::TextDisabled("%s", oldStem.c_str());
+					ImGui::SameLine();
+					ImGui::TextDisabled("\xE2\x86\x92");
+					ImGui::SameLine();
+					ImGui::TextUnformatted(newStem.c_str());
+				}
+			}
+			ImGui::EndChild();
+
+			int changed = 0;
+			for (std::size_t i = 0; i < s_patternTargets.size(); ++i)
+				if (std::filesystem::path(s_patternTargets[i]).stem().string() !=
+				    newStemFor(s_patternTargets[i], static_cast<int>(i))) ++changed;
+
+			if (!blockReason.empty())
+				ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.45f, 1.0f), "%s", blockReason.c_str());
+			else
+				ImGui::TextDisabled("References follow the assets, as with a single rename.");
+			ImGui::Spacing();
+
+			const bool canApply = blockReason.empty() && changed > 0 &&
+			                      plan.size() == s_patternTargets.size();
+			ImGui::BeginDisabled(!canApply);
+			if (EditorWidgets::primaryButton(
+					changed > 0 ? ("Rename " + std::to_string(changed)).c_str() : "Rename",
+					ImVec2(210, 0)))
+			{
+				// One gesture, so one batch for the session and one retarget walk.
+				if (ctx.collab) ctx.collab->beginAssetOpBatch();
+				for (const auto& [oldAbs, newAbs] : plan)
+				{
+					if (oldAbs == newAbs) continue;
+					// A session decides renames centrally, exactly as the single
+					// rename does; without a session this is just a move.
+					const std::string oldKey = collabKeyFor(ctx, oldAbs);
+					const std::string newKey = collabKeyFor(ctx, newAbs);
+					if (ctx.collab && !oldKey.empty() && !newKey.empty() &&
+					    ctx.collab->requestAssetRename(oldKey, newKey))
+						continue;   // asked for; the host's answer moves it everywhere
+
+					std::error_code ec;
+					std::filesystem::rename(oldAbs, newAbs, ec);
+					if (ec)
+					{
+						HE_LOG_ERROR(Editor, "%s",
+							("Editor: rename of '" + oldAbs + "' failed: " + ec.message()).c_str());
+						continue;
+					}
+					retargetReferences(ctx, oldAbs, newAbs, /*folder=*/false);
+					EditorAssetTypeCache::invalidate(oldAbs);
+					EditorAssetTypeCache::invalidate(newAbs);
+					AssetThumbnailCache::invalidate(oldAbs);
+					AssetThumbnailCache::invalidate(newAbs);
+					for (auto& t : ctx.tabs)
+						if (t.assetPath == oldAbs) t.assetPath = newAbs;
+					for (std::string& sel : s_selection)
+						if (sel == oldAbs) sel = newAbs;
+					if (s_selectedItem == oldAbs) s_selectedItem = newAbs;
+				}
+				if (ctx.collab) ctx.collab->endAssetOpBatch();
+				s_quietContentRefresh = true;
+				s_patternTargets.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			if (EditorWidgets::cancelButton("Cancel", ImVec2(210, 0)))
+			{
+				s_patternTargets.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+		else if (!s_patternTargets.empty() && !s_openPatternRenamePopup)
+			s_patternTargets.clear();
 
 		// ── "Find References" result ──────────────────────────────────────
 		// Not a confirmation: nothing is about to happen, so there is one way out

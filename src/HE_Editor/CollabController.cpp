@@ -175,6 +175,10 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
 	cfg.projectLabel = m_projectLabel;
+	// On a host this is not a preference but the session's rule, and it is fixed
+	// here for as long as the session lives — see setSyncLargeAssets for why it
+	// cannot be moved afterwards.
+	cfg.syncLargeAssets = m_syncLargeAssets;
 	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Host, cfg);
 	m_collab->setStateProvider(m_provider.get());
@@ -758,10 +762,24 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
 	cfg.projectLabel = m_projectLabel;
+	// On a client this is consent, not a rule: it decides whether a host that
+	// carries the big assets will have us at all. What actually travels once we
+	// are in is the session's answer, which arrives in the accept.
+	cfg.syncLargeAssets = m_syncLargeAssets;
 	applyLocalIdentity(cfg);
 	m_collab = std::make_unique<CollabSession>(m_net.get(), NetRole::Client, cfg);
 	m_collab->setStateProvider(m_provider.get());
 	wireCallbacks();
+
+	// Remembered before anything can fail, so a refusal that the user can answer
+	// — "this session sends the big files, agree?" — has a host to dial again.
+	// Its own copy: teardown() at the top of every join clears m_joinCode and
+	// m_localAddress, so a retry reading those would connect to nothing.
+	m_lastJoin.host        = host;
+	m_lastJoin.port        = port;
+	m_lastJoin.joinCode    = joinCode;
+	m_lastJoin.displayName = displayName;
+	m_lastJoin.valid       = true;
 
 	m_joinCode      = joinCode;
 	m_localAddress  = host;
@@ -843,6 +861,18 @@ void CollabController::wireCallbacks()
 				   "\". You have \"" + (m_projectLabel.empty() ? std::string("(no project)")
 				                                              : m_projectLabel) +
 				   "\" open — open \"" + detail + "\" and join again.");
+			break;
+		case JoinRejectReason::LargeAssetsRequired:
+			// The one refusal that is really a question. The error text is still
+			// filled in — the panel may be closed, and a status line that said
+			// nothing would leave the join looking like a timeout — but the flag
+			// is what matters: it is what turns this into a dialog the user can
+			// say yes to, rather than a dead end for someone who would happily
+			// have agreed.
+			m_largeAssetsPrompt = true;
+			m_error = "This session also transfers meshes, textures and audio. Turn on "
+			          "\"Sync larger assets\" to join it — it can use considerably more "
+			          "data.";
 			break;
 		default:
 			m_error = "The host refused the join.";
@@ -1291,6 +1321,10 @@ void CollabController::leave()
 	teardown();
 	m_status = Status::Idle;
 	m_error.clear();
+	// Walking away answers the question. Left standing, the dialog would reopen
+	// over an idle panel the next time it is drawn, asking about a session the
+	// user has already decided against.
+	m_largeAssetsPrompt = false;
 }
 
 void CollabController::shutdown()
@@ -1567,6 +1601,75 @@ void CollabController::setLanDiscoveryEnabled(bool on)
 	// Turning it on starts nothing here — updateLanDiscovery does that on the
 	// next frame, from the one place that knows whether we host, browse or
 	// neither.
+}
+
+// ─── Bigger assets ───────────────────────────────────────────────────────────
+
+void CollabController::setSyncLargeAssets(bool on)
+{
+	if (m_syncLargeAssets == on) return;
+	// Refused while a session is up, and without a word: the editor pushes its
+	// config down here every frame, so a log line would repeat sixty times a
+	// second and a return value nobody reads would say nothing at all. The panel
+	// is where the user learns this — it greys the checkbox out and explains it
+	// (largeAssetSyncLocked). What this guard actually prevents is the case the
+	// UI cannot: a setting changed through some other route mid-session, leaving
+	// one peer publishing meshes into a session the others do not carry them in,
+	// so half the group silently holds files the other half never sees.
+	if (active())
+	{
+		Logger::Log(Logger::LogLevel::Warning,
+		            "Collab: large-asset sync cannot be changed during a session — "
+		            "the session keeps the rule it started with.");
+		return;
+	}
+	m_syncLargeAssets = on;
+}
+
+bool CollabController::retryJoinWithLargeAssets()
+{
+	if (!m_lastJoin.valid) return false;
+	// The whole point of this call: the refusal was about our answer, so retrying
+	// with the same answer would be refused identically. The caller is expected
+	// to have persisted the setting too — this controller does not own
+	// config.json — but the value that goes on the wire is set here so a caller
+	// that forgot still gets a join that works rather than an infinite loop.
+	m_syncLargeAssets   = true;
+	m_largeAssetsPrompt = false;
+
+	// COPIES, taken before joinSession() calls teardown(). teardown clears the
+	// controller's session state, and m_lastJoin lives on the controller — the
+	// arguments would be read out of a struct that had just been reset.
+	const std::string   host = m_lastJoin.host;
+	const std::uint16_t port = m_lastJoin.port;
+	const std::string   code = m_lastJoin.joinCode;
+	const std::string   name = m_lastJoin.displayName;
+	Logger::Log(Logger::LogLevel::Info,
+	            ("Collab: agreeing to large-asset sync and dialling " + host + ":" +
+	             std::to_string(port) + " again").c_str());
+	return joinSession(host, port, code, name);
+}
+
+bool CollabController::sessionSyncsLargeAssets() const
+{
+	// The session's answer when there is a session, because the host decides and
+	// our own setting may well disagree with it. Outside one there is nothing to
+	// obey, so the local setting is the truthful answer — and it matters that it
+	// is: assetTypeTravels is asked by code that also runs with no session, and
+	// a hardcoded false there would be a different answer to the same question
+	// depending only on timing.
+	if (m_collab && inSession()) return m_collab->sessionSyncsLargeAssets();
+	return m_syncLargeAssets;
+}
+
+bool CollabController::assetTypeTravels(HE::AssetType type) const
+{
+	// Two independent reasons for an asset to travel, and the static one is left
+	// exactly as it was: isCollabSyncableAssetType lives in HE_Core and has
+	// callers outside the editor, so the session's decision is combined HERE
+	// rather than smuggled into a predicate that is supposed to describe the
+	// asset kind and nothing else.
+	return isSyncableAssetType(type) || sessionSyncsLargeAssets();
 }
 
 void CollabController::updateLanDiscovery(std::uint64_t nowMs)
@@ -2276,12 +2379,13 @@ void CollabController::publishAsset(const std::string& relativePath,
 	                                 std::istreambuf_iterator<char>());
 	if (bytes.empty()) return;
 	// `.hasset` is equally the container around an imported mesh or texture, and
-	// those are exactly what must not travel this channel. This hook fires for
-	// EVERY ContentManager save, including an import, so the type gate belongs
-	// here and not only where the editor walks its open tabs. C++ sources are
-	// exempt: they have no HAsset header to sniff.
+	// those are what must not travel this channel unless the session was opened
+	// to carry them — which is what assetTypeTravels folds in. This hook fires
+	// for EVERY ContentManager save, including an import, so the type gate
+	// belongs here and not only where the editor walks its open tabs. C++
+	// sources are exempt: they have no HAsset header to sniff.
 	if (relativePath.rfind("::Source::", 0) != 0 &&
-	    !isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
+	    !assetTypeTravels(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	const std::uint64_t subject = assetSubject(relativePath);
 
@@ -2305,7 +2409,30 @@ void CollabController::publishAsset(const std::string& relativePath,
 	up.bytes    = bytes;
 	up.intent   = HE::Net::CollabSession::AssetIntent::Update;
 	up.revision = ++m_docRevision[relativePath];
-	m_collab->sendAsset(up);
+	const std::size_t size = up.bytes.size();
+	if (m_collab->sendAsset(up)) return;
+
+	// It did not go. Two things can cause that here — we hold the lock, which
+	// was checked above — and only one of them is worth a notice: the size
+	// ceiling. A link that died in the same breath announces itself as a lost
+	// session a moment later, and a second message about one file would only
+	// bury it.
+	//
+	// The ceiling, though, is what a user walks straight into the day they turn
+	// large-asset sync on: nothing truncates, the frame is simply never emitted
+	// (CollabSession::sendAsset, and again on the receiving host), and until now
+	// the only trace was a log line. A 200 MB mesh vanishing without a word is
+	// precisely what makes people stop believing a setting does anything.
+	if (size <= m_collab->maxAssetBytes()) return;
+	constexpr std::size_t kMiB = 1024u * 1024u;
+	postNote(HE::Ed::NoteLevel::Problem,
+	         "\"" + std::filesystem::path(relativePath).filename().string() +
+	             "\" was not sent to the others.",
+	         "It is " + std::to_string((size + kMiB - 1) / kMiB) + " MB, and a session "
+	             "refuses anything over " + std::to_string(m_collab->maxAssetBytes() / kMiB) +
+	             " MB. The others still have the older file — pull this one from "
+	             "source control.",
+	         relativePath);
 }
 
 // ─── Reimport ────────────────────────────────────────────────────────────────
@@ -2337,10 +2464,18 @@ bool CollabController::beginBackgroundWrite(const std::string& relPath)
 	const std::string        name = std::filesystem::path(relPath).filename().string();
 	const std::string        who  = l && !l->ownerName.empty() ? l->ownerName
 	                                                           : std::string("Someone else");
+	// The second sentence depends on the session: with large assets on, the new
+	// bytes WOULD have travelled, so claiming they cannot is simply false — and
+	// a detail line that is false about the one thing it explains is worse than
+	// none. What is true either way is that the holder's copy would have been
+	// overwritten, which is the actual reason this was refused.
 	postNote(HE::Ed::NoteLevel::Problem,
 	         who + " is editing \"" + name + "\" — it was not reimported.",
-	         "Reimporting would have rewritten the file underneath them, and the "
-	         "new bytes do not travel over the session.",
+	         sessionSyncsLargeAssets()
+	             ? std::string("Reimporting would have rewritten the file underneath "
+	                           "them. Ask them to release it and try again.")
+	             : std::string("Reimporting would have rewritten the file underneath "
+	                           "them, and the new bytes do not travel over the session."),
 	         relPath);
 	m_assetNotice = who + " is editing \"" + name + "\" — it was not reimported.";
 	return false;
@@ -2370,19 +2505,23 @@ void CollabController::publishReimport(const std::string& relPath,
 	                          (isHost() && assetLockInfo(relPath) == nullptr);
 	if (canSendBytes && isSyncableAsset(relPath) &&
 	    (relPath.rfind("::Source::", 0) == 0 ||
-	     isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))))
+	     assetTypeTravels(EditorAssetTypeCache::assetTypeOf(fullPath))))
 	{
 		publishAsset(relPath, fullPath);
 		return;
 	}
 
-	// Everything else — and that is MOST of what reimport touches: meshes,
-	// textures, audio, fonts. Those are deliberately outside the sync set (see
-	// isCollabSyncableAssetType) because they are large and source control is
-	// what carries them. A reimport does not change that: widening the set for
-	// one menu item would push tens of megabytes down a link built for graphs,
-	// and it would do it silently. So the fact travels instead of the file, and
-	// each peer is told to pull it.
+	// Everything else — and outside a large-asset session that is MOST of what
+	// reimport touches: meshes, textures, audio, fonts. Those sit outside the
+	// type-based sync set (see isCollabSyncableAssetType) because they are large
+	// and source control is what carries them. That used to be the end of it:
+	// widening the set for one menu item would have pushed tens of megabytes
+	// down a link built for graphs, silently, on every peer.
+	//
+	// A HOST can now decide otherwise for its session, and when it has, the
+	// branch above already sent the new bytes — assetTypeTravels answered yes.
+	// This path is what is left when it did not: the fact travels instead of the
+	// file, and each peer is told to go and pull it.
 	requestOrPerformAssetOp(HE::Net::CollabSession::AssetOp::Reimport,
 	                        relPath, {}, /*folder=*/false);
 }
@@ -2402,9 +2541,17 @@ void CollabController::noteRemoteReimport(HE::Net::ParticipantId by,
 	// Info, not Warning: nothing here is broken. The asset on this machine is
 	// simply older than the one they now have, and the sentence says what to do
 	// about it — which is the only reason to send this at all.
+	// This notice only ever arrives for an asset whose bytes did NOT travel, so
+	// the advice is always "pull it". The sentence underneath is the one that
+	// goes stale: in a session that carries the big files, "meshes, textures and
+	// audio do not travel" contradicts what the user was told when they agreed
+	// to it, and the honest thing to say is that this particular one did not.
 	postNote(HE::Ed::NoteLevel::Info,
 	         who + " reimported \"" + name + "\" — pull it from source control.",
-	         "Meshes, textures and audio do not travel over the session.",
+	         sessionSyncsLargeAssets()
+	             ? std::string("Its new bytes were not sent — they were too large, or "
+	                           "somebody else held the file at the time.")
+	             : std::string("Meshes, textures and audio do not travel over the session."),
 	         relPath);
 }
 
@@ -2900,11 +3047,13 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 
 	const std::string& rel = relativePath;
 	if (rel.empty() || !isSyncableAsset(rel)) return;
-	// Same type gate as a save, and with the same exception: a C++ source is raw
-	// text with no HAsset header, so sniffing it reads Unknown and would drop
-	// it. Its own key prefix is the admission ticket.
+	// Same type gate as a save — one helper, so a create and a save can never
+	// disagree about whether a kind of asset belongs in this session — and with
+	// the same exception: a C++ source is raw text with no HAsset header, so
+	// sniffing it reads Unknown and would drop it. Its own key prefix is the
+	// admission ticket.
 	if (rel.rfind("::Source::", 0) != 0 &&
-	    !isSyncableAssetType(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
+	    !assetTypeTravels(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
 	std::ifstream f(fullPath, std::ios::binary);
 	if (!f) return;

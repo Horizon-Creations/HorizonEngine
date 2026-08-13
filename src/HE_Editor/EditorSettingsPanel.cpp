@@ -324,6 +324,41 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		     "visible on.");
 	});
 
+	row("collabsynclarge", "Collaboration", [&]{
+		// Locked while a session is live, and this is the reason: everyone in the
+		// session joined under THIS value — a guest is asked about it before the
+		// join and is refused if it disagrees. Flipping it afterwards would leave
+		// one peer sending (or expecting) files the others never agreed to carry,
+		// and the whole point of the setting is that nobody ends up pulling
+		// hundreds of megabytes they said no to. Peers quietly holding different
+		// copies of the same project is the failure this prevents.
+		// active(), not inSession(): a guest that is still CONNECTING has already
+		// put its answer in the join request, so the window in which this may
+		// change closes at connect, not when the snapshot lands.
+		const bool locked = ctx.collab && ctx.collab->largeAssetSyncLocked();
+		ImGui::BeginDisabled(locked);
+		ImGui::Checkbox("Sync Large Assets (Meshes, Textures, Audio)", &cfg.CollabSyncLargeAssets);
+		// Read the hover state off the checkbox itself, before anything else can
+		// become the "last item" — a tooltip that only appears on the enabled
+		// control would never be seen, since it exists to explain the disabled one.
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		ImGui::EndDisabled();
+		if (locked && hovered)
+			ImGui::SetTooltip("Cannot be changed while a session is running.");
+		hint("Carries the big imported media over the session as well — meshes, "
+		     "textures, audio, fonts, the files source control normally carries. "
+		     "Those are measured in hundreds of megabytes, so a session with this "
+		     "on can use considerably more data than the scenes and scripts it "
+		     "otherwise syncs; leave it off on a metered or slow connection. It is "
+		     "the HOST's setting for the session: a guest is asked to match it "
+		     "before joining and cannot join without agreeing, so nobody is put on "
+		     "the big downloads without being asked first.");
+		if (locked)
+			hint("Locked while a session is running — the others joined under the "
+			     "current setting, and changing it now would leave the peers "
+			     "holding different files. Leave the session to change it.");
+	});
+
 	row("camspeed", "Viewport", [&]{
 		if (Row::sliderFloat("Camera Speed", &cfg.EditorCameraSpeed, 1.0f, 50.0f, "%.1f u/s")
 		    && ctx.editorCamera)
@@ -1251,6 +1286,13 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.SSAOMethod        = 0;
 			cfg.GpuParticles      = true;
 			cfg.CollabLanDiscovery = true;
+			// Restore Defaults is the one path that can move CollabSyncLargeAssets
+			// without touching its (disabled) checkbox, so it has to honour the same
+			// lock: a running session would silently switch to a rule its peers did
+			// not join under, which is exactly the split-project state the checkbox
+			// is greyed out to avoid. Outside a session it resets like everything
+			// else — off, because the big media is opt-in.
+			if (!(ctx.collab && ctx.collab->largeAssetSyncLocked())) cfg.CollabSyncLargeAssets = false;
 			if (ctx.editorCamera) ctx.editorCamera->setFlySpeed(cfg.EditorCameraSpeed);
 		}
 		ImGui::SameLine();

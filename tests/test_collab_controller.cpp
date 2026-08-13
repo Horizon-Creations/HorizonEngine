@@ -2012,3 +2012,250 @@ TEST_CASE("CollabPresenceBar: a degenerate viewport rectangle draws nothing")
     const auto m = cam.place({ 0.0f, 0.0f, -10.0f });
     CHECK_FALSE(m.onScreen);
 }
+
+// ─── Larger assets over the session ──────────────────────────────────────────
+// A session normally leaves meshes, textures and audio to source control. A
+// HOST may decide otherwise, and then everything below changes at once: who is
+// allowed in, what a save publishes, and what a reimport does. These drive the
+// real two-controller path, because the interesting part is precisely that the
+// two sides end up agreeing.
+
+namespace {
+
+// A host with the flag as given, and a client that has NOT joined yet — the
+// tests below care about the join itself, so they start it themselves.
+bool openHostOnly(Session& s, bool hostSyncsLarge) {
+    s.hostWorld.createEntity("Cube");
+    s.host.setWorld(&s.hostWorld);
+    s.host.setSyncLargeAssets(hostSyncsLarge);
+    s.client.setWorld(&s.clientWorld);
+    s.client.onWorldReplaced([&s] { s.client.seedNetIds(); });
+    return s.host.startHosting(0, "Anna");
+}
+
+} // namespace
+
+TEST_CASE("Larger assets: a host that carries them turns away an editor that has not agreed")
+{
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+    REQUIRE_FALSE(s.client.syncLargeAssetsSetting());   // the default, and the point
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.largeAssetsPrompt(); }));
+
+    // Refused, but as a QUESTION — the flag is what the panel turns into a
+    // dialog. Reported as a plain failure it would be a dead end for someone who
+    // would have agreed in a second.
+    CHECK(s.client.status() == CollabController::Status::Failed);
+    CHECK_FALSE(s.client.inSession());
+    // The cost is what the user is deciding on, so it has to be in the sentence.
+    CHECK(s.client.lastError().find("considerably more data") != std::string::npos);
+    // And the host really did not admit them.
+    CHECK(s.host.participants().size() == 1);
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Larger assets: agreeing re-dials the same host and gets in")
+{
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.largeAssetsPrompt(); }));
+
+    // What the panel's "Enable and join" does. The address, port, code and name
+    // all come from what the controller remembered, which is the whole reason it
+    // remembers them: the user answered a dialog, not a connection form.
+    REQUIRE(s.client.retryJoinWithLargeAssets());
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.client.status() == CollabController::Status::Joined;
+    }));
+
+    CHECK_FALSE(s.client.largeAssetsPrompt());   // answered, so no longer asked
+    CHECK(s.client.syncLargeAssetsSetting());
+    // Both sides agree on what the session is. That agreement is what every
+    // publishing decision on either machine is about to be made against.
+    CHECK(s.host.sessionSyncsLargeAssets());
+    CHECK(s.client.sessionSyncsLargeAssets());
+
+    s.client.leave();
+    s.host.leave();
+}
+
+TEST_CASE("Larger assets: a guest willing to send them still follows a host that will not")
+{
+    // The reverse is not an error and must not be treated as one: the host
+    // decides what the session carries, so the guest simply joins and holds its
+    // meshes back. Refusing here would deny a join over a difference that costs
+    // nobody anything.
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/false));
+    s.client.setSyncLargeAssets(true);
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.client.status() == CollabController::Status::Joined;
+    }));
+    CHECK_FALSE(s.client.largeAssetsPrompt());
+
+    // It kept its own SETTING — that is a persisted preference and no session
+    // gets to rewrite it — but it obeys the SESSION.
+    CHECK(s.client.syncLargeAssetsSetting());
+    CHECK_FALSE(s.client.sessionSyncsLargeAssets());
+    CHECK_FALSE(s.client.assetTypeTravels(HE::AssetType::StaticMesh));
+    CHECK(s.client.assetTypeTravels(HE::AssetType::Material));
+
+    // And it holds back in practice, not just in the predicate. Bob reimports a
+    // mesh he holds the lock on: with the setting alone deciding, the bytes
+    // would go out; with the session deciding, the fact does instead.
+    HE::Ed::NotificationStore hostNotes;
+    s.host.setNotifications(&hostNotes);
+
+    bool bytesArrived = false;
+    s.host.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>&) {
+        bytesArrived = true;
+    });
+
+    const std::string key  = "Content/Meshes/Crate.hasset";
+    const fs::path    file = writeHAsset("he_collab_crate.hasset",
+                                         HE::AssetType::StaticMesh, "crate-v2");
+    s.client.requestAssetLock(key);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.client.ownsAssetLock(key); }));
+
+    s.client.publishReimport(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !hostNotes.snapshot().empty(); }));
+
+    CHECK_FALSE(bytesArrived);
+    const HE::Ed::Notification n = findNote(hostNotes, "Crate.hasset");
+    CHECK(n.text.find("source control") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Larger assets: with the session carrying them, a reimported mesh travels")
+{
+    // The exact behaviour the previous commit left type-gated, and the reason
+    // the setting is worth having: the peers no longer have to go to source
+    // control for a file one of them just rebuilt.
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+    s.client.setSyncLargeAssets(true);
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.client.status() == CollabController::Status::Joined;
+    }));
+
+    HE::Ed::NotificationStore clientNotes;
+    s.client.setNotifications(&clientNotes);
+
+    std::string               gotPath;
+    std::vector<std::uint8_t> got;
+    s.client.onRemoteAsset([&](const std::string& p, const std::vector<std::uint8_t>& b) {
+        gotPath = p; got = b;
+    });
+
+    const std::string key  = "Content/Meshes/Boulder.hasset";
+    const fs::path    file = writeHAsset("he_collab_boulder.hasset",
+                                         HE::AssetType::StaticMesh, "boulder-v2");
+
+    s.host.requestAssetLock(key);
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return s.host.ownsAssetLock(key); }));
+
+    s.host.publishReimport(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !got.empty(); }));
+
+    CHECK(gotPath == key);
+    CHECK(std::string(got.begin(), got.end()).find("boulder-v2") != std::string::npos);
+    // The bytes went, so nobody is told to go and fetch them — being sent a file
+    // AND told to pull it is the contradiction this replaces.
+    CHECK(clientNotes.snapshot().empty());
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Larger assets: an ordinary save of a mesh travels too once the session carries them")
+{
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/true));
+    s.client.setSyncLargeAssets(true);
+
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(s.host, s.client, [&] {
+        return s.client.status() == CollabController::Status::Joined;
+    }));
+
+    std::vector<std::uint8_t> got;
+    s.client.onRemoteAsset([&](const std::string&, const std::vector<std::uint8_t>& b) {
+        got = b;
+    });
+
+    const std::string key  = "Content/Textures/Wall.hasset";
+    const fs::path    file = writeHAsset("he_collab_wall.hasset",
+                                         HE::AssetType::Texture, "wall-v2");
+
+    // publishAsset, not publishReimport: the two used to make the same decision
+    // through two copies of it, which is exactly how they drift apart.
+    s.host.publishAsset(key, file.string());
+    REQUIRE(pumpUntil(s.host, s.client, [&] { return !got.empty(); }));
+    CHECK(std::string(got.begin(), got.end()).find("wall-v2") != std::string::npos);
+
+    s.client.leave();
+    s.host.leave();
+    he_test::removeQuiet(file);
+}
+
+TEST_CASE("Larger assets: the rule cannot be changed while a session is running")
+{
+    // Half a session running one rule and half the other is a group that quietly
+    // holds different files — which is why the setting is locked rather than
+    // merely discouraged, and why the lock lives here and not only in the UI
+    // that greys the checkbox out.
+    Session s;
+    REQUIRE(openHostOnly(s, /*hostSyncsLarge=*/false));
+
+    CHECK(s.host.largeAssetSyncLocked());
+    s.host.setSyncLargeAssets(true);
+    CHECK_FALSE(s.host.syncLargeAssetsSetting());
+    CHECK_FALSE(s.host.sessionSyncsLargeAssets());
+
+    // Connecting counts as running for this: the join request that is already in
+    // flight carries the answer, so the window closed when the connect started
+    // and not when the snapshot landed.
+    REQUIRE(s.client.joinSession("127.0.0.1", s.host.port(), s.host.joinCode(), "Bob"));
+    CHECK(s.client.largeAssetSyncLocked());
+    s.client.setSyncLargeAssets(true);
+    CHECK_FALSE(s.client.syncLargeAssetsSetting());
+
+    s.client.leave();
+    s.host.leave();
+
+    // And out of a session it is an ordinary setting again.
+    CHECK_FALSE(s.host.largeAssetSyncLocked());
+    s.host.setSyncLargeAssets(true);
+    CHECK(s.host.syncLargeAssetsSetting());
+}
+
+TEST_CASE("Larger assets: outside a session the local setting is the answer")
+{
+    // assetTypeTravels is asked by code that also runs with no session at all.
+    // Answering a hard "no" there would make the same question have two answers
+    // depending only on when it was asked.
+    CollabController c;
+    CHECK(c.assetTypeTravels(HE::AssetType::Material));
+    CHECK_FALSE(c.assetTypeTravels(HE::AssetType::StaticMesh));
+
+    c.setSyncLargeAssets(true);
+    CHECK(c.assetTypeTravels(HE::AssetType::StaticMesh));
+    CHECK(c.assetTypeTravels(HE::AssetType::Audio));
+    // The static type rule is untouched by any of this — it is HE_Core's answer
+    // about the asset kind, and it has callers outside the editor.
+    CHECK_FALSE(CollabController::isSyncableAssetType(HE::AssetType::StaticMesh));
+}

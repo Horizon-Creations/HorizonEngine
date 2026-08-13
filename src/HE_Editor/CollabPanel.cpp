@@ -47,6 +47,10 @@ namespace
 
 	// Why the last picture could not be used, shown until the next attempt.
 	std::string s_avatarError;
+	// Set when agreeing to large-asset sync could not re-dial by itself, so the
+	// user is told the setting took effect and only the join is left to redo.
+	// Cleared the moment a join is started, since it is then out of date.
+	std::string s_joinRetryHint;
 	// Result slot for the picture file dialog. SDL may deliver the callback on
 	// another thread, so the flag is atomic and is set AFTER the path — the
 	// reader sees a complete path or no path at all, never half of one.
@@ -238,6 +242,115 @@ namespace
 		}
 	}
 
+	// ── "This session sends the big files — is that all right?" ──────────────
+	// The host decides what its session carries, but the cost of the big assets
+	// lands on the GUEST's connection, so a guest who has not agreed is refused
+	// at the handshake (JoinRejectReason::LargeAssetsRequired) rather than
+	// quietly signed up. That refusal is a question, and this is where it gets
+	// asked: the alternative is a failed join with a paragraph in a status line,
+	// which reads as a dead end to somebody who would have said yes immediately.
+	//
+	// Modal on purpose, unlike the host's request queue next door. That queue is
+	// other people's work arriving while you get on with yours; this is the
+	// answer to something the user asked for two seconds ago and is waiting on,
+	// and there is nothing else to do in this window until it is answered.
+	const char* kLargePopup = "Larger assets##collab";
+	// Whether OpenPopup has already been called for the pending question. ImGui
+	// pushes a popup that is opened again while it is up, which — with a modal —
+	// closes and reopens it under the cursor and can eat the click that was
+	// about to answer it. So it is opened on the EDGE, once.
+	bool s_largePopupArmed = false;
+
+	void DrawLargeAssetPrompt(AppContext& ctx)
+	{
+		CollabController* collab = ctx.collab;
+		if (!collab) return;
+
+		const bool pending = collab->largeAssetsPrompt();
+		if (pending && !s_largePopupArmed)
+		{
+			ImGui::OpenPopup(kLargePopup);
+			s_largePopupArmed = true;
+		}
+		if (!pending)
+		{
+			s_largePopupArmed = false;
+			return;
+		}
+
+		// Centred rather than wherever the window happens to sit: it is asking
+		// about something the user cannot see yet, so it should not look like a
+		// footnote to the panel behind it.
+		const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+		ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+		ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_Appearing);
+		if (!ImGui::BeginPopupModal(kLargePopup, nullptr,
+		                            ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			// Armed, still pending, and yet not on screen: ImGui closed it
+			// itself, which for a modal means Escape. That has to count as
+			// Cancel. Without this the controller's flag stays set while the
+			// arm-latch also stays set, so the popup is never reopened and the
+			// question can never be answered again — the panel would sit there
+			// refusing to join with no way to say yes.
+			collab->clearLargeAssetsPrompt();
+			s_largePopupArmed = false;
+			return;
+		}
+
+		ImGui::TextWrapped("This session also transfers larger assets — meshes, "
+		                   "textures and audio — instead of leaving them to source "
+		                   "control.");
+		ImGui::Spacing();
+		// The sentence the user is actually deciding on, and the reason the
+		// setting exists at all. Coloured because it is the cost, not the
+		// description: somebody on a phone hotspot has to be able to see it
+		// without reading the paragraph above.
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
+		ImGui::TextWrapped("It can use considerably more data than an ordinary "
+		                   "session. On a metered or slow connection, that is worth "
+		                   "thinking about before you agree.");
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+		ImGui::TextDisabled("The setting is remembered, and applies to every session "
+		                    "you host or join from now on. You can turn it off again "
+		                    "in Preferences while you are not in a session.");
+		ImGui::Spacing();
+
+		if (EditorWidgets::primaryButton("Enable and join", ImVec2(150, 0)))
+		{
+			// Two writes, because they answer two different questions. The
+			// config is the persisted setting (the editor writes it out and
+			// reads it back on the next launch) and it is what the Preferences
+			// checkbox shows; the controller is what actually goes on the wire
+			// for the retry, which happens now and cannot wait for the editor to
+			// push its config down on the next frame.
+			ctx.editorConfig.CollabSyncLargeAssets = true;
+			collab->setSyncLargeAssets(true);
+			if (!collab->retryJoinWithLargeAssets())
+			{
+				// Nothing remembered to dial — the join was never begun through
+				// this controller. The setting is on regardless, so joining
+				// again by hand now works; saying nothing would look like the
+				// button did nothing at all.
+				s_joinRetryHint = "The setting is on. Join the session again.";
+			}
+			collab->clearLargeAssetsPrompt();
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)))
+		{
+			// Refusing is a real answer, not a failure to answer: nothing is
+			// turned on, no join is retried, and the panel goes back to the join
+			// form with the session's own refusal text still in the error line.
+			collab->clearLargeAssetsPrompt();
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
+	}
+
 	// Pick up a picture the OS dialog delivered, whichever thread it arrived on.
 	void ConsumePendingAvatarPick()
 	{
@@ -258,6 +371,11 @@ namespace
 void DrawCollabWindow(AppContext& ctx, bool& open)
 {
 #ifdef HE_IMGUI_ENABLED
+	// A refused join that the user can still say yes to reopens this window.
+	// The question is drawn from inside it, and somebody who started a join and
+	// then closed the panel would otherwise never see it — the join would simply
+	// have failed, for a reason they had already agreed to in their head.
+	if (ctx.collab && ctx.collab->largeAssetsPrompt()) open = true;
 	if (!open) return;
 
 	ImGui::SetNextWindowSize(ImVec2(440, 400), ImGuiCond_FirstUseEver);
@@ -272,6 +390,11 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 	}
 
 	ConsumePendingAvatarPick();
+	// Before the branches below, so it is asked whatever state the panel is in.
+	// A rejection leaves the controller Failed — the "not active" branch — but
+	// binding the question to that branch would tie a decision the user has to
+	// make to a status they never see.
+	DrawLargeAssetPrompt(ctx);
 
 	if (!collab->active())
 	{
@@ -523,6 +646,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						ImGui::BeginDisabled(s_lanJoinCode[0] == '\0');
 						if (EditorWidgets::primaryButton("Join this session", ImVec2(190, 0)))
 						{
+							s_joinRetryHint.clear();
 							collab->joinSession(picked->address, picked->port,
 							                    s_lanJoinCode, s_displayName);
 						}
@@ -551,10 +675,26 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		const bool canJoin = s_joinSessionId[0] != '\0' && s_joinCode[0] != '\0';
 		ImGui::BeginDisabled(!canJoin);
 		if (EditorWidgets::primaryButton("Join", ImVec2(170, 0)))
+		{
+			s_joinRetryHint.clear();
 			collab->joinBySessionId(s_joinSessionId, s_joinCode, s_displayName);
+		}
 		ImGui::EndDisabled();
 		if (!canJoin)
 			ImGui::TextDisabled("Both the session ID and the join code are required.");
+		if (!s_joinRetryHint.empty())
+			ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "%s",
+			                   s_joinRetryHint.c_str());
+
+		// What THIS editor has agreed to, said where a join is started rather
+		// than only in Preferences. It changes which sessions will have us —
+		// a host that carries the big assets refuses an editor that has not
+		// agreed — and being refused is a worse way to find that out.
+		if (ctx.editorConfig.CollabSyncLargeAssets)
+		{
+			ImGui::TextDisabled("Larger assets (meshes, textures, audio) are shared in "
+			                    "your sessions. This can use considerably more data.");
+		}
 
 		// Joining REPLACES the open scene, which a button labelled "Join" does
 		// not convey — say so before it happens, not after.
@@ -709,6 +849,23 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			ImGui::Text("Session fingerprint: %s", fp.c_str());
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Should read the same for everyone in the session.");
+		}
+
+		// The HOST's rule, which is what a guest is actually living under — its
+		// own setting decided only whether it was let in. Shown for both roles
+		// and from the same accessor, so a guest reading "larger assets are
+		// shared" is reading the session and not its own preference.
+		if (collab->sessionSyncsLargeAssets())
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
+				"This session also transfers larger assets (meshes, textures, audio).");
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"The host decided this when the session was opened, and it cannot\n"
+					"change while the session runs. It can use considerably more data\n"
+					"than an ordinary session.");
+			}
 		}
 
 		// The identity is fixed for the life of the session (it was read when the

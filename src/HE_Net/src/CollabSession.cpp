@@ -125,6 +125,11 @@ CollabSession::CollabSession(NetSession* net, NetRole role, Config cfg)
         self.color  = assignColor(m_cfg.preferredColor, m_localId);
         m_participants.push_back(std::move(self));
         m_joined = true;
+        // The host's wish IS the session's rule, and it is true from the first
+        // frame rather than from the first join: the host publishes into its own
+        // session before anybody else is there, and a flag that only became true
+        // once a guest arrived would have it holding back its own meshes.
+        m_sessionLargeAssets = m_cfg.syncLargeAssets;
     }
     installHandlers();
 }
@@ -268,6 +273,10 @@ void CollabSession::update(std::uint64_t nowMs) {
         writeAvatar(w, m_cfg.avatar);
         // A wish, not a claim — the host answers with the colour we actually get.
         writeColor(w, m_cfg.preferredColor);
+        // Whether this user has agreed to receive the big assets. Sent even when
+        // false — especially when false: it is the "no" that has to reach the
+        // host for it to refuse us, and a refusal is what gets the user asked.
+        w.writeBool(m_cfg.syncLargeAssets);
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
     }
@@ -365,13 +374,14 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     std::string      clientKey;
     Avatar           avatar;
     ParticipantColor wish;
+    bool             wantsLargeAssets = false;
     if (!r.readString(projectKey)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no project key)",
                     name.c_str());
         return;
     }
     if (!r.readString(clientKey) || !readAvatar(r, avatar, m_cfg.maxAvatarSize) ||
-        !readColor(r, wish)) {
+        !readColor(r, wish) || !r.readBool(wantsLargeAssets)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no identity block)",
                     name.c_str());
         return;
@@ -396,6 +406,25 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
                     m_cfg.projectKey.empty() ? "<none>" : m_cfg.projectKey.c_str(),
                     projectKey.empty() ? "<none — nothing open there>" : projectKey.c_str());
         reject(JoinRejectReason::ProjectMismatch, m_cfg.projectLabel);
+        return;
+    }
+    // Only this direction is a refusal. A joiner that WOULD take the big assets
+    // arriving at a session that does not carry them is not a conflict at all:
+    // the host decides what the session is, and the guest simply follows it and
+    // publishes nothing large — there is nobody its preference could bind.
+    //
+    // The other way round costs the joiner megabytes on a link they may be
+    // paying for, so it is refused here rather than downgraded quietly, and it
+    // is refused with a reason of its own so the client can ask its user instead
+    // of reporting a dead end. Deliberately AFTER the ban and the project check:
+    // both of those are unfixable by agreeing to this, and being asked to turn
+    // on large-asset sync only to be refused again for the real reason is worse
+    // than being told the real reason first.
+    if (m_cfg.syncLargeAssets && !wantsLargeAssets) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — this session also transfers meshes, "
+                         "textures and audio, and that editor has not agreed to receive them",
+                    name.c_str());
+        reject(JoinRejectReason::LargeAssetsRequired, m_cfg.projectLabel);
         return;
     }
     if (m_participants.size() >= m_cfg.maxParticipants) {
@@ -445,6 +474,12 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     // the joiner cannot work out on its own that its choice was taken.
     writeColor(accept, joiner.color);
     accept.writeUInt64(m_sequence);
+    // What the session carries, so the joiner publishes by the session's rule
+    // and not by its own setting. Ahead of the roster on purpose: the roster is
+    // variable-length and its reader bails out mid-list on a short frame, and a
+    // session property that only arrives when the roster happens to parse would
+    // be missing in exactly the case worth diagnosing.
+    accept.writeBool(m_sessionLargeAssets);
     accept.writeUInt16(static_cast<std::uint16_t>(m_participants.size()));
     for (const auto& p : m_participants) {
         accept.writeUInt32(p.id);
@@ -530,6 +565,11 @@ void CollabSession::onPeerDisconnected(ConnectionId conn) {
         m_presence.clear();
         m_locks.clear();
         m_everSentPresence = false;
+        // Back to our own answer, which for a client is "nothing agreed yet".
+        // The rule belonged to the session that just ended; carrying it into the
+        // next join would have us publishing meshes on a host's say-so that we
+        // are no longer connected to.
+        m_sessionLargeAssets = false;
         HE_LOG_WARN(Net, "Collab: lost the connection to the host — session over");
         return;
     }
@@ -792,13 +832,20 @@ void CollabSession::handleJoinAccepted(BitReader& r) {
     std::uint64_t    sequence = 0;
     std::uint16_t    count = 0;
     ParticipantColor assigned;
+    bool             largeAssets = false;
     if (!r.readUInt32(id) || !readColor(r, assigned) ||
-        !r.readUInt64(sequence) || !r.readUInt16(count)) {
+        !r.readUInt64(sequence) || !r.readBool(largeAssets) || !r.readUInt16(count)) {
         return;
     }
 
     m_localId  = id;
     m_sequence = sequence;
+    // The host's answer replaces our wish for the rest of the session. Our own
+    // Config::syncLargeAssets only ever decided whether we were ADMITTED; from
+    // here on, what travels is the session's rule, and a client that kept
+    // consulting its own setting would push meshes into a session that does not
+    // carry them (where every other peer would simply have nothing to apply).
+    m_sessionLargeAssets = largeAssets;
     m_participants.clear();
 
     for (std::uint16_t i = 0; i < count; ++i) {
@@ -849,6 +896,10 @@ void CollabSession::handleJoinRejected(BitReader& r) {
     case JoinRejectReason::SnapshotFailed:  text = "the host could not produce a scene snapshot"; break;
     case JoinRejectReason::ProjectMismatch: text = "the host has a different project open"; break;
     case JoinRejectReason::Banned:          text = "the host banned you from this session"; break;
+    case JoinRejectReason::LargeAssetsRequired:
+        text = "the session also transfers meshes, textures and audio, which this "
+               "editor has not agreed to receive";
+        break;
     default: break;
     }
     HE_LOG_WARN(Net, "Collab: join rejected by the host — %s%s%s", text,

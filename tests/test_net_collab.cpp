@@ -106,11 +106,17 @@ Avatar makeAvatar(std::uint16_t size, std::uint8_t seed) {
 // would send it. Several tests need to knock on the host's door more than once
 // over the same link (a reconnect after a kick or a ban), which a client session
 // object deliberately refuses to do.
+// `syncLargeAssets` is last and defaults to false, which is what an editor with
+// the setting off sends — the ordinary case, and the one every test that does
+// not care about this flag wants. It is a trailing parameter for the same
+// reason it is last on the wire: it was added afterwards, and none of the calls
+// that predate it should have had to change.
 void writeJoinRequest(BitWriter& w, const std::string& name,
                       const std::string& projectKey = {},
                       const std::string& clientKey  = {},
                       std::uint16_t avatarSize = 0,
-                      ParticipantColor wish = {}) {
+                      ParticipantColor wish = {},
+                      bool syncLargeAssets = false) {
     w.writeUInt16(kCollabProtocolVersion);
     w.writeString(name);
     w.writeString(projectKey);
@@ -121,6 +127,7 @@ void writeJoinRequest(BitWriter& w, const std::string& name,
     w.writeByte(wish.r);
     w.writeByte(wish.g);
     w.writeByte(wish.b);
+    w.writeBool(syncLargeAssets);
 }
 
 int colorDistSq(const ParticipantColor& a, const ParticipantColor& b) {
@@ -2693,6 +2700,136 @@ TEST_CASE("v10: the version before this one is still refused at the door")
     w.writeUInt16(9);              // the protocol before the batch id existed
     w.writeString("Yesterday");
     clientNet.send(LoopbackTransport::kPeer, kFirstUserMessage + 0, w);
+
+    for (int i = 0; i < 6; ++i) {
+        a->update(); b->update();
+        hostNet.pump(); clientNet.pump();
+    }
+
+    CHECK(reason == JoinRejectReason::VersionMismatch);
+    CHECK(host.participants().size() == 1);
+}
+
+// ─── Larger assets: whose decision, and who is asked ─────────────────────────
+// The host decides what its session carries. The guest pays for it in bandwidth,
+// so a guest who has not agreed is refused BEFORE anything transfers — and
+// refused in a way it can tell apart from every other refusal, because the right
+// response is to ask the user rather than to give up.
+
+TEST_CASE("CollabSession: a host that sends the big assets refuses a guest who has not agreed")
+{
+    CollabSession::Config hostCfg;
+    hostCfg.syncLargeAssets = true;
+    CollabSession::Config clientCfg;
+    clientCfg.syncLargeAssets = false;   // the default, spelled out: it is the point
+
+    auto p = makePair("Anna", "Bob", clientCfg, hostCfg);
+    p->hostState.data = makeBlob(512);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+
+    p->pump();
+
+    // Its own reason, not a generic refusal: the editor turns exactly this into
+    // "this session sends the big files, is that all right?" and retries. Folded
+    // into any other code it would reach the user as a dead end.
+    CHECK(reason == JoinRejectReason::LargeAssetsRequired);
+    CHECK_FALSE(p->client->isJoined());
+    // Refused before the snapshot, not after: the host must not have serialized
+    // its scene for a peer it was never going to admit.
+    CHECK(p->hostState.captureCalls == 0);
+    CHECK(p->host->participants().size() == 1);
+}
+
+TEST_CASE("CollabSession: a guest that has agreed joins the same host, and learns the rule")
+{
+    CollabSession::Config hostCfg;
+    hostCfg.syncLargeAssets = true;
+    CollabSession::Config clientCfg;
+    clientCfg.syncLargeAssets = true;
+
+    auto p = makePair("Anna", "Bob", clientCfg, hostCfg);
+    p->hostState.data = makeBlob(512);
+
+    p->pump();
+
+    REQUIRE(p->client->isJoined());
+    // Both sides agree on what the session is, which is the whole reason the
+    // accept carries it — the guest publishes by this from here on.
+    CHECK(p->host->sessionSyncsLargeAssets());
+    CHECK(p->client->sessionSyncsLargeAssets());
+}
+
+TEST_CASE("CollabSession: a guest that would send the big assets follows a host that does not")
+{
+    // The reverse case is NOT an error. The host decides what the session
+    // carries, so a guest whose own setting is more permissive simply follows it
+    // — there is nobody for its preference to bind, and refusing it would deny
+    // a join over a difference that costs nobody anything.
+    CollabSession::Config hostCfg;
+    hostCfg.syncLargeAssets = false;
+    CollabSession::Config clientCfg;
+    clientCfg.syncLargeAssets = true;
+
+    auto p = makePair("Anna", "Bob", clientCfg, hostCfg);
+    p->hostState.data = makeBlob(512);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+
+    p->pump();
+
+    CHECK(reason == JoinRejectReason::None);
+    REQUIRE(p->client->isJoined());
+    // And it learned the HOST's answer, not its own — this is what stops it
+    // publishing meshes into a session where nobody else carries them.
+    CHECK_FALSE(p->client->sessionSyncsLargeAssets());
+    CHECK_FALSE(p->host->sessionSyncsLargeAssets());
+}
+
+TEST_CASE("CollabSession: an ordinary session says it does not carry the big assets")
+{
+    auto p = makePair("Anna", "Bob");
+    p->hostState.data = makeBlob(256);
+    p->pump();
+
+    REQUIRE(p->client->isJoined());
+    CHECK_FALSE(p->host->sessionSyncsLargeAssets());
+    CHECK_FALSE(p->client->sessionSyncsLargeAssets());
+}
+
+TEST_CASE("CollabSession: the version is still checked before the large-asset rule")
+{
+    // A peer that speaks an older protocol did not send the large-asset answer
+    // at all, so reading one would land on whatever follows — and refusing it as
+    // "you have not agreed to large assets" would send its user to a setting
+    // that cannot fix anything. The version check runs first and says the one
+    // true thing: these two builds do not speak the same protocol.
+    auto [a, b] = LoopbackTransport::createPair();
+    NetSession hostNet(a.get(), NetRole::Host);
+    NetSession clientNet(b.get(), NetRole::Client);
+
+    CollabSession::Config hostCfg;
+    hostCfg.syncLargeAssets = true;
+    FakeState hostState;
+    CollabSession host(&hostNet, NetRole::Host, hostCfg);
+    host.setStateProvider(&hostState);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    clientNet.on(kIdJoinRejected, [&](ConnectionId, BitReader& r) {
+        std::uint8_t code = 0;
+        r.readByte(code);
+        reason = static_cast<JoinRejectReason>(code);
+    });
+
+    a->update(); b->update();
+    hostNet.pump(); clientNet.pump();
+
+    BitWriter w;
+    w.writeUInt16(kCollabProtocolVersion - 1);   // the protocol before this flag
+    w.writeString("Yesterday");
+    clientNet.send(LoopbackTransport::kPeer, kIdJoinRequest, w);
 
     for (int i = 0; i < 6; ++i) {
         a->update(); b->update();

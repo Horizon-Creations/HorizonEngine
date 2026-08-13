@@ -73,6 +73,19 @@ struct EditorConfig
 	// visible on at all.
 	bool CollabLanDiscovery = true;
 
+	// Collaboration: also send the BIG assets — meshes, textures, audio, fonts —
+	// over the session instead of leaving them to source control. Off by default,
+	// and deliberately so: those are the files that are measured in hundreds of
+	// megabytes, and somebody on a metered or slow connection has to be able to
+	// say no.
+	//
+	// It is the HOST's decision for the session, because it is the host that
+	// decides what the session carries; a guest whose own setting disagrees is
+	// refused at the join and asked first (see JoinRejectReason). It cannot be
+	// changed while a session is running — half a session with one rule and half
+	// with another is a set of peers that quietly hold different files.
+	bool CollabSyncLargeAssets = false;
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
