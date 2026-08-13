@@ -2581,6 +2581,19 @@ void CollabController::publishAsset(const std::string& relativePath,
 {
 	if (!m_collab || !inSession()) return;
 	if (m_applyingRemoteAsset) return;      // this save WAS the remote change
+	// ── The save that IS a create ──
+	// ContentManager::saveAsset fires the hook this sits behind, so a caller that
+	// writes a brand-new asset through it and then announces the create sent the
+	// same bytes twice: once as an update to a file no peer has ever heard of,
+	// once as the create. Worse than the duplication, the update path CLAIMS THE
+	// LOCK, which the create path deliberately does not — asking for one would
+	// race every other peer creating at the same path. On a client that claim is
+	// a round trip behind, so when the host then refuses the create as a taken
+	// name and the file is renamed underneath it, the grant lands on a path this
+	// editor no longer owns and holds it for the rest of the session: the person
+	// who DID win the name finds every save of their own prefab silently dropped,
+	// with the asset showing as held by someone who never opened it.
+	if (!m_creatingAsset.empty() && m_creatingAsset == relativePath) return;
 	if (!isSyncableAsset(relativePath)) return;
 
 	std::ifstream f(fullPath, std::ios::binary);

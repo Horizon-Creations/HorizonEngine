@@ -1450,23 +1450,52 @@ namespace
 				name = n->name;
 
 			json eJson;
+			// The sequential index stays, because it is what makes a prefab file
+			// readable and it costs nothing. The UUID next to it is what makes the
+			// blob usable for anything but a template.
+			//
+			// It was missing, and the omission was invisible for as long as this
+			// blob was only ever a prefab: instantiating a template deliberately
+			// mints fresh identities, so nothing ever read the field. Then
+			// collaboration started sending the same blob over the wire with
+			// preserveIds=true — "a peer instantiating another peer's new subtree
+			// must end up with the SAME identities, because every later edit
+			// travels addressed by them" — and there was nothing to preserve.
+			// entityKeyOf fell back to legacyKey(seqId), so the receiver stamped
+			// {hi:0, lo:1}, {hi:0, lo:2} … onto the children. Wire ids are taken
+			// from uuid.lo, so those children answered to ids 1 and 2 on one
+			// machine and to their real uuids on the other: moving an arm of a
+			// replicated prefab moved nothing on the far side, deleting it deleted
+			// nothing, and two received prefabs gave one editor two entities both
+			// claiming id 1 — which then went into its scene file.
+			eJson["uuid"] = uuidToJson(entityUuid(registry, entity));
 			eJson["id"]   = seqId;
 			eJson["name"] = name;
 
 			if (auto* hier = registry.try_get<HierarchyComponent>(entity))
 			{
-				if (hier->parent != entt::null)
+				// Links by UUID for the same reason, since entityKeyOf now answers
+				// with one: a map keyed by UUID cannot be searched with an ordinal,
+				// so leaving these as seqIds would have restored no hierarchy at all.
+				//
+				// The parent is still written ONLY when it is inside this subtree,
+				// which is the one place this must not copy the whole-scene path.
+				// There the parentless record IS the root and maps onto the world
+				// root; here the root's real parent lives outside the blob, and
+				// naming it would make applyPrefabJson see every record as having a
+				// parent, find no root, and return null — every prefab in the
+				// project silently refusing to instantiate.
+				if (hier->parent != entt::null &&
+				    idMap.find(static_cast<uint32_t>(hier->parent)) != idMap.end())
 				{
-					auto pit = idMap.find(static_cast<uint32_t>(hier->parent));
-					if (pit != idMap.end())
-						eJson["parent"] = pit->second;
+					eJson["parent"] = uuidToJson(entityUuid(registry, hier->parent));
 				}
 				json children = json::array();
 				for (Entity child : hier->children)
 				{
-					auto cit = idMap.find(static_cast<uint32_t>(child));
-					if (cit != idMap.end())
-						children.push_back(cit->second);
+					if (idMap.find(static_cast<uint32_t>(child)) == idMap.end())
+						continue;   // engine-generated, or otherwise not in this blob
+					children.push_back(uuidToJson(entityUuid(registry, child)));
 				}
 				if (!children.empty())
 					eJson["children"] = children;

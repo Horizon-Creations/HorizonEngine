@@ -328,3 +328,120 @@ TEST_CASE("Prefab: instantiating twice produces two independent subtrees")
         CHECK(rootChildCount(world, child) == 0);
     }
 }
+
+// ─── The identity a subtree blob carries ─────────────────────────────────────
+// Collaboration reuses serializeSubtree as its "create" payload and instantiates
+// it with preserveIds=true, because every later edit — a transform, a component
+// change, a delete — travels addressed by the entity's UUID. The blob did not
+// carry one: it wrote a sequential index and nothing else, so the receiver
+// stamped {hi:0, lo:1}, {hi:0, lo:2} … onto the children of every replicated
+// prefab. Those answered to different ids on the two machines, and two received
+// prefabs gave one editor two entities both claiming id 1.
+
+TEST_CASE("Prefab: a subtree blob carries the real entity UUIDs")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Robot");
+    const Entity armL  = world.createEntity("ArmL");
+    const Entity handL = world.createEntity("HandL");
+    REQUIRE(world.reparentEntity(armL,  root));
+    REQUIRE(world.reparentEntity(handL, armL));
+
+    auto& reg = world.registry();
+    const auto uuidOf = [&reg](Entity e) {
+        const auto* c = reg.try_get<EntityIdComponent>(e);
+        return c ? c->id : HE::UUID{};
+    };
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(world, root);
+    REQUIRE(!blob.empty());
+
+    // Serialising mints the ids if they were missing, so read them afterwards.
+    const HE::UUID rootId = uuidOf(root), armId = uuidOf(armL), handId = uuidOf(handL);
+    REQUIRE(rootId != HE::UUID{});
+    REQUIRE(armId  != HE::UUID{});
+    REQUIRE(handId != HE::UUID{});
+    // Distinct, or the whole exercise is pointless.
+    REQUIRE(armId != handId);
+
+    // The receiving side of a replicated create: a second world, preserving ids.
+    HorizonWorld peer;
+    const Entity peerRoot = ser.instantiatePrefab(peer, blob, entt::null,
+                                                  /*preserveIds=*/true);
+    REQUIRE((peerRoot != entt::null));
+
+    auto& preg = peer.registry();
+    const auto findByUuid = [&preg](const HE::UUID& id) {
+        Entity found = entt::null;
+        preg.view<EntityIdComponent>().each([&](auto e, const EntityIdComponent& c) {
+            if (c.id == id) found = e;
+        });
+        return found;
+    };
+
+    // Every entity, root included. The root used to be skipped outright: its
+    // sequential index was 0, which read back as the all-zero UUID and failed
+    // the "is there an id here" guard.
+    CHECK(findByUuid(rootId) == peerRoot);
+    const Entity peerArm  = findByUuid(armId);
+    const Entity peerHand = findByUuid(handId);
+    REQUIRE((peerArm  != entt::null));
+    REQUIRE((peerHand != entt::null));
+
+    // And the hierarchy still stands. The links are UUID references now, so a
+    // blob that kept the old ordinal refs would restore nothing at all — every
+    // child would sit at the top level.
+    const auto* armHier  = preg.try_get<HierarchyComponent>(peerArm);
+    const auto* handHier = preg.try_get<HierarchyComponent>(peerHand);
+    REQUIRE(armHier  != nullptr);
+    REQUIRE(handHier != nullptr);
+    CHECK(armHier->parent  == peerRoot);
+    CHECK(handHier->parent == peerArm);
+
+    const auto* nameArm = preg.try_get<NameComponent>(peerArm);
+    REQUIRE(nameArm != nullptr);
+    CHECK(nameArm->name == "ArmL");
+}
+
+TEST_CASE("Prefab: a template still mints fresh ids for every instance")
+{
+    // The other half of the same change. Carrying UUIDs in the blob must NOT
+    // turn an ordinary prefab drop into two entities claiming one identity —
+    // preserveIds is the sanctioned exception, and it defaults to off.
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Crate");
+    const Entity child = world.createEntity("Lid");
+    REQUIRE(world.reparentEntity(child, root));
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(world, root);
+    REQUIRE(!blob.empty());
+
+    auto& reg = world.registry();
+    const auto uuidOf = [&reg](Entity e) {
+        const auto* c = reg.try_get<EntityIdComponent>(e);
+        return c ? c->id : HE::UUID{};
+    };
+    const HE::UUID rootId = uuidOf(root), childId = uuidOf(child);
+
+    const Entity a = ser.instantiatePrefab(world, blob);
+    const Entity b = ser.instantiatePrefab(world, blob);
+    REQUIRE((a != entt::null));
+    REQUIRE((b != entt::null));
+    CHECK(a != b);
+    CHECK(uuidOf(a) != rootId);
+    CHECK(uuidOf(b) != rootId);
+    CHECK(uuidOf(a) != uuidOf(b));
+
+    // Each instance got its own child, parented to its own root.
+    const auto* ha = reg.try_get<HierarchyComponent>(a);
+    const auto* hb = reg.try_get<HierarchyComponent>(b);
+    REQUIRE(ha != nullptr);
+    REQUIRE(hb != nullptr);
+    REQUIRE(ha->children.size() == 1);
+    REQUIRE(hb->children.size() == 1);
+    CHECK(ha->children[0] != hb->children[0]);
+    CHECK(uuidOf(ha->children[0]) != childId);
+    CHECK(uuidOf(ha->children[0]) != uuidOf(hb->children[0]));
+}

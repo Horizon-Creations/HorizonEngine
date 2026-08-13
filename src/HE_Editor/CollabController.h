@@ -536,6 +536,30 @@ public:
 	// create is being applied.
 	void publishAssetCreate(const std::string& relativePath, const std::string& fullPath);
 
+	// ── Writing a new asset through ContentManager::saveAsset ────────────────
+	// Hold one of these across the save when the file being written is NEW and
+	// you are going to call publishAssetCreate for it afterwards. The save hook
+	// would otherwise publish the same bytes as an ordinary update first — see
+	// publishAsset for what that costs. Callers that write the file themselves
+	// (the content browser uses HAsset::Writer directly) never go through the
+	// hook and do not need this.
+	class CreatingAsset
+	{
+	public:
+		CreatingAsset(CollabController* c, std::string relativePath)
+			: m_c(c)
+		{
+			if (m_c) m_c->m_creatingAsset = std::move(relativePath);
+		}
+		~CreatingAsset() { if (m_c) m_c->m_creatingAsset.clear(); }
+
+		CreatingAsset(const CreatingAsset&)            = delete;
+		CreatingAsset& operator=(const CreatingAsset&) = delete;
+
+	private:
+		CollabController* m_c = nullptr;
+	};
+
 	// ── New assets that arrived from the session ──
 	// Collected rather than announced one at a time: Save All is a single user
 	// action that can produce a dozen, and a dozen notices for one keystroke is
@@ -1330,6 +1354,10 @@ private:
 		bool          summarised    = false;
 	};
 	std::unordered_map<HE::Net::ParticipantId, RemoteNoteBudget> m_noteBudgets;
+	// The one path whose save hook must not publish an update — see CreatingAsset.
+	// A single path rather than a set: this is held across one synchronous
+	// saveAsset call on the frame thread, never nested.
+	std::string m_creatingAsset;
 	// Today every one of these callbacks runs on the frame thread: HorizonNet is
 	// poll-driven end to end (CollabController::update → SecureTransport::update
 	// → NetSession::pump → CollabSession::update), and there is not a single
