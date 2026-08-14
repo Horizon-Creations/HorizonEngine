@@ -229,3 +229,65 @@ TEST_CASE("a graph reaches its own entity through the engine API")
 	const InstanceId plain = rt.add(Graph{});
 	CHECK(HE::api::entity::owned(c, plain) == 0u);
 }
+
+// ── Input routing: the controller is the central point of contact ───────────
+
+namespace
+{
+	// A graph that counts one named event into an Int variable.
+	Graph eventCounter(const char* event, const char* var)
+	{
+		Graph g;
+		Variable v; v.name = var; v.type = PinType::Int; g.variables.push_back(v);
+		Node ev; ev.type = NodeType::Event; ev.s = event;
+		const int e = g.addNode(std::move(ev));
+		Node get; get.type = NodeType::GetVariable; get.s = var; get.propType = PinType::Int;
+		const int gv = g.addNode(std::move(get));
+		Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+		const int k = g.addNode(std::move(one));
+		Node add; add.type = NodeType::Add;
+		const int a = g.addNode(std::move(add));
+		Node set; set.type = NodeType::SetVariable; set.s = var; set.propType = PinType::Int;
+		const int s = g.addNode(std::move(set));
+		REQUIRE(g.connect(gv, 0, a, 0));
+		REQUIRE(g.connect(k,  0, a, 1));
+		REQUIRE(g.connect(e,  0, s, 0));
+		REQUIRE(g.connect(a,  2, s, 2));   // Add's data-out is pin 2 (no exec pins)
+		return g;
+	}
+}
+
+TEST_CASE("input reaches the controller always, and the possessed character too")
+{
+	// The routing rule, in one place: a PlayerController is the engine's central
+	// point of contact and handles input whether or not it possesses anything;
+	// possessing a character makes the controller FORWARD the same event, it does
+	// not make the controller passive.
+	Runtime rt;
+	const InstanceId ctrl = rt.add(eventCounter("Input.Jump.Pressed", "got"), {},
+	                               { "Content/PC.hasset", "PlayerController" });
+	const InstanceId pawn = rt.add(eventCounter("Input.Jump.Pressed", "got"), {},
+	                               { "Content/Hero.hasset", "PlayerCharacter" });
+
+	HE::api::player::clear();
+	HE::api::player::setControllers({ ctrl });
+
+	// Unpossessed: the controller still handles its own input.
+	rt.fireEvent(ctrl, "Input.Jump.Pressed");
+	CHECK(rt.getVariable(ctrl, "got").i == 1);
+	CHECK(rt.getVariable(pawn, "got").i == 0);
+
+	// Possessed: BOTH get it — the controller does not go quiet.
+	HE::api::player::possess(ctrl, pawn);
+	CHECK(HE::api::player::possessed(ctrl) == pawn);
+	rt.fireEvent(ctrl, "Input.Jump.Pressed");
+	rt.fireEvent(HE::api::player::possessed(ctrl), "Input.Jump.Pressed");
+	CHECK(rt.getVariable(ctrl, "got").i == 2);
+	CHECK(rt.getVariable(pawn, "got").i == 1);
+
+	// A destroyed character must not be fired at — the handle stays in the table
+	// until someone unpossesses, so the liveness check is what covers it.
+	rt.destroy(pawn);
+	CHECK_FALSE(rt.alive(HE::api::player::possessed(ctrl)));
+	HE::api::player::clear();
+}

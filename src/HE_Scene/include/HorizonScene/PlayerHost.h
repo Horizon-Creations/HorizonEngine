@@ -5,6 +5,7 @@
 #include <vector>
 
 class ContentManager;
+class EntityHost;
 class Input;
 
 // ── PlayerHost ───────────────────────────────────────────────────────────────
@@ -16,6 +17,17 @@ class Input;
 //   Input.<Action>.Axis                 (Axis actions, per frame, Float value).
 // Event names come from HE::inputEvent* (Application/InputAssets.h) — the same
 // helpers the editor's event catalog uses.
+//
+// ── Where input goes ─────────────────────────────────────────────────────────
+// The PlayerController is the engine's central point of contact. Every input
+// event reaches EVERY controller, always — a controller stays able to handle
+// input whether or not it possesses anything. When a controller does possess a
+// character, the same event is ALSO delivered to that character, which is what
+// "the controller forwards input to the pawn" means here.
+//
+// A project with no PlayerController at all keeps the pre-possession behaviour:
+// input goes straight to the characters. Without that fallback every existing
+// PlayerCharacter graph that handles its own input would go silent.
 //
 // Bindings are the union of every InputMappingContext asset in the project;
 // action value types come from the InputAction assets. Discovery walks the
@@ -34,10 +46,16 @@ public:
 	// (compiled backend first, interpreted graph fallback); fires Construct and
 	// BeginPlay on each. Call once per play session, after content + the
 	// runtime's services are set up. `runtime` must outlive this host's session.
-	void begin(HorizonCode::Runtime& runtime, ContentManager& cm);
+	//
+	// `entities` (optional) gives PlayerCharacters a scene entity: the character
+	// is spawned through it, so it arrives with the components its class carries
+	// instead of being a bodiless runtime instance. Null = no entity, which is
+	// what a project that drives an already-placed entity itself wants.
+	void begin(HorizonCode::Runtime& runtime, ContentManager& cm,
+	           EntityHost* entities = nullptr);
 
 	// Per-frame pump: ticks the mapping against `input`, then fires Tick and
-	// the per-action input events on every player instance. No-op when not
+	// the per-action input events (see the routing note above). No-op when not
 	// running.
 	void tick(const Input& input, float dt);
 
@@ -46,13 +64,25 @@ public:
 	void end();
 
 	bool running() const { return m_runtime != nullptr; }
-	size_t playerCount() const { return m_players.size(); }
+	size_t playerCount() const { return m_controllers.size() + m_characters.size(); }
+	size_t controllerCount() const { return m_controllers.size(); }
 
 private:
 	struct ActionInfo { std::string name; bool isAxis = false; };
 
+	// Deliver one input event the way the routing note describes: to every
+	// controller, and additionally to whatever each of them possesses.
+	void fireInputEvent(const std::string& event, const HorizonCode::Value& arg);
+
 	HorizonCode::Runtime*                m_runtime = nullptr;
 	InputMapping                         m_mapping;
 	std::vector<ActionInfo>              m_actions;
-	std::vector<HorizonCode::InstanceId> m_players;
+	// Routing lists — EVERY player instance, wherever it came from.
+	std::vector<HorizonCode::InstanceId> m_controllers;
+	std::vector<HorizonCode::InstanceId> m_characters;
+	// The subset this host CREATED, and therefore the only ones it ticks and
+	// destroys. A character spawned through the EntityHost belongs to that host:
+	// ticking it here as well would fire Tick twice a frame, and destroying it
+	// here would leave a stale entry in the other host's map.
+	std::vector<HorizonCode::InstanceId> m_owned;
 };

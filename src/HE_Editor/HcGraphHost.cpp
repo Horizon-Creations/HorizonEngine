@@ -279,6 +279,42 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 	}
 }
 
+namespace
+{
+// The engine base a class ASSET derives from, "" when unknown.
+std::string assetBaseClass(ContentManager* content, const std::string& path)
+{
+	if (!content || path.empty()) return {};
+	const HE::UUID id = content->loadAsset(path);
+	const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id);
+	return a ? a->baseClass : std::string();
+}
+}
+
+std::string resolveClassBase(const HC::Node& srcNode, const HC::Graph& selfGraph,
+                             const std::string& selfBaseClass, ContentManager* content)
+{
+	switch (srcNode.type)
+	{
+		case NT::GetSelf: return selfBaseClass;
+		case NT::GetVariable:
+		case NT::SetVariable:   // the set node passes the value through
+		{
+			const HC::Variable* v = selfGraph.findVariable(srcNode.s);
+			return (v && v->type == PT::Ref) ? assetBaseClass(content, v->className) : std::string();
+		}
+		case NT::Cast:
+			// A cast to an engine class IS the base; a cast to an asset resolves
+			// through that asset.
+			if (HC::findEngineClass(srcNode.s) && !srcNode.s.empty()) return srcNode.s;
+			return assetBaseClass(content, srcNode.s);
+		case NT::CreateObject: return assetBaseClass(content, srcNode.s);
+		case NT::ForEach:
+			return srcNode.propType == PT::Ref ? assetBaseClass(content, srcNode.s) : std::string();
+		default: return {};
+	}
+}
+
 // ── Canvas model ─────────────────────────────────────────────────────────────
 
 namespace
@@ -725,6 +761,37 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (fh || vh) ImGui::Separator();
 		}
 		else ImGui::TextDisabled("(untyped object)");
+
+		// What the reference INHERITS: the members its engine base class brings
+		// with it. They are HE::api registry rows, not nodes in any graph, so
+		// picking one inserts an Engine Call already wired to this reference —
+		// which is why the base class needs no dispatch machinery of its own.
+		{
+			const std::string base =
+				resolveClassBase(*sn, graph, h.selfBaseClass, h.content);
+			bool eh = false;
+			for (const auto& m : HC::engineClassMembers(base))
+			{
+				if (!matches(m.label)) continue;
+				const HE::api::ApiFn* fn = HE::api::find(m.apiId);
+				if (!fn) continue;   // a typo in the table; a test guards it too
+				if (!eh) { ImGui::TextDisabled("Inherited"); eh = true; }
+				if (!HcEditorUtil::searchMenuItem(m.label)) continue;
+				const int id = addNode(graph, NT::EngineCall, pos, h.currentGraph);
+				HC::Node* nn = graph.findNode(id);
+				nn->s = m.apiId;
+				nn->hasArg = fn->isExec;
+				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
+				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+				// Wire this reference into the parameter that takes the target,
+				// so the node arrives usable rather than as one more thing to
+				// connect.
+				const PinRanges r = pinRanges(*nn);
+				graph.connect(srcNode, srcPin, id, r.dataIn0 + m.targetParam);
+				created = id; ImGui::CloseCurrentPopup();
+			}
+			if (eh) ImGui::Separator();
+		}
 
 		ImGui::TextDisabled("Reference");
 		auto refItem = [&](const char* lbl, NT t){

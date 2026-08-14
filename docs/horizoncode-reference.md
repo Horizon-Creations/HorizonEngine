@@ -130,6 +130,23 @@ every asset predating the taxonomy already carries, so nothing had to migrate.
 HorizonCode classes do **not** derive from one another: a class asset as a cast
 target matches that exact class and nothing else.
 
+A base class also brings **members**: drag off any reference of that type and the
+menu shows an *Inherited* section — `Possess` / `Un Possess` /
+`Get Possessed Character` on a PlayerController, `Get Controller` on a
+PlayerCharacter, `Get Owning Entity` on anything below Entity. Picking one drops
+an **Engine Call** already wired to that reference, so the member surface is
+registry rows rather than machinery of its own — and Lua/Python/codegen get the
+same functions for free.
+
+**Player input.** The PlayerController is the engine's central point of contact:
+every `Input.<Action>.*` event reaches **every** controller, always, whether or
+not it possesses anything. A controller that possesses a PlayerCharacter also has
+that same event delivered to the character — possessing makes the controller
+forward input, it does not make it passive. A project with no PlayerController at
+all keeps the older behaviour and gets input straight on its characters. Exactly
+one controller and one character in a project → they are possessed
+automatically; anything else is the game's call, in the controller's `BeginPlay`.
+
 ### Debug
 **Print** (`Print`) — log a value.
 
@@ -160,6 +177,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **Math** | 4 | `clamp`, `lerp`, `length`, `distance` (plus per-op nodes in §2) |
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
 | **Time** | 3 | `deltaTime`, `elapsed`, `frameCount` |
+| **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |
 | **Input** | 5 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
 | **Environment** | 10 | `get/setTimeOfDay`, `get/setCloudCoverage`, `get/setFogDensity`, `get/setWindDirection`, `get/setWindSpeed` |

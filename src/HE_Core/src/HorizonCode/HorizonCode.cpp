@@ -1446,9 +1446,14 @@ const std::vector<EngineClassDesc>& engineClasses()
         { "Object",           "",       { "Construct", "Destruct" }, {} },
         { "Entity",           "Object", { "BeginPlay", "Tick",
                                           "OnBeginOverlap", "OnEndOverlap",
-                                          "OnHit", "OnHitEnd" },     {} },
-        { "PlayerCharacter",  "Entity", {},                          {} },
-        { "PlayerController", "Entity", {},                          {} },
+                                          "OnHit", "OnHitEnd" },
+                                        { { "Get Owning Entity", "entity.owned", 0 } } },
+        { "PlayerCharacter",  "Entity", {},
+                                        { { "Get Controller", "player.controllerOf", 0 } } },
+        { "PlayerController", "Entity", {},
+                                        { { "Possess",   "player.possess",   0 },
+                                          { "Un Possess", "player.unpossess", 0 },
+                                          { "Get Possessed Character", "player.possessed", 0 } } },
     };
     return k;
 }

@@ -510,6 +510,30 @@ namespace time {
     int   frameCount();                  // frames since reset
 }
 
+// ── Player possession (process-global table; PlayerHost owns it) ─────────────
+// The PlayerController is the engine's central point of contact for a player:
+// input events reach IT, and it decides what to do with them. Possessing a
+// PlayerCharacter tells the engine to forward those same events to the character
+// as well — the controller keeps handling them either way, with or without a
+// character, so a controller is never made passive by possessing one.
+//
+// The table is process-global for the same reason input/time/random are: it is
+// per-session state with exactly one owner (PlayerHost) and no world of its own
+// — a controller outlives any particular scene. Refs are HorizonCode instance
+// handles; 0 means "none", and a handle whose instance is gone reads as none.
+namespace player {
+    void     possess(uint32_t controller, uint32_t character);
+    void     unpossess(uint32_t controller);
+    uint32_t possessed(uint32_t controller);     // what this controller drives
+    uint32_t controllerOf(uint32_t character);   // who drives this character
+    uint32_t controller();                       // the (first) player controller
+    uint32_t character();                        // what it possesses (0 = none)
+    // App hooks: PlayerHost registers the session's controllers so controller()
+    // has something to answer, and clears the table when the session ends.
+    void     setControllers(const std::vector<uint32_t>& controllers);
+    void     clear();
+}
+
 // ── Input (process-global snapshot; the app pushes it each frame) ─────────────
 // Key names follow SDL scancode names ("W", "Space", "Left", "Escape", …) so the
 // query side stays SDL-free here while the app populates it from real devices.

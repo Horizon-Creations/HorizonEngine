@@ -1450,3 +1450,67 @@ TEST_CASE("duplicateNodes clones the set + internal links, skips Event/FunctionE
         if (l.srcNode == fresh[0] && l.dstNode == fresh[1]) cloneLink = true;
     CHECK(cloneLink == true);
 }
+
+// ── The engine classes' inherited member surface ────────────────────────────
+
+TEST_CASE("every engine base-class member names a real registry function")
+{
+    // The member table (HorizonCode.h engineClasses) spells its members as
+    // HE::api registry IDS, because the editor turns a picked member into an
+    // Engine Call node pre-wired to the reference the menu was opened on — which
+    // is what makes "inherited members" cost no dispatch machinery at all.
+    //
+    // Those ids are strings in a table one module away from the registry, so a
+    // typo would be perfectly silent: the member would just never appear. This
+    // is the test that makes it loud.
+    for (const auto& c : HorizonCode::engineClasses())
+    {
+        for (const auto& m : c.members)
+        {
+            INFO("class ", c.name, " member ", m.label, " -> ", m.apiId);
+            const HE::api::ApiFn* fn = HE::api::find(m.apiId);
+            REQUIRE(fn != nullptr);
+            // The target parameter has to exist AND be a reference — the editor
+            // wires the object into it without asking.
+            REQUIRE(m.targetParam >= 0);
+            REQUIRE(m.targetParam < (int)fn->params.size());
+            CHECK(fn->params[m.targetParam].type == HorizonCode::PinType::Ref);
+        }
+    }
+}
+
+TEST_CASE("possession is one controller per character, both ways round")
+{
+    using namespace HE::api;
+    player::clear();
+
+    CHECK(player::possessed(1) == 0u);
+    CHECK(player::controllerOf(2) == 0u);
+
+    player::possess(1, 2);
+    CHECK(player::possessed(1) == 2u);
+    CHECK(player::controllerOf(2) == 1u);
+
+    // A second controller taking the same character must take it AWAY from the
+    // first — leaving both entries would make controllerOf answer with whichever
+    // the map happened to hash first.
+    player::possess(3, 2);
+    CHECK(player::possessed(3) == 2u);
+    CHECK(player::possessed(1) == 0u);
+    CHECK(player::controllerOf(2) == 3u);
+
+    player::unpossess(3);
+    CHECK(player::possessed(3) == 0u);
+    CHECK(player::controllerOf(2) == 0u);
+
+    // controller()/character() are the "just give me the player" shorthands and
+    // read from the session's registered controllers.
+    player::setControllers({ 7 });
+    player::possess(7, 8);
+    CHECK(player::controller() == 7u);
+    CHECK(player::character() == 8u);
+
+    player::clear();
+    CHECK(player::controller() == 0u);
+    CHECK(player::character() == 0u);
+}

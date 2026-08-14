@@ -4689,10 +4689,10 @@ void EditorApplication::setPlayMode(bool play)
 		// Player controller/character classes + input events, mirroring the
 		// packaged game: spawn after the level is up (Construct + BeginPlay),
 		// pump Tick/Input.* per frame while playing.
-		m_playerHost.begin(m_gameInstance.runtime(), contentManager());
-		// HorizonCode classes sitting on scene entities. After the player host so
-		// a controller's BeginPlay can already reach them.
+		// The entity host FIRST: the player host spawns its characters through it,
+		// so they arrive with the components their class carries.
 		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
+		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
 
 		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
 		// mouse capture (visible cursor = UI interaction mode).

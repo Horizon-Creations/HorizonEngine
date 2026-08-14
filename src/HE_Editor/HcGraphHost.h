@@ -69,6 +69,13 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
                                    const HC::Graph* giGraph, ContentManager* content,
                                    HC::Graph& scratch);
 
+// The ENGINE BASE CLASS behind that same Ref output ("" when unknown or plain
+// Object). The graph above carries a class's authored members; this carries the
+// ones its base class brings with it, which are HE::api rows rather than nodes
+// in any graph — see HorizonCode::engineClassMembers.
+std::string resolveClassBase(const HC::Node& srcNode, const HC::Graph& selfGraph,
+                             const std::string& selfBaseClass, ContentManager* content);
+
 // ── Host bindings ────────────────────────────────────────────────────────────
 
 // Which node types each frontend offers. Kept as plain data (not behaviour) so
@@ -94,6 +101,11 @@ struct Host
 	int                 currentGraph = 0;       // visible sub-graph (0 = event graph)
 	ContentManager*     content      = nullptr;
 	const HC::Graph*    giGraph      = nullptr; // for Get Game Instance member menus
+	// The engine base class the edited graph derives from ("" = Object). Lets a
+	// drag off Get Self offer the base's built-in members — Possess on a
+	// PlayerController, Get Owning Entity on any Entity. Only the class tab has
+	// one; a widget, a level script and the GameInstance leave it empty.
+	std::string         selfBaseClass;
 	// Node whose compile error gets a red halo (0 = none).
 	int                 errorNode    = 0;
 	// Header text for a node.

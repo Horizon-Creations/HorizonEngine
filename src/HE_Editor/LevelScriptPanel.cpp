@@ -713,7 +713,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 // drag payload, and that an edit bumps the scene-undo revision.
 
 void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool allowCustomEvents,
-                const ImVec2& avail, ContentManager* content, const HC::Graph* giGraph, bool& edited)
+                const ImVec2& avail, ContentManager* content, const HC::Graph* giGraph,
+                const std::string& baseClass, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -725,6 +726,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.currentGraph = g.currentGraph;
 	host.content      = content;
 	host.giGraph      = giGraph;
+	host.selfBaseClass = baseClass;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };
@@ -810,9 +812,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 // over one HorizonCode graph with the given event catalog. Used for both the
 // Level Script and the Game Instance windows (they differ only in the graph,
 // the events, and how a change is committed).
+// `baseClass` is the engine base the graph derives from — only the class tab
+// has one, which is why it is defaulted rather than required of all three.
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    bool allowCustomEvents, const char* title, const char* subtitle,
-                   ContentManager* content, const HC::Graph* giGraph, bool& edited)
+                   ContentManager* content, const HC::Graph* giGraph, bool& edited,
+                   const std::string& baseClass = {})
 {
 	// The shared panel state is reused across the Level/GI/Class tabs, so a
 	// sub-graph id from another graph (or a deleted function) must reset to the
@@ -934,7 +939,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		}
 	}
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, edited);
+	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, baseClass, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -1234,7 +1239,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
 	              isPlayer ? "Player class; lifecycle + input events."
 	                       : "Reusable class; lifecycle events + its own.",
-	              ctx.contentManager, ctx.gameInstanceGraph, edited);
+	              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

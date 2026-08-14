@@ -1205,6 +1205,53 @@ float elapsed()         { return (float)clk().elapsed; }
 int   frameCount()      { return (int)clk().frame; }
 } // namespace time
 
+// ── Player possession ────────────────────────────────────────────────────────
+namespace player {
+namespace {
+struct Table
+{
+    // controller → possessed character. Small by construction (one entry per
+    // local player), so a vector of pairs would do — the map is for the reverse
+    // lookup staying honest when a controller possesses a different character.
+    std::unordered_map<uint32_t, uint32_t> byController;
+    std::vector<uint32_t>                  controllers;   // session order
+};
+Table& tbl() { static Table t; return t; }
+}
+
+void possess(uint32_t controller, uint32_t character)
+{
+    if (controller == 0) return;
+    // One character has ONE controller: taking it away from whoever held it is
+    // the whole point of possessing, and leaving both entries would make
+    // controllerOf answer with whichever the map happened to hash first.
+    if (character != 0)
+        for (auto& [c, ch] : tbl().byController)
+            if (ch == character && c != controller) ch = 0;
+    tbl().byController[controller] = character;
+}
+void unpossess(uint32_t controller) { tbl().byController.erase(controller); }
+
+uint32_t possessed(uint32_t controller)
+{
+    const auto it = tbl().byController.find(controller);
+    return it != tbl().byController.end() ? it->second : 0u;
+}
+uint32_t controllerOf(uint32_t character)
+{
+    if (character == 0) return 0u;
+    for (const auto& [c, ch] : tbl().byController)
+        if (ch == character) return c;
+    return 0u;
+}
+uint32_t controller() { return tbl().controllers.empty() ? 0u : tbl().controllers.front(); }
+uint32_t character()  { return possessed(controller()); }
+
+void setControllers(const std::vector<uint32_t>& controllers)
+{ tbl().controllers = controllers; }
+void clear() { tbl() = Table{}; }
+} // namespace player
+
 // ── Input ────────────────────────────────────────────────────────────────────
 namespace input {
 namespace {
@@ -1415,6 +1462,22 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::elapsed()) }; } });
         t.push_back({ "time.frameCount", "Time", false, {}, {{"frame", P::Int}}, "HE::api::time::frameCount",
             [](Ctx&, const VV&){ return VV{ Value::ofInt(time::frameCount()) }; } });
+
+        // Player possession. The two that TAKE a controller are also the
+        // PlayerController base class's member surface (HorizonCode.h
+        // engineClasses()), which is why their target parameter comes first.
+        t.push_back({ "player.possess", "Player", true, {{"controller", P::Ref}, {"character", P::Ref}}, {}, "HE::api::player::possess",
+            [](Ctx&, const VV& a){ player::possess(aR(a, 0), aR(a, 1)); return VV{}; } });
+        t.push_back({ "player.unpossess", "Player", true, {{"controller", P::Ref}}, {}, "HE::api::player::unpossess",
+            [](Ctx&, const VV& a){ player::unpossess(aR(a, 0)); return VV{}; } });
+        t.push_back({ "player.possessed", "Player", false, {{"controller", P::Ref}}, {{"character", P::Ref}}, "HE::api::player::possessed",
+            [](Ctx&, const VV& a){ return VV{ Value::ofRef(player::possessed(aR(a, 0))) }; } });
+        t.push_back({ "player.controllerOf", "Player", false, {{"character", P::Ref}}, {{"controller", P::Ref}}, "HE::api::player::controllerOf",
+            [](Ctx&, const VV& a){ return VV{ Value::ofRef(player::controllerOf(aR(a, 0))) }; } });
+        t.push_back({ "player.controller", "Player", false, {}, {{"controller", P::Ref}}, "HE::api::player::controller",
+            [](Ctx&, const VV&){ return VV{ Value::ofRef(player::controller()) }; } });
+        t.push_back({ "player.character", "Player", false, {}, {{"character", P::Ref}}, "HE::api::player::character",
+            [](Ctx&, const VV&){ return VV{ Value::ofRef(player::character()) }; } });
 
         // Input (pure getters; the app pushes the snapshot each frame)
         t.push_back({ "input.keyDown", "Input", false, {{"key", P::String}}, {{"down", P::Bool}}, "HE::api::input::keyDown",
@@ -1689,6 +1752,11 @@ const std::vector<ApiFn>& registry()
             { "random.chance", "Random Chance" },
             { "time.deltaTime", "Delta Time" }, { "time.elapsed", "Elapsed Time" },
             { "time.frameCount", "Frame Count" },
+            { "player.possess", "Possess" },          { "player.unpossess", "Un Possess" },
+            { "player.possessed", "Get Possessed Character" },
+            { "player.controllerOf", "Get Controller" },
+            { "player.controller", "Get Player Controller" },
+            { "player.character", "Get Player Character" },
             { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },
@@ -1757,7 +1825,7 @@ bool isScriptGroup(std::string_view group)
 {
     static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
                                                     "string", "camera", "env", "entity", "audio",
-                                                    "debug", "fs", "save", "scene" };
+                                                    "debug", "fs", "save", "scene", "player" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

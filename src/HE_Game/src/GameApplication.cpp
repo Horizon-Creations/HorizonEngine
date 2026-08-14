@@ -356,9 +356,11 @@ void GameApplication::OnInit()
 	// BeginPlay) and start pumping Tick/Input.* events (OnRender). After the scene
 	// load so BeginPlay can reach scene entities through the engine-call API.
 	startPhysics();
-	m_playerHost.begin(m_gameInstance.runtime(), contentManager());
+	// The entity host FIRST: the player host spawns its characters through it,
+	// so they arrive with the components their class carries.
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
