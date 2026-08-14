@@ -968,5 +968,14 @@ ExportResult ProjectExporter::exportProject(
         return *fail;
     if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
 
-    return {true, "", ctx.assetsPacked, ctx.binaryCopied, ctx.assetsReused, ctx.keyEmbedded};
+    // The runtime always ships under this name (routeRuntime above keys on it),
+    // so the executable is derived, not searched for. Reported only if it is
+    // really there — a data-only export (no gameRuntimeDir) has none.
+    std::error_code exeEc;
+    std::filesystem::path exe = ctx.binDir / "HorizonGame";
+    if (!std::filesystem::exists(exe, exeEc)) exe = ctx.binDir / "HorizonGame.exe";
+    if (!std::filesystem::exists(exe, exeEc)) exe.clear();
+
+    return {true, "", ctx.assetsPacked, ctx.binaryCopied, ctx.assetsReused, ctx.keyEmbedded,
+            exe};
 }

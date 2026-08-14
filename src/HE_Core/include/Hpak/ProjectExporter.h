@@ -96,6 +96,12 @@ struct HE_API ExportResult {
     // project.hcfg). False with encrypt when the runtime binary carries no key
     // block (legacy runtime) — then the key ships in the hcfg as before.
     bool        keyEmbedded      = false;
+    // The game executable this export produced, for a caller that wants to run
+    // it. Inside the .app it is the binary itself (Contents/MacOS/HorizonGame),
+    // not the bundle directory — a bundle cannot be exec'd. Empty when no
+    // runtime was shipped, and, for a cross-platform target, a binary this
+    // machine cannot run: the caller decides whether launching makes sense.
+    std::filesystem::path executablePath;
 };
 
 // ─── Export target platforms ──────────────────────────────────────────────────

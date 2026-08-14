@@ -1,6 +1,7 @@
 #include "ExportDialogPanel.h"
 #include <algorithm>
 #include <cstdint>
+#include "BuildProgressDialog.h"         // the window a running export is watched in
 #include "EditorApplication.h"           // AppContext, ProjectManager
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
@@ -24,11 +25,13 @@
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -84,63 +87,60 @@ static std::string s_exportNewProfileName;
 // shows up on reopen.
 static std::string           s_exportBundleKey;
 static std::filesystem::path s_exportBundleCache;
-// Worker-thread state: the callback writes the atomics + the mutex-guarded
-// strings; the UI thread only reads them and joins once running flips false.
+// Worker-thread state. What the user watches while it runs — the steps, each
+// step's own progress and each step's log — is BuildProgressDialog's model; this
+// panel only owns the settings, the thread and its final message.
 static std::atomic<bool> s_exportRunning{false};
-static std::atomic<int>  s_exportDone{0};
-static std::atomic<int>  s_exportTotal{0};
-static std::mutex        s_exportMutex;            // guards the two strings below
-static std::string       s_exportCurrentFile;
+static std::mutex        s_exportMutex;            // guards the string below
 static std::string       s_exportResultShared;
-static std::string       s_exportResult;           // UI-side copy (main thread only)
 static std::thread       s_exportThread;
+// The run is started from outside the settings popup: a popup opened while
+// another popup is the current window becomes its child and closes with it, so
+// the Export button only asks and render() does it one level up.
+static bool              s_startRequest = false;
 
-// ── Build output (the detailed per-step view of a running export) ────────────
-// The worker appends log lines + advances the step list; the UI renders them
-// live. All access behind s_buildMutex (strings/vectors are not atomic).
-struct BuildLogLine { int severity = 0; std::string text; };   // 0 info, 1 warn, 2 error
-struct BuildStep    { std::string name; int state = 0; };      // 0 pending, 1 running, 2 done, 3 failed
-static std::mutex                 s_buildMutex;
-static std::vector<BuildLogLine>  s_buildLog;
-static std::vector<BuildStep>     s_buildSteps;
-static int                        s_buildStepCurrent = -1;     // index into s_buildSteps
+namespace Build = BuildProgressDialog::Build;
 
-static void buildLogLine(int severity, const std::string& text)
+// Defined below render(), which is where a run is started from.
+void startExport(AppContext& ctx);
+
+// The C++ step's progress, read off the toolchain's own output: ninja prints
+// "[7/38] Building CXX object…", make "[ 45%] Building CXX object…". A line
+// that is neither leaves the ring spinning — during cmake's configure phase
+// there is genuinely nothing to measure, and inventing a number there would be
+// a lie that stalls at 10 % for a minute.
+static std::optional<float> parseToolchainProgress(const std::string& line)
 {
-	std::lock_guard<std::mutex> lk(s_buildMutex);
-	s_buildLog.push_back({ severity, text });
-}
-static void buildStepsInit(std::vector<std::string> names)
-{
-	std::lock_guard<std::mutex> lk(s_buildMutex);
-	s_buildLog.clear();
-	s_buildSteps.clear();
-	for (auto& n : names) s_buildSteps.push_back({ std::move(n), 0 });
-	s_buildStepCurrent = -1;
-}
-// Finish the current step (done unless failed), start step `idx`.
-static void buildStepBegin(int idx)
-{
-	std::lock_guard<std::mutex> lk(s_buildMutex);
-	if (s_buildStepCurrent >= 0 && s_buildStepCurrent < (int)s_buildSteps.size() &&
-	    s_buildSteps[s_buildStepCurrent].state == 1)
-		s_buildSteps[s_buildStepCurrent].state = 2;
-	if (idx >= 0 && idx < (int)s_buildSteps.size()) s_buildSteps[idx].state = 1;
-	s_buildStepCurrent = idx;
-}
-static void buildStepsFinish(bool success)
-{
-	std::lock_guard<std::mutex> lk(s_buildMutex);
-	if (s_buildStepCurrent >= 0 && s_buildStepCurrent < (int)s_buildSteps.size())
-		s_buildSteps[s_buildStepCurrent].state = success ? 2 : 3;
-	if (success)
-		for (auto& s : s_buildSteps) if (s.state < 2) s.state = 2;
-	s_buildStepCurrent = -1;
+	const auto open = line.find('[');
+	if (open == std::string::npos || open > 4) return std::nullopt;
+	const auto close = line.find(']', open);
+	if (close == std::string::npos || close <= open + 1 || close - open > 16) return std::nullopt;
+
+	std::string in;
+	for (size_t i = open + 1; i < close; ++i)
+		if (!std::isspace(static_cast<unsigned char>(line[i]))) in += line[i];
+	if (in.empty()) return std::nullopt;
+
+	if (in.back() == '%')
+	{
+		in.pop_back();
+		if (in.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+		return std::clamp(std::stof(in) / 100.0f, 0.0f, 1.0f);
+	}
+	const auto slash = in.find('/');
+	if (slash == std::string::npos) return std::nullopt;
+	const std::string a = in.substr(0, slash), b = in.substr(slash + 1);
+	if (a.empty() || b.empty() ||
+	    a.find_first_not_of("0123456789") != std::string::npos ||
+	    b.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+	const float total = std::stof(b);
+	if (total <= 0.0f) return std::nullopt;
+	return std::clamp(std::stof(a) / total, 0.0f, 1.0f);
 }
 
 bool isOpen()
 {
-	return s_modalVisible;
+	return s_modalVisible || BuildProgressDialog::isOpen();
 }
 
 void joinPendingExport()
@@ -362,7 +362,6 @@ void open(AppContext& ctx)
 		it.increment(ec);
 	}
 
-	s_exportResult.clear();
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 	s_showExportModal = true;
 }
@@ -379,23 +378,14 @@ void render(AppContext& ctx)
         s_showExportModal = false;
     }
     {
-        // Reap a finished export worker + fetch its result. This runs outside the
-        // modal so a completed export is joined even if the popup was closed.
+        // Reap a finished export worker. This runs outside the modal so a
+        // completed export is joined even if the popup was closed; its result is
+        // already in the Build window's model, put there by the worker itself.
         if (!s_exportRunning.load() && s_exportThread.joinable())
-        {
             s_exportThread.join();
-            std::lock_guard<std::mutex> lk(s_exportMutex);
-            if (!s_exportResultShared.empty())
-                s_exportResult = s_exportResultShared;
-        }
 
-        // The modal is the UI lock while the worker packs — but ImGui force-closes
-        // it when another same-level popup opens (e.g. the Unsaved-Changes modal
-        // from a vetoed OS quit). If that popup is dismissed, re-open the export
-        // modal so the editor cannot mutate Content/ under the worker's reads.
-        if (s_exportRunning.load()
-            && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
-            ImGui::OpenPopup("Export Project##build");
+        // Holding the project still while the worker packs is the Build window's
+        // job now — it is the modal that stays up for the whole run.
 
         ImGui::SetNextWindowSize(ImVec2(560, 0), ImGuiCond_Always);
         EditorWidgets::pinDialogToEditorWindow();
@@ -433,7 +423,6 @@ void render(AppContext& ctx)
                             exportProfileToDialog(proj.exportProfiles[i], projectRoot);
                             proj.activeExportProfile = proj.exportProfiles[i].name;
                             pm->saveProject(proj.path);
-                            s_exportResult.clear();
                         }
                         if (sel) ImGui::SetItemDefaultFocus();
                     }
@@ -674,108 +663,71 @@ void render(AppContext& ctx)
 
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
-            // ── Progress (while running) / result (after) ─────────────────────
-            // Both the live filename and the result line carry an absolute path —
-            // the result line ends in the output directory, and its failure form is
-            // a whole sentence ("Error: startup scene could not be loaded: /Users/…").
-            // Clipped at the dialog's edge, a failed export looked like a success
-            // with a truncated path. Same absolute column as above, and its own
-            // scope so PopTextWrapPos runs long before the EndPopup() at the bottom
-            // of this body: EndPopup hands ImGui's current window back to whatever
-            // is under this popup — here the implicit debug window — and popping
-            // the wrap position after that pops a stack that was never pushed.
-            {
-                EditorWidgets::WrapText wrap(550.0f);
-                if (running)
-                {
-                    const int done  = s_exportDone.load();
-                    const int total = s_exportTotal.load();
-                    std::string current;
-                    {
-                        std::lock_guard<std::mutex> lk(s_exportMutex);
-                        current = s_exportCurrentFile;
-                    }
-                    char overlay[64];
-                    std::snprintf(overlay, sizeof(overlay), "%d / %d", done, total);
-                    ImGui::ProgressBar(total > 0 ? static_cast<float>(done) / static_cast<float>(total)
-                                                 : 0.0f,
-                                       ImVec2(-1.0f, 0.0f), overlay);
-                    ImGui::TextDisabled("%s", current.empty() ? "Working..." : current.c_str());
-                    ImGui::Spacing();
-                }
-                else if (!s_exportResult.empty())
-                {
-                    const bool ok = s_exportResult.rfind("OK:", 0) == 0;
-                    if (ok) ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.f), "%s", s_exportResult.c_str());
-                    else    ImGui::TextColored(ImVec4(1.f,  0.3f, 0.3f, 1.f), "%s", s_exportResult.c_str());
-                    ImGui::Spacing();
-                }
-            }
-
-            // ── Build output: the step list + live log of the current/last export.
-            {
-                std::lock_guard<std::mutex> lk(s_buildMutex);
-                if (!s_buildSteps.empty())
-                {
-                    ImGui::TextDisabled("Build steps");
-                    for (size_t i = 0; i < s_buildSteps.size(); ++i)
-                    {
-                        const BuildStep& st = s_buildSteps[i];
-                        const char* icon = st.state == 2 ? "[done]"
-                                         : st.state == 1 ? "[....]"
-                                         : st.state == 3 ? "[FAIL]" : "[    ]";
-                        const ImVec4 col = st.state == 2 ? ImVec4(0.35f, 0.85f, 0.35f, 1.0f)
-                                         : st.state == 1 ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f)
-                                         : st.state == 3 ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
-                                                         : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-                        std::string label = std::to_string(i + 1) + ". " + st.name;
-                        // The running pack step carries the asset counter live.
-                        if (st.state == 1 && i + 1 == s_buildSteps.size())
-                        {
-                            const int d = s_exportDone.load(), t = s_exportTotal.load();
-                            if (t > 0) label += "  (" + std::to_string(d) + "/" + std::to_string(t) + ")";
-                        }
-                        ImGui::TextColored(col, "%s  %s", icon, label.c_str());
-                    }
-                    ImGui::Spacing();
-                    ImGui::TextDisabled("Output");
-                    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 44.0f);
-                    if (ImGui::SmallButton("Copy"))
-                    {
-                        std::string all;
-                        for (const auto& l : s_buildLog) { all += l.text; all += '\n'; }
-                        ImGui::SetClipboardText(all.c_str());
-                    }
-                    ImGui::BeginChild("##build_output", ImVec2(0.0f, 180.0f),
-                                      ImGuiChildFlags_Borders);
-                    // Wrapped, not scrolled sideways. A compiler diagnostic puts
-                    // the part that matters — the message — after a long absolute
-                    // path, so the horizontal scrollbar hid precisely the words
-                    // the user opened this box to read. Copy is right above for
-                    // anyone who wants the raw line.
-                    ImGui::PushTextWrapPos(0.0f);
-                    for (const auto& l : s_buildLog)
-                    {
-                        if (l.severity == 2)
-                            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s", l.text.c_str());
-                        else if (l.severity == 1)
-                            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", l.text.c_str());
-                        else
-                            ImGui::TextUnformatted(l.text.c_str());
-                    }
-                    ImGui::PopTextWrapPos();
-                    // Follow the tail while the user hasn't scrolled back up.
-                    if (running && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
-                        ImGui::SetScrollHereY(1.0f);
-                    ImGui::EndChild();
-                    ImGui::Spacing();
-                }
-            }
+            // Progress, the step list and the build log used to live here, below
+            // the settings. They grew downwards while a build ran — the buttons
+            // ended up off the bottom of a dialog nobody could close — and the
+            // compiler's output shared one box with the packer's. They are the
+            // Build window now (BuildProgressDialog), which this one hands over
+            // to on Export and gets handed back from on "Build Settings".
 
             const bool canExport = !s_exportOutputDir.empty()
                                 && ctx.contentManager && !running;
             if (!canExport) ImGui::BeginDisabled();
             if (EditorWidgets::primaryButton("Export", ImVec2(110, 0)))
+            {
+                // Asked for here, done in render() one level up — see s_startRequest.
+                s_startRequest = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (!canExport) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (running) ImGui::BeginDisabled();
+            if (ImGui::Button("Close", ImVec2(80, 0)))
+                ImGui::CloseCurrentPopup();
+            if (running) ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+    }
+
+    BuildProgressDialog::render(ctx);
+
+    // What the progress dialog's buttons asked for. Both run outside every
+    // popup, for the same reason the Export button does.
+    switch (BuildProgressDialog::takeAction())
+    {
+    case BuildProgressDialog::Action::Rebuild:     s_startRequest    = true; break;
+    case BuildProgressDialog::Action::BackToSetup: s_showExportModal = true; break;
+    case BuildProgressDialog::Action::None:                                  break;
+    }
+
+    if (s_startRequest && !s_exportRunning.load())
+    {
+        s_startRequest = false;
+        startExport(ctx);
+    }
+#else
+	(void)ctx;
+#endif // HE_IMGUI_ENABLED
+}
+
+// ─── Starting a run ──────────────────────────────────────────────────────────
+// Everything from "the user pressed Export" to a worker thread doing the work.
+// A function of its own, not the button's body, because two buttons in two
+// different windows start a run — Export here and "Build Again" in the progress
+// dialog — and because the preparation below reads the project from disk, so a
+// rebuild picks up whatever was saved since the last one.
+//
+// Note the shape: the first half runs on the UI thread (it needs the
+// ContentManager and the editor's world) and does block the editor while it
+// serializes every scene; only what follows is threaded. That freeze predates
+// this dialog and is why the rings only appear once preparation is over.
+void startExport(AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+            ProjectManager* pm = ctx.projectManager;
+            if (!pm || !ctx.contentManager) return;
+            const std::filesystem::path projectRoot =
+                std::filesystem::path(pm->currentProject().path).parent_path();
             {
                 // HorizonCode → C++ codegen runs for Host exports only (v1: the
                 // generated dylib is built with the host toolchain, plan §8.4).
@@ -934,19 +886,44 @@ void render(AppContext& ctx)
                                       : std::filesystem::path{};
                 const std::filesystem::path runtimeDir = findRuntimeBundle(base, platform);
 
+                // ── The run's shape is known now: build the step list and show it.
+                // "Prepare" is already over by the time anyone sees it — the work
+                // above runs on the UI thread — but it is where a scene that will
+                // not load or a missing runtime is reported, so it is a step and
+                // not a footnote.
+                const bool hcSteps = hcCompile && !hcSources.empty();
+                std::vector<std::string> stepNames{ "Prepare" };
+                if (hcSteps) { stepNames.emplace_back("HorizonCode"); stepNames.emplace_back("Compile C++"); }
+                stepNames.emplace_back("Pack & Ship");
+                const int stepTranslate = hcSteps ? 1 : -1;
+                const int stepCompile   = hcSteps ? 2 : -1;
+                const int stepPack      = static_cast<int>(stepNames.size()) - 1;
+
+                Build::begin(stepNames);
+                Build::stepBegin(0);
+                Build::log(0, std::to_string(extraScenes.size()) + " scene(s) serialized"
+                              + (hcSteps ? ", " + std::to_string(hcSources.size())
+                                           + " HorizonCode graph(s) collected"
+                                         : std::string()));
+                BuildProgressDialog::requestOpen();
+
                 if (!sceneOk)
                 {
-                    s_exportResult = "Error: startup scene could not be loaded: " + scenePath;
+                    const std::string m = "Error: startup scene could not be loaded: " + scenePath;
+                    Build::log(2, m);
+                    Build::finish(false, m);
                 }
                 else if (runtimeDir.empty())
                 {
-                    s_exportResult = platform == ExportPlatform::Host
+                    const std::string m = platform == ExportPlatform::Host
                         ? std::string("Error: no game runtime found — build the HorizonGame "
                                       "target, then export again.")
                         : "Error: no " + s_exportPlatform + " runtime bundle at "
                           + resolveRuntimeDir(base, platform).lexically_normal().string()
                           + " — build the game runtime on " + s_exportPlatform
                           + " and place it there.";
+                    Build::log(2, m);
+                    Build::finish(false, m);
                 }
                 else
                 {
@@ -1004,40 +981,30 @@ void render(AppContext& ctx)
                 // OpenGL/Metal variants (see CompileParticleShaderVariants), so
                 // selecting D3D/Vulkan here has no effect on particles.
                 es.compileParticleShaderVariants = &CompileParticleShaderVariants;
-                // Worker → UI progress: atomics + a mutex-guarded filename.
+                // Worker → UI: the packer's per-file counter fills the last ring,
+                // and the file itself is the activity line under the log.
                 es.progress = [](int done, int total, const std::string& current)
                 {
-                    s_exportDone.store(done);
-                    s_exportTotal.store(total);
-                    std::lock_guard<std::mutex> lk(s_exportMutex);
-                    s_exportCurrentFile = current;
+                    Build::stepProgress(done, total);
+                    if (!current.empty()) Build::setActivity(current);
                 };
 
                 const std::string projName = pm ? pm->currentProject().name : "Game";
                 const std::string contentDir = ctx.contentManager->contentRoot();
                 const std::string outDir     = effOutDir.string();
+                const bool hostTarget        = platform == ExportPlatform::Host;
 
-                s_exportDone.store(0);
-                s_exportTotal.store(0);
                 {
                     std::lock_guard<std::mutex> lk(s_exportMutex);
-                    s_exportCurrentFile.clear();
                     s_exportResultShared.clear();
                 }
-                s_exportResult.clear();
-                // The build-output view: step list sized to what this export does.
-                if (hcCompile && !hcSources.empty())
-                    buildStepsInit({ "Translate HorizonCode (" + std::to_string(hcSources.size()) + " classes)",
-                                     "Compile C++ (cmake)",
-                                     "Pack assets & ship runtime" });
-                else
-                    buildStepsInit({ "Pack assets & ship runtime" });
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base]()
+                                              hcBase = base, stepTranslate, stepCompile,
+                                              stepPack, hostTarget]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1056,20 +1023,22 @@ void render(AppContext& ctx)
                         std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
                         {
-                            buildStepBegin(0);
+                            Build::stepBegin(stepTranslate);
                             HE::hccg::Options opt;
                             opt.engineVersion = HE_VERSION_STRING;
                             opt.onFailure = s_exportHcStop ? HE::hccg::OnFailure::Stop
                                                            : HE::hccg::OnFailure::Interpret;
                             opt.onClass = [](const std::string& label, size_t idx, size_t count)
                             {
-                                buildLogLine(0, "[" + std::to_string(idx + 1) + "/" +
-                                                std::to_string(count) + "] Translating " + label);
+                                Build::stepProgress(static_cast<int>(idx) + 1, static_cast<int>(count));
+                                Build::setActivity(label);
+                                Build::log(0, "[" + std::to_string(idx + 1) + "/" +
+                                              std::to_string(count) + "] Translating " + label);
                             };
                             const auto gen = HE::hccg::generate(hcSources, opt);
                             for (const auto& w : gen.warnings)
                             {
-                                buildLogLine(1, "warning: " + w);
+                                Build::log(1, "warning: " + w);
                                 HE_LOG_WARN(Editor, "%s",
                                     ("HorizonCode codegen: " + w).c_str());
                             }
@@ -1077,7 +1046,7 @@ void render(AppContext& ctx)
                             {
                                 const std::string where =
                                     fb.node ? " (node " + std::to_string(fb.node) + ")" : std::string();
-                                buildLogLine(1, (s_exportHcStop ? "ERROR " : "INTERPRETED ") +
+                                Build::log(1, (s_exportHcStop ? "ERROR " : "INTERPRETED ") +
                                                 fb.key + " — " + fb.reason + where);
                                 if (s_exportHcStop)
                                     HE_LOG_ERROR(Editor, "%s",
@@ -1100,7 +1069,7 @@ void render(AppContext& ctx)
                                 for (const auto& fb : gen.fallbacks)
                                     hcFatal += "\n  " + fb.key + ": " + fb.reason;
                             }
-                            buildLogLine(0, std::to_string(hcSources.size() - gen.fallbacks.size()) +
+                            Build::log(0, std::to_string(hcSources.size() - gen.fallbacks.size()) +
                                             " class(es) translated, " +
                                             std::to_string(gen.fallbacks.size()) +
                                             " interpreted, " + std::to_string(gen.files.size()) +
@@ -1141,22 +1110,18 @@ void render(AppContext& ctx)
                             std::string buildLine;
                             if (!hcFatal.empty())
                             {
-                                buildLogLine(2, hcFatal);
-                                std::lock_guard<std::mutex> lk(s_buildMutex);
-                                if (!s_buildSteps.empty()) s_buildSteps[0].state = 3;
+                                Build::log(2, hcFatal);
+                                Build::stepFailed(stepTranslate);
                             }
                             else if (!gen.ok || !wroteAll)
                             {
-                                buildLogLine(2, "generation failed — shipping interpreted");
-                                {
-                                    std::lock_guard<std::mutex> lk(s_buildMutex);
-                                    if (!s_buildSteps.empty()) s_buildSteps[0].state = 3;
-                                }
+                                Build::log(2, "generation failed — shipping interpreted");
+                                Build::stepFailed(stepTranslate);
                                 hcMsg = " — HorizonCode: generation failed, shipped interpreted";
                             }
                             else
                             {
-                                buildStepBegin(1);
+                                Build::stepBegin(stepCompile);
                                 const auto sdk   = HE::hccg::resolveSdk(hcBase);
                                 const auto built = HE::hccg::buildDylib(genDir, sdk,
                                     [](const std::string& line)
@@ -1166,7 +1131,9 @@ void render(AppContext& ctx)
                                         const int sev =
                                             line.find("error") != std::string::npos ? 2
                                           : line.find("warning") != std::string::npos ? 1 : 0;
-                                        buildLogLine(sev, line);
+                                        Build::log(sev, line);
+                                        if (const auto p = parseToolchainProgress(line))
+                                            Build::stepProgress(*p);
                                     });
                                 if (built.ok)
                                 {
@@ -1177,7 +1144,7 @@ void render(AppContext& ctx)
                                                       + " interpreted (validation)"
                                                     : std::string());
                                     buildLine = "build: OK (" + built.artifact.filename().string() + ")";
-                                    buildLogLine(0, "Built " + built.artifact.filename().string());
+                                    Build::log(0, "Built " + built.artifact.filename().string());
                                 }
                                 else
                                 {
@@ -1186,11 +1153,8 @@ void render(AppContext& ctx)
                                     hcMsg = " — HorizonCode: compile failed, shipped "
                                             "interpreted (" + built.message + ")";
                                     buildLine = "build: FAILED — " + built.message;
-                                    buildLogLine(2, built.message + " — shipping interpreted");
-                                    {
-                                        std::lock_guard<std::mutex> lk(s_buildMutex);
-                                        if (s_buildSteps.size() > 1) s_buildSteps[1].state = 3;
-                                    }
+                                    Build::log(2, built.message + " — shipping interpreted");
+                                    Build::stepFailed(stepCompile);
                                 }
                             }
 
@@ -1231,27 +1195,22 @@ void render(AppContext& ctx)
                         if (!hcFatal.empty()) throw std::runtime_error(hcFatal);
 
                         // The pack + runtime-copy step is the last one in the list.
-                        {
-                            std::lock_guard<std::mutex> lk(s_buildMutex);
-                            const int packIdx = (int)s_buildSteps.size() - 1;
-                            if (s_buildStepCurrent >= 0 && s_buildStepCurrent < (int)s_buildSteps.size() &&
-                                s_buildSteps[s_buildStepCurrent].state == 1)
-                                s_buildSteps[s_buildStepCurrent].state = 2;
-                            if (packIdx >= 0) s_buildSteps[packIdx].state = 1;
-                            s_buildStepCurrent = packIdx;
-                        }
+                        Build::stepBegin(stepPack);
                         const auto res = ProjectExporter::exportProject(
                             contentDir, projName, sceneName,
                             std::filesystem::path(outDir), esEff, sceneBinary, extraScenes,
                             gameInstanceJson);
                         if (res.success)
-                            buildLogLine(0, "Packed " + std::to_string(res.assetsPacked) +
-                                            " asset(s) (" + std::to_string(res.assetsReused) +
-                                            " reused), " + std::to_string(res.binaryFilesCopied) +
-                                            " runtime file(s) copied");
+                            Build::log(0, "Packed " + std::to_string(res.assetsPacked) +
+                                          " asset(s) (" + std::to_string(res.assetsReused) +
+                                          " reused), " + std::to_string(res.binaryFilesCopied) +
+                                          " runtime file(s) copied");
                         else
-                            buildLogLine(2, res.errorMessage);
-                        buildStepsFinish(res.success);
+                            Build::log(2, res.errorMessage);
+                        // Only a host-target export produces a binary this machine
+                        // can run; a Windows build made on a Mac is a file, not a
+                        // program, and the dialog's Start Game says so.
+                        Build::setLaunchTarget(res.executablePath, hostTarget);
                         msg = res.success
                             ? "OK: " + std::to_string(res.assetsPacked)
                               + " asset(s) packed ("
@@ -1270,14 +1229,14 @@ void render(AppContext& ctx)
                     catch (const std::exception& e)
                     {
                         msg = std::string("Error: ") + e.what();
-                        buildStepsFinish(false);
                     }
                     catch (...)
                     {
                         msg = "Error: export failed with an unknown error";
-                        buildStepsFinish(false);
                     }
-                    buildLogLine(msg.rfind("OK:", 0) == 0 ? 0 : 2, msg);
+                    const bool ok = msg.rfind("OK:", 0) == 0;
+                    Build::log(ok ? 0 : 2, msg);
+                    Build::finish(ok, msg);
                     {
                         std::lock_guard<std::mutex> lk(s_exportMutex);
                         s_exportResultShared = std::move(msg);
@@ -1286,15 +1245,6 @@ void render(AppContext& ctx)
                 });
                 }
             }
-            if (!canExport) ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (running) ImGui::BeginDisabled();
-            if (ImGui::Button("Close", ImVec2(80, 0)))
-                ImGui::CloseCurrentPopup();
-            if (running) ImGui::EndDisabled();
-            ImGui::EndPopup();
-        }
-    }
 #else
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
