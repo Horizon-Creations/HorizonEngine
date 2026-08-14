@@ -69,6 +69,13 @@ struct HE_API ExportSettings {
     // from whatever thread runs exportProject — the caller must make it
     // thread-safe when exporting on a worker thread.
     std::function<void(int, int, const std::string&)> progress;
+    // Optional stage callback, called as each phase of the export begins with a
+    // stable identifier: "layout", "pack", "binaries", "hclib", "config",
+    // "bundle". The counters above only describe packing; this is what lets a
+    // caller tell "packaging" from "finishing up" — copying a runtime and
+    // codesigning an .app are neither instant nor part of the pak. Same thread
+    // and the same thread-safety rule as `progress`.
+    std::function<void(const char*)> onStage;
     // Precompile node-graph material shaders into the pak for these graphics backends
     // (bitmask of 1u << HE::RendererBackend). 0 → no precompile (runtime cross-compile).
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):

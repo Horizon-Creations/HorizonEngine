@@ -88,11 +88,10 @@ static std::string s_exportNewProfileName;
 static std::string           s_exportBundleKey;
 static std::filesystem::path s_exportBundleCache;
 // Worker-thread state. What the user watches while it runs — the steps, each
-// step's own progress and each step's log — is BuildProgressDialog's model; this
-// panel only owns the settings, the thread and its final message.
+// step's own progress, each step's log and the result — is BuildProgressDialog's
+// model, written by the worker itself; this panel owns the settings and the
+// thread, and nothing has to travel back here.
 static std::atomic<bool> s_exportRunning{false};
-static std::mutex        s_exportMutex;            // guards the string below
-static std::string       s_exportResultShared;
 static std::thread       s_exportThread;
 // The run is started from outside the settings popup: a popup opened while
 // another popup is the current window becomes its child and closes with it, so
@@ -887,24 +886,29 @@ void startExport(AppContext& ctx)
                 const std::filesystem::path runtimeDir = findRuntimeBundle(base, platform);
 
                 // ── The run's shape is known now: build the step list and show it.
-                // "Prepare" is already over by the time anyone sees it — the work
-                // above runs on the UI thread — but it is where a scene that will
-                // not load or a missing runtime is reported, so it is a step and
-                // not a footnote.
-                const bool hcSteps = hcCompile && !hcSources.empty();
-                std::vector<std::string> stepNames{ "Prepare" };
-                if (hcSteps) { stepNames.emplace_back("HorizonCode"); stepNames.emplace_back("Compile C++"); }
-                stepNames.emplace_back("Pack & Ship");
-                const int stepTranslate = hcSteps ? 1 : -1;
-                const int stepCompile   = hcSteps ? 2 : -1;
-                const int stepPack      = static_cast<int>(stepNames.size()) - 1;
+                //
+                // Setup is already over by the time anyone sees it — the work above
+                // runs on the UI thread — but it is where a scene that will not
+                // load or a missing runtime is reported, so it is a step and not a
+                // footnote. Build only exists when something is actually compiled:
+                // an export with no HorizonCode to translate would otherwise show a
+                // ring that turns green without ever having done anything.
+                const bool hasBuild = hcCompile && !hcSources.empty();
+                std::vector<std::string> stepNames{ "Setup" };
+                if (hasBuild) stepNames.emplace_back("Build");
+                stepNames.emplace_back("Package");
+                stepNames.emplace_back("Clean up");
+                const int stepSetup   = 0;
+                const int stepBuild   = hasBuild ? 1 : -1;
+                const int stepPackage = hasBuild ? 2 : 1;
+                const int stepCleanup = stepPackage + 1;
 
                 Build::begin(stepNames);
-                Build::stepBegin(0);
+                Build::stepBegin(stepSetup);
                 Build::log(0, std::to_string(extraScenes.size()) + " scene(s) serialized"
-                              + (hcSteps ? ", " + std::to_string(hcSources.size())
-                                           + " HorizonCode graph(s) collected"
-                                         : std::string()));
+                              + (hasBuild ? ", " + std::to_string(hcSources.size())
+                                            + " HorizonCode graph(s) collected"
+                                          : std::string()));
                 BuildProgressDialog::requestOpen();
 
                 if (!sceneOk)
@@ -981,12 +985,40 @@ void startExport(AppContext& ctx)
                 // OpenGL/Metal variants (see CompileParticleShaderVariants), so
                 // selecting D3D/Vulkan here has no effect on particles.
                 es.compileParticleShaderVariants = &CompileParticleShaderVariants;
-                // Worker → UI: the packer's per-file counter fills the last ring,
-                // and the file itself is the activity line under the log.
+                // Worker → UI: the packer's per-file counter fills the Package
+                // ring, and the file itself is the activity line under the log.
                 es.progress = [](int done, int total, const std::string& current)
                 {
                     Build::stepProgress(done, total);
                     if (!current.empty()) Build::setActivity(current);
+                };
+                // …and the exporter's phases decide which ring that is. Packing
+                // and shipping the runtime are Package; writing the config and
+                // finishing (or codesigning) the bundle are Clean up. Both are
+                // real work — an ad-hoc codesign of an .app takes seconds — which
+                // is why they are two rings and not one that sits at 100 %.
+                es.onStage = [stepPackage, stepCleanup](const char* what)
+                {
+                    const std::string s = what;
+                    if (s == "pack")
+                    {
+                        Build::stepBegin(stepPackage);
+                        Build::setActivity("Packing assets\xe2\x80\xa6");
+                    }
+                    else if (s == "binaries")
+                    {
+                        Build::setActivity("Copying the game runtime\xe2\x80\xa6");
+                    }
+                    else if (s == "config")
+                    {
+                        Build::stepBegin(stepCleanup);
+                        Build::stepProgress(-1.0f);   // no measure — spin, don't guess
+                        Build::setActivity("Writing project.hcfg\xe2\x80\xa6");
+                    }
+                    else if (s == "bundle")
+                    {
+                        Build::setActivity("Finishing the app bundle\xe2\x80\xa6");
+                    }
                 };
 
                 const std::string projName = pm ? pm->currentProject().name : "Game";
@@ -994,17 +1026,12 @@ void startExport(AppContext& ctx)
                 const std::string outDir     = effOutDir.string();
                 const bool hostTarget        = platform == ExportPlatform::Host;
 
-                {
-                    std::lock_guard<std::mutex> lk(s_exportMutex);
-                    s_exportResultShared.clear();
-                }
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base, stepTranslate, stepCompile,
-                                              stepPack, hostTarget]()
+                                              hcBase = base, stepBuild, hostTarget]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1023,15 +1050,21 @@ void startExport(AppContext& ctx)
                         std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
                         {
-                            Build::stepBegin(stepTranslate);
+                            Build::stepBegin(stepBuild);
                             HE::hccg::Options opt;
                             opt.engineVersion = HE_VERSION_STRING;
                             opt.onFailure = s_exportHcStop ? HE::hccg::OnFailure::Stop
                                                            : HE::hccg::OnFailure::Interpret;
+                            // Translating and compiling share the Build ring, so
+                            // they share its 0..1: translation fills the first
+                            // 40 %, the toolchain the rest. Two halves of one bar
+                            // rather than a ring that reaches full and restarts.
                             opt.onClass = [](const std::string& label, size_t idx, size_t count)
                             {
-                                Build::stepProgress(static_cast<int>(idx) + 1, static_cast<int>(count));
-                                Build::setActivity(label);
+                                if (count)
+                                    Build::stepProgress(0.4f * static_cast<float>(idx + 1)
+                                                             / static_cast<float>(count));
+                                Build::setActivity("Translating " + label);
                                 Build::log(0, "[" + std::to_string(idx + 1) + "/" +
                                               std::to_string(count) + "] Translating " + label);
                             };
@@ -1111,17 +1144,18 @@ void startExport(AppContext& ctx)
                             if (!hcFatal.empty())
                             {
                                 Build::log(2, hcFatal);
-                                Build::stepFailed(stepTranslate);
+                                Build::stepFailed(stepBuild);
                             }
                             else if (!gen.ok || !wroteAll)
                             {
                                 Build::log(2, "generation failed — shipping interpreted");
-                                Build::stepFailed(stepTranslate);
+                                Build::stepFailed(stepBuild);
                                 hcMsg = " — HorizonCode: generation failed, shipped interpreted";
                             }
                             else
                             {
-                                Build::stepBegin(stepCompile);
+                                Build::setActivity("Compiling the generated C++\xe2\x80\xa6");
+                                Build::stepProgress(0.4f);
                                 const auto sdk   = HE::hccg::resolveSdk(hcBase);
                                 const auto built = HE::hccg::buildDylib(genDir, sdk,
                                     [](const std::string& line)
@@ -1132,8 +1166,10 @@ void startExport(AppContext& ctx)
                                             line.find("error") != std::string::npos ? 2
                                           : line.find("warning") != std::string::npos ? 1 : 0;
                                         Build::log(sev, line);
+                                        // The toolchain's own count, mapped into the
+                                        // Build ring's second 60 %.
                                         if (const auto p = parseToolchainProgress(line))
-                                            Build::stepProgress(*p);
+                                            Build::stepProgress(0.4f + 0.6f * *p);
                                     });
                                 if (built.ok)
                                 {
@@ -1154,7 +1190,7 @@ void startExport(AppContext& ctx)
                                             "interpreted (" + built.message + ")";
                                     buildLine = "build: FAILED — " + built.message;
                                     Build::log(2, built.message + " — shipping interpreted");
-                                    Build::stepFailed(stepCompile);
+                                    Build::stepFailed(stepBuild);
                                 }
                             }
 
@@ -1194,8 +1230,9 @@ void startExport(AppContext& ctx)
                         // failure path reports it and finishes the step list.
                         if (!hcFatal.empty()) throw std::runtime_error(hcFatal);
 
-                        // The pack + runtime-copy step is the last one in the list.
-                        Build::stepBegin(stepPack);
+                        // Package and Clean up are entered by the exporter itself,
+                        // through es.onStage — it is the only thing that knows when
+                        // packing ends and finishing begins.
                         const auto res = ProjectExporter::exportProject(
                             contentDir, projName, sceneName,
                             std::filesystem::path(outDir), esEff, sceneBinary, extraScenes,
@@ -1237,10 +1274,6 @@ void startExport(AppContext& ctx)
                     const bool ok = msg.rfind("OK:", 0) == 0;
                     Build::log(ok ? 0 : 2, msg);
                     Build::finish(ok, msg);
-                    {
-                        std::lock_guard<std::mutex> lk(s_exportMutex);
-                        s_exportResultShared = std::move(msg);
-                    }
                     s_exportRunning.store(false); // last: UI may join right after
                 });
                 }

@@ -955,17 +955,27 @@ ExportResult ProjectExporter::exportProject(
 {
     ExportContext ctx;
 
+    // Announce each phase as it starts, so a caller with a progress display can
+    // show what is actually happening instead of one bar for the whole export.
+    const auto stage = [&](const char* name) { if (settings.onStage) settings.onStage(name); };
+
+    stage("layout");
     if (auto fail = prepareOutputLayout(outputDir, projectName, settings, ctx)) return *fail;
     if (auto fail = resolvePackSettings(settings, ctx))                         return *fail;
+    stage("pack");
     if (auto fail = packContent(contentDir, projectName, settings, startupSceneBinary,
                                 extraScenes, gameInstanceJson, ctx))            return *fail;
 
     copyLooseStartupScene(contentDir, startupSceneName, startupSceneBinary, ctx);
 
+    stage("binaries");
     if (auto fail = copyRuntimeBinaries(settings, ctx))                         return *fail;
+    stage("hclib");
     if (auto fail = copyHorizonCodeLib(settings, ctx))                          return *fail;
+    stage("config");
     if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
         return *fail;
+    stage("bundle");
     if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
 
     // The runtime always ships under this name (routeRuntime above keys on it),
