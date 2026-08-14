@@ -1298,42 +1298,49 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		namespace T = EditorToolbar;
 		T::Bar bar;
 		T::assetHeader(bar, st.name.c_str(), T::iconCode, st.dirty);
+		// Everything on this band goes through the Bar's OWN cells. A raw ImGui
+		// combo or radio drawn here lays itself out in window coordinates while
+		// the Bar places its cells into a draw list — the two do not know about
+		// each other, and the widget lands on top of the band's own text.
 		bar.group();
-		// The base class was previously fixed at creation time, which made
-		// "turn this class into an Entity" a delete-and-recreate. It is a
-		// dropdown now; changing it re-scans the event catalog below.
-		bar.label("Base");
-		ImGui::SetNextItemWidth(160.0f);
-		if (ImGui::BeginCombo("##hcbase", kindLabel.c_str()))
+		if (bar.item("##hcmodegraph", nullptr, "Graph", !st.showComponents, true,
+		             "The class's logic"))
+			st.showComponents = false;
+		if (bar.item("##hcmodecomp", nullptr, "Components", st.showComponents, true,
+		             "The class's body — the components an instance brings with it"))
+			st.showComponents = true;
+		bar.endGroup();
+
+		// The base class was fixed at creation time before, which made "turn
+		// this class into an Entity" a delete-and-recreate. A cell that opens a
+		// list now; changing it rebuilds the event catalog below.
+		bar.group();
+		const bool openBase =
+			bar.item("##hcbase", nullptr, kindLabel.c_str(), false, true,
+			         "Base class — decides the events, the components and the\n"
+			         "members this class inherits");
+		bar.endGroup();
+		if (openBase) ImGui::OpenPopup("##hcbasepopup");
+		if (ImGui::BeginPopup("##hcbasepopup"))
 		{
 			for (const auto& c : HorizonCode::engineClasses())
 			{
-				const bool sel = HorizonCode::engineClassIsA(st.baseClass, c.name) &&
-				                 HorizonCode::engineClassIsA(c.name, st.baseClass);
-				if (ImGui::Selectable(humanClassName(c.name).c_str(), sel))
+				// "Object" is stored as the EMPTY string — that is what every
+				// asset predating the taxonomy carries, and writing the word
+				// instead would be a needless format change.
+				const std::string picked =
+					std::string(c.name) == "Object" ? std::string() : c.name;
+				if (!ImGui::Selectable(humanClassName(c.name).c_str(), picked == st.baseClass))
+					continue;
+				if (picked != st.baseClass)
 				{
-					// "Object" is stored as the empty string — that is what
-					// every asset predating the taxonomy carries, and writing
-					// the word instead would be a needless format change.
-					const std::string picked = std::string(c.name) == "Object" ? std::string() : c.name;
-					if (picked != st.baseClass)
-					{
-						st.baseClass      = picked;
-						st.dirty          = true;
-						st.eventsScanTime = -1.0;   // rebuild the catalog
-					}
+					st.baseClass      = picked;
+					st.dirty          = true;
+					st.eventsScanTime = -1.0;   // rebuild the catalog
 				}
 			}
-			ImGui::EndCombo();
+			ImGui::EndPopup();
 		}
-		bar.endGroup();
-		// Graph vs Components. A class is both its logic and its body, and the
-		// two want the whole panel each — hence a mode, not a split view.
-		bar.group();
-		if (ImGui::RadioButton("Graph", !st.showComponents)) st.showComponents = false;
-		ImGui::SameLine();
-		if (ImGui::RadioButton("Components", st.showComponents)) st.showComponents = true;
-		bar.endGroup();
 		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
