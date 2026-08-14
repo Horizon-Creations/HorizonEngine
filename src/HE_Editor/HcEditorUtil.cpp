@@ -867,6 +867,36 @@ std::string engineCallTitle(const std::string& apiId)
 	return apiId.empty() ? std::string("Engine Call") : apiId;
 }
 
+std::string castTargetLabel(const std::string& targetKey)
+{
+	if (targetKey.empty()) return {};
+	// An engine class is already its own label (the match is exact, and an asset
+	// path can never be one); a class asset shows as its file stem, the name the
+	// content browser and the class tab use for it too.
+	if (HorizonCode::findEngineClass(targetKey)) return targetKey;
+	return std::filesystem::path(targetKey).stem().string();
+}
+
+std::string castTitle(const std::string& targetKey)
+{
+	const std::string label = castTargetLabel(targetKey);
+	return label.empty() ? std::string("Cast") : ("Cast To " + label);
+}
+
+void setCastTarget(HorizonCode::Node& n, const std::string& targetKey)
+{
+	n.s = targetKey;
+	const std::string label = castTargetLabel(targetKey);
+	n.params.clear();
+	if (!label.empty())
+	{
+		HorizonCode::FuncParam p;
+		p.name = "As " + label;
+		p.type = HorizonCode::PinType::Ref;
+		n.params.push_back(std::move(p));
+	}
+}
+
 bool drawStructDefaultEditor(HorizonCode::Variable& v)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;

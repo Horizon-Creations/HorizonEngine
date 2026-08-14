@@ -1120,6 +1120,7 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
 		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
 		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
+		case NT::Cast:         return HcEditorUtil::castTitle(n.s);
 		default:
 			return base;
 	}

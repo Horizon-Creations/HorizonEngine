@@ -235,14 +235,29 @@ struct Fx
         return { key, name, std::move(rt) };
     }
 
-    HE::hccg::ClassSource done(const std::string& name)
+    // `baseClass` is the engine taxonomy row the class derives from (empty =
+    // Object). It reaches the generator as ClassSource::baseClass, which emits
+    // baseClassKey() — what a Cast to a BASE class resolves against.
+    HE::hccg::ClassSource done(const std::string& name, const std::string& baseClass = {})
     {
         HorizonCode::syncFunctionSignatures(g);
         // Production graphs arrive through fromJson — round-trip so both
         // backends consume exactly what a shipped asset would contain.
         Graph rt;
         must(HorizonCode::fromJson(HorizonCode::toJson(g), rt), "json round trip");
-        return { "fix/" + name, name, std::move(rt) };
+        return { "fix/" + name, name, std::move(rt), baseClass };
+    }
+
+    // A Cast node pointed at `target`, with the output pin's readable name
+    // mirrored on exactly as HcEditorUtil::setCastTarget does in the editor.
+    int cast(const std::string& target)
+    {
+        Node n; n.type = NT::Cast; n.s = target;
+        HorizonCode::FuncParam p;
+        p.name = "As " + target;
+        p.type = PT::Ref;
+        n.params.push_back(std::move(p));
+        return add(n);
     }
 };
 
@@ -1436,6 +1451,86 @@ inline HE::hccg::ClassSource fxEngineEvents()
     return f.done("engine_events");
 }
 
+// 25a — cast_target: the class fixture 25 casts references to. Its baseClass is
+// what makes a Cast to "PlayerCharacter" (and, up the chain, to "Entity")
+// meaningful, and it is what the generator turns into baseClassKey().
+inline HE::hccg::ClassSource fxCastTarget()
+{
+    Fx f;
+    f.var("constructed", PT::Float);
+    const int ctor = f.event("Construct");
+    const int sc = f.setVar("constructed", PT::Float);
+    f.g.findNode(sc)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(ctor, sc);
+    return f.done("cast_target", "PlayerCharacter");
+}
+
+// 25 — casts: every branch a Cast can take, against one live object.
+// The fixtures are generated with OnFailure::Stop, so THIS is what proves the
+// direct lowerings (hc::as for a HorizonCode class, hc::castBase for an engine
+// base) agree with the interpreter's Runtime::instanceIsA — the fast path's own
+// parity case, which is exactly the thing that would otherwise be untested.
+inline HE::hccg::ClassSource fxCasts()
+{
+    Fx f;
+    { Variable v; v.name = "obj"; v.type = PT::Ref; v.className = "fix/cast_target";
+      f.g.variables.push_back(v); }
+    f.var("objNull", PT::Ref);
+    for (const char* n : { "exact", "base", "up", "side", "other", "null", "gotRef" })
+        f.var(n, std::string(n) == "gotRef" ? PT::Ref : PT::Float);
+
+    // Spawn the object the casts run against.
+    const int evS = f.event("Spawn");
+    Node co; co.type = NT::CreateObject; co.s = "fix/cast_target";
+    const int create = f.add(co);
+    f.exec(evS, create);
+    const int sObj = f.setVar("obj", PT::Ref);
+    f.data(create, 0, sObj, 0);
+    f.exec(create, sObj);
+
+    // One cast per case, chained: Success writes its marker, Failure the next
+    // node's, so BOTH exec-outs of every Cast are reachable and the generated
+    // if/else is exercised from both sides across the run.
+    const int evG = f.event("Go");
+    int prev = evG;
+    int prevOut = 0;
+    auto step = [&](const std::string& target, const char* marker, bool expectHit,
+                    const char* refVar)
+    {
+        const int c = f.cast(target);
+        f.exec(prev, c, prevOut);
+        f.data(f.getVar("obj", PT::Ref), 0, c, 0);
+        const int sm = f.setVar(marker, PT::Float);
+        f.g.findNode(sm)->pinDefaults[0] = Value::ofFloat(1.0f);
+        // Wire the marker onto the branch we expect, so a wrong answer shows up
+        // as a MISSING trace entry rather than a merely different variable.
+        f.exec(c, sm, expectHit ? 0 : 1);
+        if (refVar)
+        {
+            const int sr = f.setVar(refVar, PT::Ref);
+            f.data(c, 0, sr, 0);      // the cast's "As …" output
+            f.exec(sm, sr);
+            prev = sr;
+        }
+        else prev = sm;
+        prevOut = 0;
+    };
+    step("fix/cast_target",  "exact", true,  "gotRef");  // exact HC class → hc::as
+    step("PlayerCharacter",  "base",  true,  nullptr);   // its own engine base
+    step("Entity",           "up",    true,  nullptr);   // up the chain
+    step("PlayerController", "side",  false, nullptr);   // sideways → Failure
+    step("fix/ref_target",   "other", false, nullptr);   // another class → Failure
+
+    // A null reference takes Failure too — Cast doubles as the Is Valid guard.
+    const int cNull = f.cast("Entity");
+    f.exec(prev, cNull, prevOut);
+    f.data(f.getVar("objNull", PT::Ref), 0, cNull, 0);
+    const int sNull = f.setVar("null", PT::Float);
+    f.g.findNode(sNull)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(cNull, sNull, 1);
+    return f.done("casts");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1447,6 +1542,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),
+        fxCastTarget(), fxCasts(),
     };
 }
 

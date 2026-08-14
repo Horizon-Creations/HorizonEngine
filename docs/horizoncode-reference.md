@@ -101,6 +101,25 @@ Array pins draw as a 2×2 grid to distinguish a list-of-T from a scalar T.
 | **Bind Event** (`BindEvent`) | Subscribe: when the target fires an event, this instance's matching Event fires. |
 | **Emit Event** (`EmitEvent`) | Broadcast an event to everyone bound to this instance. |
 | **Is Valid** (`IsValid`) | Bool: is the `Ref` a LIVE instance? The guard before touching an object that may have been destroyed (a dead Ref otherwise null-refs with an error log). |
+| **Cast** (`Cast`) | Checked downcast, Unreal's Cast node. Exec-outs **Success** / **Failure**; the `As <Class>` output carries the same reference on success and 0 otherwise, so it is only meaningful on the Success branch. The target is picked from a dropdown: an **engine class** (§2.1) or one of the project's HC classes. A reference that is 0, destroyed, or of another class all take Failure — Cast therefore doubles as an Is Valid. Its input is an object `Ref`, not an any-type pin: only a reference names a runtime class (the same rule Unreal's object pin follows). |
+
+### 2.1 Engine class taxonomy — what a class asset derives from
+
+A HorizonCode class asset picks a **base class** in its tab header. The chain is
+
+```
+Object → Entity → { PlayerCharacter, PlayerController }
+```
+
+mirroring Unreal's `AActor → { AController, APawn }`. A base class is not a
+label — it decides which lifecycle events the class's event catalog offers
+(`Object` contributes Construct/Destruct, `Entity` adds BeginPlay/Tick, the two
+player classes add the `Input.<Action>.*` set), and it is what a **Cast** to a
+base class matches against. `Object` is stored as an empty string, which is what
+every asset predating the taxonomy already carries, so nothing had to migrate.
+
+HorizonCode classes do **not** derive from one another: a class asset as a cast
+target matches that exact class and nothing else.
 
 ### Debug
 **Print** (`Print`) — log a value.
@@ -238,6 +257,14 @@ game data. `project.hcfg` records `horizonCodeCompiled`.
 - **Adding engine API functions costs nothing extra**: one `ApiFn` registry row
   serves the editor menu, the interpreter, Lua/Python AND the codegen (generated
   code dispatches through the same `callApi` seam).
+- **Cast has two lowerings, chosen by the export mode.** With the hybrid
+  (a fallback may ship interpreted) it goes through the `Context::isA` seam onto
+  the same `Runtime::instanceIsA` the interpreter asks — anything cleverer would
+  answer differently for an interpreted target. With **Stop on failure** every
+  class is native by construction, so the compatibility layer drops: a HC class
+  target becomes a `hc::as<T>` pointer comparison and an engine base class a
+  `resolveCompiled` + `baseClassKey()` chain walk. The parity harness generates
+  its fixtures in Stop mode, so the fast path is the one it proves.
 
 Dispatch safety note: event cascades are bounded twice — recursion depth 32 and
 a total budget of 256 listener fires per cascade. The budget exists because a

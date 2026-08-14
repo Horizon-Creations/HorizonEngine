@@ -1233,6 +1233,147 @@ TEST_CASE("the scene entity an instance owns rides along with it")
     CHECK(rt.ownedEntity(inst) == 0u);        // a gone instance owns nothing
 }
 
+// ── The Cast node ───────────────────────────────────────────────────────────
+
+namespace
+{
+    // Event("Go") → Cast(target) with the Object input fed by a Ref literal
+    // that the caller supplies as an event arg. Success sets "hit", Failure
+    // sets "miss", and the cast's output reference is stored into "got".
+    //
+    // Ref values have no literal node, so the reference travels as the event's
+    // argument: Event.hasArg with propType Ref.
+    Graph castGraph(const std::string& target)
+    {
+        Graph g;
+        Variable hit;  hit.name  = "hit";  hit.type = PinType::Bool;  g.variables.push_back(hit);
+        Variable miss; miss.name = "miss"; miss.type = PinType::Bool;  g.variables.push_back(miss);
+        Variable got;  got.name  = "got";  got.type = PinType::Ref;    g.variables.push_back(got);
+
+        Node ev; ev.type = NodeType::Event; ev.s = "Go";
+        ev.hasArg = true; ev.propType = PinType::Ref;
+        const int e = g.addNode(std::move(ev));
+
+        Node ca; ca.type = NodeType::Cast; ca.s = target;
+        const int c = g.addNode(std::move(ca));
+
+        Node sh; sh.type = NodeType::SetVariable; sh.s = "hit";  sh.propType = PinType::Bool;
+        const int h = g.addNode(std::move(sh));
+        Node sm; sm.type = NodeType::SetVariable; sm.s = "miss"; sm.propType = PinType::Bool;
+        const int m = g.addNode(std::move(sm));
+        Node sg; sg.type = NodeType::SetVariable; sg.s = "got";  sg.propType = PinType::Ref;
+        const int gi = g.addNode(std::move(sg));
+        Node tb; tb.type = NodeType::ConstBool; tb.f[0] = 1.0f;
+        const int t = g.addNode(std::move(tb));
+
+        // Cast pins: execIn 0, Success 1, Failure 2, Object 3, "As …" 4.
+        // Event exec (0) → Cast exec-in; Event arg (1, a Ref) → Cast Object.
+        REQUIRE(g.connect(e, 0, c, 0));
+        REQUIRE(g.connect(e, 1, c, 3));
+        // Success → Set hit → Set got (from the cast's output).
+        REQUIRE(g.connect(c, 1, h, 0));
+        REQUIRE(g.connect(t, 0, h, 2));
+        REQUIRE(g.connect(h, 1, gi, 0));
+        REQUIRE(g.connect(c, 4, gi, 2));
+        // Failure → Set miss.
+        REQUIRE(g.connect(c, 2, m, 0));
+        REQUIRE(g.connect(t, 0, m, 2));
+        return g;
+    }
+}
+
+TEST_CASE("Cast takes Success for its own class and hands the reference through")
+{
+    Runtime rt;
+    const InstanceId target = rt.add(Graph{}, {}, { "Content/Goblin.hasset", "Entity" });
+    const InstanceId caster = rt.add(castGraph("Content/Goblin.hasset"));
+
+    rt.fireEvent(caster, "Go", 0, Value::ofRef(target));
+    CHECK(rt.getVariable(caster, "hit").b);
+    CHECK_FALSE(rt.getVariable(caster, "miss").b);
+    CHECK(rt.getVariable(caster, "got").ref == target);
+}
+
+TEST_CASE("Cast to a base class succeeds; the other way round and sideways fail")
+{
+    Runtime rt;
+    const InstanceId hero = rt.add(Graph{}, {}, { "Content/Hero.hasset", "PlayerCharacter" });
+
+    // Up the chain: a PlayerCharacter IS an Entity.
+    {
+        const InstanceId c = rt.add(castGraph("Entity"));
+        rt.fireEvent(c, "Go", 0, Value::ofRef(hero));
+        CHECK(rt.getVariable(c, "hit").b);
+        CHECK(rt.getVariable(c, "got").ref == hero);
+    }
+    // Sideways: it is not a PlayerController.
+    {
+        const InstanceId c = rt.add(castGraph("PlayerController"));
+        rt.fireEvent(c, "Go", 0, Value::ofRef(hero));
+        CHECK(rt.getVariable(c, "miss").b);
+        CHECK(rt.getVariable(c, "got").ref == 0u);
+    }
+    // Down the chain: an Entity-only instance is not a PlayerCharacter.
+    {
+        const InstanceId plain = rt.add(Graph{}, {}, { "Content/Door.hasset", "Entity" });
+        const InstanceId c = rt.add(castGraph("PlayerCharacter"));
+        rt.fireEvent(c, "Go", 0, Value::ofRef(plain));
+        CHECK(rt.getVariable(c, "miss").b);
+    }
+}
+
+TEST_CASE("Cast on a null or destroyed reference takes Failure")
+{
+    Runtime rt;
+    const InstanceId victim = rt.add(Graph{}, {}, { "Content/Goblin.hasset", "Entity" });
+
+    {   // Ref 0 — nothing was ever there.
+        const InstanceId c = rt.add(castGraph("Entity"));
+        rt.fireEvent(c, "Go", 0, Value::ofRef(0));
+        CHECK(rt.getVariable(c, "miss").b);
+        CHECK_FALSE(rt.getVariable(c, "hit").b);
+    }
+    {   // A reference to something that has since been destroyed. This is why
+        // Cast doubles as an Is Valid: the guard is built in.
+        rt.destroy(victim);
+        const InstanceId c = rt.add(castGraph("Entity"));
+        rt.fireEvent(c, "Go", 0, Value::ofRef(victim));
+        CHECK(rt.getVariable(c, "miss").b);
+        CHECK(rt.getVariable(c, "got").ref == 0u);
+    }
+}
+
+TEST_CASE("a Cast with no target class always takes Failure")
+{
+    // Consistent rather than broken — and the codegen warns about it instead of
+    // failing the build, so both backends agree on this graph too.
+    Runtime rt;
+    const InstanceId target = rt.add(Graph{}, {}, { "Content/Goblin.hasset", "Entity" });
+    const InstanceId c      = rt.add(castGraph(""));
+    rt.fireEvent(c, "Go", 0, Value::ofRef(target));
+    CHECK(rt.getVariable(c, "miss").b);
+    CHECK_FALSE(rt.getVariable(c, "hit").b);
+}
+
+TEST_CASE("the Cast node's serialized name does not depend on its target")
+{
+    // nodeDisplayName IS the key on disk (see the boxed warning in
+    // HorizonCode.cpp): if it ever grew the class name, every saved graph
+    // holding a Cast would stop loading the moment the target changed.
+    CHECK(std::string(nodeDisplayName(NodeType::Cast)) == "Cast");
+    CHECK(std::string(nodeCategory(NodeType::Cast)) == "Reference");
+
+    Graph g = castGraph("Content/Goblin.hasset");
+    Graph back;
+    REQUIRE(fromJson(toJson(g), back));
+    const Node* c = nullptr;
+    for (const Node& n : back.nodes) if (n.type == NodeType::Cast) c = &n;
+    REQUIRE(c != nullptr);
+    CHECK(c->s == "Content/Goblin.hasset");
+    // Links survive, so the round trip did not shift a pin.
+    CHECK(back.links.size() == g.links.size());
+}
+
 // ── Converting wires ────────────────────────────────────────────────────────
 
 TEST_CASE("elementary types convert on the wire")

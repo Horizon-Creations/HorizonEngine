@@ -161,15 +161,25 @@ namespace
 			s.createObject  = [this](const std::string& path) -> uint32_t
 			{
 				InstanceId nid = 0;
+				// The class identity travels with the instance in BOTH worlds,
+				// exactly as the apps' svc.createObject does it. Without it the
+				// interpreted side would have no class to compare a Cast
+				// against while the compiled side reads its own classKey() —
+				// and the two would disagree for reasons the fixture never
+				// intended to test.
+				ClassIdentity cls;
+				for (const auto& src : hcfix::all())
+					if (src.key == path) { cls = { src.key, src.baseClass }; break; }
 				if (useCompiled)
 				{
 					if (const CompiledClassEntry* e = findCompiled(path))
-						nid = rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }));
+						nid = rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }),
+						                     {}, cls);
 				}
 				else
 				{
 					for (auto& src : hcfix::all())
-						if (src.key == path) { nid = rt.add(std::move(src.graph)); break; }
+						if (src.key == path) { nid = rt.add(std::move(src.graph), {}, cls); break; }
 				}
 				trace.push_back("createObject " + path + " -> " + std::to_string(nid));
 				if (nid) rt.fireEvent(nid, "Construct");
@@ -248,13 +258,14 @@ namespace
 					comp.rt.setGameInstanceCompiled(
 						CompiledPtr(gi->create(), CompiledDeleter{ gi->destroy }));
 			}
-			interp.id = interp.rt.add(std::move(src.graph), interp.host());
+			const ClassIdentity cls{ src.key, src.baseClass };   // src.graph is moved below
+			interp.id = interp.rt.add(std::move(src.graph), interp.host(), cls);
 
 			const CompiledClassEntry* entry = findCompiled(key);
 			REQUIRE(entry != nullptr);
 			CompiledPtr owned(entry->create(), CompiledDeleter{ entry->destroy });
 			compInst = owned.get();   // kept so a test can call its hooks directly
-			comp.id = comp.rt.addCompiled(std::move(owned), comp.host());
+			comp.id = comp.rt.addCompiled(std::move(owned), comp.host(), cls);
 			REQUIRE(comp.id != 0);
 		}
 
@@ -574,6 +585,71 @@ TEST_CASE("codegen parity: refs_objects (create/destroy, external access, warn p
 	p.checkInstance(obj);   // both dead → both empty
 }
 
+TEST_CASE("codegen parity: casts (the DIRECT lowerings agree with the interpreter)")
+{
+	// The fixtures are generated with OnFailure::Stop, so the compiled side here
+	// is not using the hc::castRef seam at all: an exact HorizonCode class
+	// lowers to hc::as<T> (a pointer comparison) and an engine base class to
+	// hc::castBase (resolveCompiled + baseClassKey). That fast path is only
+	// sound if it answers exactly what Runtime::instanceIsA answers, and this is
+	// the case that proves it — without it the optimization would be untested.
+	ParityPair p("fix/casts");
+	p.fire("Spawn");
+	const uint32_t obj = p.var("obj").ref;
+	CHECK(obj != 0);
+	p.checkInstance(obj);
+
+	p.fire("Go");
+	// Every marker is wired onto the branch the cast is EXPECTED to take, so a
+	// wrong answer stops the chain and leaves the rest at zero.
+	CHECK(p.var("exact").f == 1.0f);   // exact class          → hc::as<T>
+	CHECK(p.var("base").f  == 1.0f);   // its own engine base  → hc::castBase
+	CHECK(p.var("up").f    == 1.0f);   // Entity, up the chain → hc::castBase
+	CHECK(p.var("side").f  == 1.0f);   // PlayerController     → Failure
+	CHECK(p.var("other").f == 1.0f);   // a different class    → Failure
+	CHECK(p.var("null").f  == 1.0f);   // Ref 0                → Failure
+	// The Success branch hands the SAME reference through, not a fresh one.
+	CHECK(p.var("gotRef").ref == obj);
+}
+
+TEST_CASE("codegen: Cast lowers through the seam when other classes may be interpreted")
+{
+	// The other half of the story: with OnFailure::Interpret an interpreted
+	// instance can turn up in the same run, and hc::as would answer null for it
+	// — so the emission has to go through hc::castRef, which lands on the very
+	// Runtime::instanceIsA the interpreter asks. Checked on the emitted text
+	// because the compiled fixtures above can only ever exercise one mode.
+	HE::hccg::ClassSource src;
+	for (auto& s : hcfix::all())
+		if (s.key == "fix/casts") { src = std::move(s); break; }
+	REQUIRE(!src.key.empty());
+
+	auto emitFor = [&](HE::hccg::OnFailure mode)
+	{
+		HE::hccg::Options opt;
+		opt.onFailure = mode;
+		HE::hccg::ClassSource copy = src;
+		HE::hccg::Result r = HE::hccg::generate({ std::move(copy) }, opt);
+		REQUIRE(r.ok);
+		std::string all;
+		for (const auto& f : r.files) all += f.contents;
+		return all;
+	};
+
+	const std::string interp = emitFor(HE::hccg::OnFailure::Interpret);
+	CHECK(interp.find("hc::castRef(") != std::string::npos);
+	CHECK(interp.find("hc::castBase(") == std::string::npos);
+	CHECK(interp.find("hc::as<") == std::string::npos);
+
+	// Under Stop the engine-base casts take castBase. The exact-class cast falls
+	// back to the seam HERE only because this one-class run did not compile
+	// fix/cast_target — that fallback is deliberate (a target with no generated
+	// C++ type has nothing to name), and the fixture parity case above covers
+	// the hc::as path with the whole set compiled.
+	const std::string stop = emitFor(HE::hccg::OnFailure::Stop);
+	CHECK(stop.find("hc::castBase(") != std::string::npos);
+}
+
 TEST_CASE("codegen parity: dispatchers (mixed compiled↔interpreted in ONE Runtime)")
 {
 	// Three runtimes with the same population — all-interpreted (the reference),
@@ -587,17 +663,20 @@ TEST_CASE("codegen parity: dispatchers (mixed compiled↔interpreted in ONE Runt
 
 		InstanceId make(const std::string& key, bool compiled)
 		{
-			if (compiled)
-			{
-				const CompiledClassEntry* e = findCompiled(key);
-				REQUIRE(e != nullptr);
-				return rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }));
-			}
 			HE::hccg::ClassSource src;
 			for (auto& s : hcfix::all())
 				if (s.key == key) { src = std::move(s); break; }
 			REQUIRE(!src.key.empty());
-			return rt.add(std::move(src.graph));
+			// Same identity either way — which backend serves an instance must
+			// never change what class it IS.
+			const ClassIdentity cls{ src.key, src.baseClass };
+			if (compiled)
+			{
+				const CompiledClassEntry* e = findCompiled(key);
+				REQUIRE(e != nullptr);
+				return rt.addCompiled(CompiledPtr(e->create(), CompiledDeleter{ e->destroy }), {}, cls);
+			}
+			return rt.add(std::move(src.graph), {}, cls);
 		}
 
 		void setup(bool ownerCompiled, bool listenersCompiled)

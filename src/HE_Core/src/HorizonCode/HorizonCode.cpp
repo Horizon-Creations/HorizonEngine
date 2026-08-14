@@ -23,6 +23,18 @@ using P = PinType;
 
 namespace
 {
+// A Cast node's output pin reads "As Goblin", but PinDesc::name is a borrowed
+// const char* that has to outlive the call — so the readable name cannot be
+// composed here. It is MIRRORED onto the node instead (params[0].name), exactly
+// the way EngineCall mirrors its ApiFn's parameters: the pin then resolves from
+// the node alone, with no class registry in reach and no temporary to dangle.
+// The editor writes the mirror when the target changes; an empty one (a
+// hand-built node, an older document) simply falls back to the bare label.
+const char* castOutPinName(const Node& n)
+{
+    return (n.params.empty() || n.params[0].name.empty()) ? "As" : n.params[0].name.c_str();
+}
+
 // The one switch that knows every node's pins. Fills `s` IN PLACE — clearing its
 // vectors without shrinking them — so the allocation-free accessors below can
 // reuse a single scratch NodeSig instead of building four heap vectors per query.
@@ -210,6 +222,15 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::IsValid:
         s.dataIns  = { { "Target", P::Ref } };
         s.dataOuts = { { "Valid", P::Bool } };
+        break;
+    case T::Cast:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Success", P::Exec }, { "Failure", P::Exec } };
+        s.dataIns  = { { "Object", P::Ref } };
+        // The output pin's NAME carries the target class ("As Goblin"), which is
+        // why it borrows the node's own string rather than a literal — same
+        // lifetime rule as every other borrowed name in here.
+        s.dataOuts = { { castOutPinName(n), P::Ref } };
         break;
     case T::DoOnce:
         s.execIns  = { { "", P::Exec } };
@@ -406,6 +427,10 @@ const char* nodeDisplayName(NodeType t)
         case T::ForEach:      return "For Each";
         case T::Delay:        return "Delay";
         case T::IsValid:      return "Is Valid";
+        // Deliberately NOT "Cast To <Class>": this string is the node's key on
+        // disk (see the boxed warning above), so it must not depend on which
+        // class the node happens to target. The editor composes the title.
+        case T::Cast:         return "Cast";
         case T::DoOnce:       return "Do Once";
         case T::FlipFlop:     return "Flip Flop";
         case T::Add:          return "Add";
@@ -572,6 +597,10 @@ const char* nodeTooltip(NodeType t)
         case T::IsValid:
             return "True when the Target reference points to a live instance — the guard\n"
                    "to run before touching an object that may have been destroyed.";
+        case T::Cast:
+            return "Checked downcast: continues from Success when Object really is the\n"
+                   "chosen class (or derives from it) and from Failure otherwise. The\n"
+                   "output reference is only valid on the Success branch.";
         case T::MakeStruct:
             return "Builds a value of the chosen Struct asset: one input per field,\n"
                    "unwired fields fall back to their declared defaults.";
@@ -609,7 +638,8 @@ const char* nodeCategory(NodeType t)
         case T::Delay:
         case T::DoOnce:
         case T::FlipFlop:      return "Flow";
-        case T::IsValid:       return "Reference";
+        case T::IsValid:
+        case T::Cast:          return "Reference";
         case T::GetProperty:
         case T::SetProperty:   return "Property";
         case T::GetVariable:
@@ -1886,7 +1916,7 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         execNode(*n, depth);
         if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
             n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop ||
-            n->type == T::SwitchOnEnum)
+            n->type == T::SwitchOnEnum || n->type == T::Cast)
             return; // they steer their own exec-outs internally (Delay: later)
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
@@ -1909,6 +1939,19 @@ void Runner::execNode(const Node& n, int depth)
         const PinRanges r = pinRanges(n);
         runExecChain(n, r.execOut0 + 0, depth + 1);
         runExecChain(n, r.execOut0 + 1, depth + 1);
+        break;
+    }
+    case T::Cast:
+    {
+        const Value  v  = evalInput(n, 0, depth + 1);
+        // A reference that is 0, dead, or of another class all take Failure —
+        // the same three cases hc::castRef folds together in generated code.
+        const bool   ok = v.type == P::Ref && v.ref != 0 && m_ctx.isA && m_ctx.isA(v.ref, n.s);
+        // Cached like every other exec node's output, so a downstream read on
+        // the Success branch gets the reference without re-running the check.
+        m_execOutputs[n.id] = { ok ? v : Value::ofRef(0) };
+        const PinRanges r = pinRanges(n);
+        runExecChain(n, r.execOut0 + (ok ? 0 : 1), depth + 1);
         break;
     }
     case T::SetProperty:
@@ -2368,6 +2411,16 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::IsValid:
         return Value::ofBool(m_ctx.isValid && m_ctx.isValid(evalInput(n, 0, depth + 1).ref));
+    case T::Cast:
+    {
+        // The cast reference the node cached when it ran. Reading it without
+        // having run the node — which only a wire off the Failure branch, or a
+        // pure read from elsewhere, can do — yields Ref 0, the same "no object"
+        // an outright failure produces.
+        auto it = m_execOutputs.find(n.id);
+        if (it != m_execOutputs.end() && !it->second.empty()) return it->second[0];
+        return Value::ofRef(0);
+    }
     case T::FlipFlop:
         // Which side the last execution took (A = true); false before any run.
         return Value::ofBool(m_ctx.getNodeState ? m_ctx.getNodeState(n.id).b : false);

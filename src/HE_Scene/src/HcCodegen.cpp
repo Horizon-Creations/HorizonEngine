@@ -982,6 +982,15 @@ private:
                          "called (node " + std::to_string(n.id) + " is dead)");
         }
 
+        // 2c. A Cast with no target class compiles and runs — it simply always
+        //     takes Failure, in both backends alike. That is consistent rather
+        //     than broken, so it is a warning and not a fallback: failing the
+        //     build over it would be the generator overruling the interpreter.
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::Cast && n.s.empty())
+                warn("Cast node " + std::to_string(n.id) + " has no target class — "
+                     "it always takes Failure");
+
         // 3. Exec cycles would compile to unbounded loops (the interpreter only
         //    tolerates them via the step guard) → interpreted fallback.
         checkCycles(/*execEdges=*/true, "exec cycle at node ");
@@ -1000,7 +1009,7 @@ private:
             switch (n.type)
             {
                 case NT::CreateWidget: case NT::CreateObject: case NT::FunctionCall:
-                case NT::CallExternal: case NT::ForEach:
+                case NT::CallExternal: case NT::ForEach: case NT::Cast:
                     return true;
                 case NT::EngineCall: return n.hasArg;
                 default: return false;
@@ -1121,6 +1130,13 @@ private:
                 case NT::ForEach:
                     s.push_back({ field(0), trOf(n.propType, false, n.typeName) });
                     s.push_back({ field(1), { PT::Int, false } });
+                    break;
+                // The cast result, cached exactly like the interpreter's: the
+                // branch condition and the "As <Class>" output are one value,
+                // so the check runs once no matter how often the Success chain
+                // reads it.
+                case NT::Cast:
+                    s.push_back({ field(0), { PT::Ref, false } });
                     break;
                 default: break;
             }
@@ -1441,6 +1457,11 @@ private:
                    input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::IsValid:
             return "hc::isValidRef(m_ctx, " + input(n, 0, fnCtx) + ")";
+        case NT::Cast:
+            // The reference the cast cached when it ran (0 on failure) — the
+            // same slot the Success/Failure branch was chosen from, so the
+            // check never runs twice.
+            return slotRef(n, 0);
         case NT::FlipFlop:
             // IsA = the side the LAST execution took (false before any run).
             return stateMember(n.id);
@@ -1599,15 +1620,53 @@ private:
             const Node* n = m_g.findNode(l->dstNode);
             if (!n) return;
             stmt(*n, fnCtx, b);
-            // Branch/Sequence/ForEach/DoOnce/FlipFlop steer their own exec-outs;
-            // Return and Delay (latent — resumes via resumeFrom) are terminal.
+            // Branch/Sequence/ForEach/DoOnce/FlipFlop/Cast steer their own
+            // exec-outs; Return and Delay (latent — resumes via resumeFrom) are
+            // terminal. Mirrors Runner::runExecChain's list exactly.
             if (n->type == NT::Branch || n->type == NT::Sequence || n->type == NT::ForEach ||
                 n->type == NT::FunctionReturn || n->type == NT::Delay ||
                 n->type == NT::DoOnce || n->type == NT::FlipFlop ||
-                n->type == NT::SwitchOnEnum)
+                n->type == NT::SwitchOnEnum || n->type == NT::Cast)
                 return;
             l = execLinkFrom(n->id, pinRanges(*n).execOut0);
         }
+    }
+
+    // ── the Cast node's two lowerings ────────────────────────────────────────
+    // With OnFailure::Interpret the build is a per-asset hybrid: an interpreted
+    // instance can turn up in the same run, so the cast has to ask the Context
+    // seam, which lands on the very Runtime::instanceIsA the interpreter asks.
+    // Anything cleverer would answer differently for an interpreted target and
+    // break the parity harness rather than the build.
+    //
+    // With OnFailure::Stop every class is native by construction — there is no
+    // interpreted instance to stay compatible with, so the compatibility layer
+    // is what goes:
+    //   • a HorizonCode class target lowers to hc::as<T>, a pointer comparison.
+    //     Exact match is all it ever needed: HC classes do not derive from one
+    //     another, so there is no chain the pointer compare could miss.
+    //   • an engine base class still walks the chain, but through
+    //     resolveCompiled + baseClassKey() instead of the Runtime's map.
+    // Both shapes yield the reference or 0, so the caller above is unchanged.
+    // `ref` is the local the Object input was already read into — never the
+    // input expression itself, which some shapes below spell twice.
+    std::string castExpr(const Node& n, const std::string& ref)
+    {
+        if (m_opt.onFailure == OnFailure::Stop)
+        {
+            if (HorizonCode::findEngineClass(n.s))
+                return "hc::castBase(m_ctx, " + ref + ", " + strLit(n.s) + ")";
+            // A class this run did NOT compile (deleted asset, a widget, a
+            // stale target string) has no C++ type to name — the seam still
+            // answers it correctly, so fall back rather than fail the build.
+            if (const CompiledClass* c = m_ct.find(n.s))
+            {
+                m_usedClasses.insert(c->cpp);
+                return "((hc::as<" + m_opt.namespaceName + "::" + c->cpp + ">(m_ctx, " + ref +
+                       ") != nullptr) ? (" + ref + ") : 0u)";
+            }
+        }
+        return "hc::castRef(m_ctx, " + ref + ", " + strLit(n.s) + ")";
     }
 
     // The exec emission shared by CallExternal and EngineCall: pack the data-in
@@ -1669,6 +1728,28 @@ private:
             ++b.indent; chain(n, r.execOut0 + 1, fnCtx, b); --b.indent;
             b.line("}");
             break;
+        case NT::Cast:
+        {
+            // The Object input is read ONCE into a local: a pure Engine Call
+            // feeding it would otherwise dispatch again for every place the
+            // expression is spelled, and the interpreter evaluates it once.
+            const std::string rv = "c" + std::to_string(n.id);
+            b.line("{");
+            ++b.indent;
+            b.line("const uint32_t " + rv + " = " + input(n, 0, fnCtx) + ";");
+            b.line(slotRef(n, 0) + " = " + castExpr(n, rv) + ";");
+            b.line("if (" + slotRef(n, 0) + " != 0u)");
+            b.line("{");
+            ++b.indent; chain(n, r.execOut0 + 0, fnCtx, b); --b.indent;   // Success
+            b.line("}");
+            b.line("else");
+            b.line("{");
+            ++b.indent; chain(n, r.execOut0 + 1, fnCtx, b); --b.indent;   // Failure
+            b.line("}");
+            --b.indent;
+            b.line("}");
+            break;
+        }
         case NT::ForEach:
         {
             const std::string arr = "arr" + std::to_string(n.id);

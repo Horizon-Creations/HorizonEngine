@@ -156,6 +156,19 @@ enum class NodeType : uint8_t
     // a trailing Default for values no entry claims.
     SwitchOnEnum,
     EnumToInt, IntToEnum, EnumToString,   // conversions (pure)
+    // Checked downcast of an object reference (Unreal's Cast node). s = the
+    // TARGET class: either an engine class name from engineClasses() ("Entity",
+    // "PlayerCharacter", …) or a HorizonCode class asset's content-relative
+    // path. The two never collide — an asset path always carries a '/' and a
+    // '.hasset' suffix — and the engine names are checked first.
+    //
+    // Exec-outs are Success / Failure; the single data-out carries the same
+    // reference on success and 0 on failure, cached per run like every other
+    // exec node's output. The data-IN is a Ref and NOT a wildcard: only a
+    // reference can name a runtime class at all, and a wildcard pin has no C++
+    // type for the codegen to lower to (it would have to become hc::Value and
+    // drag a second type system into the generated code).
+    Cast,
     COUNT
 };
 

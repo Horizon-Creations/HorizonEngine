@@ -256,6 +256,13 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 		case NT::CreateObject:
 		case NT::CreateWidget:
 			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
+		// The whole point of a Cast: the Success reference is TYPED, so its
+		// member menu is the target class's. An engine base class has no graph
+		// of its own — its members come from the taxonomy table instead, so
+		// there is nothing to load here and null is the right answer.
+		case NT::Cast:
+			if (srcNode.s.empty() || HC::findEngineClass(srcNode.s)) return nullptr;
+			return loadClassGraph(content, srcNode.s, scratch) ? &scratch : nullptr;
 		case NT::GetVariable:
 		case NT::SetVariable: // the set node passes the value through as its output
 		{
@@ -1172,6 +1179,34 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		return true;
+	}
+
+	case NT::Cast:
+	{
+		// Two sections: the engine taxonomy (Entity, the player classes …) and
+		// the project's own HorizonCode classes. Both write the SAME field —
+		// n.s is one target-key namespace, and an asset path can never collide
+		// with an engine name because it always carries a '/' and '.hasset'.
+		const std::string cur = n.s.empty() ? std::string("(pick a class)")
+		                                    : HcEditorUtil::castTargetLabel(n.s);
+		if (ImGui::BeginCombo("Cast to", cur.c_str()))
+		{
+			ImGui::TextDisabled("Engine");
+			for (const auto& c : HC::engineClasses())
+				if (ImGui::Selectable(c.name, n.s == c.name) && n.s != c.name)
+					{ HcEditorUtil::setCastTarget(n, c.name); edit(true); }
+			ImGui::Separator();
+			ImGui::TextDisabled("Classes");
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(h.content))
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n.s == c.path) &&
+				    n.s != c.path)
+					{ HcEditorUtil::setCastTarget(n, c.path); edit(true); }
+			ImGui::EndCombo();
+		}
+		ImGui::TextDisabled("Success when Object really is that class\n"
+		                    "(or derives from it). The output is only\n"
+		                    "valid on the Success branch.");
 		return true;
 	}
 

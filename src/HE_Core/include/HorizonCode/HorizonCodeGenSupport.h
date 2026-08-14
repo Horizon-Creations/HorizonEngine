@@ -440,6 +440,38 @@ template <typename T> inline T* as(const Context& c, uint32_t target)
     return (i && i->classTag() == T::classTag_()) ? static_cast<T*>(i) : nullptr;
 }
 
+// ── the Cast node's two lowerings ────────────────────────────────────────────
+// Which one the generator emits depends on OnFailure (HcCodegen.h):
+//
+//   Interpret — the per-asset hybrid. Interpreted instances can live in the
+//     same run, so the cast has to go through the Context seam, which lands on
+//     the very same Runtime::instanceIsA the interpreter asks. Routing it
+//     through resolveCompiled/classTag instead would answer differently for a
+//     base class and for an interpreted target, and the parity harness would be
+//     comparing two languages.
+//
+//   Stop — every class is compiled, so by construction there is no interpreted
+//     instance to be compatible with. The generator then emits hc::as<T> for a
+//     HorizonCode class (a pointer comparison; exact match is all a HC class
+//     ever needs, since HC classes do not derive from one another) and
+//     castBase for an engine base class, which still walks the chain but
+//     reaches the instance directly instead of through the Runtime's map.
+//
+// Both return the reference on success and 0 on failure, so the caller's shape
+// — `if (rs.castN != 0u)` — is identical either way.
+inline uint32_t castRef(const Context& c, uint32_t ref, const char* classKey)
+{
+    return (ref != 0u && c.isA && c.isA(ref, classKey)) ? ref : 0u;
+}
+inline uint32_t castBase(const Context& c, uint32_t ref, const char* baseClass)
+{
+    if (ref == 0u || !c.resolveCompiled) return 0u;
+    HorizonCode::CompiledInstance* i = c.resolveCompiled(ref);
+    if (!i) return 0u;
+    const char* base = i->baseClassKey();
+    return HorizonCode::engineClassIsA(base ? base : "", baseClass) ? ref : 0u;
+}
+
 // The GameInstance is the one reference whose class is known while generating
 // ("__game_instance__"), and the Runtime already holds the object — so this
 // costs neither a handle lookup nor an id round trip. It is NOT guaranteed to

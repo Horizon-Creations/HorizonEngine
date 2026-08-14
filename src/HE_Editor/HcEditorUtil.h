@@ -139,6 +139,27 @@ namespace HcEditorUtil
 	// displayName, falling back to the raw id.
 	std::string engineCallTitle(const std::string& apiId);
 
+	// ── Cast node targets ───────────────────────────────────────────────────
+	// A Cast's target (Node::s) is ONE key namespace: either an engine class
+	// name from HorizonCode::engineClasses() or a content-relative HC class
+	// asset path. They cannot collide — a path always carries a '/' and a
+	// '.hasset' — so nothing has to record which kind it is.
+	//
+	// castTargetLabel reduces a key to what the UI shows ("Goblin" for
+	// "Content/Enemies/Goblin.hasset"); castTitle is the node's header
+	// ("Cast To Goblin"). The node's own DISPLAY NAME stays the bare "Cast":
+	// that string is the key a saved graph is read back by, so it must not
+	// depend on the target.
+	std::string castTargetLabel(const std::string& targetKey);
+	std::string castTitle(const std::string& targetKey);
+	// Point a Cast node at `targetKey` and mirror the readable output-pin name
+	// ("As Goblin") onto the node, the same way an EngineCall mirrors its
+	// descriptor's params: PinDesc::name is a borrowed pointer, so the label has
+	// to live on the node rather than be composed while the signature is built.
+	// The pin COUNT never changes, so unlike a struct/enum rebind this needs no
+	// link remapping.
+	void setCastTarget(HorizonCode::Node& n, const std::string& targetKey);
+
 	// Default-value slots for an ARRAY variable: add/remove/edit elements, each
 	// with the element type's editor (drag-float, checkbox, color swatch, …).
 	// Returns true when anything changed (the caller commits for undo).
