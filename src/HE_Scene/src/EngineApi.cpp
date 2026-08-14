@@ -93,6 +93,14 @@ bool exists(Ctx& c, Entity e)
 {
     return c.world && c.world->registry().valid((entt::entity)e);
 }
+Entity self(Ctx& c)
+{
+    return c.runtime ? c.runtime->ownedEntity(c.self) : 0u;
+}
+Entity owned(Ctx& c, uint32_t objectRef)
+{
+    return c.runtime ? c.runtime->ownedEntity(objectRef) : 0u;
+}
 void setVisible(Ctx& c, Entity e, bool visible)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return;
@@ -1242,6 +1250,9 @@ using VV = std::vector<Value>;
 float       aF (const VV& a, size_t k) { return k < a.size() ? a[k].f   : 0.0f; }
 bool        aB (const VV& a, size_t k) { return k < a.size() ? a[k].b   : false; }
 int         aI (const VV& a, size_t k) { return k < a.size() ? a[k].i   : 0; }
+// A Ref pin carries its instance handle in `ref`, not in `i` — reading it as an
+// int would silently hand every object reference through as 0.
+uint32_t    aR (const VV& a, size_t k) { return k < a.size() ? a[k].ref : 0u; }
 std::string aS (const VV& a, size_t k) { return k < a.size() ? a[k].s   : std::string(); }
 glm::vec2   aV2(const VV& a, size_t k) { return k < a.size() ? a[k].v2  : glm::vec2(0.0f); }
 glm::vec4   aV4(const VV& a, size_t k) { return k < a.size() ? a[k].col : glm::vec4(0.0f); }
@@ -1268,6 +1279,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::spawn(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
         t.push_back({ "entity.destroy", "Entity", true, {{"entity", P::Int}}, {}, "HE::api::entity::destroy",
             [](Ctx& c, const VV& a){ entity::destroy(c, (Entity)aI(a, 0)); return VV{}; } });
+        // Pure: which entity an Entity-class object sits on. `self` takes no
+        // argument because the caller's identity travels in the Ctx.
+        t.push_back({ "entity.self", "Entity", false, {}, {{"entity", P::Int}}, "HE::api::entity::self",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt((int)entity::self(c)) }; } });
+        t.push_back({ "entity.owned", "Entity", false, {{"object", P::Ref}}, {{"entity", P::Int}}, "HE::api::entity::owned",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::owned(c, aR(a, 0))) }; } });
         t.push_back({ "entity.distance", "Entity", false, {{"a", P::Int}, {"b", P::Int}}, {{"distance", P::Float}}, "HE::api::entity::distance",
             [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(entity::distance(c, (Entity)aI(a, 0), (Entity)aI(a, 1))) }; } });
 
@@ -1642,6 +1659,7 @@ const std::vector<ApiFn>& registry()
             { "log", "Log" },
             { "entity.getName", "Get Name" },       { "entity.spawn", "Spawn Entity" },
             { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
+            { "entity.self", "Get Owning Entity" }, { "entity.owned", "Get Entity Of" },
             { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },

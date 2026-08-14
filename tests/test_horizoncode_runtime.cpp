@@ -1155,22 +1155,29 @@ TEST_CASE("a class's event catalog is its whole chain, base first")
     CHECK(std::string(object[0]) == "Construct");
     CHECK(std::string(object[1]) == "Destruct");
 
-    // Entity is where the game lifecycle starts, and a player class inherits it
-    // without restating it.
+    // Entity is where the game lifecycle and the physics contacts start, and a
+    // player class inherits both without restating either.
     const auto entity = engineClassEvents("Entity");
     const auto player = engineClassEvents("PlayerCharacter");
-    CHECK(entity.size() == 4);
     CHECK(player.size() == entity.size());
     auto has = [](const std::vector<const char*>& v, const char* n)
     {
         for (const char* e : v) if (std::string(e) == n) return true;
         return false;
     };
-    CHECK(has(entity, "Construct"));
+    CHECK(has(entity, "Construct"));       // from Object
     CHECK(has(entity, "BeginPlay"));
     CHECK(has(entity, "Tick"));
+    CHECK(has(entity, "OnBeginOverlap"));
+    CHECK(has(entity, "OnEndOverlap"));
+    CHECK(has(entity, "OnHit"));
+    CHECK(has(entity, "OnHitEnd"));
     CHECK(has(player, "BeginPlay"));
+    CHECK(has(player, "OnBeginOverlap"));
+    // A plain Object has no world presence, so neither the game lifecycle nor
+    // any contact can reach it.
     CHECK_FALSE(has(object, "Tick"));
+    CHECK_FALSE(has(object, "OnHit"));
 
     // Every event a class offers must be one the engine actually fires.
     for (const char* e : player) CHECK(findEngineEvent(e) != nullptr);

@@ -71,6 +71,11 @@ public:
     // Call script.onCollisionExit(self, otherEntityId). No-op if not defined.
     bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) override;
 
+    // Call script.onBeginOverlap/onEndOverlap(self, otherEntityId) — the trigger
+    // pair. No-op if not defined.
+    bool callOnBeginOverlap(InstanceId id, uint32_t otherEntityId) override;
+    bool callOnEndOverlap(InstanceId id, uint32_t otherEntityId) override;
+
     // Call script.onClick/onHoverEnter/onHoverExit(self). No-op if not defined.
     bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
 

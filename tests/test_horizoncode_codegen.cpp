@@ -190,7 +190,8 @@ namespace
 				trace.push_back("destroyObject " + std::to_string(ref));
 				rt.destroy(ref);
 			};
-			s.callApi = [this](const std::string& id_, const std::vector<Value>& args) -> std::vector<Value>
+			s.callApi = [this](InstanceId, const std::string& id_,
+			                   const std::vector<Value>& args) -> std::vector<Value>
 			{
 				// The REAL registry against a null-world Ctx (its null tolerance
 				// makes every call well-defined and deterministic) — args AND

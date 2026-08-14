@@ -44,6 +44,17 @@ public:
     virtual bool callOnUpdate(InstanceId id, float dt) = 0;
     virtual bool callOnCollisionEnter(InstanceId id, uint32_t otherEntityId) = 0;
     virtual bool callOnCollisionExit(InstanceId id, uint32_t otherEntityId) = 0;
+    // Trigger contacts (ColliderComponent::isTrigger on either side), the pair
+    // HorizonCode surfaces as OnBeginOverlap / OnEndOverlap. NOT pure: a backend
+    // that predates them keeps compiling and simply never delivers one, which is
+    // the same "script does not define the handler" answer as above.
+    //
+    // The blocking pair above still fires for BOTH kinds of contact, so no
+    // existing script loses an event by this being added.
+    virtual bool callOnBeginOverlap(InstanceId id, uint32_t otherEntityId)
+    { (void)id; (void)otherEntityId; return true; }
+    virtual bool callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
+    { (void)id; (void)otherEntityId; return true; }
     // UI pointer event on the instance's own entity (click / hover enter/exit).
     virtual bool callOnUIEvent(InstanceId id, UIScriptEvent ev) = 0;
 

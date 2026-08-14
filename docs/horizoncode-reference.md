@@ -23,6 +23,15 @@ A HorizonCode graph is always owned by exactly one host. All hosts share one
 | **Level Script** | embedded in the `.hescene` | one scene/zone | `OnLevelLoaded`, `OnLevelUnloaded` |
 | **Widget graph** | a UI Widget asset | while the widget lives | `Construct`, `Destruct` + UI element events |
 | **HC Class** | a HorizonCode Class asset | while the object lives | `Construct`, `Destruct` + custom events |
+| **Entity class** | an HC Class with base `Entity`, named by an entity's **Script** component | while that entity lives | the above + `BeginPlay`, `Tick`, `OnBeginOverlap`, `OnEndOverlap`, `OnHit`, `OnHitEnd` |
+
+An Entity class is attached through the ordinary **Script** component — the same
+slot that carries a `.lua`/`.py` script; the engine branches on the referenced
+asset's type. There is no separate "HorizonCode component". The instance and the
+entity die together in both directions: destroying the entity fires the
+instance's `Destruct`, and destroying the object takes its entity with it. Its
+scene entity is reachable with **Get Owning Entity** (`entity.self`), which is
+what every transform/physics/material call takes.
 
 The GameInstance persists across scene switches and is reachable from any graph via
 **Get Game Instance**. Objects created with **Create Object** live on the runtime;
@@ -141,7 +150,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | Group | # | Functions |
 |-------|---|-----------|
 | **Debug** | 5 | `log`, `debug.line`, `debug.sphere`, `debug.box`, `debug.clear` |
-| **Entity** | 11 | `getName`, `spawn`, `destroy`, `distance`, `findByName`, `exists`, `setVisible`, `getVisible`, `saveState`, `hasSavedState`, `applySavedState` |
+| **Entity** | 13 | `getName`, `spawn`, `destroy`, `distance`, `findByName`, `exists`, `self`, `owned`, `setVisible`, `getVisible`, `saveState`, `hasSavedState`, `applySavedState` |
 | **Transform** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getScale`/`setScale` |
 | **Physics** | 3 | `raycast`, `setVelocity`, `isGrounded` |
 | **Material** | 2 | `getParam`, `setParam` |

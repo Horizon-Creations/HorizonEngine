@@ -1279,7 +1279,8 @@ void EditorApplication::OnInit()
 		// EngineCall nodes dispatch through the HE::api registry against the editor
 		// world (+ content). Physics is null here (no PIE physics threaded yet) →
 		// physics nodes no-op (null-Ctx tolerance).
-		svc.callApi = [this](const std::string& id, const std::vector<HorizonCode::Value>& args)
+		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
+		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
@@ -1289,7 +1290,10 @@ void EditorApplication::OnInit()
 			if (!projPath.empty())
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
-			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine };
+			// The caller travels along: a few rows answer "who am I" — which
+			// entity this object sits on, above all — and world state cannot.
+			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine,
+			                &m_gameInstance.runtime(), self };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -1990,7 +1994,10 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_physicsWorld && m_scriptContext)
 		{
 			HE_PROFILE_SCOPE_N("CollisionDispatch");
-			CollisionSystem::dispatch(*m_physicsWorld, *m_scriptContext, m_scriptInstances);
+			// ONE call: polling drains the queues, so Lua/Python and HorizonCode
+			// have to be served by the same pass or the second one gets nothing.
+			CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
+			                          &m_gameInstance.runtime(), m_entityHost.instances());
 		}
 
 		// Live widgets: per-frame logic tick (EventTick).
@@ -2001,6 +2008,8 @@ void EditorApplication::OnRender(float dt)
 			m_editorWorld->scripts().update(dt);
 			// Player instances: Tick + Input.<Action>.* events.
 			m_playerHost.tick(input(), dt);
+			// Entity classes: Tick, plus reaping the ones whose entity is gone.
+			m_entityHost.tick(dt);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -4679,6 +4688,9 @@ void EditorApplication::setPlayMode(bool play)
 		// packaged game: spawn after the level is up (Construct + BeginPlay),
 		// pump Tick/Input.* per frame while playing.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager());
+		// HorizonCode classes sitting on scene entities. After the player host so
+		// a controller's BeginPlay can already reach them.
+		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 
 		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
 		// mouse capture (visible cursor = UI interaction mode).
@@ -4695,6 +4707,7 @@ void EditorApplication::setPlayMode(bool play)
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
 		// doesn't touch it).
+		m_entityHost.end();
 		m_playerHost.end();
 		m_gameInstance.fireShutdown();
 

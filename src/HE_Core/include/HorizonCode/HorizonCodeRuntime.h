@@ -203,6 +203,13 @@ public:
     void fireOnWindowFocusChanged(InstanceId id, bool focused);
     void fireOnLevelLoaded(InstanceId id);
     void fireOnLevelUnloaded(InstanceId id);
+    // Physics contacts (Entity classes). `other` is the other entity's id, which
+    // is what the whole event carries — CollisionEvent holds two ids and nothing
+    // else. Overlap = a trigger was involved, Hit = a blocking contact.
+    void fireOnBeginOverlap(InstanceId id, uint32_t other);
+    void fireOnEndOverlap(InstanceId id, uint32_t other);
+    void fireOnHit(InstanceId id, uint32_t other);
+    void fireOnHitEnd(InstanceId id, uint32_t other);
 
     // Scene-switch garbage collection: keep `root` and every instance reachable
     // from it through Ref-typed variables, remove all others. Called on scene
@@ -224,7 +231,12 @@ public:
         // Generic engine-API dispatch, forwarded to every instance's Context so any
         // EngineCall node reaches the HE::api registry. The app binds it to the
         // current world's registry Ctx (world/physics/content).
-        std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
+        // `self` is the instance whose graph made the call. The engine API
+        // needs it for the handful of rows that answer "who am I" — which
+        // scene entity this object sits on, above all — and world state alone
+        // cannot say. 0 means the call came from outside HorizonCode.
+        std::function<std::vector<Value>(InstanceId self, const std::string& apiId,
+                                         const std::vector<Value>& args)> callApi;
     };
     void setServices(Services s) { m_services = std::move(s); }
 

@@ -45,6 +45,7 @@ add_executable(he_tests
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp
+    test_entity_host.cpp
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp

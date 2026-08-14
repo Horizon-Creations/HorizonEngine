@@ -1,0 +1,163 @@
+#include "HorizonScene/EntityHost.h"
+#include <cstdint>
+#include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HcCompiledLoader.h>   // HorizonCode::compiledClasses()
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <HorizonScene/Components/ScriptComponent.h>
+#include <Diagnostics/Logger.h>
+#include <vector>
+
+namespace
+{
+// The class asset behind a ScriptComponent, or null when that component points
+// at something else (a .lua/.py script — ScriptContext's business) or at nothing
+// at all. Deliberately quiet: every entity in the world is offered here, and
+// "not mine" is the common answer, not a problem.
+const HorizonCodeClassAsset* classAssetOf(ContentManager& cm, const ScriptComponent& sc)
+{
+    if (!sc.enabled) return nullptr;
+    if (cm.assetType(sc.scriptAssetId) != HE::AssetType::HorizonCodeClass) return nullptr;
+    return cm.getHorizonCodeClass(sc.scriptAssetId);
+}
+}
+
+void EntityHost::begin(HorizonCode::Runtime& runtime, HorizonWorld& world, ContentManager& cm)
+{
+	end();
+	m_runtime = &runtime;
+	m_world   = &world;
+	m_content = &cm;
+
+	// Same walk ScriptContext::startWorldScripts does, over the same component —
+	// the two split on the referenced asset's TYPE, so an entity belongs to
+	// exactly one of them and neither needs to know about the other.
+	size_t bound = 0;
+	for (auto [entity, sc] : world.registry().view<ScriptComponent>().each())
+	{
+		const HorizonCodeClassAsset* a = classAssetOf(cm, sc);
+		if (!a) continue;
+		if (bind(entity, a->path) != 0) ++bound;
+	}
+	if (bound > 0)
+		HE_LOG_INFO(HorizonCode, "EntityHost: %zu entity class instance(s) running", bound);
+}
+
+HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& classPath)
+{
+	if (!m_runtime || !m_content || !m_world) return 0;
+	if (!m_world->registry().valid(entity)) return 0;
+
+	const HE::UUID id = m_content->loadAsset(classPath);
+	const HorizonCodeClassAsset* a = m_content->getHorizonCodeClass(id);
+	if (!a)
+	{
+		HE_LOG_ERROR(HorizonCode, "Entity %u: HorizonCode class '%s' was not found — "
+		                          "no logic will run on this entity",
+		             static_cast<uint32_t>(entity), classPath.c_str());
+		return 0;
+	}
+
+	// Compiled class first, exactly like createObject and PlayerHost; the
+	// identity comes from the ASSET either way so both backends are one class.
+	const HorizonCode::ClassIdentity cls{ a->path, a->baseClass };
+	HorizonCode::InstanceId inst = 0;
+	if (auto compiled = HorizonCode::compiledClasses().create(a->path))
+		inst = m_runtime->addCompiled(std::move(compiled), {}, cls);
+	else
+	{
+		HorizonCode::Graph g;
+		if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
+		inst = m_runtime->add(std::move(g), {}, cls);
+	}
+	if (!inst) return 0;
+
+	const uint32_t raw = static_cast<uint32_t>(entity);
+	m_runtime->setOwnedEntity(inst, raw);
+	m_byEntity[raw]    = inst;
+	m_byInstance[inst] = raw;
+
+	m_runtime->fireConstruct(inst);
+	m_runtime->fireBeginPlay(inst);
+	return inst;
+}
+
+EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity parent)
+{
+	Spawned out;
+	if (!m_runtime || !m_content || !m_world) return out;
+
+	const HE::UUID id = m_content->loadAsset(classPath);
+	const HorizonCodeClassAsset* a = m_content->getHorizonCodeClass(id);
+	if (!a) return out;
+
+	// The entity the class brings with it. Today that is a bare, named entity;
+	// once a class asset carries its authored component list this is where that
+	// subtree gets instantiated instead (one call — SceneSerializer already has
+	// both halves of it as the prefab format).
+	out.entity = m_world->createEntity(a->name.empty() ? "Entity" : a->name);
+	if (parent != entt::null && m_world->registry().valid(parent))
+		m_world->reparentEntity(out.entity, parent);
+
+	out.instance = bind(out.entity, classPath);
+	if (!out.instance)
+	{
+		// Never leave a body without its logic standing in the scene.
+		m_world->destroyEntity(out.entity);
+		out.entity = entt::null;
+	}
+	return out;
+}
+
+void EntityHost::tick(float dt)
+{
+	if (!m_runtime || !m_world) return;
+
+	// Reap first, tick second. An instance whose entity is gone — anything can
+	// destroy an entity, from entity.destroy in a graph to the outliner's delete
+	// — would otherwise keep ticking, keep answering a Cast, and hand out a
+	// dangling entity id from entityOf. Watching the registry here means every
+	// path that removes an entity is covered without any of them knowing about
+	// this host.
+	std::vector<HorizonCode::InstanceId> dead;
+	for (const auto& [raw, inst] : m_byEntity)
+		if (!m_world->registry().valid(static_cast<Entity>(raw))) dead.push_back(inst);
+	for (const HorizonCode::InstanceId inst : dead) unbind(inst);
+
+	for (const auto& [raw, inst] : m_byEntity)
+		m_runtime->fireTick(inst, dt);
+}
+
+void EntityHost::unbind(HorizonCode::InstanceId instance)
+{
+	const auto it = m_byInstance.find(instance);
+	if (it == m_byInstance.end()) return;
+	const uint32_t raw = it->second;
+	m_byInstance.erase(it);
+	m_byEntity.erase(raw);
+	if (m_runtime) m_runtime->destroy(instance);   // fires Destruct
+}
+
+void EntityHost::end()
+{
+	if (m_runtime)
+		for (const auto& [raw, inst] : m_byEntity)
+			m_runtime->destroy(inst);   // fires Destruct
+	m_byEntity.clear();
+	m_byInstance.clear();
+	m_runtime = nullptr;
+	m_world   = nullptr;
+	m_content = nullptr;
+}
+
+HorizonCode::InstanceId EntityHost::instanceOf(Entity entity) const
+{
+	const auto it = m_byEntity.find(static_cast<uint32_t>(entity));
+	return it != m_byEntity.end() ? it->second : 0;
+}
+
+Entity EntityHost::entityOf(HorizonCode::InstanceId instance) const
+{
+	const auto it = m_byInstance.find(instance);
+	return it != m_byInstance.end() ? static_cast<Entity>(it->second) : entt::null;
+}

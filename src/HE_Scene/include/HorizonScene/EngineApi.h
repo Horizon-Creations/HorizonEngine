@@ -1,5 +1,6 @@
 #pragma once
-#include <HorizonCode/HorizonCode.h>   // HorizonCode::Value, PinType
+#include <HorizonCode/HorizonCode.h>          // HorizonCode::Value, PinType
+#include <HorizonCode/HorizonCodeRuntime.h>   // Ctx::runtime (who is calling)
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,17 @@ struct Ctx
     PhysicsWorld*   physics = nullptr;
     ContentManager* content = nullptr;
     AudioEngine*    audio   = nullptr;
+    // WHO is calling. `self` is the HorizonCode instance whose graph made this
+    // call (0 outside HorizonCode — Lua, Python and native game logic have no
+    // instance), and `runtime` is where that id can be looked up.
+    //
+    // Everything else in this struct is a world-level service; these two are the
+    // caller's identity, and they exist because "which entity am I on?" cannot be
+    // answered from world state alone. Both null/0 is an ordinary state, not an
+    // error: the affected rows then return their neutral default like every
+    // other null-Ctx call.
+    HorizonCode::Runtime* runtime = nullptr;
+    uint32_t              self    = 0;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -62,6 +74,13 @@ namespace entity {
     float       distance(Ctx&, Entity a, Entity b);                   // -1 if either invalid
     Entity      findByName(Ctx&, const std::string& name);            // first match, 0 if none
     bool        exists(Ctx&, Entity e);
+    // ── which entity a HorizonCode object sits on ────────────────────────────
+    // An Entity-class instance is BOUND to a scene entity by EntityHost; these
+    // are how a graph gets from itself (or from another object reference) to
+    // that entity, which is what every transform/physics/material call takes.
+    // 0 = this object owns no entity (a plain Object, a widget, a level script).
+    Entity      self(Ctx&);                     // the calling instance's entity
+    Entity      owned(Ctx&, uint32_t objectRef);// another object's entity
     // Per-entity visibility: flips every renderable component the entity carries
     // (mesh, skeletal mesh, light, particles, foliage). getVisible reads the
     // first renderable found (true when the entity has none).

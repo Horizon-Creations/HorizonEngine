@@ -1412,6 +1412,19 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },
         { "OnLevelLoaded",        "onLevelLoaded",        P::Exec,   false },
         { "OnLevelUnloaded",      "onLevelUnloaded",      P::Exec,   false },
+        // Physics contacts on an Entity class. The argument is the OTHER entity
+        // as an Int — the same way every entity id travels through HorizonCode
+        // (HE::api's entity/transform groups take P::Int). It is also all there
+        // is to carry: PhysicsWorld::CollisionEvent holds two entity ids and no
+        // contact point or normal.
+        //
+        // Overlap = a contact where one side is a trigger (ColliderComponent::
+        // isTrigger); Hit = a blocking contact. The split happens in
+        // PhysicsWorld, so a graph never has to ask which kind it got.
+        { "OnBeginOverlap",       "onBeginOverlap",       P::Int,    false },
+        { "OnEndOverlap",         "onEndOverlap",         P::Int,    false },
+        { "OnHit",                "onHit",                P::Int,    false },
+        { "OnHitEnd",             "onHitEnd",             P::Int,    false },
     };
     return k;
 }
@@ -1431,7 +1444,9 @@ const std::vector<EngineClassDesc>& engineClasses()
 {
     static const std::vector<EngineClassDesc> k = {
         { "Object",           "",       { "Construct", "Destruct" }, {} },
-        { "Entity",           "Object", { "BeginPlay", "Tick" },     {} },
+        { "Entity",           "Object", { "BeginPlay", "Tick",
+                                          "OnBeginOverlap", "OnEndOverlap",
+                                          "OnHit", "OnHitEnd" },     {} },
         { "PlayerCharacter",  "Entity", {},                          {} },
         { "PlayerController", "Entity", {},                          {} },
     };

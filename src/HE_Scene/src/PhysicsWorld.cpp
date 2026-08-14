@@ -124,6 +124,12 @@ public:
         ev.entityA = static_cast<uint32_t>(b1.GetUserData());
         ev.entityB = static_cast<uint32_t>(b2.GetUserData());
 
+        // A contact involving a SENSOR is an overlap, everything else a blocking
+        // hit. The split lives here because it is the only place that can see
+        // the bodies — and doing it here means a graph never has to ask which
+        // kind of contact it was handed.
+        const bool overlap = b1.IsSensor() || b2.IsSensor();
+
         std::lock_guard<std::mutex> lock(m_mutex);
         // Jolt reports contacts per *sub shape* pair, so one body pair can produce
         // several callbacks (compound/mesh shapes). Gameplay only cares about the
@@ -132,10 +138,12 @@ public:
         ActiveContact& contact = m_active[bodyPairKey(b1.GetID(), b2.GetID())];
         if (contact.refCount++ == 0)
         {
-            // Cache the entity ids *here*: OnContactRemoved is not allowed to look
-            // at the bodies at all, so this is the only place we can resolve them.
-            contact.event = ev;
-            m_entered.push_back(ev);
+            // Cache the entity ids AND the kind *here*: OnContactRemoved is not
+            // allowed to look at the bodies at all, so this is the only place we
+            // can resolve either.
+            contact.event   = ev;
+            contact.overlap = overlap;
+            (overlap ? m_enteredOverlap : m_entered).push_back(ev);
         }
     }
 
@@ -150,7 +158,7 @@ public:
             return;   // contact belongs to a torn-down scene (see reset()) — drop it
         if (--it->second.refCount == 0)
         {
-            m_exited.push_back(it->second.event);
+            (it->second.overlap ? m_exitedOverlap : m_exited).push_back(it->second.event);
             m_active.erase(it);
         }
     }
@@ -160,6 +168,22 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         std::vector<PhysicsWorld::CollisionEvent> result;
         result.swap(m_entered);
+        return result;
+    }
+
+    std::vector<PhysicsWorld::CollisionEvent> pollOverlapEntered()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        result.swap(m_enteredOverlap);
+        return result;
+    }
+
+    std::vector<PhysicsWorld::CollisionEvent> pollOverlapExited()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<PhysicsWorld::CollisionEvent> result;
+        result.swap(m_exitedOverlap);
         return result;
     }
 
@@ -181,6 +205,8 @@ public:
         m_active.clear();
         m_entered.clear();
         m_exited.clear();
+        m_enteredOverlap.clear();
+        m_exitedOverlap.clear();
     }
 
 private:
@@ -188,6 +214,9 @@ private:
     {
         uint32_t                     refCount = 0;
         PhysicsWorld::CollisionEvent event;
+        // Which queue this contact's EXIT belongs in. Decided on the add side,
+        // because OnContactRemoved may not touch the bodies to ask again.
+        bool                         overlap = false;
     };
 
     // Jolt already hands out body pairs sorted by BodyID, but sort defensively so
@@ -206,6 +235,8 @@ private:
     std::unordered_map<uint64_t, ActiveContact> m_active;
     std::vector<PhysicsWorld::CollisionEvent> m_entered;
     std::vector<PhysicsWorld::CollisionEvent> m_exited;
+    std::vector<PhysicsWorld::CollisionEvent> m_enteredOverlap;
+    std::vector<PhysicsWorld::CollisionEvent> m_exitedOverlap;
 };
 
 // ─── Impl ─────────────────────────────────────────────────────────────────────
@@ -347,6 +378,12 @@ void PhysicsWorld::initialize(HorizonWorld& world)
         }
         bcs.mFriction    = rb.friction;
         bcs.mRestitution = rb.restitution;
+        // ColliderComponent::isTrigger was authored, serialised and drawn in its
+        // own debug colour, but never reached Jolt — so a trigger volume blocked
+        // like a wall and produced no overlap events at all. A sensor passes
+        // bodies through and still reports contacts, which is what the
+        // OnBeginOverlap / OnEndOverlap pair is built from.
+        bcs.mIsSensor = col && col->isTrigger;
 
         JPH::EActivation activation = (motionType == JPH::EMotionType::Static)
             ? JPH::EActivation::DontActivate
@@ -616,6 +653,18 @@ std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollCollisionExit()
 {
     if (!m_impl) return {};
     return m_impl->contactListener.pollExited();
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollOverlapEnter()
+{
+    if (!m_impl) return {};
+    return m_impl->contactListener.pollOverlapEntered();
+}
+
+std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollOverlapExit()
+{
+    if (!m_impl) return {};
+    return m_impl->contactListener.pollOverlapExited();
 }
 
 void PhysicsWorld::clear()

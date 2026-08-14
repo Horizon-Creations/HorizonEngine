@@ -965,6 +965,13 @@ ScriptEngine::InstanceId ScriptContext::startEntityScript(entt::entity entity, C
     auto* sc = reg.try_get<ScriptComponent>(entity);
     if (!sc || !sc->enabled) return ScriptEngine::kInvalidInstance;
 
+    // The same component slot also carries HorizonCode CLASSES, which EntityHost
+    // runs. Quietly not ours — every entity in the world is offered to both, and
+    // the split is the referenced asset's TYPE. Without this the error below
+    // would fire for every scripted-in-HorizonCode entity in the scene.
+    if (cm.assetType(sc->scriptAssetId) == HE::AssetType::HorizonCodeClass)
+        return ScriptEngine::kInvalidInstance;
+
     // "My script isn't running" is nearly always one of the two cases below: the
     // component points at an asset that is gone, or at one that is empty. Both
     // used to be a silent early return.
@@ -1003,6 +1010,10 @@ int ScriptContext::startWorldScripts(ContentManager& cm, InstanceMap& out)
     int started = 0, attempted = 0;
     for (auto [entity, sc] : m_world->registry().view<ScriptComponent>().each())
     {
+        // HorizonCode classes share this component but belong to EntityHost —
+        // counting them here would report every one of them as a script that
+        // "failed to start".
+        if (cm.assetType(sc.scriptAssetId) == HE::AssetType::HorizonCodeClass) continue;
         ++attempted;
         const auto instId = startEntityScript(entity, cm);
         if (instId == ScriptEngine::kInvalidInstance) continue;
@@ -1069,6 +1080,18 @@ bool ScriptContext::callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t ot
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
     HE_SCRIPT_CALL("onCollisionExit", b->callOnCollisionExit(rawId(id), otherEntityId));
+}
+
+bool ScriptContext::callOnBeginOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onBeginOverlap", b->callOnBeginOverlap(rawId(id), otherEntityId));
+}
+
+bool ScriptContext::callOnEndOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onEndOverlap", b->callOnEndOverlap(rawId(id), otherEntityId));
 }
 
 bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)

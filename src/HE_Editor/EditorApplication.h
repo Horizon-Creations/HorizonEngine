@@ -20,6 +20,7 @@
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
+#include <HorizonScene/EntityHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
@@ -508,6 +509,9 @@ private:
 	// Player controller/character instances + input pump — PIE only (begun on
 	// entering play mode, ended on leaving). Shares m_gameInstance's runtime.
 	PlayerHost         m_playerHost;
+	// HorizonCode classes attached to scene entities (ScriptComponent pointing at
+	// a class asset) — PIE only, same lifetime as m_playerHost, same runtime.
+	EntityHost         m_entityHost;
 	HorizonCode::Graph m_gameInstanceGraph;
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file

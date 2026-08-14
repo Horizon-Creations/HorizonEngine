@@ -64,6 +64,14 @@ public:
     // destroyed via clear() do not produce an exit event.
     std::vector<CollisionEvent> pollCollisionExit();
 
+    // The same two, for contacts where at least one side is a TRIGGER
+    // (ColliderComponent::isTrigger — the body is created as a Jolt sensor, so
+    // it passes bodies through and only reports). A contact lands in exactly one
+    // of the two pairs, decided when it begins, so a trigger never also shows up
+    // as a blocking hit.
+    std::vector<CollisionEvent> pollOverlapEnter();
+    std::vector<CollisionEvent> pollOverlapExit();
+
     // Remove and destroy all physics bodies without touching the ECS.
     void clear();
 

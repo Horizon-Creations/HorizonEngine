@@ -93,6 +93,12 @@ public:
     // Call onCollisionExit(self, otherEntityId). No-op if not defined.
     bool callOnCollisionExit(ScriptEngine::InstanceId id, uint32_t otherEntityId);
 
+    // Call onBeginOverlap/onEndOverlap(self, otherEntityId) — the TRIGGER pair
+    // (snake_case in Python). The collision pair above fires for both kinds of
+    // contact, so a script that only knows it loses nothing.
+    bool callOnBeginOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId);
+    bool callOnEndOverlap(ScriptEngine::InstanceId id, uint32_t otherEntityId);
+
     // Call the UI pointer-event handler (onClick / onHoverEnter / onHoverExit,
     // snake_case in Python). No-op if not defined.
     bool callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev);

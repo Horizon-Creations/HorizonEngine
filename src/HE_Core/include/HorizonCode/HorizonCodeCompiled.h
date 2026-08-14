@@ -124,6 +124,11 @@ public:
     // Level script lifecycle.
     virtual void onLevelLoaded()   { fireEvent("OnLevelLoaded", 0, Value{}); }
     virtual void onLevelUnloaded() { fireEvent("OnLevelUnloaded", 0, Value{}); }
+    // Physics contacts on an Entity class; `other` is the other entity's id.
+    virtual void onBeginOverlap(int other) { fireEvent("OnBeginOverlap", 0, Value::ofInt(other)); }
+    virtual void onEndOverlap(int other)   { fireEvent("OnEndOverlap",   0, Value::ofInt(other)); }
+    virtual void onHit(int other)          { fireEvent("OnHit",          0, Value::ofInt(other)); }
+    virtual void onHitEnd(int other)       { fireEvent("OnHitEnd",       0, Value::ofInt(other)); }
 
     // ── execution (mirrors Runner's entry points) ───────────────────────────
     virtual void fireEvent(const std::string& name, int elem, const Value& arg)

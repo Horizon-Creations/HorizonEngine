@@ -398,8 +398,8 @@ Context Runtime::makeContext(InstanceId id)
     ctx.createObject  = [this](const std::string& path) -> uint32_t
     { return m_services.createObject ? m_services.createObject(path) : 0u; };
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
-    ctx.callApi       = [this](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
-    { return m_services.callApi ? m_services.callApi(apiId, args) : std::vector<Value>{}; };
+    ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
+    { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };
     // Latent flow + liveness + per-node state (all runtime-side).
     ctx.scheduleResume = [this, id](int nodeId, float seconds)
     {
@@ -527,6 +527,26 @@ HE_HC_VALUE_EVENT(fireOnCheckChanged,  "OnCheckChanged",  bool,
 HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
                   onSelectionChanged(elem, v), Value::ofInt(v))
 #undef HE_HC_VALUE_EVENT
+
+// The physics contacts: one Int argument (the other entity), no element. Same
+// shape as fireTick rather than the value events, so they get their own macro
+// instead of four near-identical hand-written copies.
+#define HE_HC_ENTITY_EVENT(fn, name, hook)                                      \
+    void Runtime::fn(InstanceId id, uint32_t other)                             \
+    {                                                                           \
+        Inst* i = find(id);                                                     \
+        if (!i) return;                                                         \
+        const Value arg = Value::ofInt((int)other);                             \
+        if (i->compiled) i->compiled->hook((int)other);                         \
+        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, 0, arg); } \
+        static const EventId ev = eventId(name);                                \
+        dispatchToListeners(id, ev, name, arg);                                 \
+    }
+HE_HC_ENTITY_EVENT(fireOnBeginOverlap, "OnBeginOverlap", onBeginOverlap)
+HE_HC_ENTITY_EVENT(fireOnEndOverlap,   "OnEndOverlap",   onEndOverlap)
+HE_HC_ENTITY_EVENT(fireOnHit,          "OnHit",          onHit)
+HE_HC_ENTITY_EVENT(fireOnHitEnd,       "OnHitEnd",       onHitEnd)
+#undef HE_HC_ENTITY_EVENT
 
 void Runtime::fireTick(InstanceId id, float dt)
 {

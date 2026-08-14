@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorUndo, panel plumbing
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
+#include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
@@ -1024,11 +1025,48 @@ void render(AppContext& ctx)
 		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
 	}
 
-	// ── Script (Lua) ────────────────────────────────────────────────────────
+	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
 	if (auto* s = registry.try_get<ScriptComponent>(entity))
 	{
 		if (componentHeader("Script", true, removed))
 		{
+			// This one slot carries every language. A .lua/.py asset runs on
+			// ScriptContext; a HorizonCode CLASS asset runs on EntityHost, which
+			// is what gives that entity the Entity lifecycle and the physics
+			// contacts. The split is the asset's type, so there is deliberately
+			// no second "code on this entity" component to keep in sync.
+			{
+				const HE::UUID before = s->scriptAssetId;
+				// The preview resolves through getHorizonCodeClass rather than a
+				// scan: it answers null for an id that is not a loaded class, so
+				// an entity scripted in Lua reads "(script)" instead of costing
+				// a content-tree walk every frame.
+				const HorizonCodeClassAsset* cur =
+					(ctx.contentManager && s->scriptAssetId != HE::UUID{})
+						? ctx.contentManager->getHorizonCodeClass(s->scriptAssetId) : nullptr;
+				const char* preview = cur ? cur->name.c_str()
+				                    : (s->scriptAssetId == HE::UUID{} ? "(none)" : "(script)");
+				if (ImGui::BeginCombo("Class", preview))
+				{
+					// The scan happens only while the list is open — the same
+					// rule the Create Object picker follows.
+					if (ImGui::Selectable("(none)", s->scriptAssetId == HE::UUID{}))
+						s->scriptAssetId = HE::UUID{};
+					for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+					{
+						const HE::UUID id = ctx.contentManager
+							? ctx.contentManager->loadAsset(c.path) : HE::UUID{};
+						if (ImGui::Selectable((c.label + "##" + c.path).c_str(),
+						                      id == s->scriptAssetId))
+							s->scriptAssetId = id;
+					}
+					ImGui::EndCombo();
+				}
+				if (s->scriptAssetId != before) trackEdit();
+			}
+			hint("A HorizonCode class asset. Its base class decides what runs: an "
+			     "Entity class gets BeginPlay/Tick and the physics contacts.");
+
 			char buf[256];
 			std::strncpy(buf, s->moduleName.c_str(), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = '\0';
@@ -1038,7 +1076,8 @@ void render(AppContext& ctx)
 				trackEdit();
 			}
 			hint("Logical name matching ScriptEngine::loadScript(name, source). The script "
-			     "must export onStart(self) and/or onUpdate(self, dt).");
+			     "must export onStart(self) and/or onUpdate(self, dt). Ignored for a "
+			     "HorizonCode class.");
 			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
 
 			// ── Declared properties (M.properties table) ──────────────────

@@ -288,11 +288,14 @@ void GameApplication::OnInit()
 		// world (+ content) — resolved at call time, so it's null-tolerant while
 		// OnInit runs before the world exists. No PhysicsWorld in the shipping
 		// runtime yet → physics nodes no-op (null-Ctx tolerance).
-		svc.callApi = [this](const std::string& id, const std::vector<HorizonCode::Value>& args)
+		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
+		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine };
+			// The caller travels along — see the editor's twin.
+			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine,
+			                &m_gameInstance.runtime(), self };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -350,6 +353,8 @@ void GameApplication::OnInit()
 	// BeginPlay) and start pumping Tick/Input.* events (OnRender). After the scene
 	// load so BeginPlay can reach scene entities through the engine-call API.
 	m_playerHost.begin(m_gameInstance.runtime(), contentManager());
+	if (m_world)
+		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
@@ -850,6 +855,8 @@ void GameApplication::OnRender(float deltaTime)
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
 	// the app Input state, which ProcessEvent keeps current).
 	m_playerHost.tick(input(), deltaTime);
+	// Entity classes: Tick, plus reaping the ones whose entity is gone.
+	m_entityHost.tick(deltaTime);
 
 	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
 	// the app-wide runtime (GameInstance + widgets + level + objects share it).
@@ -956,6 +963,7 @@ void GameApplication::OnShutdown()
 
 	// Player instances go down before the GameInstance (their Destruct may still
 	// reference it), symmetric to being spawned after its OnInit.
+	m_entityHost.end();
 	m_playerHost.end();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).

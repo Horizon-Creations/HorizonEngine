@@ -189,6 +189,26 @@ bool ScriptEngine::callOnCollisionExit(InstanceId id, uint32_t otherEntityId)
     return pcall(2, 0);
 }
 
+bool ScriptEngine::callOnBeginOverlap(InstanceId id, uint32_t otherEntityId)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onBeginOverlap")) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
+    return pcall(2, 0);
+}
+
+bool ScriptEngine::callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onEndOverlap")) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
+    return pcall(2, 0);
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

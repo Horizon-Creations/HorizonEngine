@@ -9,6 +9,7 @@
 #include <HorizonScene/UIInputSystem.h>
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
+#include <HorizonScene/EntityHost.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
@@ -81,6 +82,9 @@ private:
     // Runs on m_gameInstance's runtime; begun after the startup scene loads,
     // ended in OnShutdown before the GameInstance fires OnShutdown.
     PlayerHost m_playerHost;
+    // HorizonCode classes attached to scene entities (ScriptComponent pointing
+    // at a class asset). Same runtime and same lifetime as m_playerHost.
+    EntityHost m_entityHost;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
     // HUD created in OnInit exists before the first scene and survives scene
     // switches. Each world borrows it via setWidgetManager. Declared after

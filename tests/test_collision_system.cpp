@@ -5,6 +5,8 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 
 static constexpr float kDt = 1.0f / 60.0f;
 
@@ -249,4 +251,155 @@ TEST_CASE("CollisionSystem: dispatch is safe when instance map is empty")
         phys.step(world, kDt);
         CHECK_NOTHROW(CollisionSystem::dispatch(phys, ctx, emptyMap));
     }
+}
+
+// ── HorizonCode entity classes on the same dispatch ─────────────────────────
+
+namespace
+{
+    // Event(name, Int arg) → SetVariable(counter, counter + 1) and
+    // SetVariable(otherVar, arg). Enough to prove the event arrived AND that it
+    // carried the right entity.
+    HorizonCode::Graph countingGraph(const char* event, const char* counter,
+                                     const char* otherVar)
+    {
+        using namespace HorizonCode;
+        Graph g;
+        Variable c; c.name = counter;  c.type = PinType::Int; g.variables.push_back(c);
+        Variable o; o.name = otherVar; o.type = PinType::Int; g.variables.push_back(o);
+
+        Node ev; ev.type = NodeType::Event; ev.s = event;
+        ev.hasArg = true; ev.propType = PinType::Int;
+        const int e = g.addNode(std::move(ev));
+
+        Node add; add.type = NodeType::Add;
+        const int a = g.addNode(std::move(add));
+        Node get; get.type = NodeType::GetVariable; get.s = counter; get.propType = PinType::Int;
+        const int gv = g.addNode(std::move(get));
+
+        Node sc; sc.type = NodeType::SetVariable; sc.s = counter; sc.propType = PinType::Int;
+        const int s1 = g.addNode(std::move(sc));
+        Node so; so.type = NodeType::SetVariable; so.s = otherVar; so.propType = PinType::Int;
+        const int s2 = g.addNode(std::move(so));
+
+        Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+        const int k = g.addNode(std::move(one));
+
+        // Add has no exec pins, so its data-outs start at 2 (after the two
+        // data-ins) — the unified pin index counts every pin on the node.
+        REQUIRE(g.connect(gv, 0, a, 0));
+        REQUIRE(g.connect(k,  0, a, 1));
+        REQUIRE(g.connect(e,  0, s1, 0));    // exec
+        REQUIRE(g.connect(a,  2, s1, 2));    // value
+        REQUIRE(g.connect(s1, 1, s2, 0));    // exec
+        REQUIRE(g.connect(e,  1, s2, 2));    // the event's Int arg
+        return g;
+    }
+}
+
+TEST_CASE("CollisionSystem: one poll serves Lua AND HorizonCode")
+{
+    // The regression this guards: polling DRAINS the queues. Two dispatch calls
+    // — one per frontend — would leave whichever ran second with nothing, and it
+    // would look like the events simply never fire for that language.
+    using namespace HorizonCode;
+    HorizonWorld world;
+
+    Entity floor = world.createEntity("Floor");
+    {
+        TransformComponent t; t.position = {0,0,0}; t.scale = {10, 0.2f, 10};
+        world.addComponent(floor, t);
+        world.addComponent(floor, RigidBodyComponent{});
+    }
+    Entity box = world.createEntity("Box");
+    {
+        TransformComponent t; t.position = {0, 1.0f, 0}; t.scale = {1,1,1};
+        world.addComponent(box, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        world.addComponent(box, rb);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    ScriptContext sctx(world);
+    REQUIRE(sctx.engine().loadScript("counter", kCountCollisionsGlobal));
+    const auto luaId = sctx.engine().createInstance("counter", static_cast<uint32_t>(box));
+    REQUIRE(luaId != ScriptEngine::kInvalidInstance);
+    sctx.engine().callOnStart(luaId);
+    CollisionSystem::InstanceMap lua{ { static_cast<uint32_t>(box), luaId } };
+
+    // A blocking contact surfaces as OnHit in HorizonCode (OnBeginOverlap is the
+    // trigger pair), so that is what the graph handles.
+    Runtime rt;
+    const InstanceId hc = rt.add(countingGraph("OnHit", "hits", "other"), {},
+                                 { "Content/Box.hasset", "Entity" });
+    CollisionSystem::HcInstanceMap hcMap{ { static_cast<uint32_t>(floor), hc } };
+
+    for (int i = 0; i < 90; ++i)
+    {
+        phys.step(world, kDt);
+        CollisionSystem::dispatch(phys, &sctx, lua, &rt, hcMap);
+    }
+
+    CHECK(sctx.engine().getGlobalNumber("_heEnterCount") >= 1.0);   // Lua saw it
+    CHECK(rt.getVariable(hc, "hits").i >= 1);                       // and so did HC
+    // …and the argument really is the OTHER entity, not the receiver.
+    CHECK(rt.getVariable(hc, "other").i == static_cast<int>(box));
+}
+
+TEST_CASE("PhysicsWorld: a trigger collider overlaps instead of blocking")
+{
+    // ColliderComponent::isTrigger was authored, serialised and drawn in its own
+    // debug colour but never reached Jolt, so a trigger volume behaved like a
+    // wall and produced no overlap events at all.
+    using namespace HorizonCode;
+    HorizonWorld world;
+
+    Entity zone = world.createEntity("Zone");
+    {
+        TransformComponent t; t.position = {0, 0, 0}; t.scale = {4, 4, 4};
+        world.addComponent(zone, t);
+        world.addComponent(zone, RigidBodyComponent{});
+        ColliderComponent col;
+        col.shape       = ColliderShape::Box;
+        col.halfExtents = {2, 2, 2};
+        col.isTrigger   = true;
+        world.addComponent(zone, col);
+    }
+    Entity faller = world.createEntity("Faller");
+    {
+        TransformComponent t; t.position = {0, 6, 0}; t.scale = {1,1,1};
+        world.addComponent(faller, t);
+        RigidBodyComponent rb; rb.type = RigidBodyType::Dynamic; rb.mass = 1.0f;
+        world.addComponent(faller, rb);
+    }
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    Runtime rt;
+    const InstanceId hc = rt.add(countingGraph("OnBeginOverlap", "overlaps", "other"), {},
+                                 { "Content/Zone.hasset", "Entity" });
+    const InstanceId hit = rt.add(countingGraph("OnHit", "hits", "other"), {},
+                                  { "Content/Zone2.hasset", "Entity" });
+    CollisionSystem::HcInstanceMap hcMap{ { static_cast<uint32_t>(zone), hc } };
+    CollisionSystem::HcInstanceMap hitMap{ { static_cast<uint32_t>(zone), hit } };
+
+    float lastY = 0.0f;
+    for (int i = 0; i < 180; ++i)
+    {
+        phys.step(world, kDt);
+        CollisionSystem::dispatch(phys, nullptr, {}, &rt, hcMap);
+        lastY = world.registry().get<TransformComponent>(faller).position.y;
+    }
+    CHECK(rt.getVariable(hc, "overlaps").i >= 1);
+    CHECK(rt.getVariable(hc, "other").i == static_cast<int>(faller));
+    // A sensor does not block: the body falls straight through instead of
+    // resting on top of the volume.
+    CHECK(lastY < -2.0f);
+
+    // And the SAME contact never also shows up as a blocking hit — a contact
+    // lands in exactly one of the two pairs, decided when it begins.
+    CHECK(rt.getVariable(hit, "hits").i == 0);
 }

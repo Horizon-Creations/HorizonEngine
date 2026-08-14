@@ -963,6 +963,24 @@ bool PyScriptBackend::callOnCollisionExit(InstanceId id, uint32_t other)
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callOnBeginOverlap(InstanceId id, uint32_t other)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_begin_overlap")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_begin_overlap", "k", (unsigned long)other);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
+bool PyScriptBackend::callOnEndOverlap(InstanceId id, uint32_t other)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_end_overlap")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_end_overlap", "k", (unsigned long)other);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :
@@ -1088,6 +1106,8 @@ bool PyScriptBackend::callOnStart(InstanceId) { return false; }
 bool PyScriptBackend::callOnUpdate(InstanceId, float) { return false; }
 bool PyScriptBackend::callOnCollisionEnter(InstanceId, uint32_t) { return false; }
 bool PyScriptBackend::callOnCollisionExit(InstanceId, uint32_t) { return false; }
+bool PyScriptBackend::callOnBeginOverlap(InstanceId, uint32_t) { return false; }
+bool PyScriptBackend::callOnEndOverlap(InstanceId, uint32_t) { return false; }
 bool PyScriptBackend::callOnUIEvent(InstanceId, UIScriptEvent) { return false; }
 std::vector<ScriptPropDef> PyScriptBackend::getScriptProperties(const std::string&) const { return {}; }
 void PyScriptBackend::injectProperties(InstanceId, const std::unordered_map<std::string, ScriptPropValue>&) {}
