@@ -5,6 +5,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
@@ -80,18 +81,17 @@ HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& class
 		return 0;
 	}
 
-	// Compiled class first, exactly like createObject and PlayerHost; the
-	// identity comes from the ASSET either way so both backends are one class.
-	const HorizonCode::ClassIdentity cls{ a->path, a->baseClass };
+	// Resolve the inheritance chain and flatten it: the graph that runs is this
+	// class's own PLUS everything it inherits, with its overrides in place.
+	// The identity carries the ancestry so a Cast to a parent class can be
+	// answered without the runtime ever reading an asset.
+	HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(*m_content, a->path);
+	const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
 	HorizonCode::InstanceId inst = 0;
 	if (auto compiled = HorizonCode::compiledClasses().create(a->path))
 		inst = m_runtime->addCompiled(std::move(compiled), {}, cls);
 	else
-	{
-		HorizonCode::Graph g;
-		if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
-		inst = m_runtime->add(std::move(g), {}, cls);
-	}
+		inst = m_runtime->add(std::move(rc.graph), {}, cls);
 	if (!inst) return 0;
 
 	const uint32_t raw = static_cast<uint32_t>(entity);

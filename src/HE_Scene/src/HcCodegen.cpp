@@ -1053,7 +1053,7 @@ private:
         // functions. Seeded with the CompiledInstance surface so an event called
         // "fireEvent" cannot shadow the override it is dispatched from.
         std::unordered_set<std::string> used = {
-            "classKey", "baseClassKey", "classTag", "classTag_",
+            "classKey", "baseClassKey", "classChain", "classTag", "classTag_",
             "varInfos", "eventInfos", "fireEvent", "callFunction",
             "getVariable", "setVariable", "reseedVariables", "collectRefs",
             "resumeFrom", "bindContext", "slots", "RunState", "m_ctx",
@@ -1656,15 +1656,16 @@ private:
         {
             if (HorizonCode::findEngineClass(n.s))
                 return "hc::castBase(m_ctx, " + ref + ", " + strLit(n.s) + ")";
+            // A HorizonCode class target. hc::as would be a pointer compare —
+            // but with class inheritance the target may be an ANCESTOR of what
+            // the reference holds, and one exact address per class cannot say
+            // that. castClass asks the instance's own key AND its chain, still
+            // without the Runtime's map.
+            if (m_ct.find(n.s))
+                return "hc::castClass(m_ctx, " + ref + ", " + strLit(n.s) + ")";
             // A class this run did NOT compile (deleted asset, a widget, a
-            // stale target string) has no C++ type to name — the seam still
-            // answers it correctly, so fall back rather than fail the build.
-            if (const CompiledClass* c = m_ct.find(n.s))
-            {
-                m_usedClasses.insert(c->cpp);
-                return "((hc::as<" + m_opt.namespaceName + "::" + c->cpp + ">(m_ctx, " + ref +
-                       ") != nullptr) ? (" + ref + ") : 0u)";
-            }
+            // stale target string) — the seam still answers it correctly, so
+            // fall back rather than fail the build.
         }
         return "hc::castRef(m_ctx, " + ref + ", " + strLit(n.s) + ")";
     }
@@ -2382,6 +2383,8 @@ private:
         // be noise in every generated widget and level script header.
         if (!m_src.baseClass.empty())
             h += "    const char* baseClassKey() const override;\n";
+        if (!m_src.chain.empty())
+            h += "    const std::vector<const char*>& classChain() const override;\n";
         h += "    // Identity for hc::as — see CompiledInstance::classTag.\n";
         h += "    static const void* classTag_();\n";
         h += "    const void* classTag() const override;\n";
@@ -2490,6 +2493,14 @@ private:
         if (!m_src.baseClass.empty())
             c += "const char* " + m_cls + "::baseClassKey() const { return " +
                  strLit(m_src.baseClass) + "; }\n";
+        if (!m_src.chain.empty())
+        {
+            c += "const std::vector<const char*>& " + m_cls + "::classChain() const\n{\n";
+            c += "    static const std::vector<const char*> k = {";
+            for (size_t i = 0; i < m_src.chain.size(); ++i)
+                c += (i ? ", " : " ") + strLit(m_src.chain[i]);
+            c += " };\n    return k;\n}\n";
+        }
         c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
         c += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
 

@@ -18,6 +18,7 @@
 #include "EngineContentPublishDialog.h"    // takeRunSucceeded / shutdown
 #endif
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1261,19 +1262,23 @@ void EditorApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// Resolve the inheritance chain once: it decides BOTH whether this is
+			// an Entity class (the resolved engine base, not the raw string) and
+			// what graph actually runs (this class's own plus everything it
+			// inherits, overrides applied).
+			HorizonCode::ResolvedClass rc =
+				HorizonCode::resolveClassAsset(contentManager(), a->path);
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one. Creating it here instead would produce a half-object: it
 			// would answer a Cast to Entity, own no entity, and never tick.
-			if (HorizonCode::engineClassIsA(a->baseClass, "Entity") && m_entityHost.running())
+			if (HorizonCode::engineClassIsA(rc.engineBase, "Entity") && m_entityHost.running())
 				return m_entityHost.spawn(a->path).instance;
-			HorizonCode::Graph g;
-			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			// The asset's OWN path is the class key, not the string the node
 			// happened to spell: it is the same value the compiled class table
 			// is keyed by, so an interpreted and a compiled instance of one
 			// class are never two different classes to a Cast.
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
-				std::move(g), {}, { a->path, a->baseClass });
+				std::move(rc.graph), {}, { a->path, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};

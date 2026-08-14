@@ -127,8 +127,27 @@ player classes add the `Input.<Action>.*` set), and it is what a **Cast** to a
 base class matches against. `Object` is stored as an empty string, which is what
 every asset predating the taxonomy already carries, so nothing had to migrate.
 
-HorizonCode classes do **not** derive from one another: a class asset as a cast
-target matches that exact class and nothing else.
+A class may also derive from **another class asset**, not just from an engine
+row — pick it in the same Base dropdown. That is what makes `Cast To Enemy`
+succeed on a Goblin, and what lets a Goblin use everything Enemy defines.
+
+Inheritance is resolved by **flattening**, once, when the class is loaded: the
+ancestors' graphs are merged into one, nearest-wins, and the runtime then runs
+a single ordinary graph. Everything downstream — the variable store, event
+dispatch, Get/Set/Call External, the GC, the C++ codegen — is untouched,
+because there is still exactly one graph and one object per instance.
+
+- A derived **Event or Function** whose name the base also has **replaces**
+  it. Only the override runs, for events exactly as for functions.
+- A derived **variable** of the same name shadows the base's declaration:
+  one name, one slot, the nearest declaration's type and default.
+- A base member is only offered for overriding when it is marked
+  **Overridable** on its Event / Function node — opt-in, like `virtual`. A
+  derived class's add menu then lists them under *Inherited*; picking one
+  drops in an override with the same name and signature.
+- A derived **Entity** class starts from its parent's component list.
+- A cycle (A derives from B derives from A) is logged and stops the walk
+  rather than hanging; what resolved up to that point still runs.
 
 A class from `Entity` down also has a **body**: its class tab has a *Components*
 mode next to *Graph*, editing a real entity subtree with the same Details panel

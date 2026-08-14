@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -462,6 +463,21 @@ template <typename T> inline T* as(const Context& c, uint32_t target)
 inline uint32_t castRef(const Context& c, uint32_t ref, const char* classKey)
 {
     return (ref != 0u && c.isA && c.isA(ref, classKey)) ? ref : 0u;
+}
+// A HorizonCode class target under Stop. Not hc::as: with class inheritance the
+// target may be an ANCESTOR of what the reference holds, and classTag is one
+// exact address per class. Reads the instance's own key and its baked chain —
+// still no Runtime map lookup, still no string built at the call site.
+inline uint32_t castClass(const Context& c, uint32_t ref, const char* classKey)
+{
+    if (ref == 0u || !c.resolveCompiled) return 0u;
+    HorizonCode::CompiledInstance* i = c.resolveCompiled(ref);
+    if (!i) return 0u;
+    const char* own = i->classKey();
+    if (own && std::strcmp(own, classKey) == 0) return ref;
+    for (const char* a : i->classChain())
+        if (a && std::strcmp(a, classKey) == 0) return ref;
+    return 0u;
 }
 inline uint32_t castBase(const Context& c, uint32_t ref, const char* baseClass)
 {

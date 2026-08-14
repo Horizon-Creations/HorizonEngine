@@ -5,6 +5,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
+#include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/EntityHost.h>
 #include <HorizonScene/EngineApi.h>         // HE::api::player (the possession table)
 #include <Application/InputAssets.h>
@@ -45,8 +46,12 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 	{
 		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(id);
 		if (!a) continue;
-		const bool isController = HorizonCode::engineClassIsA(a->baseClass, "PlayerController");
-		const bool isCharacter  = HorizonCode::engineClassIsA(a->baseClass, "PlayerCharacter");
+		// The RESOLVED engine base, not the raw string: a class deriving from
+		// another class that is a PlayerController is one too, and asking the
+		// asset alone would miss every derived player in the project.
+		HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(cm, a->path);
+		const bool isController = HorizonCode::engineClassIsA(rc.engineBase, "PlayerController");
+		const bool isCharacter  = HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter");
 		if (!isController && !isCharacter) continue;
 
 		HorizonCode::InstanceId inst = 0;
@@ -67,15 +72,11 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 			// the compiled one report its own: the asset is the authority on
 			// which base class it derives from, and a generated library that
 			// predates a baseClass edit would otherwise disagree with the editor.
-			const HorizonCode::ClassIdentity cls{ a->path, a->baseClass };
+			const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
 			if (auto compiled = HorizonCode::compiledClasses().create(a->path))
 				inst = runtime.addCompiled(std::move(compiled), {}, cls);
 			else
-			{
-				HorizonCode::Graph g;
-				if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
-				inst = runtime.add(std::move(g), {}, cls);
-			}
+				inst = runtime.add(std::move(rc.graph), {}, cls);
 			runtime.fireConstruct(inst);
 			runtime.fireBeginPlay(inst);
 		}

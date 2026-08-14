@@ -59,6 +59,12 @@ struct ClassIdentity
 {
     std::string key;
     std::string baseClass;
+    // The HorizonCode classes this one derives from, NEAREST FIRST. Resolved
+    // at load time (HcClassResolve.h) because the runtime cannot read an
+    // asset — and because a class's ancestry cannot change under a running
+    // instance anyway. Empty for a class that derives from an engine row
+    // directly, which is every class that predates inheritance.
+    std::vector<std::string> chain;
 };
 
 class HE_API Runtime

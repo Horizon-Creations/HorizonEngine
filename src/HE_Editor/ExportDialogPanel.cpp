@@ -8,6 +8,7 @@
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
+#include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/HorizonScene.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -860,6 +861,22 @@ void startExport(AppContext& ctx)
                             HE::hccg::ClassSource src;
                             src.key       = c.path;
                             src.label     = c.path;
+                            if (type == HE::AssetType::HorizonCodeClass)
+                            {
+                                // The FLATTENED graph: a derived class compiles
+                                // to what it actually runs — its own nodes plus
+                                // everything it inherits, overrides applied — so
+                                // the compiled and the interpreted backend keep
+                                // executing the same thing.
+                                HorizonCode::ResolvedClass rc =
+                                    HorizonCode::resolveClassAsset(*ctx.contentManager, c.path);
+                                if (!rc.ok) continue;
+                                src.graph     = std::move(rc.graph);
+                                src.baseClass = rc.engineBase;
+                                src.chain     = std::move(rc.chain);
+                                hcSources.push_back(std::move(src));
+                                continue;
+                            }
                             src.baseClass = baseClass;
                             if (HorizonCode::fromJson(json, src.graph))
                                 hcSources.push_back(std::move(src));

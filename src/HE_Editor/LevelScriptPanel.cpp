@@ -22,6 +22,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonCode/HcClassResolve.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
@@ -740,7 +741,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 
 void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool allowCustomEvents,
                 const ImVec2& avail, ContentManager* content, const HC::Graph* giGraph,
-                const std::string& baseClass, bool& edited)
+                const std::string& baseClass,
+                const std::vector<HC::OverridableMember>& overrides, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -765,7 +767,7 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 
 	// Searchable add-node palette: world events + the shared tail (generic node
 	// categories + per-function Call + engine API + per-variable Get/Set).
-	m.drawAddMenu = [&graph, &events, allowCustomEvents, &host]() -> int {
+	m.drawAddMenu = [&graph, &events, allowCustomEvents, &host, &overrides]() -> int {
 		int created = 0;
 		const std::string q = HGH::beginAddMenu();
 		auto matches = [&](const std::string& name, const std::string& cat)
@@ -809,6 +811,37 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		}
 		if (eh) ImGui::Spacing();
 
+		// What this class INHERITS and may replace. Picking one drops a copy of
+		// the ancestor's declaration into this graph — same name, same signature
+		// — and from then on only this version runs. A member already overridden
+		// here is shown as taken rather than hidden, so it is visible that the
+		// override exists.
+		bool oh = false;
+		for (const HC::OverridableMember& m2 : overrides)
+		{
+			const bool isEvent = m2.kind == NT::Event;
+			if (isEvent && g.currentGraph != 0) continue;   // events live in the event graph
+			const std::string label = "Override " + m2.name;
+			if (!matches(label, "Override")) continue;
+			const bool used = std::any_of(graph.nodes.begin(), graph.nodes.end(),
+				[&](const HC::Node& n){ return n.type == m2.kind && n.s == m2.name; });
+			if (!oh) { ImGui::TextDisabled("Inherited"); oh = true; }
+			if (HcEditorUtil::searchMenuItem(label, used))
+			{
+				const int id = addNode(graph, m2.kind, g.ge.addMenuGraphPos);
+				HC::Node* nn = graph.findNode(id);
+				const int keepId = nn->id;
+				const float kx = nn->x, ky = nn->y;
+				const int keepSub = nn->subgraph;
+				*nn = m2.prototype;          // same name, signature and arg shape
+				nn->id = keepId; nn->x = kx; nn->y = ky; nn->subgraph = keepSub;
+				HC::syncFunctionSignatures(graph);
+				created = id; ImGui::CloseCurrentPopup();
+			}
+			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(overridden)"); }
+		}
+		if (oh) ImGui::Spacing();
+
 		if (const int c = HGH::drawAddMenuTail(host, q)) created = c;
 		HGH::endAddMenu();
 		return created;
@@ -845,7 +878,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    bool allowCustomEvents, const char* title, const char* subtitle,
                    ContentManager* content, const HC::Graph* giGraph, bool& edited,
-                   const std::string& baseClass = {}, bool derivable = false)
+                   const std::string& baseClass = {}, bool derivable = false,
+                   const std::vector<HC::OverridableMember>& overrides = {})
 {
 	// The shared panel state is reused across the Level/GI/Class tabs, so a
 	// sub-graph id from another graph (or a deleted function) must reset to the
@@ -968,7 +1002,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		}
 	}
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
-	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, baseClass, edited);
+	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, baseClass,
+	           overrides, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -1075,8 +1110,11 @@ struct ClassState
 	bool        loaded = false;
 	bool        dirty  = false;
 	std::string name;
-	std::string baseClass;              // "" = plain Object; "PlayerController"/"PlayerCharacter"
+	// "" = plain Object, an engine class name, or — with HorizonCode
+	// inheritance — ANOTHER class asset's content-relative path.
+	std::string baseClass;
 	HE::UUID    assetId;
+	std::string path;                   // content-relative, the class KEY
 	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
 	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
 	// ── Components mode ──────────────────────────────────────────────────
@@ -1088,6 +1126,19 @@ struct ClassState
 	Entity      compRoot = entt::null;
 	Entity      compSel  = entt::null;
 	bool        showComponents = false;
+	// The base class RESOLVED through the chain: with HorizonCode inheritance
+	// `baseClass` may name another class asset, and everything that used to ask
+	// the raw string — which lifecycle events to offer, whether this is a
+	// player, which components a new body starts with — means the ENGINE row at
+	// the root of the chain.
+	std::string engineBase;
+	std::vector<std::string> ancestors;   // nearest first
+	// What the ancestors declare as overridable — the add menu's Inherited
+	// section. Rebuilt together with the resolved base, since both read assets.
+	std::vector<HorizonCode::OverridableMember> overrides;
+	// Borrowed for the component seed above; the panel only ever uses it while
+	// the editor owns it.
+	ContentManager* contentForSeed = nullptr;
 };
 AssetPanelState<ClassState> s_classStates;
 
@@ -1128,8 +1179,20 @@ void ensureComponentWorld(ClassState& st, const std::vector<uint8_t>& blob)
 	if (st.compWorld) return;
 	st.compWorld = std::make_unique<HorizonWorld>();
 	SceneSerializer ser;
-	const std::vector<uint8_t>& seed =
-		blob.empty() ? EntityHost::defaultComponents(st.baseClass) : blob;
+	// An empty class seeds from what it INHERITS: its nearest ancestor's body
+	// if it derives from a class, else the engine base's default list. That is
+	// what makes a Goblin start out looking like an Enemy.
+	std::vector<uint8_t> inherited;
+	if (blob.empty())
+	{
+		if (!st.ancestors.empty() && st.contentForSeed)
+			if (const HorizonCodeClassAsset* parent =
+			        st.contentForSeed->getHorizonCodeClass(
+			            st.contentForSeed->loadAsset(st.ancestors.front())))
+				inherited = parent->componentBlob;
+		if (inherited.empty()) inherited = EntityHost::defaultComponents(st.engineBase);
+	}
+	const std::vector<uint8_t>& seed = blob.empty() ? inherited : blob;
 	if (!seed.empty())
 		st.compRoot = ser.instantiatePrefab(*st.compWorld, seed);
 	if (st.compRoot == entt::null)
@@ -1297,6 +1360,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	if (!st.loaded && ctx.contentManager)
 	{
 		const std::string rel = ctx.contentManager->toContentRelativePath(assetPath);
+		st.path    = rel;
 		st.assetId = ctx.contentManager->loadAsset(rel);
 		if (const HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClass(st.assetId))
 		{
@@ -1314,9 +1378,26 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	// Input events belong to the two player classes; everything else comes from
 	// the taxonomy chain, so a class one level down would inherit them without
 	// this line having to learn its name.
-	const bool isPlayer = HorizonCode::engineClassIsA(st.baseClass, "PlayerController") ||
-	                      HorizonCode::engineClassIsA(st.baseClass, "PlayerCharacter");
-	const std::string kindLabel = humanClassName(st.baseClass);
+	// Resolve the chain when the base changed (eventsScanTime is the same
+	// "something moved" signal the catalog uses) rather than every frame: it
+	// reads assets.
+	if (st.eventsScanTime < 0.0 && ctx.contentManager)
+	{
+		const HorizonCode::ResolvedClass rc =
+			HorizonCode::resolveClassAsset(*ctx.contentManager, st.path);
+		st.engineBase = rc.engineBase;
+		st.ancestors  = rc.chain;
+		st.overrides  = HorizonCode::overridableMembersOf(*ctx.contentManager, st.path);
+		st.contentForSeed = ctx.contentManager;
+	}
+	const bool isPlayer = HorizonCode::engineClassIsA(st.engineBase, "PlayerController") ||
+	                      HorizonCode::engineClassIsA(st.engineBase, "PlayerCharacter");
+	// The header names what this class DERIVES FROM — the class asset when it
+	// derives from one, else the engine row.
+	const std::string kindLabel = st.baseClass.empty()
+		? std::string("Object")
+		: (HorizonCode::findEngineClass(st.baseClass) ? humanClassName(st.baseClass)
+		                                              : HcEditorUtil::castTargetLabel(st.baseClass));
 
 	beginTabWindow(("##hcclass_" + assetPath).c_str(), pos, size);
 	{
@@ -1348,6 +1429,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		if (openBase) ImGui::OpenPopup("##hcbasepopup");
 		if (ImGui::BeginPopup("##hcbasepopup"))
 		{
+			ImGui::TextDisabled("Engine");
 			for (const auto& c : HorizonCode::engineClasses())
 			{
 				// "Object" is stored as the EMPTY string — that is what every
@@ -1361,7 +1443,41 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 				{
 					st.baseClass      = picked;
 					st.dirty          = true;
-					st.eventsScanTime = -1.0;   // rebuild the catalog
+					st.eventsScanTime = -1.0;   // rebuild catalog + resolved base
+				}
+			}
+			// …and the project's own classes. Deriving from another class is what
+			// makes `Cast To Enemy` succeed on a Goblin, and what lets a Goblin
+			// use everything Enemy already defines.
+			ImGui::Separator();
+			ImGui::TextDisabled("Classes");
+			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+			{
+				// A class cannot derive from itself, nor from anything that already
+				// derives from IT — the resolver survives a cycle, but offering one
+				// as a choice would be offering a mistake.
+				if (c.path == st.path) continue;
+				bool wouldCycle = false;
+				if (ctx.contentManager)
+				{
+					const HorizonCode::ResolvedClass other =
+						HorizonCode::resolveClassAsset(*ctx.contentManager, c.path);
+					for (const std::string& a : other.chain)
+						if (a == st.path) { wouldCycle = true; break; }
+				}
+				if (wouldCycle) ImGui::BeginDisabled();
+				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), st.baseClass == c.path) &&
+				    st.baseClass != c.path)
+				{
+					st.baseClass      = c.path;
+					st.dirty          = true;
+					st.eventsScanTime = -1.0;
+				}
+				if (wouldCycle)
+				{
+					ImGui::EndDisabled();
+					if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip("That class already derives from this one.");
 				}
 			}
 			ImGui::EndPopup();
@@ -1377,7 +1493,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	if (st.eventsScanTime < 0.0 || (isPlayer && now - st.eventsScanTime > 3.0))
 	{
 		st.events.clear();
-		for (const char* ev : HorizonCode::engineClassEvents(st.baseClass))
+		for (const char* ev : HorizonCode::engineClassEvents(st.engineBase))
 			st.events.emplace_back(ev);
 		if (isPlayer)
 			for (auto& ev : scanInputEvents(ctx.contentManager))
@@ -1392,7 +1508,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              isPlayer ? "Player class; lifecycle + input events."
 		                       : "Reusable class; lifecycle events + its own.",
 			              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass,
-		              /*derivable=*/true);
+		              /*derivable=*/true, st.overrides);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

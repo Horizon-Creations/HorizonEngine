@@ -64,6 +64,12 @@ public:
     // has always effectively been. Overriding it is therefore purely additive:
     // a hand-written CompiledInstance keeps behaving exactly as before.
     virtual const char* baseClassKey() const { return ""; }
+    // The HorizonCode classes this one derives from, nearest first — the same
+    // list ClassIdentity::chain carries, baked in by the generator. Needed for
+    // the same reason baseClassKey is: a Cast to a PARENT class cannot be
+    // answered by classTag, which is one exact address per class.
+    virtual const std::vector<const char*>& classChain() const
+    { static const std::vector<const char*> kNone; return kNone; }
     virtual const std::vector<CompiledVarInfo>& varInfos() const
     { static const std::vector<CompiledVarInfo> kNone; return kNone; }
     virtual const std::vector<CompiledEventInfo>& eventInfos() const

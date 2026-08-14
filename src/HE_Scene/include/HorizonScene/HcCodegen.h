@@ -28,6 +28,12 @@ struct ClassSource
     // way for a compiled instance as for an interpreted one. Widgets, level
     // scripts and the GameInstance leave it empty.
     std::string        baseClass;
+    // The HorizonCode classes this one derives from, nearest first. Emitted as
+    // classChain(), which is what lets a Cast to a PARENT class be answered
+    // without the Runtime's map — classTag is one exact address per class and
+    // knows nothing about an ancestry. `graph` is expected FLATTENED (see
+    // HcClassResolve.h): one class, one graph, exactly as before inheritance.
+    std::vector<std::string> chain;
 };
 
 // What a graph the generator cannot compile means for the build.

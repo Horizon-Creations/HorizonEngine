@@ -62,6 +62,9 @@ InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings, ClassId
     // asset path the codegen happened to use.
     if (cls.key.empty())       cls.key       = inst->classKey()      ? inst->classKey()      : "";
     if (cls.baseClass.empty()) cls.baseClass = inst->baseClassKey()  ? inst->baseClassKey()  : "";
+    if (cls.chain.empty())
+        for (const char* a : inst->classChain())
+            if (a) cls.chain.emplace_back(a);
 
     const InstanceId id = m_next++;
     Inst rec;
@@ -79,10 +82,13 @@ bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
 {
     const Inst* inst = find(id);
     if (!inst || classKey.empty()) return false;
-    // The exact class first, then the engine taxonomy. An asset path only ever
-    // matches itself: HorizonCode classes do not derive from one another, so
-    // there is no chain to walk on that side.
+    // The exact class, then the HorizonCode ancestry, then the engine
+    // taxonomy. The middle one is what makes `Cast To Enemy` succeed on a
+    // Goblin — and it is a plain list rather than a walk because resolving it
+    // needs the content system, which this layer deliberately cannot reach.
     if (!inst->cls.key.empty() && inst->cls.key == classKey) return true;
+    for (const std::string& ancestor : inst->cls.chain)
+        if (ancestor == classKey) return true;
     return engineClassIsA(inst->cls.baseClass, classKey);
 }
 

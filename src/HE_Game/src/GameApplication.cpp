@@ -15,6 +15,7 @@
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
+#include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/ScriptApi.h>
@@ -267,9 +268,15 @@ void GameApplication::OnInit()
 			// never ticks.
 			if (m_entityHost.running())
 				if (const HorizonCodeClassAsset* ea =
-				        contentManager().getHorizonCodeClass(contentManager().loadAsset(p));
-				    ea && HorizonCode::engineClassIsA(ea->baseClass, "Entity"))
-					return m_entityHost.spawn(ea->path).instance;
+				        contentManager().getHorizonCodeClass(contentManager().loadAsset(p)))
+				{
+					// The RESOLVED engine base: a class deriving from another class
+					// that is an Entity is one too.
+					const HorizonCode::ResolvedClass rc =
+						HorizonCode::resolveClassAsset(contentManager(), ea->path);
+					if (HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
+						return m_entityHost.spawn(ea->path).instance;
+				}
 			// Compiled class first (the whole per-asset hybrid is this lookup);
 			// miss → the interpreted asset path, unchanged.
 			if (auto compiled = HorizonCode::compiledClasses().create(p))
@@ -282,13 +289,14 @@ void GameApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
-			HorizonCode::Graph g;
-			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			// The asset's OWN path is the class key, matching what the compiled
 			// branch above gets from classKey() — so one class stays one class
-			// to a Cast no matter which backend served this instance.
+			// to a Cast no matter which backend served this instance. The graph
+			// is the FLATTENED one: this class plus what it inherits.
+			HorizonCode::ResolvedClass rc =
+				HorizonCode::resolveClassAsset(contentManager(), a->path);
 			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
-				std::move(g), {}, { a->path, a->baseClass });
+				std::move(rc.graph), {}, { a->path, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};
