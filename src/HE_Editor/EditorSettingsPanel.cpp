@@ -1,7 +1,7 @@
 #include "EditorSettingsPanel.h"
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
-#include "ToolchainDialog.h"             // Tools > C++ Toolchain > Recheck forces the dialog open
-#include "GitController.h"               // Source Control pages
+#include "ToolchainDialog.h"             // Tools > Status > cmake/compiler "Fix" opens the dialog
+#include "GitController.h"               // Source Control page
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
@@ -15,6 +15,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -550,17 +551,12 @@ void drawGitMessages(GitController* git)
 	if (git->busy()) { ImGui::Spacing(); ImGui::TextDisabled("Working…"); }
 }
 
-// Repository: init, remote / GitHub setup (token), auto-push. Commit, push,
-// pull and the change list stay in the Source Control window (View menu) —
-// this page is the one-time setup, that window is the daily driver.
-void drawRepositoryPage(AppContext& ctx)
+// Repository half of the page: init, remote / GitHub setup (token), auto-push.
+// Commit, push, pull and the change list stay in the Source Control window
+// (View menu) — this page is the one-time setup, that window is the daily
+// driver.
+void drawRepositorySection(AppContext& ctx)
 {
-	// Every explanation on this page is a sentence, and one of the things it
-	// prints is a remote URL that nobody typed by hand ("origin: https://…").
-	EditorWidgets::WrapText wrap;
-
-	s_scPageFrame = ImGui::GetFrameCount();
-
 	GitController* git = ctx.git;
 	if (!git)
 	{
@@ -574,11 +570,12 @@ void drawRepositoryPage(AppContext& ctx)
 	}
 	if (ctx.gitProbe && !ctx.gitProbe->gitFound)
 	{
+		// The install instructions are the section directly above this one, so
+		// this only has to say why the repository controls are missing.
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-		ImGui::TextWrapped("git was not found on this machine — see the Git Setup "
-		                   "page for install instructions.");
+		ImGui::TextWrapped("git was not found on this machine — install it above to "
+		                   "put this project under source control.");
 		ImGui::PopStyleColor();
-		if (ImGui::Button("Open Git Setup")) s_page = Page::GitSetup;
 		return;
 	}
 	if (git->blockedByCollabSession())
@@ -819,17 +816,15 @@ void drawRepositoryPage(AppContext& ctx)
 	drawGitMessages(git);
 }
 
-// Git Setup: install status (git, git-lfs), identity, credential helper —
-// the same facts the startup "Source Control Not Ready" dialog reports, as a
-// permanent page with a Recheck.
-void drawGitSetupPage(AppContext& ctx)
+// Setup half of the page: install status (git, git-lfs), identity, credential
+// helper — the same facts the startup "Source Control Not Ready" dialog
+// reports, permanently visible and with a Recheck.
+//
+// Drawn above the repository section and outside its guards on purpose: these
+// are machine-wide facts, and they are needed most in exactly the cases that
+// make the repository section bail out (no project open, git missing).
+void drawGitSetupSection(AppContext& ctx)
 {
-	// The bullets here interpolate an absolute path ("git 2.39.5 found at
-	// /usr/bin/git") and an identity, neither of which has a known length.
-	EditorWidgets::WrapText wrap;
-
-	s_scPageFrame = ImGui::GetFrameCount();
-
 	if (!ctx.gitProbe)
 	{
 		ImGui::TextDisabled("Checking git installation…");
@@ -934,8 +929,27 @@ void drawGitSetupPage(AppContext& ctx)
 	}
 
 	ImGui::Spacing();
-	ImGui::Separator();
 	if (ImGui::Button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
+}
+
+// The Source Control page: what git looks like on this machine, then what this
+// project's repository looks like. One page because the second half is unusable
+// until the first half is in order, and the first half is a two-line summary
+// once it is.
+void drawSourceControlPage(AppContext& ctx)
+{
+	// Both halves print things whose length nobody here chooses: an absolute
+	// path to git, an identity, a remote URL ("origin: https://…").
+	EditorWidgets::WrapText wrap;
+
+	s_scPageFrame = ImGui::GetFrameCount();
+
+	ImGui::SeparatorText("Git on this machine");
+	drawGitSetupSection(ctx);
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Repository");
+	drawRepositorySection(ctx);
 }
 
 // ─── Status page (Tools) ─────────────────────────────────────────────────────
@@ -972,8 +986,10 @@ const char* statusMark(StatusLevel s)
 
 // One table row: name, coloured verdict, and the detail that makes the verdict
 // actionable ("git 2.39.5 at /usr/bin/git" beats a green tick with no facts).
+// `onFix` is the remedy this row leads to — a page to open, a dialog to show;
+// leave it empty for rows that have nowhere useful to go.
 void statusRow(const char* name, StatusLevel level, const std::string& detail,
-               Page jumpTo, bool canJump)
+               const std::function<void()>& onFix = {})
 {
 	ImGui::TableNextRow();
 	ImGui::TableSetColumnIndex(0);
@@ -989,10 +1005,10 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 	ImGui::TableSetColumnIndex(3);
 	// A jump only where there is somewhere useful to go — otherwise the column
 	// fills with buttons that all lead to the same page saying the same thing.
-	if (canJump && level != StatusLevel::Ok && level != StatusLevel::Checking)
+	if (onFix && level != StatusLevel::Ok && level != StatusLevel::Checking)
 	{
 		ImGui::PushID(name);
-		if (ImGui::SmallButton("Fix")) s_page = jumpTo;
+		if (ImGui::SmallButton("Fix")) onFix();
 		ImGui::PopID();
 	}
 }
@@ -1020,13 +1036,20 @@ void drawStatusPage(AppContext& ctx)
 		ImGui::TableSetupColumn("Detail", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("##fix",  ImGuiTableColumnFlags_WidthFixed, 44.0f);
 
+		// Every git row leads to the same place: the one page that reports the
+		// install and configures the repository.
+		const auto openSourceControl = []{ s_page = Page::Repository; };
+		// cmake and the compiler have no settings page of their own — the remedy
+		// is the install dialog that already carries the per-platform steps.
+		const auto showToolchainHelp = []{ ToolchainDialog::requestShow(); };
+
 		// ── Source control ───────────────────────────────────────────────────
 		if (!ctx.gitProbe)
 		{
-			statusRow("git",              StatusLevel::Checking, "", Page::GitSetup, false);
-			statusRow("Git LFS",          StatusLevel::Checking, "", Page::GitSetup, false);
-			statusRow("git identity",     StatusLevel::Checking, "", Page::GitSetup, false);
-			statusRow("Credential helper",StatusLevel::Checking, "", Page::GitSetup, false);
+			statusRow("git",              StatusLevel::Checking, "");
+			statusRow("Git LFS",          StatusLevel::Checking, "");
+			statusRow("git identity",     StatusLevel::Checking, "");
+			statusRow("Credential helper",StatusLevel::Checking, "");
 		}
 		else
 		{
@@ -1036,7 +1059,7 @@ void drawStatusPage(AppContext& ctx)
 			              ? (g.gitVersion.empty() ? std::string("found") : g.gitVersion) +
 			                (g.gitPath.empty() ? "" : " at " + g.gitPath.string())
 			              : std::string("not found — source control is unavailable"),
-			          Page::GitSetup, true);
+			          openSourceControl);
 
 			// A warning, not an error: the repository works without LFS, it just
 			// commits big binaries the wrong way.
@@ -1044,28 +1067,28 @@ void drawStatusPage(AppContext& ctx)
 			          g.lfsFound ? g.lfsVersion
 			                     : std::string("not found — large assets would be committed "
 			                                   "directly into the repository"),
-			          Page::GitSetup, true);
+			          openSourceControl);
 
 			statusRow("git identity",
 			          g.identityConfigured ? StatusLevel::Ok : StatusLevel::Warn,
 			          g.identityConfigured ? g.userName + " <" + g.userEmail + ">"
 			                               : std::string("user.name / user.email are not set — "
 			                                             "commits will fail"),
-			          Page::GitSetup, true);
+			          openSourceControl);
 
 			statusRow("Credential helper",
 			          g.credentialHelper.empty() ? StatusLevel::Warn : StatusLevel::Ok,
 			          g.credentialHelper.empty()
 			              ? std::string("none configured — needed to push without retyping a token")
 			              : g.credentialHelper,
-			          Page::Repository, true);
+			          openSourceControl);
 		}
 
 		// ── C++ toolchain ────────────────────────────────────────────────────
 		if (!ctx.toolchainProbe)
 		{
-			statusRow("cmake",        StatusLevel::Checking, "", Page::Toolchain, false);
-			statusRow("C++ compiler", StatusLevel::Checking, "", Page::Toolchain, false);
+			statusRow("cmake",        StatusLevel::Checking, "");
+			statusRow("C++ compiler", StatusLevel::Checking, "");
 		}
 		else
 		{
@@ -1074,19 +1097,19 @@ void drawStatusPage(AppContext& ctx)
 			          t.cmakeFound ? t.cmakeVersion
 			                       : std::string("not found — needed for C++ export codegen "
 			                                     "and C++ projects"),
-			          Page::Toolchain, true);
+			          showToolchainHelp);
 			statusRow("C++ compiler", t.compilerFound ? StatusLevel::Ok : StatusLevel::Missing,
 			          t.compilerFound ? t.compilerId : std::string("not found"),
-			          Page::Toolchain, true);
+			          showToolchainHelp);
 		}
 
 		// ── Collaboration ────────────────────────────────────────────────────
 		if (!ctx.routerProbe)
 		{
-			statusRow("Local network",     StatusLevel::Checking, "", Page::Status, false);
-			statusRow("Router / UPnP",     StatusLevel::Checking, "", Page::Status, false);
-			statusRow("IPv6",              StatusLevel::Checking, "", Page::Status, false);
-			statusRow("Session directory", StatusLevel::Checking, "", Page::Status, false);
+			statusRow("Local network",     StatusLevel::Checking, "");
+			statusRow("Router / UPnP",     StatusLevel::Checking, "");
+			statusRow("IPv6",              StatusLevel::Checking, "");
+			statusRow("Session directory", StatusLevel::Checking, "");
 		}
 		else
 		{
@@ -1098,8 +1121,7 @@ void drawStatusPage(AppContext& ctx)
 			              ? std::string("this application may not talk to the local network — "
 			                            "on macOS, allow it under Privacy & Security > Local Network")
 			              : (r.gatewayV4.empty() ? std::string("no default gateway")
-			                                     : "gateway " + r.gatewayV4),
-			          Page::Status, false);
+			                                     : "gateway " + r.gatewayV4));
 
 			// Amber rather than red: without forwarding you can still JOIN a
 			// session, and a global IPv6 address makes hosting work anyway.
@@ -1117,29 +1139,26 @@ void drawStatusPage(AppContext& ctx)
 				               "port forwarded by hand, or the feature enabled on the router";
 			}
 			statusRow("Router / UPnP", forward ? StatusLevel::Ok : StatusLevel::Warn,
-			          routerDetail, Page::Status, false);
+			          routerDetail);
 
 			if (r.carrierNat)
 			{
 				statusRow("Carrier NAT", StatusLevel::Warn,
 				          "the router's own WAN address is private (CGNAT) — a port forward "
-				          "on it cannot be reached from the internet",
-				          Page::Status, false);
+				          "on it cannot be reached from the internet");
 			}
 
 			statusRow("IPv6", r.globalIPv6.empty() ? StatusLevel::Warn : StatusLevel::Ok,
 			          r.globalIPv6.empty()
 			              ? std::string("no global address — hosting depends on IPv4 forwarding")
-			              : r.globalIPv6 + (r.upnpV6Firewall ? " (router offers pinholes)" : ""),
-			          Page::Status, false);
+			              : r.globalIPv6 + (r.upnpV6Firewall ? " (router offers pinholes)" : ""));
 
 			statusRow("Session directory",
 			          r.httpsAvailable ? StatusLevel::Ok : StatusLevel::Missing,
 			          r.httpsAvailable
 			              ? std::string("HTTPS available — joining by session ID works")
 			              : std::string("this build has no HTTPS backend — sessions can only be "
-			                            "joined by address"),
-			          Page::Status, false);
+			                            "joined by address"));
 		}
 
 		ImGui::EndTable();
@@ -1178,37 +1197,9 @@ void drawStatusPage(AppContext& ctx)
 	}
 }
 
-// ─── Toolchain page (Tools) ──────────────────────────────────────────────────
-
-void drawToolchainPage(AppContext& ctx)
-{
-	// The "Not found" line is one long sentence and the "OK" line carries a
-	// compiler id string that the toolchain probe read off the machine.
-	EditorWidgets::WrapText wrap;
-
-	ImGui::TextWrapped("cmake and a C++ compiler are needed for HorizonCode C++ "
-	                   "export codegen and C++ GameLogic projects.");
-	ImGui::Spacing();
-	if (ctx.toolchainProbe)
-	{
-		const HE::hccg::ToolchainProbe& p = *ctx.toolchainProbe;
-		if (p.cmakeFound && p.compilerFound)
-			ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "OK — cmake %s, %s",
-				p.cmakeVersion.c_str(), p.compilerId.c_str());
-		else
-			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-				"Not found — needed for HorizonCode C++ export codegen and C++ GameLogic projects.");
-	}
-	else
-	{
-		ImGui::TextDisabled("Checking...");
-	}
-	if (ImGui::Button("Recheck##toolchain") && ctx.recheckToolchain)
-	{
-		ctx.recheckToolchain();
-		ToolchainDialog::requestShow();
-	}
-}
+// The C++ toolchain had a page of its own here once. It said what the Status
+// table's cmake and compiler rows already say, so the rows kept the facts and
+// their Fix button opens the install dialog that carries the remedy.
 
 // ─── Navigation + page plumbing ──────────────────────────────────────────────
 
@@ -1231,11 +1222,9 @@ constexpr NavItem kCollaborationItems[] = {
 };
 constexpr NavItem kSourceControlItems[] = {
 	{ Page::Repository, "Repository" },
-	{ Page::GitSetup,   "Git Setup" },
 };
 constexpr NavItem kToolsItems[] = {
-	{ Page::Status,    "Status" },
-	{ Page::Toolchain, "C++ Toolchain" },
+	{ Page::Status, "Status" },
 };
 constexpr NavGroup kNavGroups[] = {
 	{ "General",        kGeneralItems,       IM_ARRAYSIZE(kGeneralItems) },
@@ -1347,10 +1336,8 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		ImGui::Spacing();
 		DrawEngineSettings(ctx, SettingsMode::Preferences, category);
 	}
-	else if (s_page == Page::Repository) drawRepositoryPage(ctx);
-	else if (s_page == Page::GitSetup)   drawGitSetupPage(ctx);
+	else if (s_page == Page::Repository) drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)     drawStatusPage(ctx);
-	else if (s_page == Page::Toolchain)  drawToolchainPage(ctx);
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

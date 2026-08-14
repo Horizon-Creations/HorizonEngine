@@ -26,7 +26,7 @@ namespace GitMissingDialog
 	void requestShow();
 
 	// Platform-specific install instructions (copy-a-command + open-a-page pair),
-	// shared with the Preferences ▸ Source Control ▸ Git Setup page.
+	// shared with the Preferences ▸ Source Control ▸ Repository page.
 	void drawGitInstallRemedy();
 	void drawLfsInstallRemedy();
 }

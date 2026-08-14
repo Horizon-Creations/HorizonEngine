@@ -28,10 +28,10 @@ namespace EditorSettingsPanel
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// Collaboration
 		CollabGeneral,
-		// Source Control
-		Repository, GitSetup,
+		// Source Control (git install status and the repository share one page)
+		Repository,
 		// Tools
-		Status, Toolchain,
+		Status,
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
