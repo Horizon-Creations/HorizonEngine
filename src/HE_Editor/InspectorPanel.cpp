@@ -1038,8 +1038,12 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			     "(entity.saveState) and re-apply it later (entity.applySavedState). "
 			     "Play mode only; the attributes below choose WHAT is captured.");
 			ImGui::BeginDisabled(!ss->enabled);
-			ImGui::Checkbox("Transform", &ss->saveTransform); trackEdit();
-			ImGui::Checkbox("Visibility", &ss->saveVisibility); trackEdit();
+			// Scoped ids: these read "Transform"/"Visibility", and so do the
+			// COMPONENT HEADERS further up. ImGui derives an id from the label,
+			// so two of them in one window are the same widget as far as it is
+			// concerned — which is what the "conflicting ID" warning reports.
+			ImGui::Checkbox("Transform##savestate", &ss->saveTransform); trackEdit();
+			ImGui::Checkbox("Visibility##savestate", &ss->saveVisibility); trackEdit();
 			ImGui::EndDisabled();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SaveStateComponent>(entity); }

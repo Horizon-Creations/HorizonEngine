@@ -1048,6 +1048,7 @@ nlohmann::json nodeToJsonObj(const Node& n)
     if (n.propType != P::Float) e["propType"] = (int)n.propType;
     if (n.hasArg)            e["hasArg"]   = n.hasArg;
     if (n.access)            e["access"]   = n.access;
+    if (n.overridable)       e["virtual"]  = true;
     if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
         e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
     if (n.type == NodeType::ConstTransform)
@@ -1125,6 +1126,9 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     n.propType = (PinType)e.value("propType", (int)P::Float);
     n.hasArg   = e.value("hasArg", false);
     n.access   = e.value("access", 0);
+    // Absent means "not overridable" — every graph authored before this
+    // existed keeps exactly the behaviour it had.
+    n.overridable = e.value("virtual", false);
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)

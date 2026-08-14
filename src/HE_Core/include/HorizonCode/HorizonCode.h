@@ -235,6 +235,13 @@ struct Node
     PinType     propType = PinType::Float;// value type for Get/Set; arg type for Event
     bool        hasArg = false;           // Event carries a data arg output
     int         access = 0;               // FunctionEntry: 0 public, 1 private
+    // Event / FunctionEntry: may a class DERIVED from this one replace it?
+    // C++'s `virtual`, and opt-in for the same reason: a base author decides
+    // what is meant to be replaced. A derived class's add menu lists its
+    // ancestors' overridable members; inserting one drops an override into
+    // the child's own graph, and from then on ONLY the override runs — for
+    // events exactly as for functions.
+    bool        overridable = false;
     float       f[4] = {};                // literal payload
     // ConstTransform literal payload (rotation in euler degrees, identity scale).
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
