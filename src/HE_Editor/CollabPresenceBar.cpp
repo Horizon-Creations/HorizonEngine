@@ -179,9 +179,12 @@ namespace
 	// boundary. A stroke centred on the edge puts half its width under the image;
 	// at 18 px that left roughly one pixel of visible colour, which is how a frame
 	// that exists in the code manages not to exist on screen.
+	// `colorOverride` (0 = none) paints a colour the ROSTER does not know yet.
+	// Only the local preview needs it: outside a session nobody has handed out
+	// a colour, so the id-derived fallback would ignore the one just picked.
 	void drawAvatarAt(const AppContext& ctx, ImDrawList* dl, ImVec2 topLeft, float size,
 	                  ImTextureID tex, HE::Net::ParticipantId id, const std::string& name,
-	                  bool dim)
+	                  bool dim, ImU32 colorOverride = 0)
 	{
 		const float  radius = size * 0.5f;
 		const ImVec2 centre(topLeft.x + radius, topLeft.y + radius);
@@ -191,6 +194,13 @@ namespace
 		// colour key, and a key drawn at half strength reads as a different colour
 		// rather than as the same one, quieter.
 		const float  alpha  = dim ? 0.72f : 1.0f;
+		auto colorAt = [&](float a)
+		{
+			if (colorOverride == 0) return participantColorU32(ctx, id, a);
+			ImVec4 c = ImGui::ColorConvertU32ToFloat4(colorOverride);
+			c.w = a;
+			return ImGui::GetColorU32(c);
+		};
 
 		if (tex)
 		{
@@ -205,7 +215,7 @@ namespace
 			// No picture: their colour, with the initial on top. Better than a
 			// generic silhouette — the initial and the colour together are enough
 			// to tell three people apart at 18 pixels.
-			dl->AddCircleFilled(centre, inner, participantColorU32(ctx, id, 0.55f * alpha), 24);
+			dl->AddCircleFilled(centre, inner, colorAt(0.55f * alpha), 24);
 
 			drawInitial(dl, centre, size, name,
 			            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)));
@@ -213,8 +223,7 @@ namespace
 
 		// Stroked at the mid-line of the band it should occupy, so the ring covers
 		// exactly [radius - ring, radius] and meets the picture without a seam.
-		dl->AddCircle(centre, radius - ring * 0.5f, participantColorU32(ctx, id, 1.0f),
-		              28, ring);
+		dl->AddCircle(centre, radius - ring * 0.5f, colorAt(1.0f), 28, ring);
 	}
 
 	// ── Hover-menu state ─────────────────────────────────────────────────────
@@ -756,10 +765,19 @@ void DrawLocalAvatar(AppContext& ctx, float size)
 	const HE::Net::ParticipantId id =
 		(ctx.collab && ctx.collab->inSession()) ? ctx.collab->localParticipant() : 1u;
 
+	// Outside a session the picked colour is the ONLY truth there is — no host
+	// has handed one out — so the preview shows it the moment it is chosen
+	// rather than at the next join. Inside a session the roster wins: that is
+	// what everyone else sees, and the panel says so when the two differ.
+	ImU32 wish = 0;
+	if (!(ctx.collab && ctx.collab->inSession()) && !me.color.unset())
+		wish = ImGui::GetColorU32(ImVec4(me.color.r / 255.0f, me.color.g / 255.0f,
+		                                 me.color.b / 255.0f, 1.0f));
+
 	const ImVec2 at = ImGui::GetCursorScreenPos();
 	drawAvatarAt(ctx, ImGui::GetWindowDrawList(), at, size,
 	             avatarTexture(ctx.renderer, kLocalKey, me.avatarRgba, me.avatarSize),
-	             id, me.name, false);
+	             id, me.name, false, wish);
 	ImGui::Dummy(ImVec2(size, size));
 #else
 	(void)ctx; (void)size;
