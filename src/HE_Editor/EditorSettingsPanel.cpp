@@ -1040,8 +1040,13 @@ void drawStatusPage(AppContext& ctx)
 		// install and configures the repository.
 		const auto openSourceControl = []{ s_page = Page::Repository; };
 		// cmake and the compiler have no settings page of their own — the remedy
-		// is the install dialog that already carries the per-platform steps.
-		const auto showToolchainHelp = []{ ToolchainDialog::requestShow(); };
+		// is the install dialog that already carries the per-platform steps. It
+		// opens on a completed probe, so the recheck is what makes it appear (and
+		// the answer it shows is a fresh one, which is the question being asked).
+		const auto showToolchainHelp = [&ctx]{
+			if (ctx.recheckToolchain) ctx.recheckToolchain();
+			ToolchainDialog::requestShow();
+		};
 
 		// ── Source control ───────────────────────────────────────────────────
 		if (!ctx.gitProbe)

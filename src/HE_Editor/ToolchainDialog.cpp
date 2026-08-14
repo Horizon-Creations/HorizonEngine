@@ -28,7 +28,7 @@ void requestShow() { s_forceShowToolchainDialog = true; }
 // bypasses the suppression, since that's an explicit request to see the result).
 void DrawToolchainDialog(AppContext& ctx)
 {
-	static bool s_awaitingFirstResult = true; // consume exactly one auto-open per completed probe
+	static bool s_awaitingFirstResult = true; // the one automatic open, at the first result
 	static bool s_dontShowAgain       = false;
 	static bool s_checking            = false; // a Recheck is in flight — keep showing the last result
 	static HE::hccg::ToolchainProbe s_last;
@@ -41,9 +41,14 @@ void DrawToolchainDialog(AppContext& ctx)
 		s_checking = false;
 		s_last     = *ctx.toolchainProbe;
 		s_haveLast = true;
-		if (s_awaitingFirstResult)
+		// Two ways in: the session's first completed probe (unless the user
+		// suppressed the warning), and an explicit request from elsewhere in the
+		// editor. The second one has to work whenever it is made — the first
+		// result is long past by then, so it cannot ride on that transition.
+		const bool firstResult = s_awaitingFirstResult;
+		s_awaitingFirstResult = false;
+		if (firstResult || s_forceShowToolchainDialog)
 		{
-			s_awaitingFirstResult = false;
 			const bool missing = !s_last.cmakeFound || !s_last.compilerFound;
 			const bool suppressed = ctx.globalState &&
 				ctx.globalState->getCustomConfigBool("SuppressToolchainWarning", false);
