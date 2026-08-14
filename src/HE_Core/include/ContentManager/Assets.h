@@ -299,8 +299,14 @@ struct HorizonCodeClassAsset : public RuntimeAsset
 	// Engine base class this graph derives from. Decides the event catalog the
 	// editor offers and how the runtime hosts the instance. Empty = plain Object
 	// (pre-existing assets carry no CHUNK_HCBC and keep loading as before).
-	// Known values: "PlayerController", "PlayerCharacter".
+	// Known values: "Entity", "PlayerCharacter", "PlayerController" — see
+	// HorizonCode::engineClasses() for the chain they form.
 	std::string baseClass;
+	// The components an instance of this class brings with it (CHUNK_HCCP), in
+	// the prefab payload format: EntityHost::spawn instantiates this subtree and
+	// binds its root to the new instance. Empty = the class has no body of its
+	// own, which is what a plain Object and a PlayerController normally are.
+	std::vector<uint8_t> componentBlob;
 };
 
 // A named logical input (e.g. "Jump", "MoveForward"). JSON payload:

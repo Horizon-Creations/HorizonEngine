@@ -130,6 +130,15 @@ every asset predating the taxonomy already carries, so nothing had to migrate.
 HorizonCode classes do **not** derive from one another: a class asset as a cast
 target matches that exact class and nothing else.
 
+A class from `Entity` down also has a **body**: its class tab has a *Components*
+mode next to *Graph*, editing a real entity subtree with the same Details panel
+the scene inspector uses. `EntityHost::spawn` instantiates that subtree, so a
+spawned class arrives with its mesh, collider and whatever else it carries. A new
+class starts from its base's default list — a PlayerCharacter comes with a
+character controller, a capsule collider and an empty skeletal-mesh slot. The
+list is stored in the same payload format as a prefab (`CHUNK_HCCP`), because a
+class's component list and a prefab are the same idea.
+
 A base class also brings **members**: drag off any reference of that type and the
 menu shows an *Inherited* section — `Possess` / `Un Possess` /
 `Get Possessed Character` on a PlayerController, `Get Controller` on a

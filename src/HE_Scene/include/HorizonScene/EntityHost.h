@@ -72,6 +72,17 @@ public:
     // in the .cpp, which is the path that takes both).
     void unbind(HorizonCode::InstanceId instance);
 
+    // The component list a class of `baseClass` STARTS with, in the same prefab
+    // payload format the asset stores — a PlayerCharacter arrives with a
+    // character controller and a collider rather than as a bare transform
+    // nobody can move or hit.
+    //
+    // Built here rather than checked in as a blob literal so it follows the
+    // components themselves: a field added to CharacterControllerComponent
+    // shows up in the next class created, with no fixture to regenerate. Empty
+    // for a base class with no body of its own (Object, PlayerController).
+    static std::vector<uint8_t> defaultComponents(const std::string& baseClass);
+
 private:
     HorizonCode::Runtime* m_runtime = nullptr;
     HorizonWorld*         m_world   = nullptr;

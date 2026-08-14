@@ -5,6 +5,12 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/Components/ScriptComponent.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <Diagnostics/Logger.h>
 #include <vector>
 
@@ -91,13 +97,22 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	const HorizonCodeClassAsset* a = m_content->getHorizonCodeClass(id);
 	if (!a) return out;
 
-	// The entity the class brings with it. Today that is a bare, named entity;
-	// once a class asset carries its authored component list this is where that
-	// subtree gets instantiated instead (one call — SceneSerializer already has
-	// both halves of it as the prefab format).
-	out.entity = m_world->createEntity(a->name.empty() ? "Entity" : a->name);
-	if (parent != entt::null && m_world->registry().valid(parent))
-		m_world->reparentEntity(out.entity, parent);
+	// The entity the class brings with it: its authored component list, which is
+	// stored in the prefab payload format precisely so this is one call rather
+	// than a second deserializer. A class with no components still gets a bare
+	// named entity — it is an Entity class, so it has a place in the world even
+	// before anything has been put on it.
+	if (!a->componentBlob.empty())
+	{
+		SceneSerializer ser;
+		out.entity = ser.instantiatePrefab(*m_world, a->componentBlob, parent);
+	}
+	if (out.entity == entt::null)
+	{
+		out.entity = m_world->createEntity(a->name.empty() ? "Entity" : a->name);
+		if (parent != entt::null && m_world->registry().valid(parent))
+			m_world->reparentEntity(out.entity, parent);
+	}
 
 	out.instance = bind(out.entity, classPath);
 	if (!out.instance)
@@ -160,4 +175,42 @@ Entity EntityHost::entityOf(HorizonCode::InstanceId instance) const
 {
 	const auto it = m_byInstance.find(instance);
 	return it != m_byInstance.end() ? static_cast<Entity>(it->second) : entt::null;
+}
+
+std::vector<uint8_t> EntityHost::defaultComponents(const std::string& baseClass)
+{
+	// Nothing above Entity has a body, so nothing above Entity gets components.
+	if (!HorizonCode::engineClassIsA(baseClass, "Entity")) return {};
+	// A PlayerController is an Entity in the taxonomy — that is what keeps Cast,
+	// possession and the event catalog to ONE chain — but it is not something you
+	// place in a level. Handing it a transform would only put a component in its
+	// Components tab that nobody ever wants and everybody has to delete.
+	if (HorizonCode::engineClassIsA(baseClass, "PlayerController")) return {};
+
+	// A throwaway world just to author the subtree: serializeSubtree is the one
+	// encoder for this format, and going through it here means the class blob and
+	// a prefab can never disagree about what they contain.
+	HorizonWorld scratch;
+	const Entity root = scratch.createEntity(baseClass.empty() ? "Entity" : baseClass);
+	scratch.addComponent(root, TransformComponent{});
+
+	if (HorizonCode::engineClassIsA(baseClass, "PlayerCharacter"))
+	{
+		// The minimum a player needs to be moved and to be hit. The mesh stays
+		// unassigned on purpose — which mesh it is is the whole point of the
+		// class, so guessing one would only be something to delete.
+		scratch.addComponent(root, CharacterControllerComponent{});
+		ColliderComponent col;
+		col.shape  = ColliderShape::Capsule;
+		col.radius = 0.35f;
+		col.height = 1.8f;
+		scratch.addComponent(root, col);
+		RigidBodyComponent rb;
+		rb.type = RigidBodyType::Kinematic;   // the character controller drives it
+		scratch.addComponent(root, rb);
+		scratch.addComponent(root, SkeletalMeshComponent{});
+	}
+
+	SceneSerializer ser;
+	return ser.serializeSubtree(scratch, root);
 }

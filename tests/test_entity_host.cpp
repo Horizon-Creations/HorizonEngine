@@ -11,6 +11,10 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/SceneSerializer.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonCode/HorizonCode.h>
@@ -72,14 +76,16 @@ namespace
 
 	// Write a HorizonCode class asset carrying `graph` and return its path.
 	std::string writeClass(ContentManager& cm, const char* name,
-	                       const char* baseClass, const Graph& g)
+	                       const char* baseClass, const Graph& g,
+	                       const std::vector<uint8_t>& components = {})
 	{
 		HorizonCodeClassAsset a;
-		a.type      = HE::AssetType::HorizonCodeClass;
-		a.name      = name;
-		a.path      = std::string(name) + ".hasset";
-		a.baseClass = baseClass;
-		a.graphJson = toJson(g);
+		a.type          = HE::AssetType::HorizonCodeClass;
+		a.name          = name;
+		a.path          = std::string(name) + ".hasset";
+		a.baseClass     = baseClass;
+		a.graphJson     = toJson(g);
+		a.componentBlob = components;
 		REQUIRE(cm.saveAsset(a));
 		return a.path;
 	}
@@ -290,4 +296,86 @@ TEST_CASE("input reaches the controller always, and the possessed character too"
 	rt.destroy(pawn);
 	CHECK_FALSE(rt.alive(HE::api::player::possessed(ctrl)));
 	HE::api::player::clear();
+}
+
+// ── The class's component list ──────────────────────────────────────────────
+
+TEST_CASE("a base class hands a new class the components it cannot work without")
+{
+	// "Erben" made concrete: a PlayerCharacter arrives with what a player needs
+	// to be moved and hit, rather than as a bare transform. Built from the live
+	// component types (not a checked-in blob), so a field added to one of them
+	// follows automatically.
+	CHECK(EntityHost::defaultComponents("").empty());                 // Object has no body
+	CHECK(EntityHost::defaultComponents("PlayerController").empty()); // nor does a controller
+	CHECK_FALSE(EntityHost::defaultComponents("Entity").empty());
+
+	HorizonWorld w;
+	SceneSerializer ser;
+	const Entity root = ser.instantiatePrefab(w, EntityHost::defaultComponents("PlayerCharacter"));
+	REQUIRE((root != entt::null));
+	CHECK(w.registry().all_of<TransformComponent>(root));
+	CHECK(w.registry().all_of<CharacterControllerComponent>(root));
+	CHECK(w.registry().all_of<ColliderComponent>(root));
+	// The mesh SLOT is there but unassigned: which mesh it is is the whole point
+	// of the class, so a guess would only be something to delete.
+	REQUIRE(w.registry().all_of<SkeletalMeshComponent>(root));
+	CHECK(w.registry().get<SkeletalMeshComponent>(root).meshAssetId == HE::UUID{});
+
+	// A plain Entity gets a place in the world and nothing more.
+	HorizonWorld w2;
+	const Entity e2 = ser.instantiatePrefab(w2, EntityHost::defaultComponents("Entity"));
+	REQUIRE((e2 != entt::null));
+	CHECK(w2.registry().all_of<TransformComponent>(e2));
+	CHECK_FALSE(w2.registry().all_of<CharacterControllerComponent>(e2));
+}
+
+TEST_CASE("a spawned class brings its authored components, and survives a save/load")
+{
+	TempDir dir("he_test_entityhost_components");
+	ContentManager cm(dir.path.string());
+
+	// Author a body: a named root with a transform and a collider.
+	std::vector<uint8_t> blob;
+	{
+		HorizonWorld scratch;
+		const Entity r = scratch.createEntity("CrateBody");
+		TransformComponent t; t.position = { 3.0f, 4.0f, 5.0f };
+		scratch.addComponent(r, t);
+		ColliderComponent col; col.shape = ColliderShape::Sphere; col.radius = 2.5f;
+		scratch.addComponent(r, col);
+		SceneSerializer ser;
+		blob = ser.serializeSubtree(scratch, r);
+	}
+	REQUIRE_FALSE(blob.empty());
+	const std::string cls = writeClass(cm, "Crate", "Entity", lifecycleGraph(), blob);
+
+	// The blob is a chunk on the asset, so it has to come back off disk intact —
+	// a fresh ContentManager reads the file, not the in-memory copy.
+	{
+		ContentManager reload(dir.path.string());
+		const HorizonCodeClassAsset* a = reload.getHorizonCodeClass(reload.loadAsset(cls));
+		REQUIRE(a != nullptr);
+		CHECK(a->componentBlob == blob);
+		CHECK(a->baseClass == "Entity");
+	}
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+
+	const EntityHost::Spawned s = host.spawn(cls);
+	REQUIRE(s.instance != 0);
+	REQUIRE((s.entity != entt::null));
+	// The spawned entity IS the authored subtree, not a bare stand-in.
+	auto& reg = world.registry();
+	REQUIRE(reg.all_of<TransformComponent>(s.entity));
+	CHECK(reg.get<TransformComponent>(s.entity).position.x == doctest::Approx(3.0f));
+	REQUIRE(reg.all_of<ColliderComponent>(s.entity));
+	CHECK(reg.get<ColliderComponent>(s.entity).radius == doctest::Approx(2.5f));
+	// …and it is bound to the instance, so the graph can reach it.
+	CHECK(host.entityOf(s.instance) == s.entity);
+	HE::api::Ctx c{ &world, nullptr, &cm, nullptr, &rt, s.instance };
+	CHECK(HE::api::entity::self(c) == static_cast<uint32_t>(s.entity));
 }

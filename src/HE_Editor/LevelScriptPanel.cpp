@@ -16,6 +16,11 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
+#include <HorizonScene/EntityHost.h>   // default component lists per base class
+#include <HorizonScene/SceneSerializer.h>
+#include "InspectorPanel.h"           // the REAL component editor, over a scratch world
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/NameComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -23,6 +28,7 @@
 #include <Application/InputAssets.h>  // shared Input.<Action>.* event naming
 #include <Types/Enums.h>
 #include <map>
+#include <memory>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -1050,6 +1056,15 @@ struct ClassState
 	HE::UUID    assetId;
 	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
 	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
+	// ── Components mode ──────────────────────────────────────────────────
+	// The class's component list, edited as a real entity subtree in a world
+	// of its own. Going through an actual HorizonWorld is what lets the REAL
+	// Details panel draw it (InspectorPanel::renderFor) instead of a second
+	// component editor that would drift from the first.
+	std::unique_ptr<HorizonWorld> compWorld;
+	Entity      compRoot = entt::null;
+	Entity      compSel  = entt::null;
+	bool        showComponents = false;
 };
 AssetPanelState<ClassState> s_classStates;
 
@@ -1081,6 +1096,27 @@ std::vector<std::string> scanInputEvents(ContentManager* cm)
 
 // Persist a class tab's graph. The header's Save button AND the close/quit
 // prompt's "Save All" both come through here, so the two can never drift apart.
+// The class's component template, as an entity subtree in a world of its own.
+// Created on first use — an empty class seeds from its BASE CLASS's default
+// list, which is what "a PlayerCharacter comes with a character controller"
+// means in practice.
+void ensureComponentWorld(ClassState& st, const std::vector<uint8_t>& blob)
+{
+	if (st.compWorld) return;
+	st.compWorld = std::make_unique<HorizonWorld>();
+	SceneSerializer ser;
+	const std::vector<uint8_t>& seed =
+		blob.empty() ? EntityHost::defaultComponents(st.baseClass) : blob;
+	if (!seed.empty())
+		st.compRoot = ser.instantiatePrefab(*st.compWorld, seed);
+	if (st.compRoot == entt::null)
+	{
+		st.compRoot = st.compWorld->createEntity(st.name.empty() ? "Entity" : st.name);
+		st.compWorld->addComponent(st.compRoot, TransformComponent{});
+	}
+	st.compSel = st.compRoot;
+}
+
 bool saveClassState(ClassState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
@@ -1088,9 +1124,79 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 	if (!a) return false;
 	a->graphJson = HorizonCode::toJson(st.graph);
 	a->baseClass = st.baseClass;
+	// Only overwrite the component list once this tab has actually opened it:
+	// saving a class whose Components mode was never touched must not replace
+	// its authored subtree with a freshly seeded default.
+	if (st.compWorld && st.compRoot != entt::null)
+	{
+		SceneSerializer ser;
+		a->componentBlob = ser.serializeSubtree(*st.compWorld, st.compRoot);
+	}
 	if (!ctx.contentManager->saveAsset(*a)) return false;
 	st.dirty = false;
 	return true;
+}
+
+// Components mode: the subtree on the left, the REAL Details panel on the
+// right. InspectorPanel::renderFor draws it against this scratch world, so
+// every component gets the exact editor the scene inspector gives it —
+// including its asset slots — instead of a parallel one to keep in step.
+// Undo is null: a snapshot here would capture the SCENE, which is not what is
+// being edited.
+void drawComponentsBody(AppContext& ctx, ClassState& st)
+{
+	ensureComponentWorld(st, {});
+	if (!st.compWorld) return;
+	auto& reg = st.compWorld->registry();
+	if (!reg.valid(st.compSel)) st.compSel = st.compRoot;
+
+	const float listW = 220.0f;
+	ImGui::BeginChild("##hccomp_tree", ImVec2(listW, 0), true);
+	ImGui::TextDisabled("Subtree");
+	ImGui::Separator();
+	for (auto [e, name] : reg.view<NameComponent>().each())
+	{
+		ImGui::PushID((int)entt::to_integral(e));
+		const bool isRoot = (e == st.compRoot);
+		if (ImGui::Selectable((isRoot ? name.name + "  (root)" : name.name).c_str(),
+		                      e == st.compSel))
+			st.compSel = e;
+		ImGui::PopID();
+	}
+	ImGui::Separator();
+	if (ImGui::SmallButton("Add Child"))
+	{
+		const Entity child = st.compWorld->createEntity("Child");
+		st.compWorld->addComponent(child, TransformComponent{});
+		st.compWorld->reparentEntity(child, st.compRoot);
+		st.compSel = child;
+		st.dirty = true;
+	}
+	if (st.compSel != st.compRoot && reg.valid(st.compSel))
+	{
+		ImGui::SameLine();
+		if (EditorWidgets::dangerSmallButton("Remove"))
+		{
+			st.compWorld->destroyEntity(st.compSel);
+			st.compSel = st.compRoot;
+			st.dirty = true;
+		}
+	}
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+	ImGui::BeginChild("##hccomp_details", ImVec2(0, 0), true);
+	if (reg.valid(st.compSel))
+	{
+		InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr);
+		// The scratch world has no undo revision to diff against, so the tab
+		// takes ImGui's word for it: something inside this child is being
+		// driven right now. Coarser than an edit flag, but it only ever errs
+		// towards "unsaved", which is the safe direction for a Save button.
+		if (ImGui::IsAnyItemActive()) st.dirty = true;
+	}
+	else ImGui::TextDisabled("(nothing selected)");
+	ImGui::EndChild();
 }
 
 // "PlayerController" → "Player Controller". The taxonomy stores the C++-ish
@@ -1172,6 +1278,10 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, st.graph);
 			st.name      = a->name;
 			st.baseClass = a->baseClass;
+			// Seed the component template from what the asset carries. Only
+			// classes WITH a body get a world up front; the rest build one the
+			// first time Components mode is opened, from the base's defaults.
+			if (!a->componentBlob.empty()) ensureComponentWorld(st, a->componentBlob);
 		}
 		st.loaded = true;
 	}
@@ -1217,6 +1327,13 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			ImGui::EndCombo();
 		}
 		bar.endGroup();
+		// Graph vs Components. A class is both its logic and its body, and the
+		// two want the whole panel each — hence a mode, not a split view.
+		bar.group();
+		if (ImGui::RadioButton("Graph", !st.showComponents)) st.showComponents = false;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Components", st.showComponents)) st.showComponents = true;
+		bar.endGroup();
 		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
@@ -1236,10 +1353,13 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
-	drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
-	              isPlayer ? "Player class; lifecycle + input events."
-	                       : "Reusable class; lifecycle events + its own.",
-	              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass);
+	if (st.showComponents)
+		drawComponentsBody(ctx, st);
+	else
+		drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
+		              isPlayer ? "Player class; lifecycle + input events."
+		                       : "Reusable class; lifecycle events + its own.",
+		              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

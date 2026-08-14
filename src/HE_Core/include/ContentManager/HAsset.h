@@ -107,6 +107,12 @@ inline constexpr uint32_t CHUNK_UIWT = makeChunkId('U','I','W','T'); // UI widge
 inline constexpr uint32_t CHUNK_UIWG = makeChunkId('U','I','W','G'); // UI widget logic graph (JSON)
 inline constexpr uint32_t CHUNK_HCGR = makeChunkId('H','C','G','R'); // HorizonCode class graph (JSON)
 inline constexpr uint32_t CHUNK_HCBC = makeChunkId('H','C','B','C'); // HorizonCode base class name (UTF-8; absent → plain Object)
+// The class's authored COMPONENTS, in exactly the prefab payload format
+// (CHUNK_PFAB): an entity subtree from SceneSerializer::serializeSubtree,
+// instantiated by instantiatePrefab when the class is spawned. Same bytes on
+// purpose — a class's component list and a prefab are the same idea, and a
+// second encoding of it would be a second thing to keep correct.
+inline constexpr uint32_t CHUNK_HCCP = makeChunkId('H','C','C','P'); // HorizonCode class components (CBOR subtree; absent → none)
 
 // Input
 inline constexpr uint32_t CHUNK_IACT = makeChunkId('I','A','C','T'); // input action definition (JSON)

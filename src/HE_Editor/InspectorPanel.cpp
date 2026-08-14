@@ -92,23 +92,43 @@ void render(AppContext& ctx)
 		}
 	}
 
-	auto&  registry = ctx.world->registry();
-	Entity entity   = ctx.selectedEntity;
+	InspectorPanel::renderFor(ctx, *ctx.world, ctx.selectedEntity, ctx.undoSys);
+
+	ImGui::End();
+#else
+	(void)ctx;
+#endif // HE_IMGUI_ENABLED
+}
+
+// The body of the Details panel: every component's rows, drawn against an
+// EXPLICIT world + entity instead of the editor's current selection. Split out
+// so a panel editing a template subtree in its OWN scratch world — the
+// HorizonCode class tab's component list — gets this exact component editor
+// rather than a second copy of it that would drift the first time a component
+// gained a field.
+//
+// `undo` is the editor's SCENE undo system, or null. A scratch world passes
+// null: capturePre() serializes the whole scene, which is not what is being
+// edited there, and every use of it below is already null-guarded.
+void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo)
+{
+#ifdef HE_IMGUI_ENABLED
+	auto& registry = world.registry();
 
 	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
 	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
 	// entity was selected (the terrain's sculptHeights alone is 263k floats). An edit
 	// can only START on a mouse press inside this panel, so capture the pre-state only
 	// then; the widget's IsItemActivated (same frame) stashes it.
-	if (ctx.undoSys
+	if (undo
 	    && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
 	    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-		ctx.undoSys->capturePre();
+		undo->capturePre();
 	auto trackEdit = [&]
 	{
-		if (!ctx.undoSys) return;
-		if (ImGui::IsItemActivated())            ctx.undoSys->stashPre();
-		if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+		if (!undo) return;
+		if (ImGui::IsItemActivated())            undo->stashPre();
+		if (ImGui::IsItemDeactivatedAfterEdit()) undo->commitPending();
 	};
 
 	// ── Name ────────────────────────────────────────────────────────────────
@@ -121,8 +141,8 @@ void render(AppContext& ctx)
 		if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 		                     ImGuiInputTextFlags_EnterReturnsTrue))
 		{
-			if (ctx.undoSys) ctx.undoSys->snapshotNow();
-			ctx.world->renameEntity(entity, buf);
+			if (undo) undo->snapshotNow();
+			world.renameEntity(entity, buf);
 		}
 	}
 	ImGui::Separator();
@@ -138,7 +158,7 @@ void render(AppContext& ctx)
 		// Only the first is used — every consumer calls environmentEntity() — so
 		// say which one you are looking at, otherwise editing the inert copy looks
 		// like the settings simply do nothing.
-		inertEnvironmentNote(entity == ctx.world->environmentEntity(), "Sky");
+		inertEnvironmentNote(entity == world.environmentEntity(), "Sky");
 		if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
 		{
 			ImGui::Checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
@@ -329,7 +349,7 @@ void render(AppContext& ctx)
 	{
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
 		{
-			inertEnvironmentNote(entity == ctx.world->weatherEntity(), "Weather");
+			inertEnvironmentNote(entity == world.weatherEntity(), "Weather");
 			if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				// The Details dock is narrow, and a good deal of what the sections
@@ -425,7 +445,7 @@ void render(AppContext& ctx)
 			changed |= Row::dragFloat3("Scale",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TransformComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TransformComponent>(entity); }
 	}
 
 	// ── Transform 2D ────────────────────────────────────────────────────────
@@ -439,7 +459,7 @@ void render(AppContext& ctx)
 			changed |= Row::dragFloat2("Scale##2d",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<Transform2DComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<Transform2DComponent>(entity); }
 	}
 
 	// ── Mesh ────────────────────────────────────────────────────────────────
@@ -464,7 +484,7 @@ void render(AppContext& ctx)
 			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
 			ImGui::Checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MeshComponent>(entity); }
 	}
 
 	// ── Skeletal Mesh ────────────────────────────────────────────────────────
@@ -493,7 +513,7 @@ void render(AppContext& ctx)
 				== EditorWidgets::SlotAction::Assigned)
 				sm->dirty = true;
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
 	}
 
 	// ── Animator ────────────────────────────────────────────────────────────
@@ -519,7 +539,7 @@ void render(AppContext& ctx)
 				ImGui::Text("Duration: %.3f s  |  Channels: %d",
 					cur->duration, (int)cur->channels.size());
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorComponent>(entity); }
 	}
 
 	// ── Animator Blend ───────────────────────────────────────────────────────
@@ -542,7 +562,7 @@ void render(AppContext& ctx)
 			ImGui::SameLine();
 			ImGui::Checkbox("Playing##ab",   &ab->playing); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorBlendComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorBlendComponent>(entity); }
 	}
 
 	// ── Animator State Machine ──────────────────────────────────────────────
@@ -577,7 +597,7 @@ void render(AppContext& ctx)
 				ImGui::ProgressBar(std::min(pct, 1.0f), ImVec2(-1, 0), "crossfade");
 			}
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
 	}
 
 	// ── Property Animator ───────────────────────────────────────────────────
@@ -604,7 +624,7 @@ void render(AppContext& ctx)
 				ImGui::Text("Duration: %.2f s | Channels: %zu", cur->duration, cur->channels.size());
 			}
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<PropertyAnimatorComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<PropertyAnimatorComponent>(entity); }
 	}
 
 	// ── NavMesh ─────────────────────────────────────────────────────────────
@@ -627,13 +647,13 @@ void render(AppContext& ctx)
 			ImGui::Text("NavMesh: %s", baked ? "baked" : "not baked");
 			if (ImGui::Button("Bake##nm"))
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				if (undo) undo->snapshotNow();
 				NavigationSystem::bake(*nmc);
 			}
 			ImGui::SameLine();
 			ImGui::Checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
 	}
 
 	// ── NavAgent ────────────────────────────────────────────────────────────
@@ -655,7 +675,7 @@ void render(AppContext& ctx)
 			if (ImGui::Button("Stop##na"))
 			{ na->moving = false; na->hasPath = false; }
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<NavAgentComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<NavAgentComponent>(entity); }
 	}
 
 	// ── Material ────────────────────────────────────────────────────────────
@@ -853,7 +873,7 @@ void render(AppContext& ctx)
 						const bool ok = saved && ctx.contentManager->saveAsset(*saved);
 						if (ok)
 						{
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							if (undo) undo->snapshotNow();
 							m->materialAssetId = newId;   // this entity now owns a real asset
 							m->dirty = true;
 							ctx.contentRefreshPending = true;
@@ -878,7 +898,7 @@ void render(AppContext& ctx)
 					: "Edits apply live; Save writes them to disk.");
 			}
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<MaterialComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MaterialComponent>(entity); }
 	}
 
 	// ── Camera ──────────────────────────────────────────────────────────────
@@ -892,7 +912,7 @@ void render(AppContext& ctx)
 			ImGui::Checkbox("Main Camera", &c->isMain); trackEdit();
 			ImGui::Checkbox("Orthographic", &c->orthographic); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CameraComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraComponent>(entity); }
 	}
 
 	// ── Light ───────────────────────────────────────────────────────────────
@@ -904,7 +924,7 @@ void render(AppContext& ctx)
 			int type = static_cast<int>(l->type);
 			if (Row::combo("Type", &type, kLightTypes, 3))
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				if (undo) undo->snapshotNow();
 				l->type = static_cast<LightType>(type);
 			}
 			Row::colorEdit3("Color",    &l->color.x); trackEdit();
@@ -921,7 +941,7 @@ void render(AppContext& ctx)
 			ImGui::Checkbox("Visible##light",      &l->visible);     trackEdit();
 			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LightComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<LightComponent>(entity); }
 	}
 
 	// ── Decal ───────────────────────────────────────────────────────────────
@@ -935,7 +955,7 @@ void render(AppContext& ctx)
 				hint("Projects along the entity's local Y through its scaled box. "
 				     "Renders in the Deferred path (Metal).");
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<DecalComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<DecalComponent>(entity); }
 	}
 
 	// ── Rigid Body ──────────────────────────────────────────────────────────
@@ -947,7 +967,7 @@ void render(AppContext& ctx)
 			int type = static_cast<int>(r->type);
 			if (Row::combo("Body Type", &type, kBodyTypes, 3))
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				if (undo) undo->snapshotNow();
 				r->type = static_cast<RigidBodyType>(type);
 			}
 			Row::dragFloat("Mass",        &r->mass,        0.1f, 0.0f, 100000.0f); trackEdit();
@@ -955,7 +975,7 @@ void render(AppContext& ctx)
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			ImGui::Checkbox("2D Physics",   &r->is2D); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
 
 	// ── Collider ──────────────────────────────────────────────────────────────
@@ -967,7 +987,7 @@ void render(AppContext& ctx)
 			int shape = static_cast<int>(col->shape);
 			if (Row::combo("Shape", &shape, kShapes, 3))
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				if (undo) undo->snapshotNow();
 				col->shape = static_cast<ColliderShape>(shape);
 			}
 			switch (col->shape)
@@ -985,7 +1005,7 @@ void render(AppContext& ctx)
 			}
 			ImGui::Checkbox("Is Trigger", &col->isTrigger); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ColliderComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ColliderComponent>(entity); }
 	}
 
 	// ── Character Controller ──────────────────────────────────────────────────
@@ -1005,7 +1025,7 @@ void render(AppContext& ctx)
 			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
 	}
 
 	// ── Save State (savegames) ──────────────────────────────────────────────
@@ -1022,7 +1042,7 @@ void render(AppContext& ctx)
 			ImGui::Checkbox("Visibility", &ss->saveVisibility); trackEdit();
 			ImGui::EndDisabled();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
 	}
 
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
@@ -1132,7 +1152,7 @@ void render(AppContext& ctx)
 				}
 			}
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ScriptComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ScriptComponent>(entity); }
 	}
 
 	// ── Terrain ─────────────────────────────────────────────────────────────
@@ -1175,7 +1195,7 @@ void render(AppContext& ctx)
 
 			if (changed) t->dirty = true;
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<TerrainComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TerrainComponent>(entity); }
 	}
 
 	// ── Audio Source ────────────────────────────────────────────────────────
@@ -1204,7 +1224,7 @@ void render(AppContext& ctx)
 				Row::dragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f,  "%.2f");   trackEdit();
 			}
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }
 	}
 
 	// ── Audio Listener ──────────────────────────────────────────────────────
@@ -1214,7 +1234,7 @@ void render(AppContext& ctx)
 		{
 			Row::dragFloat("Master Volume##al", &l->masterVolume, 0.01f, 0.0f, 2.0f); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
 	}
 
 	// ── Particle System ─────────────────────────────────────────────────────
@@ -1236,7 +1256,7 @@ void render(AppContext& ctx)
 			ImGui::Checkbox("Playing##ps", &ps->playing); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
@@ -1253,7 +1273,7 @@ void render(AppContext& ctx)
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
 			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<FoliageComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<FoliageComponent>(entity); }
 	}
 
 	// ── LOD ──────────────────────────────────────────────────────────────────
@@ -1294,7 +1314,7 @@ void render(AppContext& ctx)
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<LODComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<LODComponent>(entity); }
 	}
 
 	// ── UI Canvas ───────────────────────────────────────────────────────────
@@ -1310,7 +1330,7 @@ void render(AppContext& ctx)
 			}
 			ImGui::Checkbox("Active##cv", &cv->active); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UICanvasComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UICanvasComponent>(entity); }
 	}
 
 	// ── UI Element ──────────────────────────────────────────────────────────
@@ -1332,7 +1352,7 @@ void render(AppContext& ctx)
 			Row::dragInt("Layer##el",  &el->layer, 1); trackEdit();
 			ImGui::Checkbox("Active##el", &el->active); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIElementComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIElementComponent>(entity); }
 	}
 
 	// ── UI Text ─────────────────────────────────────────────────────────────
@@ -1346,7 +1366,7 @@ void render(AppContext& ctx)
 			Row::dragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
 			Row::colorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UITextComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UITextComponent>(entity); }
 	}
 
 	// ── UI Image ─────────────────────────────────────────────────────────────
@@ -1356,7 +1376,7 @@ void render(AppContext& ctx)
 		{
 			Row::colorEdit4("Tint##img", glm::value_ptr(img->tint)); trackEdit();
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIImageComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIImageComponent>(entity); }
 	}
 
 	// ── UI Button ───────────────────────────────────────────────────────────
@@ -1371,13 +1391,13 @@ void render(AppContext& ctx)
 			strncpy(buf, btn->onClickFunction.c_str(), sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
 			if (Row::inputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
 		}
-		if (removed) { if (ctx.undoSys) ctx.undoSys->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
 	}
 
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
-	if (!ctx.world->isBuiltin(entity))
+	if (!world.isBuiltin(entity))
 	{
 		ImGui::Spacing();
 		ImGui::Separator();
@@ -1394,7 +1414,7 @@ void render(AppContext& ctx)
 			{
 				if (!registry.all_of<T>(entity) && ImGui::MenuItem(label))
 				{
-					if (ctx.undoSys) ctx.undoSys->snapshotNow();
+					if (undo) undo->snapshotNow();
 					registry.emplace<T>(entity);
 				}
 			};
@@ -1439,9 +1459,8 @@ void render(AppContext& ctx)
 		}
 	}
 
-	ImGui::End();
 #else
-	(void)ctx;
+	(void)ctx; (void)world; (void)entity; (void)undo;
 #endif // HE_IMGUI_ENABLED
 }
 

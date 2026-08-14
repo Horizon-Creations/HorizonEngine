@@ -364,6 +364,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_HCBC)) // absent → plain Object
 			a.baseClass.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_HCCP)) // absent → no components
+			a.componentBlob = c->data;
 		handle = m_hcClassAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::InputAction:
@@ -1463,6 +1465,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 			w.addChunk(HAsset::CHUNK_HCGR, a.graphJson.data(), a.graphJson.size());
 		if (!a.baseClass.empty())
 			w.addChunk(HAsset::CHUNK_HCBC, a.baseClass.data(), a.baseClass.size());
+		if (!a.componentBlob.empty())
+			w.addChunk(HAsset::CHUNK_HCCP, a.componentBlob.data(), a.componentBlob.size());
 		break;
 	}
 	case HE::AssetType::InputAction:
