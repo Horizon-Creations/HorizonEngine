@@ -10,7 +10,6 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
-#include <imgui_internal.h>      // ImLerp for the ring geometry
 #endif
 
 namespace BuildProgressDialog
@@ -211,6 +210,10 @@ Action takeAction()
 namespace
 {
 
+// Our own, rather than imgui_internal.h's IM_PI: four arc angles are not worth
+// a dependency on ImGui's private header.
+constexpr float kPi = 3.14159265358979323846f;
+
 ImU32 stateColor(int state)
 {
 	switch (state)
@@ -243,8 +246,8 @@ bool drawStepRing(const Step& st, int index, ImVec2 center, float radius, float 
 		// Length unknown (cmake configuring, codesign running): a quarter arc
 		// travelling round the ring says "working" without claiming a number.
 		const float t     = static_cast<float>(ImGui::GetTime()) * 2.0f;
-		const float start = std::fmod(t, IM_PI * 2.0f);
-		dl->PathArcTo(center, radius, start, start + IM_PI * 0.5f, 24);
+		const float start = std::fmod(t, kPi * 2.0f);
+		dl->PathArcTo(center, radius, start, start + kPi * 0.5f, 24);
 		dl->PathStroke(col, 0, thick);
 	}
 	else if (st.state == Running || st.state == Done || st.state == Failed)
@@ -252,8 +255,8 @@ bool drawStepRing(const Step& st, int index, ImVec2 center, float radius, float 
 		const float frac = st.state == Done ? 1.0f : std::clamp(st.progress, 0.0f, 1.0f);
 		if (frac > 0.001f)
 		{
-			const float a0 = -IM_PI * 0.5f;
-			dl->PathArcTo(center, radius, a0, a0 + IM_PI * 2.0f * frac, 48);
+			const float a0 = -kPi * 0.5f;
+			dl->PathArcTo(center, radius, a0, a0 + kPi * 2.0f * frac, 48);
 			dl->PathStroke(col, 0, thick);
 		}
 	}
@@ -489,11 +492,10 @@ void render([[maybe_unused]] AppContext& ctx)
 			: "The export targets another platform — it cannot run on this machine.");
 
 	ImGui::SameLine();
+	// Stays open, unlike the other two: the next run reports into this same
+	// window, and closing it here only to reopen it a frame later would flash.
 	if (ImGui::Button("Build Again", ImVec2(120.0f, 0.0f)))
-	{
 		s_action = Action::Rebuild;
-		ImGui::CloseCurrentPopup();
-	}
 	ImGui::SameLine();
 	if (ImGui::Button("Build Settings", ImVec2(130.0f, 0.0f)))
 	{
