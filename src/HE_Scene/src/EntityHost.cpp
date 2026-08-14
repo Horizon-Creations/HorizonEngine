@@ -155,8 +155,17 @@ void EntityHost::tick(float dt)
 		if (!m_world->registry().valid(static_cast<Entity>(raw))) dead.push_back(inst);
 	for (const HorizonCode::InstanceId inst : dead) unbind(inst);
 
-	for (const auto& [raw, inst] : m_byEntity)
-		m_runtime->fireTick(inst, dt);
+	// Tick over a SNAPSHOT, never over the live map. A graph is running here,
+	// and a graph may Create Object (inserting an entity class, possibly
+	// rehashing) or destroy one (erasing) — iterating m_byEntity across that is
+	// undefined behaviour, and the kind that survives every test and crashes in
+	// a shipped game. Anything spawned during this pass ticks from the NEXT
+	// frame, which is also the more predictable rule.
+	m_tickScratch.clear();
+	m_tickScratch.reserve(m_byEntity.size());
+	for (const auto& [raw, inst] : m_byEntity) m_tickScratch.push_back(inst);
+	for (const HorizonCode::InstanceId inst : m_tickScratch)
+		if (m_runtime->alive(inst)) m_runtime->fireTick(inst, dt);
 }
 
 void EntityHost::unbind(HorizonCode::InstanceId instance)
@@ -172,8 +181,18 @@ void EntityHost::unbind(HorizonCode::InstanceId instance)
 void EntityHost::end()
 {
 	if (m_runtime)
-		for (const auto& [raw, inst] : m_byEntity)
-			m_runtime->destroy(inst);   // fires Destruct
+	{
+		// Snapshot for the same reason tick() does: Destruct is graph code, and
+		// it can create or destroy other entity classes while this loop runs.
+		std::vector<HorizonCode::InstanceId> all;
+		all.reserve(m_byEntity.size());
+		for (const auto& [raw, inst] : m_byEntity) all.push_back(inst);
+		// Cleared FIRST so anything a Destruct handler spawns lands in a map
+		// this teardown is no longer walking.
+		m_byEntity.clear();
+		m_byInstance.clear();
+		for (const HorizonCode::InstanceId inst : all) m_runtime->destroy(inst);
+	}
 	m_byEntity.clear();
 	m_byInstance.clear();
 	m_runtime = nullptr;

@@ -97,4 +97,7 @@ private:
     ContentManager*       m_content = nullptr;
     Map                                                     m_byEntity;
     std::unordered_map<HorizonCode::InstanceId, uint32_t>   m_byInstance;
+    // Reused per frame so the tick pass can iterate a snapshot without an
+    // allocation each time (see tick() for why it may not walk the live map).
+    std::vector<HorizonCode::InstanceId>                    m_tickScratch;
 };

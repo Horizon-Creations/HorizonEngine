@@ -1213,10 +1213,12 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	{
 		InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr);
 		// The scratch world has no undo revision to diff against, so the tab
-		// takes ImGui's word for it: something inside this child is being
-		// driven right now. Coarser than an edit flag, but it only ever errs
-		// towards "unsaved", which is the safe direction for a Save button.
-		if (ImGui::IsAnyItemActive()) st.dirty = true;
+		// takes ImGui's word for it. Scoped to THIS child: IsAnyItemActive is
+		// global to the frame, so on its own it would mark the class unsaved
+		// because someone was dragging a slider in another panel.
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+		    ImGui::IsAnyItemActive())
+			st.dirty = true;
 	}
 	else ImGui::TextDisabled("(nothing selected)");
 	ImGui::EndChild();

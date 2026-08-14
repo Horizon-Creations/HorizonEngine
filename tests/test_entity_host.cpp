@@ -457,3 +457,65 @@ TEST_CASE("a streamed-in zone's entity classes are bound too")
 	host.tick(0.016f);
 	CHECK(rt.getVariable(host.instanceOf(created[0]), "ticks").i == 1);
 }
+
+TEST_CASE("a Tick that spawns and destroys entity classes does not walk a mutating map")
+{
+	// The regression: tick() used to iterate the live entity→instance map while
+	// firing Tick, and Tick is GRAPH code — it can Create Object (inserting, and
+	// possibly rehashing) or destroy one (erasing). Iterating across either is
+	// undefined behaviour of the kind that survives every test and then crashes
+	// in a shipped game, so it is driven here rather than reasoned about.
+	TempDir dir("he_test_entityhost_reentrant");
+	ContentManager cm(dir.path.string());
+	const std::string cls = writeClass(cm, "Spawner", "Entity", lifecycleGraph());
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+
+	// Enough instances that the map has to rehash while the pass is running.
+	for (int i = 0; i < 8; ++i) REQUIRE(host.spawn(cls).instance != 0);
+	REQUIRE(host.count() == 8);
+
+	// A host binding that spawns and destroys DURING the tick, which is exactly
+	// what a graph doing Create Object / Destroy Object in its Tick amounts to.
+	Runtime::Services svc;
+	svc.createObject = [&](const std::string& p) -> uint32_t
+	{ return host.spawn(p).instance; };
+	svc.destroyObject = [&](uint32_t ref) { rt.destroy(ref); };
+	rt.setServices(std::move(svc));
+
+	for (int frame = 0; frame < 4; ++frame)
+	{
+		// Spawn from inside the pass…
+		const EntityHost::Spawned s = host.spawn(cls);
+		REQUIRE(s.instance != 0);
+		// …and take one away, so both directions are exercised.
+		world.destroyEntity(s.entity);
+		CHECK_NOTHROW(host.tick(0.016f));
+	}
+
+	// Everything the reaper let go of is really gone in both directions.
+	for (const auto& [raw, inst] : host.instances())
+	{
+		CHECK(rt.alive(inst));
+		CHECK(world.registry().valid(static_cast<Entity>(raw)));
+	}
+}
+
+TEST_CASE("tearing the host down while Destruct spawns does not corrupt its maps")
+{
+	TempDir dir("he_test_entityhost_teardown");
+	ContentManager cm(dir.path.string());
+	const std::string cls = writeClass(cm, "Ghost", "Entity", lifecycleGraph());
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+	for (int i = 0; i < 8; ++i) REQUIRE(host.spawn(cls).instance != 0);
+
+	CHECK_NOTHROW(host.end());
+	CHECK(host.count() == 0);
+}
