@@ -11,6 +11,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/AudioSystem.h>
+#include <HorizonScene/CollisionSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -285,16 +286,18 @@ void GameApplication::OnInit()
 				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
 		};
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
-		// world (+ content) — resolved at call time, so it's null-tolerant while
-		// OnInit runs before the world exists. No PhysicsWorld in the shipping
-		// runtime yet → physics nodes no-op (null-Ctx tolerance).
+		// world, physics and content — all resolved at CALL time, which is what
+		// lets this be bound before OnInit has built any of them, and what makes a
+		// scene switch (which replaces both the world and the physics world)
+		// transparent to every graph. Both are still null while the GameInstance's
+		// OnInit runs, and the null-Ctx tolerance covers that.
 		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
 		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
 			// The caller travels along — see the editor's twin.
-			HE::api::Ctx c{ m_world.get(), nullptr, &contentManager(), &m_audioEngine,
+			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
 			                &m_gameInstance.runtime(), self };
 			return fn->invoke(c, args);
 		};
@@ -352,6 +355,7 @@ void GameApplication::OnInit()
 	// input assets, spawn the player instances on the shared runtime (Construct +
 	// BeginPlay) and start pumping Tick/Input.* events (OnRender). After the scene
 	// load so BeginPlay can reach scene entities through the engine-call API.
+	startPhysics();
 	m_playerHost.begin(m_gameInstance.runtime(), contentManager());
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
@@ -504,7 +508,13 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	// cheap main-thread deserialize; meshes/textures stream in the background.
 	const size_t refCount = streamSceneAssets(*m_world);
 
+	startPhysics();
 	startScripts();
+	// The entity classes belong to the world too — without this the new
+	// scene's Entity classes never run, and the old world's instances would
+	// linger against entities that no longer exist.
+	m_entityHost.end();
+	m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 	m_world->fireLevelLoaded();
 	HE_LOG_INFO(Core, "%s",
 		("GameApplication: switched to scene '" + label + "' ("
@@ -646,12 +656,22 @@ int GameApplication::startScriptsFor(const std::vector<entt::entity>& entities)
 	return m_scriptContext->startScriptsFor(entities, contentManager(), m_scriptInstances);
 }
 
+void GameApplication::startPhysics()
+{
+	if (!m_world) return;
+	// Rebuilt, never reused: the bodies belong to the world that is going
+	// away, and a stale contact from it would report entity ids the new
+	// world knows nothing about.
+	m_physicsWorld = std::make_unique<PhysicsWorld>();
+	m_physicsWorld->initialize(*m_world);
+	m_physicsAccum = 0.0f;
+}
+
 void GameApplication::startScripts()
 {
 	if (!m_world) return;
 	m_scriptContext = std::make_unique<ScriptContext>(*m_world);
-	// No PhysicsWorld in the shipping runtime yet → raycast/velocity/isGrounded
-	// no-op; onStart/onUpdate + horizon.setMaterialParam work.
+	m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
 	m_scriptContext->setContentManager(&contentManager());
 
 	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
@@ -845,6 +865,31 @@ void GameApplication::OnRender(float deltaTime)
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(deltaTime);
 
+	// Physics at a FIXED rate, the same one the editor previews at
+	// (PhysicsWorld::kFixedDt) — a game that simulates at a different rate
+	// than it was authored against is not the same game.
+	if (m_world && m_physicsWorld)
+	{
+		HE_PROFILE_SCOPE_N("PhysicsStep");
+		m_physicsAccum += deltaTime;
+		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot
+		// spiral into ever more catch-up steps.
+		int steps = 0;
+		while (m_physicsAccum >= PhysicsWorld::kFixedDt && steps++ < 5)
+		{
+			m_physicsWorld->step(*m_world, PhysicsWorld::kFixedDt);
+			m_physicsAccum -= PhysicsWorld::kFixedDt;
+		}
+		if (m_physicsAccum > PhysicsWorld::kFixedDt) m_physicsAccum = 0.0f;
+
+		// ONE dispatch for both frontends: polling drains the queues, so a
+		// second call would find nothing left and it would look like the
+		// events simply never fire for that language.
+		HE_PROFILE_SCOPE_N("CollisionDispatch");
+		CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
+		                          &m_gameInstance.runtime(), m_entityHost.instances());
+	}
+
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
 		AudioSystem::updateSpatial(*m_world, m_audioEngine);
@@ -882,7 +927,7 @@ void GameApplication::OnRender(float deltaTime)
 		// block, so the GI + environment pushes below are timed with it (as before).
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tick(*m_world, contentManager(), r, camPos, deltaTime,
-		                   nullptr, gpuParticles);
+		                   m_physicsWorld.get(), gpuParticles);
 
 		// Global Illumination: same GlobalState config.json key the editor's
 		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/
@@ -965,6 +1010,7 @@ void GameApplication::OnShutdown()
 	// reference it), symmetric to being spawned after its OnInit.
 	m_entityHost.end();
 	m_playerHost.end();
+	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).
 	m_gameInstance.fireShutdown();

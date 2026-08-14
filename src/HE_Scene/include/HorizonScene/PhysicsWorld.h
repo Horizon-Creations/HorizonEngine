@@ -72,6 +72,12 @@ public:
     std::vector<CollisionEvent> pollOverlapEnter();
     std::vector<CollisionEvent> pollOverlapExit();
 
+    // The fixed step both apps drive the simulation at. It lives here rather
+    // than once per application because a game that simulates at a different
+    // rate than the editor previewed it is not the same game — and two copies
+    // of a number like this drift the moment one of them is tuned.
+    static constexpr float kFixedDt = 1.0f / 60.0f;
+
     // Remove and destroy all physics bodies without touching the ECS.
     void clear();
 

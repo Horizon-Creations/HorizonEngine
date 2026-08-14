@@ -539,7 +539,9 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
-	static constexpr float kPhysicsFixedDt = 1.0f / 60.0f;
+	// One definition for both apps (PhysicsWorld.h): the packaged game has to
+	// simulate at the rate the editor previewed it at.
+	static constexpr float kPhysicsFixedDt = PhysicsWorld::kFixedDt;
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;

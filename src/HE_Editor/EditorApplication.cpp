@@ -1277,8 +1277,10 @@ void EditorApplication::OnInit()
 				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
 		};
 		// EngineCall nodes dispatch through the HE::api registry against the editor
-		// world (+ content). Physics is null here (no PIE physics threaded yet) →
-		// physics nodes no-op (null-Ctx tolerance).
+		// world, physics and content — resolved at CALL time, so PIE entering and
+		// leaving play (which creates and destroys the physics world) needs no
+		// rebinding. Outside play mode physics is null and those nodes no-op,
+		// which is the honest answer: nothing is simulating.
 		svc.callApi = [this](HorizonCode::InstanceId self, const std::string& id,
 		                     const std::vector<HorizonCode::Value>& args)
 			-> std::vector<HorizonCode::Value> {
@@ -1292,8 +1294,8 @@ void EditorApplication::OnInit()
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
-			HE::api::Ctx c{ m_editorWorld.get(), nullptr, &contentManager(), &m_audioEngine,
-			                &m_gameInstance.runtime(), self };
+			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
+			                &m_audioEngine, &m_gameInstance.runtime(), self };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));

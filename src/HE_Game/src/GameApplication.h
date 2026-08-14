@@ -10,6 +10,7 @@
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/EntityHost.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
 #include <HorizonGameServices.h>      // HeSaveServices (the injected C-ABI table)
@@ -46,6 +47,11 @@ private:
     // the mouse is captured. A no-op if the scene has no camera; game logic can
     // ignore it by not marking a camera isMain / releasing the mouse.
     void updateCameraController(float dt);
+
+    // Build the physics world for the CURRENT scene. Called BEFORE startScripts,
+    // which hands the world to the script context; run again after every scene
+    // switch, since the bodies belong to the world that is going away.
+    void startPhysics();
 
     // Start every enabled ScriptComponent in the startup scene (Lua/Python), and
     // tick their onUpdate each frame — the packaged game's ECS gameplay-script
@@ -85,6 +91,12 @@ private:
     // HorizonCode classes attached to scene entities (ScriptComponent pointing
     // at a class asset). Same runtime and same lifetime as m_playerHost.
     EntityHost m_entityHost;
+    // Physics. The shipping runtime used to have none at all, which made every
+    // physics.* call a silent no-op and left the collision/overlap events dead
+    // in an exported game while they worked in PIE. Rebuilt on every scene
+    // switch, because the bodies belong to the world that is going away.
+    std::unique_ptr<PhysicsWorld> m_physicsWorld;
+    float m_physicsAccum = 0.0f;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
     // HUD created in OnInit exists before the first scene and survives scene
     // switches. Each world borrows it via setWidgetManager. Declared after
