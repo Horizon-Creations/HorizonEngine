@@ -596,8 +596,11 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 // bind), the Lua/Python wording on FunctionEntry, the unnamed-function filter on
 // FunctionCall, and the "script" wording on Bind/Emit Event.
 // HcGraphHost::drawCommonNodeDetails lists the same split from the other side.
+// `derivable` = this graph belongs to a CLASS asset, i.e. something another
+// class can derive from. Only there does "Overridable" mean anything.
 void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
-                     bool allowCustomEvents, ContentManager* content, bool& edited)
+                     bool allowCustomEvents, ContentManager* content, bool derivable,
+                     bool& edited)
 {
 	HC::Node* n = graph.findNode(g.selectedNode);
 	if (!n) { g.selectedNode = 0; return; }
@@ -614,6 +617,21 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	common.content = content;
 	common.onEdit  = [&edited](bool){ edited = true; };
 	if (HGH::drawCommonNodeDetails(common, *n)) return;
+
+	// "May a class derived from this one replace this?" — C++'s `virtual`, and
+	// opt-in for the same reason: the base author decides what is meant to be
+	// replaced. Only a CLASS asset can be a base, so only that frontend shows
+	// it. An overridden member is fully replaced: if the child has one, only
+	// the child's runs.
+	auto overridableRow = [&](HC::Node& node, const char* what)
+	{
+		if (!derivable) return;
+		if (ImGui::Checkbox("Overridable", &node.overridable)) edited = true;
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Classes deriving from this one can replace this %s.\n"
+			                  "It then appears in their add menu as an override, and\n"
+			                  "only their version runs.", what);
+	};
 
 	switch (n->type)
 	{
@@ -660,6 +678,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			ImGui::EndCombo();
 		}
 		ImGui::TextDisabled("Fires when this class raises this event.");
+		overridableRow(*n, "event");
 		break;
 	}
 	case NT::FunctionEntry:
@@ -680,6 +699,7 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 			n->access = access; edited = true;
 		}
 		ImGui::TextDisabled("public functions are callable from Lua/Python.");
+		overridableRow(*n, "function");
 		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
@@ -820,10 +840,12 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 // the events, and how a change is committed).
 // `baseClass` is the engine base the graph derives from — only the class tab
 // has one, which is why it is defaulted rather than required of all three.
+// `baseClass` is the engine base the graph derives from and `derivable` says the
+// graph belongs to a CLASS asset — only the class tab has either.
 void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    bool allowCustomEvents, const char* title, const char* subtitle,
                    ContentManager* content, const HC::Graph* giGraph, bool& edited,
-                   const std::string& baseClass = {})
+                   const std::string& baseClass = {}, bool derivable = false)
 {
 	// The shared panel state is reused across the Level/GI/Class tabs, so a
 	// sub-graph id from another graph (or a deleted function) must reset to the
@@ -869,7 +891,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		drawFunctions(graph, edited);
 		ImGui::Spacing();
 		ImGui::Separator();
-		if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents, content, edited);
+		if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents,
+		                                                   content, derivable, edited);
 		else if (!g.selectedVar.empty())   drawVariableDetails(graph, content, edited);
 		else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
 		else ImGui::TextDisabled("Select a node, variable or event.");
@@ -1366,7 +1389,8 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
 		              isPlayer ? "Player class; lifecycle + input events."
 		                       : "Reusable class; lifecycle events + its own.",
-		              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass);
+			              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass,
+		              /*derivable=*/true);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }
