@@ -1261,6 +1261,11 @@ void EditorApplication::OnInit()
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
+			// An Entity class has a BODY, so it goes through the host that gives
+			// it one. Creating it here instead would produce a half-object: it
+			// would answer a Cast to Entity, own no entity, and never tick.
+			if (HorizonCode::engineClassIsA(a->baseClass, "Entity") && m_entityHost.running())
+				return m_entityHost.spawn(a->path).instance;
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
 			// The asset's OWN path is the class key, not the string the node
@@ -1273,8 +1278,18 @@ void EditorApplication::OnInit()
 			return inst;
 		};
 		svc.destroyObject = [this](uint32_t ref){
-			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
-				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
+			auto& rt = m_gameInstance.runtime();
+			if (ref == 0 || ref == rt.gameInstance()) return;
+			// An Entity class owns a body, and destroying the object has to take
+			// it too — otherwise a mesh without any logic stays standing in the
+			// scene. Read the entity BEFORE the instance goes (afterwards there
+			// is nothing left to ask) and destroy it AFTER, so Destruct can still
+			// reach its own entity.
+			const uint32_t owned = rt.ownedEntity(ref);
+			rt.destroy(ref); // fires "Destruct"
+			if (owned != 0 && m_editorWorld &&
+			    m_editorWorld->registry().valid(static_cast<Entity>(owned)))
+				m_editorWorld->destroyEntity(static_cast<Entity>(owned));
 		};
 		// EngineCall nodes dispatch through the HE::api registry against the editor
 		// world, physics and content — resolved at CALL time, so PIE entering and

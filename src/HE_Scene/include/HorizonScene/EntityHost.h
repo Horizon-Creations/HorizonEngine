@@ -68,8 +68,9 @@ public:
     const Map& instances() const { return m_byEntity; }
 
     // Destroy one binding: fires Destruct and removes the instance. The ENTITY
-    // is left alone — the caller decides whether it goes too (see destroyObject
-    // in the .cpp, which is the path that takes both).
+    // is left alone — this is the reaper's path, where the entity is already
+    // gone. The other direction (destroy the object, take its body with it)
+    // is the apps' destroyObject service, which reads Runtime::ownedEntity.
     void unbind(HorizonCode::InstanceId instance);
 
     // The component list a class of `baseClass` STARTS with, in the same prefab

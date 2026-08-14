@@ -379,3 +379,41 @@ TEST_CASE("a spawned class brings its authored components, and survives a save/l
 	HE::api::Ctx c{ &world, nullptr, &cm, nullptr, &rt, s.instance };
 	CHECK(HE::api::entity::self(c) == static_cast<uint32_t>(s.entity));
 }
+
+TEST_CASE("destroying an Entity-class object takes its body with it")
+{
+	// The other direction of the lifetime rule. The reaper covers "entity gone →
+	// instance goes"; this is "object gone → entity goes", and without it a mesh
+	// with no logic on it stays standing in the scene forever.
+	//
+	// The apps bind this as Runtime::Services::destroyObject; the ORDER is what
+	// matters and is asserted here: the entity id has to be read BEFORE the
+	// instance is destroyed (afterwards there is nothing left to ask) and the
+	// entity destroyed AFTER, so Destruct can still reach its own entity.
+	TempDir dir("he_test_entityhost_destroy");
+	ContentManager cm(dir.path.string());
+	const std::string cls = writeClass(cm, "Barrel", "Entity", lifecycleGraph());
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+
+	const EntityHost::Spawned s = host.spawn(cls);
+	REQUIRE(s.instance != 0);
+	REQUIRE(world.registry().valid(s.entity));
+
+	// Exactly what the apps' destroyObject service does.
+	const uint32_t owned = rt.ownedEntity(s.instance);
+	CHECK(owned == static_cast<uint32_t>(s.entity));
+	rt.destroy(s.instance);
+	CHECK(world.registry().valid(static_cast<Entity>(owned)));   // Destruct still had it
+	world.destroyEntity(static_cast<Entity>(owned));
+
+	CHECK_FALSE(world.registry().valid(s.entity));
+	CHECK_FALSE(rt.alive(s.instance));
+	// The host notices on its next tick and lets go of both map directions.
+	host.tick(0.016f);
+	CHECK(host.count() == 0);
+	CHECK(host.instanceOf(s.entity) == 0);
+}

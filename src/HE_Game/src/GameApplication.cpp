@@ -259,6 +259,17 @@ void GameApplication::OnInit()
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
 		svc.createObject  = [this](const std::string& p) -> uint32_t {
+			// An Entity class has a BODY, so it goes through the host that gives
+			// it one — before the compiled shortcut below, because it needs that
+			// body whichever backend ends up serving its logic (EntityHost::bind
+			// consults the compiled table itself). Creating it here instead would
+			// produce a half-object: answers a Cast to Entity, owns no entity,
+			// never ticks.
+			if (m_entityHost.running())
+				if (const HorizonCodeClassAsset* ea =
+				        contentManager().getHorizonCodeClass(contentManager().loadAsset(p));
+				    ea && HorizonCode::engineClassIsA(ea->baseClass, "Entity"))
+					return m_entityHost.spawn(ea->path).instance;
 			// Compiled class first (the whole per-asset hybrid is this lookup);
 			// miss → the interpreted asset path, unchanged.
 			if (auto compiled = HorizonCode::compiledClasses().create(p))
@@ -282,8 +293,17 @@ void GameApplication::OnInit()
 			return inst;
 		};
 		svc.destroyObject = [this](uint32_t ref){
-			if (ref != 0 && ref != m_gameInstance.runtime().gameInstance())
-				m_gameInstance.runtime().destroy(ref); // fires "Destruct"
+			auto& rt = m_gameInstance.runtime();
+			if (ref == 0 || ref == rt.gameInstance()) return;
+			// An Entity class owns a body; destroying the object takes it too, or
+			// a mesh without logic stays standing in the scene. Read the entity
+			// BEFORE the instance goes and destroy it AFTER, so Destruct can
+			// still reach its own entity.
+			const uint32_t owned = rt.ownedEntity(ref);
+			rt.destroy(ref); // fires "Destruct"
+			if (owned != 0 && m_world &&
+			    m_world->registry().valid(static_cast<Entity>(owned)))
+				m_world->destroyEntity(static_cast<Entity>(owned));
 		};
 		// EngineCall nodes dispatch through the HE::api registry against the CURRENT
 		// world, physics and content — all resolved at CALL time, which is what
