@@ -5,6 +5,7 @@
 #include "EditorWidgets.h"       // dangerMenuItem for node deletion
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
 #include <HorizonScene/EngineApi.h>
+#include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -238,8 +239,18 @@ bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph&
 {
 	if (!content || path.empty()) return false;
 	const HE::UUID id = content->loadAsset(path);
-	if (const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id); a && !a->graphJson.empty())
-		return HC::fromJson(a->graphJson, out);
+	// The FLATTENED graph, not the asset's own: this is what member menus are
+	// built from, and a class's members include everything it inherits. Reading
+	// the raw graphJson here is why a Cast to a derived class showed an empty
+	// member list — the child usually adds little of its own, and everything it
+	// got from its parent was simply not in the graph being read.
+	if (content->assetType(id) == HE::AssetType::HorizonCodeClass)
+	{
+		HC::ResolvedClass rc = HC::resolveClassAsset(*content, path);
+		if (!rc.ok) return false;
+		out = std::move(rc.graph);
+		return true;
+	}
 	if (const UIWidgetAsset* w = content->getWidget(id); w && !w->graphJson.empty())
 		return HC::fromJson(w->graphJson, out);
 	return false;
@@ -281,13 +292,14 @@ const HC::Graph* resolveClassGraph(const HC::Node& srcNode, const HC::Graph& sel
 
 namespace
 {
-// The engine base a class ASSET derives from, "" when unknown.
+// The ENGINE base a class asset lands on, "" when unknown. Resolved through the
+// chain rather than read off the asset: with class inheritance `baseClass` may
+// name another class, and engineClassMembers would then find nothing — which is
+// how a Cast to a derived class lost its inherited members.
 std::string assetBaseClass(ContentManager* content, const std::string& path)
 {
 	if (!content || path.empty()) return {};
-	const HE::UUID id = content->loadAsset(path);
-	const HorizonCodeClassAsset* a = content->getHorizonCodeClass(id);
-	return a ? a->baseClass : std::string();
+	return HC::resolveClassAsset(*content, path).engineBase;
 }
 }
 
