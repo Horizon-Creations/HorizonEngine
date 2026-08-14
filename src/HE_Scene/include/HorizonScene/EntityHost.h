@@ -33,6 +33,13 @@ public:
     // `runtime` and `world` must outlive this host's session.
     void begin(HorizonCode::Runtime& runtime, HorizonWorld& world, ContentManager& cm);
 
+    // Bind every entity in `entities` that names a HorizonCode class — the
+    // additive-zone counterpart of begin(), mirroring
+    // ScriptContext::startScriptsFor. Without it a streamed-in zone's Entity
+    // classes would never run: begin() only ever walked the world once.
+    // Returns how many were bound.
+    int bindFor(const std::vector<Entity>& entities);
+
     // Bind ONE already-existing entity to a class. Used by begin() and by
     // anything that adds a scripted entity mid-session. Returns 0 on failure
     // (no such asset, no graph). Fires Construct + BeginPlay.

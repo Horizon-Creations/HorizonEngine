@@ -417,3 +417,43 @@ TEST_CASE("destroying an Entity-class object takes its body with it")
 	CHECK(host.count() == 0);
 	CHECK(host.instanceOf(s.entity) == 0);
 }
+
+TEST_CASE("a streamed-in zone's entity classes are bound too")
+{
+	// begin() walks the world exactly once, so an entity that arrives LATER —
+	// an additively loaded zone — would never have its class started. That is
+	// what bindFor is for; the game's startScriptsFor calls both hosts with the
+	// zone's new entities.
+	TempDir dir("he_test_entityhost_zone");
+	ContentManager cm(dir.path.string());
+	const std::string cls = writeClass(cm, "Torch", "Entity", lifecycleGraph());
+
+	HorizonWorld world;
+	Runtime rt;
+	EntityHost host;
+	host.begin(rt, world, cm);
+	REQUIRE(host.count() == 0);
+
+	// The zone arrives.
+	std::vector<Entity> created;
+	for (int i = 0; i < 2; ++i)
+	{
+		const Entity e = world.createEntity("Torch");
+		world.addComponent(e, TransformComponent{});
+		ScriptComponent sc; sc.scriptAssetId = cm.loadAsset(cls);
+		world.addComponent(e, sc);
+		created.push_back(e);
+	}
+	created.push_back(world.createEntity("PlainProp"));   // no code: skipped, not an error
+
+	CHECK(host.bindFor(created) == 2);
+	CHECK(host.count() == 2);
+	for (int i = 0; i < 2; ++i)
+	{
+		const InstanceId inst = host.instanceOf(created[i]);
+		REQUIRE(inst != 0);
+		CHECK(rt.getVariable(inst, "beginPlays").i == 1);
+	}
+	host.tick(0.016f);
+	CHECK(rt.getVariable(host.instanceOf(created[0]), "ticks").i == 1);
+}

@@ -674,8 +674,14 @@ void GameApplication::executeSceneRequests()
 
 int GameApplication::startScriptsFor(const std::vector<entt::entity>& entities)
 {
-	if (!m_world || !m_scriptContext) return 0;
-	return m_scriptContext->startScriptsFor(entities, contentManager(), m_scriptInstances);
+	if (!m_world) return 0;
+	// A streamed-in zone carries both kinds of code, so both hosts get the
+	// new entities — the Lua/Python one and the HorizonCode one. Missing the
+	// second is how a zone's Entity classes would silently never run.
+	int started = m_entityHost.bindFor(entities);
+	if (m_scriptContext)
+		started += m_scriptContext->startScriptsFor(entities, contentManager(), m_scriptInstances);
+	return started;
 }
 
 void GameApplication::startPhysics()

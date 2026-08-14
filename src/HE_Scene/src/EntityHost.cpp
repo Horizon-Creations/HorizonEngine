@@ -49,6 +49,22 @@ void EntityHost::begin(HorizonCode::Runtime& runtime, HorizonWorld& world, Conte
 		HE_LOG_INFO(HorizonCode, "EntityHost: %zu entity class instance(s) running", bound);
 }
 
+int EntityHost::bindFor(const std::vector<Entity>& entities)
+{
+	if (!m_runtime || !m_world || !m_content) return 0;
+	int bound = 0;
+	for (const Entity e : entities)
+	{
+		if (!m_world->registry().valid(e)) continue;
+		const auto* sc = m_world->registry().try_get<ScriptComponent>(e);
+		if (!sc) continue;
+		const HorizonCodeClassAsset* a = classAssetOf(*m_content, *sc);
+		if (!a) continue;
+		if (bind(e, a->path) != 0) ++bound;
+	}
+	return bound;
+}
+
 HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& classPath)
 {
 	if (!m_runtime || !m_content || !m_world) return 0;
