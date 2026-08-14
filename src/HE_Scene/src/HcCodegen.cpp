@@ -1044,7 +1044,8 @@ private:
         // functions. Seeded with the CompiledInstance surface so an event called
         // "fireEvent" cannot shadow the override it is dispatched from.
         std::unordered_set<std::string> used = {
-            "classKey", "varInfos", "eventInfos", "fireEvent", "callFunction",
+            "classKey", "baseClassKey", "classTag", "classTag_",
+            "varInfos", "eventInfos", "fireEvent", "callFunction",
             "getVariable", "setVariable", "reseedVariables", "collectRefs",
             "resumeFrom", "bindContext", "slots", "RunState", "m_ctx",
         };
@@ -2295,6 +2296,11 @@ private:
         }
 
         h += "    const char* classKey() const override;\n";
+        // Only when the class actually has one: the base's default already
+        // returns "" (= Object), so emitting an override that repeats it would
+        // be noise in every generated widget and level script header.
+        if (!m_src.baseClass.empty())
+            h += "    const char* baseClassKey() const override;\n";
         h += "    // Identity for hc::as — see CompiledInstance::classTag.\n";
         h += "    static const void* classTag_();\n";
         h += "    const void* classTag() const override;\n";
@@ -2400,6 +2406,9 @@ private:
         }
 
         c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n";
+        if (!m_src.baseClass.empty())
+            c += "const char* " + m_cls + "::baseClassKey() const { return " +
+                 strLit(m_src.baseClass) + "; }\n";
         c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
         c += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
 

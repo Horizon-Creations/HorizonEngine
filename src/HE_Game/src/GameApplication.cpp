@@ -272,7 +272,11 @@ void GameApplication::OnInit()
 			if (!a) return 0u;
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
-			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
+			// The asset's OWN path is the class key, matching what the compiled
+			// branch above gets from classKey() — so one class stays one class
+			// to a Cast no matter which backend served this instance.
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
+				std::move(g), {}, { a->path, a->baseClass });
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};

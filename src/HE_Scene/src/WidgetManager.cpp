@@ -141,10 +141,13 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	// scriptId), so a widget is a first-class Ref object. Packaged builds may
 	// carry this widget's script compiled to native C++ (keyed by the same asset
 	// path); a table miss runs the graph interpreted, exactly as before.
+	// A widget's class key is its asset path, like any other class; it derives
+	// from nothing (a widget lives outside the entity world), so it stays Object.
+	const HorizonCode::ClassIdentity widgetCls{ assetPath, "Object" };
 	if (auto compiled = HorizonCode::compiledClasses().create(assetPath))
-		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings());
+		w.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), widgetCls);
 	else
-		w.scriptId = rt().add(std::move(graph), makeBindings());
+		w.scriptId = rt().add(std::move(graph), makeBindings(), widgetCls);
 	w.id = (int)w.scriptId;
 	m_instances.push_back(std::move(w));
 

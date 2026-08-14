@@ -2241,9 +2241,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			switch (projLang)
 			{
 			case ProjectScriptLanguage::HorizonCode:
+				// One entry per row of the engine class taxonomy
+				// (HorizonCode.h engineClasses()). "Object" is the plain class
+				// and stores an EMPTY baseClass — the spelling every asset
+				// predating the taxonomy already carries.
 				if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
-				if (ImGui::BeginMenu("HorizonCode Player"))
+				if (ImGui::BeginMenu("HorizonCode Entity"))
 				{
+					if (ImGui::MenuItem("Entity"))
+						tryCreate("NewEntity", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "Entity");
 					if (ImGui::MenuItem("Player Controller"))
 						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerController");
 					if (ImGui::MenuItem("Player Character"))

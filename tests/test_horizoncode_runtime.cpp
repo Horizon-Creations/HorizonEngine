@@ -1120,6 +1120,119 @@ TEST_CASE("engine events are a closed list, separate from a class's own")
     CHECK(std::string(click->hook) == "onClicked");
 }
 
+// ── The engine class taxonomy ───────────────────────────────────────────────
+
+TEST_CASE("the engine class chain runs Object → Entity → the two player classes")
+{
+    CHECK(findEngineClass("Entity") != nullptr);
+    CHECK(findEngineClass("PlayerCharacter") != nullptr);
+    CHECK(findEngineClass("Goblin") == nullptr);
+    // "" is how every asset predating the taxonomy spells Object on disk.
+    REQUIRE(findEngineClass("") != nullptr);
+    CHECK(std::string(findEngineClass("")->name) == "Object");
+
+    CHECK(engineClassIsA("PlayerCharacter", "Entity"));
+    CHECK(engineClassIsA("PlayerCharacter", "Object"));
+    CHECK(engineClassIsA("PlayerCharacter", ""));          // "" == Object
+    CHECK(engineClassIsA("Entity", "Object"));
+    CHECK(engineClassIsA("Entity", "Entity"));
+    CHECK(engineClassIsA("", "Object"));
+    // Downward and sideways are not "is a".
+    CHECK_FALSE(engineClassIsA("Entity", "PlayerCharacter"));
+    CHECK_FALSE(engineClassIsA("PlayerCharacter", "PlayerController"));
+    CHECK_FALSE(engineClassIsA("Object", "Entity"));
+    // A name the table does not know matches itself and nothing else — a
+    // garbage baseClass must not answer "yes" to every cast.
+    CHECK(engineClassIsA("Goblin", "Goblin"));
+    CHECK_FALSE(engineClassIsA("Goblin", "Entity"));
+    CHECK_FALSE(engineClassIsA("Goblin", "Object"));
+}
+
+TEST_CASE("a class's event catalog is its whole chain, base first")
+{
+    const auto object = engineClassEvents("");
+    REQUIRE(object.size() == 2);
+    CHECK(std::string(object[0]) == "Construct");
+    CHECK(std::string(object[1]) == "Destruct");
+
+    // Entity is where the game lifecycle starts, and a player class inherits it
+    // without restating it.
+    const auto entity = engineClassEvents("Entity");
+    const auto player = engineClassEvents("PlayerCharacter");
+    CHECK(entity.size() == 4);
+    CHECK(player.size() == entity.size());
+    auto has = [](const std::vector<const char*>& v, const char* n)
+    {
+        for (const char* e : v) if (std::string(e) == n) return true;
+        return false;
+    };
+    CHECK(has(entity, "Construct"));
+    CHECK(has(entity, "BeginPlay"));
+    CHECK(has(entity, "Tick"));
+    CHECK(has(player, "BeginPlay"));
+    CHECK_FALSE(has(object, "Tick"));
+
+    // Every event a class offers must be one the engine actually fires.
+    for (const char* e : player) CHECK(findEngineEvent(e) != nullptr);
+}
+
+TEST_CASE("an instance knows its class, so a reference can be tested against one")
+{
+    Runtime rt;
+    const InstanceId goblin = rt.add(Graph{}, {}, { "Content/Goblin.hasset", "Entity" });
+    const InstanceId hero   = rt.add(Graph{}, {}, { "Content/Hero.hasset",   "PlayerCharacter" });
+    const InstanceId plain  = rt.add(Graph{});   // registered without an identity
+
+    CHECK(rt.classKeyOf(goblin) == "Content/Goblin.hasset");
+    CHECK(rt.baseClassOf(hero) == "PlayerCharacter");
+
+    // Exact class.
+    CHECK(rt.instanceIsA(goblin, "Content/Goblin.hasset"));
+    CHECK_FALSE(rt.instanceIsA(goblin, "Content/Hero.hasset"));
+    // Up the engine chain.
+    CHECK(rt.instanceIsA(goblin, "Entity"));
+    CHECK(rt.instanceIsA(goblin, "Object"));
+    CHECK(rt.instanceIsA(hero, "PlayerCharacter"));
+    CHECK(rt.instanceIsA(hero, "Entity"));
+    CHECK_FALSE(rt.instanceIsA(hero, "PlayerController"));
+    CHECK_FALSE(rt.instanceIsA(goblin, "PlayerCharacter"));
+    // HorizonCode classes do not derive from one another: an asset path only
+    // ever matches itself, never another class's path.
+    CHECK_FALSE(rt.instanceIsA(hero, "Content/Goblin.hasset"));
+
+    // An instance nobody named is still an Object and nothing more.
+    CHECK(rt.instanceIsA(plain, "Object"));
+    CHECK_FALSE(rt.instanceIsA(plain, "Entity"));
+
+    // A dead or never-existing reference is not an instance of anything — this
+    // is what makes Cast on a destroyed object take its Failure branch.
+    rt.destroy(goblin);
+    CHECK_FALSE(rt.instanceIsA(goblin, "Entity"));
+    CHECK_FALSE(rt.instanceIsA(0, "Object"));
+    CHECK_FALSE(rt.instanceIsA(hero, ""));   // no class named "" to cast to
+}
+
+TEST_CASE("the GameInstance is keyed by its host, not by a file")
+{
+    Runtime rt;
+    const InstanceId gi = rt.setGameInstance(Graph{});
+    CHECK(rt.classKeyOf(gi) == "__game_instance__");
+    CHECK(rt.instanceIsA(gi, "__game_instance__"));
+    CHECK(rt.instanceIsA(gi, "Object"));
+    CHECK_FALSE(rt.instanceIsA(gi, "Entity"));
+}
+
+TEST_CASE("the scene entity an instance owns rides along with it")
+{
+    Runtime rt;
+    const InstanceId inst = rt.add(Graph{}, {}, { "Content/Door.hasset", "Entity" });
+    CHECK(rt.ownedEntity(inst) == 0u);        // nothing bound yet
+    rt.setOwnedEntity(inst, 42u);
+    CHECK(rt.ownedEntity(inst) == 42u);
+    rt.remove(inst);
+    CHECK(rt.ownedEntity(inst) == 0u);        // a gone instance owns nothing
+}
+
 // ── Converting wires ────────────────────────────────────────────────────────
 
 TEST_CASE("elementary types convert on the wire")

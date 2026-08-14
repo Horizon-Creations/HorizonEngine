@@ -383,6 +383,52 @@ struct EngineEventDesc
 HE_API const std::vector<EngineEventDesc>& engineEvents();
 HE_API const EngineEventDesc* findEngineEvent(const std::string& name);
 
+// ── the engine's own class taxonomy ─────────────────────────────────────────
+// What a HorizonCode class asset's `baseClass` may name, and what each name
+// brings with it. A base class is not a label: it decides which engine events
+// the class may handle, which components a new asset of that kind starts with,
+// and which built-in members its references offer in the editor.
+//
+// The chain is Object → Entity → {PlayerCharacter, PlayerController}, mirroring
+// Unreal's AActor → {AController, APawn}. `baseClass == ""` reads as "Object",
+// so assets authored before this table — they carry no CHUNK_HCBC — keep
+// loading and keep behaving exactly as they did.
+//
+// A member is spelled as an HE::api registry id rather than getting a dispatch
+// of its own: the editor inserts an Engine Call node with `targetParam` already
+// wired to the reference the menu was opened on. The member surface therefore
+// costs no runtime machinery, and Lua/Python/codegen get the same function for
+// free. Those ids are strings, so a typo here would be silent — a test in
+// tests/test_engine_api.cpp asserts every one resolves and that its
+// targetParam really is a Ref.
+struct EngineClassMember
+{
+    const char* label;        // what the member menu shows ("Possess")
+    const char* apiId;        // HE::api registry id ("player.possess")
+    int         targetParam;  // which of its params takes the target reference
+};
+struct EngineClassDesc
+{
+    const char* name;
+    const char* base;   // "" = the root (Object itself)
+    // ADDITIONAL to whatever the base already carries — engineClassEvents /
+    // engineClassMembers walk the chain and concatenate, so a row never
+    // restates its ancestors.
+    std::vector<const char*>       events;
+    std::vector<EngineClassMember> members;
+};
+HE_API const std::vector<EngineClassDesc>& engineClasses();
+HE_API const EngineClassDesc* findEngineClass(const std::string& name);
+// Is `derived` the same class as `base`, or below it in the chain? Empty reads
+// as "Object" on both sides. A name the table does not know is only ever equal
+// to itself — an asset with a garbage baseClass stays castable to itself and to
+// nothing else, rather than silently answering "yes" to everything.
+HE_API bool engineClassIsA(const std::string& derived, const std::string& base);
+// The events / members of `name` AND of everything it derives from, base-first.
+// Unknown name → empty.
+HE_API std::vector<const char*>       engineClassEvents(const std::string& name);
+HE_API std::vector<EngineClassMember> engineClassMembers(const std::string& name);
+
 // ── interned event ids ───────────────────────────────────────────────────────
 // The name is the format; the id is what dispatch runs on. Interning is
 // process-global and append-only, so an id stays valid for the whole session and
@@ -510,6 +556,16 @@ struct Context
     std::function<void(int nodeId, float seconds)> scheduleResume;
     // Is `target` a live instance? (Is Valid node.) Unbound → false.
     std::function<bool(uint32_t target)> isValid;
+    // Is `target` an instance of `classKey` — that exact class, or one derived
+    // from that engine base? (Cast node.) Unbound → false.
+    //
+    // This deliberately does NOT go through resolveCompiled/classTag: that pair
+    // is an exact pointer comparison over compiled instances only, so a Cast
+    // built on it would answer differently for a base class and for an
+    // interpreted target than the interpreter does. Both backends ask the
+    // Runtime, so both get the same answer. (Generated code may still take a
+    // direct route when the whole build is compiled — see hc::castRef.)
+    std::function<bool(uint32_t target, const std::string& classKey)> isA;
     // Per-instance NODE state (DoOnce fired?, FlipFlop side) — persistent across
     // runs like variables, but never part of the variable store/public surface.
     // Reset together with the variables (reseedVariables).

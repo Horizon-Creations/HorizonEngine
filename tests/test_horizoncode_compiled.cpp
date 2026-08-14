@@ -417,3 +417,56 @@ TEST_CASE("setGameInstanceCompiled installs the handle; a null instance keeps th
 	CHECK(rt.gameInstance() == gi);
 	CHECK(rt.alive(gi));
 }
+
+// ── class identity across both backends ─────────────────────────────────────
+
+TEST_CASE("a compiled instance names its own class when the caller does not")
+{
+	Runtime rt;
+	const InstanceId inst = rt.addCompiled(makeCompiled<MockCompiled>());
+	REQUIRE(inst != 0);
+	// Filled in from classKey()/baseClassKey(), so a caller holding nothing but
+	// the compiled object does not have to restate what the object knows.
+	CHECK(rt.classKeyOf(inst) == "Content/Logic/Mock.hasset");
+	CHECK(rt.instanceIsA(inst, "Content/Logic/Mock.hasset"));
+
+	// MockCompiled overrides no baseClassKey, and the DEFAULT is "" = Object —
+	// the same thing a class without a taxonomy row has always been. A
+	// hand-written CompiledInstance therefore keeps working unchanged.
+	CHECK(rt.baseClassOf(inst).empty());
+	CHECK(rt.instanceIsA(inst, "Object"));
+	CHECK_FALSE(rt.instanceIsA(inst, "Entity"));
+}
+
+TEST_CASE("an explicitly passed identity wins over the compiled instance's own")
+{
+	// The level script and the GameInstance are keyed by their HOST, not by the
+	// asset path the codegen happened to use — and PlayerHost trusts the asset's
+	// baseClass over a generated library that may predate an edit to it.
+	Runtime rt;
+	const InstanceId inst = rt.addCompiled(makeCompiled<MockCompiled>(), {},
+	                                       { "Content/Logic/Hero.hasset", "PlayerCharacter" });
+	CHECK(rt.classKeyOf(inst) == "Content/Logic/Hero.hasset");
+	CHECK(rt.instanceIsA(inst, "PlayerCharacter"));
+	CHECK(rt.instanceIsA(inst, "Entity"));
+	CHECK_FALSE(rt.instanceIsA(inst, "Content/Logic/Mock.hasset"));
+}
+
+TEST_CASE("interpreted and compiled instances of one class answer isA identically")
+{
+	// The whole point of routing Cast through the Runtime rather than classTag:
+	// which backend served an instance must never change what it IS.
+	Runtime rt;
+	const ClassIdentity cls{ "Content/Logic/Hero.hasset", "PlayerCharacter" };
+	const InstanceId compiled    = rt.addCompiled(makeCompiled<MockCompiled>(), {}, cls);
+	const InstanceId interpreted = rt.add(Graph{}, {}, cls);
+
+	for (const InstanceId id : { compiled, interpreted })
+	{
+		CHECK(rt.instanceIsA(id, "Content/Logic/Hero.hasset"));
+		CHECK(rt.instanceIsA(id, "PlayerCharacter"));
+		CHECK(rt.instanceIsA(id, "Entity"));
+		CHECK(rt.instanceIsA(id, "Object"));
+		CHECK_FALSE(rt.instanceIsA(id, "PlayerController"));
+	}
+}

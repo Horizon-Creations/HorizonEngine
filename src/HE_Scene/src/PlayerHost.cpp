@@ -48,13 +48,18 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm)
 		HorizonCode::InstanceId inst = 0;
 		// Compiled class first (same per-asset hybrid as createObject), keyed by
 		// the content-relative asset path; miss → the interpreted graph.
+		// Both branches pass the identity from the ASSET rather than letting the
+		// compiled one report its own: the asset is the authority on which base
+		// class it derives from, and a generated library that predates a
+		// baseClass edit would otherwise disagree with the editor.
+		const HorizonCode::ClassIdentity cls{ a->path, a->baseClass };
 		if (auto compiled = HorizonCode::compiledClasses().create(a->path))
-			inst = runtime.addCompiled(std::move(compiled));
+			inst = runtime.addCompiled(std::move(compiled), {}, cls);
 		else
 		{
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
-			inst = runtime.add(std::move(g));
+			inst = runtime.add(std::move(g), {}, cls);
 		}
 		runtime.fireConstruct(inst);
 		runtime.fireBeginPlay(inst);

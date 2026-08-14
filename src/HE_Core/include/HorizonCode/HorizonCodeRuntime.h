@@ -43,6 +43,24 @@ struct HostBindings
     std::function<void (InstanceId id)> hideSelf;
 };
 
+// Which class an instance IS — the thing a Ref alone never said. Without it the
+// runtime knows an instance's graph but not where the graph came from, so there
+// is nothing for a Cast to compare against.
+//
+// `key` is the canonical class key, spelled exactly like CompiledClassTable's:
+// the content-relative asset path for a class or widget, "__game_instance__" for
+// the GameInstance, "level:<uuid>" for a level script. `baseClass` is the
+// engine taxonomy row (HorizonCode.h engineClasses()); empty reads as "Object".
+//
+// Both default to empty so existing callers — and every test that just wants a
+// graph to run — keep compiling. An instance with no key is simply castable to
+// nothing but its base class, which is the honest answer for one nobody named.
+struct ClassIdentity
+{
+    std::string key;
+    std::string baseClass;
+};
+
 class HE_API Runtime
 {
 public:
@@ -58,11 +76,33 @@ public:
     // Register a running script. The runtime takes ownership of the graph (so a
     // caller's container reallocating can't dangle execution) and seeds the
     // instance's private variable store from the graph's declared defaults.
-    InstanceId add(Graph graph, HostBindings bindings = {});
+    InstanceId add(Graph graph, HostBindings bindings = {}, ClassIdentity cls = {});
     // Register a COMPILED script instance (ahead-of-time generated C++, see
     // HorizonCodeCompiled.h). Behaves exactly like add(): same id space, same
     // Context wiring, same delegation/GC participation. Returns 0 on null.
-    InstanceId addCompiled(CompiledPtr inst, HostBindings bindings = {});
+    // An omitted `cls` is filled in from the instance itself — a generated class
+    // already knows its classKey() and baseClassKey(), so callers on that path
+    // never have to repeat them.
+    InstanceId addCompiled(CompiledPtr inst, HostBindings bindings = {}, ClassIdentity cls = {});
+
+    // ── class identity ───────────────────────────────────────────────────────
+    // Is `id` an instance of `classKey` — either exactly that class, or a class
+    // derived from that engine base? This is what the Cast node runs on, and it
+    // is deliberately ONE function for both backends: an interpreted and a
+    // compiled instance must answer identically, or the codegen parity harness
+    // would be comparing two different languages.
+    bool instanceIsA(InstanceId id, const std::string& classKey) const;
+    // The instance's class key / engine base ("" when it was registered without
+    // one). Tooling and the Cast node's diagnostics; not a hot path.
+    const std::string& classKeyOf(InstanceId id) const;
+    const std::string& baseClassOf(InstanceId id) const;
+
+    // ── the scene entity an instance owns (Entity classes) ───────────────────
+    // Deliberately an opaque uint32: HE_Core knows nothing about entt, and this
+    // is the whole of what it needs to know. EntityHost (HE_Scene) sets it when
+    // it binds an instance to an entity; 0 = this instance owns none.
+    void     setOwnedEntity(InstanceId id, uint32_t entity);
+    uint32_t ownedEntity(InstanceId id) const;
     void       remove(InstanceId id);
     // Fire the instance's "Destruct" lifecycle event, then remove it — the
     // teardown counterpart to the "Construct" fired on create. Use this (not
@@ -203,6 +243,12 @@ private:
         Graph                                   graph;      // interpreted; empty for compiled
         CompiledPtr                             compiled;   // compiled backend (null = interpreted)
         HostBindings                            host;
+        // Which class this is (see ClassIdentity) and, for an Entity class, the
+        // scene entity it owns. Held here rather than derived from `compiled`
+        // so the interpreted and the compiled path answer instanceIsA through
+        // exactly the same field.
+        ClassIdentity                           cls;
+        uint32_t                                ownedEntity = 0;
         // Interpreted: the private variable store. Compiled: OVERFLOW store for
         // undeclared names only (Set on an undeclared name still creates an entry).
         std::unordered_map<std::string, Value>  vars;

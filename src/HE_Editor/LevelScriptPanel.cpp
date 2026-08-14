@@ -1081,9 +1081,27 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 	HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClassMutable(st.assetId);
 	if (!a) return false;
 	a->graphJson = HorizonCode::toJson(st.graph);
+	a->baseClass = st.baseClass;
 	if (!ctx.contentManager->saveAsset(*a)) return false;
 	st.dirty = false;
 	return true;
+}
+
+// "PlayerController" → "Player Controller". The taxonomy stores the C++-ish
+// spelling because it is a format (CHUNK_HCBC, and the Cast node's target key);
+// this is purely how it reads in the UI, so it stays a formatting rule rather
+// than a second column that could drift out of sync with the first.
+std::string humanClassName(const std::string& name)
+{
+	if (name.empty()) return "Object";
+	std::string out(1, name[0]);
+	for (size_t i = 1; i < name.size(); ++i)
+	{
+		if (std::isupper((unsigned char)name[i]) && !std::isupper((unsigned char)name[i - 1]))
+			out += ' ';
+		out += name[i];
+	}
+	return out;
 }
 }
 
@@ -1152,10 +1170,12 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.loaded = true;
 	}
 
-	const bool isPlayer = st.baseClass == "PlayerController" || st.baseClass == "PlayerCharacter";
-	const char* kindLabel = st.baseClass == "PlayerController" ? "Player Controller"
-	                      : st.baseClass == "PlayerCharacter"  ? "Player Character"
-	                      : "HorizonCode Class";
+	// Input events belong to the two player classes; everything else comes from
+	// the taxonomy chain, so a class one level down would inherit them without
+	// this line having to learn its name.
+	const bool isPlayer = HorizonCode::engineClassIsA(st.baseClass, "PlayerController") ||
+	                      HorizonCode::engineClassIsA(st.baseClass, "PlayerCharacter");
+	const std::string kindLabel = humanClassName(st.baseClass);
 
 	beginTabWindow(("##hcclass_" + assetPath).c_str(), pos, size);
 	{
@@ -1163,33 +1183,56 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		T::Bar bar;
 		T::assetHeader(bar, st.name.c_str(), T::iconCode, st.dirty);
 		bar.group();
-		bar.readout(nullptr, kindLabel, T::kFgDim);
+		// The base class was previously fixed at creation time, which made
+		// "turn this class into an Entity" a delete-and-recreate. It is a
+		// dropdown now; changing it re-scans the event catalog below.
+		bar.label("Base");
+		ImGui::SetNextItemWidth(160.0f);
+		if (ImGui::BeginCombo("##hcbase", kindLabel.c_str()))
+		{
+			for (const auto& c : HorizonCode::engineClasses())
+			{
+				const bool sel = HorizonCode::engineClassIsA(st.baseClass, c.name) &&
+				                 HorizonCode::engineClassIsA(c.name, st.baseClass);
+				if (ImGui::Selectable(humanClassName(c.name).c_str(), sel))
+				{
+					// "Object" is stored as the empty string — that is what
+					// every asset predating the taxonomy carries, and writing
+					// the word instead would be a needless format change.
+					const std::string picked = std::string(c.name) == "Object" ? std::string() : c.name;
+					if (picked != st.baseClass)
+					{
+						st.baseClass      = picked;
+						st.dirty          = true;
+						st.eventsScanTime = -1.0;   // rebuild the catalog
+					}
+				}
+			}
+			ImGui::EndCombo();
+		}
 		bar.endGroup();
 		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
-	// Classes expose the lifecycle events (Construct on create, Destruct on
-	// destroy) as a catalog, and can also name their own custom dispatcher events.
-	// Player classes additionally get the game lifecycle (BeginPlay/Tick) and one
-	// event set per InputAction asset in the project. Actions can be created while
-	// this tab is open, so the input catalog rescans on a coarse timer.
+	// The event catalog is the base-class chain's events (Object contributes
+	// Construct/Destruct, Entity adds BeginPlay/Tick), plus — for the player
+	// classes — one event set per InputAction asset in the project. Actions can
+	// be created while this tab is open, so that part rescans on a coarse timer.
 	const double now = ImGui::GetTime();
 	if (st.eventsScanTime < 0.0 || (isPlayer && now - st.eventsScanTime > 3.0))
 	{
+		st.events.clear();
+		for (const char* ev : HorizonCode::engineClassEvents(st.baseClass))
+			st.events.emplace_back(ev);
 		if (isPlayer)
-		{
-			st.events = { "Construct", "BeginPlay", "Tick", "Destruct" };
 			for (auto& ev : scanInputEvents(ctx.contentManager))
 				st.events.push_back(std::move(ev));
-		}
-		else
-			st.events = { "Construct", "Destruct" };
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
-	drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel,
+	drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
 	              isPlayer ? "Player class; lifecycle + input events."
-	                       : "Reusable class; Construct/Destruct + its own events.",
+	                       : "Reusable class; lifecycle events + its own.",
 	              ctx.contentManager, ctx.gameInstanceGraph, edited);
 	if (edited) st.dirty = true;
 	ImGui::End();

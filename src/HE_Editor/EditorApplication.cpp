@@ -1263,7 +1263,12 @@ void EditorApplication::OnInit()
 			if (!a) return 0u;
 			HorizonCode::Graph g;
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, g);
-			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(std::move(g));
+			// The asset's OWN path is the class key, not the string the node
+			// happened to spell: it is the same value the compiled class table
+			// is keyed by, so an interpreted and a compiled instance of one
+			// class are never two different classes to a Cast.
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
+				std::move(g), {}, { a->path, a->baseClass });
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};

@@ -569,16 +569,20 @@ void HorizonWorld::fireLevelLoaded()
     // Packaged builds: the export may have compiled this scene's level script to
     // native C++ — the key was set by the game runtime at scene load; a table
     // miss (editor, dev runs, per-asset fallback) interprets the graph as always.
+    // A level script's class key is its "level:<uuid>" host key, not a content
+    // path — it lives inside the .hescene, not in an asset of its own. It stays
+    // a plain Object: a level is not a scene entity and owns none.
+    const HorizonCode::ClassIdentity levelCls{ m_levelScriptKey, "Object" };
     if (!m_levelScriptKey.empty())
         if (auto compiled = HorizonCode::compiledClasses().create(m_levelScriptKey))
         {
-            m_levelInstance = scripts().addCompiled(std::move(compiled));
+            m_levelInstance = scripts().addCompiled(std::move(compiled), {}, levelCls);
             HE_LOG_INFO(HorizonCode, "Level script '%s' running (compiled native class)",
                         m_levelScriptKey.c_str());
             scripts().fireOnLevelLoaded(m_levelInstance);
             return;
         }
-    m_levelInstance = scripts().add(m_levelScript, {});
+    m_levelInstance = scripts().add(m_levelScript, {}, levelCls);
     HE_LOG_INFO(HorizonCode, "Level script running (interpreted, %zu node(s)) — OnLevelLoaded",
                 m_levelScript.nodes.size());
     scripts().fireOnLevelLoaded(m_levelInstance);

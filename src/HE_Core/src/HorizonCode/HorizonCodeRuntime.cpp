@@ -36,12 +36,13 @@ const Runtime::Inst* Runtime::find(InstanceId id) const
     return it != m_insts.end() ? &it->second : nullptr;
 }
 
-InstanceId Runtime::add(Graph graph, HostBindings bindings)
+InstanceId Runtime::add(Graph graph, HostBindings bindings, ClassIdentity cls)
 {
     const InstanceId id = m_next++;
     Inst inst;
     inst.graph = std::move(graph);
     inst.host  = std::move(bindings);
+    inst.cls   = std::move(cls);
     // Seed the private variable store from the graph's declared defaults so
     // GetVariable reads a valid value even before the first SetVariable.
     // Function-locals (scope != 0) live in the Runner's call frames, not here.
@@ -51,18 +52,63 @@ InstanceId Runtime::add(Graph graph, HostBindings bindings)
     return id;
 }
 
-InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings)
+InstanceId Runtime::addCompiled(CompiledPtr inst, HostBindings bindings, ClassIdentity cls)
 {
     if (!inst) return 0;
+    // A generated class already carries its own identity, so a caller that has
+    // nothing to add gets it filled in here rather than having to restate what
+    // the compiled backend would answer anyway. An explicitly passed value wins
+    // — the level script and the GameInstance are keyed by the host, not by the
+    // asset path the codegen happened to use.
+    if (cls.key.empty())       cls.key       = inst->classKey()      ? inst->classKey()      : "";
+    if (cls.baseClass.empty()) cls.baseClass = inst->baseClassKey()  ? inst->baseClassKey()  : "";
+
     const InstanceId id = m_next++;
     Inst rec;
     rec.compiled = std::move(inst);
     rec.host     = std::move(bindings);
+    rec.cls      = std::move(cls);
     auto [it, ok] = m_insts.emplace(id, std::move(rec));
     // No var seeding: the generated constructor initializes its members to the
     // declared defaults. Wire the same Context the interpreter would get.
     it->second.compiled->bindContext(makeContext(id));
     return id;
+}
+
+bool Runtime::instanceIsA(InstanceId id, const std::string& classKey) const
+{
+    const Inst* inst = find(id);
+    if (!inst || classKey.empty()) return false;
+    // The exact class first, then the engine taxonomy. An asset path only ever
+    // matches itself: HorizonCode classes do not derive from one another, so
+    // there is no chain to walk on that side.
+    if (!inst->cls.key.empty() && inst->cls.key == classKey) return true;
+    return engineClassIsA(inst->cls.baseClass, classKey);
+}
+
+const std::string& Runtime::classKeyOf(InstanceId id) const
+{
+    static const std::string kNone;
+    const Inst* inst = find(id);
+    return inst ? inst->cls.key : kNone;
+}
+
+const std::string& Runtime::baseClassOf(InstanceId id) const
+{
+    static const std::string kNone;
+    const Inst* inst = find(id);
+    return inst ? inst->cls.baseClass : kNone;
+}
+
+void Runtime::setOwnedEntity(InstanceId id, uint32_t entity)
+{
+    if (Inst* inst = find(id)) inst->ownedEntity = entity;
+}
+
+uint32_t Runtime::ownedEntity(InstanceId id) const
+{
+    const Inst* inst = find(id);
+    return inst ? inst->ownedEntity : 0u;
 }
 
 void Runtime::remove(InstanceId id)
@@ -99,10 +145,15 @@ void Runtime::clear()
     m_gameInstanceCompiled = nullptr;
 }
 
+// The GameInstance is keyed by the HOST, not by a file: it is the one class the
+// codegen already names "__game_instance__", and the loose GameInstance.hcode it
+// comes from is not a content asset with a path.
+static const ClassIdentity kGameInstanceIdentity{ "__game_instance__", "Object" };
+
 InstanceId Runtime::setGameInstance(Graph graph, HostBindings bindings)
 {
     if (m_gameInstance) remove(m_gameInstance);
-    m_gameInstance = add(std::move(graph), std::move(bindings));
+    m_gameInstance = add(std::move(graph), std::move(bindings), kGameInstanceIdentity);
     m_gameInstanceCompiled = nullptr;   // interpreted
     return m_gameInstance;
 }
@@ -111,7 +162,7 @@ InstanceId Runtime::setGameInstanceCompiled(CompiledPtr inst, HostBindings bindi
 {
     if (!inst) return m_gameInstance; // don't drop a working GameInstance for a null one
     if (m_gameInstance) remove(m_gameInstance);
-    m_gameInstance = addCompiled(std::move(inst), std::move(bindings));
+    m_gameInstance = addCompiled(std::move(inst), std::move(bindings), kGameInstanceIdentity);
     const Inst* gi = find(m_gameInstance);
     m_gameInstanceCompiled = gi ? gi->compiled.get() : nullptr;
     return m_gameInstance;
@@ -360,6 +411,8 @@ Context Runtime::makeContext(InstanceId id)
         m_pending.push_back({ id, nodeId, seconds > 0.0f ? seconds : 0.0f });
     };
     ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
+    ctx.isA = [this](uint32_t target, const std::string& classKey)
+    { return instanceIsA(target, classKey); };
     ctx.getNodeState = [this, id](int nodeId) -> Value
     {
         const Inst* i = find(id);

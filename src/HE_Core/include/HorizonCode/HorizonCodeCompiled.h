@@ -55,6 +55,15 @@ public:
     // visibility, and RTTI across that boundary is the kind of thing that breaks
     // on one platform and nowhere else. Default null = "not any generated class".
     virtual const void* classTag() const { return nullptr; }
+    // The engine base class this one derives from (HorizonCode.h engineClasses):
+    // "Entity", "PlayerCharacter", "PlayerController", … The Runtime needs it to
+    // answer a Cast to a BASE class, which classTag cannot — that one is an
+    // exact per-class address and knows nothing about a chain.
+    //
+    // The default is "" = Object, which is what a class without a taxonomy row
+    // has always effectively been. Overriding it is therefore purely additive:
+    // a hand-written CompiledInstance keeps behaving exactly as before.
+    virtual const char* baseClassKey() const { return ""; }
     virtual const std::vector<CompiledVarInfo>& varInfos() const
     { static const std::vector<CompiledVarInfo> kNone; return kNone; }
     virtual const std::vector<CompiledEventInfo>& eventInfos() const

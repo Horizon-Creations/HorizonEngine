@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <unordered_set>
 #include <vector>
 
@@ -1389,6 +1390,88 @@ const EngineEventDesc* findEngineEvent(const std::string& name)
     for (const EngineEventDesc& e : engineEvents())
         if (name == e.name) return &e;
     return nullptr;
+}
+
+// ── the engine's own class taxonomy ─────────────────────────────────────────
+// Each row lists only what it ADDS to its base; engineClassEvents/Members walk
+// the chain. Entity is where the game lifecycle starts, because BeginPlay and
+// Tick only mean something for a class the world actually runs — a plain Object
+// is created and destroyed on demand by whoever holds its reference.
+const std::vector<EngineClassDesc>& engineClasses()
+{
+    static const std::vector<EngineClassDesc> k = {
+        { "Object",           "",       { "Construct", "Destruct" }, {} },
+        { "Entity",           "Object", { "BeginPlay", "Tick" },     {} },
+        { "PlayerCharacter",  "Entity", {},                          {} },
+        { "PlayerController", "Entity", {},                          {} },
+    };
+    return k;
+}
+
+namespace
+{
+// "" is how every asset predating the taxonomy spells "Object" on disk, and
+// resolving it here rather than at each call site is what keeps those assets
+// from falling out of every chain walk below.
+const char* normalizedClassName(const std::string& name)
+{
+    return name.empty() ? "Object" : name.c_str();
+}
+}
+
+const EngineClassDesc* findEngineClass(const std::string& name)
+{
+    const char* n = normalizedClassName(name);
+    for (const EngineClassDesc& c : engineClasses())
+        if (std::strcmp(n, c.name) == 0) return &c;
+    return nullptr;
+}
+
+bool engineClassIsA(const std::string& derived, const std::string& base)
+{
+    const char* d = normalizedClassName(derived);
+    const char* b = normalizedClassName(base);
+    if (std::strcmp(d, b) == 0) return true;
+
+    // Unknown names never enter the loop below (findEngineClass returns null),
+    // so a garbage baseClass answers "yes" only to the equality above.
+    for (const EngineClassDesc* c = findEngineClass(d); c && *c->base; )
+    {
+        if (std::strcmp(c->base, b) == 0) return true;
+        c = findEngineClass(c->base);
+    }
+    return false;
+}
+
+namespace
+{
+// Base-first walk shared by the two accessors: collect the chain from the named
+// class up to the root, then append each row's own additions in reverse so the
+// result reads Object's entries first.
+std::vector<const EngineClassDesc*> classChain(const std::string& name)
+{
+    std::vector<const EngineClassDesc*> chain;
+    for (const EngineClassDesc* c = findEngineClass(name); c; c = *c->base ? findEngineClass(c->base) : nullptr)
+        chain.push_back(c);
+    std::reverse(chain.begin(), chain.end());
+    return chain;
+}
+}
+
+std::vector<const char*> engineClassEvents(const std::string& name)
+{
+    std::vector<const char*> out;
+    for (const EngineClassDesc* c : classChain(name))
+        out.insert(out.end(), c->events.begin(), c->events.end());
+    return out;
+}
+
+std::vector<EngineClassMember> engineClassMembers(const std::string& name)
+{
+    std::vector<EngineClassMember> out;
+    for (const EngineClassDesc* c : classChain(name))
+        out.insert(out.end(), c->members.begin(), c->members.end());
+    return out;
 }
 
 // ── interned event ids ───────────────────────────────────────────────────────

@@ -845,17 +845,22 @@ void startExport(AppContext& ctx)
                         {
                             const HE::UUID id = ctx.contentManager->loadAsset(c.path);
                             std::string json;
+                            std::string baseClass;
                             if (type == HE::AssetType::HorizonCodeClass)
                             {
                                 if (const auto* a = ctx.contentManager->getHorizonCodeClass(id))
-                                    json = a->graphJson;
+                                {
+                                    json      = a->graphJson;
+                                    baseClass = a->baseClass;
+                                }
                             }
                             else if (const auto* w = ctx.contentManager->getWidget(id))
                                 json = w->graphJson;
                             if (json.empty()) continue;   // no logic → nothing to compile
                             HE::hccg::ClassSource src;
-                            src.key   = c.path;
-                            src.label = c.path;
+                            src.key       = c.path;
+                            src.label     = c.path;
+                            src.baseClass = baseClass;
                             if (HorizonCode::fromJson(json, src.graph))
                                 hcSources.push_back(std::move(src));
                         }

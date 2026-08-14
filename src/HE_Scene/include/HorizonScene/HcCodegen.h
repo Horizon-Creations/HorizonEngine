@@ -23,6 +23,11 @@ struct ClassSource
     std::string        key;     // canonical registry key (asset path / "level:…" / "__game_instance__")
     std::string        label;   // for diagnostics ("MainMenu.hasset")
     HorizonCode::Graph graph;   // post-fromJson (signatures synced, subgraphs assigned)
+    // Engine base class (HorizonCode.h engineClasses()); "" = Object. Emitted as
+    // baseClassKey(), which is what lets a Cast to a BASE class answer the same
+    // way for a compiled instance as for an interpreted one. Widgets, level
+    // scripts and the GameInstance leave it empty.
+    std::string        baseClass;
 };
 
 // What a graph the generator cannot compile means for the build.
