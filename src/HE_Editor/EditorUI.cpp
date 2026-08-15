@@ -790,6 +790,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	static std::string   s_guardArg;            // path payload for OpenScenePath
 	static bool          s_openUnsavedModal = false;
 	static bool          s_guardSaveThenAct = false;
+	// The same stash for the step BEFORE that one: the confirmation a host gets
+	// when a session-ending action would drop the peers connected to this editor.
+	static GuardedAction s_collabAction     = GuardedAction::None;
+	static std::string   s_collabArg;
+	static bool          s_openCollabModal  = false;
 	// Why the prompt's last save attempt failed ("" = none). A failed write must
 	// never let the guarded action run — the modal stays open with the reason and
 	// the entries that are still dirty.
@@ -1031,7 +1036,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		return out;
 	};
-	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})
+	// The unsaved-changes half, once anything upstream has agreed to proceed.
+	auto requestGuardedInner = [&](GuardedAction a, const std::string& arg)
 	{
 		const bool tabsDirty = endsSession(a) && !unsavedTabEntries().empty();
 		if (!ctx.sceneDirty && !tabsDirty) { runGuardedAction(a, arg); return; }
@@ -1040,6 +1046,28 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		s_guardSaveThenAct = false;
 		s_guardSaveError.clear();
 		s_openUnsavedModal = true;
+	};
+	// Ending the session while HOSTING ends it for everyone: the peers are
+	// connected to THIS editor, and a project switch takes the session down with
+	// it (endProjectSession leaves before it touches anything, or the teardown
+	// would replicate as our deletion). That is a consequence for other people,
+	// so it gets its own confirmation — asked BEFORE the unsaved-changes prompt,
+	// because a "no" here means none of the rest matters. A guest disconnects
+	// only itself and is not asked.
+	auto hostsCollab = [&](GuardedAction a)
+	{
+		return endsSession(a) && ctx.collab && ctx.collab->inSession() && ctx.collab->isHost();
+	};
+	auto requestGuarded = [&](GuardedAction a, const std::string& arg = std::string{})
+	{
+		if (hostsCollab(a))
+		{
+			s_collabAction     = a;
+			s_collabArg        = arg;
+			s_openCollabModal  = true;
+			return;
+		}
+		requestGuardedInner(a, arg);
 	};
 
 	// An OS-level close (window X / Cmd+Q) that EditorApplication vetoed because of
@@ -1297,6 +1325,67 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     // ── Export Project modal ────────────────────────────────────────────────
     ExportDialogPanel::render(ctx);
+
+    // ── Hosting-a-session confirmation ──────────────────────────────────────
+    // Ahead of the unsaved-changes prompt, because it is the question with the
+    // wider consequence: closing or switching the project while hosting takes
+    // the session down for every peer connected to this editor. Confirm hands
+    // the action on to the ordinary guard, which may still ask about unsaved
+    // work; Cancel drops it entirely and the session keeps running.
+    if (s_openCollabModal)
+    {
+        ImGui::OpenPopup("Collaboration Session##host");
+        s_openCollabModal = false;
+    }
+    {
+        EditorWidgets::pinDialogToEditorWindow(ImVec2(420.0f, 0.0f));
+        if (ImGui::BeginPopupModal("Collaboration Session##host", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        {
+            const GuardedAction action = s_collabAction;
+            const std::string   arg    = s_collabArg;
+            {
+                EditorWidgets::WrapText wrap;
+                // The participant list includes this editor, so the count of
+                // OTHERS is one less — and never negative, because a host that
+                // nobody has joined yet still appears in it.
+                const int peers = ctx.collab
+                    ? std::max(0, static_cast<int>(ctx.collab->participants().size()) - 1) : 0;
+                ImGui::TextUnformatted("You are hosting a collaboration session.");
+                ImGui::Spacing();
+                if (peers > 0)
+                    ImGui::Text("%d other %s connected to this editor.",
+                                peers, peers == 1 ? "person is" : "people are");
+                ImGui::TextUnformatted(
+                    action == GuardedAction::Quit
+                        ? "Quitting ends the session for everyone."
+                        : "Leaving this project ends the session for everyone. "
+                          "A session belongs to one project, so it cannot follow "
+                          "you into the next.");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            const char* runLabel = action == GuardedAction::Quit      ? "Quit Anyway"
+                                 : action == GuardedAction::CloseProject ? "Close Anyway"
+                                                                        : "Switch Anyway";
+            if (EditorWidgets::dangerButton(runLabel, ImVec2(130, 0)))
+            {
+                s_collabAction = GuardedAction::None;
+                ImGui::CloseCurrentPopup();
+                requestGuardedInner(action, arg);
+            }
+            ImGui::SameLine();
+            if (EditorWidgets::cancelButton("Cancel", ImVec2(110, 0)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Escape))
+            {
+                s_collabAction = GuardedAction::None;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
 
     // ── Unsaved-changes modal ───────────────────────────────────────────────
     // Raised by requestGuarded() when a scene-discarding action is attempted with a
