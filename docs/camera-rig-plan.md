@@ -9,18 +9,23 @@ inklusive der Option, die Ziel-Entity mit der Kamera mitzudrehen.
 
 ## Stand
 
-**Umgesetzt** (`2e2505fc`, `ff528aa4`, `8dc841a4`, `21d7cac9`, 1610 Tests grün):
+**Umgesetzt** (`2e2505fc` … `7ad81c48`, 1625 Tests grün):
 
 * §2.4 Physik-Stomp gefixt — Rigid-Body-Rückschreiben überspringt Character-Entities
 * §2.3 `HE::propagateTransforms` als geteilter Helper
 * §3 `CameraRigComponent` + `CameraRigController`, beide Modi, Rotationskopplung
 * §2.2 Tick-Reihenfolge: Kamera nach der Physik, in Spiel und PIE
 * §4 Inspector, Serializer (JSON + CBOR), Registry-Zeilen für alle vier Frontends
+* **Spring-Arm-Kollision** — `PhysicsWorld::sphereCast` (überspringt Trigger) plus
+  `ignoreEntityId` an `raycast`; Default an, Radius 0.2 m. Ersetzt §5 unten.
 
 **Nicht verifiziert:** kein Durchlauf im echten Editor/Spiel — bisher nur durch
-Tests abgedeckt. Optik, Maus-Gefühl und PIE-Capture stehen noch aus.
+Tests abgedeckt. Optik, Maus-Gefühl, Kollisions-Popping und PIE-Capture stehen aus.
 
-**Offen:** alles unter §5, plus der Nebenfund in §6.
+**Offen:** der Rest von §5, plus der Nebenfund in §6. Dazu ein Nachbar-Befund:
+die eingefrorenen kinematischen Proxys ANDERER Figuren bleiben unsichtbare
+Hindernisse an deren Spawnpunkten — der Arm ignoriert nur sein eigenes Ziel.
+Erledigt sich mit dem Transform→`MoveKinematic`-Push aus §2.4.
 
 ---
 
@@ -234,11 +239,16 @@ Aufwand: rund 2–3 Personentage, deckt sich mit der MASTERPLAN-Schätzung für 
 
 ## 5. Bewusst nicht in v1
 
-* **Spring-Arm-Kollision.** `PhysicsWorld::raycast` hat keine Ignore-Liste und
-  keinen Layer-Filter (`PhysicsWorld.h:44`) und liefert nur den nächsten
-  Treffer — ein Ray vom Pivot nach hinten trifft zuerst die Figur selbst.
-  Empfehlung: einen `ignoreEntity`-Parameter mitnehmen (klein, passt in
-  MASTERPLAN E2). Ohne Kollision fährt die Kamera durch jede Wand.
+* ~~**Spring-Arm-Kollision.**~~ **Erledigt** (`7ad81c48`) — und anders als hier
+  geplant: statt eines Rays mit Ignore-Parameter ein **Kugel-Sweep**
+  (`PhysicsWorld::sphereCast`). Ein Ray ist eine Linie und rutscht an Wandkanten
+  vorbei, durch die die Near Plane dann schneidet; der Sweep stoppt den
+  Mittelpunkt einen Radius vor der Fläche, womit der Radius die Kamera-Freiheit
+  *ist* statt ein Tuning-Wert. `raycast` hat den `ignoreEntityId`-Parameter
+  trotzdem bekommen. Zwei Fallen dabei: Jolt liefert **Sensoren** in Queries per
+  Default mit (sphereCast filtert sie, raycast bewusst nicht — Skripte hängen am
+  alten Verhalten), und ignoriert werden muss die **Ziel-Entity**, was zugleich
+  den eingefrorenen kinematischen Proxy am Spawnpunkt abdeckt.
 * **Weiches Nachdrehen** (`FollowSmoothed` + `turnRate` °/s) — sinnvolle
   Erweiterung, aber Tuning-Fläche; erst wenn die harte Kopplung steht.
 * **Positions-Lag / Kamera-Glättung**, Blending zwischen Rigs, Shake, FOV-Kick.
