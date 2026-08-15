@@ -55,12 +55,14 @@ void signatureInto(const Node& n, NodeSig& s)
         if (n.hasArg) s.dataOuts = { { "Value", n.propType, false, tn } };
         break;
     case T::InputAction:
-        // hasArg = this action is an AXIS: one chain per frame carrying the
-        // value, rather than the press/release pair a digital action has.
+        // Three shapes, from two fields that both already persist: hasArg says
+        // "this action is an axis", propType which KIND of axis. A digital
+        // action has the press/release pair; an axis has one chain per frame
+        // carrying its value, Float for one dimension and Vec2 for two.
         if (n.hasArg)
         {
             s.execOuts = { { "", P::Exec } };
-            s.dataOuts = { { "Value", P::Float } };
+            s.dataOuts = { { "Value", n.propType == P::Vec2 ? P::Vec2 : P::Float } };
         }
         else
         {
@@ -621,7 +623,12 @@ const char* nodeTooltip(NodeType t)
         case T::InputAction:
             return "Entered when the chosen Input Action fires: Pressed when it goes down,\n"
                    "Released when it comes up. An AXIS action has neither — it runs once a\n"
-                   "frame and hands you its Value instead.";
+                   "frame and hands you its Value instead (a 2D axis hands you both\n"
+                   "components at once).\n"
+                   "A value from a MOUSE source is a displacement, not a rate: it already\n"
+                   "says how far the mouse moved this frame, so do NOT multiply it by delta\n"
+                   "time the way you would a key or stick axis — that makes it depend on\n"
+                   "the frame rate, and backwards at that.";
         case T::MakeStruct:
             return "Builds a value of the chosen Struct asset: one input per field,\n"
                    "unwired fields fall back to their declared defaults.";
@@ -649,8 +656,10 @@ const char* nodeTooltip(NodeType t)
 std::vector<std::string> inputActionEventNames(const Node& n)
 {
     if (n.type != T::InputAction || n.s.empty()) return {};
-    if (n.hasArg) return { HE::inputEventAxis(n.s) };
-    return { HE::inputEventPressed(n.s), HE::inputEventReleased(n.s) };
+    if (!n.hasArg) return { HE::inputEventPressed(n.s), HE::inputEventReleased(n.s) };
+    // A two-dimensional axis answers to its OWN name, never to ".Axis" — see
+    // inputEventAxis2D for why a Vec2 must not arrive where a Float is read.
+    return { n.propType == P::Vec2 ? HE::inputEventAxis2D(n.s) : HE::inputEventAxis(n.s) };
 }
 
 int inputActionChainFor(const Node& n, const std::string& eventName)
@@ -2247,7 +2256,7 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::Event:       return coerce(m_eventArg, n.propType);
     // The axis value rides in on the same event argument the host sends; a
     // digital action has no data-out to reach this at all.
-    case T::InputAction: return coerce(m_eventArg, P::Float);
+    case T::InputAction: return coerce(m_eventArg, n.propType == P::Vec2 ? P::Vec2 : P::Float);
     case T::ConstFloat:  return Value::ofFloat(n.f[0]);
     case T::ConstBool:   return Value::ofBool(n.f[0] != 0.0f);
     case T::ConstInt:    return Value::ofInt((int)n.f[0]);

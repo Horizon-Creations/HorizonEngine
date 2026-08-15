@@ -1502,9 +1502,12 @@ private:
             return coerceCall("rs.eventArg", trOf(n.propType, false, n.typeName));
         case NT::InputAction:
             // An axis action's Value rides in on the same argument (the host
-            // sends it with the ".Axis" event); a digital one has no data-out.
+            // sends it with the axis event); a digital one has no data-out.
+            // Vec2 for a two-dimensional axis — coercing that to a Float would
+            // silently hand the graph one component or a zero.
             m_usesEventArg = m_rsTouched = true;
-            return coerceCall("rs.eventArg", trOf(PT::Float, false, {}));
+            return coerceCall("rs.eventArg",
+                              trOf(n.propType == PT::Vec2 ? PT::Vec2 : PT::Float, false, {}));
         case NT::FunctionEntry:
         {
             // §3.4: FunctionEntry param reads the INNERMOST frame — in C++ that

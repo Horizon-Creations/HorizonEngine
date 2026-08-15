@@ -700,6 +700,16 @@ TEST_CASE("codegen parity: Input Action nodes route their own chains")
 	p.fire("Input.Move.Axis", 0, Value::ofFloat(-1.0f));
 	CHECK(p.var("axis").f == doctest::Approx(-1.0f));
 
+	// A TWO-dimensional axis: its own event name, and a Vec2 all the way
+	// through. Coercing it to a Float anywhere would leave one component or a
+	// zero, which is exactly what a separate name exists to prevent.
+	p.fire("Input.Look.Axis2D", 0, Value::ofVec2(glm::vec2(2.0f, -3.0f)));
+	CHECK(p.var("look").v2.x == doctest::Approx(2.0f));
+	CHECK(p.var("look").v2.y == doctest::Approx(-3.0f));
+	// …and it does NOT answer to the one-dimensional name.
+	p.fire("Input.Look.Axis", 0, Value::ofFloat(7.0f));
+	CHECK(p.var("look").v2.x == doctest::Approx(2.0f));
+
 	// Names this class does not handle reach nothing, on either backend.
 	p.fire("Input.Move.Pressed", 0, Value::ofFloat(9.0f));
 	p.fire("Input.Fire.Pressed");
@@ -712,7 +722,7 @@ TEST_CASE("codegen parity: Input Action nodes route their own chains")
 	for (const auto& b : p.comp.rt.eventBindingsOf(p.comp.id)) names.push_back(b.name);
 	std::sort(names.begin(), names.end());
 	CHECK(names == std::vector<std::string>{ "Input.Jump.Pressed", "Input.Jump.Released",
-	                                         "Input.Move.Axis" });
+	                                         "Input.Look.Axis2D", "Input.Move.Axis" });
 }
 
 TEST_CASE("codegen parity: a base class with no variables at all")

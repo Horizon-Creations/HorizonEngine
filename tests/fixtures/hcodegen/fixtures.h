@@ -1716,6 +1716,7 @@ inline HE::hccg::ClassSource fxInputActions()
     f.var("downs", PT::Float);
     f.var("ups", PT::Float);
     f.var("axis", PT::Float);
+    f.var("look", PT::Vec2);
 
     // Digital: two exec-outs off ONE node, counting separately so a chain that
     // ran the wrong body shows up as the wrong number rather than not at all.
@@ -1741,6 +1742,18 @@ inline HE::hccg::ClassSource fxInputActions()
         const int s = f.setVar("axis", PT::Float);
         f.exec(a, s);
         f.data(a, 0, s, 0);   // the node's Value data-out
+    }
+    // A TWO-dimensional axis: same one chain, but the Value is a Vec2 and the
+    // event it answers to is ".Axis2D". Coercing that to a Float somewhere in
+    // the generated code would hand the graph one component or a zero, and this
+    // is the case that would catch it.
+    {
+        Node ia; ia.type = NT::InputAction; ia.s = "Look";
+        ia.hasArg = true; ia.propType = PT::Vec2;
+        const int a = f.add(ia);
+        const int s = f.setVar("look", PT::Vec2);
+        f.exec(a, s);
+        f.data(a, 0, s, 0);
     }
     return f.done("input_actions", "PlayerCharacter");
 }
