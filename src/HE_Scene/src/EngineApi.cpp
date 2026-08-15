@@ -4,6 +4,7 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/AudioEngine.h"
 #include "HorizonScene/Components/CameraComponent.h"
+#include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
@@ -333,6 +334,76 @@ void setFov(Ctx& c, float degrees)
     const entt::entity e = mainCameraEntity(c.world);
     if (e == entt::null) return;
     c.world->registry().get<CameraComponent>(e).fovDegrees = degrees;
+}
+
+// ── Camera rig ───────────────────────────────────────────────────────────────
+namespace {
+CameraRigComponent* rigOf(Ctx& c)
+{
+    if (!c.world) return nullptr;
+    const entt::entity e = mainCameraEntity(c.world);
+    if (e == entt::null) return nullptr;
+    return c.world->registry().try_get<CameraRigComponent>(e);
+}
+} // namespace
+
+void setRigMode(Ctx& c, int mode)
+{
+    if (auto* r = rigOf(c))
+        r->mode = (mode == 0) ? CameraRigComponent::Mode::FirstPerson
+                              : CameraRigComponent::Mode::ThirdPerson;
+}
+int getRigMode(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r ? static_cast<int>(r->mode) : 0;
+}
+void setRigTarget(Ctx& c, int entityId)
+{
+    auto* r = rigOf(c);
+    if (!r) return;
+    // An empty id is the documented "follow the possessed player", so an entity
+    // that does not resolve lands on that rather than on nothing at all.
+    const auto e = static_cast<entt::entity>(static_cast<uint32_t>(entityId));
+    r->target = (entityId > 0 && c.world->registry().valid(e)) ? c.world->entityId(e)
+                                                               : HE::UUID{};
+}
+void setArmLength(Ctx& c, float length)
+{
+    if (auto* r = rigOf(c)) r->armLength = length;
+}
+float getArmLength(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r ? r->armLength : 0.0f;
+}
+void setTargetYawMode(Ctx& c, int mode)
+{
+    if (auto* r = rigOf(c))
+        r->targetYaw = (mode == 0) ? CameraRigComponent::TargetYaw::Free
+                                   : CameraRigComponent::TargetYaw::Follow;
+}
+int getTargetYawMode(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r ? static_cast<int>(r->targetYaw) : 0;
+}
+float getRigYaw(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r ? r->yaw : 0.0f;
+}
+float getRigPitch(Ctx& c)
+{
+    auto* r = rigOf(c);
+    return r ? r->pitch : 0.0f;
+}
+void addYawPitch(Ctx& c, float dYaw, float dPitch)
+{
+    auto* r = rigOf(c);
+    if (!r) return;
+    r->yaw   += dYaw;
+    r->pitch  = std::clamp(r->pitch + dPitch, r->pitchMin, r->pitchMax);
 }
 } // namespace camera
 
@@ -1521,6 +1592,28 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "camera.setFov", "Camera", true, {{"degrees", P::Float}}, {}, "HE::api::camera::setFov",
             [](Ctx& c, const VV& a){ camera::setFov(c, aF(a, 0)); return VV{}; } });
 
+        // Camera rig (CameraRigComponent on that same main camera)
+        t.push_back({ "camera.setRigMode", "Camera", true, {{"mode", P::Int}}, {}, "HE::api::camera::setRigMode",
+            [](Ctx& c, const VV& a){ camera::setRigMode(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getRigMode", "Camera", false, {}, {{"mode", P::Int}}, "HE::api::camera::getRigMode",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(camera::getRigMode(c)) }; } });
+        t.push_back({ "camera.setRigTarget", "Camera", true, {{"entity", P::Int}}, {}, "HE::api::camera::setRigTarget",
+            [](Ctx& c, const VV& a){ camera::setRigTarget(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "camera.setArmLength", "Camera", true, {{"length", P::Float}}, {}, "HE::api::camera::setArmLength",
+            [](Ctx& c, const VV& a){ camera::setArmLength(c, aF(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getArmLength", "Camera", false, {}, {{"length", P::Float}}, "HE::api::camera::getArmLength",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getArmLength(c)) }; } });
+        t.push_back({ "camera.setTargetYawMode", "Camera", true, {{"mode", P::Int}}, {}, "HE::api::camera::setTargetYawMode",
+            [](Ctx& c, const VV& a){ camera::setTargetYawMode(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "camera.getTargetYawMode", "Camera", false, {}, {{"mode", P::Int}}, "HE::api::camera::getTargetYawMode",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(camera::getTargetYawMode(c)) }; } });
+        t.push_back({ "camera.getRigYaw", "Camera", false, {}, {{"degrees", P::Float}}, "HE::api::camera::getRigYaw",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getRigYaw(c)) }; } });
+        t.push_back({ "camera.getRigPitch", "Camera", false, {}, {{"degrees", P::Float}}, "HE::api::camera::getRigPitch",
+            [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getRigPitch(c)) }; } });
+        t.push_back({ "camera.addYawPitch", "Camera", true, {{"deltaYaw", P::Float}, {"deltaPitch", P::Float}}, {}, "HE::api::camera::addYawPitch",
+            [](Ctx& c, const VV& a){ camera::addYawPitch(c, aF(a, 0), aF(a, 1)); return VV{}; } });
+
         // Environment — EVERY EnvironmentComponent field, generated from the
         // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
 #define HE_ENV_ROW_FLOAT(m, Name, disp) \
@@ -1768,6 +1861,13 @@ const std::vector<ApiFn>& registry()
             { "camera.getPosition", "Get Camera Position" }, { "camera.setPosition", "Set Camera Position" },
             { "camera.getRotation", "Get Camera Rotation" }, { "camera.setRotation", "Set Camera Rotation" },
             { "camera.getFov", "Get Camera FOV" },           { "camera.setFov", "Set Camera FOV" },
+            { "camera.setRigMode", "Set Camera Mode" },      { "camera.getRigMode", "Get Camera Mode" },
+            { "camera.setRigTarget", "Set Camera Target" },
+            { "camera.setArmLength", "Set Camera Distance" },{ "camera.getArmLength", "Get Camera Distance" },
+            { "camera.setTargetYawMode", "Set Target Rotation Mode" },
+            { "camera.getTargetYawMode", "Get Target Rotation Mode" },
+            { "camera.getRigYaw", "Get Camera Yaw" },        { "camera.getRigPitch", "Get Camera Pitch" },
+            { "camera.addYawPitch", "Turn Camera" },
             // Environment display names — generated from the same X-lists as
             // the functions ("Get "/"Set " + the display string per field).
 #define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },

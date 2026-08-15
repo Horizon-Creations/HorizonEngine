@@ -167,6 +167,24 @@ namespace camera {
     void      setRotation(Ctx&, const glm::vec3& r);
     float     getFov(Ctx&);                           // degrees; 0 when no camera
     void      setFov(Ctx&, float degrees);
+
+    // ── Camera rig (CameraRigComponent on the main camera) ───────────────────
+    // No-ops / zeros when the main camera carries no rig, so a graph written
+    // against a rig does not have to guard every call.
+    void  setRigMode(Ctx&, int mode);          // 0 = first person, 1 = third person
+    int   getRigMode(Ctx&);
+    void  setRigTarget(Ctx&, int entityId);    // 0 / invalid = follow the possessed player
+    void  setArmLength(Ctx&, float length);
+    float getArmLength(Ctx&);
+    void  setTargetYawMode(Ctx&, int mode);    // 0 = free, 1 = follow camera
+    int   getTargetYawMode(Ctx&);
+
+    // Where the rig is looking. getRigYaw is what makes coupled rotation usable:
+    // a character that turns with the camera has to move relative to it, and
+    // this is the value that makes "forward" mean forward instead of sideways.
+    float getRigYaw(Ctx&);
+    float getRigPitch(Ctx&);
+    void  addYawPitch(Ctx&, float dYaw, float dPitch);
 }
 
 // ── Environment (the world's EnvironmentComponent) ───────────────────────────
