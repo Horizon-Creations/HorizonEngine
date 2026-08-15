@@ -728,6 +728,17 @@ TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes"
 		CHECK(all.find("v_hits = 99.0f") != std::string::npos);
 		CHECK(all.find("C_inherit_base::Damage(") != std::string::npos);
 		CHECK(all.find("\nprotected:") != std::string::npos);
+		// The direct-call surface follows the Runtime: the base declares its
+		// public methods virtual because something derives from it, and the
+		// derived class's same-named one really overrides. Without that, C++
+		// holding a base pointer would run the BASE's body while fireEvent on
+		// the same instance runs the derived one.
+		CHECK(all.find("virtual void Ping();") != std::string::npos);
+		CHECK(all.find("void Ping() override;") != std::string::npos);
+		CHECK(all.find("virtual void Damage(float amount, float& left);") != std::string::npos);
+		// A member only the base has stays a plain virtual — nothing overrides it.
+		CHECK(all.find("virtual void Pong();") != std::string::npos);
+		CHECK(all.find("void Pong() override;") == std::string::npos);
 	}
 }
 

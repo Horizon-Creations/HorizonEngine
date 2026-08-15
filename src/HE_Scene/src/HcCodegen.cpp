@@ -756,6 +756,10 @@ struct CompiledClass
     // records them.
     std::unordered_map<std::string, std::string> publicFn;    // graph function → method
     std::unordered_map<std::string, std::string> publicVar;   // graph variable → accessor
+    // Every public C++ method this class exposes for its events and functions,
+    // with its parameter list — what a derived class compares against to know
+    // whether its same-named member OVERRIDES one or merely shares a name.
+    std::unordered_map<std::string, std::string> publicMethods;   // method → params
     // EVERY instance variable's member name, public or not. A derived class
     // reads and writes an inherited variable as a plain member (the members are
     // protected, and the name resolves through the base) — but only if it knows
@@ -845,6 +849,16 @@ public:
     const std::unordered_map<std::string, std::string>& publicFunctions() const { return m_publicFn; }
     const std::unordered_map<std::string, std::string>& publicVariables()  const { return m_publicVar; }
     const std::unordered_map<std::string, std::string>& variableMembers()  const { return m_varMember; }
+    // Valid after run(): the public surface a derived class matches against.
+    std::unordered_map<std::string, std::string> publicMethodSigs() const
+    {
+        std::unordered_map<std::string, std::string> out;
+        for (const auto& [id, name] : m_publicEv) out.emplace(name, std::string());
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::FunctionEntry && m_publicFn.count(n.s))
+                out.emplace(m_publicFn.at(n.s), publicFnParams(n));
+        return out;
+    }
 
     void run(std::string& header, std::string& impl)
     {
@@ -964,6 +978,35 @@ private:
         for (const Node& n : c.graph->nodes)
             if (n.type == NT::FunctionEntry && n.s == name) return &n;
         return nullptr;
+    }
+
+    // ── the public methods' virtual-ness ────────────────────────────────────
+    // These are the entry points hand-written C++ uses to run a graph's events
+    // and functions directly. Without `virtual` a derived class's same-named
+    // method HIDES the base's rather than replacing it — so a caller holding a
+    // base pointer to a derived object would run the BASE's body, while the very
+    // same instance runs the derived one through the Runtime (fireEvent resolves
+    // leaf-first). Two ways to the same member, two different answers.
+    //
+    // Note this does NOT read Node::overridable. That flag decides what the
+    // editor OFFERS as an override; the Runtime lets any same-named declaration
+    // win regardless, and the generated C++ has to follow the Runtime.
+    //
+    // A class that nothing derives from stays non-virtual — the vtable cost only
+    // lands where inheritance actually happens.
+    struct MethodDecl { std::string prefix, suffix; };
+    MethodDecl methodDecl(const std::string& method, const std::string& params) const
+    {
+        for (const CompiledClass* a = parent(); a;
+             a = a->parentKey.empty() ? nullptr : m_ct.find(a->parentKey))
+        {
+            const auto it = a->publicMethods.find(method);
+            // Same name AND same signature — anything else is not an override in
+            // C++'s sense, and marking it one would not compile.
+            if (it != a->publicMethods.end() && it->second == params)
+                return { {}, " override" };
+        }
+        return { m_ct.isBase.count(m_src.key) ? "virtual " : "", {} };
     }
 
     // An instance variable by name, wherever in the chain it is declared, with
@@ -2574,10 +2617,18 @@ private:
         {
             h += "    // This graph's own events and functions — call these straight from C++.\n";
             for (const auto& [id, name] : sortedPublicEv())
-                h += "    void " + name + "();\n";
+            {
+                const MethodDecl d = methodDecl(name, {});
+                h += "    " + d.prefix + "void " + name + "()" + d.suffix + ";\n";
+            }
             for (const Node* fn : fns)
                 if (m_publicFn.count(fn->s))
-                    h += "    void " + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) + ");\n";
+                {
+                    const std::string params = publicFnParams(*fn);
+                    const MethodDecl d = methodDecl(m_publicFn.at(fn->s), params);
+                    h += "    " + d.prefix + "void " + m_publicFn.at(fn->s) + "(" + params + ")" +
+                         d.suffix + ";\n";
+                }
             h += "\n";
         }
         {
@@ -3104,7 +3155,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
                 classes.byKey[src.key] = { src.key, className, &src.graph,
                                            src.chain.empty() ? std::string() : src.chain.front(),
                                            em.publicFunctions(), em.publicVariables(),
-                                           em.variableMembers() };
+                                           em.publicMethodSigs(), em.variableMembers() };
             }
             catch (...) { probeNames.erase(className); }
         }
