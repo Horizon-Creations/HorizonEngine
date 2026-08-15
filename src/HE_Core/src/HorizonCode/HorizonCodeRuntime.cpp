@@ -23,6 +23,17 @@ const CompiledVarInfo* findVarInfo(const CompiledInstance& c, const std::string&
         if (name == vi.name) return &vi;
     return nullptr;
 }
+
+// A variable's declaration anywhere in the instance's chain, searched LEAF
+// FIRST: a derived declaration is the one that answers, and only when nothing
+// derived declares it does a base class's reach the caller. Null = no level
+// declares it.
+const Variable* findVarInLevels(const std::vector<Graph>& levels, const std::string& name)
+{
+    for (auto lv = levels.rbegin(); lv != levels.rend(); ++lv)
+        if (const Variable* v = lv->findVariable(name)) return v;
+    return nullptr;
+}
 }
 
 Runtime::Inst* Runtime::find(InstanceId id)
@@ -38,16 +49,28 @@ const Runtime::Inst* Runtime::find(InstanceId id) const
 
 InstanceId Runtime::add(Graph graph, HostBindings bindings, ClassIdentity cls)
 {
+    std::vector<Graph> one;
+    one.push_back(std::move(graph));
+    return addLevels(std::move(one), std::move(bindings), std::move(cls));
+}
+
+InstanceId Runtime::addLevels(std::vector<Graph> levels, HostBindings bindings, ClassIdentity cls)
+{
     const InstanceId id = m_next++;
     Inst inst;
-    inst.graph = std::move(graph);
-    inst.host  = std::move(bindings);
-    inst.cls   = std::move(cls);
+    inst.levels = std::move(levels);
+    if (inst.levels.empty()) inst.levels.emplace_back();   // always at least one
+    inst.host   = std::move(bindings);
+    inst.cls    = std::move(cls);
     // Seed the private variable store from the graph's declared defaults so
     // GetVariable reads a valid value even before the first SetVariable.
     // Function-locals (scope != 0) live in the Runner's call frames, not here.
-    for (const auto& var : inst.graph.variables)
-        if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
+    //
+    // Seeded ROOT FIRST, so a derived declaration of the same name overwrites the
+    // base's — which is what the leaf-most rule means for a starting value.
+    for (const Graph& g : inst.levels)
+        for (const auto& var : g.variables)
+            if (var.scope == 0) inst.vars[var.name] = variableDefaultValue(var);
     m_insts.emplace(id, std::move(inst));
     return id;
 }
@@ -217,7 +240,11 @@ const Graph& Runtime::graphOf(InstanceId id) const
 {
     static const Graph kEmpty;
     const Inst* i = find(id);
-    return i ? i->graph : kEmpty;
+    // The MOST DERIVED level — the class this instance is. Callers that want
+    // the whole object's surface (which handlers it answers to) ask
+    // eventBindingsOf, which unions the chain; this one is for inspecting the
+    // class itself.
+    return (i && i->hasGraph()) ? i->leaf() : kEmpty;
 }
 
 Value Runtime::getVariable(InstanceId id, const std::string& name) const
@@ -247,8 +274,11 @@ void Runtime::reseedVariables(InstanceId id)
     i->vars.clear();
     i->nodeState.clear();   // DoOnce/FlipFlop start over with the fresh state
     if (i->compiled) { i->compiled->reseedVariables(); return; }
-    for (const auto& var : i->graph.variables)
-        if (var.scope == 0) i->vars[var.name] = variableDefaultValue(var);
+    // Root first, like addLevels: a derived declaration of the same name is the
+    // one whose default survives.
+    for (const Graph& g : i->levels)
+        for (const auto& var : g.variables)
+            if (var.scope == 0) i->vars[var.name] = variableDefaultValue(var);
 }
 
 const std::unordered_map<std::string, Value>& Runtime::variablesOf(InstanceId id) const
@@ -280,9 +310,18 @@ std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
             out.push_back({ e.name, e.elem });
         return out;
     }
-    for (const auto& n : i->graph.nodes)
-        if (n.type == NodeType::Event)
-            out.push_back({ n.s, n.elem });
+    // Every level's handlers: a base class's Event is just as firable on this
+    // instance as the derived class's own. A name declared on both appears once,
+    // because the derived one replaced it (leaf-most wins) — searched leaf first
+    // so that is the entry reported.
+    for (auto lv = i->levels.rbegin(); lv != i->levels.rend(); ++lv)
+        for (const auto& n : lv->nodes)
+        {
+            if (n.type != NodeType::Event) continue;
+            const bool have = std::any_of(out.begin(), out.end(),
+                [&](const EventBinding& b) { return b.name == n.s && b.elem == n.elem; });
+            if (!have) out.push_back({ n.s, n.elem });
+        }
     return out;
 }
 
@@ -355,7 +394,7 @@ Context Runtime::makeContext(InstanceId id)
             { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
             return i->compiled->getVariable(var);
         }
-        const Variable* v = i->graph.findVariable(var);
+        const Variable* v = findVarInLevels(i->levels, var);
         if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
         { hcWarn("variable '" + var + "' not found or not public on the target object"); return {}; }
         auto it = i->vars.find(var);
@@ -373,7 +412,7 @@ Context Runtime::makeContext(InstanceId id)
             i->compiled->setVariable(var, val);
             return;
         }
-        const Variable* v = i->graph.findVariable(var);
+        const Variable* v = findVarInLevels(i->levels, var);
         if (!v || v->access != 0 || v->scope != 0) // locals are never externally visible
         { hcWarn("variable '" + var + "' not found or not public on the target object"); return; }
         i->vars[var] = val;
@@ -454,7 +493,7 @@ void Runtime::update(float dt)
             i->compiled->resumeFrom(p.node);
         else
         {
-            Runner runner(i->graph, makeContext(p.id));
+            Runner runner(i->leaf(), makeContext(p.id));
             runner.resumeFrom(p.node);
         }
     }
@@ -475,7 +514,7 @@ void Runtime::update(float dt)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn(elem);                             \
-        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, elem, {}); } \
+        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, elem, {}); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -498,7 +537,7 @@ HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn();                                 \
-        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, 0, {}); } \
+        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, 0, {}); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -518,7 +557,7 @@ HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookCall;                                 \
-        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, elem, boxed); } \
+        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, elem, boxed); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, boxed);                               \
     }
@@ -544,7 +583,7 @@ HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
         if (!i) return;                                                         \
         const Value arg = Value::ofInt((int)other);                             \
         if (i->compiled) i->compiled->hook((int)other);                         \
-        else { Runner r(i->graph, makeContext(id)); r.fireEvent(name, 0, arg); } \
+        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, 0, arg); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, arg);                                 \
     }
@@ -559,7 +598,7 @@ void Runtime::fireTick(InstanceId id, float dt)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onTick(dt);
-    else { Runner r(i->graph, makeContext(id)); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
+    else { Runner r(i->leaf(), makeContext(id)); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
     static const EventId ev = eventId("Tick");
     dispatchToListeners(id, ev, "Tick", Value::ofFloat(dt));
 }
@@ -569,7 +608,7 @@ void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onWindowFocusChanged(focused);
-    else { Runner r(i->graph, makeContext(id));
+    else { Runner r(i->leaf(), makeContext(id));
            r.fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
     static const EventId ev = eventId("OnWindowFocusChanged");
     dispatchToListeners(id, ev, "OnWindowFocusChanged", Value::ofBool(focused));
@@ -582,7 +621,7 @@ void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const
     if (i->compiled)
         i->compiled->fireEvent(event, elem, arg);
     else
-    { Runner runner(i->graph, makeContext(id)); runner.fireEvent(event, elem, arg); }
+    { Runner runner(i->leaf(), makeContext(id)); runner.fireEvent(event, elem, arg); }
     // An event firing on an instance also reaches everyone bound to it, so
     // another class holding a reference can react (Unreal-style dispatchers).
     dispatchToListeners(id, event, arg);
@@ -644,7 +683,7 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
     if (!i) return false;
     if (i->compiled)
         return i->compiled->callFunction(fn, requirePublic, args, results);
-    Runner runner(i->graph, makeContext(id));
+    Runner runner(i->leaf(), makeContext(id));
     return runner.callFunction(fn, requirePublic, args, results);
 }
 

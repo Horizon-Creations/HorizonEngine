@@ -83,6 +83,10 @@ public:
     // caller's container reallocating can't dangle execution) and seeds the
     // instance's private variable store from the graph's declared defaults.
     InstanceId add(Graph graph, HostBindings bindings = {}, ClassIdentity cls = {});
+    // The same, for a class with an inheritance chain: one graph per class,
+    // ROOT FIRST, the class itself last. `add` is this with a single level.
+    InstanceId addLevels(std::vector<Graph> levels, HostBindings bindings = {},
+                         ClassIdentity cls = {});
     // Register a COMPILED script instance (ahead-of-time generated C++, see
     // HorizonCodeCompiled.h). Behaves exactly like add(): same id space, same
     // Context wiring, same delegation/GC participation. Returns 0 on null.
@@ -258,9 +262,24 @@ private:
         Inst(Inst&&)                 = default;
         Inst& operator=(Inst&&)      = default;
 
-        Graph                                   graph;      // interpreted; empty for compiled
+        // The instance's graphs, ROOT FIRST: one per class in its inheritance
+        // chain, with the class itself last. A class that derives from nothing —
+        // which is every class that predates inheritance — has exactly one.
+        //
+        // Kept as separate levels rather than merged into one graph so a base
+        // class stays a base class at run time: its private variables are not
+        // shadowed by a derived name that happens to match, an override can
+        // still reach the version it replaced, and a node id means something
+        // only within its own level. `leaf()` is the class the instance IS, and
+        // is what everything that used to read a single `graph` asks for.
+        std::vector<Graph>                      levels;     // interpreted; empty for compiled
         CompiledPtr                             compiled;   // compiled backend (null = interpreted)
         HostBindings                            host;
+
+        // The most-derived level — the class this instance actually is.
+        Graph&       leaf()       { return levels.back(); }
+        const Graph& leaf() const { return levels.back(); }
+        bool         hasGraph() const { return !levels.empty(); }
         // Which class this is (see ClassIdentity) and, for an Entity class, the
         // scene entity it owns. Held here rather than derived from `compiled`
         // so the interpreted and the compiled path answer instanceIsA through
