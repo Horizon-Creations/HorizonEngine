@@ -745,6 +745,15 @@ Variable*       Graph::findVariable(const std::string& name)
 const Variable* Graph::findVariable(const std::string& name) const
 { for (const auto& v : variables) if (v.name == name) return &v; return nullptr; }
 
+const Variable* Graph::findVariableOrInherited(const std::string& name) const
+{
+    // Own declaration first — a class's own list is the nearer one, the same way
+    // the runtime searches its levels leaf-first.
+    if (const Variable* v = findVariable(name)) return v;
+    for (const auto& v : inherited) if (v.name == name) return &v;
+    return nullptr;
+}
+
 Value variableDefaultValue(const Variable& v)
 {
     if (v.isArray)

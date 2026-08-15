@@ -333,6 +333,23 @@ struct HE_API Graph
     std::vector<EventDecl> events;
     int nextId = 1;
 
+    // ── What this graph INHERITS, for the editor only ────────────────────────
+    // A class asset whose baseClass names another class asset can read and write
+    // its ancestors' variables and call their public functions under the same
+    // names — the runtime resolves both across the instance's levels. The editor
+    // has to OFFER them, and the menus and pickers that would do the offering sit
+    // deep in HcGraphHost behind a `const Graph&`, with no route back to the
+    // content system or to the class panel's state.
+    //
+    // So they ride here. Deliberately NOT merged into `variables`/`nodes`: these
+    // are declared somewhere else and must never be written back into this
+    // class's asset, and keeping them in their own list makes that true by
+    // construction rather than by remembering to strip them before every save.
+    // Neither field is serialized; fromJson leaves them empty and the class panel
+    // refills them whenever the base class changes.
+    std::vector<Variable> inherited;      // ancestors' instance variables, nearest wins
+    std::vector<Node>     inheritedFns;   // ancestors' PUBLIC FunctionEntry prototypes
+
     Node*       findNode(int id);
     const Node* findNode(int id) const;
     int  addNode(Node n);
@@ -343,6 +360,11 @@ struct HE_API Graph
 
     Variable*       findVariable(const std::string& name);
     const Variable* findVariable(const std::string& name) const;
+    // The same lookup widened to the inherited list — what a reader wants when it
+    // asks "what type is the variable this node names", because a node in a
+    // derived class may legitimately name one it did not declare. Never returns a
+    // mutable pointer: an inherited declaration belongs to the ancestor's asset.
+    const Variable* findVariableOrInherited(const std::string& name) const;
     EventDecl*       findEvent(const std::string& name);
     const EventDecl* findEvent(const std::string& name) const;
 };

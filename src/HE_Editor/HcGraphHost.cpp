@@ -195,12 +195,80 @@ std::string uniqueFunctionName(const HC::Graph& g)
 	return "NewFunction";
 }
 
+namespace
+{
+// ── What the menus may offer ─────────────────────────────────────────────────
+// A class that derives from another class reads and writes its ancestors'
+// variables and calls their public functions under the same names — the runtime
+// resolves both across the instance's graph levels. These two put the inherited
+// declarations behind the same iteration the menus already do, so every place
+// that offers "this graph's variables" offers them without learning what
+// inheritance is.
+//
+// Both return pointers into the graph: valid for as long as the caller holds it,
+// which is one menu frame.
+std::vector<const HC::Variable*> offerableVariables(const HC::Graph& g)
+{
+	std::vector<const HC::Variable*> out;
+	out.reserve(g.variables.size() + g.inherited.size());
+	for (const auto& v : g.variables) out.push_back(&v);
+	for (const auto& v : g.inherited)
+	{
+		// Private stays private: an ancestor's private variable reserves its
+		// NAME here (one store per instance) but is not readable from a derived
+		// class, so offering it would offer something that does not work.
+		if (v.access != 0) continue;
+		// A local declaration of the same name wins — it cannot happen in a class
+		// authored since names became unique across the chain, but an older asset
+		// may carry one, and showing the variable twice would be worse than
+		// showing the nearer one.
+		if (g.findVariable(v.name)) continue;
+		out.push_back(&v);
+	}
+	return out;
+}
+
+std::vector<const HC::Node*> offerableFunctions(const HC::Graph& g)
+{
+	std::vector<const HC::Node*> out;
+	for (const auto& n : g.nodes)
+		if (n.type == NT::FunctionEntry && !n.s.empty()) out.push_back(&n);
+	for (const auto& n : g.inheritedFns)
+	{
+		bool own = false;
+		for (const auto& e : g.nodes)
+			if (e.type == NT::FunctionEntry && e.s == n.s) { own = true; break; }
+		if (!own) out.push_back(&n);   // an override IS the local entry
+	}
+	return out;
+}
+
+// Point a fresh Call node at `fn` and give it the matching pins.
+// syncFunctionSignatures mirrors from a FunctionEntry IN THIS GRAPH, and an
+// inherited function has none — so the prototype's signature is copied here, and
+// sync deliberately leaves such a call alone afterwards ("calls whose function
+// lives in another graph keep their own mirror").
+void bindCallTo(HC::Graph& g, int callId, const HC::Node& fn)
+{
+	HC::Node* nn = g.findNode(callId);
+	if (!nn) return;
+	nn->s       = fn.s;
+	nn->params  = fn.params;
+	nn->results = fn.results;
+	HC::syncFunctionSignatures(g);
+}
+} // namespace
+
 std::string uniqueVarName(const HC::Graph& g)
 {
 	for (int i = 1; i < 1000; ++i)
 	{
 		const std::string name = i == 1 ? "NewVar" : ("NewVar" + std::to_string(i));
-		if (!g.findVariable(name)) return name;
+		// Inherited names count as taken: one store per instance, so a second
+		// declaration of the same name is the base's variable, not a new one.
+		// (Graphs that inherit nothing carry an empty list, so this is the old
+		// answer everywhere else.)
+		if (!g.findVariableOrInherited(name)) return name;
 	}
 	return "NewVar";
 }
@@ -536,19 +604,18 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 		if (header) ImGui::Spacing();
 	}
 
-	// Call <function> for each declared function entry, plus a Return node.
+	// Call <function> for each declared function entry — this class's own and the
+	// public ones it inherits — plus a Return node.
 	bool fh = false;
-	for (const auto& e : graph.nodes)
+	for (const HC::Node* e : offerableFunctions(graph))
 	{
-		if (e.type != NT::FunctionEntry || e.s.empty()) continue;
-		const std::string lbl = "Call " + e.s;
+		const std::string lbl = "Call " + e->s;
 		if (!matches(lbl, "Functions")) continue;
 		if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 		if (HcEditorUtil::searchMenuItem(lbl))
 		{
 			const int id = addNode(graph, NT::FunctionCall, drop, h.currentGraph);
-			graph.findNode(id)->s = e.s;
-			HC::syncFunctionSignatures(graph); // mirror the function's pins onto the call
+			bindCallTo(graph, id, *e);
 			created = id; ImGui::CloseCurrentPopup();
 		}
 	}
@@ -589,7 +656,9 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 
 	// Get/Set for each declared variable (locals only inside their function).
 	bool vh = false;
-	for (const auto& v : graph.variables)
+	for (const HC::Variable* vp : offerableVariables(graph))
+	{
+		const HC::Variable& v = *vp;
 		for (int k = 0; k < 2; ++k)
 		{
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
@@ -606,6 +675,7 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				created = id; ImGui::CloseCurrentPopup();
 			}
 		}
+	}
 	if (vh) ImGui::Spacing();
 
 	// ── User-defined types: one entry per project Struct/Enum asset ─────────
@@ -915,8 +985,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	//    locals only inside their owning function) ──
 	{
 		bool vh = false;
-		for (const auto& v : graph.variables)
+		for (const HC::Variable* vp : offerableVariables(graph))
 		{
+			const HC::Variable& v = *vp;
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
 			const bool setOk = (isExecPin && !srcInput) ||
 				(!isExecPin && !srcInput && v.type == dragType && v.isArray == dragArray);
@@ -947,15 +1018,14 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	if (isExecPin)
 	{
 		bool fh = false;
-		for (const auto& e : graph.nodes)
+		for (const HC::Node* e : offerableFunctions(graph))
 		{
-			if (e.type != NT::FunctionEntry || e.s.empty() || !matches("Call " + e.s)) continue;
+			if (!matches("Call " + e->s)) continue;
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-			if (HcEditorUtil::searchMenuItem("Call " + e.s))
+			if (HcEditorUtil::searchMenuItem("Call " + e->s))
 			{
 				const int id = addNode(graph, NT::FunctionCall, pos, h.currentGraph);
-				graph.findNode(id)->s = e.s;
-				HC::syncFunctionSignatures(graph);
+				bindCallTo(graph, id, *e);
 				HC::Node* nn = graph.findNode(id);
 				const PinRanges r = pinRanges(*nn);
 				wireAt(id, srcInput ? r.execOut0 : r.execIn0);
@@ -1200,8 +1270,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	{
 		if (ImGui::BeginCombo("Variable", n.s.empty() ? "(none)" : n.s.c_str()))
 		{
-			for (const auto& v : g.variables)
+			for (const HC::Variable* vp : offerableVariables(g))
 			{
+				const HC::Variable& v = *vp;
 				// A function-local is only usable inside its owning sub-graph.
 				if (v.scope != 0 && v.scope != n.subgraph) continue;
 				if (ImGui::Selectable(v.name.c_str(), n.s == v.name))
@@ -1384,8 +1455,9 @@ void drawQuickPickPopup(const Host& h)
 		ImGui::Separator();
 		ImGui::BeginChild("##qpVarList", ImVec2(240.0f, 300.0f));
 		bool any = false;
-		for (const auto& v : graph.variables)
+		for (const HC::Variable* vp : offerableVariables(graph))
 		{
+			const HC::Variable& v = *vp;
 			// Locals belong to their own function only.
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
 			if (!q.empty() && lower(v.name).find(q) == std::string::npos) continue;

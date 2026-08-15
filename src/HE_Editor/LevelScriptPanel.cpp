@@ -98,6 +98,11 @@ struct LSState
 	std::string selectedEvent;      // declared event shown in the details pane
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
+	// The last rejected rename, so the snap-back can say why. `varNameErrorName`
+	// is the name that was refused (empty = nothing to report), `varNameError`
+	// the ancestor that already uses it ("" = this class's own list does).
+	std::string varNameError;
+	std::string varNameErrorName;
 	std::string evtNameEdit;        // scratch buffer for a custom Event name (uniqueness)
 	int         evtNameEditFor = 0;
 	std::string dropVar;            // variable dragged onto the canvas
@@ -191,7 +196,28 @@ const HGH::MenuOpts kMenus = {
 // trailing TextDisabled + tooltip, drags "HE_UIWGRAPH_VAR", and leads with a UI
 // element browser that has no counterpart here.
 
-void drawVariables(HC::Graph& graph, bool& edited)
+// Which ancestor declared `name`, or "" — only for the hints and the refusal
+// message; everything functional reads Graph::inherited.
+std::string inheritedFrom(const std::vector<HC::InheritedVariable>& list,
+                          const std::string& name)
+{
+	for (const auto& iv : list)
+		if (iv.var.name == name) return iv.fromClass;
+	return {};
+}
+
+// A name a new or renamed variable may not take: this graph's own, plus every
+// one the chain declares. Inherited names are refused even when the ancestor
+// keeps the variable PRIVATE — an instance has ONE variable store, so a
+// same-named declaration here would not shadow the base's state, it would write
+// over it.
+bool varNameTaken(const HC::Graph& graph, const std::string& name)
+{
+	return graph.findVariableOrInherited(name) != nullptr;
+}
+
+void drawVariables(HC::Graph& graph, const std::vector<HC::InheritedVariable>& inheritedVars,
+                   bool& edited)
 {
 	// One row: selectable + drag source. Shared by the instance list and the
 	// per-function locals list below it.
@@ -227,6 +253,51 @@ void drawVariables(HC::Graph& graph, bool& edited)
 	}
 	for (const auto& v : graph.variables)
 		if (v.scope == 0) varRow(v);
+
+	// ── What the base classes bring ──────────────────────────────────────────
+	// Listed apart from this class's own, because that is what they are: read and
+	// written under the same name, but declared in another asset and edited
+	// there. Public ones drag onto the canvas like any other variable; a private
+	// one is shown greyed so the author can see why its NAME is refused without
+	// being offered a variable they cannot reach.
+	if (!graph.inherited.empty())
+	{
+		ImGui::SeparatorText("Inherited");
+		for (const auto& v : graph.inherited)
+		{
+			const std::string from = inheritedFrom(inheritedVars, v.name);
+			ImGui::PushID(v.name.c_str());
+			if (v.access != 0)
+			{
+				ImGui::BeginDisabled();
+				ImGui::Selectable((v.name + "  (private)").c_str(), false);
+				ImGui::EndDisabled();
+			}
+			else
+			{
+				// Never selected: the details editor below writes into THIS
+				// class's variable list, and an inherited declaration is not in
+				// it. Dragging is the whole interaction — it makes a Get/Set node
+				// that names the variable, which is all a derived class can do.
+				ImGui::Selectable((v.name + "  (" + HGH::variableTypeLabel(v) + ")").c_str(), false);
+				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+				{
+					char buf[64] = {};
+					std::strncpy(buf, v.name.c_str(), sizeof(buf) - 1);
+					ImGui::SetDragDropPayload(kVarPayload, buf, sizeof(buf));
+					ImGui::TextUnformatted(v.name.c_str());
+					ImGui::EndDragDropSource();
+				}
+			}
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s%s%s",
+					v.access != 0 ? "Private to " : "Declared in ",
+					from.empty() ? "the base class" : HcEditorUtil::castTargetLabel(from).c_str(),
+					v.access != 0 ? " — the name is taken, but the variable is not readable here."
+					              : " — edit it there; here it reads and writes the same value.");
+			ImGui::PopID();
+		}
+	}
 
 	// Function-locals of the OPEN function sub-graph: fresh per invocation,
 	// usable only inside that function (menus/drops elsewhere won't offer them).
@@ -440,7 +511,8 @@ void drawEventDetails(HC::Graph& graph, ContentManager* content, bool& edited)
 	}
 }
 
-void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited)
+void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariable>& inheritedVars,
+                         ContentManager* content, bool& edited)
 {
 	HC::Variable* v = graph.findVariable(g.selectedVar);
 	if (!v) { g.selectedVar.clear(); return; }
@@ -456,15 +528,24 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 	{
 		g.varNameEdit = v->name;
 		g.varNameEditFor = v->name;
+		g.varNameErrorName.clear();
 	}
 	ImGui::InputText("Name", &g.varNameEdit);
 	if (ImGui::IsItemDeactivatedAfterEdit())
 	{
 		const std::string oldName = v->name;
 		const std::string nn = g.varNameEdit;
-		if (nn.empty() || (nn != oldName && graph.findVariable(nn)))
+		if (nn.empty() || (nn != oldName && varNameTaken(graph, nn)))
 		{
 			g.varNameEdit = oldName; // reject blank/clash
+			// A clash with this class's OWN list is visible in the sidebar above,
+			// so silently snapping back explains itself. A clash with a base
+			// class's PRIVATE variable does not — that declaration is in another
+			// asset and this panel cannot show it — and an unexplained rejection
+			// is the kind of thing an author retries four times before giving up.
+			g.varNameError = nn.empty() ? std::string()
+			                            : inheritedFrom(inheritedVars, nn);
+			g.varNameErrorName = nn;
 		}
 		else if (nn != oldName)
 		{
@@ -474,8 +555,23 @@ void drawVariableDetails(HC::Graph& graph, ContentManager* content, bool& edited
 					n.s = nn;
 			g.selectedVar = nn;
 			g.varNameEditFor = nn;
+			g.varNameErrorName.clear();
 			edited = true;
 		}
+	}
+	if (!g.varNameErrorName.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(235, 120, 90, 255));
+		if (g.varNameError.empty())
+			ImGui::TextWrapped("\"%s\" is already used by another variable here.",
+			                   g.varNameErrorName.c_str());
+		else
+			ImGui::TextWrapped("\"%s\" is already used by %s. An instance has one "
+			                   "variable store, so the same name here would be that "
+			                   "variable, not a new one.",
+			                   g.varNameErrorName.c_str(),
+			                   HcEditorUtil::castTargetLabel(g.varNameError).c_str());
+		ImGui::PopStyleColor();
 	}
 
 	// One searchable type dropdown: default value types + object (class) types.
@@ -879,7 +975,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    bool allowCustomEvents, const char* title, const char* subtitle,
                    ContentManager* content, const HC::Graph* giGraph, bool& edited,
                    const std::string& baseClass = {}, bool derivable = false,
-                   const std::vector<HC::OverridableMember>& overrides = {})
+                   const std::vector<HC::OverridableMember>& overrides = {},
+                   const std::vector<HC::InheritedVariable>& inheritedVars = {})
 {
 	// The shared panel state is reused across the Level/GI/Class tabs, so a
 	// sub-graph id from another graph (or a deleted function) must reset to the
@@ -920,14 +1017,14 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		ImGui::TextUnformatted(title);
 		ImGui::TextDisabled("%s", subtitle);
 		ImGui::Spacing();
-		drawVariables(graph, edited);
+		drawVariables(graph, inheritedVars, edited);
 		ImGui::Spacing();
 		drawFunctions(graph, edited);
 		ImGui::Spacing();
 		ImGui::Separator();
 		if (g.selectedNode != 0)           drawNodeDetails(graph, events, allowCustomEvents,
 		                                                   content, derivable, edited);
-		else if (!g.selectedVar.empty())   drawVariableDetails(graph, content, edited);
+		else if (!g.selectedVar.empty())   drawVariableDetails(graph, inheritedVars, content, edited);
 		else if (!g.selectedEvent.empty()) drawEventDetails(graph, content, edited);
 		else ImGui::TextDisabled("Select a node, variable or event.");
 	}
@@ -1009,7 +1106,9 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
 	if (ImGui::BeginPopup("##ls_var_drop"))
 	{
-		const HC::Variable* v = graph.findVariable(g.dropVar);
+		// Inherited too: the sidebar hands those out as drag sources, and a Get
+		// node made from one has to take ITS type, not fall through untyped.
+		const HC::Variable* v = graph.findVariableOrInherited(g.dropVar);
 		// A function-local can only be placed inside its owning function's graph.
 		const bool scopeOk = v && (v->scope == 0 || v->scope == g.currentGraph);
 		ImGui::TextDisabled("%s", g.dropVar.c_str());
@@ -1136,6 +1235,11 @@ struct ClassState
 	// What the ancestors declare as overridable — the add menu's Inherited
 	// section. Rebuilt together with the resolved base, since both read assets.
 	std::vector<HorizonCode::OverridableMember> overrides;
+	// The chain's variables, with the ancestor each came from. The graph carries
+	// the declarations themselves (Graph::inherited) for the menus and pickers;
+	// this list keeps the ORIGIN, which only the sidebar and the "that name is
+	// taken" message need.
+	std::vector<HorizonCode::InheritedVariable> inheritedVars;
 	// Borrowed for the component seed above; the panel only ever uses it while
 	// the editor owns it.
 	ContentManager* contentForSeed = nullptr;
@@ -1388,6 +1492,15 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.engineBase = rc.engineBase;
 		st.ancestors  = rc.chain;
 		st.overrides  = HorizonCode::overridableMembersOf(*ctx.contentManager, st.path);
+		// What the chain contributes by name. Rebuilt here rather than every
+		// frame because it reads assets, and refreshed on a base change for
+		// free — this block runs exactly when the base moved.
+		st.inheritedVars = HorizonCode::inheritedVariables(rc);
+		st.graph.inherited.clear();
+		st.graph.inheritedFns.clear();
+		for (const auto& iv : st.inheritedVars) st.graph.inherited.push_back(iv.var);
+		for (const auto& f : HorizonCode::inheritedFunctions(rc))
+			st.graph.inheritedFns.push_back(f.proto);
 		st.contentForSeed = ctx.contentManager;
 	}
 	const bool isPlayer = HorizonCode::engineClassIsA(st.engineBase, "PlayerController") ||
@@ -1508,7 +1621,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              isPlayer ? "Player class; lifecycle + input events."
 		                       : "Reusable class; lifecycle events + its own.",
 			              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass,
-		              /*derivable=*/true, st.overrides);
+		              /*derivable=*/true, st.overrides, st.inheritedVars);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

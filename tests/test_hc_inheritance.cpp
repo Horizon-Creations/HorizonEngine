@@ -534,3 +534,121 @@ TEST_CASE("a base class's private function stays private to it")
 	CHECK_FALSE(rt.callFunction(inst, "Hidden", /*requirePublic=*/true));
 	CHECK(rt.getVariable(inst, "x").i == 1);
 }
+
+// ── What a derived class inherits BY NAME ────────────────────────────────────
+// The editor asks for this: it lists the ancestors' members, offers them in the
+// add menus, and refuses a new variable whose name the chain already uses.
+TEST_CASE("inherited variables are reported nearest-first, once per name")
+{
+	Project p;
+	{
+		Graph root;
+		addVar(root, "hp", 100);
+		addVar(root, "tag", 1);
+		p.add("Content/Actor.hasset", root, "Entity");
+	}
+	{
+		Graph mid;
+		addVar(mid, "hp", 250);          // redeclared: the nearer one must win
+		addVar(mid, "armor", 5);
+		p.add("Content/Enemy.hasset", mid, "Content/Actor.hasset");
+	}
+	{
+		Graph leaf;
+		addVar(leaf, "mine", 0);
+		// A function-local is not an instance variable and cannot collide with
+		// one, so it must not be reported.
+		Variable loc; loc.name = "temp"; loc.type = PinType::Int; loc.scope = 42;
+		leaf.variables.push_back(loc);
+		p.add("Content/Goblin.hasset", leaf, "Content/Enemy.hasset");
+	}
+
+	const ResolvedClass rc = resolveClass("Content/Goblin.hasset", p.loader());
+	REQUIRE(rc.ok);
+	const std::vector<InheritedVariable> iv = inheritedVariables(rc);
+
+	// Three names, and the class's own "mine" is not among them.
+	std::vector<std::string> names;
+	for (const auto& e : iv) names.push_back(e.var.name);
+	std::sort(names.begin(), names.end());
+	CHECK(names == std::vector<std::string>{ "armor", "hp", "tag" });
+
+	auto entry = [&](const char* n) -> const InheritedVariable*
+	{
+		for (const auto& e : iv) if (e.var.name == n) return &e;
+		return nullptr;
+	};
+	// Nearest declaration wins, and it is attributed to the class that made it.
+	REQUIRE(entry("hp"));
+	CHECK(entry("hp")->var.f[0] == doctest::Approx(250.0f));
+	CHECK(entry("hp")->fromClass == "Content/Enemy.hasset");
+	REQUIRE(entry("tag"));
+	CHECK(entry("tag")->fromClass == "Content/Actor.hasset");
+}
+
+TEST_CASE("a base class's PRIVATE variable is inherited as a reserved name")
+{
+	// It cannot be read from the derived class, but the derived class must not
+	// declare one of the same name either: there is a single variable store per
+	// instance, so a second declaration would not shadow the base's state, it
+	// would write over it. Reporting it is how the editor can refuse the name.
+	Project p;
+	{
+		Graph base;
+		addVar(base, "secret", 3);
+		base.variables.back().access = 1;   // private
+		p.add("Content/Door.hasset", base, "Object");
+	}
+	p.add("Content/BigDoor.hasset", Graph{}, "Content/Door.hasset");
+
+	const ResolvedClass rc = resolveClass("Content/BigDoor.hasset", p.loader());
+	REQUIRE(rc.ok);
+	const std::vector<InheritedVariable> iv = inheritedVariables(rc);
+	REQUIRE(iv.size() == 1);
+	CHECK(iv[0].var.name == "secret");
+	CHECK(iv[0].var.access == 1);          // …and the editor can tell it apart
+
+	// The lookup the editor's name check runs, over a graph carrying the list.
+	Graph child;
+	for (const auto& e : iv) child.inherited.push_back(e.var);
+	CHECK(child.findVariable("secret") == nullptr);             // not this class's
+	CHECK(child.findVariableOrInherited("secret") != nullptr);  // but the name is taken
+}
+
+TEST_CASE("only PUBLIC inherited functions are offered")
+{
+	Project p;
+	{
+		Graph base;
+		addVar(base, "x", 0);
+		addFunctionWriting(base, "Open",   "x", 1);
+		addFunctionWriting(base, "Hidden", "x", 2);
+		addFunctionWriting(base, "Close",  "x", 3);
+		for (Node& n : base.nodes)
+			if (n.type == NodeType::FunctionEntry && n.s == "Hidden") n.access = 1;
+		p.add("Content/Door.hasset", base, "Object");
+	}
+	{
+		Graph leaf;
+		addVar(leaf, "y", 0);
+		addFunctionWriting(leaf, "Close", "y", 9);   // overrides the base's
+		p.add("Content/BigDoor.hasset", leaf, "Content/Door.hasset");
+	}
+
+	const ResolvedClass rc = resolveClass("Content/BigDoor.hasset", p.loader());
+	REQUIRE(rc.ok);
+	std::vector<std::string> fns;
+	for (const auto& f : inheritedFunctions(rc)) fns.push_back(f.proto.s);
+	std::sort(fns.begin(), fns.end());
+	// "Hidden" is private. "Close" IS reported here — the editor is what drops
+	// it, because the class declares its own and that is the entry a call binds
+	// to; keeping the filter there means this function stays a plain answer to
+	// "what does the chain declare".
+	CHECK(fns == std::vector<std::string>{ "Close", "Open" });
+
+	// Nothing is inherited when there is nothing above the class.
+	const ResolvedClass root = resolveClass("Content/Door.hasset", p.loader());
+	REQUIRE(root.ok);
+	CHECK(inheritedFunctions(root).empty());
+	CHECK(inheritedVariables(root).empty());
+}

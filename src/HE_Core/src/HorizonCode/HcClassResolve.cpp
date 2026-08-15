@@ -235,6 +235,58 @@ std::vector<OverridableMember> overridableMembers(const std::string& key,
 
 namespace
 {
+// Which ancestor a level belongs to. `levels` is root-first and ends with the
+// class itself; `chain` is nearest-first and excludes it — so level i pairs with
+// chain[levels.size() - 2 - i]. Returns "" when the two disagree in length,
+// which only a caller that hand-built a ResolvedClass can manage.
+std::string classOfLevel(const ResolvedClass& rc, size_t level)
+{
+    const size_t ancestors = rc.levels.size() - 1;
+    if (rc.chain.size() != ancestors || level >= ancestors) return {};
+    return rc.chain[ancestors - 1 - level];
+}
+} // namespace
+
+std::vector<InheritedVariable> inheritedVariables(const ResolvedClass& rc)
+{
+    std::vector<InheritedVariable> out;
+    if (rc.levels.size() < 2) return out;   // nothing above this class
+
+    // Nearest ancestor first, so the first declaration of a name is the one that
+    // wins — the same order Runtime::findVarInLevels resolves in.
+    for (size_t i = rc.levels.size() - 1; i-- > 0; )
+        for (const Variable& v : rc.levels[i].variables)
+        {
+            // Function-locals live in a call frame, not in the instance store —
+            // they are not inherited and cannot collide with anything.
+            if (v.scope != 0 || v.name.empty()) continue;
+            const bool have = std::any_of(out.begin(), out.end(),
+                [&](const InheritedVariable& iv) { return iv.var.name == v.name; });
+            if (!have) out.push_back({ v, classOfLevel(rc, i) });
+        }
+    return out;
+}
+
+std::vector<InheritedFunction> inheritedFunctions(const ResolvedClass& rc)
+{
+    std::vector<InheritedFunction> out;
+    if (rc.levels.size() < 2) return out;
+
+    for (size_t i = rc.levels.size() - 1; i-- > 0; )
+        for (const Node& n : rc.levels[i].nodes)
+        {
+            // Public only: a private function is its own class's business, and
+            // callFunction refuses to reach one across a class boundary anyway.
+            if (n.type != NodeType::FunctionEntry || n.access != 0 || n.s.empty()) continue;
+            const bool have = std::any_of(out.begin(), out.end(),
+                [&](const InheritedFunction& f) { return f.proto.s == n.s; });
+            if (!have) out.push_back({ n, classOfLevel(rc, i) });
+        }
+    return out;
+}
+
+namespace
+{
 // The content system's answer to "what is this class's graph and base".
 ClassLoader contentLoader(ContentManager& cm)
 {

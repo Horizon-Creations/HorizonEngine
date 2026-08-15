@@ -88,4 +88,31 @@ HE_API std::vector<OverridableMember> overridableMembers(const std::string& key,
 HE_API std::vector<OverridableMember> overridableMembersOf(ContentManager& cm,
                                                            const std::string& classPath);
 
+// ── What a derived class inherits by NAME ────────────────────────────────────
+// An ancestor's variable is reachable from the derived class under the same name
+// (there is one variable store per instance, searched leaf-first), and so is an
+// ancestor's public function (Runtime::callFunction escalates across the levels).
+// The editor needs both: to OFFER them, and — for variables — to refuse a new
+// declaration that would take a name the chain already uses. That refusal has to
+// include the ancestors' PRIVATE variables too: private or not, they occupy a
+// slot in the same store, so a same-named declaration in the child would not
+// shadow the base's state, it would overwrite it.
+struct InheritedVariable
+{
+    Variable    var;
+    std::string fromClass;   // which ancestor declared it (for the editor's hint)
+};
+struct InheritedFunction
+{
+    Node        proto;       // the FunctionEntry, so a call node mirrors its pins
+    std::string fromClass;
+};
+// Both read a resolved chain rather than loading one: every caller already has
+// the ResolvedClass in hand, and taking it keeps these testable without a
+// ContentManager. Nearest ancestor first; a name declared twice in the chain is
+// reported once, by its nearest declaration. The class ITSELF contributes
+// nothing — its own members are not "inherited".
+HE_API std::vector<InheritedVariable> inheritedVariables(const ResolvedClass& rc);
+HE_API std::vector<InheritedFunction> inheritedFunctions(const ResolvedClass& rc);
+
 } // namespace HorizonCode
