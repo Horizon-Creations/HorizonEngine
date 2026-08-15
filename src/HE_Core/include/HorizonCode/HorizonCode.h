@@ -169,6 +169,25 @@ enum class NodeType : uint8_t
     // type for the codegen to lower to (it would have to become hc::Value and
     // drag a second type system into the generated code).
     Cast,
+    // ── Input Action ─────────────────────────────────────────────────────────
+    // One node per InputAction asset, entered when that action fires. `s` is the
+    // action's logical name (its asset stem — what the mapping context and
+    // PlayerHost key on), so a node is bound to an action the way a Cast is
+    // bound to a class.
+    //
+    // A digital action gets TWO exec-outs, Pressed and Released, instead of the
+    // two separate Event nodes it used to take: the pair belongs to one action
+    // and reads as one thing. An AXIS action has no press or release — it
+    // carries a value every frame — so it gets one exec-out and a Float
+    // data-out instead, selected by `hasArg` exactly as an Event node's
+    // argument is.
+    //
+    // The WIRE format is unchanged: the host still fires
+    // "Input.<name>.Pressed"/".Released"/".Axis" (see Application/InputAssets.h),
+    // and this node is matched against those names. That is what keeps
+    // PlayerHost, Lua, Python and every graph authored before this node working
+    // without knowing it exists.
+    InputAction,
     COUNT
 };
 
@@ -368,6 +387,20 @@ struct HE_API Graph
     EventDecl*       findEvent(const std::string& name);
     const EventDecl* findEvent(const std::string& name) const;
 };
+
+// ── Input Action nodes ───────────────────────────────────────────────────────
+// The host fires input as ordinary named events ("Input.Jump.Pressed"), which is
+// what keeps Lua, Python and pre-existing graphs working. These two translate
+// between that wire format and an InputAction node, and they are the ONLY place
+// that does — the interpreter, the runtime's dispatch and the C++ codegen all
+// ask here rather than each spelling the convention out again.
+
+// The event names this node answers to, one per exec-out, in pin order:
+// { Pressed, Released } for a digital action, { Axis } for an axis one. Empty
+// for any other node type or an unbound node.
+HE_API std::vector<std::string> inputActionEventNames(const Node& n);
+// Which exec-out `eventName` enters, or -1 when this node does not handle it.
+HE_API int inputActionChainFor(const Node& n, const std::string& eventName);
 
 HE_API std::string toJson(const Graph& g);
 HE_API bool        fromJson(const std::string& json, Graph& out);

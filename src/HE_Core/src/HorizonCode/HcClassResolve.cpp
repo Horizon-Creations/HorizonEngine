@@ -14,7 +14,8 @@ namespace
 // override replaces. Everything else in a graph is body.
 bool isEntryPoint(const Node& n)
 {
-    return n.type == NodeType::Event || n.type == NodeType::FunctionEntry;
+    return n.type == NodeType::Event || n.type == NodeType::FunctionEntry ||
+           n.type == NodeType::InputAction;
 }
 
 // Two entry points are "the same member" when they are the same KIND with the

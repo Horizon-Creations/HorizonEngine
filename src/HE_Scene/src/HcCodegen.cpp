@@ -904,6 +904,9 @@ private:
     std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
     std::unordered_map<std::string, std::string> m_fnName;     // function → f_*
     std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
+    // InputAction node id → one body method per exec-out (Pressed, Released),
+    // or a single one for an axis action.
+    std::unordered_map<int, std::vector<std::string>> m_iaName;
     std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
     std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
     std::unordered_map<std::string, std::string> m_publicVar;  // public variable → accessor
@@ -1237,6 +1240,16 @@ private:
                 m_fnName[n.s] = unique("f_" + sanitize(n.s));
             if (n.type == NT::Event)
                 m_evName[n.id] = unique("ev_" + sanitize(n.s) + "_" + std::to_string(n.id));
+            // An Input Action node is TWO entry points (Pressed and Released),
+            // or one for an axis — so it gets one body method per exec-out,
+            // named after the event it answers to rather than the pin.
+            if (n.type == NT::InputAction)
+            {
+                std::vector<std::string> names;
+                for (const std::string& ev : HorizonCode::inputActionEventNames(n))
+                    names.push_back(unique("ia_" + sanitize(ev) + "_" + std::to_string(n.id)));
+                m_iaName[n.id] = std::move(names);
+            }
             if (n.type == NT::DoOnce || n.type == NT::FlipFlop) used.insert(stateMember(n.id));
             if (n.type == NT::Delay) used.insert("resume_" + std::to_string(n.id));
         }
@@ -1487,6 +1500,11 @@ private:
             // §3.3: Event data-out ← this run's arg coerced to propType.
             m_usesEventArg = m_rsTouched = true;
             return coerceCall("rs.eventArg", trOf(n.propType, false, n.typeName));
+        case NT::InputAction:
+            // An axis action's Value rides in on the same argument (the host
+            // sends it with the ".Axis" event); a digital one has no data-out.
+            m_usesEventArg = m_rsTouched = true;
+            return coerceCall("rs.eventArg", trOf(PT::Float, false, {}));
         case NT::FunctionEntry:
         {
             // §3.4: FunctionEntry param reads the INNERMOST frame — in C++ that
@@ -2314,6 +2332,23 @@ private:
         return groups;
     }
 
+    // The Input Action nodes' entry points, one per exec-out: the event name the
+    // host fires, the node, and which chain that name enters. Kept apart from
+    // eventGroups because the two differ in exactly that last field — an Event
+    // node has one chain and an Input Action has one PER NAME.
+    struct InputEntry { std::string event; const Node* node; int chain; };
+    std::vector<InputEntry> inputEntries() const
+    {
+        std::vector<InputEntry> out;
+        for (const Node& n : m_g.nodes)
+        {
+            if (n.type != NT::InputAction) continue;
+            const std::vector<std::string> names = HorizonCode::inputActionEventNames(n);
+            for (size_t k = 0; k < names.size(); ++k) out.push_back({ names[k], &n, (int)k });
+        }
+        return out;
+    }
+
     // Functions deduplicated by name, first entry wins (§3.1 callFunction).
     std::vector<const Node*> functionEntries() const
     {
@@ -2377,8 +2412,12 @@ private:
     {
         m_stmtCount = 0;
         std::vector<Fragment> out;
+        // `outPin` is the exec-out to enter from, counted off execOut0 — 0 for
+        // everything with one chain, and 0/1 for an Input Action's Pressed and
+        // Released. It is the first ENTRY node with more than one chain, which
+        // is why this took a parameter it never needed before.
         auto translate = [this, &out](const std::string& name, const Node* start,
-                                      const Node* fn, int fnCtx)
+                                      const Node* fn, int fnCtx, int outPin = 0)
         {
             Fragment f;
             f.name = name;
@@ -2391,7 +2430,7 @@ private:
             Body b;
             b.indent = 2;   // inside a member function inside the class
             m_rsTouched = false;
-            if (start) chain(*start, pinRanges(*start).execOut0, fnCtx, b);
+            if (start) chain(*start, pinRanges(*start).execOut0 + outPin, fnCtx, b);
             f.body   = std::move(b.text);
             f.rsUsed = m_rsTouched;
             out.push_back(std::move(f));
@@ -2399,6 +2438,10 @@ private:
 
         for (const Node& n : m_g.nodes)
             if (n.type == NT::Event) translate(m_evName.at(n.id), &n, nullptr, 0);
+        for (const Node& n : m_g.nodes)
+            if (n.type == NT::InputAction && m_iaName.count(n.id))
+                for (size_t k = 0; k < m_iaName.at(n.id).size(); ++k)
+                    translate(m_iaName.at(n.id)[k], &n, nullptr, 0, (int)k);
         for (const Node* fn : functionEntries())
             translate(m_fnName.at(fn->s), fn, fn, fn->id);
         // Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
@@ -2526,6 +2569,10 @@ private:
         const auto delays  = delayNodeIds();
         const auto states  = stateNodeIds();
         const auto groups  = eventGroups();
+        const auto inputs  = inputEntries();
+        // Both are dispatched by fireEvent and both belong in eventInfos, so
+        // every "does this class handle events at all" test asks about both.
+        const bool anyEvents = !groups.empty() || !inputs.empty();
         const auto fns     = functionEntries();
         bool anyElemFilter = false, anyPrivateFn = false, anyFnParams = false, anyRefVar = false;
         for (const Node& n : m_g.nodes) if (n.type == NT::Event && n.elem != 0) anyElemFilter = true;
@@ -2683,7 +2730,7 @@ private:
             h += "    static const hc::VarSlots& slots();\n";
             h += "    const std::vector<HorizonCode::CompiledVarInfo>& varInfos() const override;\n";
         }
-        if (!groups.empty())
+        if (anyEvents)
         {
             h += "    const std::vector<HorizonCode::CompiledEventInfo>& eventInfos() const override;\n";
             h += "    void fireEvent(const std::string& name, int elem, const hc::Value& arg) override;\n";
@@ -2827,13 +2874,18 @@ private:
             c += "{ static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
         }
 
-        if (!groups.empty())
+        if (anyEvents)
         {
             c += "const std::vector<HorizonCode::CompiledEventInfo>& " + m_cls + "::eventInfos() const\n{\n";
             c += "    static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
             for (const Node& n : m_g.nodes)
                 if (n.type == NT::Event)
                     c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
+            // One row per input event this class handles — same reason the
+            // inherited ones are listed below: this table is what says the
+            // instance cares, and a handler missing from it is never fired.
+            for (const InputEntry& e : inputs)
+                c += "        { " + strLit(e.event) + ", 0 },\n";
             c += "    };\n";
             if (par)
             {
@@ -2875,6 +2927,17 @@ private:
                     if (n->elem == 0) c += "        " + call + "\n";
                     else c += "        if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
                 }
+                c += "    }\n";
+                first = false;
+            }
+            // The input entries, in the same if/else chain: each name enters ONE
+            // chain of its node, which is the whole difference from an Event.
+            for (const InputEntry& e : inputs)
+            {
+                c += std::string("    ") + (first ? "if" : "else if") + " (name == " +
+                     strLit(e.event) + ")\n    {\n";
+                c += "        " + m_iaName.at(e.node->id)[(size_t)e.chain] +
+                     "(" + rsArg() + ");\n";
                 c += "    }\n";
                 first = false;
             }

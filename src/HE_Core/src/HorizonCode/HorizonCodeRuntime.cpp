@@ -317,10 +317,22 @@ std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
     for (auto lv = i->levels.rbegin(); lv != i->levels.rend(); ++lv)
         for (const auto& n : lv->nodes)
         {
+            auto report = [&](const std::string& name, int elem)
+            {
+                const bool have = std::any_of(out.begin(), out.end(),
+                    [&](const EventBinding& b) { return b.name == name && b.elem == elem; });
+                if (!have) out.push_back({ name, elem });
+            };
+            // An Input Action node handles one event per exec-out, so it reports
+            // all of them: this list is what says an instance cares about an
+            // event at all, and a handler nobody knows about is never fired.
+            if (n.type == NodeType::InputAction)
+            {
+                for (const std::string& ev : inputActionEventNames(n)) report(ev, 0);
+                continue;
+            }
             if (n.type != NodeType::Event) continue;
-            const bool have = std::any_of(out.begin(), out.end(),
-                [&](const EventBinding& b) { return b.name == n.s && b.elem == n.elem; });
-            if (!have) out.push_back({ n.s, n.elem });
+            report(n.s, n.elem);
         }
     return out;
 }
@@ -699,8 +711,15 @@ int Runtime::levelHandlingEvent(const Inst& i, const std::string& event, int ele
 {
     for (size_t lv = i.levels.size(); lv-- > 0; )
         for (const Node& n : i.levels[lv].nodes)
+        {
             if (n.type == NodeType::Event && n.s == event && (n.elem == 0 || n.elem == elem))
                 return (int)lv;
+            // An Input Action node handles the events its action produces, so a
+            // derived class binding one overrides the base's for that action —
+            // the same leaf-first rule every other handler follows.
+            if (n.type == NodeType::InputAction && inputActionChainFor(n, event) >= 0)
+                return (int)lv;
+        }
     return -1;
 }
 

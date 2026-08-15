@@ -1705,6 +1705,46 @@ inline HE::hccg::ClassSource fxInheritNovars()
     return f.done("inherit_novars", "fix/inherit_novars_base", "Entity");
 }
 
+// 28 — input_actions: the Input Action node, which is the one ENTRY node with
+// more than one chain. Pressed and Released are separate bodies reached from the
+// same node, and an axis action is a third shape (one chain plus a value). The
+// host fires all three as ordinary named events, so the harness drives both
+// backends with exactly what PlayerHost sends.
+inline HE::hccg::ClassSource fxInputActions()
+{
+    Fx f;
+    f.var("downs", PT::Float);
+    f.var("ups", PT::Float);
+    f.var("axis", PT::Float);
+
+    // Digital: two exec-outs off ONE node, counting separately so a chain that
+    // ran the wrong body shows up as the wrong number rather than not at all.
+    {
+        Node ia; ia.type = NT::InputAction; ia.s = "Jump";
+        const int a = f.add(ia);
+        auto bump = [&](int outPin, const char* var)
+        {
+            const int s = f.setVar(var, PT::Float);
+            const int add = f.op(NT::Add);
+            f.data(f.getVar(var, PT::Float), 0, add, 0);
+            f.data(f.constF(1.0f), 0, add, 1);
+            f.data(add, 0, s, 0);
+            f.exec(a, s, outPin);
+        };
+        bump(0, "downs");
+        bump(1, "ups");
+    }
+    // Axis: one chain, and the value arrives on the event argument.
+    {
+        Node ia; ia.type = NT::InputAction; ia.s = "Move"; ia.hasArg = true;
+        const int a = f.add(ia);
+        const int s = f.setVar("axis", PT::Float);
+        f.exec(a, s);
+        f.data(a, 0, s, 0);   // the node's Value data-out
+    }
+    return f.done("input_actions", "PlayerCharacter");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1719,6 +1759,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxCastTarget(), fxCasts(),
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
+        fxInputActions(),
     };
 }
 

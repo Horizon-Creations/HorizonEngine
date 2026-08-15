@@ -2,6 +2,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Diagnostics/Logger.h>
+#include <algorithm>   // sort — libc++ pulls it in transitively, MSVC does not
 #include <string>
 #include <vector>
 
@@ -1422,4 +1423,95 @@ TEST_CASE("elementary types convert on the wire")
     const Value v = rt.getVariable(id, "out");
     CHECK(v.type == PinType::Int);
     CHECK(v.i == 3);                      // (int)3.9, the interpreter's own rule
+}
+
+// ── Input Action nodes ───────────────────────────────────────────────────────
+namespace
+{
+	// InputAction(action) — Pressed → Set pressedVar, Released → Set releasedVar.
+	// Pins: execOut 0 = Pressed, execOut 1 = Released.
+	int addInputAction(Graph& g, const std::string& action,
+	                   const std::string& pressedVar, const std::string& releasedVar)
+	{
+		Node ia; ia.type = NodeType::InputAction; ia.s = action;
+		const int a = g.addNode(std::move(ia));
+		auto arm = [&](int outPin, const std::string& var)
+		{
+			Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f;
+			const int c = g.addNode(std::move(cb));
+			Node sv; sv.type = NodeType::SetVariable; sv.s = var; sv.propType = PinType::Bool;
+			const int s = g.addNode(std::move(sv));
+			REQUIRE(g.connect(a, outPin, s, 0));
+			REQUIRE(g.connect(c, 0, s, 2));
+		};
+		arm(0, pressedVar);
+		arm(1, releasedVar);
+		return a;
+	}
+}
+
+TEST_CASE("an Input Action node routes Pressed and Released to its own exec-outs")
+{
+	Graph g;
+	for (const char* n : { "down", "up" })
+	{ Variable v; v.name = n; v.type = PinType::Bool; g.variables.push_back(v); }
+	addInputAction(g, "Jump", "down", "up");
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+
+	// The host fires the ordinary named events — the node is matched against
+	// them, which is what keeps Lua/Python and older graphs working unchanged.
+	rt.fireEvent(id, "Input.Jump.Pressed", 0, {});
+	CHECK(rt.getVariable(id, "down").b);
+	CHECK_FALSE(rt.getVariable(id, "up").b);
+
+	rt.fireEvent(id, "Input.Jump.Released", 0, {});
+	CHECK(rt.getVariable(id, "up").b);
+
+	// A different action, and the axis name of this one, reach neither chain.
+	rt.setVariable(id, "down", Value::ofBool(false));
+	rt.fireEvent(id, "Input.Fire.Pressed", 0, {});
+	rt.fireEvent(id, "Input.Jump.Axis", 0, Value::ofFloat(1.0f));
+	CHECK_FALSE(rt.getVariable(id, "down").b);
+}
+
+TEST_CASE("an axis Input Action has one chain and carries its value")
+{
+	Graph g;
+	Variable v; v.name = "amount"; v.type = PinType::Float;
+	g.variables.push_back(v);
+
+	Node ia; ia.type = NodeType::InputAction; ia.s = "Move"; ia.hasArg = true;  // axis
+	const int a = g.addNode(std::move(ia));
+	Node sv; sv.type = NodeType::SetVariable; sv.s = "amount"; sv.propType = PinType::Float;
+	const int s = g.addNode(std::move(sv));
+	REQUIRE(g.connect(a, 0, s, 0));
+	// data-out 0 is the axis Value (execOut 0 comes first in the unified layout).
+	REQUIRE(g.connect(a, 1, s, 2));
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Input.Move.Axis", 0, Value::ofFloat(0.75f));
+	CHECK(rt.getVariable(id, "amount").f == doctest::Approx(0.75f));
+
+	// An axis action has no press or release — those names reach nothing.
+	rt.fireEvent(id, "Input.Move.Pressed", 0, Value::ofFloat(9.0f));
+	CHECK(rt.getVariable(id, "amount").f == doctest::Approx(0.75f));
+}
+
+TEST_CASE("an Input Action node is reported as handling its events")
+{
+	// eventBindingsOf is what says an instance cares about an event at all — a
+	// handler missing from it exists and is never fired.
+	Graph g;
+	Variable v; v.name = "x"; v.type = PinType::Bool; g.variables.push_back(v);
+	addInputAction(g, "Jump", "x", "x");
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+	std::vector<std::string> names;
+	for (const auto& b : rt.eventBindingsOf(id)) names.push_back(b.name);
+	std::sort(names.begin(), names.end());
+	CHECK(names == std::vector<std::string>{ "Input.Jump.Pressed", "Input.Jump.Released" });
 }

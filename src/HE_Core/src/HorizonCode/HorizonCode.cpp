@@ -1,5 +1,6 @@
 #include <HorizonCode/HorizonCode.h>
 #include <cstdint>
+#include <Application/InputAssets.h>   // the ONE spelling of the input event names
 #include <Diagnostics/Logger.h>
 #include <Types/TypeRegistry.h>   // struct/enum definitions (field/entry resolution)
 #include <GraphCommon/GraphJson.h>
@@ -52,6 +53,19 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::Event:
         s.execOuts = { { "", P::Exec } };
         if (n.hasArg) s.dataOuts = { { "Value", n.propType, false, tn } };
+        break;
+    case T::InputAction:
+        // hasArg = this action is an AXIS: one chain per frame carrying the
+        // value, rather than the press/release pair a digital action has.
+        if (n.hasArg)
+        {
+            s.execOuts = { { "", P::Exec } };
+            s.dataOuts = { { "Value", P::Float } };
+        }
+        else
+        {
+            s.execOuts = { { "Pressed", P::Exec }, { "Released", P::Exec } };
+        }
         break;
     case T::FunctionEntry:
         s.execOuts = { { "", P::Exec } };
@@ -431,6 +445,9 @@ const char* nodeDisplayName(NodeType t)
         // disk (see the boxed warning above), so it must not depend on which
         // class the node happens to target. The editor composes the title.
         case T::Cast:         return "Cast";
+        // Fixed, like Cast's: the ACTION is in `s`, and this string is what the
+        // node serializes as. The editor titles it "Input: <action>".
+        case T::InputAction:  return "Input Action";
         case T::DoOnce:       return "Do Once";
         case T::FlipFlop:     return "Flip Flop";
         case T::Add:          return "Add";
@@ -601,6 +618,10 @@ const char* nodeTooltip(NodeType t)
             return "Checked downcast: continues from Success when Object really is the\n"
                    "chosen class (or derives from it) and from Failure otherwise. The\n"
                    "output reference is only valid on the Success branch.";
+        case T::InputAction:
+            return "Entered when the chosen Input Action fires: Pressed when it goes down,\n"
+                   "Released when it comes up. An AXIS action has neither — it runs once a\n"
+                   "frame and hands you its Value instead.";
         case T::MakeStruct:
             return "Builds a value of the chosen Struct asset: one input per field,\n"
                    "unwired fields fall back to their declared defaults.";
@@ -625,11 +646,27 @@ const char* nodeTooltip(NodeType t)
     }
 }
 
+std::vector<std::string> inputActionEventNames(const Node& n)
+{
+    if (n.type != T::InputAction || n.s.empty()) return {};
+    if (n.hasArg) return { HE::inputEventAxis(n.s) };
+    return { HE::inputEventPressed(n.s), HE::inputEventReleased(n.s) };
+}
+
+int inputActionChainFor(const Node& n, const std::string& eventName)
+{
+    const std::vector<std::string> names = inputActionEventNames(n);
+    for (size_t i = 0; i < names.size(); ++i)
+        if (names[i] == eventName) return (int)i;
+    return -1;
+}
+
 const char* nodeCategory(NodeType t)
 {
     switch (t)
     {
         case T::Event:         return "Events";
+        case T::InputAction:   return "Input";
         case T::FunctionEntry: return "Functions";
         case T::FunctionCall:  return "Functions";
         case T::FunctionReturn:return "Functions";
@@ -1880,6 +1917,14 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
     m_callStack.clear();
     for (const auto& n : m_graph.nodes)
     {
+        // An Input Action node answers to the names its action produces, and
+        // enters the chain the name selects: Pressed, Released or the axis one.
+        if (n.type == T::InputAction)
+        {
+            const int chain = inputActionChainFor(n, eventName);
+            if (chain >= 0) runExecChain(n, pinRanges(n).execOut0 + chain, 0);
+            continue;
+        }
         if (n.type != T::Event || n.s != eventName) continue;
         if (n.elem != 0 && n.elem != elem) continue;
         runExecChain(n, pinRanges(n).execOut0, 0);
@@ -2200,6 +2245,9 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     switch (n.type)
     {
     case T::Event:       return coerce(m_eventArg, n.propType);
+    // The axis value rides in on the same event argument the host sends; a
+    // digital action has no data-out to reach this at all.
+    case T::InputAction: return coerce(m_eventArg, P::Float);
     case T::ConstFloat:  return Value::ofFloat(n.f[0]);
     case T::ConstBool:   return Value::ofBool(n.f[0] != 0.0f);
     case T::ConstInt:    return Value::ofInt((int)n.f[0]);

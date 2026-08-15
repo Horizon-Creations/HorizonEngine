@@ -72,6 +72,11 @@ std::string nodeTitle(const HC::Node& n)
 		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
 		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
 		case NT::Cast:         return HcEditorUtil::castTitle(n.s);
+		// The action, not the event names it answers to — those are the wire's
+		// business. "(Axis)" because the pin layout differs and the reason for
+		// it should be readable off the node.
+		case NT::InputAction:  return n.s.empty() ? std::string(base)
+		                                          : (n.s + (n.hasArg ? " (Axis)" : ""));
 		default:               return base;
 	}
 }
@@ -86,6 +91,13 @@ bool eventNameUsed(const HC::Graph& g, const std::string& name, int exceptId = 0
 		if (n.type == NT::Event && n.id != exceptId && n.s == name) return true;
 	return false;
 }
+
+// One InputAction asset, as the add menu offers it.
+struct InputActionRef
+{
+	std::string name;    // the action's logical name (its asset stem)
+	bool        isAxis = false;
+};
 
 // ── Persistent panel state (the panel edits the current scene's graph) ────────
 struct LSState
@@ -904,7 +916,8 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool allowCustomEvents,
                 const ImVec2& avail, ContentManager* content, const HC::Graph* giGraph,
                 const std::string& baseClass,
-                const std::vector<HC::OverridableMember>& overrides, bool& edited)
+                const std::vector<HC::OverridableMember>& overrides,
+                const std::vector<InputActionRef>& inputActions, bool& edited)
 {
 	g.ge.selected = g.selectedNode;
 	if (g.focusSelected) { g.ge.focusNode = g.selectedNode; g.focusSelected = false; }
@@ -929,7 +942,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 
 	// Searchable add-node palette: world events + the shared tail (generic node
 	// categories + per-function Call + engine API + per-variable Get/Set).
-	m.drawAddMenu = [&graph, &events, allowCustomEvents, &host, &overrides]() -> int {
+	m.drawAddMenu = [&graph, &events, allowCustomEvents, &host, &overrides,
+	                 &inputActions]() -> int {
 		int created = 0;
 		const std::string q = HGH::beginAddMenu();
 		auto matches = [&](const std::string& name, const std::string& cat)
@@ -972,6 +986,41 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			{ created = addNode(graph, NT::Event, g.ge.addMenuGraphPos); ImGui::CloseCurrentPopup(); }
 		}
 		if (eh) ImGui::Spacing();
+
+		// ── Input ────────────────────────────────────────────────────────────
+		// One entry per InputAction asset, under the action's own name. The node
+		// it inserts carries the Pressed and Released chains together, which is
+		// why this replaced the two "Input.<action>.Pressed"/".Released" entries
+		// that used to sit in the Events list: one action, one thing to pick,
+		// and the event-name convention stays where it belongs — on the wire.
+		// Like events, they belong in the event graph, not inside a function.
+		if (g.currentGraph == 0)
+		{
+			bool ih = false;
+			for (const InputActionRef& ia : inputActions)
+			{
+				if (!matches(ia.name, "Input")) continue;
+				if (!ih) { ImGui::TextDisabled("Input"); ih = true; }
+				// One node per action: a second one for the same action would be a
+				// second handler for the same events, which is confusing rather
+				// than useful (Sequence is how you fan out).
+				const bool used = std::any_of(graph.nodes.begin(), graph.nodes.end(),
+					[&](const HC::Node& n){ return n.type == NT::InputAction && n.s == ia.name; });
+				if (HcEditorUtil::searchMenuItem(ia.name, used))
+				{
+					const int id = addNode(graph, NT::InputAction, g.ge.addMenuGraphPos);
+					HC::Node* nn = graph.findNode(id);
+					nn->s = ia.name;
+					// An axis action has no press or release — one chain and a
+					// value instead. This is the pin layout, so it is set here and
+					// not left to be discovered.
+					nn->hasArg = ia.isAxis;
+					created = id; ImGui::CloseCurrentPopup();
+				}
+				if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
+			}
+			if (ih) ImGui::Spacing();
+		}
 
 		// What this class INHERITS and may replace. Picking one starts a copy of
 		// the ancestor's declaration here — same name, same signature — and from
@@ -1073,7 +1122,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    const std::string& baseClass = {}, bool derivable = false,
                    const std::vector<HC::OverridableMember>& overrides = {},
                    const std::vector<HC::InheritedVariable>& inheritedVars = {},
-                   const std::string& classKey = {})
+                   const std::string& classKey = {},
+                   const std::vector<InputActionRef>& inputActions = {})
 {
 	// Swap in this graph's own context (see s_graphStates). The outgoing one is
 	// parked under its own key, so coming back to a tab finds the sub-graph it
@@ -1212,7 +1262,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 	}
 	const ImVec2 avail = ImGui::GetContentRegionAvail();
 	drawCanvas(graph, events, allowCustomEvents, avail, content, giGraph, baseClass,
-	           overrides, edited);
+	           overrides, inputActions, edited);
 
 	// Variable drop → Get/Set popup.
 	if (g.openVarDrop) { ImGui::OpenPopup("##ls_var_drop"); g.openVarDrop = false; }
@@ -1332,7 +1382,10 @@ struct ClassState
 	std::string baseClass;
 	HE::UUID    assetId;
 	std::string path;                   // content-relative, the class KEY
-	std::vector<std::string> events;    // event catalog (lifecycle + player input events)
+	std::vector<std::string> events;    // event catalog (the base-class chain's)
+	// The project's InputAction assets, offered as their own menu section on a
+	// player class — one entry per action, not two events per action.
+	std::vector<InputActionRef> inputActions;
 	double      eventsScanTime = -1.0;  // last catalog (re)build, ImGui time
 	// ── Components mode ──────────────────────────────────────────────────
 	// The class's component list, edited as a real entity subtree in a world
@@ -1367,9 +1420,14 @@ AssetPanelState<ClassState> s_classStates;
 // Input.<Action>.* event names for every InputAction asset in the project —
 // the input-event catalog player classes offer. Walks the content dir (cheap
 // header sniffs), so callers cache the result and refresh on a coarse timer.
-std::vector<std::string> scanInputEvents(ContentManager* cm)
+// Every InputAction asset in the project, as (action name, is it an axis).
+// One entry per ACTION — the add menu offers one node for it, with a Pressed
+// and a Released exec-out, instead of the two separate "Input.<x>.Pressed" /
+// ".Released" events it used to list. The wire format still uses those names
+// (HE::inputEvent*), but nobody has to read or pick them any more.
+std::vector<InputActionRef> scanInputActions(ContentManager* cm)
 {
-	std::vector<std::string> out;
+	std::vector<InputActionRef> out;
 	if (!cm) return out;
 	for (const auto& ref : HcEditorUtil::listAssets(cm, HE::AssetType::InputAction))
 	{
@@ -1379,13 +1437,7 @@ std::vector<std::string> scanInputEvents(ContentManager* cm)
 			if (const auto* c = r.findChunk(HAsset::CHUNK_IACT))
 				axis = HE::inputActionIsAxis(std::string(
 					reinterpret_cast<const char*>(c->data.data()), c->data.size()));
-		if (axis)
-			out.push_back(HE::inputEventAxis(ref.label));
-		else
-		{
-			out.push_back(HE::inputEventPressed(ref.label));
-			out.push_back(HE::inputEventReleased(ref.label));
-		}
+		out.push_back({ ref.label, axis });
 	}
 	return out;
 }
@@ -1735,18 +1787,20 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 	}
 
 	// The event catalog is the base-class chain's events (Object contributes
-	// Construct/Destruct, Entity adds BeginPlay/Tick), plus — for the player
-	// classes — one event set per InputAction asset in the project. Actions can
-	// be created while this tab is open, so that part rescans on a coarse timer.
+	// Construct/Destruct, Entity adds BeginPlay/Tick). The project's input
+	// actions come alongside it as their OWN menu section rather than as events,
+	// one entry per action — they used to be listed here as two events each
+	// ("Input.Jump.Pressed", "Input.Jump.Released"), which put the wire format in
+	// front of the author and split one action into two things to find. Actions
+	// can be created while this tab is open, so that part rescans on a timer.
 	const double now = ImGui::GetTime();
 	if (st.eventsScanTime < 0.0 || (isPlayer && now - st.eventsScanTime > 3.0))
 	{
 		st.events.clear();
 		for (const char* ev : HorizonCode::engineClassEvents(st.engineBase))
 			st.events.emplace_back(ev);
-		if (isPlayer)
-			for (auto& ev : scanInputEvents(ctx.contentManager))
-				st.events.push_back(std::move(ev));
+		st.inputActions = isPlayer ? scanInputActions(ctx.contentManager)
+		                           : std::vector<InputActionRef>{};
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
@@ -1757,7 +1811,8 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              isPlayer ? "Player class; lifecycle + input events."
 		                       : "Reusable class; lifecycle events + its own.",
 			              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass,
-		              /*derivable=*/true, st.overrides, st.inheritedVars, st.path);
+		              /*derivable=*/true, st.overrides, st.inheritedVars, st.path,
+		              st.inputActions);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }

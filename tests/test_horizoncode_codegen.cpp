@@ -679,6 +679,42 @@ TEST_CASE("codegen parity: a derived class is a derived class in C++ too")
 	CHECK(p.var("mine").f == 0.0f);
 }
 
+TEST_CASE("codegen parity: Input Action nodes route their own chains")
+{
+	// The one entry node with more than one chain — Pressed and Released are
+	// separate bodies reached from the same node, so an off-by-one in the
+	// generated dispatch would run the wrong one rather than nothing.
+	ParityPair p("fix/input_actions");
+
+	p.fire("Input.Jump.Pressed");
+	CHECK(p.var("downs").f == doctest::Approx(1.0f));
+	CHECK(p.var("ups").f   == doctest::Approx(0.0f));
+	p.fire("Input.Jump.Pressed");
+	p.fire("Input.Jump.Released");
+	CHECK(p.var("downs").f == doctest::Approx(2.0f));
+	CHECK(p.var("ups").f   == doctest::Approx(1.0f));
+
+	// The axis chain, and its value off the event argument.
+	p.fire("Input.Move.Axis", 0, Value::ofFloat(0.5f));
+	CHECK(p.var("axis").f == doctest::Approx(0.5f));
+	p.fire("Input.Move.Axis", 0, Value::ofFloat(-1.0f));
+	CHECK(p.var("axis").f == doctest::Approx(-1.0f));
+
+	// Names this class does not handle reach nothing, on either backend.
+	p.fire("Input.Move.Pressed", 0, Value::ofFloat(9.0f));
+	p.fire("Input.Fire.Pressed");
+	CHECK(p.var("axis").f  == doctest::Approx(-1.0f));
+	CHECK(p.var("downs").f == doctest::Approx(2.0f));
+
+	// And both backends agree on WHAT they handle — the list the Runtime reads
+	// to decide whether an instance cares about an event at all.
+	std::vector<std::string> names;
+	for (const auto& b : p.comp.rt.eventBindingsOf(p.comp.id)) names.push_back(b.name);
+	std::sort(names.begin(), names.end());
+	CHECK(names == std::vector<std::string>{ "Input.Jump.Pressed", "Input.Jump.Released",
+	                                         "Input.Move.Axis" });
+}
+
 TEST_CASE("codegen parity: a base class with no variables at all")
 {
 	// slots() is a generated static, not a virtual — a child that concatenated
