@@ -22,6 +22,7 @@ add_library(HorizonScene SHARED
     src/SceneSystems.cpp
     src/EnvironmentPush.cpp
     src/FlyCameraController.cpp
+    src/TransformHierarchy.cpp
     src/FoliageSystem.cpp
     src/UISystem.cpp
     src/UIInputSystem.cpp

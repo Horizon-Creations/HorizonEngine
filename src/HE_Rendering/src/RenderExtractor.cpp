@@ -5,6 +5,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
@@ -35,33 +36,7 @@
 // every renderable before the shadow fit, the lights before the day-night pass.
 namespace
 {
-	glm::mat4 localMatrix(const TransformComponent& t)
-	{
-		glm::quat q = glm::quat(glm::radians(t.rotation));
-		return glm::translate(glm::mat4(1.0f), t.position)
-		     * glm::mat4_cast(q)
-		     * glm::scale(glm::mat4(1.0f), t.scale);
-	}
-
-	// Recompute world matrices top-down from the world root. This is the only
-	// place world matrices are propagated — there is no separate scene-graph
-	// pass. Walking from world.rootEntity() is what makes it work: HorizonWorld
-	// parents everything to a root *entity*, so anything keyed on
-	// parent == entt::null would never fire. Recomputing every frame is cheap at
-	// current scene sizes; dirty-flag pruning can come back with profiling.
-	void propagateFrom(entt::registry& reg, entt::entity e, const glm::mat4& parentWorld)
-	{
-		glm::mat4 world = parentWorld;
-		if (auto* t = reg.try_get<TransformComponent>(e))
-		{
-			world          = parentWorld * localMatrix(*t);
-			t->worldMatrix = world;
-			t->dirty       = false;
-		}
-		if (auto* h = reg.try_get<HierarchyComponent>(e))
-			for (entt::entity child : h->children)
-				propagateFrom(reg, child, world);
-	}
+	using HE::localMatrix;
 
 	const HE::AABB kUnitCube = []{
 		HE::AABB b;
@@ -71,15 +46,11 @@ namespace
 	}();
 
 	// ── Transforms ──────────────────────────────────────────────────────────
-	void extractTransforms(HorizonWorld& world, entt::registry& reg)
+	// Idempotent, so extracting still works when a caller (the camera rig, which
+	// needs world positions mid-frame) already propagated this frame.
+	void extractTransforms(HorizonWorld& world, entt::registry&)
 	{
-		propagateFrom(reg, world.rootEntity(), glm::mat4(1.0f));
-		// Entities outside the root hierarchy (no HierarchyComponent)
-		for (auto [e, t] : reg.view<TransformComponent>(entt::exclude<HierarchyComponent>).each())
-		{
-			t.worldMatrix = localMatrix(t);
-			t.dirty       = false;
-		}
+		HE::propagateTransforms(world);
 	}
 
 	// ── Camera ──────────────────────────────────────────────────────────────
