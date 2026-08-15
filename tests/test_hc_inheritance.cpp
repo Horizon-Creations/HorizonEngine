@@ -7,6 +7,7 @@
 #include "doctest.h"
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
+#include <algorithm>   // sort / adjacent_find — libc++ pulls these in transitively, MSVC does not
 #include <map>
 #include <string>
 #include <vector>
