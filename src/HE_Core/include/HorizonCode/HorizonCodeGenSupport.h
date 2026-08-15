@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>   // make_move_iterator — concatSlots
 #include <string>
 #include <vector>
 
@@ -416,6 +417,23 @@ inline void collectVarRefs(const VarSlots& slots, const HorizonCode::CompiledIns
         else for (const Value& it : v.items) if (it.ref != 0u) out.push_back(it.ref);
     }
 }
+// A derived class's table: its base's entries followed by its own. The base's
+// entries keep accessors typed on the BASE (SlotAccess static_casts the
+// CompiledInstance* down to it), which is exactly right for a derived object —
+// single, non-virtual inheritance, so the base sub-object is right there.
+//
+// Base first, and the names cannot repeat: the editor refuses a variable whose
+// name an ancestor already uses, and the generator refuses to compile a class
+// that carries one anyway. That is what makes ONE table stand for the whole
+// chain the way the interpreter's single variable store does.
+inline VarSlots concatSlots(const VarSlots& base, VarSlots own)
+{
+    VarSlots out = base;
+    out.insert(out.end(), std::make_move_iterator(own.begin()),
+               std::make_move_iterator(own.end()));
+    return out;
+}
+
 inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slots)
 {
     std::vector<HorizonCode::CompiledVarInfo> out;
@@ -434,6 +452,13 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
 // Ref variable's declared className is editor metadata, never enforced), or an
 // interpreted target. Generated code falls back to the seam on null, which is
 // what keeps mixed compiled/interpreted populations behaving identically.
+//
+// EXACT, deliberately. A generated class derives from its base class in C++, so
+// an instance of a derived class IS a T when T is one of its ancestors — but the
+// tag is one address per class and says nothing about ancestry, so `as` answers
+// null there and the caller takes the seam. That is correct, only slower; making
+// it hit would mean carrying a per-class key comparison here, which is the
+// Cast node's job (castClass) and not worth putting in every direct call.
 template <typename T> inline T* as(const Context& c, uint32_t target)
 {
     if (target == 0u || !c.resolveCompiled) return nullptr;
@@ -452,9 +477,9 @@ template <typename T> inline T* as(const Context& c, uint32_t target)
 //     comparing two languages.
 //
 //   Stop — every class is compiled, so by construction there is no interpreted
-//     instance to be compatible with. The generator then emits hc::as<T> for a
-//     HorizonCode class (a pointer comparison; exact match is all a HC class
-//     ever needs, since HC classes do not derive from one another) and
+//     instance to be compatible with. The generator then emits castClass for a
+//     HorizonCode class (its own key plus its chain — a class may be an
+//     ancestor of the reference's, which one exact tag cannot answer) and
 //     castBase for an engine base class, which still walks the chain but
 //     reaches the instance directly instead of through the Runtime's map.
 //

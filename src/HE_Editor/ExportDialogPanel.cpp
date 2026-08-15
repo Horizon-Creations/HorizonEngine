@@ -857,21 +857,27 @@ void startExport(AppContext& ctx)
                             }
                             else if (const auto* w = ctx.contentManager->getWidget(id))
                                 json = w->graphJson;
-                            if (json.empty()) continue;   // no logic → nothing to compile
+                            // No logic → nothing to compile. A CLASS is the
+                            // exception: an empty one may still be somebody's
+                            // base class, and dropping it here would take every
+                            // class below it down with it (a C++ base has to
+                            // exist even when it does nothing).
+                            if (json.empty() && type != HE::AssetType::HorizonCodeClass) continue;
                             HE::hccg::ClassSource src;
                             src.key       = c.path;
                             src.label     = c.path;
                             if (type == HE::AssetType::HorizonCodeClass)
                             {
-                                // The FLATTENED graph: a derived class compiles
-                                // to what it actually runs — its own nodes plus
-                                // everything it inherits, overrides applied — so
-                                // the compiled and the interpreted backend keep
-                                // executing the same thing.
+                                // This class's OWN level, not the flattened
+                                // chain: the generator emits the inheritance as
+                                // C++ inheritance (C_Goblin : public C_Enemy),
+                                // so what it inherits is compiled once, in the
+                                // base's class — handing in the flattened graph
+                                // would emit every inherited member twice.
                                 HorizonCode::ResolvedClass rc =
                                     HorizonCode::resolveClassAsset(*ctx.contentManager, c.path);
-                                if (!rc.ok) continue;
-                                src.graph     = std::move(rc.graph);
+                                if (!rc.ok || rc.levels.empty()) continue;
+                                src.graph     = std::move(rc.levels.back());
                                 src.baseClass = rc.engineBase;
                                 src.chain     = std::move(rc.chain);
                                 hcSources.push_back(std::move(src));

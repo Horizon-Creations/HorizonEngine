@@ -31,8 +31,14 @@ struct ClassSource
     // The HorizonCode classes this one derives from, nearest first. Emitted as
     // classChain(), which is what lets a Cast to a PARENT class be answered
     // without the Runtime's map — classTag is one exact address per class and
-    // knows nothing about an ancestry. `graph` is expected FLATTENED (see
-    // HcClassResolve.h): one class, one graph, exactly as before inheritance.
+    // knows nothing about an ancestry.
+    //
+    // It is also the INHERITANCE the generator emits: chain.front() must appear
+    // in the same run as its own source, and the class comes out as
+    // `C_Goblin : public C_Enemy`. `graph` is therefore this class's OWN level
+    // (ResolvedClass::levels.back()) — NOT the flattened chain. Handing in a
+    // flattened graph together with a chain would compile every inherited member
+    // twice: once in the base's class and once more here.
     std::vector<std::string> chain;
 };
 

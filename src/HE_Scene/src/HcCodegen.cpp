@@ -743,21 +743,63 @@ std::string emitTypesUmbrella(const TypeTable& tt)
 // function or variable it wants exists and is public on the target.
 struct CompiledClass
 {
+    std::string key;              // the registry key, for diagnostics
     std::string cpp;
     const Graph* graph = nullptr;
+    // The HorizonCode class this one derives from ("" = none). With inheritance
+    // emitted as inheritance, a lookup that has to reach "anywhere up the chain"
+    // — an inherited variable's member, an inherited function's method — walks
+    // this rather than re-reading the source's chain.
+    std::string parentKey;
     // The C++ names its public surface got — a caller cannot re-derive them
     // (they are uniquified against that class's whole scope), so the probe pass
     // records them.
     std::unordered_map<std::string, std::string> publicFn;    // graph function → method
     std::unordered_map<std::string, std::string> publicVar;   // graph variable → accessor
+    // EVERY instance variable's member name, public or not. A derived class
+    // reads and writes an inherited variable as a plain member (the members are
+    // protected, and the name resolves through the base) — but only if it knows
+    // what that member is called.
+    std::unordered_map<std::string, std::string> varMember;   // graph variable → v_*
 };
 struct ClassTable
 {
     std::unordered_map<std::string, CompiledClass> byKey;   // class key → class
+    // Keys some other source derives from. A class in here cannot be `final`.
+    std::unordered_set<std::string> isBase;
     const CompiledClass* find(const std::string& key) const
     {
         const auto it = byKey.find(key);
         return it != byKey.end() ? &it->second : nullptr;
+    }
+    // The nearest ANCESTOR of `key` that declares `name` — an instance variable
+    // when `var`, else a function. `key` itself is skipped: this answers "did I
+    // inherit this", and a class's own members are found without it. Null when
+    // no ancestor declares it (or the chain leaves this run).
+    const CompiledClass* declaring(const std::string& key, const std::string& name,
+                                   bool var) const
+    {
+        const CompiledClass* start = find(key);
+        for (std::string k = start ? start->parentKey : std::string(); !k.empty(); )
+        {
+            const CompiledClass* p = find(k);
+            if (!p) break;
+            if (p->graph)
+            {
+                if (var)
+                {
+                    const Variable* v = p->graph->findVariable(name);
+                    if (v && v->scope == 0) return p;
+                }
+                else
+                {
+                    for (const Node& n : p->graph->nodes)
+                        if (n.type == NT::FunctionEntry && n.s == name) return p;
+                }
+            }
+            k = p->parentKey;
+        }
+        return nullptr;
     }
 };
 
@@ -802,6 +844,7 @@ public:
     // the Runtime's name-based seam.
     const std::unordered_map<std::string, std::string>& publicFunctions() const { return m_publicFn; }
     const std::unordered_map<std::string, std::string>& publicVariables()  const { return m_publicVar; }
+    const std::unordered_map<std::string, std::string>& variableMembers()  const { return m_varMember; }
 
     void run(std::string& header, std::string& impl)
     {
@@ -891,6 +934,65 @@ private:
         return nullptr;
     }
 
+    // ── inheritance ─────────────────────────────────────────────────────────
+    // The class this one derives FROM, as C++. chain.front() is the nearest
+    // HorizonCode ancestor; an empty chain means this class derives from an
+    // engine row (or nothing), and CompiledInstance stays the base.
+    const std::string& parentKey() const
+    {
+        static const std::string kNone;
+        return m_src.chain.empty() ? kNone : m_src.chain.front();
+    }
+    const CompiledClass* parent() const
+    { return parentKey().empty() ? nullptr : m_ct.find(parentKey()); }
+    // The ancestor that declares `name`, or null when this class does / nobody
+    // does. Answers "is this member inherited" for the body emitters.
+    const CompiledClass* inheritedVarFrom(const std::string& name) const
+    {
+        if (m_g.findVariable(name)) return nullptr;   // ours wins
+        return m_ct.declaring(m_src.key, name, /*var=*/true);
+    }
+    const CompiledClass* inheritedFnFrom(const std::string& name) const
+    {
+        if (fnEntryByName(name)) return nullptr;
+        return m_ct.declaring(m_src.key, name, /*var=*/false);
+    }
+    // That ancestor's declaration, for the signature a call has to match.
+    static const Node* fnEntryIn(const CompiledClass& c, const std::string& name)
+    {
+        if (!c.graph) return nullptr;
+        for (const Node& n : c.graph->nodes)
+            if (n.type == NT::FunctionEntry && n.s == name) return &n;
+        return nullptr;
+    }
+
+    // An instance variable by name, wherever in the chain it is declared, with
+    // the C++ member that reads it. The members are protected, so an inherited
+    // one is reached by its plain name from here — which is what makes the
+    // generated code agree with the interpreter's ONE variable store instead of
+    // detouring through the Runtime's overflow map.
+    // The number a Delay schedules its resume under. The Runtime keys a pending
+    // resume by (instance, LEVEL, node) for an interpreted instance, but a
+    // compiled one is a single object with no levels — so a base class's node 7
+    // and this class's node 7 would be one and the same pending Delay: the
+    // second would be swallowed as a retrigger, and the wrong chain would
+    // resume. Shifting by the class's depth in the chain keeps them apart, and
+    // the value is opaque to everyone in between — it only has to come back.
+    int resumeId(int nodeId) const
+    { return (int)m_src.chain.size() * 1000000 + nodeId; }
+
+    struct VarRef { const Variable* decl = nullptr; std::string member; };
+    VarRef instanceVar(const std::string& name) const
+    {
+        if (const Variable* v = m_g.findVariable(name); v && v->scope == 0)
+            return { v, m_varMember.at(name) };
+        const CompiledClass* from = m_ct.declaring(m_src.key, name, /*var=*/true);
+        if (!from || !from->graph) return {};
+        const auto it = from->varMember.find(name);
+        if (it == from->varMember.end()) return {};
+        return { from->graph->findVariable(name), it->second };
+    }
+
     // ── Stage A0: recover missing user-type definitions ─────────────────────
     // Array/ForEach nodes carry their element type in `propType` but not the
     // DEFINITION path, so a struct-array graph would have Struct pins with no
@@ -902,6 +1004,28 @@ private:
     void validate()
     {
         HorizonCode::inferUserTypeNames(m_g);
+
+        // 0. Inheritance. A class whose base did not reach C++ cannot either:
+        //    `C_Goblin : public C_Enemy` needs C_Enemy to exist. Falling back
+        //    with it is not a loss — the interpreted pair behaves identically —
+        //    and it is the only answer that keeps ONE object per instance.
+        if (!parentKey().empty() && !parent())
+            throw FallbackError{ "base class '" + parentKey() +
+                                 "' is not compiled, so this class cannot derive from it", 0 };
+
+        //    A variable an ancestor already declares would become a SECOND C++
+        //    member under one name, where the interpreter has one store slot —
+        //    the derived write would leave the base's reads on the old value.
+        //    The editor refuses to create these; an asset authored before it did
+        //    gets told why instead of silently diverging.
+        for (const Variable& v : m_g.variables)
+        {
+            if (v.scope != 0) continue;
+            if (const CompiledClass* from = m_ct.declaring(m_src.key, v.name, /*var=*/true))
+                throw FallbackError{ "variable '" + v.name + "' is already declared by the base "
+                                     "class '" + from->key + "' — rename it, or use the "
+                                     "inherited one", 0 };
+        }
 
         // 1. EngineCall nodes must resolve in the registry; the registry is
         //    authoritative for the pin mirror (stale assets re-mirror + warn).
@@ -1352,8 +1476,10 @@ private:
                     throw FallbackError{ "local '" + n.s + "' read outside its function", n.id };
                 return convertExpr(m_localName.at(n.s), trOf(v->type, v->isArray, v->typeName), pin);
             }
-            if (v)
-                return convertExpr(m_varMember.at(n.s), trOf(v->type, v->isArray, v->typeName), pin);
+            // This class's own, or a base class's — both are members here.
+            if (const VarRef iv = instanceVar(n.s); iv.decl)
+                return convertExpr(iv.member,
+                                   trOf(iv.decl->type, iv.decl->isArray, iv.decl->typeName), pin);
             // Undeclared: through the Context → the Runtime store (overflow for
             // compiled instances) so §3.4's dynamic-store semantics stay exact.
             return coerceCall("hc::getVariableCtx(m_ctx, " + strLit(n.s) + ")", pin);
@@ -1642,9 +1768,10 @@ private:
     // With OnFailure::Stop every class is native by construction — there is no
     // interpreted instance to stay compatible with, so the compatibility layer
     // is what goes:
-    //   • a HorizonCode class target lowers to hc::as<T>, a pointer comparison.
-    //     Exact match is all it ever needed: HC classes do not derive from one
-    //     another, so there is no chain the pointer compare could miss.
+    //   • a HorizonCode class target lowers to hc::castClass — its own key and
+    //     its chain, without the Runtime's map. NOT hc::as<T>: that is one exact
+    //     address per class, and since classes derive from one another the
+    //     target is often an ANCESTOR of what the reference holds.
     //   • an engine base class still walks the chain, but through
     //     resolveCompiled + baseClassKey() instead of the Runtime's map.
     // Both shapes yield the reference or 0, so the caller above is unchanged.
@@ -1794,10 +1921,10 @@ private:
                        convertExpr(input(n, 0, fnCtx), pin,
                                    trOf(v->type, v->isArray, v->typeName)) + ";");
             }
-            else if (v)
-                b.line(m_varMember.at(n.s) + " = " +
+            else if (const VarRef iv = instanceVar(n.s); iv.decl)
+                b.line(iv.member + " = " +
                        convertExpr(input(n, 0, fnCtx), pin,
-                                   trOf(v->type, v->isArray, v->typeName)) + ";");
+                                   trOf(iv.decl->type, iv.decl->isArray, iv.decl->typeName)) + ";");
             else
                 // §3.4: Set on an undeclared name creates a store entry — routed
                 // through the Context to the Runtime's (overflow) store.
@@ -1968,6 +2095,10 @@ private:
             const Node* entry = fnEntryByName(n.s);
             if (!entry)
             {
+                // Inherited: the base class has it, and since this class really
+                // derives from it in C++, the call is a plain qualified call to
+                // the base's own public method — no seam, no name lookup.
+                if (emitInheritedCall(n, fnCtx, b)) break;
                 // §3.4: no local entry → silent no-op (nothing cached). Warned at
                 // generation time so authors notice.
                 warn("call to missing function '" + n.s + "' lowered to a no-op");
@@ -2045,7 +2176,7 @@ private:
         case NT::Delay:
             // Latent: schedule the continuation (resume_<id> via resumeFrom)
             // and stop the chain — like the interpreter's runExecChain break.
-            b.line("hc::scheduleResume(m_ctx, " + std::to_string(n.id) + ", " +
+            b.line("hc::scheduleResume(m_ctx, " + std::to_string(resumeId(n.id)) + ", " +
                    input(n, 0, fnCtx) + ");");
             break;
         case NT::DoOnce:
@@ -2267,6 +2398,67 @@ private:
         return call + ");";
     }
 
+    // A Call Function whose entry lives in a BASE class. Returns false when the
+    // name is not inherited at all (the caller then keeps the no-op).
+    //
+    // Only PUBLIC base functions are reachable, which is not a shortcut but the
+    // rule: Runtime::callFunction refuses a private member across a class
+    // boundary, so a private one has to stay the no-op the interpreter performs.
+    bool emitInheritedCall(const Node& n, int fnCtx, Body& b)
+    {
+        const CompiledClass* from = inheritedFnFrom(n.s);
+        if (!from) return false;
+        const Node* entry = fnEntryIn(*from, n.s);
+        if (!entry) return false;
+        if (entry->access != 0)
+        {
+            warn("call to '" + n.s + "' is private to the base class '" + from->key +
+                 "' — lowered to a no-op, as the interpreter does");
+            return true;   // handled: the no-op IS the answer
+        }
+        const auto pf = from->publicFn.find(n.s);
+        if (pf == from->publicFn.end()) return false;   // the base did not expose it
+
+        b.line("{");
+        ++b.indent;
+        std::vector<std::string> argNames, resNames;
+        for (size_t i = 0; i < entry->params.size(); ++i)
+        {
+            const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
+            const TypeRef tr = trOf(entry->params[i].type, entry->params[i].isArray,
+                                    entry->params[i].typeName);
+            b.line("const " + cppType(tr) + " " + a + " = " +
+                   (i < n.params.size() ? input(n, (int)i, fnCtx) : zeroLit(tr)) + ";");
+            argNames.push_back(a);
+        }
+        for (size_t i = 0; i < entry->results.size(); ++i)
+        {
+            const std::string r = "r" + std::to_string(n.id) + "_" + std::to_string(i);
+            const TypeRef tr = trOf(entry->results[i].type, entry->results[i].isArray,
+                                    entry->results[i].typeName);
+            b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
+            resNames.push_back(r);
+        }
+        // The base's public method takes params then results by reference, and
+        // opens its OWN RunState — the depth guard is still ours, because the
+        // recursion this counts is the graph's, not C++'s.
+        std::string call = from->cpp + "::" + pf->second + "(";
+        for (size_t i = 0; i < argNames.size(); ++i) call += (i ? ", " : "") + argNames[i];
+        for (size_t i = 0; i < resNames.size(); ++i)
+            call += (i || !argNames.empty() ? ", " : "") + resNames[i];
+        call += ");";
+        b.line("if (++rs.depth <= hc::kMaxDepth) " + call + "   // depth guard (§3.6)");
+        b.line("--rs.depth;");
+        m_rsTouched = true;
+        const auto it = m_slots.find(n.id);
+        if (it != m_slots.end())
+            for (size_t k = 0; k < it->second.size() && k < resNames.size(); ++k)
+                b.line("rs." + it->second[k].field + " = " + resNames[k] + ";");
+        --b.indent;
+        b.line("}");
+        return true;
+    }
+
     void emitClassFiles(std::string& h, std::string& c)
     {
         const std::string ns = m_opt.namespaceName;
@@ -2306,6 +2498,27 @@ private:
             ++varCount;
             if (v.type == PT::Ref) anyRefVar = true;
         }
+        // ── what inheritance changes about the frame ────────────────────────
+        // The name-keyed entry points (varInfos, getVariable, setVariable,
+        // collectRefs) all read slots(), and slots() is a STATIC function — the
+        // base's copy would answer with the base's table and lose everything
+        // this class declares. So a derived class re-emits them whenever the
+        // CHAIN has variables, even when it declares none itself.
+        const CompiledClass* par = parent();
+        size_t chainVarCount = varCount;
+        bool   chainRefVar   = anyRefVar;
+        for (const CompiledClass* a = par; a; a = a->parentKey.empty() ? nullptr
+                                                                      : m_ct.find(a->parentKey))
+        {
+            if (!a->graph) continue;
+            for (const Variable& v : a->graph->variables)
+            {
+                if (v.scope != 0) continue;
+                ++chainVarCount;
+                if (v.type == PT::Ref) chainRefVar = true;
+            }
+        }
+        const bool ownTable = par && varCount > 0;   // an ownSlots() beside slots()
         // A parameter the DEFINITION never touches loses its name (the
         // declaration keeps it) — no `(void)x;` noise, and the header still
         // documents what the argument is.
@@ -2336,8 +2549,17 @@ private:
             }
             for (const std::string& inc : headers) h += "#include \"" + inc + "\"\n";
         }
+        // The base class is a real C++ base, so its declaration has to be here —
+        // in the HEADER, not just the .cpp: anyone including this one gets an
+        // incomplete type otherwise.
+        if (par) h += "#include \"hcgen_" + par->cpp + ".h\"\n";
         h += "\nnamespace " + ns + " {\n\n";
-        h += "class " + m_cls + " final : public HorizonCode::CompiledInstance\n{\npublic:\n";
+        // `final` only when nothing in this run derives from it. It is worth
+        // keeping where it applies (the devirtualization it allows is the reason
+        // every generated class had it), and it must go where it does not.
+        const std::string fin = m_ct.isBase.count(m_src.key) ? "" : " final";
+        h += "class " + m_cls + fin + " : public " +
+             (par ? par->cpp : std::string("HorizonCode::CompiledInstance")) + "\n{\npublic:\n";
 
         if (!m_publicEv.empty() || !m_publicFn.empty())
         {
@@ -2388,10 +2610,16 @@ private:
         h += "    // Identity for hc::as — see CompiledInstance::classTag.\n";
         h += "    static const void* classTag_();\n";
         h += "    const void* classTag() const override;\n";
-        if (varCount)
+        if (chainVarCount)
         {
             h += "    // The declared variables as ONE table: the Runtime's name-based entry\n";
             h += "    // points below all read it instead of carrying a branch per variable.\n";
+            if (ownTable)
+            {
+                h += "    // ownSlots() is what THIS class declares; slots() is the whole chain,\n";
+                h += "    // so a name-based read finds an inherited variable too.\n";
+                h += "    static const hc::VarSlots& ownSlots();\n";
+            }
             h += "    static const hc::VarSlots& slots();\n";
             h += "    const std::vector<HorizonCode::CompiledVarInfo>& varInfos() const override;\n";
         }
@@ -2406,16 +2634,19 @@ private:
             h += "                      const std::vector<hc::Value>& args,\n";
             h += "                      std::vector<hc::Value>* results) override;\n";
         }
-        if (varCount)
+        if (chainVarCount)
         {
             h += "    hc::Value getVariable(const std::string& name) const override;\n";
             h += "    bool setVariable(const std::string& name, const hc::Value& v) override;\n";
-            if (anyRefVar) h += "    void collectRefs(std::vector<uint32_t>& out) const override;\n";
+            if (chainRefVar) h += "    void collectRefs(std::vector<uint32_t>& out) const override;\n";
         }
         if (varCount || !states.empty()) h += "    void reseedVariables() override;\n";
         if (!delays.empty())             h += "    void resumeFrom(int nodeId) override;\n";
 
-        h += "\nprivate:\n";
+        // protected, not private: a derived class's generated code reads and
+        // writes the inherited members directly — that is what keeps ONE C++
+        // member per graph variable, matching the interpreter's one store.
+        h += "\nprotected:\n";
         if (rsOn)
         {
             // Per-run state: mirrors the Runner exactly (§3.3/§5.4) — and only the
@@ -2504,21 +2735,34 @@ private:
         c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
         c += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
 
-        if (varCount)
+        if (chainVarCount)
         {
-            c += "const hc::VarSlots& " + m_cls + "::slots()\n{\n";
-            c += "    static const hc::VarSlots k = {\n";
-            for (const auto& v : m_g.variables)
+            if (varCount)
             {
-                if (v.scope != 0) continue;
-                const TypeRef tr = varType(v);
-                c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
-                     strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
-                     (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
-                     strLit(v.typeName) + ", " +
-                     toValueCall(memberDefault(v), tr, ns) + "),\n";
+                c += "const hc::VarSlots& " + m_cls + "::" +
+                     (ownTable ? "ownSlots" : "slots") + "()\n{\n";
+                c += "    static const hc::VarSlots k = {\n";
+                for (const auto& v : m_g.variables)
+                {
+                    if (v.scope != 0) continue;
+                    const TypeRef tr = varType(v);
+                    c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
+                         strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
+                         (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
+                         strLit(v.typeName) + ", " +
+                         toValueCall(memberDefault(v), tr, ns) + "),\n";
+                }
+                c += "    };\n    return k;\n}\n\n";
             }
-            c += "    };\n    return k;\n}\n\n";
+            if (par)
+            {
+                // The base's table plus this class's. The base's entries keep
+                // accessors typed on the BASE — correct for an object of this
+                // class, since the base sub-object is right there.
+                c += "const hc::VarSlots& " + m_cls + "::slots()\n";
+                c += "{ static const hc::VarSlots k = hc::concatSlots(" + par->cpp + "::slots()" +
+                     (ownTable ? ", ownSlots()" : ", {}") + "); return k; }\n\n";
+            }
             c += "const std::vector<HorizonCode::CompiledVarInfo>& " + m_cls + "::varInfos() const\n";
             c += "{ static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
         }
@@ -2530,13 +2774,33 @@ private:
             for (const Node& n : m_g.nodes)
                 if (n.type == NT::Event)
                     c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) + " },\n";
-            c += "    };\n    return kEvents;\n}\n\n";
+            c += "    };\n";
+            if (par)
+            {
+                // Plus the base's. This is the list Runtime::handlesEvent reads
+                // to decide whether an instance cares about an event at all, so
+                // leaving the inherited handlers out of it would make them
+                // unreachable — the handler exists, and nobody would ever fire.
+                c += "    static const std::vector<HorizonCode::CompiledEventInfo> kAll = [this]\n";
+                c += "    {\n";
+                c += "        std::vector<HorizonCode::CompiledEventInfo> v = " + par->cpp +
+                     "::eventInfos();\n";
+                c += "        v.insert(v.end(), kEvents.begin(), kEvents.end());\n";
+                c += "        return v;\n";
+                c += "    }();\n";
+                c += "    return kAll;\n}\n\n";
+            }
+            else
+                c += "    return kEvents;\n}\n\n";
 
             // fireEvent: fresh RunState per fire == the per-run cache clear (§3.1);
             // every matching handler of one fire shares it, in graph order.
+            // With a base class the parameters always keep their names: whatever
+            // this class does not handle is passed on, so `elem` and `arg` are
+            // used even when none of its own handlers reads them.
             c += "void " + m_cls + "::fireEvent(const std::string& name, " +
-                 p("int", "elem", anyElemFilter) + ", " +
-                 p("const hc::Value&", "arg", m_usesEventArg) + ")\n{\n";
+                 p("int", "elem", anyElemFilter || par != nullptr) + ", " +
+                 p("const hc::Value&", "arg", m_usesEventArg || par != nullptr) + ")\n{\n";
             if (rsOn) c += "    RunState rs;\n";
             if (m_usesEventArg) c += "    rs.eventArg = arg;\n";
             bool first = true;
@@ -2552,6 +2816,15 @@ private:
                 }
                 c += "    }\n";
                 first = false;
+            }
+            if (par)
+            {
+                // Not handled here → the base class. Leaf first, stopping at the
+                // first class that declares the handler: an override REPLACES
+                // the base's version, exactly as Runtime::runEventOnLevel
+                // resolves it for an interpreted instance.
+                c += std::string("    ") + (first ? "" : "else ") + "{ " + par->cpp +
+                     "::fireEvent(name, elem, arg); }\n";
             }
             c += "}\n\n";
         }
@@ -2635,16 +2908,26 @@ private:
                          toValueCall("r" + std::to_string(i), resTypes[i], ns) + ");\n";
                 c += "        }\n        return true;\n    }\n";
             }
-            c += "    return false;\n}\n\n";
+            // An inherited function is the base's to run — and only if it is
+            // public, which is the base's own check, not something to repeat.
+            if (par)
+                c += "    return " + par->cpp + "::callFunction(name, " +
+                     (anyPrivateFn ? "requirePublic" : "true") + ", " +
+                     (anyFnParams ? "args" : "{}") + ", results);\n}\n\n";
+            else
+                c += "    return false;\n}\n\n";
         }
 
-        if (varCount)
+        if (chainVarCount)
         {
+            // slots() is the whole chain, so these three answer for an inherited
+            // name as readily as for an own one — which is what the Runtime's
+            // name-keyed seam and the garbage collector both need.
             c += "hc::Value " + m_cls + "::getVariable(const std::string& name) const\n";
             c += "{ return hc::getVar(slots(), this, name); }\n\n";
             c += "bool " + m_cls + "::setVariable(const std::string& name, const hc::Value& v)\n";
             c += "{ return hc::setVar(slots(), this, name, v); }\n\n";
-            if (anyRefVar)
+            if (chainRefVar)
             {
                 c += "void " + m_cls + "::collectRefs(std::vector<uint32_t>& out) const\n";
                 c += "{ hc::collectVarRefs(slots(), this, out); }\n\n";
@@ -2653,7 +2936,13 @@ private:
         if (varCount || !states.empty())
         {
             c += "void " + m_cls + "::reseedVariables()\n{\n";
-            if (varCount) c += "    hc::reseedVars(slots(), this);\n";
+            // The base's variables AND its node states first — its own reseed is
+            // the only thing that can reach the DoOnce flags it declares.
+            if (par) c += "    " + par->cpp + "::reseedVariables();\n";
+            // Own slots only: the base's were just reseeded, and doing them twice
+            // would only be slower, not wrong.
+            if (varCount) c += "    hc::reseedVars(" + std::string(ownTable ? "ownSlots()" : "slots()") +
+                               ", this);\n";
             for (const int id : states)
                 c += "    " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
             c += "}\n\n";
@@ -2663,8 +2952,11 @@ private:
             c += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
             if (rsOn) c += "    RunState rs;\n";
             for (const int id : delays)
-                c += "    if (nodeId == " + std::to_string(id) + ") { resume_" +
+                c += "    if (nodeId == " + std::to_string(resumeId(id)) + ") { resume_" +
                      std::to_string(id) + "(" + rsArg() + "); return; }\n";
+            // A Delay in a base class schedules a resume by ITS node id; the id
+            // means nothing here, so the lookup has to continue up the chain.
+            if (par) c += "    " + par->cpp + "::resumeFrom(nodeId);\n";
             c += "}\n\n";
         }
 
@@ -2765,24 +3057,44 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     struct Entry { std::string key, className; };
     std::vector<Entry> compiled;
 
+    // ── base classes first ───────────────────────────────────────────────────
+    // `C_Goblin : public C_Enemy` needs C_Enemy's emitter to have run: its C++
+    // name, its member names and its public methods are all things the child
+    // asks the ClassTable for. Sorting by how deep a class sits in its chain
+    // does that in one pass — the chain is already resolved, so no graph walk is
+    // needed, and classes at the same depth keep the caller's order.
+    std::vector<const ClassSource*> order;
+    order.reserve(sources.size());
+    for (const ClassSource& s : sources) order.push_back(&s);
+    std::stable_sort(order.begin(), order.end(),
+        [](const ClassSource* a, const ClassSource* b)
+        { return a->chain.size() < b->chain.size(); });
+
     // Probe pass: which classes reach native C++ at all. A direct call into
     // another class is only emittable if that class HAS a C++ type, and the only
     // way to know is to try. Output and warnings are thrown away; the real pass
     // below repeats the work with the answer in hand.
     ClassTable classes;
+    // Who is somebody's base — decided before any emission, because it is what
+    // says whether a class may be `final`.
+    for (const ClassSource& s : sources)
+        if (!s.chain.empty()) classes.isBase.insert(s.chain.front());
     {
         std::unordered_set<std::string> probeNames;
         const size_t warningsBefore = res.warnings.size();
-        for (const ClassSource& src : sources)
+        for (const ClassSource* srcp : order)
         {
+            const ClassSource& src = *srcp;
             const std::string className = classNameFor(src.key, probeNames);
             try
             {
                 ClassEmitter em(src, className, opt, types, classes, res.warnings);
                 std::string h, c;
                 em.run(h, c);
-                classes.byKey[src.key] = { className, &src.graph,
-                                           em.publicFunctions(), em.publicVariables() };
+                classes.byKey[src.key] = { src.key, className, &src.graph,
+                                           src.chain.empty() ? std::string() : src.chain.front(),
+                                           em.publicFunctions(), em.publicVariables(),
+                                           em.variableMembers() };
             }
             catch (...) { probeNames.erase(className); }
         }
@@ -2828,14 +3140,22 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         }
     }
 
-    for (size_t si = 0; si < sources.size(); ++si)
+    // A class that fell back in the REAL pass takes its descendants with it: the
+    // probe said the parent was compilable, so the child was translated against
+    // a C++ base that will not exist. (The probe can disagree with the real pass
+    // — it runs against a partially filled table.)
+    std::unordered_set<std::string> failed;
+    for (size_t si = 0; si < order.size(); ++si)
     {
-        const ClassSource& src = sources[si];
+        const ClassSource& src = *order[si];
         if (opt.onClass)
-            opt.onClass(src.label.empty() ? src.key : src.label, si, sources.size());
+            opt.onClass(src.label.empty() ? src.key : src.label, si, order.size());
         const std::string className = classNameFor(src.key, usedNames);
         try
         {
+            if (!src.chain.empty() && failed.count(src.chain.front()))
+                throw FallbackError{ "base class '" + src.chain.front() +
+                                     "' could not be compiled", 0 };
             ClassEmitter em(src, className, opt, types, classes, res.warnings);
             std::string header, impl;
             em.run(header, impl);
@@ -2846,6 +3166,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
         catch (const FallbackError& e)
         {
             usedNames.erase(className);   // name freed — the class ships interpreted
+            failed.insert(src.key);
             res.fallbacks.push_back({ src.key, e.reason, e.node });
             // Stop mode: a class that cannot be compiled is the build's problem,
             // not something to paper over. Every one is still collected, so the
@@ -2863,6 +3184,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
             // per-class compile check reads only `fallbacks` — without one it would
             // report the graph as compiling cleanly.
             usedNames.erase(className);
+            failed.insert(src.key);
             res.ok = false;
             res.warnings.push_back("internal codegen error in '" +
                                    (src.label.empty() ? src.key : src.label) + "': " + e.what());

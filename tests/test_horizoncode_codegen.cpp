@@ -259,8 +259,23 @@ namespace
 					comp.rt.setGameInstanceCompiled(
 						CompiledPtr(gi->create(), CompiledDeleter{ gi->destroy }));
 			}
-			const ClassIdentity cls{ src.key, src.baseClass };   // src.graph is moved below
-			interp.id = interp.rt.add(std::move(src.graph), interp.host(), cls);
+			const ClassIdentity cls{ src.key, src.baseClass, src.chain };
+			// The interpreted side gets the CHAIN as levels, root first — the
+			// fixture's `graph` is one class's own level now, exactly like the
+			// compiled side, where the ancestry is C++ inheritance. Building it
+			// here is what makes the two comparable at all for a derived class.
+			{
+				std::vector<Graph> levels;
+				for (auto a = src.chain.rbegin(); a != src.chain.rend(); ++a)
+				{
+					bool have = false;
+					for (auto& s : hcfix::all())
+						if (s.key == *a) { levels.push_back(std::move(s.graph)); have = true; break; }
+					REQUIRE(have);   // a fixture chain must be complete
+				}
+				levels.push_back(std::move(src.graph));
+				interp.id = interp.rt.addLevels(std::move(levels), interp.host(), cls);
+			}
 
 			const CompiledClassEntry* entry = findCompiled(key);
 			REQUIRE(entry != nullptr);
@@ -611,6 +626,113 @@ TEST_CASE("codegen parity: casts (the DIRECT lowerings agree with the interprete
 	CHECK(p.var("null").f  == 1.0f);   // Ref 0                → Failure
 	// The Success branch hands the SAME reference through, not a fresh one.
 	CHECK(p.var("gotRef").ref == obj);
+}
+
+TEST_CASE("codegen parity: a derived class is a derived class in C++ too")
+{
+	// The interpreted side runs two graph LEVELS; the compiled side is one
+	// object of a class that derives from another. Every clause of "what
+	// inheritance means" has to come out the same on both.
+	ParityPair p("fix/inherit_derived");
+
+	// 1. An override REPLACES: Construct is declared in both, and only the
+	//    derived one may run (baseOnly would be 1 if the base's had).
+	p.compInst->onConstruct();
+	p.interp.rt.fireConstruct(p.interp.id);
+	p.checkParity();
+	CHECK(p.var("mine").f == 5.0f);
+	CHECK(p.var("baseOnly").f == 0.0f);
+
+	// 2. An inherited variable is ONE variable: the derived handler writes the
+	//    base's `hits`, and the base's default for `hp` is visible here.
+	CHECK(p.var("hp").f == 100.0f);
+	p.fire("Ping");
+	CHECK(p.var("hits").f == 99.0f);
+
+	// 3. What the derived class does NOT handle still reaches the base.
+	p.fire("Pong");
+	CHECK(p.var("hits").f == 109.0f);
+
+	// 4. A call to an inherited PUBLIC function runs it, results and all; a call
+	//    to a private one reaches nothing (both are in the "Go" chain).
+	p.fire("Go");
+	CHECK(p.var("hp").f   == 70.0f);
+	CHECK(p.var("left").f == 70.0f);
+	CHECK(p.var("secret").f == 0.0f);   // private to the base — not callable
+
+	// 5. A Cast to the BASE class succeeds. One exact class tag per class cannot
+	//    answer that, so this is the case the chain-aware lowering exists for.
+	p.fire("Check");
+	CHECK(p.var("isBase").f == 1.0f);
+
+	// 6. The name-keyed seam reaches the whole chain — this is what the Runtime
+	//    (and the garbage collector, through the same table) actually uses.
+	CHECK(p.comp.rt.getVariable(p.comp.id, "hp").f == 70.0f);
+	p.comp.rt.setVariable(p.comp.id, "hp", Value::ofFloat(5.0f));
+	p.interp.rt.setVariable(p.interp.id, "hp", Value::ofFloat(5.0f));
+	p.checkParity();
+
+	// 7. Reseeding resets the base's variables as well as the derived one's —
+	//    the base's own reseed is the only thing that can reach them.
+	p.reseed();
+	CHECK(p.var("hp").f == 100.0f);
+	CHECK(p.var("mine").f == 0.0f);
+}
+
+TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes")
+{
+	// The class frame is the same either way — only the Cast lowering differs by
+	// mode (see the next case), and that difference must not quietly change what
+	// a derived class IS.
+	std::vector<HE::hccg::ClassSource> pair;
+	for (auto& s : hcfix::all())
+		if (s.key == "fix/inherit_base" || s.key == "fix/inherit_derived")
+			pair.push_back(std::move(s));
+	REQUIRE(pair.size() == 2);
+
+	for (const HE::hccg::OnFailure mode : { HE::hccg::OnFailure::Interpret,
+	                                        HE::hccg::OnFailure::Stop })
+	{
+		HE::hccg::Options opt;
+		opt.onFailure = mode;
+		std::vector<HE::hccg::ClassSource> copy = pair;
+		HE::hccg::Result r = HE::hccg::generate(std::move(copy), opt);
+		REQUIRE(r.ok);
+		REQUIRE(r.fallbacks.empty());
+		std::string all;
+		for (const auto& f : r.files) all += f.contents;
+
+		CHECK(all.find("class C_inherit_derived final : public C_inherit_base") != std::string::npos);
+		// The base cannot be final — something derives from it.
+		CHECK(all.find("class C_inherit_base : public HorizonCode::CompiledInstance") != std::string::npos);
+		// One table for the chain, and the unhandled cases passed upward.
+		CHECK(all.find("hc::concatSlots(C_inherit_base::slots()") != std::string::npos);
+		CHECK(all.find("C_inherit_base::fireEvent(name, elem, arg)") != std::string::npos);
+		CHECK(all.find("C_inherit_base::reseedVariables()") != std::string::npos);
+		// The inherited members are reachable from the derived bodies: a direct
+		// member write, and a direct qualified call.
+		CHECK(all.find("v_hits = 99.0f") != std::string::npos);
+		CHECK(all.find("C_inherit_base::Damage(") != std::string::npos);
+		CHECK(all.find("\nprotected:") != std::string::npos);
+	}
+}
+
+TEST_CASE("codegen: a class whose base did not compile ships interpreted with it")
+{
+	// `C_Goblin : public C_Enemy` cannot exist without C_Enemy. Handing in the
+	// derived class alone must not produce a class with a missing base — it has
+	// to fall back, which is the answer that keeps ONE object per instance.
+	HE::hccg::ClassSource derived;
+	for (auto& s : hcfix::all())
+		if (s.key == "fix/inherit_derived") { derived = std::move(s); break; }
+	REQUIRE(!derived.key.empty());
+
+	HE::hccg::Options opt;   // Interpret: a fallback is an answer, not a failure
+	HE::hccg::Result r = HE::hccg::generate({ std::move(derived) }, opt);
+	CHECK(r.ok);
+	REQUIRE(r.fallbacks.size() == 1);
+	CHECK(r.fallbacks[0].key == "fix/inherit_derived");
+	CHECK(r.fallbacks[0].reason.find("fix/inherit_base") != std::string::npos);
 }
 
 TEST_CASE("codegen: Cast lowers through the seam when other classes may be interpreted")

@@ -248,6 +248,17 @@ struct Fx
         return { "fix/" + name, name, std::move(rt), baseClass };
     }
 
+    // A class that derives from ANOTHER fixture class. `chain` is what the
+    // generator turns into real C++ inheritance, so `g` must hold this class's
+    // OWN nodes only — what it inherits lives in the base's fixture.
+    HE::hccg::ClassSource done(const std::string& name, const std::string& baseKey,
+                               const std::string& engineBase)
+    {
+        HE::hccg::ClassSource s = done(name, engineBase);
+        s.chain = { baseKey };
+        return s;
+    }
+
     // A Cast node pointed at `target`, with the output pin's readable name
     // mirrored on exactly as HcEditorUtil::setCastTarget does in the editor.
     int cast(const std::string& target)
@@ -1467,9 +1478,9 @@ inline HE::hccg::ClassSource fxCastTarget()
 
 // 25 — casts: every branch a Cast can take, against one live object.
 // The fixtures are generated with OnFailure::Stop, so THIS is what proves the
-// direct lowerings (hc::as for a HorizonCode class, hc::castBase for an engine
-// base) agree with the interpreter's Runtime::instanceIsA — the fast path's own
-// parity case, which is exactly the thing that would otherwise be untested.
+// direct lowerings (hc::castClass for a HorizonCode class, hc::castBase for an
+// engine base) agree with the interpreter's Runtime::instanceIsA — the fast
+// path's own parity case, which would otherwise be the untested one.
 inline HE::hccg::ClassSource fxCasts()
 {
     Fx f;
@@ -1531,6 +1542,134 @@ inline HE::hccg::ClassSource fxCasts()
     return f.done("casts");
 }
 
+// 26a — inherit_base: the base half of the inheritance pair. Everything a
+// derived class is supposed to be able to reach lives here and NOWHERE in the
+// derived fixture: an instance variable, a handler it overrides, a handler it
+// does not, a public function and a private one.
+inline HE::hccg::ClassSource fxInheritBase()
+{
+    Fx f;
+    f.var("hp", PT::Float, 100.0f);
+    f.var("hits", PT::Float);
+    f.var("baseOnly", PT::Float);
+    f.var("secret", PT::Float, 0.0f, {}, /*access=*/1);
+
+    // Construct: the derived class overrides it, so on a derived instance this
+    // must NOT run — baseOnly staying 0 is what proves it.
+    const int ctor = f.event("Construct");
+    const int sBase = f.setVar("baseOnly", PT::Float);
+    f.g.findNode(sBase)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(ctor, sBase);
+
+    // Ping is overridden too; Pong is not, so Pong on a derived instance runs
+    // THIS handler — the "the base still answers what the child ignores" half.
+    const int ping = f.event("Ping");
+    const int sPing = f.setVar("hits", PT::Float);
+    f.g.findNode(sPing)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.exec(ping, sPing);
+
+    const int pong = f.event("Pong");
+    const int sPong = f.setVar("hits", PT::Float);
+    { const int a = f.op(NT::Add);
+      f.data(f.getVar("hits", PT::Float), 0, a, 0);
+      f.data(f.constF(10.0f), 0, a, 1);
+      f.data(a, 0, sPong, 0); }
+    f.exec(pong, sPong);
+
+    // A public function the derived class calls, results included: hp -= amount,
+    // and the remainder comes back out.
+    {
+        const int fe = f.fnEntry("Damage", 0, { { "amount", PT::Float, false, {} } },
+                                             { { "left",   PT::Float, false, {} } });
+        f.g.findNode(fe)->subgraph = fe;
+        const int sub = f.setVar("hp", PT::Float);
+        f.g.findNode(sub)->subgraph = fe;
+        const int a = f.op(NT::Subtract);
+        f.g.findNode(a)->subgraph = fe;
+        const int gh = f.getVar("hp", PT::Float);
+        f.g.findNode(gh)->subgraph = fe;
+        f.data(gh, 0, a, 0);
+        f.data(fe, 0, a, 1);          // the "amount" parameter
+        f.data(a, 0, sub, 0);
+        f.exec(fe, sub);
+        const int ret = f.fnReturn("Damage");
+        f.g.findNode(ret)->subgraph = fe;
+        f.g.findNode(ret)->results = f.g.findNode(fe)->results;
+        const int gh2 = f.getVar("hp", PT::Float);
+        f.g.findNode(gh2)->subgraph = fe;
+        f.data(gh2, 0, ret, 0);
+        f.exec(sub, ret);
+    }
+    // A PRIVATE one: a call from the derived class must reach nothing, in both
+    // backends — Runtime::callFunction refuses a private member across a class
+    // boundary, and the generator lowers that call to the same no-op.
+    {
+        const int fe = f.fnEntry("Secret", 1, {}, {});
+        f.g.findNode(fe)->subgraph = fe;
+        const int ss = f.setVar("secret", PT::Float);
+        f.g.findNode(ss)->subgraph = fe;
+        f.g.findNode(ss)->pinDefaults[0] = Value::ofFloat(1.0f);
+        f.exec(fe, ss);
+    }
+    return f.done("inherit_base", "Entity");
+}
+
+// 26 — inherit_derived: `C_inherit_derived : public C_inherit_base`. Its graph
+// holds ONLY its own nodes; everything else it reaches is inherited.
+inline HE::hccg::ClassSource fxInheritDerived()
+{
+    Fx f;
+    f.var("mine", PT::Float);
+    f.var("left", PT::Float);
+    f.var("isBase", PT::Float);
+
+    // Overrides Construct: the base's handler must not also run.
+    const int ctor = f.event("Construct");
+    const int sMine = f.setVar("mine", PT::Float);
+    f.g.findNode(sMine)->pinDefaults[0] = Value::ofFloat(5.0f);
+    f.exec(ctor, sMine);
+
+    // Overrides Ping, and writes an INHERITED variable while doing it — one
+    // store in the interpreter, one C++ member here.
+    const int ping = f.event("Ping");
+    const int sHits = f.setVar("hits", PT::Float);
+    f.g.findNode(sHits)->pinDefaults[0] = Value::ofFloat(99.0f);
+    f.exec(ping, sHits);
+    // Pong is deliberately absent — the base's handler answers it.
+
+    // Calls the base's public function and keeps its result.
+    {
+        const int go = f.event("Go");
+        const int call = f.fnCall("Damage");
+        // No local FunctionEntry to mirror from, so the call carries the base's
+        // signature itself — which is exactly what syncFunctionSignatures leaves
+        // alone for a function declared in another graph.
+        f.g.findNode(call)->params  = { { "amount", PT::Float, false, {} } };
+        f.g.findNode(call)->results = { { "left",   PT::Float, false, {} } };
+        f.exec(go, call);
+        f.data(f.constF(30.0f), 0, call, 0);
+        const int sLeft = f.setVar("left", PT::Float);
+        f.data(call, 0, sLeft, 0);
+        f.exec(call, sLeft);
+        // …and the base's PRIVATE one, which reaches nothing on either backend.
+        const int priv = f.fnCall("Secret");
+        f.exec(sLeft, priv);
+    }
+
+    // Cast to the base CLASS: one exact tag per class cannot answer this, so it
+    // is the case that proves the chain-aware lowering.
+    {
+        const int ev = f.event("Check");
+        const int cast = f.cast("fix/inherit_base");
+        f.exec(ev, cast);
+        f.data(f.op(NT::GetSelf), 0, cast, 0);
+        const int sIs = f.setVar("isBase", PT::Float);
+        f.g.findNode(sIs)->pinDefaults[0] = Value::ofFloat(1.0f);
+        f.exec(cast, sIs, 0);   // Success
+    }
+    return f.done("inherit_derived", "fix/inherit_base", "Entity");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1543,6 +1682,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),
         fxCastTarget(), fxCasts(),
+        fxInheritBase(), fxInheritDerived(),
     };
 }
 

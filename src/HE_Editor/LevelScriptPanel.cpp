@@ -122,23 +122,64 @@ LSState g;
 // Run the SINGLE-class compile check the export would run: JSON round-trip
 // (what a shipped asset contains), then HE::hccg::generate. Success = the class
 // would compile on export; a fallback carries the reason + offending node.
-void runCompileCheck(const HC::Graph& graph, const char* title)
+// `classKey`/`content` are set for a CLASS tab and empty for the level script
+// and the GameInstance. With them the check compiles the whole ancestry, which
+// is what an export does — a derived class alone cannot be translated at all
+// (its C++ base would be missing), and even where it could, a call to an
+// inherited function would look like a call to nothing.
+void runCompileCheck(const HC::Graph& graph, const char* title,
+                     const std::string& classKey, ContentManager* content)
 {
-	HE::hccg::ClassSource src;
-	src.key   = title;
-	src.label = title;
-	HorizonCode::fromJson(HorizonCode::toJson(graph), src.graph);
-	const HE::hccg::Result res = HE::hccg::generate({ src }, {});
+	std::vector<HE::hccg::ClassSource> sources;
+	const std::string selfKey = classKey.empty() ? std::string(title) : classKey;
+	if (!classKey.empty() && content)
+	{
+		const HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(*content, classKey);
+		// The ancestors as they are on disk; only the class itself comes from
+		// the tab, unsaved edits included.
+		for (auto a = rc.chain.rbegin(); a != rc.chain.rend(); ++a)
+		{
+			const HorizonCode::ResolvedClass arc = HorizonCode::resolveClassAsset(*content, *a);
+			if (!arc.ok || arc.levels.empty()) continue;
+			HE::hccg::ClassSource s;
+			s.key = s.label = *a;
+			s.graph     = arc.levels.back();
+			s.baseClass = arc.engineBase;
+			s.chain     = arc.chain;
+			sources.push_back(std::move(s));
+		}
+		HE::hccg::ClassSource self;
+		self.key = self.label = classKey;
+		HorizonCode::fromJson(HorizonCode::toJson(graph), self.graph);
+		self.baseClass = rc.engineBase;
+		self.chain     = rc.chain;
+		sources.push_back(std::move(self));
+	}
+	else
+	{
+		HE::hccg::ClassSource src;
+		src.key   = title;
+		src.label = title;
+		HorizonCode::fromJson(HorizonCode::toJson(graph), src.graph);
+		sources.push_back(std::move(src));
+	}
+	const HE::hccg::Result res = HE::hccg::generate(sources, {});
 
 	g.compileHas  = true;
 	g.compileFor  = title;
 	g.compileAt   = ImGui::GetTime();
 	g.compileNode = 0;
-	if (!res.fallbacks.empty())
+	// Only THIS class's verdict is this tab's business: an ancestor that does
+	// not compile is reported in its own tab, and blaming this one for it would
+	// send the author to the wrong graph.
+	const HE::hccg::Result::Fallback* mine = nullptr;
+	for (const auto& f : res.fallbacks)
+		if (f.key == selfKey) { mine = &f; break; }
+	if (mine)
 	{
 		g.compileOk   = false;
-		g.compileMsg  = res.fallbacks[0].reason;
-		g.compileNode = res.fallbacks[0].node;
+		g.compileMsg  = mine->reason;
+		g.compileNode = mine->node;
 		// Jump to the offending node: open its sub-graph and center on it.
 		if (const HC::Node* n = graph.findNode(g.compileNode))
 		{
@@ -154,6 +195,8 @@ void runCompileCheck(const HC::Graph& graph, const char* title)
 		for (const auto& f : res.files)
 			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
 		g.compileOk  = true;
+		// The line count covers the whole ancestry when there is one — which is
+		// honest: that is what an export builds to make THIS class native.
 		g.compileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
 		if (!res.warnings.empty())
 			g.compileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
@@ -976,7 +1019,8 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    ContentManager* content, const HC::Graph* giGraph, bool& edited,
                    const std::string& baseClass = {}, bool derivable = false,
                    const std::vector<HC::OverridableMember>& overrides = {},
-                   const std::vector<HC::InheritedVariable>& inheritedVars = {})
+                   const std::vector<HC::InheritedVariable>& inheritedVars = {},
+                   const std::string& classKey = {})
 {
 	// The shared panel state is reused across the Level/GI/Class tabs, so a
 	// sub-graph id from another graph (or a deleted function) must reset to the
@@ -1075,7 +1119,7 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 		             "Errors highlight the offending node; a clean result means the\n"
 		             "class ships compiled (everything else runs interpreted)."))
 		{
-			runCompileCheck(graph, title);
+			runCompileCheck(graph, title, classKey, content);
 		}
 		bar.endGroup();
 	}
@@ -1621,7 +1665,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              isPlayer ? "Player class; lifecycle + input events."
 		                       : "Reusable class; lifecycle events + its own.",
 			              ctx.contentManager, ctx.gameInstanceGraph, edited, st.baseClass,
-		              /*derivable=*/true, st.overrides, st.inheritedVars);
+		              /*derivable=*/true, st.overrides, st.inheritedVars, st.path);
 	if (edited) st.dirty = true;
 	ImGui::End();
 }
