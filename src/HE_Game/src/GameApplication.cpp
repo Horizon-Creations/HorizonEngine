@@ -295,8 +295,8 @@ void GameApplication::OnInit()
 			// is the FLATTENED one: this class plus what it inherits.
 			HorizonCode::ResolvedClass rc =
 				HorizonCode::resolveClassAsset(contentManager(), a->path);
-			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
-				std::move(rc.graph), {}, { a->path, rc.engineBase, rc.chain });
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
+				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst);
 			return inst;
 		};

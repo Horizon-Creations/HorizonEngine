@@ -1277,8 +1277,8 @@ void EditorApplication::OnInit()
 			// happened to spell: it is the same value the compiled class table
 			// is keyed by, so an interpreted and a compiled instance of one
 			// class are never two different classes to a Cast.
-			const HorizonCode::InstanceId inst = m_gameInstance.runtime().add(
-				std::move(rc.graph), {}, { a->path, rc.engineBase, rc.chain });
+			const HorizonCode::InstanceId inst = m_gameInstance.runtime().addLevels(
+				std::move(rc.levels), {}, { a->path, rc.engineBase, rc.chain });
 			m_gameInstance.runtime().fireConstruct(inst); // let the object init
 			return inst;
 		};

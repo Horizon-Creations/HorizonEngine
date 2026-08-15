@@ -457,6 +457,18 @@ Context Runtime::makeContext(InstanceId id, size_t level)
             if (p.id == id && p.level == level && p.node == nodeId) return;
         m_pending.push_back({ id, level, nodeId, seconds > 0.0f ? seconds : 0.0f });
     };
+    // An inherited call: resolved across the instance's OTHER levels, and only
+    // to public members — a base class's private function stays its own.
+    ctx.callOwn = [this, id](const std::string& fn, const std::vector<Value>& args,
+                             std::vector<Value>* results) -> bool
+    {
+        Inst* i = find(id);
+        if (!i) return false;
+        const int lv = levelWithFunction(*i, fn, /*publicOnly=*/true);
+        if (lv < 0) return false;
+        Runner r(i->levels[lv], makeContext(id, (size_t)lv));
+        return r.callFunction(fn, /*requirePublic=*/false, args, results);
+    };
     ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
     ctx.isA = [this](uint32_t target, const std::string& classKey)
     { return instanceIsA(target, classKey); };
@@ -522,7 +534,7 @@ void Runtime::update(float dt)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn(elem);                             \
-        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, elem, {}); } \
+        else runEventOnLevel(*i, id, name, elem, {}); \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -545,7 +557,7 @@ HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn();                                 \
-        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, 0, {}); } \
+        else runEventOnLevel(*i, id, name, 0, {}); \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -565,7 +577,7 @@ HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookCall;                                 \
-        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, elem, boxed); } \
+        else runEventOnLevel(*i, id, name, elem, boxed); \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, boxed);                               \
     }
@@ -591,7 +603,7 @@ HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
         if (!i) return;                                                         \
         const Value arg = Value::ofInt((int)other);                             \
         if (i->compiled) i->compiled->hook((int)other);                         \
-        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, 0, arg); } \
+        else runEventOnLevel(*i, id, name, 0, arg); \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, arg);                                 \
     }
@@ -606,7 +618,7 @@ void Runtime::fireTick(InstanceId id, float dt)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onTick(dt);
-    else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
+    else runEventOnLevel(*i, id, "Tick", 0, Value::ofFloat(dt));
     static const EventId ev = eventId("Tick");
     dispatchToListeners(id, ev, "Tick", Value::ofFloat(dt));
 }
@@ -616,8 +628,7 @@ void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onWindowFocusChanged(focused);
-    else { Runner r(i->leaf(), makeContext(id, i->leafLevel()));
-           r.fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
+    else runEventOnLevel(*i, id, "OnWindowFocusChanged", 0, Value::ofBool(focused));
     static const EventId ev = eventId("OnWindowFocusChanged");
     dispatchToListeners(id, ev, "OnWindowFocusChanged", Value::ofBool(focused));
 }
@@ -629,7 +640,7 @@ void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const
     if (i->compiled)
         i->compiled->fireEvent(event, elem, arg);
     else
-    { Runner runner(i->leaf(), makeContext(id, i->leafLevel())); runner.fireEvent(event, elem, arg); }
+        runEventOnLevel(*i, id, event, elem, arg);
     // An event firing on an instance also reaches everyone bound to it, so
     // another class holding a reference can react (Unreal-style dispatchers).
     dispatchToListeners(id, event, arg);
@@ -684,6 +695,36 @@ void Runtime::dispatchToListeners(InstanceId owner, EventId ev, const std::strin
     if (m_dispatchDepth == 0) m_dispatchFires = 0; // cascade over — fresh budget
 }
 
+int Runtime::levelHandlingEvent(const Inst& i, const std::string& event, int elem) const
+{
+    for (size_t lv = i.levels.size(); lv-- > 0; )
+        for (const Node& n : i.levels[lv].nodes)
+            if (n.type == NodeType::Event && n.s == event && (n.elem == 0 || n.elem == elem))
+                return (int)lv;
+    return -1;
+}
+
+int Runtime::levelWithFunction(const Inst& i, const std::string& fn, bool publicOnly) const
+{
+    for (size_t lv = i.levels.size(); lv-- > 0; )
+        for (const Node& n : i.levels[lv].nodes)
+            if (n.type == NodeType::FunctionEntry && n.s == fn)
+            {
+                if (publicOnly && n.access != 0) continue;   // private to its own class
+                return (int)lv;
+            }
+    return -1;
+}
+
+void Runtime::runEventOnLevel(Inst& i, InstanceId id, const std::string& event,
+                              int elem, const Value& arg)
+{
+    const int lv = levelHandlingEvent(i, event, elem);
+    if (lv < 0) return;
+    Runner r(i.levels[lv], makeContext(id, (size_t)lv));
+    r.fireEvent(event, elem, arg);
+}
+
 bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePublic,
                            const std::vector<Value>& args, std::vector<Value>* results)
 {
@@ -691,7 +732,9 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
     if (!i) return false;
     if (i->compiled)
         return i->compiled->callFunction(fn, requirePublic, args, results);
-    Runner runner(i->leaf(), makeContext(id, i->leafLevel()));
+    const int lv = levelWithFunction(*i, fn, /*publicOnly=*/false);
+    if (lv < 0) return false;
+    Runner runner(i->levels[lv], makeContext(id, (size_t)lv));
     return runner.callFunction(fn, requirePublic, args, results);
 }
 

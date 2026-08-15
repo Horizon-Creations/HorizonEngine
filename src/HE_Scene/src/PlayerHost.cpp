@@ -76,7 +76,7 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 			if (auto compiled = HorizonCode::compiledClasses().create(a->path))
 				inst = runtime.addCompiled(std::move(compiled), {}, cls);
 			else
-				inst = runtime.add(std::move(rc.graph), {}, cls);
+				inst = runtime.addLevels(std::move(rc.levels), {}, cls);
 			runtime.fireConstruct(inst);
 			runtime.fireBeginPlay(inst);
 		}

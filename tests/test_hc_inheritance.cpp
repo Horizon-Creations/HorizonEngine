@@ -364,3 +364,173 @@ TEST_CASE("merging keeps both sides' wiring intact")
 	CHECK(rt.getVariable(inst, "a").i == 11);   // the base's chain still wired
 	CHECK(rt.getVariable(inst, "b").i == 22);   // and the child's
 }
+
+// ── The instance hierarchy (the levels the runtime actually executes) ────────
+//
+// Everything above asserts the MERGED graph, which is what the editor reads to
+// show a class's whole member surface. What RUNS is one graph level per class,
+// kept apart — so an override is resolved by asking the levels leaf-first
+// rather than by having deleted the base's version at load time. These are the
+// cases where the difference is observable.
+
+TEST_CASE("levels are kept apart, root first, and the instance runs them as one object")
+{
+	Project p;
+	{
+		Graph enemy;
+		addVar(enemy, "hp", 100);
+		addVar(enemy, "seen", 0);
+		addEventWriting(enemy, "Construct", "seen", 1);
+		addFunctionWriting(enemy, "TakeDamage", "hp", 50);
+		p.add("Content/Enemy.hasset", enemy, "Entity");
+	}
+	{
+		Graph goblin;
+		addVar(goblin, "mine", 0);
+		addEventWriting(goblin, "BeginPlay", "mine", 7);
+		p.add("Content/Goblin.hasset", goblin, "Content/Enemy.hasset");
+	}
+
+	const ResolvedClass rc = resolveClass("Content/Goblin.hasset", p.loader());
+	REQUIRE(rc.ok);
+	// Two classes, two levels, root first — NOT merged into one.
+	REQUIRE(rc.levels.size() == 2);
+	CHECK(rc.levels[0].findVariable("hp")   != nullptr);   // Enemy
+	CHECK(rc.levels[0].findVariable("mine") == nullptr);
+	CHECK(rc.levels[1].findVariable("mine") != nullptr);   // Goblin
+
+	Runtime rt;
+	const InstanceId g = rt.addLevels(rc.levels, {}, { "Content/Goblin.hasset", rc.engineBase, rc.chain });
+
+	// One object: an inherited handler and an inherited function both run on it,
+	// and they share the one variable store.
+	rt.fireConstruct(g);
+	CHECK(rt.getVariable(g, "seen").i == 1);      // Enemy's Construct
+	rt.fireBeginPlay(g);
+	CHECK(rt.getVariable(g, "mine").i == 7);      // Goblin's own BeginPlay
+	REQUIRE(rt.callFunction(g, "TakeDamage"));    // declared two levels up
+	CHECK(rt.getVariable(g, "hp").i == 50);
+	// And it is one object, not two: Get Self is a single reference.
+	CHECK(rt.alive(g));
+}
+
+TEST_CASE("an override is resolved leaf-first — the base's version is not also run")
+{
+	Project p;
+	{
+		Graph base;
+		addVar(base, "who", 0);
+		addVar(base, "baseRan", 0);
+		// The base writes a SECOND marker, so "the base also ran" would be
+		// visible even if both wrote `who`.
+		addEventWriting(base, "Construct", "baseRan", 1, /*overridable=*/true);
+		addFunctionWriting(base, "Speak", "who", 1, /*overridable=*/true);
+		p.add("Content/Base.hasset", base, "Object");
+	}
+	{
+		Graph child;
+		addEventWriting(child, "Construct", "who", 2);
+		addFunctionWriting(child, "Speak", "who", 2);
+		p.add("Content/Child.hasset", child, "Content/Base.hasset");
+	}
+
+	const ResolvedClass rc = resolveClass("Content/Child.hasset", p.loader());
+	REQUIRE(rc.ok);
+	// BOTH declarations still exist — nothing was deleted at load time. The
+	// override is a dispatch decision now, which is the whole point of levels.
+	REQUIRE(rc.levels.size() == 2);
+	auto declares = [](const Graph& g, NodeType t, const char* n)
+	{
+		for (const Node& node : g.nodes) if (node.type == t && node.s == n) return true;
+		return false;
+	};
+	CHECK(declares(rc.levels[0], NodeType::Event, "Construct"));
+	CHECK(declares(rc.levels[1], NodeType::Event, "Construct"));
+
+	Runtime rt;
+	const InstanceId inst = rt.addLevels(rc.levels, {}, { "Content/Child.hasset", rc.engineBase, rc.chain });
+	rt.fireConstruct(inst);
+	CHECK(rt.getVariable(inst, "who").i == 2);       // the child's ran
+	CHECK(rt.getVariable(inst, "baseRan").i == 0);   // and the base's did NOT
+
+	REQUIRE(rt.callFunction(inst, "Speak"));
+	CHECK(rt.getVariable(inst, "who").i == 2);
+}
+
+TEST_CASE("a Do Once in the base and one in the child are two different Do Onces")
+{
+	// The trap that made per-level state necessary: a node id is unique inside
+	// its own graph and nowhere else, so both graphs own a node 7. One shared
+	// state map would have the child's Do Once arrive already fired.
+	Project p;
+	auto onceGraph = [](const char* event, const char* var, int marker)
+	{
+		Graph g;
+		Variable v; v.name = var; v.type = PinType::Int; g.variables.push_back(v);
+		Node ev; ev.type = NodeType::Event; ev.s = event;
+		const int e = g.addNode(std::move(ev));
+		Node once; once.type = NodeType::DoOnce;
+		const int o = g.addNode(std::move(once));
+		Node k; k.type = NodeType::ConstInt; k.f[0] = (float)marker;
+		const int c = g.addNode(std::move(k));
+		Node sv; sv.type = NodeType::SetVariable; sv.s = var; sv.propType = PinType::Int;
+		const int s = g.addNode(std::move(sv));
+		REQUIRE(g.connect(e, 0, o, 0));    // Event → Do Once
+		REQUIRE(g.connect(o, 1, s, 0));    // Do Once "Then" → Set
+		REQUIRE(g.connect(c, 0, s, 2));
+		return g;
+	};
+	p.add("Content/B.hasset", onceGraph("Ping", "fromBase", 1), "Object");
+	{
+		// The child handles a DIFFERENT event, so both Do Onces can fire.
+		Graph child = onceGraph("Pong", "fromChild", 2);
+		p.add("Content/C.hasset", child, "Content/B.hasset");
+	}
+
+	const ResolvedClass rc = resolveClass("Content/C.hasset", p.loader());
+	REQUIRE(rc.ok);
+	REQUIRE(rc.levels.size() == 2);
+
+	Runtime rt;
+	const InstanceId inst = rt.addLevels(rc.levels, {}, { "Content/C.hasset", rc.engineBase, rc.chain });
+	rt.fireEvent(inst, "Ping");
+	rt.fireEvent(inst, "Pong");
+	// Both got through: their Do Onces do not share state despite sharing ids.
+	CHECK(rt.getVariable(inst, "fromBase").i == 1);
+	CHECK(rt.getVariable(inst, "fromChild").i == 2);
+
+	// And each is still a Do ONCE: a second Ping changes nothing.
+	rt.setVariable(inst, "fromBase", Value::ofInt(0));
+	rt.fireEvent(inst, "Ping");
+	CHECK(rt.getVariable(inst, "fromBase").i == 0);
+}
+
+TEST_CASE("a base class's private function stays private to it")
+{
+	// C++'s rule, and the reason the escalation asks for public members only.
+	Project p;
+	{
+		Graph base;
+		addVar(base, "x", 0);
+		addFunctionWriting(base, "Open",   "x", 1, /*overridable=*/false);
+		addFunctionWriting(base, "Hidden", "x", 2);
+		// Make Hidden private.
+		for (Node& n : base.nodes)
+			if (n.type == NodeType::FunctionEntry && n.s == "Hidden") n.access = 1;
+		p.add("Content/Door.hasset", base, "Object");
+	}
+	p.add("Content/BigDoor.hasset", Graph{}, "Content/Door.hasset");
+
+	const ResolvedClass rc = resolveClass("Content/BigDoor.hasset", p.loader());
+	REQUIRE(rc.ok);
+	Runtime rt;
+	const InstanceId inst = rt.addLevels(rc.levels, {},
+	                                     { "Content/BigDoor.hasset", rc.engineBase, rc.chain });
+
+	// A public inherited function is reachable…
+	REQUIRE(rt.callFunction(inst, "Open"));
+	CHECK(rt.getVariable(inst, "x").i == 1);
+	// …and a private one is not, when the call crosses a class boundary.
+	CHECK_FALSE(rt.callFunction(inst, "Hidden", /*requirePublic=*/true));
+	CHECK(rt.getVariable(inst, "x").i == 1);
+}

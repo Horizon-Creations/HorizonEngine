@@ -570,6 +570,17 @@ struct Context
     // decoupled from the engine surface it drives.
     std::function<std::vector<Value>(const std::string& apiId, const std::vector<Value>& args)> callApi;
 
+    // Call a function on THIS instance that the running graph does not itself
+    // declare — an INHERITED one. A class's graph only holds its own members,
+    // so a Call Function node in a derived class finds no entry locally and
+    // would otherwise be a silent no-op. The Runtime resolves it against the
+    // instance's other levels, nearest first, and only reaches PUBLIC ones: a
+    // base class's private function is private to that class, as in C++.
+    // False = no level declares it, which leaves the call the no-op it was
+    // before inheritance existed.
+    std::function<bool(const std::string& fn, const std::vector<Value>& args,
+                       std::vector<Value>* results)> callOwn;
+
     // Latent flow (bound by the Runtime): schedule THIS instance's exec chain to
     // resume from `nodeId`'s exec-out after `seconds` (Delay node). Unbound →
     // the Delay is a dead end (never resumes).

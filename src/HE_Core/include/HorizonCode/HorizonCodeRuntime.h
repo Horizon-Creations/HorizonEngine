@@ -325,6 +325,23 @@ private:
     // Delay continuations — needs it, because a node id only means something
     // inside its own graph.
     Context makeContext(InstanceId id, size_t level = 0);
+
+    // ── dispatch across an instance's levels ─────────────────────────────────
+    // Which level answers for a member, searched LEAF FIRST. That single rule
+    // is the whole of "an override replaces the base": the derived class's
+    // handler is found first and the search STOPS, so the base's never runs.
+    // -1 = no level declares it, which is the ordinary case for most events.
+    //
+    // `elem` filters widget-element handlers (0 = any), the same rule
+    // Runner::fireEvent applies within one graph.
+    int levelHandlingEvent(const Inst& i, const std::string& event, int elem) const;
+    // Functions searched the same way. `publicOnly` is what a call arriving
+    // from ANOTHER level uses: a base class's private function is private to
+    // that class, exactly as in C++.
+    int levelWithFunction(const Inst& i, const std::string& fn, bool publicOnly) const;
+    // Fire `event` on the one level that answers for it (no-op when none does).
+    void runEventOnLevel(Inst& i, InstanceId id, const std::string& event,
+                         int elem, const Value& arg);
     // Fire `event` on every listener bound to (owner, event). Bounded recursion.
     // The listener table is keyed by the interned id, not the name: dispatch
     // then costs an integer hash instead of a string one, and the engine's own

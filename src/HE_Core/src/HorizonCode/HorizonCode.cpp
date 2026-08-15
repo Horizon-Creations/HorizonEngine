@@ -2045,7 +2045,23 @@ void Runner::execNode(const Node& n, int depth)
         const Node* entry = nullptr;
         for (const auto& fn : m_graph.nodes)
             if (fn.type == T::FunctionEntry && fn.s == n.s) { entry = &fn; break; }
-        if (!entry) break;
+        if (!entry)
+        {
+            // Not in THIS class's graph — so it is inherited, and the instance
+            // has to resolve it against the levels this Runner cannot see. The
+            // arguments are still evaluated in the caller's context, exactly as
+            // the local path does before pushing its frame.
+            if (m_ctx.callOwn)
+            {
+                std::vector<Value> args(n.params.size());
+                for (size_t i = 0; i < n.params.size(); ++i)
+                    args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+                std::vector<Value> res;
+                if (m_ctx.callOwn(n.s, args, &res))
+                    m_execOutputs[n.id] = std::move(res);
+            }
+            break;
+        }
         // Build the call frame: evaluate arguments in the CALLER's context (before
         // pushing, so the caller's own params still resolve), seed typed results
         // and the callee's locals at their declared defaults.

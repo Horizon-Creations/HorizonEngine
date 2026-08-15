@@ -192,9 +192,13 @@ ResolvedClass resolveClass(const std::string& key, const ClassLoader& load)
     for (size_t i = a.keysRootFirst.size() - 1; i-- > 0; )
         out.chain.push_back(a.keysRootFirst[i]);
 
-    out.graph = std::move(a.graphsRootFirst.front());
+    // The levels are what RUNS: kept apart, root first.
+    out.levels = a.graphsRootFirst;
+    // And the same chain merged, for the editor's member lists (and for the
+    // codegen while it still compiles one class to one C++ class).
+    out.graph = a.graphsRootFirst.front();
     for (size_t i = 1; i < a.graphsRootFirst.size(); ++i)
-        mergeDerivedInto(out.graph, std::move(a.graphsRootFirst[i]));
+        mergeDerivedInto(out.graph, a.graphsRootFirst[i]);
 
     // A derived Call Function reaching a base's function needs the mirrored
     // signature, and the merge just brought the two into one graph for the

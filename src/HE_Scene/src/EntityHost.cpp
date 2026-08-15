@@ -91,7 +91,7 @@ HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& class
 	if (auto compiled = HorizonCode::compiledClasses().create(a->path))
 		inst = m_runtime->addCompiled(std::move(compiled), {}, cls);
 	else
-		inst = m_runtime->add(std::move(rc.graph), {}, cls);
+		inst = m_runtime->addLevels(std::move(rc.levels), {}, cls);
 	if (!inst) return 0;
 
 	const uint32_t raw = static_cast<uint32_t>(entity);

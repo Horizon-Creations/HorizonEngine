@@ -31,9 +31,16 @@ namespace HorizonCode {
 
 struct ResolvedClass
 {
-    // The flattened graph: every ancestor's nodes, with the derived class's
-    // overrides in place of the ones they replace. This is what gets executed
-    // and what the codegen compiles.
+    // One graph per class in the chain, ROOT FIRST, the class itself last —
+    // what the runtime executes. Kept apart rather than merged so a base class
+    // stays a base class at run time: an override is resolved by asking the
+    // levels leaf-first, and a node id keeps meaning something only inside its
+    // own graph.
+    std::vector<Graph>       levels;
+    // The same chain merged into ONE graph, nearest declaration winning. Not
+    // what runs — it is what the EDITOR reads to show a class's whole member
+    // surface in one list, and what the C++ codegen compiled before it learned
+    // real inheritance.
     Graph                    graph;
     // Ancestor class keys, NEAREST FIRST, excluding the class itself. This is
     // what Runtime::instanceIsA answers a Cast to a parent class with — resolved
