@@ -950,11 +950,17 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 		}
 		if (eh) ImGui::Spacing();
 
-		// What this class INHERITS and may replace. Picking one drops a copy of
-		// the ancestor's declaration into this graph — same name, same signature
-		// — and from then on only this version runs. A member already overridden
-		// here is shown as taken rather than hidden, so it is visible that the
-		// override exists.
+		// What this class INHERITS and may replace. Picking one starts a copy of
+		// the ancestor's declaration here — same name, same signature — and from
+		// then on only this version runs. A member already overridden here is
+		// shown as taken rather than hidden, so it is visible that it exists.
+		//
+		// An EVENT override is a node in the event graph. A FUNCTION override is
+		// a function: it gets its own sub-graph and the editor switches to it,
+		// exactly as the sidebar's "Add function" does. Dropping a bare entry
+		// beside the events instead left the override's body in the middle of
+		// the event graph, where it does not belong and where the Graphs list —
+		// which is how a function is reopened — could not lead back to it.
 		bool oh = false;
 		for (const HC::OverridableMember& m2 : overrides)
 		{
@@ -967,15 +973,39 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 			if (!oh) { ImGui::TextDisabled("Inherited"); oh = true; }
 			if (HcEditorUtil::searchMenuItem(label, used))
 			{
-				const int id = addNode(graph, m2.kind, g.ge.addMenuGraphPos);
-				HC::Node* nn = graph.findNode(id);
-				const int keepId = nn->id;
-				const float kx = nn->x, ky = nn->y;
-				const int keepSub = nn->subgraph;
-				*nn = m2.prototype;          // same name, signature and arg shape
-				nn->id = keepId; nn->x = kx; nn->y = ky; nn->subgraph = keepSub;
-				HC::syncFunctionSignatures(graph);
-				created = id; ImGui::CloseCurrentPopup();
+				// The declaration is copied wholesale, then the identity the new
+				// node was born with is put back: an id and a position belong to
+				// THIS graph, and the sub-graph is decided below.
+				auto stamp = [&](int id, float x, float y, int sub)
+				{
+					HC::Node* nn = graph.findNode(id);
+					*nn = m2.prototype;
+					nn->id = id; nn->x = x; nn->y = y; nn->subgraph = sub;
+				};
+				if (isEvent)
+				{
+					const int id = addNode(graph, m2.kind, g.ge.addMenuGraphPos);
+					stamp(id, g.ge.addMenuGraphPos.x, g.ge.addMenuGraphPos.y, g.currentGraph);
+					HC::syncFunctionSignatures(graph);
+					created = id;
+				}
+				else
+				{
+					const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+					stamp(fnId, 40.0f, 40.0f, fnId);    // the function owns its sub-graph
+					g.currentGraph = fnId;              // …so addNode scopes the return here
+					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+					HC::Node* rn = graph.findNode(retId);
+					rn->s       = m2.prototype.s;
+					rn->results = m2.prototype.results;
+					HC::syncFunctionSignatures(graph);
+					g.selectedNode = fnId;
+					g.selectedVar.clear();
+					g.selectedEvent.clear();
+					g.focusSelected = true;
+					created = fnId;
+				}
+				ImGui::CloseCurrentPopup();
 			}
 			if (used) { ImGui::SameLine(); ImGui::TextDisabled("(overridden)"); }
 		}
