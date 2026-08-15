@@ -1435,17 +1435,14 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			addItem("Rigid Body",          RigidBodyComponent{});
 			addItem("Collider",            ColliderComponent{});
 			addItem("Save State",          SaveStateComponent{});
-			// A ScriptComponent points at a Lua/Python Script asset, so it's only
-			// offered when the project is authored in one of those languages
-			// (HorizonCode drives entities via player/level graphs; C++ via native
-			// GameLogic). Entities that already carry the component still edit fine.
-			{
-				const ProjectScriptLanguage plang = ctx.projectManager
-					? ctx.projectManager->currentProject().scriptLanguage
-					: ProjectScriptLanguage::HorizonCode;
-				if (plang == ProjectScriptLanguage::Lua || plang == ProjectScriptLanguage::Python)
-					addItem("Script",         ScriptComponent{});
-			}
+			// Offered in EVERY project. It used to be gated on Lua/Python,
+			// because back then the slot only took a .lua/.py asset and a
+			// HorizonCode project drove entities through the player and level
+			// graphs instead. That stopped being true when the same slot learned
+			// to carry a HorizonCode CLASS (see the Script panel above): putting
+			// a class on an entity is now the ordinary way to give it logic, and
+			// the gate was hiding exactly the component you need.
+			addItem("Script",         ScriptComponent{});
 			addItem("Audio Source",    AudioSourceComponent{});
 			addItem("Audio Listener",  AudioListenerComponent{});
 			addItem("Particle System", ParticleSystemComponent{});
