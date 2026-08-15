@@ -57,6 +57,13 @@ public:
 	// leaves ctx.tabs (see unsavedAssetPaths above), and those are exactly the
 	// assets Save All would write back into a folder that no longer exists.
 	static void discardPanelStateUnder(AppContext& ctx, const std::string& folderPath);
+	// End the current project's session: close every tab, drop every panel's
+	// cached state (unsaved edits included — the guard has already asked), clear
+	// the HorizonCode graph view contexts and reset the world to an empty scene.
+	// Called when a project is opened over an open one, and when one is closed.
+	// Without it the new project inherits the old one's tabs, scene and undo
+	// history, all keyed by paths and node ids that mean something else in it.
+	static void endProjectSession(AppContext& ctx);
 
 	// The live documents behind an open tab, for collaboration's item-level sync
 	// (CollabDocSync). Same dispatch as the three above. Empty for tabs with no

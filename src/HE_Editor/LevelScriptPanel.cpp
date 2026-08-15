@@ -1286,6 +1286,12 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 	ImGui::End();
 }
 
+void LevelScriptPanel::forgetAllGraphContexts()
+{
+	s_graphStates.clear();
+	g = LSState{};
+}
+
 void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 {
 	beginTabWindow("##gameinstance_tab", pos, size);

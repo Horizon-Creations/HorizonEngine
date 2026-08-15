@@ -683,6 +683,58 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	AudioEditorPanel::forget(assetPath);
 }
 
+// ── Leaving a project ────────────────────────────────────────────────────────
+// Opening a project while one is already open, or closing one, ends a SESSION.
+// What survived it did not just look stale, it was wrong: every tab still
+// belonged to the old project's assets, the world still held the old scene, and
+// the panels behind those tabs still cached its graphs — all of it addressed by
+// paths and ids that mean something else, or nothing, in the project now open.
+//
+// Deliberately unconditional, and deliberately AFTER the unsaved-changes guard
+// (both entry points below are reached through requestGuarded, which has already
+// offered to save). Anything still dirty at this point is something the user
+// chose to discard, and keeping it alive would let a later Save All write the
+// old project's edits into a session that no longer has anything to do with it.
+void EditorUI::endProjectSession(AppContext& ctx)
+{
+	// The collaboration session goes FIRST, and not merely because a session is
+	// scoped to one project (its keys are that project's paths, its locks are on
+	// that project's assets). The teardown below empties documents the session
+	// is actively mirroring — the level script and the GameInstance graph are
+	// diffed whenever we hold their lock, with no dirty flag to hide behind — so
+	// leaving the session running through it would publish the whole teardown to
+	// the peer as OUR deletion, and they would lose their level script.
+	if (ctx.collab && ctx.collab->inSession()) ctx.collab->leave();
+
+	// Both the open tabs and the panels whose tab was already closed while
+	// dirty — the second set has no tab to walk to.
+	std::vector<std::string> paths = unsavedAssetPaths();
+	for (const auto& t : ctx.tabs)
+		if (!t.assetPath.empty()) paths.push_back(t.assetPath);
+	std::sort(paths.begin(), paths.end());
+	paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+	for (const std::string& p : paths) discardPanelState(ctx, p);
+
+	// The two virtual HorizonCode tabs own no asset, so nothing above reached
+	// their view contexts.
+	LevelScriptPanel::forgetAllGraphContexts();
+
+	// Every tab that belongs to a document goes — asset tabs AND the virtual
+	// ones (Level Script, Game Instance, Settings), which are just as much the
+	// old project's. The Viewport is the session's own and stays; it is also the
+	// tab EditorApplication::restoreOpenTabs only re-creates when it has a saved
+	// list to restore, so clearing outright would leave a project with no
+	// remembered tabs showing no tabs at all.
+	ctx.tabs.erase(std::remove_if(ctx.tabs.begin(), ctx.tabs.end(),
+		[](const auto& t){ return !t.assetPath.empty(); }), ctx.tabs.end());
+	if (ctx.tabs.empty()) ctx.tabs.push_back({ "Viewport", "", false, true });
+	ctx.activeTab = 0;
+	// The world last: it drops the scene, the selection and the undo history,
+	// and it is what a panel above might still have been reading.
+	if (ctx.newScene) ctx.newScene();
+	ctx.contentRefreshPending = true;
+}
+
 void EditorUI::discardPanelStateUnder(AppContext& ctx, const std::string& folderPath)
 {
 	if (folderPath.empty()) return;
@@ -921,6 +973,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	};
 	auto doCloseProject = [&]()
 	{
+		// Same teardown as switching projects — closing one left its tabs, its
+		// scene and its panel caches standing, so the next project opened in the
+		// session inherited them.
+		EditorUI::endProjectSession(ctx);
 		ctx.projectManager->closeProject();
 		ctx.globalState->setLastProjectPath("");
 		ctx.globalState->writeConfig();
@@ -1496,6 +1552,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         else // OpenProject
         {
+            // End the old session BEFORE loading the new one. The other order
+            // looks safer — keep everything until the new project is known to
+            // load — but it means tearing the old project's tabs and panels down
+            // against a ContentManager that already points somewhere else, so
+            // every path they hold resolves to nothing or to the wrong asset.
+            // A failed load then simply leaves no project open, which is a state
+            // the editor already has (the hub) and says what happened.
+            const bool switching = ctx.projectLoaded;
+            if (switching) EditorUI::endProjectSession(ctx);
             if (ctx.projectManager->loadProject(chosen))
             {
                 ctx.globalState->addKnownProject(chosen);
@@ -1505,6 +1570,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             }
             else
             {
+                if (switching) ctx.projectLoaded = false;   // the old one is gone
                 ctx.hubOpenError = "Failed to load project file.";
                 ImGui::OpenPopup("##EditorOpenError");
             }
