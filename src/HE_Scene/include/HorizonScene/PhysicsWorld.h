@@ -39,11 +39,38 @@ public:
     // positions and orientations back to TransformComponent.
     void step(HorizonWorld& world, float dt);
 
+    // "No entity" for the ignore parameters below. A real entity id can be 0,
+    // so the sentinel has to be a value the allocator never hands out.
+    static constexpr uint32_t kNoEntity = 0xFFFFFFFFu;
+
     // Cast a ray from `origin` along `direction` (need not be normalised) up to
     // `maxDistance` metres. Returns the closest hit or RaycastHit{hit=false}.
+    //
+    // `ignoreEntityId` skips that entity's body — without it a ray fired from
+    // something's own position reports that something, which is never what the
+    // caller meant. Triggers ARE reported, as they always were; callers that
+    // care check the hit entity.
     RaycastHit raycast(const glm::vec3& origin,
                        const glm::vec3& direction,
-                       float            maxDistance = 1000.0f) const;
+                       float            maxDistance = 1000.0f,
+                       uint32_t         ignoreEntityId = kNoEntity) const;
+
+    // Sweep a sphere of `radius` from `origin` along `direction` up to
+    // `maxDistance` metres, and report the first thing it touches.
+    //
+    // This is what a camera boom needs and a ray cannot give it: a ray is a line,
+    // so it slips past wall corners that the camera's near plane then cuts
+    // through. The sphere stops its CENTRE one radius short of the surface, which
+    // is exactly the clearance a camera wants.
+    //
+    // Unlike raycast, this one skips TRIGGERS. A sweep is asking "what would
+    // block me", and a trigger volume blocks nothing — a checkpoint between the
+    // player and the camera would otherwise yank the view in.
+    RaycastHit sphereCast(const glm::vec3& origin,
+                          const glm::vec3& direction,
+                          float            radius,
+                          float            maxDistance,
+                          uint32_t         ignoreEntityId = kNoEntity) const;
 
     // Set the movement velocity for a CharacterController entity (m/s).
     // Has no effect if the entity has no active character controller.

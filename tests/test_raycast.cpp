@@ -25,6 +25,146 @@ static Entity buildBoxWorld(HorizonWorld& world)
     return floor;
 }
 
+// A static box of `half` extents, centred at `centre`.
+static Entity buildBox(HorizonWorld& world, glm::vec3 centre, glm::vec3 half,
+                       bool isTrigger = false)
+{
+    Entity e = world.createEntity("Box");
+    TransformComponent t; t.position = centre;
+    world.addComponent(e, t);
+    RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+    world.addComponent(e, rb);
+    ColliderComponent col;
+    col.shape       = ColliderShape::Box;
+    col.halfExtents = half;
+    col.isTrigger   = isTrigger;
+    world.addComponent(e, col);
+    return e;
+}
+
+// ─── Ignore filter ────────────────────────────────────────────────────────────
+
+TEST_CASE("PhysicsWorld::raycast: ignoreEntityId skips that entity's body")
+{
+    // The case a camera boom hits immediately: a ray fired from something's own
+    // position reports that something, unless it is told not to.
+    HorizonWorld world;
+    Entity self  = buildBox(world, { 0.0f, 0.0f, 0.0f }, { 0.5f, 0.5f, 0.5f });
+    Entity other = buildBox(world, { 0.0f, 0.0f, 5.0f }, { 0.5f, 0.5f, 0.5f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 0.0f, -1.0f }, dir{ 0.0f, 0.0f, 1.0f };
+
+    auto naive = phys.raycast(from, dir, 20.0f);
+    REQUIRE(naive.hit);
+    CHECK(naive.entityId == static_cast<uint32_t>(self));
+
+    auto ignored = phys.raycast(from, dir, 20.0f, static_cast<uint32_t>(self));
+    REQUIRE(ignored.hit);
+    CHECK(ignored.entityId == static_cast<uint32_t>(other));
+}
+
+// ─── Sphere cast ──────────────────────────────────────────────────────────────
+
+TEST_CASE("PhysicsWorld::sphereCast: the centre stops one radius short of the wall")
+{
+    HorizonWorld world;
+    buildBox(world, { 0.0f, 0.0f, 5.0f }, { 2.0f, 2.0f, 0.5f });   // wall at z = 4.5
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const float radius = 0.25f;
+    auto hit = phys.sphereCast({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, radius, 10.0f);
+
+    REQUIRE(hit.hit);
+    // Wall face is at z = 4.5, so the sphere centre stops at 4.5 - radius.
+    CHECK(hit.distance == doctest::Approx(4.5f - radius).epsilon(0.02f));
+}
+
+TEST_CASE("PhysicsWorld::sphereCast: a ray slips past a corner where a sphere does not")
+{
+    // Exactly why a boom uses a sweep: the ray threads the gap next to the pillar
+    // and reports open space, while the camera's bulk would clip it.
+    HorizonWorld world;
+    buildBox(world, { 0.4f, 0.0f, 5.0f }, { 0.3f, 2.0f, 0.3f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 0.0f, 0.0f }, dir{ 0.0f, 0.0f, 1.0f };
+    CHECK_FALSE(phys.raycast(from, dir, 10.0f).hit);
+    CHECK(phys.sphereCast(from, dir, 0.4f, 10.0f).hit);
+}
+
+TEST_CASE("PhysicsWorld::sphereCast: triggers do not block the sweep")
+{
+    // A checkpoint volume between the player and the camera must not yank the
+    // view in. raycast still reports triggers — that behaviour is unchanged.
+    HorizonWorld world;
+    buildBox(world, { 0.0f, 0.0f, 3.0f }, { 2.0f, 2.0f, 0.5f }, /*isTrigger=*/true);
+    buildBox(world, { 0.0f, 0.0f, 8.0f }, { 2.0f, 2.0f, 0.5f });   // solid, at z = 7.5
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    const glm::vec3 from{ 0.0f, 0.0f, 0.0f }, dir{ 0.0f, 0.0f, 1.0f };
+
+    auto sweep = phys.sphereCast(from, dir, 0.25f, 20.0f);
+    REQUIRE(sweep.hit);
+    CHECK(sweep.distance > 5.0f);          // sailed past the trigger at z = 2.5
+
+    auto ray = phys.raycast(from, dir, 20.0f);
+    REQUIRE(ray.hit);
+    CHECK(ray.distance == doctest::Approx(2.5f).epsilon(0.05f));
+}
+
+TEST_CASE("PhysicsWorld::sphereCast: ignoreEntityId skips that entity's body")
+{
+    HorizonWorld world;
+    Entity self = buildBox(world, { 0.0f, 0.0f, 0.0f }, { 0.5f, 0.5f, 0.5f });
+    buildBox(world, { 0.0f, 0.0f, 6.0f }, { 2.0f, 2.0f, 0.5f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    auto hit = phys.sphereCast({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, 0.25f, 20.0f,
+                               static_cast<uint32_t>(self));
+    REQUIRE(hit.hit);
+    CHECK(hit.entityId != static_cast<uint32_t>(self));
+    CHECK(hit.distance > 4.0f);
+}
+
+TEST_CASE("PhysicsWorld::sphereCast: starting inside geometry reports zero distance, not a miss")
+{
+    // The player with their back against a wall. Whatever Jolt reports for an
+    // already-penetrating sweep, the caller must be able to act on it — a MISS
+    // here would put the camera through the wall, which is the failure this
+    // whole feature exists to prevent.
+    HorizonWorld world;
+    buildBox(world, { 0.0f, 0.0f, 0.0f }, { 2.0f, 2.0f, 2.0f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    auto hit = phys.sphereCast({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, 0.25f, 5.0f);
+    REQUIRE(hit.hit);
+    CHECK(hit.distance < 2.0f);
+}
+
+TEST_CASE("PhysicsWorld::sphereCast: clear line of sight is a miss")
+{
+    HorizonWorld world;
+    buildBox(world, { 0.0f, 0.0f, 0.0f }, { 0.5f, 0.5f, 0.5f });
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+
+    CHECK_FALSE(phys.sphereCast({ 0.0f, 20.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, 0.25f, 5.0f).hit);
+}
+
 // ─── Basic raycast ────────────────────────────────────────────────────────────
 
 TEST_CASE("PhysicsWorld::raycast: ray hits static box from above")

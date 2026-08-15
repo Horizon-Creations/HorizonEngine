@@ -70,6 +70,18 @@ struct CameraRigComponent {
 
     TargetYaw targetYaw = TargetYaw::Free;
 
+    // Third person only. Sweep a sphere from the pivot out to where the camera
+    // wants to be and stop it at the first solid thing, so the boom does not put
+    // the view inside a wall. On by default: a camera that drives through
+    // geometry does not read as "collision is off", it reads as broken.
+    //
+    // The sphere's radius IS the clearance the camera keeps from surfaces —
+    // sweeping stops the sphere's centre one radius short. Too small and the
+    // near plane still clips; too large and the camera shoves forward in
+    // corridors it would have fit through.
+    bool  collision       = true;
+    float collisionRadius = 0.2f;
+
     // First person: hide the target's own mesh so the player is not looking at
     // the inside of their own head. Shadow casting is left on — the character
     // still has a shadow, it just is not drawn.

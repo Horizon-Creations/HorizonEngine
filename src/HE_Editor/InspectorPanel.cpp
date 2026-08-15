@@ -963,6 +963,16 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			{
 				Row::dragFloat3("Arm Offset", &rig->armOffset.x, 0.05f, -20.0f, 20.0f); trackEdit();
 				Row::dragFloat("Arm Length", &rig->armLength, 0.05f, 0.0f, 100.0f); trackEdit();
+				ImGui::Checkbox("Collide With World", &rig->collision); trackEdit();
+				if (rig->collision)
+				{
+					// The radius IS the clearance the camera keeps from surfaces,
+					// so it is worth saying so rather than leaving a bare number.
+					Row::dragFloat("Camera Radius", &rig->collisionRadius, 0.01f, 0.02f, 2.0f, "%.2f");
+					trackEdit();
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("How far the camera stays clear of walls.");
+				}
 			}
 			else
 			{

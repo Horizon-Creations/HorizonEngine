@@ -265,8 +265,10 @@ namespace
 				{ "sensitivity",    rig->sensitivity },
 				{ "pitchMin",       rig->pitchMin },
 				{ "pitchMax",       rig->pitchMax },
-				{ "targetYaw",      static_cast<uint8_t>(rig->targetYaw) },
-				{ "hideTargetMesh", rig->hideTargetMesh },
+				{ "targetYaw",       static_cast<uint8_t>(rig->targetYaw) },
+				{ "hideTargetMesh",  rig->hideTargetMesh },
+				{ "collision",       rig->collision },
+				{ "collisionRadius", rig->collisionRadius },
 			};
 		}
 		if (auto* l = registry.try_get<LightComponent>(entity))
@@ -763,7 +765,9 @@ namespace
 			rig.pitchMax       = c.value("pitchMax",       rig.pitchMax);
 			rig.targetYaw      = static_cast<CameraRigComponent::TargetYaw>(
 			                         c.value("targetYaw", static_cast<uint8_t>(rig.targetYaw)));
-			rig.hideTargetMesh = c.value("hideTargetMesh", rig.hideTargetMesh);
+			rig.hideTargetMesh  = c.value("hideTargetMesh",  rig.hideTargetMesh);
+			rig.collision       = c.value("collision",       rig.collision);
+			rig.collisionRadius = c.value("collisionRadius", rig.collisionRadius);
 			registry.emplace_or_replace<CameraRigComponent>(entity, rig);
 		}
 		if (comps.contains("light"))

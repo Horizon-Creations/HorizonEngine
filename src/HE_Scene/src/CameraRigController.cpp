@@ -1,6 +1,7 @@
 #include "HorizonScene/CameraRigController.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/TransformHierarchy.h"
+#include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
@@ -64,7 +65,8 @@ entt::entity CameraRigController::findRigCamera(entt::registry& reg)
 
 CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
                                                        const MouseFrame& mouse,
-                                                       entt::entity fallbackTarget)
+                                                       entt::entity fallbackTarget,
+                                                       const PhysicsWorld* physics)
 {
     Frame f;
     entt::registry& reg = world.registry();
@@ -140,7 +142,33 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     const float armLength   = firstPerson ? 0.0f : std::max(0.0f, rig.armLength);
     const glm::vec3 arm     = firstPerson ? glm::vec3(0.0f) : rig.armOffset;
 
-    const glm::vec3 camPos = pivot + rot * arm - forward * armLength;
+    glm::vec3 camPos = pivot + rot * arm - forward * armLength;
+
+    // ── Boom collision ───────────────────────────────────────────────────────
+    // Sweep a sphere from the pivot to where the camera wants to be and stop it
+    // at the first solid thing. A sphere rather than a ray because a ray is a
+    // line: it slips past the corner of a wall that the camera's near plane then
+    // cuts straight through.
+    //
+    // The target is ignored, which covers two things at once — the character's
+    // own collider, and the frozen kinematic proxy that sits at its spawn point
+    // (see the character-controller skip in PhysicsWorld). Without that the boom
+    // would collapse the moment the player walks near where they started.
+    if (physics && rig.collision && !firstPerson && rig.collisionRadius > 0.0f)
+    {
+        const glm::vec3 toCam = camPos - pivot;
+        if (const float reach = glm::length(toCam); reach > 1e-4f)
+        {
+            const PhysicsWorld::RaycastHit hit =
+                physics->sphereCast(pivot, toCam / reach, rig.collisionRadius, reach,
+                                    static_cast<uint32_t>(f.target));
+            if (hit.hit)
+            {
+                camPos      = pivot + (toCam / reach) * hit.distance;
+                f.occluded  = true;
+            }
+        }
+    }
 
     // Store it in the camera's parent space. Identity for a camera under the
     // world root, which is where cameras normally live.

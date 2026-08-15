@@ -18,8 +18,11 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
@@ -593,10 +596,39 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
     }
 }
 
+namespace {
+
+// Skips one entity's body, and optionally every sensor.
+//
+// Both decisions are made in ShouldCollideLocked rather than the BodyID
+// overload: the entity id lives in the body's user data and IsSensor is a body
+// member, so this is the one callback that can see either. The extra lock is
+// paid only for bodies the broad phase already accepted.
+class HEQueryFilter final : public JPH::BodyFilter
+{
+public:
+    HEQueryFilter(uint32_t ignoreEntityId, bool skipSensors)
+        : m_ignore(ignoreEntityId), m_skipSensors(skipSensors) {}
+
+    bool ShouldCollideLocked(const JPH::Body& inBody) const override
+    {
+        if (m_skipSensors && inBody.IsSensor())                       return false;
+        if (static_cast<uint32_t>(inBody.GetUserData()) == m_ignore)   return false;
+        return true;
+    }
+
+private:
+    uint32_t m_ignore;
+    bool     m_skipSensors;
+};
+
+} // namespace
+
 PhysicsWorld::RaycastHit PhysicsWorld::raycast(
     const glm::vec3& origin,
     const glm::vec3& direction,
-    float            maxDistance) const
+    float            maxDistance,
+    uint32_t         ignoreEntityId) const
 {
     RaycastHit result;
     if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f)
@@ -614,8 +646,12 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
         JPH::RVec3(origin.x, origin.y, origin.z),
         JPH::Vec3(dir.x, dir.y, dir.z) * maxDistance
     };
+    // Sensors stay visible to raycast — that is what it has always reported, and
+    // a script asking "what is in front of me" may well mean a trigger.
+    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+
     JPH::RayCastResult hit;
-    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit))
+    if (!m_impl->physicsSystem.GetNarrowPhaseQuery().CastRay(ray, hit, {}, {}, bodyFilter))
         return result;
 
     result.hit      = true;
@@ -639,6 +675,73 @@ PhysicsWorld::RaycastHit PhysicsWorld::raycast(
             result.normal = { n.GetX(), n.GetY(), n.GetZ() };
             result.entityId = static_cast<uint32_t>(body.GetUserData());
         }
+    }
+
+    return result;
+}
+
+PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float            radius,
+    float            maxDistance,
+    uint32_t         ignoreEntityId) const
+{
+    RaycastHit result;
+    if (!m_impl || !m_impl->initialized || maxDistance <= 0.0f || radius <= 0.0f)
+        return result;
+
+    const float len = std::sqrt(direction.x * direction.x +
+                                direction.y * direction.y +
+                                direction.z * direction.z);
+    if (len < 1e-6f)
+        return result;
+    const glm::vec3 dir         = direction / len;
+    const glm::vec3 displacement = dir * maxDistance;
+
+    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+
+    // The cast is expressed relative to inBaseOffset (the origin here), which is
+    // what keeps the numbers small and precise far from the world origin.
+    const JPH::RShapeCast cast = JPH::RShapeCast::sFromWorldTransform(
+        sphere,
+        JPH::Vec3::sReplicate(1.0f),
+        JPH::RMat44::sTranslation(JPH::RVec3(origin.x, origin.y, origin.z)),
+        JPH::Vec3(displacement.x, displacement.y, displacement.z));
+
+    JPH::ShapeCastSettings settings;
+    // A camera boom asks "how far can I go", so a surface it is already touching
+    // must not read as a hit at fraction 0 for the back face it is leaving.
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::IgnoreBackFaces;
+
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    const HEQueryFilter bodyFilter(ignoreEntityId, /*skipSensors=*/true);
+
+    m_impl->physicsSystem.GetNarrowPhaseQuery().CastShape(
+        cast, settings, JPH::RVec3(origin.x, origin.y, origin.z), collector,
+        {}, {}, bodyFilter);
+
+    if (!collector.HadHit())
+        return result;
+
+    // Distance comes from the FRACTION, not from the contact point: the fraction
+    // is where the sphere's CENTRE stopped, which already sits one radius clear
+    // of the surface. Using the contact point would put the camera in the wall.
+    const float fraction = std::clamp(collector.mHit.mFraction, 0.0f, 1.0f);
+
+    result.hit      = true;
+    result.distance = fraction * maxDistance;
+    result.point    = origin + dir * result.distance;
+    result.normal   = { collector.mHit.mPenetrationAxis.GetX(),
+                        collector.mHit.mPenetrationAxis.GetY(),
+                        collector.mHit.mPenetrationAxis.GetZ() };
+    if (const float n = glm::length(result.normal); n > 1e-6f)
+        result.normal = -result.normal / n;   // penetration axis points INTO the hit surface
+
+    {
+        JPH::BodyLockRead lock(m_impl->physicsSystem.GetBodyLockInterface(), collector.mHit.mBodyID2);
+        if (lock.Succeeded())
+            result.entityId = static_cast<uint32_t>(lock.GetBody().GetUserData());
     }
 
     return result;

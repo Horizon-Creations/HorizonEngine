@@ -1428,7 +1428,9 @@ namespace
 		a.cameraRig.pitchMin       = -70.0f;
 		a.cameraRig.pitchMax       = 65.0f;
 		a.cameraRig.targetYaw      = CameraRigComponent::TargetYaw::Follow;
-		a.cameraRig.hideTargetMesh = false;
+		a.cameraRig.hideTargetMesh  = false;
+		a.cameraRig.collision       = false;
+		a.cameraRig.collisionRadius = 0.45f;
 		reg.emplace<CameraRigComponent>(actor, a.cameraRig);
 
 		a.light.type         = LightType::Spot;
@@ -1694,7 +1696,9 @@ namespace
 			CHECK(rig->pitchMin       == doctest::Approx(a.cameraRig.pitchMin));
 			CHECK(rig->pitchMax       == doctest::Approx(a.cameraRig.pitchMax));
 			CHECK(rig->targetYaw      == a.cameraRig.targetYaw);
-			CHECK(rig->hideTargetMesh == a.cameraRig.hideTargetMesh);
+			CHECK(rig->hideTargetMesh  == a.cameraRig.hideTargetMesh);
+			CHECK(rig->collision       == a.cameraRig.collision);
+			CHECK(rig->collisionRadius == doctest::Approx(a.cameraRig.collisionRadius));
 			// Runtime-only: a fresh session has hidden nothing yet.
 			CHECK((rig->meshHiddenEntity == entt::null));
 		}

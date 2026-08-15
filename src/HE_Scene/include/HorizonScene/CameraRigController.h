@@ -2,6 +2,7 @@
 #include <entt/entt.hpp>
 
 class HorizonWorld;
+class PhysicsWorld;
 struct MouseFrame;
 
 // Drives a camera that carries a CameraRigComponent: first person or third
@@ -29,6 +30,7 @@ struct CameraRigFrame
     entt::entity camera = entt::null;  // rig camera found (null = scene has none)
     entt::entity target = entt::null;  // resolved target (null = nothing to follow)
     bool         driven = false;       // the camera transform was actually written
+    bool         occluded = false;     // the boom was shortened by geometry
 };
 
 class CameraRigController
@@ -46,8 +48,13 @@ public:
     //
     // Propagates world transforms itself, so the target's world position is this
     // frame's regardless of where the caller sits in the frame.
+    //
+    // `physics` is what the third-person boom sweeps against so it does not put
+    // the camera inside a wall. Null (edit mode, tests, a scene without physics)
+    // simply means no collision — the boom keeps its full length.
     static Frame update(HorizonWorld& world, const MouseFrame& mouse,
-                        entt::entity fallbackTarget = entt::null);
+                        entt::entity fallbackTarget = entt::null,
+                        const PhysicsWorld* physics = nullptr);
 
     // The camera this controller drives: an entity with both CameraComponent and
     // CameraRigComponent, preferring isMain. entt::null when there is none.

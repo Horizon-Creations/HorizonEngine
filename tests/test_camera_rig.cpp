@@ -5,6 +5,9 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/PhysicsWorld.h>
 #include <Application/Input.h>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -227,6 +230,138 @@ TEST_CASE("CameraRig: isMain decides between two rig cameras")
     r->world.registry().get<CameraComponent>(r->camera).isMain = false;
 
     CHECK(HE::CameraRigController::findRigCamera(r->world.registry()) == second);
+}
+
+// ─── Boom collision ───────────────────────────────────────────────────────────
+
+namespace {
+
+// A static box, for putting walls in a rig's way.
+Entity addWall(HorizonWorld& world, glm::vec3 centre, glm::vec3 half, bool isTrigger = false)
+{
+    Entity e = world.createEntity("Wall");
+    TransformComponent t; t.position = centre;
+    world.addComponent(e, t);
+    RigidBodyComponent rb; rb.type = RigidBodyType::Static;
+    world.addComponent(e, rb);
+    ColliderComponent col;
+    col.shape       = ColliderShape::Box;
+    col.halfExtents = half;
+    col.isTrigger   = isTrigger;
+    world.addComponent(e, col);
+    return e;
+}
+
+} // namespace
+
+TEST_CASE("CameraRig: the boom stops at a wall instead of going through it")
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 8.0f;
+    r->rig().collisionRadius = 0.25f;
+
+    // The boom trails on +Z; put a wall across it at z = 3.5.
+    addWall(r->world, { 0.0f, 0.0f, 4.0f }, { 4.0f, 4.0f, 0.5f });
+
+    PhysicsWorld phys;
+    phys.initialize(r->world);
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse, entt::null, &phys);
+    REQUIRE(f.driven);
+    CHECK(f.occluded);
+    CHECK(r->camXform().position.z == doctest::Approx(3.5f - 0.25f).epsilon(0.05f));
+}
+
+TEST_CASE("CameraRig: no physics world means the boom keeps its full length")
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 8.0f;
+    addWall(r->world, { 0.0f, 0.0f, 4.0f }, { 4.0f, 4.0f, 0.5f });
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse);   // physics = nullptr
+    REQUIRE(f.driven);
+    CHECK_FALSE(f.occluded);
+    CHECK(r->camXform().position.z == doctest::Approx(8.0f));
+}
+
+TEST_CASE("CameraRig: collision off keeps the boom's full length")
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 8.0f;
+    r->rig().collision   = false;
+    addWall(r->world, { 0.0f, 0.0f, 4.0f }, { 4.0f, 4.0f, 0.5f });
+
+    PhysicsWorld phys;
+    phys.initialize(r->world);
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse, entt::null, &phys);
+    CHECK_FALSE(f.occluded);
+    CHECK(r->camXform().position.z == doctest::Approx(8.0f));
+}
+
+TEST_CASE("CameraRig: the boom ignores the target's own collider")
+{
+    // Otherwise the very first sweep hits the character it is following and the
+    // camera collapses into its head — and with the frozen kinematic proxy, it
+    // would do that again whenever the player walks past their spawn point.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 6.0f;
+
+    // Give the target a body sitting right where the sweep starts.
+    RigidBodyComponent rb; rb.type = RigidBodyType::Kinematic;
+    r->world.addComponent(r->target, rb);
+    ColliderComponent col;
+    col.shape = ColliderShape::Capsule; col.radius = 0.35f; col.height = 1.8f;
+    r->world.addComponent(r->target, col);
+
+    PhysicsWorld phys;
+    phys.initialize(r->world);
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse, entt::null, &phys);
+    REQUIRE(f.driven);
+    CHECK_FALSE(f.occluded);
+    CHECK(r->camXform().position.z == doctest::Approx(6.0f));
+}
+
+TEST_CASE("CameraRig: a trigger volume does not pull the camera in")
+{
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 8.0f;
+    addWall(r->world, { 0.0f, 0.0f, 4.0f }, { 4.0f, 4.0f, 0.5f }, /*isTrigger=*/true);
+
+    PhysicsWorld phys;
+    phys.initialize(r->world);
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse, entt::null, &phys);
+    CHECK_FALSE(f.occluded);
+    CHECK(r->camXform().position.z == doctest::Approx(8.0f));
+}
+
+TEST_CASE("CameraRig: first person never sweeps")
+{
+    // The camera is at the pivot, so there is nothing to sweep — and a wall the
+    // player is standing against must not shove the view somewhere else.
+    auto r = makeRig(CameraRigComponent::Mode::FirstPerson);
+    r->rig().pivotOffset = { 0.0f, 1.7f, 0.0f };
+    addWall(r->world, { 0.0f, 0.0f, 0.0f }, { 4.0f, 4.0f, 4.0f });   // pivot is inside it
+
+    PhysicsWorld phys;
+    phys.initialize(r->world);
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse, entt::null, &phys);
+    REQUIRE(f.driven);
+    CHECK_FALSE(f.occluded);
+    CHECK(r->camXform().position.y == doctest::Approx(1.7f));
 }
 
 // ─── First-person mesh hiding ─────────────────────────────────────────────────

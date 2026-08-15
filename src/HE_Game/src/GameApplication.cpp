@@ -819,7 +819,8 @@ void GameApplication::updateCameraController(float dt)
 	// built-in free flight take over, so a scene without a rig behaves exactly
 	// as it always did.
 	if (HE::CameraRigController::update(*m_world, input().mouse(),
-	                                    possessedCharacterEntity()).driven)
+	                                    possessedCharacterEntity(),
+	                                    m_physicsWorld.get()).driven)
 	{
 		// The rig path has to park the cursor itself. With relative mode engaged
 		// this is a pure internal position update, but when it is NOT engaged (a

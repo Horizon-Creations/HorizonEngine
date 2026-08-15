@@ -4615,7 +4615,10 @@ void EditorApplication::updatePlayCameraController(float dt)
 	Entity possessed = entt::null;
 	for (HorizonCode::InstanceId inst : m_playerHost.characters())
 		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
-	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed).driven)
+	// Physics only exists while playing, and this whole function is gated on
+	// m_isPlaying — so the boom collides in PIE exactly as it will in the game.
+	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed,
+	                                    m_physicsWorld.get()).driven)
 	{
 		// Park the cursor, same reason as the fly-camera path (see
 		// FlyCameraController): without it the look stalls at the screen edge
