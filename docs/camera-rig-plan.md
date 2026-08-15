@@ -7,6 +7,23 @@ inklusive der Option, die Ziel-Entity mit der Kamera mitzudrehen.
 
 ---
 
+## Stand
+
+**Umgesetzt** (`2e2505fc`, `ff528aa4`, `8dc841a4`, `21d7cac9`, 1610 Tests grün):
+
+* §2.4 Physik-Stomp gefixt — Rigid-Body-Rückschreiben überspringt Character-Entities
+* §2.3 `HE::propagateTransforms` als geteilter Helper
+* §3 `CameraRigComponent` + `CameraRigController`, beide Modi, Rotationskopplung
+* §2.2 Tick-Reihenfolge: Kamera nach der Physik, in Spiel und PIE
+* §4 Inspector, Serializer (JSON + CBOR), Registry-Zeilen für alle vier Frontends
+
+**Nicht verifiziert:** kein Durchlauf im echten Editor/Spiel — bisher nur durch
+Tests abgedeckt. Optik, Maus-Gefühl und PIE-Capture stehen noch aus.
+
+**Offen:** alles unter §5, plus der Nebenfund in §6.
+
+---
+
 ## 1. Ausgangslage
 
 | Teil | Ort | Zustand |
