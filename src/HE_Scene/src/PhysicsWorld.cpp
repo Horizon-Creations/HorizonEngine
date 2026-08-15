@@ -494,6 +494,23 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         if (!reg.valid(entity))
             continue;
 
+        // An entity that also has a character controller belongs to the character
+        // loop below — this one must not touch its transform at all.
+        //
+        // Both components on one entity is the NORMAL case, not an edge case:
+        // EntityHost::defaultComponents gives every PlayerCharacter a character
+        // controller AND a kinematic rigid body (the body is the collision proxy
+        // other bodies see; the controller is what moves). Nothing ever pushes the
+        // transform back INTO that body, so it still sits in its spawn pose — and
+        // writing that pose out here every step is how a character ends up unable
+        // to turn. Position survived only by accident, because the character loop
+        // runs after this one and overwrites it; rotation is written nowhere else,
+        // so it was silently pinned to the spawn value. That is why game code could
+        // not rotate a player: scripts run BEFORE the step, so their write was gone
+        // the same frame.
+        if (reg.all_of<CharacterControllerComponent>(entity))
+            continue;
+
         auto* transform = reg.try_get<TransformComponent>(entity);
         if (!transform)
             continue;
