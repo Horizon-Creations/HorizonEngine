@@ -205,8 +205,11 @@ namespace
 // that offers "this graph's variables" offers them without learning what
 // inheritance is.
 //
-// Both return pointers into the graph: valid for as long as the caller holds it,
-// which is one menu frame.
+// Variables come back as POINTERS into the graph and functions as COPIES, which
+// is not an inconsistency: the menu bodies call addNode, and addNode appends to
+// `nodes`. A pointer into `variables` survives that; a pointer into `nodes` is
+// dangling the moment the vector grows — and the loop reads it again, both to
+// mirror the call's pins and to label the remaining entries.
 std::vector<const HC::Variable*> offerableVariables(const HC::Graph& g)
 {
 	std::vector<const HC::Variable*> out;
@@ -228,17 +231,17 @@ std::vector<const HC::Variable*> offerableVariables(const HC::Graph& g)
 	return out;
 }
 
-std::vector<const HC::Node*> offerableFunctions(const HC::Graph& g)
+std::vector<HC::Node> offerableFunctions(const HC::Graph& g)
 {
-	std::vector<const HC::Node*> out;
+	std::vector<HC::Node> out;
 	for (const auto& n : g.nodes)
-		if (n.type == NT::FunctionEntry && !n.s.empty()) out.push_back(&n);
+		if (n.type == NT::FunctionEntry && !n.s.empty()) out.push_back(n);
 	for (const auto& n : g.inheritedFns)
 	{
 		bool own = false;
 		for (const auto& e : g.nodes)
 			if (e.type == NT::FunctionEntry && e.s == n.s) { own = true; break; }
-		if (!own) out.push_back(&n);   // an override IS the local entry
+		if (!own) out.push_back(n);   // an override IS the local entry
 	}
 	return out;
 }
@@ -607,15 +610,15 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	// Call <function> for each declared function entry — this class's own and the
 	// public ones it inherits — plus a Return node.
 	bool fh = false;
-	for (const HC::Node* e : offerableFunctions(graph))
+	for (const HC::Node& e : offerableFunctions(graph))
 	{
-		const std::string lbl = "Call " + e->s;
+		const std::string lbl = "Call " + e.s;
 		if (!matches(lbl, "Functions")) continue;
 		if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 		if (HcEditorUtil::searchMenuItem(lbl))
 		{
 			const int id = addNode(graph, NT::FunctionCall, drop, h.currentGraph);
-			bindCallTo(graph, id, *e);
+			bindCallTo(graph, id, e);
 			created = id; ImGui::CloseCurrentPopup();
 		}
 	}
@@ -1018,14 +1021,14 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	if (isExecPin)
 	{
 		bool fh = false;
-		for (const HC::Node* e : offerableFunctions(graph))
+		for (const HC::Node& e : offerableFunctions(graph))
 		{
-			if (!matches("Call " + e->s)) continue;
+			if (!matches("Call " + e.s)) continue;
 			if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
-			if (HcEditorUtil::searchMenuItem("Call " + e->s))
+			if (HcEditorUtil::searchMenuItem("Call " + e.s))
 			{
 				const int id = addNode(graph, NT::FunctionCall, pos, h.currentGraph);
-				bindCallTo(graph, id, *e);
+				bindCallTo(graph, id, e);
 				HC::Node* nn = graph.findNode(id);
 				const PinRanges r = pinRanges(*nn);
 				wireAt(id, srcInput ? r.execOut0 : r.execIn0);
