@@ -1670,6 +1670,41 @@ inline HE::hccg::ClassSource fxInheritDerived()
     return f.done("inherit_derived", "fix/inherit_base", "Entity");
 }
 
+// 27a/27 — a base class with NO instance variables at all, and a child that has
+// one. slots() is a generated static rather than a virtual, so a child that
+// concatenated its base's table here would name a function the base never
+// emitted — a .cpp that fails to compile at EXPORT time, in front of the user.
+// A class of nothing but events and functions is an ordinary shape (a
+// controller, say), so this pair exists to keep that path compiling.
+inline HE::hccg::ClassSource fxInheritNovarsBase()
+{
+    Fx f;
+    const int fe = f.fnEntry("Bump", 0, {}, { { "out", PT::Float, false, {} } });
+    f.g.findNode(fe)->subgraph = fe;
+    const int ret = f.fnReturn("Bump");
+    f.g.findNode(ret)->subgraph = fe;
+    f.g.findNode(ret)->results = f.g.findNode(fe)->results;
+    const int k = f.constF(7.0f);
+    f.g.findNode(k)->subgraph = fe;
+    f.data(k, 0, ret, 0);
+    f.exec(fe, ret);
+    return f.done("inherit_novars_base", "Entity");
+}
+
+inline HE::hccg::ClassSource fxInheritNovars()
+{
+    Fx f;
+    f.var("got", PT::Float);
+    const int go = f.event("Go");
+    const int call = f.fnCall("Bump");
+    f.g.findNode(call)->results = { { "out", PT::Float, false, {} } };
+    f.exec(go, call);
+    const int s = f.setVar("got", PT::Float);
+    f.data(call, 0, s, 0);
+    f.exec(call, s);
+    return f.done("inherit_novars", "fix/inherit_novars_base", "Entity");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1683,6 +1718,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),
         fxCastTarget(), fxCasts(),
         fxInheritBase(), fxInheritDerived(),
+        fxInheritNovarsBase(), fxInheritNovars(),
     };
 }
 

@@ -679,6 +679,20 @@ TEST_CASE("codegen parity: a derived class is a derived class in C++ too")
 	CHECK(p.var("mine").f == 0.0f);
 }
 
+TEST_CASE("codegen parity: a base class with no variables at all")
+{
+	// slots() is a generated static, not a virtual — a child that concatenated
+	// its base's table when the base emitted none would name a function that
+	// does not exist, and the break would surface as a compiler error during a
+	// packaged export. That this fixture is COMPILED INTO this binary is half
+	// the test; the rest checks the inherited call still lands.
+	ParityPair p("fix/inherit_novars");
+	p.fire("Go");
+	CHECK(p.var("got").f == 7.0f);
+	p.reseed();
+	CHECK(p.var("got").f == 0.0f);
+}
+
 TEST_CASE("codegen: inheritance is emitted as inheritance in both failure modes")
 {
 	// The class frame is the same either way — only the Cast lowering differs by

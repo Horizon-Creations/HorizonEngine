@@ -217,6 +217,7 @@ set(HCGEN_CLASSES
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
+    inherit_novars_base inherit_novars
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

@@ -2518,7 +2518,16 @@ private:
                 if (v.type == PT::Ref) chainRefVar = true;
             }
         }
-        const bool ownTable = par && varCount > 0;   // an ownSlots() beside slots()
+        // slots() is a GENERATED static, not a virtual on CompiledInstance — so
+        // unlike fireEvent/callFunction/reseedVariables, a qualified call to a
+        // base's slots() only resolves if that base actually emitted one. A base
+        // whose whole chain declares no variable emits none (a class of nothing
+        // but events and functions is an ordinary shape), and concatenating with
+        // it would produce a .cpp that fails to compile at EXPORT time, in front
+        // of the user. So the concat only exists when there is something above.
+        const size_t parentChainVars = chainVarCount - varCount;
+        const bool   inheritsVars    = par && parentChainVars > 0;
+        const bool   ownTable        = inheritsVars && varCount > 0;   // ownSlots() beside slots()
         // A parameter the DEFINITION never touches loses its name (the
         // declaration keeps it) — no `(void)x;` noise, and the header still
         // documents what the argument is.
@@ -2754,7 +2763,7 @@ private:
                 }
                 c += "    };\n    return k;\n}\n\n";
             }
-            if (par)
+            if (inheritsVars)
             {
                 // The base's table plus this class's. The base's entries keep
                 // accessors typed on the BASE — correct for an object of this
@@ -2777,10 +2786,11 @@ private:
             c += "    };\n";
             if (par)
             {
-                // Plus the base's. This is the list Runtime::handlesEvent reads
-                // to decide whether an instance cares about an event at all, so
-                // leaving the inherited handlers out of it would make them
-                // unreachable — the handler exists, and nobody would ever fire.
+                // Plus the base's. Runtime::eventBindingsOf reports this list as
+                // everything the instance handles — that is what a Bind Event
+                // subscribes against — so leaving the inherited handlers out
+                // would make them unreachable: the handler exists, and nobody
+                // ever fires it.
                 c += "    static const std::vector<HorizonCode::CompiledEventInfo> kAll = [this]\n";
                 c += "    {\n";
                 c += "        std::vector<HorizonCode::CompiledEventInfo> v = " + par->cpp +
