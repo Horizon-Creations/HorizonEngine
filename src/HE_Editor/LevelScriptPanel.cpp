@@ -121,6 +121,25 @@ struct LSState
 	std::string compileFor;         // panel title the result belongs to
 	double      compileAt  = 0.0;   // when the check ran (ImGui::GetTime)
 };
+
+// ── One context per graph ────────────────────────────────────────────────────
+// None of the state above means anything in a graph other than the one it was
+// made in: a sub-graph id, a selection and a scroll position are all in terms of
+// node ids, and every graph hands those out starting at 1. A single state behind
+// the Level Script, the Game Instance and every class tab therefore did not just
+// look wrong after a switch — it named DIFFERENT nodes, and Delete, Cut,
+// Duplicate and drag all took it at its word.
+//
+// So each graph keeps its own, and switching tabs finds it exactly as it was
+// left. `g` stays THE state every reader below uses; drawGraphBody swaps the
+// right one in. Doing it that way rather than handing a context to a hundred
+// call sites is not only the smaller change: it leaves exactly one place where
+// a graph's state can be selected, so there is no second path to get wrong.
+//
+// Keyed by the class asset's path, or — for the two virtual tabs that have no
+// asset — the panel title. Not the tab title of a class, which is its BASE
+// class's label and shared by every class deriving from it.
+std::map<std::string, LSState> s_graphStates;
 LSState g;
 
 // Run the SINGLE-class compile check the export would run: JSON round-trip
@@ -1056,36 +1075,20 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    const std::vector<HC::InheritedVariable>& inheritedVars = {},
                    const std::string& classKey = {})
 {
-	// ── This state belongs to ONE graph at a time ───────────────────────────
-	// There is a single panel state behind the Level Script, the Game Instance
-	// and every class tab, and none of it means anything in a graph other than
-	// the one it was made in: a sub-graph id, a selection, a scroll position.
-	// Node ids are small integers that every graph hands out from 1, so an id
-	// carried across does not read as "gone" — it names a DIFFERENT node.
-	//
-	// Two ways that showed up as "nodes disappear". Being inside function 7 of
-	// one class and opening another put the second class straight into ITS
-	// node 7, so a node added there landed in a sub-graph the author never
-	// meant and was nowhere to be seen in the event graph. And a scroll
-	// position from a graph parked at (5000, 3000) left a freshly opened class
-	// showing empty canvas, with everything it has far off screen.
-	//
-	// So the view resets when the graph changes. `classKey` is the identity —
-	// `title` is only the base-class label for a class tab, which two classes
-	// can share.
+	// Swap in this graph's own context (see s_graphStates). The outgoing one is
+	// parked under its own key, so coming back to a tab finds the sub-graph it
+	// was left in, the same selection and the same scroll position — and,
+	// crucially, nothing of it can act on the graph now on screen.
 	{
 		const std::string key = classKey.empty() ? std::string(title) : classKey;
 		if (g.graphFor != key)
 		{
-			g.graphFor     = key;
-			g.currentGraph = 0;
-			g.selectedNode = 0;
-			g.selectedVar.clear();
-			g.selectedEvent.clear();
-			g.ge.selection.clear();
-			g.ge.selected = 0;
-			g.ge.pan = ImVec2(0.0f, 0.0f);
-			g.ge.zoom = 1.0f;
+			if (!g.graphFor.empty()) s_graphStates[g.graphFor] = std::move(g);
+			if (const auto it = s_graphStates.find(key); it != s_graphStates.end())
+				g = std::move(it->second);
+			else
+				g = LSState{};
+			g.graphFor = key;
 		}
 	}
 	// A sub-graph id that no longer names a function (it was deleted) must fall
@@ -1523,7 +1526,20 @@ bool HorizonCodeClassPanel::isClassAsset(const std::string& path)
 	return EditorAssetTypeCache::is(path, HE::AssetType::HorizonCodeClass);
 }
 
-void HorizonCodeClassPanel::forget(const std::string& path) { s_classStates.forget(path); }
+void HorizonCodeClassPanel::forget(const std::string& path)
+{
+	// The graph context goes with the tab. It is keyed by the CONTENT-relative
+	// path (that is what drawGraphBody is handed), which only the ClassState
+	// knows — so read it before forgetting the state that holds it. Leaving it
+	// behind would hand a class recreated under the same path the view state of
+	// the deleted one, pointing at node ids that are gone.
+	if (const ClassState* st = s_classStates.find(path); st && !st->path.empty())
+	{
+		s_graphStates.erase(st->path);
+		if (g.graphFor == st->path) g = LSState{};
+	}
+	s_classStates.forget(path);
+}
 
 bool HorizonCodeClassPanel::isDirty(const std::string& path) { return s_classStates.dirty(path); }
 
