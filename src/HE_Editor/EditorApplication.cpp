@@ -48,6 +48,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
 #include <HorizonScene/FlyCameraController.h>  // free-fly PIE camera (shared with the game runtime)
+#include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the game runtime)
 #include <HorizonScene/Components/ScriptComponent.h>
 #include <ContentManager/Assets.h>
 #include <Renderer/RendererFactory.h>
@@ -1965,8 +1966,6 @@ void EditorApplication::OnRender(float dt)
 			// Shared with the standalone game runtime (GameApplication) so weather,
 			// animation, particles, terrain, foliage, nav & LOD behave identically.
 			// Pass the physics world in play mode so precipitation collides with the scene.
-			// Drive the free-fly PIE camera first so LOD/particles follow the new pose.
-			updatePlayCameraController(dt);
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
@@ -1987,6 +1986,12 @@ void EditorApplication::OnRender(float dt)
 				m_physicsAccum -= kPhysicsFixedDt;
 			}
 		}
+
+		// The PIE camera runs AFTER physics: a rig following a target it updated
+		// before the step would follow where that target was last frame, and that
+		// lag is visible. Same order as the packaged game, which is the point of a
+		// preview.
+		updatePlayCameraController(dt);
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
@@ -4593,6 +4598,25 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// the one the cursor is warped back into (see FlyCameraController) — with
 	// multi-viewport panels that may be a floating panel's OS window, not the main one.
 	SDL_Window* const focusWin = SDL_GetKeyboardFocus();
+
+	// Re-assert the capture BEFORE either controller runs. SDL engages relative
+	// mode only while the flagged window holds keyboard focus, and with
+	// multi-viewport panels focus can move between OS windows mid-play. The fly
+	// camera does this itself (cfg.reassertCapture), but the rig path returns
+	// before ever reaching it — leaving it to the controller would mean the
+	// cursor reappears in PIE exactly when a scene has a rig.
+	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
+		SDL_SetWindowRelativeMouseMode(focusWin, true);
+	if (SDL_CursorVisible())
+		SDL_HideCursor();
+
+	// A camera rig wins when the scene has one it can drive — PIE has to show the
+	// same camera the shipped game will, or it is not a preview.
+	Entity possessed = entt::null;
+	for (HorizonCode::InstanceId inst : m_playerHost.characters())
+		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
+	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed).driven)
+		return;
 
 	HE::FlyCameraController::Config cfg;
 	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play

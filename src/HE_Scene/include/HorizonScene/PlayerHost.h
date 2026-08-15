@@ -67,6 +67,12 @@ public:
 	// Idempotent; begin() may be called again for the next session.
 	void end();
 
+	// The spawned player characters, in spawn order. Exposed so a caller can map
+	// them to their scene entities via EntityHost::entityOf — which is what lets
+	// a camera rig default to "follow the player" without the project having to
+	// name an entity.
+	const std::vector<HorizonCode::InstanceId>& characters() const { return m_characters; }
+
 	bool running() const { return m_runtime != nullptr; }
 	size_t playerCount() const { return m_controllers.size() + m_characters.size(); }
 	size_t controllerCount() const { return m_controllers.size(); }

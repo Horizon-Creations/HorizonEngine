@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
@@ -1324,6 +1325,7 @@ namespace
 		MeshComponent                  mesh;
 		MaterialComponent              material;
 		CameraComponent                camera;
+		CameraRigComponent             cameraRig;
 		LightComponent                 light;
 		RigidBodyComponent             rigidbody;
 		ColliderComponent              collider;
@@ -1414,6 +1416,20 @@ namespace
 		a.camera.isMain       = true;
 		a.camera.orthographic = true;
 		reg.emplace<CameraComponent>(actor, a.camera);
+
+		a.cameraRig.mode           = CameraRigComponent::Mode::FirstPerson;
+		a.cameraRig.target         = HE::UUID{ 0x1234ull, 0x5678ull };
+		a.cameraRig.pivotOffset    = { 0.1f, 1.75f, -0.2f };
+		a.cameraRig.armOffset      = { 0.55f, 0.15f, -0.05f };
+		a.cameraRig.armLength      = 3.25f;
+		a.cameraRig.yaw            = 123.5f;
+		a.cameraRig.pitch          = -22.25f;
+		a.cameraRig.sensitivity    = 0.085f;
+		a.cameraRig.pitchMin       = -70.0f;
+		a.cameraRig.pitchMax       = 65.0f;
+		a.cameraRig.targetYaw      = CameraRigComponent::TargetYaw::Follow;
+		a.cameraRig.hideTargetMesh = false;
+		reg.emplace<CameraRigComponent>(actor, a.cameraRig);
 
 		a.light.type         = LightType::Spot;
 		a.light.color        = { 0.15f, 0.25f, 0.35f };
@@ -1663,6 +1679,24 @@ namespace
 			CHECK(c->farPlane     == doctest::Approx(a.camera.farPlane));
 			CHECK(c->isMain       == a.camera.isMain);
 			CHECK(c->orthographic == a.camera.orthographic);
+		}
+		{
+			const auto* rig = reg.try_get<CameraRigComponent>(actor);
+			REQUIRE(rig != nullptr);
+			CHECK(rig->mode == a.cameraRig.mode);
+			CHECK(rig->target == a.cameraRig.target);
+			checkVec3(rig->pivotOffset, a.cameraRig.pivotOffset);
+			checkVec3(rig->armOffset,   a.cameraRig.armOffset);
+			CHECK(rig->armLength      == doctest::Approx(a.cameraRig.armLength));
+			CHECK(rig->yaw            == doctest::Approx(a.cameraRig.yaw));
+			CHECK(rig->pitch          == doctest::Approx(a.cameraRig.pitch));
+			CHECK(rig->sensitivity    == doctest::Approx(a.cameraRig.sensitivity));
+			CHECK(rig->pitchMin       == doctest::Approx(a.cameraRig.pitchMin));
+			CHECK(rig->pitchMax       == doctest::Approx(a.cameraRig.pitchMax));
+			CHECK(rig->targetYaw      == a.cameraRig.targetYaw);
+			CHECK(rig->hideTargetMesh == a.cameraRig.hideTargetMesh);
+			// Runtime-only: a fresh session has hidden nothing yet.
+			CHECK_FALSE(rig->meshHiddenByRig);
 		}
 		{
 			const auto* l = reg.try_get<LightComponent>(actor);

@@ -7,6 +7,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
+#include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
@@ -244,6 +245,28 @@ namespace
 				{ "farPlane",     c->farPlane },
 				{ "isMain",       c->isMain },
 				{ "orthographic", c->orthographic },
+			};
+		}
+		if (auto* rig = registry.try_get<CameraRigComponent>(entity))
+		{
+			// yaw/pitch are runtime state, but they are also the camera's
+			// starting direction on load — dropping them would snap every
+			// reloaded scene back to due north. meshHiddenByRig is NOT saved:
+			// it says what the rig did to a mesh this session, and a fresh
+			// session has done nothing yet.
+			comps["cameraRig"] = {
+				{ "mode",           static_cast<uint8_t>(rig->mode) },
+				{ "target",         uuidToJson(rig->target) },
+				{ "pivotOffset",    vec3ToJson(rig->pivotOffset) },
+				{ "armOffset",      vec3ToJson(rig->armOffset) },
+				{ "armLength",      rig->armLength },
+				{ "yaw",            rig->yaw },
+				{ "pitch",          rig->pitch },
+				{ "sensitivity",    rig->sensitivity },
+				{ "pitchMin",       rig->pitchMin },
+				{ "pitchMax",       rig->pitchMax },
+				{ "targetYaw",      static_cast<uint8_t>(rig->targetYaw) },
+				{ "hideTargetMesh", rig->hideTargetMesh },
 			};
 		}
 		if (auto* l = registry.try_get<LightComponent>(entity))
@@ -722,6 +745,26 @@ namespace
 			cam.isMain       = c.value("isMain",       cam.isMain);
 			cam.orthographic = c.value("orthographic", cam.orthographic);
 			registry.emplace_or_replace<CameraComponent>(entity, cam);
+		}
+		if (comps.contains("cameraRig"))
+		{
+			const json& c = comps["cameraRig"];
+			CameraRigComponent rig;
+			rig.mode           = static_cast<CameraRigComponent::Mode>(
+			                         c.value("mode", static_cast<uint8_t>(rig.mode)));
+			rig.target         = jsonToUuid(c.value("target", json()));
+			rig.pivotOffset    = jsonToVec3(c.value("pivotOffset", json()), rig.pivotOffset);
+			rig.armOffset      = jsonToVec3(c.value("armOffset",   json()), rig.armOffset);
+			rig.armLength      = c.value("armLength",      rig.armLength);
+			rig.yaw            = c.value("yaw",            rig.yaw);
+			rig.pitch          = c.value("pitch",          rig.pitch);
+			rig.sensitivity    = c.value("sensitivity",    rig.sensitivity);
+			rig.pitchMin       = c.value("pitchMin",       rig.pitchMin);
+			rig.pitchMax       = c.value("pitchMax",       rig.pitchMax);
+			rig.targetYaw      = static_cast<CameraRigComponent::TargetYaw>(
+			                         c.value("targetYaw", static_cast<uint8_t>(rig.targetYaw)));
+			rig.hideTargetMesh = c.value("hideTargetMesh", rig.hideTargetMesh);
+			registry.emplace_or_replace<CameraRigComponent>(entity, rig);
 		}
 		if (comps.contains("light"))
 		{

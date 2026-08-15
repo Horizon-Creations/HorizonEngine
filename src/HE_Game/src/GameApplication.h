@@ -42,11 +42,18 @@ private:
     // reachable (e.g. to quit) without trapping the player.
     void setMouseCaptured(bool captured);
 
-    // Built-in free-fly camera so a shipped game is navigable out of the box:
-    // mouse look + WASD/QE (Shift = sprint) drive the scene's main camera while
-    // the mouse is captured. A no-op if the scene has no camera; game logic can
-    // ignore it by not marking a camera isMain / releasing the mouse.
+    // Whatever camera the scene asks for, while the mouse is captured: a
+    // CameraRigComponent camera (first/third person, following a target) when
+    // there is one, otherwise the built-in free flight — mouse look + WASD/QE
+    // (Shift = sprint) — so a shipped game is navigable out of the box. A no-op
+    // if the scene has no camera; game logic can ignore it by not marking a
+    // camera isMain / releasing the mouse.
     void updateCameraController(float dt);
+
+    // The scene entity of the first player character the PlayerHost spawned, so
+    // a rig with no explicit target follows the player. entt::null when there is
+    // none (no player class, or one that brings no entity).
+    Entity possessedCharacterEntity() const;
 
     // Build the physics world for the CURRENT scene. Called BEFORE startScripts,
     // which hands the world to the script context; run again after every scene

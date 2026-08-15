@@ -915,6 +915,66 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraComponent>(entity); }
 	}
 
+	// ── Camera Rig ──────────────────────────────────────────────────────────
+	if (auto* rig = registry.try_get<CameraRigComponent>(entity))
+	{
+		if (componentHeader("Camera Rig", true, removed))
+		{
+			static const char* kRigModes[] = { "First Person", "Third Person" };
+			int mode = static_cast<int>(rig->mode);
+			if (Row::combo("Mode", &mode, kRigModes, 2))
+			{ rig->mode = static_cast<CameraRigComponent::Mode>(mode); trackEdit(); }
+
+			// Target picker. "None" is not "no target" — it follows whichever
+			// player character the PlayerHost possesses, which is what a normal
+			// project wants and what saves every scene an explicit assignment.
+			{
+				std::vector<const char*> names{ "Player (possessed)" };
+				std::vector<HE::UUID>    ids{ HE::UUID{} };
+				int current = 0;
+				for (auto [e, name] : registry.view<NameComponent>().each())
+				{
+					if (e == entity || e == world.rootEntity()) continue;
+					if (!registry.all_of<TransformComponent>(e))  continue;
+					const HE::UUID id = world.entityId(e);
+					if (id == HE::UUID{}) continue;
+					if (id == rig->target) current = static_cast<int>(ids.size());
+					names.push_back(name.name.c_str());
+					ids.push_back(id);
+				}
+				if (Row::combo("Target", &current, names.data(), static_cast<int>(names.size())))
+				{ rig->target = ids[static_cast<size_t>(current)]; trackEdit(); }
+			}
+
+			Row::dragFloat3("Pivot Offset", &rig->pivotOffset.x, 0.05f, -50.0f, 50.0f); trackEdit();
+
+			if (rig->mode == CameraRigComponent::Mode::ThirdPerson)
+			{
+				Row::dragFloat3("Arm Offset", &rig->armOffset.x, 0.05f, -20.0f, 20.0f); trackEdit();
+				Row::dragFloat("Arm Length", &rig->armLength, 0.05f, 0.0f, 100.0f); trackEdit();
+			}
+			else
+			{
+				ImGui::Checkbox("Hide Target Mesh", &rig->hideTargetMesh); trackEdit();
+			}
+
+			// Rotation coupling. Free lets the character turn on its own; Follow
+			// makes it face where the camera looks, which is what allows strafing
+			// and backing up.
+			static const char* kTargetYaw[] = { "Free", "Follow Camera" };
+			int yawMode = static_cast<int>(rig->targetYaw);
+			if (Row::combo("Target Rotation", &yawMode, kTargetYaw, 2))
+			{ rig->targetYaw = static_cast<CameraRigComponent::TargetYaw>(yawMode); trackEdit(); }
+
+			Row::dragFloat("Sensitivity", &rig->sensitivity, 0.005f, 0.005f, 2.0f, "%.3f"); trackEdit();
+			Row::dragFloat("Yaw",         &rig->yaw,   0.5f, -180.0f, 180.0f, "%.1f"); trackEdit();
+			Row::dragFloat("Pitch",       &rig->pitch, 0.5f, rig->pitchMin, rig->pitchMax, "%.1f"); trackEdit();
+			Row::dragFloat("Pitch Min",   &rig->pitchMin, 0.5f, -89.0f, 0.0f, "%.1f"); trackEdit();
+			Row::dragFloat("Pitch Max",   &rig->pitchMax, 0.5f, 0.0f, 89.0f, "%.1f"); trackEdit();
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraRigComponent>(entity); }
+	}
+
 	// ── Light ───────────────────────────────────────────────────────────────
 	if (auto* l = registry.try_get<LightComponent>(entity))
 	{
@@ -1437,6 +1497,7 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
+			addItem("Camera Rig",   CameraRigComponent{});
 			addItem("Light",        LightComponent{});
 			addItem("Decal",        DecalComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});

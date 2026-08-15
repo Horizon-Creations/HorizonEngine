@@ -22,6 +22,7 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
+#include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -793,9 +794,27 @@ void GameApplication::setMouseCaptured(bool captured)
 	else SDL_ShowCursor();
 }
 
+Entity GameApplication::possessedCharacterEntity() const
+{
+	for (HorizonCode::InstanceId inst : m_playerHost.characters())
+	{
+		const Entity e = m_entityHost.entityOf(inst);
+		if (e != entt::null) return e;
+	}
+	return entt::null;
+}
+
 void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
+
+	// A camera rig wins when the scene has one it can actually drive. Only when
+	// it cannot — no rig camera, or a target that does not resolve — does the
+	// built-in free flight take over, so a scene without a rig behaves exactly
+	// as it always did.
+	if (HE::CameraRigController::update(*m_world, input().mouse(),
+	                                    possessedCharacterEntity()).driven)
+		return;
 
 	// The cursor is warped back to this window's centre every frame (see
 	// FlyCameraController) — but only while WE have focus, so an alt-tabbed game
@@ -893,10 +912,6 @@ void GameApplication::OnRender(float deltaTime)
 	if (!justRegistered.empty() && r)
 		r->WarmupMaterials(justRegistered);
 
-	// Built-in free-fly camera (mouse look + WASD) so the game is navigable —
-	// runs before the systems tick so LOD/particles follow the new camera pos.
-	updateCameraController(deltaTime);
-
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(deltaTime);
@@ -925,6 +940,12 @@ void GameApplication::OnRender(float deltaTime)
 		CollisionSystem::dispatch(*m_physicsWorld, m_scriptContext.get(), m_scriptInstances,
 		                          &m_gameInstance.runtime(), m_entityHost.instances());
 	}
+
+	// Cameras run AFTER physics, and after the scripts that move things: a camera
+	// following a target it updated before the step would follow where that
+	// target was LAST frame, and that lag is visible. Still before the systems
+	// tick, so LOD and precipitation get this frame's camera position.
+	updateCameraController(deltaTime);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())

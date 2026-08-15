@@ -18,6 +18,7 @@
 #include "Components/NavAgentComponent.h"
 #include "Components/MaterialComponent.h"
 #include "Components/CameraComponent.h"
+#include "Components/CameraRigComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/DecalComponent.h"
 #include "Components/RigidBodyComponent.h"

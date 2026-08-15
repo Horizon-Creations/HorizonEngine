@@ -50,6 +50,7 @@ add_executable(he_tests
     test_collider.cpp
     test_raycast.cpp
     test_character.cpp
+    test_camera_rig.cpp
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
     test_skeletalmeshcomponent.cpp
