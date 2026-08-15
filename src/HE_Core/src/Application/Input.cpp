@@ -22,3 +22,22 @@ void Input::ProcessEvent(const SDL_Event& event)
         break;
     }
 }
+
+void Input::ProcessMouseEvent(const SDL_Event& event)
+{
+    switch (event.type)
+    {
+    // Accumulated, not assigned: one frame can carry several motion events, and
+    // a fast movement is exactly the case where it does. Taking only the last
+    // one would quietly throw away most of a flick.
+    case SDL_EVENT_MOUSE_MOTION:
+        m_mouse.dx += event.motion.xrel;
+        m_mouse.dy += event.motion.yrel;
+        break;
+    case SDL_EVENT_MOUSE_WHEEL:
+        m_mouse.wheel += event.wheel.y;
+        break;
+    default:
+        break;
+    }
+}

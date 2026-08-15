@@ -1675,7 +1675,11 @@ void EditorApplication::OnRender(float dt)
 	if (m_isPlaying)
 	{
 		HE::api::time::advance(dt);
-		HE::api::input::pushSdlSnapshot();
+		// Same ownership rule as the player host below: the Mouse Delta node
+		// reads a movement only while play mode holds the mouse.
+		HE::api::input::pushSdlSnapshot(
+			m_playMouseCaptured ? input().mouse().dx : 0.0f,
+			m_playMouseCaptured ? input().mouse().dy : 0.0f);
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
@@ -2029,7 +2033,15 @@ void EditorApplication::OnRender(float dt)
 			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
 			m_editorWorld->scripts().update(dt);
 			// Player instances: Tick + Input.<Action>.* events.
-			m_playerHost.tick(input(), dt);
+			//
+			// The mouse only reaches them while play mode HOLDS it. Outside that
+			// the same movement belongs to the editor — the viewport's fly-look,
+			// a gizmo drag, an ImGui slider — and feeding it to a mouse-bound
+			// axis as well would turn every drag across the viewport into player
+			// input. Esc toggles the capture, so this is also how the author
+			// gets the cursor back without the game turning with it.
+			m_playerHost.tick(input(), dt,
+			                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
 			// Entity classes: Tick, plus reaping the ones whose entity is gone.
 			m_entityHost.tick(dt);
 

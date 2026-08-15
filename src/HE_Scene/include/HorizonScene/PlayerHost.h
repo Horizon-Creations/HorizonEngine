@@ -57,7 +57,11 @@ public:
 	// Per-frame pump: ticks the mapping against `input`, then fires Tick and
 	// the per-action input events (see the routing note above). No-op when not
 	// running.
-	void tick(const Input& input, float dt);
+	// `mouse` is the frame's mouse movement, for axes bound to a mouse source.
+	// Passed in rather than read off `input` because who may act on the mouse is
+	// the caller's decision: a running game always may, the editor only while
+	// play mode holds it. Default {} = no mouse this frame.
+	void tick(const Input& input, float dt, const MouseFrame& mouse = {});
 
 	// Destroy the spawned instances (fires Destruct) and drop all state.
 	// Idempotent; begin() may be called again for the next session.
@@ -68,7 +72,10 @@ public:
 	size_t controllerCount() const { return m_controllers.size(); }
 
 private:
-	struct ActionInfo { std::string name; bool isAxis = false; };
+	// An action is a button, a one-dimensional axis or a two-dimensional one —
+	// three shapes, three event names, so one bool no longer says it.
+	enum class ActionKind { Button, Axis, Axis2D };
+	struct ActionInfo { std::string name; ActionKind kind = ActionKind::Button; };
 
 	// Deliver one input event the way the routing note describes: to every
 	// controller, and additionally to whatever each of them possesses.

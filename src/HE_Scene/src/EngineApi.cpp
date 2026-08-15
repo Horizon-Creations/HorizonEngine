@@ -1268,7 +1268,7 @@ bool      mouseButton(int i)            { return i >= 0 && i < 32 && (snap().but
 glm::vec2 mousePosition()               { return snap().pos; }
 glm::vec2 mouseDelta()                  { return snap().delta; }
 float     scrollDelta()                 { return snap().scroll; }
-void pushSdlSnapshot()
+void pushSdlSnapshot(float dx, float dy)
 {
     int n = 0;
     const bool* ks = SDL_GetKeyboardState(&n);
@@ -1282,7 +1282,7 @@ void pushSdlSnapshot()
     if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   buttons |= 1u << 0;
     if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  buttons |= 1u << 1;
     if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
-    setMouse({ mx, my }, { 0.0f, 0.0f }, buttons, 0.0f);
+    setMouse({ mx, my }, { dx, dy }, buttons, 0.0f);
     setKeysDown(down);
 }
 } // namespace input

@@ -550,7 +550,13 @@ namespace input {
     // name, e.g. "W"/"Space") are polled. Called once per frame by whichever app owns
     // the SDL window — the packaged game every frame, the editor only while playing
     // (edit mode leaves the snapshot untouched).
-    void pushSdlSnapshot();
+    // `dx`/`dy` is the frame's mouse MOVEMENT. It has to be handed in: the rest
+    // of this snapshot is polled (SDL_GetMouseState), and a movement cannot be —
+    // it only exists as motion events, accumulated by Input. Until this took a
+    // parameter it was hardcoded to zero, which is why the "Mouse Delta" node
+    // has always answered (0,0). Pass 0,0 where the mouse is not the caller's
+    // to give (the editor outside play mode).
+    void pushSdlSnapshot(float dx = 0.0f, float dy = 0.0f);
     // Script queries.
     bool      keyDown(const std::string& name);
     bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle

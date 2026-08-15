@@ -1,5 +1,6 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Application/Input.h"   // MouseFrame — tick() takes the frame's movement
 #include <SDL3/SDL.h>
 #include <string>
 #include <vector>
@@ -43,15 +44,11 @@ struct AxisBinding
     AxisSource   source      = AxisSource::Key;
 };
 
-// What the mouse did during one frame. Passed into tick() rather than read off
-// Input, which is keyboard-only on purpose: a delta cannot be polled (see
-// MouseFrame's producer), and who owns the mouse differs between the editor and
-// a running game, so it is handed in by whoever knows.
-struct MouseFrame
-{
-    float dx = 0.0f, dy = 0.0f;   // movement since the last frame, in pixels
-    float wheel = 0.0f;           // wheel movement since the last frame
-};
+// MouseFrame comes from Input (the device stream). It is PASSED IN to tick()
+// rather than read off the Input reference this class already has, because who
+// is allowed to act on the mouse differs by caller: a running game always may,
+// the editor only while play mode holds it. Handing it in makes that an explicit
+// decision at each call site instead of a rule to remember.
 
 // Per-frame state of a named action.
 struct InputActionState

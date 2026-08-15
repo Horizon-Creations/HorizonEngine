@@ -32,8 +32,12 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 	// Actions: logical name (asset stem — what mappings and events key on) + kind.
 	for (const HE::UUID id : discoverAssets(cm, HE::AssetType::InputAction))
 		if (const InputActionAsset* a = cm.getInputAction(id))
-			m_actions.push_back({ HE::inputActionNameFromPath(a->path),
-			                      HE::inputActionIsAxis(a->json) });
+		{
+			const ActionKind k = HE::inputActionIsAxis2D(a->json) ? ActionKind::Axis2D
+			                   : HE::inputActionIsAxis(a->json)   ? ActionKind::Axis
+			                                                      : ActionKind::Button;
+			m_actions.push_back({ HE::inputActionNameFromPath(a->path), k });
+		}
 
 	// Bindings: union of every mapping context in the project.
 	size_t bound = 0;
@@ -123,28 +127,40 @@ void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Val
 	}
 }
 
-void PlayerHost::tick(const Input& input, float dt)
+void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 {
 	if (!m_runtime) return;
-	m_mapping.tick(input);
+	m_mapping.tick(input, mouse);
 
 	for (const HorizonCode::InstanceId inst : m_owned)
 		m_runtime->fireTick(inst, dt);
 
 	for (const ActionInfo& a : m_actions)
 	{
-		if (a.isAxis)
+		switch (a.kind)
 		{
-			// Per-frame, like the Tick event — graphs use it as their movement pump.
+		case ActionKind::Axis:
+			// Per-frame, like the Tick event — graphs use it as their movement
+			// pump. The value is NOT scaled by dt here: a key axis is a held
+			// state the graph integrates itself, and a mouse-sourced one is
+			// already a displacement. Doing it here would be wrong for both.
 			fireInputEvent(HE::inputEventAxis(a.name),
 			               HorizonCode::Value::ofFloat(m_mapping.axisValue(a.name)));
-		}
-		else
+			break;
+		case ActionKind::Axis2D:
 		{
+			float x = 0.0f, y = 0.0f;
+			m_mapping.axis2DValue(a.name, x, y);
+			fireInputEvent(HE::inputEventAxis2D(a.name),
+			               HorizonCode::Value::ofVec2(glm::vec2(x, y)));
+			break;
+		}
+		case ActionKind::Button:
 			if (m_mapping.justPressed(a.name))
 				fireInputEvent(HE::inputEventPressed(a.name), {});
 			if (m_mapping.justReleased(a.name))
 				fireInputEvent(HE::inputEventReleased(a.name), {});
+			break;
 		}
 	}
 }

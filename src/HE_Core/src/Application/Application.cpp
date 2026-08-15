@@ -103,6 +103,13 @@ namespace HE
 					return;
 				}
 			}
+			// Mouse MOVEMENT is accumulated unconditionally, ahead of the
+			// consume gate below. It is raw device data, and deciding who may
+			// act on it is the consumer's job — the game always, the editor only
+			// while play mode holds the mouse. Running it through the gate would
+			// make ImGui's "I want the mouse" the arbiter of whether a captured,
+			// cursor-hidden play session gets to look around, which it is not.
+			m_input.ProcessMouseEvent(e);
 			// Give the derived application a chance to handle/consume the event first
 			// (e.g. EditorApplication forwards it to ImGui).
 			if (!OnEvent(e))
@@ -224,6 +231,11 @@ namespace HE
 				m_running = false;
 				break;
 			}
+
+			// The mouse movement belonged to the frame just drawn. Cleared here
+			// rather than on read, so every reader in a frame sees the same
+			// numbers instead of the first one draining it for the rest.
+			m_input.EndFrame();
 
 			if (m_world)
 			{

@@ -866,7 +866,7 @@ void GameApplication::OnRender(float deltaTime)
 	// Feed the per-frame engine clock + input snapshot so time.*/input.* nodes and
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
-	HE::api::input::pushSdlSnapshot();
+	HE::api::input::pushSdlSnapshot(input().mouse().dx, input().mouse().dy);
 
 	// Deferred scene transitions requested by scripts/graphs last frame: executed
 	// at the frame START so nothing downstream touches a half-swapped world.
@@ -935,7 +935,11 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
 	// the app Input state, which ProcessEvent keeps current).
-	m_playerHost.tick(input(), deltaTime);
+	// A running game always owns the mouse — there is no editor UI competing for
+	// it — so the frame's movement goes straight through to the input mapping.
+	// Capture only decides whether the OS keeps the cursor in the window; an
+	// uncaptured game still gets motion while the pointer is over it.
+	m_playerHost.tick(input(), deltaTime, input().mouse());
 	// Entity classes: Tick, plus reaping the ones whose entity is gone.
 	m_entityHost.tick(deltaTime);
 
