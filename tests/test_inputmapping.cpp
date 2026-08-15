@@ -289,6 +289,121 @@ TEST_CASE("InputAssets: applyInputMappingContext binds keys and axes")
     CHECK(im.axisValue("IA_Move") == doctest::Approx(1.0f));
 }
 
+// ─── Mouse sources and 2D axes ────────────────────────────────────────────────
+
+TEST_CASE("InputMapping: a mouse-sourced axis carries the frame's delta unclamped")
+{
+    InputMapping im;
+    AxisBinding b; b.source = AxisSource::MouseX; b.scale = 1.0f;
+    im.mapAxis("Look", { b });
+
+    Input input;
+    // A key axis clamps to ±1; a DELTA does not, or a fast flick would turn no
+    // further than a held key — the whole reason mouse look could not be an
+    // axis before.
+    im.tick(input, { /*dx=*/40.0f, /*dy=*/0.0f, /*wheel=*/0.0f });
+    CHECK(im.axisValue("Look") == doctest::Approx(40.0f));
+
+    // It is per-FRAME: nothing carries over into a tick with no movement.
+    im.tick(input, {});
+    CHECK(im.axisValue("Look") == doctest::Approx(0.0f));
+
+    // …and the scale applies, sign included.
+    AxisBinding inv; inv.source = AxisSource::MouseY; inv.scale = -0.5f;
+    im.mapAxis("LookY", { inv });
+    im.tick(input, { 0.0f, 10.0f, 0.0f });
+    CHECK(im.axisValue("LookY") == doctest::Approx(-5.0f));
+}
+
+TEST_CASE("InputMapping: keys clamp, the delta adds on top")
+{
+    // Two key bindings still cannot push a held direction past full deflection,
+    // and a mouse source on the same axis is not capped by them.
+    InputMapping im;
+    AxisBinding k1; k1.positiveKey = SDL_SCANCODE_D;
+    AxisBinding k2; k2.positiveKey = SDL_SCANCODE_RIGHT;
+    AxisBinding m;  m.source = AxisSource::MouseX;
+    im.mapAxis("Turn", { k1, k2, m });
+
+    Input input;
+    pressKey(input, SDL_SCANCODE_D);
+    pressKey(input, SDL_SCANCODE_RIGHT);
+    im.tick(input, {});
+    CHECK(im.axisValue("Turn") == doctest::Approx(1.0f));      // 2 keys, still 1
+
+    im.tick(input, { 12.0f, 0.0f, 0.0f });
+    CHECK(im.axisValue("Turn") == doctest::Approx(13.0f));     // clamp(2) + 12
+}
+
+TEST_CASE("InputMapping: a 2D axis keeps its components apart")
+{
+    InputMapping im;
+    AxisBinding mx; mx.source = AxisSource::MouseX;
+    AxisBinding my; my.source = AxisSource::MouseY;
+    im.mapAxis2D("Look", { mx }, { my });
+
+    Input input;
+    im.tick(input, { 3.0f, -7.0f, 0.0f });
+    float x = 0.0f, y = 0.0f;
+    im.axis2DValue("Look", x, y);
+    CHECK(x == doctest::Approx(3.0f));
+    CHECK(y == doctest::Approx(-7.0f));
+    // Asking a 2D axis for a single value is a mistake, and reads as zero
+    // rather than as one of the two components.
+    CHECK(im.axisValue("Look") == doctest::Approx(0.0f));
+
+    // Re-mapping the same name as 1D drops the second component with it.
+    AxisBinding k; k.positiveKey = SDL_SCANCODE_D;
+    im.mapAxis("Look", { k });
+    pressKey(input, SDL_SCANCODE_D);
+    im.tick(input, { 3.0f, -7.0f, 0.0f });
+    im.axis2DValue("Look", x, y);
+    CHECK(x == doctest::Approx(0.0f));
+    CHECK(y == doctest::Approx(0.0f));
+    CHECK(im.axisValue("Look") == doctest::Approx(1.0f));
+}
+
+TEST_CASE("InputAssets: axis sources and 2D axes come out of a mapping context")
+{
+    InputMapping im;
+    // An "axes" row with no "source" is a KEY row — every context written
+    // before mouse sources existed says exactly that by leaving it out.
+    const size_t bound = HE::applyInputMappingContext(im, R"({"entries":[
+        { "action":"IA_Move.hasset", "axes":[{"positive":"W","negative":"S"}] },
+        { "action":"IA_Zoom.hasset", "axes":[{"source":"MouseWheel","scale":2.0}] },
+        { "action":"IA_Look.hasset",
+          "axesX":[{"source":"MouseX"}],
+          "axesY":[{"source":"MouseY","scale":-1.0}] }
+    ]})");
+    CHECK(bound == 3);
+
+    Input input;
+    pressKey(input, SDL_SCANCODE_W);
+    im.tick(input, { 5.0f, 8.0f, 3.0f });
+    CHECK(im.axisValue("IA_Move") == doctest::Approx(1.0f));
+    CHECK(im.axisValue("IA_Zoom") == doctest::Approx(6.0f));
+    float x = 0.0f, y = 0.0f;
+    im.axis2DValue("IA_Look", x, y);
+    CHECK(x == doctest::Approx(5.0f));
+    CHECK(y == doctest::Approx(-8.0f));
+}
+
+TEST_CASE("InputAssets: the three value types are told apart")
+{
+    CHECK_FALSE(HE::inputActionIsAxis(R"({"valueType":"Button"})"));
+    CHECK(HE::inputActionIsAxis(R"({"valueType":"Axis"})"));
+    // An Axis2D is NOT an Axis: callers key on that to mean "one float".
+    CHECK_FALSE(HE::inputActionIsAxis(R"({"valueType":"Axis2D"})"));
+    CHECK(HE::inputActionIsAxis2D(R"({"valueType":"Axis2D"})"));
+    // Missing or malformed reads as Button, never as an error.
+    CHECK_FALSE(HE::inputActionIsAxis("{}"));
+    CHECK_FALSE(HE::inputActionIsAxis2D("nonsense"));
+    // Each type has its own event name — a retyped action stops firing the old
+    // handler instead of handing it a value of the wrong shape.
+    CHECK(HE::inputEventAxis("Look")   == "Input.Look.Axis");
+    CHECK(HE::inputEventAxis2D("Look") == "Input.Look.Axis2D");
+}
+
 TEST_CASE("InputAssets: malformed mapping JSON binds nothing")
 {
     InputMapping im;

@@ -9,7 +9,19 @@ void InputMapping::mapAction(std::string name, std::vector<ActionBinding> bindin
 
 void InputMapping::mapAxis(std::string name, std::vector<AxisBinding> bindings)
 {
-    m_axes[name].bindings = std::move(bindings);
+    AxisEntry& e = m_axes[name];
+    e.bindings = std::move(bindings);
+    e.yBindings.clear();
+    e.is2D = false;
+}
+
+void InputMapping::mapAxis2D(std::string name, std::vector<AxisBinding> xBindings,
+                             std::vector<AxisBinding> yBindings)
+{
+    AxisEntry& e = m_axes[name];
+    e.bindings  = std::move(xBindings);
+    e.yBindings = std::move(yBindings);
+    e.is2D      = true;
 }
 
 void InputMapping::clear()
@@ -18,7 +30,7 @@ void InputMapping::clear()
     m_axes.clear();
 }
 
-void InputMapping::tick(const Input& input)
+void InputMapping::tick(const Input& input, const MouseFrame& mouse)
 {
     for (auto& [name, entry] : m_actions)
     {
@@ -32,17 +44,48 @@ void InputMapping::tick(const Input& input)
         entry.state.justReleased = !cur && prev;
     }
 
+    // One axis component from its bindings.
+    //
+    // The keys are summed and clamped; the delta sources are added on top,
+    // UNCLAMPED. Clamping the total would cap a fast mouse flick at one held
+    // key's worth of turn, which is the whole reason mouse look could not be
+    // expressed as an axis before. Clamping the keys on their own keeps the old
+    // guarantee where it belonged: two key bindings on one axis cannot push a
+    // held direction past full deflection.
+    auto component = [&](const std::vector<AxisBinding>& binds)
+    {
+        float keys = 0.0f, delta = 0.0f;
+        for (const AxisBinding& b : binds)
+        {
+            switch (b.source)
+            {
+            case AxisSource::Key:
+                if (b.positiveKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.positiveKey))
+                    keys += b.scale;
+                if (b.negativeKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.negativeKey))
+                    keys -= b.scale;
+                break;
+            case AxisSource::MouseX:     delta += mouse.dx    * b.scale; break;
+            case AxisSource::MouseY:     delta += mouse.dy    * b.scale; break;
+            case AxisSource::MouseWheel: delta += mouse.wheel * b.scale; break;
+            }
+        }
+        return std::clamp(keys, -1.0f, 1.0f) + delta;
+    };
+
     for (auto& [name, entry] : m_axes)
     {
-        float v = 0.0f;
-        for (auto& b : entry.bindings)
+        if (entry.is2D)
         {
-            if (b.positiveKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.positiveKey))
-                v += b.scale;
-            if (b.negativeKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.negativeKey))
-                v -= b.scale;
+            entry.state.x = component(entry.bindings);
+            entry.state.y = component(entry.yBindings);
+            entry.state.value = 0.0f;   // a 2D axis has no single value
         }
-        entry.state.value = std::clamp(v, -1.0f, 1.0f);
+        else
+        {
+            entry.state.value = component(entry.bindings);
+            entry.state.x = entry.state.y = 0.0f;
+        }
     }
 }
 
@@ -80,4 +123,11 @@ float InputMapping::axisValue(const std::string& name) const
 {
     auto* s = getAxis(name);
     return s ? s->value : 0.0f;
+}
+
+void InputMapping::axis2DValue(const std::string& name, float& x, float& y) const
+{
+    const InputAxisState* s = getAxis(name);
+    x = s ? s->x : 0.0f;
+    y = s ? s->y : 0.0f;
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include "Types/Defines.h"
+#include "Application/InputMapping.h"   // AxisSource — the names below map to it
 #include <string>
 
 class InputMapping;
@@ -14,15 +15,32 @@ namespace HE
 	HE_API std::string inputEventPressed (const std::string& actionName); // "Input.<name>.Pressed"
 	HE_API std::string inputEventReleased(const std::string& actionName); // "Input.<name>.Released"
 	HE_API std::string inputEventAxis    (const std::string& actionName); // "Input.<name>.Axis"
+	// A TWO-dimensional axis gets its own event name rather than sending a Vec2
+	// under ".Axis". Retyping an action would otherwise hand a graph that still
+	// has the old one-dimensional handler a Vec2 where it expects a Float, and
+	// the coercion would silently produce a zero (or an x nobody asked for). A
+	// separate name means the stale handler simply stops firing — visible, and
+	// the same thing that already happens when an action is deleted.
+	HE_API std::string inputEventAxis2D  (const std::string& actionName); // "Input.<name>.Axis2D"
 
 	// True when an InputActionAsset JSON payload declares "valueType":"Axis".
-	// Tolerant: malformed or missing → Button.
+	// Tolerant: malformed or missing → Button. Deliberately NOT true for an
+	// Axis2D action — callers key on this to mean "one float".
 	HE_API bool inputActionIsAxis(const std::string& json);
+	// True for "valueType":"Axis2D".
+	HE_API bool inputActionIsAxis2D(const std::string& json);
 
 	// The logical action name for a content-relative InputAction asset path —
 	// the file stem ("Content/Input/IA_Jump.hasset" → "IA_Jump"). Mapping
 	// entries reference actions by path; events and bindings key on this name.
 	HE_API std::string inputActionNameFromPath(const std::string& path);
+
+	// The name an AxisSource carries in a mapping context's JSON, and back. The
+	// editor writes these and the loader reads them, so they live together;
+	// anything unrecognised reads as Key, which is what every context written
+	// before mouse sources existed means by leaving the field out.
+	HE_API std::string axisSourceName(AxisSource s);
+	HE_API AxisSource  axisSourceFromName(const std::string& name);
 
 	// Apply one InputMappingContextAsset JSON payload to `mapping`: resolves
 	// each entry's action path to its logical name and registers key ("keys")
