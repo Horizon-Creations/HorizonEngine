@@ -96,6 +96,10 @@ struct LSState
 	int         currentGraph = 0;   // visible sub-graph: 0 = event graph, else a FunctionEntry id
 	std::string selectedVar;        // variable selected in the left panel
 	std::string selectedEvent;      // declared event shown in the details pane
+	// Which graph everything below belongs to (a class key, or the Level
+	// Script / Game Instance title). One panel state serves all of those tabs,
+	// and a switch has to wipe what only made sense in the previous one.
+	std::string graphFor;
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
 	// The last rejected rename, so the snap-back can say why. `varNameErrorName`
@@ -1052,9 +1056,40 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
                    const std::vector<HC::InheritedVariable>& inheritedVars = {},
                    const std::string& classKey = {})
 {
-	// The shared panel state is reused across the Level/GI/Class tabs, so a
-	// sub-graph id from another graph (or a deleted function) must reset to the
-	// event graph.
+	// ── This state belongs to ONE graph at a time ───────────────────────────
+	// There is a single panel state behind the Level Script, the Game Instance
+	// and every class tab, and none of it means anything in a graph other than
+	// the one it was made in: a sub-graph id, a selection, a scroll position.
+	// Node ids are small integers that every graph hands out from 1, so an id
+	// carried across does not read as "gone" — it names a DIFFERENT node.
+	//
+	// Two ways that showed up as "nodes disappear". Being inside function 7 of
+	// one class and opening another put the second class straight into ITS
+	// node 7, so a node added there landed in a sub-graph the author never
+	// meant and was nowhere to be seen in the event graph. And a scroll
+	// position from a graph parked at (5000, 3000) left a freshly opened class
+	// showing empty canvas, with everything it has far off screen.
+	//
+	// So the view resets when the graph changes. `classKey` is the identity —
+	// `title` is only the base-class label for a class tab, which two classes
+	// can share.
+	{
+		const std::string key = classKey.empty() ? std::string(title) : classKey;
+		if (g.graphFor != key)
+		{
+			g.graphFor     = key;
+			g.currentGraph = 0;
+			g.selectedNode = 0;
+			g.selectedVar.clear();
+			g.selectedEvent.clear();
+			g.ge.selection.clear();
+			g.ge.selected = 0;
+			g.ge.pan = ImVec2(0.0f, 0.0f);
+			g.ge.zoom = 1.0f;
+		}
+	}
+	// A sub-graph id that no longer names a function (it was deleted) must fall
+	// back to the event graph too.
 	if (g.currentGraph != 0)
 	{
 		const HC::Node* e = graph.findNode(g.currentGraph);

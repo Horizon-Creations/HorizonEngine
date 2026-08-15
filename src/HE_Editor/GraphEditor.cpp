@@ -192,6 +192,28 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // ── Layout every node for this frame ─────────────────────────────────────
     const std::vector<int> ids = model.nodeIds ? model.nodeIds() : std::vector<int>{};
 
+    // ── The selection may only ever name nodes this graph is SHOWING ─────────
+    // State is shared across everything drawn with it — the sub-graphs of one
+    // graph (event graph vs. each function) and, in the HorizonCode panels, the
+    // Level Script, the Game Instance and every class tab. Nothing cleared the
+    // selection on a switch, so an id selected in one of them survived into the
+    // next, where the same small integer is almost certainly a DIFFERENT node.
+    //
+    // Every consumer below takes the selection at its word: Delete and Cut
+    // destroy it, Duplicate clones it, a drag writes positions into it. So a
+    // selection made in one graph, followed by a switch and a single Delete,
+    // silently removed nodes somewhere the user was not even looking — they
+    // only found out on going back. Dropping what is not on screen is the one
+    // place that fixes all of them at once.
+    if (!st.selection.empty() || st.selected != 0)
+    {
+        const std::unordered_set<int> visible(ids.begin(), ids.end());
+        st.selection.erase(std::remove_if(st.selection.begin(), st.selection.end(),
+            [&](int id){ return !visible.count(id); }), st.selection.end());
+        if (st.selected != 0 && !visible.count(st.selected))
+            st.selected = st.selection.empty() ? 0 : st.selection.front();
+    }
+
     // Links are needed twice: for the wires and to know which INPUT pins are
     // wired (unwired simple inputs show an inline default editor).
     const std::vector<std::array<int,4>> links =
