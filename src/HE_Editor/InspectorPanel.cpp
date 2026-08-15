@@ -1068,7 +1068,14 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 				const HorizonCodeClassAsset* cur =
 					(ctx.contentManager && s->scriptAssetId != HE::UUID{})
 						? ctx.contentManager->getHorizonCodeClass(s->scriptAssetId) : nullptr;
-				const char* preview = cur ? cur->name.c_str()
+				// From the PATH, not from `name`. `name` is whatever the META
+				// chunk was written with at creation ("NewClass"), and renaming
+				// the file never rewrites it — so it would show the default
+				// forever, while the list below (and the content browser, and
+				// the class tab) all call the asset by its file stem.
+				const std::string curLabel =
+					cur ? HcEditorUtil::castTargetLabel(cur->path) : std::string();
+				const char* preview = !curLabel.empty() ? curLabel.c_str()
 				                    : (s->scriptAssetId == HE::UUID{} ? "(none)" : "(script)");
 				if (ImGui::BeginCombo("Class", preview))
 				{

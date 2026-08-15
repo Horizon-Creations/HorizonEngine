@@ -13,6 +13,8 @@
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <Diagnostics/Logger.h>
+#include <filesystem>
+#include <string>
 #include <vector>
 
 namespace
@@ -125,7 +127,11 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 	}
 	if (out.entity == entt::null)
 	{
-		out.entity = m_world->createEntity(a->name.empty() ? "Entity" : a->name);
+		// The file stem, not the asset's stored `name` — that one is the META
+		// chunk's, written once at creation and never rewritten by a rename, so
+		// every spawned Goblin would stand in the outliner as "NewClass".
+		const std::string stem = std::filesystem::path(a->path).stem().string();
+		out.entity = m_world->createEntity(stem.empty() ? "Entity" : stem);
 		if (parent != entt::null && m_world->registry().valid(parent))
 			m_world->reparentEntity(out.entity, parent);
 	}

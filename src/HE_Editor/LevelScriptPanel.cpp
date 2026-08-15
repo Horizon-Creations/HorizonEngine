@@ -1513,7 +1513,12 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		if (const HorizonCodeClassAsset* a = ctx.contentManager->getHorizonCodeClass(st.assetId))
 		{
 			if (!a->graphJson.empty()) HorizonCode::fromJson(a->graphJson, st.graph);
-			st.name      = a->name;
+			// The FILE STEM, not the asset's stored `name`: that one is written
+			// into the META chunk at creation and a rename never touches it, so
+			// a renamed class would keep announcing itself as "NewClass" in its
+			// own tab header. The stem is what the content browser and every
+			// class picker call it.
+			st.name      = HcEditorUtil::castTargetLabel(rel);
 			st.baseClass = a->baseClass;
 			// Seed the component template from what the asset carries. Only
 			// classes WITH a body get a world up front; the rest build one the
