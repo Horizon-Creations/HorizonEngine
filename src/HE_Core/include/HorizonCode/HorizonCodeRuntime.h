@@ -280,6 +280,9 @@ private:
         Graph&       leaf()       { return levels.back(); }
         const Graph& leaf() const { return levels.back(); }
         bool         hasGraph() const { return !levels.empty(); }
+        // Its index. Anything that builds a Context for the leaf graph needs
+        // this rather than 0, or per-node state would be filed under the root.
+        size_t       leafLevel() const { return levels.empty() ? 0 : levels.size() - 1; }
         // Which class this is (see ClassIdentity) and, for an Entity class, the
         // scene entity it owns. Held here rather than derived from `compiled`
         // so the interpreted and the compiled path answer instanceIsA through
@@ -292,16 +295,36 @@ private:
         // Per-node state (DoOnce fired?, FlipFlop side) — persistent like vars
         // but never part of the variable store/public surface; cleared by
         // reseedVariables. Interpreted only (compiled classes keep members).
-        std::unordered_map<int, Value>          nodeState;
+        //
+        // ONE MAP PER LEVEL, and that is not tidiness: a node id is unique
+        // within its own graph and nowhere else, so a base class and a derived
+        // class both own a node 7. Sharing one map by id would have them share
+        // one Do Once — the derived class's would arrive already fired.
+        std::vector<std::unordered_map<int, Value>> nodeState;
+
+        // The state map for one level, grown on demand so a level that never
+        // runs a stateful node costs nothing.
+        std::unordered_map<int, Value>& stateAt(size_t level)
+        {
+            if (nodeState.size() <= level) nodeState.resize(level + 1);
+            return nodeState[level];
+        }
     };
     // One scheduled Delay continuation (Runtime::update drives these).
-    struct PendingResume { InstanceId id; int node; float remaining; };
+    // `level` travels with it for the same reason nodeState is per level: the
+    // node id alone does not say which graph to resume in.
+    struct PendingResume { InstanceId id; size_t level; int node; float remaining; };
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
     // Build a Context that routes variable access to the instance's private
     // store, property/show/hide to its host bindings, and the delegation hooks
     // (emit/bind/callExternal/self/gameInstance) back to the runtime.
-    Context makeContext(InstanceId id);
+    //
+    // `level` is which of the instance's graphs the Runner about to use this
+    // context is running. Everything keyed by NODE ID — per-node state and the
+    // Delay continuations — needs it, because a node id only means something
+    // inside its own graph.
+    Context makeContext(InstanceId id, size_t level = 0);
     // Fire `event` on every listener bound to (owner, event). Bounded recursion.
     // The listener table is keyed by the interned id, not the name: dispatch
     // then costs an integer hash instead of a string one, and the engine's own

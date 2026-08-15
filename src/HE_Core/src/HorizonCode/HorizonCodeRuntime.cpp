@@ -328,7 +328,7 @@ std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
 // The Context binds variable access to the instance's private store and
 // property/show/hide to its host. Captures (this, id) and looks the instance up
 // on each call, so it tolerates concurrent add()/remove() of other instances.
-Context Runtime::makeContext(InstanceId id)
+Context Runtime::makeContext(InstanceId id, size_t level)
 {
     Context ctx;
     ctx.getVariable = [this, id](const std::string& var) -> Value
@@ -446,28 +446,31 @@ Context Runtime::makeContext(InstanceId id)
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };
     // Latent flow + liveness + per-node state (all runtime-side).
-    ctx.scheduleResume = [this, id](int nodeId, float seconds)
+    ctx.scheduleResume = [this, id, level](int nodeId, float seconds)
     {
         if (!find(id)) return;
         // Retriggering a pending Delay is ignored (Unreal semantics) — the
         // running timer wins; a tick-driven Delay can't stack continuations.
+        // Compared per LEVEL too: the same node id in a base and a derived
+        // graph are two different Delays.
         for (const auto& p : m_pending)
-            if (p.id == id && p.node == nodeId) return;
-        m_pending.push_back({ id, nodeId, seconds > 0.0f ? seconds : 0.0f });
+            if (p.id == id && p.level == level && p.node == nodeId) return;
+        m_pending.push_back({ id, level, nodeId, seconds > 0.0f ? seconds : 0.0f });
     };
     ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
     ctx.isA = [this](uint32_t target, const std::string& classKey)
     { return instanceIsA(target, classKey); };
-    ctx.getNodeState = [this, id](int nodeId) -> Value
+    ctx.getNodeState = [this, id, level](int nodeId) -> Value
     {
         const Inst* i = find(id);
-        if (!i) return {};
-        auto it = i->nodeState.find(nodeId);
-        return it != i->nodeState.end() ? it->second : Value{};
+        if (!i || level >= i->nodeState.size()) return {};
+        const auto& m = i->nodeState[level];
+        auto it = m.find(nodeId);
+        return it != m.end() ? it->second : Value{};
     };
-    ctx.setNodeState = [this, id](int nodeId, const Value& v)
+    ctx.setNodeState = [this, id, level](int nodeId, const Value& v)
     {
-        if (Inst* i = find(id)) i->nodeState[nodeId] = v;
+        if (Inst* i = find(id)) i->stateAt(level)[nodeId] = v;
     };
     return ctx;
 }
@@ -493,7 +496,12 @@ void Runtime::update(float dt)
             i->compiled->resumeFrom(p.node);
         else
         {
-            Runner runner(i->leaf(), makeContext(p.id));
+            // Resume in the graph the Delay was scheduled from. The node id
+            // alone would not say which — a base and a derived graph each have
+            // their own node 7, and resuming in the wrong one would run a
+            // different chain than the one that paused.
+            if (p.level >= i->levels.size()) continue;   // that level is gone
+            Runner runner(i->levels[p.level], makeContext(p.id, p.level));
             runner.resumeFrom(p.node);
         }
     }
@@ -514,7 +522,7 @@ void Runtime::update(float dt)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn(elem);                             \
-        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, elem, {}); } \
+        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, elem, {}); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -537,7 +545,7 @@ HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookFn();                                 \
-        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, 0, {}); } \
+        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, 0, {}); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, {});                                  \
     }
@@ -557,7 +565,7 @@ HE_HC_PLAIN_EVENT(fireOnLevelUnloaded, "OnLevelUnloaded", onLevelUnloaded)
         Inst* i = find(id);                                                     \
         if (!i) return;                                                         \
         if (i->compiled) i->compiled->hookCall;                                 \
-        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, elem, boxed); } \
+        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, elem, boxed); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, boxed);                               \
     }
@@ -583,7 +591,7 @@ HE_HC_VALUE_EVENT(fireOnSelectionChanged, "OnSelectionChanged", int,
         if (!i) return;                                                         \
         const Value arg = Value::ofInt((int)other);                             \
         if (i->compiled) i->compiled->hook((int)other);                         \
-        else { Runner r(i->leaf(), makeContext(id)); r.fireEvent(name, 0, arg); } \
+        else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent(name, 0, arg); } \
         static const EventId ev = eventId(name);                                \
         dispatchToListeners(id, ev, name, arg);                                 \
     }
@@ -598,7 +606,7 @@ void Runtime::fireTick(InstanceId id, float dt)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onTick(dt);
-    else { Runner r(i->leaf(), makeContext(id)); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
+    else { Runner r(i->leaf(), makeContext(id, i->leafLevel())); r.fireEvent("Tick", 0, Value::ofFloat(dt)); }
     static const EventId ev = eventId("Tick");
     dispatchToListeners(id, ev, "Tick", Value::ofFloat(dt));
 }
@@ -608,7 +616,7 @@ void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
     Inst* i = find(id);
     if (!i) return;
     if (i->compiled) i->compiled->onWindowFocusChanged(focused);
-    else { Runner r(i->leaf(), makeContext(id));
+    else { Runner r(i->leaf(), makeContext(id, i->leafLevel()));
            r.fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
     static const EventId ev = eventId("OnWindowFocusChanged");
     dispatchToListeners(id, ev, "OnWindowFocusChanged", Value::ofBool(focused));
@@ -621,7 +629,7 @@ void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const
     if (i->compiled)
         i->compiled->fireEvent(event, elem, arg);
     else
-    { Runner runner(i->leaf(), makeContext(id)); runner.fireEvent(event, elem, arg); }
+    { Runner runner(i->leaf(), makeContext(id, i->leafLevel())); runner.fireEvent(event, elem, arg); }
     // An event firing on an instance also reaches everyone bound to it, so
     // another class holding a reference can react (Unreal-style dispatchers).
     dispatchToListeners(id, event, arg);
@@ -683,7 +691,7 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
     if (!i) return false;
     if (i->compiled)
         return i->compiled->callFunction(fn, requirePublic, args, results);
-    Runner runner(i->leaf(), makeContext(id));
+    Runner runner(i->leaf(), makeContext(id, i->leafLevel()));
     return runner.callFunction(fn, requirePublic, args, results);
 }
 
