@@ -28,12 +28,21 @@ namespace
 {
 
 // ── Decoded models ────────────────────────────────────────────────────────────
-struct AxisRow { std::string positive, negative; float scale = 1.0f; };
+// One axis contribution. `source` decides whether the key columns mean
+// anything: a mouse row has no keys, it takes the frame's movement instead.
+struct AxisRow
+{
+	std::string positive, negative;
+	float       scale = 1.0f;
+	AxisSource  source = AxisSource::Key;
+};
 struct MapEntry
 {
 	std::string actionPath;            // content-relative InputAction path
 	std::vector<std::string> keys;     // Button bindings (SDL scancode names)
-	std::vector<AxisRow>     axes;     // Axis bindings
+	std::vector<AxisRow>     axes;     // Axis bindings (a 2D action's X)
+	std::vector<AxisRow>     axesY;    // a 2D action's Y — its own list, so the
+	                                   // 1D reader can never half-read one
 };
 struct PanelState
 {
@@ -43,7 +52,8 @@ struct PanelState
 	std::string name;
 	HE::UUID    assetId;
 	// Action payload
-	bool  isAxis = false;
+	// 0 Button, 1 Axis, 2 Axis 2D — three now, so a bool no longer says it.
+	int   valueType = 0;
 	// Mapping payload
 	std::vector<MapEntry> entries;
 };
@@ -93,11 +103,17 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 		if (e.contains("keys") && e["keys"].is_array())
 			for (const auto& k : e["keys"])
 				if (k.is_string()) me.keys.push_back(k.get<std::string>());
-		if (e.contains("axes") && e["axes"].is_array())
-			for (const auto& a : e["axes"])
+		auto readAxes = [](const nlohmann::json& arr, std::vector<AxisRow>& into)
+		{
+			for (const auto& a : arr)
 				if (a.is_object())
-					me.axes.push_back({ a.value("positive", ""), a.value("negative", ""),
-					                    a.value("scale", 1.0f) });
+					into.push_back({ a.value("positive", ""), a.value("negative", ""),
+					                 a.value("scale", 1.0f),
+					                 HE::axisSourceFromName(a.value("source", "Key")) });
+		};
+		if (e.contains("axes")  && e["axes"].is_array())  readAxes(e["axes"],  me.axes);
+		if (e.contains("axesX") && e["axesX"].is_array()) readAxes(e["axesX"], me.axes);
+		if (e.contains("axesY") && e["axesY"].is_array()) readAxes(e["axesY"], me.axesY);
 		out.push_back(std::move(me));
 	}
 }
@@ -109,13 +125,24 @@ std::string encodeMapping(const std::vector<MapEntry>& entries)
 	{
 		nlohmann::json je; je["action"] = e.actionPath;
 		if (!e.keys.empty()) je["keys"] = e.keys;
-		if (!e.axes.empty())
+		auto writeAxes = [](const std::vector<AxisRow>& rows)
 		{
-			je["axes"] = nlohmann::json::array();
-			for (const auto& a : e.axes)
-				je["axes"].push_back({ {"positive", a.positive}, {"negative", a.negative},
-				                       {"scale", a.scale} });
+			nlohmann::json arr = nlohmann::json::array();
+			for (const auto& a : rows)
+				arr.push_back({ {"positive", a.positive}, {"negative", a.negative},
+				                {"scale", a.scale},
+				                {"source", HE::axisSourceName(a.source)} });
+			return arr;
+		};
+		// A Y list is what makes this a 2D entry, so the X list is written under
+		// "axesX" then — a loader reading "axes" must not pick up half of one.
+		if (!e.axesY.empty())
+		{
+			if (!e.axes.empty()) je["axesX"] = writeAxes(e.axes);
+			je["axesY"] = writeAxes(e.axesY);
 		}
+		else if (!e.axes.empty())
+			je["axes"] = writeAxes(e.axes);
 		j["entries"].push_back(std::move(je));
 	}
 	return j.dump();
@@ -237,7 +264,9 @@ bool saveState(PanelState& st, AppContext& ctx)
 	{
 		InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId);
 		if (!a) return false;
-		a->json = st.isAxis ? "{\"valueType\":\"Axis\"}" : "{\"valueType\":\"Button\"}";
+		a->json = st.valueType == 2 ? "{\"valueType\":\"Axis2D\"}"
+		        : st.valueType == 1 ? "{\"valueType\":\"Axis\"}"
+		                            : "{\"valueType\":\"Button\"}";
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 	}
 	st.dirty = false;
@@ -300,7 +329,8 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (const InputActionAsset* a = ctx.contentManager->getInputAction(st.assetId))
 		{
 			st.name   = a->name;
-			st.isAxis = HE::inputActionIsAxis(a->json);
+			st.valueType = HE::inputActionIsAxis2D(a->json) ? 2
+			             : HE::inputActionIsAxis(a->json)   ? 1 : 0;
 		}
 		else if (const InputMappingContextAsset* m = ctx.contentManager->getInputMappingContext(st.assetId))
 		{
@@ -341,14 +371,28 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		// pushed at that point would be popped off a window that no longer exists.
 		{
 			EditorWidgets::WrapText wrap;
-			ImGui::TextDisabled("A Button action fires Pressed/Released events; an Axis");
-			ImGui::TextDisabled("action fires a per-frame Axis event with a Float value.");
+			ImGui::TextDisabled(
+				"A Button action fires Pressed and Released events. An Axis fires "
+				"once a frame with a Float value; an Axis 2D fires once a frame "
+				"with both components at once \xe2\x80\x94 which is what mouse look "
+				"is, one movement rather than two.");
 		}
 		ImGui::Spacing();
-		int vt = st.isAxis ? 1 : 0;
-		if (ImGui::RadioButton("Button", &vt, 0)) { st.isAxis = false; st.dirty = true; }
+		int vt = st.valueType;
+		if (ImGui::RadioButton("Button", &vt, 0))  { st.valueType = 0; st.dirty = true; }
 		ImGui::SameLine();
-		if (ImGui::RadioButton("Axis", &vt, 1))   { st.isAxis = true;  st.dirty = true; }
+		if (ImGui::RadioButton("Axis", &vt, 1))    { st.valueType = 1; st.dirty = true; }
+		ImGui::SameLine();
+		if (ImGui::RadioButton("Axis 2D", &vt, 2)) { st.valueType = 2; st.dirty = true; }
+		{
+			// Retyping is not free, and saying so beats letting it be discovered.
+			EditorWidgets::WrapText wrap;
+			ImGui::Spacing();
+			ImGui::TextDisabled(
+				"Each type fires its own event, so changing this leaves any node "
+				"already placed for the old one silent. Re-add it from the graph's "
+				"Input section.");
+		}
 		ImGui::End();
 		return;
 	}
@@ -479,54 +523,121 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (removeKey >= 0) { e.keys.erase(e.keys.begin() + removeKey); st.dirty = true; cancelCaptureForThisAsset(); }
 
 		// ── Axes ─────────────────────────────────────────────────────────────
-		int removeAxis = -1;
-		if (!e.axes.empty())
+		// One table per component list. A 2D action binds X and Y separately, so
+		// the same renderer runs twice; `idBase` and `rowBase` keep the two
+		// apart for ImGui and for the key-capture identity, which is keyed by
+		// (asset, entry, ROW, kind) and would otherwise have one row answering
+		// for both lists.
+		auto drawAxisTable = [&](std::vector<AxisRow>& rows, const char* tableId,
+		                         int idBase, int rowBase) -> int
 		{
-			ImGui::Spacing();
-			ImGui::TextDisabled("Axes");
-			ImGui::SameLine();
-			helpMarker("Holding the \"+\" key drives the axis toward +1, the \"-\" key "
-			           "toward -1; either can stay blank for a one-sided axis. Scale "
-			           "multiplies the raw value \xe2\x80\x94 -1 inverts.");
-			if (ImGui::BeginTable("##axes", 6, ImGuiTableFlags_SizingStretchProp))
+			int remove = -1;
+			if (rows.empty()) return remove;
+			if (ImGui::BeginTable(tableId, 7, ImGuiTableFlags_SizingStretchProp))
 			{
+				ImGui::TableSetupColumn("##source",  ImGuiTableColumnFlags_WidthFixed, 108.0f);
 				ImGui::TableSetupColumn("##pos",     ImGuiTableColumnFlags_WidthStretch);
 				ImGui::TableSetupColumn("##posbind", ImGuiTableColumnFlags_WidthFixed, bindW);
 				ImGui::TableSetupColumn("##neg",     ImGuiTableColumnFlags_WidthStretch);
 				ImGui::TableSetupColumn("##negbind", ImGuiTableColumnFlags_WidthFixed, bindW);
 				ImGui::TableSetupColumn("##scale",   ImGuiTableColumnFlags_WidthFixed, 74.0f);
 				ImGui::TableSetupColumn("##remove",  ImGuiTableColumnFlags_WidthFixed, removeW);
-				for (int k = 0; k < static_cast<int>(e.axes.size()); ++k)
+				for (int k = 0; k < static_cast<int>(rows.size()); ++k)
 				{
-					AxisRow& a = e.axes[k];
-					ImGui::PushID(2000 + k);
+					AxisRow& a = rows[k];
+					ImGui::PushID(idBase + k);
 					ImGui::TableNextRow();
 					ImGui::TableNextColumn();
-					keyBindCells("pos", "+ key", a.positive, st.dirty, assetPath, i, k,
-					             CaptureKind::AxisPositive, capturedKeyName, captureWasCancelled);
+					{
+						static const char* kNames[] = { "Keys", "Mouse X", "Mouse Y", "Wheel" };
+						int src = static_cast<int>(a.source);
+						ImGui::SetNextItemWidth(-FLT_MIN);
+						if (ImGui::Combo("##src", &src, kNames, 4))
+						{ a.source = static_cast<AxisSource>(src); st.dirty = true; }
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip(
+								"Where this row's value comes from.\n"
+								"Keys: the two key fields, -1..+1 while held.\n"
+								"Mouse / Wheel: how far it moved THIS FRAME — a\n"
+								"displacement, so it is not capped at 1 and must not\n"
+								"be multiplied by delta time in your logic.");
+					}
+					// A mouse row has no keys; showing empty key fields for it
+					// would invite filling them in for nothing.
+					const bool keyed = a.source == AxisSource::Key;
 					ImGui::TableNextColumn();
-					keyBindCells("neg", "\xe2\x88\x92 key", a.negative, st.dirty, assetPath, i, k,
-					             CaptureKind::AxisNegative, capturedKeyName, captureWasCancelled);
+					if (keyed)
+						keyBindCells("pos", "+ key", a.positive, st.dirty, assetPath, i, rowBase + k,
+						             CaptureKind::AxisPositive, capturedKeyName, captureWasCancelled);
+					else
+					{
+						ImGui::TextDisabled("\xe2\x80\x94");
+						ImGui::TableNextColumn();
+					}
+					ImGui::TableNextColumn();
+					if (keyed)
+						keyBindCells("neg", "\xe2\x88\x92 key", a.negative, st.dirty, assetPath, i, rowBase + k,
+						             CaptureKind::AxisNegative, capturedKeyName, captureWasCancelled);
+					else
+					{
+						ImGui::TextDisabled("\xe2\x80\x94");
+						ImGui::TableNextColumn();
+					}
 					ImGui::TableNextColumn();
 					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (ImGui::DragFloat("##scale", &a.scale, 0.05f, 0.0f, 0.0f, "\xc3\x97 %.2f"))
 						st.dirty = true;
-					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale");
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Scale — -1 inverts, a mouse row uses it as sensitivity");
 					ImGui::TableNextColumn();
-					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeAxis = k;
+					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) remove = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this axis");
 					ImGui::PopID();
 				}
 				ImGui::EndTable();
 			}
+			return remove;
+		};
+
+		const bool is2D = !e.axesY.empty();
+		int removeAxis = -1, removeAxisY = -1;
+		if (!e.axes.empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextDisabled(is2D ? "Axes \xe2\x80\x94 X" : "Axes");
+			ImGui::SameLine();
+			helpMarker("Holding the \"+\" key drives the axis toward +1, the \"-\" key "
+			           "toward -1; either can stay blank for a one-sided axis. Scale "
+			           "multiplies the raw value \xe2\x80\x94 -1 inverts.\n\n"
+			           "A Mouse row takes the movement of this frame instead of keys. "
+			           "Keys are still capped at \xc2\xb1" "1 together; a mouse row is "
+			           "added on top uncapped, because a fast flick has to be able to "
+			           "turn further than a held key.");
+			removeAxis = drawAxisTable(e.axes, "##axes", 2000, 0);
+		}
+		if (is2D)
+		{
+			ImGui::Spacing();
+			ImGui::TextDisabled("Axes \xe2\x80\x94 Y");
+			removeAxisY = drawAxisTable(e.axesY, "##axesY", 3000, 500);
 		}
 		if (removeAxis >= 0) { e.axes.erase(e.axes.begin() + removeAxis); st.dirty = true; cancelCaptureForThisAsset(); }
+		if (removeAxisY >= 0) { e.axesY.erase(e.axesY.begin() + removeAxisY); st.dirty = true; cancelCaptureForThisAsset(); }
 
 		// ── Card footer: grow the entry ──────────────────────────────────────
 		ImGui::Spacing();
 		if (ImGui::Button("+ Key", ImVec2(110.0f, 0.0f)))  { e.keys.emplace_back(); st.dirty = true; }
 		ImGui::SameLine();
-		if (ImGui::Button("+ Axis", ImVec2(110.0f, 0.0f))) { e.axes.emplace_back(); st.dirty = true; }
+		if (ImGui::Button(is2D ? "+ X Axis" : "+ Axis", ImVec2(110.0f, 0.0f)))
+		{ e.axes.emplace_back(); st.dirty = true; }
+		ImGui::SameLine();
+		// Adding a Y row is what turns the entry into a 2D binding — the same
+		// thing the loader keys on, so the UI and the format agree by shape
+		// rather than by a flag that could disagree with either.
+		if (ImGui::Button("+ Y Axis", ImVec2(110.0f, 0.0f)))
+		{ e.axesY.emplace_back(); st.dirty = true; }
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Makes this a 2D binding — for an Axis 2D action");
 
 		ImGui::EndChild();
 		ImGui::Spacing();

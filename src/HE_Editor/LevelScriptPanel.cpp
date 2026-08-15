@@ -76,7 +76,9 @@ std::string nodeTitle(const HC::Node& n)
 		// business. "(Axis)" because the pin layout differs and the reason for
 		// it should be readable off the node.
 		case NT::InputAction:  return n.s.empty() ? std::string(base)
-		                                          : (n.s + (n.hasArg ? " (Axis)" : ""));
+		                                          : (n.s + (!n.hasArg ? ""
+		                                             : n.propType == PT::Vec2 ? " (Axis 2D)"
+		                                                                      : " (Axis)"));
 		default:               return base;
 	}
 }
@@ -92,11 +94,13 @@ bool eventNameUsed(const HC::Graph& g, const std::string& name, int exceptId = 0
 	return false;
 }
 
-// One InputAction asset, as the add menu offers it.
+// One InputAction asset, as the add menu offers it. The kind decides the shape
+// of the node the menu inserts — press/release pair, one value, or two.
 struct InputActionRef
 {
 	std::string name;    // the action's logical name (its asset stem)
-	bool        isAxis = false;
+	enum class Kind { Button, Axis, Axis2D };
+	Kind        kind = Kind::Button;
 };
 
 // ── Persistent panel state (the panel edits the current scene's graph) ────────
@@ -1012,9 +1016,11 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 					HC::Node* nn = graph.findNode(id);
 					nn->s = ia.name;
 					// An axis action has no press or release — one chain and a
-					// value instead. This is the pin layout, so it is set here and
-					// not left to be discovered.
-					nn->hasArg = ia.isAxis;
+					// value instead, Float or Vec2. This IS the pin layout, so it
+					// is set here rather than left to be discovered.
+					nn->hasArg   = ia.kind != InputActionRef::Kind::Button;
+					nn->propType = ia.kind == InputActionRef::Kind::Axis2D ? PT::Vec2
+					                                                       : PT::Float;
 					created = id; ImGui::CloseCurrentPopup();
 				}
 				if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
@@ -1431,13 +1437,18 @@ std::vector<InputActionRef> scanInputActions(ContentManager* cm)
 	if (!cm) return out;
 	for (const auto& ref : HcEditorUtil::listAssets(cm, HE::AssetType::InputAction))
 	{
-		bool axis = false;
+		InputActionRef::Kind kind = InputActionRef::Kind::Button;
 		HAsset::Reader r;
 		if (r.open(cm->resolveAbsolutePath(ref.path)))
 			if (const auto* c = r.findChunk(HAsset::CHUNK_IACT))
-				axis = HE::inputActionIsAxis(std::string(
-					reinterpret_cast<const char*>(c->data.data()), c->data.size()));
-		out.push_back({ ref.label, axis });
+			{
+				const std::string json(reinterpret_cast<const char*>(c->data.data()),
+				                       c->data.size());
+				kind = HE::inputActionIsAxis2D(json) ? InputActionRef::Kind::Axis2D
+				     : HE::inputActionIsAxis(json)   ? InputActionRef::Kind::Axis
+				                                     : InputActionRef::Kind::Button;
+			}
+		out.push_back({ ref.label, kind });
 	}
 	return out;
 }
