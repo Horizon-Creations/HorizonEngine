@@ -249,6 +249,45 @@ TEST_CASE("CameraRig: first person hides the target mesh and gives it back")
     CHECK(m.visible);
 }
 
+TEST_CASE("CameraRig: retargeting in first person gives the old mesh back")
+{
+    // The rig remembers WHICH entity it hid, not merely that it hid something.
+    // With a flag, retargeting would look like "already hiding" — the old target
+    // would stay invisible for good and the new one would be drawn straight
+    // through the camera.
+    auto r = makeRig(CameraRigComponent::Mode::FirstPerson);
+    r->world.addComponent(r->target, MeshComponent{});
+
+    Entity other = r->world.createEntity("Other");
+    r->world.addComponent(other, TransformComponent{});
+    r->world.addComponent(other, MeshComponent{});
+
+    HE::CameraRigController::update(r->world, kNoMouse);
+    CHECK_FALSE(r->world.registry().get<MeshComponent>(r->target).visible);
+
+    r->rig().target = r->world.entityId(other);
+    HE::CameraRigController::update(r->world, kNoMouse);
+
+    CHECK(r->world.registry().get<MeshComponent>(r->target).visible);
+    CHECK_FALSE(r->world.registry().get<MeshComponent>(other).visible);
+}
+
+TEST_CASE("CameraRig: a target that goes away gets its mesh back")
+{
+    auto r = makeRig(CameraRigComponent::Mode::FirstPerson);
+    r->world.addComponent(r->target, MeshComponent{});
+
+    HE::CameraRigController::update(r->world, kNoMouse);
+    CHECK_FALSE(r->world.registry().get<MeshComponent>(r->target).visible);
+
+    // Point the rig at an id nothing owns — the target is gone as far as it knows.
+    r->rig().target = HE::UUID{ 0xDEADull, 0xBEEFull };
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse);
+
+    CHECK_FALSE(f.driven);
+    CHECK(r->world.registry().get<MeshComponent>(r->target).visible);
+}
+
 TEST_CASE("CameraRig: hideTargetMesh off leaves the mesh alone")
 {
     auto r = makeRig(CameraRigComponent::Mode::FirstPerson);

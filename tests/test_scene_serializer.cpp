@@ -1696,7 +1696,7 @@ namespace
 			CHECK(rig->targetYaw      == a.cameraRig.targetYaw);
 			CHECK(rig->hideTargetMesh == a.cameraRig.hideTargetMesh);
 			// Runtime-only: a fresh session has hidden nothing yet.
-			CHECK_FALSE(rig->meshHiddenByRig);
+			CHECK((rig->meshHiddenEntity == entt::null));
 		}
 		{
 			const auto* l = reg.try_get<LightComponent>(actor);

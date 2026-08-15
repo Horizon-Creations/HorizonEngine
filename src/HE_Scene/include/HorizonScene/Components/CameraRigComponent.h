@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/UUID.h>
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
 // ── Camera rig ───────────────────────────────────────────────────────────────
@@ -74,9 +75,11 @@ struct CameraRigComponent {
     // still has a shadow, it just is not drawn.
     bool hideTargetMesh = true;
 
-    // Runtime only, not serialised: whether the rig is the one currently holding
-    // that mesh hidden. Without it the rig could not tell "I hid this" from "the
-    // author hid this", and switching back to third person would either leave an
-    // invisible character behind or un-hide something it never touched.
-    bool meshHiddenByRig = false;
+    // Runtime only, not serialised: WHICH entity the rig is currently holding
+    // hidden, entt::null for none. Two things depend on it being an entity
+    // rather than a flag — telling "I hid this" apart from "the author hid
+    // this", and noticing that the target changed. A bool would say "already
+    // hiding" when the rig retargets, leaving the old target invisible forever
+    // and the new one drawn straight through the camera.
+    entt::entity meshHiddenEntity = entt::null;
 };

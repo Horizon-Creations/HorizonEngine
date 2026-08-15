@@ -808,19 +808,33 @@ void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
 
+	// The cursor is parked back at this window's centre every frame — but only
+	// while WE have focus, so an alt-tabbed game never yanks the cursor away from
+	// another app.
+	SDL_Window* warpWin = window() ? window()->GetNativeWindow() : nullptr;
+	if (warpWin && !(SDL_GetWindowFlags(warpWin) & SDL_WINDOW_INPUT_FOCUS)) warpWin = nullptr;
+
 	// A camera rig wins when the scene has one it can actually drive. Only when
 	// it cannot — no rig camera, or a target that does not resolve — does the
 	// built-in free flight take over, so a scene without a rig behaves exactly
 	// as it always did.
 	if (HE::CameraRigController::update(*m_world, input().mouse(),
 	                                    possessedCharacterEntity()).driven)
+	{
+		// The rig path has to park the cursor itself. With relative mode engaged
+		// this is a pure internal position update, but when it is NOT engaged (a
+		// focus transition, a platform quirk) the OS cursor drifts and the look
+		// stalls at the screen edge. FlyCameraController does this for its own
+		// path; without it here a scene with a rig would lose a safety net that a
+		// scene without one has.
+		if (warpWin)
+		{
+			int ww = 0, wh = 0;
+			SDL_GetWindowSize(warpWin, &ww, &wh);
+			SDL_WarpMouseInWindow(warpWin, ww * 0.5f, wh * 0.5f);
+		}
 		return;
-
-	// The cursor is warped back to this window's centre every frame (see
-	// FlyCameraController) — but only while WE have focus, so an alt-tabbed game
-	// never yanks the cursor away from another app.
-	SDL_Window* warpWin = window() ? window()->GetNativeWindow() : nullptr;
-	if (warpWin && !(SDL_GetWindowFlags(warpWin) & SDL_WINDOW_INPUT_FOCUS)) warpWin = nullptr;
+	}
 
 	HE::FlyCameraController::update(m_world->registry(), input(), dt, warpWin);
 }

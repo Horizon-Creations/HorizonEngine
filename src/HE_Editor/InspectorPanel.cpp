@@ -923,7 +923,18 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			static const char* kRigModes[] = { "First Person", "Third Person" };
 			int mode = static_cast<int>(rig->mode);
 			if (Row::combo("Mode", &mode, kRigModes, 2))
-			{ rig->mode = static_cast<CameraRigComponent::Mode>(mode); trackEdit(); }
+			{
+				rig->mode = static_cast<CameraRigComponent::Mode>(mode);
+				// Switching to first person also couples the rotation. A head
+				// that does not turn with the mouse is nobody's idea of first
+				// person, and "add rig, pick First Person" is the very first
+				// thing anyone does — it should not need a second setting to
+				// stop feeling broken. Still just a default: flip it back and it
+				// stays flipped, because only the combo above writes it.
+				if (rig->mode == CameraRigComponent::Mode::FirstPerson)
+					rig->targetYaw = CameraRigComponent::TargetYaw::Follow;
+				trackEdit();
+			}
 
 			// Target picker. "None" is not "no target" — it follows whichever
 			// player character the PlayerHost possesses, which is what a normal

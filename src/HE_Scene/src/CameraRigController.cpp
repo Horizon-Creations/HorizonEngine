@@ -18,11 +18,11 @@ namespace HE {
 
 namespace {
 
-    // Show or hide the target's mesh, remembering that the rig is the one doing
-    // it. castsShadow is deliberately untouched: a first-person character still
-    // has a shadow, it is just not drawn.
+    // Show or hide a mesh. castsShadow is deliberately untouched: a first-person
+    // character still has a shadow, it is just not drawn.
     void applyMeshVisibility(entt::registry& reg, entt::entity target, bool hide)
     {
+        if (!reg.valid(target)) return;
         if (auto* m = reg.try_get<MeshComponent>(target))
         {
             m->visible = !hide;
@@ -83,10 +83,13 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     if (f.target == entt::null || !reg.valid(f.target) ||
         !reg.all_of<TransformComponent>(f.target))
     {
-        // Nothing to follow. Un-hide anything this rig hid, so a target that goes
-        // away does not leave an invisible character behind.
-        if (rig.meshHiddenByRig)
-            rig.meshHiddenByRig = false;
+        // Nothing to follow. Give back whatever this rig hid, so a target that
+        // goes away does not leave an invisible character behind.
+        if (rig.meshHiddenEntity != entt::null)
+        {
+            applyMeshVisibility(reg, rig.meshHiddenEntity, false);
+            rig.meshHiddenEntity = entt::null;
+        }
         return f;
     }
 
@@ -158,11 +161,18 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     ct.dirty = true;
 
     // ── First-person mesh hiding ─────────────────────────────────────────────
-    const bool wantHidden = firstPerson && rig.hideTargetMesh;
-    if (wantHidden != rig.meshHiddenByRig)
+    // Keyed on the ENTITY, not on a flag: a rig that retargets while hiding has
+    // to give the old target back before it hides the new one, or the old one
+    // stays invisible for good and the camera sits inside a drawn head.
+    const entt::entity wantHidden =
+        (firstPerson && rig.hideTargetMesh) ? f.target : entt::null;
+    if (wantHidden != rig.meshHiddenEntity)
     {
-        applyMeshVisibility(reg, f.target, wantHidden);
-        rig.meshHiddenByRig = wantHidden;
+        if (rig.meshHiddenEntity != entt::null)
+            applyMeshVisibility(reg, rig.meshHiddenEntity, false);
+        if (wantHidden != entt::null)
+            applyMeshVisibility(reg, wantHidden, true);
+        rig.meshHiddenEntity = wantHidden;
     }
 
     // The camera moved after the propagate above, so run it once more — the

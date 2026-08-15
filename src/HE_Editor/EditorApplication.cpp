@@ -4616,7 +4616,28 @@ void EditorApplication::updatePlayCameraController(float dt)
 	for (HorizonCode::InstanceId inst : m_playerHost.characters())
 		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
 	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed).driven)
+	{
+		// Park the cursor, same reason as the fly-camera path (see
+		// FlyCameraController): without it the look stalls at the screen edge
+		// whenever relative mode is not actually engaged.
+		if (focusWin)
+		{
+			int ww = 0, wh = 0;
+			SDL_GetWindowSize(focusWin, &ww, &wh);
+			SDL_WarpMouseInWindow(focusWin, ww * 0.5f, wh * 0.5f);
+		}
+		// Keep the self-diagnostic conclusive: a "the camera still doesn't move"
+		// report from a rig scene would otherwise come with a silent log.
+		static int s_rigDiagFrames = 0;
+		if (++s_rigDiagFrames >= 60)
+		{
+			HE_LOG_INFO(Editor, "PIE camera controller: driving a camera RIG%s",
+			            input().mouse().dx != 0.0f || input().mouse().dy != 0.0f
+			                ? "" : ", no mouse motion this frame");
+			s_rigDiagFrames = 0;
+		}
 		return;
+	}
 
 	HE::FlyCameraController::Config cfg;
 	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
