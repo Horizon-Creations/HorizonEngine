@@ -56,6 +56,20 @@ std::string variableTypeLabel(const HC::Variable& v);
 // Add a node at `pos`, owned by the visible sub-graph.
 int addNode(HC::Graph& g, HC::NodeType type, const ImVec2& pos, int subgraph);
 
+// What a node's header says, for every frontend that has nothing to add.
+//
+// A node's TYPE is almost never what you want to read on it: "Engine Call" and
+// "Event" say nothing about which call and which event, and a canvas of those
+// is a canvas you have to click through to understand. This resolves the type
+// into the thing the node actually does — the API call's display name, the
+// event's name, "Cast To Goblin", "Set speed".
+//
+// Frontends that genuinely differ still pass their own `Host::title` (the widget
+// editor appends the bound element), but they build it ON this rather than
+// beside it: the table used to be written out once per editor, and a fourth copy
+// is how one of them ends up saying something the others do not.
+std::string defaultNodeTitle(const HC::Node& n);
+
 // Search helper for the menus.
 std::string lower(std::string v);
 

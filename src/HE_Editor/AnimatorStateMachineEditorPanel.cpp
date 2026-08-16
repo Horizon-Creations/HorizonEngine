@@ -548,7 +548,7 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 	h.currentGraph  = 0;
 	h.content       = ctx.contentManager;
 	h.menus         = &syncMenus();
-	h.title         = [](const HC::Node& n){ return std::string(HC::nodeDisplayName(n.type)); };
+	h.title         = [](const HC::Node& n){ return HcGraphHost::defaultNodeTitle(n); };
 	h.onEdit        = [&edited](bool){ edited = true; };
 
 	const float rightW = 300.0f;

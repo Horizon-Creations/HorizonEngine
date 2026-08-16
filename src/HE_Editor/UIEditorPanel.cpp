@@ -1096,6 +1096,9 @@ std::string elemLabel(const State& st, int elemId)
 	return elementName(*e);
 }
 
+// The widget editor is the one frontend with something to add: a node bound to
+// a UI element says WHICH element. Everything else is the shared table, so only
+// the three element-bearing cases live here.
 std::string graphNodeTitle(const State& st, const HC::Node& n)
 {
 	const char* base = HC::nodeDisplayName(n.type);
@@ -1107,22 +1110,8 @@ std::string graphNodeTitle(const State& st, const HC::Node& n)
 			return "Get " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
 		case NT::SetProperty:
 			return "Set " + elemLabel(st, n.elem) + "." + (n.s.empty() ? std::string("prop") : n.s);
-		case NT::GetVariable:
-			return "Get " + (n.s.empty() ? std::string("var") : n.s);
-		case NT::SetVariable:
-			return "Set " + (n.s.empty() ? std::string("var") : n.s);
-		case NT::FunctionEntry:
-		case NT::FunctionCall:
-			return std::string(base) + " " + n.s;
-		case NT::BindEvent:    return "Bind " + (n.s.empty() ? std::string("event") : n.s);
-		case NT::EmitEvent:    return "Emit " + (n.s.empty() ? std::string("event") : n.s);
-		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
-		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
-		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
-		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
-		case NT::Cast:         return HcEditorUtil::castTitle(n.s);
 		default:
-			return base;
+			return HGH::defaultNodeTitle(n);
 	}
 }
 

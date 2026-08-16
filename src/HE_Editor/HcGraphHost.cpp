@@ -287,6 +287,34 @@ int addNode(HC::Graph& g, NT type, const ImVec2& pos, int subgraph)
 	return g.addNode(std::move(n));
 }
 
+std::string defaultNodeTitle(const HC::Node& n)
+{
+	const char* base = HC::nodeDisplayName(n.type);
+	switch (n.type)
+	{
+		case NT::Event:        return n.s.empty() ? std::string(base) : n.s;
+		case NT::GetVariable:  return "Get " + (n.s.empty() ? std::string("var") : n.s);
+		case NT::SetVariable:  return "Set " + (n.s.empty() ? std::string("var") : n.s);
+		case NT::FunctionEntry:
+		case NT::FunctionCall: return std::string(base) + " " + n.s;
+		case NT::BindEvent:    return "Bind " + (n.s.empty() ? std::string("event") : n.s);
+		case NT::EmitEvent:    return "Emit " + (n.s.empty() ? std::string("event") : n.s);
+		case NT::CallExternal: return n.s.empty() ? std::string("Call (Ref)") : ("Call " + n.s);
+		case NT::GetExternal:  return n.s.empty() ? std::string("Get (Ref)")  : ("Get " + n.s);
+		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
+		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
+		case NT::Cast:         return HcEditorUtil::castTitle(n.s);
+		// The action, not the event names it answers to — those are the wire's
+		// business. "(Axis)" because the pin layout differs and the reason for
+		// it should be readable off the node.
+		case NT::InputAction:  return n.s.empty() ? std::string(base)
+		                                          : (n.s + (!n.hasArg ? ""
+		                                             : n.propType == HC::PinType::Vec2 ? " (Axis 2D)"
+		                                                                               : " (Axis)"));
+		default:               return base;
+	}
+}
+
 std::string lower(std::string v)
 {
 	std::transform(v.begin(), v.end(), v.begin(),
