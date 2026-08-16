@@ -1254,6 +1254,17 @@ float clamp(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x
 float lerp(float a, float b, float t)    { return a + (b - a) * t; }
 float length(const glm::vec2& v)                   { return glm::length(v); }
 float distance(const glm::vec2& a, const glm::vec2& b) { return glm::length(a - b); }
+float     length3(const glm::vec3& v)   { return glm::length(v); }
+float     distance3(const glm::vec3& a, const glm::vec3& b) { return glm::length(a - b); }
+// glm::normalize divides by the length unconditionally, so a zero vector comes
+// back as NaN and poisons everything downstream. Gameplay wants "no direction".
+glm::vec3 normalize3(const glm::vec3& v)
+{
+    const float len = glm::length(v);
+    return len > 1e-8f ? v / len : glm::vec3(0.0f);
+}
+float     dot3(const glm::vec3& a, const glm::vec3& b)   { return glm::dot(a, b); }
+glm::vec3 cross(const glm::vec3& a, const glm::vec3& b)  { return glm::cross(a, b); }
 } // namespace math
 
 // ── Random ───────────────────────────────────────────────────────────────────
@@ -1547,6 +1558,16 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::length(aV2(a, 0))) }; } });
         t.push_back({ "math.distance", "Math", false, {{"a", P::Vec2}, {"b", P::Vec2}}, {{"result", P::Float}}, "HE::api::math::distance",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::distance(aV2(a, 0), aV2(a, 1))) }; } });
+        t.push_back({ "math.length3", "Math", false, {{"v", P::Vec3}}, {{"result", P::Float}}, "HE::api::math::length3",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::length3(aV3(a, 0))) }; } });
+        t.push_back({ "math.distance3", "Math", false, {{"a", P::Vec3}, {"b", P::Vec3}}, {{"result", P::Float}}, "HE::api::math::distance3",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::distance3(aV3(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "math.normalize3", "Math", false, {{"v", P::Vec3}}, {{"result", P::Vec3}}, "HE::api::math::normalize3",
+            [](Ctx&, const VV& a){ return VV{ v3(math::normalize3(aV3(a, 0))) }; } });
+        t.push_back({ "math.dot3", "Math", false, {{"a", P::Vec3}, {"b", P::Vec3}}, {{"result", P::Float}}, "HE::api::math::dot3",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(math::dot3(aV3(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "math.cross", "Math", false, {{"a", P::Vec3}, {"b", P::Vec3}}, {{"result", P::Vec3}}, "HE::api::math::cross",
+            [](Ctx&, const VV& a){ return VV{ v3(math::cross(aV3(a, 0), aV3(a, 1))) }; } });
 
         // Random (stateful → isExec, so a HorizonCode node caches one draw per run)
         t.push_back({ "random.seed", "Random", true, {{"seed", P::Int}}, {}, "HE::api::random::seed",
@@ -1877,6 +1898,9 @@ const std::vector<ApiFn>& registry()
             { "math.atan2", "Atan2" }, { "math.min", "Min" },   { "math.max", "Max" },
             { "math.clamp", "Clamp" }, { "math.lerp", "Lerp" },
             { "math.length", "Length (Vec2)" }, { "math.distance", "Distance (Vec2)" },
+            { "math.length3", "Length (Vec3)" }, { "math.distance3", "Distance (Vec3)" },
+            { "math.normalize3", "Normalize (Vec3)" }, { "math.dot3", "Dot Product" },
+            { "math.cross", "Cross Product" },
             { "random.seed", "Seed Random" },   { "random.value", "Random Value" },
             { "random.range", "Random Range" }, { "random.rangeInt", "Random Range (Int)" },
             { "random.chance", "Random Chance" },

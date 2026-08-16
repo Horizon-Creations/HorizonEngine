@@ -84,23 +84,24 @@ the node** — no literal node needed.
 **Equals**, **And**, **Or**, **Not**.
 
 ### Vectors
-**Make Vector 2/3/4** build a vector pin from separate floats;
-**Break Vector 2/3/4** take one apart into X/Y/Z/W.
+**Make Vector 2/3/4** build a vector from separate floats; **Break Vector 2/3/4**
+take one apart into X/Y/Z/W. Each width has its own pin type: `Vec2`, `Vec3`,
+`Vec4`.
 
-Vector 3 and Vector 4 are the **same pin type**. There is no Vec3 pin — every
-engine node that takes a position, velocity or direction declares that pin as a
-vector4, so one type connects to all of them. `Make Vector 3` leaves W at `0`
-(vector semantics); for a colour with alpha use `Make Vector 4`, and to read W
-off any vector use `Break Vector 4`.
+`Vec3` is what every engine node that takes a position, velocity or direction
+speaks. A **colour** is a separate type: it wants a colour picker rather than
+three number fields, and its empty is opaque black while a vector's is the null
+vector. `Vec3`, `Vec4` and `Color` convert into one another, so mixing them is
+allowed and a graph authored before the split keeps working — widening pads with
+`0` into a vector and with alpha `1` into a colour.
 
-These are what make a *computed* vector expressible at all: the literal nodes are
-`Const Vec2` and `Const Color`, and the latter is edited through a colour picker
-clamped to 0..1 — so a velocity or a world position could not be built from
-graph values before.
+Vector maths lives in the `Math` group (§3): **Length (Vec3)**,
+**Distance (Vec3)**, **Normalize (Vec3)** (a zero vector stays zero rather than
+becoming NaN), **Dot Product**, **Cross Product**.
 
 Angles: everything the engine hands out is in **degrees** (rotations, camera
 yaw/pitch, FOV) while `Sine`/`Cosine`/`Tangent` take radians — convert with
-**Degrees to Radians** / **Radians to Degrees** (§3, `Math`).
+**Degrees to Radians** / **Radians to Degrees**.
 
 ### Strings
 **Concat**, **To String**. (Richer string ops live in the `String` subsystem — §3.)
@@ -221,7 +222,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **UI** | 11 | element access: `getText`/`setText`, `getColor`/`setColor`, `getVisible`/`setVisible`, `getPosition`/`setPosition`, `getSize`/`setSize`, `setMaterialParam` |
 | **Widget** | 7 | `create`, `destroy`, `show`, `hide`, `setZOrder`, `isVisible`, `callFunction` |
 | **Cursor** | 1 | `setVisible` |
-| **Math** | 6 | `clamp`, `lerp`, `length`, `distance`, `radians`, `degrees` (plus per-op nodes in §2) |
+| **Math** | 11 | `clamp`, `lerp`, `length`, `distance`, `radians`, `degrees`, `length3`, `distance3`, `normalize3`, `dot3`, `cross` (plus per-op nodes in §2) |
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
 | **Time** | 3 | `deltaTime`, `elapsed`, `frameCount` |
 | **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |

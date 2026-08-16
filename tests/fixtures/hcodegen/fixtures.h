@@ -434,7 +434,8 @@ inline HE::hccg::ClassSource fxVectorOps()
 {
     Fx f;
     for (const char* v : { "x2", "y2", "x3", "y3", "z3", "x4", "y4", "z4", "w4",
-                           "w3drop", "rad", "deg", "roundTrip" })
+                           "w3drop", "rad", "deg", "roundTrip",
+                           "len3", "dist3", "dot", "nx", "cz" })
         f.var(v, PT::Float);
 
     const int ev = f.event("Build");
@@ -503,6 +504,46 @@ inline HE::hccg::ClassSource fxVectorOps()
         const int d2 = f.engineCall("math.degrees");
         f.data(r2, 0, d2, 0);
         chainSet("roundTrip", d2, 0);
+    }
+    // Vector maths, fed from Make Vector 3 so the whole chain — build a vector,
+    // hand it to an engine call, read a float back — runs in both backends.
+    {
+        auto mk3 = [&](float x, float y, float z)
+        {
+            const int n = f.op(NT::MakeVector3);
+            f.data(f.constF(x), 0, n, 0);
+            f.data(f.constF(y), 0, n, 1);
+            f.data(f.constF(z), 0, n, 2);
+            return n;
+        };
+        const int a = mk3(3.0f, 4.0f, 0.0f);     // length 5
+        const int b = mk3(0.0f, 0.0f, 2.0f);
+
+        const int len = f.engineCall("math.length3");
+        f.data(a, 0, len, 0);
+        chainSet("len3", len, 0);
+
+        const int dist = f.engineCall("math.distance3");
+        f.data(a, 0, dist, 0); f.data(b, 0, dist, 1);
+        chainSet("dist3", dist, 0);
+
+        const int dot = f.engineCall("math.dot3");
+        f.data(a, 0, dot, 0); f.data(b, 0, dot, 1);
+        chainSet("dot", dot, 0);
+
+        // normalize3 returns a Vec3 → straight back through a Break Vector 3.
+        const int nrm = f.engineCall("math.normalize3");
+        f.data(a, 0, nrm, 0);
+        const int bn = f.op(NT::BreakVector3);
+        f.data(nrm, 0, bn, 0);
+        chainSet("nx", bn, 0);                   // 3/5
+
+        // cross((3,4,0), (0,0,2)) = (8, -6, 0)
+        const int crs = f.engineCall("math.cross");
+        f.data(a, 0, crs, 0); f.data(b, 0, crs, 1);
+        const int bc = f.op(NT::BreakVector3);
+        f.data(crs, 0, bc, 0);
+        chainSet("cz", bc, 1);                   // y = -6
     }
     return f.done("vector_ops");
 }

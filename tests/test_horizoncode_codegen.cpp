@@ -455,6 +455,13 @@ TEST_CASE("codegen parity: vector_ops")
 	CHECK(p.var("rad").f == doctest::Approx(3.14159265f).epsilon(1e-5));
 	CHECK(p.var("deg").f == doctest::Approx(180.0f).epsilon(1e-5));
 	CHECK(p.var("roundTrip").f == doctest::Approx(57.5f).epsilon(1e-5));
+
+	// Vector maths, built from Make Vector 3 and read back through Break.
+	CHECK(p.var("len3").f  == doctest::Approx(5.0f));            // |(3,4,0)|
+	CHECK(p.var("dist3").f == doctest::Approx(std::sqrt(29.0f)));// |(3,4,-2)|
+	CHECK(p.var("dot").f   == doctest::Approx(0.0f));            // perpendicular
+	CHECK(p.var("nx").f    == doctest::Approx(0.6f));            // 3/5
+	CHECK(p.var("cz").f    == doctest::Approx(-6.0f));           // cross y
 }
 
 TEST_CASE("codegen parity: variables")

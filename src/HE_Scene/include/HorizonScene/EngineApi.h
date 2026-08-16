@@ -510,6 +510,14 @@ namespace math {
     float lerp(float a, float b, float t);
     float length(const glm::vec2& v);
     float distance(const glm::vec2& a, const glm::vec2& b);
+    // 3D versions of the same, plus what a vector type is actually for. The
+    // suffix marks the width, except for cross — a cross product only exists in
+    // 3D, so there is nothing to disambiguate it from.
+    float     length3(const glm::vec3& v);
+    float     distance3(const glm::vec3& a, const glm::vec3& b);
+    glm::vec3 normalize3(const glm::vec3& v);            // zero vector stays zero
+    float     dot3(const glm::vec3& a, const glm::vec3& b);
+    glm::vec3 cross(const glm::vec3& a, const glm::vec3& b);
 }
 
 // ── Random (seeded PRNG; process-global state) ───────────────────────────────
