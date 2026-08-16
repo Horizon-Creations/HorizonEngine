@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
+#include "HorizonScene/EntityHost.h"
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
@@ -105,6 +106,14 @@ Entity self(Ctx& c)
 Entity owned(Ctx& c, uint32_t objectRef)
 {
     return c.runtime ? c.runtime->ownedEntity(objectRef) : 0u;
+}
+uint32_t instance(Ctx& c, Entity e)
+{
+    // Asked of EntityHost rather than the Runtime on purpose: several instances
+    // may own one entity — a character's class and its animator's sync graph
+    // both do — so a reverse lookup in the runtime could not say which one is
+    // meant. EntityHost holds exactly the class bindings, which is the answer.
+    return c.entities ? static_cast<uint32_t>(c.entities->instanceOf((entt::entity)e)) : 0u;
 }
 void setVisible(Ctx& c, Entity e, bool visible)
 {
@@ -1555,6 +1564,8 @@ const std::vector<ApiFn>& registry()
         // argument because the caller's identity travels in the Ctx.
         t.push_back({ "entity.self", "Entity", false, {}, {{"entity", P::Int}}, "HE::api::entity::self",
             [](Ctx& c, const VV&){ return VV{ Value::ofInt((int)entity::self(c)) }; } });
+        t.push_back({ "entity.instance", "Entity", false, {{"entity", P::Int}}, {{"object", P::Ref}}, "HE::api::entity::instance",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofRef(entity::instance(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "entity.owned", "Entity", false, {{"object", P::Ref}}, {{"entity", P::Int}}, "HE::api::entity::owned",
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::owned(c, aR(a, 0))) }; } });
         t.push_back({ "entity.distance", "Entity", false, {{"a", P::Int}, {"b", P::Int}}, {{"distance", P::Float}}, "HE::api::entity::distance",
@@ -2015,6 +2026,7 @@ const std::vector<ApiFn>& registry()
             { "entity.getName", "Get Name" },       { "entity.spawn", "Spawn Entity" },
             { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
             { "entity.self", "Get Owning Entity" }, { "entity.owned", "Get Entity Of" },
+            { "entity.instance", "Get Object On Entity" },
             { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },

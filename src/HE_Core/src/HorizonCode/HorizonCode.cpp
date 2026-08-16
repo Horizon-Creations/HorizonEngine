@@ -52,7 +52,16 @@ void signatureInto(const Node& n, NodeSig& s)
     {
     case T::Event:
         s.execOuts = { { "", P::Exec } };
-        if (n.hasArg) s.dataOuts = { { "Value", n.propType, false, tn } };
+        // "Value" is right for an event whose payload is whatever it carries,
+        // but the per-frame ones all carry the same thing and should say so —
+        // reading "Value: Float" off a Tick tells you nothing you could not
+        // already see. The literal outlives the call, like every borrowed pin
+        // name in here.
+        if (n.hasArg)
+        {
+            const bool perFrame = (n.s == "Tick" || n.s == "Update");
+            s.dataOuts = { { perFrame ? "Delta Time" : "Value", n.propType, false, tn } };
+        }
         break;
     case T::InputAction:
         // Three shapes, from two fields that both already persist: hasArg says

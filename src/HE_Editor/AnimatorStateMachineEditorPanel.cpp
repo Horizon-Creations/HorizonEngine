@@ -589,9 +589,15 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 			return created;
 		};
 
+		// The canvas owns the selection while it draws; the details column reads
+		// the host's copy. Without handing it over in both directions the panel
+		// keeps showing "select a node" no matter what is selected — which is
+		// how a Cast ends up with no way to pick its target.
+		st.syncGe.selected = st.syncSelected;
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
 		if (GraphEditor::draw("##asmSyncGe", model, st.syncGe, avail) || st.syncGe.liveEdit)
 			edited = true;
+		st.syncSelected = st.syncGe.selected;
 	}
 	ImGui::EndChild();
 
@@ -618,9 +624,18 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 
 		if (HC::Node* n = st.syncGraph.findNode(st.syncSelected))
 		{
-			ImGui::TextUnformatted(HC::nodeDisplayName(n->type));
+			ImGui::TextUnformatted(HcGraphHost::defaultNodeTitle(*n).c_str());
 			ImGui::Separator();
-			if (HcGraphHost::drawCommonNodeDetails(h, *n)) edited = true;
+			// Covers the Cast target picker, every literal, Get/Set Variable and
+			// the engine-call rows. The Event node is not among them — every
+			// other frontend picks its event from a catalog, and this graph has
+			// exactly one, so there is nothing to choose.
+			if (!HcGraphHost::drawCommonNodeDetails(h, *n) &&
+			    n->type == HC::NodeType::Event)
+				ImGui::TextDisabled("%s",
+					"Fires once per frame for every character this\n"
+					"machine animates. Delta Time is the seconds\n"
+					"since the last frame.");
 		}
 		else ImGui::TextDisabled("Select a node.");
 	}

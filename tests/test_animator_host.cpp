@@ -5,6 +5,8 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/AnimatorHost.h>
+#include <HorizonScene/EntityHost.h>
+#include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/SceneSystems.h>
@@ -208,6 +210,68 @@ TEST_CASE("AnimatorHost: a sync graph steers the state machine in the same frame
 	const auto& sm = world.registry().get<AnimatorStateMachineComponent>(e);
 	CHECK(sm.params.at("speed") == doctest::Approx(1.0f));
 	CHECK(sm.currentStateName == "Walk");
+}
+
+TEST_CASE("entity.instance answers with the CLASS on an entity, not the sync graph")
+{
+	// Cast takes an object reference, and Get Owning Entity gives an entity —
+	// so a sync graph could not reach the character's own class at all until
+	// this row existed.
+	//
+	// It cannot come from the runtime: TWO instances own the animated entity —
+	// the character's class and the sync graph itself, because both call
+	// setOwnedEntity. A reverse lookup there would be ambiguous by
+	// construction, so the question goes to EntityHost, which holds exactly the
+	// class bindings.
+	TempDir dir("he_entity_instance");
+	ContentManager cm(dir.path.string());
+
+	// A minimal Entity class to bind to the character.
+	HorizonCodeClassAsset cls;
+	cls.type      = HE::AssetType::HorizonCodeClass;
+	cls.name      = "Hero";
+	cls.path      = "Hero.hasset";
+	cls.baseClass = "Entity";
+	{ Graph g; Node ev; ev.type = NodeType::Event; ev.s = "BeginPlay"; g.addNode(std::move(ev));
+	  cls.graphJson = toJson(g); }
+	REQUIRE(cm.saveAsset(cls));
+
+	AnimatorStateMachineAsset sm;
+	sm.type          = HE::AssetType::AnimatorStateMachine;
+	sm.name          = "Locomotion";
+	sm.path          = "Locomotion.hasset";
+	sm.graphJson     = stateMachineJson();
+	sm.syncGraphJson = toJson(syncGraphSettingSpeed(1.0f));
+	REQUIRE(cm.saveAsset(sm));
+
+	HorizonWorld world;
+	const Entity e = makeAnimatedEntity(world, cm, cm.loadAsset(sm.path));
+	{
+		ScriptComponent sc;
+		sc.scriptAssetId = cm.loadAsset(cls.path);
+		world.addComponent(e, sc);
+	}
+
+	Runtime rt;
+	bindApi(rt, world, cm);
+	EntityHost entities;
+	entities.begin(rt, world, cm);
+	AnimatorHost animators;
+	animators.begin(rt, world, cm);
+
+	// Both really do own the same entity — that is the ambiguity this row steps
+	// around, so it is worth stating rather than assuming.
+	const InstanceId classInst = entities.instanceOf(e);
+	REQUIRE(classInst != 0);
+	REQUIRE(animators.count() == 1);
+
+	HE::api::Ctx c{ &world, nullptr, &cm, nullptr, &rt, 0, &entities };
+	CHECK(HE::api::entity::instance(c, (HE::api::Entity)e) == classInst);
+
+	// No EntityHost in the context (edit mode, a bare script call): 0, not a
+	// guess.
+	HE::api::Ctx bare{ &world, nullptr, &cm, nullptr, &rt, 0 };
+	CHECK(HE::api::entity::instance(bare, (HE::api::Entity)e) == 0u);
 }
 
 TEST_CASE("AnimatorHost: a sync graph's variables ARE the machine's parameters")

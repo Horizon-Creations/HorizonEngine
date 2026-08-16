@@ -12,6 +12,7 @@ class HorizonWorld;
 class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
+class EntityHost;
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices; // HorizonGameServices.h (global scope, C ABI)
 
@@ -61,6 +62,14 @@ struct Ctx
     // other null-Ctx call.
     HorizonCode::Runtime* runtime = nullptr;
     uint32_t              self    = 0;
+    // Which HorizonCode CLASS instance sits on a given entity. The runtime
+    // alone cannot answer that: several instances may own the same entity (a
+    // character's class and its animator's sync graph both do), so a reverse
+    // lookup there would be ambiguous by construction. EntityHost holds the one
+    // that means "the class on this entity", so that is who gets asked.
+    // Null outside a play session — the affected row then returns 0, like every
+    // other null-Ctx call.
+    EntityHost*           entities = nullptr;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -81,6 +90,11 @@ namespace entity {
     // 0 = this object owns no entity (a plain Object, a widget, a level script).
     Entity      self(Ctx&);                     // the calling instance's entity
     Entity      owned(Ctx&, uint32_t objectRef);// another object's entity
+    // The HorizonCode class instance sitting on `e` (0 when there is none) —
+    // the inverse of `owned`. This is what turns "Get Owning Entity" into
+    // something a Cast can take: Cast works on object references, and an entity
+    // is not one until you ask which object is on it.
+    uint32_t    instance(Ctx&, Entity e);
     // Per-entity visibility: flips every renderable component the entity carries
     // (mesh, skeletal mesh, light, particles, foliage). getVisible reads the
     // first renderable found (true when the entity has none).

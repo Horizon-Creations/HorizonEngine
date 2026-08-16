@@ -1316,7 +1316,7 @@ void EditorApplication::OnInit()
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
 			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
-			                &m_audioEngine, &m_gameInstance.runtime(), self };
+			                &m_audioEngine, &m_gameInstance.runtime(), self, &m_entityHost };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));

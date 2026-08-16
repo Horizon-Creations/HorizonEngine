@@ -327,7 +327,7 @@ void GameApplication::OnInit()
 			if (!fn) return {};
 			// The caller travels along — see the editor's twin.
 			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
-			                &m_gameInstance.runtime(), self };
+			                &m_gameInstance.runtime(), self, &m_entityHost };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
