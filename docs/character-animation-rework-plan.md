@@ -5,6 +5,37 @@ Blueprint-Pawn. Betrifft MASTERPLAN-Block **E5**.
 
 ---
 
+## Stand (16.08.2026)
+
+| CP | Inhalt | Status |
+|---|---|---|
+| **CP0** | Tick-Split, Animation nach dem Gameplay | ✅ `55459e8b` |
+| **CP1** | `animator.*`-Registry + Anlege-Weg mit SkeletalMesh-Gate | ✅ `b0a08fdf` |
+| **CP2a** | Sync-Graph im Asset + `AnimatorHost` | ✅ `162256b6` |
+| **CP2b** | Autoren-Oberfläche + Palette-Erlaubnisliste | ✅ `2f20c561` |
+| **CP2c** | Codegen-Sammlung + Parity-Fixture | ✅ `dba7505b` |
+| — | Variablen **sind** die Parameter, Update geseedet, Palette enger | ✅ `1ed4a177` |
+| — | `MovementComponent` + `movement.*`/`locomotion.*` | ✅ `dd683474` |
+| — | Knotentitel, `entity.instance`, `Get Owning Object`, Details-Spalte | ✅ `3ab4c19d`, `3490268a`, `d402a49d` |
+| **CP3** | **Klassen-Editor: Code/Viewport-Trennung** | **offen** |
+| **CP4a** | Vorschau der angewählten Komponente | **offen** |
+| **CP4b** | Vorschau des Zusammenbaus (neue Renderer-Methode, pro Backend) | **offen** |
+
+**Nie live verifiziert:** nichts davon ist im laufenden Editor gelaufen. Optik,
+Maus-Gefühl, Kollisions-Popping und der Sync-Graph in PIE stehen aus.
+
+Kleinere Reste, die zum Umbau gehören, aber keinen eigenen CP haben:
+
+* Der Animator-Editor hat **keinen Compile-Button** wie der Klassen-Editor —
+  ein Sync-Graph, der nicht kompiliert, fällt erst beim Export auf.
+* `AssetThumbnailCache::thumbnailKindOf` kennt `HorizonCodeClass` nicht, obwohl
+  der `componentBlob` Prefab-Format ist und `prefabPrimaryMesh` direkt passt.
+* MASTERPLAN-E5-Reste, unberührt: Root Motion, Layer/Bone-Masks, Blend-Trees,
+  Animation-Notifies, IK. Die FSM kann weiterhin **eine** Bedingung pro
+  Transition, ohne Exit-Time und „Any State".
+
+---
+
 ## Ausgangslage
 
 Die State Machine ist **autorierbar, aber nicht ansteuerbar** — und das steht so
