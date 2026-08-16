@@ -1960,6 +1960,51 @@ namespace
 	}
 }
 
+TEST_CASE("Every component the save path writes is a key the loader admits to knowing")
+{
+	// The drift this catches: a component wired into BOTH save and load still
+	// counts as "unknown" until its key is added to isKnownComponentKey by hand,
+	// and loading then warns that it is being DROPPED when it is not. That is
+	// worse than a missing warning — it is a false alarm on the one message whose
+	// job is to flag real data loss, and people stop reading those.
+	//
+	// Reproduced live: a Camera Rig on a cube warned on every PIE start while
+	// loading perfectly. saveState and __name had the same gap, unnoticed.
+	HorizonWorld world;
+	populateEveryComponent(world);
+
+	const fs::path file = fs::temp_directory_path() / "he_test_known_keys.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	std::ifstream in(file);
+	REQUIRE(in.good());
+	nlohmann::json scene;
+	in >> scene;
+	in.close();
+	he_test::removeQuiet(file);
+
+	size_t checked = 0;
+	for (const auto& e : scene.value("entities", nlohmann::json::array()))
+	{
+		const auto comps = e.find("components");
+		if (comps == e.end() || !comps->is_object()) continue;
+		for (auto it = comps->begin(); it != comps->end(); ++it)
+		{
+			INFO("component key '", it.key(), "' is written by save() but the "
+			     "loader does not list it as known");
+			CHECK(SceneSerializer::isKnownComponentKey(it.key()));
+			++checked;
+		}
+	}
+	// Guard against the test passing because it looked at nothing.
+	CHECK(checked > 20);
+
+	// The single-entity (collaboration) blob carries the display name alongside
+	// the components, so that key has to be admitted too.
+	CHECK(SceneSerializer::isKnownComponentKey("__name"));
+}
+
 TEST_CASE("Every component survives a round-trip with non-default values in every persisted field")
 {
 	SUBCASE("JSON")

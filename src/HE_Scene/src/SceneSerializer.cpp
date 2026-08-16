@@ -659,20 +659,6 @@ namespace
 	// carrying anything else is silently losing data — usually a component that
 	// was added to the save path but not the load path, or a scene written by a
 	// newer build. Reported once per unknown key rather than per entity.
-	bool isKnownComponentKey(const std::string& key)
-	{
-		static const std::unordered_set<std::string> kKnown = {
-			"animator", "animatorblend", "animstatemachine", "audiolistener",
-			"audiosource", "camera", "characterController", "collider", "decal",
-			"environment", "foliage", "light", "lod", "material", "mesh",
-			"navagent", "navmesh", "particlesystem", "propertyanimator",
-			"rigidbody", "script", "skeletalmesh", "terrain", "transform",
-			"transform2d", "uibutton", "uicanvas", "uielement", "uiimage",
-			"uitext", "weather",
-		};
-		return kKnown.count(key) > 0;
-	}
-
 	void warnUnknownComponents(const json& comps)
 	{
 		if (!comps.is_object()) return;
@@ -680,7 +666,7 @@ namespace
 		static std::unordered_set<std::string> s_reported;
 		for (auto it = comps.begin(); it != comps.end(); ++it)
 		{
-			if (isKnownComponentKey(it.key())) continue;
+			if (SceneSerializer::isKnownComponentKey(it.key())) continue;
 			std::lock_guard<std::mutex> lk(s_mutex);
 			if (!s_reported.insert(it.key()).second) continue;
 			HE_LOG_WARN(Serialize, "Scene contains unknown component '%s' — it is being "
@@ -1654,6 +1640,33 @@ namespace
         auto it = scene.find("entities");
         return (it != scene.end() && it->is_array()) ? it->size() : 0u;
     }
+}
+
+// Every key applyComponents restores, plus the entity-level extras that ride
+// inside the same object on the single-entity (collaboration) path.
+//
+// This list is written out by hand and there is no compiler check tying it to
+// the save or load path — a component wired into BOTH still shows up as
+// "unknown" until someone remembers this. The failure is quiet in the worst
+// way: the load works fine, but the log claims data was dropped, and a warning
+// that cries wolf is a warning people stop reading. tests/test_scene_serializer
+// walks a world carrying every component and asserts this covers each key.
+bool SceneSerializer::isKnownComponentKey(const std::string& key)
+{
+	static const std::unordered_set<std::string> kKnown = {
+		"animator", "animatorblend", "animstatemachine", "audiolistener",
+		"audiosource", "camera", "cameraRig", "characterController", "collider",
+		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
+		"navagent", "navmesh", "particlesystem", "propertyanimator",
+		"rigidbody", "saveState", "script", "skeletalmesh", "terrain",
+		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
+		"uiimage", "uitext", "weather",
+		// Not a component: serializeEntityComponents carries the display name
+		// in the same object, because a rename would otherwise be the one edit
+		// the component-sync path drops.
+		"__name",
+	};
+	return kKnown.count(key) > 0;
 }
 
 bool SceneSerializer::save(const HorizonWorld& world,

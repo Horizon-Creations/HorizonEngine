@@ -59,6 +59,17 @@ public:
     bool applyEntityComponents(HorizonWorld& world, Entity entity,
                                const std::vector<uint8_t>& data);
 
+    // Is this a component key the loader restores? Anything else in a scene is
+    // data being dropped, and loading warns about it.
+    //
+    // Public because the list is hand-maintained and therefore drifts: adding a
+    // component to the save AND load paths still leaves it looking unknown, and
+    // the result is a warning that says a component was dropped when it was
+    // not — noise that trains people to ignore a message meant to catch real
+    // loss. A test walks a world holding every component and asserts this
+    // answers true for every key the save path writes.
+    static bool isKnownComponentKey(const std::string& key);
+
     // Instantiate a prefab blob into the world. Creates fresh entities for
     // every entry in the prefab and re-wires their hierarchy. The new subtree
     // root is reparented to `parent` (world root if entt::null). Returns the
