@@ -8,7 +8,9 @@
 #include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
+#include "HorizonScene/Components/NameComponent.h"
 #include <Application/Input.h>
+#include <Diagnostics/Log.h>
 
 #include <algorithm>
 #include <cmath>
@@ -85,8 +87,21 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     if (f.target == entt::null || !reg.valid(f.target) ||
         !reg.all_of<TransformComponent>(f.target))
     {
-        // Nothing to follow. Give back whatever this rig hid, so a target that
-        // goes away does not leave an invisible character behind.
+        // Say so. A rig that cannot resolve a target writes no transform at
+        // all, so the view stays at the camera entity's raw position — which
+        // looks like the camera is stuck inside something and sends people
+        // tuning arm length and collision, neither of which is being read.
+        // Throttled, because it is true every frame until the target appears.
+        // The editor installs a log sink for the play session, so this lands in
+        // the Play Session Report where a stuck camera is actually noticed.
+        HE_LOG_THROTTLE(Scene, Warning, 5.0,
+            "Camera rig on '%s' has no target to follow — it is not driving the "
+            "camera (arm length and collision do nothing until it has one)",
+            reg.all_of<NameComponent>(f.camera)
+                ? reg.get<NameComponent>(f.camera).name.c_str() : "?");
+
+        // Give back whatever this rig hid, so a target that goes away does not
+        // leave an invisible character behind.
         if (rig.meshHiddenEntity != entt::null)
         {
             applyMeshVisibility(reg, rig.meshHiddenEntity, false);
