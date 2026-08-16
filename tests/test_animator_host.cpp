@@ -137,6 +137,40 @@ namespace
 	}
 }
 
+TEST_CASE("A sync graph's palette is restricted by GROUP, not by wishful thinking")
+{
+	// The sync graph runs inside the animation phase, once per animated
+	// character. Letting it switch scenes or write savegames from there is a
+	// footgun the editor should not hand over, so its palette is an allow-list.
+	//
+	// This checks the RULE both menus share (HE::api::groupAllowed). It lives in
+	// the API rather than the editor precisely so they cannot disagree:
+	// filtering the add menu and forgetting the drag-off menu leaves a
+	// restriction you can drag around.
+	const std::vector<const char*> allowed = {
+		"animator", "entity", "transform", "physics", "player", "math", "time",
+	};
+
+	CHECK(HE::api::groupAllowed("animator.setParam", allowed));
+	CHECK(HE::api::groupAllowed("entity.self", allowed));
+	CHECK(HE::api::groupAllowed("physics.isGrounded", allowed));
+	CHECK(HE::api::groupAllowed("math.length3", allowed));
+
+	// The ones a sync graph has no business doing from inside the animation pass.
+	CHECK_FALSE(HE::api::groupAllowed("scene.load", allowed));
+	CHECK_FALSE(HE::api::groupAllowed("save.setNumber", allowed));
+	CHECK_FALSE(HE::api::groupAllowed("widget.create", allowed));
+	CHECK_FALSE(HE::api::groupAllowed("audio.play", allowed));
+
+	// A prefix that merely starts the same must not slip through — the group is
+	// the id up to the first dot, not a string prefix.
+	CHECK_FALSE(HE::api::groupAllowed("entityfoo.bar", allowed));
+	CHECK_FALSE(HE::api::groupAllowed("ent.bar", allowed));
+
+	// No list = the general-purpose editors, unchanged.
+	CHECK(HE::api::groupAllowed("scene.load", {}));
+}
+
 TEST_CASE("AnimatorHost: a sync graph steers the state machine in the same frame")
 {
 	// The whole point of CP2. Before it, a parameter could only ever hold the

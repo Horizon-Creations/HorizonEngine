@@ -6,6 +6,9 @@
 #include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
 #include "EditorWidgets.h"          // shared Content-Browser asset drop target
 #include "GraphEditor.h"            // shared node-graph canvas frontend
+#include "HcGraphHost.h"            // the HorizonCode half of that canvas (sync graph)
+#include "HcEditorUtil.h"
+#include <HorizonCode/HorizonCode.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
@@ -34,6 +37,18 @@ struct State
 	CollabDocSync::DocMirror collabMirror;
 
 	GraphEditor::State geState;
+
+	// ── The sync graph ───────────────────────────────────────────────────────
+	// The second half of the asset: a HorizonCode graph fired once per frame per
+	// animated entity, whose one job is to read that character and write this
+	// machine's parameters. Unreal keeps the same two things in one Animation
+	// Blueprint — EventGraph next to AnimGraph — and for the same reason: the
+	// parameters are the seam between them, so authoring them apart would mean
+	// keeping two files in step by hand.
+	bool               showSync = false;   // which of the two the canvas shows
+	HorizonCode::Graph syncGraph;
+	GraphEditor::State syncGe;
+	int                syncSelected = 0;
 };
 
 static AssetPanelState<State> s_states;
@@ -50,6 +65,12 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 	{
 		HE::AnimatorStateMachineGraph parsed;
 		if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) st.graph = std::move(parsed);
+	}
+	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
+	    asset && !asset->syncGraphJson.empty())
+	{
+		HorizonCode::Graph parsed;
+		if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
 	}
 
 	st.loaded = true;
@@ -84,6 +105,10 @@ static bool saveToDisk(State& st, AppContext& ctx)
 	AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachineMutable(st.assetId);
 	if (!asset) return false;
 	asset->graphJson = HE::animatorStateMachineToJson(st.graph);
+	// An empty sync graph is written as no chunk at all, so an asset that never
+	// got one stays byte-identical to what it was before sync graphs existed.
+	asset->syncGraphJson = st.syncGraph.nodes.empty() ? std::string()
+	                                                  : HorizonCode::toJson(st.syncGraph);
 	if (!ctx.contentManager->saveAsset(*asset)) return false;
 	st.dirty = false;
 	// Live entities already using this asset should reflect the edit now, not only
@@ -141,7 +166,38 @@ HE::AnimationState* findStateByName(HE::AnimatorStateMachineGraph& g, const std:
 // HorizonCode/ParticleGraph node bodies use) — the one copy lives with the canvas.
 using GraphEditor::pushWidgetScale;
 using GraphEditor::popWidgetScale;
+
+// ── What a sync graph is allowed to do ───────────────────────────────────────
+// Deliberately narrow. This graph runs inside the animation phase, once per
+// frame for every character the machine animates, and its job is one sentence:
+// read the character, write the parameters. A graph that can also switch scenes
+// or spawn objects is a graph someone will eventually use to do that, from a
+// place in the frame where it is the wrong thing to do.
+//
+// The restriction is data, honoured by both the add menu and the drag-off menu
+// (see HcGraphHost::MenuOpts::apiGroups) — filtering one and not the other
+// leaves the palette looking restricted while a pin drag hands over everything.
+const HcGraphHost::MenuOpts& syncMenus()
+{
+	static const HcGraphHost::MenuOpts m = []{
+		HcGraphHost::MenuOpts o;
+		o.addCategories = { "Flow", "Literals", "Math", "Logic", "Variables", "Debug" };
+		o.apiGroups = {
+			"animator",   // the point of the graph
+			"entity",     // entity.self — how it reaches the character it animates
+			"transform",  // where that character is and how it is turned
+			"physics",    // grounded, velocity, a ray under the feet
+			"player",     // which character the player possesses
+			"math", "time",
+		};
+		return o;
+	}();
+	return m;
+}
 } // namespace
+
+// Declared here because render() dispatches to it before the definition below.
+static void drawSyncGraph(AppContext& ctx, State& st);
 
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
@@ -175,8 +231,27 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		bar.readout(T::iconLayers, counts, T::kFgDim);
 		bar.endGroup();
 
+		// The asset's two halves. Same radio pair the class editor uses for
+		// Graph/Components, for the same reason: they are two views of one
+		// document, not two documents.
+		bar.group();
+		if (bar.item("##asmmodestates", nullptr, "States", !st.showSync, true,
+		             "The machine itself — states, transitions, parameters"))
+			st.showSync = false;
+		if (bar.item("##asmmodesync", nullptr, "Sync Graph", st.showSync, true,
+		             "Runs once per frame per animated character: read it, write the parameters"))
+			st.showSync = true;
+		bar.endGroup();
+
 		if (!asset) bar.label("Asset could not be loaded", T::kBad);
 		if (T::saveButton(bar, asset != nullptr)) saveToDisk(st, ctx);
+	}
+
+	if (st.showSync)
+	{
+		drawSyncGraph(ctx, st);
+		ImGui::End();
+		return;
 	}
 
 	bool structuralEdit = false;
@@ -416,6 +491,104 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	if (structuralEdit) st.dirty = true;
 
 	ImGui::End();
+}
+
+// ── The sync graph view ──────────────────────────────────────────────────────
+// A HorizonCode canvas on the same shared GraphEditor every other graph editor
+// uses, with the restricted palette from syncMenus(). The side column lists the
+// machine's parameters — the things this graph exists to write — and the
+// selected node's details.
+static void drawSyncGraph(AppContext& ctx, State& st)
+{
+	namespace HC = HorizonCode;
+
+	bool edited = false;
+	HcGraphHost::Host h;
+	h.graph         = &st.syncGraph;
+	h.ge            = &st.syncGe;
+	h.selectedNode  = &st.syncSelected;
+	h.currentGraph  = 0;
+	h.content       = ctx.contentManager;
+	h.menus         = &syncMenus();
+	h.title         = [](const HC::Node& n){ return std::string(HC::nodeDisplayName(n.type)); };
+	h.onEdit        = [&edited](bool){ edited = true; };
+
+	const float rightW = 300.0f;
+	const float leftW  = std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW);
+
+	ImGui::BeginChild("##asmSyncCanvas", ImVec2(leftW, 0), ImGuiChildFlags_Borders);
+	{
+		GraphEditor::Model model = HcGraphHost::buildModel(h);
+		model.drawAddMenu = [&st, &h]() -> int {
+			int created = 0;
+			const std::string q = HcGraphHost::beginAddMenu();
+			// The one event this graph has. Not a catalog, because there is
+			// nothing else to pick: a sync graph is called once a frame, and
+			// this is that call.
+			if (q.empty() || HcGraphHost::lower("Update").find(q) != std::string::npos)
+			{
+				ImGui::TextDisabled("Events");
+				const bool used = [&]{
+					for (const auto& n : st.syncGraph.nodes)
+						if (n.type == HC::NodeType::Event && n.s == "Update") return true;
+					return false;
+				}();
+				if (HcEditorUtil::searchMenuItem("Update", used))
+				{
+					const int id = HcGraphHost::addNode(st.syncGraph, HC::NodeType::Event,
+					                                    st.syncGe.addMenuGraphPos, 0);
+					HC::Node* n = st.syncGraph.findNode(id);
+					n->s = "Update";
+					n->hasArg = true; n->propType = HC::PinType::Float;   // dt
+					created = id;
+					ImGui::CloseCurrentPopup();
+				}
+				if (used) { ImGui::SameLine(); ImGui::TextDisabled("(added)"); }
+				ImGui::Spacing();
+			}
+			if (const int id = HcGraphHost::drawAddMenuTail(h, q)) created = id;
+			HcGraphHost::endAddMenu();
+			return created;
+		};
+
+		const ImVec2 avail = ImGui::GetContentRegionAvail();
+		if (GraphEditor::draw("##asmSyncGe", model, st.syncGe, avail) || st.syncGe.liveEdit)
+			edited = true;
+	}
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+	ImGui::BeginChild("##asmSyncSide", ImVec2(0, 0), ImGuiChildFlags_Borders);
+	{
+		ImGui::TextDisabled("%s", "Runs once per frame, for every character this");
+		ImGui::TextDisabled("%s", "machine animates. Reach the character with");
+		ImGui::TextDisabled("%s", "Get Owning Entity — never \"the player\", or the");
+		ImGui::TextDisabled("%s", "same machine animates an NPC with the");
+		ImGui::TextDisabled("%s", "player's numbers.");
+		ImGui::Separator();
+
+		// The parameters, so the names this graph has to write are in front of
+		// you while you write them. Authored on the States side; listed here.
+		if (ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (st.graph.defaultParams.empty())
+				ImGui::TextDisabled("None declared — add them under States.");
+			for (const auto& [name, value] : st.graph.defaultParams)
+				ImGui::BulletText("%s  (default %.3g)", name.c_str(), value);
+		}
+		ImGui::Separator();
+
+		if (HC::Node* n = st.syncGraph.findNode(st.syncSelected))
+		{
+			ImGui::TextUnformatted(HC::nodeDisplayName(n->type));
+			ImGui::Separator();
+			if (HcGraphHost::drawCommonNodeDetails(h, *n)) edited = true;
+		}
+		else ImGui::TextDisabled("Select a node.");
+	}
+	ImGui::EndChild();
+
+	if (edited) st.dirty = true;
 }
 
 } // namespace AnimatorStateMachineEditorPanel

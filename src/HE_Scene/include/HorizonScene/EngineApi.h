@@ -658,4 +658,14 @@ const ApiFn* find(const std::string& id);
 // (x, y, z, _) on this path. Widening the surface = adding a name to the list.
 bool isScriptGroup(std::string_view group);
 
+// Is `apiId`'s group ("player.character" → "player") in `allowed`? An EMPTY list
+// means yes — no restriction, which is what every general-purpose caller wants
+// and what the whole engine did before restrictions existed.
+//
+// It lives here rather than in the editor because it is a statement about the
+// API, and because two different menus have to reach the same verdict: the
+// add-node palette and the drag-off-a-pin menu. Filtering one and not the other
+// gives a restriction you can simply drag around.
+bool groupAllowed(std::string_view apiId, const std::vector<const char*>& allowed);
+
 } // namespace HE::api

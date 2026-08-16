@@ -2035,6 +2035,17 @@ bool isScriptGroup(std::string_view group)
     return false;
 }
 
+bool groupAllowed(std::string_view apiId, const std::vector<const char*>& allowed)
+{
+    if (allowed.empty()) return true;
+    // The group is the id up to the first dot. Comparing the whole segment, not
+    // a prefix — "entityfoo.bar" must not pass as "entity".
+    const size_t dot = apiId.find('.');
+    const std::string_view group = apiId.substr(0, dot == std::string_view::npos ? apiId.size() : dot);
+    for (const char* g : allowed) if (g && group == g) return true;
+    return false;
+}
+
 const ApiFn* find(const std::string& id)
 {
     // Every script call (Lua, Python, the HorizonCode interpreter) and every

@@ -90,6 +90,15 @@ struct MenuOpts
 	// Same for the drag-off menu, which walks the whole registry rather than
 	// per category — so every exclusion here is live.
 	std::vector<HC::NodeType> dragExcluded;
+	// Engine-API groups this frontend may call ("player", "math", …). EMPTY =
+	// no restriction, which is what every general-purpose editor wants and what
+	// the whole engine did before.
+	//
+	// It has to be honoured in BOTH menus. The add menu is grouped by category
+	// and the drag-off menu walks the registry flat; filtering only one leaves
+	// the restriction cosmetic — drag off a pin and the excluded call is right
+	// there.
+	std::vector<const char*> apiGroups;
 };
 
 // What the shared canvas needs from the editor embedding it.

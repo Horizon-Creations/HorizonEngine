@@ -640,7 +640,9 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 
 	// Engine API calls — the HE::api registry surfaced as one generic
 	// EngineCall node per function, grouped by subsystem, same search box.
-	if (std::string picked = HcEditorUtil::drawEngineApiMenu(q); !picked.empty())
+	if (std::string picked = HcEditorUtil::drawEngineApiMenu(
+	        q, h.menus ? h.menus->apiGroups : std::vector<const char*>{});
+	    !picked.empty())
 	{
 		if (const HE::api::ApiFn* fn = HE::api::find(picked))
 		{
@@ -966,6 +968,10 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		bool eh = false;
 		for (const HE::api::ApiFn& fn : HE::api::registry())
 		{
+			// Same allow-list as the add menu — this is the second half of the
+			// restriction, and skipping it here would make the first half a
+			// decoration you can drag around.
+			if (h.menus && !HcEditorUtil::apiGroupAllowed(fn.id, h.menus->apiGroups)) continue;
 			const int pin = HcEditorUtil::dragMatchApiPin(fn, dragType, dragArray, srcInput, isExecPin);
 			const char* shown = fn.displayName ? fn.displayName : fn.id;
 			if (pin < 0 || !matches(shown)) continue;

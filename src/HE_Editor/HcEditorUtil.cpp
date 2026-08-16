@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cstring>
 #include <climits>
 #include <cstdio>
 #include <string>
@@ -841,7 +842,13 @@ void searchMenuEnd()
 	if (!s_nav.queryDirty) s_nav.enterQueued = false;
 }
 
-std::string drawEngineApiMenu(const std::string& lowerQuery)
+bool apiGroupAllowed(const char* apiId, const std::vector<const char*>& allowedGroups)
+{
+	return !apiId || HE::api::groupAllowed(apiId, allowedGroups);
+}
+
+std::string drawEngineApiMenu(const std::string& lowerQuery,
+                              const std::vector<const char*>& allowedGroups)
 {
 	auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
 		[](unsigned char c){ return (char)std::tolower(c); }); return v; };
@@ -849,6 +856,7 @@ std::string drawEngineApiMenu(const std::string& lowerQuery)
 	const char* header = nullptr; // current category header, drawn lazily
 	for (const HE::api::ApiFn& fn : HE::api::registry())
 	{
+		if (!apiGroupAllowed(fn.id, allowedGroups)) continue;
 		const char* shown = fn.displayName ? fn.displayName : fn.id; // readable name
 		const bool match = lowerQuery.empty()
 			|| lower(shown).find(lowerQuery) != std::string::npos

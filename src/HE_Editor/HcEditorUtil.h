@@ -134,7 +134,16 @@ namespace HcEditorUtil
 	// "". The caller resolves it via HE::api::find and builds an EngineCall node
 	// (copying the descriptor's isExec → hasArg and params/results onto the node).
 	// Entries go through searchMenuItem, so they join the keyboard ranking.
-	std::string drawEngineApiMenu(const std::string& lowerQuery);
+	// `allowedGroups` restricts which HE::api groups are offered ("player",
+	// "math", …). Empty = everything, which is what every general-purpose editor
+	// passes. See HcGraphHost::MenuOpts::apiGroups.
+	std::string drawEngineApiMenu(const std::string& lowerQuery,
+	                              const std::vector<const char*>& allowedGroups = {});
+
+	// Is this api id in `allowedGroups`? Empty list = yes. Thin pass-through to
+	// HE::api::groupAllowed, which is where the rule lives — the two menus that
+	// use it must not be able to disagree.
+	bool apiGroupAllowed(const char* apiId, const std::vector<const char*>& allowedGroups);
 	// Readable title for an EngineCall node ("Sine" for math.sin) — the registry's
 	// displayName, falling back to the raw id.
 	std::string engineCallTitle(const std::string& apiId);
