@@ -1769,7 +1769,22 @@ private:
                    " = " + convertExpr(input(n, 1, fnCtx), dataInType(n, 1), ft) + "; return s__; }())";
         }
         default:
-            return zeroLit(out);   // unknown data-out (§3.3: Value{} → zero)
+            // A node this emitter has no case for. This used to return zeroLit,
+            // and that was the worst failure mode the generator had: the class
+            // compiled, shipped, and the node evaluated to 0 — no error, no
+            // report line, no fallback, and an editor that behaved differently
+            // from the build. A wrong answer that looks like a right one.
+            //
+            // Falling back is strictly better in every direction: the class runs
+            // interpreted, which is CORRECT (just slower), and it says so in
+            // hc_report.txt and the export dialog with the node id. Verified free
+            // — the whole fixture suite generates without reaching this.
+            //
+            // It also fires for a known node asked for a data-out it does not
+            // emit. Same answer for the same reason: interpret rather than guess.
+            throw FallbackError{ std::string("no C++ emitter for node type '") +
+                                 HorizonCode::nodeDisplayName(n.type) +
+                                 "' (data-out " + std::to_string(outIdx) + ")", n.id };
         }
     }
 
