@@ -832,11 +832,20 @@ int Graph::addNode(Node n)
 
 void Graph::removeNode(int id)
 {
-    // A deleted function takes its local variables with it. (HorizonCode has no
-    // fixed sink node, so unlike Material/ParticleGraph nothing is un-removable.)
+    // A deleted function takes its local variables AND its body with it. The
+    // body nodes live with subgraph == the entry's id; once the entry is gone
+    // no tab can show them and no entry point can reach them — without this
+    // they would sit invisibly in the file forever.
     if (const Node* n = findNode(id); n && n->type == NodeType::FunctionEntry)
+    {
         variables.erase(std::remove_if(variables.begin(), variables.end(),
             [&](const Variable& v){ return v.scope == id; }), variables.end());
+        std::vector<int> body;
+        for (const Node& bn : nodes)
+            if (bn.subgraph == id && bn.id != id) body.push_back(bn.id);
+        for (const int bid : body)
+            HE::graph::removeNodeAndLinks(nodes, links, bid);
+    }
     HE::graph::removeNodeAndLinks(nodes, links, id);
 }
 
@@ -1400,9 +1409,34 @@ bool fromJson(const std::string& json, Graph& out)
         if (!g.findEvent(d.name)) g.events.push_back(std::move(d));
     }
     inferEventDecls(g);        // graphs older than declared events arrive with one
+    // Both syncs below rebuild pin layouts from definitions that may have changed
+    // shape since this graph was saved (a function edited elsewhere, a struct
+    // field or enum entry deleted in the type editor). The stored mirrors ARE the
+    // layout the stored links were addressed against — snapshot them first so
+    // every wire follows its pin instead of silently sliding onto a neighbour.
+    std::vector<int> mirrored;
+    for (const Node& n : g.nodes)
+        switch (n.type)
+        {
+        case NodeType::FunctionEntry: case NodeType::FunctionCall:
+        case NodeType::FunctionReturn:
+            mirrored.push_back(n.id); break;
+        case NodeType::MakeStruct: case NodeType::BreakStruct:
+        case NodeType::SwitchOnEnum:
+            // Only nodes that already KNOW their definition — those carry the
+            // stored mirror the links were addressed against. A bare node
+            // (older build, no typeName yet) is repaired by inferUserTypeNames
+            // below, and that repair remaps its links itself; snapshotting it
+            // here would remap them twice and drop them as stale.
+            if (!n.typeName.empty()) mirrored.push_back(n.id);
+            break;
+        default: break;
+        }
+    const LinkRemapSnapshot preSync = captureLinkRemapSnapshot(g, mirrored);
     syncFunctionSignatures(g); // reconcile call/return pins with their entries
     inferUserTypeNames(g);     // recover Enum/Struct definitions from the wiring
     syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
+    remapLinksFromSnapshot(g, preSync); // wires follow their pins (or drop, visibly)
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
     return true;
@@ -1494,6 +1528,92 @@ void remapLinksForMirror(Graph& g, const std::vector<int>& nodes)
         l.srcPin = remap(l.srcNode, l.srcPin);
         l.dstPin = remap(l.dstNode, l.dstPin);
     }
+}
+
+LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g, const std::vector<int>& nodeIds)
+{
+    LinkRemapSnapshot snap;
+    auto names = [](const std::vector<PinDesc>& v)
+    {
+        std::vector<std::string> out;
+        out.reserve(v.size());
+        for (const PinDesc& p : v) out.emplace_back(p.name ? p.name : "");
+        return out;
+    };
+    for (const int id : nodeIds)
+    {
+        const Node* n = g.findNode(id);
+        if (!n) continue;
+        const NodeSig s = signatureOf(*n);
+        LinkRemapSnapshot::Sig sig;
+        sig.execIns  = names(s.execIns);
+        sig.execOuts = names(s.execOuts);
+        sig.dataIns  = names(s.dataIns);
+        sig.dataOuts = names(s.dataOuts);
+        snap.sigs.emplace(id, std::move(sig));
+    }
+    return snap;
+}
+
+void remapLinksFromSnapshot(Graph& g, const LinkRemapSnapshot& snap)
+{
+    if (snap.sigs.empty()) return;
+
+    // The layouts as they are NOW, for the same nodes.
+    std::vector<int> ids;
+    ids.reserve(snap.sigs.size());
+    for (const auto& [id, sig] : snap.sigs) ids.push_back(id);
+    const LinkRemapSnapshot now = captureLinkRemapSnapshot(g, ids);
+
+    // Move one link end onto the pin that carries its old pin's NAME today.
+    // Returns false when the pin is genuinely gone — the caller drops the link,
+    // which is visible and safe; the silent alternative is the wire sliding
+    // onto whatever pin inherited the index.
+    auto remapEnd = [&](int nodeId, int& pin) -> bool
+    {
+        const auto itOld = snap.sigs.find(nodeId);
+        if (itOld == snap.sigs.end()) return true;   // node wasn't re-mirrored
+        const auto itNew = now.sigs.find(nodeId);
+        if (itNew == now.sigs.end()) return false;   // node no longer exists
+        const auto& o = itOld->second;
+        const auto& c = itNew->second;
+        const std::vector<std::string>* oldRegs[4] = { &o.execIns, &o.execOuts, &o.dataIns, &o.dataOuts };
+        const std::vector<std::string>* newRegs[4] = { &c.execIns, &c.execOuts, &c.dataIns, &c.dataOuts };
+        int base = 0, newBase = 0;
+        for (int r = 0; r < 4; ++r)
+        {
+            const std::vector<std::string>& ov = *oldRegs[r];
+            const std::vector<std::string>& nv = *newRegs[r];
+            if (pin < base + (int)ov.size())
+            {
+                const int idx = pin - base;
+                const std::string& name = ov[idx];
+                // Duplicate names stay deterministic: this pin is the k-th
+                // occurrence of `name`, so it maps to the k-th occurrence now.
+                int occ = 0;
+                for (int i = 0; i < idx; ++i) if (ov[i] == name) ++occ;
+                int seen = 0;
+                for (int i = 0; i < (int)nv.size(); ++i)
+                    if (nv[i] == name && seen++ == occ) { pin = newBase + i; return true; }
+                // No pin of that name any more. Same region size means an
+                // in-place rename/retype — keeping the index is what preserves
+                // the user's wires there. A changed size means the pin was
+                // removed: drop.
+                if (nv.size() == ov.size()) { pin = newBase + idx; return true; }
+                return false;
+            }
+            base    += (int)ov.size();
+            newBase += (int)nv.size();
+        }
+        return false;   // pin was already beyond the old layout — stale link
+    };
+
+    std::vector<Link> kept;
+    kept.reserve(g.links.size());
+    for (Link l : g.links)
+        if (remapEnd(l.srcNode, l.srcPin) && remapEnd(l.dstNode, l.dstPin))
+            kept.push_back(l);
+    g.links = std::move(kept);
 }
 
 EventDecl* Graph::findEvent(const std::string& name)
@@ -1679,12 +1799,11 @@ EventId eventId(const std::string& name)
     t.ids.emplace(name, id);
     return id;
 }
-const std::string& eventName(EventId id)
+std::string eventName(EventId id)
 {
     EventInternTable& t = interns();
     std::lock_guard<std::mutex> lk(t.mutex);
-    static const std::string kNone;
-    return id < t.names.size() ? t.names[id] : kNone;
+    return id < t.names.size() ? t.names[id] : std::string();
 }
 
 void inferEventDecls(Graph& g)
@@ -2565,10 +2684,13 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::FunctionEntry:
     {
-        // A function's input parameter: read it from the active call frame.
-        if (!m_callStack.empty() && dataOutPin >= 0 &&
-            dataOutPin < (int)m_callStack.back().args.size())
-            return m_callStack.back().args[dataOutPin];
+        // A function's input parameter: read it from THIS function's call
+        // frame, not blindly from the top of the stack — with nested calls
+        // (A calls B) a data wire evaluated inside B that reaches A's entry
+        // must yield A's arguments, not B's. Same lookup the locals use.
+        if (const CallFrame* f = frameFor(n.id);
+            f && dataOutPin >= 0 && dataOutPin < (int)f->args.size())
+            return f->args[dataOutPin];
         return {};
     }
     case T::FunctionCall:

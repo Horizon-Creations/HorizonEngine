@@ -544,7 +544,11 @@ HE_API std::vector<EngineClassMember> engineClassMembers(const std::string& name
 // two graphs naming the same event agree without ever comparing strings.
 using EventId = std::uint32_t;
 HE_API EventId            eventId(const std::string& name);
-HE_API const std::string& eventName(EventId id);
+// BY VALUE, deliberately: the intern table is a growing vector<string> shared
+// across threads (asset streaming + export intern too) — a returned reference
+// would dangle the moment eventId() reallocates it, and it would escape the
+// mutex besides.
+HE_API std::string eventName(EventId id);
 
 // May a wire carry `from` into `to`? Equal types always; beyond that exactly the
 // conversions the interpreter's `coerce` performs and no others — Float/Int/Bool
@@ -570,6 +574,28 @@ HE_API void inferEventDecls(Graph& g);
 // without this a wire quietly lands on a different pin. Callers pass nodes whose
 // definition was just set (their "before" is the bare shape).
 HE_API void remapLinksForMirror(Graph& g, const std::vector<int>& nodes);
+
+// The general re-mirror problem: whenever a node's pin LAYOUT is rebuilt from a
+// definition that changed shape (a function parameter removed mid-list, a struct
+// field deleted, an enum entry gone), the persisted links still address the OLD
+// pin indices — without a remap every wire below the removed pin silently slides
+// onto its neighbour, which is a misroute nobody sees. Capture the named layout
+// BEFORE the mirror, re-mirror, then remap: each wire follows its pin NAME; a
+// wire whose pin name vanished is dropped (visible and safe, unlike the slide).
+// Pins that lost their name but whose region kept its size stay by index — that
+// is the in-place rename/retype case, which must NOT cost the user their wires.
+struct LinkRemapSnapshot
+{
+    // Per node id: the pin names of each region, in pin order.
+    struct Sig { std::vector<std::string> execIns, execOuts, dataIns, dataOuts; };
+    std::unordered_map<int, Sig> sigs;
+};
+HE_API LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g,
+                                                  const std::vector<int>& nodeIds);
+// Remaps g.links against the snapshot (taken before the mirror) and prunes any
+// link on a snapshot node that ends up without a pin. Safe to call with nodes
+// whose layout did not change — those remap onto themselves.
+HE_API void remapLinksFromSnapshot(Graph& g, const LinkRemapSnapshot& snap);
 
 HE_API void syncTypeSignatures(Graph& g);
 

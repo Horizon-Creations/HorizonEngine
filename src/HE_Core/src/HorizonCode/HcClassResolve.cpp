@@ -47,8 +47,14 @@ void removeMember(Graph& g, int entryId, NodeType entryType)
     // dangle the moment it did.
     std::unordered_set<int> doomed{ entryId };
     if (entryType == NodeType::FunctionEntry)
+    {
         for (const Node& n : g.nodes)
             if (n.subgraph == entryId) doomed.insert(n.id);
+        // An overridden function's locals go with it — they are scoped to an
+        // entry that is about to stop existing.
+        g.variables.erase(std::remove_if(g.variables.begin(), g.variables.end(),
+            [&](const Variable& v) { return v.scope == entryId; }), g.variables.end());
+    }
 
     g.nodes.erase(std::remove_if(g.nodes.begin(), g.nodes.end(),
         [&](const Node& n) { return doomed.count(n.id) != 0; }), g.nodes.end());
@@ -79,6 +85,8 @@ void mergeDerivedInto(Graph& base, Graph derived)
             if (n.subgraph) n.subgraph += shift;   // the owning FunctionEntry moved too
         }
         for (Link& l : derived.links) { l.srcNode += shift; l.dstNode += shift; }
+        for (Variable& v : derived.variables)
+            if (v.scope) v.scope += shift;         // function locals follow their entry
     }
 
     // 2. Overrides: an incoming entry point whose member the base also declares
@@ -99,8 +107,14 @@ void mergeDerivedInto(Graph& base, Graph derived)
     //    store, the nearest declaration's type and default.
     for (Variable& dv : derived.variables)
     {
+        // Shadowing is a CLASS-MEMBER concept: only a scope-0 declaration
+        // replaces a base member of the same name. Function locals travel with
+        // their own (freshly shifted) entry — a base function's local "i" and
+        // an unrelated derived local "i" are different slots, not an override.
+        if (dv.scope != 0) { base.variables.push_back(std::move(dv)); continue; }
         auto it = std::find_if(base.variables.begin(), base.variables.end(),
-                               [&](const Variable& bv) { return bv.name == dv.name; });
+                               [&](const Variable& bv)
+                               { return bv.scope == 0 && bv.name == dv.name; });
         if (it != base.variables.end()) *it = std::move(dv);
         else                            base.variables.push_back(std::move(dv));
     }

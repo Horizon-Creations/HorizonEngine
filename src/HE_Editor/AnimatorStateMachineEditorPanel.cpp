@@ -594,10 +594,16 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 		// keeps showing "select a node" no matter what is selected — which is
 		// how a Cast ends up with no way to pick its target.
 		st.syncGe.selected = st.syncSelected;
+		const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
 		if (GraphEditor::draw("##asmSyncGe", model, st.syncGe, avail) || st.syncGe.liveEdit)
 			edited = true;
 		st.syncSelected = st.syncGe.selected;
+		// Clipboard + duplicate shortcuts AND the popup the G / Shift+G / E
+		// quick-picks open — buildModel registers those keys unconditionally,
+		// so without this the picker request would sit unanswered in this
+		// window's popup stack (and Ctrl+C/X/V/D would silently do nothing).
+		HcGraphHost::handleGraphKeys(h, canvasOrigin, avail);
 	}
 	ImGui::EndChild();
 

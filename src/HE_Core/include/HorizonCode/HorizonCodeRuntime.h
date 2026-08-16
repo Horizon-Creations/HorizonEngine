@@ -122,7 +122,7 @@ public:
     bool       alive(InstanceId id) const;
     // Drop every instance (whole-runtime teardown).
     void       clear();
-    size_t     count() const { return m_insts.size(); }
+    size_t     count() const { return m_insts.size() - m_doomed.size(); } // live only
 
     // The instance's graph (for hosts that inspect it). Returns a shared empty
     // graph when the id is unknown — and for compiled instances, which carry no
@@ -374,6 +374,19 @@ private:
     // Pending Delay continuations (append order preserved on expiry).
     std::vector<PendingResume> m_pending;
     std::unordered_set<InstanceId> m_destructing; // ids mid-destroy (self-destruct guard)
+    // Removed instances whose BODY (graphs / compiled object) must survive until
+    // no runner can still be executing it — a graph destroying its own instance
+    // mid-run is legal ("Destroy Widget on Get Self"). find() hides these, so
+    // they are logically gone the moment remove() marks them; purgeDoomed()
+    // frees them at the next safe point.
+    std::unordered_set<InstanceId> m_doomed;
+    void purgeDoomed();
+    // Cross-runner call depth (Call Function (Ref) / inherited calls) — each
+    // such edge builds a FRESH Runner whose own depth/step budgets restart, so
+    // unbounded recursion needs a runtime-wide account or it becomes a native
+    // stack overflow.
+    static constexpr int kMaxCallDepth = 64;
+    int m_callDepth = 0;
     Services   m_services;
 };
 

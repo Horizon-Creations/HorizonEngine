@@ -23,42 +23,17 @@ namespace HcEditorUtil
 {
 namespace
 {
-	// Data-pin count check helper: how many total pins a function node has now
-	// (params/results already synced). Exec pins come first, so links on pins at
-	// or beyond this index are stale after an interface change.
-	int functionPinCount(const HorizonCode::Node& n)
+	// The ids of every node that mirrors function `fn`'s interface — the nodes
+	// whose links have to survive an interface edit.
+	std::vector<int> functionNodeIds(const HorizonCode::Graph& g, const std::string& fn)
 	{
 		using T = HorizonCode::NodeType;
-		switch (n.type)
-		{
-			case T::FunctionEntry:  return 1 + (int)n.params.size();                      // execOut + params
-			case T::FunctionCall:   return 2 + (int)n.params.size() + (int)n.results.size(); // exec in/out + ins + outs
-			case T::FunctionReturn: return 1 + (int)n.results.size();                     // execIn + results
-			default:                return 1 << 30;
-		}
-	}
-
-	// After an interface edit: re-sync every call/return, then drop links pointing
-	// at pins that no longer exist on this function's nodes (exec links, at fixed
-	// low indices, always survive).
-	void syncAndPrune(HorizonCode::Graph& g, const std::string& fn)
-	{
-		HorizonCode::syncFunctionSignatures(g);
-		using T = HorizonCode::NodeType;
+		std::vector<int> ids;
 		for (const HorizonCode::Node& n : g.nodes)
-		{
-			const bool isFnNode = (n.type == T::FunctionEntry || n.type == T::FunctionCall ||
-			                       n.type == T::FunctionReturn);
-			if (!isFnNode || n.s != fn) continue;
-			const int total = functionPinCount(n);
-			const int id = n.id;
-			g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
-				[&](const HorizonCode::Link& l)
-				{
-					return (l.srcNode == id && l.srcPin >= total) ||
-					       (l.dstNode == id && l.dstPin >= total);
-				}), g.links.end());
-		}
+			if ((n.type == T::FunctionEntry || n.type == T::FunctionCall ||
+			     n.type == T::FunctionReturn) && n.s == fn)
+				ids.push_back(n.id);
+		return ids;
 	}
 
 	// Type combo over the value pin types (Exec excluded). Index maps to PinType
@@ -525,6 +500,13 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 	using namespace HorizonCode;
 	bool changed = false;
 
+	// Snapshot BEFORE the rows below mutate the interface: removing a parameter
+	// mid-list shifts every pin behind it, and the existing links were addressed
+	// against the layout as it is NOW. The remap after the sync moves each wire
+	// to the pin that still carries its name — instead of letting it silently
+	// slide onto the neighbouring parameter (see LinkRemapSnapshot).
+	const LinkRemapSnapshot before = captureLinkRemapSnapshot(g, functionNodeIds(g, entry.s));
+
 	auto editList = [&](const char* title, const char* prefix, std::vector<FuncParam>& list)
 	{
 		ImGui::SeparatorText(title);
@@ -557,7 +539,8 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 
 	if (changed)
 	{
-		syncAndPrune(g, entry.s);
+		syncFunctionSignatures(g);
+		remapLinksFromSnapshot(g, before);
 		edited = true;
 	}
 }

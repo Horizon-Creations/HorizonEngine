@@ -9,6 +9,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include <imgui_internal.h>      // CurrentItemFlags — detect a BeginDisabled scope
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -816,8 +817,13 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	if (!sn) return 0;
 	int created = 0;
 
+	// BY VALUE, deliberately: every pick below addNode()s into graph.nodes, and
+	// a vector realloc would leave `sn` dangling for everything drawn after the
+	// pick in this same frame (the menu keeps rendering past a pick).
+	const HC::Node src = *sn;
+
 	// Classify the dragged pin (exec vs data; data type + array-ness).
-	const DragPin dp = classifyDragPin(*sn, srcPin);
+	const DragPin dp = classifyDragPin(src, srcPin);
 	const bool isExecPin = dp.isExec;
 	const PT   dragType  = dp.type;
 	const bool dragArray = dp.array;
@@ -845,13 +851,20 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (nn) graph.connect(srcNode, srcPin, newId, pinRanges(*nn).dataIn0); // → Target
 		};
 		HC::Graph scratch;
-		const HC::Graph* cls = resolveClassGraph(*sn, graph, h.giGraph, h.content, scratch);
+		const HC::Graph* cls = resolveClassGraph(src, graph, h.giGraph, h.content, scratch);
 		if (cls)
 		{
-			bool fh = false;
+			// SNAPSHOT the offered signatures first: with a "Get Self" source,
+			// `cls` ALIASES `graph`, and a pick addNode()s into that very
+			// nodes-vector — iterating it live would leave the loop iterator
+			// AND `fn` (read after the add) dangling on reallocation.
+			std::vector<HC::Node> fns;
 			for (const auto& fn : cls->nodes)
-				if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty() &&
-				    matches("Call " + fn.s))
+				if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty())
+					fns.push_back(fn);
+			bool fh = false;
+			for (const auto& fn : fns)
+				if (matches("Call " + fn.s))
 				{
 					if (!fh) { ImGui::TextDisabled("Functions"); fh = true; }
 					if (HcEditorUtil::searchMenuItem("Call " + fn.s))
@@ -883,7 +896,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		// which is why the base class needs no dispatch machinery of its own.
 		{
 			const std::string base =
-				resolveClassBase(*sn, graph, h.selfBaseClass, h.content);
+				resolveClassBase(src, graph, h.selfBaseClass, h.content);
 			bool eh = false;
 			for (const auto& m : HC::engineClassMembers(base))
 			{
@@ -1535,7 +1548,15 @@ void handleGraphKeys(const Host& h, const ImVec2& canvasOrigin, const ImVec2& av
 
 	const ImGuiIO& kio = ImGui::GetIO();
 	const bool mod  = kio.KeyCtrl || kio.KeySuper;
-	const bool kbOk = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
+	// IsWindowHovered knows nothing about BeginDisabled — while a collab peer
+	// holds the asset's lock the whole tab renders disabled and the canvas
+	// already refuses edits, but these shortcuts would still mutate the graph
+	// (and the "anything unsaved here is stale" reload would then silently
+	// throw the edit away). Same guard the canvas gets for free via hover.
+	const bool disabled =
+		(ImGui::GetCurrentContext()->CurrentItemFlags & ImGuiItemFlags_Disabled) != 0;
+	const bool kbOk = !disabled
+	                  && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
 	                  && !kio.WantTextInput && !ImGui::IsAnyItemActive();
 	std::vector<int>& sel = ge.selection;
 	// Fall back to the single selected node when no box-selection is active.

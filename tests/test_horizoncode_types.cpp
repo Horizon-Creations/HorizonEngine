@@ -907,3 +907,115 @@ TEST_CASE("HcCodegen: events reach the Runtime as ids, under readable names")
     CHECK(cpp.find("hc::bindEvent(m_ctx, ") != std::string::npos);
     CHECK(cpp.find("kEvt_Signal);") != std::string::npos);
 }
+
+// ── Link remap across signature drift ────────────────────────────────────────
+// Removing a function parameter mid-list (or a struct field, below) shifts every
+// pin behind it. The links were addressed against the OLD layout — without the
+// snapshot+remap they would silently slide onto the neighbouring pin.
+
+TEST_CASE("Function interface edit: wires follow their parameters by name")
+{
+    Graph g;
+    Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F";
+    fe.params = { { "A", PinType::Float, false, {} },
+                  { "B", PinType::Float, false, {} } };
+    const int f = g.addNode(std::move(fe));
+    Node fc; fc.type = NodeType::FunctionCall; fc.s = "F";
+    const int c = g.addNode(std::move(fc));
+    syncFunctionSignatures(g);   // the call mirrors [A, B]
+
+    Node c1; c1.type = NodeType::ConstFloat; c1.f[0] = 1.0f;
+    Node c2; c2.type = NodeType::ConstFloat; c2.f[0] = 2.0f;
+    const int a = g.addNode(std::move(c1));
+    const int b = g.addNode(std::move(c2));
+    // FunctionCall pins: execIn 0, execOut 1, dataIn A=2, dataIn B=3.
+    REQUIRE(g.connect(a, 0, c, 2));
+    REQUIRE(g.connect(b, 0, c, 3));
+
+    SUBCASE("removing a parameter mid-list drops its wire, the rest follow")
+    {
+        const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { f, c });
+        Node* entry = g.findNode(f);
+        entry->params.erase(entry->params.begin());   // A is gone, B moves up
+        syncFunctionSignatures(g);
+        remapLinksFromSnapshot(g, snap);
+
+        REQUIRE(g.links.size() == 1);                 // A's wire dropped, visibly
+        CHECK(g.links[0].srcNode == b);
+        CHECK(g.links[0].dstNode == c);
+        CHECK(g.links[0].dstPin  == 2);               // B's wire followed B
+    }
+    SUBCASE("an in-place rename keeps every wire")
+    {
+        const LinkRemapSnapshot snap = captureLinkRemapSnapshot(g, { f, c });
+        g.findNode(f)->params[0].name = "Speed";      // same slot, new name
+        syncFunctionSignatures(g);
+        remapLinksFromSnapshot(g, snap);
+
+        REQUIRE(g.links.size() == 2);
+        CHECK(g.links[0].dstPin == 2);
+        CHECK(g.links[1].dstPin == 3);
+    }
+}
+
+TEST_CASE("Struct field removal: Break Struct wires follow their fields across a load")
+{
+    TypeFixture fx;
+    Graph g;
+    const int br = addTypedNode(g, NodeType::BreakStruct, kStats);
+    // BreakStruct pins: dataIn Struct=0, dataOuts hp=1 title=2 weapon=3.
+    Node s1; s1.type = NodeType::SetVariable; s1.s = "t"; s1.propType = PinType::String;
+    Node s2; s2.type = NodeType::SetVariable; s2.s = "w"; s2.propType = PinType::Enum;
+    s2.typeName = kWeapon;
+    Node s3; s3.type = NodeType::SetVariable; s3.s = "h"; s3.propType = PinType::Float;
+    const int t = g.addNode(std::move(s1));
+    const int w = g.addNode(std::move(s2));
+    const int h = g.addNode(std::move(s3));
+    REQUIRE(g.connect(br, 2, t, 2));   // title → t
+    REQUIRE(g.connect(br, 3, w, 2));   // weapon → w
+    REQUIRE(g.connect(br, 1, h, 2));   // hp → h
+    const std::string json = toJson(g);
+
+    // The struct loses hp while the graph is on disk.
+    HE::StructDef edited;
+    REQUIRE(HE::TypeRegistry::instance().getStruct(kStats, edited));
+    edited.fields.erase(edited.fields.begin());       // [title, weapon] remain
+    HE::TypeRegistry::instance().registerStruct(edited);
+
+    Graph loaded;
+    REQUIRE(fromJson(json, loaded));
+    // New layout: Struct=0, title=1, weapon=2. hp's wire is gone; the other two
+    // follow their fields instead of sliding onto the neighbour.
+    int titleLinks = 0, weaponLinks = 0;
+    for (const Link& l : loaded.links)
+    {
+        if (l.srcNode == br && l.dstNode == t) { ++titleLinks;  CHECK(l.srcPin == 1); }
+        if (l.srcNode == br && l.dstNode == w) { ++weaponLinks; CHECK(l.srcPin == 2); }
+        CHECK(l.dstNode != h);                        // hp consumer lost its feed
+    }
+    CHECK(titleLinks == 1);
+    CHECK(weaponLinks == 1);
+    CHECK(loaded.links.size() == 2);
+}
+
+TEST_CASE("Deleting a FunctionEntry removes its body nodes, not just the entry")
+{
+    Graph g;
+    Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F";
+    const int f = g.addNode(std::move(fe));
+    Node body; body.type = NodeType::ConstFloat; body.subgraph = f;
+    const int b1 = g.addNode(std::move(body));
+    Node body2; body2.type = NodeType::FunctionReturn; body2.s = "F"; body2.subgraph = f;
+    const int b2 = g.addNode(std::move(body2));
+    Node top; top.type = NodeType::ConstFloat;          // subgraph 0 — must survive
+    const int keep = g.addNode(std::move(top));
+    REQUIRE(g.connect(f, 0, b2, 0));
+
+    g.removeNode(f);
+
+    CHECK(g.findNode(f)  == nullptr);
+    CHECK(g.findNode(b1) == nullptr);   // body went with the entry
+    CHECK(g.findNode(b2) == nullptr);
+    CHECK(g.findNode(keep) != nullptr); // the event graph is untouched
+    CHECK(g.links.empty());
+}

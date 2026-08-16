@@ -36,13 +36,21 @@ const Variable* findVarInLevels(const std::vector<Graph>& levels, const std::str
 }
 }
 
+void Runtime::purgeDoomed()
+{
+    for (const InstanceId id : m_doomed) m_insts.erase(id);
+    m_doomed.clear();
+}
+
 Runtime::Inst* Runtime::find(InstanceId id)
 {
+    if (m_doomed.count(id)) return nullptr;      // logically gone, body pending free
     auto it = m_insts.find(id);
     return it != m_insts.end() ? &it->second : nullptr;
 }
 const Runtime::Inst* Runtime::find(InstanceId id) const
 {
+    if (m_doomed.count(id)) return nullptr;      // logically gone, body pending free
     auto it = m_insts.find(id);
     return it != m_insts.end() ? &it->second : nullptr;
 }
@@ -142,7 +150,14 @@ uint32_t Runtime::ownedEntity(InstanceId id) const
 
 void Runtime::remove(InstanceId id)
 {
-    m_insts.erase(id);
+    // The instance disappears LOGICALLY here (find() hides doomed ids, so no
+    // event/call/alive reaches it any more), but the Inst itself — its graphs
+    // and, for compiled classes, the object whose member function may be on
+    // the stack RIGHT NOW — must outlive the current run: "Destroy Widget
+    // (Get Self)" reaches this mid-execution, and runExecChain keeps reading
+    // the graph after the node returns. purgeDoomed() frees it once nothing
+    // can be executing (top of update(), clear, level GC).
+    m_doomed.insert(id);
     m_listeners.erase(id);                       // dispatchers this instance owned
     for (auto& [owner, events] : m_listeners)    // its subscriptions to others
         for (auto& [ev, vec] : events)
@@ -168,6 +183,7 @@ bool Runtime::alive(InstanceId id) const { return find(id) != nullptr; }
 void Runtime::clear()
 {
     m_insts.clear();
+    m_doomed.clear();
     m_listeners.clear();
     m_pending.clear();
     m_gameInstance = 0;
@@ -234,6 +250,9 @@ void Runtime::retainOnlyReachableFrom(InstanceId root)
     for (const auto& [id, inst] : m_insts)
         if (!keep.count(id)) doomed.push_back(id);
     for (const InstanceId id : doomed) destroy(id); // fire "Destruct" before GC
+    // Level GC runs from the (queued) level-switch request, never from inside a
+    // runner — the deferred bodies can be freed for real right here.
+    purgeDoomed();
 }
 
 const Graph& Runtime::graphOf(InstanceId id) const
@@ -478,8 +497,19 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         if (!i) return false;
         const int lv = levelWithFunction(*i, fn, /*publicOnly=*/true);
         if (lv < 0) return false;
+        // Same cross-runner recursion guard as Runtime::callFunction — this is
+        // the one call edge that builds its Runner without going through it.
+        if (m_callDepth >= kMaxCallDepth)
+        {
+            hcError("call depth limit hit calling inherited '" + fn +
+                    "' — recursive call chain aborted");
+            return false;
+        }
+        ++m_callDepth;
         Runner r(i->levels[lv], makeContext(id, (size_t)lv));
-        return r.callFunction(fn, /*requirePublic=*/false, args, results);
+        const bool ok = r.callFunction(fn, /*requirePublic=*/false, args, results);
+        --m_callDepth;
+        return ok;
     };
     ctx.isValid = [this](uint32_t target) { return find(target) != nullptr; };
     ctx.isA = [this](uint32_t target, const std::string& classKey)
@@ -501,6 +531,9 @@ Context Runtime::makeContext(InstanceId id, size_t level)
 
 void Runtime::update(float dt)
 {
+    // Nothing is executing between frames — free the bodies of instances that
+    // destroyed themselves (or each other) mid-run since the last tick.
+    purgeDoomed();
     if (m_pending.empty()) return;
     // Decrement first, then snapshot the expired set: a resumed chain may
     // schedule NEW delays (they must wait at least one tick), destroy
@@ -749,12 +782,29 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
 {
     Inst* i = find(id);
     if (!i) return false;
+    // Cross-runner recursion guard. kMaxDepth/kMaxSteps live PER RUNNER, but
+    // every Call Function (Ref) edge builds a fresh one with a fresh budget —
+    // F calling itself via Get Self, or A.f ↔ B.g ping-pong, would otherwise
+    // recurse natively until the process stack blows, in PIE and in packaged
+    // builds alike. 64 nested cross-instance calls is far beyond any
+    // legitimate graph.
+    if (m_callDepth >= kMaxCallDepth)
+    {
+        hcError("call depth limit hit calling '" + fn +
+                "' — recursive Call Function chain aborted");
+        return false;
+    }
+    ++m_callDepth;
+    bool ok = false;
     if (i->compiled)
-        return i->compiled->callFunction(fn, requirePublic, args, results);
-    const int lv = levelWithFunction(*i, fn, /*publicOnly=*/false);
-    if (lv < 0) return false;
-    Runner runner(i->levels[lv], makeContext(id, (size_t)lv));
-    return runner.callFunction(fn, requirePublic, args, results);
+        ok = i->compiled->callFunction(fn, requirePublic, args, results);
+    else if (const int lv = levelWithFunction(*i, fn, /*publicOnly=*/false); lv >= 0)
+    {
+        Runner runner(i->levels[lv], makeContext(id, (size_t)lv));
+        ok = runner.callFunction(fn, requirePublic, args, results);
+    }
+    --m_callDepth;
+    return ok;
 }
 
 } // namespace HorizonCode
