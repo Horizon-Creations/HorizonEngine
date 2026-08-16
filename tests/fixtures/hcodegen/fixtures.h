@@ -391,6 +391,88 @@ inline HE::hccg::ClassSource fxMath()
     return f.done("math_ops");
 }
 
+// 3b — vector_ops: Make/Break Vector at all three widths, plus the angle
+// conversions. The point of this fixture is the codegen: expr()'s default case
+// emits a zero literal, so a node with no case there compiles SILENTLY to 0 and
+// diverges from the interpreter with no error and no fallback. Only a parity
+// run catches that.
+inline HE::hccg::ClassSource fxVectorOps()
+{
+    Fx f;
+    for (const char* v : { "x2", "y2", "x3", "y3", "z3", "x4", "y4", "z4", "w4",
+                           "w3drop", "rad", "deg", "roundTrip" })
+        f.var(v, PT::Float);
+
+    const int ev = f.event("Build");
+    int prev = ev;
+    auto chainSet = [&](const std::string& var, int src, int srcOut)
+    {
+        const int s = f.setVar(var, PT::Float);
+        f.data(src, srcOut, s, 0);
+        f.exec(prev, s);
+        prev = s;
+    };
+
+    // Vec2 round trip.
+    {
+        const int mk = f.op(NT::MakeVector2);
+        f.data(f.constF(1.5f), 0, mk, 0);
+        f.data(f.constF(-2.5f), 0, mk, 1);
+        const int bk = f.op(NT::BreakVector2);
+        f.data(mk, 0, bk, 0);
+        chainSet("x2", bk, 0);
+        chainSet("y2", bk, 1);
+    }
+    // Vector 3 → Break 3. Also read pin 3 (W) off a Break 4 fed by Make 3, to
+    // pin down that Make Vector 3 really leaves W at zero in BOTH backends.
+    {
+        const int mk = f.op(NT::MakeVector3);
+        f.data(f.constF(3.0f),  0, mk, 0);
+        f.data(f.constF(4.0f),  0, mk, 1);
+        f.data(f.constF(-5.0f), 0, mk, 2);
+        const int bk = f.op(NT::BreakVector3);
+        f.data(mk, 0, bk, 0);
+        chainSet("x3", bk, 0);
+        chainSet("y3", bk, 1);
+        chainSet("z3", bk, 2);
+
+        const int bk4 = f.op(NT::BreakVector4);
+        f.data(mk, 0, bk4, 0);
+        chainSet("w3drop", bk4, 3);
+    }
+    // Vector 4 round trip.
+    {
+        const int mk = f.op(NT::MakeVector4);
+        f.data(f.constF(0.25f), 0, mk, 0);
+        f.data(f.constF(0.5f),  0, mk, 1);
+        f.data(f.constF(0.75f), 0, mk, 2);
+        f.data(f.constF(1.25f), 0, mk, 3);
+        const int bk = f.op(NT::BreakVector4);
+        f.data(mk, 0, bk, 0);
+        chainSet("x4", bk, 0);
+        chainSet("y4", bk, 1);
+        chainSet("z4", bk, 2);
+        chainSet("w4", bk, 3);
+    }
+    // Angle conversion, both directions, and degrees(radians(x)) back to x.
+    {
+        const int r = f.engineCall("math.radians");
+        f.g.findNode(r)->pinDefaults[0] = Value::ofFloat(180.0f);
+        chainSet("rad", r, 0);
+
+        const int d = f.engineCall("math.degrees");
+        f.g.findNode(d)->pinDefaults[0] = Value::ofFloat(3.14159265f);
+        chainSet("deg", d, 0);
+
+        const int r2 = f.engineCall("math.radians");
+        f.g.findNode(r2)->pinDefaults[0] = Value::ofFloat(57.5f);
+        const int d2 = f.engineCall("math.degrees");
+        f.data(r2, 0, d2, 0);
+        chainSet("roundTrip", d2, 0);
+    }
+    return f.done("vector_ops");
+}
+
 // 4 — variables: defaults of every type + arrays, set/get, pass-through
 // data-out, undeclared-set-then-get (§3.4).
 inline HE::hccg::ClassSource fxVariables()
@@ -1762,7 +1844,7 @@ inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
     return {
-        fxFlow(), fxCoerce(), fxMath(), fxVariables(), fxFunctionsBasic(),
+        fxFlow(), fxCoerce(), fxMath(), fxVectorOps(), fxVariables(), fxFunctionsBasic(),
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
         fxEnginePureMultiout(), fxEngineExecCached(),

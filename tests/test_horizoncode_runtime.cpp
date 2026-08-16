@@ -3,6 +3,7 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>   // sort — libc++ pulls it in transitively, MSVC does not
+#include <set>
 #include <string>
 #include <vector>
 
@@ -957,6 +958,39 @@ TEST_CASE("Graph never reuses a node id after removeNode")
 	CHECK(c != a);
 	CHECK(c != b);
 	CHECK(c > b);
+}
+
+TEST_CASE("every node type has a display name, a tooltip and a real category")
+{
+	// nodeDisplayName falls back to "?" and nodeTooltip to "" — both silent. A
+	// forgotten case therefore ships a node that shows as "?" in the menu and,
+	// worse, SERIALISES as "?": the display name is the on-disk type key, so two
+	// nameless nodes would collide and load as each other. Nothing else in the
+	// suite looks at these.
+	std::set<std::string> names;
+	for (NodeType t : nodeRegistry())
+	{
+		const char* name = nodeDisplayName(t);
+		REQUIRE(name != nullptr);
+		INFO("node type index ", (int)t, " name '", name, "'");
+		CHECK(std::string(name) != "?");
+		CHECK(std::string(name) != "");
+		// Unique, because the name is what fromJson matches on.
+		CHECK(names.insert(name).second);
+
+		CHECK(std::string(nodeTooltip(t)) != "");
+		// "Misc" is nodeCategory's fallback; the add menu lists by category, so a
+		// node that lands there is invisible in every host.
+		CHECK(std::string(nodeCategory(t)) != "Misc");
+
+		// And the name actually survives a save/load: nodeFromJson matches the
+		// stored string back to a type, so a node whose name does not resolve
+		// would be dropped — silently, along with all its links.
+		Node n; n.type = t; n.id = 1;
+		Node back;
+		REQUIRE(nodeFromJson(nodeToJson(n), back));
+		CHECK(back.type == t);
+	}
 }
 
 TEST_CASE("signatureCountsOf / dataPinDescOf agree with signatureOf for every node type")

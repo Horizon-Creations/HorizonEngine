@@ -336,6 +336,11 @@ namespace
 			case T::ConstColor:  return P::Color;
 			case T::ConstTransform: return P::Transform;
 			case T::Add: case T::Subtract: case T::Multiply: case T::Divide: return P::Float;
+			// Coloured by what they PRODUCE, so a Make node reads as its vector
+			// type and a Break node as the floats it hands out.
+			case T::MakeVector2: return P::Vec2;
+			case T::MakeVector3: case T::MakeVector4: return P::Color;
+			case T::BreakVector2: case T::BreakVector3: case T::BreakVector4: return P::Float;
 			case T::Greater: case T::Less: case T::Equals:
 			case T::And: case T::Or: case T::Not: return P::Bool;
 			case T::Concat: case T::ToString: return P::String;

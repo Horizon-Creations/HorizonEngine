@@ -261,6 +261,31 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Float } };
         break;
+    // Vector assembly. 3 and 4 share PinType::Color — see the NodeType comment.
+    case T::MakeVector2:
+        s.dataIns  = { { "X", P::Float }, { "Y", P::Float } };
+        s.dataOuts = { { "", P::Vec2 } };
+        break;
+    case T::MakeVector3:
+        s.dataIns  = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float } };
+        s.dataOuts = { { "", P::Color } };
+        break;
+    case T::MakeVector4:
+        s.dataIns  = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float }, { "W", P::Float } };
+        s.dataOuts = { { "", P::Color } };
+        break;
+    case T::BreakVector2:
+        s.dataIns  = { { "", P::Vec2 } };
+        s.dataOuts = { { "X", P::Float }, { "Y", P::Float } };
+        break;
+    case T::BreakVector3:
+        s.dataIns  = { { "", P::Color } };
+        s.dataOuts = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float } };
+        break;
+    case T::BreakVector4:
+        s.dataIns  = { { "", P::Color } };
+        s.dataOuts = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float }, { "W", P::Float } };
+        break;
     case T::Greater: case T::Less: case T::Equals:
         s.dataIns  = { { "A", P::Float }, { "B", P::Float } };
         s.dataOuts = { { "", P::Bool } };
@@ -481,6 +506,12 @@ const char* nodeDisplayName(NodeType t)
         case T::EnumToInt:      return "Enum to Int";
         case T::IntToEnum:      return "Int to Enum";
         case T::EnumToString:   return "Enum to String";
+        case T::MakeVector2:    return "Make Vector 2";
+        case T::MakeVector3:    return "Make Vector 3";
+        case T::MakeVector4:    return "Make Vector 4";
+        case T::BreakVector2:   return "Break Vector 2";
+        case T::BreakVector3:   return "Break Vector 3";
+        case T::BreakVector4:   return "Break Vector 4";
         default:              return "?";
     }
 }
@@ -649,6 +680,15 @@ const char* nodeTooltip(NodeType t)
         case T::IntToEnum:    return "Reinterprets an Int as the chosen Enum asset's value.";
         case T::EnumToString: return "Outputs the NAME of the enum entry matching the value\n"
                    "(empty when no entry matches).";
+        case T::MakeVector2:  return "Builds a Vec2 from two floats.";
+        case T::MakeVector3:  return "Builds a vector from three floats — the pin type every\n"
+                   "engine node that takes a position, velocity or direction uses.\n"
+                   "W is left at 0; for a colour with alpha use Make Vector 4.";
+        case T::MakeVector4:  return "Builds a vector from four floats. Same pin type as\n"
+                   "Make Vector 3, with W wired instead of zeroed.";
+        case T::BreakVector2: return "Splits a Vec2 into X and Y.";
+        case T::BreakVector3: return "Splits a vector into X, Y and Z, dropping W.";
+        case T::BreakVector4: return "Splits a vector into X, Y, Z and W.";
         default: return "";
     }
 }
@@ -701,6 +741,12 @@ const char* nodeCategory(NodeType t)
         case T::ConstTransform: return "Literals";
         case T::Add: case T::Subtract: case T::Multiply: case T::Divide:
         case T::Greater: case T::Less: case T::Equals: return "Math";
+        // "Math" and not a new "Vector" category on purpose: the category list
+        // is HOST data (LevelScriptPanel/UIEditorPanel each carry their own),
+        // so a new one has to be added to every host or the nodes are invisible
+        // in that editor. Math is already in all of them.
+        case T::MakeVector2: case T::MakeVector3: case T::MakeVector4:
+        case T::BreakVector2: case T::BreakVector3: case T::BreakVector4: return "Math";
         case T::And: case T::Or: case T::Not: return "Logic";
         case T::Concat: case T::ToString: return "String";
         case T::BindEvent:
@@ -2530,6 +2576,32 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::FlipFlop:
         // Which side the last execution took (A = true); false before any run.
         return Value::ofBool(m_ctx.getNodeState ? m_ctx.getNodeState(n.id).b : false);
+    case T::MakeVector2:
+        return Value::ofVec2({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f });
+    case T::MakeVector3:
+        // W stays 0 — this is a vector, not a colour (see the NodeType comment).
+        return Value::ofColor({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
+                                evalInput(n, 2, depth + 1).f, 0.0f });
+    case T::MakeVector4:
+        return Value::ofColor({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
+                                evalInput(n, 2, depth + 1).f, evalInput(n, 3, depth + 1).f });
+    case T::BreakVector2:
+    {
+        const glm::vec2 v = evalInput(n, 0, depth + 1).v2;
+        return Value::ofFloat(dataOutPin == 1 ? v.y : v.x);
+    }
+    case T::BreakVector3:
+    case T::BreakVector4:
+    {
+        const glm::vec4 v = evalInput(n, 0, depth + 1).col;
+        switch (dataOutPin)
+        {
+            case 1:  return Value::ofFloat(v.y);
+            case 2:  return Value::ofFloat(v.z);
+            case 3:  return Value::ofFloat(v.w);   // BreakVector3 has no pin 3
+            default: return Value::ofFloat(v.x);
+        }
+    }
     case T::Add:      return Value::ofFloat(evalInput(n, 0, depth + 1).f + evalInput(n, 1, depth + 1).f);
     case T::Subtract: return Value::ofFloat(evalInput(n, 0, depth + 1).f - evalInput(n, 1, depth + 1).f);
     case T::Multiply: return Value::ofFloat(evalInput(n, 0, depth + 1).f * evalInput(n, 1, depth + 1).f);

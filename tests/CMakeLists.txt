@@ -212,7 +212,7 @@ endif()
 # no compiler is needed at test runtime.
 set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
 set(HCGEN_CLASSES
-    flow_branch_sequence coerce_matrix math_ops variables functions_basic
+    flow_branch_sequence coerce_matrix math_ops vector_ops variables functions_basic
     functions_recursive foreach_arrays events_multi widget_props limits_smoke
     functions_locals engine_pure_multiout engine_exec_cached
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink

@@ -1655,6 +1655,21 @@ private:
         case NT::FlipFlop:
             // IsA = the side the LAST execution took (false before any run).
             return stateMember(n.id);
+        case NT::MakeVector2:
+            return "glm::vec2(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::MakeVector3:
+            // W is 0, matching the interpreter — a vector, not a colour.
+            return "glm::vec4(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+                   input(n, 2, fnCtx) + ", 0.0f)";
+        case NT::MakeVector4:
+            return "glm::vec4(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+                   input(n, 2, fnCtx) + ", " + input(n, 3, fnCtx) + ")";
+        case NT::BreakVector2:
+            return "(" + input(n, 0, fnCtx) + ")." + (outIdx == 1 ? "y" : "x");
+        case NT::BreakVector3:
+        case NT::BreakVector4:
+            return "(" + input(n, 0, fnCtx) + ")." +
+                   (outIdx == 1 ? "y" : outIdx == 2 ? "z" : outIdx == 3 ? "w" : "x");
         case NT::Add:      return "(" + input(n, 0, fnCtx) + " + " + input(n, 1, fnCtx) + ")";
         case NT::Subtract: return "(" + input(n, 0, fnCtx) + " - " + input(n, 1, fnCtx) + ")";
         case NT::Multiply: return "(" + input(n, 0, fnCtx) + " * " + input(n, 1, fnCtx) + ")";

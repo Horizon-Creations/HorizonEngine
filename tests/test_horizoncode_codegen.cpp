@@ -420,6 +420,30 @@ TEST_CASE("codegen parity: math_ops")
 	CHECK(p.var("str").s == "3.5x");  // %g + Concat
 }
 
+TEST_CASE("codegen parity: vector_ops")
+{
+	ParityPair p("fix/vector_ops");
+	p.fire("Build");
+
+	CHECK(p.var("x2").f == 1.5f);
+	CHECK(p.var("y2").f == -2.5f);
+
+	CHECK(p.var("x3").f == 3.0f);
+	CHECK(p.var("y3").f == 4.0f);
+	CHECK(p.var("z3").f == -5.0f);
+	// Make Vector 3 leaves W at zero — read back through a Break Vector 4.
+	CHECK(p.var("w3drop").f == 0.0f);
+
+	CHECK(p.var("x4").f == 0.25f);
+	CHECK(p.var("y4").f == 0.5f);
+	CHECK(p.var("z4").f == 0.75f);
+	CHECK(p.var("w4").f == 1.25f);
+
+	CHECK(p.var("rad").f == doctest::Approx(3.14159265f).epsilon(1e-5));
+	CHECK(p.var("deg").f == doctest::Approx(180.0f).epsilon(1e-5));
+	CHECK(p.var("roundTrip").f == doctest::Approx(57.5f).epsilon(1e-5));
+}
+
 TEST_CASE("codegen parity: variables")
 {
 	ParityPair p("fix/variables");

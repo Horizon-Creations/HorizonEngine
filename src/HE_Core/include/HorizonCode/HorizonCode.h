@@ -188,6 +188,22 @@ enum class NodeType : uint8_t
     // PlayerHost, Lua, Python and every graph authored before this node working
     // without knowing it exists.
     InputAction,
+
+    // ── Vector assembly ──────────────────────────────────────────────────────
+    // Build a vector pin from separate floats, and take one apart again.
+    // Without these a graph could not produce a vector AT ALL: the only vector
+    // literals are ConstVec2 and ConstColor, and ConstColor is edited through a
+    // colour picker clamped to 0..1 — so a computed velocity or position was
+    // simply not expressible, while Lua got the same API as three plain floats.
+    //
+    // Vector 3 and Vector 4 BOTH use PinType::Color. There is no Vec3 pin, and
+    // deliberately so: every engine API that takes a vec3 (Set Position, Set
+    // Velocity, Set Camera Target's neighbours …) already declares its pin as
+    // Color, so a separate Vec3 type would connect to none of them. Make Vector
+    // 3 leaves w at 0 — vector semantics. For a colour WITH alpha, use 4.
+    MakeVector2, MakeVector3, MakeVector4,
+    BreakVector2, BreakVector3, BreakVector4,
+
     COUNT
 };
 
