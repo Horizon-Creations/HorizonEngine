@@ -1379,7 +1379,14 @@ struct ClassState
 	std::unique_ptr<HorizonWorld> compWorld;
 	Entity      compRoot = entt::null;
 	Entity      compSel  = entt::null;
-	bool        showComponents = false;
+	// Which half of the class is on screen. It used to be called
+	// "showComponents", which described the middle column rather than the view:
+	// the components are only the LIST, and next to it sits the thing they add
+	// up to. Unreal calls that half the Viewport and it is the better name — you
+	// go there to see the character, not to see a list.
+	bool        showViewport = false;
+	// Orbit for that preview, per tab so switching back finds it as you left it.
+	float       previewYaw = 0.6f, previewPitch = 0.25f, previewDist = 4.0f;
 	// The base class RESOLVED through the chain: with HorizonCode inheritance
 	// `baseClass` may name another class asset, and everything that used to ask
 	// the raw string — which lifecycle events to offer, whether this is a
@@ -1492,6 +1499,90 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 // including its asset slots — instead of a parallel one to keep in step.
 // Undo is null: a snapshot here would capture the SCENE, which is not what is
 // being edited.
+// The Viewport half's middle column. Draws the selected component's asset
+// through the renderer's per-asset preview paths (the same ones the Skeletal
+// Mesh and Material tabs use), with the orbit those tabs established.
+void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
+{
+	HE::UUID skeletalId{}, staticId{};
+	if (reg.valid(st.compSel))
+	{
+		if (const auto* sm = reg.try_get<SkeletalMeshComponent>(st.compSel)) skeletalId = sm->meshAssetId;
+		if (const auto* m  = reg.try_get<MeshComponent>(st.compSel))         staticId   = m->meshAssetId;
+	}
+
+	if (skeletalId == HE::UUID{} && staticId == HE::UUID{})
+	{
+		ImGui::TextDisabled("%s", reg.valid(st.compSel)
+			? "Nothing to draw for this component.\n"
+			  "Select one with a mesh — or assign one on the right."
+			: "Select a component.");
+		return;
+	}
+
+	ImVec2 av = ImVec2(std::max(64.0f, ImGui::GetContentRegionAvail().x),
+	                   std::max(64.0f, ImGui::GetContentRegionAvail().y));
+	// The material path renders SQUARE (one `size`), the skeletal one takes a
+	// width and a height. Squaring the pane for both keeps a mesh from
+	// stretching when the column is dragged narrow.
+	const float side = std::min(av.x, av.y);
+	if (skeletalId == HE::UUID{}) av = ImVec2(side, side);
+	const ImVec2 org = ImGui::GetCursorScreenPos();
+
+	void* tex = nullptr;
+	if (ctx.renderer && ctx.contentManager)
+	{
+		if (skeletalId != HE::UUID{})
+		{
+			// Empty bone matrices = the bind pose, which is what a class editor
+			// should show: the character as authored, not mid-animation.
+			static const std::vector<glm::mat4> kBindPose;
+			tex = ctx.renderer->RenderSkeletalPreview(*ctx.contentManager, skeletalId, kBindPose,
+				static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
+				st.previewYaw, st.previewPitch, st.previewDist, /*showSkeleton=*/false);
+		}
+		else
+		{
+			// A static mesh goes through the MATERIAL preview with a mesh
+			// override — that path already frames an arbitrary mesh to its
+			// bounds, which is the whole job here.
+			HE::UUID materialId{};
+			if (const auto* mat = reg.try_get<MaterialComponent>(st.compSel))
+				materialId = mat->materialAssetId;
+			if (materialId == HE::UUID{}) materialId = HE::kDefaultMaterialId;
+			tex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, materialId,
+				static_cast<uint32_t>(side), st.previewYaw, st.previewPitch, st.previewDist,
+				/*shape=*/0, staticId);
+		}
+	}
+
+	if (tex)
+	{
+		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
+			flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+	}
+	else
+		ImGui::TextDisabled("(preview unavailable on this backend)");
+
+	// Same orbit as the Skeletal Mesh tab, down to the right-drag: the main
+	// viewport steers with RMB and that muscle memory lands here too.
+	ImGui::SetCursorScreenPos(org);
+	ImGui::InvisibleButton("##hccompOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+	if (ImGui::IsItemActive() &&
+	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
+	{
+		const ImVec2 md = ImGui::GetIO().MouseDelta;
+		st.previewYaw   -= md.x * 0.01f;
+		st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
+	}
+	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+		st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
+}
+
 void drawComponentsBody(AppContext& ctx, ClassState& st)
 {
 	ensureComponentWorld(st, {});
@@ -1501,23 +1592,53 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 
 	const float listW = 220.0f;
 	ImGui::BeginChild("##hccomp_tree", ImVec2(listW, 0), true);
-	ImGui::TextDisabled("Subtree");
+	ImGui::TextDisabled("Components");
 	ImGui::Separator();
-	for (auto [e, name] : reg.view<NameComponent>().each())
+	// A real tree, not the flat list this used to be. The class HAS a hierarchy
+	// — a PlayerCharacter carries a Camera child — and listing parent and child
+	// side by side said the opposite of what the subtree actually is.
 	{
-		ImGui::PushID((int)entt::to_integral(e));
-		const bool isRoot = (e == st.compRoot);
-		if (ImGui::Selectable((isRoot ? name.name + "  (root)" : name.name).c_str(),
-		                      e == st.compSel))
-			st.compSel = e;
-		ImGui::PopID();
+		// Recursive lambda via an explicit self-parameter: the walk needs to
+		// call itself and a capturing lambda cannot name its own type.
+		const auto drawNode = [&](auto&& self, Entity e) -> void
+		{
+			if (!reg.valid(e)) return;
+			const auto* nameC = reg.try_get<NameComponent>(e);
+			const std::string label = nameC ? nameC->name : std::string("Entity");
+			const auto* hier = reg.try_get<HierarchyComponent>(e);
+			const bool hasKids = hier && !hier->children.empty();
+
+			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+			                           ImGuiTreeNodeFlags_SpanAvailWidth |
+			                           ImGuiTreeNodeFlags_DefaultOpen;
+			if (!hasKids) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+			if (e == st.compSel) flags |= ImGuiTreeNodeFlags_Selected;
+
+			ImGui::PushID((int)entt::to_integral(e));
+			const bool open = ImGui::TreeNodeEx("##n", flags, "%s%s",
+			                                    label.c_str(), e == st.compRoot ? "  (root)" : "");
+			if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) st.compSel = e;
+			if (open && hasKids)
+			{
+				// A copy: adding or removing a child inside the walk would
+				// invalidate the vector we are iterating.
+				const std::vector<Entity> kids = hier->children;
+				for (Entity c : kids) self(self, c);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		};
+		drawNode(drawNode, st.compRoot);
 	}
 	ImGui::Separator();
 	if (ImGui::SmallButton("Add Child"))
 	{
+		// Under the SELECTION, not always under the root: a tree you can only
+		// grow one level deep is a list with indentation.
+		const Entity parent = reg.valid(st.compSel) ? st.compSel : st.compRoot;
 		const Entity child = st.compWorld->createEntity("Child");
 		st.compWorld->addComponent(child, TransformComponent{});
-		st.compWorld->reparentEntity(child, st.compRoot);
+		st.compWorld->reparentEntity(child, parent);
 		st.compSel = child;
 		st.dirty = true;
 	}
@@ -1533,7 +1654,26 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	}
 	ImGui::EndChild();
 
+	// ── Middle: what the components add up to ────────────────────────────────
+	// The reason this half is called Viewport. Today it draws the SELECTED
+	// component's asset — a skeletal mesh in its bind pose, a static mesh —
+	// through the per-asset preview paths the renderer already has.
+	//
+	// It is deliberately not yet the whole assembly. Mesh AND collider AND
+	// camera arm in one image needs a renderer entry point that extracts an
+	// arbitrary world into its own target, which is per-backend work; this
+	// shows something useful without any of it. The gap is worth naming rather
+	// than papering over: what you see is one component, not the character.
 	ImGui::SameLine();
+	{
+		const float detailsW = 320.0f;
+		const float previewW = std::max(160.0f, ImGui::GetContentRegionAvail().x - detailsW);
+		ImGui::BeginChild("##hccomp_preview", ImVec2(previewW, 0), true);
+		drawComponentPreview(ctx, st, reg);
+		ImGui::EndChild();
+		ImGui::SameLine();
+	}
+
 	ImGui::BeginChild("##hccomp_details", ImVec2(0, 0), true);
 	if (reg.valid(st.compSel))
 	{
@@ -1699,12 +1839,12 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		// the Bar places its cells into a draw list — the two do not know about
 		// each other, and the widget lands on top of the band's own text.
 		bar.group();
-		if (bar.item("##hcmodegraph", nullptr, "Graph", !st.showComponents, true,
+		if (bar.item("##hcmodeviewport", nullptr, "Viewport", st.showViewport, true,
+		             "The class's body — its components, and what they add up to"))
+			st.showViewport = true;
+		if (bar.item("##hcmodecode", nullptr, "Code", !st.showViewport, true,
 		             "The class's logic"))
-			st.showComponents = false;
-		if (bar.item("##hcmodecomp", nullptr, "Components", st.showComponents, true,
-		             "The class's body — the components an instance brings with it"))
-			st.showComponents = true;
+			st.showViewport = false;
 		bar.endGroup();
 
 		// The base class was fixed at creation time before, which made "turn
@@ -1793,7 +1933,7 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
-	if (st.showComponents)
+	if (st.showViewport)
 		drawComponentsBody(ctx, st);
 	else
 		drawGraphBody(st.graph, st.events, /*allowCustomEvents=*/true, kindLabel.c_str(),
