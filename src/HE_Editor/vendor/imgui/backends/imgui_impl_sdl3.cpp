@@ -461,8 +461,14 @@ bool ImGui_ImplSDL3_ProcessEvent(const SDL_Event* event)
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
         {
+            // HE-PATCH(stuck-keys): gate only key-DOWNs on the viewport lookup. A key-UP
+            // whose windowID no longer maps to a live viewport (OS window destroyed that
+            // instant, brief no-key-window gap on macOS) must still reach ImGui — dropping
+            // it leaves the key logically held forever, and e.g. a stuck Enter then
+            // insta-picks the first entry of every search palette via key-repeat. A
+            // redundant key-up is a harmless no-op. Keep this patch when re-vendoring.
             ImGuiViewport* viewport = ImGui_ImplSDL3_GetViewportForWindowID(event->key.windowID);
-            if (viewport == nullptr)
+            if (viewport == nullptr && event->type == SDL_EVENT_KEY_DOWN)
                 return false;
             //IMGUI_DEBUG_LOG("SDL_EVENT_KEY_%s : key=0x%08X ('%s'), scancode=%d ('%s'), mod=%X, windowID=%d, viewport=%08X\n",
             //    (event->type == SDL_EVENT_KEY_DOWN) ? "DOWN" : "UP  ", event->key.key, SDL_GetKeyName(event->key.key), event->key.scancode, SDL_GetScancodeName(event->key.scancode), event->key.mod, event->key.windowID, viewport ? viewport->ID : 0);

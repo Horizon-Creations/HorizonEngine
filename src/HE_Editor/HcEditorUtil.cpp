@@ -718,6 +718,7 @@ namespace
 		bool scrollTo    = false;         // bring the highlight into view
 		bool refocus     = false;         // Enter deactivates the field — take it back
 		bool queryDirty  = false;         // query edited this frame → re-pick the best match
+		bool swallowEnter = false;        // Enter was already held when the menu opened
 	};
 	SearchNav s_nav;
 
@@ -755,8 +756,18 @@ std::string searchMenuBegin(const char* id, const char* hint, float width)
 	{
 		s_nav = SearchNav{};
 		s_nav.scrollTo = true;
+		// An Enter that is ALREADY held when the menu opens was never aimed at
+		// this menu — it is a stuck key (a key-up the backend lost) or a press
+		// carried over from whatever the user confirmed last. Honoring it would
+		// insta-pick the default highlight the moment the popup appears, so
+		// Enter is swallowed until the key has been seen released once.
+		s_nav.swallowEnter = ImGui::IsKeyDown(ImGuiKey_Enter)
+		                  || ImGui::IsKeyDown(ImGuiKey_KeypadEnter);
 		ImGui::SetKeyboardFocusHere();
 	}
+	if (s_nav.swallowEnter && !ImGui::IsKeyDown(ImGuiKey_Enter)
+	                       && !ImGui::IsKeyDown(ImGuiKey_KeypadEnter))
+		s_nav.swallowEnter = false;
 	// EnterReturnsTrue deactivates the field, so an Enter that picks nothing (no
 	// match) would leave the user typing into a dead box — take the focus back.
 	if (s_nav.refocus) { ImGui::SetKeyboardFocusHere(); s_nav.refocus = false; }
@@ -765,7 +776,7 @@ std::string searchMenuBegin(const char* id, const char* hint, float width)
 	if (ImGui::InputTextWithHint(id, hint, &s_nav.text,
 	        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory,
 	        searchNavCallback))
-	{ s_nav.enterQueued = true; s_nav.refocus = true; }
+	{ s_nav.enterQueued = !s_nav.swallowEnter; s_nav.refocus = true; }
 
 	std::string q = s_nav.text;
 	std::transform(q.begin(), q.end(), q.begin(),

@@ -1669,8 +1669,63 @@ void EditorApplication::appendPlayLog(HE::LogLevel level, const char* message)
 	m_playLog.push_back({ level, msg, HE::api::time::elapsed(), 1 });
 }
 
+#ifdef HE_IMGUI_ENABLED
+// Defined (non-static) in the vendored SDL3 backend; declared here instead of in
+// its header because the header doesn't know the SDL key types.
+extern ImGuiKey ImGui_ImplSDL3_KeyEventToImGuiKey(SDL_Keycode keycode, SDL_Scancode scancode);
+
+// HE-PATCH(stuck-keys) watchdog: once a second, compare ImGui's idea of the
+// keyboard against SDL's. A key ImGui thinks is held while SDL says it is up
+// means a key-up never reached ImGui (see the HE-PATCH in imgui_impl_sdl3.cpp's
+// key handler — before that patch, key-ups whose windowID had no live viewport
+// were silently dropped, leaving the key "held" forever; a stuck Enter then
+// insta-picked the first entry of every node palette). Healing is a synthetic
+// release, logged so any remaining loss route shows up in the log.
+static void healStuckImGuiKeys(float dt)
+{
+	static float s_sinceCheck = 0.0f;
+	s_sinceCheck += dt;
+	if (s_sinceCheck < 1.0f) return;
+	s_sinceCheck = 0.0f;
+	// Unfocused, ImGui clears its own key state (AppFocusLost) and SDL's state
+	// may legitimately lag behind the OS — nothing to compare.
+	if (!SDL_GetKeyboardFocus()) return;
+
+	int numKeys = 0;
+	const bool* ks = SDL_GetKeyboardState(&numKeys);
+	if (!ks) return;
+
+	// Several scancodes can map onto one ImGuiKey, so collect the whole physical
+	// state first. Only keys the mapping can produce are ever healed — that
+	// keeps mouse/gamepad ImGuiKeys (never in this map) untouchable.
+	bool coverable[ImGuiKey_NamedKey_COUNT] = {};
+	bool physDown[ImGuiKey_NamedKey_COUNT]  = {};
+	for (int sc = 0; sc < numKeys; ++sc)
+	{
+		const SDL_Keycode kc = SDL_GetKeyFromScancode((SDL_Scancode)sc, SDL_KMOD_NONE, true);
+		const ImGuiKey k = ImGui_ImplSDL3_KeyEventToImGuiKey(kc, (SDL_Scancode)sc);
+		if (k == ImGuiKey_None) continue;
+		const int i = (int)k - (int)ImGuiKey_NamedKey_BEGIN;
+		if (i < 0 || i >= ImGuiKey_NamedKey_COUNT) continue;
+		coverable[i] = true;
+		if (ks[sc]) physDown[i] = true;
+	}
+	for (int i = 0; i < ImGuiKey_NamedKey_COUNT; ++i)
+	{
+		const ImGuiKey k = (ImGuiKey)((int)ImGuiKey_NamedKey_BEGIN + i);
+		if (!coverable[i] || physDown[i] || !ImGui::IsKeyDown(k)) continue;
+		ImGui::GetIO().AddKeyEvent(k, false);
+		HE_LOG_WARN(Editor, "Stuck key healed: ImGui held '%s' but SDL says it is up "
+			"(a key-up event was lost)", ImGui::GetKeyName(k));
+	}
+}
+#endif // HE_IMGUI_ENABLED
+
 void EditorApplication::OnRender(float dt)
 {
+#ifdef HE_IMGUI_ENABLED
+	if (m_imguiReady) healStuckImGuiKeys(dt);
+#endif
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
 	if (m_isPlaying)
