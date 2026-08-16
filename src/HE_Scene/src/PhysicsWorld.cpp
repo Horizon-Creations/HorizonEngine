@@ -413,9 +413,21 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     for (auto [entity, transform, cc] :
          reg.view<TransformComponent, CharacterControllerComponent>().each())
     {
-        // Entities with both RigidBody and CharacterController: skip as body.
-        if (reg.any_of<RigidBodyComponent>(entity))
-            continue;
+        // An entity carrying BOTH a CharacterController and a RigidBody used to
+        // be skipped here — the comment said "skip as body", but this is the
+        // CHARACTER loop, so what it actually skipped was the character.
+        //
+        // That combination is not exotic: EntityHost::defaultComponents gives it
+        // to every PlayerCharacter, because the kinematic body is the collision
+        // proxy other bodies see and the character is what moves. Skipping the
+        // character left those entities as a bare kinematic body — unable to
+        // walk, never grounded, with movement.* reading zeros forever. A default
+        // player could not move at all.
+        //
+        // Both are created now. The two are kept from fighting elsewhere: the
+        // body write-back skips character entities (the character owns the
+        // transform), the character ignores its own body while stepping, and the
+        // body is dragged along after (see step()).
 
         // Use ColliderComponent if present (Capsule/Box/Sphere), else default capsule.
         JPH::ShapeSettings::ShapeResult shapeResult;
@@ -576,8 +588,17 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         JPH::Vec3 gravity(0.0f, -grav, 0.0f);
         euSettings.mWalkStairsStepUp = JPH::Vec3(0, cc->stepHeight, 0);
 
+        // Ignore its OWN collision proxy. The kinematic body now follows the
+        // character (see the MoveKinematic below), which means it sits exactly
+        // where the character is — and a character that collides with itself
+        // cannot move at all. Before the proxy followed, this only bit at the
+        // spawn point, which is why it went unnoticed.
+        const auto bodyIt = m_impl->entityToBody.find(entityId);
+        const JPH::IgnoreSingleBodyFilter selfFilter(
+            bodyIt != m_impl->entityToBody.end() ? bodyIt->second : JPH::BodyID());
+
         character->ExtendedUpdate(dt, gravity, euSettings,
-            bpFilter, olFilter, bodyFilter, shapeFilter,
+            bpFilter, olFilter, selfFilter, shapeFilter,
             m_impl->tempAllocator);
 
         // Sync position back to transform
@@ -593,6 +614,26 @@ void PhysicsWorld::step(HorizonWorld& world, float dt)
         JPH::Vec3 newVel = character->GetLinearVelocity();
         cc->velocity   = { newVel.GetX(), newVel.GetY(), newVel.GetZ() };
         cc->isGrounded = (character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround);
+
+        // ── Drag the collision proxy along ───────────────────────────────────
+        // A character usually carries BOTH a CharacterVirtual (what moves) and a
+        // kinematic rigid body (what everything else collides with) — that is
+        // what EntityHost::defaultComponents gives every PlayerCharacter. But
+        // nothing ever moved that body: it was placed at initialize() and stayed
+        // there. So the character walked away and left a ghost of itself at its
+        // spawn point, which other bodies bumped into and which a camera boom
+        // saw as a wall.
+        //
+        // MoveKinematic rather than SetPosition: it moves the body over the step
+        // so contacts and velocities come out right, instead of teleporting it
+        // through whatever is in between.
+        if (bodyIt != m_impl->entityToBody.end())
+        {
+            const glm::quat q = glm::quat(glm::radians(transform->rotation));
+            bodyInterface.MoveKinematic(bodyIt->second,
+                JPH::RVec3(transform->position.x, transform->position.y, transform->position.z),
+                JPH::Quat(q.x, q.y, q.z, q.w), dt);
+        }
     }
 }
 

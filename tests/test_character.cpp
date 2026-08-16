@@ -196,6 +196,74 @@ TEST_CASE("CharacterController: game code can rotate a character with a kinemati
     }
 }
 
+TEST_CASE("CharacterController: an entity with a rigid body still GETS a character")
+{
+	// The root cause behind "a default player cannot move". The character loop
+	// skipped every entity that also had a RigidBodyComponent — the comment said
+	// "skip as body", but this is the character loop, so what it skipped was the
+	// character. And that combination is what EntityHost::defaultComponents
+	// hands every PlayerCharacter, so a stock player was a bare kinematic body:
+	// no walking, never grounded, movement.* reading zeros forever.
+	HorizonWorld world;
+	buildFloor(world);
+	Entity player = buildDefaultPlayer(world, { 0.0f, 3.0f, 0.0f });
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+
+	const uint32_t id = static_cast<uint32_t>(player);
+	for (int i = 0; i < 90; ++i) phys.step(world, PhysicsWorld::kFixedDt);
+
+	// It fell and it landed — both only possible if a character exists at all.
+	const auto& p = world.registry().get<TransformComponent>(player).position;
+	INFO("landed at y=", p.y);
+	CHECK(p.y < 2.0f);
+	CHECK(phys.isCharacterGrounded(id));
+}
+
+TEST_CASE("CharacterController: the collision proxy follows the character")
+{
+	// A character carries BOTH a CharacterVirtual (what moves) and a kinematic
+	// rigid body (what everything else collides with). Nothing used to move the
+	// body: it was placed at initialize() and stayed. The character walked off
+	// and left a ghost of itself at its spawn point — something other bodies
+	// bumped into, and something a camera boom read as a wall.
+	//
+	// Measured through a RAYCAST rather than the transform, because the
+	// transform is the character's and always right; the question is where the
+	// BODY is, and only a query can answer that.
+	HorizonWorld world;
+	buildFloor(world);
+	Entity player = buildDefaultPlayer(world, { 0.0f, 1.0f, 0.0f });
+
+	PhysicsWorld phys;
+	phys.initialize(world);
+
+	// Before anything moves, the proxy is findable where the character spawned.
+	// Cast along -Z→+Z so the floor (a wide, flat box below) is never in the way.
+	REQUIRE(phys.raycast({ 0.0f, 1.0f, -5.0f }, { 0.0f, 0.0f, 1.0f }, 10.0f).hit);
+
+	// Walk the character well clear of where it started.
+	for (int i = 0; i < 60; ++i)
+	{
+		phys.setCharacterVelocity(static_cast<uint32_t>(player), { 6.0f, 0.0f, 0.0f });
+		phys.step(world, PhysicsWorld::kFixedDt);
+	}
+	const auto& pt = world.registry().get<TransformComponent>(player).position;
+	INFO("character ended at (", pt.x, ", ", pt.y, ", ", pt.z, ")");
+	const float movedTo = pt.x;
+	REQUIRE(movedTo > 2.0f);   // it really did leave
+
+	// Nothing left behind at the spawn point…
+	const auto ghost = phys.raycast({ 0.0f, 1.0f, -5.0f }, { 0.0f, 0.0f, 1.0f }, 3.0f);
+	CHECK_FALSE(ghost.hit);
+
+	// …and the proxy is where the character now is.
+	const auto here = phys.raycast({ movedTo, 1.0f, -5.0f }, { 0.0f, 0.0f, 1.0f }, 10.0f);
+	REQUIRE(here.hit);
+	CHECK(here.entityId == static_cast<uint32_t>(player));
+}
+
 TEST_CASE("CharacterController: a plain kinematic body still gets its transform written back")
 {
     // The guard above keys on CharacterControllerComponent, not on "kinematic" —
