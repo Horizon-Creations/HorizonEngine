@@ -173,33 +173,139 @@ nicht ausgeliefert und verdrahtet wird, feuert dort nichts —
 
 ## CP3 — Klassen-Editor: Code und Viewport trennen
 
-*(Detailplanung folgt, sobald die Bestandsaufnahme der Panels vorliegt.)*
+### Was heute da ist
 
-Zielbild nach Unreals Blueprint-Editor:
+Der Klassen-Editor (`LevelScriptPanel.cpp:1654-1829`, die Datei beherbergt
+Level Script, Game Instance und Klassen in einem) hat **zwei Modi**, umgeschaltet
+über zwei Toolbar-Zellen — keine Tab-Leiste, keine Dock-Struktur:
+
+* **Graph** → `drawGraphBody` (`:1125`): 220-px-Spalte mit Variablen, Funktionen
+  und Details, daneben die Node-Canvas.
+* **Components** → `drawComponentsBody` (`:1517`): 220-px-**flache Liste** aller
+  benannten Entities, daneben `InspectorPanel::renderFor` gegen eine echte
+  `HorizonWorld`.
+
+Diese `compWorld` ist der wichtigste Bestandteil für den Umbau. Sie wird von
+`ensureComponentWorld` (`:1462`) aus dem Prefab-Blob der Klasse instanziiert —
+mit Vererbung: eigener `componentBlob` → der des nächsten Vorfahren →
+`EntityHost::defaultComponents`. **Der Details-Bereich ist damit schon der echte
+Inspector auf einer echten Welt.** Was fehlt, ist das Bild und ein Baum.
+
+### Zielbild
+
+Aus „Graph / Components" wird **„Code / Viewport"**. Der Code-Modus bleibt, wie
+er ist; der Components-Modus wird zum Viewport-Modus und bekommt eine Spalte
+dazu:
 
 ```
-┌──────────────┬─────────────────────────────┬──────────────┐
-│ Components   │  [Viewport] [Code]          │ Details      │
-│              │                             │              │
-│ Player       │   3D-Vorschau der Klasse    │ Eigenschaften│
-│ ├ Capsule    │   mit Mesh, Collider,       │ der Auswahl  │
-│ ├ SkelMesh   │   Kamera-Arm                │              │
-│ └ Camera     │                             │ z.B. welche  │
-│              │                             │ State Machine│
-└──────────────┴─────────────────────────────┴──────────────┘
+Viewport                                      Code
+┌──────────┬──────────────────┬──────────┐   ┌──────────┬──────────────────────┐
+│Components│  3D-Vorschau     │ Details  │   │Variablen │                      │
+│          │                  │          │   │Funktionen│   Node-Canvas        │
+│ Player   │   Mesh, Collider │ z.B. die │   │Details   │                      │
+│ ├ Capsule│   Kamera-Arm     │ State    │   │          │                      │
+│ ├SkelMesh│                  │ Machine  │   │          │                      │
+│ └ Camera │                  │          │   │          │                      │
+└──────────┴──────────────────┴──────────┘   └──────────┴──────────────────────┘
 ```
+
+Damit schließt sich der Kreis zu CP1: weil die State Machine an
+`SkeletalMeshComponent` hängt, zeigt das Anwählen der Mesh-Komponente im Baum
+rechts direkt den Asset-Slot „welche State Machine" — genau die Stelle, an der
+Unreal die „Anim Class" führt.
+
+### Arbeit
+
+1. **Die zwei Toolbar-Zellen umbenennen** und `st.showComponents` in einen
+   Modus-Enum überführen (`:1714-1798`). Klein.
+2. **Flache Liste → echter Hierarchie-Baum.** `drawComponentsBody:1525` listet
+   heute alle `NameComponent`-Entities nebeneinander; die Klasse hat seit der
+   Kamera aber eine Hierarchie (`Player → Camera`). `OutlinerPanel` hat den
+   Baum-Code samt Drag&Drop bereits — Muster übernehmen, nicht neu erfinden.
+3. **Die Vorschau-Spalte einhängen** (CP4).
+
+Layout-Vorlage ist `MaterialEditorPanel.cpp` (`:2034-2368`): feste linke Spalte
+mit Vorschau oben (`##matPreview`, Höhe 240) und Eigenschaften darunter, rechts
+die Canvas. Strukturell ist das fast schon das Blueprint-Layout.
+
+**Kein verschachteltes DockSpace.** Asset-Tabs sind heute `NoDocking`-Fenster auf
+einem berechneten Rechteck (`EditorUI.cpp:2388-2420`); dockbare Sub-Panels
+innerhalb eines Klassen-Tabs wären ein Bruch mit dem Muster aller anderen
+Editoren und bräuchten eine eigene ini-Sektion. Handgebaute Spalten bleiben.
+
+**Nicht vergessen:** `HorizonCodeClassPanel::collabDocs` (`:1615`) und
+`reloadFromDisk` (`:1625`) hängen am Panel-State.
 
 ---
 
-## CP4 — Viewport-Vorschau
+## CP4 — Die Vorschau
 
-*(Detailplanung folgt.)*
+Hier liegt die Unbekannte, und sie hat einen klaren Preis.
+
+**Die vorhandene Vorschau-Infrastruktur ist per Asset, nicht per Welt.**
+`IRenderer` bietet `RenderSkeletalPreview`, `RenderMaterialPreview` (optional mit
+`meshId`-Override), `RenderParticlePreview` und die Thumbnail-Pfade — jeder
+rendert **genau ein Asset** in ein eigenes Offscreen-Target. Keiner nimmt eine
+`HorizonWorld`. (`RenderExtractor` hat entgegen der Vermutung *keine*
+Preview-Pfade; er ist nur der ECS→`RenderWorld`-Snapshot.)
+
+Deshalb in zwei Stufen:
+
+### CP4a — Vorschau der ausgewählten Komponente
+
+Zeigt das, was die angewählte Komponente ist: `SkeletalMeshComponent` →
+`RenderSkeletalPreview` (Bind-Pose oder ein Clip), `MeshComponent` →
+`RenderMaterialPreview` mit `meshId`-Override. Vorlage ist
+`SkeletalMeshEditorPanel.cpp:220-267` — rund 30 Zeilen inklusive Orbit.
+
+**Keine Backend-Arbeit.** Ehrliche Grenze: das ist die Vorschau *einer*
+Komponente, nicht des Zusammenbaus. Collider und Kamera-Arm fehlen.
+
+### CP4b — Vorschau des Zusammenbaus
+
+Das, was du eigentlich willst: Mesh **und** Collider **und** Kamera-Arm in einem
+Bild, mit Klick-Auswahl.
+
+Dafür braucht es eine neue `IRenderer`-Methode in der Art
+`RenderWorldPreview(world, root, size, yaw, pitch, dist)`, die eine beliebige
+Welt extrahiert und in ein eigenes FBO rendert. Die Bausteine liegen bereit —
+`RenderExtractor` ist public und exportiert, jedes Backend hat schon ein
+`m_extractor`-Member, und `RenderSkeletalPreview` (`OpenGLRenderer.cpp:7700ff`)
+ist die exakte Vorlage für „eigenes FBO, lazy resize, kleines eigenes Shaderset".
+
+**Aber es ist Arbeit pro Backend** — GL, Metal, Vulkan, D3D11, D3D12. Auf dieser
+Maschine sind nur GL und Metal baubar; die anderen drei wären wieder blind
+geschrieben. Das ist der teuerste Posten des ganzen Umbaus, und er ist der
+einzige, den man auch später nachziehen kann: CP4a liefert vorher schon ein Bild.
+
+Collider-Umrisse und der Kamera-Arm kommen als Debug-Linien, denselben Weg wie
+im Haupt-Viewport.
+
+---
+
+## Nebenbefund: Klassen haben kein Thumbnail
+
+`AssetThumbnailCache::thumbnailKindOf` (`:88-107`) kennt `HorizonCodeClass`
+nicht, obwohl der `componentBlob` exakt das Prefab-Format hat und der
+Prefab-Pfad (`prefabPrimaryMesh`, `:575-591`) unverändert anwendbar wäre — er
+zeichnet ein Prefab als „das erste Mesh darin". Ein paar Zeilen, und
+PlayerCharacter-Assets im Content Browser haben ein Bild statt eines Icons.
+Gehört nicht zum Umbau, ist aber der billigste sichtbare Gewinn hier.
 
 ---
 
 ## Reihenfolge
 
-CP0 und CP1 sind klein, voneinander unabhängig und schalten alles Weitere frei —
-nach CP1 ist die State Machine zum ersten Mal aus Gameplay-Code bedienbar. CP2
-ist der eigentliche Architektur-Schritt. CP3/CP4 sind der lange Teil; die
-Viewport-Vorschau ist die Unbekannte.
+| CP | Inhalt | Größe |
+|---|---|---|
+| **CP0** | Tick-Split, Animation nach dem Code-Pass | klein |
+| **CP1** | `animator.*`-Registry + Anlege-Weg mit SkeletalMesh-Gate | klein |
+| **CP2** | Sync-Graph im Animator-Asset, Palette begrenzt, Codegen | mittel |
+| **CP3** | Code/Viewport-Trennung, Hierarchie-Baum | mittel |
+| **CP4a** | Vorschau der ausgewählten Komponente | klein |
+| **CP4b** | Vorschau des Zusammenbaus, neue Renderer-Methode | groß, pro Backend |
+
+CP0 und CP1 sind unabhängig voneinander und schalten alles Weitere frei — nach
+CP1 ist die State Machine zum ersten Mal aus Gameplay-Code bedienbar. CP2 ist der
+Architektur-Schritt. CP3 + CP4a zusammen ergeben bereits einen Editor, der sich
+wie ein Blueprint-Pawn anfühlt; CP4b macht das Bild vollständig.
