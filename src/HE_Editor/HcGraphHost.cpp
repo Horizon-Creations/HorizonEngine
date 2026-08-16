@@ -831,6 +831,13 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
 	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
 
+	// Node types the hand-written "Reference" section already offers. The
+	// generic registry walk below must skip them, or a Ref-output drag lists
+	// e.g. "Get (Ref)" twice — two Selectables with the same label are the
+	// same ImGui ID, which trips the ID-conflict detector on hover (and no
+	// menus-list exclusion can express "excluded only from the generic half").
+	std::vector<NT> refOffered;
+
 	ImGui::BeginChild("##pindrag", ImVec2(240.0f, 320.0f));
 
 	// Wire the new node to the dragged pin (direction depends on the drag side).
@@ -923,6 +930,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 
 		ImGui::TextDisabled("Reference");
 		auto refItem = [&](const char* lbl, NT t){
+			refOffered.push_back(t);   // the generic walk below must skip these
 			if (matches(lbl) && HcEditorUtil::searchMenuItem(lbl))
 			{ const int id = addNode(graph, t, pos, h.currentGraph); wire(id); created = id; ImGui::CloseCurrentPopup(); } };
 		refItem("Call Function (Ref)", NT::CallExternal);
@@ -983,6 +991,8 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		for (NT t : HC::nodeRegistry())
 		{
 			if (listed(h.menus->dragExcluded, t)) continue;
+			if (std::find(refOffered.begin(), refOffered.end(), t) != refOffered.end())
+				continue;   // the "Reference" section above already offers it
 			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
 			if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
 			if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
