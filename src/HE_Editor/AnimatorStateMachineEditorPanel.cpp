@@ -13,6 +13,7 @@
 #include <ContentManager/Assets.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
+#include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <Types/Enums.h>
@@ -49,6 +50,14 @@ struct State
 	HorizonCode::Graph syncGraph;
 	GraphEditor::State syncGe;
 	int                syncSelected = 0;
+
+	// The sync graph's in-editor compile check (the Compile button) — the same
+	// hccg::generate an export runs, remembered for the toolbar readout. An
+	// error anchors to a node so "Show node" can jump to it.
+	bool        syncCompileHas  = false;
+	bool        syncCompileOk   = false;
+	std::string syncCompileMsg;
+	int         syncCompileNode = 0;
 };
 
 static AssetPanelState<State> s_states;
@@ -161,6 +170,50 @@ bool reloadFromDisk(const std::string& assetPath)
 	return true;
 }
 
+
+// The sync graph's Compile button: run the exact translation an export would —
+// one self-contained ClassSource, keyed by the asset path the way both the
+// export loop and AnimatorHost::bind key it — and remember the verdict for the
+// toolbar readout. Same round-trip through JSON the class tabs' check does, so
+// the check sees what a SHIPPED asset would contain, unsaved edits included.
+static void runSyncCompileCheck(State& st)
+{
+	std::vector<HE::hccg::ClassSource> sources;
+	HE::hccg::ClassSource src;
+	src.key = src.label = st.relPath.empty() ? st.name : st.relPath;
+	HorizonCode::fromJson(HorizonCode::toJson(st.syncGraph), src.graph);
+	sources.push_back(std::move(src));
+	const HE::hccg::Result res = HE::hccg::generate(sources, {});
+
+	st.syncCompileHas  = true;
+	st.syncCompileNode = 0;
+	if (!res.fallbacks.empty())
+	{
+		const HE::hccg::Result::Fallback& mine = res.fallbacks.front();
+		st.syncCompileOk   = false;
+		st.syncCompileMsg  = mine.reason;
+		st.syncCompileNode = mine.node;
+		// Jump to the offending node right away, like the class tabs do.
+		if (const HorizonCode::Node* n = st.syncGraph.findNode(mine.node))
+		{
+			st.syncSelected     = n->id;
+			st.syncGe.focusNode = n->id;
+			st.syncGe.selected  = n->id;
+		}
+	}
+	else
+	{
+		size_t lines = 0;
+		for (const auto& f : res.files)
+			lines += (size_t)std::count(f.contents.begin(), f.contents.end(), '\n');
+		st.syncCompileOk  = true;
+		st.syncCompileMsg = "compiles clean — " + std::to_string(lines) + " lines of C++";
+		if (!res.warnings.empty())
+			st.syncCompileMsg += " (" + std::to_string(res.warnings.size()) + " warning(s), see log)";
+		for (const auto& w : res.warnings)
+			HE_LOG_WARN(Editor, "%s", ("Sync graph compile check: " + w).c_str());
+	}
+}
 
 bool save(AppContext& ctx, const std::string& assetPath)
 {
@@ -281,8 +334,29 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			st.showSync = true;
 		bar.endGroup();
 
+		// The sync graph's compile verdict — only while that half is on screen
+		// (the STATES half is data, there is nothing to compile).
+		if (st.showSync && st.syncCompileHas)
+		{
+			bar.group();
+			bar.readout(st.syncCompileOk ? T::iconCheck : T::iconWarning,
+			            st.syncCompileMsg.c_str(),
+			            st.syncCompileOk ? T::kGood : T::kBad);
+			bar.endGroup();
+		}
+
 		if (!asset) bar.label("Asset could not be loaded", T::kBad);
 		if (T::saveButton(bar, asset != nullptr)) saveToDisk(st, ctx);
+		if (st.showSync)
+		{
+			bar.rightGroup(bar.labelGroupWidth({ "Compile" }));
+			if (bar.item("##asmsynccompile", T::iconHammer, "Compile", false, true,
+			             "Translate this sync graph to C++ the way a packaged export\n"
+			             "would. Errors highlight the offending node; a clean result\n"
+			             "means it ships compiled (otherwise it runs interpreted)."))
+				runSyncCompileCheck(st);
+			bar.endGroup();
+		}
 	}
 
 	if (st.showSync)
@@ -550,6 +624,24 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 	h.menus         = &syncMenus();
 	h.title         = [](const HC::Node& n){ return HcGraphHost::defaultNodeTitle(n); };
 	h.onEdit        = [&edited](bool){ edited = true; };
+
+	// A failed compile check means the export will ship this graph interpreted —
+	// same line + jump the HC class tabs show under their toolbar.
+	if (st.syncCompileHas && !st.syncCompileOk)
+	{
+		ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Runs interpreted.");
+		if (st.syncCompileNode != 0)
+		{
+			ImGui::SameLine();
+			if (ImGui::SmallButton("Show node"))
+				if (const HC::Node* n = st.syncGraph.findNode(st.syncCompileNode))
+				{
+					st.syncSelected     = n->id;
+					st.syncGe.focusNode = n->id;
+					st.syncGe.selected  = n->id;
+				}
+		}
+	}
 
 	const float rightW = 300.0f;
 	const float leftW  = std::max(200.0f, ImGui::GetContentRegionAvail().x - rightW);
