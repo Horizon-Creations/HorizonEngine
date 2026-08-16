@@ -268,6 +268,16 @@ TEST_CASE("entity.instance answers with the CLASS on an entity, not the sync gra
 	HE::api::Ctx c{ &world, nullptr, &cm, nullptr, &rt, 0, &entities };
 	CHECK(HE::api::entity::instance(c, (HE::api::Entity)e) == classInst);
 
+	// …and the one-step version, asked from the vantage point that matters: the
+	// SYNC instance. Both own the same entity, so "my owner's object" has to
+	// answer with the character's class and not with the asker itself.
+	const InstanceId syncInst = animators.instanceOf(e);
+	REQUIRE(syncInst != 0);
+	REQUIRE(syncInst != classInst);   // genuinely two instances on one entity
+
+	HE::api::Ctx fromSync{ &world, nullptr, &cm, nullptr, &rt, syncInst, &entities };
+	CHECK(HE::api::entity::selfObject(fromSync) == classInst);
+
 	// No EntityHost in the context (edit mode, a bare script call): 0, not a
 	// guess.
 	HE::api::Ctx bare{ &world, nullptr, &cm, nullptr, &rt, 0 };

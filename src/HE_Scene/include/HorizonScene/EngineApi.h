@@ -95,6 +95,11 @@ namespace entity {
     // something a Cast can take: Cast works on object references, and an entity
     // is not one until you ask which object is on it.
     uint32_t    instance(Ctx&, Entity e);
+    // The class instance on the CALLER's own entity — `instance(self())` in one
+    // step, and the one a sync graph almost always wants: it animates a
+    // character and needs that character's class to read anything the author
+    // put on it. Cast takes what this returns.
+    uint32_t    selfObject(Ctx&);
     // Per-entity visibility: flips every renderable component the entity carries
     // (mesh, skeletal mesh, light, particles, foliage). getVisible reads the
     // first renderable found (true when the entity has none).

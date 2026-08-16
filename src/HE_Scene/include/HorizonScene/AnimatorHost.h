@@ -80,6 +80,15 @@ public:
     bool   running() const { return m_runtime != nullptr; }
     size_t count() const { return m_byEntity.size(); }
 
+    // The sync instance on `entity` (0 when there is none). Exposed mainly so a
+    // test can ask a question FROM that instance — which is the only vantage
+    // point where "my owner's class" differs from "me".
+    HorizonCode::InstanceId instanceOf(Entity entity) const
+    {
+        const auto it = m_byEntity.find(static_cast<uint32_t>(entity));
+        return it != m_byEntity.end() ? it->second : 0;
+    }
+
 private:
     HorizonCode::Runtime* m_runtime = nullptr;
     HorizonWorld*         m_world   = nullptr;

@@ -115,6 +115,13 @@ uint32_t instance(Ctx& c, Entity e)
     // meant. EntityHost holds exactly the class bindings, which is the answer.
     return c.entities ? static_cast<uint32_t>(c.entities->instanceOf((entt::entity)e)) : 0u;
 }
+uint32_t selfObject(Ctx& c)
+{
+    // NOT the caller's own instance: an animator's sync graph asking this means
+    // "the character I animate", and that character's class is a different
+    // instance sitting on the same entity.
+    return instance(c, self(c));
+}
 void setVisible(Ctx& c, Entity e, bool visible)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return;
@@ -1564,6 +1571,8 @@ const std::vector<ApiFn>& registry()
         // argument because the caller's identity travels in the Ctx.
         t.push_back({ "entity.self", "Entity", false, {}, {{"entity", P::Int}}, "HE::api::entity::self",
             [](Ctx& c, const VV&){ return VV{ Value::ofInt((int)entity::self(c)) }; } });
+        t.push_back({ "entity.selfObject", "Entity", false, {}, {{"object", P::Ref}}, "HE::api::entity::selfObject",
+            [](Ctx& c, const VV&){ return VV{ Value::ofRef(entity::selfObject(c)) }; } });
         t.push_back({ "entity.instance", "Entity", false, {{"entity", P::Int}}, {{"object", P::Ref}}, "HE::api::entity::instance",
             [](Ctx& c, const VV& a){ return VV{ Value::ofRef(entity::instance(c, (Entity)aI(a, 0))) }; } });
         t.push_back({ "entity.owned", "Entity", false, {{"object", P::Ref}}, {{"entity", P::Int}}, "HE::api::entity::owned",
@@ -2027,6 +2036,7 @@ const std::vector<ApiFn>& registry()
             { "entity.destroy", "Destroy Entity" }, { "entity.distance", "Distance Between" },
             { "entity.self", "Get Owning Entity" }, { "entity.owned", "Get Entity Of" },
             { "entity.instance", "Get Object On Entity" },
+            { "entity.selfObject", "Get Owning Object" },
             { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
