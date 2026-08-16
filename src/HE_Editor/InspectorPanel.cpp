@@ -920,6 +920,29 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 	{
 		if (componentHeader("Camera Rig", true, removed))
 		{
+			// ── Why the rig might be doing nothing ───────────────────────────
+			// A rig that cannot run writes no transform at all, and the view
+			// then sits at the entity's raw position — which reads as "the
+			// camera is stuck inside something" and sends people tuning arm
+			// length and collision, neither of which is even being read. Both
+			// causes are visible from here, so say them.
+			if (!registry.all_of<CameraComponent>(entity))
+				ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "%s",
+					"Not driving: this entity has no Camera component.\n"
+					"A rig aims a camera — add one, or put the rig on your camera.");
+			else if (!(rig->target == HE::UUID{}) &&
+			         world.findByEntityId(rig->target) == entt::null)
+				ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "%s",
+					"Not driving: the target entity no longer exists.");
+			else if (rig->target == HE::UUID{})
+				// Whether a PlayerCharacter class exists is not something the
+				// editor can answer cheaply (they are assets the PlayerHost
+				// discovers at play), so state the condition instead of guessing.
+				ImGui::TextDisabled("%s",
+					"Follows the possessed player. Without a PlayerCharacter class\n"
+					"there is nothing to follow and the rig stays idle — pick an\n"
+					"entity below to try it out.");
+
 			static const char* kRigModes[] = { "First Person", "Third Person" };
 			int mode = static_cast<int>(rig->mode);
 			if (Row::combo("Mode", &mode, kRigModes, 2))
@@ -1518,7 +1541,17 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Camera",       CameraComponent{});
-			addItem("Camera Rig",   CameraRigComponent{});
+			// A rig aims a camera, so it brings one along. Adding it alone left
+			// people with a component that silently did nothing, on an entity
+			// that could not be a camera in the first place.
+			if (ImGui::MenuItem("Camera Rig"))
+			{
+				if (undo) undo->snapshotNow();
+				if (!registry.all_of<CameraComponent>(entity))
+					registry.emplace<CameraComponent>(entity, CameraComponent{});
+				registry.emplace_or_replace<CameraRigComponent>(entity, CameraRigComponent{});
+				ImGui::CloseCurrentPopup();
+			}
 			addItem("Light",        LightComponent{});
 			addItem("Decal",        DecalComponent{});
 			addItem("Rigid Body",          RigidBodyComponent{});
