@@ -890,6 +890,24 @@ void startExport(AppContext& ctx)
                     };
                     collectAssets(HE::AssetType::HorizonCodeClass);
                     collectAssets(HE::AssetType::Widget);
+
+                    // Animator sync graphs. Keyed by the asset's own path, which
+                    // is exactly what AnimatorHost::bind looks up in
+                    // compiledClasses() — miss this loop and every sync graph
+                    // ships interpreted while the editor happily compiled it,
+                    // which is the shape the GameInstance bug had.
+                    for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager,
+                                                                  HE::AssetType::AnimatorStateMachine))
+                    {
+                        const HE::UUID id = ctx.contentManager->loadAsset(c.path);
+                        const auto* a = ctx.contentManager->getAnimatorStateMachine(id);
+                        if (!a || a->syncGraphJson.empty()) continue;   // no logic, nothing to compile
+                        HE::hccg::ClassSource src;
+                        src.key   = c.path;
+                        src.label = c.path;
+                        if (HorizonCode::fromJson(a->syncGraphJson, src.graph))
+                            hcSources.push_back(std::move(src));
+                    }
                     if (!gameInstanceJson.empty())
                     {
                         HE::hccg::ClassSource src;

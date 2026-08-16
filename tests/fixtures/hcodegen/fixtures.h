@@ -1017,6 +1017,43 @@ inline HE::hccg::ClassSource fxEnginePureMultiout()
 // position and cache raw results (reads are free); seeded random keeps the
 // process-global RNG deterministic per backend run; save.* round-trips the
 // process-global store. Arg coercion to the descriptor's param types.
+// An animator SYNC GRAPH, in the shape the export ships one: a single Update
+// event that reads its own owner and writes state-machine parameters. It is a
+// plain graph with no base class and no chain — like the level script, which is
+// the precedent for a chain-less ClassSource compiling at all.
+//
+// The point of the fixture is parity: a sync graph is dispatched from inside the
+// animation phase, so if the compiled form diverged from the interpreted one the
+// symptom would be a character that animates differently in the shipped game
+// than in the editor — the hardest kind of difference to chase.
+inline HE::hccg::ClassSource fxAnimatorSync()
+{
+    Fx f;
+    f.var("wrote", PT::Float);
+
+    const int ev = f.event("Update", 0, /*hasArg=*/true, PT::Float);   // dt
+
+    const int self = f.engineCall("entity.self");
+    const int set  = f.engineCall("animator.setParam");
+    f.data(self, 0, set, 0);                                  // entity
+    { Node* n = f.g.findNode(set);
+      n->pinDefaults[1] = Value::ofString("speed");
+      n->pinDefaults[2] = Value::ofFloat(1.5f); }
+    f.exec(ev, set);
+
+    // Read it straight back through getParam, so the fixture also pins down the
+    // round trip rather than just the call reaching the seam. With a null world
+    // both sides answer 0 — what matters is that they answer the SAME.
+    const int get = f.engineCall("animator.getParam");
+    f.data(self, 0, get, 0);
+    f.g.findNode(get)->pinDefaults[1] = Value::ofString("speed");
+    const int s = f.setVar("wrote", PT::Float);
+    f.data(get, 0, s, 0);
+    f.exec(set, s);
+
+    return f.done("animator_sync");
+}
+
 inline HE::hccg::ClassSource fxEngineExecCached()
 {
     Fx f;
@@ -1922,7 +1959,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxFlow(), fxCoerce(), fxMath(), fxVectorOps(), fxVariables(), fxFunctionsBasic(),
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
-        fxEnginePureMultiout(), fxEngineExecCached(),
+        fxEnginePureMultiout(), fxEngineExecCached(), fxAnimatorSync(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),

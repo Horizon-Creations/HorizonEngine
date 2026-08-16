@@ -215,7 +215,7 @@ set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
 set(HCGEN_CLASSES
     flow_branch_sequence coerce_matrix math_ops vector_ops variables functions_basic
     functions_recursive foreach_arrays events_multi widget_props limits_smoke
-    functions_locals engine_pure_multiout engine_exec_cached
+    functions_locals engine_pure_multiout engine_exec_cached animator_sync
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived

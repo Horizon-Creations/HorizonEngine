@@ -597,6 +597,23 @@ TEST_CASE("codegen parity: engine_pure_multiout (dispatch per data-out read)")
 	CHECK(p.var("sinv").f == std::sin(0.5f));
 }
 
+TEST_CASE("codegen parity: animator_sync")
+{
+	// A sync graph is fired from inside the animation phase, once per animated
+	// character. A compiled/interpreted divergence here would show up as a
+	// character animating differently in the shipped game than in the editor —
+	// which is about the hardest difference there is to chase, because both
+	// halves look right on their own.
+	ParityPair p("fix/animator_sync");
+	p.fire("Update", 0, Value::ofFloat(0.016f));
+
+	// The seam is what matters: same calls, same arguments, same order. Against
+	// a null world both backends get 0 back, and both must agree on that too.
+	CHECK(p.var("wrote").f == 0.0f);
+	const auto isSet = [](const std::string& t) { return t.rfind("callApi animator.setParam", 0) == 0; };
+	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), isSet) == 1);
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");
