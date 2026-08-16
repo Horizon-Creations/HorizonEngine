@@ -2215,19 +2215,13 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::CloseCurrentPopup();
 			};
 
-			if (ImGui::MenuItem("Scene"))        tryCreate("NewScene",    ".hescene", HE::AssetType::Scene);
-			if (ImGui::MenuItem("Material"))     tryCreate("NewMaterial", ".hasset",  HE::AssetType::Material);
-			if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
-			if (ImGui::MenuItem("Particle System")) tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
-			if (ImGui::MenuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
-			if (ImGui::MenuItem("UI Widget"))    tryCreate("NewWidget",   ".hasset",  HE::AssetType::Widget);
-			if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
-			if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
-			// Type definitions are language-neutral (savegame templates, script
-			// constants, C++ codegen all consume them) — offered in every project.
-			if (ImGui::MenuItem("Struct"))       tryCreate("NewStruct",    ".hasset",  HE::AssetType::StructType);
-			if (ImGui::MenuItem("Enum"))         tryCreate("NewEnum",      ".hasset",  HE::AssetType::EnumType);
-			if (ImGui::MenuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
+			// ── Grouped, because a flat list of sixteen is a list you read every
+			// time instead of aiming at. The two that stay loose are the ones you
+			// make most and open as documents in their own right; everything else
+			// sits under the thing it belongs to.
+			if (ImGui::MenuItem("Scene"))     tryCreate("NewScene",  ".hescene", HE::AssetType::Scene);
+			if (ImGui::MenuItem("UI Widget")) tryCreate("NewWidget", ".hasset",  HE::AssetType::Widget);
+			ImGui::Separator();
 
 			// ── Gameplay logic — restricted to the project's chosen language ──────
 			// The project's scriptLanguage (picked in the New Project wizard) is
@@ -2238,40 +2232,69 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			const ProjectScriptLanguage projLang = ctx.projectManager
 				? ctx.projectManager->currentProject().scriptLanguage
 				: ProjectScriptLanguage::HorizonCode;
-			switch (projLang)
+			if (ImGui::BeginMenu("Gameplay"))
 			{
-			case ProjectScriptLanguage::HorizonCode:
-				// One entry per row of the engine class taxonomy
-				// (HorizonCode.h engineClasses()). "Object" is the plain class
-				// and stores an EMPTY baseClass — the spelling every asset
-				// predating the taxonomy already carries.
-				if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
-				if (ImGui::BeginMenu("HorizonCode Entity"))
+				switch (projLang)
 				{
+				case ProjectScriptLanguage::HorizonCode:
+					// One entry per row of the engine class taxonomy
+					// (HorizonCode.h engineClasses()). "Object" is the plain class
+					// and stores an EMPTY baseClass — the spelling every asset
+					// predating the taxonomy already carries.
+					if (ImGui::MenuItem("HorizonCode Class")) tryCreate("NewClass", ".hasset", HE::AssetType::HorizonCodeClass);
 					if (ImGui::MenuItem("Entity"))
 						tryCreate("NewEntity", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "Entity");
 					if (ImGui::MenuItem("Player Controller"))
 						tryCreate("NewPlayerController", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerController");
 					if (ImGui::MenuItem("Player Character"))
 						tryCreate("NewPlayerCharacter", ".hasset", HE::AssetType::HorizonCodeClass, HE::ScriptLanguage::Lua, "PlayerCharacter");
-					ImGui::EndMenu();
+					break;
+				case ProjectScriptLanguage::Lua:
+					if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
+					break;
+				case ProjectScriptLanguage::Python:
+					if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
+					break;
+				case ProjectScriptLanguage::Cpp:
+					if (ImGui::MenuItem("C++ Class"))
+					{
+						std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
+						s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
+						s_openCppClassPopup = true;
+						ImGui::CloseCurrentPopup();
+					}
+					break;
 				}
-				break;
-			case ProjectScriptLanguage::Lua:
-				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Lua);
-				break;
-			case ProjectScriptLanguage::Python:
-				if (ImGui::MenuItem("Script")) tryCreate("NewScript", ".hasset", HE::AssetType::Script, HE::ScriptLanguage::Python);
-				break;
-			case ProjectScriptLanguage::Cpp:
-				if (ImGui::MenuItem("C++ Class"))
-				{
-					std::strncpy(s_cppClassName, "GameplayClass", sizeof(s_cppClassName) - 1);
-					s_cppClassName[sizeof(s_cppClassName) - 1] = '\0';
-					s_openCppClassPopup = true;
-					ImGui::CloseCurrentPopup();
-				}
-				break;
+				// Authored next to character logic and only ever used by it, so it
+				// sits here rather than in a submenu of its own.
+				ImGui::Separator();
+				if (ImGui::MenuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
+				ImGui::EndMenu();
+			}
+
+			if (ImGui::BeginMenu("Input"))
+			{
+				if (ImGui::MenuItem("Input Action"))          tryCreate("NewInputAction",  ".hasset", HE::AssetType::InputAction);
+				if (ImGui::MenuItem("Input Mapping Context")) tryCreate("NewInputMapping", ".hasset", HE::AssetType::InputMappingContext);
+				ImGui::EndMenu();
+			}
+
+			if (ImGui::BeginMenu("Rendering"))
+			{
+				if (ImGui::MenuItem("Material"))          tryCreate("NewMaterial", ".hasset", HE::AssetType::Material);
+				if (ImGui::MenuItem("Material Function")) tryCreate("NewMaterialFunction", ".hasset", HE::AssetType::MaterialFunction);
+				if (ImGui::MenuItem("Particle System"))   tryCreate("NewParticleSystem", ".hasset", HE::AssetType::ParticleSystem);
+				ImGui::EndMenu();
+			}
+
+			// Type definitions are language-neutral (savegame templates, script
+			// constants, C++ codegen all consume them) — offered in every project.
+			if (ImGui::BeginMenu("Data"))
+			{
+				if (ImGui::MenuItem("Struct")) tryCreate("NewStruct", ".hasset", HE::AssetType::StructType);
+				if (ImGui::MenuItem("Enum"))   tryCreate("NewEnum",   ".hasset", HE::AssetType::EnumType);
+				if (ImGui::MenuItem("SaveGame Template")) tryCreate("NewSaveTemplate", ".hasset", HE::AssetType::SaveGameTemplate);
+				ImGui::EndMenu();
 			}
 
 			// A folder belongs in the list of things you can make here. It used to
