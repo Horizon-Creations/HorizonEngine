@@ -589,6 +589,15 @@ static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinT
     case P::Color:  { float r = (float)luaL_checknumber(L, idx++), g = (float)luaL_checknumber(L, idx++),
                             b = (float)luaL_checknumber(L, idx++), a = (float)luaL_checknumber(L, idx++);
                       return V::ofColor({ r, g, b, a }); }
+    // A Vec3 takes THREE numbers, not four. That is the point of the type
+    // existing: horizon.transform.setPosition(e, x, y, z) used to demand a
+    // fourth number nobody had, because the parameter was a Color.
+    case P::Vec3:   { float x = (float)luaL_checknumber(L, idx++), y = (float)luaL_checknumber(L, idx++),
+                            z = (float)luaL_checknumber(L, idx++);
+                      return V::ofVec3({ x, y, z }); }
+    case P::Vec4:   { float x = (float)luaL_checknumber(L, idx++), y = (float)luaL_checknumber(L, idx++),
+                            z = (float)luaL_checknumber(L, idx++), w = (float)luaL_checknumber(L, idx++);
+                      return V::ofVec4({ x, y, z, w }); }
     case P::Ref:    return V::ofRef(static_cast<uint32_t>(luaL_checkinteger(L, idx++)));
     case P::Struct: return luaToStructValue(L, idx++, 0);
     case P::Float:
@@ -607,6 +616,10 @@ static int luaPushValue(lua_State* L, const HorizonCode::Value& v, HorizonCode::
     case P::Vec2:   lua_pushnumber(L, v.v2.x); lua_pushnumber(L, v.v2.y); return 2;
     case P::Color:  lua_pushnumber(L, v.col.x); lua_pushnumber(L, v.col.y);
                     lua_pushnumber(L, v.col.z); lua_pushnumber(L, v.col.w); return 4;
+    case P::Vec3:   lua_pushnumber(L, v.v3.x); lua_pushnumber(L, v.v3.y);
+                    lua_pushnumber(L, v.v3.z); return 3;
+    case P::Vec4:   lua_pushnumber(L, v.v4.x); lua_pushnumber(L, v.v4.y);
+                    lua_pushnumber(L, v.v4.z); lua_pushnumber(L, v.v4.w); return 4;
     case P::Ref:    lua_pushinteger(L, static_cast<lua_Integer>(v.ref)); return 1;
     case P::Enum:   lua_pushinteger(L, v.i); return 1;
     case P::Struct: luaPushStructTable(L, v, 0); return 1;

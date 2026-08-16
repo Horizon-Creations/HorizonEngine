@@ -337,6 +337,23 @@ PyObject* pyFieldValueToObj(const HorizonCode::Value& v, int depth)
 		PyList_SetItem(l, 1, PyFloat_FromDouble(v.v2.y));
 		return l;
 	}
+	case P::Vec3:
+	{
+		PyObject* l = PyList_New(3);
+		PyList_SetItem(l, 0, PyFloat_FromDouble(v.v3.x));
+		PyList_SetItem(l, 1, PyFloat_FromDouble(v.v3.y));
+		PyList_SetItem(l, 2, PyFloat_FromDouble(v.v3.z));
+		return l;
+	}
+	case P::Vec4:
+	{
+		PyObject* l = PyList_New(4);
+		PyList_SetItem(l, 0, PyFloat_FromDouble(v.v4.x));
+		PyList_SetItem(l, 1, PyFloat_FromDouble(v.v4.y));
+		PyList_SetItem(l, 2, PyFloat_FromDouble(v.v4.z));
+		PyList_SetItem(l, 3, PyFloat_FromDouble(v.v4.w));
+		return l;
+	}
 	case P::Color:
 	{
 		PyObject* l = PyList_New(4);
@@ -427,6 +444,30 @@ HorizonCode::Value pyObjToFieldValue(PyObject* o, const HE::StructField& f, int 
 			}
 		return V::ofVec2(r);
 	}
+	case P::Vec3:
+	{
+		glm::vec3 r{ 0.0f };
+		if (o && PySequence_Check(o))
+			for (int i = 0; i < 3 && i < (int)PySequence_Size(o); ++i)
+			{
+				PyObject* it = PySequence_GetItem(o, i);
+				if (it && PyNumber_Check(it)) r[i] = (float)PyFloat_AsDouble(it);
+				Py_XDECREF(it);
+			}
+		return V::ofVec3(r);
+	}
+	case P::Vec4:
+	{
+		glm::vec4 r{ 0.0f };
+		if (o && PySequence_Check(o))
+			for (int i = 0; i < 4 && i < (int)PySequence_Size(o); ++i)
+			{
+				PyObject* it = PySequence_GetItem(o, i);
+				if (it && PyNumber_Check(it)) r[i] = (float)PyFloat_AsDouble(it);
+				Py_XDECREF(it);
+			}
+		return V::ofVec4(r);
+	}
 	case P::Color:
 	{
 		glm::vec4 r{ 0.0f, 0.0f, 0.0f, 1.0f };
@@ -492,6 +533,10 @@ HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::Pin
 	case P::String: { PyObject* o = PyTuple_GetItem(args, idx++); const char* s = o ? PyUnicode_AsUTF8(o) : nullptr; return V::ofString(s ? s : ""); }
 	case P::Vec2:   { float x = num(), y = num(); return V::ofVec2({ x, y }); }
 	case P::Color:  { float r = num(), g = num(), b = num(), a = num(); return V::ofColor({ r, g, b, a }); }
+	// Three numbers for a Vec3, four for a Vec4 — a vec3 parameter used to be a
+	// Color and therefore demanded a fourth number that meant nothing.
+	case P::Vec3:   { float x = num(), y = num(), z = num(); return V::ofVec3({ x, y, z }); }
+	case P::Vec4:   { float x = num(), y = num(), z = num(), w = num(); return V::ofVec4({ x, y, z, w }); }
 	case P::Ref:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofRef(o ? (uint32_t)PyLong_AsUnsignedLong(o) : 0u); }
 	case P::Struct: { PyObject* o = PyTuple_GetItem(args, idx++); return pyObjToStructValue(o, 0); }
 	case P::Float:
@@ -512,6 +557,10 @@ void pyAppendValue(PyObject* out, const HorizonCode::Value& v, HorizonCode::PinT
 	case P::Vec2:   add(PyFloat_FromDouble(v.v2.x)); add(PyFloat_FromDouble(v.v2.y)); break;
 	case P::Color:  add(PyFloat_FromDouble(v.col.x)); add(PyFloat_FromDouble(v.col.y));
 	                add(PyFloat_FromDouble(v.col.z)); add(PyFloat_FromDouble(v.col.w)); break;
+	case P::Vec3:   add(PyFloat_FromDouble(v.v3.x)); add(PyFloat_FromDouble(v.v3.y));
+	                add(PyFloat_FromDouble(v.v3.z)); break;
+	case P::Vec4:   add(PyFloat_FromDouble(v.v4.x)); add(PyFloat_FromDouble(v.v4.y));
+	                add(PyFloat_FromDouble(v.v4.z)); add(PyFloat_FromDouble(v.v4.w)); break;
 	case P::Ref:    add(PyLong_FromUnsignedLong(v.ref)); break;
 	case P::Enum:   add(PyLong_FromLong(v.i)); break;
 	case P::Struct: add(pyStructValueToDict(v, 0)); break;
@@ -666,6 +715,10 @@ void bootstrapUserTypes()
 		case P::Vec2:   return "[" + std::to_string(v.v2.x) + "," + std::to_string(v.v2.y) + "]";
 		case P::Color:  return "[" + std::to_string(v.col.x) + "," + std::to_string(v.col.y) + ","
 		                     + std::to_string(v.col.z) + "," + std::to_string(v.col.w) + "]";
+		case P::Vec3:   return "[" + std::to_string(v.v3.x) + "," + std::to_string(v.v3.y) + ","
+		                     + std::to_string(v.v3.z) + "]";
+		case P::Vec4:   return "[" + std::to_string(v.v4.x) + "," + std::to_string(v.v4.y) + ","
+		                     + std::to_string(v.v4.z) + "," + std::to_string(v.v4.w) + "]";
 		case P::Transform:
 			return "{\"pos\":[" + std::to_string(v.tpos.x) + "," + std::to_string(v.tpos.y) + "," + std::to_string(v.tpos.z)
 			     + "],\"rot\":[" + std::to_string(v.trot.x) + "," + std::to_string(v.trot.y) + "," + std::to_string(v.trot.z)

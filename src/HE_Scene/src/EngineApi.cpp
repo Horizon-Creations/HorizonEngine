@@ -1375,10 +1375,40 @@ int         aI (const VV& a, size_t k) { return k < a.size() ? a[k].i   : 0; }
 uint32_t    aR (const VV& a, size_t k) { return k < a.size() ? a[k].ref : 0u; }
 std::string aS (const VV& a, size_t k) { return k < a.size() ? a[k].s   : std::string(); }
 glm::vec2   aV2(const VV& a, size_t k) { return k < a.size() ? a[k].v2  : glm::vec2(0.0f); }
-glm::vec4   aV4(const VV& a, size_t k) { return k < a.size() ? a[k].col : glm::vec4(0.0f); }
-// vec3 rides in a Color value's xyz (HorizonCode has no Vec3 pin yet).
-glm::vec3   aV3(const VV& a, size_t k) { return k < a.size() ? glm::vec3(a[k].col) : glm::vec3(0.0f); }
-Value       v3 (const glm::vec3& v)    { return Value::ofColor(glm::vec4(v, 0.0f)); }
+// Vector reads go by the value's OWN type, not by one hard-coded field. These
+// rows used to be Color-typed (Color doubled as the vec3 type), so a caller may
+// still hand over a Color — from a graph authored back then, or from Lua/Python
+// passing four numbers. Reading `.col` unconditionally would return zeros for
+// the Vec3 values every current caller sends.
+glm::vec3   aV3(const VV& a, size_t k)
+{
+    if (k >= a.size()) return glm::vec3(0.0f);
+    const Value& v = a[k];
+    switch (v.type)
+    {
+        case P::Vec3:  return v.v3;
+        case P::Vec4:  return glm::vec3(v.v4);
+        case P::Color: return glm::vec3(v.col);
+        default:       return glm::vec3(0.0f);
+    }
+}
+glm::vec4   aV4(const VV& a, size_t k)
+{
+    if (k >= a.size()) return glm::vec4(0.0f);
+    const Value& v = a[k];
+    switch (v.type)
+    {
+        case P::Vec4:  return v.v4;
+        case P::Color: return v.col;
+        case P::Vec3:  return glm::vec4(v.v3, 0.0f);
+        default:       return glm::vec4(0.0f);
+    }
+}
+Value       v3 (const glm::vec3& v)    { return Value::ofVec3(v); }
+// An RGB colour. It is three floats like a vector, but it stays a Color pin so
+// the editor offers a colour picker for it — and it is opaque, because that is
+// what a colour without an alpha channel means.
+Value       rgb(const glm::vec3& v)    { return Value::ofColor(glm::vec4(v, 1.0f)); }
 
 } // namespace
 
@@ -1409,27 +1439,27 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(entity::distance(c, (Entity)aI(a, 0), (Entity)aI(a, 1))) }; } });
 
         // Transform
-        t.push_back({ "transform.getPosition", "Transform", false, {{"entity", P::Int}}, {{"position", P::Color}}, "HE::api::transform::getPosition",
+        t.push_back({ "transform.getPosition", "Transform", false, {{"entity", P::Int}}, {{"position", P::Vec3}}, "HE::api::transform::getPosition",
             [](Ctx& c, const VV& a){ return VV{ v3(transform::getPosition(c, (Entity)aI(a, 0))) }; } });
-        t.push_back({ "transform.setPosition", "Transform", true, {{"entity", P::Int}, {"position", P::Color}}, {}, "HE::api::transform::setPosition",
+        t.push_back({ "transform.setPosition", "Transform", true, {{"entity", P::Int}, {"position", P::Vec3}}, {}, "HE::api::transform::setPosition",
             [](Ctx& c, const VV& a){ transform::setPosition(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
-        t.push_back({ "transform.getRotation", "Transform", false, {{"entity", P::Int}}, {{"rotation", P::Color}}, "HE::api::transform::getRotation",
+        t.push_back({ "transform.getRotation", "Transform", false, {{"entity", P::Int}}, {{"rotation", P::Vec3}}, "HE::api::transform::getRotation",
             [](Ctx& c, const VV& a){ return VV{ v3(transform::getRotation(c, (Entity)aI(a, 0))) }; } });
-        t.push_back({ "transform.setRotation", "Transform", true, {{"entity", P::Int}, {"rotation", P::Color}}, {}, "HE::api::transform::setRotation",
+        t.push_back({ "transform.setRotation", "Transform", true, {{"entity", P::Int}, {"rotation", P::Vec3}}, {}, "HE::api::transform::setRotation",
             [](Ctx& c, const VV& a){ transform::setRotation(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
-        t.push_back({ "transform.getScale", "Transform", false, {{"entity", P::Int}}, {{"scale", P::Color}}, "HE::api::transform::getScale",
+        t.push_back({ "transform.getScale", "Transform", false, {{"entity", P::Int}}, {{"scale", P::Vec3}}, "HE::api::transform::getScale",
             [](Ctx& c, const VV& a){ return VV{ v3(transform::getScale(c, (Entity)aI(a, 0))) }; } });
-        t.push_back({ "transform.setScale", "Transform", true, {{"entity", P::Int}, {"scale", P::Color}}, {}, "HE::api::transform::setScale",
+        t.push_back({ "transform.setScale", "Transform", true, {{"entity", P::Int}, {"scale", P::Vec3}}, {}, "HE::api::transform::setScale",
             [](Ctx& c, const VV& a){ transform::setScale(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
 
         // Physics
         t.push_back({ "physics.raycast", "Physics", false,
-            {{"origin", P::Color}, {"direction", P::Color}, {"maxDistance", P::Float}},
-            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Color}, {"normal", P::Color}, {"distance", P::Float}},
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"maxDistance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
             "HE::api::physics::raycast",
             [](Ctx& c, const VV& a){ auto r = physics::raycast(c, aV3(a, 0), aV3(a, 1), aF(a, 2));
                 return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
-        t.push_back({ "physics.setVelocity", "Physics", true, {{"entity", P::Int}, {"velocity", P::Color}}, {}, "HE::api::physics::setVelocity",
+        t.push_back({ "physics.setVelocity", "Physics", true, {{"entity", P::Int}, {"velocity", P::Vec3}}, {}, "HE::api::physics::setVelocity",
             [](Ctx& c, const VV& a){ physics::setVelocity(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "physics.isGrounded", "Physics", false, {{"entity", P::Int}}, {{"grounded", P::Bool}}, "HE::api::physics::isGrounded",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::isGrounded(c, (Entity)aI(a, 0))) }; } });
@@ -1583,13 +1613,13 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(entity::getVisible(c, (Entity)aI(a, 0))) }; } });
 
         // Camera (the world's main camera)
-        t.push_back({ "camera.getPosition", "Camera", false, {}, {{"position", P::Color}}, "HE::api::camera::getPosition",
+        t.push_back({ "camera.getPosition", "Camera", false, {}, {{"position", P::Vec3}}, "HE::api::camera::getPosition",
             [](Ctx& c, const VV&){ return VV{ v3(camera::getPosition(c)) }; } });
-        t.push_back({ "camera.setPosition", "Camera", true, {{"position", P::Color}}, {}, "HE::api::camera::setPosition",
+        t.push_back({ "camera.setPosition", "Camera", true, {{"position", P::Vec3}}, {}, "HE::api::camera::setPosition",
             [](Ctx& c, const VV& a){ camera::setPosition(c, aV3(a, 0)); return VV{}; } });
-        t.push_back({ "camera.getRotation", "Camera", false, {}, {{"rotation", P::Color}}, "HE::api::camera::getRotation",
+        t.push_back({ "camera.getRotation", "Camera", false, {}, {{"rotation", P::Vec3}}, "HE::api::camera::getRotation",
             [](Ctx& c, const VV&){ return VV{ v3(camera::getRotation(c)) }; } });
-        t.push_back({ "camera.setRotation", "Camera", true, {{"rotation", P::Color}}, {}, "HE::api::camera::setRotation",
+        t.push_back({ "camera.setRotation", "Camera", true, {{"rotation", P::Vec3}}, {}, "HE::api::camera::setRotation",
             [](Ctx& c, const VV& a){ camera::setRotation(c, aV3(a, 0)); return VV{}; } });
         t.push_back({ "camera.getFov", "Camera", false, {}, {{"degrees", P::Float}}, "HE::api::camera::getFov",
             [](Ctx& c, const VV&){ return VV{ Value::ofFloat(camera::getFov(c)) }; } });
@@ -1637,7 +1667,7 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ env::set##Name(c, aI(a, 0)); return VV{}; } });
 #define HE_ENV_ROW_COLOR(m, Name, disp) \
         t.push_back({ "env.get" #Name, "Environment", false, {}, {{"color", P::Color}}, "HE::api::env::get" #Name, \
-            [](Ctx& c, const VV&){ return VV{ v3(env::get##Name(c)) }; } }); \
+            [](Ctx& c, const VV&){ return VV{ rgb(env::get##Name(c)) }; } }); \
         t.push_back({ "env.set" #Name, "Environment", true, {{"color", P::Color}}, {}, "HE::api::env::set" #Name, \
             [](Ctx& c, const VV& a){ env::set##Name(c, aV3(a, 0)); return VV{}; } });
         HE_ENV_FIELDS_FLOAT(HE_ENV_ROW_FLOAT)
@@ -1656,7 +1686,7 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(audio::play(c, aS(a, 0),
                 a.size() > 1 ? aF(a, 1) : 1.0f, a.size() > 2 ? aF(a, 2) : 1.0f, aB(a, 3))) }; } });
         t.push_back({ "audio.playAt", "Audio", true,
-            {{"asset", P::String}, {"position", P::Color}, {"volume", P::Float}, {"pitch", P::Float},
+            {{"asset", P::String}, {"position", P::Vec3}, {"volume", P::Float}, {"pitch", P::Float},
              {"loop", P::Bool}, {"minDist", P::Float}, {"maxDist", P::Float}},
             {{"handle", P::Int}}, "HE::api::audio::playAt",
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt(audio::playAt(c, aS(a, 0), aV3(a, 1),
@@ -1670,7 +1700,7 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(audio::isPlaying(c, aI(a, 0))) }; } });
         t.push_back({ "audio.setBusVolume", "Audio", true, {{"bus", P::String}, {"volume", P::Float}}, {}, "HE::api::audio::setBusVolume",
             [](Ctx& c, const VV& a){ audio::setBusVolume(c, aS(a, 0), aF(a, 1)); return VV{}; } });
-        t.push_back({ "audio.setSoundPosition", "Audio", true, {{"handle", P::Int}, {"position", P::Color}}, {}, "HE::api::audio::setSoundPosition",
+        t.push_back({ "audio.setSoundPosition", "Audio", true, {{"handle", P::Int}, {"position", P::Vec3}}, {}, "HE::api::audio::setSoundPosition",
             [](Ctx& c, const VV& a){ audio::setSoundPosition(c, aI(a, 0), aV3(a, 1)); return VV{}; } });
 
         // Debug draw (timed world-space primitives; drained by the app per frame)
@@ -1766,9 +1796,9 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ scene::showZone(aI(a, 0)); return VV{}; } });
         t.push_back({ "scene.hideZone", "Scene", true, {{"zone", P::Int}}, {}, "HE::api::scene::hideZone",
             [](Ctx&, const VV& a){ scene::hideZone(aI(a, 0)); return VV{}; } });
-        t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Color}}, "HE::api::scene::zonePosition",
+        t.push_back({ "scene.zonePosition", "Scene", false, {{"zone", P::Int}}, {{"position", P::Vec3}}, "HE::api::scene::zonePosition",
             [](Ctx& c, const VV& a){ return VV{ v3(scene::zonePosition(c, aI(a, 0))) }; } });
-        t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Color}}, {}, "HE::api::scene::requestZonePosition",
+        t.push_back({ "scene.setZonePosition", "Scene", true, {{"zone", P::Int}, {"position", P::Vec3}}, {}, "HE::api::scene::requestZonePosition",
             [](Ctx&, const VV& a){ scene::requestZonePosition(aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "scene.zoneScene", "Scene", false, {{"zone", P::Int}}, {{"scene", P::String}}, "HE::api::scene::zoneScene",
             [](Ctx&, const VV& a){ return VV{ Value::ofString(scene::zoneScene(aI(a, 0))) }; } });

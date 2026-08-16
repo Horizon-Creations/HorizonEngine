@@ -112,7 +112,7 @@ TEST_CASE("EngineApi: side-effect classification is correct")
     const auto* setPos = HE::api::find("transform.setPosition");
     REQUIRE(setPos->params.size() == 2);
     CHECK(setPos->params[0].type == P::Int);      // entity
-    CHECK(setPos->params[1].type == P::Color);    // position (vec3 carrier)
+    CHECK(setPos->params[1].type == P::Vec3);     // position
     CHECK(setPos->results.empty());
 
     const auto* ray = HE::api::find("physics.raycast");
@@ -128,16 +128,28 @@ TEST_CASE("EngineApi: transform round-trips through the registry")
     Ctx c{ &world, nullptr, nullptr };
     auto e = spawnWithTransform(world);
 
-    // set via the registry thunk
+    // set via the registry thunk — deliberately handing over a COLOR value, the
+    // way a graph authored before Vec3 existed still does. The argument readers
+    // go by the value's own type, so the legacy shape has to keep working.
     HE::api::find("transform.setPosition")->invoke(c,
         { Value::ofInt((int)e), Value::ofColor(glm::vec4(1.0f, 2.0f, 3.0f, 0.0f)) });
 
     // read back via the registry thunk
     auto out = HE::api::find("transform.getPosition")->invoke(c, { Value::ofInt((int)e) });
     REQUIRE(out.size() == 1);
-    CHECK(out[0].col.x == doctest::Approx(1.0f));
-    CHECK(out[0].col.y == doctest::Approx(2.0f));
-    CHECK(out[0].col.z == doctest::Approx(3.0f));
+    CHECK(out[0].type == P::Vec3);
+    CHECK(out[0].v3.x == doctest::Approx(1.0f));
+    CHECK(out[0].v3.y == doctest::Approx(2.0f));
+    CHECK(out[0].v3.z == doctest::Approx(3.0f));
+
+    // …and the current shape, a Vec3 value, lands in the same place.
+    HE::api::find("transform.setPosition")->invoke(c,
+        { Value::ofInt((int)e), Value::ofVec3({ 4.0f, 5.0f, 6.0f }) });
+    out = HE::api::find("transform.getPosition")->invoke(c, { Value::ofInt((int)e) });
+    CHECK(out[0].v3 == glm::vec3(4.0f, 5.0f, 6.0f));
+
+    HE::api::find("transform.setPosition")->invoke(c,
+        { Value::ofInt((int)e), Value::ofVec3({ 1.0f, 2.0f, 3.0f }) });
 
     // and via the typed C++ api directly — same result
     const glm::vec3 p = HE::api::transform::getPosition(c, e);
@@ -798,8 +810,9 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     Ctx c{ &world, nullptr, nullptr };
     auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
 
-    // Camera transform + fov round-trip through the registry (vec3 packed in Color).
-    CHECK(call("camera.getPosition", {})[0].col.y == doctest::Approx(2.0f));
+    // Camera transform + fov round-trip through the registry. The setter is fed a
+    // COLOR on purpose — that is the shape a pre-Vec3 graph still sends.
+    CHECK(call("camera.getPosition", {})[0].v3.y == doctest::Approx(2.0f));
     call("camera.setPosition", { Value::ofColor({ 9, 8, 7, 0 }) });
     CHECK(world.registry().get<TransformComponent>(camE).position.x == doctest::Approx(9.0f));
     call("camera.setFov", { Value::ofFloat(90.0f) });
@@ -817,7 +830,9 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     CHECK(call("env.getWindSpeed", {})[0].f == doctest::Approx(4.0f));
 
     // The X-list generation covers EVERY component field and all four kinds:
-    // float (above), bool, int and vec3-colour (packed in a Color value).
+    // float (above), bool, int and RGB colour. A colour stays a Color pin even
+    // though it is three floats — it wants the editor's colour picker, not three
+    // number fields — and it reads back OPAQUE.
     call("env.setNebulaCoverage", { Value::ofFloat(0.9f) });
     CHECK(env.nebulaCoverage == doctest::Approx(0.9f));
     CHECK(call("env.getNebulaCoverage", {})[0].f == doctest::Approx(0.9f));
@@ -830,6 +845,7 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     call("env.setNebulaColor2", { Value::ofColor({ 0.1f, 0.2f, 0.3f, 0.0f }) });
     CHECK(env.nebulaColor2.y == doctest::Approx(0.2f));
     CHECK(call("env.getNebulaColor2", {})[0].col.z == doctest::Approx(0.3f));
+    CHECK(call("env.getNebulaColor2", {})[0].col.w == doctest::Approx(1.0f));
     // Registry sanity: one Get + one Set row per field, all in "Environment".
     int envRows = 0;
     for (const auto& fn : HE::api::registry())
