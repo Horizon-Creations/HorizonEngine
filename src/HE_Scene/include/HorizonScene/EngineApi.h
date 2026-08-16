@@ -497,6 +497,13 @@ namespace math {
     float pow(float base, float exp);
     float mod(float a, float b);                 // 0 if b == 0
     float atan2(float y, float x);
+    // Angle conversion, named the GLSL way: radians() RETURNS radians.
+    // Everything the engine hands out as an angle is in DEGREES (rotations,
+    // camera yaw/pitch, FOV) while sin/cos/tan take radians, so without these
+    // every graph that does trigonometry on an engine angle has to multiply by
+    // a magic 0.0174533.
+    float radians(float degrees);
+    float degrees(float radians);
     float min(float a, float b);
     float max(float a, float b);
     float clamp(float x, float lo, float hi);

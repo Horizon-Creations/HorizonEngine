@@ -1246,6 +1246,8 @@ float sign(float x)  { return (float)((x > 0.0f) - (x < 0.0f)); }
 float pow(float b, float e) { return std::pow(b, e); }
 float mod(float a, float b) { return b != 0.0f ? std::fmod(a, b) : 0.0f; }
 float atan2(float y, float x) { return std::atan2(y, x); }
+float radians(float deg) { return glm::radians(deg); }
+float degrees(float rad) { return glm::degrees(rad); }
 float min(float a, float b) { return a < b ? a : b; }
 float max(float a, float b) { return a > b ? a : b; }
 float clamp(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
@@ -1500,6 +1502,8 @@ const std::vector<ApiFn>& registry()
         unary("math.ceil",  "HE::api::math::ceil",  math::ceil);
         unary("math.round", "HE::api::math::round", math::round);
         unary("math.sign",  "HE::api::math::sign",  math::sign);
+        unary("math.radians", "HE::api::math::radians", math::radians);
+        unary("math.degrees", "HE::api::math::degrees", math::degrees);
         binary("math.pow",   "HE::api::math::pow",   math::pow,   "base", "exp");
         binary("math.mod",   "HE::api::math::mod",   math::mod,   "a", "b");
         binary("math.atan2", "HE::api::math::atan2", math::atan2, "y", "x");
@@ -1837,6 +1841,9 @@ const std::vector<ApiFn>& registry()
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
             { "math.sign", "Sign" },   { "math.pow", "Power" }, { "math.mod", "Modulo" },
+            // Spelled out both ways round: "Radians" alone says nothing about
+            // which direction it converts when you meet it in the add menu.
+            { "math.radians", "Degrees to Radians" }, { "math.degrees", "Radians to Degrees" },
             { "math.atan2", "Atan2" }, { "math.min", "Min" },   { "math.max", "Max" },
             { "math.clamp", "Clamp" }, { "math.lerp", "Lerp" },
             { "math.length", "Length (Vec2)" }, { "math.distance", "Distance (Vec2)" },
