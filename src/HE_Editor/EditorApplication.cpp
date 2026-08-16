@@ -1964,15 +1964,19 @@ void EditorApplication::OnRender(float dt)
 		if (m_editorWorld)
 		{
 			// Shared with the standalone game runtime (GameApplication) so weather,
-			// animation, particles, terrain, foliage, nav & LOD behave identically.
+			// particles, terrain, foliage, nav & LOD behave identically.
 			// Pass the physics world in play mode so precipitation collides with the scene.
+			// ANIMATION IS NOT HERE — it runs at the end of the frame, after the
+			// gameplay block below, because a state machine reads what gameplay
+			// produced. Doing it here animated last frame's world, and in the
+			// opposite order from the shipped game.
 			const bool gpuParticles = m_editorConfig.GpuParticles &&
 			                          renderer()->GetCapabilities().supportsGpuParticles;
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
-			SceneSystems::tick(*m_editorWorld, contentManager(), renderer(),
-			                   m_editorCamera.position(), dt,
-			                   (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
-			                   gpuParticles);
+			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
+			                        m_editorCamera.position(), dt,
+			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
+			                        gpuParticles);
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -2062,6 +2066,19 @@ void EditorApplication::OnRender(float dt)
 					m_widgetTextInputActive = want;
 				}
 			}
+		}
+
+		// Animation, at the END of the frame — after physics, the camera, the
+		// scripts and both hosts, so a state machine reads what gameplay just
+		// produced rather than what it produced last frame. Same position the
+		// packaged game runs it in; that is the whole point of a preview.
+		//
+		// NOT gated on play mode: an authored clip keeps animating in the editor
+		// viewport, exactly as it did when this sat inside the tick above.
+		if (m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("SceneAnimationTick");
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), dt);
 		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
@@ -3406,8 +3423,8 @@ void EditorApplication::dumpFrameHeadless()
 		          glm::vec3(18.0f, 10.0f, 0.4f));
 
 		// The headless dump renders from OnInit, BEFORE the main loop's
-		// SceneSystems::tick — without this the terrain has no chunk entities
-		// yet and there is nothing for the rays to hit.
+		// SceneSystems::tickWorld — without this the terrain has no chunk
+		// entities yet and there is nothing for the rays to hit.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_GIREFLLANDSCAPE witness scene added");
@@ -3570,8 +3587,8 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
-		// SceneSystems::tick — without this the terrain has no chunk entities yet
-		// and there is simply nothing to draw.
+		// SceneSystems::tickWorld — without this the terrain has no chunk
+		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");

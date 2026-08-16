@@ -82,20 +82,18 @@ void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
 }
 } // namespace
 
-void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
-                        const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics,
-                        bool gpuParticles)
+void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
+                             const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics,
+                             bool gpuParticles)
 {
-    // The whole gameplay tick in one budget. The profiler breaks it down per
+    // The whole world tick in one budget. The profiler breaks it down per
     // system; this line is what makes a stall show up in the log of a run
     // nobody was profiling.
-    HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tick");
+    HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickWorld");
 
     { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer); }
-    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
+    // Navigation moves transforms, so it belongs on the gameplay side of the
+    // frame — ahead of the animation phase, like physics and scripts.
     { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt); }
     { HE_PROFILE_SCOPE_N("Weather");               WeatherSystem::update(world, dt, cameraPos, physics, gpuParticles); } // env clouds/fog/wind + precip
     if (renderer)
@@ -111,6 +109,19 @@ void SceneSystems::tick(HorizonWorld& world, ContentManager& cm, IRenderer* rend
     { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, physics); } // entity-bound emitters only — precipitation is WeatherSystem's own pool
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
+}
+
+void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt)
+{
+    HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickAnimation");
+
+    // Order within the phase is unchanged: the three skeletal drivers all write
+    // SkeletalMeshComponent::boneMatrices, so the last one wins on an entity
+    // that carries more than one of them (which nothing stops today).
+    { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
 }
 
 std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)

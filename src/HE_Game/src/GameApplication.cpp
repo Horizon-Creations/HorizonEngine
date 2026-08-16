@@ -1007,8 +1007,12 @@ void GameApplication::OnRender(float deltaTime)
 		// Unbraced on purpose: the scope reaches to the end of this `if (m_world)`
 		// block, so the GI + environment pushes below are timed with it (as before).
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
-		SceneSystems::tick(*m_world, contentManager(), r, camPos, deltaTime,
-		                   m_physicsWorld.get(), gpuParticles);
+		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, deltaTime,
+		                        m_physicsWorld.get(), gpuParticles);
+		// Animation last, after every system that could have moved something this
+		// frame — a state machine reads what gameplay just produced. Still ahead
+		// of extraction, which consumes the bone matrices.
+		SceneSystems::tickAnimation(*m_world, contentManager(), deltaTime);
 
 		// Global Illumination: same GlobalState config.json key the editor's
 		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/

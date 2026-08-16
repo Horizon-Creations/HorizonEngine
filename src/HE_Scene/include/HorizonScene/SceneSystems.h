@@ -24,18 +24,34 @@ namespace SceneSystems
     // UUIDs render immediately after a reload/restart. Returns how many resolved.
     size_t preloadAssetRefs(HorizonWorld& world, ContentManager& cm);
 
-    // Runs the always-on visual / gameplay systems for one frame: terrain regen,
-    // skeletal animation (clip / blend / state-machine / property), navigation,
-    // weather, particles, foliage and LOD. Shared by the editor (preview every frame)
-    // and the standalone game runtime so weather & friends behave identically in both.
-    // Physics, scripts and audio are stepped separately by the caller — the editor gates
-    // those on play-mode; the game runs them every frame.
-    // physics (optional) enables real precipitation collision via the weather system's
-    // ground-height grid (downward raycasts); nullptr falls back to a flat ground plane.
-    // gpuParticles = the resolved "GPU weather particles" setting (toggle AND backend
-    // support). When true the CPU precipitation pool is skipped and the renderer is
-    // handed the emission parameters to simulate + draw rain/snow on the GPU instead.
-    void tick(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
-              const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics = nullptr,
-              bool gpuParticles = false);
+    // ── The frame, in two phases ─────────────────────────────────────────────
+    // These used to be one `tick`. They are split because ANIMATION HAS TO RUN
+    // AFTER GAMEPLAY: a state machine reads values that gameplay code produced
+    // this frame (speed, grounded, …), so running it first means it animates
+    // last frame's world. The editor did exactly that — its single tick sat at
+    // the TOP of the frame, before physics, before scripts — while the game ran
+    // the same call at the BOTTOM. A preview that ticks in a different order
+    // than the shipped game is not a preview.
+    //
+    // Both apps now run: gameplay → tickWorld → tickAnimation → extraction.
+    // tickAnimation must stay ahead of extraction, which consumes the bone
+    // matrices; moving it later only trades one frame of lag for another.
+
+    // The world's own systems: terrain regen, navigation, weather, particles,
+    // foliage and LOD. Not gated on play mode — the editor previews these while
+    // authoring, which is the point of them.
+    //
+    // physics (optional) enables real precipitation collision via the weather
+    // system's ground-height grid (downward raycasts); nullptr falls back to a
+    // flat ground plane. gpuParticles = the resolved "GPU weather particles"
+    // setting (toggle AND backend support). When true the CPU precipitation pool
+    // is skipped and the renderer is handed the emission parameters instead.
+    void tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
+                   const glm::vec3& cameraPos, float dt, const PhysicsWorld* physics = nullptr,
+                   bool gpuParticles = false);
+
+    // Everything that poses a skeleton or drives a property: clip playback,
+    // two-clip blend, the animator state machine, property animation. Also not
+    // gated on play mode — an authored clip animates in the editor viewport.
+    void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt);
 }

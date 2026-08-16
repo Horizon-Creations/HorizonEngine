@@ -12,6 +12,7 @@
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationPreview.h>
+#include <HorizonScene/SceneSystems.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -664,6 +665,52 @@ TEST_CASE("AnimationStateMachineSystem plays current state clip")
     // Bone 0 local translation should be X=3 (clip A / Idle state)
     CHECK(boneMatrices[0][3][0] == doctest::Approx(3.0f).epsilon(0.01f));
     CHECK(boneMatrices[0][3][1] == doctest::Approx(0.0f).epsilon(0.01f));
+}
+
+TEST_CASE("SceneSystems: animation is its own phase, so it can run after gameplay")
+{
+    // The split exists because a state machine reads what gameplay produced THIS
+    // frame. The editor used to run the whole tick at the top of the frame —
+    // before physics, before scripts — while the game ran it at the bottom, so
+    // PIE animated a frame late and in the opposite order from the shipped game.
+    //
+    // What this pins down is the seam: the world phase must not pose skeletons,
+    // and the animation phase must. Anything that folds them back together, or
+    // quietly moves a driver from one to the other, fails here.
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({ 3.0f, 0.0f, 0.0f }));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({ 0.0f, 5.0f, 0.0f }));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    world.addComponent(e, makeSimpleSM(cm, clipAId, clipBId));
+
+    // A fresh SkeletalMeshComponent already carries one IDENTITY matrix (the
+    // bind-pose fallback), so "did anything pose this" is a question about the
+    // values, not about the vector being empty.
+    auto boneX = [&]{ return world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][0]; };
+    REQUIRE(boneX() == doctest::Approx(0.0f));
+
+    // The world phase leaves the skeleton alone.
+    SceneSystems::tickWorld(world, cm, nullptr, glm::vec3(0.0f), 0.016f);
+    CHECK(boneX() == doctest::Approx(0.0f));
+
+    // Whatever gameplay would have written, written here — this stands in for
+    // the script or sync-graph that sets the parameter mid-frame.
+    world.registry().get<AnimatorStateMachineComponent>(e).params["speed"] = 1.0f;
+
+    // …and the animation phase picks it up in the SAME tick: the pose appears,
+    // and the parameter set a moment ago has already started the transition.
+    SceneSystems::tickAnimation(world, cm, 0.016f);
+    const auto& sm = world.registry().get<AnimatorStateMachineComponent>(e);
+    CHECK((sm.inTransition || sm.currentStateName == "Walk"));
+    CHECK(boneX() > 1.0f);   // Idle clip is X=3, barely blended toward Walk yet
 }
 
 TEST_CASE("AnimationStateMachineSystem transition fires when param exceeds threshold")
