@@ -2,7 +2,9 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 class ContentManager;
 
@@ -52,9 +54,24 @@ public:
     // component goes away or its asset changes underneath.
     void unbind(Entity entity);
 
-    // Fire the sync graph for one entity. Called by AnimationStateMachineSystem,
-    // once per animated entity, before its transitions are evaluated. No-op when
-    // the host is not running or the entity has no sync instance.
+    // Fire the sync graph for one entity, then copy its declared Float variables
+    // into that entity's state-machine parameters. Called by
+    // AnimationStateMachineSystem, once per animated entity, before its
+    // transitions are evaluated. No-op when the host is not running or the
+    // entity has no sync instance.
+    //
+    // ── Variables ARE the parameters ─────────────────────────────────────────
+    // A sync graph declares what the machine reacts to, in the same place it
+    // computes it — declare `speed` as a Float variable, Set it from whatever
+    // the character is doing, and the transitions see it. Unreal works the same
+    // way: an Animation Blueprint's variables are what its AnimGraph reads.
+    //
+    // The States side's default params stay useful as DEFAULTS and as what the
+    // editor shows, but they are no longer the registry of what exists.
+    //
+    // Precedence: the copy happens AFTER the graph ran, so a variable wins over
+    // an animator.setParam call made inside the same graph for the same name.
+    // (setParam remains the path for Lua/Python, which have no sync graph.)
     void fireUpdate(Entity entity, float dt);
 
     // Destroy every instance and drop all state. Idempotent.
@@ -71,4 +88,8 @@ private:
     // Which asset each binding was made from, so an entity that swaps state
     // machines rebinds instead of running the previous asset's sync graph.
     std::unordered_map<uint32_t, HE::UUID> m_assetOf;
+    // The graph's Float variable names, resolved once at bind. Per frame the
+    // copy-back reads exactly these — walking a full variable snapshot every
+    // frame for every animated character is not what that call is for.
+    std::unordered_map<uint32_t, std::vector<std::string>> m_paramsOf;
 };

@@ -210,6 +210,129 @@ TEST_CASE("AnimatorHost: a sync graph steers the state machine in the same frame
 	CHECK(sm.currentStateName == "Walk");
 }
 
+TEST_CASE("AnimatorHost: a sync graph's variables ARE the machine's parameters")
+{
+	// Declaring what the machine reacts to, in the same place it is computed.
+	// The States side's default params stay as defaults and as what the editor
+	// shows, but a variable declared here is a parameter without anyone saying
+	// so twice.
+	TempDir dir("he_animator_host_vars");
+	ContentManager cm(dir.path.string());
+
+	// A graph with a Float variable `speed`, set to 1.5 on Update. No
+	// animator.setParam call anywhere.
+	Graph g;
+	{
+		Variable v; v.name = "speed"; v.type = PinType::Float; v.f[0] = 0.0f;
+		g.variables.push_back(v);
+
+		Node ev; ev.type = NodeType::Event; ev.s = "Update";
+		ev.hasArg = true; ev.propType = PinType::Float;
+		const int e = g.addNode(std::move(ev));
+
+		Node k; k.type = NodeType::ConstFloat; k.f[0] = 1.5f;
+		const int c = g.addNode(std::move(k));
+
+		Node set; set.type = NodeType::SetVariable; set.s = "speed"; set.propType = PinType::Float;
+		const int s = g.addNode(std::move(set));
+
+		REQUIRE(g.connect(e, 0, s, 0));   // exec
+		REQUIRE(g.connect(c, 0, s, 2));   // value (exec-in, exec-out, then data)
+	}
+
+	AnimatorStateMachineAsset asset;
+	asset.type          = HE::AssetType::AnimatorStateMachine;
+	asset.name          = "Locomotion";
+	asset.path          = "Locomotion.hasset";
+	asset.graphJson     = stateMachineJson();
+	asset.syncGraphJson = toJson(g);
+	REQUIRE(cm.saveAsset(asset));
+
+	HorizonWorld world;
+	const Entity e = makeAnimatedEntity(world, cm, cm.loadAsset(asset.path));
+
+	Runtime rt;
+	bindApi(rt, world, cm);
+	AnimatorHost host;
+	host.begin(rt, world, cm);
+	REQUIRE(host.count() == 1);
+
+	SceneSystems::tickAnimation(world, cm, 0.016f, &host);
+
+	const auto& sm = world.registry().get<AnimatorStateMachineComponent>(e);
+	CHECK(sm.params.at("speed") == doctest::Approx(1.5f));
+	CHECK(sm.currentStateName == "Walk");   // 1.5 > 0.5, so the transition fired
+}
+
+TEST_CASE("AnimatorHost: a variable beats a setParam call for the same name")
+{
+	// The copy happens after the graph ran, so the variable is the later write.
+	// Worth pinning down rather than leaving to whoever reads the code next:
+	// the two paths exist for different callers (graph vs Lua/Python) and a
+	// graph that used both would otherwise be a coin flip.
+	TempDir dir("he_animator_host_precedence");
+	ContentManager cm(dir.path.string());
+
+	Graph g;
+	{
+		Variable v; v.name = "speed"; v.type = PinType::Float;
+		g.variables.push_back(v);
+
+		Node ev; ev.type = NodeType::Event; ev.s = "Update";
+		ev.hasArg = true; ev.propType = PinType::Float;
+		const int e = g.addNode(std::move(ev));
+
+		// setParam("speed", 9) first…
+		const HE::api::ApiFn* fn = HE::api::find("animator.setParam");
+		REQUIRE(fn != nullptr);
+		Node call; call.type = NodeType::EngineCall; call.s = fn->id; call.hasArg = fn->isExec;
+		for (const auto& p : fn->params)  call.params.push_back({ p.name, p.type, p.isArray });
+		for (const auto& r : fn->results) call.results.push_back({ r.name, r.type, r.isArray });
+		const int set = g.addNode(std::move(call));
+		{
+			Node* n = g.findNode(set);
+			n->pinDefaults[1] = Value::ofString("speed");
+			n->pinDefaults[2] = Value::ofFloat(9.0f);
+		}
+		const HE::api::ApiFn* selfFn = HE::api::find("entity.self");
+		Node selfCall; selfCall.type = NodeType::EngineCall; selfCall.s = selfFn->id;
+		selfCall.hasArg = selfFn->isExec;
+		for (const auto& r : selfFn->results) selfCall.results.push_back({ r.name, r.type, r.isArray });
+		const int self = g.addNode(std::move(selfCall));
+		REQUIRE(g.connect(self, 0, set, 2));
+
+		// …then the variable, set to 2.
+		Node k; k.type = NodeType::ConstFloat; k.f[0] = 2.0f;
+		const int c = g.addNode(std::move(k));
+		Node sv; sv.type = NodeType::SetVariable; sv.s = "speed"; sv.propType = PinType::Float;
+		const int s = g.addNode(std::move(sv));
+
+		REQUIRE(g.connect(e,   0, set, 0));
+		REQUIRE(g.connect(set, 1, s,   0));   // setParam's exec-out → SetVariable
+		REQUIRE(g.connect(c,   0, s,   2));
+	}
+
+	AnimatorStateMachineAsset asset;
+	asset.type          = HE::AssetType::AnimatorStateMachine;
+	asset.name          = "Locomotion";
+	asset.path          = "Locomotion.hasset";
+	asset.graphJson     = stateMachineJson();
+	asset.syncGraphJson = toJson(g);
+	REQUIRE(cm.saveAsset(asset));
+
+	HorizonWorld world;
+	const Entity e = makeAnimatedEntity(world, cm, cm.loadAsset(asset.path));
+
+	Runtime rt;
+	bindApi(rt, world, cm);
+	AnimatorHost host;
+	host.begin(rt, world, cm);
+
+	SceneSystems::tickAnimation(world, cm, 0.016f, &host);
+	CHECK(world.registry().get<AnimatorStateMachineComponent>(e).params.at("speed")
+	      == doctest::Approx(2.0f));   // the variable, not the 9 from setParam
+}
+
 TEST_CASE("AnimatorHost: without it the same machine never leaves its start state")
 {
 	// The other half of the claim: it is the sync graph doing this, not the

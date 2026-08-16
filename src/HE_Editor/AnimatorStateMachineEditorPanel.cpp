@@ -73,6 +73,20 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 		if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
 	}
 
+	// A sync graph has exactly one entry point and it is not optional, so it is
+	// there from the start rather than something to remember. Seeded WITHOUT
+	// marking dirty: merely opening the view must not decide to write a chunk
+	// into an asset that never had one.
+	if (st.syncGraph.nodes.empty())
+	{
+		HorizonCode::Node ev;
+		ev.type = HorizonCode::NodeType::Event;
+		ev.s = "Update";
+		ev.hasArg = true; ev.propType = HorizonCode::PinType::Float;   // dt
+		ev.x = 60.0f; ev.y = 60.0f;
+		st.syncGraph.addNode(std::move(ev));
+	}
+
 	st.loaded = true;
 	return st;
 }
@@ -105,10 +119,18 @@ static bool saveToDisk(State& st, AppContext& ctx)
 	AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachineMutable(st.assetId);
 	if (!asset) return false;
 	asset->graphJson = HE::animatorStateMachineToJson(st.graph);
-	// An empty sync graph is written as no chunk at all, so an asset that never
-	// got one stays byte-identical to what it was before sync graphs existed.
-	asset->syncGraphJson = st.syncGraph.nodes.empty() ? std::string()
-	                                                  : HorizonCode::toJson(st.syncGraph);
+	// An UNTOUCHED sync graph is written as no chunk at all, so an asset that
+	// never got one stays byte-identical to what it was before sync graphs
+	// existed. "Untouched" is not "empty": the view seeds the Update event on
+	// open, so the bare seed — one event, nothing wired, nothing declared — has
+	// to count as nothing too.
+	const bool syncUntouched =
+		st.syncGraph.links.empty() && st.syncGraph.variables.empty() &&
+		(st.syncGraph.nodes.empty() ||
+		 (st.syncGraph.nodes.size() == 1 &&
+		  st.syncGraph.nodes[0].type == HorizonCode::NodeType::Event &&
+		  st.syncGraph.nodes[0].s == "Update"));
+	asset->syncGraphJson = syncUntouched ? std::string() : HorizonCode::toJson(st.syncGraph);
 	if (!ctx.contentManager->saveAsset(*asset)) return false;
 	st.dirty = false;
 	// Live entities already using this asset should reflect the edit now, not only
@@ -181,14 +203,26 @@ const HcGraphHost::MenuOpts& syncMenus()
 {
 	static const HcGraphHost::MenuOpts m = []{
 		HcGraphHost::MenuOpts o;
-		o.addCategories = { "Flow", "Literals", "Math", "Logic", "Variables", "Debug" };
+		// "Flow" is in, but pared down. Not because control flow is wanted here
+		// — the graph only pulls values off its owner — but because Cast is an
+		// EXEC node, so a graph with no exec flow at all could not cast. What
+		// goes is everything that makes a graph remember something across
+		// frames or split into branches of work: this thing runs once a frame
+		// and computes numbers.
+		o.addCategories = { "Flow", "Reference", "Literals", "Math", "Logic",
+		                    "Variables", "Debug" };
+		o.addExcluded = { HorizonCode::NodeType::Sequence, HorizonCode::NodeType::Delay,
+		                  HorizonCode::NodeType::DoOnce,   HorizonCode::NodeType::FlipFlop };
+		// The same list again for the drag-off menu. It walks the registry flat
+		// rather than by category, so an exclusion that lives only above is one
+		// you get back by dragging off a pin.
+		o.dragExcluded = o.addExcluded;
 		o.apiGroups = {
 			"animator",   // the point of the graph
 			"entity",     // entity.self — how it reaches the character it animates
 			"transform",  // where that character is and how it is turned
 			"physics",    // grounded, velocity, a ray under the feet
-			"player",     // which character the player possesses
-			"math", "time",
+			"math",       // turning those into the numbers a transition wants
 		};
 		return o;
 	}();

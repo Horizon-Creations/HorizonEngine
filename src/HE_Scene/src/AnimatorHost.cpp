@@ -80,6 +80,17 @@ HorizonCode::InstanceId AnimatorHost::bind(Entity entity)
     m_byEntity[raw] = inst;
     m_assetOf[raw]  = assetId;
     m_runtime->fireConstruct(inst);
+
+    // Which Float variables this graph declares — those are the parameters. Read
+    // once, here, through the backend-agnostic snapshot so a compiled instance
+    // answers the same as an interpreted one; per frame only these names are
+    // fetched.
+    {
+        std::vector<std::string>& names = m_paramsOf[raw];
+        names.clear();
+        for (const auto& [name, v] : m_runtime->variablesSnapshot(inst))
+            if (!v.isArray && v.type == HorizonCode::PinType::Float) names.push_back(name);
+    }
     return inst;
 }
 
@@ -91,14 +102,29 @@ void AnimatorHost::unbind(Entity entity)
     if (m_runtime) m_runtime->destroy(it->second);
     m_byEntity.erase(it);
     m_assetOf.erase(raw);
+    m_paramsOf.erase(raw);
 }
 
 void AnimatorHost::fireUpdate(Entity entity, float dt)
 {
-    if (!m_runtime) return;
-    auto it = m_byEntity.find(static_cast<uint32_t>(entity));
+    if (!m_runtime || !m_world) return;
+    const uint32_t raw = static_cast<uint32_t>(entity);
+    auto it = m_byEntity.find(raw);
     if (it == m_byEntity.end()) return;
     m_runtime->fireEvent(it->second, "Update", 0, HorizonCode::Value::ofFloat(dt));
+
+    // …then hand the graph's variables to the machine as its parameters. AFTER
+    // the run, so what the graph just computed is what the transitions read —
+    // and so a variable beats an animator.setParam call made inside the same
+    // graph for the same name.
+    auto pit = m_paramsOf.find(raw);
+    if (pit == m_paramsOf.end() || pit->second.empty()) return;
+    auto& reg = m_world->registry();
+    if (!reg.valid(entity)) return;
+    auto* sm = reg.try_get<AnimatorStateMachineComponent>(entity);
+    if (!sm) return;
+    for (const std::string& name : pit->second)
+        sm->params[name] = m_runtime->getVariable(it->second, name).f;
 }
 
 void AnimatorHost::end()
@@ -107,6 +133,7 @@ void AnimatorHost::end()
         for (auto& [raw, inst] : m_byEntity) m_runtime->destroy(inst);
     m_byEntity.clear();
     m_assetOf.clear();
+    m_paramsOf.clear();
     m_runtime = nullptr;
     m_world   = nullptr;
     m_content = nullptr;
