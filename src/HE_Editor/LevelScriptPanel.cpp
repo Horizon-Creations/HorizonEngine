@@ -1502,21 +1502,147 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 // The Viewport half's middle column. Draws the selected component's asset
 // through the renderer's per-asset preview paths (the same ones the Skeletal
 // Mesh and Material tabs use), with the orbit those tabs established.
+// Draw the subtree's colliders and camera booms over the preview image, in the
+// space the renderer just drew it in.
+//
+// This is deliberately an OVERLAY rather than a second render pass. Putting mesh
+// + collider + boom into one picture properly would mean a renderer entry point
+// that extracts an arbitrary world into its own target — real work in every
+// backend, of which only two are even buildable here, and all of it judged by
+// whether the picture looks right, which is exactly what cannot be checked
+// without a screen. Projecting a handful of line segments costs nothing, works
+// on every backend including the ones nobody can compile here, and draws the
+// gizmos THROUGH the mesh, which for a collider is what you want anyway.
+//
+// The matrix comes from the renderer (RenderSkeletalPreview's outViewProj)
+// rather than being rebuilt here: the framing depends on GPU-side bounds only
+// the renderer has, and a copy of that rule would drift into looking like a
+// wrong collider.
+void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
+                       const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize)
+{
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+
+	// World → screen. Returns false behind the camera, so a segment with one
+	// end behind it is dropped rather than drawn mirrored across the pane.
+	const auto project = [&](const glm::vec3& p, ImVec2& out) -> bool
+	{
+		const glm::vec4 clip = viewProj * glm::vec4(p, 1.0f);
+		if (clip.w <= 1e-4f) return false;
+		const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+		out = ImVec2(imgOrigin.x + (ndc.x * 0.5f + 0.5f) * imgSize.x,
+		             imgOrigin.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * imgSize.y);
+		return true;
+	};
+	const auto line = [&](const glm::vec3& a, const glm::vec3& b, ImU32 col)
+	{
+		ImVec2 pa, pb;
+		if (project(a, pa) && project(b, pb)) dl->AddLine(pa, pb, col, 1.4f);
+	};
+
+	// Local → root space for one entity of the class subtree.
+	const auto worldOf = [&](Entity e)
+	{
+		glm::mat4 m(1.0f);
+		for (Entity cur = e; cur != entt::null && reg.valid(cur); )
+		{
+			if (const auto* t = reg.try_get<TransformComponent>(cur))
+			{
+				const glm::quat q = glm::quat(glm::radians(t->rotation));
+				m = glm::translate(glm::mat4(1.0f), t->position) * glm::mat4_cast(q) *
+				    glm::scale(glm::mat4(1.0f), t->scale) * m;
+			}
+			if (cur == root) break;
+			const auto* h = reg.try_get<HierarchyComponent>(cur);
+			cur = h ? h->parent : entt::null;
+		}
+		return m;
+	};
+
+	constexpr ImU32 kCollider = IM_COL32(120, 230, 140, 210);
+	constexpr ImU32 kSelected = IM_COL32(255, 210, 100, 255);
+	constexpr ImU32 kBoom     = IM_COL32(120, 200, 255, 220);
+
+	for (auto [e, col] : reg.view<ColliderComponent>().each())
+	{
+		const glm::mat4 m = worldOf(e);
+		const ImU32 c = (e == selected) ? kSelected : kCollider;
+		const auto at = [&](float x, float y, float z){ return glm::vec3(m * glm::vec4(x, y, z, 1.0f)); };
+
+		if (col.shape == ColliderShape::Capsule || col.shape == ColliderShape::Sphere)
+		{
+			// Two upright rings and a waist ring read as a capsule without
+			// needing a mesh; for a sphere the caps collapse onto the middle.
+			const float r  = std::max(0.01f, col.radius);
+			const float hy = col.shape == ColliderShape::Capsule
+			                 ? std::max(0.0f, col.height * 0.5f - r) : 0.0f;
+			constexpr int kSeg = 24;
+			for (int ring = 0; ring < 3; ++ring)
+			{
+				for (int i = 0; i < kSeg; ++i)
+				{
+					const float a0 = (float)i / kSeg * 6.2831853f;
+					const float a1 = (float)(i + 1) / kSeg * 6.2831853f;
+					if (ring == 0)   // waist, in XZ
+						line(at(std::cos(a0) * r, 0.0f, std::sin(a0) * r),
+						     at(std::cos(a1) * r, 0.0f, std::sin(a1) * r), c);
+					else if (ring == 1)  // side profile, in XY
+						line(at(std::cos(a0) * r, std::sin(a0) * r + (std::sin(a0) > 0 ? hy : -hy), 0.0f),
+						     at(std::cos(a1) * r, std::sin(a1) * r + (std::sin(a1) > 0 ? hy : -hy), 0.0f), c);
+					else                 // side profile, in ZY
+						line(at(0.0f, std::sin(a0) * r + (std::sin(a0) > 0 ? hy : -hy), std::cos(a0) * r),
+						     at(0.0f, std::sin(a1) * r + (std::sin(a1) > 0 ? hy : -hy), std::cos(a1) * r), c);
+				}
+			}
+		}
+		else   // Box
+		{
+			const glm::vec3 h = glm::max(col.halfExtents, glm::vec3(0.01f));
+			const glm::vec3 v[8] = {
+				at(-h.x,-h.y,-h.z), at( h.x,-h.y,-h.z), at( h.x, h.y,-h.z), at(-h.x, h.y,-h.z),
+				at(-h.x,-h.y, h.z), at( h.x,-h.y, h.z), at( h.x, h.y, h.z), at(-h.x, h.y, h.z) };
+			constexpr int edges[12][2] = { {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
+			                               {0,4},{1,5},{2,6},{3,7} };
+			for (const auto& ed : edges) line(v[ed[0]], v[ed[1]], c);
+		}
+	}
+
+	// Camera booms: pivot, the arm, and the camera's own place at the end of it.
+	for (auto [e, t, cam, rig] : reg.view<TransformComponent, CameraComponent, CameraRigComponent>().each())
+	{
+		const glm::vec3 camPos = glm::vec3(worldOf(e)[3]);
+		// The target is resolved at runtime; in the class editor the thing it
+		// follows is the root, which is what the pivot offset is measured from.
+		const glm::vec3 pivot = glm::vec3(worldOf(root)[3]) + rig.pivotOffset;
+		line(pivot, camPos, kBoom);
+		const float s = 0.08f;
+		line(camPos - glm::vec3(s, 0, 0), camPos + glm::vec3(s, 0, 0), kBoom);
+		line(camPos - glm::vec3(0, s, 0), camPos + glm::vec3(0, s, 0), kBoom);
+		line(camPos - glm::vec3(0, 0, s), camPos + glm::vec3(0, 0, s), kBoom);
+	}
+}
+
 void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 {
+	// The MESH is the root's, not the selection's. The renderer draws it at
+	// identity, so root space is the space of the picture — and that is the only
+	// space in which the subtree's colliders and booms line up with it. Picking
+	// a child's mesh instead would draw it at the origin while its gizmo sat at
+	// its real offset, which reads as everything being in the wrong place.
+	const Entity meshOwner = st.compRoot;
 	HE::UUID skeletalId{}, staticId{};
-	if (reg.valid(st.compSel))
+	if (reg.valid(meshOwner))
 	{
-		if (const auto* sm = reg.try_get<SkeletalMeshComponent>(st.compSel)) skeletalId = sm->meshAssetId;
-		if (const auto* m  = reg.try_get<MeshComponent>(st.compSel))         staticId   = m->meshAssetId;
+		if (const auto* sm = reg.try_get<SkeletalMeshComponent>(meshOwner)) skeletalId = sm->meshAssetId;
+		if (const auto* m  = reg.try_get<MeshComponent>(meshOwner))         staticId   = m->meshAssetId;
 	}
 
 	if (skeletalId == HE::UUID{} && staticId == HE::UUID{})
 	{
-		ImGui::TextDisabled("%s", reg.valid(st.compSel)
-			? "Nothing to draw for this component.\n"
-			  "Select one with a mesh — or assign one on the right."
-			: "Select a component.");
+		ImGui::TextDisabled("%s",
+			"No mesh on this class yet.\n"
+			"Assign one to its root and it shows up here,\n"
+			"with the colliders and camera boom over it.");
 		return;
 	}
 
@@ -1530,6 +1656,8 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 	const ImVec2 org = ImGui::GetCursorScreenPos();
 
 	void* tex = nullptr;
+	glm::mat4 viewProj(1.0f);
+	bool haveViewProj = false;
 	if (ctx.renderer && ctx.contentManager)
 	{
 		if (skeletalId != HE::UUID{})
@@ -1539,7 +1667,9 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			static const std::vector<glm::mat4> kBindPose;
 			tex = ctx.renderer->RenderSkeletalPreview(*ctx.contentManager, skeletalId, kBindPose,
 				static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
-				st.previewYaw, st.previewPitch, st.previewDist, /*showSkeleton=*/false);
+				st.previewYaw, st.previewPitch, st.previewDist, /*showSkeleton=*/false,
+				&viewProj);
+			haveViewProj = (tex != nullptr);
 		}
 		else
 		{
@@ -1561,6 +1691,11 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
 		ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
 			flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+		// The rest of the class, over the mesh: what it collides with and where
+		// its camera sits. Only when the renderer reported its framing — drawing
+		// gizmos against a guessed matrix would be worse than drawing none.
+		if (haveViewProj)
+			drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
 	}
 	else
 		ImGui::TextDisabled("(preview unavailable on this backend)");

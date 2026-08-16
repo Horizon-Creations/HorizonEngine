@@ -50,7 +50,8 @@ public:
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
 	                            float yaw, float pitch, float dist,
-	                            bool showSkeleton = true) override;
+	                            bool showSkeleton = true,
+	                            glm::mat4* outViewProj = nullptr) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;

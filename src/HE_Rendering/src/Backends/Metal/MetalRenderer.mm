@@ -7641,7 +7641,8 @@ void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& m
                                            const std::vector<glm::mat4>& boneMatrices,
                                            uint32_t width, uint32_t height,
                                            float yaw, float pitch, float dist,
-                                           bool showSkeleton)
+                                           bool showSkeleton,
+                                           glm::mat4* outViewProj)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 2048);
 	const int H = std::clamp(static_cast<int>(height), 32, 2048);
@@ -7769,6 +7770,10 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 	const glm::mat4 proj = glm::perspective(glm::radians(35.0f),
 		static_cast<float>(W) / static_cast<float>(H), 0.01f, camDist * 20.0f + 10.0f);
 	const glm::mat4 model(1.0f);
+
+	// Hand the framing out so a caller can overlay in the same space (model is
+	// identity here, so the view-projection is the whole transform).
+	if (outViewProj) *outViewProj = proj * view;
 
 	UnlitUniforms u;
 	u.mvp   = proj * view * model;

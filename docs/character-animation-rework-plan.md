@@ -17,9 +17,30 @@ Blueprint-Pawn. Betrifft MASTERPLAN-Block **E5**.
 | — | Variablen **sind** die Parameter, Update geseedet, Palette enger | ✅ `1ed4a177` |
 | — | `MovementComponent` + `movement.*`/`locomotion.*` | ✅ `dd683474` |
 | — | Knotentitel, `entity.instance`, `Get Owning Object`, Details-Spalte | ✅ `3ab4c19d`, `3490268a`, `d402a49d` |
-| **CP3** | **Klassen-Editor: Code/Viewport-Trennung** | **offen** |
-| **CP4a** | Vorschau der angewählten Komponente | **offen** |
-| **CP4b** | Vorschau des Zusammenbaus (neue Renderer-Methode, pro Backend) | **offen** |
+| **CP3** | Klassen-Editor: Code/Viewport-Trennung, Hierarchie-Baum | ✅ `0146b328` |
+| **CP4** | Vorschau: Mesh + Collider + Kamera-Arm | ✅ (siehe unten) |
+
+**CP4 ist anders gebaut als geplant.** Der Plan sah eine neue
+`IRenderer`-Methode vor, die eine beliebige Welt in ein eigenes Target
+extrahiert — echte Arbeit in jedem Backend, von denen hier nur zwei baubar
+sind, und beurteilt allein danach, ob das Bild stimmt: genau das, was ohne
+Bildschirm nicht prüfbar ist.
+
+Stattdessen rendert die Vorschau das Mesh der Wurzel über den vorhandenen
+Per-Asset-Pfad und legt Collider und Kamera-Arm als projizierte Linien darüber
+(`ImDrawList`). Das kostet kein Backend- nichts, funktioniert auch auf D3D und
+Vulkan, und zeichnet die Gizmos DURCH das Mesh — was man bei einem Collider
+ohnehin will.
+
+Die Matrix dafür kommt aus dem Renderer (`RenderSkeletalPreview` hat einen
+optionalen `outViewProj` bekommen) statt im Panel nachgebaut zu werden: die
+Rahmung hängt an GPU-seitigen Bounds, die nur der Renderer hat, und eine Kopie
+dieser Regel würde driften — sichtbar als falscher Collider, nicht als falsche
+Kamera.
+
+Was damit weiterhin fehlt: echte Verdeckung der Gizmos und ein zweites Mesh im
+Bild (nur die Wurzel wird gezeichnet). Beides wäre der ursprüngliche CP4b, und
+er bleibt möglich, falls das Overlay sich als zu wenig erweist.
 
 **Nie live verifiziert:** nichts davon ist im laufenden Editor gelaufen. Optik,
 Maus-Gefühl, Kollisions-Popping und der Sync-Graph in PIE stehen aus.

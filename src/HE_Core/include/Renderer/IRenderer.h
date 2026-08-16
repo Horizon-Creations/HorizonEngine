@@ -400,11 +400,20 @@ public:
     // width/height in pixels — the target matches the panel's pane, so the
     // preview fills it edge to edge instead of sitting as a square in a strip
     // of dead space (the projection takes its aspect from the same numbers).
+    //
+    // `outViewProj` (optional) reports the view-projection this preview was
+    // drawn with. It exists so a caller can put its OWN overlay on top — a
+    // collider outline, a camera boom — in the same space, without rebuilding
+    // the framing. That framing depends on the mesh's GPU-side bounds, which
+    // only the renderer has; a caller recomputing it would drift the moment the
+    // rule here changed, and the drift would look like a wrong collider rather
+    // than a wrong camera. Left untouched on backends without a preview path.
     virtual void* RenderSkeletalPreview(class ContentManager& /*cm*/, const HE::UUID& /*meshId*/,
                                         const std::vector<glm::mat4>& /*boneMatrices*/,
                                         uint32_t /*width*/, uint32_t /*height*/,
                                         float /*yaw*/, float /*pitch*/, float /*dist*/,
-                                        bool /*showSkeleton*/ = true)
+                                        bool /*showSkeleton*/ = true,
+                                        glm::mat4* /*outViewProj*/ = nullptr)
     { return nullptr; }
 
     // ── Particle system preview ────────────────────────────────────────────
