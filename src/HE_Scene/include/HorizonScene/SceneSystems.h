@@ -7,6 +7,7 @@ class HorizonWorld;
 class ContentManager;
 class IRenderer;
 class PhysicsWorld;
+class AnimatorHost;
 
 namespace SceneSystems
 {
@@ -53,5 +54,11 @@ namespace SceneSystems
     // Everything that poses a skeleton or drives a property: clip playback,
     // two-clip blend, the animator state machine, property animation. Also not
     // gated on play mode — an authored clip animates in the editor viewport.
-    void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt);
+    //
+    // `sync` carries the state machines' sync graphs. It is passed down rather
+    // than ticked separately because each graph must fire immediately before the
+    // transitions it feeds; see AnimationStateMachineSystem::update. nullptr
+    // outside a play session, where those graphs deliberately do not run.
+    void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
+                       AnimatorHost* sync = nullptr);
 }

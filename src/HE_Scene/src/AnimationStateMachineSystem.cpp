@@ -1,4 +1,5 @@
 #include <HorizonScene/AnimationStateMachineSystem.h>
+#include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
@@ -113,7 +114,8 @@ bool evalTransition(const AnimatorStateMachineComponent& sm, const HE::Animation
 
 void AnimationStateMachineSystem::markConfigDirty(AnimatorStateMachineComponent& sm) { sm.configDirty = true; }
 
-void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt)
+void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
+                                         AnimatorHost* sync)
 {
     auto& reg  = world.registry();
     auto  view = reg.view<AnimatorStateMachineComponent, SkeletalMeshComponent>();
@@ -121,6 +123,16 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
     for (auto [e, sm, smc] : view.each())
     {
         resolveConfigIfNeeded(sm, cm);
+
+        // The sync graph writes this entity's parameters, and it runs HERE —
+        // right before the transitions below read them. bind() is idempotent, so
+        // calling it every frame is also how an entity that gained a state
+        // machine (or swapped its asset) mid-session gets picked up.
+        if (sync && sync->running())
+        {
+            sync->bind(e);
+            sync->fireUpdate(e, dt);
+        }
 
         const HE::AnimationState* curState = findState(sm, sm.currentStateName);
         if (!curState)

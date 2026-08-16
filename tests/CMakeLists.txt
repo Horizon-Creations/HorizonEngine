@@ -46,6 +46,7 @@ add_executable(he_tests
     test_physics.cpp
     test_collision_system.cpp
     test_entity_host.cpp
+    test_animator_host.cpp
     test_hc_inheritance.cpp
     test_collider.cpp
     test_raycast.cpp

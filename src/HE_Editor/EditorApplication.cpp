@@ -2078,7 +2078,10 @@ void EditorApplication::OnRender(float dt)
 		if (m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("SceneAnimationTick");
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), dt);
+			// The host is only running during PIE, so outside play the sync
+			// graphs stay silent and the parameters keep their authored defaults
+			// — the behaviour state machines had before sync graphs existed.
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), dt, &m_animatorHost);
 		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
@@ -4771,6 +4774,9 @@ void EditorApplication::setPlayMode(bool play)
 		// so they arrive with the components their class carries.
 		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// Last: a player character spawned just above may be the very entity
+		// whose state machine needs a sync graph.
+		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 
 		// The fallback camera goes up AFTER the player spawns, mirroring the
 		// packaged game: a PlayerCharacter class brings its own camera, and that
@@ -4816,6 +4822,7 @@ void EditorApplication::setPlayMode(bool play)
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
 		// doesn't touch it).
+		m_animatorHost.end();
 		m_entityHost.end();
 		m_playerHost.end();
 		m_gameInstance.fireShutdown();

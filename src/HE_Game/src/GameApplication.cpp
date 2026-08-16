@@ -386,6 +386,9 @@ void GameApplication::OnInit()
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+	// Last of the hosts: a player character spawned just above may be the very
+	// entity whose state machine needs a sync graph.
+	m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 
 	// AFTER the player spawns, not before: a PlayerCharacter class brings its own
 	// camera along, and that camera only exists once the class has been
@@ -551,6 +554,9 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	// linger against entities that no longer exist.
 	m_entityHost.end();
 	m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	// Same reason: the sync instances belong to the world that is going away.
+	m_animatorHost.end();
+	m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 	m_world->fireLevelLoaded();
 	HE_LOG_INFO(Core, "%s",
 		("GameApplication: switched to scene '" + label + "' ("
@@ -1012,7 +1018,7 @@ void GameApplication::OnRender(float deltaTime)
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
-		SceneSystems::tickAnimation(*m_world, contentManager(), deltaTime);
+		SceneSystems::tickAnimation(*m_world, contentManager(), deltaTime, &m_animatorHost);
 
 		// Global Illumination: same GlobalState config.json key the editor's
 		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/
@@ -1093,6 +1099,7 @@ void GameApplication::OnShutdown()
 
 	// Player instances go down before the GameInstance (their Destruct may still
 	// reference it), symmetric to being spawned after its OnInit.
+	m_animatorHost.end();
 	m_entityHost.end();
 	m_playerHost.end();
 	m_physicsWorld.reset();

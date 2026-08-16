@@ -10,6 +10,7 @@
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/EntityHost.h>
+#include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // SaveServicesBinding (C++ GameLogic services)
@@ -98,6 +99,10 @@ private:
     // HorizonCode classes attached to scene entities (ScriptComponent pointing
     // at a class asset). Same runtime and same lifetime as m_playerHost.
     EntityHost m_entityHost;
+    // The state machines' sync graphs. Not ticked from here — it is handed to
+    // the animation phase, which fires each graph right before the transitions
+    // it feeds (see AnimationStateMachineSystem::update).
+    AnimatorHost m_animatorHost;
     // Physics. The shipping runtime used to have none at all, which made every
     // physics.* call a silent no-op and left the collision/overlap events dead
     // in an exported game while they worked in PIE. Rebuilt on every scene

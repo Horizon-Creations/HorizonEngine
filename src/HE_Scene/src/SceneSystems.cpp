@@ -111,7 +111,8 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 }
 
-void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt)
+void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
+                                 AnimatorHost* sync)
 {
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickAnimation");
 
@@ -120,7 +121,7 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     // that carries more than one of them (which nothing stops today).
     { HE_PROFILE_SCOPE_N("Animation");             AnimationSystem::update(world, cm, dt); }
     { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt); }
-    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt); }
+    { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync); }
     { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
 }
 

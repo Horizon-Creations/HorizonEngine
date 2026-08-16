@@ -396,6 +396,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		AnimatorStateMachineAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_ASMG))
 			a.graphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_ASSY))
+			a.syncGraphJson.assign(reinterpret_cast<const char*>(c->data.data()), c->data.size());
 		handle = m_animatorStateMachineAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::StructType:
@@ -1493,6 +1495,10 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<AnimatorStateMachineAsset&>(asset);
 		w.addChunk(HAsset::CHUNK_ASMG, a.graphJson.data(), a.graphJson.size());
+		// Only when there is one — an absent chunk is how every asset written
+		// before the sync graph existed keeps loading unchanged.
+		if (!a.syncGraphJson.empty())
+			w.addChunk(HAsset::CHUNK_ASSY, a.syncGraphJson.data(), a.syncGraphJson.size());
 		break;
 	}
 	case HE::AssetType::StructType:

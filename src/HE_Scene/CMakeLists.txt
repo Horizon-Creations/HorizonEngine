@@ -4,6 +4,7 @@ add_library(HorizonScene SHARED
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
+    src/AnimatorHost.cpp
     src/SceneSerializer.cpp
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp

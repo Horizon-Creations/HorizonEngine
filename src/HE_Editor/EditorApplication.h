@@ -21,6 +21,7 @@
 #include <HorizonScene/GameInstanceHost.h>
 #include <HorizonScene/PlayerHost.h>
 #include <HorizonScene/EntityHost.h>
+#include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
@@ -512,6 +513,10 @@ private:
 	// HorizonCode classes attached to scene entities (ScriptComponent pointing at
 	// a class asset) — PIE only, same lifetime as m_playerHost, same runtime.
 	EntityHost         m_entityHost;
+	// The state machines' sync graphs — PIE only, same lifetime and runtime.
+	// Handed to the animation phase rather than ticked here, so each graph fires
+	// right before the transitions it feeds.
+	AnimatorHost       m_animatorHost;
 	HorizonCode::Graph m_gameInstanceGraph;
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file

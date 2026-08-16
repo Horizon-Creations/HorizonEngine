@@ -124,6 +124,10 @@ inline constexpr uint32_t CHUNK_PPSD = makeChunkId('P','P','S','D'); // precompi
 
 // Animator State Machine
 inline constexpr uint32_t CHUNK_ASMG = makeChunkId('A','S','M','G'); // states/transitions/params graph (JSON)
+// The sync graph: a HorizonCode graph whose one job is to read the character it
+// animates and write the state machine's parameters, once per frame. Absent =
+// the asset has none, which is every asset written before this existed.
+inline constexpr uint32_t CHUNK_ASSY = makeChunkId('A','S','S','Y'); // sync graph (HorizonCode JSON)
 
 // User-defined types (HE::TypeRegistry round-trips the JSON)
 inline constexpr uint32_t CHUNK_STDF = makeChunkId('S','T','D','F'); // struct definition (JSON)

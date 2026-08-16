@@ -280,6 +280,17 @@ struct ParticleGraphAsset : public RuntimeAsset
 struct AnimatorStateMachineAsset : public RuntimeAsset
 {
 	std::string graphJson;
+	// The sync graph (CHUNK_ASSY): a HorizonCode graph fired once per frame, per
+	// animated entity, immediately before the transitions are evaluated. Its only
+	// job is to read the character and write `params` — Unreal's AnimBP
+	// EventGraph, in the role that matters.
+	//
+	// It lives on the ASSET, so two characters sharing a state machine share the
+	// sync logic. Node code must therefore ask for its own owner and never for
+	// "the player", or the same state machine stops working on an NPC.
+	//
+	// Empty = no sync graph, which is every asset written before this existed.
+	std::string syncGraphJson;
 };
 
 // A UI widget tree (UMG-style widget editor asset). The JSON is the source of
