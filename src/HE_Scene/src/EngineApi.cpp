@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/NameComponent.h"
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
+#include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
@@ -248,6 +249,38 @@ namespace material {
 glm::vec4 getParam(Ctx& c, Entity e, const std::string& n)                     { return c.world ? ScriptApi::getMaterialParam(*c.world, c.content, e, n) : glm::vec4(0.0f); }
 bool      setParam(Ctx& c, Entity e, const std::string& n, const glm::vec4& v) { return c.world ? ScriptApi::setMaterialParam(*c.world, c.content, e, n, v) : false; }
 } // namespace material
+
+// ── Animator ─────────────────────────────────────────────────────────────────
+namespace animator {
+namespace {
+AnimatorStateMachineComponent* smOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<AnimatorStateMachineComponent>(id) : nullptr;
+}
+}
+void setParam(Ctx& c, Entity e, const std::string& name, float value)
+{
+    // operator[] on purpose: a name the asset never declared is still a usable
+    // parameter, exactly as it is when the scene file carries one. A transition
+    // that reads an unknown name evaluates false rather than erroring, so a typo
+    // is inert instead of fatal.
+    if (auto* sm = smOf(c, e)) sm->params[name] = value;
+}
+float getParam(Ctx& c, Entity e, const std::string& name)
+{
+    if (auto* sm = smOf(c, e))
+        if (auto it = sm->params.find(name); it != sm->params.end()) return it->second;
+    return 0.0f;
+}
+std::string getState(Ctx& c, Entity e)
+{
+    auto* sm = smOf(c, e);
+    return sm ? sm->currentStateName : std::string();
+}
+} // namespace animator
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -1481,6 +1514,14 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "material.setParam", "Material", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Color}}, {{"ok", P::Bool}}, "HE::api::material::setParam",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(material::setParam(c, (Entity)aI(a, 0), aS(a, 1), aV4(a, 2))) }; } });
 
+        // Animator — the state machine's parameters, and the only way to steer it
+        t.push_back({ "animator.setParam", "Animator", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Float}}, {}, "HE::api::animator::setParam",
+            [](Ctx& c, const VV& a){ animator::setParam(c, (Entity)aI(a, 0), aS(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "animator.getParam", "Animator", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Float}}, "HE::api::animator::getParam",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(animator::getParam(c, (Entity)aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "animator.getState", "Animator", false, {{"entity", P::Int}}, {{"state", P::String}}, "HE::api::animator::getState",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(animator::getState(c, (Entity)aI(a, 0))) }; } });
+
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(ui::getText(c, (Entity)aI(a, 0))) }; } });
@@ -1874,6 +1915,8 @@ const std::vector<ApiFn>& registry()
             { "transform.getPosition", "Get Position" }, { "transform.setPosition", "Set Position" },
             { "transform.getRotation", "Get Rotation" }, { "transform.setRotation", "Set Rotation" },
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
+            { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
+            { "animator.getState", "Get Animator State" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             { "physics.isGrounded", "Is Grounded" },
             { "material.getParam", "Get Material Param" }, { "material.setParam", "Set Material Param" },
@@ -1986,7 +2029,8 @@ bool isScriptGroup(std::string_view group)
 {
     static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
                                                     "string", "camera", "env", "entity", "audio",
-                                                    "debug", "fs", "save", "scene", "player" };
+                                                    "debug", "fs", "save", "scene", "player",
+                                                    "animator" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

@@ -1570,14 +1570,25 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			addItem("Particle System", ParticleSystemComponent{});
 			addItem("LOD",             LODComponent{});
 			addItem("Foliage",         FoliageComponent{});
-			// Animator / Animator Blend / Animator State Machine / Property
-			// Animator, Character Controller, and the UI components are
-			// intentionally not offered here — they're meaningless bolted onto
-			// an arbitrary entity and are set up through their owning asset
-			// workflow instead (Skeletal Mesh + Animation State Machine editor
-			// tabs, the player/character setup, the UI Widget designer). The
-			// component types and their Inspector panels above still work for
-			// entities that already carry them (e.g. older scenes).
+			// A state machine animates a SKELETON, so it is offered exactly where
+			// there is one — not on an arbitrary entity, and not nowhere.
+			//
+			// It used to be in the second group below, left out with a note that
+			// it is "set up through its owning asset workflow instead". That
+			// workflow does not add it: outside the serializer there was no
+			// emplace<AnimatorStateMachineComponent> in the whole engine, so a
+			// scene that did not already carry one could never get one. The
+			// dependency is the rule that makes it meaningful, not the absence.
+			if (registry.all_of<SkeletalMeshComponent>(entity))
+				addItem("Animator State Machine", AnimatorStateMachineComponent{});
+
+			// Animator / Animator Blend / Property Animator, Character
+			// Controller, and the UI components are intentionally not offered
+			// here — they're meaningless bolted onto an arbitrary entity and are
+			// set up through their owning asset workflow instead (Skeletal Mesh
+			// editor tab, the player/character setup, the UI Widget designer).
+			// The component types and their Inspector panels above still work
+			// for entities that already carry them (e.g. older scenes).
 			ImGui::EndPopup();
 		}
 	}

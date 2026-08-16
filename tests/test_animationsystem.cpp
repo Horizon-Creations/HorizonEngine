@@ -13,6 +13,7 @@
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationPreview.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/EngineApi.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -711,6 +712,58 @@ TEST_CASE("SceneSystems: animation is its own phase, so it can run after gamepla
     const auto& sm = world.registry().get<AnimatorStateMachineComponent>(e);
     CHECK((sm.inTransition || sm.currentStateName == "Walk"));
     CHECK(boneX() > 1.0f);   // Idle clip is X=3, barely blended toward Walk yet
+}
+
+TEST_CASE("EngineApi animator.* is what makes the state machine steerable")
+{
+    // Before these rows existed the FSM was authorable and unreachable: no
+    // registry entry, no script binding, no node, no inspector field. A
+    // parameter kept its asset default forever, so every authored transition sat
+    // there waiting for a value nothing could deliver. This drives it end to end
+    // through the same registry the four frontends dispatch.
+    ContentManager cm;
+    HorizonWorld   world;
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({ 3.0f, 0.0f, 0.0f }));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({ 0.0f, 5.0f, 0.0f }));
+
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    world.addComponent(e, makeSimpleSM(cm, clipAId, clipBId, /*transitionDuration=*/0.0f));
+
+    HE::api::Ctx ctx{ &world, nullptr, &cm };
+    const auto eid = (HE::api::Entity)e;
+
+    auto call = [&](const char* id, std::vector<HorizonCode::Value> a)
+    { return HE::api::find(id)->invoke(ctx, a); };
+    using V = HorizonCode::Value;
+
+    // Reading an unset parameter is 0, not an error.
+    CHECK(call("animator.getParam", { V::ofInt((int)eid), V::ofString("nope") })[0].f
+          == doctest::Approx(0.0f));
+    CHECK(call("animator.getState", { V::ofInt((int)eid) })[0].s == "Idle");
+
+    // Set it the way gameplay code would, then let the animation phase run.
+    call("animator.setParam", { V::ofInt((int)eid), V::ofString("speed"), V::ofFloat(1.0f) });
+    CHECK(call("animator.getParam", { V::ofInt((int)eid), V::ofString("speed") })[0].f
+          == doctest::Approx(1.0f));
+
+    SceneSystems::tickAnimation(world, cm, 0.016f);
+    // A zero-length transition lands immediately, so the state is observable
+    // through the same API in the very next call.
+    CHECK(call("animator.getState", { V::ofInt((int)eid) })[0].s == "Walk");
+
+    // An entity without a state machine answers instead of crashing.
+    entt::entity bare = world.createEntity();
+    world.addComponent(bare, TransformComponent{});
+    const auto bid = (int)(HE::api::Entity)bare;
+    CHECK_NOTHROW(call("animator.setParam", { V::ofInt(bid), V::ofString("x"), V::ofFloat(1.0f) }));
+    CHECK(call("animator.getParam", { V::ofInt(bid), V::ofString("x") })[0].f == doctest::Approx(0.0f));
+    CHECK(call("animator.getState", { V::ofInt(bid) })[0].s == "");
 }
 
 TEST_CASE("AnimationStateMachineSystem transition fires when param exceeds threshold")

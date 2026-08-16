@@ -122,6 +122,21 @@ namespace physics {
     bool       isGrounded(Ctx&, Entity e);
 }
 
+// ── Animator (the state machine's parameters) ────────────────────────────────
+// The state machine READS these and never writes them: a transition compares,
+// nothing more. Gameplay code is the only writer, which is what makes the FSM
+// steerable at all — until this existed, a parameter kept the value its asset
+// defaulted to, forever, and every authored transition was unreachable.
+//
+// Values live on the entity's AnimatorStateMachineComponent, so two characters
+// sharing one asset hold their own. Unknown entity or no state machine: setting
+// is a no-op, reading gives 0 / "".
+namespace animator {
+    void        setParam(Ctx&, Entity e, const std::string& name, float value);
+    float       getParam(Ctx&, Entity e, const std::string& name);   // 0 when unset
+    std::string getState(Ctx&, Entity e);                            // "" when none
+}
+
 // ── Materials (node-graph param by name) ─────────────────────────────────────
 namespace material {
     glm::vec4 getParam(Ctx&, Entity e, const std::string& name);                       // (0,0,0,0)
