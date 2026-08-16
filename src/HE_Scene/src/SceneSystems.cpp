@@ -6,6 +6,7 @@
 #include "HorizonScene/AnimationStateMachineSystem.h"
 #include "HorizonScene/PropertyAnimationSystem.h"
 #include "HorizonScene/NavigationSystem.h"
+#include "HorizonScene/MovementSystem.h"
 #include "HorizonScene/WeatherSystem.h"
 #include "HorizonScene/ParticleSystem.h"
 #include "HorizonScene/FoliageSystem.h"
@@ -92,6 +93,11 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickWorld");
 
     { HE_PROFILE_SCOPE_N("Terrain");               TerrainSystem::updateTerrains(world, cm, renderer); }
+    // Movement turns this frame's intent into character motion. Gameplay side,
+    // like navigation — it must land before physics steps and long before the
+    // animation phase reads the result.
+    { HE_PROFILE_SCOPE_N("Movement");              MovementSystem::update(world,
+        const_cast<PhysicsWorld*>(physics), dt); }
     // Navigation moves transforms, so it belongs on the gameplay side of the
     // frame — ahead of the animation phase, like physics and scripts.
     { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt); }

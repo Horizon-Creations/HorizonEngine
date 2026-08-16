@@ -915,6 +915,27 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraComponent>(entity); }
 	}
 
+	// ── Movement ────────────────────────────────────────────────────────────
+	if (auto* mv = registry.try_get<MovementComponent>(entity))
+	{
+		if (componentHeader("Movement", true, removed))
+		{
+			Row::dragFloat("Max Speed", &mv->maxSpeed, 0.1f, 0.0f, 100.0f); trackEdit();
+			ImGui::Checkbox("Orient To Movement", &mv->orientToMovement); trackEdit();
+			if (mv->orientToMovement)
+			{
+				Row::dragFloat("Turn Rate", &mv->turnRate, 5.0f, 0.0f, 3600.0f, "%.0f\xc2\xb0/s");
+				trackEdit();
+			}
+			// Speed and grounded are deliberately absent: they are not stored
+			// here. They come off the character controller when asked, so there
+			// is never a second copy to disagree with it.
+			if (!registry.all_of<CharacterControllerComponent>(entity))
+				ImGui::TextDisabled("%s", "No Character Controller — nothing to move.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MovementComponent>(entity); }
+	}
+
 	// ── Camera Rig ──────────────────────────────────────────────────────────
 	if (auto* rig = registry.try_get<CameraRigComponent>(entity))
 	{
@@ -1540,6 +1561,7 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			addItem("Nav Mesh",                NavMeshComponent{});
 			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
+			addItem("Movement",     MovementComponent{});
 			addItem("Camera",       CameraComponent{});
 			// A rig aims a camera, so it brings one along. Adding it alone left
 			// people with a component that silently did nothing, on an entity

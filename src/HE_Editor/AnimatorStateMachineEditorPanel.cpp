@@ -220,9 +220,13 @@ const HcGraphHost::MenuOpts& syncMenus()
 		o.apiGroups = {
 			"animator",   // the point of the graph
 			"entity",     // entity.self — how it reaches the character it animates
-			"transform",  // where that character is and how it is turned
-			"physics",    // grounded, velocity, a ray under the feet
+			"movement",   // what that character is doing: speed, grounded, direction
+			"transform",  // where it is and how it is turned
+			"physics",    // a ray under the feet, when speed and grounded aren't enough
 			"math",       // turning those into the numbers a transition wants
+			// NOT "locomotion": those move the character, and this graph runs in
+			// the animation phase — a transform write from here lands after
+			// physics has already run.
 		};
 		return o;
 	}();

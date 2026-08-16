@@ -11,6 +11,9 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
+#include "HorizonScene/Components/MovementComponent.h"
+#include "HorizonScene/Components/CharacterControllerComponent.h"
+#include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/ParticleSystemComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
@@ -281,6 +284,81 @@ std::string getState(Ctx& c, Entity e)
     return sm ? sm->currentStateName : std::string();
 }
 } // namespace animator
+
+// ── Movement / Locomotion ────────────────────────────────────────────────────
+namespace {
+const CharacterControllerComponent* ccOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<CharacterControllerComponent>(id) : nullptr;
+}
+MovementComponent* mvOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<MovementComponent>(id) : nullptr;
+}
+} // namespace
+
+namespace movement {
+glm::vec3 velocity(Ctx& c, Entity e)
+{
+    const auto* cc = ccOf(c, e);
+    return cc ? cc->velocity : glm::vec3(0.0f);
+}
+float speed(Ctx& c, Entity e)
+{
+    const glm::vec3 v = velocity(c, e);
+    return glm::length(glm::vec2(v.x, v.z));   // horizontal only — falling is not running
+}
+float verticalSpeed(Ctx& c, Entity e) { return velocity(c, e).y; }
+bool  isGrounded(Ctx& c, Entity e)
+{
+    const auto* cc = ccOf(c, e);
+    return cc && cc->isGrounded;
+}
+namespace {
+// Travel direction in the character's own frame. Both amounts come from the
+// same projection, so they are computed together and read apart.
+glm::vec2 localTravel(Ctx& c, Entity e)
+{
+    if (!c.world) return glm::vec2(0.0f);
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    if (!reg.valid(id)) return glm::vec2(0.0f);
+    const auto* t = reg.try_get<TransformComponent>(id);
+    if (!t) return glm::vec2(0.0f);
+    const glm::vec3 v = velocity(c, e);
+    const glm::vec2 planar(v.x, v.z);
+    if (glm::length(planar) < 1e-4f) return glm::vec2(0.0f);
+    const glm::quat q = glm::quat(glm::radians(t->rotation));
+    const glm::vec3 fwd = q * glm::vec3(0.0f, 0.0f, -1.0f);
+    const glm::vec3 rgt = q * glm::vec3(1.0f, 0.0f,  0.0f);
+    return { glm::dot(planar, glm::vec2(fwd.x, fwd.z)),
+             glm::dot(planar, glm::vec2(rgt.x, rgt.z)) };
+}
+}
+float forwardAmount(Ctx& c, Entity e) { return localTravel(c, e).x; }
+float rightAmount(Ctx& c, Entity e)   { return localTravel(c, e).y; }
+} // namespace movement
+
+namespace locomotion {
+void move(Ctx& c, Entity e, const glm::vec3& direction)
+{
+    // Accumulated, not assigned: two calls in one frame are two pushes, which is
+    // what a caller adding "forward" and "strafe" separately means.
+    if (auto* mv = mvOf(c, e)) mv->moveInput += direction;
+}
+void look(Ctx& c, Entity e, float yawDegrees, float pitchDegrees)
+{
+    if (auto* mv = mvOf(c, e)) { mv->lookYaw += yawDegrees; mv->lookPitch += pitchDegrees; }
+}
+void setMaxSpeed(Ctx& c, Entity e, float v)          { if (auto* mv = mvOf(c, e)) mv->maxSpeed = v; }
+void setOrientToMovement(Ctx& c, Entity e, bool on)  { if (auto* mv = mvOf(c, e)) mv->orientToMovement = on; }
+} // namespace locomotion
 
 // ── Entity UI ────────────────────────────────────────────────────────────────
 namespace ui {
@@ -1522,6 +1600,31 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "animator.getState", "Animator", false, {{"entity", P::Int}}, {{"state", P::String}}, "HE::api::animator::getState",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(animator::getState(c, (Entity)aI(a, 0))) }; } });
 
+        // Movement — the reads an animator asks for. Derived from the character
+        // controller on the spot, so there is no second copy to go stale.
+        t.push_back({ "movement.speed", "Movement", false, {{"entity", P::Int}}, {{"speed", P::Float}}, "HE::api::movement::speed",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(movement::speed(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "movement.verticalSpeed", "Movement", false, {{"entity", P::Int}}, {{"speed", P::Float}}, "HE::api::movement::verticalSpeed",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(movement::verticalSpeed(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "movement.isGrounded", "Movement", false, {{"entity", P::Int}}, {{"grounded", P::Bool}}, "HE::api::movement::isGrounded",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(movement::isGrounded(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "movement.velocity", "Movement", false, {{"entity", P::Int}}, {{"velocity", P::Vec3}}, "HE::api::movement::velocity",
+            [](Ctx& c, const VV& a){ return VV{ v3(movement::velocity(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "movement.forwardAmount", "Movement", false, {{"entity", P::Int}}, {{"amount", P::Float}}, "HE::api::movement::forwardAmount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(movement::forwardAmount(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "movement.rightAmount", "Movement", false, {{"entity", P::Int}}, {{"amount", P::Float}}, "HE::api::movement::rightAmount",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(movement::rightAmount(c, (Entity)aI(a, 0))) }; } });
+
+        // Locomotion — the writes. Not offered to a sync graph (see its palette).
+        t.push_back({ "locomotion.move", "Locomotion", true, {{"entity", P::Int}, {"direction", P::Vec3}}, {}, "HE::api::locomotion::move",
+            [](Ctx& c, const VV& a){ locomotion::move(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
+        t.push_back({ "locomotion.look", "Locomotion", true, {{"entity", P::Int}, {"yaw", P::Float}, {"pitch", P::Float}}, {}, "HE::api::locomotion::look",
+            [](Ctx& c, const VV& a){ locomotion::look(c, (Entity)aI(a, 0), aF(a, 1), aF(a, 2)); return VV{}; } });
+        t.push_back({ "locomotion.setMaxSpeed", "Locomotion", true, {{"entity", P::Int}, {"speed", P::Float}}, {}, "HE::api::locomotion::setMaxSpeed",
+            [](Ctx& c, const VV& a){ locomotion::setMaxSpeed(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "locomotion.setOrientToMovement", "Locomotion", true, {{"entity", P::Int}, {"on", P::Bool}}, {}, "HE::api::locomotion::setOrientToMovement",
+            [](Ctx& c, const VV& a){ locomotion::setOrientToMovement(c, (Entity)aI(a, 0), aB(a, 1)); return VV{}; } });
+
         // Entity UI
         t.push_back({ "ui.getText", "UI", false, {{"entity", P::Int}}, {{"text", P::String}}, "HE::api::ui::getText",
             [](Ctx& c, const VV& a){ return VV{ Value::ofString(ui::getText(c, (Entity)aI(a, 0))) }; } });
@@ -1917,6 +2020,13 @@ const std::vector<ApiFn>& registry()
             { "transform.getScale", "Get Scale" },       { "transform.setScale", "Set Scale" },
             { "animator.setParam", "Set Animator Param" }, { "animator.getParam", "Get Animator Param" },
             { "animator.getState", "Get Animator State" },
+            { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
+            { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
+            { "movement.forwardAmount", "Get Forward Amount" },
+            { "movement.rightAmount", "Get Right Amount" },
+            { "locomotion.move", "Move" }, { "locomotion.look", "Look" },
+            { "locomotion.setMaxSpeed", "Set Max Speed" },
+            { "locomotion.setOrientToMovement", "Set Orient To Movement" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             { "physics.isGrounded", "Is Grounded" },
             { "material.getParam", "Get Material Param" }, { "material.setParam", "Set Material Param" },
@@ -2030,7 +2140,7 @@ bool isScriptGroup(std::string_view group)
     static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
                                                     "string", "camera", "env", "entity", "audio",
                                                     "debug", "fs", "save", "scene", "player",
-                                                    "animator" };
+                                                    "animator", "movement", "locomotion" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

@@ -1562,6 +1562,10 @@ const std::vector<EngineClassDesc>& engineClasses()
                                         { { "Get Owning Entity", "entity.owned", 0 } } },
         { "PlayerCharacter",  "Entity", {},
                                         { { "Get Controller", "player.controllerOf", 0 } } },
+        // Movement reads hang off Entity's "Get Owning Entity", not here: they
+        // take an entity, and every Entity has one. Dragging off a character
+        // reference therefore reads as the traversal it is — the character, its
+        // entity, its speed — with no per-class table to keep in step.
         { "PlayerController", "Entity", {},
                                         { { "Possess",   "player.possess",   0 },
                                           { "Un Possess", "player.unpossess", 0 },

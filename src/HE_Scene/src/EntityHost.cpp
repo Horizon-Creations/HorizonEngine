@@ -14,6 +14,7 @@
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/MovementComponent.h>
 #include <Diagnostics/Logger.h>
 #include <filesystem>
 #include <string>
@@ -252,6 +253,10 @@ std::vector<uint8_t> EntityHost::defaultComponents(const std::string& baseClass)
 		rb.type = RigidBodyType::Kinematic;   // the character controller drives it
 		scratch.addComponent(root, rb);
 		scratch.addComponent(root, SkeletalMeshComponent{});
+		// What it is doing, in the form an animator reads it. Without this the
+		// character controller is the only source, and every project rederives
+		// "how fast" and "on the ground" by hand — differently each time.
+		scratch.addComponent(root, MovementComponent{});
 
 		// …and a camera to see it with. A character class without one is a
 		// character nobody can look at: the author has to know that a camera is a

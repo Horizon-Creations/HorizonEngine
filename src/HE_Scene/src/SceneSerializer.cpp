@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/MaterialComponent.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
+#include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
@@ -245,6 +246,17 @@ namespace
 				{ "farPlane",     c->farPlane },
 				{ "isMain",       c->isMain },
 				{ "orthographic", c->orthographic },
+			};
+		}
+		if (auto* mv = registry.try_get<MovementComponent>(entity))
+		{
+			// Config only. moveInput/lookYaw/lookPitch are this frame's intent
+			// and are cleared at the end of it — saving them would restore a
+			// character mid-step.
+			comps["movement"] = {
+				{ "maxSpeed",         mv->maxSpeed },
+				{ "turnRate",         mv->turnRate },
+				{ "orientToMovement", mv->orientToMovement },
 			};
 		}
 		if (auto* rig = registry.try_get<CameraRigComponent>(entity))
@@ -733,6 +745,15 @@ namespace
 			cam.isMain       = c.value("isMain",       cam.isMain);
 			cam.orthographic = c.value("orthographic", cam.orthographic);
 			registry.emplace_or_replace<CameraComponent>(entity, cam);
+		}
+		if (comps.contains("movement"))
+		{
+			const json& c = comps["movement"];
+			MovementComponent mv;
+			mv.maxSpeed         = c.value("maxSpeed",         mv.maxSpeed);
+			mv.turnRate         = c.value("turnRate",         mv.turnRate);
+			mv.orientToMovement = c.value("orientToMovement", mv.orientToMovement);
+			registry.emplace_or_replace<MovementComponent>(entity, mv);
 		}
 		if (comps.contains("cameraRig"))
 		{
@@ -1656,6 +1677,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 	static const std::unordered_set<std::string> kKnown = {
 		"animator", "animatorblend", "animstatemachine", "audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
+		"movement",
 		"decal", "environment", "foliage", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem", "propertyanimator",
 		"rigidbody", "saveState", "script", "skeletalmesh", "terrain",

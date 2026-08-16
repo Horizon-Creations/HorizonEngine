@@ -137,6 +137,38 @@ namespace animator {
     std::string getState(Ctx&, Entity e);                            // "" when none
 }
 
+// ── Movement: what a character is doing ──────────────────────────────────────
+// READS only, and that is the whole design. These are the questions an animator
+// asks — how fast, on the ground, which way relative to where I face — and the
+// answers are derived from the character controller on the spot rather than
+// stored a second time next to it.
+//
+// Split from `locomotion` below on purpose: this group is what a sync graph may
+// call, and a sync graph runs in the ANIMATION phase. Anything that moves a
+// character from there would be a transform write after physics has already run,
+// which is the ordering bug the animation split exists to prevent.
+namespace movement {
+    float     speed(Ctx&, Entity e);          // horizontal metres/second
+    float     verticalSpeed(Ctx&, Entity e);  // signed; negative = falling
+    bool      isGrounded(Ctx&, Entity e);
+    glm::vec3 velocity(Ctx&, Entity e);
+    // Travel direction in the character's OWN frame: +1 forward, -1 back for
+    // the first, +1 right for the second. This is what a 2D blend space wants,
+    // and computing it here keeps the trigonometry out of every graph.
+    float     forwardAmount(Ctx&, Entity e);
+    float     rightAmount(Ctx&, Entity e);
+}
+
+// ── Locomotion: telling a character what to do ───────────────────────────────
+// The write half. Belongs in a PlayerCharacter's graph, in the gameplay phase —
+// deliberately NOT in a sync graph's palette.
+namespace locomotion {
+    void move(Ctx&, Entity e, const glm::vec3& direction);  // world space, length 0..1
+    void look(Ctx&, Entity e, float yawDegrees, float pitchDegrees);
+    void setMaxSpeed(Ctx&, Entity e, float metresPerSecond);
+    void setOrientToMovement(Ctx&, Entity e, bool on);
+}
+
 // ── Materials (node-graph param by name) ─────────────────────────────────────
 namespace material {
     glm::vec4 getParam(Ctx&, Entity e, const std::string& name);                       // (0,0,0,0)

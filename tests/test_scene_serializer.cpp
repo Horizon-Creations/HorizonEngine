@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/MovementComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ScriptComponent.h>
@@ -1326,6 +1327,7 @@ namespace
 		MaterialComponent              material;
 		CameraComponent                camera;
 		CameraRigComponent             cameraRig;
+		MovementComponent              movement;
 		LightComponent                 light;
 		RigidBodyComponent             rigidbody;
 		ColliderComponent              collider;
@@ -1432,6 +1434,16 @@ namespace
 		a.cameraRig.collision       = false;
 		a.cameraRig.collisionRadius = 0.45f;
 		reg.emplace<CameraRigComponent>(actor, a.cameraRig);
+
+		a.movement.maxSpeed         = 7.25f;
+		a.movement.turnRate         = 540.0f;
+		a.movement.orientToMovement = true;
+		// The intent fields are set here on purpose and asserted GONE below:
+		// they are one frame's worth of "was told to move", and restoring them
+		// would resume a character mid-step on load.
+		a.movement.moveInput = { 1.0f, 0.0f, 1.0f };
+		a.movement.lookYaw   = 33.0f;
+		reg.emplace<MovementComponent>(actor, a.movement);
 
 		a.light.type         = LightType::Spot;
 		a.light.color        = { 0.15f, 0.25f, 0.35f };
@@ -1701,6 +1713,17 @@ namespace
 			CHECK(rig->collisionRadius == doctest::Approx(a.cameraRig.collisionRadius));
 			// Runtime-only: a fresh session has hidden nothing yet.
 			CHECK((rig->meshHiddenEntity == entt::null));
+		}
+		{
+			const auto* mv = reg.try_get<MovementComponent>(actor);
+			REQUIRE(mv != nullptr);
+			CHECK(mv->maxSpeed         == doctest::Approx(a.movement.maxSpeed));
+			CHECK(mv->turnRate         == doctest::Approx(a.movement.turnRate));
+			CHECK(mv->orientToMovement == a.movement.orientToMovement);
+			// This frame's intent is NOT persisted — a saved character resumes
+			// standing still, not mid-stride.
+			CHECK(mv->moveInput == glm::vec3(0.0f));
+			CHECK(mv->lookYaw   == doctest::Approx(0.0f));
 		}
 		{
 			const auto* l = reg.try_get<LightComponent>(actor);
