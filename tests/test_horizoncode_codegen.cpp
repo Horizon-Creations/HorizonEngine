@@ -41,6 +41,8 @@ namespace
 			case PinType::String: return "s:\"" + v.s + "\"";
 			case PinType::Vec2:   std::snprintf(buf, sizeof buf, "v2:(%g,%g)", v.v2.x, v.v2.y); return buf;
 			case PinType::Color:  std::snprintf(buf, sizeof buf, "col:(%g,%g,%g,%g)", v.col.x, v.col.y, v.col.z, v.col.w); return buf;
+			case PinType::Vec3:   std::snprintf(buf, sizeof buf, "v3:(%g,%g,%g)", v.v3.x, v.v3.y, v.v3.z); return buf;
+			case PinType::Vec4:   std::snprintf(buf, sizeof buf, "v4:(%g,%g,%g,%g)", v.v4.x, v.v4.y, v.v4.z, v.v4.w); return buf;
 			case PinType::Ref:    return "ref:" + std::to_string(v.ref);
 			case PinType::Transform:
 				std::snprintf(buf, sizeof buf, "xf:(%g,%g,%g|%g,%g,%g|%g,%g,%g)",
@@ -104,6 +106,8 @@ namespace
 			case PinType::String: return a.s == b.s;
 			case PinType::Vec2:   return a.v2 == b.v2;
 			case PinType::Color:  return a.col == b.col;
+			case PinType::Vec3:   return a.v3 == b.v3;
+			case PinType::Vec4:   return a.v4 == b.v4;
 			case PinType::Ref:    return a.ref == b.ref;
 			case PinType::Transform:
 				return a.tpos == b.tpos && a.trot == b.trot && a.tscl == b.tscl;
@@ -402,6 +406,15 @@ TEST_CASE("codegen parity: coerce_matrix")
 	CHECK(p.var("bOut").b == true);
 	p.fire("ArgB", 0, Value::ofFloat(0.0f));
 	CHECK(p.var("bOut").b == false);
+
+	// Vector ↔ colour. checkParity() has already compared both backends value
+	// for value (including the PinType tag); these pin down WHICH value.
+	p.fire("Vectors");
+	CHECK(p.var("v3FromColor").v3 == glm::vec3(1.0f, 2.0f, 3.0f));   // w dropped
+	CHECK(p.var("v4FromVec3").v4 == glm::vec4(1.0f, 2.0f, 3.0f, 0.0f));   // vector pad
+	CHECK(p.var("colorFromVec3").col == glm::vec4(1.0f, 2.0f, 3.0f, 1.0f)); // opaque pad
+	CHECK(p.var("v3FromVec4").v3 == glm::vec3(5.0f, 6.0f, 7.0f));
+	CHECK(p.var("v3FromFloat").v3 == glm::vec3(0.0f));   // inconvertible → null vector
 }
 
 TEST_CASE("codegen parity: math_ops")

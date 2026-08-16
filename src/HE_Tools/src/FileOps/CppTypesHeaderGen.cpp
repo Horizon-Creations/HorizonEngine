@@ -74,6 +74,8 @@ std::string fieldCppType(const StructField& f, const NameTable& nt)
     case PinType::Bool:      base = "bool"; break;
     case PinType::String:    base = "std::string"; break;
     case PinType::Vec2:      base = "HeVec2"; break;
+    case PinType::Vec3:      base = "HeVec3"; break;
+    case PinType::Vec4:      base = "HeVec4"; break;
     case PinType::Color:     base = "HeColor"; break;
     case PinType::Transform: base = "HeTransform"; break;
     case PinType::Enum:
@@ -114,6 +116,11 @@ std::string fieldInitializer(const StructField& f, const NameTable& nt,
     case PinType::String: return v.s.empty() ? std::string{} : " = " + cppStringLiteral(v.s);
     case PinType::Vec2:
         return " = { " + floatLit(v.v2.x) + ", " + floatLit(v.v2.y) + " }";
+    case PinType::Vec3:
+        return " = { " + floatLit(v.v3.x) + ", " + floatLit(v.v3.y) + ", " + floatLit(v.v3.z) + " }";
+    case PinType::Vec4:
+        return " = { " + floatLit(v.v4.x) + ", " + floatLit(v.v4.y) + ", "
+             + floatLit(v.v4.z) + ", " + floatLit(v.v4.w) + " }";
     case PinType::Color:
         return " = { " + floatLit(v.col.x) + ", " + floatLit(v.col.y) + ", "
              + floatLit(v.col.z) + ", " + floatLit(v.col.w) + " }";
@@ -165,6 +172,9 @@ std::string generateCppTypesHeader()
     out += "#include <string>\n#include <vector>\n\n";
     out += "// Minimal value helpers (no engine/glm dependency in game code).\n";
     out += "struct HeVec2      { float x = 0.0f, y = 0.0f; };\n";
+    // Vectors default to the null vector; only a colour is opaque by default.
+    out += "struct HeVec3      { float x = 0.0f, y = 0.0f, z = 0.0f; };\n";
+    out += "struct HeVec4      { float x = 0.0f, y = 0.0f, z = 0.0f, w = 0.0f; };\n";
     out += "struct HeColor     { float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f; };\n";
     out += "struct HeVec3      { float x = 0.0f, y = 0.0f, z = 0.0f; };\n";
     out += "struct HeTransform { HeVec3 pos{}; HeVec3 rot{}; HeVec3 scl{ 1.0f, 1.0f, 1.0f }; };\n\n";

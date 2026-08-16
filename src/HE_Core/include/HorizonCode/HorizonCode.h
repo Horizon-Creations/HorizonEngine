@@ -29,8 +29,18 @@ class CompiledInstance;
 // = user-defined types from HE::TypeRegistry — a pin/value of these types names
 // its definition asset in `typeName`. Appended last so existing serialized
 // propType ints stay stable.
+// Vec3/Vec4 are the VECTOR types — positions, velocities, directions. They exist
+// separately from Color because the two mean different things and want different
+// empties: a vector's zero is the null vector, a colour's is opaque black
+// (alpha 1). Appended last, like everything before them.
+//
+// Color used to double as vec3 AND vec4 for every engine API. Those rows have
+// moved to Vec3, and {Vec3, Vec4, Color} interconvert — so a graph authored
+// before the split keeps its wires and coerce does the work. Vec2 stays outside
+// that set: nothing ever converted into it and adding it would only widen the
+// rules that two coerce implementations have to agree on.
 enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform,
-                               Enum, Struct };
+                               Enum, Struct, Vec3, Vec4 };
 
 struct Value
 {
@@ -40,6 +50,13 @@ struct Value
     int         i = 0;
     glm::vec2   v2{ 0.0f };
     glm::vec4   col{ 0.0f, 0.0f, 0.0f, 1.0f };
+    // Vectors keep their OWN storage rather than borrowing col. Sharing it would
+    // hand a default-constructed Vec4 the alpha-1 of a colour, and "the empty
+    // vector is (0,0,0,1)" is a bug waiting for someone to read w. This zero has
+    // to match in four places: here, coerce's typed zero, the codegen's zeroLit,
+    // and the coerce duplicate in HorizonCodeGenSupport.h.
+    glm::vec3   v3{ 0.0f };
+    glm::vec4   v4{ 0.0f };
     std::string s;
     uint32_t    ref = 0;   // instance handle when type == Ref (0 = none)
     // Transform payload (type == Transform): rotation in euler degrees, identity scale.
@@ -62,6 +79,8 @@ struct Value
     static Value ofString(std::string v)     { Value r; r.type = PinType::String; r.s = std::move(v); return r; }
     static Value ofVec2(const glm::vec2& v)  { Value r; r.type = PinType::Vec2;   r.v2 = v; return r; }
     static Value ofColor(const glm::vec4& v) { Value r; r.type = PinType::Color;  r.col = v; return r; }
+    static Value ofVec3(const glm::vec3& v)  { Value r; r.type = PinType::Vec3;   r.v3 = v; return r; }
+    static Value ofVec4(const glm::vec4& v)  { Value r; r.type = PinType::Vec4;   r.v4 = v; return r; }
     static Value ofRef(uint32_t id)          { Value r; r.type = PinType::Ref;    r.ref = id; return r; }
     static Value ofTransform(const glm::vec3& p, const glm::vec3& r_, const glm::vec3& s_)
     { Value r; r.type = PinType::Transform; r.tpos = p; r.trot = r_; r.tscl = s_; return r; }
@@ -196,11 +215,10 @@ enum class NodeType : uint8_t
     // colour picker clamped to 0..1 — so a computed velocity or position was
     // simply not expressible, while Lua got the same API as three plain floats.
     //
-    // Vector 3 and Vector 4 BOTH use PinType::Color. There is no Vec3 pin, and
-    // deliberately so: every engine API that takes a vec3 (Set Position, Set
-    // Velocity, Set Camera Target's neighbours …) already declares its pin as
-    // Color, so a separate Vec3 type would connect to none of them. Make Vector
-    // 3 leaves w at 0 — vector semantics. For a colour WITH alpha, use 4.
+    // Each width produces its own pin type: Vec2, Vec3, Vec4. They started out
+    // all riding on Color — which is also four floats — and that is why
+    // {Vec3, Vec4, Color} still interconvert, so a graph authored back then
+    // keeps working. A colour is now a colour: for one WITH alpha, use Color.
     MakeVector2, MakeVector3, MakeVector4,
     BreakVector2, BreakVector3, BreakVector4,
 

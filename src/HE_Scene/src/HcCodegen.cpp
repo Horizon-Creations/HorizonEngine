@@ -143,6 +143,10 @@ std::string cppScalar(const TypeRef& tr)
         case PT::String:    return "std::string";
         case PT::Vec2:      return "glm::vec2";
         case PT::Color:     return "glm::vec4";
+        case PT::Vec3:      return "glm::vec3";
+        // hc::Vec4, not glm::vec4 — Color already owns that C++ type and the
+        // support header's type-keyed templates have to tell the two apart.
+        case PT::Vec4:      return "hc::Vec4";
         case PT::Ref:       return "uint32_t";
         case PT::Transform: return "hc::Transform";
         // Int-backed like everywhere else in the engine, but named: `enum class
@@ -207,6 +211,8 @@ std::string zeroLit(const TypeRef& tr)
         case PT::String:    return "std::string()";
         case PT::Vec2:      return "glm::vec2(0.0f, 0.0f)";
         case PT::Color:     return "glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)";
+        case PT::Vec3:      return "glm::vec3(0.0f)";
+        case PT::Vec4:      return "hc::Vec4{}";
         case PT::Ref:       return "0u";
         case PT::Transform: return "hc::Transform{}";
         case PT::Enum:      return cppScalar(tr) + "{}";   // = 0, like a fresh Value
@@ -263,6 +269,10 @@ std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want)
         case PT::Vec2:   return "glm::vec2(" + floatLit(v.v2.x) + ", " + floatLit(v.v2.y) + ")";
         case PT::Color:  return "glm::vec4(" + floatLit(v.col.x) + ", " + floatLit(v.col.y) + ", " +
                                  floatLit(v.col.z) + ", " + floatLit(v.col.w) + ")";
+        case PT::Vec3:   return "glm::vec3(" + floatLit(v.v3.x) + ", " + floatLit(v.v3.y) + ", " +
+                                 floatLit(v.v3.z) + ")";
+        case PT::Vec4:   return "hc::Vec4(" + floatLit(v.v4.x) + ", " + floatLit(v.v4.y) + ", " +
+                                 floatLit(v.v4.z) + ", " + floatLit(v.v4.w) + ")";
         case PT::Ref:    return std::to_string(v.ref) + "u";
         case PT::Enum:
         {
@@ -299,6 +309,14 @@ Value coerceValue(Value v, PinType want)
                             : v.type == PT::Int ? v.i != 0 : false; break;
         case PT::Enum:  r.i = v.type == PT::Int ? v.i
                             : v.type == PT::Float ? (int)v.f : 0; break;
+        // Same three-way vector conversion as the interpreter, pad by target.
+        case PT::Vec3:  r.v3 = v.type == PT::Vec4  ? glm::vec3(v.v4)
+                             : v.type == PT::Color ? glm::vec3(v.col) : glm::vec3(0.0f); break;
+        case PT::Vec4:  r.v4 = v.type == PT::Vec3  ? glm::vec4(v.v3, 0.0f)
+                             : v.type == PT::Color ? v.col : glm::vec4(0.0f); break;
+        case PT::Color: r.col = v.type == PT::Vec3 ? glm::vec4(v.v3, 1.0f)
+                              : v.type == PT::Vec4 ? v.v4
+                                                   : glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); break;
         default: break;
     }
     return r;
@@ -336,6 +354,24 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
         case PT::Bool:
             if (from.t == PT::Float) return "((" + e + ") != 0.0f)";
             if (from.t == PT::Int)   return "((" + e + ") != 0)";
+            break;
+        // Vector ↔ colour on a statically-typed wire. This is the branch a graph
+        // authored before the Vec3 split runs through: its Color output still
+        // feeds what is now a Vec3 parameter, and links are restored from JSON
+        // without re-checking types — so if this were missing, every legacy wire
+        // would compile to a zero while the interpreter converted it properly.
+        case PT::Vec3:
+            if (from.t == PT::Vec4)  return "glm::vec3(glm::vec4(" + e + "))";
+            if (from.t == PT::Color) return "glm::vec3(" + e + ")";
+            break;
+        case PT::Vec4:
+            if (from.t == PT::Vec3)  return "hc::Vec4(glm::vec4(" + e + ", 0.0f))";
+            if (from.t == PT::Color) return "hc::Vec4(" + e + ")";
+            break;
+        case PT::Color:
+            // Pad alpha 1, not 0 — an opaque colour is Color's own empty.
+            if (from.t == PT::Vec3)  return "glm::vec4(" + e + ", 1.0f)";
+            if (from.t == PT::Vec4)  return "glm::vec4(" + e + ")";
             break;
         case PT::Enum:
             if (from.t == PT::Int)   return "((" + cppScalar(to) + ")(" + e + "))";
@@ -1658,17 +1694,18 @@ private:
         case NT::MakeVector2:
             return "glm::vec2(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
         case NT::MakeVector3:
-            // W is 0, matching the interpreter — a vector, not a colour.
-            return "glm::vec4(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
-                   input(n, 2, fnCtx) + ", 0.0f)";
+            return "glm::vec3(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+                   input(n, 2, fnCtx) + ")";
         case NT::MakeVector4:
-            return "glm::vec4(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+            return "hc::Vec4(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
                    input(n, 2, fnCtx) + ", " + input(n, 3, fnCtx) + ")";
         case NT::BreakVector2:
             return "(" + input(n, 0, fnCtx) + ")." + (outIdx == 1 ? "y" : "x");
         case NT::BreakVector3:
+            return "(" + input(n, 0, fnCtx) + ")." + (outIdx == 1 ? "y" : outIdx == 2 ? "z" : "x");
         case NT::BreakVector4:
-            return "(" + input(n, 0, fnCtx) + ")." +
+            // hc::Vec4 wraps its components, so reach through .v.
+            return "(" + input(n, 0, fnCtx) + ").v." +
                    (outIdx == 1 ? "y" : outIdx == 2 ? "z" : outIdx == 3 ? "w" : "x");
         case NT::Add:      return "(" + input(n, 0, fnCtx) + " + " + input(n, 1, fnCtx) + ")";
         case NT::Subtract: return "(" + input(n, 0, fnCtx) + " - " + input(n, 1, fnCtx) + ")";

@@ -349,6 +349,40 @@ inline HE::hccg::ClassSource fxCoerce()
     const int sb = f.setVar("bOut", PT::Bool);
     f.data(evB, 0, sb, 0);
     f.exec(evB, sb);
+
+    // ── Vector ↔ colour ──────────────────────────────────────────────────────
+    // The rule that carries graphs authored while Color WAS the vec3 type: links
+    // are restored from JSON without re-checking pin types, so a legacy Color
+    // wire lands on a Vec3 pin and only coerce makes it right. The pad follows
+    // the TARGET — a vector's fourth component is 0, a colour's is 1 — so both
+    // widening directions are pinned here, in both backends.
+    {
+        Variable v3; v3.name = "v3FromColor"; v3.type = PT::Vec3; f.g.variables.push_back(v3);
+        Variable v4; v4.name = "v4FromVec3";  v4.type = PT::Vec4; f.g.variables.push_back(v4);
+        Variable cl; cl.name = "colorFromVec3"; cl.type = PT::Color; f.g.variables.push_back(cl);
+        Variable v3s; v3s.name = "v3FromVec4"; v3s.type = PT::Vec3; f.g.variables.push_back(v3s);
+        Variable v3z; v3z.name = "v3FromFloat"; v3z.type = PT::Vec3; f.g.variables.push_back(v3z);
+
+        const int evV = f.event("Vectors");
+        int prev = evV;
+        auto setFromDefault = [&](const char* name, PT t, const Value& literal)
+        {
+            const int s = f.setVar(name, t);
+            f.g.findNode(s)->pinDefaults[0] = literal;
+            f.exec(prev, s);
+            prev = s;
+        };
+        // Color(1,2,3,4) on a Vec3 pin → (1,2,3), w dropped.
+        setFromDefault("v3FromColor", PT::Vec3, Value::ofColor({ 1.0f, 2.0f, 3.0f, 4.0f }));
+        // Vec3(1,2,3) on a Vec4 pin → w padded with 0 (a direction has no w).
+        setFromDefault("v4FromVec3", PT::Vec4, Value::ofVec3({ 1.0f, 2.0f, 3.0f }));
+        // Vec3(1,2,3) on a Color pin → alpha padded with 1 (opaque).
+        setFromDefault("colorFromVec3", PT::Color, Value::ofVec3({ 1.0f, 2.0f, 3.0f }));
+        // Vec4(5,6,7,8) on a Vec3 pin → (5,6,7).
+        setFromDefault("v3FromVec4", PT::Vec3, Value::ofVec4({ 5.0f, 6.0f, 7.0f, 8.0f }));
+        // Anything else on a Vec3 pin → the null vector, like every mismatch.
+        setFromDefault("v3FromFloat", PT::Vec3, Value::ofFloat(9.0f));
+    }
     return f.done("coerce_matrix");
 }
 

@@ -162,6 +162,8 @@ namespace
 			case P::String:    return "String";
 			case P::Vec2:      return "Vec2";
 			case P::Color:     return "Color";
+			case P::Vec3:      return "Vec3";
+			case P::Vec4:      return "Vec4";
 			case P::Ref:       return "Object";
 			case P::Transform: return "Transform";
 			case P::Enum:      return "Enum";
@@ -301,6 +303,11 @@ std::uint32_t pinTypeColor(HorizonCode::PinType t)
 		case P::String: return IM_COL32(220, 130, 210, 255);
 		case P::Vec2:   return IM_COL32(120, 200, 210, 255);
 		case P::Color:  return IM_COL32(230, 210, 110, 255);
+		// Vectors get their own family (teal), distinct from Color's yellow —
+		// telling a position from a colour at a glance is the whole point of
+		// having split the types.
+		case P::Vec3:   return IM_COL32( 90, 210, 200, 255);
+		case P::Vec4:   return IM_COL32( 70, 180, 195, 255);
 		case P::Ref:    return IM_COL32(180, 140, 240, 255);
 		case P::Transform: return IM_COL32(240, 160, 100, 255);   // orange
 		case P::Enum:   return IM_COL32(100, 220, 160, 255);      // mint
@@ -411,6 +418,7 @@ namespace
 			case P::Float:  return "Float";  case P::Bool:  return "Bool";
 			case P::Int:    return "Int";    case P::String:return "String";
 			case P::Vec2:   return "Vec2";   case P::Color: return "Color";
+			case P::Vec3:   return "Vec3";   case P::Vec4:  return "Vec4";
 			case P::Transform: return "Transform";
 			case P::Ref:    return "Object"; default:       return "Exec";
 		}
@@ -440,7 +448,8 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
 
 		ImGui::TextDisabled("Default");
-		const P defs[] = { P::Float, P::Bool, P::Int, P::String, P::Vec2, P::Color, P::Transform };
+		const P defs[] = { P::Float, P::Bool, P::Int, P::String,
+		                   P::Vec2, P::Vec3, P::Vec4, P::Color, P::Transform };
 		for (P d : defs)
 			if (hit(valueTypeName(d)) && ImGui::Selectable(valueTypeName(d), type == d && (!className || className->empty())))
 			{ type = d; if (className) className->clear(); if (typeName) typeName->clear(); changed = true; }
@@ -972,6 +981,11 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 			case P::Vec2:   if (ImGui::DragFloat2("##sd", &edit.v2.x, 0.1f)) touched = true; break;
 			case P::Color:  if (ImGui::ColorEdit4("##sd", &edit.col.x,
 			                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) touched = true; break;
+			// Number fields, not a colour picker: a vector is a magnitude and a
+			// direction, and the picker clamps to 0..1 with no way to type a
+			// negative. That gap is exactly why vectors were not authorable.
+			case P::Vec3:   if (ImGui::DragFloat3("##sd", &edit.v3.x, 0.1f)) touched = true; break;
+			case P::Vec4:   if (ImGui::DragFloat4("##sd", &edit.v4.x, 0.1f)) touched = true; break;
 			case P::Transform:
 				if (ImGui::DragFloat3("Pos##sd", &edit.tpos.x, 0.1f))  touched = true;
 				if (ImGui::DragFloat3("Rot##sd", &edit.trot.x, 0.5f))  touched = true;
@@ -1040,6 +1054,8 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 			                if (ImGui::IsItemDeactivatedAfterEdit()) changed = true; break;
 			case P::Vec2:   if (ImGui::DragFloat2("##el", &it.v2.x, 0.1f)) changed = true; break;
 			case P::Color:  if (ImGui::ColorEdit4("##el", &it.col.x)) changed = true; break;
+			case P::Vec3:   if (ImGui::DragFloat3("##el", &it.v3.x, 0.1f)) changed = true; break;
+			case P::Vec4:   if (ImGui::DragFloat4("##el", &it.v4.x, 0.1f)) changed = true; break;
 			case P::Transform:
 				if (ImGui::DragFloat3("Pos##el", &it.tpos.x, 0.1f))  changed = true;
 				if (ImGui::DragFloat3("Rot##el", &it.trot.x, 0.5f))  changed = true;

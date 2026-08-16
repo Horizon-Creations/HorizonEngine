@@ -33,6 +33,23 @@ struct Transform
     bool operator==(const Transform& o) const { return pos == o.pos && rot == o.rot && scl == o.scl; }
 };
 
+// The Vec4 pin's C++ shape. It is four floats and nothing else — the wrapper
+// exists ONLY so the type-keyed templates below (raw/toValue/tagOf/coerce) can
+// tell a Vec4 apart from a Color, which is also glm::vec4 and got there first.
+// Without it an array of Vec4 would box itself as an array of Color and the
+// parity harness would (correctly) call that a divergence.
+//
+// Vec3 needs no such wrapper: glm::vec3 was not spoken for.
+struct Vec4
+{
+    glm::vec4 v{ 0.0f };
+    Vec4() = default;
+    Vec4(const glm::vec4& x) : v(x) {}
+    Vec4(float x, float y, float z, float w) : v(x, y, z, w) {}
+    operator glm::vec4() const { return v; }
+    bool operator==(const Vec4& o) const { return v == o.v; }
+};
+
 // ── zero values ──────────────────────────────────────────────────────────────
 // "The zero value of the target type" (§3.3) is a FRESH Value's field — note
 // Color's alpha 1 and Transform's identity scale.
@@ -43,6 +60,9 @@ template <> inline int         zeroOf<int>()         { return 0; }
 template <> inline std::string zeroOf<std::string>() { return {}; }
 template <> inline glm::vec2   zeroOf<glm::vec2>()   { return glm::vec2(0.0f); }
 template <> inline glm::vec4   zeroOf<glm::vec4>()   { return glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); }
+// A vector's empty is the null vector — Color's alpha-1 belongs to Color alone.
+template <> inline glm::vec3   zeroOf<glm::vec3>()   { return glm::vec3(0.0f); }
+template <> inline Vec4        zeroOf<Vec4>()        { return Vec4{}; }
 template <> inline uint32_t    zeroOf<uint32_t>()    { return 0u; }
 template <> inline Transform   zeroOf<Transform>()   { return {}; }
 
@@ -56,6 +76,8 @@ template <> inline int         raw<int>(const Value& v)         { return v.i; }
 template <> inline std::string raw<std::string>(const Value& v) { return v.s; }
 template <> inline glm::vec2   raw<glm::vec2>(const Value& v)   { return v.v2; }
 template <> inline glm::vec4   raw<glm::vec4>(const Value& v)   { return v.col; }
+template <> inline glm::vec3   raw<glm::vec3>(const Value& v)   { return v.v3; }
+template <> inline Vec4        raw<Vec4>(const Value& v)        { return Vec4{ v.v4 }; }
 template <> inline uint32_t    raw<uint32_t>(const Value& v)    { return v.ref; }
 template <> inline Transform   raw<Transform>(const Value& v)   { return { v.tpos, v.trot, v.tscl }; }
 
@@ -74,6 +96,8 @@ inline Value toValue(const std::string& v) { return Value::ofString(v); }
 inline Value toValue(const char* v)        { return Value::ofString(v); }
 inline Value toValue(const glm::vec2& v)   { return Value::ofVec2(v); }
 inline Value toValue(const glm::vec4& v)   { return Value::ofColor(v); }
+inline Value toValue(const glm::vec3& v)   { return Value::ofVec3(v); }
+inline Value toValue(const Vec4& v)        { return Value::ofVec4(v.v); }
 inline Value toValue(uint32_t v)           { return Value::ofRef(v); }
 inline Value toValue(const Transform& v)   { return Value::ofTransform(v.pos, v.rot, v.scl); }
 
@@ -85,6 +109,8 @@ template <> inline PinType tagOf<int>()         { return PinType::Int; }
 template <> inline PinType tagOf<std::string>() { return PinType::String; }
 template <> inline PinType tagOf<glm::vec2>()   { return PinType::Vec2; }
 template <> inline PinType tagOf<glm::vec4>()   { return PinType::Color; }
+template <> inline PinType tagOf<glm::vec3>()   { return PinType::Vec3; }
+template <> inline PinType tagOf<Vec4>()        { return PinType::Vec4; }
 template <> inline PinType tagOf<uint32_t>()    { return PinType::Ref; }
 template <> inline PinType tagOf<Transform>()   { return PinType::Transform; }
 
@@ -149,8 +175,31 @@ inline std::string coerceString(const Value& v)
 { return (v.isArray || v.type == PinType::String) ? v.s : std::string(); }
 inline glm::vec2 coerceVec2(const Value& v)
 { return (v.isArray || v.type == PinType::Vec2) ? v.v2 : zeroOf<glm::vec2>(); }
+// Vec3/Vec4/Color are three views of the same numbers, so they interconvert —
+// this is what carries a graph authored while Color WAS the vec3 type. The pad
+// on widening follows the TARGET: a vector's fourth component is 0, a colour's
+// is 1 (opaque). Mirrors HorizonCode.cpp's `coerce` case for case.
 inline glm::vec4 coerceColor(const Value& v)
-{ return (v.isArray || v.type == PinType::Color) ? v.col : zeroOf<glm::vec4>(); }
+{
+    if (v.isArray || v.type == PinType::Color) return v.col;
+    if (v.type == PinType::Vec3) return glm::vec4(v.v3, 1.0f);
+    if (v.type == PinType::Vec4) return v.v4;
+    return zeroOf<glm::vec4>();
+}
+inline glm::vec3 coerceVec3(const Value& v)
+{
+    if (v.isArray || v.type == PinType::Vec3) return v.v3;
+    if (v.type == PinType::Vec4)  return glm::vec3(v.v4);
+    if (v.type == PinType::Color) return glm::vec3(v.col);
+    return zeroOf<glm::vec3>();
+}
+inline Vec4 coerceVec4(const Value& v)
+{
+    if (v.isArray || v.type == PinType::Vec4) return Vec4{ v.v4 };
+    if (v.type == PinType::Vec3)  return Vec4{ glm::vec4(v.v3, 0.0f) };
+    if (v.type == PinType::Color) return Vec4{ v.col };
+    return zeroOf<Vec4>();
+}
 inline uint32_t coerceRef(const Value& v)
 { return (v.isArray || v.type == PinType::Ref) ? v.ref : 0u; }
 inline Transform coerceTransform(const Value& v)
@@ -166,6 +215,8 @@ template <> inline int         coerce<int>(const Value& v)         { return coer
 template <> inline std::string coerce<std::string>(const Value& v) { return coerceString(v); }
 template <> inline glm::vec2   coerce<glm::vec2>(const Value& v)   { return coerceVec2(v); }
 template <> inline glm::vec4   coerce<glm::vec4>(const Value& v)   { return coerceColor(v); }
+template <> inline glm::vec3   coerce<glm::vec3>(const Value& v)   { return coerceVec3(v); }
+template <> inline Vec4        coerce<Vec4>(const Value& v)        { return coerceVec4(v); }
 template <> inline uint32_t    coerce<uint32_t>(const Value& v)    { return coerceRef(v); }
 template <> inline Transform   coerce<Transform>(const Value& v)   { return coerceTransform(v); }
 

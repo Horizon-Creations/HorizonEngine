@@ -268,22 +268,22 @@ void signatureInto(const Node& n, NodeSig& s)
         break;
     case T::MakeVector3:
         s.dataIns  = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float } };
-        s.dataOuts = { { "", P::Color } };
+        s.dataOuts = { { "", P::Vec3 } };
         break;
     case T::MakeVector4:
         s.dataIns  = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float }, { "W", P::Float } };
-        s.dataOuts = { { "", P::Color } };
+        s.dataOuts = { { "", P::Vec4 } };
         break;
     case T::BreakVector2:
         s.dataIns  = { { "", P::Vec2 } };
         s.dataOuts = { { "X", P::Float }, { "Y", P::Float } };
         break;
     case T::BreakVector3:
-        s.dataIns  = { { "", P::Color } };
+        s.dataIns  = { { "", P::Vec3 } };
         s.dataOuts = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float } };
         break;
     case T::BreakVector4:
-        s.dataIns  = { { "", P::Color } };
+        s.dataIns  = { { "", P::Vec4 } };
         s.dataOuts = { { "X", P::Float }, { "Y", P::Float }, { "Z", P::Float }, { "W", P::Float } };
         break;
     case T::Greater: case T::Less: case T::Equals:
@@ -681,14 +681,13 @@ const char* nodeTooltip(NodeType t)
         case T::EnumToString: return "Outputs the NAME of the enum entry matching the value\n"
                    "(empty when no entry matches).";
         case T::MakeVector2:  return "Builds a Vec2 from two floats.";
-        case T::MakeVector3:  return "Builds a vector from three floats — the pin type every\n"
-                   "engine node that takes a position, velocity or direction uses.\n"
-                   "W is left at 0; for a colour with alpha use Make Vector 4.";
-        case T::MakeVector4:  return "Builds a vector from four floats. Same pin type as\n"
-                   "Make Vector 3, with W wired instead of zeroed.";
+        case T::MakeVector3:  return "Builds a Vec3 from three floats — the type every engine\n"
+                   "node that takes a position, velocity or direction uses.";
+        case T::MakeVector4:  return "Builds a Vec4 from four floats. For a colour with alpha,\n"
+                   "use a Color instead — Vec4 and Color convert either way.";
         case T::BreakVector2: return "Splits a Vec2 into X and Y.";
-        case T::BreakVector3: return "Splits a vector into X, Y and Z, dropping W.";
-        case T::BreakVector4: return "Splits a vector into X, Y, Z and W.";
+        case T::BreakVector3: return "Splits a Vec3 into X, Y and Z.";
+        case T::BreakVector4: return "Splits a Vec4 into X, Y, Z and W.";
         default: return "";
     }
 }
@@ -864,6 +863,8 @@ Value variableDefaultValue(const Variable& v)
         case P::String: return Value::ofString(v.s);
         case P::Vec2:   return Value::ofVec2({ v.f[0], v.f[1] });
         case P::Color:  return Value::ofColor({ v.f[0], v.f[1], v.f[2], v.f[3] });
+        case P::Vec3:   return Value::ofVec3({ v.f[0], v.f[1], v.f[2] });
+        case P::Vec4:   return Value::ofVec4({ v.f[0], v.f[1], v.f[2], v.f[3] });
         case P::Ref:    return Value::ofRef(0);
         case P::Transform: return Value::ofTransform(v.tpos, v.trot, v.tscl);
         case P::Enum:
@@ -1058,6 +1059,8 @@ nlohmann::json scalarValueToJson(const Value& v, PinType t)
         case P::String: return v.s;
         case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
         case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
+        case P::Vec3:   return nlohmann::json::array({ v.v3.x, v.v3.y, v.v3.z });
+        case P::Vec4:   return nlohmann::json::array({ v.v4.x, v.v4.y, v.v4.z, v.v4.w });
         case P::Ref:    return v.ref;
         case P::Enum:   return v.s;   // the entry NAME (renumber-safe)
         case P::Struct:
@@ -1090,6 +1093,10 @@ Value scalarValueFromJson(const nlohmann::json& j, PinType t)
                             v.v2 = { j[0].get<float>(), j[1].get<float>() }; break;
         case P::Color:  if (j.is_array() && j.size() >= 4)
                             v.col = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() }; break;
+        case P::Vec3:   if (j.is_array() && j.size() >= 3)
+                            v.v3 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() }; break;
+        case P::Vec4:   if (j.is_array() && j.size() >= 4)
+                            v.v4 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() }; break;
         case P::Ref:    if (j.is_number()) v.ref = j.get<uint32_t>(); break;
         case P::Enum:   if (j.is_string()) v.s = j.get<std::string>(); break;  // entry NAME
         case P::Transform:
@@ -1693,6 +1700,15 @@ bool canConvertPinType(PinType from, PinType to)
     // Enum is int-backed, so it reads as a number and a number can name one.
     if (from == P::Enum && (to == P::Float || to == P::Int)) return true;
     if (to == P::Enum && (from == P::Float || from == P::Int)) return true;
+    // Vec3/Vec4/Color are three views of the same numbers. They interconvert so
+    // that a graph authored while Color WAS the vec3 type keeps its wires — links
+    // are restored from JSON without re-checking pin types, so the conversion is
+    // what actually carries those graphs, not this predicate. Vec2 stays out:
+    // nothing ever converted into it, and each rule here is duplicated in two
+    // coerce implementations that must not drift.
+    auto vectorish = [](PinType t)
+    { return t == P::Vec3 || t == P::Vec4 || t == P::Color; };
+    if (vectorish(from) && vectorish(to)) return true;
     return false;
 }
 
@@ -1893,6 +1909,8 @@ bool valueEquals(const Value& a, const Value& b, PinType t)
         case P::String: return a.s == b.s;
         case P::Vec2:   return a.v2 == b.v2;
         case P::Color:  return a.col == b.col;
+        case P::Vec3:   return a.v3 == b.v3;
+        case P::Vec4:   return a.v4 == b.v4;
         case P::Ref:    return a.ref == b.ref;
         case P::Transform: return a.tpos == b.tpos && a.trot == b.trot && a.tscl == b.tscl;
         case P::Enum:   return a.i == b.i;
@@ -1929,6 +1947,22 @@ Value coerce(Value v, PinType want)
                             : v.type == P::Int ? v.i != 0 : false; break;
         case P::Enum:   r.i = v.type == P::Int ? v.i
                             : v.type == P::Float ? (int)v.f : 0; break;
+        // Vector ↔ colour. Widening pads, narrowing drops — and the pad differs
+        // by TARGET, not by source: a vector's fourth component is 0 (a direction
+        // has no w), a colour's is 1 (opaque). Anything that is not one of the
+        // three yields the target's zero, like every other mismatch here.
+        case P::Vec3:
+            r.v3 = v.type == P::Vec4  ? glm::vec3(v.v4)
+                 : v.type == P::Color ? glm::vec3(v.col) : glm::vec3(0.0f);
+            break;
+        case P::Vec4:
+            r.v4 = v.type == P::Vec3  ? glm::vec4(v.v3, 0.0f)
+                 : v.type == P::Color ? v.col : glm::vec4(0.0f);
+            break;
+        case P::Color:
+            r.col = v.type == P::Vec3 ? glm::vec4(v.v3, 1.0f)
+                  : v.type == P::Vec4 ? v.v4 : glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+            break;
         default: break;
     }
     return r;
@@ -2579,26 +2613,34 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::MakeVector2:
         return Value::ofVec2({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f });
     case T::MakeVector3:
-        // W stays 0 — this is a vector, not a colour (see the NodeType comment).
-        return Value::ofColor({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
-                                evalInput(n, 2, depth + 1).f, 0.0f });
+        return Value::ofVec3({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
+                               evalInput(n, 2, depth + 1).f });
     case T::MakeVector4:
-        return Value::ofColor({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
-                                evalInput(n, 2, depth + 1).f, evalInput(n, 3, depth + 1).f });
+        return Value::ofVec4({ evalInput(n, 0, depth + 1).f, evalInput(n, 1, depth + 1).f,
+                               evalInput(n, 2, depth + 1).f, evalInput(n, 3, depth + 1).f });
     case T::BreakVector2:
     {
         const glm::vec2 v = evalInput(n, 0, depth + 1).v2;
         return Value::ofFloat(dataOutPin == 1 ? v.y : v.x);
     }
     case T::BreakVector3:
-    case T::BreakVector4:
     {
-        const glm::vec4 v = evalInput(n, 0, depth + 1).col;
+        const glm::vec3 v = evalInput(n, 0, depth + 1).v3;
         switch (dataOutPin)
         {
             case 1:  return Value::ofFloat(v.y);
             case 2:  return Value::ofFloat(v.z);
-            case 3:  return Value::ofFloat(v.w);   // BreakVector3 has no pin 3
+            default: return Value::ofFloat(v.x);
+        }
+    }
+    case T::BreakVector4:
+    {
+        const glm::vec4 v = evalInput(n, 0, depth + 1).v4;
+        switch (dataOutPin)
+        {
+            case 1:  return Value::ofFloat(v.y);
+            case 2:  return Value::ofFloat(v.z);
+            case 3:  return Value::ofFloat(v.w);
             default: return Value::ofFloat(v.x);
         }
     }

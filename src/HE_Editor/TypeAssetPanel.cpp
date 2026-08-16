@@ -51,7 +51,7 @@ bool sniffType(const std::string& path, HE::AssetType type)
 // runtime instance handle — neither is data a definition can hold.
 constexpr PinType kFieldTypes[] = {
 	PinType::Float, PinType::Int, PinType::Bool, PinType::String,
-	PinType::Vec2, PinType::Color, PinType::Transform,
+	PinType::Vec2, PinType::Vec3, PinType::Vec4, PinType::Color, PinType::Transform,
 	PinType::Enum, PinType::Struct,
 };
 
@@ -64,6 +64,8 @@ const char* fieldTypeLabel(PinType t)
 	case PinType::Bool:      return "Bool";
 	case PinType::String:    return "String";
 	case PinType::Vec2:      return "Vec2";
+	case PinType::Vec3:      return "Vec3";
+	case PinType::Vec4:      return "Vec4";
 	case PinType::Color:     return "Color";
 	case PinType::Transform: return "Transform";
 	case PinType::Enum:      return "Enum";
@@ -156,6 +158,12 @@ void defaultValueEditor(HE::StructField& f, bool& dirty)
 		break;
 	case PinType::Vec2:
 		if (ImGui::DragFloat2("##def", &v.v2.x, 0.05f)) dirty = true;
+		break;
+	case PinType::Vec3:
+		if (ImGui::DragFloat3("##def", &v.v3.x, 0.05f)) dirty = true;
+		break;
+	case PinType::Vec4:
+		if (ImGui::DragFloat4("##def", &v.v4.x, 0.05f)) dirty = true;
 		break;
 	case PinType::Color:
 		if (ImGui::ColorEdit4("##def", &v.col.x,

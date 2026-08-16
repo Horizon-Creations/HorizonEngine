@@ -318,6 +318,8 @@ json defaultToJson(const StructField& f)
     case PinType::Enum:   return v.s;   // entry name
     case PinType::Vec2:   return json::array({ v.v2.x, v.v2.y });
     case PinType::Color:  return json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
+    case PinType::Vec3:   return json::array({ v.v3.x, v.v3.y, v.v3.z });
+    case PinType::Vec4:   return json::array({ v.v4.x, v.v4.y, v.v4.z, v.v4.w });
     case PinType::Transform:
         return json{ { "pos", { v.tpos.x, v.tpos.y, v.tpos.z } },
                      { "rot", { v.trot.x, v.trot.y, v.trot.z } },
@@ -339,6 +341,14 @@ void defaultFromJson(const json& j, StructField& f)
     case PinType::Vec2:
         if (j.is_array() && j.size() >= 2)
             v.v2 = { j[0].get<float>(), j[1].get<float>() };
+        break;
+    case PinType::Vec3:
+        if (j.is_array() && j.size() >= 3)
+            v.v3 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
+        break;
+    case PinType::Vec4:
+        if (j.is_array() && j.size() >= 4)
+            v.v4 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         break;
     case PinType::Color:
         if (j.is_array() && j.size() >= 4)
