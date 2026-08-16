@@ -14,6 +14,9 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -321,6 +324,27 @@ TEST_CASE("a base class hands a new class the components it cannot work without"
 	// of the class, so a guess would only be something to delete.
 	REQUIRE(w.registry().all_of<SkeletalMeshComponent>(root));
 	CHECK(w.registry().get<SkeletalMeshComponent>(root).meshAssetId == HE::UUID{});
+
+	// …and a camera to see it with, as a CHILD. Without it, "how do I attach a
+	// camera to my player" is a question the tool creates: the author would have
+	// to know that a camera is its own entity, that a rig aims it, and that the
+	// rig's target defaults to the possessed player. Shipping it wired up answers
+	// all three, and the Outliner then reads "Player → Camera".
+	{
+		REQUIRE(w.registry().all_of<HierarchyComponent>(root));
+		Entity camera = entt::null;
+		for (Entity child : w.registry().get<HierarchyComponent>(root).children)
+			if (w.registry().all_of<CameraComponent>(child)) { camera = child; break; }
+		REQUIRE((camera != entt::null));
+		CHECK(w.registry().all_of<CameraRigComponent>(camera));
+		CHECK(w.registry().all_of<TransformComponent>(camera));
+		// It has to be the camera the game renders through, or the fallback wins.
+		CHECK(w.registry().get<CameraComponent>(camera).isMain);
+		const auto& rig = w.registry().get<CameraRigComponent>(camera);
+		CHECK(rig.mode == CameraRigComponent::Mode::ThirdPerson);
+		// Empty target = "the possessed player", which is this very class.
+		CHECK(rig.target == HE::UUID{});
+	}
 
 	// A plain Entity gets a place in the world and nothing more.
 	HorizonWorld w2;

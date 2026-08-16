@@ -376,10 +376,6 @@ void GameApplication::OnInit()
 	}
 	setWorld(m_world.get());
 
-	if (ensureDefaultCamera(*m_world))
-		HE_LOG_INFO(Core, "%s",
-			"GameApplication: added a default free-fly camera (scene had none)");
-
 	// Player controller/character classes + input events: discover the project's
 	// input assets, spawn the player instances on the shared runtime (Construct +
 	// BeginPlay) and start pumping Tick/Input.* events (OnRender). After the scene
@@ -390,6 +386,15 @@ void GameApplication::OnInit()
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
 	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+
+	// AFTER the player spawns, not before: a PlayerCharacter class brings its own
+	// camera along, and that camera only exists once the class has been
+	// instantiated. Checking first would find an empty scene, add a fallback
+	// camera flagged isMain, and that fallback — created earlier — is the one the
+	// extractor picks. The player would then own a camera nothing renders through.
+	if (ensureDefaultCamera(*m_world))
+		HE_LOG_INFO(Core, "%s",
+			"GameApplication: added a default free-fly camera (scene had none)");
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).

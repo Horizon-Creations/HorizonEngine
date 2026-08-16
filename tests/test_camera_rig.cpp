@@ -232,6 +232,57 @@ TEST_CASE("CameraRig: isMain decides between two rig cameras")
     CHECK(HE::CameraRigController::findRigCamera(r->world.registry()) == second);
 }
 
+// ─── Parented cameras ─────────────────────────────────────────────────────────
+
+TEST_CASE("CameraRig: a camera parented to its own target still lands in the right place")
+{
+    // This is the shape a PlayerCharacter class ships: the camera is a CHILD of
+    // the character it follows. The rig computes a world pose and stores it in
+    // the camera's PARENT space, so a non-identity parent has to be divided back
+    // out — and here the parent is the very thing that moved.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+
+    REQUIRE(r->world.reparentEntity(r->camera, r->target));
+    r->tgtXform().position = { 10.0f, 0.0f, -5.0f };
+
+    const auto f = HE::CameraRigController::update(r->world, kNoMouse);
+    REQUIRE(f.driven);
+
+    // What matters is where the camera ends up in the WORLD; the local transform
+    // is just how it is stored.
+    const glm::vec3 worldPos = glm::vec3(r->camXform().worldMatrix[3]);
+    CHECK(worldPos.x == doctest::Approx(10.0f));
+    CHECK(worldPos.z == doctest::Approx(-1.0f));   // 4 behind the target on +Z
+}
+
+TEST_CASE("CameraRig: a rotated parent does not drag the camera with it")
+{
+    // The failure this guards: forgetting the parent-space conversion puts the
+    // world pose into a local slot, and the parent's rotation then applies on
+    // top — the boom swings out by the character's yaw. With coupling on, the
+    // parent's yaw IS the camera's yaw, so the error doubles the rotation.
+    auto r = makeRig();
+    r->rig().pivotOffset = {};
+    r->rig().armOffset   = {};
+    r->rig().armLength   = 4.0f;
+    r->rig().targetYaw   = CameraRigComponent::TargetYaw::Follow;
+    r->rig().sensitivity = 1.0f;
+
+    REQUIRE(r->world.reparentEntity(r->camera, r->target));
+
+    MouseFrame m; m.dx = -90.0f;             // yaw 90° — target follows
+    HE::CameraRigController::update(r->world, m);
+
+    REQUIRE(r->tgtXform().rotation.y == doctest::Approx(90.0f));
+    // yaw 90° looks down -X, so the boom trails on +X, not on +Z.
+    const glm::vec3 worldPos = glm::vec3(r->camXform().worldMatrix[3]);
+    CHECK(worldPos.x == doctest::Approx(4.0f).epsilon(0.01));
+    CHECK(worldPos.z == doctest::Approx(0.0f).epsilon(0.01));
+}
+
 // ─── Boom collision ───────────────────────────────────────────────────────────
 
 namespace {

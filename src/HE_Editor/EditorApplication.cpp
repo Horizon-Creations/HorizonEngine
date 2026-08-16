@@ -4726,25 +4726,6 @@ void EditorApplication::setPlayMode(bool play)
 		// PIE opens on the view you were looking at. Mapping editor yaw/pitch → TransformComponent
 		// euler: editor forward = (cp·sy, sp, -cp·cy); TransformComponent forward = quat(radians(rot))·(0,0,-1),
 		// which yields rot.x = +pitch, rot.y = -yaw.
-		{
-			auto& reg = m_editorWorld->registry();
-			bool hasCamera = false;
-			for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
-			if (!hasCamera)
-			{
-				auto camE = m_editorWorld->createEntity("PlayCamera");
-				TransformComponent tc;
-				tc.position   =  m_editorCamera.position();
-				tc.rotation.x =  glm::degrees(m_editorCamera.pitch());
-				tc.rotation.y = -glm::degrees(m_editorCamera.yaw());
-				reg.emplace<TransformComponent>(camE, tc);
-				CameraComponent cc; cc.isMain = true;
-				reg.emplace<CameraComponent>(camE, cc);
-				HE_LOG_INFO(Editor, "%s",
-					"EditorApplication: PIE added a default main camera at the editor view (scene had none)");
-			}
-		}
-
 		// Initialise physics from the current world state
 		m_physicsWorld = std::make_unique<PhysicsWorld>();
 		m_physicsWorld->initialize(*m_editorWorld);
@@ -4773,6 +4754,35 @@ void EditorApplication::setPlayMode(bool play)
 		// so they arrive with the components their class carries.
 		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+
+		// The fallback camera goes up AFTER the player spawns, mirroring the
+		// packaged game: a PlayerCharacter class brings its own camera, and that
+		// camera does not exist until the class is instantiated. Checking earlier
+		// would find an empty scene, add a fallback flagged isMain, and — being
+		// the older entity — that fallback is the one the extractor picks.
+		{
+			auto& reg = m_editorWorld->registry();
+			bool hasCamera = false;
+			for (auto e : reg.view<CameraComponent>()) { (void)e; hasCamera = true; break; }
+			if (!hasCamera)
+			{
+				// Seeded at the editor camera's current pose so PIE opens on the view
+				// you were looking at. Mapping editor yaw/pitch → TransformComponent
+				// euler: editor forward = (cp·sy, sp, -cp·cy); TransformComponent
+				// forward = quat(radians(rot))·(0,0,-1) → rot.x = +pitch, rot.y = -yaw.
+				// Added after the play snapshot, so leaving play mode drops it again.
+				auto camE = m_editorWorld->createEntity("PlayCamera");
+				TransformComponent tc;
+				tc.position   =  m_editorCamera.position();
+				tc.rotation.x =  glm::degrees(m_editorCamera.pitch());
+				tc.rotation.y = -glm::degrees(m_editorCamera.yaw());
+				reg.emplace<TransformComponent>(camE, tc);
+				CameraComponent cc; cc.isMain = true;
+				reg.emplace<CameraComponent>(camE, cc);
+				HE_LOG_INFO(Editor, "%s",
+					"EditorApplication: PIE added a default main camera at the editor view (scene had none)");
+			}
+		}
 
 		// horizon.showCursor()/hideCursor(): scripts release/re-grab the PIE
 		// mouse capture (visible cursor = UI interaction mode).

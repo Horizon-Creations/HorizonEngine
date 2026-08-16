@@ -18,6 +18,117 @@
 namespace OutlinerPanel
 {
 
+#ifdef HE_IMGUI_ENABLED
+namespace
+{
+    // ── "Create ▸" ───────────────────────────────────────────────────────────
+    // Until now the Outliner offered exactly one thing to create: an entity with
+    // a name and a transform. Everything else — a light, a camera, a cube — meant
+    // knowing which components add up to it, which is knowledge the menu was
+    // hiding rather than teaching. This is where people coming from other engines
+    // look first, and it is where the tutorial points them.
+    //
+    // Each entry is a whole recipe, not a component. "Camera (Third Person)" is
+    // the one that matters most: a rig already defaults to third person and to
+    // following the possessed player, so the recipe is the entire setup.
+    enum class Preset
+    {
+        Empty, Cube,
+        CameraThirdPerson, CameraFirstPerson, CameraPlain,
+        LightDirectional, LightPoint, LightSpot,
+    };
+
+    Entity createPreset(HorizonWorld& world, Preset p)
+    {
+        const char* name = "Entity";
+        switch (p)
+        {
+            case Preset::Cube:              name = "Cube";              break;
+            case Preset::CameraThirdPerson:
+            case Preset::CameraFirstPerson:
+            case Preset::CameraPlain:       name = "Camera";            break;
+            case Preset::LightDirectional:  name = "Directional Light"; break;
+            case Preset::LightPoint:        name = "Point Light";       break;
+            case Preset::LightSpot:         name = "Spot Light";        break;
+            default:                                                    break;
+        }
+
+        const Entity e = world.createEntity(name);
+        world.addComponent(e, TransformComponent{});
+
+        switch (p)
+        {
+            case Preset::Cube:
+                world.addComponent(e, MeshComponent{ .meshAssetId = HE::kDefaultCubeMeshId });
+                break;
+            case Preset::CameraThirdPerson:
+            case Preset::CameraFirstPerson:
+            case Preset::CameraPlain:
+            {
+                CameraComponent cam;
+                // A camera you just asked for is the one you want to look through.
+                cam.isMain = true;
+                world.addComponent(e, cam);
+                if (p != Preset::CameraPlain)
+                {
+                    CameraRigComponent rig;
+                    rig.mode = (p == Preset::CameraFirstPerson)
+                        ? CameraRigComponent::Mode::FirstPerson
+                        : CameraRigComponent::Mode::ThirdPerson;
+                    // First person only makes sense with the head turning along.
+                    if (rig.mode == CameraRigComponent::Mode::FirstPerson)
+                        rig.targetYaw = CameraRigComponent::TargetYaw::Follow;
+                    world.addComponent(e, rig);
+                }
+                break;
+            }
+            case Preset::LightDirectional:
+            case Preset::LightPoint:
+            case Preset::LightSpot:
+            {
+                LightComponent l;
+                l.type = p == Preset::LightDirectional ? LightType::Directional
+                       : p == Preset::LightPoint       ? LightType::Point
+                                                       : LightType::Spot;
+                world.addComponent(e, l);
+                break;
+            }
+            default: break;
+        }
+        return e;
+    }
+
+    // The menu body, shared by the background menu and the per-entity "create a
+    // child" menu — one list, so the two can never drift apart.
+    bool drawCreateMenu(Preset& out)
+    {
+        bool picked = false;
+        auto item = [&](const char* label, Preset p)
+        { if (ImGui::MenuItem(label)) { out = p; picked = true; } };
+
+        item("Empty", Preset::Empty);
+        item("Cube",  Preset::Cube);
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Camera"))
+        {
+            item("Third Person", Preset::CameraThirdPerson);
+            item("First Person", Preset::CameraFirstPerson);
+            ImGui::Separator();
+            item("Plain (no rig)", Preset::CameraPlain);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Light"))
+        {
+            item("Directional", Preset::LightDirectional);
+            item("Point",       Preset::LightPoint);
+            item("Spot",        Preset::LightSpot);
+            ImGui::EndMenu();
+        }
+        return picked;
+    }
+}
+#endif
+
 void render(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
@@ -196,13 +307,18 @@ void render(AppContext& ctx)
             if (ImGui::BeginPopupContextItem())
             {
                 ctx.selectedEntity = node.entity;
-                if (ImGui::MenuItem("Create Child Entity"))
+                if (ImGui::BeginMenu("Create Child"))
                 {
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
-                    Entity child = ctx.world->createEntity("Entity");
-                    ctx.world->addComponent(child, TransformComponent{});
-                    ctx.world->reparentEntity(child, node.entity);
-                    ctx.selectedEntity = child;
+                    Preset preset{};
+                    if (drawCreateMenu(preset))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        const Entity child = createPreset(*ctx.world, preset);
+                        ctx.world->reparentEntity(child, node.entity);
+                        ctx.selectedEntity = child;
+                        ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndMenu();
                 }
                 if (ImGui::MenuItem("Rename"))
                 {
@@ -330,12 +446,12 @@ void render(AppContext& ctx)
         if (ImGui::BeginPopupContextWindow("##outliner_bg_ctx",
             ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
         {
-            if (ImGui::MenuItem("Create Entity"))
+            Preset preset{};
+            if (drawCreateMenu(preset))
             {
                 if (ctx.undoSys) ctx.undoSys->snapshotNow();
-                Entity e = ctx.world->createEntity("Entity");
-                ctx.world->addComponent(e, TransformComponent{});
-                ctx.selectedEntity = e;
+                ctx.selectedEntity = createPreset(*ctx.world, preset);
+                ctx.world->markHierarchyDirty();
             }
             ImGui::EndPopup();
         }

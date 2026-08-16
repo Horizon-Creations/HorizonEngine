@@ -12,6 +12,8 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <Diagnostics/Logger.h>
 #include <filesystem>
 #include <string>
@@ -250,6 +252,26 @@ std::vector<uint8_t> EntityHost::defaultComponents(const std::string& baseClass)
 		rb.type = RigidBodyType::Kinematic;   // the character controller drives it
 		scratch.addComponent(root, rb);
 		scratch.addComponent(root, SkeletalMeshComponent{});
+
+		// …and a camera to see it with. A character class without one is a
+		// character nobody can look at: the author has to know that a camera is a
+		// separate entity, that a rig aims it, and that the rig's target defaults
+		// to the possessed player. Shipping it wired up answers all three by
+		// showing the answer — in the Outliner it reads "Player → Camera", which
+		// is the relationship, spelled out.
+		//
+		// A CHILD, because defaultComponents serialises a subtree and the class is
+		// its root. The rig writes its camera's transform in parent space, so
+		// being parented to the very thing it follows is fine — it is the same
+		// arithmetic, just with a non-identity parent.
+		const Entity camera = scratch.createEntity("Camera");
+		scratch.addComponent(camera, TransformComponent{});
+		CameraComponent cam;
+		cam.isMain = true;   // this is the camera the game renders through
+		scratch.addComponent(camera, cam);
+		// Target stays empty = "the possessed player", which is this very class.
+		scratch.addComponent(camera, CameraRigComponent{});
+		scratch.reparentEntity(camera, root);
 	}
 
 	SceneSerializer ser;
