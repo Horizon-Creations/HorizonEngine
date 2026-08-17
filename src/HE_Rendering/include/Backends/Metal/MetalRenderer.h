@@ -758,11 +758,31 @@ private:
 	// feeds it is actually active). One place, so pass setup and shader binding
 	// cannot disagree about whether there is a velocity buffer.
 	bool  TaaActive() const;
+	// True when this frame needs jitter + velocity at all — our TAA or MetalFX.
+	bool  TemporalActive() const;
 	// The rasterisation matrix: `viewProj` shifted by this frame's subpixel
 	// jitter. Identity-equivalent when TAA is off.
 	glm::mat4 JitteredViewProj(const glm::mat4& viewProj, int width, int height) const;
 	void  EncodeVelocity(void* cmdBuf, int width, int height);
 	void  EncodeTaa(void* cmdBuf, int width, int height);
+
+	// ── MetalFX temporal scaling (A5) ────────────────────────────────────────
+	// The same inputs our own TAA needs (colour, depth, motion, jitter), handed
+	// to the OS scaler instead — which is why it sits behind the SAME deferred
+	// gate. Unlike our TAA it runs on the HDR image BEFORE the tonemap: that is
+	// what Apple's model expects, and it means the tonemap then runs at output
+	// resolution. Falls back to our TAA when the device or OS lacks it.
+	bool  m_mfxSupported = false;  // queried once, at Initialize
+	void* m_mfxScaler    = nullptr; // id<MTLFXTemporalScaler>
+	void* m_mfxOutput    = nullptr; // id<MTLTexture>, HDR at OUTPUT size
+	int   m_mfxInW = 0, m_mfxInH = 0, m_mfxOutW = 0, m_mfxOutH = 0;
+	bool  m_mfxReset = true;        // true = discard history (resize, mode switch)
+	bool  MetalFxActive() const;
+	void  EnsureMetalFX(int inW, int inH, int outW, int outH);
+	void  DestroyMetalFX();
+	// Runs the scaler; returns the upscaled HDR texture, or null when it could
+	// not run (the caller then tonemaps the un-upscaled image as before).
+	void* EncodeMetalFX(void* cmdBuf, int inW, int inH, int outW, int outH);
 
 	void* m_smaaPipeline   = nullptr; // id<MTLRenderPipelineState> — AA = SMAA
 	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off

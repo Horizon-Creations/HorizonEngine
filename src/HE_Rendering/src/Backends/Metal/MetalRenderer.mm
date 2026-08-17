@@ -29,6 +29,15 @@
 #include <simd/simd.h>
 
 #import <Metal/Metal.h>
+// MetalFX (A5): weak-linked, and its presence is a COMPILE-time question as well
+// as a runtime one — an older SDK has no header at all. Everything guarded by
+// this macro degrades to "MetalFX unsupported", which resolves to our own TAA.
+#if __has_include(<MetalFX/MetalFX.h>)
+	#import <MetalFX/MetalFX.h>
+	#define HE_HAS_METALFX 1
+#else
+	#define HE_HAS_METALFX 0
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 #include <cstdint>
 #include <cstring>
@@ -6404,6 +6413,31 @@ void MetalRenderer::EnsureRaytracingSupport()
 	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: ray-traced GI supported (")
 		 + (m_giHwRt ? "hardware" : "software") + " ray tracing)").c_str());
+
+	// MetalFX (A5): asked ONCE, here — the answer cannot change while the app
+	// runs, and asking per frame would put a framework call in the hot path.
+	//
+	// OPT-IN (HE_METALFX=1) on purpose. The path is fully wired and the device
+	// reports support, but on this machine the scaler writes its result 1:1 into
+	// the corner of the output instead of upscaling — with the sizes verified
+	// correct in the log below (858x482 -> 1280x720). Until that is understood,
+	// reporting "supported" would hand users a visibly broken mode; reporting
+	// false makes the AA combo fall back to our own TAA, which works. The two
+	// open suspects are the descriptor's input-content properties
+	// (inputContentPropertiesEnabled + min/max scale) and this being a 27-beta
+	// behaviour — the same kind of beta trap MTLBinaryArchive turned out to be.
+	bool mfxDevice = false;
+#if HE_HAS_METALFX
+	if (@available(macOS 13.0, *))
+		mfxDevice = [MTLFXTemporalScalerDescriptor supportsDevice:device];
+#endif
+	const char* mfxOptIn = std::getenv("HE_METALFX");
+	m_mfxSupported = mfxDevice && mfxOptIn && *mfxOptIn && *mfxOptIn != '0';
+	HE_LOG_INFO(RHI, "%s", mfxDevice
+		? (m_mfxSupported
+			? "MetalRenderer: MetalFX temporal scaling ENABLED (HE_METALFX)"
+			: "MetalRenderer: MetalFX present but off — set HE_METALFX=1 to try it (see A5)")
+		: "MetalRenderer: MetalFX temporal scaling unavailable — the TAA mode covers it");
 }
 
 void* MetalRenderer::BuildBLAS(const GpuMesh& mesh)
@@ -10472,7 +10506,7 @@ void MetalRenderer::DestroyLdrTarget()
 // construction: it only ever reads positions.
 void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 {
-	if (!TaaActive() || !m_velocityTex || m_sortedIndices.empty()) return;
+	if (!TemporalActive() || !m_velocityTex || m_sortedIndices.empty()) return;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 
 	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -10573,14 +10607,118 @@ void MetalRenderer::EncodeTaa(void* cmdBufPtr, int width, int height)
 	m_taaHistoryValid = true;
 }
 
+// ─── MetalFX temporal scaling (A5) ──────────────────────────────────────────
+bool MetalRenderer::MetalFxActive() const
+{
+	return m_mfxSupported && ActiveAAMethod() == HE::AAMethod::MetalFX &&
+	       m_renderPath == HE::RenderPath::Deferred && m_velocityPipeline;
+}
+
+void MetalRenderer::EnsureMetalFX(int inW, int inH, int outW, int outH)
+{
+#if HE_HAS_METALFX
+	if (m_mfxScaler && inW == m_mfxInW && inH == m_mfxInH &&
+	    outW == m_mfxOutW && outH == m_mfxOutH)
+		return;
+	DestroyMetalFX();
+	if (@available(macOS 13.0, *))
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		MTLFXTemporalScalerDescriptor* d = [[MTLFXTemporalScalerDescriptor alloc] init];
+		d.colorTextureFormat  = kSceneColorFormat;      // HDR, pre-tonemap
+		d.depthTextureFormat  = kDepthFormat;
+		d.motionTextureFormat = MTLPixelFormatRG16Float;
+		d.outputTextureFormat = kSceneColorFormat;
+		d.inputWidth   = inW;  d.inputHeight  = inH;
+		d.outputWidth  = outW; d.outputHeight = outH;
+		id<MTLFXTemporalScaler> scaler = [d newTemporalScalerWithDevice:device];
+		if (!scaler) return;
+		m_mfxScaler = (void*)CFBridgingRetain(scaler);
+
+		MTLTextureDescriptor* td = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:outW height:outH mipmapped:NO];
+		td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+		                 MTLTextureUsageShaderWrite;   // the scaler writes it
+		td.storageMode = MTLStorageModePrivate;
+		m_mfxOutput = (void*)CFBridgingRetain([device newTextureWithDescriptor:td]);
+		m_mfxInW = inW; m_mfxInH = inH; m_mfxOutW = outW; m_mfxOutH = outH;
+		HE_LOG_INFO(RHI, "%s", ("MetalRenderer: MetalFX scaler " + std::to_string(inW) + "x"
+			+ std::to_string(inH) + " -> " + std::to_string(outW) + "x" + std::to_string(outH)
+			+ " (color " + std::to_string((int)((__bridge id<MTLTexture>)m_hdrColor).width) + "x"
+			+ std::to_string((int)((__bridge id<MTLTexture>)m_hdrColor).height) + ")").c_str());
+		// A new scaler has no history — same rule as our own TAA target.
+		m_mfxReset = true;
+	}
+#else
+	(void)inW; (void)inH; (void)outW; (void)outH;
+#endif
+}
+
+void MetalRenderer::DestroyMetalFX()
+{
+	if (m_mfxScaler) { CFBridgingRelease(m_mfxScaler); m_mfxScaler = nullptr; }
+	if (m_mfxOutput) { CFBridgingRelease(m_mfxOutput); m_mfxOutput = nullptr; }
+	m_mfxInW = m_mfxInH = m_mfxOutW = m_mfxOutH = 0;
+	m_mfxReset = true;
+}
+
+void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, int inW, int inH, int outW, int outH)
+{
+#if HE_HAS_METALFX
+	if (!MetalFxActive() || !m_hdrColor || !m_hdrDepth || !m_velocityTex) return nullptr;
+	EnsureMetalFX(inW, inH, outW, outH);
+	if (!m_mfxScaler || !m_mfxOutput) return nullptr;
+	if (@available(macOS 13.0, *))
+	{
+		id<MTLFXTemporalScaler> scaler = (__bridge id<MTLFXTemporalScaler>)m_mfxScaler;
+		scaler.colorTexture  = (__bridge id<MTLTexture>)m_hdrColor;
+		scaler.depthTexture  = (__bridge id<MTLTexture>)m_hdrDepth;
+		scaler.motionTexture = (__bridge id<MTLTexture>)m_velocityTex;
+		scaler.outputTexture = (__bridge id<MTLTexture>)m_mfxOutput;
+		// Which part of the input textures actually holds this frame. NOT
+		// optional: left unset the scaler copies the input 1:1 into the corner of
+		// the output instead of upscaling, which looks exactly like "the scene
+		// renders small in the top-left of a black frame".
+		scaler.inputContentWidth  = inW;
+		scaler.inputContentHeight = inH;
+		// Our velocity texture holds "where this pixel moved TO", in UV units.
+		// MetalFX wants "where it came FROM", in input pixels — so the scale
+		// carries both the unit conversion AND the sign flip. Two constants, one
+		// place: if a future capture shows motion tracking the wrong way, this
+		// is the line, not the shader.
+		scaler.motionVectorScaleX = -static_cast<float>(inW);
+		scaler.motionVectorScaleY = -static_cast<float>(inH);
+		// The jitter the frame was rendered with, in pixels, so the scaler can
+		// undo it — the same offset JitteredViewProj applied.
+		scaler.jitterOffsetX = -m_taaJitter.x;
+		scaler.jitterOffsetY = -m_taaJitter.y;
+		scaler.reset = m_mfxReset;
+		[scaler encodeToCommandBuffer:(__bridge id<MTLCommandBuffer>)cmdBufPtr];
+		m_mfxReset = false;
+		return m_mfxOutput;
+	}
+	return nullptr;
+#else
+	(void)cmdBufPtr; (void)inW; (void)inH; (void)outW; (void)outH;
+	return nullptr;
+#endif
+}
+
+// Everything temporal needs the same two things — a jittered raster and a
+// velocity buffer — whether the accumulation is ours or the OS scaler's. Asking
+// it once here is what keeps pass setup, jitter and shader binding from
+// disagreeing about whether this frame has motion data.
+bool MetalRenderer::TemporalActive() const
+{
+	const HE::AAMethod m = ActiveAAMethod();
+	return (m == HE::AAMethod::TAA || m == HE::AAMethod::MetalFX) &&
+	       m_renderPath == HE::RenderPath::Deferred && m_velocityPipeline;
+}
+
 bool MetalRenderer::TaaActive() const
 {
-	// Both halves have to be true: the user picked it AND the deferred path that
-	// feeds the velocity pass is really running this frame. Asking this in one
-	// place is what keeps pass setup and shader binding from disagreeing.
-	return ActiveAAMethod() == HE::AAMethod::TAA &&
-	       m_renderPath == HE::RenderPath::Deferred &&
-	       m_velocityPipeline && m_taaPipeline;
+	return TemporalActive() && ActiveAAMethod() == HE::AAMethod::TAA && m_taaPipeline;
 }
 
 // The rasterisation matrix. The offset is applied in CLIP space (a translation
@@ -10589,7 +10727,7 @@ bool MetalRenderer::TaaActive() const
 // unjittered one stays available for motion and reprojection.
 glm::mat4 MetalRenderer::JitteredViewProj(const glm::mat4& viewProj, int width, int height) const
 {
-	if (!TaaActive() || width <= 0 || height <= 0) return viewProj;
+	if (!TemporalActive() || width <= 0 || height <= 0) return viewProj;
 	glm::mat4 j(1.0f);
 	j[3][0] = m_taaJitter.x * 2.0f / static_cast<float>(width);
 	j[3][1] = m_taaJitter.y * 2.0f / static_cast<float>(height);
@@ -13694,7 +13832,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// pixel evenly in few frames, where a random offset clumps and a
 			// regular grid re-aliases. Chosen BEFORE anything builds a matrix,
 			// because every rasterising pass this frame must share one offset.
-			if (TaaActive())
+			if (TemporalActive())
 			{
 				EnsureTaaTargets(sceneW, sceneH);
 				auto halton = [](uint32_t i, uint32_t base) {
@@ -13712,6 +13850,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				// with it — a stale one would blend against a different world
 				// the moment TAA comes back on.
 				DestroyTaaTargets();
+				DestroyMetalFX();
 				m_taaJitter = glm::vec2(0.0f);
 			}
 			const bool deferredTile = deferredActive && m_deferredTileMode;
@@ -14021,10 +14160,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				m_lensFlareParams[2] = aspect;   m_lensFlareParams[3] = strength;
 			}
 
+			// MetalFX (A5): upscale the HDR image BEFORE the tonemap — that is the
+			// stage Apple's model expects, and it means the tonemap (and every
+			// filter after it) then works at output resolution. Returns null
+			// unless MetalFX is the active mode and the device has it.
+			void* const mfxHdr = EncodeMetalFX((__bridge void*)cmdBuf, sceneW, sceneH, outW, outH);
+			// Everything downstream of the tonemap works at THIS size: the scene
+			// resolution normally, the output resolution when MetalFX ran.
+			const int postW = mfxHdr ? outW : sceneW;
+			const int postH = mfxHdr ? outH : sceneH;
+
 			// Tonemap HDR → LDR intermediate; FXAA reads it next (for both the editor
 			// viewport and the direct-to-drawable path). m_hdrDepth is a DontCare
 			// depth so the (depth-carrying) tonemap pipeline stays valid.
-			EnsureLdrTarget(sceneW, sceneH);
+			EnsureLdrTarget(postW, postH);
 			{
 				MTLRenderPassDescriptor* tmPass = [MTLRenderPassDescriptor renderPassDescriptor];
 				tmPass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ldrColor;
@@ -14036,14 +14185,14 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				ftAttachPass((__bridge void*)tmPass, "Tonemap");
 				id<MTLRenderCommandEncoder> tmEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:tmPass];
-				EncodeTonemap((__bridge void*)tmEncoder);
+				EncodeTonemap((__bridge void*)tmEncoder, mfxHdr);
 				[tmEncoder endEncoding];
 			}
 
 			// Temporal accumulation on the tonemapped image (A3). No-op unless
 			// TAA is the active mode; the AA-resolve slot below then reads
 			// m_taaResolved instead of m_ldrColor.
-			EncodeTaa((__bridge void*)cmdBuf, sceneW, sceneH);
+			EncodeTaa((__bridge void*)cmdBuf, postW, postH);
 
 			// FXAA LDR → offscreen viewport texture (shown by the editor).
 			if (offscreen)
@@ -14058,7 +14207,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				fxPass.depthAttachment.storeAction = MTLStoreActionDontCare;
 				id<MTLRenderCommandEncoder> fxEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:fxPass];
-				EncodeFxaa((__bridge void*)fxEncoder, sceneW, sceneH);
+				// Source resolution, not output: the spatial filters step in
+				// TEXELS of the image they read.
+				EncodeFxaa((__bridge void*)fxEncoder, postW, postH);
 				// UI is laid out in OUTPUT pixels — it is drawn onto the viewport
 				// texture after the rescale, so a render scale must not reach it
 				// (or every widget would be placed as if the screen were smaller).
@@ -14583,6 +14734,9 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// the SSR gate above). Reported as a capability rather than silently falling
 	// back, so the editor can grey the entry out and say why.
 	c.supportsTemporalAA = (m_renderPath == HE::RenderPath::Deferred);
+	// MetalFX rides on the same velocity buffer, so it inherits the same gate on
+	// top of the device/OS check made at Initialize.
+	c.supportsMetalFX    = m_mfxSupported && c.supportsTemporalAA;
 #endif
 	return c;
 }

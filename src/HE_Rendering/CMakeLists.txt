@@ -166,8 +166,12 @@ if(APPLE)
         src/Backends/Metal/MetalRenderer.mm
         src/Backends/Metal/MetalShaderManager.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    # MetalFX (docs/anti-aliasing-plan.md A5): the OS temporal scaler. Weak-linked
+    # so a build still runs on a system whose SDK predates it — the backend asks
+    # MTLFXTemporalScalerDescriptor at runtime and falls back to its own TAA.
     target_link_libraries(RendererMetal
         PUBLIC  "-framework Metal" "-framework QuartzCore" "-framework Foundation"
+                "-weak_framework MetalFX"
         PRIVATE glm::glm HorizonCore SDL3::SDL3)
     target_compile_definitions(RendererMetal PRIVATE HE_RENDERING_BUILD_DLL)
     # Cross-backend shader codegen (material system M1). The shared material shader
