@@ -89,6 +89,38 @@ namespace AssetThumbnailCache
 	// Edge length of a generated tile, in pixels.
 	uint32_t thumbnailSize();
 
+	// ── Scenes: the tile is the last saved viewport ──────────────────────────
+	// A scene has no shape to render — it IS the shape — so there is nothing for
+	// RenderAssetThumbnail to draw and its tile used to be the generic glyph.
+	// Instead the editor hands the viewport image over when the scene is saved,
+	// and that picture becomes the tile: what you last looked at is what the
+	// browser shows, and it stays in step because every save replaces it.
+	//
+	// `rgba` is a tightly packed top-down RGBA8 frame (IRenderer::CaptureViewport's
+	// contract) of `w`×`h`. Call AFTER the asset file is written: the tile is
+	// stamped with the file's current (mtime, size), which is what stops the
+	// staleness check from throwing it away on the next poll.
+	//
+	// Returns false without side effects when there is no project cache dir, no
+	// ContentManager, or the frame is unusable.
+	bool storeCapture(const std::string& absPath, const std::vector<uint8_t>& rgba,
+	                  uint32_t w, uint32_t h);
+
+	// The crop + downscale behind storeCapture: centre-crop to a square, then box-
+	// filter to kThumbSize² RGBA8 with alpha forced opaque. Centre-crop, not
+	// letterbox — a viewport is a WINDOW onto a scene, so trimming its sides
+	// keeps the subject at tile scale, whereas letterboxing a 21:9 view would
+	// leave a postage stamp in a bar of empty space. Public for tests (it is the
+	// only part of the scene-tile path that can run without a GPU).
+	bool captureToTile(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h,
+	                   std::vector<uint8_t>& out);
+
+	// <projectRoot>/Saved/Thumbnails for a .heproj path — the cacheDir every
+	// caller must pass to setContext. Shared because setContext compares the
+	// string: two callers deriving it differently would each drop the other's
+	// textures on every save.
+	std::string cacheDirForProject(const std::string& projectFilePath);
+
 	// A prefab is a CBOR entity subtree, not a shape — its tile is the first mesh
 	// found inside it, which is exactly right for the common case (a prop) and
 	// shows the primary part rather than nothing for an assembly. Resolves the

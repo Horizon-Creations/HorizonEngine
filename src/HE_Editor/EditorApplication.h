@@ -662,6 +662,10 @@ private:
 	std::string m_currentScenePath;
 	uint64_t    m_savedRevision = 0;
 	void saveSceneToPath(const std::string& path);
+	// Hand the current viewport image to the thumbnail cache as this scene's
+	// tile. A scene has nothing to render a preview FROM, so its picture is
+	// taken at save time instead of generated on demand.
+	void captureSceneThumbnail(const std::string& scenePath);
 	void openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();

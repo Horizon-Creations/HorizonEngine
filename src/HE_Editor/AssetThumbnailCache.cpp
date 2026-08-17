@@ -105,6 +105,12 @@ namespace
 			case HE::AssetType::ParticleSystem:   out = ThumbnailKind::Material;     return true;
 			// Widgets go through RenderWidgetThumbnail; kind unused.
 			case HE::AssetType::Widget:           out = ThumbnailKind::Material;     return true;
+			// A scene is never RENDERED for its tile — it has no shape of its own,
+			// and loading a whole level to draw a 128px square would be absurd. Its
+			// picture is the viewport, captured when the scene was last saved
+			// (storeCapture). Accepted here purely so get() reaches the disk cache;
+			// the render path bails out for it explicitly.
+			case HE::AssetType::Scene:            out = ThumbnailKind::Material;     return true;
 			default: return false;
 		}
 	}
@@ -511,8 +517,10 @@ void* get(const std::string& absPath)
 	if (absPath.empty() || !s_renderer || !s_content) return nullptr;
 
 	// Type first, BEFORE an entry exists: the grid asks for every file it draws,
-	// and scripts/textures/scenes must not each cost a map entry and a periodic
-	// stat. The answer comes from the shared header-sniff cache, which the editor
+	// and a script or an audio file must not cost a map entry and a periodic stat
+	// apiece. (A scene deliberately does get one now — it can have a tile, from
+	// the viewport capture its last save left behind.) The answer comes from the
+	// shared header-sniff cache, which the editor
 	// already drops whenever the content tree changes — so an asset appearing at a
 	// path that used to hold something else is picked up there, not here.
 	ThumbnailKind kind;
@@ -564,6 +572,18 @@ void* get(const std::string& absPath)
 	// A material FUNCTION is rendered through a scratch material standing in for
 	// it; everything else is drawn as itself.
 	const HE::AssetType type = EditorAssetTypeCache::assetTypeOf(absPath);
+
+	// A scene stops here: the disk cache above is its ONLY source, because a tile
+	// for it is a viewport capture, not a render of an asset. Latched Unsupported
+	// only when that cache was actually consulted — a frame that ran out of
+	// upload budget skipped it, and giving up then would leave the tile a glyph
+	// until the next save.
+	if (type == HE::AssetType::Scene)
+	{
+		if (!file.empty() && s_uploadsLeft > 0) e.state = State::Unsupported;
+		return nullptr;
+	}
+
 	const bool isFunction = type == HE::AssetType::MaterialFunction;
 	// Whether the asset was ALREADY in memory decides if we may drop it again
 	// below: generating a tile must not evict something the scene is using, but it
@@ -623,6 +643,100 @@ void* get(const std::string& absPath)
 	e.texture = s_renderer->CreateImGuiTexture(pixels.data(), (int)kThumbSize, (int)kThumbSize);
 	e.state   = e.texture ? State::Ready : State::Unsupported;
 	return e.texture;
+}
+
+std::string cacheDirForProject(const std::string& projectFilePath)
+{
+	if (projectFilePath.empty()) return {};
+	return (fs::path(projectFilePath).parent_path() / "Saved" / "Thumbnails").string();
+}
+
+bool captureToTile(const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h,
+                   std::vector<uint8_t>& out)
+{
+	if (w == 0 || h == 0) return false;
+	if (rgba.size() < static_cast<size_t>(w) * h * 4) return false;
+
+	// Centre square of the frame. A viewport is a window onto a scene, so its
+	// sides are the part you can lose — letterboxing a wide view instead would
+	// shrink the actual subject into a stamp between two empty bars.
+	const uint32_t side = std::min(w, h);
+	const uint32_t cx   = (w - side) / 2;
+	const uint32_t cy   = (h - side) / 2;
+
+	const int S = static_cast<int>(kThumbSize);
+	out.assign(static_cast<size_t>(S) * S * 4, 0);
+
+	// Box filter with a capped tap count, same reasoning as makeTextureThumbnail:
+	// a 4K viewport averaged in full would be millions of reads inside a save.
+	constexpr int kMaxTaps = 4;
+	for (int y = 0; y < S; ++y)
+	{
+		const uint32_t sy0 = cy + static_cast<uint32_t>((static_cast<float>(y)     / S) * side);
+		const uint32_t sy1 = cy + std::max(static_cast<uint32_t>(1),
+		                                   static_cast<uint32_t>((static_cast<float>(y + 1) / S) * side));
+		for (int x = 0; x < S; ++x)
+		{
+			const uint32_t sx0 = cx + static_cast<uint32_t>((static_cast<float>(x)     / S) * side);
+			const uint32_t sx1 = cx + std::max(static_cast<uint32_t>(1),
+			                                   static_cast<uint32_t>((static_cast<float>(x + 1) / S) * side));
+			const uint32_t stepX = std::max(1u, (sx1 - sx0) / kMaxTaps);
+			const uint32_t stepY = std::max(1u, (sy1 - sy0) / kMaxTaps);
+
+			uint32_t acc[3] = { 0, 0, 0 };
+			uint32_t taps = 0;
+			for (uint32_t sy = sy0; sy < sy1 && sy < h; sy += stepY)
+				for (uint32_t sx = sx0; sx < sx1 && sx < w; sx += stepX)
+				{
+					const uint8_t* p = &rgba[(static_cast<size_t>(sy) * w + sx) * 4];
+					acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2];
+					++taps;
+				}
+			if (taps == 0) continue;
+			uint8_t* d = &out[(static_cast<size_t>(y) * S + x) * 4];
+			d[0] = static_cast<uint8_t>(acc[0] / taps);
+			d[1] = static_cast<uint8_t>(acc[1] / taps);
+			d[2] = static_cast<uint8_t>(acc[2] / taps);
+			// Opaque on purpose: the viewport's alpha channel is whatever the
+			// tonemap pass happened to leave there, and a tile that inherits it
+			// reads as a half-erased picture.
+			d[3] = 255;
+		}
+	}
+	return true;
+}
+
+bool storeCapture(const std::string& absPath, const std::vector<uint8_t>& rgba,
+                  uint32_t w, uint32_t h)
+{
+	// Without a ContentManager the relative path this would be filed under is not
+	// the one get() will look it up by — a written-but-unfindable tile is worse
+	// than none.
+	if (absPath.empty() || !s_content || s_cacheDir.empty()) return false;
+
+	std::vector<uint8_t> pixels;
+	if (!captureToTile(rgba, w, h, pixels)) return false;
+
+	const std::string relPath = relPathOf(absPath);
+	const uint64_t    stamp   = sourceStampOf(absPath);
+	if (stamp == 0) return false; // the asset file is not there — nothing to key on
+
+	std::error_code ec;
+	fs::create_directories(s_cacheDir, ec);
+	const std::string file = (fs::path(s_cacheDir) / fileNameFor(relPath)).string();
+	if (!writeFile(file, relPath, stamp, kThumbSize, pixels)) return false;
+
+	// Drop the in-memory texture ONLY — deliberately not invalidate(), which
+	// also deletes the .hthumb and would erase the capture just written. The next
+	// get() reloads it from disk.
+	if (const auto it = s_entries.find(absPath); it != s_entries.end())
+	{
+		releaseTexture(it->second);
+		it->second.state    = State::Unknown;
+		it->second.stamp    = stamp;
+		it->second.lastStat = s_now;
+	}
+	return true;
 }
 
 void invalidate(const std::string& absPath)

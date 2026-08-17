@@ -5089,12 +5089,40 @@ void EditorApplication::saveSceneToPath(const std::string& path)
 	{
 		m_currentScenePath = path;
 		m_savedRevision    = m_undo.revision(); // scene is now clean
+		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
 	}
 	else
 	{
 		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	}
+}
+
+// The scene's Content-Browser tile: the viewport as it looked when the scene was
+// saved. A scene has no shape of its own to render a preview from — it IS the
+// shape — so the picture has to be taken rather than generated, and a save is
+// the one moment where "what is on screen" and "what is in the file" agree.
+//
+// Called AFTER the file is written: the tile is stamped with that file's
+// (mtime, size), which is what keeps the cache's staleness check from throwing
+// it away again on the next poll.
+void EditorApplication::captureSceneThumbnail(const std::string& scenePath)
+{
+	IRenderer* r = renderer();
+	if (!r || scenePath.empty()) return;
+	// In Play the viewport shows the PLAY world, which is not what is being
+	// saved. Keeping the previous tile is the honest answer.
+	if (m_isPlaying) return;
+
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	if (!r->CaptureViewport(rgba, w, h) || w == 0 || h == 0) return;
+
+	// The Content Browser sets this every frame, but it may never have been
+	// drawn in this session. Same derivation, so this is a no-op when it has.
+	AssetThumbnailCache::setContext(r, &contentManager(),
+		AssetThumbnailCache::cacheDirForProject(m_projectManager.currentProject().path));
+	AssetThumbnailCache::storeCapture(scenePath, rgba, w, h);
 }
 
 void EditorApplication::pushEnvironment(float dt)

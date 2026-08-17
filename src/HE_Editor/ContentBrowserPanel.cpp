@@ -1054,10 +1054,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 		// A miss just falls back to the extension icon below.
 		if (ctx.projectManager)
 		{
-			const std::string& projFile = ctx.projectManager->currentProject().path;
-			const std::string cacheDir = projFile.empty() ? std::string{}
-				: (std::filesystem::path(projFile).parent_path() / "Saved" / "Thumbnails").string();
-			AssetThumbnailCache::setContext(ctx.renderer, ctx.contentManager, cacheDir);
+			// Through the shared derivation: setContext compares the string, so a
+			// second caller spelling the same directory differently would make the
+			// two drop each other's textures on every call.
+			AssetThumbnailCache::setContext(ctx.renderer, ctx.contentManager,
+				AssetThumbnailCache::cacheDirForProject(ctx.projectManager->currentProject().path));
 		}
 		AssetThumbnailCache::beginFrame(ImGui::GetTime());
 
