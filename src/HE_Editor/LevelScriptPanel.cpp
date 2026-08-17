@@ -1639,12 +1639,19 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 {
 	if (!ctx.renderer || !ctx.contentManager || !st.compWorld) return false;
 	glm::mat4 viewProj(1.0f);
-	// The pivot is the class's origin, not the content's centre: the character's
-	// own origin is the thing every component transform is relative to, so it is
-	// what the view should turn around.
+	// The pivot is the ROOT's own origin, not the content's centre and not a
+	// hardcoded world zero: it is the point every component transform is
+	// measured from, so it is what the view turns around and what the renderer
+	// marks. A class whose root carries an offset — the blob stores it, and the
+	// spawner honours it — would otherwise be framed against an empty patch of
+	// grid, which reads as a broken origin marker rather than a moved root.
+	glm::vec3 pivot(0.0f);
+	if (reg.valid(st.compRoot))
+		if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
+			pivot = t->position;
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.compWorld,
 		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
-		st.previewYaw, st.previewPitch, st.previewDist, glm::vec3(0.0f), &viewProj);
+		st.previewYaw, st.previewPitch, st.previewDist, pivot, &viewProj);
 	if (!tex) return false;
 
 	const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
@@ -1836,7 +1843,11 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 			{
 				ImGui::TextDisabled("Add Component");
 				ImGui::Separator();
-				InspectorPanel::addComponentMenu(*st.compWorld, e, nullptr);
+				// The popup is its own window, so the details column's
+				// "was anything active in here" heuristic never sees this —
+				// the menu says so itself instead.
+				if (InspectorPanel::addComponentMenu(*st.compWorld, e, nullptr))
+					st.dirty = true;
 				ImGui::EndPopup();
 			}
 			if (open && (hasKids || !comps.empty()))
@@ -1915,9 +1926,12 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	if (reg.valid(st.compSel))
 	{
 		// One component when the tree has one selected, the whole entity
-		// otherwise — the same panel either way, just narrowed.
-		InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr,
-		                          st.compFocus.empty() ? nullptr : st.compFocus.c_str());
+		// otherwise — the same panel either way, just narrowed. It reports
+		// added/removed components itself; the heuristic below cannot see
+		// those (a popup is its own window, a removal leaves no active item).
+		if (InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr,
+		                              st.compFocus.empty() ? nullptr : st.compFocus.c_str()))
+			st.dirty = true;
 		// The scratch world has no undo revision to diff against, so the tab
 		// takes ImGui's word for it. Scoped to THIS child: IsAnyItemActive is
 		// global to the frame, so on its own it would mark the class unsaved

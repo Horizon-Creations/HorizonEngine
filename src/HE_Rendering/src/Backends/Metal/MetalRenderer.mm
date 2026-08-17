@@ -8020,9 +8020,9 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	{
 		const float halfExtent = std::max(10.0f, std::ceil(camDist * 2.0f));
 		std::vector<float> verts;
-		HE::buildPreviewGround(halfExtent, verts);
+		HE::buildPreviewGround(halfExtent, verts, pivot);
 		const NSUInteger groundVerts = verts.size() / 6;
-		HE::buildPreviewGrid(halfExtent, 1.0f, verts);
+		HE::buildPreviewGrid(halfExtent, 1.0f, verts, pivot);
 		const NSUInteger totalVerts = verts.size() / 6;
 
 		id<MTLBuffer> lineBuf = [device newBufferWithBytes:verts.data()

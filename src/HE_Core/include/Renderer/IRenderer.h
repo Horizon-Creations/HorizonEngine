@@ -428,8 +428,12 @@ public:
     //  • the background is an opaque GRAY with a ground plane and a grid, not
     //    transparent — this is a scene view in the sense of Unreal's character
     //    viewport, and a floating mesh with no ground reads as scale-less.
-    //  • the camera orbits a fixed `pivot` (normally the world origin = the
-    //    character's own origin) at `dist` in PLAIN WORLD UNITS. It does NOT
+    //  • the camera orbits a fixed `pivot` at `dist` in PLAIN WORLD UNITS, and
+    //    the whole backdrop — ground, grid, origin marker — is laid out around
+    //    that same point. `pivot` is meant to be the SUBJECT's origin (a class
+    //    preview passes its root entity's position, normally zero), so the
+    //    marked origin is the one every component transform is relative to
+    //    rather than an unrelated world zero. It does NOT
     //    auto-frame on the content's bounds: the extractor deliberately leaves
     //    bounds invalid for meshes that are not resident yet, so an auto-fit
     //    would jump around while assets stream in.

@@ -118,6 +118,16 @@ zeigt, woraus die Klasse besteht:
 * `previewDist` bedeutet jetzt **Meter um den Origin**, nicht mehr ein Vielfaches
   der Mesh-Bounds; der Zoom ist multiplikativ, sonst fühlt er sich auf 20 m tot
   an.
+* Der Origin ist der **des Wurzel-Entities**, nicht die Welt-Null: der Blob
+  speichert das Transform der Wurzel und der Spawner beachtet es, also würde eine
+  Klasse mit versetzter Wurzel sonst gegen ein leeres Stück Grid gerahmt — was
+  wie ein kaputter Origin-Marker aussieht und nicht wie eine verschobene Wurzel.
+  Boden, Grid und Marker liegen deshalb alle um diesen Punkt.
+* `renderFor` und `addComponentMenu` melden jetzt, ob eine Komponente dazukam
+  oder wegfiel. Von außen ist beides unsichtbar — das Menü lebt in einem Popup
+  (eigenes ImGui-Fenster), und ein Entfernen hinterlässt kein aktives Item —,
+  also hätte die „war hier gerade etwas aktiv"-Heuristik des Tabs die Änderung
+  nicht als ungespeichert gezählt: Komponente anlegen, Tab schließen, weg.
 
 **Nie live verifiziert** — wie alles in diesem Umbau.
 

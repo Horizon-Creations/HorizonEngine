@@ -92,6 +92,49 @@ TEST_CASE("buildPreviewGrid marks the origin with an up axis")
 	CHECK(sawUpAxis);
 }
 
+TEST_CASE("the backdrop follows the origin it is given")
+{
+	// A class whose ROOT carries an offset must still see its own origin marked
+	// and the grid laid out around it — the alternative frames the character
+	// against an empty patch of grid, which reads as a broken marker rather
+	// than a moved root.
+	const glm::vec3 o(3.0f, 1.5f, -2.0f);
+	std::vector<float> raw;
+	HE::buildPreviewGround(6.0f, raw, o);
+	for (const Vert& v : unpack(raw))
+	{
+		CHECK(v.pos.y == doctest::Approx(o.y - HE::kPreviewGroundDrop));
+		CHECK(std::abs(v.pos.x - o.x) == doctest::Approx(6.0f));
+		CHECK(std::abs(v.pos.z - o.z) == doctest::Approx(6.0f));
+	}
+
+	std::vector<float> grid;
+	HE::buildPreviewGrid(6.0f, 1.0f, grid, o);
+	const std::vector<Vert> verts = unpack(grid);
+
+	// The marker's up axis starts exactly on the origin.
+	bool sawUpAxis = false;
+	for (size_t i = 0; i + 1 < verts.size(); i += 2)
+		if (verts[i].pos == o && verts[i + 1].pos == o + glm::vec3(0.0f, 1.0f, 0.0f))
+			sawUpAxis = true;
+	CHECK(sawUpAxis);
+
+	// And the two tinted axes run THROUGH it, which only holds because the
+	// lines are laid out from the origin rather than from world zero.
+	bool sawBlueZ = false, sawRedX = false;
+	for (size_t i = 0; i + 1 < verts.size(); i += 2)
+	{
+		const Vert& a = verts[i];
+		const Vert& b = verts[i + 1];
+		if (a.pos.x == doctest::Approx(o.x) && b.pos.x == doctest::Approx(o.x) &&
+		    a.pos.z != b.pos.z && a.color.b > a.color.r) sawBlueZ = true;
+		if (a.pos.z == doctest::Approx(o.z) && b.pos.z == doctest::Approx(o.z) &&
+		    a.pos.x != b.pos.x && a.color.r > a.color.b) sawRedX = true;
+	}
+	CHECK(sawBlueZ);
+	CHECK(sawRedX);
+}
+
 TEST_CASE("buildPreviewGrid survives a zero step instead of looping forever")
 {
 	std::vector<float> raw;

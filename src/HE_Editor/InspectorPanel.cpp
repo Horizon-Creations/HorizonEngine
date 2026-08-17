@@ -125,13 +125,18 @@ void render(AppContext& ctx)
 //               step; this way there is still only the one.
 // In the two silent modes this function must emit no ImGui calls at all — it
 // runs while the caller's tree child window is the current one.
-void renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+// Returns whether a component was ADDED or REMOVED — a caller tracking unsaved
+// changes cannot see either from the outside (the add menu lives in a popup,
+// which is its own ImGui window, and a removal happens on a click that leaves
+// no active item behind).
+bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
                    const char* only, std::vector<std::string>* collect,
                    bool removeMatching = false)
 {
 #ifdef HE_IMGUI_ENABLED
 	auto& registry = world.registry();
 	const bool quiet = (collect != nullptr) || removeMatching;
+	bool structuralChange = false;
 
 	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
 	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
@@ -161,12 +166,12 @@ void renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (only && std::strcmp(only, label) != 0) return false;
 		// Removal mode: report it as removed and draw nothing — the section's
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
-		if (removeMatching) { removed = removable; return false; }
+		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
 		if (removable && ImGui::BeginPopupContextItem())
 		{
 			if (ImGui::MenuItem("Remove Component"))
-				removed = true;
+				removed = structuralChange = true;
 			ImGui::EndPopup();
 		}
 		return open && !removed;
@@ -1581,13 +1586,16 @@ void renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 		if (ImGui::BeginPopup("##add_component"))
 		{
-			addComponentMenu(world, entity, undo);
+			if (addComponentMenu(world, entity, undo)) structuralChange = true;
 			ImGui::EndPopup();
 		}
 	}
+	return structuralChange;
 
 #else
 	(void)ctx; (void)world; (void)entity; (void)undo; (void)only; (void)collect;
+	(void)removeMatching;
+	return false;
 #endif // HE_IMGUI_ENABLED
 }
 
@@ -1595,11 +1603,18 @@ void renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 // Split out so the Details panel's button and the class tab's component tree
 // offer the same list — two copies of a forty-entry menu would part ways the
 // first time a component was added to one of them.
-void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
+//
+// Returns whether something was actually added. A caller that tracks unsaved
+// changes cannot infer it: this runs inside a POPUP, which is its own ImGui
+// window, so the usual "was any item active in my child window" heuristic never
+// sees it — and a component added but not marked dirty is a component silently
+// lost when the tab closes.
+bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 {
 #ifdef HE_IMGUI_ENABLED
-	if (world.isBuiltin(entity)) return;
+	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
+	bool added = false;
 	{
 		{
 			auto addItem = [&]<typename T>(const char* label, T)
@@ -1608,6 +1623,7 @@ void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 				{
 					if (undo) undo->snapshotNow();
 					registry.emplace<T>(entity);
+					added = true;
 				}
 			};
 			addItem("Transform",    TransformComponent{});
@@ -1628,6 +1644,7 @@ void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 				if (!registry.all_of<CameraComponent>(entity))
 					registry.emplace<CameraComponent>(entity, CameraComponent{});
 				registry.emplace_or_replace<CameraRigComponent>(entity, CameraRigComponent{});
+				added = true;
 				ImGui::CloseCurrentPopup();
 			}
 			addItem("Light",        LightComponent{});
@@ -1669,17 +1686,19 @@ void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// for entities that already carry them (e.g. older scenes).
 		}
 	}
+	return added;
 
 #else
 	(void)world; (void)entity; (void)undo;
+	return false;
 #endif // HE_IMGUI_ENABLED
 }
 
 // ── Public wrappers ─────────────────────────────────────────────────────────
-void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+bool renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
                const char* onlyComponent)
 {
-	renderForImpl(ctx, world, entity, undo, onlyComponent, nullptr);
+	return renderForImpl(ctx, world, entity, undo, onlyComponent, nullptr);
 }
 
 void listComponents(AppContext& ctx, HorizonWorld& world, Entity entity,

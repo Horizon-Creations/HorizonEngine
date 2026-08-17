@@ -7986,9 +7986,9 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	{
 		const float halfExtent = std::max(10.0f, std::ceil(camDist * 2.0f));
 		std::vector<float> verts;
-		HE::buildPreviewGround(halfExtent, verts);
+		HE::buildPreviewGround(halfExtent, verts, pivot);
 		const GLsizei groundVerts = static_cast<GLsizei>(verts.size() / 6);
-		HE::buildPreviewGrid(halfExtent, 1.0f, verts);
+		HE::buildPreviewGrid(halfExtent, 1.0f, verts, pivot);
 		const GLsizei totalVerts = static_cast<GLsizei>(verts.size() / 6);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);

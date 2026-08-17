@@ -31,7 +31,12 @@ namespace InspectorPanel
 	// that label — what the class tab's component tree wants when a single
 	// component is selected. The entity name row and the Add Component button
 	// belong to the entity and are left out then.
-	void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+	//
+	// Returns true when a component was added or removed. Neither is visible
+	// from the outside — the add menu is a popup (its own ImGui window) and a
+	// removal leaves no active item behind — so a caller that tracks unsaved
+	// changes by watching for active widgets would miss both.
+	bool renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
 	               const char* onlyComponent = nullptr);
 
 	// The labels of the sections renderFor WOULD draw for this entity, drawing
@@ -52,5 +57,9 @@ namespace InspectorPanel
 	// The Add Component menu's items, inside a popup the CALLER has opened
 	// (BeginPopup/BeginPopupContextItem … EndPopup). Shared by the Details
 	// panel's button and the class tab's component tree.
-	void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo);
+	//
+	// Returns true when something was added — a popup is its own ImGui window,
+	// so a caller tracking unsaved changes cannot detect the edit from the
+	// outside, and an untracked add is a component lost when the tab closes.
+	bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo);
 }
