@@ -722,6 +722,7 @@ private:
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
+	float m_renderScale     = 1.0f;   // A4 — scene render size / output size
 	bool  m_specularAA      = true;   // A6 — roughness regularization in shading
 	float m_specularAAStrength = 1.0f;
 	void* m_fxaaPipeline   = nullptr; // id<MTLRenderPipelineState>

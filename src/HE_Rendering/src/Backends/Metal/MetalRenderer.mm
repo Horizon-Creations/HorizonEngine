@@ -9868,6 +9868,7 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 	// Resolve once, here, against what this backend can do — the render path
 	// then only ever sees a runnable method.
 	m_aaMethodRequested = s.method;   // resolved at use time — see ActiveAAMethod()
+	m_renderScale       = s.renderScale;
 	m_aaSharpness       = s.sharpness;
 	m_specularAA        = s.specularAA;
 	m_specularAAStrength = s.specularAAStrength;
@@ -13662,8 +13663,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		const bool offscreen = isPrimary && m_viewportReqW > 0 && m_viewportReqH > 0;
 		if (isPrimary)
 		{
-			const int sceneW = offscreen ? (int)m_viewportReqW : pw;
-			const int sceneH = offscreen ? (int)m_viewportReqH : ph;
+			// Output size (what the user sees) vs. RENDER size (what the scene is
+			// rasterized at). Render scale (A4) separates the two: everything
+			// scene-side below uses sceneW/sceneH, and the AA-resolve pass — a
+			// fullscreen triangle sampling in normalized UV — rescales to the
+			// output for free. < 1 upscales, > 1 is plain supersampling.
+			const int outW = offscreen ? (int)m_viewportReqW : pw;
+			const int outH = offscreen ? (int)m_viewportReqH : ph;
+			const float rscale = std::clamp(m_renderScale, 0.25f, 2.0f);
+			const int sceneW = std::max(1, (int)std::lround(outW * rscale));
+			const int sceneH = std::max(1, (int)std::lround(outH * rscale));
 			EnsureHDRTarget(sceneW, sceneH);
 
 			// ── Deferred G-buffer pass (docs/deferred-renderer-plan.md) ─────────
@@ -14050,7 +14059,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				id<MTLRenderCommandEncoder> fxEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:fxPass];
 				EncodeFxaa((__bridge void*)fxEncoder, sceneW, sceneH);
-				EncodeUIPass((__bridge void*)fxEncoder, sceneW, sceneH);
+				// UI is laid out in OUTPUT pixels — it is drawn onto the viewport
+				// texture after the rescale, so a render scale must not reach it
+				// (or every widget would be placed as if the screen were smaller).
+				EncodeUIPass((__bridge void*)fxEncoder, outW, outH);
 				[fxEncoder endEncoding];
 			}
 			else if (m_viewportColor)
