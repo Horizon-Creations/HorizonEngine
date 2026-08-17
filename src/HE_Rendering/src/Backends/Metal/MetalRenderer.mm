@@ -8459,24 +8459,6 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 
-	// ── Sky dome, if this preview has one. First, with depth always passing:
-	// it is the backdrop, so everything else simply draws over it.
-	if (env.sky && m_debugLinePipeline)
-	{
-		std::vector<float> sky;
-		HE::buildPreviewSkyDome(camPos, camera.farPlane * 0.5f, snapshot.sunDirection, sky);
-		id<MTLBuffer> skyBuf = [device newBufferWithBytes:sky.data()
-		                                           length:sky.size() * sizeof(float)
-		                                          options:MTLResourceStorageModeShared];
-		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
-		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
-		[enc setVertexBuffer:skyBuf offset:0 atIndex:0];
-		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
-		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-		        vertexCount:(NSUInteger)(sky.size() / 6)];
-		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-	}
-
 	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
 	// the character stands ON the floor instead of being drawn over it. Extent
 	// follows how far the camera has flown from the origin so the grid never

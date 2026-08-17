@@ -8526,24 +8526,6 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	// ── Sky dome, if this preview has one. First and depth-test-free: it is the
-	// backdrop, so everything else simply draws over it.
-	if (env.sky)
-	{
-		std::vector<float> sky;
-		HE::buildPreviewSkyDome(camPos, camera.farPlane * 0.5f, snapshot.sunDirection, sky);
-		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
-		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sky.size() * sizeof(float)),
-		             sky.data(), GL_DYNAMIC_DRAW);
-		glUseProgram(m_skelPreviewLineProgram);
-		glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(viewProj));
-		glBindVertexArray(m_skelPreviewLineVAO);
-		glDisable(GL_DEPTH_TEST);
-		glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(sky.size() / 6));
-		glEnable(GL_DEPTH_TEST);
-		glBindVertexArray(0);
-	}
-
 	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
 	// the character stands ON the floor instead of being drawn over it. Extent
 	// follows how far the camera has flown from the origin so the grid never
@@ -10622,27 +10604,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// background), so the heavy sky shader is never paid for behind solid
 		// objects. With no geometry the whole frame is background → full sky.
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
-		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
-		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
-	}
-}
-
-// The sky, as a fullscreen pass into the CURRENTLY BOUND target. Split out of the
-// scene frame so the world PREVIEW can draw the very same sky — the alternative
-// (a cheaper stand-in) was tried and looked like a cheaper stand-in: a coarse
-// coloured dome turned the sun disc into a faceted white polygon, because the
-// disc is a fraction of a degree wide and nothing but a per-pixel evaluation
-// resolves it. There is one sky in this engine; this is it.
-//
-// `allowLowResClouds` is false for previews: the quarter-res pre-pass juggles
-// its own FBO and leans on the previous frame's camera, neither of which a
-// small offscreen render has any business doing.
-void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
-                                       const glm::vec3& camPos,
-                                       const IRenderer::EnvironmentSettings& env,
-                                       bool allowLowResClouds, int pw, int ph)
-{
-		if (m_skyProgram && env.skyEnabled)
+		if (m_skyProgram && GetEnvironment().skyEnabled)
 		{
 			glUseProgram(m_skyProgram);
 			glDepthFunc(GL_LEQUAL);
