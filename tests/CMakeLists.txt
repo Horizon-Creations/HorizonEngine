@@ -38,6 +38,7 @@ add_executable(he_tests
     test_rendermanager.cpp
     test_prefab.cpp
     test_inputmapping.cpp
+    test_input_gamepad.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
