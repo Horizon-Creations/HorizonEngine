@@ -402,10 +402,16 @@ private:
 	// Procedural skybox: fills the HDR target's background before the scene.
 	void* m_skyPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_moonTexture = nullptr; // id<MTLTexture>, night-sky moon (or null)
-	// Everything else the sky shader needs comes from GetEnvironment() via the shared
-	// HE::BuildSkyFrameParams; only the per-frame camera/clock values are passed in.
+	// Everything else the sky shader needs comes from `env` via the shared
+	// HE::BuildSkyFrameParams; the per-frame camera/clock values are passed in.
+	// `env`/`camPos` are parameters rather than GetEnvironment()/m_renderWorld so
+	// the world PREVIEW can draw the very same sky under its own time of day —
+	// there is one sky in this engine, and a cheaper stand-in for the preview was
+	// tried and looked like one. `lowResClouds` false forces the inline raymarch
+	// (the preview runs no quarter-res pre-pass, so there is no buffer to composite).
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
-	                float time);
+	                float time, const IRenderer::EnvironmentSettings& env,
+	                const glm::vec3& camPos, bool lowResClouds);
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -584,7 +590,11 @@ private:
 	// verbatim. ONE target, because only one asset tab is ever active. Unlike the
 	// per-asset previews this one clears to an opaque gray and draws a ground
 	// plane + grid, so it reads as a scene view rather than a cut-out asset.
-	void* m_worldPreviewColorTex = nullptr; // id<MTLTexture> (retained)
+	// Two colour targets, mirroring the scene: the pass renders HDR, the tonemap
+	// resolves into the LDR one ImGui shows. Handing ImGui raw HDR is what made
+	// the first sky-lit preview a white mesh under a blown-out sky.
+	void* m_worldPreviewHdrTex   = nullptr; // id<MTLTexture> (retained), kSceneColorFormat
+	void* m_worldPreviewColorTex = nullptr; // id<MTLTexture> (retained), kSwapchainFormat
 	void* m_worldPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
 	int   m_worldPreviewW        = 0;
 	int   m_worldPreviewH        = 0;
@@ -671,7 +681,9 @@ private:
 	int   m_hdrH            = 0;
 	void  EnsureHDRTarget(int width, int height);
 	void  DestroyHDRTarget();
-	void  EncodeTonemap(void* renderEncoder); // fullscreen tonemap of m_hdrColor → LDR
+	// Fullscreen tonemap of an HDR target → LDR. `sourceHdr` null = the scene's
+	// m_hdrColor; the world preview passes its own and turns bloom/flare off.
+	void  EncodeTonemap(void* renderEncoder, void* sourceHdr = nullptr, bool withBloom = true);
 #if defined(HE_HAVE_SHADERC)
 	// Build (or fetch cached) a pipeline for a material's custom fragment GLSL, spliced
 	// onto the standard drop-in vertex. Returns null on compile/link failure (also cached).

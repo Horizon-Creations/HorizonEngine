@@ -40,9 +40,10 @@ struct EditorCameraOverride
 // that badly.
 struct WorldPreviewEnv
 {
-    bool  sky           = false;   // sky dome + sun driven by the time of day
+    bool  sky           = false;   // the scene's procedural sky + a sun at `timeOfDay`
     float timeOfDay     = 0.5f;    // 0..1 — 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight
     float cloudCoverage = 0.35f;   // feeds the same overcast dimming the scene uses
+    bool  grid          = true;    // ground plane + grid + origin marker
 };
 
 // One fully-resolved particle for RenderParticlePreview — position/size/color/

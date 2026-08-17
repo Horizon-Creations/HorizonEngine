@@ -67,6 +67,9 @@ struct State
 	// day, the same fixed key light every thumbnail is rendered under. Both are
 	// real questions about a mesh, so neither is the only option.
 	bool         useSky = true;
+	// Ground + grid + origin marker. On by default (scale is hard to read against
+	// nothing), off for a clean look at the silhouette.
+	bool         showGrid3d = true;
 };
 
 AssetPanelState<State> s_states;
@@ -272,6 +275,7 @@ void drawMeshView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const
 	WorldPreviewEnv env;
 	env.sky       = st.useSky;
 	env.timeOfDay = st.timeOfDay;
+	env.grid      = st.showGrid3d;
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.world,
 		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
 		st.cam.makeOverride(), glm::vec3(0.0f), env);
@@ -377,7 +381,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// Which of the two views the right pane holds. The 3D view is the one you
 		// open a mesh to see; the unwrap is what you switch to when the question
 		// is about texturing.
-		bar.rightGroup(bar.iconGroupWidth(st.showUv ? 5 : 3));
+		bar.rightGroup(bar.iconGroupWidth(st.showUv ? 5 : 4));
 		if (bar.item("##sm3d", T::iconLayers, "3D", !st.showUv, true,
 		             "The mesh in a lit world"))
 			st.showUv = false;
@@ -397,6 +401,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			{
 				st.flipV = !st.flipV;
 			}
+		}
+		else if (bar.item("##sm3dgrid", T::iconGrid, nullptr, st.showGrid3d, true,
+		                  "Show the ground and its grid"))
+		{
+			st.showGrid3d = !st.showGrid3d;
 		}
 		if (bar.item("##smfit", T::iconFit, nullptr, false, true,
 		             st.showUv ? "Reset the UV view" : "Frame the mesh (F)"))

@@ -5347,6 +5347,7 @@ void MetalRenderer::Shutdown()
 	// World-preview target (RenderWorldPreview); its pipelines are the skeletal /
 	// mesh preview's, released with those.
 	if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
+	if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
 	if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
 	m_worldPreviewW = 0;
 	m_worldPreviewH = 0;
@@ -8385,14 +8386,21 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
 	previewExtractor.setContentManager(m_contentManager);
-	// The sun is not computed here: setDayNight puts it where the SCENE would
-	// have it at this time, so a preview and the level agree about what 0.75
-	// looks like. Colours/intensities are the engine defaults (EnvironmentSettings).
+	// One description of the preview's sky, built the way the editor and the
+	// packaged game build theirs. Hand-assembling it here would be a fourth copy
+	// of "what does a default sky look like" and would drift from the Sky panel.
+	IRenderer::EnvironmentSettings previewEnvSettings{};
 	if (env.sky)
+	{
+		previewEnvSettings = HE::makeWorldPreviewEnvironment(env.timeOfDay, env.cloudCoverage);
+		// The sun is not computed here either: setDayNight puts it where the
+		// SCENE would have it at this hour, so preview and level agree about
+		// what 0.75 looks like — and it reads the same numbers the sky pixels do.
 		previewExtractor.setDayNight(true, env.timeOfDay,
-		                             glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
-		                             glm::vec3(0.55f, 0.65f, 0.95f), 0.66f,
-		                             env.cloudCoverage);
+		                             previewEnvSettings.sunColor, previewEnvSettings.sunIntensity,
+		                             previewEnvSettings.moonColor, previewEnvSettings.moonIntensity,
+		                             previewEnvSettings.cloudCoverage);
+	}
 	EditorCameraOverride previewCam = camera;
 	previewCam.active = true;
 	RenderWorld snapshot;
@@ -8425,12 +8433,24 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
 	}
 
-	// ── Lazy / resized target.
+	// ── Lazy / resized targets. TWO of them, mirroring the scene: the pass
+	// renders HDR (the sky's radiance and a sun at intensity 2.2 both run well
+	// past 1.0), then a tonemap resolves that into the LDR texture ImGui shows.
+	// Handing ImGui the raw HDR texture is what made the first sky-lit preview a
+	// uniformly white mesh under a blown-out sky.
 	if (!m_worldPreviewColorTex || m_worldPreviewW != W || m_worldPreviewH != H)
 	{
 		if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
+		if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
 		if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
-		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+		MTLTextureDescriptor* hd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:W height:H mipmapped:NO];
+		hd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		hd.storageMode = MTLStorageModePrivate;
+		m_worldPreviewHdrTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
+		// LDR in the SWAPCHAIN format, because that is what the tonemap pipeline
+		// targets — a pipeline's colour format must match its pass's attachment.
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
 			width:W height:H mipmapped:NO];
 		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		cd.storageMode = MTLStorageModePrivate;
@@ -8445,10 +8465,10 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_worldPreviewColorTex;
 
 	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_worldPreviewHdrTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-	// Opaque gray — this is a scene view, not a cut-out asset.
+	// Studio gray — covered by the sky when there is one.
 	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.22, 0.22, 0.235, 1.0);
 	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
 	rp.depthAttachment.loadAction  = MTLLoadActionClear;
@@ -8459,15 +8479,29 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 
-	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
-	// the character stands ON the floor instead of being drawn over it. Extent
-	// follows how far the camera has flown from the origin so the grid never
-	// runs out — but capped, because the line count grows with it and a free
-	// camera can end up two thousand units away.
+	// ── Sky FIRST, unlike the scene, which draws it last to skip the shading
+	// behind solid geometry. Here the ground must not occlude the mesh (see
+	// below), so it writes no depth — and a sky drawn afterwards would then
+	// paint straight over it. A preview target is small; the overdraw is not
+	// worth the ordering trap.
+	if (env.sky)
+	{
+		float skyClock = 0.0f;
+		if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+			skyClock = static_cast<float>(std::atof(ov));
+		EncodeSky((__bridge void*)enc, glm::inverse(viewProj), snapshot.sunDirection,
+		          skyClock, previewEnvSettings, camPos, /*lowResClouds=*/false);
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+	}
+
+	// ── Backdrop: ground plane, then grid + origin marker. Depth-tested but
+	// WITHOUT depth writes: a floor that occludes is a floor that hides the
+	// bottom of whatever you came to look at, and in a viewer the object always
+	// wins. So it is drawn first and everything else simply covers it.
 	// Drawn through the debug-line pipeline, which is exactly a pos3+color3
 	// vertex buffer with an MVP — the primitive type is a per-draw choice, so
 	// the ground quad goes through it as triangles.
-	if (m_debugLinePipeline)
+	if (env.grid && m_debugLinePipeline)
 	{
 		const float halfExtent = std::clamp(
 			std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
@@ -8481,11 +8515,16 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		                                            length:verts.size() * sizeof(float)
 		                                           options:MTLResourceStorageModeShared];
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
+		// No depth WRITE (nothing has written depth yet at this point, so "always"
+		// and "less" coincide) — that is what keeps the floor from swallowing the
+		// bottom of the mesh drawn next.
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 		[enc setVertexBuffer:lineBuf offset:0 atIndex:0];
 		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:groundVerts];
 		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:groundVerts
 		        vertexCount:(totalVerts - groundVerts)];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	}
 
 	// ── Static meshes.
@@ -8557,13 +8596,30 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 
 	[enc endEncoding];
 
-	// Headless witness (HE_WORLD_PREVIEW_DUMP=path) — same blit + half-float
-	// readback convention as the sibling previews.
+	// ── Tonemap resolve: HDR → the texture ImGui shows, through the very same
+	// pipeline the scene's frame ends with. Its own encoder, because it targets
+	// a different attachment; the tonemap pipeline was built with a depth format,
+	// so the pass still needs a depth attachment even though it ignores it.
+	{
+		MTLRenderPassDescriptor* tp = [MTLRenderPassDescriptor renderPassDescriptor];
+		tp.colorAttachments[0].texture     = colorTex;
+		tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+		tp.colorAttachments[0].storeAction = MTLStoreActionStore;
+		tp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+		tp.depthAttachment.loadAction  = MTLLoadActionDontCare;
+		tp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		id<MTLRenderCommandEncoder> tenc = [cb renderCommandEncoderWithDescriptor:tp];
+		EncodeTonemap((__bridge void*)tenc, m_worldPreviewHdrTex, /*withBloom=*/false);
+		[tenc endEncoding];
+	}
+
+	// Headless witness (HE_WORLD_PREVIEW_DUMP=path). Reads the LDR result — what
+	// the editor actually shows — so the channel order is the swapchain's (BGRA).
 	const char* dp = std::getenv("HE_WORLD_PREVIEW_DUMP");
 	id<MTLTexture> staging = nil;
 	if (dp && *dp)
 	{
-		MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+		MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
 			width:W height:H mipmapped:NO];
 		sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
 		staging = [device newTextureWithDescriptor:sd];
@@ -8579,29 +8635,18 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 
 	if (staging)
 	{
-		std::vector<uint16_t> half((size_t)W * H * 4);
-		[staging getBytes:half.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+		std::vector<uint8_t> bgra((size_t)W * H * 4);
+		[staging getBytes:bgra.data() bytesPerRow:W * 4
 		       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
-		auto h2f = [](uint16_t h) -> float {
-			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
-			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
-			else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
-			else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
-			float o; std::memcpy(&o, &f, 4); return o;
-		};
 		if (std::ofstream fo(dp, std::ios::binary); fo)
 		{
 			fo << "P6\n" << W << " " << H << "\n255\n";
 			for (int y = 0; y < H; ++y)
 				for (int x = 0; x < W; ++x)
 				{
-					const uint16_t* pxl = &half[((size_t)y * W + x) * 4];
-					for (int c = 0; c < 3; ++c)
-					{
-						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);
-						uint8_t b = (uint8_t)(v * 255.0f + 0.5f);
-						fo.write(reinterpret_cast<const char*>(&b), 1);
-					}
+					const uint8_t* pxl = &bgra[((size_t)y * W + x) * 4];
+					const uint8_t rgb[3] = { pxl[2], pxl[1], pxl[0] }; // BGRA → RGB
+					fo.write(reinterpret_cast<const char*>(rgb), 3);
 				}
 		}
 	}
@@ -10003,24 +10048,32 @@ void* MetalRenderer::GetOrBuildParticlePipeline(uint64_t key, const HE::Particle
 	return result;
 }
 
-// Fullscreen tonemap of the HDR scene color (+ bloom) into the bound encoder's target.
-void MetalRenderer::EncodeTonemap(void* renderEncoderPtr)
+// Fullscreen tonemap of an HDR color target (+ bloom) into the bound encoder's
+// target. `sourceHdr` defaults to the scene's; the world preview passes its own,
+// because it renders HDR too and must go through the SAME curve — writing sky
+// radiance and a sun at intensity 2.2 straight to display is what turned the
+// first sky-lit preview into a uniformly white mesh under a blown-out sky.
+void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool withBloom)
 {
-	if (!m_tonemapPipeline || !m_hdrColor) return;
+	void* hdr = sourceHdr ? sourceHdr : m_hdrColor;
+	if (!m_tonemapPipeline || !hdr) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_tonemapPipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
-	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrColor atIndex:0];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)hdr atIndex:0];
 	// Bloom on texture slot 1 (fall back to the HDR texture with 0 strength so the
 	// shader's sampler always has a valid binding). m_bloomResult is null when
-	// bloom was disabled or unavailable this frame.
-	id<MTLTexture> bloomTex = m_bloomResult
+	// bloom was disabled or unavailable this frame — and a preview never has one.
+	const bool bloom = withBloom && m_bloomResult;
+	id<MTLTexture> bloomTex = bloom
 		? (__bridge id<MTLTexture>)m_bloomResult
-		: (__bridge id<MTLTexture>)m_hdrColor;
+		: (__bridge id<MTLTexture>)hdr;
 	[enc setFragmentTexture:bloomTex atIndex:1];
-	const simd::float2 params = { 1.0f, m_bloomResult ? m_bloomStrength : 0.0f };
+	const simd::float2 params = { 1.0f, bloom ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
-	[enc setFragmentBytes:m_lensFlareParams length:sizeof(m_lensFlareParams) atIndex:1];
+	static const float kNoFlare[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	[enc setFragmentBytes:(withBloom ? m_lensFlareParams : kNoFlare)
+	               length:sizeof(m_lensFlareParams) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
 
@@ -10256,10 +10309,12 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 // ─── Frame encoding ───────────────────────────────────────────────────────────
 
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
-                             const glm::vec3& sunDir, float time)
+                             const glm::vec3& sunDir, float time,
+                             const IRenderer::EnvironmentSettings& env,
+                             const glm::vec3& camPos, bool lowResClouds)
 {
 	if (!m_skyPipeline) return;
-	if (!GetEnvironment().skyEnabled) return; // no Sky entity → leave the cleared background
+	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyPipeline];
 	// Depth-test == far, no write — only fills background pixels (drawn after scene).
@@ -10271,16 +10326,15 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
-	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	HE::SkyFrameInputs in;
 	in.invViewProj    = invViewProj;
 	in.sunDir         = sunDir;
-	in.cameraPos      = m_renderWorld.camera.position;
+	in.cameraPos      = camPos;
 	in.time           = time;
 	in.hasMoonTexture = m_moonTexture != nullptr;
 	// Composite the low-res clouds only when the pre-pass actually produced a buffer
 	// (else fall back to the inline raymarch so nothing breaks if the target is missing).
-	in.lowResClouds   = (env.lowResClouds && m_cloudColor);
+	in.lowResClouds   = (lowResClouds && env.lowResClouds && m_cloudColor);
 	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
 	// Quarter-res cloud buffer (rgb=L, a=T) on slot 2; dummy when unused (must be bound).
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudColor ? m_cloudColor : m_dummyTexture) atIndex:2];
@@ -10485,7 +10539,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	auto drawSky = [&]() {
-		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock);
+		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
+		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true);
 	};
 
 	// Intra-Scene element timing (draw-boundary): anchor before the first element,

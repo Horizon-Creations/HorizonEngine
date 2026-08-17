@@ -8454,14 +8454,24 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
 	previewExtractor.setContentManager(m_contentManager);
-	// The sun is not computed here: setDayNight puts it where the SCENE would
-	// have it at this time, so a preview and the level agree about what 0.75
-	// looks like. Colours/intensities are the engine defaults (EnvironmentSettings).
+	// One description of the preview's sky, built the way the editor and the
+	// packaged game build theirs — from an EnvironmentComponent through
+	// makeEnvironmentSettings. Hand-assembling the struct here would be a fourth
+	// copy of "what does a default sky look like", and it would drift from the
+	// Sky panel's defaults the first time one of them changed. dt = 0: nothing
+	// may advance in a preview (same convention as the headless dump path).
+	IRenderer::EnvironmentSettings previewEnvSettings{};
 	if (env.sky)
+	{
+		previewEnvSettings = HE::makeWorldPreviewEnvironment(env.timeOfDay, env.cloudCoverage);
+		// The sun is not computed here either: setDayNight puts it where the
+		// SCENE would have it at this hour, so preview and level agree about
+		// what 0.75 looks like — and it reads the same numbers the sky pixels do.
 		previewExtractor.setDayNight(true, env.timeOfDay,
-		                             glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
-		                             glm::vec3(0.55f, 0.65f, 0.95f), 0.66f,
-		                             env.cloudCoverage);
+		                             previewEnvSettings.sunColor, previewEnvSettings.sunIntensity,
+		                             previewEnvSettings.moonColor, previewEnvSettings.moonIntensity,
+		                             previewEnvSettings.cloudCoverage);
+	}
 	EditorCameraOverride previewCam = camera;
 	previewCam.active = true;
 	RenderWorld snapshot;
@@ -8494,23 +8504,41 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 		ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
 	}
 
-	// ── Lazy / resized offscreen target.
+	// ── Lazy / resized offscreen targets. TWO of them, mirroring the scene: the
+	// pass renders HDR (the sky's radiance runs well past 1.0, and so does a sun
+	// at intensity 2.2), then a tonemap resolves that into the LDR texture ImGui
+	// shows. Writing the HDR values straight into an 8-bit target is what made
+	// the first sky-lit preview a uniformly white mesh under a blown-out sky.
 	if (!m_worldPreviewFBO || m_worldPreviewW != W || m_worldPreviewH != H)
 	{
 		if (m_worldPreviewColor) glDeleteTextures(1, &m_worldPreviewColor);
+		if (m_worldPreviewHdr)   glDeleteTextures(1, &m_worldPreviewHdr);
 		if (m_worldPreviewDepth) glDeleteRenderbuffers(1, &m_worldPreviewDepth);
-		if (!m_worldPreviewFBO) glGenFramebuffers(1, &m_worldPreviewFBO);
+		if (!m_worldPreviewFBO)    glGenFramebuffers(1, &m_worldPreviewFBO);
+		if (!m_worldPreviewLdrFBO) glGenFramebuffers(1, &m_worldPreviewLdrFBO);
+
 		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
+		glGenTextures(1, &m_worldPreviewHdr);
+		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, W, H, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_worldPreviewHdr, 0);
+		glGenRenderbuffers(1, &m_worldPreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_worldPreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_worldPreviewDepth);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewLdrFBO);
 		glGenTextures(1, &m_worldPreviewColor);
 		glBindTexture(GL_TEXTURE_2D, m_worldPreviewColor);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_worldPreviewColor, 0);
-		glGenRenderbuffers(1, &m_worldPreviewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_worldPreviewDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_worldPreviewDepth);
+
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		m_worldPreviewW = W;
@@ -8521,17 +8549,29 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
 	glViewport(0, 0, W, H);
-	glClearColor(0.22f, 0.22f, 0.235f, 1.0f); // opaque gray — this is a scene view, not a cut-out asset
+	glClearColor(0.22f, 0.22f, 0.235f, 1.0f); // studio gray — covered by the sky when there is one
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
-	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
-	// the character stands ON the floor instead of being drawn over it. Extent
-	// follows how far the camera has flown from the origin so the grid never
-	// runs out — but capped, because the line count grows with it and a free
-	// camera can end up two thousand units away.
+	// ── Sky FIRST, unlike the scene, which draws it last to skip the shading
+	// behind solid geometry. Here the ground must not occlude the mesh (see
+	// below), so it writes no depth — and a sky drawn afterwards would then
+	// paint straight over it. A preview target is small; the overdraw is not
+	// worth the ordering trap.
+	if (env.sky)
+		DrawSkyFullscreen(glm::inverse(viewProj), snapshot.sunDirection, camPos,
+		                  previewEnvSettings, /*allowLowResClouds=*/false, W, H);
+
+	// ── Backdrop: ground plane, then grid + origin marker. Depth-tested but
+	// WITHOUT depth writes: a floor that occludes is a floor that hides the
+	// bottom of whatever you came to look at, and in a viewer the object always
+	// wins. So it is drawn first and everything else simply covers it.
+	if (env.grid)
 	{
+		// Extent follows how far the camera has flown from the origin so the grid
+		// never runs out — but capped, because the line count grows with it and a
+		// free camera can end up two thousand units away.
 		const float halfExtent = std::clamp(
 			std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
 		std::vector<float> verts;
@@ -8546,9 +8586,11 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 		glUseProgram(m_skelPreviewLineProgram);
 		glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(viewProj));
 		glBindVertexArray(m_skelPreviewLineVAO);
+		glDepthMask(GL_FALSE);
 		glDrawArrays(GL_TRIANGLES, 0, groundVerts);
 		glLineWidth(1.0f);
 		glDrawArrays(GL_LINES, groundVerts, totalVerts - groundVerts);
+		glDepthMask(GL_TRUE);
 		glBindVertexArray(0);
 	}
 
@@ -8602,7 +8644,40 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	}
 	glBindVertexArray(0);
 
-	// Headless witness, same convention as the sibling previews.
+	// ── Tonemap resolve: HDR → the 8-bit texture ImGui shows, through the very
+	// same program the scene's frame ends with. Without it the sky's radiance
+	// and a sun at intensity 2.2 both clip, and everything lit lands on white.
+	// Bloom is bound at strength 0 (a preview is not a film camera) and the lens
+	// flare zeroed; the sampler still needs a valid binding, so the HDR texture
+	// stands in for the bloom buffer.
+	if (m_tonemapProgram && m_worldPreviewLdrFBO)
+	{
+		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewLdrFBO);
+		glViewport(0, 0, W, H);
+		glDisable(GL_DEPTH_TEST);
+		glUseProgram(m_tonemapProgram);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glUniform1i(m_uHDRTex, 0);
+		glUniform1f(m_uExposure, 1.0f);
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glUniform1i(m_uBloomTex, 1);
+		glUniform1f(m_uBloomStrength, 0.0f);
+		if (m_uLensFlare >= 0)
+		{
+			const float noFlare[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			glUniform4fv(m_uLensFlare, 1, noFlare);
+		}
+		glActiveTexture(GL_TEXTURE0);
+		glBindVertexArray(m_fsVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		glBindVertexArray(0);
+		glEnable(GL_DEPTH_TEST);
+	}
+
+	// Headless witness, same convention as the sibling previews. Reads the LDR
+	// result, i.e. what the editor actually shows.
 	if (const char* dp = std::getenv("HE_WORLD_PREVIEW_DUMP"); dp && *dp)
 	{
 		std::vector<uint8_t> px((size_t)W * H * 3);
@@ -8993,8 +9068,10 @@ void OpenGLRenderer::Shutdown()
 	// World-preview target (RenderWorldPreview); its programs are the skeletal
 	// preview's, freed with those.
 	if (m_worldPreviewColor) { glDeleteTextures(1, &m_worldPreviewColor);      m_worldPreviewColor = 0; }
+	if (m_worldPreviewHdr)   { glDeleteTextures(1, &m_worldPreviewHdr);        m_worldPreviewHdr = 0; }
 	if (m_worldPreviewDepth) { glDeleteRenderbuffers(1, &m_worldPreviewDepth); m_worldPreviewDepth = 0; }
 	if (m_worldPreviewFBO)   { glDeleteFramebuffers(1, &m_worldPreviewFBO);    m_worldPreviewFBO = 0; }
+	if (m_worldPreviewLdrFBO){ glDeleteFramebuffers(1, &m_worldPreviewLdrFBO); m_worldPreviewLdrFBO = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);

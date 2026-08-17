@@ -5,6 +5,8 @@
 #include <Diagnostics/Profiler.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -711,6 +713,18 @@ glm::vec2 cascadeTexelSnapOffset(const glm::mat4& lightViewProj, float shadowMap
 	const float halfRes = shadowMapRes * 0.5f;
 	const glm::vec2 so  = glm::vec2(o.x, o.y) * halfRes;        // origin in texels
 	return (glm::round(so) - so) / halfRes;                     // sub-texel NDC fix
+}
+
+IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(float timeOfDay, float cloudCoverage)
+{
+	EnvironmentComponent ec{};
+	ec.dayNightCycle = true;
+	ec.timeOfDay     = timeOfDay;
+	ec.cloudCoverage = cloudCoverage;
+	// dt = 0: nothing may ADVANCE in a preview. makeEnvironmentSettings is a
+	// per-frame tick that moves timeOfDay along when autoAdvance is set, and a
+	// preview that drifted away from its own slider would be a puzzle.
+	return makeEnvironmentSettings(ec, 0.0f);
 }
 
 } // namespace HE

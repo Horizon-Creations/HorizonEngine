@@ -1,5 +1,6 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
+#include <Renderer/IRenderer.h>   // EditorCameraOverride, EnvironmentSettings
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
@@ -47,6 +48,17 @@ HE_RENDERING_API void computeCascadeSplits(float camNear, float shadowFar, int c
 // edges crawl as the cascade centre rides along with the camera.
 HE_RENDERING_API glm::vec2 cascadeTexelSnapOffset(const glm::mat4& lightViewProj,
                                                   float shadowMapRes);
+
+// The environment a WORLD PREVIEW renders under: a default Sky at `timeOfDay`
+// with `cloudCoverage`, built through the very map the editor and the packaged
+// game use (EnvironmentComponent → makeEnvironmentSettings). Hand-assembling
+// the settings inside a backend would be a fourth copy of "what does a default
+// sky look like" and would drift from the Sky panel's defaults.
+//
+// Lives here rather than in the backends because only HorizonRendering links
+// HorizonScene — a backend static lib sees neither the component nor the map.
+HE_RENDERING_API IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(float timeOfDay,
+                                                                           float cloudCoverage);
 
 } // namespace HE
 
