@@ -241,6 +241,14 @@ Zwei Dinge daran sind nicht verhandelbar und im Code kommentiert:
   Funktions-Qualifier, und der Metal-Shader ist mit genau diesem Namen nicht mehr
   kompiliert (`expected unqualified-id`). Steht jetzt in allen Kopien als `kernelRough` da.
 
+**Reichweite von A6, exakt:** Graph-Materialien bekommen es über die Preamble auf **jedem**
+Backend, sobald dieses `heLight.specAA` füllt — heute füllen es GL und Metal. Die
+**Built-in**-Shader von D3D11/D3D12/Vulkan haben es nicht (eigene Cbuffer, kein Deferred-Pfad;
+dieselbe Parität-Lücke wie bei SSAO/GI, siehe `docs/backend-parity-plan.md`). Der
+**GL-Skinned-Pfad** ebenfalls nicht: er schiebt schon heute weder Wetness noch Snow in seinen
+Shader, das ist eine ältere Lücke dieses Pfades und kein A6-Thema — Metal-Skinned ist dagegen
+abgedeckt, weil es die SceneUniforms des Aufrufers weiterreicht.
+
 **Verifikationslücke A6:** headless nachweisbar ist bisher nur, dass es dort **nichts** tut, wo
 es nichts tun darf — auf den flachen Flächen der Testszene ist das Bild bei Stärke 400
 byte-identisch zu „aus". Eine Headless-Szene mit gekrümmter oder normal-gemappter Geometrie im
