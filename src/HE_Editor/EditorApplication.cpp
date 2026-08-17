@@ -4757,7 +4757,16 @@ void EditorApplication::setPlayMouseCaptured(bool captured)
 // playing AND the mouse is captured.
 void EditorApplication::updatePlayCameraController(float dt)
 {
-	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
+	if (!m_isPlaying || !m_editorWorld || dt <= 0.0f) return;
+
+	// Stick look does NOT require the mouse capture: a pad has no cursor to
+	// fight ImGui over, and demanding Esc-to-capture before the right stick
+	// works would be a rule nobody could discover. Mouse look keeps the
+	// capture requirement it always had.
+	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	const bool  padLook = stickX != 0.0f || stickY != 0.0f;
+	if (!m_playMouseCaptured && !padLook) return;
 
 	// The focused window is both the one whose relative mode must be re-asserted and
 	// the one the cursor is warped back into (see FlyCameraController) — with
@@ -4770,10 +4779,15 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// camera does this itself (cfg.reassertCapture), but the rig path returns
 	// before ever reaching it — leaving it to the controller would mean the
 	// cursor reappears in PIE exactly when a scene has a rig.
-	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
-		SDL_SetWindowRelativeMouseMode(focusWin, true);
-	if (SDL_CursorVisible())
-		SDL_HideCursor();
+	// Only while the mouse is actually held, though: a stick-only frame must
+	// not hide the cursor the user is still using on editor panels.
+	if (m_playMouseCaptured)
+	{
+		if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
+			SDL_SetWindowRelativeMouseMode(focusWin, true);
+		if (SDL_CursorVisible())
+			SDL_HideCursor();
+	}
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
@@ -4782,13 +4796,19 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
 	// Physics only exists while playing, and this whole function is gated on
 	// m_isPlaying — so the boom collides in PIE exactly as it will in the game.
-	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed,
+	HE::CameraLookInput look;
+	look.mouse  = m_playMouseCaptured ? input().mouse() : MouseFrame{};
+	look.stickX = stickX;
+	look.stickY = stickY;
+	look.dt     = dt;
+	if (HE::CameraRigController::update(*m_editorWorld, look, possessed,
 	                                    m_physicsWorld.get()).driven)
 	{
 		// Park the cursor, same reason as the fly-camera path (see
 		// FlyCameraController): without it the look stalls at the screen edge
-		// whenever relative mode is not actually engaged.
-		if (focusWin)
+		// whenever relative mode is not actually engaged. Mouse-capture frames
+		// only — a stick-only frame has a live cursor that must stay put.
+		if (focusWin && m_playMouseCaptured)
 		{
 			int ww = 0, wh = 0;
 			SDL_GetWindowSize(focusWin, &ww, &wh);
@@ -4807,6 +4827,11 @@ void EditorApplication::updatePlayCameraController(float dt)
 		return;
 	}
 
+	// The fly fallback is mouse/keyboard-only and re-asserts the mouse capture
+	// (reassertCapture) — on a stick-only frame with a live cursor it would
+	// grab the mouse out of the user's hand. It only ever ran on captured
+	// frames before the stick path widened the gate above; keep it that way.
+	if (!m_playMouseCaptured) return;
 	HE::FlyCameraController::Config cfg;
 	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
 	cfg.runWithoutCamera = true;   // keep feeding the self-diagnostic below

@@ -1093,6 +1093,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{ rig->targetYaw = static_cast<CameraRigComponent::TargetYaw>(yawMode); trackEdit(); }
 
 			Row::dragFloat("Sensitivity", &rig->sensitivity, 0.005f, 0.005f, 2.0f, "%.3f"); trackEdit();
+			// Separate knob on purpose: mouse is degrees per PIXEL, the stick
+			// is degrees per SECOND at full deflection — one number cannot be
+			// right for both units.
+			Row::dragFloat("Stick Sensitivity", &rig->stickSensitivity, 1.0f, 10.0f, 720.0f, "%.0f \xc2\xb0/s"); trackEdit();
+			ImGui::Checkbox("Invert Stick Y", &rig->stickInvertY); trackEdit();
 			Row::dragFloat("Yaw",         &rig->yaw,   0.5f, -180.0f, 180.0f, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch",       &rig->pitch, 0.5f, rig->pitchMin, rig->pitchMax, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Min",   &rig->pitchMin, 0.5f, -89.0f, 0.0f, "%.1f"); trackEdit();

@@ -829,7 +829,12 @@ void GameApplication::updateCameraController(float dt)
 	// it cannot — no rig camera, or a target that does not resolve — does the
 	// built-in free flight take over, so a scene without a rig behaves exactly
 	// as it always did.
-	if (HE::CameraRigController::update(*m_world, input().mouse(),
+	HE::CameraLookInput look;
+	look.mouse  = input().mouse();
+	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	look.dt     = dt;
+	if (HE::CameraRigController::update(*m_world, look,
 	                                    possessedCharacterEntity(),
 	                                    m_physicsWorld.get()).driven)
 	{
