@@ -1403,6 +1403,9 @@ struct ClassState
 	// What the renderer drew with, so the transform gizmo lands on the object
 	// instead of next to it — see drawWorldPreviewGizmo.
 	glm::mat4    previewViewProj{ 1.0f };
+	// Whether the mouse is over the preview image, read off the image itself —
+	// nothing may be laid over it, or ImGuizmo refuses to grab a handle.
+	bool         previewHovered = false;
 	// Which operation the gizmo is on (W/E/R), per tab. The class viewport has
 	// no toolbar of its own; this is the same state the Scene window's bar edits.
 	ViewportToolbar::State previewGizmo;
@@ -1586,6 +1589,12 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	constexpr ImU32 kCollider = IM_COL32(120, 230, 140, 210);
 	constexpr ImU32 kSelected = IM_COL32(255, 210, 100, 255);
 	constexpr ImU32 kBoom     = IM_COL32(120, 200, 255, 220);
+	// Everything that is NOT the selection. It used to keep its full colour, so
+	// selecting the camera left a bright green capsule on screen and the eye
+	// read THAT as the highlight — pointing at the wrong component. Dim, not
+	// hidden: where the collider sits is still context worth seeing while the
+	// camera arm is being placed.
+	constexpr ImU32 kIdle     = IM_COL32(150, 155, 165, 70);
 
 	// Highlighting follows the selected COMPONENT, not just its entity. One
 	// entity commonly carries several of these — a character root with a
@@ -1599,11 +1608,16 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	{
 		return e == selected && (focus.empty() || focus == label);
 	};
+	// While the selection names ONE component, everything else steps back. With
+	// the whole entity selected there is nothing to step back from, so the
+	// gizmos keep their own colours.
+	const bool oneInFocus = !focus.empty();
 
 	for (auto [e, col] : reg.view<ColliderComponent>().each())
 	{
 		const glm::mat4 m = worldOf(e);
-		const ImU32 c = highlighted(e, "Collider") ? kSelected : kCollider;
+		const ImU32 c = highlighted(e, "Collider") ? kSelected
+		                                          : (oneInFocus ? kIdle : kCollider);
 		const auto at = [&](float x, float y, float z){ return glm::vec3(m * glm::vec4(x, y, z, 1.0f)); };
 
 		if (col.shape == ColliderShape::Capsule || col.shape == ColliderShape::Sphere)
@@ -1648,7 +1662,7 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	for (auto [e, t, cam, rig] : reg.view<TransformComponent, CameraComponent, CameraRigComponent>().each())
 	{
 		const ImU32 c = (highlighted(e, "Camera") || highlighted(e, "Camera Rig"))
-		                ? kSelected : kBoom;
+		                ? kSelected : (oneInFocus ? kIdle : kBoom);
 		const glm::vec3 camPos = glm::vec3(worldOf(e)[3]);
 		// The target is resolved at runtime; in the class editor the thing it
 		// follows is the root, which is what the pivot offset is measured from.
@@ -1703,8 +1717,15 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// Colliders and camera booms stay an overlay even now: they have no mesh to
 	// render, and drawing them THROUGH the character is what you want from a
 	// collider outline anyway.
-	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+	// Hover is taken from the IMAGE, not from an InvisibleButton laid over it.
+	// ImGuizmo only lets a handle be grabbed when no ImGui item is hovered or
+	// active (its CanActivate), so a full-size button over the viewport made the
+	// gizmo undraggable — visible, and dead to every click. ImGui::Image submits
+	// an item without an id, which is exactly why the Scene window never had the
+	// problem.
+	st.previewHovered  = ImGui::IsItemHovered();
 	st.previewViewProj = viewProj;
+	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
 	return true;
 }
 
@@ -1747,8 +1768,10 @@ bool driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& re
                              const glm::vec3& origin, bool hovered)
 {
 	EditorCamera::Input cin;
+	// Owner = this tab's state, so the editor's per-frame "the scene viewport is
+	// not drawn, drop its capture" guard cannot end a look that started here.
 	const bool navigating = EditorViewportNav::gather(
-		ctx, hovered, ImGui::GetIO().DeltaTime,
+		ctx, &st, hovered, ImGui::GetIO().DeltaTime,
 		std::max(1.0f, ImGui::GetItemRectSize().y), cin);
 
 	// F frames the selection, exactly as in the Scene window — the class world's
@@ -1856,29 +1879,28 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			ImGui::TextDisabled("(preview unavailable on this backend)");
 	}
 
-	// An item over the image so hovering is a real ImGui hit test rather than a
-	// rectangle comparison — and, in the fallback path, so the drag has an
-	// owner. (The Scene window gets away without one only because it is NoMove.)
-	ImGui::SetCursorScreenPos(org);
-	ImGui::InvisibleButton("##hccompOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
-		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
-		ImGuiButtonFlags_MouseButtonMiddle);
-	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
-
 	if (drewWorld)
 	{
-		// The real thing: identical controls to the Scene window.
+		// The real thing: identical controls to the Scene window. Deliberately
+		// NO invisible button over the image — see drawWorldPreview.
 		glm::vec3 origin(0.0f);
 		if (reg.valid(st.compRoot))
 			if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
 				origin = t->position;
-		const bool hovered = ImGui::IsItemHovered();
-		const bool navigating = driveWorldPreviewCamera(ctx, st, reg, origin, hovered);
+		const bool navigating =
+			driveWorldPreviewCamera(ctx, st, reg, origin, st.previewHovered);
 		// After the navigation, so a fly drag cannot grab a gizmo handle.
-		drawWorldPreviewGizmo(st, av, org, hovered, navigating);
+		drawWorldPreviewGizmo(st, av, org, st.previewHovered, navigating);
 		return;
 	}
+
+	// An item over the image so the fallback's drag has an owner. (Only in the
+	// fallback: over the world preview it would block the gizmo.)
+	ImGui::SetCursorScreenPos(org);
+	ImGui::InvisibleButton("##hccompOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
 
 	// Fallback path only (no world preview on this backend): the per-asset
 	// preview frames ONE asset on its own bounds, so it orbits — there is
@@ -2039,7 +2061,12 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	{
 		const float detailsW = 320.0f;
 		const float previewW = std::max(160.0f, ImGui::GetContentRegionAvail().x - detailsW);
-		ImGui::BeginChild("##hccomp_preview", ImVec2(previewW, 0), true);
+		// NoScrollWithMouse: the wheel is the camera's dolly here, and without
+		// this the child eats it before the viewport sees it. (The fallback path
+		// used to claim it with SetItemKeyOwner on its invisible button; the
+		// world preview has no such button, on purpose.)
+		ImGui::BeginChild("##hccomp_preview", ImVec2(previewW, 0), true,
+			ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
 		drawComponentPreview(ctx, st, reg);
 		ImGui::EndChild();
 		ImGui::SameLine();

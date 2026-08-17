@@ -20,6 +20,7 @@ add_executable(he_tests
     test_editor_input.cpp
     test_editor_row_widgets.cpp
     test_report_issue.cpp
+    test_notification_store.cpp
     test_editor_dock_state.cpp
     test_game_instance.cpp
     test_culling.cpp

@@ -27,14 +27,17 @@ namespace EditorViewportNav
 	// Read this frame's navigation input for the viewport image just submitted.
 	// Call directly after the image item, passing its IsItemHovered().
 	//
+	// `owner` identifies the calling viewport — any stable address will do. It
+	// is remembered when a fly-look capture engages, so a viewport that is not
+	// drawn this frame can drop ITS capture without stealing another's.
 	// `viewportHeight` is the image's logical height (pan scales with it).
 	// Fills `out` and returns whether a navigation gesture is active — the caller
 	// usually wants that to suppress its own click handling (picking, gizmos).
 	//
 	// Camera-agnostic on purpose: the Scene window and every asset viewport own
 	// different EditorCamera instances, and this only describes the intent.
-	bool gather(AppContext& ctx, bool imageHovered, float dt, float viewportHeight,
-	            EditorCamera::Input& out);
+	bool gather(AppContext& ctx, const void* owner, bool imageHovered,
+	            float dt, float viewportHeight, EditorCamera::Input& out);
 
 	// Drop a fly-look capture: warp the cursor back to where the look started
 	// BEFORE leaving relative mode (SDL applies the warp as the post-relative
@@ -44,6 +47,14 @@ namespace EditorViewportNav
 	// Every teardown path goes through here — tab switch, play mode, Esc — so a
 	// fly toggle can never outlive its capture.
 	void releaseLookCapture(SDL_Window* win);
+
+	// The same, but only if `owner` is the viewport that engaged the capture.
+	// This is what a "I am not being drawn this frame, so let go of anything I
+	// was holding" guard must use: the unconditional release would end a look
+	// that a DIFFERENT viewport is in the middle of — which is precisely what
+	// happens every frame an asset tab is open, since the editor drops the scene
+	// viewport's capture there.
+	void releaseLookCaptureFor(const void* owner, SDL_Window* win);
 
 	// Once per frame, BEFORE any early-out: a held-button fly-look must never
 	// outlive a physically-held right mouse button. Recovers from any path that

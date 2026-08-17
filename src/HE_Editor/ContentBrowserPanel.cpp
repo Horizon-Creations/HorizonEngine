@@ -3885,7 +3885,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				const std::string projectContentRoot = ctx.contentManager->contentRoot();
 				HE::Cs::EngineContentSync::instance().enqueueDownload(
 					relPath, s_remoteDownloadUuid, HE::Cs::DownloadTrigger::Explicit,
-					[fullPath, gs, engineContentPath, projectContentRoot](bool success)
+					[fullPath, relPath, gs, engineContentPath, projectContentRoot](bool success)
 					{
 						// Worker thread — must not touch ctx/ImGui. GlobalState's own
 						// refresh is safe here (mutex-guarded, filesystem-only, same
@@ -3896,7 +3896,22 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						// The tab-open request, which DOES need the main thread, goes
 						// through s_pendingOpenFullPaths (static storage, so this
 						// reference stays valid regardless of when the callback fires).
-						if (!success) return;
+						//
+						// This is the EXPLICIT route: the user pressed Download and
+						// is waiting for a tab to open. By the time it fails the
+						// dialog has closed and the footer's progress bar is gone —
+						// so without a word here, the answer to "I clicked Download"
+						// is nothing at all, forever.
+						if (!success)
+						{
+							HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+								"\"" + std::filesystem::path(relPath).filename().string()
+									+ "\" could not be downloaded.",
+								"The EngineContent server did not hand over the file. Check "
+								"the connection and start the download again.",
+								fullPath);
+							return;
+						}
 						if (gs && !engineContentPath.empty())
 							gs->refreshEngineFolder(engineContentPath, projectContentRoot);
 						std::lock_guard<std::mutex> lock(s_pendingOpenMutex);

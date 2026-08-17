@@ -93,19 +93,29 @@ void NotificationStore::clear()
 
 // ─── The engine-wide error channel ───────────────────────────────────────────
 
+// Both of these take NO lock of this store's, and that is the point. addSink and
+// removeSink take the LOG's mutex, and the log calls sinks with that same mutex
+// held — so holding m_bridgeMutex across either of them would establish
+// bridge→log here against the log→bridge the sink itself walks, and any thread
+// logging an error during a startup or a shutdown would deadlock against it.
+// m_logSink needs no lock instead: attach and detach are called once each, from
+// the main thread (EditorApplication's OnInit and OnShutdown), and the sink
+// never reads it.
 void NotificationStore::attachToEngineLog()
 {
-	std::lock_guard<std::mutex> lock(m_bridgeMutex);
 	if (m_logSink != 0) return;   // already attached; twice would post twice
 	m_logSink = HE::Log::addSink(&NotificationStore::logSink, this);
 }
 
 void NotificationStore::detachFromEngineLog()
 {
-	std::lock_guard<std::mutex> lock(m_bridgeMutex);
 	if (m_logSink == 0) return;
-	HE::Log::removeSink(m_logSink);
+	const int handle = m_logSink;
+	// Cleared BEFORE the removal, so a record already inside the sink finds a
+	// store that is still fully alive — removeSink only guarantees no FURTHER
+	// calls, and this is the ordering that makes a second detach a no-op.
 	m_logSink = 0;
+	HE::Log::removeSink(handle);
 }
 
 void NotificationStore::logSink(const HE::Log::Record& record, void* user)

@@ -109,9 +109,17 @@ static HE::ScenePick::MeshLookup meshLookup(ContentManager& cm)
 // Both of these are now EditorViewportNav's — the capture is a property of the
 // WINDOW, not of the Scene window, and it is released from paths that draw no
 // viewport at all. Kept here as the names the rest of the editor already calls.
+
+// Identifies THIS viewport's fly-look capture. The editor calls the release
+// below on every frame an asset tab is open ("the scene viewport won't run to
+// release its own"), and an asset tab's viewport can be flying at that moment —
+// so the release has to name whose capture it means.
+static const char kSceneNavOwner = 0;
+const void* navOwner() { return &kSceneNavOwner; }
+
 void releaseViewportLookCapture(SDL_Window* win)
 {
-	EditorViewportNav::releaseLookCapture(win);
+	EditorViewportNav::releaseLookCaptureFor(navOwner(), win);
 }
 
 void enforceViewportLookCaptureInvariant(SDL_Window* win)
@@ -231,7 +239,8 @@ void render(AppContext& ctx, float dt)
 					const bool imageHovered = ImGui::IsItemHovered();
 
 					EditorCamera::Input cin;
-					navigating = EditorViewportNav::gather(ctx, imageHovered, dt, avail.y, cin);
+					navigating = EditorViewportNav::gather(ctx, navOwner(), imageHovered,
+					                                      dt, avail.y, cin);
 					// Focus on selection (F) — frame the selected entity.
 					if (imageHovered && !io.WantTextInput && !navigating &&
 					    ImGui::IsKeyPressed(ImGuiKey_F) &&

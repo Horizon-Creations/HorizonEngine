@@ -102,8 +102,12 @@ private:
 
 	// ── Bridge state ─────────────────────────────────────────────────────────
 	// Its own mutex, taken BEFORE m_mutex and never while holding it, so the
-	// throttling bookkeeping cannot serialise against a UI snapshot.
+	// throttling bookkeeping cannot serialise against a UI snapshot — and never
+	// held across an HE::Log call, which would invert against the log mutex the
+	// sink is already called under.
 	std::mutex                                          m_bridgeMutex;
+	// Main thread only (attach/detach), never read by the sink — see the note on
+	// attachToEngineLog's definition for why it is deliberately lock-free.
 	int                                                 m_logSink = 0;
 	std::vector<std::pair<std::string, std::uint64_t>>  m_recentErrors;  // message → last posted
 	std::uint64_t                                       m_burstWindowMs = 0;

@@ -18,11 +18,14 @@ namespace ViewportPanel
 	// counter — hence readable from outside.
 	void renderSizePx(int& outW, int& outH);
 
-	// Drop any active fly-look capture: warp the cursor back to where the look-drag began,
-	// leave relative mode, re-show the OS cursor, and hand mouse control back to ImGui.
-	// Safe to call every frame — a no-op unless a capture is actually active.
-	// Public because paths that DON'T draw the viewport have to force-release it
-	// (e.g. switching to a material/script tab mid-look via a keyboard shortcut).
+	// Drop THIS viewport's fly-look capture: warp the cursor back to where the look-drag
+	// began, leave relative mode, re-show the OS cursor, and hand mouse control back to
+	// ImGui. Safe to call every frame — a no-op unless this viewport is actually holding
+	// a capture. Public because paths that DON'T draw the viewport have to force-release
+	// it (e.g. switching to a material/script tab mid-look via a keyboard shortcut).
+	//
+	// Scoped to the Scene viewport on purpose: an asset tab's viewport navigates through
+	// the same module now and can be mid-look while this is being called every frame.
 	void releaseViewportLookCapture(SDL_Window* win);
 
 	// Belt-and-suspenders invariant, run once per frame BEFORE any early-out: fly-look

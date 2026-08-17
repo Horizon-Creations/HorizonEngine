@@ -28,6 +28,13 @@ static float s_rmbStartY   = 0.f;
 // flying. File-scope for the same reason as s_rmbCaptured, and because the
 // capture invariant must know a toggled fly is not a leaked capture.
 static bool  s_flyToggle   = false;
+// WHICH viewport engaged the capture. There is more than one 3D viewport now
+// (the Scene window and the class editor's), and each has a "I am not drawn
+// this frame, drop what I was holding" guard. Without an owner those guards
+// cancel each other: the editor releases the scene viewport's capture on every
+// frame an asset tab is open, which ended a fly-look in the class viewport one
+// frame after it began.
+static const void* s_captureOwner = nullptr;
 
 void releaseLookCapture(SDL_Window* win)
 {
@@ -45,6 +52,13 @@ void releaseLookCapture(SDL_Window* win)
 	// Every teardown path runs through here, so the fly toggle can never outlive
 	// its capture (tab switch, play mode, Esc — all of them land here).
 	s_flyToggle   = false;
+	s_captureOwner = nullptr;
+}
+
+void releaseLookCaptureFor(const void* owner, SDL_Window* win)
+{
+	if (!s_rmbCaptured || s_captureOwner != owner) return;
+	releaseLookCapture(win);
 }
 
 void enforceCaptureInvariant(SDL_Window* win)
@@ -58,8 +72,8 @@ void enforceCaptureInvariant(SDL_Window* win)
 	if (!rmbDown) releaseLookCapture(win);
 }
 
-bool gather(AppContext& ctx, bool imageHovered, float dt, float viewportHeight,
-            EditorCamera::Input& out)
+bool gather(AppContext& ctx, const void* owner, bool imageHovered,
+            float dt, float viewportHeight, EditorCamera::Input& out)
 {
 	ImGuiIO& io = ImGui::GetIO();
 	SDL_Window* sdlWin = ctx.window ? ctx.window->GetNativeWindow() : nullptr;
@@ -131,7 +145,8 @@ bool gather(AppContext& ctx, bool imageHovered, float dt, float viewportHeight,
 			// Discard any relative motion accumulated before capture so the first
 			// look frame doesn't jump by a stale delta.
 			SDL_GetRelativeMouseState(nullptr, nullptr);
-			s_rmbCaptured = true;
+			s_rmbCaptured  = true;
+			s_captureOwner = owner;
 		}
 		else if ((!rmb || altLmb) && s_rmbCaptured)
 		{
@@ -215,8 +230,9 @@ bool gather(AppContext& ctx, bool imageHovered, float dt, float viewportHeight,
 
 #else // !HE_IMGUI_ENABLED
 
-bool gather(AppContext&, bool, float, float, EditorCamera::Input&) { return false; }
+bool gather(AppContext&, const void*, bool, float, float, EditorCamera::Input&) { return false; }
 void releaseLookCapture(SDL_Window*) {}
+void releaseLookCaptureFor(const void*, SDL_Window*) {}
 void enforceCaptureInvariant(SDL_Window*) {}
 
 #endif // HE_IMGUI_ENABLED
