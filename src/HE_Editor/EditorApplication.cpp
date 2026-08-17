@@ -2190,8 +2190,10 @@ void EditorApplication::OnRender(float dt)
 			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
 			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
-			// Scaled, so a Delay does not fire while the game is paused.
-			m_editorWorld->scripts().update(gameDt);
+			// Game seconds by default (a pause stops the wait), real seconds for
+			// the Delays whose Real Time pin is set — which is how a pause menu
+			// times anything while the game behind it stands still.
+			m_editorWorld->scripts().update(gameDt, dt);
 			// Player instances: Tick + Input.<Action>.* events.
 			//
 			// The mouse only reaches them while play mode HOLDS it. Outside that

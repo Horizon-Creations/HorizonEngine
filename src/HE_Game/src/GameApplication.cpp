@@ -1009,11 +1009,11 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
 	// the app-wide runtime (GameInstance + widgets + level + objects share it).
-	// Scaled like the rest of gameplay, which means a Delay node does NOT fire
-	// while the game is paused — the same rule Unreal/Unity timers follow. The
-	// way back out of a pause is therefore an input event or a widget tick, not
-	// a Delay.
-	m_gameInstance.runtime().update(gameDt);
+	// Both clocks: a Delay counts game seconds by default (so a pause stops it,
+	// the rule Unreal/Unity timers follow), and real seconds when its Real Time
+	// pin is set. Widgets share this runtime, so that pin is what lets a pause
+	// menu time anything at all while the game behind it stands still.
+	m_gameInstance.runtime().update(gameDt, deltaTime);
 
 	// In-game UI pointer input (hover/click on buttons + scripted elements).
 	updateUIInput();

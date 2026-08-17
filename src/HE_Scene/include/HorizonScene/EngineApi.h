@@ -623,6 +623,10 @@ namespace time {
     void  setTimeScale(float scale);
     float timeScale();
     inline constexpr float kMaxTimeScale = 5.0f;
+    // "The game is paused" as ONE predicate rather than a `== 0.0f` spelled out
+    // at every gate (input dispatch, latent flow). No registry row: a script
+    // that wants to ask already has timeScale().
+    inline bool isPaused() { return timeScale() <= 0.0f; }
 }
 
 // ── Player possession (process-global table; PlayerHost owns it) ─────────────

@@ -27,6 +27,27 @@ std::string valueTypeOf(const std::string& json)
 bool inputActionIsAxis  (const std::string& json) { return valueTypeOf(json) == "Axis"; }
 bool inputActionIsAxis2D(const std::string& json) { return valueTypeOf(json) == "Axis2D"; }
 
+bool inputActionRunsWhilePaused(const std::string& json)
+{
+	const auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+	// Anything that is not an explicit `true` — a missing field, a malformed
+	// payload, a string — reads as false. An action that fires during a pause
+	// has to SAY so; guessing yes would let a stray character re-arm the game.
+	if (!j.is_object()) return false;
+	const auto it = j.find("runWhilePaused");
+	return it != j.end() && it->is_boolean() && it->get<bool>();
+}
+
+std::string makeInputActionJson(const std::string& valueType, bool runWhilePaused)
+{
+	nlohmann::json j;
+	j["valueType"] = valueType.empty() ? "Button" : valueType;
+	// Written even when false: an author reading the file should see the switch
+	// exists, not have to know that its absence means "off".
+	j["runWhilePaused"] = runWhilePaused;
+	return j.dump();
+}
+
 std::string inputActionNameFromPath(const std::string& path)
 {
 	return std::filesystem::path(path).stem().string();

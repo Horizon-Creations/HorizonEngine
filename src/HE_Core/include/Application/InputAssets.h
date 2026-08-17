@@ -30,6 +30,18 @@ namespace HE
 	// True for "valueType":"Axis2D".
 	HE_API bool inputActionIsAxis2D(const std::string& json);
 
+	// True when the action declares `"runWhilePaused": true` — it keeps firing
+	// its events while the game is paused (time scale 0). Default FALSE, and
+	// missing/malformed reads as false, so every action authored before this
+	// existed stays silent during a pause: that is the point of a pause. The
+	// pause menu's own actions (open/close, navigate, confirm) opt in.
+	HE_API bool inputActionRunsWhilePaused(const std::string& json);
+
+	// The InputAction payload for a value type ("Button"/"Axis"/"Axis2D") and
+	// the pause flag. One writer, so the editor cannot drop a field the loader
+	// expects by hand-assembling the JSON somewhere else.
+	HE_API std::string makeInputActionJson(const std::string& valueType, bool runWhilePaused);
+
 	// The logical action name for a content-relative InputAction asset path —
 	// the file stem ("Content/Input/IA_Jump.hasset" → "IA_Jump"). Mapping
 	// entries reference actions by path; events and bindings key on this name.

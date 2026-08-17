@@ -242,7 +242,10 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::Delay:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "Completed", P::Exec } };
-        s.dataIns  = { { "Duration", P::Float } };
+        // "Real Time" appended, never inserted: Duration stays data-in 0, so
+        // every graph saved before this pin existed keeps its wire and its
+        // inline default. Unwired and unset it reads false — the old behaviour.
+        s.dataIns  = { { "Duration", P::Float }, { "Real Time", P::Bool } };
         break;
     case T::IsValid:
         s.dataIns  = { { "Target", P::Ref } };
@@ -547,7 +550,9 @@ const char* nodeTooltip(NodeType t)
             return "Runs its exec outputs in order (Then 0, Then 1, …), one after another.";
         case T::Delay:
             return "Pauses the exec chain and resumes from Completed after Duration seconds.\n"
-                   "Retriggering while already pending is ignored.";
+                   "Retriggering while already pending is ignored.\n"
+                   "Real Time counts real seconds instead of game seconds: the wait\n"
+                   "ignores Set Time Scale and keeps running while the game is paused.";
         case T::DoOnce:
             return "Lets execution through only the FIRST time it is reached;\n"
                    "every later trigger is swallowed.";
@@ -2399,7 +2404,8 @@ void Runner::execNode(const Node& n, int depth)
         // Latent: hand the continuation to the host scheduler and stop the
         // chain here — Runtime::update resumes from our exec-out later.
         if (m_ctx.scheduleResume)
-            m_ctx.scheduleResume(n.id, evalInput(n, 0, depth + 1).f);
+            m_ctx.scheduleResume(n.id, evalInput(n, 0, depth + 1).f,
+                                 coerce(evalInput(n, 1, depth + 1), P::Bool).b);
         break;
     case T::DoOnce:
         // Let the chain through only the first time (per instance; node state

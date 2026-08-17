@@ -2308,7 +2308,7 @@ private:
             // Latent: schedule the continuation (resume_<id> via resumeFrom)
             // and stop the chain — like the interpreter's runExecChain break.
             b.line("hc::scheduleResume(m_ctx, " + std::to_string(resumeId(n.id)) + ", " +
-                   input(n, 0, fnCtx) + ");");
+                   input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ");");
             break;
         case NT::DoOnce:
             b.line("if (!" + stateMember(n.id) + ")");

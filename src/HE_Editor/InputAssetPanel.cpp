@@ -54,6 +54,7 @@ struct PanelState
 	// Action payload
 	// 0 Button, 1 Axis, 2 Axis 2D — three now, so a bool no longer says it.
 	int   valueType = 0;
+	bool  runWhilePaused = false;
 	// Mapping payload
 	std::vector<MapEntry> entries;
 };
@@ -264,9 +265,9 @@ bool saveState(PanelState& st, AppContext& ctx)
 	{
 		InputActionAsset* a = ctx.contentManager->getInputActionMutable(st.assetId);
 		if (!a) return false;
-		a->json = st.valueType == 2 ? "{\"valueType\":\"Axis2D\"}"
-		        : st.valueType == 1 ? "{\"valueType\":\"Axis\"}"
-		                            : "{\"valueType\":\"Button\"}";
+		a->json = HE::makeInputActionJson(st.valueType == 2 ? "Axis2D"
+		                                : st.valueType == 1 ? "Axis" : "Button",
+		                                 st.runWhilePaused);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 	}
 	st.dirty = false;
@@ -331,6 +332,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			st.name   = a->name;
 			st.valueType = HE::inputActionIsAxis2D(a->json) ? 2
 			             : HE::inputActionIsAxis(a->json)   ? 1 : 0;
+			st.runWhilePaused = HE::inputActionRunsWhilePaused(a->json);
 		}
 		else if (const InputMappingContextAsset* m = ctx.contentManager->getInputMappingContext(st.assetId))
 		{
@@ -392,6 +394,23 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				"Each type fires its own event, so changing this leaves any node "
 				"already placed for the old one silent. Re-add it from the graph's "
 				"Input section.");
+		}
+
+		// ── Pause behaviour ────────────────────────────────────────────────
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::Spacing();
+		if (ImGui::Checkbox("Fires while the game is paused", &st.runWhilePaused))
+			st.dirty = true;
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled(
+				"A pause (Set Time Scale 0) silences every action by default \xe2\x80\x94 "
+				"otherwise the player would keep shooting through the pause menu. "
+				"Switch this on for the few that have to get through anyway: opening "
+				"and closing the menu, navigating it, confirming. Presses that arrive "
+				"while a silenced action is paused are dropped, not queued up for the "
+				"moment the game resumes.");
 		}
 		ImGui::End();
 		return;

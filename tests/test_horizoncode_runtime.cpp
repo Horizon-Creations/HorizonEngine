@@ -1549,3 +1549,82 @@ TEST_CASE("an Input Action node is reported as handling its events")
 	std::sort(names.begin(), names.end());
 	CHECK(names == std::vector<std::string>{ "Input.Jump.Pressed", "Input.Jump.Released" });
 }
+
+TEST_CASE("a Real Time Delay runs on the unscaled clock, an ordinary one does not")
+{
+	// The pause case in miniature: a frame where game time stands still but
+	// real time keeps moving. One Delay has to finish, the other must not.
+	Graph g;
+	for (const char* n : { "real", "game" })
+	{ Variable v; v.name = n; v.type = PinType::Bool; g.variables.push_back(v); }
+
+	// Two independent chains: Event → Delay(1s) → SetVariable(<var>, true).
+	auto delayChain = [&g](const char* event, const char* var, bool realTime)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event;
+		const int e = g.addNode(ev);
+		Node d; d.type = NodeType::Delay;
+		d.pinDefaults[0] = Value::ofFloat(1.0f);
+		if (realTime) d.pinDefaults[1] = Value::ofBool(true);
+		const int dl = g.addNode(d);
+		Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f;
+		const int c = g.addNode(cb);
+		Node sv; sv.type = NodeType::SetVariable; sv.s = var; sv.propType = PinType::Bool;
+		const int s = g.addNode(sv);
+		REQUIRE(g.connect(e, 0, dl, 0));    // Event exec-out → Delay exec-in
+		REQUIRE(g.connect(dl, 1, s, 0));    // Delay "Completed" → Set exec-in
+		REQUIRE(g.connect(c, 0, s, 2));     // ConstBool → Set Value
+	};
+	delayChain("Real", "real", /*realTime=*/true);
+	delayChain("Game", "game", /*realTime=*/false);
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Real");
+	rt.fireEvent(id, "Game");
+
+	// Paused: game dt 0, real dt 1.2s.
+	rt.update(0.0f, 1.2f);
+	CHECK(rt.getVariable(id, "real").b);
+	CHECK_FALSE(rt.getVariable(id, "game").b);   // still waiting out the pause
+
+	// Resumed: the ordinary one finishes on game time.
+	rt.update(1.2f, 1.2f);
+	CHECK(rt.getVariable(id, "game").b);
+}
+
+TEST_CASE("one dt means one clock: a caller with no time scale keeps the old behaviour")
+{
+	// Every tool and test that predates the Real Time pin calls update(dt) with
+	// a single number. Both kinds of Delay must still expire on it.
+	Graph g;
+	for (const char* n : { "real", "game" })
+	{ Variable v; v.name = n; v.type = PinType::Bool; g.variables.push_back(v); }
+
+	auto delayChain = [&g](const char* event, const char* var, bool realTime)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event;
+		const int e = g.addNode(ev);
+		Node d; d.type = NodeType::Delay;
+		d.pinDefaults[0] = Value::ofFloat(1.0f);
+		if (realTime) d.pinDefaults[1] = Value::ofBool(true);
+		const int dl = g.addNode(d);
+		Node cb; cb.type = NodeType::ConstBool; cb.f[0] = 1.0f;
+		const int c = g.addNode(cb);
+		Node sv; sv.type = NodeType::SetVariable; sv.s = var; sv.propType = PinType::Bool;
+		const int s = g.addNode(sv);
+		REQUIRE(g.connect(e, 0, dl, 0));
+		REQUIRE(g.connect(dl, 1, s, 0));
+		REQUIRE(g.connect(c, 0, s, 2));
+	};
+	delayChain("Real", "real", /*realTime=*/true);
+	delayChain("Game", "game", /*realTime=*/false);
+
+	Runtime rt;
+	const InstanceId id = rt.add(std::move(g));
+	rt.fireEvent(id, "Real");
+	rt.fireEvent(id, "Game");
+	rt.update(1.5f);
+	CHECK(rt.getVariable(id, "real").b);
+	CHECK(rt.getVariable(id, "game").b);
+}
