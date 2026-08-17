@@ -135,6 +135,55 @@ TEST_CASE("the backdrop follows the origin it is given")
 	CHECK(sawRedX);
 }
 
+TEST_CASE("the sky dome surrounds the camera and carries the sky's own colours")
+{
+	const glm::vec3 cam(5.0f, 2.0f, -3.0f);
+	const glm::vec3 sun = glm::normalize(glm::vec3(0.3f, 0.8f, 0.5f));
+	std::vector<float> raw;
+	HE::buildPreviewSkyDome(cam, 100.0f, sun, raw);
+
+	REQUIRE(raw.size() % 6 == 0);
+	const std::vector<Vert> verts = unpack(raw);
+	CHECK(verts.size() % 3 == 0);   // triangles
+	REQUIRE(!verts.empty());
+
+	bool above = false, below = false;
+	for (const Vert& v : verts)
+	{
+		// Centred on the CAMERA, at the given radius — that is what makes it
+		// impossible to fly out of the sky.
+		CHECK(glm::length(v.pos - cam) == doctest::Approx(100.0f).epsilon(0.001));
+		// Colours come from the scattering model, so they must at least be
+		// finite and non-negative; a NaN here paints black holes in the sky.
+		CHECK(std::isfinite(v.color.r));
+		CHECK(std::isfinite(v.color.g));
+		CHECK(std::isfinite(v.color.b));
+		CHECK(v.color.r >= 0.0f);
+		if (v.pos.y > cam.y + 50.0f) above = true;
+		if (v.pos.y < cam.y - 50.0f) below = true;
+	}
+	CHECK(above);   // a full sphere, so looking down still finds sky
+	CHECK(below);
+}
+
+TEST_CASE("the sky dome answers different sun positions differently")
+{
+	// The one thing that makes a time-of-day slider worth having: moving the sun
+	// has to change the picture. A dome that ignored `sunDir` would still pass
+	// every check above.
+	const glm::vec3 cam(0.0f);
+	std::vector<float> noon, dusk;
+	HE::buildPreviewSkyDome(cam, 50.0f, glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f)), noon);
+	HE::buildPreviewSkyDome(cam, 50.0f, glm::normalize(glm::vec3(0.98f, 0.05f, 0.0f)), dusk);
+	REQUIRE(noon.size() == dusk.size());
+
+	int differing = 0;
+	for (size_t i = 0; i < noon.size(); i += 6)
+		for (int c = 3; c < 6; ++c)
+			if (std::abs(noon[i + c] - dusk[i + c]) > 0.01f) { ++differing; break; }
+	CHECK(differing > 0);
+}
+
 TEST_CASE("buildPreviewGrid survives a zero step instead of looping forever")
 {
 	std::vector<float> raw;

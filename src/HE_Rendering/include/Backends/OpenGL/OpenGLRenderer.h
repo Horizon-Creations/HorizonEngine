@@ -56,6 +56,7 @@ public:
 	                         uint32_t width, uint32_t height,
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
+	                         const WorldPreviewEnv& env = {},
 	                         glm::mat4* outViewProj = nullptr) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
@@ -270,6 +271,9 @@ private:
 	unsigned int m_skelPreviewProgram = 0;
 	int          m_uSkelPvMVP = -1, m_uSkelPvModel = -1, m_uSkelPvBones = -1;
 	int          m_uSkelPvColor = -1, m_uSkelPvHasTex = -1;
+	// Optional sun for the world preview (w == 0 = the fixed studio light every
+	// thumbnail was rendered with — see the shader).
+	int          m_uSkelPvSun = -1, m_uSkelPvSunColor = -1, m_uSkelPvAmbient = -1;
 	// Simple immediate-mode line pass for the bone overlay, drawn into the same
 	// target right after the skinned mesh (own tiny program — DebugDrawBuffer's
 	// pipeline targets the backbuffer scene, not an arbitrary offscreen FBO).
@@ -315,6 +319,7 @@ private:
 	unsigned int m_meshPreviewProgram = 0;
 	int          m_uMeshPvMVP = -1, m_uMeshPvModel = -1, m_uMeshPvColor = -1;
 	int          m_uMeshPvHasTex = -1, m_uMeshPvCamPos = -1, m_uMeshPvPbr = -1;
+	int          m_uMeshPvSun = -1, m_uMeshPvSunColor = -1, m_uMeshPvAmbient = -1;
 	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
 	bool EnsureThumbnailTarget(int S);
 	// Read the bound thumbnail target back as tightly packed, TOP-DOWN RGBA8.

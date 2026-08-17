@@ -1708,7 +1708,9 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	glm::mat4 viewProj(1.0f);
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.compWorld,
 		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
-		st.previewCam.makeOverride(), origin, &viewProj);
+		// No sky: the class viewport is a neutral studio, where a sunset would
+		// only be a coloured cast over the thing being authored.
+		st.previewCam.makeOverride(), origin, WorldPreviewEnv{}, &viewProj);
 	if (!tex) return false;
 
 	const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);

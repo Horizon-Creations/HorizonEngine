@@ -4585,6 +4585,13 @@ struct UnlitUniforms
 	glm::vec4 color;   // rgb: base-color tint
 	glm::vec4 flags;   // x: hasTexture
 	glm::vec4 pbr;     // x: metallic, y: roughness
+	// Optional sun for the world preview: xyz points TOWARD the light, w > 0
+	// arms it. w == 0 keeps the fixed studio light every thumbnail was rendered
+	// with, so a cached tile does not change the day a preview gains a sky —
+	// which is why this is APPENDED rather than folded into a spare lane.
+	glm::vec4 sun        = glm::vec4(0.0f);
+	glm::vec4 skyAmbient = glm::vec4(0.0f);   // rgb ambient, a unused
+	glm::vec4 sunColor   = glm::vec4(1.0f);   // rgb color × intensity
 };
 
 // One collected draw for a later replay pass. Used by the transparency pass
@@ -7129,7 +7136,10 @@ bool MetalRenderer::EnsureMeshPreviewPipeline()
 #include <metal_stdlib>
 using namespace metal;
 struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
-struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr; };
+// The tail (sun/skyAmbient/sunColor) is optional: every other shader sharing
+// UnlitUniforms declares only the prefix, which is why appending was safe.
+struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr;
+                  float4 sun; float4 skyAmbient; float4 sunColor; };
 struct VOut { float4 position [[position]]; float3 normal; float2 uv; float3 worldPos; };
 
 vertex VOut meshPreviewVertex(uint vid [[vertex_id]],
@@ -7151,8 +7161,11 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
                                     texture2d<float> tex [[texture(0)]],
                                     sampler samp [[sampler(0)]])
 {
+    bool   lit = u.sun.w > 0.0;
+    float3 L   = lit ? normalize(u.sun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? u.sunColor.rgb : float3(1.0);
+    float3 amb = lit ? u.skyAmbient.rgb : float3(0.32);
     float3 N = normalize(in.normal);
-    float3 L = normalize(float3(0.45, 0.75, 0.55));
     float3 V = normalize(u.flags.yzw - in.worldPos);
     float3 H = normalize(L + V);
     float diff  = max(dot(N, L), 0.0);
@@ -7160,7 +7173,8 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
     float spec  = pow(max(dot(N, H), 0.0), mix(128.0, 8.0, rough))
                 * (1.0 - rough) * mix(0.25, 1.0, clamp(u.pbr.x, 0.0, 1.0));
     float3 albedo = u.flags.x > 0.5 ? tex.sample(samp, in.uv).rgb * u.color.rgb : u.color.rgb;
-    return float4(albedo * (0.32 + 0.68 * diff) + float3(spec), 1.0);
+    float3 lightIn = amb + lc * (lit ? diff : 0.68 * diff);
+    return float4(albedo * lightIn + float3(spec) * lc, 1.0);
 }
 )";
 			id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
@@ -7669,7 +7683,8 @@ bool MetalRenderer::EnsureSkelPreviewPipeline()
 #include <metal_stdlib>
 using namespace metal;
 struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
-struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr; };
+struct Uniforms { float4x4 mvp; float4x4 model; float4 color; float4 flags; float4 pbr;
+                  float4 sun; float4 skyAmbient; float4 sunColor; };
 struct VOut { float4 position [[position]]; float3 normal; float2 uv; };
 
 vertex VOut skelPreviewVertex(uint vid [[vertex_id]],
@@ -7698,11 +7713,14 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
                                      texture2d<float> tex [[texture(0)]],
                                      sampler samp [[sampler(0)]])
 {
+    bool   lit = u.sun.w > 0.0;
+    float3 L   = lit ? normalize(u.sun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? u.sunColor.rgb : float3(1.0);
+    float3 amb = lit ? u.skyAmbient.rgb : float3(0.35);
     float3 N = normalize(in.normal);
-    float3 L = normalize(float3(0.45, 0.75, 0.55));
     float diff = max(dot(N, L), 0.0);
     float3 albedo = u.flags.x > 0.5 ? tex.sample(samp, in.uv).rgb * u.color.rgb : u.color.rgb;
-    return float4(albedo * (0.35 + 0.65 * diff), 1.0);
+    return float4(albedo * (amb + lc * (lit ? diff : 0.65 * diff)), 1.0);
 }
 )";
 			id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil error:&error];
@@ -7936,6 +7954,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
                                         uint32_t width, uint32_t height,
                                         const EditorCameraOverride& camera,
                                         const glm::vec3& origin,
+                                        const WorldPreviewEnv& env,
                                         glm::mat4* outViewProj)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
@@ -7962,10 +7981,45 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
 	previewExtractor.setContentManager(m_contentManager);
+	// The sun is not computed here: setDayNight puts it where the SCENE would
+	// have it at this time, so a preview and the level agree about what 0.75
+	// looks like. Colours/intensities are the engine defaults (EnvironmentSettings).
+	if (env.sky)
+		previewExtractor.setDayNight(true, env.timeOfDay,
+		                             glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
+		                             glm::vec3(0.55f, 0.65f, 0.95f), 0.66f,
+		                             env.cloudCoverage);
 	EditorCameraOverride previewCam = camera;
 	previewCam.active = true;
 	RenderWorld snapshot;
 	previewExtractor.extract(world, snapshot, aspect, &previewCam);
+
+	// Lighting from the extracted sun. dominantDirectionalLight, NOT
+	// sunDirection: the latter is the SKY-DOME sun and sits below the horizon at
+	// night, which would light the mesh from underneath. The dome itself does
+	// want the sky sun — that is the one it draws.
+	glm::vec4 sunUniform(0.0f);
+	glm::vec3 sunColor(1.0f), ambient(0.0f);
+	if (env.sky)
+	{
+		glm::vec3 toward(0.0f, 1.0f, 0.0f), colorIntensity(0.0f);
+		if (snapshot.dominantDirectionalLight(toward, colorIntensity))
+		{
+			sunUniform = glm::vec4(toward, 1.0f);
+			sunColor   = colorIntensity;
+		}
+		else
+		{
+			// Night with nothing shining: arm the uniform anyway (w > 0) so the
+			// ambient below is what lights the mesh, instead of the studio light
+			// snapping back on and making midnight look like noon.
+			sunUniform = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+			sunColor   = glm::vec3(0.0f);
+		}
+		// A floor under the extractor's ambient: a mesh viewer that goes fully
+		// black at midnight is a viewer you cannot use at midnight.
+		ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
+	}
 
 	// ── Lazy / resized target.
 	if (!m_worldPreviewColorTex || m_worldPreviewW != W || m_worldPreviewH != H)
@@ -8000,6 +8054,24 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+
+	// ── Sky dome, if this preview has one. First, with depth always passing:
+	// it is the backdrop, so everything else simply draws over it.
+	if (env.sky && m_debugLinePipeline)
+	{
+		std::vector<float> sky;
+		HE::buildPreviewSkyDome(camPos, camera.farPlane * 0.5f, snapshot.sunDirection, sky);
+		id<MTLBuffer> skyBuf = [device newBufferWithBytes:sky.data()
+		                                           length:sky.size() * sizeof(float)
+		                                          options:MTLResourceStorageModeShared];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
+		[enc setVertexBuffer:skyBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+		        vertexCount:(NSUInteger)(sky.size() / 6)];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+	}
 
 	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
 	// the character stands ON the floor instead of being drawn over it. Extent
@@ -8045,6 +8117,9 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		u.color = glm::vec4(obj.baseColor, 1.0f);
 		u.flags = glm::vec4(mesh->texture ? 1.0f : 0.0f, camPos.x, camPos.y, camPos.z);
 		u.pbr   = glm::vec4(obj.metallic, obj.roughness, 0.0f, 0.0f);
+		u.sun        = sunUniform;
+		u.sunColor   = glm::vec4(sunColor, 1.0f);
+		u.skyAmbient = glm::vec4(ambient, 1.0f);
 		[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
 		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 		[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
@@ -8077,6 +8152,9 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		u.color = glm::vec4(obj.baseColor, 1.0f);
 		u.flags = glm::vec4(smesh->texture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 		u.pbr   = glm::vec4(0.0f);
+		u.sun        = sunUniform;
+		u.sunColor   = glm::vec4(sunColor, 1.0f);
+		u.skyAmbient = glm::vec4(ambient, 1.0f);
 		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
 		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];

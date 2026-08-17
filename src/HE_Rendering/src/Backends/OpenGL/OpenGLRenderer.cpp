@@ -587,13 +587,20 @@ out vec4 FragColor;
 uniform vec3 uColor;
 uniform bool uHasTex;
 uniform sampler2D uTex;
+// Same convention as the mesh preview: w == 0 means the fixed studio light.
+uniform vec4 uSun;
+uniform vec3 uSunColor;
+uniform vec3 uAmbient;
 void main()
 {
+    bool  lit = uSun.w > 0.0;
+    vec3  L   = lit ? normalize(uSun.xyz) : normalize(vec3(0.45, 0.75, 0.55));
+    vec3  lc  = lit ? uSunColor : vec3(1.0);
+    vec3  amb = lit ? uAmbient  : vec3(0.35);
     vec3 N = normalize(vNormal);
-    vec3 L = normalize(vec3(0.45, 0.75, 0.55));
     float diff = max(dot(N, L), 0.0);
     vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
-    FragColor = vec4(albedo * (0.35 + 0.65 * diff), 1.0);
+    FragColor = vec4(albedo * (amb + lc * (lit ? diff : 0.65 * diff)), 1.0);
 }
 )GLSL";
 
@@ -635,10 +642,19 @@ uniform bool  uHasTex;
 uniform sampler2D uTex;
 uniform vec3  uCamPos;
 uniform vec2  uPbr;   // x = metallic, y = roughness
+// Sun for the world preview: xyz points TOWARD the light, w > 0 arms it.
+// w == 0 keeps the fixed studio light every thumbnail was rendered with, so a
+// cached tile does not change the day someone adds a sky to a preview.
+uniform vec4  uSun;
+uniform vec3  uSunColor;
+uniform vec3  uAmbient;
 void main()
 {
+    bool  lit = uSun.w > 0.0;
+    vec3  L   = lit ? normalize(uSun.xyz) : normalize(vec3(0.45, 0.75, 0.55));
+    vec3  lc  = lit ? uSunColor : vec3(1.0);
+    vec3  amb = lit ? uAmbient  : vec3(0.32);
     vec3 N = normalize(vNormal);
-    vec3 L = normalize(vec3(0.45, 0.75, 0.55));
     vec3 V = normalize(uCamPos - vWorldPos);
     vec3 H = normalize(L + V);
     float diff  = max(dot(N, L), 0.0);
@@ -646,7 +662,8 @@ void main()
     float spec  = pow(max(dot(N, H), 0.0), mix(128.0, 8.0, rough))
                 * (1.0 - rough) * mix(0.25, 1.0, clamp(uPbr.x, 0.0, 1.0));
     vec3 albedo = uHasTex ? texture(uTex, vUV).rgb * uColor : uColor;
-    FragColor = vec4(albedo * (0.32 + 0.68 * diff) + vec3(spec), 1.0);
+    vec3 lightIn = amb + lc * (lit ? diff : 0.68 * diff);
+    FragColor = vec4(albedo * lightIn + vec3(spec) * lc, 1.0);
 }
 )GLSL";
 
@@ -7431,6 +7448,9 @@ bool OpenGLRenderer::EnsureMeshPreviewProgram()
 	m_uMeshPvHasTex = glGetUniformLocation(m_meshPreviewProgram, "uHasTex");
 	m_uMeshPvCamPos = glGetUniformLocation(m_meshPreviewProgram, "uCamPos");
 	m_uMeshPvPbr    = glGetUniformLocation(m_meshPreviewProgram, "uPbr");
+	m_uMeshPvSun      = glGetUniformLocation(m_meshPreviewProgram, "uSun");
+	m_uMeshPvSunColor = glGetUniformLocation(m_meshPreviewProgram, "uSunColor");
+	m_uMeshPvAmbient  = glGetUniformLocation(m_meshPreviewProgram, "uAmbient");
 	return m_meshPreviewProgram != 0;
 }
 
@@ -7725,6 +7745,9 @@ bool OpenGLRenderer::EnsureSkelPreviewPrograms()
 		m_uSkelPvBones  = glGetUniformLocation(m_skelPreviewProgram, "uBoneMatrices");
 		m_uSkelPvColor  = glGetUniformLocation(m_skelPreviewProgram, "uColor");
 		m_uSkelPvHasTex = glGetUniformLocation(m_skelPreviewProgram, "uHasTex");
+		m_uSkelPvSun      = glGetUniformLocation(m_skelPreviewProgram, "uSun");
+		m_uSkelPvSunColor = glGetUniformLocation(m_skelPreviewProgram, "uSunColor");
+		m_uSkelPvAmbient  = glGetUniformLocation(m_skelPreviewProgram, "uAmbient");
 	}
 	if (!m_skelPreviewLineProgram)
 	{
@@ -7911,6 +7934,7 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
                                          uint32_t width, uint32_t height,
                                          const EditorCameraOverride& camera,
                                          const glm::vec3& origin,
+                                         const WorldPreviewEnv& env,
                                          glm::mat4* outViewProj)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
@@ -7934,10 +7958,45 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
 	previewExtractor.setContentManager(m_contentManager);
+	// The sun is not computed here: setDayNight puts it where the SCENE would
+	// have it at this time, so a preview and the level agree about what 0.75
+	// looks like. Colours/intensities are the engine defaults (EnvironmentSettings).
+	if (env.sky)
+		previewExtractor.setDayNight(true, env.timeOfDay,
+		                             glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
+		                             glm::vec3(0.55f, 0.65f, 0.95f), 0.66f,
+		                             env.cloudCoverage);
 	EditorCameraOverride previewCam = camera;
 	previewCam.active = true;
 	RenderWorld snapshot;
 	previewExtractor.extract(world, snapshot, aspect, &previewCam);
+
+	// Lighting from the extracted sun. dominantDirectionalLight, NOT
+	// sunDirection: the latter is the SKY-DOME sun and sits below the horizon at
+	// night, which would light the mesh from underneath. The dome itself does
+	// want the sky sun — that is the one it draws.
+	glm::vec4 sunUniform(0.0f);
+	glm::vec3 sunColor(1.0f), ambient(0.0f);
+	if (env.sky)
+	{
+		glm::vec3 toward(0.0f, 1.0f, 0.0f), colorIntensity(0.0f);
+		if (snapshot.dominantDirectionalLight(toward, colorIntensity))
+		{
+			sunUniform = glm::vec4(toward, 1.0f);
+			sunColor   = colorIntensity;
+		}
+		else
+		{
+			// Night with nothing shining: arm the uniform anyway (w > 0) so the
+			// ambient below is what lights the mesh, instead of the studio light
+			// snapping back on and making midnight look like noon.
+			sunUniform = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+			sunColor   = glm::vec3(0.0f);
+		}
+		// A floor under the extractor's ambient: a mesh viewer that goes fully
+		// black at midnight is a viewer you cannot use at midnight.
+		ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
+	}
 
 	// ── Lazy / resized offscreen target.
 	if (!m_worldPreviewFBO || m_worldPreviewW != W || m_worldPreviewH != H)
@@ -7971,6 +8030,24 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
 
+	// ── Sky dome, if this preview has one. First and depth-test-free: it is the
+	// backdrop, so everything else simply draws over it.
+	if (env.sky)
+	{
+		std::vector<float> sky;
+		HE::buildPreviewSkyDome(camPos, camera.farPlane * 0.5f, snapshot.sunDirection, sky);
+		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(sky.size() * sizeof(float)),
+		             sky.data(), GL_DYNAMIC_DRAW);
+		glUseProgram(m_skelPreviewLineProgram);
+		glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(viewProj));
+		glBindVertexArray(m_skelPreviewLineVAO);
+		glDisable(GL_DEPTH_TEST);
+		glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(sky.size() / 6));
+		glEnable(GL_DEPTH_TEST);
+		glBindVertexArray(0);
+	}
+
 	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
 	// the character stands ON the floor instead of being drawn over it. Extent
 	// follows how far the camera has flown from the origin so the grid never
@@ -8000,6 +8077,9 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// ── Static meshes.
 	glUseProgram(m_meshPreviewProgram);
 	glUniform3fv(m_uMeshPvCamPos, 1, glm::value_ptr(camPos));
+	glUniform4fv(m_uMeshPvSun,      1, glm::value_ptr(sunUniform));
+	glUniform3fv(m_uMeshPvSunColor, 1, glm::value_ptr(sunColor));
+	glUniform3fv(m_uMeshPvAmbient,  1, glm::value_ptr(ambient));
 	glActiveTexture(GL_TEXTURE0);
 	for (const RenderObject& obj : snapshot.objects)
 	{
@@ -8020,6 +8100,9 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
 	constexpr int kMaxBones = 128;
 	glUseProgram(m_skelPreviewProgram);
+	glUniform4fv(m_uSkelPvSun,      1, glm::value_ptr(sunUniform));
+	glUniform3fv(m_uSkelPvSunColor, 1, glm::value_ptr(sunColor));
+	glUniform3fv(m_uSkelPvAmbient,  1, glm::value_ptr(ambient));
 	glActiveTexture(GL_TEXTURE0);
 	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
 	{

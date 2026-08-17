@@ -32,6 +32,19 @@ struct EditorCameraOverride
     bool      orthographic = false;
 };
 
+// ─── WorldPreviewEnv ────────────────────────────────────────────────────────
+// What the sky does in a RenderWorldPreview. Off by default: the class editor's
+// viewport wants a neutral gray studio, where a sunset would only be a coloured
+// cast over the thing being authored. A mesh viewer wants the opposite — you
+// look at a mesh to judge how it CATCHES light, and one flat headlight answers
+// that badly.
+struct WorldPreviewEnv
+{
+    bool  sky           = false;   // sky dome + sun driven by the time of day
+    float timeOfDay     = 0.5f;    // 0..1 — 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight
+    float cloudCoverage = 0.35f;   // feeds the same overcast dimming the scene uses
+};
+
 // One fully-resolved particle for RenderParticlePreview — position/size/color/
 // alpha already interpolated over the particle's lifetime by the caller (the
 // Particle Graph Editor, which owns the live scratch simulation via
@@ -444,7 +457,9 @@ public:
     //    yet, so an auto-fit would jump around while assets stream in.
     //  • lighting is the previews' fixed headlight, not the world's lights — a
     //    class blob normally contains no light at all, and "your character is
-    //    black" would be the wrong lesson to teach.
+    //    black" would be the wrong lesson to teach. `env.sky` swaps that
+    //    headlight for a sky dome and a sun at `env.timeOfDay`, which is what a
+    //    MESH viewer wants: you look at a mesh to judge how it catches light.
     //
     // ONE shared target per backend, so exactly one world preview is live at a
     // time. That matches the call site: asset tabs are exclusive, and ImGui
@@ -459,6 +474,7 @@ public:
                                      uint32_t /*width*/, uint32_t /*height*/,
                                      const EditorCameraOverride& /*camera*/,
                                      const glm::vec3& /*origin*/ = glm::vec3(0.0f),
+                                     const WorldPreviewEnv& /*env*/ = {},
                                      glm::mat4* /*outViewProj*/ = nullptr)
     { return nullptr; }
 
