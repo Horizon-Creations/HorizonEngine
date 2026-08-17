@@ -206,6 +206,26 @@ Sinnvoller Schnitt für eine erste Auslieferung: **A0 + A1 + A6** (klein, sofort
 Umbau der Pipeline). **A2 + A3** ist das eigentliche Projekt und sollte zusammen mit der offenen
 SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur einmal entsteht.
 
+> **Entschieden (17.08.2026): A2/A3 laufen deferred-only, Metal zuerst, GL danach.** Velocity
+> wird ein G-Buffer-Attachment; im Forward-Pfad gibt es kein TAA. Das ist exakt das Muster von
+> SSR und GI und erspart es, Velocity per MRT durch *jede* Forward-Pipeline zu fädeln (built-in,
+> skinned, instanced, Graph-Material, Transparenz — mal fünf Backends, drei davon blind).
+> **Konsequenz, die man kennen muss:** der Standard-Render-Pfad ist Forward, dort bleibt es
+> also bei SMAA. `supportsTemporalAA` bleibt dort false → der Combo-Eintrag ist ausgegraut und
+> `ResolveAAMethod` fällt auf SMAA zurück, mit genau dem Hinweistext, den A0 schon zeigt.
+>
+> Zwei Architektur-Festlegungen dazu, damit sie nicht später teuer werden:
+> * **Jitter lebt NUR in der Rasterisierungs-Projektion.** Velocity, TAA-Reprojektion und die
+>   vorhandene GI/SSR-`prevViewProj`-Reprojektion rechnen mit den *ungejitterten* Matrizen —
+>   sonst wandert das Sub-Pixel-Zittern in die GI/SSR-Akkumulation und die Velocity trägt den
+>   Jitter-Delta mit. Beide Matrizen werden ab Tag eins getrennt gehalten. Der Sky-Prepass
+>   (`m_prepassViewProj`) und die Shadow-Matrizen bleiben ungejittert.
+> * **TAA akkumuliert auf dem getonemappten LDR-Bild**, im AA-Resolve-Slot, den A0/A1 schon
+>   gebaut haben — nicht auf HDR vor dem Tonemap. Das fügt sich in die bestehende Pass-Struktur
+>   ein statt sie umzubauen, und dämpft nebenbei Fireflies.
+> * Headless: temporale Modi brauchen Aufwärm-Frames — `HE_DUMP_FRAMES` (Default 3) existiert
+>   bereits und geht bis 240.
+
 ---
 
 ## 5b. Umsetzungsstand
