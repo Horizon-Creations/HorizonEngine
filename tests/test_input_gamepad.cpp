@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <Application/Input.h>
 #include <Application/InputMapping.h>
+#include <Application/InputAssets.h>
 #include <cmath>
 
 // CP0 of gamepad support: the pure device-layer math. No SDL gamepad subsystem
@@ -360,6 +361,83 @@ TEST_CASE("Mapping: Axis2D from both stick components")
     m.axis2DValue("Move", x, y);
     CHECK(x > 0.5f);
     CHECK(y > 0.5f);
+}
+
+TEST_CASE("Assets: gamepadButtons array binds an action, pad-only entries work")
+{
+    InputMapping m;
+    const char* json = R"({"entries":[
+        {"action":"Input/Jump.hasset","keys":["Space"],"gamepadButtons":["a"]},
+        {"action":"Input/Dash.hasset","gamepadButtons":["leftshoulder"]}
+    ]})";
+    CHECK(HE::applyInputMappingContext(m, json) == 2);
+
+    GamepadFrame f;
+    f.connected = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] = true;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK(m.isPressed("Jump"));
+    CHECK(m.isPressed("Dash"));
+}
+
+TEST_CASE("Assets: stick source and pad-button axis rows parse")
+{
+    InputMapping m;
+    const char* json = R"({"entries":[
+        {"action":"Input/Move.hasset","axesX":[
+            {"source":"GamepadLeftX","positive":"","negative":"","scale":1.0},
+            {"source":"Key","positiveButton":"dpright","negativeButton":"dpleft","scale":1.0}
+        ],"axesY":[
+            {"source":"GamepadLeftY","positive":"","negative":"","scale":-1.0}
+        ]}
+    ]})";
+    CHECK(HE::applyInputMappingContext(m, json) == 1);
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTY] = -1.0f; // up
+    f.buttons[SDL_GAMEPAD_BUTTON_DPAD_RIGHT] = true;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    float x = 0.0f, y = 0.0f;
+    m.axis2DValue("Move", x, y);
+    CHECK(x == doctest::Approx(1.0f));  // D-pad right
+    CHECK(y == doctest::Approx(1.0f));  // stick up, scale -1 flips SDL's sign
+}
+
+TEST_CASE("Assets: unknown gamepad names are skipped, not errors")
+{
+    InputMapping m;
+    const char* json = R"({"entries":[
+        {"action":"Input/Jump.hasset","gamepadButtons":["not_a_button","a"]},
+        {"action":"Input/Aim.hasset","axes":[{"source":"GamepadNoSuchAxis","positive":"E"}]}
+    ]})";
+    // Both entries still bind: the bad button is dropped, the unknown source
+    // falls back to Key (existing convention) and keeps its key.
+    CHECK(HE::applyInputMappingContext(m, json) == 2);
+
+    GamepadFrame f;
+    f.connected = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    Input input = inputWithFrame(f);
+    m.tick(input);
+    CHECK(m.isPressed("Jump"));
+}
+
+TEST_CASE("Assets: round-trip through name tables covers every source")
+{
+    using HE::axisSourceName;
+    using HE::axisSourceFromName;
+    for (AxisSource s : { AxisSource::Key, AxisSource::MouseX, AxisSource::MouseY,
+                          AxisSource::MouseWheel,
+                          AxisSource::GamepadLeftX, AxisSource::GamepadLeftY,
+                          AxisSource::GamepadRightX, AxisSource::GamepadRightY,
+                          AxisSource::GamepadLeftTrigger, AxisSource::GamepadRightTrigger })
+        CHECK(axisSourceFromName(axisSourceName(s)) == s);
 }
 
 TEST_CASE("Mapping: gamepad sources are not delta sources")

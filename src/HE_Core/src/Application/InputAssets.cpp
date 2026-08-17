@@ -36,19 +36,31 @@ std::string axisSourceName(AxisSource s)
 {
 	switch (s)
 	{
-		case AxisSource::MouseX:     return "MouseX";
-		case AxisSource::MouseY:     return "MouseY";
-		case AxisSource::MouseWheel: return "MouseWheel";
-		case AxisSource::Key:        break;
+		case AxisSource::MouseX:              return "MouseX";
+		case AxisSource::MouseY:              return "MouseY";
+		case AxisSource::MouseWheel:          return "MouseWheel";
+		case AxisSource::GamepadLeftX:        return "GamepadLeftX";
+		case AxisSource::GamepadLeftY:        return "GamepadLeftY";
+		case AxisSource::GamepadRightX:       return "GamepadRightX";
+		case AxisSource::GamepadRightY:       return "GamepadRightY";
+		case AxisSource::GamepadLeftTrigger:  return "GamepadLeftTrigger";
+		case AxisSource::GamepadRightTrigger: return "GamepadRightTrigger";
+		case AxisSource::Key:                 break;
 	}
 	return "Key";
 }
 
 AxisSource axisSourceFromName(const std::string& name)
 {
-	if (name == "MouseX")     return AxisSource::MouseX;
-	if (name == "MouseY")     return AxisSource::MouseY;
-	if (name == "MouseWheel") return AxisSource::MouseWheel;
+	if (name == "MouseX")              return AxisSource::MouseX;
+	if (name == "MouseY")              return AxisSource::MouseY;
+	if (name == "MouseWheel")          return AxisSource::MouseWheel;
+	if (name == "GamepadLeftX")        return AxisSource::GamepadLeftX;
+	if (name == "GamepadLeftY")        return AxisSource::GamepadLeftY;
+	if (name == "GamepadRightX")       return AxisSource::GamepadRightX;
+	if (name == "GamepadRightY")       return AxisSource::GamepadRightY;
+	if (name == "GamepadLeftTrigger")  return AxisSource::GamepadLeftTrigger;
+	if (name == "GamepadRightTrigger") return AxisSource::GamepadRightTrigger;
 	return AxisSource::Key;   // unknown reads as the default, never as an error
 }
 
@@ -73,15 +85,35 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 		if (action.empty()) continue;
 		const std::string name = inputActionNameFromPath(action);
 
-		if (e.contains("keys") && e["keys"].is_array())
+		// Keys and gamepad buttons are SEPARATE arrays in SEPARATE name spaces:
+		// "A" in "keys" is the keyboard key (SDL_GetScancodeFromName); "a" in
+		// "gamepadButtons" is the pad's SOUTH button — pad names come from
+		// SDL's mapping-string table ("a", "b", "leftshoulder", "dpup", …,
+		// SDL_GetGamepadButtonFromString), Xbox-layout positions by convention.
+		if ((e.contains("keys") && e["keys"].is_array()) ||
+		    (e.contains("gamepadButtons") && e["gamepadButtons"].is_array()))
 		{
 			std::vector<ActionBinding> binds;
-			for (const auto& k : e["keys"])
-			{
-				if (!k.is_string()) continue;
-				const SDL_Scancode sc = SDL_GetScancodeFromName(k.get<std::string>().c_str());
-				if (sc != SDL_SCANCODE_UNKNOWN) binds.push_back({ sc });
-			}
+			if (e.contains("keys") && e["keys"].is_array())
+				for (const auto& k : e["keys"])
+				{
+					if (!k.is_string()) continue;
+					const SDL_Scancode sc = SDL_GetScancodeFromName(k.get<std::string>().c_str());
+					if (sc != SDL_SCANCODE_UNKNOWN) binds.push_back({ sc });
+				}
+			if (e.contains("gamepadButtons") && e["gamepadButtons"].is_array())
+				for (const auto& gb : e["gamepadButtons"])
+				{
+					if (!gb.is_string()) continue;
+					const SDL_GamepadButton b =
+						SDL_GetGamepadButtonFromString(gb.get<std::string>().c_str());
+					if (b != SDL_GAMEPAD_BUTTON_INVALID)
+					{
+						ActionBinding ab;
+						ab.gamepadButton = b;
+						binds.push_back(ab);
+					}
+				}
 			if (!binds.empty()) { mapping.mapAction(name, std::move(binds)); ++bound; }
 		}
 		// One axis row. "source" is absent in every context written before mouse
@@ -97,10 +129,16 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 				b.positiveKey = SDL_GetScancodeFromName(a.value("positive", "").c_str());
 				b.negativeKey = SDL_GetScancodeFromName(a.value("negative", "").c_str());
 				b.scale       = a.value("scale", 1.0f);
-				// A key row needs at least one key — a one-sided axis is fine.
-				// A mouse row has no keys at all and is always usable.
+				// Pad buttons for button-as-axis rows (D-pad movement); same
+				// SDL name space as "gamepadButtons" above.
+				b.positiveButton = SDL_GetGamepadButtonFromString(a.value("positiveButton", "").c_str());
+				b.negativeButton = SDL_GetGamepadButtonFromString(a.value("negativeButton", "").c_str());
+				// A key row needs at least one key or pad button — a one-sided
+				// axis is fine. A mouse/stick row has neither and is always usable.
 				if (b.source != AxisSource::Key ||
-				    b.positiveKey != SDL_SCANCODE_UNKNOWN || b.negativeKey != SDL_SCANCODE_UNKNOWN)
+				    b.positiveKey != SDL_SCANCODE_UNKNOWN || b.negativeKey != SDL_SCANCODE_UNKNOWN ||
+				    b.positiveButton != SDL_GAMEPAD_BUTTON_INVALID ||
+				    b.negativeButton != SDL_GAMEPAD_BUTTON_INVALID)
 					binds.push_back(b);
 			}
 			return binds;
