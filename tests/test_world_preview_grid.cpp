@@ -1,5 +1,10 @@
 #include "doctest.h"
 #include <HorizonRendering/WorldPreviewGrid.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include <cmath>
 
 // The backdrop of IRenderer::RenderWorldPreview. It lives in a shared header
@@ -182,6 +187,63 @@ TEST_CASE("the sky dome answers different sun positions differently")
 		for (int c = 3; c < 6; ++c)
 			if (std::abs(noon[i + c] - dusk[i + c]) > 0.01f) { ++differing; break; }
 	CHECK(differing > 0);
+}
+
+TEST_CASE("the dome's sky is the same gradient WITHOUT the sun's glare lobes")
+{
+	// The disc is a fraction of a degree wide; interpolated across triangles it
+	// does not read as a sun but as a huge faceted white polygon — which is what
+	// the first version of the dome looked like. So the dome asks for the
+	// gradient only, and that has to be a real difference near the sun.
+	const glm::vec3 sun = glm::normalize(glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 atSun = HE::SkyColorCPU(sun, sun, /*withSunDisc=*/false);
+	const glm::vec3 withDisc = HE::SkyColorCPU(sun, sun, /*withSunDisc=*/true);
+	CHECK(withDisc.r > atSun.r + 1.0f);   // the disc is worth many units of radiance
+	CHECK(atSun.r < 4.0f);                // …and without it nothing blows out
+
+	// Away from the sun the two must agree — the disc is the ONLY difference,
+	// so the IBL bake and the dome still describe the same sky.
+	const glm::vec3 away(0.0f, 0.2f, 1.0f);
+	const glm::vec3 a = HE::SkyColorCPU(away, sun, false);
+	const glm::vec3 b = HE::SkyColorCPU(away, sun, true);
+	CHECK(a.r == doctest::Approx(b.r).epsilon(0.05));
+	CHECK(a.b == doctest::Approx(b.b).epsilon(0.05));
+}
+
+TEST_CASE("day-night lights a world that brought no light of its own")
+{
+	// What a preview hands over: geometry, no lights. The moon has always been
+	// synthesised in that case; the sun was not, so such a world was lit by
+	// moonlight at noon — visible as a mesh that the time-of-day slider moved
+	// the sky of but never the shading.
+	HorizonWorld world;
+	const Entity e = world.createEntity("Cube");
+	world.addComponent(e, TransformComponent{});
+	world.addComponent(e, MeshComponent{});
+
+	RenderExtractor ex;
+	ex.setDayNight(true, /*timeOfDay=*/0.5f,          // noon
+	               glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
+	               glm::vec3(0.55f, 0.65f, 0.95f), 0.66f, /*cloudCoverage=*/0.2f);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	glm::vec3 toward(0.0f), colorIntensity(0.0f);
+	REQUIRE(rw.dominantDirectionalLight(toward, colorIntensity));
+	CHECK(toward.y > 0.5f);                       // the sun is up at noon…
+	CHECK(glm::length(colorIntensity) > 0.5f);    // …and actually shining
+
+	// And at midnight the dominant light is the moon's — dimmer, and from the
+	// other side. If this stopped holding, "noon" and "midnight" would look the
+	// same and the slider would be decoration.
+	RenderExtractor night;
+	night.setDayNight(true, 0.0f, glm::vec3(1.0f, 0.97f, 0.90f), 2.2f,
+	                  glm::vec3(0.55f, 0.65f, 0.95f), 0.66f, 0.2f);
+	RenderWorld rwNight;
+	night.extract(world, rwNight, 1.0f);
+	glm::vec3 nToward(0.0f), nColor(0.0f);
+	if (rwNight.dominantDirectionalLight(nToward, nColor))
+		CHECK(glm::length(nColor) < glm::length(colorIntensity));
 }
 
 TEST_CASE("buildPreviewGrid survives a zero step instead of looping forever")

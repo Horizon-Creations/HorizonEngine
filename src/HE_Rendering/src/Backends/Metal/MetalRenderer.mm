@@ -3511,9 +3511,12 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		float form = starNoise3(npc * 0.22 + float3(time * 0.013 * evo, 31.0, -time * 0.009 * evo),
 		                        noiseTex, noiseSamp);
 		cover += (form - 0.5) * 0.14;
-		// Slightly early onset: the zero-mean variety terms widen the field's
-		// distribution, which alone would thin the coverage below the slider.
-		float pres = smoothstep(lo - 0.03, lo + 0.17, cover);
+		// WIDE presence transition (and early onset to keep the coverage
+		// calibration): a narrow window leaves only a paper-thin shell where
+		// env is intermediate, and the carve erosion below then has no volume
+		// to sculpt — the clouds stay smooth balls with rough skin. The wide
+		// band gives the erosion a thick rind to cut real lobes out of.
+		float pres = smoothstep(lo - 0.05, lo + 0.30, cover);
 		if (pres <= 0.0) return 0.0;
 		// Tower height varies per formation (macro): some stay flat banks,
 		// others billow into towers — not one uniform dome height.
@@ -3533,14 +3536,20 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		// the OUTSIDE — a thin shell (env < carve) breaks into rounded lobes,
 		// the deep core survives. This is what sculpts the cauliflower
 		// silhouette; a plain multiply only dims, it never re-shapes.
+		// TWO-SCALE carve: the coarse billow shapes the big lobes, a second
+		// higher-frequency Worley octave cuts V-shaped creases along its cell
+		// borders — the angular edges and corners real cumulus have, instead
+		// of one smooth rounded shell.
 		float billow = cloudBillowFbm(np * 1.2 + float3(0.0, -time * 0.08 * evo, 0.0), 1.0,
-		                              noiseTex, noiseSamp);
-		float carve  = billow * mix(0.50, 0.78, fluff);
+		                              noiseTex, noiseSamp) * 0.62
+		             + worleyNoise3(np * 2.4 + float3(3.0, -time * 0.06 * evo, 0.0),
+		                            noiseTex, noiseSamp) * 0.38;
+		float carve  = billow * mix(0.55, 0.85, fluff);
 		float x      = (env - carve) / max(1.0 - carve, 1e-3);
-		// MIST SKIRT: a thin low-density veil in the zone the carve just cut
-		// away — it hugs every lobe as a soft evaporating fringe, so the crisp
-		// cores keep their shape but the outline stops being knife-sharp.
-		float mist = 0.13 * smoothstep(-0.30, 0.0, min(x, 0.0)) * rise;
+		// MIST SKIRT: a low-density veil in the zone the carve just cut away —
+		// it hugs every lobe as a soft evaporating fringe, so the crisp cores
+		// keep their shape but the outline stops being knife-sharp.
+		float mist = 0.17 * smoothstep(-0.40, 0.0, min(x, 0.0)) * rise;
 		return clamp(max(x, 0.0) + mist, 0.0, 1.0);
 	}
 	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
@@ -3742,7 +3751,11 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 
 	float sunY  = clamp(sunDir.y, -0.3, 1.0);
 	float day   = smoothstep(-0.10, 0.10, sunY);
-	float dusk  = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
+	// NARROWER dusk window than classic: it must not start while the sky is
+	// still night — pre-dawn the clouds were glowing fully orange under a
+	// starry sky (the realistic powder floor amplified what classic hid).
+	// Alpenglow now begins only just before the sun actually clears -3°.
+	float dusk  = smoothstep(-0.05, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.26, sunY));
 	float costh = max(dot(dir, sunDir), 0.0);
 	// Dual lobe + a strong forward peak → silver lining hugging the sun.
 	float phase = mix(hgPhase(costh, 0.65), hgPhase(costh, -0.35), 0.30)
@@ -4680,6 +4693,13 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 	// normalize → stars/nebula/celestial frame don't jitter as the camera turns (GL parity).
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	float3 col  = skyColor(dir, p.sunDir.xyz);
+	// Star-free atmosphere base for the REALISTIC cloud path's ambient/twilight
+	// fill: feeding the full `col` (stars/nebula/moon already added) into the
+	// cloud march paints the star field ONTO the cloud bodies via the twilight
+	// term. The clouds are lit by THIS instead; the celestial layer is then
+	// occluded by the cloud transmittance at the composite (same recipe the
+	// low-res pre-pass always used).
+	float3 atmoBase = col;
 	// Lift the sun's cloud-occludable bloom out (re-added below) and compute the
 	// geometric sun disk (a sky-only body, like the moon) to add on top of it.
 	float3 sunGlareCol = sunGlare(dir, p.sunDir.xyz);
@@ -4726,10 +4746,16 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		cloudT = lt.a;
 	}
 	else if (p.cameraPos.w > 0.5 && p.neb2.y > 0.5)
-		col = applyClouds3DReal(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
-		                        p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
-		                        p.cloudTint.xyz, p.neb2.z, p.neb2.w, in.position.xy,
-		                        noiseTex, noiseSamp, cloudT);
+	{
+		// Clouds lit by the star-free atmosphere; stars/nebula/moon (in `col`)
+		// are occluded by the transmittance instead of being painted onto the
+		// cloud bodies. L = comp − atmoBase·T recovers the clouds' own light.
+		float3 comp = applyClouds3DReal(atmoBase, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z,
+		                                p.params.y, p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z,
+		                                p.cloud.y, p.star2.y, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
+		                                in.position.xy, noiseTex, noiseSamp, cloudT);
+		col = col * cloudT + (comp - atmoBase * cloudT);
+	}
 	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
