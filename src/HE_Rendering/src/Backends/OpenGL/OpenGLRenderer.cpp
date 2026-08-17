@@ -7909,8 +7909,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 
 void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
                                          uint32_t width, uint32_t height,
-                                         float yaw, float pitch, float dist,
-                                         const glm::vec3& pivot,
+                                         const EditorCameraOverride& camera,
+                                         const glm::vec3& origin,
                                          glm::mat4* outViewProj)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
@@ -7919,16 +7919,13 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	if (!EnsureSkelPreviewPrograms()) return nullptr;
 	if (!EnsureMeshPreviewProgram())  return nullptr;
 
-	// ── Camera. `dist` is in PLAIN WORLD UNITS around `pivot`: no auto-fit on
-	// the content's bounds, because the extractor leaves bounds invalid for
-	// meshes that are not resident yet — an auto-fit would jump while assets
-	// stream in, which looks like the character moving.
-	const float camDist = std::max(0.1f, dist);
-	const float cp = std::cos(pitch), sp = std::sin(pitch);
-	const glm::vec3 camPos = pivot + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
-	const glm::mat4 view = glm::lookAt(camPos, pivot, glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::mat4 proj = glm::perspective(glm::radians(45.0f),
-		static_cast<float>(W) / static_cast<float>(H), 0.05f, camDist * 20.0f + 100.0f);
+	// ── Camera: the caller's, verbatim. Only the projection is built here,
+	// because only here is the target's aspect known.
+	const float aspect = static_cast<float>(W) / static_cast<float>(H);
+	const glm::vec3 camPos = camera.position;
+	const glm::mat4 view = camera.view;
+	const glm::mat4 proj = glm::perspective(glm::radians(camera.fovDegrees), aspect,
+	                                        camera.nearPlane, camera.farPlane);
 	const glm::mat4 viewProj = proj * view;
 	if (outViewProj) *outViewProj = viewProj;
 
@@ -7937,16 +7934,10 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// inheriting the scene's sunset tint would be a puzzling surprise.
 	RenderExtractor previewExtractor;
 	previewExtractor.setContentManager(m_contentManager);
-	EditorCameraOverride previewCam;
-	previewCam.active     = true;
-	previewCam.view       = view;
-	previewCam.position   = camPos;
-	previewCam.fovDegrees = 45.0f;
-	previewCam.nearPlane  = 0.05f;
-	previewCam.farPlane   = camDist * 20.0f + 100.0f;
+	EditorCameraOverride previewCam = camera;
+	previewCam.active = true;
 	RenderWorld snapshot;
-	previewExtractor.extract(world, snapshot,
-	                         static_cast<float>(W) / static_cast<float>(H), &previewCam);
+	previewExtractor.extract(world, snapshot, aspect, &previewCam);
 
 	// ── Lazy / resized offscreen target.
 	if (!m_worldPreviewFBO || m_worldPreviewW != W || m_worldPreviewH != H)
@@ -7982,13 +7973,16 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 
 	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
 	// the character stands ON the floor instead of being drawn over it. Extent
-	// follows the camera distance, so the grid never runs out at high zoom.
+	// follows how far the camera has flown from the origin so the grid never
+	// runs out — but capped, because the line count grows with it and a free
+	// camera can end up two thousand units away.
 	{
-		const float halfExtent = std::max(10.0f, std::ceil(camDist * 2.0f));
+		const float halfExtent = std::clamp(
+			std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
 		std::vector<float> verts;
-		HE::buildPreviewGround(halfExtent, verts, pivot);
+		HE::buildPreviewGround(halfExtent, verts, origin);
 		const GLsizei groundVerts = static_cast<GLsizei>(verts.size() / 6);
-		HE::buildPreviewGrid(halfExtent, 1.0f, verts, pivot);
+		HE::buildPreviewGrid(halfExtent, 1.0f, verts, origin);
 		const GLsizei totalVerts = static_cast<GLsizei>(verts.size() / 6);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);

@@ -19,6 +19,8 @@
 #include <HorizonScene/EntityHost.h>   // default component lists per base class
 #include <HorizonScene/SceneSerializer.h>
 #include "InspectorPanel.h"           // the REAL component editor, over a scratch world
+#include "EditorCamera.h"             // the viewport camera — the Scene window's, per tab
+#include "EditorViewportNav.h"        // and the Scene window's navigation grammar, shared
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonCode/HorizonCode.h>
@@ -1391,7 +1393,15 @@ struct ClassState
 	// up to. Unreal calls that half the Viewport and it is the better name — you
 	// go there to see the character, not to see a list.
 	bool        showViewport = false;
-	// Orbit for that preview, per tab so switching back finds it as you left it.
+	// The viewport's camera, per tab so switching back finds the view as you
+	// left it. A full EditorCamera, not an orbit triple: this viewport navigates
+	// with the SAME grammar as the Scene window (fly, orbit, pan, dolly, F), and
+	// the scene's camera is exactly what that grammar drives.
+	EditorCamera previewCam;
+	bool         previewCamFramed = false;   // first frame places it on the class
+	// The per-asset FALLBACK preview (backends without a world-preview path)
+	// still orbits: it renders one asset framed on its own bounds, and a fly
+	// camera has nothing to fly through there.
 	float       previewYaw = 0.6f, previewPitch = 0.25f, previewDist = 4.0f;
 	// The base class RESOLVED through the chain: with HorizonCode inheritance
 	// `baseClass` may name another class asset, and everything that used to ask
@@ -1638,20 +1648,30 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
                       const ImVec2& av, const ImVec2& org)
 {
 	if (!ctx.renderer || !ctx.contentManager || !st.compWorld) return false;
-	glm::mat4 viewProj(1.0f);
-	// The pivot is the ROOT's own origin, not the content's centre and not a
-	// hardcoded world zero: it is the point every component transform is
-	// measured from, so it is what the view turns around and what the renderer
-	// marks. A class whose root carries an offset — the blob stores it, and the
-	// spawner honours it — would otherwise be framed against an empty patch of
-	// grid, which reads as a broken origin marker rather than a moved root.
-	glm::vec3 pivot(0.0f);
+
+	// The origin is the ROOT's own, not the content's centre and not a hardcoded
+	// world zero: it is the point every component transform is measured from, so
+	// it is what the backdrop marks and what the view frames on. A class whose
+	// root carries an offset — the blob stores it, and the spawner honours it —
+	// would otherwise sit against an empty patch of grid, which reads as a
+	// broken origin marker rather than a moved root.
+	glm::vec3 origin(0.0f);
 	if (reg.valid(st.compRoot))
 		if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
-			pivot = t->position;
+			origin = t->position;
+
+	// Open framed on the class rather than at the scene camera's default
+	// three-quarter view eight metres out, which for a character is a speck.
+	if (!st.previewCamFramed)
+	{
+		st.previewCam.focusOn(origin + glm::vec3(0.0f, 1.0f, 0.0f), 1.4f);
+		st.previewCamFramed = true;
+	}
+
+	glm::mat4 viewProj(1.0f);
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.compWorld,
 		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
-		st.previewYaw, st.previewPitch, st.previewDist, pivot, &viewProj);
+		st.previewCam.makeOverride(), origin, &viewProj);
 	if (!tex) return false;
 
 	const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
@@ -1662,6 +1682,37 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// collider outline anyway.
 	drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
 	return true;
+}
+
+// One frame of camera navigation for the class viewport, through the SAME
+// gesture grammar as the Scene window — Alt+LMB orbit, MMB pan, RMB fly-look
+// with WASDQE/Shift, wheel dolly, the trackpad fly toggle, F to frame the
+// selection. Shared code, not a lookalike: two navigation implementations would
+// answer the same gesture differently the first time either was fixed.
+void driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& reg,
+                             const glm::vec3& origin, bool hovered)
+{
+	EditorCamera::Input cin;
+	const bool navigating = EditorViewportNav::gather(
+		ctx, hovered, ImGui::GetIO().DeltaTime,
+		std::max(1.0f, ImGui::GetItemRectSize().y), cin);
+
+	// F frames the selection, exactly as in the Scene window — the class world's
+	// transforms are already propagated by the extractor, so the world matrix is
+	// this frame's.
+	if (hovered && !ImGui::GetIO().WantTextInput && !navigating &&
+	    ImGui::IsKeyPressed(ImGuiKey_F) && reg.valid(st.compSel))
+	{
+		if (const auto* t = reg.try_get<TransformComponent>(st.compSel))
+			st.previewCam.focusOn(glm::vec3(t->worldMatrix[3]),
+			                      glm::length(t->scale) * 0.75f + 0.5f);
+		else
+			st.previewCam.focusOn(origin + glm::vec3(0.0f, 1.0f, 0.0f), 1.4f);
+	}
+
+	st.previewCam.update(cin);
+	// Deliberately NOT SetEditorCamera: that is the SCENE's override. This
+	// camera exists only for the picture this panel asks the renderer for.
 }
 
 void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
@@ -1750,13 +1801,30 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			ImGui::TextDisabled("(preview unavailable on this backend)");
 	}
 
-	// Same orbit as the Skeletal Mesh tab, down to the right-drag: the main
-	// viewport steers with RMB and that muscle memory lands here too.
+	// An item over the image so hovering is a real ImGui hit test rather than a
+	// rectangle comparison — and, in the fallback path, so the drag has an
+	// owner. (The Scene window gets away without one only because it is NoMove.)
 	ImGui::SetCursorScreenPos(org);
 	ImGui::InvisibleButton("##hccompOrbit", ImVec2(std::max(av.x, 1.0f), std::max(av.y, 1.0f)),
-		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+		ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
+		ImGuiButtonFlags_MouseButtonMiddle);
 	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
 	ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelX);
+
+	if (drewWorld)
+	{
+		// The real thing: identical controls to the Scene window.
+		glm::vec3 origin(0.0f);
+		if (reg.valid(st.compRoot))
+			if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
+				origin = t->position;
+		driveWorldPreviewCamera(ctx, st, reg, origin, ImGui::IsItemHovered());
+		return;
+	}
+
+	// Fallback path only (no world preview on this backend): the per-asset
+	// preview frames ONE asset on its own bounds, so it orbits — there is
+	// nothing to fly through.
 	if (ImGui::IsItemActive() &&
 	    (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right)))
 	{
@@ -1764,9 +1832,6 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		st.previewYaw   -= md.x * 0.01f;
 		st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 	}
-	// Multiplicative zoom: with the world preview `previewDist` is a distance in
-	// METRES around the origin, not a multiple of the mesh's bounds, and a fixed
-	// step of 0.1 m per notch feels dead once you are twenty metres out.
 	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
 		st.previewDist = std::clamp(st.previewDist * (1.0f - ImGui::GetIO().MouseWheel * 0.1f),
 		                            0.5f, 30.0f);

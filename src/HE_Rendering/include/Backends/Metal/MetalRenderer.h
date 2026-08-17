@@ -99,8 +99,8 @@ public:
 	                            glm::mat4* outViewProj = nullptr) override;
 	void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	                         uint32_t width, uint32_t height,
-	                         float yaw, float pitch, float dist,
-	                         const glm::vec3& pivot = glm::vec3(0.0f),
+	                         const EditorCameraOverride& camera,
+	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         glm::mat4* outViewProj = nullptr) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,

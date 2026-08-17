@@ -428,15 +428,20 @@ public:
     //  • the background is an opaque GRAY with a ground plane and a grid, not
     //    transparent — this is a scene view in the sense of Unreal's character
     //    viewport, and a floating mesh with no ground reads as scale-less.
-    //  • the camera orbits a fixed `pivot` at `dist` in PLAIN WORLD UNITS, and
-    //    the whole backdrop — ground, grid, origin marker — is laid out around
-    //    that same point. `pivot` is meant to be the SUBJECT's origin (a class
-    //    preview passes its root entity's position, normally zero), so the
-    //    marked origin is the one every component transform is relative to
-    //    rather than an unrelated world zero. It does NOT
-    //    auto-frame on the content's bounds: the extractor deliberately leaves
-    //    bounds invalid for meshes that are not resident yet, so an auto-fit
-    //    would jump around while assets stream in.
+    //  • the caller supplies the CAMERA outright, as the same
+    //    EditorCameraOverride the scene view uses, instead of an orbit triple.
+    //    An asset viewport that navigates like the Scene window — fly, orbit,
+    //    pan — has a full camera pose to hand over, and inventing a second,
+    //    weaker camera description here would only mean converting back and
+    //    forth. The projection is built from its fov/near/far and this call's
+    //    aspect, so it always matches the target exactly.
+    //  • the backdrop — ground, grid, origin marker — is laid out around
+    //    `origin`, the SUBJECT's own origin (a class preview passes its root
+    //    entity's position, normally zero), so the marked origin is the one
+    //    every component transform is relative to rather than an unrelated
+    //    world zero. Nothing auto-frames on the content's bounds: the extractor
+    //    deliberately leaves bounds invalid for meshes that are not resident
+    //    yet, so an auto-fit would jump around while assets stream in.
     //  • lighting is the previews' fixed headlight, not the world's lights — a
     //    class blob normally contains no light at all, and "your character is
     //    black" would be the wrong lesson to teach.
@@ -452,8 +457,8 @@ public:
     // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
     virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
                                      uint32_t /*width*/, uint32_t /*height*/,
-                                     float /*yaw*/, float /*pitch*/, float /*dist*/,
-                                     const glm::vec3& /*pivot*/ = glm::vec3(0.0f),
+                                     const EditorCameraOverride& /*camera*/,
+                                     const glm::vec3& /*origin*/ = glm::vec3(0.0f),
                                      glm::mat4* /*outViewProj*/ = nullptr)
     { return nullptr; }
 

@@ -51,8 +51,8 @@ gebaut. Signatur wie die Geschwister-Previews, nur nimmt sie eine
 ```cpp
 void* RenderWorldPreview(ContentManager&, HorizonWorld&,
                          uint32_t width, uint32_t height,
-                         float yaw, float pitch, float dist,
-                         const glm::vec3& pivot = glm::vec3(0.0f),
+                         const EditorCameraOverride& camera,
+                         const glm::vec3& origin = glm::vec3(0.0f),
                          glm::mat4* outViewProj = nullptr);
 ```
 
@@ -63,10 +63,15 @@ Bewusste Abweichungen von den Per-Asset-Previews, alle im Header begründet:
   die Markierung des **eigenen Origins** liegen in
   `HorizonRendering/WorldPreviewGrid.h`, damit GL und Metal nicht auseinander
   laufen (getestet in `tests/test_world_preview_grid.cpp`).
-* **Kein Auto-Fit** auf die Bounds: `dist` ist eine echte Weltdistanz um
-  `pivot`. Der Extractor lässt Bounds für noch nicht residente Meshes
-  absichtlich ungültig — ein Auto-Fit würde beim Nachladen springen, und das
-  sähe aus, als bewege sich der Charakter.
+* **Die Kamera kommt vom Aufrufer**, als derselbe `EditorCameraOverride`, den
+  die Szenen-Ansicht benutzt — ein Asset-Viewport, der wie das Szenen-Fenster
+  navigiert (fliegen, orbiten, pannen), hat eine volle Kamerapose in der Hand,
+  und eine zweite, schwächere Kamerabeschreibung hier hiesse nur hin- und
+  herrechnen. Nur die Projektion baut der Renderer, weil nur dort das
+  Seitenverhältnis des Targets bekannt ist. **Kein Auto-Fit** auf die Bounds:
+  der Extractor lässt Bounds für noch nicht residente Meshes absichtlich
+  ungültig — ein Auto-Fit würde beim Nachladen springen, und das sähe aus, als
+  bewege sich der Charakter.
 * **Eigener `RenderExtractor`** statt `m_extractor`: auf dem hängt der
   Tag/Nacht-Zustand der Hauptszene, und eine Vorschau, die den Sonnenuntergang
   der Welt erbt, ist eine Überraschung ohne Nutzen.
