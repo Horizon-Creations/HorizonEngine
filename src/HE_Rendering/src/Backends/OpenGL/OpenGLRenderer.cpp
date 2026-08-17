@@ -8563,10 +8563,10 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 		DrawSkyFullscreen(glm::inverse(viewProj), snapshot.sunDirection, camPos,
 		                  previewEnvSettings, /*allowLowResClouds=*/false, W, H);
 
-	// ── Backdrop: ground plane, then grid + origin marker. Depth-tested but
-	// WITHOUT depth writes: a floor that occludes is a floor that hides the
-	// bottom of whatever you came to look at, and in a viewer the object always
-	// wins. So it is drawn first and everything else simply covers it.
+	// ── Grid + origin marker. LINES ONLY — a filled floor in a viewer is only
+	// ever in the way, hiding the underside of the mesh and, with a sky on, the
+	// entire lower half of the world. Drawn without depth writes so the lines
+	// cannot occlude the object either.
 	if (env.grid)
 	{
 		// Extent follows how far the camera has flown from the origin so the grid
@@ -8575,10 +8575,7 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 		const float halfExtent = std::clamp(
 			std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
 		std::vector<float> verts;
-		HE::buildPreviewGround(halfExtent, verts, origin);
-		const GLsizei groundVerts = static_cast<GLsizei>(verts.size() / 6);
 		HE::buildPreviewGrid(halfExtent, 1.0f, verts, origin);
-		const GLsizei totalVerts = static_cast<GLsizei>(verts.size() / 6);
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
@@ -8587,9 +8584,8 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 		glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(viewProj));
 		glBindVertexArray(m_skelPreviewLineVAO);
 		glDepthMask(GL_FALSE);
-		glDrawArrays(GL_TRIANGLES, 0, groundVerts);
 		glLineWidth(1.0f);
-		glDrawArrays(GL_LINES, groundVerts, totalVerts - groundVerts);
+		glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(verts.size() / 6));
 		glDepthMask(GL_TRUE);
 		glBindVertexArray(0);
 	}

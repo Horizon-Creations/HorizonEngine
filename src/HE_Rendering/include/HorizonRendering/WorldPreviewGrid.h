@@ -3,46 +3,31 @@
 #include <cmath>
 #include <vector>
 
-// ─── World-preview backdrop geometry ────────────────────────────────────────
-// The ground plane, the grid and the origin marker that IRenderer::
-// RenderWorldPreview draws behind the world (see the Class Editor's viewport).
+// ─── World-preview grid ─────────────────────────────────────────────────────
+// The grid and the origin marker that IRenderer::RenderWorldPreview draws
+// behind the world (see the Class Editor's viewport and the Mesh viewer).
+//
+// LINES ONLY. There used to be a filled ground quad under them, and a filled
+// floor in a viewer is only ever in the way: it hides whatever sits below it —
+// the underside of the mesh, and with a sky on, the whole lower half of the
+// world. Lines say where the ground is without standing in front of anything.
 //
 // Free functions in a header, deliberately: every backend has to build the same
-// backdrop, and a grid that is one shade darker or half a unit wider on OpenGL
-// than on Metal is exactly the kind of difference nobody notices until an author
+// grid, and one that is a shade darker or half a unit wider on OpenGL than on
+// Metal is exactly the kind of difference nobody notices until an author
 // switches machines and thinks the scale changed. Vertices are plain
-// pos3 + color3 floats, which is the layout every backend's small line/triangle
+// pos3 + color3 floats, which is the layout every backend's small line
 // preview program already uses.
 //
 // Coordinates are WORLD space with Y up. Everything is laid out RELATIVE TO
 // `origin` — for a class preview that is the character's own origin, the point
 // every component transform is measured from, and it is normally the world
-// origin. Centring the backdrop on it is what makes "objects sit relative to
-// the origin" true in the picture and not just in the data. The ground sits a
-// hair below the grid plane so the two cannot z-fight.
+// origin. Centring the grid on it is what makes "objects sit relative to the
+// origin" true in the picture and not just in the data.
 
 namespace HE
 {
 
-constexpr float kPreviewGroundDrop = 0.002f;
-
-// Two triangles, 6 vertices (36 floats), spanning ±halfExtent in X/Z around
-// `origin`.
-inline void buildPreviewGround(float halfExtent, std::vector<float>& out,
-                               const glm::vec3& origin = glm::vec3(0.0f))
-{
-    const float y = origin.y - kPreviewGroundDrop;
-    const glm::vec3 c(0.155f, 0.155f, 0.170f);
-    const float h = halfExtent;
-    const float x0 = origin.x - h, x1 = origin.x + h;
-    const float z0 = origin.z - h, z1 = origin.z + h;
-    const float quad[6][3] = {
-        { x0, y, z0 }, { x0, y, z1 }, { x1, y, z1 },
-        { x0, y, z0 }, { x1, y, z1 }, { x1, y, z0 },
-    };
-    for (const auto& v : quad)
-        out.insert(out.end(), { v[0], v[1], v[2], c.r, c.g, c.b });
-}
 
 // Grid lines every `step` units out to ±halfExtent, with every tenth line
 // brighter, the two axes THROUGH the origin tinted, and a small marker on the

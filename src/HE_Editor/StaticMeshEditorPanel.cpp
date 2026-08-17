@@ -479,6 +479,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			if (ImGui::RadioButton("Sky", st.useSky)) st.useSky = true;
 			ImGui::SameLine();
 			if (ImGui::RadioButton("Studio", !st.useSky)) st.useSky = false;
+			// A labelled checkbox, not just the toolbar icon: an unlabelled grid
+			// glyph among four others is not something anyone finds.
+			ImGui::Checkbox("Ground grid", &st.showGrid3d);
 
 			// One slider, because one number is what actually changes the answer:
 			// where the sun is. Everything else about the sky follows from it.

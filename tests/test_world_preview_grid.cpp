@@ -25,21 +25,6 @@ std::vector<Vert> unpack(const std::vector<float>& raw, size_t fromVertex = 0)
 }
 } // namespace
 
-TEST_CASE("buildPreviewGround is two triangles just below the grid plane")
-{
-	std::vector<float> raw;
-	HE::buildPreviewGround(10.0f, raw);
-	REQUIRE(raw.size() == 6 * 6); // 6 vertices × (pos3 + color3)
-
-	for (const Vert& v : unpack(raw))
-	{
-		// Below y = 0, or the grid lines lying exactly on the plane z-fight.
-		CHECK(v.pos.y < 0.0f);
-		CHECK(std::abs(v.pos.x) == doctest::Approx(10.0f));
-		CHECK(std::abs(v.pos.z) == doctest::Approx(10.0f));
-	}
-}
-
 TEST_CASE("buildPreviewGrid lays whole line pairs on the ground plane")
 {
 	std::vector<float> raw;
@@ -97,22 +82,13 @@ TEST_CASE("buildPreviewGrid marks the origin with an up axis")
 	CHECK(sawUpAxis);
 }
 
-TEST_CASE("the backdrop follows the origin it is given")
+TEST_CASE("the grid follows the origin it is given")
 {
 	// A class whose ROOT carries an offset must still see its own origin marked
 	// and the grid laid out around it — the alternative frames the character
 	// against an empty patch of grid, which reads as a broken marker rather
 	// than a moved root.
 	const glm::vec3 o(3.0f, 1.5f, -2.0f);
-	std::vector<float> raw;
-	HE::buildPreviewGround(6.0f, raw, o);
-	for (const Vert& v : unpack(raw))
-	{
-		CHECK(v.pos.y == doctest::Approx(o.y - HE::kPreviewGroundDrop));
-		CHECK(std::abs(v.pos.x - o.x) == doctest::Approx(6.0f));
-		CHECK(std::abs(v.pos.z - o.z) == doctest::Approx(6.0f));
-	}
-
 	std::vector<float> grid;
 	HE::buildPreviewGrid(6.0f, 1.0f, grid, o);
 	const std::vector<Vert> verts = unpack(grid);
@@ -184,16 +160,15 @@ TEST_CASE("buildPreviewGrid survives a zero step instead of looping forever")
 	CHECK(!raw.empty());
 }
 
-TEST_CASE("ground and grid append, so one buffer can hold both")
+TEST_CASE("the grid is nothing but lines")
 {
+	// It used to have a filled ground quad in front of it, and a filled floor in
+	// a viewer is only ever in the way — it hides the underside of the mesh and,
+	// with a sky on, the whole lower half of the world. The backends now issue a
+	// single line draw over the entire buffer, so an odd vertex count or a
+	// stray triangle would silently mis-pair every line after it.
 	std::vector<float> raw;
-	HE::buildPreviewGround(8.0f, raw);
-	const size_t groundVerts = raw.size() / 6;
 	HE::buildPreviewGrid(8.0f, 1.0f, raw);
-
-	// The backends draw [0, groundVerts) as triangles and the rest as lines —
-	// that split only works if the grid strictly appends.
-	CHECK(groundVerts == 6);
-	CHECK(raw.size() / 6 > groundVerts);
-	for (const Vert& v : unpack(raw, groundVerts)) CHECK(v.pos.y >= 0.0f);
+	REQUIRE(raw.size() % 6 == 0);
+	CHECK((raw.size() / 6) % 2 == 0);
 }

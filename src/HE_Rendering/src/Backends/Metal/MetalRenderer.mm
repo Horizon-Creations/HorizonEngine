@@ -8494,36 +8494,27 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	}
 
-	// ── Backdrop: ground plane, then grid + origin marker. Depth-tested but
-	// WITHOUT depth writes: a floor that occludes is a floor that hides the
-	// bottom of whatever you came to look at, and in a viewer the object always
-	// wins. So it is drawn first and everything else simply covers it.
-	// Drawn through the debug-line pipeline, which is exactly a pos3+color3
-	// vertex buffer with an MVP — the primitive type is a per-draw choice, so
-	// the ground quad goes through it as triangles.
+	// ── Grid + origin marker. LINES ONLY — a filled floor in a viewer is only
+	// ever in the way, hiding the underside of the mesh and, with a sky on, the
+	// entire lower half of the world. Drawn through the debug-line pipeline,
+	// which is exactly a pos3+color3 vertex buffer with an MVP.
 	if (env.grid && m_debugLinePipeline)
 	{
 		const float halfExtent = std::clamp(
 			std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
 		std::vector<float> verts;
-		HE::buildPreviewGround(halfExtent, verts, origin);
-		const NSUInteger groundVerts = verts.size() / 6;
 		HE::buildPreviewGrid(halfExtent, 1.0f, verts, origin);
-		const NSUInteger totalVerts = verts.size() / 6;
 
 		id<MTLBuffer> lineBuf = [device newBufferWithBytes:verts.data()
 		                                            length:verts.size() * sizeof(float)
 		                                           options:MTLResourceStorageModeShared];
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
-		// No depth WRITE (nothing has written depth yet at this point, so "always"
-		// and "less" coincide) — that is what keeps the floor from swallowing the
-		// bottom of the mesh drawn next.
+		// No depth WRITE, so the lines cannot occlude the object either.
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 		[enc setVertexBuffer:lineBuf offset:0 atIndex:0];
 		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
-		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:groundVerts];
-		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:groundVerts
-		        vertexCount:(totalVerts - groundVerts)];
+		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0
+		        vertexCount:(NSUInteger)(verts.size() / 6)];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	}
 
