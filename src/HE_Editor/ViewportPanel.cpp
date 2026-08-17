@@ -375,10 +375,6 @@ void render(AppContext& ctx, float dt)
 				}
 
 
-				// Suppress the gizmo while the camera is being driven so Alt+LMB
-				// orbit and RMB fly-look don't fight the manipulator.
-				ImGuizmo::Enable(!navigating && !io.KeyAlt);
-
 				// ── Gizmo on the selected entity ────────────────────────────
 				// Suppressed in Landscape mode: there LMB belongs to the sculpt
 				// brush, and a stray gizmo drag would silently move/scale the
@@ -393,10 +389,13 @@ void render(AppContext& ctx, float dt)
 						s_tb, ImGui::IsWindowHovered(), navigating);
 					// The gizmo itself is shared with the class editor's viewport —
 					// see EditorTransformGizmo for why a second copy would be a bug.
+					// Suppressed while the camera is being driven so Alt+LMB orbit
+					// and RMB fly-look don't fight the manipulator for the button.
 					gizmoActive = EditorTransformGizmo::manipulate(
 						*ctx.world, ctx.selectedEntity,
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
-						rectMin, rectMax, s_tb, /*enabled=*/true, ctx.undoSys);
+						rectMin, rectMax, s_tb,
+						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
 				}
 				// ── Picking: click in the viewport selects the hit entity ──
 				// Disabled in Landscape mode so a brush stroke can't deselect /

@@ -1,7 +1,10 @@
 #include "NotificationStore.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 
 namespace HE::Ed
 {
@@ -86,6 +89,130 @@ void NotificationStore::clear()
 	std::lock_guard<std::mutex> lock(m_mutex);
 	m_entries.clear();
 	m_unseen = 0;
+}
+
+// ─── The engine-wide error channel ───────────────────────────────────────────
+
+void NotificationStore::attachToEngineLog()
+{
+	std::lock_guard<std::mutex> lock(m_bridgeMutex);
+	if (m_logSink != 0) return;   // already attached; twice would post twice
+	m_logSink = HE::Log::addSink(&NotificationStore::logSink, this);
+}
+
+void NotificationStore::detachFromEngineLog()
+{
+	std::lock_guard<std::mutex> lock(m_bridgeMutex);
+	if (m_logSink == 0) return;
+	HE::Log::removeSink(m_logSink);
+	m_logSink = 0;
+}
+
+void NotificationStore::logSink(const HE::Log::Record& record, void* user)
+{
+	// Error and Critical only. Warning is where "it did not fully work, nothing
+	// is lost" lives, and a session produces hundreds of those legitimately —
+	// routing them here would bury the handful of entries this surface exists
+	// for. Compared rather than matched against Error alone so Critical, which is
+	// strictly worse, cannot be the one severity that goes unreported.
+	if (record.level < HE::Log::Level::Error) return;
+	if (!user) return;
+	static_cast<NotificationStore*>(user)->onLogError(record);
+}
+
+void NotificationStore::onLogError(const HE::Log::Record& record)
+{
+	const char* message = record.message ? record.message : "";
+	if (*message == '\0') return;
+
+	const std::uint64_t now = nowMs();
+	std::string         text(message);
+
+	{
+		std::lock_guard<std::mutex> lock(m_bridgeMutex);
+
+		// Same message again while it is still on screen: dropped, not counted.
+		// post()'s own collapse only merges the row at the END of the list, so two
+		// errors alternating every frame would otherwise interleave into an
+		// unbounded pair of growing lists. Dropping is also the honest answer —
+		// "this failed 4000 times" is a log fact, not something to act on.
+		auto hit = std::find_if(m_recentErrors.begin(), m_recentErrors.end(),
+			[&text](const auto& e){ return e.first == text; });
+		if (hit != m_recentErrors.end())
+		{
+			if (now - hit->second < k_errorCooldownMs) return;
+			hit->second = now;
+		}
+		else
+		{
+			if (m_recentErrors.size() >= k_recentErrorsMax)
+			{
+				// Evict the least recently seen — the one whose cooldown is most
+				// likely to have lapsed anyway.
+				auto oldest = std::min_element(m_recentErrors.begin(), m_recentErrors.end(),
+					[](const auto& a, const auto& b){ return a.second < b.second; });
+				m_recentErrors.erase(oldest);
+			}
+			m_recentErrors.emplace_back(text, now);
+		}
+
+		// A ceiling on how much of this surface one bad moment may take. Ten
+		// DISTINCT errors already say "something is badly wrong"; the eleventh
+		// only pushes the first one out of view.
+		if (now - m_burstWindowMs >= k_burstWindowMs)
+		{
+			m_burstWindowMs = now;
+			m_burstCount    = 0;
+		}
+		if (++m_burstCount > k_burstMax) return;
+	}
+
+	// Where it came from, in the log's own vocabulary, so the line can be found
+	// again in HorizonEngine.log. The category alone is not enough for that; the
+	// file and line are what make it a starting point rather than a shrug.
+	std::string detail = HE::Log::categoryName(record.category);
+	if (record.file && record.file[0] != '\0')
+	{
+		// Filename only: the absolute build path of a machine that is not the
+		// user's says nothing to them and eats the whole line.
+		const char* slash = std::strrchr(record.file, '/');
+#ifdef _WIN32
+		const char* back  = std::strrchr(record.file, '\\');
+		if (back && (!slash || back > slash)) slash = back;
+#endif
+		char buf[160];
+		std::snprintf(buf, sizeof(buf), " — %s:%d", slash ? slash + 1 : record.file,
+		              record.line);
+		detail += buf;
+	}
+
+	// m_bridgeMutex is NOT held here: post() takes m_mutex, and the two are only
+	// ever taken in this order, never nested.
+	post(NoteLevel::Problem, std::move(text), std::move(detail));
+}
+
+// ─── Posting from anywhere ───────────────────────────────────────────────────
+
+namespace
+{
+	// Atomic rather than a plain pointer: worker threads read it while the main
+	// thread installs and (at shutdown) clears it. Never dereferenced after
+	// EditorApplication clears it, which is the whole reason it is set to null
+	// before the store dies rather than simply left dangling.
+	std::atomic<NotificationStore*> s_globalStore{nullptr};
+}
+
+void setGlobalNotifications(NotificationStore* store)
+{
+	s_globalStore.store(store, std::memory_order_release);
+}
+
+void notify(NoteLevel level, std::string text, std::string detail,
+            std::string assetPath)
+{
+	NotificationStore* store = s_globalStore.load(std::memory_order_acquire);
+	if (!store) return;   // headless, tests, the runtime game: nowhere to show it
+	store->post(level, std::move(text), std::move(detail), std::move(assetPath));
 }
 
 } // namespace HE::Ed

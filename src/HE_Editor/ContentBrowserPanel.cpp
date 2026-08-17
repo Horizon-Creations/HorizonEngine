@@ -2436,12 +2436,29 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 				const std::string remotePath = cacheRel;
 				const HE::UUID    id         = uuid;
+				const std::string relPath = rel;
 				ctx.contentManager->registerRemoteAsset(id, rel,
-					[remotePath, id](std::function<void(bool)> done)
+					[remotePath, relPath, id](std::function<void(bool)> done)
 					{
 						HE::Cs::EngineContentSync::instance().enqueueDownload(
 							remotePath, id, HE::Cs::DownloadTrigger::Passive,
-							[done](bool success) { done(success); });
+							[done, remotePath, relPath](bool success)
+							{
+								// Passive route, so nothing on screen is waiting on
+								// this: whatever asked for the asset simply goes
+								// without it. Told to the user by name, or the local
+								// copy they just removed looks like it took the
+								// asset with it for good.
+								if (!success)
+									HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+										"\"" + std::filesystem::path(remotePath).filename().string()
+											+ "\" could not be downloaded again.",
+										"Its local copy was removed and the server did not hand "
+										"it back. It stays missing until a later attempt "
+										"succeeds.",
+										relPath);
+								done(success);
+							});
 					});
 			}
 

@@ -29,16 +29,19 @@ struct AppContext;
 
 namespace NotificationBar
 {
-	// How wide the bell cluster will be, in pixels; 0 when there is nothing at
-	// all to show. Separate from DrawFooter because the footer right-aligns its
-	// contents and therefore has to know the width BEFORE it places the cursor —
-	// and the two must agree exactly, which is why both go through the same
-	// private layout helper.
+	// How wide the bell cluster will be, in pixels; 0 only where there is no
+	// store at all (headless, a test context). Separate from DrawFooter because
+	// the footer right-aligns its contents and therefore has to know the width
+	// BEFORE it places the cursor — and the two must agree exactly, which is why
+	// both go through the same private layout helper.
 	float FooterWidth(AppContext& ctx);
 
 	// The bell and its count. Call from inside the footer window, at the position
-	// FooterWidth() was used to compute. Draws nothing when the store is empty:
-	// the footer is not a place to park a dead icon.
+	// FooterWidth() was used to compute. Always drawn, greyed out and countless
+	// while nothing has happened: a channel that is invisible until it has
+	// something to say asks the user to notice, mid-problem, a control they have
+	// never seen before. Its colour and count carry the alarm; its presence
+	// carries the knowledge that this is where the editor speaks.
 	void DrawFooter(AppContext& ctx);
 
 	// The flyout. Call from the editor's overlay pass, after every panel, so

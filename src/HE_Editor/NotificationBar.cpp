@@ -113,7 +113,6 @@ namespace
 
 	struct BellLayout
 	{
-		bool  draw   = false;
 		float bellW  = 0.0f;
 		float slotH  = 0.0f;
 		float countW = 0.0f;
@@ -124,12 +123,15 @@ namespace
 	BellLayout layoutFor(const Cache& c)
 	{
 		BellLayout l;
-		// Nothing has ever happened: no bell. An icon that is always there and
-		// never means anything trains the eye to skip the corner it lives in,
-		// which is the corner the first real problem will appear in.
-		if (c.entries.empty()) return l;
-
-		l.draw  = true;
+		// The bell is always there, empty store or not. It used to hide itself
+		// until the first entry, on the argument that an icon which never means
+		// anything trains the eye to skip its corner — but that argument only
+		// holds for a surface people already know about. This one was invisible
+		// for entire sessions, so when something finally did go wrong the user was
+		// being asked to notice a control they had never seen, in a corner they
+		// had no reason to watch. A permanently present, greyed-out bell is how
+		// "there is a place where the editor tells you things" gets learned at
+		// all; what carries the alarm is its colour and count, not its existence.
 		l.slotH = ImGui::GetTextLineHeight();
 		// A bell is taller than it is wide; matching the slot's height would
 		// leave it floating in its own whitespace.
@@ -323,14 +325,30 @@ namespace
 
 			ImGui::TextUnformatted("Notifications");
 			ImGui::SameLine();
-			if (c.unseen > 0) ImGui::TextDisabled("%zu unread", c.unseen);
-			else              ImGui::TextDisabled("all read");
+			if (c.unseen > 0)             ImGui::TextDisabled("%zu unread", c.unseen);
+			else if (!c.entries.empty())  ImGui::TextDisabled("all read");
 			ImGui::Separator();
+
+			// The empty state, which is what the bell shows for most of a healthy
+			// session. It says what the list is FOR rather than "no items": this is
+			// the one moment the user is looking at the surface with nothing on it,
+			// so it is the only chance to explain what will appear here later.
+			if (c.entries.empty())
+			{
+				ImGui::Spacing();
+				ImGui::TextDisabled(
+					"Nothing to report. Anything that goes wrong in the background — a "
+					"server that cannot be reached, a download that failed, a change a "
+					"collaborator could not apply — is collected here.");
+				ImGui::Spacing();
+			}
 
 			// The list grows with its contents up to a ceiling and scrolls after
 			// that. A fixed-height box would leave a hole under a single entry;
 			// an unbounded one would run 200 entries straight off the top of the
-			// screen, since the store keeps that many.
+			// screen, since the store keeps that many. Drawn even when empty — the
+			// child auto-resizes to nothing, and skipping it would mean an
+			// ImGui::EndChild that no longer pairs with a BeginChild call.
 			ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
 			                                    ImVec2(FLT_MAX, kMaxList));
 			if (ImGui::BeginChild("##notificationList", ImVec2(0.0f, 0.0f),
@@ -464,12 +482,14 @@ namespace
 			ImGui::SameLine();
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 			                     std::max(0.0f, ImGui::GetContentRegionAvail().x - 52.0f));
+			ImGui::BeginDisabled(c.entries.empty());
 			if (ImGui::SmallButton("Clear") && ctx.notifications)
 			{
-				// The store empties, so next frame the bell has nothing to draw
-				// and DrawFooter closes this window on its way out.
+				// The store empties, so the list is replaced by the empty state
+				// next frame — the bell itself stays, it is permanent now.
 				ctx.notifications->clear();
 			}
+			ImGui::EndDisabled();
 		}
 		ImGui::End();
 		ImGui::PopStyleVar();
@@ -500,11 +520,6 @@ void DrawFooter(AppContext& ctx)
 
 	const Cache&     c      = refresh(ctx);
 	const BellLayout layout = layoutFor(c);
-	// Nothing left to show — after Clear, or before anything has ever been
-	// posted. Closing here as well as drawing nothing matters: a pinned flyout
-	// whose anchor has just disappeared would otherwise hang over the footer
-	// with no way back to the bell that opened it.
-	if (!layout.draw) { closeFlyout(); return; }
 
 	// One hit box for the whole cluster: the flyout belongs to the bell and its
 	// count together, not to whichever of the two the mouse happens to land on.
@@ -542,8 +557,12 @@ void DrawOverlay(AppContext& ctx)
 	if (s_bellFrame != ImGui::GetFrameCount()) { closeFlyout(); return; }
 
 	const Cache& c = refresh(ctx);
-	if (c.entries.empty()) { closeFlyout(); return; }
 
+	// An empty store no longer closes this. The bell is permanent now, and a
+	// permanent control whose click does nothing reads as broken — so the flyout
+	// opens on an empty list too and says so in a sentence. That is also the only
+	// moment the surface can explain itself, since by definition nothing has gone
+	// wrong yet when someone first pokes at it.
 	if (s_bellHovered) s_open = true;
 
 	bool flyoutHovered = false;

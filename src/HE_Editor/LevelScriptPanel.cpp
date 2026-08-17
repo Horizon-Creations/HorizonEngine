@@ -1592,6 +1592,9 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	// collider, or a root that also got a camera rig — so entity-only matching
 	// lit up the capsule whenever the camera was selected, which reads as the
 	// editor pointing at the wrong thing.
+	//
+	// The labels are the Details panel's own (componentHeader in
+	// InspectorPanel.cpp), which is where the tree's rows come from too.
 	const auto highlighted = [&](Entity e, const char* label)
 	{
 		return e == selected && (focus.empty() || focus == label);
@@ -1724,10 +1727,13 @@ void drawWorldPreviewGizmo(ClassState& st, const ImVec2& av, const ImVec2& org,
 	// disagreed the handles would sit next to the object instead of on it.
 	const glm::mat4 view = st.previewCam.viewMatrix();
 	const glm::mat4 proj = st.previewViewProj * glm::inverse(view);
+	// The Scene window's predicate, literally: Alt+LMB is orbit here too now, so
+	// the manipulator must let go of the button for it.
 	bool changed = false;
 	EditorTransformGizmo::manipulate(*st.compWorld, st.compSel, view, proj,
 	                                 org, ImVec2(org.x + av.x, org.y + av.y),
-	                                 st.previewGizmo, /*enabled=*/!navigating,
+	                                 st.previewGizmo,
+	                                 /*enabled=*/!navigating && !ImGui::GetIO().KeyAlt,
 	                                 /*undo=*/nullptr, &changed);
 	if (changed) st.dirty = true;
 }

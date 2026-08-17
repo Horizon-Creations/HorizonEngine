@@ -337,6 +337,18 @@ void EditorApplication::OnInit()
 	// into a log line nobody has open. Set before any callback below can fire.
 	m_collab.setNotifications(&m_notifications);
 
+	// The same channel, reachable from everywhere else: worker threads, download
+	// callbacks and static panel helpers post through HE::Ed::notify() because
+	// they have no AppContext to reach m_notifications through. Cleared in
+	// OnShutdown before this object dies.
+	HE::Ed::setGlobalNotifications(&m_notifications);
+
+	// And the catch-all underneath both: every HE_LOG_ERROR in the engine becomes
+	// a notification, so a failure nobody thought to report by hand still reaches
+	// the user instead of scrolling past in a file they do not have open. It
+	// throttles itself — see NotificationStore::attachToEngineLog.
+	m_notifications.attachToEngineLog();
+
 	// ── Structural replication ───────────────────────────────────────────────
 	// The editor creates and deletes entities from many places (outliner menus,
 	// drag & drop, prefab drops, terrain tools). Rather than hooking every one of
@@ -1518,6 +1530,45 @@ void EditorApplication::startSftpProbe()
 		if (!haveManifest)
 			haveManifest = HE::Cs::EngineContentSync::instance().loadCachedManifest();
 
+		// ── Say so ────────────────────────────────────────────────────────────
+		// Everything above degrades silently by design — that is what keeps an
+		// offline editor usable. But "usable" is not "unchanged": the Engine tree
+		// is a day old at best and empty at worst, and every EngineContent asset a
+		// scene asks for will fail to materialise. Without a word here the user
+		// meets that as a series of assets that simply do not appear, with nothing
+		// naming the cause. The probe already knows the cause.
+		//
+		// Not configured is deliberately NOT reported: the endpoint is compiled in
+		// (SftpCredentials.h), so an empty one means a build that was never meant
+		// to reach the server, and nagging about it every start would train the
+		// user to ignore the bell before it has ever carried anything real.
+		if (probe.configured && !probe.reachable)
+		{
+			HE::Ed::notify(
+				haveManifest ? HE::Ed::NoteLevel::Warning : HE::Ed::NoteLevel::Problem,
+				"The EngineContent server could not be reached.",
+				(probe.detail.empty()
+					? std::string("The connection was refused or timed out.")
+					: probe.detail)
+				+ (haveManifest
+					? "  Working from the catalogue of the last successful connection: "
+					  "assets already downloaded still work, anything else cannot be "
+					  "fetched until the server is back."
+					: "  No catalogue is available, so no EngineContent can be browsed "
+					  "or downloaded this session."));
+		}
+		else if (probe.configured && !haveManifest)
+		{
+			// Reached and authenticated, but the catalogue itself did not arrive —
+			// a different fault (manifest missing, unreadable, or unparseable) and
+			// one the user cannot fix by checking their network.
+			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+				"The EngineContent catalogue could not be read.",
+				"The server answered, but its manifest could not be fetched or parsed, "
+				"and there is no cached copy on this machine. EngineContent will not "
+				"appear in the Content Browser this session.");
+		}
+
 		if (haveManifest && gs && !engineContentPath.empty())
 		{
 			gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
@@ -1546,7 +1597,21 @@ void EditorApplication::refreshEngineContentManifest()
 	m_sftpThread = std::thread([this, gs, engineContentPath, projectContentRoot]
 	{
 		if (!gs || engineContentPath.empty()) return;
-		if (!HE::Cs::EngineContentSync::instance().refreshManifestBlocking()) return;
+		if (!HE::Cs::EngineContentSync::instance().refreshManifestBlocking())
+		{
+			// This one always follows an action the user just took (a publish, a
+			// manifest rebuild), and its failure mode is the worst kind: the run
+			// reported success, and the Content Browser now shows a catalogue that
+			// no longer matches the server — assets the publish removed still
+			// listed, ones it added still missing — with nothing on screen saying
+			// so until the next restart quietly fixes it.
+			HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+				"The EngineContent catalogue could not be refreshed.",
+				"The change reached the server, but re-reading its manifest failed. "
+				"What the Content Browser shows under Engine is from before that "
+				"change until the connection recovers or the editor is restarted.");
+			return;
+		}
 
 		gs->setEngineRemoteAssets(engineManifestAsRemoteAssets());
 		gs->refreshEngineFolder(engineContentPath, projectContentRoot);
@@ -1901,11 +1966,29 @@ void EditorApplication::OnRender(float dt)
 			const std::string remotePath = e.relativePath;
 			const std::string enginePath = std::string("Engine/") + remotePath;
 			contentManager().registerRemoteAsset(uuid, enginePath,
-				[remotePath, uuid](std::function<void(bool)> done)
+				[remotePath, enginePath, uuid](std::function<void(bool)> done)
 				{
 					HE::Cs::EngineContentSync::instance().enqueueDownload(
 						remotePath, uuid, HE::Cs::DownloadTrigger::Passive,
-						[done](bool success) { done(success); });
+						[done, remotePath, enginePath](bool success)
+						{
+							// The PASSIVE route: a scene referenced this asset and
+							// the download was arranged on its behalf, so a failure
+							// reaches the user as a mesh that renders as nothing or
+							// a material that falls back to grey — with nothing
+							// anywhere naming the file. Saying which one did not
+							// arrive is the whole difference between "the scene
+							// looks wrong" and a fact somebody can act on.
+							if (!success)
+								HE::Ed::notify(HE::Ed::NoteLevel::Warning,
+									"\"" + std::filesystem::path(remotePath).filename().string()
+										+ "\" could not be downloaded.",
+									"A scene references this EngineContent asset, but it could "
+									"not be fetched from the server. It stays missing until a "
+									"later attempt succeeds.",
+									enginePath);
+							done(success);
+						});
 				});
 		}
 	}
@@ -5269,6 +5352,16 @@ void EditorApplication::OnShutdown()
 	// The auto-install worker can outlive the dialog (installs take minutes); join
 	// it too so we never destroy it joinable.
 	if (m_installThread.joinable()) m_installThread.join();
+
+	// Both ends of the notification channel, closed here rather than in the
+	// destructor: the log sink and the global pointer are process-wide, and the
+	// store they point at is a member of this object. Tasks on the global thread
+	// pool can still be running (the Content Browser submits some that outlive
+	// their panel), and after these two lines their posts are a no-op instead of
+	// a write through a dangling pointer. Deliberately AFTER the joins above, so
+	// everything those threads still had to say made it in.
+	m_notifications.detachFromEngineLog();
+	HE::Ed::setGlobalNotifications(nullptr);
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;
