@@ -170,6 +170,15 @@ private:
 	void CreateInstancedPipeline();
 	void UpdateSkyEnvCube(const glm::vec3& sunDir); // rebuild the IBL cubemap on sun move
 	void DrawScene(int width, int height);
+	// The procedural sky as a fullscreen pass into the currently bound target.
+	// Shared by the scene frame and the world preview — there is one sky, and a
+	// cheaper stand-in for the preview was tried and looked like one.
+	// `allowLowResClouds` is false for previews (the quarter-res pre-pass rebinds
+	// its own FBO/viewport, which an offscreen render must not do mid-pass).
+	void DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
+	                       const glm::vec3& camPos,
+	                       const IRenderer::EnvironmentSettings& env,
+	                       bool allowLowResClouds, int pw, int ph);
 
 	// ── Per-frame scene lighting + CSM uniforms (one block, three programs) ──
 	// The unlit, instanced and skinned programs are all linked from the shared

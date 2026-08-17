@@ -9194,6 +9194,132 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 		glUniformMatrix4fv(L.localShadowVP, F.nLocalLayers, GL_FALSE, F.localVPData);
 }
 
+// The procedural sky, as a fullscreen pass into the CURRENTLY BOUND target.
+// Lifted out of the frame so the world PREVIEW can draw the very same sky.
+//
+// A cheaper stand-in was tried first — a coarse dome coloured per vertex from
+// SkyColorCPU — and it looked like a cheaper stand-in: the sun disc is a
+// fraction of a degree wide, so interpolated across triangles it became a huge
+// faceted white polygon. Nothing short of the per-pixel shader resolves it.
+// There is one sky in this engine, and this is it.
+//
+// The caller owns the target, the depth state it was left in, and the viewport;
+// this restores GL_LESS + depth writes on the way out, as the frame expects.
+// `allowLowResClouds` is false for previews: the quarter-res pre-pass rebinds
+// its own FBO and viewport, which a small offscreen render has no business
+// doing mid-pass.
+void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
+                                       const glm::vec3& camPos,
+                                       const IRenderer::EnvironmentSettings& env,
+                                       bool allowLowResClouds, int pw, int ph)
+{
+	if (!m_skyProgram || !env.skyEnabled) return;
+
+	glUseProgram(m_skyProgram);
+	glDepthFunc(GL_LEQUAL);
+	glDepthMask(GL_FALSE);
+	glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+	glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_moonTex);
+	glUniform1i(m_uSkyMoonTex, 0);
+	glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
+	glUniform1f(m_uSkyMoonPhase, env.moonPhase);
+	glUniform1f(m_uSkyTime, env.timeOfDay);
+	glUniform1f(m_uSkyCoverage, env.cloudCoverage);
+	// Cloud render mode + 3D-cloud parallax inputs (camera world pos + layer height).
+	glUniform1i(m_uSkyCloudMode,   env.cloudMode);
+	glUniform1i(m_uSkyCloudQuality, env.cloudQuality);
+	glUniform1i(m_uSkyCloudStyle,        env.cloudStyle);
+	glUniform1i(m_uSkyCloudInterShadows, env.cloudInterShadows ? 1 : 0);
+	glUniform1f(m_uSkyCloudEvolution,    env.cloudEvolution);
+	glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(camPos));
+	glUniform1f(m_uSkyCloudHeight, env.cloudHeight);
+	glUniform1f(m_uSkyCloudDensity,    env.cloudDensity);
+	glUniform1f(m_uSkyCloudFluffiness, env.cloudFluffiness);
+	glUniform3fv(m_uSkyCloudTint, 1, glm::value_ptr(env.cloudTint));
+	glUniform1f(m_uSkyContrails,  env.contrailAmount);
+	glUniform1f(m_uSkyCirrus,     env.cirrusAmount);
+	glUniform1f(m_uSkyCirrusSeed, env.cirrusSeed);
+	glUniform1f(m_uSkyStarBright, env.starBrightness);
+	glUniform3fv(m_uSkyStarColor, 1, glm::value_ptr(env.starColor));
+	glUniform1f(m_uSkyStarSize,    env.starSize);
+	glUniform1f(m_uSkyStarSizeVar, env.starSizeVariation);
+	glUniform1f(m_uSkyStarDensity, env.starDensity);
+	glUniform1f(m_uSkyStarGlow,    env.starGlow);
+	glUniform1f(m_uSkyStarTwinkle, env.starTwinkle);
+	glUniform1f(m_uSkyRainAmount,  env.rainAmount);
+	glUniform1f(m_uSkyGodRays,     env.godRays);
+	glUniform1f(m_uSkyShootingStars, env.shootingStars);
+	// HE_SKY_TIME overrides the animation clock (for deterministic headless capture
+	// of time-animated sky elements like the aurora); normal runs use the wall clock.
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	glUniform1f(m_uSkyClock, skyClock);
+	glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(env.sunColor));
+	glUniform1f(m_uSkyAurora, env.auroraIntensity);
+	glUniform1f(m_uSkyAuroraHeight,   env.auroraHeight);
+	glUniform1f(m_uSkyAuroraFragment, env.auroraFragmentation);
+	glUniform1f(m_uSkyMilkyWay, env.milkyWayIntensity);
+	glUniform1f(m_uSkyNebula, env.nebulaIntensity);
+	glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(env.nebulaColor));
+	glUniform3fv(m_uSkyNebulaColor2, 1, glm::value_ptr(env.nebulaColor2));
+	glUniform3fv(m_uSkyNebulaColor3, 1, glm::value_ptr(env.nebulaColor3));
+	glUniform1f(m_uSkyNebulaSeed, env.nebulaSeed);
+	glUniform1f(m_uSkyNebulaHiFi, (float)env.nebulaQuality); // 0/1/2 (carried in uNebulaHiFi)
+	glUniform1f(m_uSkyNebulaCover, env.nebulaCoverage);
+	glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(env.auroraColor));
+	glUniform3fv(m_uSkyAuroraColorTop, 1, glm::value_ptr(env.auroraColorTop));
+	glUniform1f(m_uSkyFlash, env.flash);
+	{
+		// Wind control → horizontal cloud drift vector. Direction 0° drifts
+		// toward -Z (north), increasing clockwise; speed scales the rate.
+		const glm::vec3 wind = HE::CloudWindVector(env);
+		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+	}
+	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
+	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glUniform1i(m_uSkyNoise, 2);
+	// ── Low-res clouds: quarter-res clouds-only pre-pass (previous-frame camera so
+	// it can run without re-extracting; 1-frame lag is imperceptible on soft clouds).
+	const bool lowRes = allowLowResClouds && env.lowResClouds && env.cloudCoverage > 0.0f;
+	if (lowRes)
+	{
+		GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+		EnsureCloudTarget(std::max(1, pw / 2), std::max(1, ph / 2));
+		// Render the pre-pass with the CURRENT camera (this backend draws the sky after
+		// extraction, so the current view is available inline). Compositing at the current
+		// screen UV then lines the clouds up 1:1 with the sky — no lag/swim when panning.
+		// (uInvVP/uSunDir are already the current values here; set explicitly for clarity.)
+		glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
+		glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+		glUniform1f(m_uSkyCloudPrepass, 1.0f);
+		glUniform1f(m_uSkyLowResClouds, 0.0f);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
+		glViewport(0, 0, m_cloudW, m_cloudH);
+		glDisable(GL_DEPTH_TEST);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);    // L=0, T=1 (clear sky)
+		glClear(GL_COLOR_BUFFER_BIT);
+		glBindVertexArray(m_fsVAO);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		glEnable(GL_DEPTH_TEST);
+		glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+		glViewport(0, 0, pw, ph);
+		glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj)); // restore this frame
+		glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
+	}
+	glUniform1f(m_uSkyCloudPrepass, 0.0f);
+	glUniform1f(m_uSkyLowResClouds, (lowRes && m_cloudTex) ? 1.0f : 0.0f);
+	glActiveTexture(GL_TEXTURE3);            // quarter-res cloud buffer on unit 3
+	glBindTexture(GL_TEXTURE_2D, m_cloudTex);
+	glUniform1i(m_uSkyCloudTex, 3);
+	glActiveTexture(GL_TEXTURE0);
+	glBindVertexArray(m_fsVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glDepthFunc(GL_LESS);   // restore default for the next pass
+	glDepthMask(GL_TRUE);
+}
+
 void OpenGLRenderer::DrawScene(int pw, int ph)
 {
 	// Reset the render counters before the early-return guards so a non-rendered
@@ -10604,112 +10730,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// background), so the heavy sky shader is never paid for behind solid
 		// objects. With no geometry the whole frame is background → full sky.
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
-		if (m_skyProgram && GetEnvironment().skyEnabled)
-		{
-			glUseProgram(m_skyProgram);
-			glDepthFunc(GL_LEQUAL);
-			glDepthMask(GL_FALSE);
-			glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
-			glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, m_moonTex);
-			glUniform1i(m_uSkyMoonTex, 0);
-			glUniform1i(m_uSkyHasMoon, m_moonTex ? 1 : 0);
-			glUniform1f(m_uSkyMoonPhase, GetEnvironment().moonPhase);
-			glUniform1f(m_uSkyTime, GetEnvironment().timeOfDay);
-			glUniform1f(m_uSkyCoverage, GetEnvironment().cloudCoverage);
-			// Cloud render mode + 3D-cloud parallax inputs (camera world pos + layer height).
-			glUniform1i(m_uSkyCloudMode,   GetEnvironment().cloudMode);
-			glUniform1i(m_uSkyCloudQuality, GetEnvironment().cloudQuality);
-			glUniform1i(m_uSkyCloudStyle,        GetEnvironment().cloudStyle);
-			glUniform1i(m_uSkyCloudInterShadows, GetEnvironment().cloudInterShadows ? 1 : 0);
-			glUniform1f(m_uSkyCloudEvolution,    GetEnvironment().cloudEvolution);
-			glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(m_renderWorld.camera.position));
-			glUniform1f(m_uSkyCloudHeight, GetEnvironment().cloudHeight);
-			glUniform1f(m_uSkyCloudDensity,    GetEnvironment().cloudDensity);
-			glUniform1f(m_uSkyCloudFluffiness, GetEnvironment().cloudFluffiness);
-			glUniform3fv(m_uSkyCloudTint, 1, glm::value_ptr(GetEnvironment().cloudTint));
-			glUniform1f(m_uSkyContrails,  GetEnvironment().contrailAmount);
-			glUniform1f(m_uSkyCirrus,     GetEnvironment().cirrusAmount);
-			glUniform1f(m_uSkyCirrusSeed, GetEnvironment().cirrusSeed);
-			glUniform1f(m_uSkyStarBright, GetEnvironment().starBrightness);
-			glUniform3fv(m_uSkyStarColor, 1, glm::value_ptr(GetEnvironment().starColor));
-			glUniform1f(m_uSkyStarSize,    GetEnvironment().starSize);
-			glUniform1f(m_uSkyStarSizeVar, GetEnvironment().starSizeVariation);
-			glUniform1f(m_uSkyStarDensity, GetEnvironment().starDensity);
-			glUniform1f(m_uSkyStarGlow,    GetEnvironment().starGlow);
-			glUniform1f(m_uSkyStarTwinkle, GetEnvironment().starTwinkle);
-			glUniform1f(m_uSkyRainAmount,  GetEnvironment().rainAmount);
-			glUniform1f(m_uSkyGodRays,     GetEnvironment().godRays);
-			glUniform1f(m_uSkyShootingStars, GetEnvironment().shootingStars);
-			// HE_SKY_TIME overrides the animation clock (for deterministic headless capture
-			// of time-animated sky elements like the aurora); normal runs use the wall clock.
-			float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
-			if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
-			glUniform1f(m_uSkyClock, skyClock);
-			glUniform3fv(m_uSkySunColor, 1, glm::value_ptr(GetEnvironment().sunColor));
-			glUniform1f(m_uSkyAurora, GetEnvironment().auroraIntensity);
-			glUniform1f(m_uSkyAuroraHeight,   GetEnvironment().auroraHeight);
-			glUniform1f(m_uSkyAuroraFragment, GetEnvironment().auroraFragmentation);
-			glUniform1f(m_uSkyMilkyWay, GetEnvironment().milkyWayIntensity);
-			glUniform1f(m_uSkyNebula, GetEnvironment().nebulaIntensity);
-			glUniform3fv(m_uSkyNebulaColor, 1, glm::value_ptr(GetEnvironment().nebulaColor));
-			glUniform3fv(m_uSkyNebulaColor2, 1, glm::value_ptr(GetEnvironment().nebulaColor2));
-			glUniform3fv(m_uSkyNebulaColor3, 1, glm::value_ptr(GetEnvironment().nebulaColor3));
-			glUniform1f(m_uSkyNebulaSeed, GetEnvironment().nebulaSeed);
-			glUniform1f(m_uSkyNebulaHiFi, (float)GetEnvironment().nebulaQuality); // 0/1/2 (carried in uNebulaHiFi)
-			glUniform1f(m_uSkyNebulaCover, GetEnvironment().nebulaCoverage);
-			glUniform3fv(m_uSkyAuroraColor, 1, glm::value_ptr(GetEnvironment().auroraColor));
-			glUniform3fv(m_uSkyAuroraColorTop, 1, glm::value_ptr(GetEnvironment().auroraColorTop));
-			glUniform1f(m_uSkyFlash, GetEnvironment().flash);
-			{
-				// Wind control → horizontal cloud drift vector. Direction 0° drifts
-				// toward -Z (north), increasing clockwise; speed scales the rate.
-				const glm::vec3 wind = HE::CloudWindVector(GetEnvironment());
-				glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
-			}
-			glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
-			glBindTexture(GL_TEXTURE_3D, m_noiseTex);
-			glUniform1i(m_uSkyNoise, 2);
-			// ── Low-res clouds: quarter-res clouds-only pre-pass (previous-frame camera so
-			// it can run without re-extracting; 1-frame lag is imperceptible on soft clouds).
-			const bool lowRes = GetEnvironment().lowResClouds && GetEnvironment().cloudCoverage > 0.0f;
-			if (lowRes)
-			{
-				GLint prevFBO = 0; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
-				EnsureCloudTarget(std::max(1, pw / 2), std::max(1, ph / 2));
-				// Render the pre-pass with the CURRENT camera (this backend draws the sky after
-				// extraction, so the current view is available inline). Compositing at the current
-				// screen UV then lines the clouds up 1:1 with the sky — no lag/swim when panning.
-				// (uInvVP/uSunDir are already the current values here; set explicitly for clarity.)
-				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
-				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
-				glUniform1f(m_uSkyCloudPrepass, 1.0f);
-				glUniform1f(m_uSkyLowResClouds, 0.0f);
-				glBindFramebuffer(GL_FRAMEBUFFER, m_cloudFBO);
-				glViewport(0, 0, m_cloudW, m_cloudH);
-				glDisable(GL_DEPTH_TEST);
-				glClearColor(0.0f, 0.0f, 0.0f, 1.0f);    // L=0, T=1 (clear sky)
-				glClear(GL_COLOR_BUFFER_BIT);
-				glBindVertexArray(m_fsVAO);
-				glDrawArrays(GL_TRIANGLES, 0, 3);
-				glEnable(GL_DEPTH_TEST);
-				glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
-				glViewport(0, 0, pw, ph);
-				glUniformMatrix4fv(m_uSkyInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj)); // restore this frame
-				glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(sunDir));
-			}
-			glUniform1f(m_uSkyCloudPrepass, 0.0f);
-			glUniform1f(m_uSkyLowResClouds, (lowRes && m_cloudTex) ? 1.0f : 0.0f);
-			glActiveTexture(GL_TEXTURE3);            // quarter-res cloud buffer on unit 3
-			glBindTexture(GL_TEXTURE_2D, m_cloudTex);
-			glUniform1i(m_uSkyCloudTex, 3);
-			glActiveTexture(GL_TEXTURE0);
-			glBindVertexArray(m_fsVAO);
-			glDrawArrays(GL_TRIANGLES, 0, 3);
-			glDepthFunc(GL_LESS);   // restore default for the next pass
-			glDepthMask(GL_TRUE);
-		}
+		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
+		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 
