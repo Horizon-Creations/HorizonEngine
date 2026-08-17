@@ -300,6 +300,47 @@ geht: Kante glätten statt Bild weichzeichnen.
 
 ---
 
+## 5c. MSAA: was es in DIESER Engine kosten würde
+
+Abschnitt 2.2 sagt, warum MSAA im Deferred-Pfad ausscheidet. Die interessantere Frage ist der
+**Forward-Pfad** — der ist der Default, und dort ist MSAA technisch möglich. Der konkrete Preis,
+am Metal-Backend abgezählt:
+
+**1. Jede Pipeline im Szenen-Pass braucht die Sample-Anzahl.** In Metal ist
+`rasterSampleCount` Teil des Pipeline-State und muss zu den Attachments passen — eine
+1-Sample-Pipeline in einem 4x-Pass ist ein Laufzeitfehler, kein Fallback. Betroffen sind nicht
+nur die festen Pipelines (Szene opak, Szene blend, Skinned, Sky, Debug-Linien, Partikel), sondern
+auch die **drei Caches**: `m_materialPipelineCache` (eine Pipeline pro Graph-Material),
+`m_particlePipelineCache` und `m_uiMaterialPipelines`. Deren Schlüssel ist heute der Shader-Hash;
+er müsste die Sample-Anzahl mit aufnehmen, sonst liefert der Cache nach dem Umschalten die
+falsche Variante zurück. Insgesamt ~40 Stellen, an denen ein Pipeline-Deskriptor entsteht.
+
+**2. Umschalten heißt neu bauen.** Sample-Anzahl ändern = alle diese Pipelines verwerfen und neu
+kompilieren, inklusive der gecachten Material-Pipelines. Das ist ein sichtbarer Hänger beim
+Verstellen des Reglers, und es kollidiert mit dem Metal-Pipeline-Cache auf Platte
+(`MTLBinaryArchive`, auf 27-Beta ohnehin deaktiviert).
+
+**3. Die Screenspace-Effekte müssen mitgezogen werden.** SSAO, Forward-SSR und die
+GI-Reflexionen lesen Tiefe/Normalen aus Prepässen. Entweder laufen die ebenfalls multisampled
+(teuer, und jeder Consumer braucht `texture2d_ms` + eigenen Resolve), oder sie bleiben
+1-Sample — dann sind sie gegen die MSAA-Geometrie um bis zu ein halbes Pixel versetzt.
+
+**4. Was es dafür bringt, ist begrenzt.** MSAA supersampled die Rasterisierung, nicht den
+Fragment-Shader: kriechende Glanzlichter (A6), Alpha-Test-Kanten ohne Alpha-to-Coverage und die
+Sub-Pixel-Details, an denen FXAA/SMAA scheitern, bleiben unangetastet. Gegen den vorhandenen
+Stand steht also 4x MSAA (20–40 % Frame-Kosten, alle Pipelines neu) gegen **Render Scale 2.0**,
+das seit A4 da ist, dieselben Geometriekanten löst *und* das Shading mitsupersampled — zum
+Preis von ×4 Pixeln, aber **null** Pipeline-Umbau.
+
+**Empfehlung:** MSAA nicht als nächsten Schritt bauen. Wer im Forward-Pfad harte Kanten will,
+nimmt heute SMAA (kostenlos) oder Render Scale > 1 (teuer, aber besser als MSAA, weil es das
+Shading mitnimmt). MSAA lohnt erst, wenn ein Grund auftaucht, den keine der beiden Optionen
+abdeckt — z. B. VR, wo Supersampling zu teuer und temporale Verfahren wegen der Kopfbewegung
+heikel sind. Dann ist der Einstiegspunkt Punkt 1 oben: Sample-Anzahl in die drei Cache-Schlüssel,
+und eine `rasterSampleCount`-Quelle statt 40 Einzelstellen.
+
+---
+
 ## 6. Fallen, absehbar
 
 * **Velocity ist mehr als `prevViewProj`**: Skinning, Instancing, Landscape-Chunks und
