@@ -1036,6 +1036,143 @@ fragment float4 smaaFragment(FXOut in [[stage_in]],
 }
 )MSL";
 
+// ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
+// Two shaders and one rule: the geometry is RASTERIZED with the jittered matrix
+// (so the subpixel offset lands in the image, which is the whole point), but the
+// MOTION is measured with unjittered ones. Mixing those up makes every static
+// pixel report the jitter as movement, and TAA then chases its own offset.
+static const char* kTaaMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexIn { packed_float3 position; packed_float3 normal; packed_float2 uv; };
+
+// mvpJitter rasterizes; mvpNow / mvpPrev (both unjittered) measure.
+struct VelocityUniforms {
+	float4x4 mvpJitter;
+	float4x4 mvpNow;
+	float4x4 mvpPrev;
+};
+
+struct VelOut {
+	float4 position [[position]];
+	float4 clipNow;
+	float4 clipPrev;
+};
+
+vertex VelOut velocityVertex(uint vid [[vertex_id]],
+                             const device VertexIn* verts [[buffer(0)]],
+                             constant VelocityUniforms& u [[buffer(1)]])
+{
+	const float4 p = float4(float3(verts[vid].position), 1.0);
+	VelOut o;
+	o.position = u.mvpJitter * p;
+	o.clipNow  = u.mvpNow  * p;
+	o.clipPrev = u.mvpPrev * p;
+	return o;
+}
+
+// Screen-space motion in TEXTURE-UV units, so the resolve can subtract it from
+// its own uv without knowing anything about clip space or the y flip.
+fragment float2 velocityFragment(VelOut in [[stage_in]])
+{
+	const float2 ndcNow  = in.clipNow.xy  / max(in.clipNow.w,  1e-6);
+	const float2 ndcPrev = in.clipPrev.xy / max(in.clipPrev.w, 1e-6);
+	float2 uvNow  = float2(ndcNow.x,  -ndcNow.y)  * 0.5 + 0.5;
+	float2 uvPrev = float2(ndcPrev.x, -ndcPrev.y) * 0.5 + 0.5;
+	return uvNow - uvPrev;
+}
+
+struct TaaOut { float4 position [[position]]; float2 uv; };
+
+vertex TaaOut taaVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	TaaOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+// params: x/y = 1/resolution, z = history blend weight (0 = history unusable
+// this frame — resize, camera jump, first frame), w unused.
+fragment float4 taaFragment(TaaOut in [[stage_in]],
+                            texture2d<float> current  [[texture(0)]],
+                            texture2d<float> history  [[texture(1)]],
+                            texture2d<float> velocity [[texture(2)]],
+                            constant float4& params   [[buffer(0)]])
+{
+	constexpr sampler linearS(filter::linear, address::clamp_to_edge);
+	constexpr sampler pointS(filter::nearest, address::clamp_to_edge);
+	const float2 rcp = params.xy;
+	const float3 cur = current.sample(pointS, in.uv).rgb;
+	if (params.z <= 0.0) return float4(cur, 1.0);
+
+	// Motion of the CLOSEST fragment in the neighbourhood, not this pixel's own:
+	// on a silhouette the pixel itself may carry the background's motion while
+	// the eye follows the object, and picking the nearest keeps the edge with
+	// the object instead of smearing it against the background.
+	float2 vel = velocity.sample(pointS, in.uv).rg;
+	{
+		float best = length(vel);
+		for (int y = -1; y <= 1; ++y)
+			for (int x = -1; x <= 1; ++x)
+			{
+				const float2 v = velocity.sample(pointS, in.uv + float2(x, y) * rcp).rg;
+				const float  l = length(v);
+				if (l > best) { best = l; vel = v; }
+			}
+	}
+
+	const float2 histUV = in.uv - vel;
+	// Off-screen history is no history: nothing was ever accumulated there.
+	if (any(histUV < float2(0.0)) || any(histUV > float2(1.0)))
+		return float4(cur, 1.0);
+
+	float3 hist = history.sample(linearS, histUV).rgb;
+
+	// Neighbourhood clamp — the whole defence against ghosting. Whatever the
+	// history says, the result has to stay inside the colours this frame
+	// actually produced around this pixel; a disoccluded surface therefore
+	// cannot keep showing what used to be in front of it.
+	float3 lo = cur, hi = cur;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			const float3 c = current.sample(pointS, in.uv + float2(x, y) * rcp).rgb;
+			lo = min(lo, c);
+			hi = max(hi, c);
+		}
+	hist = clamp(hist, lo, hi);
+
+	// Fast motion means less history: the further the reprojection reached, the
+	// less it can be trusted (and the less a stale sample is worth).
+	const float motion = saturate(length(vel * float2(current.get_width(), current.get_height())) / 32.0);
+	const float blend  = mix(params.z, 0.0, motion);
+	return float4(mix(cur, hist, blend), 1.0);
+}
+
+// The temporal average is softer than a single frame by construction — this is
+// the sharpen that buys that back, and the only reason the AA-resolve slot still
+// runs a shader for TAA instead of a plain blit. sharpness 0 = exact passthrough.
+fragment float4 taaSharpenFragment(TaaOut in [[stage_in]],
+                                   texture2d<float> src [[texture(0)]],
+                                   constant float4& params [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	const float2 rcp = params.xy;
+	const float  amount = params.z;
+	const float3 c = src.sample(s, in.uv).rgb;
+	if (amount <= 0.0) return float4(c, 1.0);
+	const float3 blur = 0.25 * (src.sample(s, in.uv + float2( rcp.x, 0.0)).rgb
+	                          + src.sample(s, in.uv + float2(-rcp.x, 0.0)).rgb
+	                          + src.sample(s, in.uv + float2(0.0,  rcp.y)).rgb
+	                          + src.sample(s, in.uv + float2(0.0, -rcp.y)).rgb);
+	return float4(clamp(c + (c - blur) * amount, 0.0, 1.0), 1.0);
+}
+)MSL";
+
 // In-Game UI 2D pass: quads derived from vertex_id + uniforms.
 // rect = {x, y, w, h} pixels;  viewport = {vpW, vpH} pixels;
 // uvrect = {u0, v0, u1, v1} into the font atlas (glyph quads).
@@ -5505,6 +5642,10 @@ void MetalRenderer::Shutdown()
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_aaBlitPipeline)       { CFBridgingRelease(m_aaBlitPipeline);       m_aaBlitPipeline = nullptr; }
 	if (m_smaaPipeline)         { CFBridgingRelease(m_smaaPipeline);         m_smaaPipeline = nullptr; }
+	if (m_velocityPipeline)     { CFBridgingRelease(m_velocityPipeline);     m_velocityPipeline = nullptr; }
+	if (m_taaPipeline)          { CFBridgingRelease(m_taaPipeline);          m_taaPipeline = nullptr; }
+	if (m_taaSharpenPipeline)   { CFBridgingRelease(m_taaSharpenPipeline);   m_taaSharpenPipeline = nullptr; }
+	DestroyTaaTargets();
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
 	for (auto& [k, t] : m_uiFontAtlases) if (t) CFBridgingRelease(t);
@@ -5744,6 +5885,57 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: SMAA pipeline creation failed: ")
 				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
 		m_smaaPipeline = (void*)CFBridgingRetain(smaaPso);
+
+		// ── TAA: velocity pass + temporal resolve + sharpen (A2/A3) ─────────
+		{
+			NSError* taaError = nil;
+			id<MTLLibrary> taaLib = [device newLibraryWithSource:
+				[NSString stringWithUTF8String:kTaaMSL] options:nil error:&taaError];
+			if (!taaLib)
+				throw std::runtime_error(std::string("MetalRenderer: TAA shader compile failed: ")
+					+ (taaError ? [[taaError localizedDescription] UTF8String] : "unknown"));
+
+			// Velocity: RG16F colour, depth-tested against the depth the G-buffer
+			// pass already wrote (LessEqual, no write) so only visible surfaces
+			// report motion.
+			MTLRenderPipelineDescriptor* velDesc = [[MTLRenderPipelineDescriptor alloc] init];
+			velDesc.vertexFunction   = [taaLib newFunctionWithName:@"velocityVertex"];
+			velDesc.fragmentFunction = [taaLib newFunctionWithName:@"velocityFragment"];
+			velDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
+			velDesc.depthAttachmentPixelFormat      = kDepthFormat;
+			id<MTLRenderPipelineState> velPso =
+				[device newRenderPipelineStateWithDescriptor:velDesc error:&taaError];
+			if (!velPso)
+				throw std::runtime_error(std::string("MetalRenderer: velocity pipeline creation failed: ")
+					+ (taaError ? [[taaError localizedDescription] UTF8String] : "unknown"));
+			m_velocityPipeline = (void*)CFBridgingRetain(velPso);
+
+			// Temporal resolve: LDR in, LDR out, no depth (its own pass).
+			MTLRenderPipelineDescriptor* taaDesc = [[MTLRenderPipelineDescriptor alloc] init];
+			taaDesc.vertexFunction   = [taaLib newFunctionWithName:@"taaVertex"];
+			taaDesc.fragmentFunction = [taaLib newFunctionWithName:@"taaFragment"];
+			taaDesc.colorAttachments[0].pixelFormat = kSwapchainFormat;
+			id<MTLRenderPipelineState> taaPso =
+				[device newRenderPipelineStateWithDescriptor:taaDesc error:&taaError];
+			if (!taaPso)
+				throw std::runtime_error(std::string("MetalRenderer: TAA pipeline creation failed: ")
+					+ (taaError ? [[taaError localizedDescription] UTF8String] : "unknown"));
+			m_taaPipeline = (void*)CFBridgingRetain(taaPso);
+
+			// Sharpen runs in the shared AA-resolve slot, so it needs that slot's
+			// attachment formats (colour + depth), like the FXAA/SMAA pipelines.
+			MTLRenderPipelineDescriptor* shDesc = [[MTLRenderPipelineDescriptor alloc] init];
+			shDesc.vertexFunction   = [taaLib newFunctionWithName:@"taaVertex"];
+			shDesc.fragmentFunction = [taaLib newFunctionWithName:@"taaSharpenFragment"];
+			shDesc.colorAttachments[0].pixelFormat = kSwapchainFormat;
+			shDesc.depthAttachmentPixelFormat      = kDepthFormat;
+			id<MTLRenderPipelineState> shPso =
+				[device newRenderPipelineStateWithDescriptor:shDesc error:&taaError];
+			if (!shPso)
+				throw std::runtime_error(std::string("MetalRenderer: TAA sharpen pipeline creation failed: ")
+					+ (taaError ? [[taaError localizedDescription] UTF8String] : "unknown"));
+			m_taaSharpenPipeline = (void*)CFBridgingRetain(shPso);
+		}
 
 		// AA = Off: same pass, same attachments, passthrough fragment.
 		fxDesc.fragmentFunction = [fxLib newFunctionWithName:@"aaBlitFragment"];
@@ -9675,7 +9867,7 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
 	// Resolve once, here, against what this backend can do — the render path
 	// then only ever sees a runnable method.
-	m_aaMethod          = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	m_aaMethodRequested = s.method;   // resolved at use time — see ActiveAAMethod()
 	m_aaSharpness       = s.sharpness;
 	m_specularAA        = s.specularAA;
 	m_specularAAStrength = s.specularAAStrength;
@@ -10271,20 +10463,201 @@ void MetalRenderer::DestroyLdrTarget()
 	m_ldrW = m_ldrH = 0;
 }
 
+// Draw the frame's opaque geometry once more, writing only where each surface
+// moved on screen. A separate pass on purpose: the alternative is a fifth
+// G-buffer attachment, which would mean teaching FOUR pipeline descriptors and
+// the graph-material codegen to write velocity — a material that forgot would
+// leave undefined motion and ghost. This pass is material-agnostic by
+// construction: it only ever reads positions.
+void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
+{
+	if (!TaaActive() || !m_velocityTex || m_sortedIndices.empty()) return;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_velocityTex;
+	pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	// Cleared to zero = "did not move", which is also what the sky and every
+	// pixel this pass does not reach should report.
+	pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+	// Depth-test against what the G-buffer pass already wrote, without touching
+	// it: only the surfaces that are actually visible get to report motion.
+	pass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
+	pass.depthAttachment.loadAction  = MTLLoadActionLoad;
+	pass.depthAttachment.storeAction = MTLStoreActionStore;
+
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_velocityPipeline];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+
+	const glm::mat4 viewProjClean = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 viewProjJit   = JitteredViewProj(viewProjClean, width, height);
+
+	struct VelocityUniformsCPU { glm::mat4 mvpJitter, mvpNow, mvpPrev; };
+	m_taaCurTransforms.clear();
+	for (const uint32_t idx : m_sortedIndices)
+	{
+		const RenderObject& obj = m_renderWorld.objects[idx];
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		if (!mesh || !mesh->vertexBuf || !mesh->indexBuf) continue;
+
+		// An object seen for the first time reports no motion — its "previous"
+		// position is where it is now. Anything else invents a streak out of
+		// nowhere on the frame something spawns.
+		const auto it = m_taaPrevTransforms.find(obj.entityId);
+		const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+		m_taaCurTransforms[obj.entityId] = obj.transform;
+
+		VelocityUniformsCPU u;
+		u.mvpJitter = viewProjJit   * obj.transform;
+		u.mvpNow    = viewProjClean * obj.transform;
+		u.mvpPrev   = m_taaPrevViewProj * prevModel;
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                indexCount:mesh->indexCount
+		                 indexType:MTLIndexTypeUInt32
+		               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
+		         indexBufferOffset:0];
+	}
+	[enc endEncoding];
+
+	// Advance the history HERE, at the end of the one pass that consumed it —
+	// not at some "frame end" further out. The extractor runs several times per
+	// frame; anchoring the step to this pass is what keeps a frame from being
+	// compared against itself.
+	m_taaPrevViewProj = viewProjClean;
+	m_taaPrevTransforms.swap(m_taaCurTransforms);
+}
+
+// Blend this frame's tonemapped image with the reprojected history. Runs AFTER
+// the tonemap and BEFORE the AA-resolve slot, so the history lives in the same
+// LDR space the user sees — which also keeps a single bright HDR sample from
+// poisoning the accumulation for the next dozen frames.
+void MetalRenderer::EncodeTaa(void* cmdBufPtr, int width, int height)
+{
+	if (!TaaActive() || !m_taaResolved || !m_ldrColor) return;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_taaResolved;
+	pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_taaPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ldrColor    atIndex:0];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_taaHistory  atIndex:1];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_velocityTex atIndex:2];
+	// 0.9 keeps ~10 frames of samples: enough to converge on an edge, short
+	// enough that a mis-reprojected pixel does not linger.
+	const simd::float4 params = { 1.0f / (float)std::max(1, width),
+	                              1.0f / (float)std::max(1, height),
+	                              m_taaHistoryValid ? 0.9f : 0.0f,
+	                              0.0f };
+	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+
+	// This frame's result IS next frame's history.
+	id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+	[blit copyFromTexture:(__bridge id<MTLTexture>)m_taaResolved
+	          sourceSlice:0 sourceLevel:0
+	         sourceOrigin:MTLOriginMake(0, 0, 0)
+	           sourceSize:MTLSizeMake(m_taaW, m_taaH, 1)
+	            toTexture:(__bridge id<MTLTexture>)m_taaHistory
+	     destinationSlice:0 destinationLevel:0
+	    destinationOrigin:MTLOriginMake(0, 0, 0)];
+	[blit endEncoding];
+	m_taaHistoryValid = true;
+}
+
+bool MetalRenderer::TaaActive() const
+{
+	// Both halves have to be true: the user picked it AND the deferred path that
+	// feeds the velocity pass is really running this frame. Asking this in one
+	// place is what keeps pass setup and shader binding from disagreeing.
+	return ActiveAAMethod() == HE::AAMethod::TAA &&
+	       m_renderPath == HE::RenderPath::Deferred &&
+	       m_velocityPipeline && m_taaPipeline;
+}
+
+// The rasterisation matrix. The offset is applied in CLIP space (a translation
+// of the projected x/y by a fraction of a pixel), which is the same thing as
+// shifting the sample grid — and it leaves the caller's matrix untouched, so the
+// unjittered one stays available for motion and reprojection.
+glm::mat4 MetalRenderer::JitteredViewProj(const glm::mat4& viewProj, int width, int height) const
+{
+	if (!TaaActive() || width <= 0 || height <= 0) return viewProj;
+	glm::mat4 j(1.0f);
+	j[3][0] = m_taaJitter.x * 2.0f / static_cast<float>(width);
+	j[3][1] = m_taaJitter.y * 2.0f / static_cast<float>(height);
+	return j * viewProj;
+}
+
+void MetalRenderer::EnsureTaaTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_taaHistory && width == m_taaW && height == m_taaH) return;
+	DestroyTaaTargets();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	auto make = [&](MTLPixelFormat fmt) -> void* {
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:fmt width:width height:height mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		return (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+	};
+	m_velocityTex = make(MTLPixelFormatRG16Float);
+	m_taaHistory  = make(kSwapchainFormat);
+	m_taaResolved = make(kSwapchainFormat);
+	m_taaW = width;
+	m_taaH = height;
+	// A fresh history is garbage, not history: the first frame after a resize
+	// must show the current frame only, or it blends against uninitialised
+	// memory. Same reason a camera jump has to clear this.
+	m_taaHistoryValid = false;
+}
+
+void MetalRenderer::DestroyTaaTargets()
+{
+	if (m_velocityTex) { CFBridgingRelease(m_velocityTex); m_velocityTex = nullptr; }
+	if (m_taaHistory)  { CFBridgingRelease(m_taaHistory);  m_taaHistory  = nullptr; }
+	if (m_taaResolved) { CFBridgingRelease(m_taaResolved); m_taaResolved = nullptr; }
+	m_taaW = m_taaH = 0;
+	m_taaHistoryValid = false;
+	m_taaPrevTransforms.clear();
+	m_taaCurTransforms.clear();
+}
+
 // Fullscreen AA resolve of the tonemapped LDR image into the bound encoder's
 // target. This is the pass that FILLS that target, so it always draws — the AA
 // method only picks the pipeline (FXAA filter vs. straight blit).
 void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 {
-	void* pipeline = (m_aaMethod == HE::AAMethod::Off)  ? m_aaBlitPipeline
-	               : (m_aaMethod == HE::AAMethod::SMAA) ? m_smaaPipeline
-	                                                    : m_fxaaPipeline;
+	const HE::AAMethod method = ActiveAAMethod();
+	// TAA already produced the finished image in its own pass; this slot only
+	// moves it to the target (with the optional sharpen the temporal blur asks
+	// for). Off = passthrough, SMAA/FXAA filter the tonemapped LDR.
+	void* pipeline = (method == HE::AAMethod::TAA && m_taaResolved) ? m_taaSharpenPipeline
+	               : (method == HE::AAMethod::Off)                  ? m_aaBlitPipeline
+	               : (method == HE::AAMethod::SMAA)                 ? m_smaaPipeline
+	                                                                : m_fxaaPipeline;
 	if (!pipeline || !m_ldrColor) return;
+	// The TAA slot reads its own output, everything else the tonemapped LDR.
+	void* source = (pipeline == m_taaSharpenPipeline) ? m_taaResolved : m_ldrColor;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
-	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ldrColor atIndex:0];
-	const simd::float2 rcpFrame = { 1.0f / (float)std::max(1, width), 1.0f / (float)std::max(1, height) };
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)source atIndex:0];
+	// float4, not float2: the sharpen used by the TAA slot needs its amount in
+	// .z. The FXAA/SMAA fragments declare a float2 and simply ignore the tail.
+	const simd::float4 rcpFrame = { 1.0f / (float)std::max(1, width),
+	                                1.0f / (float)std::max(1, height),
+	                                (pipeline == m_taaSharpenPipeline) ? m_aaSharpness : 0.0f,
+	                                0.0f };
 	[enc setFragmentBytes:&rcpFrame length:sizeof(rcpFrame) atIndex:0];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -10698,8 +11071,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
 	                      m_renderWorld);
 
-	const glm::mat4 viewProj =
-		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	// Jittered for TAA (no-op otherwise): the forward tail — sky, transparency,
+	// the resolve's own fullscreen draw — has to sit on the same sample grid as
+	// the G-buffer geometry, or the temporal filter sees them fighting.
+	const glm::mat4 viewProj = JitteredViewProj(
+		m_renderWorld.camera.projection * m_renderWorld.camera.view, width, height);
 
 	// Direction toward the sun for sky + image-based ambient — resolved by the
 	// extractor (scene directional light, or the day-night cycle when enabled).
@@ -12774,8 +13150,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	                    static_cast<float>(width) / static_cast<float>(height),
 	                    &m_editorCamera);
 
-	const glm::mat4 viewProj =
-		m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	// Rasterised with this frame's subpixel jitter when TAA is on (no-op
+	// otherwise). The clean matrix stays available for the velocity pass, which
+	// must measure motion, not jitter.
+	const glm::mat4 viewProj = JitteredViewProj(
+		m_renderWorld.camera.projection * m_renderWorld.camera.view, width, height);
 
 	if (m_renderWorld.objects.empty()) return;
 
@@ -13300,6 +13679,32 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool deferredActive =
 				m_renderPath == HE::RenderPath::Deferred && EnsureDeferredPipelines();
 			m_deferredFrameActive = deferredActive;
+
+			// ── TAA: this frame's jitter (A2) ───────────────────────────────
+			// Halton(2,3), 8 positions: a low-discrepancy sequence covers the
+			// pixel evenly in few frames, where a random offset clumps and a
+			// regular grid re-aliases. Chosen BEFORE anything builds a matrix,
+			// because every rasterising pass this frame must share one offset.
+			if (TaaActive())
+			{
+				EnsureTaaTargets(sceneW, sceneH);
+				auto halton = [](uint32_t i, uint32_t base) {
+					float f = 1.0f, r = 0.0f;
+					while (i > 0) { f /= static_cast<float>(base); r += f * (i % base); i /= base; }
+					return r;
+				};
+				const uint32_t n = (m_taaFrameIndex % 8u) + 1u;
+				m_taaJitter = glm::vec2(halton(n, 2) - 0.5f, halton(n, 3) - 0.5f);
+				++m_taaFrameIndex;
+			}
+			else if (m_taaHistory)
+			{
+				// Freed as soon as the mode is off, and the history is dropped
+				// with it — a stale one would blend against a different world
+				// the moment TAA comes back on.
+				DestroyTaaTargets();
+				m_taaJitter = glm::vec2(0.0f);
+			}
 			const bool deferredTile = deferredActive && m_deferredTileMode;
 			// SSR: deferred TILE mode traces the stored G-buffer + this frame's
 			// resolved HDR (§4.5, lag-free); the FORWARD path traces the MRT
@@ -13422,6 +13827,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					deferredFrame.resolveDone = true;
 				}
 				[gbEncoder endEncoding];
+
+				// Screen-space motion, straight after the pass whose depth it
+				// tests against (A2). Only runs when TAA is the active mode.
+				EncodeVelocity((__bridge void*)cmdBuf, sceneW, sceneH);
 
 				// Reflections: the GI compute trace fills m_giReflTex first,
 				// then the shared composite (SSR trace + additive env-specular
@@ -13621,6 +14030,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				EncodeTonemap((__bridge void*)tmEncoder);
 				[tmEncoder endEncoding];
 			}
+
+			// Temporal accumulation on the tonemapped image (A3). No-op unless
+			// TAA is the active mode; the AA-resolve slot below then reads
+			// m_taaResolved instead of m_ldrColor.
+			EncodeTaa((__bridge void*)cmdBuf, sceneW, sceneH);
 
 			// FXAA LDR → offscreen viewport texture (shown by the editor).
 			if (offscreen)
@@ -14152,6 +14566,11 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// Ray-traced GI reflections: tile-deferred AND forward (same kernels, fed
 	// from the pre-pass); the SW-BVH kernel covers devices without HW RT.
 	c.supportsGIReflections = true;
+	// TAA needs a velocity buffer, and the velocity pass depth-tests against the
+	// G-buffer's depth — so it exists in the DEFERRED path only (same shape as
+	// the SSR gate above). Reported as a capability rather than silently falling
+	// back, so the editor can grey the entry out and say why.
+	c.supportsTemporalAA = (m_renderPath == HE::RenderPath::Deferred);
 #endif
 	return c;
 }

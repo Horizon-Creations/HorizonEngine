@@ -712,11 +712,57 @@ private:
 	// to the output (viewport or drawable). The METHOD picks the pipeline — FXAA
 	// on the gamma-space luma, or a passthrough when the user chose Off. The pass
 	// is never skipped: it is what fills the output.
-	HE::AAMethod m_aaMethod = HE::AAMethod::FXAA;
+	// The RAW requested method, not the resolved one: resolving depends on
+	// GetCapabilities(), and supportsTemporalAA depends on the render path,
+	// which the editor pushes AFTER the AA settings. Storing the request and
+	// resolving at use time removes that one-frame ordering trap entirely.
+	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
+	HE::AAMethod ActiveAAMethod() const
+	{
+		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
+	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
 	bool  m_specularAA      = true;   // A6 — roughness regularization in shading
 	float m_specularAAStrength = 1.0f;
 	void* m_fxaaPipeline   = nullptr; // id<MTLRenderPipelineState>
+	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ───────────────────────
+	// Deferred path only: the velocity pass depth-tests against the G-buffer's
+	// depth, so it needs geometry that pass already drew. m_aaMethod == TAA is
+	// resolved against supportsTemporalAA, which is false while the render path
+	// is Forward — so these stay untouched there.
+	//
+	// The jitter lives ONLY in the rasterisation matrices (JitteredViewProj).
+	// Velocity, TAA reprojection and the GI/SSR history all use the CLEAN ones:
+	// a jittered velocity would carry the subpixel offset as if the world had
+	// moved, and jittered GI accumulation would never settle.
+	void* m_velocityTex    = nullptr; // id<MTLTexture> RG16F — this frame's screen-space motion
+	void* m_taaHistory     = nullptr; // id<MTLTexture> — last frame's RESOLVED LDR image
+	void* m_taaResolved    = nullptr; // id<MTLTexture> — this frame's TAA output (history next frame)
+	int   m_taaW = 0, m_taaH = 0;
+	bool  m_taaHistoryValid = false;  // false after resize / camera jump → first frame takes current only
+	uint32_t  m_taaFrameIndex = 0;    // drives the Halton sequence
+	glm::vec2 m_taaJitter{0.0f};      // this frame's offset, NDC units
+	glm::mat4 m_taaPrevViewProj{1.0f};// LAST frame's UNJITTERED view-proj (velocity + reprojection)
+	// Per-entity world transform of the LAST frame. Kept HERE and not in the
+	// extractor because the extractor runs more than once per frame — advancing
+	// the history there would compare a frame against itself.
+	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
+	std::unordered_map<uint32_t, glm::mat4> m_taaCurTransforms;
+	void* m_velocityPipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_taaPipeline      = nullptr; // id<MTLRenderPipelineState> — resolve+history blend
+	void* m_taaSharpenPipeline = nullptr; // id<MTLRenderPipelineState> — TAA output → final target
+	void  EnsureTaaTargets(int width, int height);
+	void  DestroyTaaTargets();
+	// True when TAA should run this frame (mode picked AND the deferred path that
+	// feeds it is actually active). One place, so pass setup and shader binding
+	// cannot disagree about whether there is a velocity buffer.
+	bool  TaaActive() const;
+	// The rasterisation matrix: `viewProj` shifted by this frame's subpixel
+	// jitter. Identity-equivalent when TAA is off.
+	glm::mat4 JitteredViewProj(const glm::mat4& viewProj, int width, int height) const;
+	void  EncodeVelocity(void* cmdBuf, int width, int height);
+	void  EncodeTaa(void* cmdBuf, int width, int height);
+
 	void* m_smaaPipeline   = nullptr; // id<MTLRenderPipelineState> — AA = SMAA
 	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off
 	void* m_ldrColor     = nullptr; // id<MTLTexture> (retained), tonemap out / FXAA in

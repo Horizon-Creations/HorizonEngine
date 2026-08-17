@@ -233,6 +233,7 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 | Stufe | Stand | Anmerkung |
 |---|---|---|
 | **A0** | ✅ auf dem Branch | `HE::AAMethod` + `IRenderer::AntiAliasingSettings` + `ResolveAAMethod`, Editor-Preferences-Zeile, Projekt-Config, Push aus Editor **und** gepacktem Spiel, `HE_DUMP_AA` / `HE_DUMP_RENDERSCALE` / `HE_DUMP_SPECAA`. „Off" tauscht den Shader gegen einen Passthrough — der Pass läuft weiter, weil er das Ausgabetarget füllt. Metal headless verifiziert |
+| **A2+A3** | ✅ Metal (deferred) auf dem Branch | Halton(2,3)-Jitter nur in der Rasterisierungsmatrix, **eigener Velocity-Pass** statt fünftem G-Buffer-Attachment (siehe unten), TAA auf dem getonemappten Bild mit Neighbourhood-Clamp + Sharpen im vorhandenen Resolve-Slot. `supportsTemporalAA` = „Render Path ist Deferred". GL/D3D/Vulkan: offen |
 | **A6** | ✅ auf dem Branch | Roughness-Verbreiterung aus der Normal-Varianz im Pixel (Kaplanyan/Filament), in Forward **und** G-Buffer, nie im Resolve. Schalter + Stärke in den Preferences, `HE_DUMP_SPECAA` überschreibt beides headless. Wirkungsnachweis auf gekrümmter Geometrie offen (siehe unten) |
 | **A1** | ✅ auf dem Branch | SMAA in allen fünf Backends, aber **einpassig**: Kantenerkennung, Span-Suche, analytische Coverage und Blend stecken in dem Pass, der vorher FXAA war. Kein Edges-/Weights-Target, also keine neuen Render-Targets, Descriptor-Slots oder Render-Passes in fünf Backends. Verzicht: keine AreaTex → keine Diagonalen, keine Corner-Rounding; Suchreichweite 32 Texel (8 Einzel-, dann Doppelschritte). Qualität = MLAA-Niveau, sichtbar über FXAA. Nächster Ausbau wäre die AreaTex zur Laufzeit zu erzeugen — nicht Binaries zu vendorn |
 
@@ -260,6 +261,20 @@ Zwei Dinge daran sind nicht verhandelbar und im Code kommentiert:
 * Der Zwischenwert darf nicht `kernel` heißen — das ist in MSL ein reservierter
   Funktions-Qualifier, und der Metal-Shader ist mit genau diesem Namen nicht mehr
   kompiliert (`expected unqualified-id`). Steht jetzt in allen Kopien als `kernelRough` da.
+
+**Warum A2 ein eigener Pass wurde statt eines fünften G-Buffer-Attachments:** ein weiteres
+Attachment hätte **vier** Pipeline-Deskriptoren (Built-in-G-Buffer, zwei Graph-Material-Varianten,
+Decals) und die Node-Graph-Codegen dazu bringen müssen, Velocity mitzuschreiben — und ein
+Material, das es vergisst, liefert undefinierte Bewegung und geistert. Der separate Pass ist
+material-agnostisch: er liest nur Positionen, tiefen-testet gegen die Tiefe, die der G-Buffer
+schon geschrieben hat (LessEqual, kein Write), und kostet einen zusätzlichen Geometrie-Durchlauf
+— nur wenn TAA an ist.
+
+Gemessen (Metal, deferred, Würfel-auf-Boden): Spalten der Silhouette mit echtem Zwischenwert
+**135 ohne AA → 584 mit TAA** (FXAA: 680, glättet aber per Filter statt per Sub-Pixel-Sample).
+Zwischen 16 und 48 Aufwärm-Frames ändern sich noch 3723 Pixel — die History-Gewichtung 0.9
+behält bewusst 10 % des letzten (gejitterten) Frames, das Bild „atmet" also minimal, statt
+einzufrieren.
 
 **Reichweite von A6, exakt:** Graph-Materialien bekommen es über die Preamble auf **jedem**
 Backend, sobald dieses `heLight.specAA` füllt — heute füllen es GL und Metal. Die

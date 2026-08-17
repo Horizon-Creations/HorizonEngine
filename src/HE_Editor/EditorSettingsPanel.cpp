@@ -247,7 +247,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
-			hint("This backend has no velocity buffer yet — falls back to SMAA.");
+			hint("TAA needs Render Path = Deferred (velocity buffer) — falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
