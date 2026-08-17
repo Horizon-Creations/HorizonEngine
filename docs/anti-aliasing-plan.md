@@ -228,11 +228,16 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 
 ## 7. Quellen
 
-* PCGamingWiki — Glossary: Anti-aliasing (AA), Glossary: High-fidelity upscaling
-* Apple Developer — „Applying temporal antialiasing and upscaling using MetalFX",
-  WWDC22 „Boost performance with MetalFX Upscaling"
-* Unreal Engine: TAA vs. TSR (Kosten/Verhalten im Deferred-Renderer)
+* PCGamingWiki — [Glossary: Anti-aliasing (AA)](https://www.pcgamingwiki.com/wiki/Glossary:Anti-aliasing_(AA)),
+  [Glossary: High-fidelity upscaling](https://www.pcgamingwiki.com/wiki/Glossary:High-fidelity_upscaling)
+* Apple Developer — [Applying temporal antialiasing and upscaling using MetalFX](https://developer.apple.com/documentation/MetalFX/applying-temporal-antialiasing-and-upscaling-using-metalfx),
+  WWDC22 [Boost performance with MetalFX Upscaling](https://developer.apple.com/videos/play/wwdc2022/10103/)
+* [Anti-Aliasing in Unreal Engine 5: TAA vs TSR](https://medium.com/@GroundZer0/understanding-anti-aliasing-in-unreal-engine-5-4d993140177f)
+  (Kosten/Verhalten im Deferred-Renderer)
 * Vergleichsübersichten DLSS 4 / FSR 4 / XeSS 2 (2026): Transformer-Modell in DLSS 4,
-  FSR 4 auf RX 9000, XeSS 2 „Native AA", jeweils über nativem TAA in vielen Titeln
+  FSR 4 auf RX 9000, XeSS 2 „Native AA", jeweils über nativem TAA in vielen Titeln —
+  [PC Game Check](https://pcgamecheck.com/blog/dlss-4-vs-fsr-4-vs-xess-2026),
+  [Switchblade Gaming](https://www.switchbladegaming.com/game-settings/dlss-vs-fsr-vs-xess-2026/),
+  [Notebookcheck: FSR 4 vs FSR 3 vs DLSS](https://www.notebookcheck.net/FSR-4-vs-FSR-3-vs-DLSS-FSR-4-shows-remarkable-improvement-over-FSR-3-and-approaches-latest-DLSS-version-in-quality.973137.0.html)
 * Engine-intern: `docs/deferred-renderer-plan.md` (G-Buffer v1), `docs/ssr-plan.md`
   (Reprojektion/Jitter), `docs/backend-parity-plan.md`
