@@ -28,6 +28,14 @@
 namespace HE
 {
 
+// The preview's studio background, and the reference point for the colours
+// below. LINEAR — the preview renders HDR and resolves through the scene's ACES
+// tonemap + gamma encode, which lifts a value a long way: the 0.22 this used to
+// be arrived on screen at about 0.60, a bright silver that fought with
+// everything in front of it. 0.030 lands near 0.17, the dark neutral an asset
+// viewer wants. Change this and the grid colours together or the contrast
+// between them drifts.
+constexpr float kPreviewBackground[3] = { 0.030f, 0.030f, 0.034f };
 
 // Grid lines every `step` units out to ±halfExtent, with every tenth line
 // brighter, the two axes THROUGH the origin tinted, and a small marker on the
@@ -36,11 +44,15 @@ namespace HE
 inline void buildPreviewGrid(float halfExtent, float step, std::vector<float>& out,
                              const glm::vec3& origin = glm::vec3(0.0f))
 {
-    const glm::vec3 minor(0.255f, 0.255f, 0.275f);
-    const glm::vec3 major(0.360f, 0.360f, 0.385f);
-    const glm::vec3 axisX(0.55f, 0.22f, 0.22f);
-    const glm::vec3 axisZ(0.22f, 0.28f, 0.62f);
-    const glm::vec3 axisY(0.24f, 0.55f, 0.28f);
+    // LINEAR values feeding the same ACES + gamma resolve as the background —
+    // roughly a quarter of what they would be if this drew straight to the
+    // screen. Read them as "minor ≈ 0.28 on screen, major ≈ 0.33": the numbers
+    // here look far darker than the result.
+    const glm::vec3 minor(0.060f, 0.060f, 0.066f);
+    const glm::vec3 major(0.085f, 0.085f, 0.092f);
+    const glm::vec3 axisX(0.130f, 0.048f, 0.048f);
+    const glm::vec3 axisZ(0.048f, 0.064f, 0.150f);
+    const glm::vec3 axisY(0.052f, 0.130f, 0.062f);
 
     auto push = [&out](const glm::vec3& p, const glm::vec3& c) {
         out.insert(out.end(), { p.x, p.y, p.z, c.r, c.g, c.b });

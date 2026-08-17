@@ -41,6 +41,8 @@ void InputMapping::tick(const Input& input, const MouseFrame& mouse)
             cur = cur || (b.key != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.key));
             cur = cur || (b.gamepadButton != SDL_GAMEPAD_BUTTON_INVALID &&
                           input.isGamepadButtonDown(b.gamepadButton));
+            cur = cur || (b.mouseButton >= 0 && b.mouseButton < kMouseButtonCount &&
+                          (mouse.buttons & (1u << b.mouseButton)) != 0);
         }
 
         entry.state.isPressed    = cur;

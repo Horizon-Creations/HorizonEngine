@@ -9,14 +9,20 @@
 
 class Input;
 
-// One key OR one gamepad button that triggers a named action. A binding row
-// sets one of the two; a row may also set both, in which case either triggers.
-// The button is appended (not a tagged union) so `{ SDL_SCANCODE_SPACE }`
+// One key, gamepad button OR mouse button that triggers a named action. A
+// binding row usually sets one of the three; any that are set trigger. Each
+// new device is appended (not a tagged union) so `{ SDL_SCANCODE_SPACE }`
 // keeps compiling and meaning what it meant.
+//
+// The mouse button is checked against the MouseFrame HANDED TO tick(), not
+// against Input — so it obeys the same ownership gate as mouse movement: the
+// editor passes a blank frame outside play capture, and a click on editor UI
+// can never fire a game action.
 struct ActionBinding
 {
     SDL_Scancode      key           = SDL_SCANCODE_UNKNOWN;
     SDL_GamepadButton gamepadButton = SDL_GAMEPAD_BUTTON_INVALID;
+    int               mouseButton   = -1;   // MouseButton index, -1 = none
 };
 
 // Where an axis binding takes its value from. Named so it extends — and the

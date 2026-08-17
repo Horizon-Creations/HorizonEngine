@@ -8,10 +8,30 @@
 // travel, both as DISPLACEMENTS. Which is the whole point — they are "how far",
 // not "how fast", so game code must never multiply them by delta time the way it
 // correctly does for a held key or a stick.
+//
+// `buttons` is the exception in here: a HELD-state mask (bit = MouseButton),
+// not a displacement — EndFrame clears the movement and keeps the mask. It
+// rides in the frame rather than on Input because the frame is what call sites
+// already gate by ownership (the editor hands PlayerHost a blank MouseFrame
+// outside capture), and a mouse-button action binding must obey the same gate
+// as mouse movement — otherwise clicking editor UI would fire game actions.
 struct MouseFrame
 {
     float dx = 0.0f, dy = 0.0f;
     float wheel = 0.0f;
+    uint32_t buttons = 0;
+};
+
+// Bit indices for MouseFrame::buttons, in the order every consumer already
+// numbers them (EngineApi's input.mouseButton, UI hit-testing): 0 = left.
+enum MouseButton : int
+{
+    kMouseButtonLeft   = 0,
+    kMouseButtonRight  = 1,
+    kMouseButtonMiddle = 2,
+    kMouseButtonX1     = 3,
+    kMouseButtonX2     = 4,
+    kMouseButtonCount  = 5,
 };
 
 // What every connected gamepad amounts to this frame, merged into one virtual
@@ -112,9 +132,10 @@ public:
     void SetGamepadFrame(const GamepadFrame& frame) { m_gamepad = frame; }
     // Clear the frame's movement. Called by Application after the frame is
     // rendered, so everything drawing that frame sees the same numbers.
-    // The gamepad frame is NOT cleared here — it is rebuilt from device state
-    // by PollGamepads(), not accumulated from events.
-    void EndFrame() { m_mouse = MouseFrame{}; }
+    // The button mask survives — it is a held state like a key, not a
+    // displacement; the gamepad frame is NOT cleared either (rebuilt from
+    // device state by PollGamepads(), not accumulated from events).
+    void EndFrame() { const uint32_t held = m_mouse.buttons; m_mouse = MouseFrame{}; m_mouse.buttons = held; }
 
 private:
     // Per-frame state

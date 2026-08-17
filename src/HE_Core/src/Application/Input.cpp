@@ -78,6 +78,30 @@ void Input::ProcessMouseEvent(const SDL_Event& event)
     case SDL_EVENT_MOUSE_WHEEL:
         m_mouse.wheel += event.wheel.y;
         break;
+    // Held mask, assigned not accumulated. The bit index is OUR MouseButton
+    // order (left, right, middle — the order input.mouseButton has always
+    // used), NOT SDL's button numbering, which puts MIDDLE second. A plain
+    // `button - 1` would swap right and middle silently.
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    {
+        int bit = -1;
+        switch (event.button.button)
+        {
+        case SDL_BUTTON_LEFT:   bit = kMouseButtonLeft;   break;
+        case SDL_BUTTON_RIGHT:  bit = kMouseButtonRight;  break;
+        case SDL_BUTTON_MIDDLE: bit = kMouseButtonMiddle; break;
+        case SDL_BUTTON_X1:     bit = kMouseButtonX1;     break;
+        case SDL_BUTTON_X2:     bit = kMouseButtonX2;     break;
+        default: break;
+        }
+        if (bit >= 0)
+        {
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) m_mouse.buttons |= 1u << bit;
+            else                                           m_mouse.buttons &= ~(1u << bit);
+        }
+        break;
+    }
     default:
         break;
     }

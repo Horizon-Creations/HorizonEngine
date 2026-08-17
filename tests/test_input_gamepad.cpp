@@ -450,6 +450,80 @@ TEST_CASE("Mapping: gamepad sources are not delta sources")
     CHECK_FALSE(axisSourceIsDelta(AxisSource::Key));
 }
 
+// ─── Mouse buttons as action bindings ────────────────────────────────────────
+
+TEST_CASE("Mouse: button events fill the held mask in OUR order, not SDL's")
+{
+    Input input;
+    auto press = [&](Uint8 sdlButton, bool down){
+        SDL_Event evt{};
+        evt.type          = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        evt.button.button = sdlButton;
+        input.ProcessMouseEvent(evt);
+    };
+    // SDL numbers LEFT=1, MIDDLE=2, RIGHT=3 — our mask is left/RIGHT/middle.
+    press(SDL_BUTTON_RIGHT, true);
+    CHECK((input.mouse().buttons & (1u << kMouseButtonRight)) != 0);
+    CHECK((input.mouse().buttons & (1u << kMouseButtonMiddle)) == 0);
+    press(SDL_BUTTON_MIDDLE, true);
+    CHECK((input.mouse().buttons & (1u << kMouseButtonMiddle)) != 0);
+    press(SDL_BUTTON_RIGHT, false);
+    CHECK((input.mouse().buttons & (1u << kMouseButtonRight)) == 0);
+
+    // EndFrame clears the movement, keeps the held mask — a button is a held
+    // state, not a displacement.
+    input.EndFrame();
+    CHECK((input.mouse().buttons & (1u << kMouseButtonMiddle)) != 0);
+}
+
+TEST_CASE("Mapping: mouse-button binding obeys the handed-in frame (ownership gate)")
+{
+    InputMapping m;
+    ActionBinding mb;
+    mb.mouseButton = kMouseButtonLeft;
+    m.mapAction("Fire", { mb });
+
+    Input input;
+    MouseFrame held;
+    held.buttons = 1u << kMouseButtonLeft;
+
+    // Same Input, same click — with the frame handed in it fires, with a
+    // blank frame (the editor outside play capture) it must not.
+    m.tick(input, held);
+    CHECK(m.isPressed("Fire"));
+    m.tick(input, MouseFrame{});
+    CHECK_FALSE(m.isPressed("Fire"));
+    CHECK(m.justReleased("Fire"));
+}
+
+TEST_CASE("Assets: mouseButtons array parses, unknown names skipped")
+{
+    InputMapping m;
+    const char* json = R"({"entries":[
+        {"action":"Input/Fire.hasset","mouseButtons":["left","nope","x2"]}
+    ]})";
+    CHECK(HE::applyInputMappingContext(m, json) == 1);
+
+    Input input;
+    MouseFrame frame;
+    frame.buttons = 1u << kMouseButtonX2;
+    m.tick(input, frame);
+    CHECK(m.isPressed("Fire"));
+}
+
+TEST_CASE("Assets: mouse button name table round-trips, display names exist")
+{
+    for (int b = 0; b < kMouseButtonCount; ++b)
+    {
+        CHECK(HE::mouseButtonFromName(HE::mouseButtonName(b)) == b);
+        CHECK(HE::mouseButtonDisplayName(b) != "?");
+    }
+    CHECK(HE::mouseButtonFromName("bogus") == -1);
+    // Every SDL pad button has a readable label (worst case its SDL name).
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+        CHECK_FALSE(HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b)).empty());
+}
+
 // ─── End to end: SDL virtual gamepad ─────────────────────────────────────────
 // A real SDL device (no hardware, works headless — verified on macOS) through
 // the REAL plumbing: hot-plug event → Input opens the pad → PollGamepads reads

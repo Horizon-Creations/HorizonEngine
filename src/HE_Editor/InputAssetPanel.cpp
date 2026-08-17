@@ -15,6 +15,7 @@
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <SDL3/SDL.h>
+#include <cctype>
 #include <cfloat>
 #include <cstring>
 #include <filesystem>
@@ -49,6 +50,7 @@ struct MapEntry
 	std::string actionPath;            // content-relative InputAction path
 	std::vector<std::string> keys;     // Button bindings (SDL scancode names)
 	std::vector<std::string> gamepadButtons; // pad bindings (SDL button names)
+	std::vector<std::string> mouseButtons;   // mouse bindings ("left"/"right"/…)
 	std::vector<AxisRow>     axes;     // Axis bindings (a 2D action's X)
 	std::vector<AxisRow>     axesY;    // a 2D action's Y — its own list, so the
 	                                   // 1D reader can never half-read one
@@ -73,7 +75,10 @@ AssetPanelState<PanelState> s_states;
 // It's identified by (assetPath, entryIndex, subIndex, kind) rather than a
 // pointer into the entry's vectors, since those can reallocate/shift while
 // the capture is waiting (multiple frames) for a key press.
-enum class CaptureKind { None, Key, AxisPositive, AxisNegative };
+// AnyBinding is the "Auto Detect" capture: it listens on ALL devices at once —
+// keyboard, mouse buttons AND gamepad buttons — and appends whatever is
+// pressed first to the entry's matching binding list.
+enum class CaptureKind { None, Key, AxisPositive, AxisNegative, AnyBinding };
 struct CaptureState
 {
 	std::string  assetPath;
@@ -82,8 +87,23 @@ struct CaptureState
 	CaptureKind  kind       = CaptureKind::None;
 	bool         primed     = false;                    // snapshot-only first frame
 	bool         prevKeys[SDL_SCANCODE_COUNT] = {};      // last frame's held-key snapshot
+	uint32_t     prevMouse  = 0;                         // …held-mouse-button mask
+	bool         prevPad[SDL_GAMEPAD_BUTTON_COUNT] = {}; // …held-pad-button snapshot
 };
 CaptureState s_capture;
+
+// Search text of the "+ Add Binding" popup. One popup is open at a time
+// (ImGui closes the previous), so one filter string serves all tabs.
+std::string s_addFilter;
+
+// What one frame of an AnyBinding capture found (at most one of the three).
+struct DetectedBinding
+{
+	std::string key;           // SDL scancode name
+	std::string mouseButton;   // "left"/"right"/… (HE::mouseButtonName)
+	std::string gamepadButton; // SDL button string ("a"/"dpup"/…)
+	bool any() const { return !key.empty() || !mouseButton.empty() || !gamepadButton.empty(); }
+};
 
 void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind)
 {
@@ -115,6 +135,9 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 		if (e.contains("gamepadButtons") && e["gamepadButtons"].is_array())
 			for (const auto& gb : e["gamepadButtons"])
 				if (gb.is_string()) me.gamepadButtons.push_back(gb.get<std::string>());
+		if (e.contains("mouseButtons") && e["mouseButtons"].is_array())
+			for (const auto& mb : e["mouseButtons"])
+				if (mb.is_string()) me.mouseButtons.push_back(mb.get<std::string>());
 		auto readAxes = [](const nlohmann::json& arr, std::vector<AxisRow>& into)
 		{
 			for (const auto& a : arr)
@@ -146,6 +169,7 @@ std::string encodeMapping(const std::vector<MapEntry>& entries)
 		nlohmann::json je; je["action"] = e.actionPath;
 		if (!e.keys.empty()) je["keys"] = e.keys;
 		if (!e.gamepadButtons.empty()) je["gamepadButtons"] = e.gamepadButtons;
+		if (!e.mouseButtons.empty())   je["mouseButtons"]   = e.mouseButtons;
 		auto writeAxes = [](const std::vector<AxisRow>& rows)
 		{
 			nlohmann::json arr = nlohmann::json::array();
@@ -283,7 +307,12 @@ bool padButtonCombo(const char* id, std::string& value, const char* noneLabel)
 {
 	bool changed = false;
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	const char* shown = value.empty() ? noneLabel : value.c_str();
+	// The value STORES SDL's stable name ("a", "dpup"); the person SEES the
+	// display name ("A (South)", "D-Pad Up").
+	const std::string shownName = value.empty()
+		? std::string()
+		: HE::gamepadButtonDisplayName(SDL_GetGamepadButtonFromString(value.c_str()));
+	const char* shown = value.empty() ? noneLabel : shownName.c_str();
 	if (ImGui::BeginCombo(id, shown))
 	{
 		if (ImGui::Selectable(noneLabel, value.empty()))
@@ -294,7 +323,9 @@ bool padButtonCombo(const char* id, std::string& value, const char* noneLabel)
 		{
 			const char* n = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b));
 			if (!n || !n[0]) continue;
-			if (ImGui::Selectable(n, value == n))
+			const std::string label =
+				HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
+			if (ImGui::Selectable(label.c_str(), value == n))
 			{
 				if (value != n) { value = n; changed = true; }
 			}
@@ -302,9 +333,66 @@ bool padButtonCombo(const char* id, std::string& value, const char* noneLabel)
 		ImGui::EndCombo();
 	}
 	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-		ImGui::SetTooltip("Xbox-layout names: \"a\" is the south button\n"
-		                  "(Cross on a PlayStation pad), \"dpup\" the D-pad.");
+		ImGui::SetTooltip("Positions are named in Xbox-layout terms:\n"
+		                  "\"A (South)\" is Cross on a PlayStation pad.");
 	return changed;
+}
+
+// One mouse button as a dropdown cell — same shape as padButtonCombo: the
+// value stores the short JSON name ("left"), the person sees the display name.
+bool mouseButtonComboCell(const char* id, std::string& value, const char* noneLabel)
+{
+	bool changed = false;
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const std::string shownName = value.empty()
+		? std::string()
+		: HE::mouseButtonDisplayName(HE::mouseButtonFromName(value));
+	const char* shown = value.empty() ? noneLabel : shownName.c_str();
+	if (ImGui::BeginCombo(id, shown))
+	{
+		if (ImGui::Selectable(noneLabel, value.empty()))
+		{
+			if (!value.empty()) { value.clear(); changed = true; }
+		}
+		for (int b = 0; b < kMouseButtonCount; ++b)
+		{
+			const std::string stored = HE::mouseButtonName(b);
+			const std::string label  = HE::mouseButtonDisplayName(b);
+			if (ImGui::Selectable(label.c_str(), value == stored))
+			{
+				if (value != stored) { value = stored; changed = true; }
+			}
+		}
+		ImGui::EndCombo();
+	}
+	return changed;
+}
+
+// Case-insensitive substring match for the Add Binding search field.
+bool matchesFilter(const std::string& label, const std::string& filter)
+{
+	if (filter.empty()) return true;
+	auto lower = [](std::string s){
+		std::transform(s.begin(), s.end(), s.begin(),
+		               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+		return s;
+	};
+	return lower(label).find(lower(filter)) != std::string::npos;
+}
+
+// Every named keyboard key, built once. ~240 entries — small enough to filter
+// per frame, and the scancode ORDER groups related keys (letters, digits,
+// function row) better than alphabetic sorting would.
+const std::vector<std::string>& allKeyNames()
+{
+	static const std::vector<std::string> names = []{
+		std::vector<std::string> v;
+		for (int sc = 0; sc < SDL_SCANCODE_COUNT; ++sc)
+			if (const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)); n && n[0])
+				v.emplace_back(n);
+		return v;
+	}();
+	return names;
 }
 
 // Persist a tab's decoded model back into its asset. The header's Save button AND
@@ -458,18 +546,19 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 
 	// ── Input Mapping Context: one block per action entry ──────────────────
-	ImGui::TextDisabled("Binds keys and gamepad inputs to Input Actions.");
+	ImGui::TextDisabled("Binds keyboard, mouse and gamepad inputs to Input Actions.");
 	ImGui::SameLine();
 	helpMarker(
-		"Click \"Bind\" next to a key field, then press the physical key you want "
-		"to use \xe2\x80\x94 it fills in the exact name for you. Press Esc, or click "
-		"the button again, to cancel.\n\n"
-		"You can still type a name by hand; they're SDL key names (e.g. \"W\", "
-		"\"Space\", \"Left Shift\"). A red outline means the typed name isn't "
-		"recognized and won't bind to anything at runtime.\n\n"
-		"Gamepad buttons are picked from a list instead \xe2\x80\x94 no controller "
-		"needs to be plugged in. Names follow the Xbox layout: \"a\" is the south "
-		"button (Cross on a PlayStation pad), \"dpup\" the D-pad.\n\n"
+		"\"+ Add Binding\" opens a searchable list of every bindable input \xe2\x80\x94 "
+		"keyboard keys, mouse buttons and gamepad buttons \xe2\x80\x94 no hardware "
+		"needs to be plugged in. \"Auto Detect\" listens on all three devices at "
+		"once and binds whatever you press first (Esc cancels).\n\n"
+		"Key fields also accept typed SDL key names (e.g. \"W\", \"Space\", "
+		"\"Left Shift\") and \"Bind\" captures the next key press. A red outline "
+		"means a typed name isn't recognized and won't bind at runtime.\n\n"
+		"Gamepad positions are named in Xbox-layout terms: \"A (South)\" is Cross "
+		"on a PlayStation pad. Mouse-button bindings fire in play-in-editor only "
+		"while play mode holds the mouse, so clicking editor panels stays safe.\n\n"
 		"An Axis reads -1..+1 each frame: holding the \"+\" key drives it toward "
 		"+1, the \"-\" key toward -1. Either can be left blank for a one-sided "
 		"axis. Stick rows read the deadzone-filtered deflection, trigger rows "
@@ -477,21 +566,44 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		"(stick Y is positive downward!), or a higher value for a faster response.");
 	ImGui::Spacing();
 
-	// Poll SDL's live keyboard state once per frame while a field on THIS tab
-	// is listening for the next key press. s_capture is global across all open
-	// tabs; only the tab it targets does anything with the poll result below.
+	// Poll the live device state once per frame while a field on THIS tab is
+	// listening. s_capture is global across all open tabs; only the tab it
+	// targets does anything with the poll result below. A Key-field capture
+	// polls the keyboard alone; an AnyBinding ("Auto Detect") capture listens
+	// on mouse buttons and gamepad buttons as well.
 	std::string capturedKeyName;
 	bool captureWasCancelled = false;
+	DetectedBinding detected;
 	if (s_capture.kind != CaptureKind::None && s_capture.assetPath == assetPath)
 	{
+		const bool any = s_capture.kind == CaptureKind::AnyBinding;
 		int numKeys = 0;
 		const bool* keyState = SDL_GetKeyboardState(&numKeys);
 		numKeys = std::min(numKeys, static_cast<int>(SDL_SCANCODE_COUNT));
+
+		// Mouse: SDL's mask orders left/MIDDLE/right — translate to our
+		// left/right/middle indices (same trap as Input::ProcessMouseEvent).
+		uint32_t mouseMask = 0;
+		if (any)
+		{
+			const SDL_MouseButtonFlags mb = SDL_GetMouseState(nullptr, nullptr);
+			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   mouseMask |= 1u << 0;
+			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT))  mouseMask |= 1u << 1;
+			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) mouseMask |= 1u << 2;
+			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_X1))     mouseMask |= 1u << 3;
+			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_X2))     mouseMask |= 1u << 4;
+		}
+		const GamepadFrame* pad = any && ctx.appInput ? &ctx.appInput->gamepad() : nullptr;
+
 		if (!s_capture.primed)
 		{
-			// First active frame is snapshot-only, so a key still held down from
-			// the click that opened the capture isn't mistaken for a fresh press.
+			// First active frame is snapshot-only, so a key or button still
+			// held from the click that opened the capture isn't mistaken for
+			// a fresh press — that click itself included.
 			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+			s_capture.prevMouse = mouseMask;
+			if (pad) std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
+			else     std::memset(s_capture.prevPad, 0, sizeof(s_capture.prevPad));
 			s_capture.primed = true;
 		}
 		else
@@ -502,11 +614,29 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				{
 					if (sc == SDL_SCANCODE_ESCAPE) captureWasCancelled = true;
 					else if (const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)); n && n[0])
-						capturedKeyName = n;
+					{ capturedKeyName = n; detected.key = n; }
 					break;
 				}
 			}
+			if (any && !detected.any() && !captureWasCancelled)
+			{
+				for (int b = 0; b < 5; ++b)
+					if ((mouseMask & (1u << b)) && !(s_capture.prevMouse & (1u << b)))
+					{ detected.mouseButton = HE::mouseButtonName(b); break; }
+			}
+			if (pad && !detected.any() && !captureWasCancelled)
+			{
+				for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+					if (pad->buttons[b] && !s_capture.prevPad[b])
+					{
+						if (const char* n = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b)); n && n[0])
+							detected.gamepadButton = n;
+						break;
+					}
+			}
 			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
+			s_capture.prevMouse = mouseMask;
+			if (pad) std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
 		}
 	}
 	// Any structural edit below (add/remove key, axis or entry) can shift the
@@ -617,6 +747,41 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		}
 		if (removePadButton >= 0)
 		{ e.gamepadButtons.erase(e.gamepadButtons.begin() + removePadButton); st.dirty = true; }
+
+		// ── Mouse buttons ────────────────────────────────────────────────────
+		int removeMouseButton = -1;
+		if (!e.mouseButtons.empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextDisabled("Mouse Buttons");
+			ImGui::SameLine();
+			helpMarker("A mouse-button binding obeys the same ownership rule as "
+			           "mouse look: in the game it always fires, in play-in-editor "
+			           "only while play mode holds the mouse \xe2\x80\x94 so "
+			           "clicking editor panels never triggers game actions.");
+			if (ImGui::BeginTable("##mousebuttons", 3, ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("##name",   ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("##bind",   ImGuiTableColumnFlags_WidthFixed, bindW);
+				ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, removeW);
+				for (int k = 0; k < static_cast<int>(e.mouseButtons.size()); ++k)
+				{
+					ImGui::PushID(1700 + k);
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					if (mouseButtonComboCell("##mbtn", e.mouseButtons[k], "Select a button\xE2\x80\xA6"))
+						st.dirty = true;
+					ImGui::TableNextColumn();
+					ImGui::TableNextColumn();
+					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeMouseButton = k;
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this button");
+					ImGui::PopID();
+				}
+				ImGui::EndTable();
+			}
+		}
+		if (removeMouseButton >= 0)
+		{ e.mouseButtons.erase(e.mouseButtons.begin() + removeMouseButton); st.dirty = true; }
 
 		// ── Axes ─────────────────────────────────────────────────────────────
 		// One table per component list. A 2D action binds X and Y separately, so
@@ -765,11 +930,52 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (removeAxisY >= 0) { e.axesY.erase(e.axesY.begin() + removeAxisY); st.dirty = true; cancelCaptureForThisAsset(); }
 
 		// ── Card footer: grow the entry ──────────────────────────────────────
+		// Apply this frame's Auto Detect result to THIS entry before drawing
+		// the footer, so the pressed button appears in its list immediately.
+		if (s_capture.kind == CaptureKind::AnyBinding &&
+		    s_capture.assetPath == assetPath && s_capture.entryIndex == i)
+		{
+			if (detected.any())
+			{
+				if      (!detected.key.empty())           e.keys.push_back(detected.key);
+				else if (!detected.mouseButton.empty())   e.mouseButtons.push_back(detected.mouseButton);
+				else if (!detected.gamepadButton.empty()) e.gamepadButtons.push_back(detected.gamepadButton);
+				st.dirty = true;
+				s_capture.kind = CaptureKind::None;
+			}
+			else if (captureWasCancelled)
+				s_capture.kind = CaptureKind::None;
+		}
+		const bool detecting = s_capture.kind == CaptureKind::AnyBinding &&
+		                       s_capture.assetPath == assetPath && s_capture.entryIndex == i;
+
 		ImGui::Spacing();
-		if (ImGui::Button("+ Key", ImVec2(110.0f, 0.0f)))  { e.keys.emplace_back(); st.dirty = true; }
+		// One entry point for every device instead of a button per device: a
+		// searchable list (below) or a press on the actual hardware (right).
+		if (ImGui::Button("+ Add Binding", ImVec2(130.0f, 0.0f)))
+		{
+			s_addFilter.clear();
+			ImGui::OpenPopup("##addbinding");
+		}
 		ImGui::SameLine();
-		if (ImGui::Button("+ Pad Button", ImVec2(110.0f, 0.0f)))
-		{ e.gamepadButtons.emplace_back(); st.dirty = true; }
+		if (detecting)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+			if (ImGui::Button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
+				s_capture.kind = CaptureKind::None;
+			ImGui::PopStyleColor(2);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Press a key, click a mouse button or press a\n"
+				                  "gamepad button to bind it. Esc or click to cancel.");
+		}
+		else if (ImGui::Button("Auto Detect", ImVec2(150.0f, 0.0f)))
+		{
+			beginCapture(assetPath, i, 0, CaptureKind::AnyBinding);
+		}
+		if (!detecting && ImGui::IsItemHovered())
+			ImGui::SetTooltip("Listens on keyboard, mouse AND gamepad at once\n"
+			                  "and adds whatever you press first.");
 		ImGui::SameLine();
 		if (ImGui::Button(is2D ? "+ X Axis" : "+ Axis", ImVec2(110.0f, 0.0f)))
 		{ e.axes.emplace_back(); st.dirty = true; }
@@ -781,6 +987,48 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		{ e.axesY.emplace_back(); st.dirty = true; }
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Makes this a 2D binding — for an Axis 2D action");
+
+		// ── Add Binding popup: one searchable list across all devices ───────
+		if (ImGui::BeginPopup("##addbinding"))
+		{
+			ImGui::SetNextItemWidth(260.0f);
+			// Keyboard focus lands in the search field the frame the popup
+			// opens, so typing filters immediately.
+			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+			ImGui::InputTextWithHint("##search", "Search bindings\xE2\x80\xA6", &s_addFilter);
+
+			bool chose = false;
+			ImGui::BeginChild("##addlist", ImVec2(260.0f, 320.0f));
+			ImGui::SeparatorText("Gamepad");
+			for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+			{
+				const char* stored = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b));
+				if (!stored || !stored[0]) continue;
+				const std::string label =
+					HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
+				if (!matchesFilter(label, s_addFilter)) continue;
+				if (ImGui::Selectable((label + "##gp").c_str()))
+				{ e.gamepadButtons.emplace_back(stored); st.dirty = true; chose = true; }
+			}
+			ImGui::SeparatorText("Mouse");
+			for (int b = 0; b < kMouseButtonCount; ++b)
+			{
+				const std::string label = HE::mouseButtonDisplayName(b);
+				if (!matchesFilter(label, s_addFilter)) continue;
+				if (ImGui::Selectable((label + "##ms").c_str()))
+				{ e.mouseButtons.push_back(HE::mouseButtonName(b)); st.dirty = true; chose = true; }
+			}
+			ImGui::SeparatorText("Keyboard");
+			for (const std::string& keyName : allKeyNames())
+			{
+				if (!matchesFilter(keyName, s_addFilter)) continue;
+				if (ImGui::Selectable((keyName + "##kb").c_str()))
+				{ e.keys.push_back(keyName); st.dirty = true; chose = true; }
+			}
+			ImGui::EndChild();
+			if (chose) ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
 
 		ImGui::EndChild();
 		ImGui::Spacing();
