@@ -1,5 +1,4 @@
 #pragma once
-#include "SkyEnvBake.h"   // HE::SkyColorCPU — the sky the scene renders, on the CPU
 #include <glm/vec3.hpp>
 #include <cmath>
 #include <vector>
@@ -85,69 +84,6 @@ inline void buildPreviewGrid(float halfExtent, float step, std::vector<float>& o
     push({ origin.x, y, origin.z }, axisY); push({ origin.x, y + step, origin.z }, axisY);
     push({ origin.x - a, yr, origin.z }, axisY); push({ origin.x + a, yr, origin.z }, axisY);
     push({ origin.x, yr, origin.z - a }, axisY); push({ origin.x, yr, origin.z + a }, axisY);
-}
-
-// ─── Sky dome ───────────────────────────────────────────────────────────────
-// A sphere around the camera whose vertices carry the sky's own colour, so a
-// preview can have a real sky without a sky pass.
-//
-// The colours come from `SkyColorCPU` — the SAME function that bakes the
-// scene's image-based ambient cubemap — so the preview and the scene can never
-// disagree about what a given sun position looks like. Interpolating a grid is
-// enough because the sky IS a gradient.
-//
-// WITHOUT the sun disc, deliberately. It is a fraction of a degree wide and its
-// widest glare lobe still only ~30°: interpolated across triangles it does not
-// become a small bright sun, it becomes a huge faceted white polygon — which is
-// exactly what the first version of this looked like. The gradient underneath
-// interpolates perfectly well, and a preview is about the object, not the sun.
-//
-// Drawn as plain triangles through the same pos3+color3 program as the ground,
-// which is what makes it cost no shader on any backend. Depth testing must be
-// OFF while it draws: it is a backdrop, not geometry.
-//
-// `sunDir` points TOWARD the sun. `radius` should sit well inside the far
-// plane; the dome is centred on `camPos`, so no amount of flying leaves it.
-inline void buildPreviewSkyDome(const glm::vec3& camPos, float radius,
-                                const glm::vec3& sunDir, std::vector<float>& out)
-{
-    // Fine enough that the horizon gradient — the steepest part — does not band.
-    constexpr int kSeg   = 48;   // around
-    constexpr int kRings = 24;   // pole to pole
-    const glm::vec3 sun = glm::normalize(sunDir);
-
-    // One evaluation per unique grid vertex, not per triangle corner:
-    // SkyColorCPU runs a scattering integral, and the naive version would run it
-    // six times for every quad.
-    struct V { glm::vec3 p, c; };
-    std::vector<V> grid((kRings + 1) * (kSeg + 1));
-    for (int r = 0; r <= kRings; ++r)
-    {
-        const float phi = 3.14159265f * static_cast<float>(r) / kRings;   // 0 = up
-        const float sy = std::cos(phi), sr = std::sin(phi);
-        for (int s = 0; s <= kSeg; ++s)
-        {
-            const float th = 6.2831853f * static_cast<float>(s) / kSeg;
-            const glm::vec3 dir(sr * std::sin(th), sy, sr * std::cos(th));
-            V& v = grid[static_cast<size_t>(r) * (kSeg + 1) + s];
-            v.p  = camPos + dir * radius;
-            v.c  = SkyColorCPU(dir, sun, /*withSunDisc=*/false);
-        }
-    }
-
-    auto push = [&out](const V& v) {
-        out.insert(out.end(), { v.p.x, v.p.y, v.p.z, v.c.r, v.c.g, v.c.b });
-    };
-    for (int r = 0; r < kRings; ++r)
-        for (int s = 0; s < kSeg; ++s)
-        {
-            const V& a = grid[static_cast<size_t>(r)     * (kSeg + 1) + s];
-            const V& b = grid[static_cast<size_t>(r)     * (kSeg + 1) + s + 1];
-            const V& c = grid[static_cast<size_t>(r + 1) * (kSeg + 1) + s + 1];
-            const V& d = grid[static_cast<size_t>(r + 1) * (kSeg + 1) + s];
-            push(a); push(b); push(c);
-            push(a); push(c); push(d);
-        }
 }
 
 } // namespace HE
