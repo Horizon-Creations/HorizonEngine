@@ -110,17 +110,35 @@ void render(AppContext& ctx)
 // `undo` is the editor's SCENE undo system, or null. A scratch world passes
 // null: capturePre() serializes the whole scene, which is not what is being
 // edited there, and every use of it below is already null-guarded.
-void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo)
+//
+// Two extra modes, both driven through the one `componentHeader` gate below so
+// they can never disagree with what this function actually draws:
+//   `only`    — draw ONLY the section with that label (the class tab's component
+//               tree selects a single component and expects just its fields).
+//   `collect` — draw NOTHING, and report the labels of the sections this entity
+//               would have. That is where the class tab's tree rows come from:
+//               a hand-written second list of component names would drift the
+//               first time a component was added here.
+//   `removeMatching` — draw nothing and REMOVE the component `only` names, by
+//               taking the same path the header's right-click menu takes. A
+//               label→type map for removal would be a third list to keep in
+//               step; this way there is still only the one.
+// In the two silent modes this function must emit no ImGui calls at all — it
+// runs while the caller's tree child window is the current one.
+void renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+                   const char* only, std::vector<std::string>* collect,
+                   bool removeMatching = false)
 {
 #ifdef HE_IMGUI_ENABLED
 	auto& registry = world.registry();
+	const bool quiet = (collect != nullptr) || removeMatching;
 
 	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
 	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
 	// entity was selected (the terrain's sculptHeights alone is 263k floats). An edit
 	// can only START on a mouse press inside this panel, so capture the pre-state only
 	// then; the widget's IsItemActivated (same frame) stashes it.
-	if (undo
+	if (undo && !quiet
 	    && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)
 	    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 		undo->capturePre();
@@ -131,21 +149,50 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 		if (ImGui::IsItemDeactivatedAfterEdit()) undo->commitPending();
 	};
 
-	// ── Name ────────────────────────────────────────────────────────────────
-	if (auto* name = registry.try_get<NameComponent>(entity))
+	// Header with a right-click "Remove Component" menu. Returns true when
+	// the section is open; sets `removed` when the user removed the component.
+	// The single gate every component section passes through — which is what
+	// makes the `only` filter and the `collect` listing complete by
+	// construction rather than by maintenance.
+	auto componentHeader = [&](const char* label, bool removable, bool& removed) -> bool
 	{
-		char buf[256];
-		std::strncpy(buf, name->name.c_str(), sizeof(buf) - 1);
-		buf[sizeof(buf) - 1] = '\0';
-		ImGui::SetNextItemWidth(-1.0f);
-		if (ImGui::InputText("##entity_name", buf, sizeof(buf),
-		                     ImGuiInputTextFlags_EnterReturnsTrue))
+		removed = false;
+		if (collect) { collect->push_back(label); return false; }
+		if (only && std::strcmp(only, label) != 0) return false;
+		// Removal mode: report it as removed and draw nothing — the section's
+		// own `if (removed) registry.remove<T>(entity)` does the rest.
+		if (removeMatching) { removed = removable; return false; }
+		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		if (removable && ImGui::BeginPopupContextItem())
 		{
-			if (undo) undo->snapshotNow();
-			world.renameEntity(entity, buf);
+			if (ImGui::MenuItem("Remove Component"))
+				removed = true;
+			ImGui::EndPopup();
 		}
+		return open && !removed;
+	};
+	bool removed = false;
+
+	// ── Name ────────────────────────────────────────────────────────────────
+	// Belongs to the ENTITY, not to a component, so it is out of the way when a
+	// single component is in focus.
+	if (!quiet && !only)
+	{
+		if (auto* name = registry.try_get<NameComponent>(entity))
+		{
+			char buf[256];
+			std::strncpy(buf, name->name.c_str(), sizeof(buf) - 1);
+			buf[sizeof(buf) - 1] = '\0';
+			ImGui::SetNextItemWidth(-1.0f);
+			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
+			                     ImGuiInputTextFlags_EnterReturnsTrue))
+			{
+				if (undo) undo->snapshotNow();
+				world.renameEntity(entity, buf);
+			}
+		}
+		ImGui::Separator();
 	}
-	ImGui::Separator();
 
 	// ── Environment / Sky (the "Sky" scene entity's EnvironmentComponent) ────
 	// Shown whenever the selected entity carries an EnvironmentComponent (the Sky
@@ -158,8 +205,9 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 		// Only the first is used — every consumer calls environmentEntity() — so
 		// say which one you are looking at, otherwise editing the inert copy looks
 		// like the settings simply do nothing.
-		inertEnvironmentNote(entity == world.environmentEntity(), "Sky");
-		if (ImGui::CollapsingHeader("Environment", ImGuiTreeNodeFlags_DefaultOpen))
+		if (!quiet && (!only || std::strcmp(only, "Environment") == 0))
+			inertEnvironmentNote(entity == world.environmentEntity(), "Sky");
+		if (componentHeader("Environment", false, removed))
 		{
 			ImGui::Checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
 
@@ -341,7 +389,7 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			     "Fragmentation how much the curtain breaks up.");
 			ImGui::TreePop(); } // end Aurora
 		}
-		ImGui::Separator();
+		if (!quiet && !only) ImGui::Separator();
 	}
 
 	// ── Weather (its own "Weather" scene entity; drives the Sky's clouds/fog/wind) ──
@@ -349,8 +397,9 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 	{
 		if (auto* w = registry.try_get<WeatherComponent>(entity))
 		{
-			inertEnvironmentNote(entity == world.weatherEntity(), "Weather");
-			if (ImGui::CollapsingHeader("Weather", ImGuiTreeNodeFlags_DefaultOpen))
+			if (!quiet && (!only || std::strcmp(only, "Weather") == 0))
+				inertEnvironmentNote(entity == world.weatherEntity(), "Weather");
+			if (componentHeader("Weather", false, removed))
 			{
 				// The Details dock is narrow, and a good deal of what the sections
 				// below print is prose or a path rather than a label: "Transitioning
@@ -414,25 +463,9 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 					/*rejectNoun=*/nullptr, /*showClear=*/true);
 
 			}
-			ImGui::Separator();
+			if (!quiet && !only) ImGui::Separator();
 		}
 	}
-
-	// Header with a right-click "Remove Component" menu. Returns true when
-	// the section is open; sets `removed` when the user removed the component.
-	auto componentHeader = [&](const char* label, bool removable, bool& removed) -> bool
-	{
-		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
-		removed = false;
-		if (removable && ImGui::BeginPopupContextItem())
-		{
-			if (ImGui::MenuItem("Remove Component"))
-				removed = true;
-			ImGui::EndPopup();
-		}
-		return open && !removed;
-	};
-	bool removed = false;
 
 	// ── Transform ───────────────────────────────────────────────────────────
 	if (auto* t = registry.try_get<TransformComponent>(entity))
@@ -1533,7 +1566,9 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 	// ── Add Component ───────────────────────────────────────────────────────
 	// Not for the World root — it only carries the scene's Environment, no
 	// arbitrary components (and the built-in sun/moon are managed automatically).
-	if (!world.isBuiltin(entity))
+	// Skipped when a single component is in focus (the button belongs to the
+	// entity, not to the component being edited) and, obviously, while collecting.
+	if (!quiet && !only && !world.isBuiltin(entity))
 	{
 		ImGui::Spacing();
 		ImGui::Separator();
@@ -1545,6 +1580,27 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			ImGui::OpenPopup("##add_component");
 
 		if (ImGui::BeginPopup("##add_component"))
+		{
+			addComponentMenu(world, entity, undo);
+			ImGui::EndPopup();
+		}
+	}
+
+#else
+	(void)ctx; (void)world; (void)entity; (void)undo; (void)only; (void)collect;
+#endif // HE_IMGUI_ENABLED
+}
+
+// The Add Component menu's ITEMS, inside a popup the caller has already opened.
+// Split out so the Details panel's button and the class tab's component tree
+// offer the same list — two copies of a forty-entry menu would part ways the
+// first time a component was added to one of them.
+void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (world.isBuiltin(entity)) return;
+	auto& registry = world.registry();
+	{
 		{
 			auto addItem = [&]<typename T>(const char* label, T)
 			{
@@ -1611,13 +1667,32 @@ void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
 			// editor tab, the player/character setup, the UI Widget designer).
 			// The component types and their Inspector panels above still work
 			// for entities that already carry them (e.g. older scenes).
-			ImGui::EndPopup();
 		}
 	}
 
 #else
-	(void)ctx; (void)world; (void)entity; (void)undo;
+	(void)world; (void)entity; (void)undo;
 #endif // HE_IMGUI_ENABLED
+}
+
+// ── Public wrappers ─────────────────────────────────────────────────────────
+void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+               const char* onlyComponent)
+{
+	renderForImpl(ctx, world, entity, undo, onlyComponent, nullptr);
+}
+
+void listComponents(AppContext& ctx, HorizonWorld& world, Entity entity,
+                    std::vector<std::string>& out)
+{
+	renderForImpl(ctx, world, entity, nullptr, nullptr, &out);
+}
+
+void removeComponent(AppContext& ctx, HorizonWorld& world, Entity entity,
+                     const char* label, EditorUndo* undo)
+{
+	if (!label || !*label) return;
+	renderForImpl(ctx, world, entity, undo, label, nullptr, /*removeMatching=*/true);
 }
 
 } // namespace InspectorPanel

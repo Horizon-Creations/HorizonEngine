@@ -1,5 +1,7 @@
 #pragma once
 #include <HorizonScene/HorizonWorld.h>   // Entity, HorizonWorld
+#include <string>
+#include <vector>
 
 struct AppContext;
 class EditorUndo;
@@ -24,5 +26,31 @@ namespace InspectorPanel
 	//
 	// `undo` is the editor's SCENE undo system, or null for a world that is not
 	// the scene (a snapshot there would capture the wrong thing).
-	void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo);
+	//
+	// `onlyComponent` (optional) restricts the output to the ONE section with
+	// that label — what the class tab's component tree wants when a single
+	// component is selected. The entity name row and the Add Component button
+	// belong to the entity and are left out then.
+	void renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* undo,
+	               const char* onlyComponent = nullptr);
+
+	// The labels of the sections renderFor WOULD draw for this entity, drawing
+	// nothing. It runs the very same body in a collect mode, so a caller listing
+	// components (the class tab's tree) can never fall behind what this panel
+	// actually edits — a hand-written second list would drift the first time a
+	// component was added here. Safe to call from inside another window: it
+	// emits no ImGui calls.
+	void listComponents(AppContext& ctx, HorizonWorld& world, Entity entity,
+	                    std::vector<std::string>& out);
+
+	// Remove the component with that Details-panel label. Goes through the very
+	// same section body the header's right-click "Remove Component" uses, so
+	// there is no second label→type map to keep in step. Draws nothing.
+	void removeComponent(AppContext& ctx, HorizonWorld& world, Entity entity,
+	                     const char* label, EditorUndo* undo = nullptr);
+
+	// The Add Component menu's items, inside a popup the CALLER has opened
+	// (BeginPopup/BeginPopupContextItem … EndPopup). Shared by the Details
+	// panel's button and the class tab's component tree.
+	void addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo);
 }

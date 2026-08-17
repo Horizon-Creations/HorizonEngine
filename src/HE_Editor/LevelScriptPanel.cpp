@@ -1379,6 +1379,12 @@ struct ClassState
 	std::unique_ptr<HorizonWorld> compWorld;
 	Entity      compRoot = entt::null;
 	Entity      compSel  = entt::null;
+	// Which single component of `compSel` is in focus, by its Details-panel
+	// label; empty = the whole entity. The tree lists every component as its own
+	// row under its entity — that is what "each one individually editable"
+	// means — and this is the row that is selected. The labels come from
+	// InspectorPanel::listComponents, never from a list kept here.
+	std::string compFocus;
 	// Which half of the class is on screen. It used to be called
 	// "showComponents", which described the middle column rather than the view:
 	// the components are only the LIST, and next to it sits the thing they add
@@ -1622,8 +1628,45 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	}
 }
 
+// The whole assembly, drawn by the renderer from the class's OWN scratch world:
+// gray backdrop with a ground plane, a grid and the class's origin marked, and
+// every component's mesh where its transform actually puts it. Returns false on
+// a backend that has no world-preview path (D3D11/D3D12/Vulkan today) — the
+// caller then falls back to the per-asset preview below, which is exactly what
+// this panel showed before the hook existed.
+bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
+                      const ImVec2& av, const ImVec2& org)
+{
+	if (!ctx.renderer || !ctx.contentManager || !st.compWorld) return false;
+	glm::mat4 viewProj(1.0f);
+	// The pivot is the class's origin, not the content's centre: the character's
+	// own origin is the thing every component transform is relative to, so it is
+	// what the view should turn around.
+	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.compWorld,
+		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
+		st.previewYaw, st.previewPitch, st.previewDist, glm::vec3(0.0f), &viewProj);
+	if (!tex) return false;
+
+	const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+	ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
+		flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+	// Colliders and camera booms stay an overlay even now: they have no mesh to
+	// render, and drawing them THROUGH the character is what you want from a
+	// collider outline anyway.
+	drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
+	return true;
+}
+
 void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 {
+	ImVec2 av = ImVec2(std::max(64.0f, ImGui::GetContentRegionAvail().x),
+	                   std::max(64.0f, ImGui::GetContentRegionAvail().y));
+	const ImVec2 org = ImGui::GetCursorScreenPos();
+
+	// The whole class, out of its own world. Everything below is the fallback
+	// for the backends that have no world-preview path yet.
+	const bool drewWorld = drawWorldPreview(ctx, st, reg, av, org);
+
 	// The MESH is the root's, not the selection's. The renderer draws it at
 	// identity, so root space is the space of the picture — and that is the only
 	// space in which the subtree's colliders and booms line up with it. Picking
@@ -1631,13 +1674,13 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 	// its real offset, which reads as everything being in the wrong place.
 	const Entity meshOwner = st.compRoot;
 	HE::UUID skeletalId{}, staticId{};
-	if (reg.valid(meshOwner))
+	if (!drewWorld && reg.valid(meshOwner))
 	{
 		if (const auto* sm = reg.try_get<SkeletalMeshComponent>(meshOwner)) skeletalId = sm->meshAssetId;
 		if (const auto* m  = reg.try_get<MeshComponent>(meshOwner))         staticId   = m->meshAssetId;
 	}
 
-	if (skeletalId == HE::UUID{} && staticId == HE::UUID{})
+	if (!drewWorld && skeletalId == HE::UUID{} && staticId == HE::UUID{})
 	{
 		ImGui::TextDisabled("%s",
 			"No mesh on this class yet.\n"
@@ -1646,19 +1689,16 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		return;
 	}
 
-	ImVec2 av = ImVec2(std::max(64.0f, ImGui::GetContentRegionAvail().x),
-	                   std::max(64.0f, ImGui::GetContentRegionAvail().y));
 	// The material path renders SQUARE (one `size`), the skeletal one takes a
 	// width and a height. Squaring the pane for both keeps a mesh from
 	// stretching when the column is dragged narrow.
 	const float side = std::min(av.x, av.y);
-	if (skeletalId == HE::UUID{}) av = ImVec2(side, side);
-	const ImVec2 org = ImGui::GetCursorScreenPos();
+	if (!drewWorld && skeletalId == HE::UUID{}) av = ImVec2(side, side);
 
 	void* tex = nullptr;
 	glm::mat4 viewProj(1.0f);
 	bool haveViewProj = false;
-	if (ctx.renderer && ctx.contentManager)
+	if (!drewWorld && ctx.renderer && ctx.contentManager)
 	{
 		if (skeletalId != HE::UUID{})
 		{
@@ -1686,19 +1726,22 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		}
 	}
 
-	if (tex)
+	if (!drewWorld)
 	{
-		const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
-		ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
-			flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
-		// The rest of the class, over the mesh: what it collides with and where
-		// its camera sits. Only when the renderer reported its framing — drawing
-		// gizmos against a guessed matrix would be worse than drawing none.
-		if (haveViewProj)
-			drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
+		if (tex)
+		{
+			const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+			ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
+				flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+			// The rest of the class, over the mesh: what it collides with and where
+			// its camera sits. Only when the renderer reported its framing — drawing
+			// gizmos against a guessed matrix would be worse than drawing none.
+			if (haveViewProj)
+				drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
+		}
+		else
+			ImGui::TextDisabled("(preview unavailable on this backend)");
 	}
-	else
-		ImGui::TextDisabled("(preview unavailable on this backend)");
 
 	// Same orbit as the Skeletal Mesh tab, down to the right-drag: the main
 	// viewport steers with RMB and that muscle memory lands here too.
@@ -1714,8 +1757,12 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		st.previewYaw   -= md.x * 0.01f;
 		st.previewPitch  = std::clamp(st.previewPitch + md.y * 0.01f, -1.45f, 1.45f);
 	}
+	// Multiplicative zoom: with the world preview `previewDist` is a distance in
+	// METRES around the origin, not a multiple of the mesh's bounds, and a fixed
+	// step of 0.1 m per notch feels dead once you are twenty metres out.
 	if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
-		st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
+		st.previewDist = std::clamp(st.previewDist * (1.0f - ImGui::GetIO().MouseWheel * 0.1f),
+		                            0.5f, 30.0f);
 }
 
 void drawComponentsBody(AppContext& ctx, ClassState& st)
@@ -1724,6 +1771,16 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	if (!st.compWorld) return;
 	auto& reg = st.compWorld->registry();
 	if (!reg.valid(st.compSel)) st.compSel = st.compRoot;
+	// A focused component that is no longer there — removed from the tree or
+	// from the Details header — would leave the details column blank with no
+	// hint why. Fall back to the whole entity instead.
+	if (!st.compFocus.empty() && reg.valid(st.compSel))
+	{
+		std::vector<std::string> have;
+		InspectorPanel::listComponents(ctx, *st.compWorld, st.compSel, have);
+		if (std::find(have.begin(), have.end(), st.compFocus) == have.end())
+			st.compFocus.clear();
+	}
 
 	const float listW = 220.0f;
 	ImGui::BeginChild("##hccomp_tree", ImVec2(listW, 0), true);
@@ -1732,6 +1789,11 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	// A real tree, not the flat list this used to be. The class HAS a hierarchy
 	// — a PlayerCharacter carries a Camera child — and listing parent and child
 	// side by side said the opposite of what the subtree actually is.
+	//
+	// Under each entity hang its COMPONENTS, one row apiece, exactly as Unreal's
+	// Blueprint components panel does it: everything the class is made of is
+	// visible at once and each piece is selectable on its own, instead of the
+	// entity being the smallest thing you can point at.
 	{
 		// Recursive lambda via an explicit self-parameter: the walk needs to
 		// call itself and a capturing lambda cannot name its own type.
@@ -1740,24 +1802,64 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 			if (!reg.valid(e)) return;
 			const auto* nameC = reg.try_get<NameComponent>(e);
 			const std::string label = nameC ? nameC->name : std::string("Entity");
+			// Copied up front: the popup below can add a component, and the
+			// recursion can add or remove a child — either way, iterating the
+			// live vector afterwards would be reading a moved-from thing.
 			const auto* hier = reg.try_get<HierarchyComponent>(e);
-			const bool hasKids = hier && !hier->children.empty();
+			const std::vector<Entity> kids = hier ? hier->children : std::vector<Entity>{};
+			const bool hasKids = !kids.empty();
+
+			// The component labels come from the Details panel itself, so a
+			// component added there shows up here without anyone maintaining a
+			// second list.
+			std::vector<std::string> comps;
+			InspectorPanel::listComponents(ctx, *st.compWorld, e, comps);
 
 			ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
 			                           ImGuiTreeNodeFlags_SpanAvailWidth |
 			                           ImGuiTreeNodeFlags_DefaultOpen;
-			if (!hasKids) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-			if (e == st.compSel) flags |= ImGuiTreeNodeFlags_Selected;
+			if (!hasKids && comps.empty())
+				flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+			if (e == st.compSel && st.compFocus.empty()) flags |= ImGuiTreeNodeFlags_Selected;
 
 			ImGui::PushID((int)entt::to_integral(e));
 			const bool open = ImGui::TreeNodeEx("##n", flags, "%s%s",
 			                                    label.c_str(), e == st.compRoot ? "  (root)" : "");
-			if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) st.compSel = e;
-			if (open && hasKids)
+			if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
 			{
-				// A copy: adding or removing a child inside the walk would
-				// invalidate the vector we are iterating.
-				const std::vector<Entity> kids = hier->children;
+				st.compSel = e;
+				st.compFocus.clear();
+			}
+			// New components are attached HERE, on the thing they attach to —
+			// the same menu the Details panel offers, not a copy of it.
+			if (ImGui::BeginPopupContextItem("##addcomp"))
+			{
+				ImGui::TextDisabled("Add Component");
+				ImGui::Separator();
+				InspectorPanel::addComponentMenu(*st.compWorld, e, nullptr);
+				ImGui::EndPopup();
+			}
+			if (open && (hasKids || !comps.empty()))
+			{
+				for (const std::string& c : comps)
+				{
+					ImGuiTreeNodeFlags cf = ImGuiTreeNodeFlags_Leaf |
+					                        ImGuiTreeNodeFlags_NoTreePushOnOpen |
+					                        ImGuiTreeNodeFlags_SpanAvailWidth;
+					if (e == st.compSel && st.compFocus == c) cf |= ImGuiTreeNodeFlags_Selected;
+					ImGui::TreeNodeEx(c.c_str(), cf, "%s", c.c_str());
+					if (ImGui::IsItemClicked()) { st.compSel = e; st.compFocus = c; }
+					if (ImGui::BeginPopupContextItem(c.c_str()))
+					{
+						if (ImGui::MenuItem("Remove Component"))
+						{
+							InspectorPanel::removeComponent(ctx, *st.compWorld, e, c.c_str());
+							if (st.compFocus == c) st.compFocus.clear();
+							st.dirty = true;
+						}
+						ImGui::EndPopup();
+					}
+				}
 				for (Entity c : kids) self(self, c);
 				ImGui::TreePop();
 			}
@@ -1812,7 +1914,10 @@ void drawComponentsBody(AppContext& ctx, ClassState& st)
 	ImGui::BeginChild("##hccomp_details", ImVec2(0, 0), true);
 	if (reg.valid(st.compSel))
 	{
-		InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr);
+		// One component when the tree has one selected, the whole entity
+		// otherwise — the same panel either way, just narrowed.
+		InspectorPanel::renderFor(ctx, *st.compWorld, st.compSel, nullptr,
+		                          st.compFocus.empty() ? nullptr : st.compFocus.c_str());
 		// The scratch world has no undo revision to diff against, so the tab
 		// takes ImGui's word for it. Scoped to THIS child: IsAnyItemActive is
 		// global to the frame, so on its own it would mark the class unsaved

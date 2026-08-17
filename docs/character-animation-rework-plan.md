@@ -99,6 +99,28 @@ Nachzug ist jeweils der eigene `RenderSkeletalPreview` des Backends plus die
 beiden Ensure-Helfer; der Rest — Kamera, Extraktion, Backdrop-Geometrie — ist
 backend-unabhängig und steht schon.
 
+### CP5 — Der Viewport ist jetzt ein Viewport
+
+Damit hängt das Panel am neuen Haken statt am Per-Asset-Bild, und der linke Baum
+zeigt, woraus die Klasse besteht:
+
+* **Jede Komponente ist eine eigene Zeile** unter ihrer Entity, einzeln
+  auswählbar; die Details-Spalte zeigt dann genau diese eine Komponente. Neue
+  Komponenten hängt man per Rechtsklick auf die Entity-Zeile an, entfernen geht
+  per Rechtsklick auf die Komponenten-Zeile.
+* Die Zeilen kommen aus **`InspectorPanel::listComponents`**, das denselben
+  Funktionskörper wie das Details-Panel in einem Sammel-Modus durchläuft. Eine
+  zweite, handgepflegte Liste von Komponentennamen wäre beim nächsten neuen
+  Komponententyp sofort veraltet. Aus demselben Grund gehen „Add" und „Remove"
+  über `addComponentMenu`/`removeComponent` durch genau die vorhandenen Pfade —
+  das Entfernen benutzt die `if (removed) registry.remove<T>()`-Zeile, die schon
+  am Header hing, statt eine Label→Typ-Tabelle als dritte Liste einzuführen.
+* `previewDist` bedeutet jetzt **Meter um den Origin**, nicht mehr ein Vielfaches
+  der Mesh-Bounds; der Zoom ist multiplikativ, sonst fühlt er sich auf 20 m tot
+  an.
+
+**Nie live verifiziert** — wie alles in diesem Umbau.
+
 **Nie live verifiziert:** nichts davon ist im laufenden Editor gelaufen. Optik,
 Maus-Gefühl, Kollisions-Popping und der Sync-Graph in PIE stehen aus.
 
