@@ -11513,10 +11513,15 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)tex atIndex:slot];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:slot];
 	};
+	bindTex(giActive ? m_giShadowResult    : m_dummyTexture, 5);
 	bindTex(giActive ? m_giIrradianceAtlas : m_dummyTexture, 6);
 	bindTex(giActive ? m_giVisibilityAtlas : m_dummyTexture, 7);
-	bindTex(giActive ? m_giShadowResult    : m_dummyTexture, 9);
-	bindTex(giActive ? m_giLocalMaskTex    : m_dummyTexture, 10);
+	bindTex(giActive ? m_giLocalMaskTex    : m_dummyTexture, 8);
+	// Forward reflection results on 9/10 — the resolve zeroes the term via
+	// ssr.w, but the gated samples still execute when the refl passes ran, so
+	// the slots must hold a valid texture (dummies otherwise).
+	bindTex(m_fwdReflSsrTex ? m_fwdReflSsrTex : m_dummyTexture, 9);
+	bindTex(m_fwdReflGiTex  ? m_fwdReflGiTex  : m_dummyTexture, 10);
 	bindTex(m_shadowDepthTex, 11);
 	bindTex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex, 12);
 	bindTex(m_skyEnvCube, 14);

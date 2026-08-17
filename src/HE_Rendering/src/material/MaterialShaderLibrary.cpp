@@ -1083,8 +1083,19 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
     std::vector<MslPin> pins = {
         { Stage::Fragment, 0, 0, static_cast<uint32_t>(MaterialShaderLibrary::kMetalLightingBufferIndex) },
         { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
-        { Stage::Fragment, 0, 10, 9 },    // GI sun mask (as in fragment())
-        { Stage::Fragment, 0, 11, 10 },   // GI local mask
+        // GI screen-space masks on 5/8 and the forward reflection results on
+        // 9/10 — the SAME slots fragment() pins and the scene-pass encoder
+        // binds per frame (the two-pass resolve draw inherits those binds; it
+        // only rebinds the G-buffer slots 0..3 itself). The 31/32 pins are
+        // load-bearing even though the resolve discards the reflection term
+        // (ssr.w zeroes ambSpec — the composite pass owns it): unpinned,
+        // spirv-cross auto-assigns them from 0 and collides with the reserved
+        // heGB0 pin — the whole pipeline then fails to build and the renderer
+        // silently stays forward.
+        { Stage::Fragment, 0, 10, 5 },    // GI sun mask (as in fragment())
+        { Stage::Fragment, 0, 11, 8 },    // GI local mask
+        { Stage::Fragment, 0, 31, 9 },    // forward SSR result
+        { Stage::Fragment, 0, 32, 10 },   // forward GI reflection result
         { Stage::Fragment, 0, 12, 11 },   // CSM array
         { Stage::Fragment, 0, 13, 12 },   // local shadow atlas
         { Stage::Fragment, 0, 15, 14 },   // sky env cubemap
