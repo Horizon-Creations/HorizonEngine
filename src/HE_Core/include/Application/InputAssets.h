@@ -54,9 +54,22 @@ namespace HE
 	HE_API std::string axisSourceName(AxisSource s);
 	HE_API AxisSource  axisSourceFromName(const std::string& name);
 
+	// Mouse button name in a mapping context's JSON ("left"/"right"/"middle"/
+	// "x1"/"x2"), and back. Index is the MouseButton enum; unknown → -1.
+	HE_API std::string mouseButtonName(int button);
+	HE_API int         mouseButtonFromName(const std::string& name);
+
+	// Human-readable labels for binding UI. The STORED names stay SDL's tables
+	// (stable, what the loader parses); these are only what a person sees.
+	// Gamepad names are positional in Xbox-layout terms, so the label says both
+	// halves: SDL's "a" shows as "A (South)", "dpup" as "D-Pad Up".
+	HE_API std::string gamepadButtonDisplayName(SDL_GamepadButton b);
+	HE_API std::string mouseButtonDisplayName(int button);
+
 	// Apply one InputMappingContextAsset JSON payload to `mapping`: resolves
-	// each entry's action path to its logical name and registers key ("keys")
-	// and/or axis ("axes") bindings by SDL scancode name. Unknown key names
-	// are skipped. Returns the number of entries that produced a binding.
+	// each entry's action path to its logical name and registers key ("keys"),
+	// gamepad button ("gamepadButtons"), mouse button ("mouseButtons") and/or
+	// axis ("axes") bindings. Unknown names are skipped. Returns the number of
+	// entries that produced a binding.
 	HE_API size_t applyInputMappingContext(InputMapping& mapping, const std::string& json);
 }

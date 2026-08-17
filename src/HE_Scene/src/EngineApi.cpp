@@ -1482,7 +1482,16 @@ void clear() { tbl() = Table{}; }
 // ── Input ────────────────────────────────────────────────────────────────────
 namespace input {
 namespace {
-struct Snapshot { std::unordered_set<std::string> keys; uint32_t buttons = 0; glm::vec2 pos{0.0f}, delta{0.0f}; float scroll = 0.0f; };
+struct Snapshot
+{
+    std::unordered_set<std::string> keys;
+    uint32_t buttons = 0;
+    glm::vec2 pos{0.0f}, delta{0.0f};
+    float scroll = 0.0f;
+    bool  padConnected = false;
+    float padAxes[SDL_GAMEPAD_AXIS_COUNT] = {};
+    bool  padButtons[SDL_GAMEPAD_BUTTON_COUNT] = {};
+};
 Snapshot& snap() { static Snapshot s; return s; }
 }
 void setMouse(const glm::vec2& p, const glm::vec2& d, uint32_t mask, float sc)
@@ -1511,6 +1520,30 @@ void pushSdlSnapshot(float dx, float dy)
     if (mb & SDL_BUTTON_MASK(SDL_BUTTON_MIDDLE)) buttons |= 1u << 2;
     setMouse({ mx, my }, { dx, dy }, buttons, 0.0f);
     setKeysDown(down);
+}
+void setGamepad(bool connected,
+                const float* axes, size_t axisCount,
+                const bool* buttons, size_t buttonCount)
+{
+    Snapshot& s = snap();
+    s.padConnected = connected;
+    const size_t na = std::min(axisCount,   (size_t)SDL_GAMEPAD_AXIS_COUNT);
+    const size_t nb = std::min(buttonCount, (size_t)SDL_GAMEPAD_BUTTON_COUNT);
+    for (size_t i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i)
+        s.padAxes[i] = (axes && i < na) ? axes[i] : 0.0f;
+    for (size_t i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
+        s.padButtons[i] = (buttons && i < nb) && buttons[i];
+}
+bool gamepadConnected() { return snap().padConnected; }
+bool gamepadButton(const std::string& name)
+{
+    const SDL_GamepadButton b = SDL_GetGamepadButtonFromString(name.c_str());
+    return b != SDL_GAMEPAD_BUTTON_INVALID && snap().padButtons[b];
+}
+float gamepadAxis(const std::string& name)
+{
+    const SDL_GamepadAxis a = SDL_GetGamepadAxisFromString(name.c_str());
+    return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
 } // namespace input
 
@@ -1804,6 +1837,15 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofVec2(input::mouseDelta()) }; } });
         t.push_back({ "input.scrollDelta", "Input", false, {}, {{"scroll", P::Float}}, "HE::api::input::scrollDelta",
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::scrollDelta()) }; } });
+        // Gamepad (names are SDL's mapping strings, Xbox layout: buttons
+        // "a"/"leftshoulder"/"dpup"/…, axes "leftx"/"righty"/"lefttrigger"/…).
+        // Axes come deadzone-filtered from the app; a resting stick reads 0.0.
+        t.push_back({ "input.gamepadConnected", "Input", false, {}, {{"connected", P::Bool}}, "HE::api::input::gamepadConnected",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::gamepadConnected()) }; } });
+        t.push_back({ "input.gamepadButton", "Input", false, {{"button", P::String}}, {{"down", P::Bool}}, "HE::api::input::gamepadButton",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::gamepadButton(aS(a, 0))) }; } });
+        t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
 
         // Entity queries
         t.push_back({ "entity.findByName", "Entity", false, {{"name", P::String}}, {{"entity", P::Int}}, "HE::api::entity::findByName",
@@ -2115,6 +2157,9 @@ const std::vector<ApiFn>& registry()
             { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },
+            { "input.gamepadConnected", "Gamepad Connected" },
+            { "input.gamepadButton", "Gamepad Button" },
+            { "input.gamepadAxis", "Gamepad Axis" },
             { "entity.findByName", "Find By Name" },  { "entity.exists", "Entity Exists" },
             { "entity.setVisible", "Set Entity Visible" }, { "entity.getVisible", "Get Entity Visible" },
             { "entity.saveState", "Save Entity State" },

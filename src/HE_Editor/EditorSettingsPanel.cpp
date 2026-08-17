@@ -440,6 +440,46 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			     "RMB-hold flies the viewport.");
 	});
 
+	row("gamepad", "Input", [&]{
+		Input* in = ctx.appInput;
+		if (!in) return;
+		// Connection readout answers "is my pad even seen?" before any tuning.
+		if (in->gamepad().connected)
+			ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.0f), "Gamepad connected");
+		else
+			ImGui::TextDisabled("No gamepad connected");
+
+		bool changed = false;
+		changed |= Row::sliderFloat("Stick Deadzone",   &cfg.GamepadStickDeadzone,   0.0f, 0.5f, "%.2f");
+		changed |= Row::sliderFloat("Trigger Deadzone", &cfg.GamepadTriggerDeadzone, 0.0f, 0.5f, "%.2f");
+		if (changed)
+		{
+			// Input owns the live values; the config row is just their home
+			// across restarts — write through immediately so the readout below
+			// answers the drag in the same frame.
+			in->stickDeadzone   = cfg.GamepadStickDeadzone;
+			in->triggerDeadzone = cfg.GamepadTriggerDeadzone;
+		}
+		hint("Radial deadzone: stick drift below this deflection reads as exactly "
+		     "zero, and intensity re-scales from the edge so full tilt still "
+		     "reaches 1. Raise it if a worn stick drifts; lower it for finer "
+		     "low-speed control.");
+
+		if (in->gamepad().connected)
+		{
+			// Live values, filtered — a resting stick showing 0.00 IS the
+			// deadzone working, which makes this readout the calibration UI.
+			const float lx = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX);
+			const float ly = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTY);
+			const float rx = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+			const float ry = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+			const float lt = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+			const float rt = in->gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+			ImGui::TextDisabled("L %.2f/%.2f   R %.2f/%.2f   LT %.2f  RT %.2f",
+			                    lx, ly, rx, ry, lt, rt);
+		}
+	});
+
 	row("fontscale", "Appearance", [&]{
 		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
 	});

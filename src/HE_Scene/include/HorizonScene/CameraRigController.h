@@ -1,9 +1,9 @@
 #pragma once
 #include <entt/entt.hpp>
+#include <Application/Input.h>   // MouseFrame — embedded in CameraLookInput
 
 class HorizonWorld;
 class PhysicsWorld;
-struct MouseFrame;
 
 // Drives a camera that carries a CameraRigComponent: first person or third
 // person, following a target entity.
@@ -33,6 +33,24 @@ struct CameraRigFrame
     bool         occluded = false;     // the boom was shortened by geometry
 };
 
+// One frame of look input, both device families in their own units — because
+// they ARE different units and conflating them is the classic bug:
+//   mouse  = a DISPLACEMENT (degrees per pixel via `sensitivity`); scaling it
+//            by dt would make the same flick turn further at a lower framerate.
+//   stick  = a RATE (deflection -1..+1, degrees per second via
+//            `stickSensitivity`); NOT scaling it by dt would make the turn
+//            speed framerate-dependent. The rig applies dt itself — that is
+//            what `dt` is here for.
+// Stick values are expected deadzone-filtered (Input::gamepadAxisFiltered);
+// SDL convention: stickY positive is DOWNWARD, matching mouse dy.
+struct CameraLookInput
+{
+    MouseFrame mouse;
+    float stickX = 0.0f;
+    float stickY = 0.0f;
+    float dt     = 0.0f;
+};
+
 class CameraRigController
 {
 public:
@@ -52,9 +70,20 @@ public:
     // `physics` is what the third-person boom sweeps against so it does not put
     // the camera inside a wall. Null (edit mode, tests, a scene without physics)
     // simply means no collision — the boom keeps its full length.
-    static Frame update(HorizonWorld& world, const MouseFrame& mouse,
+    static Frame update(HorizonWorld& world, const CameraLookInput& look,
                         entt::entity fallbackTarget = entt::null,
                         const PhysicsWorld* physics = nullptr);
+
+    // Mouse-only convenience — the pre-gamepad signature, kept so tests and
+    // callers without a pad don't have to spell out a CameraLookInput.
+    static Frame update(HorizonWorld& world, const MouseFrame& mouse,
+                        entt::entity fallbackTarget = entt::null,
+                        const PhysicsWorld* physics = nullptr)
+    {
+        CameraLookInput look;
+        look.mouse = mouse;
+        return update(world, look, fallbackTarget, physics);
+    }
 
     // The camera this controller drives: an entity with both CameraComponent and
     // CameraRigComponent, preferring isMain. entt::null when there is none.

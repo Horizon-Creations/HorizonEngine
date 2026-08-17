@@ -121,6 +121,58 @@ TEST_CASE("CameraRig: mouse motion turns the rig and the pitch clamps")
     CHECK(r->rig().pitch == doctest::Approx(r->rig().pitchMax));
 }
 
+TEST_CASE("CameraRig: stick look is a rate — dt-scaled, unlike the mouse")
+{
+    auto r = makeRig();
+    r->rig().stickSensitivity = 90.0f;   // quarter turn per second at full tilt
+
+    HE::CameraLookInput look;
+    look.stickX = 1.0f;
+    look.dt     = 0.5f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().yaw == doctest::Approx(-45.0f)); // 90°/s * 0.5s, mouse sign convention
+
+    // Same deflection, half the dt → half the turn. THE property that
+    // separates a rate from a displacement.
+    auto r2 = makeRig();
+    r2->rig().stickSensitivity = 90.0f;
+    look.dt = 0.25f;
+    HE::CameraRigController::update(r2->world, look);
+    CHECK(r2->rig().yaw == doctest::Approx(-22.5f));
+}
+
+TEST_CASE("CameraRig: stick pitch follows mouse convention and invert flips it")
+{
+    auto r = makeRig();
+    r->rig().stickSensitivity = 90.0f;
+    r->rig().pitch = 0.0f;
+
+    HE::CameraLookInput look;
+    look.stickY = 1.0f;   // SDL: stick pushed DOWN
+    look.dt     = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().pitch == doctest::Approx(-9.0f)); // looks down, like mouse dy+
+
+    r->rig().pitch = 0.0f;
+    r->rig().stickInvertY = true;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().pitch == doctest::Approx(9.0f));
+}
+
+TEST_CASE("CameraRig: mouse and stick combine in one update")
+{
+    auto r = makeRig();
+    r->rig().sensitivity      = 0.1f;
+    r->rig().stickSensitivity = 90.0f;
+
+    HE::CameraLookInput look;
+    look.mouse.dx = 10.0f;   // -1° via mouse
+    look.stickX   = 1.0f;    // -9° via stick
+    look.dt       = 0.1f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().yaw == doctest::Approx(-10.0f));
+}
+
 TEST_CASE("CameraRig: yaw stays in (-180, 180] instead of winding up")
 {
     auto r = makeRig();

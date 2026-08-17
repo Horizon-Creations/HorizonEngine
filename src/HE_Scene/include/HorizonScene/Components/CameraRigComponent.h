@@ -65,6 +65,12 @@ struct CameraRigComponent {
     float pitch = -10.0f;
 
     float sensitivity = 0.12f;    // degrees per pixel of mouse motion
+    // Right-stick look: degrees per SECOND at full deflection — a rate, where
+    // the mouse sensitivity above is per pixel of displacement. The two are
+    // separate knobs because they are separate units; one number could not be
+    // right for both. 180 = a half turn per second at full tilt.
+    float stickSensitivity = 180.0f;
+    bool  stickInvertY     = false;
     float pitchMin    = -80.0f;
     float pitchMax    =  75.0f;
 

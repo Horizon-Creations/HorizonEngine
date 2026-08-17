@@ -8549,7 +8549,10 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 	glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
 	glViewport(0, 0, W, H);
-	glClearColor(0.22f, 0.22f, 0.235f, 1.0f); // studio gray — covered by the sky when there is one
+	// Studio gray — covered by the sky when there is one. LINEAR: this is resolved
+	// through ACES + gamma below, which lifts it a long way (see kPreviewBackground).
+	glClearColor(HE::kPreviewBackground[0], HE::kPreviewBackground[1],
+	             HE::kPreviewBackground[2], 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
 	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);

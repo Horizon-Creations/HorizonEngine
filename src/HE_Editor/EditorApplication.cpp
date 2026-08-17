@@ -1100,6 +1100,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
+	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
+	m_editorConfig.GamepadTriggerDeadzone      = globalstate.getCustomConfigFloat("GamepadTriggerDeadzone", m_editorConfig.GamepadTriggerDeadzone);
+	// Input owns the live deadzones; the config is only their overnight home.
+	input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
+	input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
@@ -1801,6 +1806,17 @@ void EditorApplication::OnRender(float dt)
 		HE::api::input::pushSdlSnapshot(
 			m_playMouseCaptured ? input().mouse().dx : 0.0f,
 			m_playMouseCaptured ? input().mouse().dy : 0.0f);
+		// Gamepad snapshot: unlike the mouse it is NOT gated on the capture —
+		// a pad has no cursor to fight ImGui over, so while playing it always
+		// belongs to the game. Pushed from Input's merged frame, filtered.
+		{
+			float axes[SDL_GAMEPAD_AXIS_COUNT];
+			for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+				axes[a] = input().gamepadAxisFiltered(static_cast<SDL_GamepadAxis>(a));
+			HE::api::input::setGamepad(input().gamepad().connected,
+			                           axes, SDL_GAMEPAD_AXIS_COUNT,
+			                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
+		}
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
@@ -4580,6 +4596,7 @@ AppContext EditorApplication::makeContext()
 		.globalState         = m_globalState,
 		.projectManager      = &m_projectManager,
 		.renderer            = renderer(),
+		.appInput            = &input(),
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
@@ -4774,7 +4791,16 @@ void EditorApplication::setPlayMouseCaptured(bool captured)
 // playing AND the mouse is captured.
 void EditorApplication::updatePlayCameraController(float dt)
 {
-	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
+	if (!m_isPlaying || !m_editorWorld || dt <= 0.0f) return;
+
+	// Stick look does NOT require the mouse capture: a pad has no cursor to
+	// fight ImGui over, and demanding Esc-to-capture before the right stick
+	// works would be a rule nobody could discover. Mouse look keeps the
+	// capture requirement it always had.
+	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	const bool  padLook = stickX != 0.0f || stickY != 0.0f;
+	if (!m_playMouseCaptured && !padLook) return;
 
 	// The focused window is both the one whose relative mode must be re-asserted and
 	// the one the cursor is warped back into (see FlyCameraController) — with
@@ -4787,10 +4813,15 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// camera does this itself (cfg.reassertCapture), but the rig path returns
 	// before ever reaching it — leaving it to the controller would mean the
 	// cursor reappears in PIE exactly when a scene has a rig.
-	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
-		SDL_SetWindowRelativeMouseMode(focusWin, true);
-	if (SDL_CursorVisible())
-		SDL_HideCursor();
+	// Only while the mouse is actually held, though: a stick-only frame must
+	// not hide the cursor the user is still using on editor panels.
+	if (m_playMouseCaptured)
+	{
+		if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
+			SDL_SetWindowRelativeMouseMode(focusWin, true);
+		if (SDL_CursorVisible())
+			SDL_HideCursor();
+	}
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
@@ -4799,13 +4830,19 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
 	// Physics only exists while playing, and this whole function is gated on
 	// m_isPlaying — so the boom collides in PIE exactly as it will in the game.
-	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed,
+	HE::CameraLookInput look;
+	look.mouse  = m_playMouseCaptured ? input().mouse() : MouseFrame{};
+	look.stickX = stickX;
+	look.stickY = stickY;
+	look.dt     = dt;
+	if (HE::CameraRigController::update(*m_editorWorld, look, possessed,
 	                                    m_physicsWorld.get()).driven)
 	{
 		// Park the cursor, same reason as the fly-camera path (see
 		// FlyCameraController): without it the look stalls at the screen edge
-		// whenever relative mode is not actually engaged.
-		if (focusWin)
+		// whenever relative mode is not actually engaged. Mouse-capture frames
+		// only — a stick-only frame has a live cursor that must stay put.
+		if (focusWin && m_playMouseCaptured)
 		{
 			int ww = 0, wh = 0;
 			SDL_GetWindowSize(focusWin, &ww, &wh);
@@ -4824,6 +4861,11 @@ void EditorApplication::updatePlayCameraController(float dt)
 		return;
 	}
 
+	// The fly fallback is mouse/keyboard-only and re-asserts the mouse capture
+	// (reassertCapture) — on a stick-only frame with a live cursor it would
+	// grab the mouse out of the user's hand. It only ever ran on captured
+	// frames before the stick path widened the gate above; keep it that way.
+	if (!m_playMouseCaptured) return;
 	HE::FlyCameraController::Config cfg;
 	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
 	cfg.runWithoutCamera = true;   // keep feeding the self-diagnostic below
@@ -5486,6 +5528,8 @@ void EditorApplication::OnShutdown()
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
+	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
+	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);

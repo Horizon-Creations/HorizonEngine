@@ -829,7 +829,12 @@ void GameApplication::updateCameraController(float dt)
 	// it cannot — no rig camera, or a target that does not resolve — does the
 	// built-in free flight take over, so a scene without a rig behaves exactly
 	// as it always did.
-	if (HE::CameraRigController::update(*m_world, input().mouse(),
+	HE::CameraLookInput look;
+	look.mouse  = input().mouse();
+	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	look.dt     = dt;
+	if (HE::CameraRigController::update(*m_world, look,
 	                                    possessedCharacterEntity(),
 	                                    m_physicsWorld.get()).driven)
 	{
@@ -912,6 +917,16 @@ void GameApplication::OnRender(float deltaTime)
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
 	HE::api::input::pushSdlSnapshot(input().mouse().dx, input().mouse().dy);
+	// Gamepad snapshot: PUSHED from Input's merged frame, deadzone-filtered —
+	// the snapshot never polls SDL itself (one owner per device stream).
+	{
+		float axes[SDL_GAMEPAD_AXIS_COUNT];
+		for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+			axes[a] = input().gamepadAxisFiltered(static_cast<SDL_GamepadAxis>(a));
+		HE::api::input::setGamepad(input().gamepad().connected,
+		                           axes, SDL_GAMEPAD_AXIS_COUNT,
+		                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
+	}
 
 	// From here on there are TWO clocks, and which one a tick gets is a design
 	// decision, not a detail:

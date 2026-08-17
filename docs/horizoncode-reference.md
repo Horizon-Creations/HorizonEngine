@@ -210,7 +210,15 @@ registry function under a readable name (e.g. *Set Position*, *Sine*, *Play Soun
 ## 3. Engine subsystems (the `HE::api` registry)
 
 One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and** the
-`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 131 functions.**
+`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 134 functions.**
+
+Gamepad names are SDL's mapping strings in Xbox-layout positions: buttons
+`a`/`b`/`x`/`y` (so `a` is the south button — Cross on a PlayStation pad),
+`leftshoulder`, `dpup`, …; axes `leftx`/`lefty`/`rightx`/`righty`/
+`lefttrigger`/`righttrigger`. Sticks read −1..+1 deadzone-filtered (SDL
+convention: Y positive downward), triggers 0..1. Prefer `Input.<Action>.*`
+events over polling — gamepad bindings in the Input Mapping Context arrive
+there with no script changes at all.
 
 | Group | # | Functions |
 |-------|---|-----------|
@@ -226,7 +234,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
 | **Time** | 6 | `deltaTime`, `elapsed`, `frameCount`, `setTimeScale`, `timeScale`, `unscaledDeltaTime` |
 | **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |
-| **Input** | 5 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta` |
+| **Input** | 8 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta`, `gamepadConnected`, `gamepadButton`, `gamepadAxis` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
 | **Environment** | 10 | `get/setTimeOfDay`, `get/setCloudCoverage`, `get/setFogDensity`, `get/setWindDirection`, `get/setWindSpeed` |
 | **Audio** | 7 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition` |

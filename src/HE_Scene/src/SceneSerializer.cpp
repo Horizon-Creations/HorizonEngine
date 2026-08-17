@@ -275,6 +275,8 @@ namespace
 				{ "yaw",            rig->yaw },
 				{ "pitch",          rig->pitch },
 				{ "sensitivity",    rig->sensitivity },
+				{ "stickSensitivity", rig->stickSensitivity },
+				{ "stickInvertY",     rig->stickInvertY },
 				{ "pitchMin",       rig->pitchMin },
 				{ "pitchMax",       rig->pitchMax },
 				{ "targetYaw",       static_cast<uint8_t>(rig->targetYaw) },
@@ -768,6 +770,8 @@ namespace
 			rig.yaw            = c.value("yaw",            rig.yaw);
 			rig.pitch          = c.value("pitch",          rig.pitch);
 			rig.sensitivity    = c.value("sensitivity",    rig.sensitivity);
+			rig.stickSensitivity = c.value("stickSensitivity", rig.stickSensitivity);
+			rig.stickInvertY     = c.value("stickInvertY",     rig.stickInvertY);
 			rig.pitchMin       = c.value("pitchMin",       rig.pitchMin);
 			rig.pitchMax       = c.value("pitchMax",       rig.pitchMax);
 			rig.targetYaw      = static_cast<CameraRigComponent::TargetYaw>(

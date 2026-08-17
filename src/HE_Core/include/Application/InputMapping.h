@@ -9,30 +9,55 @@
 
 class Input;
 
-// One key that triggers a named action.
+// One key, gamepad button OR mouse button that triggers a named action. A
+// binding row usually sets one of the three; any that are set trigger. Each
+// new device is appended (not a tagged union) so `{ SDL_SCANCODE_SPACE }`
+// keeps compiling and meaning what it meant.
+//
+// The mouse button is checked against the MouseFrame HANDED TO tick(), not
+// against Input — so it obeys the same ownership gate as mouse movement: the
+// editor passes a blank frame outside play capture, and a click on editor UI
+// can never fire a game action.
 struct ActionBinding
 {
-    SDL_Scancode key = SDL_SCANCODE_UNKNOWN;
+    SDL_Scancode      key           = SDL_SCANCODE_UNKNOWN;
+    SDL_GamepadButton gamepadButton = SDL_GAMEPAD_BUTTON_INVALID;
+    int               mouseButton   = -1;   // MouseButton index, -1 = none
 };
 
-// Where an axis binding takes its value from. Named so it extends: gamepad
-// sticks and triggers belong in this list, they are just not built yet.
+// Where an axis binding takes its value from. Named so it extends — and the
+// gamepad sources promised here since day one now exist.
 enum class AxisSource
 {
-    Key,        // the key PAIR below — the original and still the default
+    Key,        // the key/button PAIR below — the original and still the default
     MouseX,     // this frame's mouse movement, horizontal
     MouseY,     // …and vertical
     MouseWheel, // this frame's wheel movement
+    // Deadzone-filtered stick/trigger values (Input::gamepadAxisFiltered).
+    // These are HELD STATES like keys — clamped with them, dt-scaled by the
+    // consumer — not displacements. SDL sign convention: stick Y is positive
+    // DOWNWARD; bind with a negative scale for up-positive axes.
+    GamepadLeftX,
+    GamepadLeftY,
+    GamepadRightX,
+    GamepadRightY,
+    GamepadLeftTrigger,  // 0..1
+    GamepadRightTrigger, // 0..1
 };
 
 // True for the sources that report a DISPLACEMENT rather than a held state.
 // The difference decides two things: such a source is not clamped (see tick),
 // and game code must not multiply it by delta time — it is already "how far",
-// not "how fast".
-inline bool axisSourceIsDelta(AxisSource s) { return s != AxisSource::Key; }
+// not "how fast". Sticks and triggers are on the HELD side of this line: a
+// deflected stick is a held key with intensity, so it clamps and dt-scales
+// exactly like one.
+inline bool axisSourceIsDelta(AxisSource s)
+{
+    return s == AxisSource::MouseX || s == AxisSource::MouseY || s == AxisSource::MouseWheel;
+}
 
-// One contribution to a named axis: either a pair of keys producing
-// +scale / -scale, or a mouse source scaled by the same factor.
+// One contribution to a named axis: a pair of keys/buttons producing
+// +scale / -scale, or a mouse/gamepad source scaled by the same factor.
 struct AxisBinding
 {
     SDL_Scancode positiveKey = SDL_SCANCODE_UNKNOWN;
@@ -42,6 +67,10 @@ struct AxisBinding
     // was written before there was anything else to bind, and appending keeps
     // every one of those spellings valid AND meaning what it meant.
     AxisSource   source      = AxisSource::Key;
+    // Button-as-axis (D-pad movement): evaluated with the Key source alongside
+    // the keys, appended after `source` under the same backward-compat rule.
+    SDL_GamepadButton positiveButton = SDL_GAMEPAD_BUTTON_INVALID;
+    SDL_GamepadButton negativeButton = SDL_GAMEPAD_BUTTON_INVALID;
 };
 
 // MouseFrame comes from Input (the device stream). It is PASSED IN to tick()
