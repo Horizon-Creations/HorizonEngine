@@ -913,6 +913,16 @@ void GameApplication::OnRender(float deltaTime)
 	HE::api::time::advance(deltaTime);
 	HE::api::input::pushSdlSnapshot(input().mouse().dx, input().mouse().dy);
 
+	// From here on there are TWO clocks, and which one a tick gets is a design
+	// decision, not a detail:
+	//   gameDt — the scaled one (time.setTimeScale), for everything that IS the
+	//            game: scripts, physics, cameras, animation, the ECS systems.
+	//   deltaTime — the raw frame time, for what has to keep running while the
+	//            game is paused at scale 0: the UI (a pause menu that froze
+	//            could never unpause itself) and timed debug primitives (which
+	//            would otherwise never expire).
+	const float gameDt = HE::api::time::deltaTime();
+
 	// Deferred scene transitions requested by scripts/graphs last frame: executed
 	// at the frame START so nothing downstream touches a half-swapped world.
 	executeSceneRequests();
@@ -940,7 +950,7 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Per-frame ECS script update (Lua/Python onUpdate), before the systems tick so
 	// script-driven transforms/params are reflected the same frame.
-	updateScripts(deltaTime);
+	updateScripts(gameDt);
 
 	// Physics at a FIXED rate, the same one the editor previews at
 	// (PhysicsWorld::kFixedDt) — a game that simulates at a different rate
@@ -948,11 +958,16 @@ void GameApplication::OnRender(float deltaTime)
 	if (m_world && m_physicsWorld)
 	{
 		HE_PROFILE_SCOPE_N("PhysicsStep");
-		m_physicsAccum += deltaTime;
+		m_physicsAccum += gameDt;
 		// Bounded so a long stall (a streaming hitch, a breakpoint) cannot
-		// spiral into ever more catch-up steps.
+		// spiral into ever more catch-up steps. The bound RIDES the time scale:
+		// at scale 5 a single frame legitimately owes ~5× the steps, and a fixed
+		// cap of 5 would saturate every frame and dump the remainder below —
+		// fast-forward would silently decay into slow motion. The rate itself
+		// stays fixed; only the number of steps per frame moves.
+		const int maxSteps = 5 * std::max(1, (int)std::ceil(HE::api::time::timeScale()));
 		int steps = 0;
-		while (m_physicsAccum >= PhysicsWorld::kFixedDt && steps++ < 5)
+		while (m_physicsAccum >= PhysicsWorld::kFixedDt && steps++ < maxSteps)
 		{
 			m_physicsWorld->step(*m_world, PhysicsWorld::kFixedDt);
 			m_physicsAccum -= PhysicsWorld::kFixedDt;
@@ -971,13 +986,15 @@ void GameApplication::OnRender(float deltaTime)
 	// following a target it updated before the step would follow where that
 	// target was LAST frame, and that lag is visible. Still before the systems
 	// tick, so LOD and precipitation get this frame's camera position.
-	updateCameraController(deltaTime);
+	updateCameraController(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
 		AudioSystem::updateSpatial(*m_world, m_audioEngine);
 
-	// Live widgets: per-frame logic tick (EventTick).
+	// Live widgets: per-frame logic tick (EventTick). RAW dt on purpose — the
+	// pause menu is a widget, and a menu that stops ticking when the game pauses
+	// cannot animate, count down, or hand the player a way back out.
 	if (m_world) m_world->widgets().tick(deltaTime);
 
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
@@ -986,13 +1003,17 @@ void GameApplication::OnRender(float deltaTime)
 	// it — so the frame's movement goes straight through to the input mapping.
 	// Capture only decides whether the OS keeps the cursor in the window; an
 	// uncaptured game still gets motion while the pointer is over it.
-	m_playerHost.tick(input(), deltaTime, input().mouse());
+	m_playerHost.tick(input(), gameDt, input().mouse());
 	// Entity classes: Tick, plus reaping the ones whose entity is gone.
-	m_entityHost.tick(deltaTime);
+	m_entityHost.tick(gameDt);
 
 	// Latent HorizonCode flow (Delay nodes): resume expired continuations on
 	// the app-wide runtime (GameInstance + widgets + level + objects share it).
-	m_gameInstance.runtime().update(deltaTime);
+	// Scaled like the rest of gameplay, which means a Delay node does NOT fire
+	// while the game is paused — the same rule Unreal/Unity timers follow. The
+	// way back out of a pause is therefore an input event or a widget tick, not
+	// a Delay.
+	m_gameInstance.runtime().update(gameDt);
 
 	// In-game UI pointer input (hover/click on buttons + scripted elements).
 	updateUIInput();
@@ -1013,12 +1034,12 @@ void GameApplication::OnRender(float deltaTime)
 		// Unbraced on purpose: the scope reaches to the end of this `if (m_world)`
 		// block, so the GI + environment pushes below are timed with it (as before).
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
-		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, deltaTime,
+		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.
-		SceneSystems::tickAnimation(*m_world, contentManager(), deltaTime, &m_animatorHost);
+		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
 
 		// Global Illumination: same GlobalState config.json key the editor's
 		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/
@@ -1079,7 +1100,9 @@ void GameApplication::OnRender(float deltaTime)
 				r->SetEnvironmentSettings(IRenderer::EnvironmentSettings{ .skyEnabled = false });
 			else
 			{
-				r->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, deltaTime));
+				// Scaled: the day-night cycle is world state, so slow motion slows
+				// the sun and a pause holds it in place.
+				r->SetEnvironmentSettings(HE::makeEnvironmentSettings(*env, gameDt));
 				// Mirror onto the built-in sun/moon LightComponents, so gameplay code
 				// reading them sees the Sky's values and not a stale default.
 				m_world->syncEnvironmentLights();

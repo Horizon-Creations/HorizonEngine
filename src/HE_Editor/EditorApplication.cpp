@@ -1865,6 +1865,17 @@ void EditorApplication::OnRender(float dt)
 		}
 	}
 
+	// Play-mode gameplay runs on the SCALED clock (time.setTimeScale), exactly
+	// as the packaged game does — that is the whole point of a preview. OUTSIDE
+	// play mode this is the raw frame time: the viewport keeps previewing
+	// authored animation at author speed, and the scale is play-session state
+	// that setPlayMode resets anyway.
+	//
+	// Two things deliberately keep the raw dt even while playing: the widget
+	// tick (a pause menu frozen at scale 0 could never unpause itself) and the
+	// timed debug primitives (which would otherwise never expire).
+	const float gameDt = m_isPlaying ? HE::api::time::deltaTime() : dt;
+
 	// ── Window title ─────────────────────────────────────────────────────
 	{
 		const std::string& projName = m_projectManager.currentProject().name;
@@ -2112,7 +2123,7 @@ void EditorApplication::OnRender(float dt)
 			                          renderer()->GetCapabilities().supportsGpuParticles;
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
-			                        m_editorCamera.position(), dt,
+			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
 		}
@@ -2121,7 +2132,7 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("PhysicsStep");
-			m_physicsAccum += dt;
+			m_physicsAccum += gameDt;
 			while (m_physicsAccum >= kPhysicsFixedDt)
 			{
 				m_physicsWorld->step(*m_editorWorld, kPhysicsFixedDt);
@@ -2133,7 +2144,7 @@ void EditorApplication::OnRender(float dt)
 		// before the step would follow where that target was last frame, and that
 		// lag is visible. Same order as the packaged game, which is the point of a
 		// preview.
-		updatePlayCameraController(dt);
+		updatePlayCameraController(gameDt);
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
@@ -2160,7 +2171,7 @@ void EditorApplication::OnRender(float dt)
 		{
 			HE_PROFILE_SCOPE_N("ScriptUpdate");
 			for (auto& [entityId, instId] : m_scriptInstances)
-				m_scriptContext->callOnUpdate(instId, dt);
+				m_scriptContext->callOnUpdate(instId, gameDt);
 		}
 
 		// Dispatch collision events to scripts (after physics has stepped this frame)
@@ -2176,9 +2187,11 @@ void EditorApplication::OnRender(float dt)
 		// Live widgets: per-frame logic tick (EventTick).
 		if (m_isPlaying && m_editorWorld)
 		{
+			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
 			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
-			m_editorWorld->scripts().update(dt);
+			// Scaled, so a Delay does not fire while the game is paused.
+			m_editorWorld->scripts().update(gameDt);
 			// Player instances: Tick + Input.<Action>.* events.
 			//
 			// The mouse only reaches them while play mode HOLDS it. Outside that
@@ -2187,10 +2200,10 @@ void EditorApplication::OnRender(float dt)
 			// axis as well would turn every drag across the viewport into player
 			// input. Esc toggles the capture, so this is also how the author
 			// gets the cursor back without the game turning with it.
-			m_playerHost.tick(input(), dt,
+			m_playerHost.tick(input(), gameDt,
 			                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
 			// Entity classes: Tick, plus reaping the ones whose entity is gone.
-			m_entityHost.tick(dt);
+			m_entityHost.tick(gameDt);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -2219,7 +2232,7 @@ void EditorApplication::OnRender(float dt)
 			// The host is only running during PIE, so outside play the sync
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), dt, &m_animatorHost);
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
 		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
@@ -2272,7 +2285,9 @@ void EditorApplication::OnRender(float dt)
 
 		{
 			HE_PROFILE_SCOPE_N("EnvironmentPush");
-			pushEnvironment(dt); // auto-advances + pushes the World env component
+			// Scaled while playing: the day-night cycle is world state, so slow
+			// motion slows the sun and a pause holds it in place.
+			pushEnvironment(gameDt); // auto-advances + pushes the World env component
 		}
 
 		// ── Debug draw overlay (selected-entity marker + colliders) ──────────

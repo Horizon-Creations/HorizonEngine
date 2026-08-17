@@ -1408,12 +1408,28 @@ bool  chance(float p)           { return value() < (p < 0.0f ? 0.0f : (p > 1.0f 
 
 // ── Time / frame ─────────────────────────────────────────────────────────────
 namespace time {
-namespace { struct Clock { float delta = 0.0f; double elapsed = 0.0; uint64_t frame = 0; }; Clock& clk() { static Clock c; return c; } }
-void  advance(float dt) { Clock& c = clk(); c.delta = dt; c.elapsed += dt; ++c.frame; }
-void  reset()           { clk() = Clock{}; }
-float deltaTime()       { return clk().delta; }
-float elapsed()         { return (float)clk().elapsed; }
-int   frameCount()      { return (int)clk().frame; }
+namespace {
+struct Clock
+{
+    float    delta         = 0.0f;   // scaled — what deltaTime() answers
+    float    unscaledDelta = 0.0f;   // as the app measured it
+    double   elapsed       = 0.0;    // sum of the SCALED deltas
+    uint64_t frame         = 0;
+    float    scale         = 1.0f;
+};
+Clock& clk() { static Clock c; return c; }
+}
+// The scale is applied ONCE, here: elapsed accumulates the scaled delta, so a
+// paused game's clock stands still and a script that integrates elapsed() sees
+// the same time base as one integrating deltaTime().
+void  advance(float dt)          { Clock& c = clk(); c.unscaledDelta = dt; c.delta = dt * c.scale; c.elapsed += c.delta; ++c.frame; }
+void  reset()                    { clk() = Clock{}; }  // scale 1 again: play never starts paused
+float deltaTime()                { return clk().delta; }
+float unscaledDeltaTime()        { return clk().unscaledDelta; }
+float elapsed()                  { return (float)clk().elapsed; }
+int   frameCount()               { return (int)clk().frame; }
+void  setTimeScale(float scale)  { clk().scale = std::clamp(scale, 0.0f, kMaxTimeScale); }
+float timeScale()                { return clk().scale; }
 } // namespace time
 
 // ── Player possession ────────────────────────────────────────────────────────
@@ -1752,6 +1768,14 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::elapsed()) }; } });
         t.push_back({ "time.frameCount", "Time", false, {}, {{"frame", P::Int}}, "HE::api::time::frameCount",
             [](Ctx&, const VV&){ return VV{ Value::ofInt(time::frameCount()) }; } });
+        // Time control. setTimeScale is the only stateful one (isExec) — the two
+        // getters are constant within a frame like the rest of the group.
+        t.push_back({ "time.setTimeScale", "Time", true, {{"scale", P::Float}}, {}, "HE::api::time::setTimeScale",
+            [](Ctx&, const VV& a){ time::setTimeScale(aF(a, 0)); return VV{}; } });
+        t.push_back({ "time.timeScale", "Time", false, {}, {{"scale", P::Float}}, "HE::api::time::timeScale",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::timeScale()) }; } });
+        t.push_back({ "time.unscaledDeltaTime", "Time", false, {}, {{"dt", P::Float}}, "HE::api::time::unscaledDeltaTime",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(time::unscaledDeltaTime()) }; } });
 
         // Player possession. The two that TAKE a controller are also the
         // PlayerController base class's member surface (HorizonCode.h
@@ -2081,6 +2105,8 @@ const std::vector<ApiFn>& registry()
             { "random.chance", "Random Chance" },
             { "time.deltaTime", "Delta Time" }, { "time.elapsed", "Elapsed Time" },
             { "time.frameCount", "Frame Count" },
+            { "time.setTimeScale", "Set Time Scale" }, { "time.timeScale", "Get Time Scale" },
+            { "time.unscaledDeltaTime", "Unscaled Delta Time" },
             { "player.possess", "Possess" },          { "player.unpossess", "Un Possess" },
             { "player.possessed", "Get Possessed Character" },
             { "player.controllerOf", "Get Controller" },

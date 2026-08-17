@@ -412,6 +412,43 @@ TEST_CASE("Time: advancing the clock reflects through the registry")
     CHECK(call("time.frameCount")[0].i == 0);
 }
 
+TEST_CASE("Time: the time scale dilates delta and elapsed, never the raw frame time")
+{
+    Ctx c{};
+    auto call    = [&](const char* id){ return HE::api::find(id)->invoke(c, {}); };
+    auto setScale = [&](float s){ HE::api::find("time.setTimeScale")->invoke(c, { Value::ofFloat(s) }); };
+
+    HE::api::time::reset();
+    CHECK(call("time.timeScale")[0].f == doctest::Approx(1.0f)); // play never starts scaled
+
+    // Fast-forward: gameplay sees 2× the time, the app's own frame time is untouched.
+    setScale(2.0f);
+    HE::api::time::advance(0.5f);
+    CHECK(call("time.deltaTime")[0].f         == doctest::Approx(1.0f));
+    CHECK(call("time.unscaledDeltaTime")[0].f == doctest::Approx(0.5f));
+    CHECK(call("time.elapsed")[0].f           == doctest::Approx(1.0f)); // scaled, like deltaTime
+
+    // Pause: the game clock stands still while frames keep coming.
+    setScale(0.0f);
+    HE::api::time::advance(0.5f);
+    CHECK(call("time.deltaTime")[0].f         == doctest::Approx(0.0f));
+    CHECK(call("time.unscaledDeltaTime")[0].f == doctest::Approx(0.5f));
+    CHECK(call("time.elapsed")[0].f           == doctest::Approx(1.0f)); // did not move
+    CHECK(call("time.frameCount")[0].i        == 2);                     // frames still count
+
+    // Clamped in the C++ setter, so every frontend inherits the same bounds.
+    setScale(-3.0f);
+    CHECK(call("time.timeScale")[0].f == doctest::Approx(0.0f));
+    setScale(1000.0f);
+    CHECK(call("time.timeScale")[0].f == doctest::Approx(HE::api::time::kMaxTimeScale));
+
+    // A play-start reset lifts a pause: nobody may inherit the last session's scale.
+    HE::api::time::reset();
+    CHECK(call("time.timeScale")[0].f == doctest::Approx(1.0f));
+    HE::api::time::advance(0.25f);
+    CHECK(call("time.deltaTime")[0].f == doctest::Approx(0.25f));
+}
+
 // ═══ Input snapshot ═══════════════════════════════════════════════════════════
 
 TEST_CASE("Input: the pushed snapshot reflects through the registry")

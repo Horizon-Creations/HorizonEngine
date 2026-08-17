@@ -606,12 +606,23 @@ namespace random {
 
 // ── Time / frame (process-global clock; the app advances it once per frame) ───
 // Getters are pure (constant within a frame) → pure data nodes in HorizonCode.
+// deltaTime() is SCALED by the time scale (Unity semantics): a script that
+// already integrates against it slows down, speeds up and pauses for free, and
+// the app loops read this ONE value for every gameplay tick. Anything that must
+// keep running while the game is paused (a pause menu, debug primitives) uses
+// the app's raw frame dt or unscaledDeltaTime() instead.
 namespace time {
-    void  advance(float dtSeconds);      // app hook: called once per rendered frame
-    void  reset();                       // app hook: zero on play-start
-    float deltaTime();                   // last frame's dt (seconds)
-    float elapsed();                     // seconds since reset
+    void  advance(float dtSeconds);      // app hook: called once per rendered frame (RAW dt)
+    void  reset();                       // app hook: zero on play-start (also restores scale 1)
+    float deltaTime();                   // last frame's dt (seconds), SCALED
+    float unscaledDeltaTime();           // last frame's dt as the app measured it
+    float elapsed();                     // scaled seconds since reset
     int   frameCount();                  // frames since reset
+    // 0 = paused, 1 = normal, up to kMaxTimeScale. Clamped HERE so every
+    // frontend (Lua, Python, HorizonCode, C++) inherits the same bounds.
+    void  setTimeScale(float scale);
+    float timeScale();
+    inline constexpr float kMaxTimeScale = 5.0f;
 }
 
 // ── Player possession (process-global table; PlayerHost owns it) ─────────────

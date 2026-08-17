@@ -224,7 +224,7 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **Cursor** | 1 | `setVisible` |
 | **Math** | 11 | `clamp`, `lerp`, `length`, `distance`, `radians`, `degrees`, `length3`, `distance3`, `normalize3`, `dot3`, `cross` (plus per-op nodes in §2) |
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
-| **Time** | 3 | `deltaTime`, `elapsed`, `frameCount` |
+| **Time** | 6 | `deltaTime`, `elapsed`, `frameCount`, `setTimeScale`, `timeScale`, `unscaledDeltaTime` |
 | **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |
 | **Input** | 5 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
@@ -273,6 +273,18 @@ Notes:
   Append/Insert/Remove at runtime). In Lua/Python a struct simply IS a table/dict —
   `stats.hp`, `stats.tags[1]` — so field access needs no API. Packed builds load the
   definitions eagerly from the pak's `__type_index__` before any script runs.
+- **Time** is the game's clock, not the app's. `time.setTimeScale(s)` dilates it —
+  `0` pauses, `1` is normal, up to `5` (clamped in the engine, so every frontend
+  gets the same bounds); `time.deltaTime` and `time.elapsed` are already scaled, so
+  a script that integrates against them slows, speeds up and freezes for free.
+  Everything that *is* the game runs on that clock: scripts, physics (fixed rate,
+  more steps per frame — never a bigger step), cameras, animation, the ECS systems
+  and the day-night cycle. Two things deliberately keep the real frame time —
+  **widget ticks** (a pause menu frozen at scale 0 could never unpause itself) and
+  timed debug lines; `time.unscaledDeltaTime` gives anything else the same
+  exemption. A `Delay` node runs on the scaled clock too, so it does **not** fire
+  while paused: the way back out of a pause is an input event or a widget tick.
+  Play-start resets the scale to 1, so a session never inherits a pause.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in
   Lua/Python).
 
