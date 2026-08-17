@@ -449,3 +449,71 @@ TEST_CASE("Mapping: gamepad sources are not delta sources")
     CHECK(axisSourceIsDelta(AxisSource::MouseWheel));
     CHECK_FALSE(axisSourceIsDelta(AxisSource::Key));
 }
+
+// ─── End to end: SDL virtual gamepad ─────────────────────────────────────────
+// A real SDL device (no hardware, works headless — verified on macOS) through
+// the REAL plumbing: hot-plug event → Input opens the pad → PollGamepads reads
+// it → InputMapping maps it. This is the test that would catch a broken event
+// route or axis normalisation, which frame injection by design cannot.
+
+TEST_CASE("End-to-end: virtual pad drives Input and InputMapping via hot-plug")
+{
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+    {
+        // Headless CI without device support: not a failure of OUR code.
+        MESSAGE("SDL gamepad subsystem unavailable here (", SDL_GetError(),
+                ") — end-to-end covered by frame injection only");
+        return;
+    }
+
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type     = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes    = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    const SDL_JoystickID vid = SDL_AttachVirtualJoystick(&desc);
+    REQUIRE(vid != 0);
+
+    Input input;
+    // Route the queued events the way Application's callback does. The ADDED
+    // event is what makes Input open the pad — nothing is opened by hand here.
+    auto pump = [&]{
+        SDL_UpdateJoysticks();
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) input.ProcessGamepadEvent(e);
+    };
+    pump();
+    input.PollGamepads();
+    REQUIRE(input.gamepad().connected);
+
+    // Drive the virtual hardware and read it through the whole stack.
+    SDL_Gamepad*  pad = SDL_GetGamepadFromID(vid);
+    REQUIRE(pad != nullptr);
+    SDL_Joystick* js  = SDL_GetGamepadJoystick(pad);
+    SDL_SetJoystickVirtualAxis(js, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+    SDL_SetJoystickVirtualButton(js, SDL_GAMEPAD_BUTTON_SOUTH, true);
+    pump();
+    input.PollGamepads();
+
+    CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == doctest::Approx(1.0f));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));
+
+    InputMapping m;
+    m.mapAction("Jump", { { SDL_SCANCODE_UNKNOWN, SDL_GAMEPAD_BUTTON_SOUTH } });
+    AxisBinding stick;
+    stick.source = AxisSource::GamepadLeftX;
+    m.mapAxis("Move", { stick });
+    m.tick(input);
+    CHECK(m.isPressed("Jump"));
+    CHECK(m.axisValue("Move") == doctest::Approx(1.0f));
+
+    // Unplug: the REMOVED event must close the pad AND zero the frame — a
+    // stick held while the cable is yanked must not keep the character moving.
+    SDL_DetachVirtualJoystick(vid);
+    pump();
+    input.PollGamepads();
+    CHECK_FALSE(input.gamepad().connected);
+    CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == 0.0f);
+
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+}

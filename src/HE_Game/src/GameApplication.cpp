@@ -917,6 +917,16 @@ void GameApplication::OnRender(float deltaTime)
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
 	HE::api::input::pushSdlSnapshot(input().mouse().dx, input().mouse().dy);
+	// Gamepad snapshot: PUSHED from Input's merged frame, deadzone-filtered —
+	// the snapshot never polls SDL itself (one owner per device stream).
+	{
+		float axes[SDL_GAMEPAD_AXIS_COUNT];
+		for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+			axes[a] = input().gamepadAxisFiltered(static_cast<SDL_GamepadAxis>(a));
+		HE::api::input::setGamepad(input().gamepad().connected,
+		                           axes, SDL_GAMEPAD_AXIS_COUNT,
+		                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
+	}
 
 	// Deferred scene transitions requested by scripts/graphs last frame: executed
 	// at the frame START so nothing downstream touches a half-swapped world.

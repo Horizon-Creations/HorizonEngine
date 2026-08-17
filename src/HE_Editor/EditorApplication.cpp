@@ -1100,6 +1100,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
+	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
+	m_editorConfig.GamepadTriggerDeadzone      = globalstate.getCustomConfigFloat("GamepadTriggerDeadzone", m_editorConfig.GamepadTriggerDeadzone);
+	// Input owns the live deadzones; the config is only their overnight home.
+	input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
+	input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
@@ -1801,6 +1806,17 @@ void EditorApplication::OnRender(float dt)
 		HE::api::input::pushSdlSnapshot(
 			m_playMouseCaptured ? input().mouse().dx : 0.0f,
 			m_playMouseCaptured ? input().mouse().dy : 0.0f);
+		// Gamepad snapshot: unlike the mouse it is NOT gated on the capture —
+		// a pad has no cursor to fight ImGui over, so while playing it always
+		// belongs to the game. Pushed from Input's merged frame, filtered.
+		{
+			float axes[SDL_GAMEPAD_AXIS_COUNT];
+			for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+				axes[a] = input().gamepadAxisFiltered(static_cast<SDL_GamepadAxis>(a));
+			HE::api::input::setGamepad(input().gamepad().connected,
+			                           axes, SDL_GAMEPAD_AXIS_COUNT,
+			                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
+		}
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
@@ -4563,6 +4579,7 @@ AppContext EditorApplication::makeContext()
 		.globalState         = m_globalState,
 		.projectManager      = &m_projectManager,
 		.renderer            = renderer(),
+		.appInput            = &input(),
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
@@ -5494,6 +5511,8 @@ void EditorApplication::OnShutdown()
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
+	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
+	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
