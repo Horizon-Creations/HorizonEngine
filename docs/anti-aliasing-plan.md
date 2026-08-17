@@ -208,6 +208,31 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 
 ---
 
+## 5b. Umsetzungsstand
+
+| Stufe | Stand | Anmerkung |
+|---|---|---|
+| **A0** | ✅ auf dem Branch | `HE::AAMethod` + `IRenderer::AntiAliasingSettings` + `ResolveAAMethod`, Editor-Preferences-Zeile, Projekt-Config, Push aus Editor **und** gepacktem Spiel, `HE_DUMP_AA` / `HE_DUMP_RENDERSCALE` / `HE_DUMP_SPECAA`. „Off" tauscht den Shader gegen einen Passthrough — der Pass läuft weiter, weil er das Ausgabetarget füllt. Metal headless verifiziert |
+| **A1** | ✅ auf dem Branch | SMAA in allen fünf Backends, aber **einpassig**: Kantenerkennung, Span-Suche, analytische Coverage und Blend stecken in dem Pass, der vorher FXAA war. Kein Edges-/Weights-Target, also keine neuen Render-Targets, Descriptor-Slots oder Render-Passes in fünf Backends. Verzicht: keine AreaTex → keine Diagonalen, keine Corner-Rounding; Suchreichweite 32 Texel (8 Einzel-, dann Doppelschritte). Qualität = MLAA-Niveau, sichtbar über FXAA. Nächster Ausbau wäre die AreaTex zur Laufzeit zu erzeugen — nicht Binaries zu vendorn |
+
+Zwei Messungen, die den A1-Shader geformt haben (Referenzimplementierung in Python gegen
+synthetische Treppen, damit die Mathematik nicht über 2-Minuten-Renders debuggt werden muss):
+
+* **Reichweite entscheidet, ob flache Kanten überhaupt geglättet werden.** Mit Suchlimit 12
+  bekommt eine Kante mit 33-Texel-Spans in 23 von 60 Spalten einen Zwischenwert, mit 32
+  Texeln in 57 von 60. Ein Span, dessen Enden beide außer Reichweite liegen, hat kein
+  Muster und damit Gewicht 0 — er bleibt eine Treppe.
+* **Ein Sample in der Pixelmitte verliert genau die Ecktexel.** Bei einem Ein-Texel-Span liegt
+  die Mitte exakt auf dem Nulldurchgang der revektorisierten Linie. Zwei-Punkt-Quadratur über
+  die Pixelbreite: 46 → 56 von 60 Spalten.
+
+Am Würfel-auf-Boden-Testbild (`HE_DUMP_SSRTEST`, Metal) glättet SMAA die Silhouette
+vergleichbar zu FXAA (572 vs. 602 von 1280 Spalten mit Zwischenwert), fasst dabei aber
+deutlich weniger Bild an (1674 vs. 2286 geänderte Pixel) — genau der Unterschied, um den es
+geht: Kante glätten statt Bild weichzeichnen.
+
+---
+
 ## 6. Fallen, absehbar
 
 * **Velocity ist mehr als `prevViewProj`**: Skinning, Instancing, Landscape-Chunks und

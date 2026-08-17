@@ -691,6 +691,9 @@ private:
 	unsigned int m_fxaaProgram   = 0;
 	int          m_uFxaaScene    = -1;
 	int          m_uFxaaRcpFrame = -1;
+	unsigned int m_smaaProgram   = 0;   // AA = SMAA: edge search + analytic coverage
+	int          m_uSmaaScene    = -1;
+	int          m_uSmaaRcpFrame = -1;
 	unsigned int m_blitProgram   = 0;   // AA = Off: passthrough of m_ldrColor
 	int          m_uBlitScene    = -1;
 	unsigned int m_ldrFBO        = 0;

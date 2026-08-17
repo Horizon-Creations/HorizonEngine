@@ -250,6 +250,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("This backend has no velocity buffer yet — falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
+		else if (aaMode == 2)
+			hint("Edge search + analytic coverage: sharper than FXAA, no diagonals.");
 		else
 			hint("Specular AA fixes crawling highlights — no edge filter can.");
 	});

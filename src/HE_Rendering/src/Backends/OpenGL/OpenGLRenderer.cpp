@@ -3143,6 +3143,143 @@ void main()
 }
 )GLSL";
 
+// SMAA-style spatial AA (docs/anti-aliasing-plan.md, A1), fused into ONE pass.
+//
+// What it does, and how it differs from FXAA above: FXAA estimates an edge
+// TANGENT from four diagonal lumas and blurs along it — it never learns how long
+// the edge is, so a 2-texel step and a 40-texel one get the same treatment. This
+// pass instead does what MLAA/SMAA do: find the boundary the pixel sits on,
+// SEARCH along it for both of its ends, classify what the edge does at those
+// ends, and derive the pixel's coverage analytically from its position inside
+// that span. The result is a perpendicular blend of a computed fraction, not a
+// smear along a guessed direction — long edges stay straight and flat areas are
+// never touched.
+//
+// Honest scope: this is the orthogonal (L/Z/U) half of SMAA 1x with the coverage
+// computed in closed form instead of read from SMAA's precomputed AreaTex. There
+// are no diagonal patterns and no corner rounding, and the span search steps one
+// texel at a time up to kSmaaMaxSearch (no SearchTex to jump with). Quality sits
+// where MLAA sits: clearly sharper than FXAA, below real SMAA 1x. Upgrading
+// later means generating the AreaTex at startup — not vendoring binaries.
+static const char* kSmaaFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uScene;
+uniform vec2      uRcpFrame;   // 1.0 / resolution
+out vec4 FragColor;
+
+const float kEdgeMin   = 1.0 / 24.0; // absolute floor — ignore imperceptible steps
+const float kEdgeRel   = 1.0 / 8.0;  // relative threshold, scaled by local max luma
+// Span search: single texel steps first (that is where the coverage ramp is
+// steepest and a ±1 texel error shows), then double steps. 8 + 12*2 = 32 texels
+// of reach for 20 iterations. Reach is not a nicety: a shallow edge has LONG
+// spans, and a span whose ends are both out of reach gets no pattern and no
+// blending at all — measured, raising this from 12 took a 33-texel-span test
+// edge from 23/60 antialiased columns to 57/60.
+const int   kFineSteps   = 8;
+const int   kSearchIters = 20;
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float lumaAt(vec2 uv) { return luma(texture(uScene, uv).rgb); }
+
+// Walk from `uv` in `along` while the boundary to `across` survives. Returns the
+// distance to the last texel that still carries it. `ended` is false when the
+// walk ran into the cap — a span whose end we never saw has no usable pattern,
+// so the caller treats that side as "no crossing" instead of inventing one.
+float smaaSearch(vec2 uv, vec2 along, vec2 across, float thr,
+                 out bool ended, out float outerLuma)
+{
+	ended = false; outerLuma = 0.0;
+	float dist = 0.0;
+	for (int i = 0; i < kSearchIters; ++i)
+	{
+		float st = (i < kFineSteps) ? 1.0 : 2.0;
+		dist += st;
+		vec2  p = uv + along * dist;
+		float a = lumaAt(p);
+		float b = lumaAt(p + across);
+		if (abs(a - b) < thr) { ended = true; outerLuma = a; return dist - st; }
+	}
+	return dist;
+}
+
+// Height of the revectorized edge at `t` (0..1 along the span), as a fraction of
+// a texel. Each end is -0.5 when the OTHER surface steps into our row (it covers
+// part of us → we owe it coverage), +0.5 when we step into theirs (their
+// problem, computed when that pixel runs this for its own boundary), 0 when the
+// span end was never found. Two ends of equal sign are a notch, and a straight
+// line cannot describe it — the line is split at the middle instead (the U case).
+float smaaCover(float t, float y1, float y2, bool split)
+{
+	float f = split ? ((t < 0.5) ? mix(y1, 0.0, t * 2.0) : mix(0.0, y2, (t - 0.5) * 2.0))
+	                : mix(y1, y2, t);
+	return max(0.0, -f);
+}
+
+// How much this pixel blends toward the neighbour across `across`.
+float smaaWeight(vec2 uv, vec2 along, vec2 across, float lumaP, float lumaO, float thr)
+{
+	bool  e1, e2;
+	float o1, o2;
+	float d1 = smaaSearch(uv, -along, across, thr, e1, o1);
+	float d2 = smaaSearch(uv,  along, across, thr, e2, o2);
+	float len = d1 + d2 + 1.0;
+	float t   = (d1 + 0.5) / len;   // where this pixel sits inside the span, 0..1
+	float y1  = e1 ? (abs(o1 - lumaO) < abs(o1 - lumaP) ? -0.5 : 0.5) : 0.0;
+	float y2  = e2 ? (abs(o2 - lumaO) < abs(o2 - lumaP) ? -0.5 : 0.5) : 0.0;
+	bool  split = (e1 && e2 && y1 == y2);
+	// Two-point quadrature ACROSS THE PIXEL instead of one sample at its centre.
+	// Without it the corner texel of a one-texel span sits exactly on the line's
+	// zero crossing and gets nothing — the one place a staircase is most visible.
+	// Measured: 46/60 → 56/60 antialiased columns on a test edge.
+	float dt = 0.25 / len;
+	return 0.5 * (smaaCover(clamp(t - dt, 0.0, 1.0), y1, y2, split)
+	            + smaaCover(clamp(t + dt, 0.0, 1.0), y1, y2, split));
+}
+
+void main()
+{
+	vec2  rcp = uRcpFrame;
+	vec3  C   = texture(uScene, vUV).rgb;
+	float lC  = luma(C);
+	float lW  = lumaAt(vUV + vec2(-rcp.x, 0.0));
+	float lE  = lumaAt(vUV + vec2( rcp.x, 0.0));
+	float lN  = lumaAt(vUV + vec2(0.0, -rcp.y));
+	float lS  = lumaAt(vUV + vec2(0.0,  rcp.y));
+	float lMax = max(lC, max(max(lW, lE), max(lN, lS)));
+	float lMin = min(lC, min(min(lW, lE), min(lN, lS)));
+	float thr  = max(kEdgeMin, lMax * kEdgeRel);
+	if (lMax - lMin < thr) { FragColor = vec4(C, 1.0); return; }
+
+	// One orientation per pixel: the axis with the stronger second derivative is
+	// the one the edge actually runs across. Doing both would double the search
+	// cost to fix cases the second axis gets wrong anyway.
+	float edgeH = abs(lN - 2.0 * lC + lS);   // varies vertically → horizontal edge
+	float edgeV = abs(lW - 2.0 * lC + lE);
+	float wA = 0.0, wB = 0.0;
+	vec2  offA, offB;
+	if (edgeH >= edgeV)
+	{
+		offA = vec2(0.0, -rcp.y); offB = vec2(0.0, rcp.y);
+		if (abs(lC - lN) >= thr) wA = smaaWeight(vUV, vec2(rcp.x, 0.0), offA, lC, lN, thr);
+		if (abs(lC - lS) >= thr) wB = smaaWeight(vUV, vec2(rcp.x, 0.0), offB, lC, lS, thr);
+	}
+	else
+	{
+		offA = vec2(-rcp.x, 0.0); offB = vec2(rcp.x, 0.0);
+		if (abs(lC - lW) >= thr) wA = smaaWeight(vUV, vec2(0.0, rcp.y), offA, lC, lW, thr);
+		if (abs(lC - lE) >= thr) wB = smaaWeight(vUV, vec2(0.0, rcp.y), offB, lC, lE, thr);
+	}
+
+	float sum = wA + wB;
+	if (sum > 1.0) { wA /= sum; wB /= sum; sum = 1.0; }
+	vec3 outC = C * (1.0 - sum)
+	          + wA * texture(uScene, vUV + offA).rgb
+	          + wB * texture(uScene, vUV + offB).rgb;
+	FragColor = vec4(outC, 1.0);
+}
+)GLSL";
+
 // AA = Off: the resolve pass still has to fill the output target, so it runs
 // this passthrough instead of skipping. Same inputs as FXAA, no filtering.
 static const char* kBlitFS = R"GLSL(
@@ -5410,6 +5547,28 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uFxaaRcpFrame = glGetUniformLocation(m_fxaaProgram, "uRcpFrame");
 	}
 
+	// SMAA program (same VS + uniforms as FXAA; see kSmaaFS).
+	{
+		GLuint svs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint sfs = CompileStage(GL_FRAGMENT_SHADER, kSmaaFS);
+		m_smaaProgram = glCreateProgram();
+		glAttachShader(m_smaaProgram, svs);
+		glAttachShader(m_smaaProgram, sfs);
+		glLinkProgram(m_smaaProgram);
+		glDeleteShader(svs);
+		glDeleteShader(sfs);
+		GLint sok = 0;
+		glGetProgramiv(m_smaaProgram, GL_LINK_STATUS, &sok);
+		if (!sok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(m_smaaProgram, sizeof(log), nullptr, log);
+			throw std::runtime_error(std::string("OpenGLRenderer: SMAA link failed: ") + log);
+		}
+		m_uSmaaScene    = glGetUniformLocation(m_smaaProgram, "uScene");
+		m_uSmaaRcpFrame = glGetUniformLocation(m_smaaProgram, "uRcpFrame");
+	}
+
 	// Passthrough program for AA = Off (same VS, same input texture).
 	{
 		GLuint bvs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
@@ -5535,11 +5694,7 @@ void OpenGLRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
 	// Resolve against our own capabilities once, here, so the render path only
 	// ever sees a method this backend can actually run.
-	HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
-	// A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
-	// to nothing. Remove this line when the SMAA programs exist.
-	if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
-	m_aaMethod = m;
+	m_aaMethod = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
 }
 
 void OpenGLRenderer::EnsureBloomTargets(int width, int height)
@@ -9121,6 +9276,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
 	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
+	if (m_smaaProgram)    { glDeleteProgram(m_smaaProgram);    m_smaaProgram = 0; }
 	if (m_blitProgram)    { glDeleteProgram(m_blitProgram);    m_blitProgram = 0; }
 	if (m_uiProgram)      { glDeleteProgram(m_uiProgram);      m_uiProgram = 0; }
 	if (m_uiFontTexture)  { glDeleteTextures(1, &m_uiFontTexture); m_uiFontTexture = 0; }
@@ -9718,15 +9874,21 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// The pass ALWAYS runs — it is what fills the output target; the AA
 			// method only decides which program does it.
 			{
-				const bool aaOff = (m_aaMethod == HE::AAMethod::Off);
-				GpuPassScope _fxaaTimer(this, aaOff ? "AA Resolve" : "FXAA");
+				const bool aaOff  = (m_aaMethod == HE::AAMethod::Off);
+				const bool aaSmaa = (m_aaMethod == HE::AAMethod::SMAA);
+				GpuPassScope _fxaaTimer(this, aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
 				glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 				glViewport(0, 0, pw, ph);
-				glUseProgram(aaOff ? m_blitProgram : m_fxaaProgram);
+				glUseProgram(aaOff ? m_blitProgram : (aaSmaa ? m_smaaProgram : m_fxaaProgram));
 				glBindTexture(GL_TEXTURE_2D, m_ldrColor);
 				if (aaOff)
 				{
 					glUniform1i(m_uBlitScene, 0);
+				}
+				else if (aaSmaa)
+				{
+					glUniform1i(m_uSmaaScene, 0);
+					glUniform2f(m_uSmaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
 				}
 				else
 				{

@@ -378,6 +378,7 @@ private:
 	VkPipeline            m_bloomBlurPipe    = VK_NULL_HANDLE;
 	VkPipeline            m_tonemapPipe      = VK_NULL_HANDLE;
 	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
+	VkPipeline            m_smaaPipe         = VK_NULL_HANDLE; // AA = SMAA
 	VkPipeline            m_aaBlitPipe       = VK_NULL_HANDLE; // AA = Off passthrough
 
 	// Anti-aliasing method in force, already resolved against this backend's

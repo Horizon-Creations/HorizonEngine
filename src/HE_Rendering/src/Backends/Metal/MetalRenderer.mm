@@ -895,6 +895,114 @@ fragment float4 aaBlitFragment(FXOut in [[stage_in]],
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	return float4(scene.sample(s, in.uv).rgb, 1.0);
 }
+
+// ── SMAA-style spatial AA (A1) — mirrors the GL kSmaaFS line for line ────────
+// Where FXAA guesses an edge tangent and blurs along it, this finds the span the
+// pixel's boundary belongs to, classifies both of its ends and derives the
+// coverage analytically from the position inside that span. Orthogonal (L/Z/U)
+// patterns only — no AreaTex, so no diagonals and no corner rounding; MLAA-tier
+// quality, clearly above FXAA. Keep IDENTICAL to the GL version: the two are
+// meant to produce the same image, and that is only checkable if they read the
+// same.
+constant float kSmaaEdgeMin   = 1.0 / 24.0;
+constant float kSmaaEdgeRel   = 1.0 / 8.0;
+// Single texel steps first, then double: 8 + 12*2 = 32 texels of reach. Reach
+// decides whether shallow edges get antialiased at all — see the GL twin.
+constant int   kSmaaFineSteps   = 8;
+constant int   kSmaaSearchIters = 20;
+
+static float smaaLumaAt(texture2d<float> scene, sampler s, float2 uv)
+{
+	return fxLuma(scene.sample(s, uv).rgb);
+}
+
+// Distance to the last texel that still carries the boundary. `ended` is false
+// when the walk hit the cap — an unseen end means "no crossing", never a guess.
+static float smaaSearch(texture2d<float> scene, sampler s, float2 uv,
+                        float2 along, float2 across, float thr,
+                        thread bool& ended, thread float& outerLuma)
+{
+	ended = false; outerLuma = 0.0;
+	float dist = 0.0;
+	for (int i = 0; i < kSmaaSearchIters; ++i)
+	{
+		float st = (i < kSmaaFineSteps) ? 1.0 : 2.0;
+		dist += st;
+		float2 p = uv + along * dist;
+		float  a = smaaLumaAt(scene, s, p);
+		float  b = smaaLumaAt(scene, s, p + across);
+		if (fabs(a - b) < thr) { ended = true; outerLuma = a; return dist - st; }
+	}
+	return dist;
+}
+
+static float smaaCover(float t, float y1, float y2, bool split)
+{
+	float f = split ? ((t < 0.5) ? mix(y1, 0.0, t * 2.0) : mix(0.0, y2, (t - 0.5) * 2.0))
+	                : mix(y1, y2, t);
+	return max(0.0, -f);
+}
+
+static float smaaWeight(texture2d<float> scene, sampler s, float2 uv,
+                        float2 along, float2 across, float lumaP, float lumaO, float thr)
+{
+	bool  e1, e2;
+	float o1, o2;
+	float d1 = smaaSearch(scene, s, uv, -along, across, thr, e1, o1);
+	float d2 = smaaSearch(scene, s, uv,  along, across, thr, e2, o2);
+	float len = d1 + d2 + 1.0;
+	float t   = (d1 + 0.5) / len;
+	float y1  = e1 ? (fabs(o1 - lumaO) < fabs(o1 - lumaP) ? -0.5 : 0.5) : 0.0;
+	float y2  = e2 ? (fabs(o2 - lumaO) < fabs(o2 - lumaP) ? -0.5 : 0.5) : 0.0;
+	bool  split = (e1 && e2 && y1 == y2);
+	// Quadrature across the pixel, not one sample at its centre — see the GL twin.
+	float dt = 0.25 / len;
+	return 0.5 * (smaaCover(clamp(t - dt, 0.0, 1.0), y1, y2, split)
+	            + smaaCover(clamp(t + dt, 0.0, 1.0), y1, y2, split));
+}
+
+fragment float4 smaaFragment(FXOut in [[stage_in]],
+                             texture2d<float> scene [[texture(0)]],
+                             constant float2& rcpFrame [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	float2 rcp = rcpFrame;
+	float2 uv  = in.uv;
+	float3 C   = scene.sample(s, uv).rgb;
+	float  lC  = fxLuma(C);
+	float  lW  = smaaLumaAt(scene, s, uv + float2(-rcp.x, 0.0));
+	float  lE  = smaaLumaAt(scene, s, uv + float2( rcp.x, 0.0));
+	float  lN  = smaaLumaAt(scene, s, uv + float2(0.0, -rcp.y));
+	float  lS  = smaaLumaAt(scene, s, uv + float2(0.0,  rcp.y));
+	float lMax = max(lC, max(max(lW, lE), max(lN, lS)));
+	float lMin = min(lC, min(min(lW, lE), min(lN, lS)));
+	float thr  = max(kSmaaEdgeMin, lMax * kSmaaEdgeRel);
+	if (lMax - lMin < thr) return float4(C, 1.0);
+
+	float edgeH = fabs(lN - 2.0 * lC + lS);
+	float edgeV = fabs(lW - 2.0 * lC + lE);
+	float wA = 0.0, wB = 0.0;
+	float2 offA, offB;
+	if (edgeH >= edgeV)
+	{
+		offA = float2(0.0, -rcp.y); offB = float2(0.0, rcp.y);
+		if (fabs(lC - lN) >= thr) wA = smaaWeight(scene, s, uv, float2(rcp.x, 0.0), offA, lC, lN, thr);
+		if (fabs(lC - lS) >= thr) wB = smaaWeight(scene, s, uv, float2(rcp.x, 0.0), offB, lC, lS, thr);
+	}
+	else
+	{
+		offA = float2(-rcp.x, 0.0); offB = float2(rcp.x, 0.0);
+		if (fabs(lC - lW) >= thr) wA = smaaWeight(scene, s, uv, float2(0.0, rcp.y), offA, lC, lW, thr);
+		if (fabs(lC - lE) >= thr) wB = smaaWeight(scene, s, uv, float2(0.0, rcp.y), offB, lC, lE, thr);
+	}
+
+	float sum = wA + wB;
+	if (sum > 1.0) { wA /= sum; wB /= sum; sum = 1.0; }
+	float3 outC = C * (1.0 - sum)
+	            + wA * scene.sample(s, uv + offA).rgb
+	            + wB * scene.sample(s, uv + offB).rgb;
+	return float4(outC, 1.0);
+}
 )MSL";
 
 // In-Game UI 2D pass: quads derived from vertex_id + uniforms.
@@ -5362,6 +5470,7 @@ void MetalRenderer::Shutdown()
 	m_worldPreviewH = 0;
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_aaBlitPipeline)       { CFBridgingRelease(m_aaBlitPipeline);       m_aaBlitPipeline = nullptr; }
+	if (m_smaaPipeline)         { CFBridgingRelease(m_smaaPipeline);         m_smaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
 	for (auto& [k, t] : m_uiFontAtlases) if (t) CFBridgingRelease(t);
@@ -5593,6 +5702,14 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: FXAA pipeline creation failed: ")
 				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
 		m_fxaaPipeline = (void*)CFBridgingRetain(fxPso);
+
+		// SMAA: same pass, same attachments, different fragment function.
+		fxDesc.fragmentFunction = [fxLib newFunctionWithName:@"smaaFragment"];
+		id<MTLRenderPipelineState> smaaPso = [device newRenderPipelineStateWithDescriptor:fxDesc error:&fxError];
+		if (!smaaPso)
+			throw std::runtime_error(std::string("MetalRenderer: SMAA pipeline creation failed: ")
+				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
+		m_smaaPipeline = (void*)CFBridgingRetain(smaaPso);
 
 		// AA = Off: same pass, same attachments, passthrough fragment.
 		fxDesc.fragmentFunction = [fxLib newFunctionWithName:@"aaBlitFragment"];
@@ -9524,11 +9641,7 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
 	// Resolve once, here, against what this backend can do — the render path
 	// then only ever sees a runnable method.
-	HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
-	// A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
-	// to nothing. Remove this line when the SMAA pipelines exist.
-	if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
-	m_aaMethod          = m;
+	m_aaMethod          = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
 	m_aaSharpness       = s.sharpness;
 	m_specularAA        = s.specularAA;
 	m_specularAAStrength = s.specularAAStrength;
@@ -10129,8 +10242,9 @@ void MetalRenderer::DestroyLdrTarget()
 // method only picks the pipeline (FXAA filter vs. straight blit).
 void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 {
-	const bool aaOff = (m_aaMethod == HE::AAMethod::Off);
-	void* pipeline = aaOff ? m_aaBlitPipeline : m_fxaaPipeline;
+	void* pipeline = (m_aaMethod == HE::AAMethod::Off)  ? m_aaBlitPipeline
+	               : (m_aaMethod == HE::AAMethod::SMAA) ? m_smaaPipeline
+	                                                    : m_fxaaPipeline;
 	if (!pipeline || !m_ldrColor) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
 	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];

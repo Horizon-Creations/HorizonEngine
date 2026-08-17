@@ -720,6 +720,98 @@ float4 main(In i) : SV_Target {
     float lB=luma(B); return(lB<lMin||lB>lMax)?float4(A,1):float4(B,1);
 }
 )HLSL";
+// SMAA-style spatial AA (A1) — same algorithm as the GL/Metal/D3D11 twins, with
+// this backend's extra t1 dummy binding. Span search + analytic coverage,
+// orthogonal patterns only (no AreaTex → no diagonals, no corner rounding).
+static const char* kSmaaHLSL12 = R"HLSL(
+Texture2D    uScene : register(t0);
+Texture2D    _dummy : register(t1);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float2 uRcpFrame; float2 _pad; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+static const float kEdgeMin     = 1.0/24.0;
+static const float kEdgeRel     = 1.0/8.0;
+// 8 single-texel steps, then double steps: 32 texels of reach. Reach decides
+// whether shallow edges get antialiased at all — see the GL twin.
+static const int   kFineSteps   = 8;
+static const int   kSearchIters = 20;
+float luma(float3 c) { return dot(c, float3(0.299,0.587,0.114)); }
+float lumaAt(float2 uv) { return luma(uScene.Sample(uSamp, uv).rgb); }
+float smaaSearch(float2 uv, float2 along, float2 across, float thr,
+                 out bool ended, out float outerLuma)
+{
+    ended = false; outerLuma = 0.0;
+    float dist = 0.0;
+    for (int i = 0; i < kSearchIters; ++i)
+    {
+        float st = (i < kFineSteps) ? 1.0 : 2.0;
+        dist += st;
+        float2 p = uv + along * dist;
+        float  a = lumaAt(p);
+        float  b = lumaAt(p + across);
+        if (abs(a - b) < thr) { ended = true; outerLuma = a; return dist - st; }
+    }
+    return dist;
+}
+float smaaCover(float t, float y1, float y2, bool split)
+{
+    float f = split ? ((t < 0.5) ? lerp(y1, 0.0, t * 2.0) : lerp(0.0, y2, (t - 0.5) * 2.0))
+                    : lerp(y1, y2, t);
+    return max(0.0, -f);
+}
+float smaaWeight(float2 uv, float2 along, float2 across, float lumaP, float lumaO, float thr)
+{
+    bool  e1, e2;
+    float o1, o2;
+    float d1 = smaaSearch(uv, -along, across, thr, e1, o1);
+    float d2 = smaaSearch(uv,  along, across, thr, e2, o2);
+    float len = d1 + d2 + 1.0;
+    float t   = (d1 + 0.5) / len;
+    float y1  = e1 ? (abs(o1 - lumaO) < abs(o1 - lumaP) ? -0.5 : 0.5) : 0.0;
+    float y2  = e2 ? (abs(o2 - lumaO) < abs(o2 - lumaP) ? -0.5 : 0.5) : 0.0;
+    bool  split = (e1 && e2 && y1 == y2);
+    // Quadrature across the pixel, not one sample at its centre — see the GL twin.
+    float dt = 0.25 / len;
+    return 0.5 * (smaaCover(clamp(t - dt, 0.0, 1.0), y1, y2, split)
+                + smaaCover(clamp(t + dt, 0.0, 1.0), y1, y2, split));
+}
+float4 main(In i) : SV_Target {
+    float2 rcp = uRcpFrame;
+    float3 C  = uScene.Sample(uSamp, i.uv).rgb;
+    float  lC = luma(C);
+    float  lW = lumaAt(i.uv + float2(-rcp.x, 0.0));
+    float  lE = lumaAt(i.uv + float2( rcp.x, 0.0));
+    float  lN = lumaAt(i.uv + float2(0.0, -rcp.y));
+    float  lS = lumaAt(i.uv + float2(0.0,  rcp.y));
+    float lMax = max(lC, max(max(lW, lE), max(lN, lS)));
+    float lMin = min(lC, min(min(lW, lE), min(lN, lS)));
+    float thr  = max(kEdgeMin, lMax * kEdgeRel);
+    if (lMax - lMin < thr) return float4(C, 1);
+    float edgeH = abs(lN - 2.0 * lC + lS);
+    float edgeV = abs(lW - 2.0 * lC + lE);
+    float wA = 0.0, wB = 0.0;
+    float2 offA, offB;
+    if (edgeH >= edgeV)
+    {
+        offA = float2(0.0, -rcp.y); offB = float2(0.0, rcp.y);
+        if (abs(lC - lN) >= thr) wA = smaaWeight(i.uv, float2(rcp.x, 0.0), offA, lC, lN, thr);
+        if (abs(lC - lS) >= thr) wB = smaaWeight(i.uv, float2(rcp.x, 0.0), offB, lC, lS, thr);
+    }
+    else
+    {
+        offA = float2(-rcp.x, 0.0); offB = float2(rcp.x, 0.0);
+        if (abs(lC - lW) >= thr) wA = smaaWeight(i.uv, float2(0.0, rcp.y), offA, lC, lW, thr);
+        if (abs(lC - lE) >= thr) wB = smaaWeight(i.uv, float2(0.0, rcp.y), offB, lC, lE, thr);
+    }
+    float sum = wA + wB;
+    if (sum > 1.0) { wA /= sum; wB /= sum; sum = 1.0; }
+    float3 outC = C * (1.0 - sum)
+                + wA * uScene.Sample(uSamp, i.uv + offA).rgb
+                + wB * uScene.Sample(uSamp, i.uv + offB).rgb;
+    return float4(outC, 1);
+}
+)HLSL";
+
 // AA = Off (docs/anti-aliasing-plan.md): the resolve pass still runs and fills
 // viewportRT, it just does not filter. Same bindings as the FXAA PS above.
 static const char* kAABlitHLSL12 = R"HLSL(
@@ -1150,6 +1242,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  postFxRootSig;
     ComPtr<ID3D12PipelineState>  tonemapPSO;
     ComPtr<ID3D12PipelineState>  fxaaPSO;
+    ComPtr<ID3D12PipelineState>  smaaPSO;     // AA = SMAA
     ComPtr<ID3D12PipelineState>  aaBlitPSO;   // AA = Off passthrough
     ComPtr<ID3D12PipelineState>  bloomBrightPSO;
     ComPtr<ID3D12PipelineState>  bloomBlurPSO;
@@ -1305,10 +1398,11 @@ struct D3D12RendererImpl
                 return false;
         }
 
-        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB;
+        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB, smB;
         if (!compile(kFSTriangleVS,   "main","vs_5_0",vsB)) return false;
         if (!compile(kTonemapHLSL,    "main","ps_5_0",tmB)) return false;
         if (!compile(kFxaaHLSL12,       "main","ps_5_0",fxB)) return false;
+        if (!compile(kSmaaHLSL12,       "main","ps_5_0",smB)) return false;
         if (!compile(kAABlitHLSL12,     "main","ps_5_0",btB)) return false;
         if (!compile(kBloomBrightHLSL12,"main","ps_5_0",brB)) return false;
         if (!compile(kBloomBlurHLSL12,  "main","ps_5_0",blB)) return false;
@@ -1333,6 +1427,7 @@ struct D3D12RendererImpl
 
         if (!makePSO(vsB.Get(), tmB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, tonemapPSO))   return false;
         if (!makePSO(vsB.Get(), fxB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, fxaaPSO))      return false;
+        if (!makePSO(vsB.Get(), smB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, smaaPSO))      return false;
         if (!makePSO(vsB.Get(), btB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, aaBlitPSO))    return false;
         if (!makePSO(vsB.Get(), brB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBrightPSO)) return false;
         if (!makePSO(vsB.Get(), blB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBlurPSO))   return false;
@@ -1438,7 +1533,9 @@ struct D3D12RendererImpl
         { D3D12_CPU_DESCRIPTOR_HANDLE vrtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
           cl->OMSetRenderTargets(1, &vrtv, FALSE, nullptr); }
         setVP(w, h);
-        cl->SetPipelineState(aaMethod == HE::AAMethod::Off ? aaBlitPSO.Get() : fxaaPSO.Get());
+        cl->SetPipelineState(aaMethod == HE::AAMethod::Off  ? aaBlitPSO.Get()
+                           : aaMethod == HE::AAMethod::SMAA ? smaaPSO.Get()
+                                                            : fxaaPSO.Get());
         { const float cb[4]={1.0f/float(w),1.0f/float(h),0,0};
           cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
         cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(4)); // t0=ldrSRV
@@ -7199,11 +7296,7 @@ void D3D12Renderer::SetBloomSettings(const BloomSettings& s)
 
 void D3D12Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
-    HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
-    // A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
-    // to nothing. Remove this line when the SMAA PSOs exist.
-    if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
-    m_impl->aaMethod = m;
+    m_impl->aaMethod = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
 }
 
 void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)

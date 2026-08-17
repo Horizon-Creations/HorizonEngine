@@ -717,6 +717,7 @@ private:
 	bool  m_specularAA      = true;   // A6 — roughness regularization in shading
 	float m_specularAAStrength = 1.0f;
 	void* m_fxaaPipeline   = nullptr; // id<MTLRenderPipelineState>
+	void* m_smaaPipeline   = nullptr; // id<MTLRenderPipelineState> — AA = SMAA
 	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off
 	void* m_ldrColor     = nullptr; // id<MTLTexture> (retained), tonemap out / FXAA in
 	int   m_ldrW         = 0;
