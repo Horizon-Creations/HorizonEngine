@@ -108,6 +108,11 @@ struct EditorConfig
 	// Pointer-device grammar for the preview panes (see EditorInput.h):
 	// 0 = Auto (detect trackpad), 1 = Mouse, 2 = Trackpad.
 	int   PointerInput      = 0;
+	// Gamepad deadzones, mirrored into Input each frame (Input owns the live
+	// values; these are just what survives a restart). Sticks radial, trigger
+	// scalar — see Input.h for why the shapes differ.
+	float GamepadStickDeadzone   = 0.15f;
+	float GamepadTriggerDeadzone = 0.05f;
 
 	// Post-process: bloom (pushed to the renderer each frame via SetBloomSettings)
 	bool  BloomEnabled   = true;
@@ -253,6 +258,10 @@ struct AppContext
 	GlobalState*       globalState  = nullptr;
 	ProjectManager*    projectManager = nullptr;
 	IRenderer*         renderer     = nullptr;
+	// The app's device-input state. Settings uses it for the gamepad section:
+	// connected-pad readout, live axis values, and the deadzone knobs (which
+	// live on Input so the filter and its setting cannot drift apart).
+	Input*             appInput     = nullptr;
 	HE::Window*        window       = nullptr;
 	HorizonWorld*      world        = nullptr;
 	ContentManager*    contentManager = nullptr;

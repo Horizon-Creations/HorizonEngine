@@ -29,6 +29,12 @@ namespace HE
                         SDL_VERSIONNUM_MINOR(SDL_GetVersion()),
                         SDL_VERSIONNUM_MICRO(SDL_GetVersion()),
                         SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?");
+            // Separate subsystem init, warn-only: gamepads are optional, video
+            // is not, and a headless/CI environment that can do one may not be
+            // able to do the other. Failure here just means no controllers.
+            if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+                HE_LOG_WARN(Window, "SDL_InitSubSystem(GAMEPAD) failed: %s — controllers disabled",
+                            SDL_GetError());
         }
 
         // Choose SDL window flags and set GL attributes only for OpenGL

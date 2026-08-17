@@ -1100,6 +1100,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
+	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
+	m_editorConfig.GamepadTriggerDeadzone      = globalstate.getCustomConfigFloat("GamepadTriggerDeadzone", m_editorConfig.GamepadTriggerDeadzone);
+	// Input owns the live deadzones; the config is only their overnight home.
+	input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
+	input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 	m_editorConfig.BloomEnabled                = globalstate.getCustomConfigBool("BloomEnabled",        m_editorConfig.BloomEnabled);
 	m_editorConfig.BloomThreshold              = globalstate.getCustomConfigFloat("BloomThreshold",     m_editorConfig.BloomThreshold);
 	m_editorConfig.BloomIntensity              = globalstate.getCustomConfigFloat("BloomIntensity",     m_editorConfig.BloomIntensity);
@@ -1806,6 +1811,17 @@ void EditorApplication::OnRender(float dt)
 		HE::api::input::pushSdlSnapshot(
 			m_playMouseCaptured ? input().mouse().dx : 0.0f,
 			m_playMouseCaptured ? input().mouse().dy : 0.0f);
+		// Gamepad snapshot: unlike the mouse it is NOT gated on the capture —
+		// a pad has no cursor to fight ImGui over, so while playing it always
+		// belongs to the game. Pushed from Input's merged frame, filtered.
+		{
+			float axes[SDL_GAMEPAD_AXIS_COUNT];
+			for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+				axes[a] = input().gamepadAxisFiltered(static_cast<SDL_GamepadAxis>(a));
+			HE::api::input::setGamepad(input().gamepad().connected,
+			                           axes, SDL_GAMEPAD_AXIS_COUNT,
+			                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
+		}
 		// Zone requests (additive load / unload / show / hide / move) run in PIE
 		// against the editor world — leaving play mode restores the pre-play
 		// snapshot, which drops zone entities again. Only the FULL level switch
@@ -1869,6 +1885,17 @@ void EditorApplication::OnRender(float dt)
 					 + " runs in the packaged game — play-in-editor keeps the current scene.").c_str());
 		}
 	}
+
+	// Play-mode gameplay runs on the SCALED clock (time.setTimeScale), exactly
+	// as the packaged game does — that is the whole point of a preview. OUTSIDE
+	// play mode this is the raw frame time: the viewport keeps previewing
+	// authored animation at author speed, and the scale is play-session state
+	// that setPlayMode resets anyway.
+	//
+	// Two things deliberately keep the raw dt even while playing: the widget
+	// tick (a pause menu frozen at scale 0 could never unpause itself) and the
+	// timed debug primitives (which would otherwise never expire).
+	const float gameDt = m_isPlaying ? HE::api::time::deltaTime() : dt;
 
 	// ── Window title ─────────────────────────────────────────────────────
 	{
@@ -2140,7 +2167,7 @@ void EditorApplication::OnRender(float dt)
 			                          renderer()->GetCapabilities().supportsGpuParticles;
 			HE_PROFILE_SCOPE_N("SceneSystemsTick");
 			SceneSystems::tickWorld(*m_editorWorld, contentManager(), renderer(),
-			                        m_editorCamera.position(), dt,
+			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
 		}
@@ -2149,7 +2176,7 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_physicsWorld && m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("PhysicsStep");
-			m_physicsAccum += dt;
+			m_physicsAccum += gameDt;
 			while (m_physicsAccum >= kPhysicsFixedDt)
 			{
 				m_physicsWorld->step(*m_editorWorld, kPhysicsFixedDt);
@@ -2161,7 +2188,7 @@ void EditorApplication::OnRender(float dt)
 		// before the step would follow where that target was last frame, and that
 		// lag is visible. Same order as the packaged game, which is the point of a
 		// preview.
-		updatePlayCameraController(dt);
+		updatePlayCameraController(gameDt);
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
@@ -2188,7 +2215,7 @@ void EditorApplication::OnRender(float dt)
 		{
 			HE_PROFILE_SCOPE_N("ScriptUpdate");
 			for (auto& [entityId, instId] : m_scriptInstances)
-				m_scriptContext->callOnUpdate(instId, dt);
+				m_scriptContext->callOnUpdate(instId, gameDt);
 		}
 
 		// Dispatch collision events to scripts (after physics has stepped this frame)
@@ -2204,9 +2231,13 @@ void EditorApplication::OnRender(float dt)
 		// Live widgets: per-frame logic tick (EventTick).
 		if (m_isPlaying && m_editorWorld)
 		{
+			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
 			// Latent HorizonCode flow (Delay nodes) — PIE only, like the tick.
-			m_editorWorld->scripts().update(dt);
+			// Game seconds by default (a pause stops the wait), real seconds for
+			// the Delays whose Real Time pin is set — which is how a pause menu
+			// times anything while the game behind it stands still.
+			m_editorWorld->scripts().update(gameDt, dt);
 			// Player instances: Tick + Input.<Action>.* events.
 			//
 			// The mouse only reaches them while play mode HOLDS it. Outside that
@@ -2215,10 +2246,10 @@ void EditorApplication::OnRender(float dt)
 			// axis as well would turn every drag across the viewport into player
 			// input. Esc toggles the capture, so this is also how the author
 			// gets the cursor back without the game turning with it.
-			m_playerHost.tick(input(), dt,
+			m_playerHost.tick(input(), gameDt,
 			                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
 			// Entity classes: Tick, plus reaping the ones whose entity is gone.
-			m_entityHost.tick(dt);
+			m_entityHost.tick(gameDt);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -2247,7 +2278,7 @@ void EditorApplication::OnRender(float dt)
 			// The host is only running during PIE, so outside play the sync
 			// graphs stay silent and the parameters keep their authored defaults
 			// — the behaviour state machines had before sync graphs existed.
-			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), dt, &m_animatorHost);
+			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost);
 		}
 
 		// In-game UI pointer input (hover/click) + script event dispatch. The
@@ -2300,7 +2331,9 @@ void EditorApplication::OnRender(float dt)
 
 		{
 			HE_PROFILE_SCOPE_N("EnvironmentPush");
-			pushEnvironment(dt); // auto-advances + pushes the World env component
+			// Scaled while playing: the day-night cycle is world state, so slow
+			// motion slows the sun and a pause holds it in place.
+			pushEnvironment(gameDt); // auto-advances + pushes the World env component
 		}
 
 		// ── Debug draw overlay (selected-entity marker + colliders) ──────────
@@ -4615,6 +4648,7 @@ AppContext EditorApplication::makeContext()
 		.globalState         = m_globalState,
 		.projectManager      = &m_projectManager,
 		.renderer            = renderer(),
+		.appInput            = &input(),
 		.window              = window(),
 		.world               = world(),
 		.contentManager      = &contentManager(),
@@ -4809,7 +4843,16 @@ void EditorApplication::setPlayMouseCaptured(bool captured)
 // playing AND the mouse is captured.
 void EditorApplication::updatePlayCameraController(float dt)
 {
-	if (!m_isPlaying || !m_playMouseCaptured || !m_editorWorld || dt <= 0.0f) return;
+	if (!m_isPlaying || !m_editorWorld || dt <= 0.0f) return;
+
+	// Stick look does NOT require the mouse capture: a pad has no cursor to
+	// fight ImGui over, and demanding Esc-to-capture before the right stick
+	// works would be a rule nobody could discover. Mouse look keeps the
+	// capture requirement it always had.
+	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
+	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	const bool  padLook = stickX != 0.0f || stickY != 0.0f;
+	if (!m_playMouseCaptured && !padLook) return;
 
 	// The focused window is both the one whose relative mode must be re-asserted and
 	// the one the cursor is warped back into (see FlyCameraController) — with
@@ -4822,10 +4865,15 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// camera does this itself (cfg.reassertCapture), but the rig path returns
 	// before ever reaching it — leaving it to the controller would mean the
 	// cursor reappears in PIE exactly when a scene has a rig.
-	if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
-		SDL_SetWindowRelativeMouseMode(focusWin, true);
-	if (SDL_CursorVisible())
-		SDL_HideCursor();
+	// Only while the mouse is actually held, though: a stick-only frame must
+	// not hide the cursor the user is still using on editor panels.
+	if (m_playMouseCaptured)
+	{
+		if (focusWin && !SDL_GetWindowRelativeMouseMode(focusWin))
+			SDL_SetWindowRelativeMouseMode(focusWin, true);
+		if (SDL_CursorVisible())
+			SDL_HideCursor();
+	}
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
@@ -4834,13 +4882,19 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
 	// Physics only exists while playing, and this whole function is gated on
 	// m_isPlaying — so the boom collides in PIE exactly as it will in the game.
-	if (HE::CameraRigController::update(*m_editorWorld, input().mouse(), possessed,
+	HE::CameraLookInput look;
+	look.mouse  = m_playMouseCaptured ? input().mouse() : MouseFrame{};
+	look.stickX = stickX;
+	look.stickY = stickY;
+	look.dt     = dt;
+	if (HE::CameraRigController::update(*m_editorWorld, look, possessed,
 	                                    m_physicsWorld.get()).driven)
 	{
 		// Park the cursor, same reason as the fly-camera path (see
 		// FlyCameraController): without it the look stalls at the screen edge
-		// whenever relative mode is not actually engaged.
-		if (focusWin)
+		// whenever relative mode is not actually engaged. Mouse-capture frames
+		// only — a stick-only frame has a live cursor that must stay put.
+		if (focusWin && m_playMouseCaptured)
 		{
 			int ww = 0, wh = 0;
 			SDL_GetWindowSize(focusWin, &ww, &wh);
@@ -4859,6 +4913,11 @@ void EditorApplication::updatePlayCameraController(float dt)
 		return;
 	}
 
+	// The fly fallback is mouse/keyboard-only and re-asserts the mouse capture
+	// (reassertCapture) — on a stick-only frame with a live cursor it would
+	// grab the mouse out of the user's hand. It only ever ran on captured
+	// frames before the stick path widened the gate above; keep it that way.
+	if (!m_playMouseCaptured) return;
 	HE::FlyCameraController::Config cfg;
 	cfg.reassertCapture  = true;   // focus can move between OS windows mid-play
 	cfg.runWithoutCamera = true;   // keep feeding the self-diagnostic below
@@ -5521,6 +5580,8 @@ void EditorApplication::OnShutdown()
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
+	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
+	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);
 	globalstate.setCustomConfigEntry("CollabLanDiscovery",         m_editorConfig.CollabLanDiscovery);
 	globalstate.setCustomConfigEntry("CollabSyncLargeAssets",      m_editorConfig.CollabSyncLargeAssets);
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);

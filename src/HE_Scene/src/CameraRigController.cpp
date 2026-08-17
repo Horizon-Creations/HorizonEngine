@@ -66,7 +66,7 @@ entt::entity CameraRigController::findRigCamera(entt::registry& reg)
 }
 
 CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
-                                                       const MouseFrame& mouse,
+                                                       const CameraLookInput& look,
                                                        entt::entity fallbackTarget,
                                                        const PhysicsWorld* physics)
 {
@@ -112,8 +112,15 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
 
     // Mouse look. The delta is a displacement, not a rate — scaling it by delta
     // time would make the same flick turn further at a lower frame rate.
-    rig.yaw   -= mouse.dx * rig.sensitivity;
-    rig.pitch -= mouse.dy * rig.sensitivity;
+    rig.yaw   -= look.mouse.dx * rig.sensitivity;
+    rig.pitch -= look.mouse.dy * rig.sensitivity;
+    // Stick look is the opposite: a RATE, so it MUST be dt-scaled or the turn
+    // speed depends on the framerate. Same sign convention as the mouse (SDL
+    // stick Y positive = down); stickInvertY flips pitch only, the way every
+    // "invert look" option means it.
+    const float stickDeg = rig.stickSensitivity * look.dt;
+    rig.yaw   -= look.stickX * stickDeg;
+    rig.pitch -= look.stickY * stickDeg * (rig.stickInvertY ? -1.0f : 1.0f);
     rig.pitch  = std::clamp(rig.pitch, rig.pitchMin, rig.pitchMax);
 
     // Keep yaw in (-180, 180] so it neither drifts into float mush over a long

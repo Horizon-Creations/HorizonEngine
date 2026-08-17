@@ -81,7 +81,14 @@ private:
 	// An action is a button, a one-dimensional axis or a two-dimensional one —
 	// three shapes, three event names, so one bool no longer says it.
 	enum class ActionKind { Button, Axis, Axis2D };
-	struct ActionInfo { std::string name; ActionKind kind = ActionKind::Button; };
+	struct ActionInfo
+	{
+		std::string name;
+		ActionKind  kind = ActionKind::Button;
+		// The action's "Fires while the game is paused" switch. Off by default,
+		// so a pause silences everything unless the author said otherwise.
+		bool        runWhilePaused = false;
+	};
 
 	// Deliver one input event the way the routing note describes: to every
 	// controller, and additionally to whatever each of them possesses.

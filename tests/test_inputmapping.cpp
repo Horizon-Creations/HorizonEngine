@@ -404,6 +404,32 @@ TEST_CASE("InputAssets: the three value types are told apart")
     CHECK(HE::inputEventAxis2D("Look") == "Input.Look.Axis2D");
 }
 
+TEST_CASE("InputAssets: an action fires during a pause only when it says so")
+{
+    // Off unless explicitly true — an action authored before the switch existed
+    // must go silent during a pause, which is the whole point of pausing.
+    CHECK_FALSE(HE::inputActionRunsWhilePaused(R"({"valueType":"Button"})"));
+    CHECK_FALSE(HE::inputActionRunsWhilePaused("{}"));
+    CHECK_FALSE(HE::inputActionRunsWhilePaused("not json"));
+    CHECK_FALSE(HE::inputActionRunsWhilePaused(R"({"runWhilePaused":false})"));
+    CHECK(HE::inputActionRunsWhilePaused(R"({"runWhilePaused":true})"));
+    // Only a real boolean counts: a stringly-typed "true" is not a yes.
+    CHECK_FALSE(HE::inputActionRunsWhilePaused(R"({"runWhilePaused":"true"})"));
+    CHECK_FALSE(HE::inputActionRunsWhilePaused(R"({"runWhilePaused":1})"));
+
+    // The writer round-trips through both readers, so the editor cannot save a
+    // payload the loader reads differently.
+    const std::string j = HE::makeInputActionJson("Axis2D", true);
+    CHECK(HE::inputActionIsAxis2D(j));
+    CHECK(HE::inputActionRunsWhilePaused(j));
+    const std::string b = HE::makeInputActionJson("Button", false);
+    CHECK_FALSE(HE::inputActionIsAxis(b));
+    CHECK_FALSE(HE::inputActionIsAxis2D(b));
+    CHECK_FALSE(HE::inputActionRunsWhilePaused(b));
+    // An empty type is a Button, not an unreadable asset.
+    CHECK_FALSE(HE::inputActionIsAxis(HE::makeInputActionJson("", false)));
+}
+
 TEST_CASE("InputAssets: malformed mapping JSON binds nothing")
 {
     InputMapping im;

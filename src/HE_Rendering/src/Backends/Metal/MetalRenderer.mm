@@ -8863,8 +8863,11 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_worldPreviewHdrTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-	// Studio gray — covered by the sky when there is one.
-	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.22, 0.22, 0.235, 1.0);
+	// Studio gray — covered by the sky when there is one. LINEAR: this is resolved
+	// through ACES + gamma below, which lifts it a long way (see kPreviewBackground).
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(HE::kPreviewBackground[0],
+	                                                       HE::kPreviewBackground[1],
+	                                                       HE::kPreviewBackground[2], 1.0);
 	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
 	rp.depthAttachment.loadAction  = MTLLoadActionClear;
 	rp.depthAttachment.storeAction = MTLStoreActionDontCare;

@@ -198,6 +198,34 @@ TEST_CASE("ScriptContext: registry-driven horizon.time.*/input.* (Lua)")
     HE::api::input::clear();
 }
 
+TEST_CASE("ScriptContext: horizon.time.setTimeScale drives the game clock (Lua)")
+{
+    // The registry-driven binding is the whole point: nothing was hand-written
+    // for these three, so this is what proves a new Time row reaches scripts.
+    HE::api::time::reset();
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+
+    REQUIRE(engine.exec("horizon.time.setTimeScale(0.25)\n"
+                        "_G._s = horizon.time.timeScale()\n"));
+    CHECK(engine.getGlobalNumber("_s") == doctest::Approx(0.25));
+
+    HE::api::time::advance(0.4f);
+    REQUIRE(engine.exec("_G._dt = horizon.time.deltaTime()\n"
+                        "_G._raw = horizon.time.unscaledDeltaTime()\n"));
+    CHECK(engine.getGlobalNumber("_dt")  == doctest::Approx(0.1));  // slow motion
+    CHECK(engine.getGlobalNumber("_raw") == doctest::Approx(0.4));  // real frame
+
+    // The clamp lives in C++, so a script cannot fast-forward past the cap.
+    REQUIRE(engine.exec("horizon.time.setTimeScale(99)\n"
+                        "_G._s = horizon.time.timeScale()\n"));
+    CHECK(engine.getGlobalNumber("_s") == doctest::Approx(HE::api::time::kMaxTimeScale));
+
+    HE::api::time::reset();
+}
+
 TEST_CASE("ScriptContext: setPosition modifies entity transform")
 {
     HorizonWorld world;

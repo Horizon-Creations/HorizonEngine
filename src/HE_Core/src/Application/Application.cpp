@@ -110,6 +110,10 @@ namespace HE
 			// make ImGui's "I want the mouse" the arbiter of whether a captured,
 			// cursor-hidden play session gets to look around, which it is not.
 			m_input.ProcessMouseEvent(e);
+			// Gamepad hot-plug rides the same ungated path as mouse motion:
+			// ImGui never competes for pads (NavEnableGamepad stays off), so
+			// there is nothing a consume gate could arbitrate.
+			m_input.ProcessGamepadEvent(e);
 			// Give the derived application a chance to handle/consume the event first
 			// (e.g. EditorApplication forwards it to ImGui).
 			if (!OnEvent(e))
@@ -202,6 +206,11 @@ namespace HE
 				m_window->PollEvents();
 			}
 			if (m_window->ShouldClose()) break;
+
+			// Snapshot pad state right after event polling so hot-plug from
+			// this batch is reflected and every consumer in the frame sees the
+			// same stick/button values.
+			m_input.PollGamepads();
 
 			try
 				{

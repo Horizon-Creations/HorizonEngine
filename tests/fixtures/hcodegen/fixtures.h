@@ -1293,6 +1293,7 @@ inline HE::hccg::ClassSource fxLatentFlow()
     f.var("flip", PT::String);
     f.var("isA", PT::Bool);
     f.var("valid", PT::Bool);
+    f.var("r", PT::Float);       // the real-time Delay's counter
 
     // Once: DoOnce → once += 1 (only the first fire).
     const int evO = f.event("Once");
@@ -1340,6 +1341,19 @@ inline HE::hccg::ClassSource fxLatentFlow()
     { const int a = f.op(NT::Add); f.data(f.getVar("n", PT::Float), 0, a, 0);
       f.data(f.constF(10.0f), 0, a, 1); f.data(a, 0, s2, 0); }
     f.exec(delay, s2, 0);   // Completed
+
+    // WaitReal: the same shape on the REAL-TIME clock (Delay's second data-in),
+    // so the parity harness proves both backends read the new pin — and that a
+    // frame whose game time stands still (a pause) still expires this one.
+    const int evR = f.event("WaitReal");
+    const int delayR = f.op(NT::Delay);
+    f.g.findNode(delayR)->pinDefaults[0] = Value::ofFloat(1.0f);
+    f.g.findNode(delayR)->pinDefaults[1] = Value::ofBool(true);
+    f.exec(evR, delayR);
+    const int s3 = f.setVar("r", PT::Float);
+    { const int a = f.op(NT::Add); f.data(f.getVar("r", PT::Float), 0, a, 0);
+      f.data(f.constF(1.0f), 0, a, 1); f.data(a, 0, s3, 0); }
+    f.exec(delayR, s3, 0);   // Completed
     return f.done("latent_flow");
 }
 

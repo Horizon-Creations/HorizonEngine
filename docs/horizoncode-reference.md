@@ -60,7 +60,7 @@ therefore fires before the first world is even built.)
 | **Branch** (`Branch`) | `if` — True / False exec-outs from a Bool. |
 | **Sequence** (`Sequence`) | Run several exec-outs in order. |
 | **For Each** (`ForEach`) | Loop an array: `Body` (Element + Index) per element, then `Done`. Accepts any array type and re-types its pins to the connected array. The sanctioned way to reach elements of an object array. |
-| **Delay** (`Delay`) | Latent: pause the chain, resume from `Completed` after `Duration` seconds (driven per frame by the runtime). Retriggering while pending is ignored. The continuation is a FRESH run — event args and cached exec outputs of the original run are gone; wire through variables instead. Loops back into a Delay are the sanctioned "timer loop". |
+| **Delay** (`Delay`) | Latent: pause the chain, resume from `Completed` after `Duration` seconds (driven per frame by the runtime). Retriggering while pending is ignored. The continuation is a FRESH run — event args and cached exec outputs of the original run are gone; wire through variables instead. Loops back into a Delay are the sanctioned "timer loop". `Real Time` switches the wait from game seconds to real ones: immune to `Set Time Scale`, and the only kind that still finishes while the game is paused. |
 | **Do Once** (`DoOnce`) | Lets the chain through only the FIRST time per instance. Resets with the instance's variables (fresh play session). |
 | **Flip Flop** (`FlipFlop`) | Alternates its `A` / `B` exec-outs (A first); the `Is A` data-out reports which side just ran. State persists per instance like Do Once. |
 
@@ -210,7 +210,15 @@ registry function under a readable name (e.g. *Set Position*, *Sine*, *Play Soun
 ## 3. Engine subsystems (the `HE::api` registry)
 
 One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and** the
-`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 131 functions.**
+`horizon.<group>.<fn>` Lua/Python APIs simultaneously. **19 groups, 134 functions.**
+
+Gamepad names are SDL's mapping strings in Xbox-layout positions: buttons
+`a`/`b`/`x`/`y` (so `a` is the south button — Cross on a PlayStation pad),
+`leftshoulder`, `dpup`, …; axes `leftx`/`lefty`/`rightx`/`righty`/
+`lefttrigger`/`righttrigger`. Sticks read −1..+1 deadzone-filtered (SDL
+convention: Y positive downward), triggers 0..1. Prefer `Input.<Action>.*`
+events over polling — gamepad bindings in the Input Mapping Context arrive
+there with no script changes at all.
 
 | Group | # | Functions |
 |-------|---|-----------|
@@ -224,9 +232,9 @@ One descriptor registry (`EngineApi.cpp`) lights up **Engine Call** nodes **and*
 | **Cursor** | 1 | `setVisible` |
 | **Math** | 11 | `clamp`, `lerp`, `length`, `distance`, `radians`, `degrees`, `length3`, `distance3`, `normalize3`, `dot3`, `cross` (plus per-op nodes in §2) |
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
-| **Time** | 3 | `deltaTime`, `elapsed`, `frameCount` |
+| **Time** | 6 | `deltaTime`, `elapsed`, `frameCount`, `setTimeScale`, `timeScale`, `unscaledDeltaTime` |
 | **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |
-| **Input** | 5 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta` |
+| **Input** | 8 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta`, `gamepadConnected`, `gamepadButton`, `gamepadAxis` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
 | **Environment** | 10 | `get/setTimeOfDay`, `get/setCloudCoverage`, `get/setFogDensity`, `get/setWindDirection`, `get/setWindSpeed` |
 | **Audio** | 7 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition` |
@@ -273,6 +281,31 @@ Notes:
   Append/Insert/Remove at runtime). In Lua/Python a struct simply IS a table/dict —
   `stats.hp`, `stats.tags[1]` — so field access needs no API. Packed builds load the
   definitions eagerly from the pak's `__type_index__` before any script runs.
+- **Time** is the game's clock, not the app's. `time.setTimeScale(s)` dilates it —
+  `0` pauses, `1` is normal, up to `5` (clamped in the engine, so every frontend
+  gets the same bounds); `time.deltaTime` and `time.elapsed` are already scaled, so
+  a script that integrates against them slows, speeds up and freezes for free.
+  Everything that *is* the game runs on that clock: scripts, physics (fixed rate,
+  more steps per frame — never a bigger step), cameras, animation, the ECS systems
+  and the day-night cycle. Two things deliberately keep the real frame time —
+  **widget ticks** (a pause menu frozen at scale 0 could never unpause itself) and
+  timed debug lines; `time.unscaledDeltaTime` gives anything else the same
+  exemption. Play-start resets the scale to 1, so a session never inherits a pause.
+- **Pausing is not silence.** Two switches decide what still runs at scale 0:
+  - An **InputAction** asset has *"Fires while the game is paused"* (JSON
+    `runWhilePaused`). **Off by default** — otherwise the player keeps shooting
+    through the pause menu — so switch it on for the few actions that must get
+    through: opening/closing the menu, navigating it, confirming. Presses that
+    arrive while a silenced action is paused are **dropped, not queued**. The
+    mapping itself keeps ticking, so a key held across a pause is not mistaken
+    for a fresh press on resume. `Tick` keeps firing throughout (with dt 0), as
+    do Lua/Python `onUpdate` and the ungated `horizon.input.*` getters — which
+    is the text-script way to read input during a pause.
+  - A **Delay** node has a second input, **Real Time**. Off, it counts game
+    seconds: `Set Time Scale` stretches it and a pause stops it (Unreal/Unity
+    timer semantics). On, it counts real seconds — immune to the scale, and the
+    only kind that can finish while the game is paused. Widgets share the
+    runtime, so that pin is what lets a pause menu time anything at all.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in
   Lua/Python).
 

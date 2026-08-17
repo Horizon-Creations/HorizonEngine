@@ -36,7 +36,8 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 			const ActionKind k = HE::inputActionIsAxis2D(a->json) ? ActionKind::Axis2D
 			                   : HE::inputActionIsAxis(a->json)   ? ActionKind::Axis
 			                                                      : ActionKind::Button;
-			m_actions.push_back({ HE::inputActionNameFromPath(a->path), k });
+			m_actions.push_back({ HE::inputActionNameFromPath(a->path), k,
+			                      HE::inputActionRunsWhilePaused(a->json) });
 		}
 
 	// Bindings: union of every mapping context in the project.
@@ -132,11 +133,22 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	if (!m_runtime) return;
 	m_mapping.tick(input, mouse);
 
+	// Tick still fires while paused — with dt 0, so anything integrating against
+	// it stands still. That is what lets a controller keep driving a pause menu
+	// without a second, pause-only tick channel.
 	for (const HorizonCode::InstanceId inst : m_owned)
 		m_runtime->fireTick(inst, dt);
 
+	// A pause silences input by DEFAULT: without that the player keeps shooting
+	// through the pause menu, because the mapping below never stopped reading
+	// the keyboard. The mapping is still ticked (above) either way — dropping
+	// its tick would make a key held across the pause look like a fresh press on
+	// resume. Events that fall in a pause are dropped, never queued.
+	const bool paused = HE::api::time::isPaused();
+
 	for (const ActionInfo& a : m_actions)
 	{
+		if (paused && !a.runWhilePaused) continue;
 		switch (a.kind)
 		{
 		case ActionKind::Axis:

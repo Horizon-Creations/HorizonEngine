@@ -327,10 +327,12 @@ namespace
 		}
 
 		// Advance latent flow (Delay) on both backends in lockstep.
-		void update(float dt, bool compare = true)
+		// `unscaledDt` < 0 means "one clock for both kinds of Delay", which is
+		// what a caller with no time scale (most of these tests) means.
+		void update(float dt, bool compare = true, float unscaledDt = -1.0f)
 		{
-			interp.rt.update(dt);
-			comp.rt.update(dt);
+			interp.rt.update(dt, unscaledDt);
+			comp.rt.update(dt, unscaledDt);
 			if (compare) checkParity();
 		}
 
@@ -1068,6 +1070,22 @@ TEST_CASE("codegen parity: latent_flow (Delay, Do Once, Flip Flop, Is Valid)")
 	CHECK(p.var("n").f == 12.0f);     // ONE continuation (+10), not two
 	p.update(5.0f);
 	CHECK(p.var("n").f == 12.0f);     // nothing pending anymore
+
+	// Real Time (Delay's second data-in): counts the UNSCALED clock. A paused
+	// frame — game dt 0, real dt still ticking — expires this one and leaves an
+	// ordinary Delay pending, which is exactly what a pause menu needs.
+	p.fire("WaitReal");
+	p.fire("Wait");
+	CHECK(p.var("n").f == 13.0f);                       // pre-Delay half again
+	p.update(0.0f, /*compare=*/true, /*unscaledDt=*/0.4f);
+	CHECK(p.var("r").f == 0.0f);                        // 0.4 < 1s, not yet
+	p.update(0.0f, /*compare=*/true, /*unscaledDt=*/0.7f);
+	CHECK(p.var("r").f == 1.0f);                        // real time ran out
+	CHECK(p.var("n").f == 13.0f);                       // the game-time one did NOT
+	// Unpause: the ordinary Delay finishes on game time as it always did.
+	p.update(1.5f, /*compare=*/true, /*unscaledDt=*/1.5f);
+	CHECK(p.var("n").f == 23.0f);
+	CHECK(p.var("r").f == 1.0f);                        // ONE real continuation
 
 	// A destroyed instance never resumes (no ghost continuation).
 	p.fire("Wait", 0, {}, /*compare=*/true);

@@ -699,7 +699,10 @@ struct Context
     // Latent flow (bound by the Runtime): schedule THIS instance's exec chain to
     // resume from `nodeId`'s exec-out after `seconds` (Delay node). Unbound →
     // the Delay is a dead end (never resumes).
-    std::function<void(int nodeId, float seconds)> scheduleResume;
+    // `realTime` counts REAL seconds: the wait ignores the time scale and keeps
+    // running while the game is paused — which is the only way a pause menu can
+    // time anything, since the runtime itself is driven by the scaled clock.
+    std::function<void(int nodeId, float seconds, bool realTime)> scheduleResume;
     // Is `target` a live instance? (Is Valid node.) Unbound → false.
     std::function<bool(uint32_t target)> isValid;
     // Is `target` an instance of `classKey` — that exact class, or one derived

@@ -102,7 +102,7 @@ Weder gesetzt noch geplant (EditorApplication.cpp:712-714 setzt nur Keyboard/Doc
 
 ### CP3 — Skript-API (HE_Scene, EngineApi)
 - Snapshot-Struct (EngineApi.cpp:1469) um Gamepad-Zustand erweitern; neuer App-Hook `input::pushGamepadSnapshot(const float* axes, const bool* buttons, bool connected)` — von der App gespeist, kein SDL-Poll im Snapshot (Punkt 8).
-- Neue Registry-Rows (EngineApi.cpp:1773ff): `input.gamepadConnected()`, `input.gamepadButton(name)`, `input.gamepadAxis(name)` (rohe Werte; Namen wie im Asset-Schema), Display-Namen bei :2089ff. Durch `isScriptGroup` sofort in Lua (`horizon.input.gamepadAxis("LeftX")`) und Python verfügbar — null Binding-Code.
+- Neue Registry-Rows (EngineApi.cpp:1773ff): `input.gamepadConnected()`, `input.gamepadButton(name)`, `input.gamepadAxis(name)`, Display-Namen bei :2089ff. Durch `isScriptGroup` sofort in Lua (`horizon.input.gamepadAxis("leftx")`) und Python verfügbar — null Binding-Code. **Umgesetzt: gefilterte Werte, nicht rohe** — Skripte implementieren Gameplay, und ein ruhender Stick, der im Skript nie 0.0 liest, wäre die Drift-Falle aus Punkt 4 durch die Hintertür; rohe Werte bleiben in C++ über `Input::gamepad()` abfragbar (Kalibrier-UI). Namen sind SDLs Mapping-Strings (`"a"`, `"leftx"` — **nicht** `"south"`: SDL3s Tabelle nutzt die Legacy-Mapping-Namen im Xbox-Layout).
 - HorizonCode: dieselben Rows erscheinen automatisch als Nodes; zusätzlich prüfen, dass die `Input.<Action>.*`-Events (der eigentliche Empfehlungsweg) unverändert funktionieren — Gamepad kommt dort via CP1 gratis an.
 - `docs/horizoncode-reference.md` um die neuen Nodes ergänzen.
 
@@ -120,7 +120,7 @@ Weder gesetzt noch geplant (EditorApplication.cpp:712-714 setzt nur Keyboard/Doc
 ## Verifikation (ohne physisches Pad in der Sandbox)
 
 - **Primär: synthetische Injektion.** `GamepadFrame` ist ein POD — Unit-Tests befüllen ihn direkt und treiben `InputMapping::tick`/`PlayerHost::tick` (Muster von `test_inputmapping.cpp`/`test_editor_input.cpp`). Deckt Mapping, Deadzone, Events, Asset-Parsing vollständig ab.
-- **End-to-End-Kandidat: SDL3 Virtual Gamepad.** `SDL_AttachVirtualJoystick` (Typ Gamepad) + `SDL_SetJoystickVirtualAxis/Button` erzeugt ein echtes SDL-Gerät ohne Hardware. Beim CP0-Bau prüfen, ob das headless (Dummy-Video-Treiber) initialisiert — wenn ja, testet ein `test_gamepad_virtual.cpp` die komplette Kette inkl. Hot-Plug-Events; wenn nein, bleibt die Injektion primär.
+- **End-to-End: SDL3 Virtual Gamepad — GEKLÄRT, funktioniert headless** (auf macOS verifiziert). Der Test lebt in `test_input_gamepad.cpp` („End-to-end: virtual pad …"): Attach → Hot-Plug-Event → `Input` öffnet das Pad → `PollGamepads` → `InputMapping`, plus Unplug-nullt-den-Frame; skippt sauber, wo das Subsystem fehlt (CI ohne Gerätesupport).
 - **Real-HW-Verify bleibt offen** (wie GL-Runtime): Xbox-/DualSense-Pad am Mac, PIE + gepacktes Spiel, Stick-Look-Gefühl (`stickSensitivity`-Default), Trigger, Hot-Plug im laufenden Spiel. Explizit als offener Punkt führen, nicht versprechen.
 
 ## Explizit NICHT in E4

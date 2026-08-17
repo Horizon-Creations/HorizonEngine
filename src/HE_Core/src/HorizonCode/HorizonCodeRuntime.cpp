@@ -477,7 +477,7 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };
     // Latent flow + liveness + per-node state (all runtime-side).
-    ctx.scheduleResume = [this, id, level](int nodeId, float seconds)
+    ctx.scheduleResume = [this, id, level](int nodeId, float seconds, bool realTime)
     {
         if (!find(id)) return;
         // Retriggering a pending Delay is ignored (Unreal semantics) — the
@@ -486,7 +486,7 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         // graph are two different Delays.
         for (const auto& p : m_pending)
             if (p.id == id && p.level == level && p.node == nodeId) return;
-        m_pending.push_back({ id, level, nodeId, seconds > 0.0f ? seconds : 0.0f });
+        m_pending.push_back({ id, level, nodeId, seconds > 0.0f ? seconds : 0.0f, realTime });
     };
     // An inherited call: resolved across the instance's OTHER levels, and only
     // to public members — a base class's private function stays its own.
@@ -529,17 +529,20 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     return ctx;
 }
 
-void Runtime::update(float dt)
+void Runtime::update(float dt, float unscaledDt)
 {
     // Nothing is executing between frames — free the bodies of instances that
     // destroyed themselves (or each other) mid-run since the last tick.
     purgeDoomed();
     if (m_pending.empty()) return;
+    // A caller with no notion of a time scale passes one number and means it
+    // for every Delay — the behaviour this had before Real Time existed.
+    const float realDt = unscaledDt < 0.0f ? dt : unscaledDt;
     // Decrement first, then snapshot the expired set: a resumed chain may
     // schedule NEW delays (they must wait at least one tick), destroy
     // instances (remove() prunes m_pending), or re-enter update indirectly.
     std::vector<PendingResume> expired;
-    for (auto& p : m_pending) p.remaining -= dt;
+    for (auto& p : m_pending) p.remaining -= p.realTime ? realDt : dt;
     for (const auto& p : m_pending)
         if (p.remaining <= 0.0f) expired.push_back(p);
     m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),

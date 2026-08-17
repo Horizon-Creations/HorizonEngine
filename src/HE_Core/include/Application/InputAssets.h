@@ -30,6 +30,18 @@ namespace HE
 	// True for "valueType":"Axis2D".
 	HE_API bool inputActionIsAxis2D(const std::string& json);
 
+	// True when the action declares `"runWhilePaused": true` — it keeps firing
+	// its events while the game is paused (time scale 0). Default FALSE, and
+	// missing/malformed reads as false, so every action authored before this
+	// existed stays silent during a pause: that is the point of a pause. The
+	// pause menu's own actions (open/close, navigate, confirm) opt in.
+	HE_API bool inputActionRunsWhilePaused(const std::string& json);
+
+	// The InputAction payload for a value type ("Button"/"Axis"/"Axis2D") and
+	// the pause flag. One writer, so the editor cannot drop a field the loader
+	// expects by hand-assembling the JSON somewhere else.
+	HE_API std::string makeInputActionJson(const std::string& valueType, bool runWhilePaused);
+
 	// The logical action name for a content-relative InputAction asset path —
 	// the file stem ("Content/Input/IA_Jump.hasset" → "IA_Jump"). Mapping
 	// entries reference actions by path; events and bindings key on this name.
@@ -42,9 +54,22 @@ namespace HE
 	HE_API std::string axisSourceName(AxisSource s);
 	HE_API AxisSource  axisSourceFromName(const std::string& name);
 
+	// Mouse button name in a mapping context's JSON ("left"/"right"/"middle"/
+	// "x1"/"x2"), and back. Index is the MouseButton enum; unknown → -1.
+	HE_API std::string mouseButtonName(int button);
+	HE_API int         mouseButtonFromName(const std::string& name);
+
+	// Human-readable labels for binding UI. The STORED names stay SDL's tables
+	// (stable, what the loader parses); these are only what a person sees.
+	// Gamepad names are positional in Xbox-layout terms, so the label says both
+	// halves: SDL's "a" shows as "A (South)", "dpup" as "D-Pad Up".
+	HE_API std::string gamepadButtonDisplayName(SDL_GamepadButton b);
+	HE_API std::string mouseButtonDisplayName(int button);
+
 	// Apply one InputMappingContextAsset JSON payload to `mapping`: resolves
-	// each entry's action path to its logical name and registers key ("keys")
-	// and/or axis ("axes") bindings by SDL scancode name. Unknown key names
-	// are skipped. Returns the number of entries that produced a binding.
+	// each entry's action path to its logical name and registers key ("keys"),
+	// gamepad button ("gamepadButtons"), mouse button ("mouseButtons") and/or
+	// axis ("axes") bindings. Unknown names are skipped. Returns the number of
+	// entries that produced a binding.
 	HE_API size_t applyInputMappingContext(InputMapping& mapping, const std::string& json);
 }

@@ -606,12 +606,27 @@ namespace random {
 
 // ── Time / frame (process-global clock; the app advances it once per frame) ───
 // Getters are pure (constant within a frame) → pure data nodes in HorizonCode.
+// deltaTime() is SCALED by the time scale (Unity semantics): a script that
+// already integrates against it slows down, speeds up and pauses for free, and
+// the app loops read this ONE value for every gameplay tick. Anything that must
+// keep running while the game is paused (a pause menu, debug primitives) uses
+// the app's raw frame dt or unscaledDeltaTime() instead.
 namespace time {
-    void  advance(float dtSeconds);      // app hook: called once per rendered frame
-    void  reset();                       // app hook: zero on play-start
-    float deltaTime();                   // last frame's dt (seconds)
-    float elapsed();                     // seconds since reset
+    void  advance(float dtSeconds);      // app hook: called once per rendered frame (RAW dt)
+    void  reset();                       // app hook: zero on play-start (also restores scale 1)
+    float deltaTime();                   // last frame's dt (seconds), SCALED
+    float unscaledDeltaTime();           // last frame's dt as the app measured it
+    float elapsed();                     // scaled seconds since reset
     int   frameCount();                  // frames since reset
+    // 0 = paused, 1 = normal, up to kMaxTimeScale. Clamped HERE so every
+    // frontend (Lua, Python, HorizonCode, C++) inherits the same bounds.
+    void  setTimeScale(float scale);
+    float timeScale();
+    inline constexpr float kMaxTimeScale = 5.0f;
+    // "The game is paused" as ONE predicate rather than a `== 0.0f` spelled out
+    // at every gate (input dispatch, latent flow). No registry row: a script
+    // that wants to ask already has timeScale().
+    inline bool isPaused() { return timeScale() <= 0.0f; }
 }
 
 // ── Player possession (process-global table; PlayerHost owns it) ─────────────
@@ -661,12 +676,29 @@ namespace input {
     // has always answered (0,0). Pass 0,0 where the mouse is not the caller's
     // to give (the editor outside play mode).
     void pushSdlSnapshot(float dx = 0.0f, float dy = 0.0f);
+    // App hook: the merged gamepad state for this frame. PUSHED, not polled —
+    // Input (HE_Core) owns the SDL devices, and this snapshot deliberately has
+    // no second opinion about them (the mouse-delta ownership conflict that
+    // pushSdlSnapshot documents above is not getting a gamepad sibling).
+    // `axes` are the DEADZONE-FILTERED values (what gameplay wants; a script
+    // reading a resting stick sees exactly 0.0). Raw values stay queryable in
+    // C++ via Input::gamepad() for calibration UI.
+    void setGamepad(bool connected,
+                    const float* axes, size_t axisCount,
+                    const bool* buttons, size_t buttonCount);
     // Script queries.
     bool      keyDown(const std::string& name);
     bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle
     glm::vec2 mousePosition();
     glm::vec2 mouseDelta();
     float     scrollDelta();
+    // Gamepad queries. Names are SDL's mapping-string tables, Xbox layout:
+    // buttons "a"/"b"/"x"/"y"/"leftshoulder"/"dpup"/…, axes "leftx"/"lefty"/
+    // "rightx"/"righty"/"lefttrigger"/"righttrigger". Sticks read -1..+1
+    // (SDL convention: Y positive DOWNWARD), triggers 0..1.
+    bool  gamepadConnected();
+    bool  gamepadButton(const std::string& name);
+    float gamepadAxis(const std::string& name);
 }
 
 // ── Machine-readable registry ─────────────────────────────────────────────────

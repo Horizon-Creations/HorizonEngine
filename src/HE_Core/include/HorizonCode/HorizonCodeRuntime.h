@@ -157,7 +157,14 @@ public:
     // Advance latent flow (Delay nodes): decrement every pending resume and run
     // the expired ones. The app calls this once per frame (game update / PIE
     // tick) on its runtime; an un-ticked runtime simply never resumes.
-    void update(float dt);
+    //
+    // TWO clocks, because a Delay can be either: `dt` is game time (already
+    // scaled by HE::api::time, so a pause stops these waits), `unscaledDt` is
+    // real frame time for the Delays whose Real Time pin is set — the only ones
+    // that may still finish while the game is paused. Omitting the second
+    // argument means "same clock for both", which is what every caller that has
+    // no notion of a time scale (tests, tools) wants.
+    void update(float dt, float unscaledDt = -1.0f);
 
     // Run a function on an instance, passing `args` and copying its return values
     // into `results` (when non-null). requirePublic enforces the access modifier
@@ -313,7 +320,8 @@ private:
     // One scheduled Delay continuation (Runtime::update drives these).
     // `level` travels with it for the same reason nodeState is per level: the
     // node id alone does not say which graph to resume in.
-    struct PendingResume { InstanceId id; size_t level; int node; float remaining; };
+    struct PendingResume { InstanceId id; size_t level; int node; float remaining;
+                           bool realTime = false; };
     Inst*       find(InstanceId id);
     const Inst* find(InstanceId id) const;
     // Build a Context that routes variable access to the instance's private
