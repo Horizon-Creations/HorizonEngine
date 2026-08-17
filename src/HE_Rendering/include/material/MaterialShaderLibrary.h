@@ -102,6 +102,19 @@ public:
         // other fill site leaves them 0 (the heGIRefl sample then contributes
         // nothing regardless of what texture is bound).
         float giRefl[4]       = {};
+        // Cloud shadows (append-only, v2.9): the sky's procedural cloud layer
+        // projected along the sun onto the scene. heCloudShadow (binding 33,
+        // Metal texture 16 with an inline constexpr sampler — the 16-sampler
+        // cap stays untouched) holds the transmittance of the cloud slab over a
+        // world-space XZ region around the camera; heLitP projects the fragment
+        // along the directional light's L onto the slab's mid-plane and darkens
+        // only the directional term.
+        //   cloudShadowA: x/y = region origin (world XZ), z = 1 / region size,
+        //                 w = slab mid-plane world Y
+        //   cloudShadowB: x = strength (0 = off — every legacy fill site leaves
+        //                 this 0, so the sample folds dead there)
+        float cloudShadowA[4] = {};
+        float cloudShadowB[4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

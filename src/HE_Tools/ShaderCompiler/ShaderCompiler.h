@@ -65,6 +65,11 @@ struct MslPin
 struct MslOptions
 {
     bool framebufferFetchSubpasses = false;
+    // Combined samplers (set, binding) to emit as INLINE constexpr samplers
+    // (linear filter, clamp-to-edge) instead of a [[sampler(n)]] argument.
+    // Frees a sampler slot when the fragment stage sits at Metal's 16-sampler
+    // cap — the texture still needs (and gets) its [[texture(n)]] pin.
+    std::vector<std::pair<uint32_t, uint32_t>> constexprLinearSamplers;
 };
 
 // Compile canonical GLSL to MSL with explicit buffer-slot assignments (Target::Msl).

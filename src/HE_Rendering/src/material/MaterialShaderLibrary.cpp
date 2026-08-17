@@ -217,6 +217,8 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 weather;        // x = wetness, y = snow amount
     vec4 ssr;            // x = 1 → heSSR bound (FORWARD path), y = SSR intensity, z = max roughness, w = 1 → skip ambSpec (deferred reflection pass)
     vec4 giRefl;         // x = ray-traced GI-reflection intensity, y = max roughness, z = 1 → heGIRefl bound (FORWARD path), w = resolution blur floor
+    vec4 cloudShadowA;   // cloud shadows: xy = region origin (world XZ), z = 1/region size, w = slab mid-plane Y
+    vec4 cloudShadowB;   // x = strength (0 = off / not bound)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -256,6 +258,14 @@ layout(set = 0, binding = 18) uniform sampler2D heGIVisibility;
 // binds a dummy and the branches fold dead. Sampled per gl_FragCoord like heAO.
 layout(set = 0, binding = 31) uniform sampler2D heSSRFwd;    // rgb radiance, a confidence
 layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a confidence
+// Cloud-shadow transmittance map (binding 33): the sky's procedural cloud layer
+// evaluated once per frame over a world-space XZ region around the camera (its
+// own tiny pass in each backend, using the SAME cloud density the sky shader
+// raymarches). Metal texture 16 with an INLINE constexpr sampler — the material
+// fragment stage sits at Metal's 16-sampler cap, so this texture deliberately
+// consumes no sampler slot (ShaderCompiler MslOptions::constexprLinearSamplers).
+// GL assigns unit 19 by name. Gated by heLight.cloudShadowB.x (0 = off).
+layout(set = 0, binding = 33) uniform sampler2D heCloudShadow;
 // Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
 // the backends' octEncode; kept a copy here for the same reason they keep theirs:
 // each shader string is its own compilation unit.
@@ -417,6 +427,24 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
     return vis / 9.0;
+}
+// Cloud-shadow visibility for the directional light (1 = fully lit). Projects
+// the fragment along the light direction L (TOWARD the light) onto the cloud
+// slab's mid-plane and samples the per-frame transmittance map. Fades out at
+// the map border so the region edge never shows as a hard shadow line.
+// SYNC: the same three lines live in the built-in shaders (Metal fragmentMain's
+// cloudShadowFactor, GL kUnlitFS's cloudShadowFactor) — change one, change all.
+float heCloudShadowFactor(vec3 worldPos, vec3 L) {
+    float s = heLight.cloudShadowB.x;
+    if (s <= 0.0 || L.y <= 0.05) return 1.0;
+    float t = (heLight.cloudShadowA.w - worldPos.y) / L.y;
+    if (t <= 0.0) return 1.0;
+    vec2 uv = (worldPos.xz + L.xz * t - heLight.cloudShadowA.xy) * heLight.cloudShadowA.z;
+    vec2 e = min(uv, vec2(1.0) - uv);
+    float edge = smoothstep(0.0, 0.08, min(e.x, e.y));
+    if (edge <= 0.0) return 1.0;
+    float T = texture(heCloudShadow, uv).r;
+    return mix(1.0, T, s * edge);
 }
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
 // escape-hatch fragments that call heLit() keep working unchanged. Has no
@@ -583,6 +611,11 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         {
             sh = heCsmShadow(worldPos, n, L);
         }
+        // Cloud shadows darken the directional light on top of BOTH shadow
+        // sources (GI mask and CSM) — the geometry shadow and the cloud layer
+        // occlude independently.
+        if (type == 0)
+            sh *= heCloudShadowFactor(worldPos, L);
         // Local (point/spot) lights: shadow-map the atlas layer the extractor
         // assigned (lightParams[i].y). min() with the GI mask above — the map
         // covers lights beyond the mask's first-4 window, the mask adds
@@ -1015,6 +1048,19 @@ void main() {
 
 namespace
 {
+// MSL options shared by every pipeline that injects kLightingPreamble: the
+// cloud-shadow map (binding 33) samples through an INLINE constexpr sampler so
+// it consumes a texture slot (16) but no sampler slot — the material fragment
+// stage is exactly AT Metal's 16-sampler cap, and a 17th sampler argument would
+// fail the whole pipeline build. Harmless for sources that never reference the
+// sampler (the remap is a no-op then).
+he::shaderc::MslOptions kMaterialMslOptions()
+{
+    he::shaderc::MslOptions opts;
+    opts.constexprLinearSamplers = { { 0u, 33u } };
+    return opts;
+}
+
 // Shared compile for the four resolve variants. Metal pins: everything the
 // preamble binds on its scene-pass slots, HeResolve on fragment buffer 3, the
 // G-buffer as texture slots 0..3 (sampled variant only — the tile variant
@@ -1045,6 +1091,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         { Stage::Fragment, 0, 16, 15 },   // screen-space AO
         { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
         { Stage::Fragment, 0, 18, 7 },    // DDGI visibility atlas
+        { Stage::Fragment, 0, 33, 16 },   // cloud-shadow map → texture 16 (constexpr sampler)
     };
     if (!tile)
     {
@@ -1059,7 +1106,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         pins.push_back({ Stage::Fragment, 0, 25, 5 }); // cluster grid → buffer 5
         pins.push_back({ Stage::Fragment, 0, 26, 6 }); // light index list → buffer 6
     }
-    MslOptions opts;
+    MslOptions opts = kMaterialMslOptions();
     opts.framebufferFetchSubpasses = tile;
     return toCompiled(compileMslPinned(injected, Stage::Fragment, pins, opts));
 }
@@ -1798,7 +1845,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // slots freed by moving the GI masks onto the built-in pipeline's
               // 5/8 above. Per-frame binds shared with the built-in shaders.
               { Stage::Fragment, 0, 31, 9 },
-              { Stage::Fragment, 0, 32, 10 } }));
+              { Stage::Fragment, 0, 32, 10 },
+              // Cloud-shadow transmittance map (binding 33) → MSL TEXTURE 16.
+              // Textures go up to 30; only SAMPLERS are capped at 16 — this one
+              // uses an inline constexpr sampler (kMaterialMslOptions below), so
+              // the sampler budget stays untouched. Per-frame bind shared with
+              // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
+              { Stage::Fragment, 0, 33, 16 } },
+            kMaterialMslOptions()));
     }
     else
     {

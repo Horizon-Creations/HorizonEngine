@@ -6,13 +6,19 @@
 #include "EditorPanelState.h" // shared per-tab state map + lazy asset open
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "EditorWidgets.h"          // WrapText — text wraps at the pane edge, never runs off it
+#include "EditorCamera.h"           // the Scene window's camera, one per tab
+#include "EditorViewportNav.h"      // …and its navigation grammar, shared
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
 #include <Types/Enums.h>
 #include <imgui.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,6 +52,16 @@ struct State
 
 	UvStats stats;
 	bool    statsDone = false;
+
+	// ── 3D view ──────────────────────────────────────────────────────────────
+	// A viewer for a mesh has to answer "how does this catch light", which a UV
+	// unwrap cannot and a fixed headlight answers badly. So: the real renderer,
+	// over a one-entity world, under a sky whose time of day is a slider.
+	bool showUv = false;     // the unwrap instead of the 3D view (toolbar)
+	std::unique_ptr<HorizonWorld> world;   // one entity, one MeshComponent
+	EditorCamera cam;
+	bool         camFramed = false;
+	float        timeOfDay = 0.32f;        // mid-morning: a raking light, so form reads
 };
 
 AssetPanelState<State> s_states;
@@ -207,6 +223,79 @@ void drawUvView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const I
 		                    drawn, mesh.indices.size());
 }
 
+// ── The 3D view ─────────────────────────────────────────────────────────────
+// The mesh as the engine actually draws it, in a world of its own: one entity
+// with this mesh on it, handed to the renderer's world-preview path. That is
+// what buys the sky, the ground, the grid and the Scene window's navigation for
+// the price of building a one-entity world.
+void ensurePreviewWorld(State& st)
+{
+	if (st.world) return;
+	st.world = std::make_unique<HorizonWorld>();
+	const Entity e = st.world->createEntity(st.name.empty() ? "Mesh" : st.name);
+	st.world->addComponent(e, TransformComponent{});
+	MeshComponent mc;
+	mc.meshAssetId = st.meshId;
+	st.world->addComponent(e, mc);
+}
+
+void drawMeshView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const ImVec2& size)
+{
+	if (!ctx.renderer || !ctx.contentManager)
+	{
+		ImGui::TextDisabled("(no renderer)");
+		return;
+	}
+	ensurePreviewWorld(st);
+	if (!st.world) return;
+
+	// Framed on the mesh's own bounds the first time — the same numbers the
+	// stats pane prints, so what you read on the left is what you are looking at.
+	if (!st.camFramed)
+	{
+		const glm::vec3 lo(mesh.boundsMin[0], mesh.boundsMin[1], mesh.boundsMin[2]);
+		const glm::vec3 hi(mesh.boundsMax[0], mesh.boundsMax[1], mesh.boundsMax[2]);
+		const glm::vec3 c = (lo + hi) * 0.5f;
+		const float     r = std::max(0.25f, glm::length(hi - lo) * 0.5f);
+		st.cam.focusOn(c, r);
+		st.camFramed = true;
+	}
+
+	const ImVec2 av(std::max(64.0f, size.x), std::max(64.0f, size.y));
+	const ImVec2 org = ImGui::GetCursorScreenPos();
+
+	WorldPreviewEnv env;
+	env.sky       = true;
+	env.timeOfDay = st.timeOfDay;
+	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.world,
+		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
+		st.cam.makeOverride(), glm::vec3(0.0f), env);
+	if (!tex)
+	{
+		ImGui::TextDisabled("(no 3D preview on this backend — the UV view still works)");
+		return;
+	}
+
+	const bool flipY = (ctx.backend == HE::RendererBackend::OpenGL);
+	ImGui::Image(reinterpret_cast<ImTextureID>(tex), av,
+		flipY ? ImVec2(0, 1) : ImVec2(0, 0), flipY ? ImVec2(1, 0) : ImVec2(1, 1));
+	// Hover off the IMAGE, with nothing laid over it: an item covering the
+	// viewport is what stopped the class editor's gizmo from being grabbed, and
+	// the rule is worth keeping even where there is no gizmo.
+	const bool hovered = ImGui::IsItemHovered();
+
+	EditorCamera::Input cin;
+	// Owner = this tab's state, so the editor's per-frame "the scene viewport is
+	// not drawn, drop its capture" guard cannot end a look that started here.
+	const bool navigating = EditorViewportNav::gather(
+		ctx, &st, hovered, ImGui::GetIO().DeltaTime, av.y, cin);
+	if (hovered && !ImGui::GetIO().WantTextInput && !navigating &&
+	    ImGui::IsKeyPressed(ImGuiKey_F))
+		st.camFramed = false;   // F re-frames, the same key as in the Scene window
+	st.cam.update(cin);
+	(void)org;
+}
+
 } // namespace
 
 bool isStaticMeshAsset(const std::string& path)
@@ -280,22 +369,35 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
 		bar.endGroup();
 
-		bar.rightGroup(bar.iconGroupWidth(3));
-		if (bar.item("##smgrid", T::iconGrid, nullptr, st.showTileGrid, true,
-		             "Show the 0..1 tile grid"))
+		// Which of the two views the right pane holds. The 3D view is the one you
+		// open a mesh to see; the unwrap is what you switch to when the question
+		// is about texturing.
+		bar.rightGroup(bar.iconGroupWidth(st.showUv ? 5 : 3));
+		if (bar.item("##sm3d", T::iconLayers, "3D", !st.showUv, true,
+		             "The mesh in a lit world"))
+			st.showUv = false;
+		if (bar.item("##smuv", T::iconGrid, "UV", st.showUv, true,
+		             "The unwrap over the 0..1 tile"))
+			st.showUv = true;
+		if (st.showUv)
 		{
-			st.showTileGrid = !st.showTileGrid;
+			if (bar.item("##smgrid", T::iconGrid, nullptr, st.showTileGrid, true,
+			             "Show the 0..1 tile grid"))
+			{
+				st.showTileGrid = !st.showTileGrid;
+			}
+			if (bar.item("##smflip", T::iconFlip, nullptr, st.flipV, true,
+			             "Flip V.\nThe engine uses a GL-style bottom-left UV origin; flip to "
+			             "preview\nhow the unwrap reads under the other convention."))
+			{
+				st.flipV = !st.flipV;
+			}
 		}
-		if (bar.item("##smflip", T::iconFlip, nullptr, st.flipV, true,
-		             "Flip V.\nThe engine uses a GL-style bottom-left UV origin; flip to "
-		             "preview\nhow the unwrap reads under the other convention."))
+		if (bar.item("##smfit", T::iconFit, nullptr, false, true,
+		             st.showUv ? "Reset the UV view" : "Frame the mesh (F)"))
 		{
-			st.flipV = !st.flipV;
-		}
-		if (bar.item("##smfit", T::iconFit, nullptr, false, true, "Reset the UV view"))
-		{
-			st.uvZoom = 1.0f;
-			st.uvPan  = ImVec2(0.0f, 0.0f);
+			if (st.showUv) { st.uvZoom = 1.0f; st.uvPan = ImVec2(0.0f, 0.0f); }
+			else           { st.camFramed = false; }
 		}
 		bar.endGroup();
 	}
@@ -348,22 +450,48 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// Tile grid, Flip V and Reset live on the toolbar now — one place for the
 		// controls, and this pane keeps the readouts it alone can give.
 		ImGui::SeparatorText("View");
-		ImGui::Text("Zoom %.2fx", st.uvZoom);
-		ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
-			? "Drag or two-finger swipe to pan,\nCmd/Ctrl+scroll to zoom."
-			: "Drag to pan, wheel to zoom.");
+		if (st.showUv)
+		{
+			ImGui::Text("Zoom %.2fx", st.uvZoom);
+			ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+				? "Drag or two-finger swipe to pan,\nCmd/Ctrl+scroll to zoom."
+				: "Drag to pan, wheel to zoom.");
+		}
+		else
+		{
+			// One slider, because one number is what actually changes the answer:
+			// where the sun is. Everything else about the sky follows from it.
+			// Shown as a clock inside the slider, like the Sky panel does — "0.32"
+			// says nothing, "07:40" says which light you are judging the mesh in.
+			int minutes = static_cast<int>(st.timeOfDay * 1440.0f) % 1440;
+			if (minutes < 0) minutes += 1440;
+			char clock[8];
+			std::snprintf(clock, sizeof(clock), "%02d:%02d", minutes / 60, minutes % 60);
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::SliderFloat("##smtod", &st.timeOfDay, 0.0f, 1.0f, clock,
+			                   ImGuiSliderFlags_NoRoundToFormat);
+			ImGui::TextDisabled("Time of day");
+			ImGui::Spacing();
+			ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
+				? "Two-finger tap to fly (WASDQE),\nAlt+drag to orbit, scroll to zoom, F to frame."
+				: "Right-drag to look (WASDQE),\nAlt+drag to orbit, wheel to zoom, F to frame.");
+		}
 	}
 	ImGui::EndChild();
 
-	// ── Right: the UV wireframe ──────────────────────────────────────────────
+	// ── Right: the mesh, or its unwrap ───────────────────────────────────────
 	ImGui::SameLine();
-	ImGui::BeginChild("##smUv", ImVec2(0.0f, 0.0f), true);
+	// NoScrollWithMouse: in the 3D view the wheel is the camera's dolly, and
+	// without this the child eats it first.
+	ImGui::BeginChild("##smUv", ImVec2(0.0f, 0.0f), true,
+		st.showUv ? 0 : (ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar));
 	{
 		// The unwrap itself is immune — every edge goes through the draw list at a
 		// computed position, which no wrap position can reach. What this scope is
 		// for is the one sentence drawUvView emits when it truncates.
 		EditorWidgets::WrapText wrap;
-		drawUvView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
+		if (st.showUv) drawUvView  (ctx, *mesh, st, ImGui::GetContentRegionAvail());
+		else           drawMeshView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
 	}
 	ImGui::EndChild();
 
