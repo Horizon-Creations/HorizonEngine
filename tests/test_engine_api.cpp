@@ -443,6 +443,39 @@ TEST_CASE("Input: the pushed snapshot reflects through the registry")
     HE::api::input::clear();
 }
 
+TEST_CASE("Input: the pushed gamepad state reflects through the registry")
+{
+    Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    HE::api::input::clear();
+    CHECK(call("input.gamepadConnected", {})[0].b == false);
+    CHECK(call("input.gamepadButton", { Value::ofString("a") })[0].b == false);
+    CHECK(call("input.gamepadAxis", { Value::ofString("leftx") })[0].f == doctest::Approx(0.0f));
+
+    // SDL axis order: leftx, lefty, rightx, righty, lefttrigger, righttrigger.
+    float axes[6] = { 0.5f, -0.25f, 0.0f, 0.0f, 1.0f, 0.0f };
+    bool  buttons[16] = {};
+    buttons[0]  = true; // "a" (south)
+    buttons[11] = true; // "dpup"
+    HE::api::input::setGamepad(true, axes, 6, buttons, 16);
+
+    CHECK(call("input.gamepadConnected", {})[0].b == true);
+    CHECK(call("input.gamepadButton", { Value::ofString("a") })[0].b    == true);
+    CHECK(call("input.gamepadButton", { Value::ofString("dpup") })[0].b == true);
+    CHECK(call("input.gamepadButton", { Value::ofString("b") })[0].b    == false);
+    CHECK(call("input.gamepadButton", { Value::ofString("not_a_button") })[0].b == false);
+    CHECK(call("input.gamepadAxis", { Value::ofString("leftx") })[0].f == doctest::Approx(0.5f));
+    CHECK(call("input.gamepadAxis", { Value::ofString("lefty") })[0].f == doctest::Approx(-0.25f));
+    CHECK(call("input.gamepadAxis", { Value::ofString("lefttrigger") })[0].f == doctest::Approx(1.0f));
+    CHECK(call("input.gamepadAxis", { Value::ofString("bogus") })[0].f == doctest::Approx(0.0f));
+
+    // clear() wipes the pad too — a stale stick must not survive a session end.
+    HE::api::input::clear();
+    CHECK(call("input.gamepadConnected", {})[0].b == false);
+    CHECK(call("input.gamepadAxis", { Value::ofString("leftx") })[0].f == doctest::Approx(0.0f));
+}
+
 // ═══ Transform value type ═════════════════════════════════════════════════════
 
 TEST_CASE("Transform: ConstTransform flows through Set as a Transform value")

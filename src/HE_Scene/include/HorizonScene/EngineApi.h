@@ -661,12 +661,29 @@ namespace input {
     // has always answered (0,0). Pass 0,0 where the mouse is not the caller's
     // to give (the editor outside play mode).
     void pushSdlSnapshot(float dx = 0.0f, float dy = 0.0f);
+    // App hook: the merged gamepad state for this frame. PUSHED, not polled —
+    // Input (HE_Core) owns the SDL devices, and this snapshot deliberately has
+    // no second opinion about them (the mouse-delta ownership conflict that
+    // pushSdlSnapshot documents above is not getting a gamepad sibling).
+    // `axes` are the DEADZONE-FILTERED values (what gameplay wants; a script
+    // reading a resting stick sees exactly 0.0). Raw values stay queryable in
+    // C++ via Input::gamepad() for calibration UI.
+    void setGamepad(bool connected,
+                    const float* axes, size_t axisCount,
+                    const bool* buttons, size_t buttonCount);
     // Script queries.
     bool      keyDown(const std::string& name);
     bool      mouseButton(int index);    // 0 = left, 1 = right, 2 = middle
     glm::vec2 mousePosition();
     glm::vec2 mouseDelta();
     float     scrollDelta();
+    // Gamepad queries. Names are SDL's mapping-string tables, Xbox layout:
+    // buttons "a"/"b"/"x"/"y"/"leftshoulder"/"dpup"/…, axes "leftx"/"lefty"/
+    // "rightx"/"righty"/"lefttrigger"/"righttrigger". Sticks read -1..+1
+    // (SDL convention: Y positive DOWNWARD), triggers 0..1.
+    bool  gamepadConnected();
+    bool  gamepadButton(const std::string& name);
+    float gamepadAxis(const std::string& name);
 }
 
 // ── Machine-readable registry ─────────────────────────────────────────────────
