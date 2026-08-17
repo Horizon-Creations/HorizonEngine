@@ -62,6 +62,11 @@ struct State
 	EditorCamera cam;
 	bool         camFramed = false;
 	float        timeOfDay = 0.32f;        // mid-morning: a raking light, so form reads
+	// Sky or studio. The sky answers "how does this read outdoors at this hour";
+	// the studio light answers "what is the SHAPE" — no colour cast, no time of
+	// day, the same fixed key light every thumbnail is rendered under. Both are
+	// real questions about a mesh, so neither is the only option.
+	bool         useSky = true;
 };
 
 AssetPanelState<State> s_states;
@@ -265,7 +270,7 @@ void drawMeshView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const
 	const ImVec2 org = ImGui::GetCursorScreenPos();
 
 	WorldPreviewEnv env;
-	env.sky       = true;
+	env.sky       = st.useSky;
 	env.timeOfDay = st.timeOfDay;
 	void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *st.world,
 		static_cast<uint32_t>(av.x), static_cast<uint32_t>(av.y),
@@ -459,10 +464,18 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		else
 		{
+			// Sky or studio: two different questions about a mesh. Outdoors at a
+			// given hour, or the shape alone under a fixed key light with no
+			// colour cast — the light every thumbnail is rendered under.
+			if (ImGui::RadioButton("Sky", st.useSky)) st.useSky = true;
+			ImGui::SameLine();
+			if (ImGui::RadioButton("Studio", !st.useSky)) st.useSky = false;
+
 			// One slider, because one number is what actually changes the answer:
 			// where the sun is. Everything else about the sky follows from it.
 			// Shown as a clock inside the slider, like the Sky panel does — "0.32"
 			// says nothing, "07:40" says which light you are judging the mesh in.
+			ImGui::BeginDisabled(!st.useSky);
 			int minutes = static_cast<int>(st.timeOfDay * 1440.0f) % 1440;
 			if (minutes < 0) minutes += 1440;
 			char clock[8];
@@ -471,6 +484,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SliderFloat("##smtod", &st.timeOfDay, 0.0f, 1.0f, clock,
 			                   ImGuiSliderFlags_NoRoundToFormat);
 			ImGui::TextDisabled("Time of day");
+			ImGui::EndDisabled();
 			ImGui::Spacing();
 			ImGui::TextDisabled(EditorInput::trackpadPointer(ctx)
 				? "Two-finger tap to fly (WASDQE),\nAlt+drag to orbit, scroll to zoom, F to frame."

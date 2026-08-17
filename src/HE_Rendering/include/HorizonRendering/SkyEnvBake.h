@@ -98,7 +98,14 @@ inline glm::vec3 AtmoScatterCPU(glm::vec3 dir, glm::vec3 sunDir)
 
 // Radiance arriving from `dir` for the given sun direction. Both are normalised
 // internally, so callers may pass unnormalised face directions.
-inline glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
+//
+// `withSunDisc` adds the sun (and moon) glare lobes. On for the IBL bake, which
+// needs the sun's ENERGY in the ambient it produces. Off for anything that
+// interpolates this function over a coarse mesh: the disc is a fraction of a
+// degree wide and its widest lobe still only ~30°, so linear interpolation
+// across 10°-wide triangles turns it into a huge faceted white polygon rather
+// than a sun. The gradient underneath interpolates perfectly well.
+inline glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir, bool withSunDisc = true)
 {
 	dir = glm::normalize(dir); sunDir = glm::normalize(sunDir);
 	float sunY = glm::clamp(sunDir.y, -0.3f, 1.0f);
@@ -134,17 +141,21 @@ inline glm::vec3 SkyColorCPU(glm::vec3 dir, glm::vec3 sunDir)
 	sky += glm::mix(glm::vec3(0.006f,0.009f,0.024f), glm::vec3(0.003f,0.005f,0.015f), h) * toNight;
 	glm::vec3 ground = glm::mix(sky * 0.32f, glm::vec3(0.24f,0.23f,0.21f), day);
 	sky = glm::mix(sky, ground, glm::smoothstep(0.0f, -0.20f, dir.y));
-	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy).
-	glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
-	float s = std::max(glm::dot(dir, sunDir), 0.0f);
-	float sunVis = std::max(day, dusk);
-	sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
-	sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
-	sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
 	float night = 1.0f - day;
-	glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
-	float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
-	sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
+	// CPU mirror deliberately keeps a sun DISK (IBL ambient carries sun energy)
+	// — unless the caller is going to interpolate this, see the header note.
+	if (withSunDisc)
+	{
+		glm::vec3 sunTint = glm::mix(glm::vec3(1.0f,0.42f,0.20f), glm::vec3(1.0f,0.96f,0.88f), glm::smoothstep(0.0f,0.25f,sunY));
+		float s = std::max(glm::dot(dir, sunDir), 0.0f);
+		float sunVis = std::max(day, dusk);
+		sky += sunTint * (std::pow(s,1800.0f) * 14.0f * day);
+		sky += sunTint * (std::pow(s,180.0f)  * 2.2f * sunVis);
+		sky += sunTint * (std::pow(s,22.0f)   * 0.7f * sunVis);
+		glm::vec3 moonDir = glm::normalize(glm::vec3(-sunDir.x, -sunDir.y, sunDir.z));
+		float mdot = std::max(glm::dot(dir, moonDir), 0.0f);
+		sky += glm::vec3(0.80f,0.86f,1.00f) * (std::pow(mdot,60.0f) * 0.05f * night);
+	}
 	sky += glm::vec3(0.015f,0.018f,0.030f) * night;
 	return sky;
 }

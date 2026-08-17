@@ -93,9 +93,14 @@ inline void buildPreviewGrid(float halfExtent, float step, std::vector<float>& o
 //
 // The colours come from `SkyColorCPU` — the SAME function that bakes the
 // scene's image-based ambient cubemap — so the preview and the scene can never
-// disagree about what a given sun position looks like. Interpolating a coarse
-// grid is enough because the sky IS a gradient: the one feature a per-pixel
-// pass would add (the sun disc) sits behind the geometry a preview is about.
+// disagree about what a given sun position looks like. Interpolating a grid is
+// enough because the sky IS a gradient.
+//
+// WITHOUT the sun disc, deliberately. It is a fraction of a degree wide and its
+// widest glare lobe still only ~30°: interpolated across triangles it does not
+// become a small bright sun, it becomes a huge faceted white polygon — which is
+// exactly what the first version of this looked like. The gradient underneath
+// interpolates perfectly well, and a preview is about the object, not the sun.
 //
 // Drawn as plain triangles through the same pos3+color3 program as the ground,
 // which is what makes it cost no shader on any backend. Depth testing must be
@@ -106,8 +111,9 @@ inline void buildPreviewGrid(float halfExtent, float step, std::vector<float>& o
 inline void buildPreviewSkyDome(const glm::vec3& camPos, float radius,
                                 const glm::vec3& sunDir, std::vector<float>& out)
 {
-    constexpr int kSeg   = 24;   // around
-    constexpr int kRings = 12;   // pole to pole
+    // Fine enough that the horizon gradient — the steepest part — does not band.
+    constexpr int kSeg   = 48;   // around
+    constexpr int kRings = 24;   // pole to pole
     const glm::vec3 sun = glm::normalize(sunDir);
 
     // One evaluation per unique grid vertex, not per triangle corner:
@@ -125,7 +131,7 @@ inline void buildPreviewSkyDome(const glm::vec3& camPos, float radius,
             const glm::vec3 dir(sr * std::sin(th), sy, sr * std::cos(th));
             V& v = grid[static_cast<size_t>(r) * (kSeg + 1) + s];
             v.p  = camPos + dir * radius;
-            v.c  = SkyColorCPU(dir, sun);
+            v.c  = SkyColorCPU(dir, sun, /*withSunDisc=*/false);
         }
     }
 

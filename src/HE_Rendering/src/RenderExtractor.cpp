@@ -786,14 +786,35 @@ void RenderExtractor::applyDayNight(RenderWorld& out) const
 		ambient += (m_sunColor  * (m_sunIntensity  * sunUp)
 		          + m_moonColor * (m_moonIntensity * moonUp)) * (overcast * 0.22f);
 
+		// Scene geometry gets neutral (luminance-only) direct light so the sun's
+		// warm hue scatters only into the sky/clouds, not the terrain.
+		const float lum = 0.299f * m_sunColor.r + 0.587f * m_sunColor.g + 0.114f * m_sunColor.b;
 		if (sunLight)
 		{
-			// Scene geometry gets neutral (luminance-only) direct light so the
-			// sun's warm hue scatters only into the sky/clouds, not the terrain.
-			const float lum = 0.299f * m_sunColor.r + 0.587f * m_sunColor.g + 0.114f * m_sunColor.b;
 			sunLight->color     = glm::vec3(lum);
 			sunLight->direction = -sunToward; // light travels away from the sun
 			sunLight->intensity = m_sunIntensity * sunUp * direct;
+		}
+		else
+		{
+			// No directional light in the world at all — synthesise the sun, the
+			// same way the moon below always has. It used to be only the moon,
+			// which left such a world lit by moonlight in broad daylight: a
+			// day-night cycle whose SUN is the one thing it does not add. A world
+			// with no lights is not exotic, it is what a preview hands over.
+			// (push_back may reallocate out.lights, so the pointers above go stale
+			// — moonLight is re-resolved below by the same push_back path.)
+			LightData sun{};
+			sun.type         = 0; // directional
+			sun.direction    = -sunToward;
+			sun.color        = glm::vec3(lum);
+			sun.intensity    = m_sunIntensity * sunUp * direct;
+			sun.envRole      = 1;
+			sun.spotAngleCos = 1.0f;
+			out.lights.push_back(sun);
+			moonLight = nullptr;   // the push may have moved the array
+			for (LightData& l : out.lights)
+				if (l.envRole == 2) { moonLight = &l; break; }
 		}
 		if (moonLight)
 		{
@@ -810,6 +831,7 @@ void RenderExtractor::applyDayNight(RenderWorld& out) const
 			moon.direction    = -moonToward;
 			moon.color        = m_moonColor;
 			moon.intensity    = m_moonIntensity * moonUp * direct;
+			moon.envRole      = 2;
 			moon.spotAngleCos = 1.0f;
 			out.lights.push_back(moon);
 		}

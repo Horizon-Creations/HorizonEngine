@@ -3536,7 +3536,12 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		float billow = cloudBillowFbm(np * 1.2 + float3(0.0, -time * 0.08 * evo, 0.0), 1.0,
 		                              noiseTex, noiseSamp);
 		float carve  = billow * mix(0.50, 0.78, fluff);
-		return clamp((env - carve) / max(1.0 - carve, 1e-3), 0.0, 1.0);
+		float x      = (env - carve) / max(1.0 - carve, 1e-3);
+		// MIST SKIRT: a thin low-density veil in the zone the carve just cut
+		// away — it hugs every lobe as a soft evaporating fringe, so the crisp
+		// cores keep their shape but the outline stops being knife-sharp.
+		float mist = 0.13 * smoothstep(-0.30, 0.0, min(x, 0.0)) * rise;
+		return clamp(max(x, 0.0) + mist, 0.0, 1.0);
 	}
 	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
 	// formula (the ground shadows of classic scenes must not change).
@@ -3769,7 +3774,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		float  fineW = (0.50 + 0.35 * fluff) * detailFade
 		             * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
-		dens *= smoothstep(0.015, 0.10, dens); // cut the wispy tail -> crisp lobed silhouette
+		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
 		if (dens <= 0.002) continue;
 
 		// Sun march over the same field; the FIRST step is tight so each
@@ -3802,7 +3807,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		}
 		float sun    = ms / wsum;
 		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
-		float lit    = sun * powder;
+		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
+		// not as grey soot — darkness should come from the sun march (od), not
+		// from low local density.
+		float lit    = sun * mix(0.55, 1.0, powder);
 		// Blue-grey skylit belly → near-white sunlit top; night/dusk logic kept
 		// from classic so the clouds enter and leave sunset with the sky.
 		float3 dayCol   = mix(float3(0.30, 0.35, 0.46), sunColor * 1.30, lit);
