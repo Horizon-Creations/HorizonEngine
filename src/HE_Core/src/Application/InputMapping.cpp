@@ -37,7 +37,11 @@ void InputMapping::tick(const Input& input, const MouseFrame& mouse)
         bool prev = entry.state.isPressed;
         bool cur  = false;
         for (auto& b : entry.bindings)
+        {
             cur = cur || (b.key != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.key));
+            cur = cur || (b.gamepadButton != SDL_GAMEPAD_BUTTON_INVALID &&
+                          input.isGamepadButtonDown(b.gamepadButton));
+        }
 
         entry.state.isPressed    = cur;
         entry.state.justPressed  = cur  && !prev;
@@ -64,10 +68,30 @@ void InputMapping::tick(const Input& input, const MouseFrame& mouse)
                     keys += b.scale;
                 if (b.negativeKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.negativeKey))
                     keys -= b.scale;
+                if (b.positiveButton != SDL_GAMEPAD_BUTTON_INVALID &&
+                    input.isGamepadButtonDown(b.positiveButton))
+                    keys += b.scale;
+                if (b.negativeButton != SDL_GAMEPAD_BUTTON_INVALID &&
+                    input.isGamepadButtonDown(b.negativeButton))
+                    keys -= b.scale;
                 break;
             case AxisSource::MouseX:     delta += mouse.dx    * b.scale; break;
             case AxisSource::MouseY:     delta += mouse.dy    * b.scale; break;
             case AxisSource::MouseWheel: delta += mouse.wheel * b.scale; break;
+            // Held states like the keys: they join the clamped sum, so a stick
+            // plus a key bound to the same axis cannot exceed full deflection.
+            case AxisSource::GamepadLeftX:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX) * b.scale; break;
+            case AxisSource::GamepadLeftY:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTY) * b.scale; break;
+            case AxisSource::GamepadRightX:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX) * b.scale; break;
+            case AxisSource::GamepadRightY:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY) * b.scale; break;
+            case AxisSource::GamepadLeftTrigger:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * b.scale; break;
+            case AxisSource::GamepadRightTrigger:
+                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * b.scale; break;
             }
         }
         return std::clamp(keys, -1.0f, 1.0f) + delta;

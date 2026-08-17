@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <Application/Input.h>
+#include <Application/InputMapping.h>
 #include <cmath>
 
 // CP0 of gamepad support: the pure device-layer math. No SDL gamepad subsystem
@@ -197,4 +198,176 @@ TEST_CASE("Input: EndFrame clears mouse but not gamepad state")
 
     input.EndFrame();
     CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_START)); // held state, not a displacement
+}
+
+// ─── InputMapping with gamepad sources (CP1) ─────────────────────────────────
+
+namespace {
+    Input inputWithFrame(const GamepadFrame& f)
+    {
+        Input input;
+        input.SetGamepadFrame(f);
+        return input;
+    }
+}
+
+TEST_CASE("Mapping: gamepad button triggers an action with edges")
+{
+    InputMapping m;
+    m.mapAction("Jump", { { SDL_SCANCODE_SPACE, SDL_GAMEPAD_BUTTON_SOUTH } });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK(m.isPressed("Jump"));
+    CHECK(m.justPressed("Jump"));
+
+    f.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = false;
+    input.SetGamepadFrame(f);
+    m.tick(input);
+    CHECK_FALSE(m.isPressed("Jump"));
+    CHECK(m.justReleased("Jump"));
+}
+
+TEST_CASE("Mapping: key-only bindings ignore the gamepad, old spellings intact")
+{
+    InputMapping m;
+    m.mapAction("Fire", { { SDL_SCANCODE_F } }); // pre-gamepad brace-init
+
+    GamepadFrame f;
+    f.connected = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK_FALSE(m.isPressed("Fire"));
+}
+
+TEST_CASE("Mapping: stick source feeds an axis, deadzone already applied")
+{
+    InputMapping m;
+    AxisBinding stick;
+    stick.source = AxisSource::GamepadLeftX;
+    m.mapAxis("Steer", { stick });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK(m.axisValue("Steer") == doctest::Approx(1.0f));
+
+    f.axes[SDL_GAMEPAD_AXIS_LEFTX] = 0.05f; // drift, inside deadzone
+    input.SetGamepadFrame(f);
+    m.tick(input);
+    CHECK(m.axisValue("Steer") == 0.0f);
+}
+
+TEST_CASE("Mapping: stick plus key on the same axis clamps to full deflection")
+{
+    InputMapping m;
+    AxisBinding keys{ SDL_SCANCODE_D, SDL_SCANCODE_A };
+    AxisBinding stick;
+    stick.source = AxisSource::GamepadLeftX;
+    m.mapAxis("Move", { keys, stick });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    Input input = inputWithFrame(f);
+    SDL_Event evt{};
+    evt.type         = SDL_EVENT_KEY_DOWN;
+    evt.key.scancode = SDL_SCANCODE_D;
+    input.ProcessEvent(evt);
+
+    m.tick(input);
+    CHECK(m.axisValue("Move") == doctest::Approx(1.0f)); // not 2.0
+}
+
+TEST_CASE("Mapping: negative scale flips SDL's downward-positive stick Y")
+{
+    InputMapping m;
+    AxisBinding stickY;
+    stickY.source = AxisSource::GamepadLeftY;
+    stickY.scale  = -1.0f; // up-positive for gameplay
+    m.mapAxis("MoveY", { stickY });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTY] = -1.0f; // stick pushed UP (SDL: negative)
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK(m.axisValue("MoveY") == doctest::Approx(1.0f));
+}
+
+TEST_CASE("Mapping: D-pad button pair drives an axis like keys")
+{
+    InputMapping m;
+    AxisBinding dpad;
+    dpad.positiveButton = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+    dpad.negativeButton = SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+    m.mapAxis("Move", { dpad });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.buttons[SDL_GAMEPAD_BUTTON_DPAD_LEFT] = true;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    CHECK(m.axisValue("Move") == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("Mapping: trigger source spans 0..1 on an axis")
+{
+    InputMapping m;
+    AxisBinding trig;
+    trig.source = AxisSource::GamepadRightTrigger;
+    m.mapAxis("Throttle", { trig });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = 0.5f;
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    const float v = m.axisValue("Throttle");
+    CHECK(v > 0.4f);
+    CHECK(v < 0.6f);
+}
+
+TEST_CASE("Mapping: Axis2D from both stick components")
+{
+    InputMapping m;
+    AxisBinding sx, sy;
+    sx.source = AxisSource::GamepadLeftX;
+    sy.source = AxisSource::GamepadLeftY;
+    sy.scale  = -1.0f;
+    m.mapAxis2D("Move", { sx }, { sy });
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTX] = 0.7f;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTY] = -0.7f; // up
+    Input input = inputWithFrame(f);
+
+    m.tick(input);
+    float x = 0.0f, y = 0.0f;
+    m.axis2DValue("Move", x, y);
+    CHECK(x > 0.5f);
+    CHECK(y > 0.5f);
+}
+
+TEST_CASE("Mapping: gamepad sources are not delta sources")
+{
+    CHECK_FALSE(axisSourceIsDelta(AxisSource::GamepadLeftX));
+    CHECK_FALSE(axisSourceIsDelta(AxisSource::GamepadRightY));
+    CHECK_FALSE(axisSourceIsDelta(AxisSource::GamepadLeftTrigger));
+    CHECK(axisSourceIsDelta(AxisSource::MouseX));
+    CHECK(axisSourceIsDelta(AxisSource::MouseWheel));
+    CHECK_FALSE(axisSourceIsDelta(AxisSource::Key));
 }
