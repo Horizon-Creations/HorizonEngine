@@ -134,6 +134,26 @@ zeigt, woraus die Klasse besteht:
   also hätte die „war hier gerade etwas aktiv"-Heuristik des Tabs die Änderung
   nicht als ungespeichert gezählt: Komponente anlegen, Tab schließen, weg.
 
+### CP6 — Der Viewport bedient sich wie das Szenen-Fenster
+
+Steuerung, Gizmo und Auswahl-Hervorhebung, alle drei über denselben Code wie die
+Szenen-Ansicht statt daneben:
+
+* **Navigation** über `EditorViewportNav` — Alt+LMB orbit, MMB pan, RMB fly-look
+  mit WASDQE/Shift, Rad-Dolly, F rahmt die Auswahl, plus die Trackpad-Variante
+  mit Zwei-Finger-Tap. Der Capture-Zustand (Relative-Mouse) bleibt global: das
+  ist eine Eigenschaft des Fensters, nicht des Viewports.
+* **Gizmo** über `EditorTransformGizmo` — Move/Rotate/Scale mit W/E/R, geschrieben
+  in ELTERN-Raum, und da die Elternkette dieser Welt an der Klassen-Wurzel endet,
+  ist „relativ zum Origin des Spielers" genau das, was dabei herauskommt. Die
+  Projektion für ImGuizmo wird aus dem gemeldeten `viewProj` zurückgerechnet
+  statt neu gebaut — eine zweite Kopie der Rahmungsregel würde die Griffe beim
+  ersten Auseinanderlaufen neben das Objekt setzen.
+* **Hervorhebung folgt der Komponente**, nicht nur der Entity. Eine Entity trägt
+  oft mehrere Gizmos (eine Wurzel mit Collider, die zusätzlich einen Kamera-Rig
+  bekommen hat) — mit reinem Entity-Vergleich leuchtete die Kapsel auf, sobald
+  die Kamera ausgewählt war.
+
 **Nie live verifiziert** — wie alles in diesem Umbau.
 
 **Nie live verifiziert:** nichts davon ist im laufenden Editor gelaufen. Optik,

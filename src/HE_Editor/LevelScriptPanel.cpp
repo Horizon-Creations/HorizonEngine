@@ -21,6 +21,7 @@
 #include "InspectorPanel.h"           // the REAL component editor, over a scratch world
 #include "EditorCamera.h"             // the viewport camera — the Scene window's, per tab
 #include "EditorViewportNav.h"        // and the Scene window's navigation grammar, shared
+#include "EditorTransformGizmo.h"     // …and its move/rotate/scale gizmo
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonCode/HorizonCode.h>
@@ -1399,6 +1400,12 @@ struct ClassState
 	// the scene's camera is exactly what that grammar drives.
 	EditorCamera previewCam;
 	bool         previewCamFramed = false;   // first frame places it on the class
+	// What the renderer drew with, so the transform gizmo lands on the object
+	// instead of next to it — see drawWorldPreviewGizmo.
+	glm::mat4    previewViewProj{ 1.0f };
+	// Which operation the gizmo is on (W/E/R), per tab. The class viewport has
+	// no toolbar of its own; this is the same state the Scene window's bar edits.
+	ViewportToolbar::State previewGizmo;
 	// The per-asset FALLBACK preview (backends without a world-preview path)
 	// still orbits: it renders one asset framed on its own bounds, and a fly
 	// camera has nothing to fly through there.
@@ -1535,6 +1542,7 @@ bool saveClassState(ClassState& st, AppContext& ctx)
 // the renderer has, and a copy of that rule would drift into looking like a
 // wrong collider.
 void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
+                       const std::string& focus,
                        const glm::mat4& viewProj, const ImVec2& imgOrigin, const ImVec2& imgSize)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1579,10 +1587,20 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	constexpr ImU32 kSelected = IM_COL32(255, 210, 100, 255);
 	constexpr ImU32 kBoom     = IM_COL32(120, 200, 255, 220);
 
+	// Highlighting follows the selected COMPONENT, not just its entity. One
+	// entity commonly carries several of these — a character root with a
+	// collider, or a root that also got a camera rig — so entity-only matching
+	// lit up the capsule whenever the camera was selected, which reads as the
+	// editor pointing at the wrong thing.
+	const auto highlighted = [&](Entity e, const char* label)
+	{
+		return e == selected && (focus.empty() || focus == label);
+	};
+
 	for (auto [e, col] : reg.view<ColliderComponent>().each())
 	{
 		const glm::mat4 m = worldOf(e);
-		const ImU32 c = (e == selected) ? kSelected : kCollider;
+		const ImU32 c = highlighted(e, "Collider") ? kSelected : kCollider;
 		const auto at = [&](float x, float y, float z){ return glm::vec3(m * glm::vec4(x, y, z, 1.0f)); };
 
 		if (col.shape == ColliderShape::Capsule || col.shape == ColliderShape::Sphere)
@@ -1626,15 +1644,17 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	// Camera booms: pivot, the arm, and the camera's own place at the end of it.
 	for (auto [e, t, cam, rig] : reg.view<TransformComponent, CameraComponent, CameraRigComponent>().each())
 	{
+		const ImU32 c = (highlighted(e, "Camera") || highlighted(e, "Camera Rig"))
+		                ? kSelected : kBoom;
 		const glm::vec3 camPos = glm::vec3(worldOf(e)[3]);
 		// The target is resolved at runtime; in the class editor the thing it
 		// follows is the root, which is what the pivot offset is measured from.
 		const glm::vec3 pivot = glm::vec3(worldOf(root)[3]) + rig.pivotOffset;
-		line(pivot, camPos, kBoom);
+		line(pivot, camPos, c);
 		const float s = 0.08f;
-		line(camPos - glm::vec3(s, 0, 0), camPos + glm::vec3(s, 0, 0), kBoom);
-		line(camPos - glm::vec3(0, s, 0), camPos + glm::vec3(0, s, 0), kBoom);
-		line(camPos - glm::vec3(0, 0, s), camPos + glm::vec3(0, 0, s), kBoom);
+		line(camPos - glm::vec3(s, 0, 0), camPos + glm::vec3(s, 0, 0), c);
+		line(camPos - glm::vec3(0, s, 0), camPos + glm::vec3(0, s, 0), c);
+		line(camPos - glm::vec3(0, 0, s), camPos + glm::vec3(0, 0, s), c);
 	}
 }
 
@@ -1680,8 +1700,36 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// Colliders and camera booms stay an overlay even now: they have no mesh to
 	// render, and drawing them THROUGH the character is what you want from a
 	// collider outline anyway.
-	drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
+	drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
+	st.previewViewProj = viewProj;
 	return true;
+}
+
+// Move / rotate / scale in the class viewport, the Scene window's gizmo under
+// the Scene window's keys. Everything is placed relative to the class's own
+// root: the gizmo writes back in PARENT space, and this world's parent chain
+// ends at that root.
+//
+// Drawn AFTER the navigation was read, so a fly drag cannot grab a handle —
+// which is also why it is not part of drawWorldPreview.
+void drawWorldPreviewGizmo(ClassState& st, const ImVec2& av, const ImVec2& org,
+                           bool hovered, bool navigating)
+{
+	if (!st.compWorld) return;
+	EditorTransformGizmo::handleOperationKeys(st.previewGizmo, hovered, navigating);
+
+	// The projection is recovered from the view-projection the renderer reported
+	// rather than rebuilt from fov/aspect/near/far: rebuilding it would be a
+	// second copy of the renderer's framing rule, and the first time the two
+	// disagreed the handles would sit next to the object instead of on it.
+	const glm::mat4 view = st.previewCam.viewMatrix();
+	const glm::mat4 proj = st.previewViewProj * glm::inverse(view);
+	bool changed = false;
+	EditorTransformGizmo::manipulate(*st.compWorld, st.compSel, view, proj,
+	                                 org, ImVec2(org.x + av.x, org.y + av.y),
+	                                 st.previewGizmo, /*enabled=*/!navigating,
+	                                 /*undo=*/nullptr, &changed);
+	if (changed) st.dirty = true;
 }
 
 // One frame of camera navigation for the class viewport, through the SAME
@@ -1689,7 +1737,7 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 // with WASDQE/Shift, wheel dolly, the trackpad fly toggle, F to frame the
 // selection. Shared code, not a lookalike: two navigation implementations would
 // answer the same gesture differently the first time either was fixed.
-void driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& reg,
+bool driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& reg,
                              const glm::vec3& origin, bool hovered)
 {
 	EditorCamera::Input cin;
@@ -1713,6 +1761,7 @@ void driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& re
 	st.previewCam.update(cin);
 	// Deliberately NOT SetEditorCamera: that is the SCENE's override. This
 	// camera exists only for the picture this panel asks the renderer for.
+	return navigating;
 }
 
 void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
@@ -1795,7 +1844,7 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 			// its camera sits. Only when the renderer reported its framing — drawing
 			// gizmos against a guessed matrix would be worse than drawing none.
 			if (haveViewProj)
-				drawSubtreeGizmos(reg, st.compRoot, st.compSel, viewProj, org, av);
+				drawSubtreeGizmos(reg, st.compRoot, st.compSel, st.compFocus, viewProj, org, av);
 		}
 		else
 			ImGui::TextDisabled("(preview unavailable on this backend)");
@@ -1818,7 +1867,10 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 		if (reg.valid(st.compRoot))
 			if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
 				origin = t->position;
-		driveWorldPreviewCamera(ctx, st, reg, origin, ImGui::IsItemHovered());
+		const bool hovered = ImGui::IsItemHovered();
+		const bool navigating = driveWorldPreviewCamera(ctx, st, reg, origin, hovered);
+		// After the navigation, so a fly drag cannot grab a gizmo handle.
+		drawWorldPreviewGizmo(st, av, org, hovered, navigating);
 		return;
 	}
 

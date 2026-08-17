@@ -3,6 +3,7 @@
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "EditorInput.h"                 // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "EditorViewportNav.h"           // shared orbit/pan/fly gesture grammar + look capture
+#include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -383,103 +384,20 @@ void render(AppContext& ctx, float dt)
 				// brush, and a stray gizmo drag would silently move/scale the
 				// terrain — which then breaks the brush's world↔grid mapping.
 				bool gizmoActive = false;
-				if (ctx.editorConfig.mode != EditorMode::Landscape &&
-				    ctx.world && ctx.selectedEntity != entt::null &&
-				    ctx.world->registry().valid(ctx.selectedEntity))
-				if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
+				if (ctx.editorConfig.mode != EditorMode::Landscape && ctx.world)
 				{
-					// W/E/R switch operation while the viewport is hovered
-					// (but not while flying — W/A/S/D drive the camera then). The
-					// toolbar's Move/Rotate/Scale cells set the same shared state.
-					if (ImGui::IsWindowHovered() && !ImGui::GetIO().WantTextInput && !navigating)
-					{
-						if (ImGui::IsKeyPressed(ImGuiKey_W)) s_tb.op = ImGuizmo::TRANSLATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_E)) s_tb.op = ImGuizmo::ROTATE;
-						if (ImGui::IsKeyPressed(ImGuiKey_R)) s_tb.op = ImGuizmo::SCALE;
-					}
-
-					ImGuizmo::SetOrthographic(false);
-					ImGuizmo::SetDrawlist();
-					ImGuizmo::SetRect(rectMin.x, rectMin.y,
-					                  rectMax.x - rectMin.x, rectMax.y - rectMin.y);
-
-					// Pre-state for undo — captured ONLY on the frame a gizmo drag is
-					// about to begin (mouse pressed over the gizmo), NOT every frame.
-					// capturePre() serializes the WHOLE world (expensive with terrain),
-					// so the old per-frame call dropped the editor to ~15 ms the moment
-					// anything was selected. IsOver()+MouseClicked fires once, just
-					// before Manipulate first mutates the transform this frame.
-					if (ctx.undoSys && !ImGuizmo::IsUsing() && ImGuizmo::IsOver()
-					    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-						ctx.undoSys->capturePre();
-
-					// For rotation, optionally drop ImGuizmo's outer screen-space
-					// ring (rotate about the view axis) — it's the confusing white
-					// circle. Toggled from the toolbar's options popup.
-					ImGuizmo::OPERATION effectiveOp = s_tb.op;
-					if (s_tb.op == ImGuizmo::ROTATE && !s_tb.rotateScreenRing)
-						effectiveOp = ImGuizmo::ROTATE_X | ImGuizmo::ROTATE_Y | ImGuizmo::ROTATE_Z;
-
-					// While a drag is in progress the gizmo works on the matrix IT
-					// produced last frame, NOT on the scene graph's freshly
-					// recomposed worldMatrix. The round-trip
-					//   TRS -> worldMatrix -> decompose -> TRS -> worldMatrix
-					// is not an identity: DecomposeMatrixToComponents extracts an
-					// Euler triple that is only *equivalent* to the authored one, so
-					// each frame handed the gizmo a slightly different matrix and the
-					// values visibly jittered mid-drag.
-					static bool      s_gizmoWasUsing = false;
-					static glm::mat4 s_gizmoWorld(1.0f);
-					glm::mat4 world = s_gizmoWasUsing ? s_gizmoWorld : t->worldMatrix;
-					// Snapping (toolbar): ImGuizmo quantises the drag to the
-					// increment of whichever operation is armed, or moves freely
-					// when activeSnap() hands back nullptr.
-					ImGuizmo::Manipulate(
-						&s_sceneSnapshot.camera.view[0][0],
-						&s_sceneSnapshot.camera.projection[0][0],
-						effectiveOp, s_tb.mode, &world[0][0],
-						nullptr, s_tb.activeSnap());
-					s_gizmoWorld = world;
-
-					// Undo session: one entry per drag
-					if (ctx.undoSys)
-					{
-						if (ImGuizmo::IsUsing() && !s_gizmoWasUsing) ctx.undoSys->stashPre();
-						if (!ImGuizmo::IsUsing() && s_gizmoWasUsing) ctx.undoSys->commitPending();
-					}
-					s_gizmoWasUsing = ImGuizmo::IsUsing();
-
-					gizmoActive = ImGuizmo::IsOver() || ImGuizmo::IsUsing();
-
-					if (ImGuizmo::IsUsing())
-					{
-						// world → local: divide out the parent's world matrix
-						glm::mat4 parentWorld(1.0f);
-						if (auto* h = ctx.world->registry().try_get<HierarchyComponent>(ctx.selectedEntity);
-						    h && h->parent != entt::null)
-							if (auto* pt = ctx.world->registry().try_get<TransformComponent>(h->parent))
-								parentWorld = pt->worldMatrix;
-						glm::mat4 local = glm::inverse(parentWorld) * world;
-
-						float pos[3], rot[3], scale[3];
-						ImGuizmo::DecomposeMatrixToComponents(&local[0][0], pos, rot, scale);
-						// Write back ONLY the channels this operation manipulates. A
-						// scale drag used to overwrite rotation with the re-extracted
-						// (equivalent but different) Euler triple and vice versa —
-						// visible as a value that jumps the moment you touch an
-						// unrelated handle.
-						const unsigned opBits = static_cast<unsigned>(effectiveOp);
-						if (opBits & static_cast<unsigned>(ImGuizmo::TRANSLATE))
-							t->position = { pos[0], pos[1], pos[2] };
-						if (opBits & static_cast<unsigned>(ImGuizmo::ROTATE))
-							t->rotation = { rot[0], rot[1], rot[2] };
-						if (opBits & (static_cast<unsigned>(ImGuizmo::SCALE) |
-						              static_cast<unsigned>(ImGuizmo::SCALEU)))
-							t->scale = { scale[0], scale[1], scale[2] };
-						t->dirty = true;
-					}
+					// W/E/R switch operation while the viewport is hovered (but not
+					// while flying — W/A/S/D drive the camera then). The toolbar's
+					// Move/Rotate/Scale cells set the same shared state.
+					EditorTransformGizmo::handleOperationKeys(
+						s_tb, ImGui::IsWindowHovered(), navigating);
+					// The gizmo itself is shared with the class editor's viewport —
+					// see EditorTransformGizmo for why a second copy would be a bug.
+					gizmoActive = EditorTransformGizmo::manipulate(
+						*ctx.world, ctx.selectedEntity,
+						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+						rectMin, rectMax, s_tb, /*enabled=*/true, ctx.undoSys);
 				}
-
 				// ── Picking: click in the viewport selects the hit entity ──
 				// Disabled in Landscape mode so a brush stroke can't deselect /
 				// reselect entities and pop the gizmo back up mid-sculpt.
