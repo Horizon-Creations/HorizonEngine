@@ -3237,6 +3237,15 @@ void EditorApplication::dumpFrameHeadless()
 		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
 		TransformComponent tc;
 		tc.position = m_editorCamera.position() + camFwd * 8.0f;
+		// …and make the renderer USE that camera. The headless dump never runs the
+		// viewport panel, so nobody pushes the editor camera; without an override the
+		// extractor falls back to its own (4,3,4)→origin default while the sphere sits
+		// 8 units ahead of the EDITOR camera. In a fresh editor (no project: camera at
+		// (6,4.5,6), no sky, black background) that left the sphere 74° off-axis — the
+		// capture came out mean 0. SSRTEST never noticed because it places its floor at
+		// fixed world coordinates the fallback camera happens to look at. Under
+		// HE_DUMP_SKYTEST this just repeats that block's override with the same value.
+		r->SetEditorCamera(m_editorCamera.makeOverride());
 		reg.emplace<TransformComponent>(e, tc);
 		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
 		MaterialComponent mc{ matId };
