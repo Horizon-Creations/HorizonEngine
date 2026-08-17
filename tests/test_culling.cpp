@@ -1311,4 +1311,105 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		REQUIRE(first != std::string::npos); // term moved/reworded — update BOTH copies + this needle
 		CHECK(lib.find(needle, first + 1) != std::string::npos);
 	}
+
+	SUBCASE("specular AA (A6) is the same widening in every copy")
+	{
+		// docs/anti-aliasing-plan.md A6. Four hand-kept copies of one formula:
+		// the shared preamble (graph materials, every backend), the GL built-in
+		// scene shader, the GL G-buffer shader and the Metal scene MSL (which
+		// carries the built-in forward AND G-buffer shaders in one literal).
+		// Drift here is invisible: nothing fails to build, the image just gets a
+		// different amount of highlight widening depending on which shader drew
+		// the surface — a graph material and a built-in one side by side start
+		// disagreeing, exactly the failure this file already guards for GI.
+		const std::string lib = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "material" / "MaterialShaderLibrary.cpp");
+		const std::string gl  = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "Backends" / "OpenGL" / "OpenGLRenderer.cpp");
+		const std::string mtl = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                 "Backends" / "Metal" / "MetalRenderer.mm");
+		// checkGroup joins every match, so it cannot be used here: the GL file
+		// carries TWO copies (scene + G-buffer) against one in the others, and
+		// the joined strings would differ by count alone. Compare the DISTINCT
+		// values instead — that still catches one copy drifting away, which is
+		// the failure mode, and stays indifferent to how many copies a file has.
+		const std::vector<std::pair<const char*, std::string>> files = {
+			{ "kLightingPreamble", stripLineComments(lib) },
+			{ "OpenGLRenderer.cpp", stripLineComments(gl) },
+			{ "MetalRenderer.mm",  stripLineComments(mtl) },
+		};
+		auto distinct = [](const std::string& text, const char* pattern) {
+			const std::regex re(pattern);
+			std::vector<std::string> out;
+			for (auto it = std::sregex_iterator(text.begin(), text.end(), re);
+			     it != std::sregex_iterator(); ++it)
+			{
+				std::string joined;
+				for (size_t g = 1; g < it->size(); ++g)
+				{
+					if (!joined.empty()) joined += " | ";
+					joined += (*it)[g].str();
+				}
+				if (std::find(out.begin(), out.end(), joined) == out.end())
+					out.push_back(joined);
+			}
+			return out;
+		};
+		const std::vector<std::pair<const char*, const char*>> constants = {
+			{ "variance gain",     R"(variance = ([0-9.]+) \* (?:heLight\.specAA\.x|uSpecAA|strength) \* \(dot\(du, du\) \+ dot\(dv, dv\)\);)" },
+			{ "kernel cap",        R"(kernelRough = min\(([0-9.]+) \* variance, ([0-9.]+)\);)" },
+			{ "widened roughness", R"(widened\s+= clamp\(alpha \* alpha \+ kernelRough, ([0-9.]+), ([0-9.]+)\);)" },
+		};
+		for (const auto& [name, pattern] : constants)
+		{
+			std::string reference;
+			for (const auto& [file, text] : files)
+			{
+				const std::vector<std::string> vals = distinct(text, pattern);
+				CHECK_MESSAGE(vals.size() == 1, name, ": ", file, " has ", vals.size(),
+				              " distinct spellings - the copies inside one file drifted");
+				if (vals.empty()) continue;
+				if (reference.empty()) reference = vals[0];
+				CHECK_MESSAGE(vals[0] == reference, name, " drifted: ", file, " has '",
+				              vals[0], "', expected '", reference, "'");
+			}
+			CHECK_MESSAGE(!reference.empty(), "no match for '", name,
+			              "' anywhere - this drift guard's pattern is stale");
+		}
+		// The widening must never sharpen — the one property that keeps "specular
+		// AA on" from ever being the crisper image.
+		for (const auto& [file, text] : files)
+			CHECK_MESSAGE(text.find("max(perceptualRough, sqrt(sqrt(widened)))") != std::string::npos,
+			              file, " lost the never-sharpen clamp");
+	}
+}
+
+TEST_CASE("specular AA widening: the numbers the shader copies implement")
+{
+	// The formula itself (Kaplanyan/Filament normal filtering), so its BEHAVIOUR
+	// is pinned and not just the spelling of its constants: strength 0 is an
+	// exact no-op, a flat surface is untouched however hard it is pushed, and a
+	// turning normal only ever widens the lobe.
+	auto widen = [](float perceptualRough, float strength, float normalVariance) {
+		if (strength <= 0.0f) return perceptualRough;
+		const float variance    = 0.15f * strength * normalVariance;
+		const float kernelRough = std::min(2.0f * variance, 0.25f);
+		const float alpha       = perceptualRough * perceptualRough;
+		const float widened     = std::clamp(alpha * alpha + kernelRough, 0.0f, 1.0f);
+		return std::max(perceptualRough, std::sqrt(std::sqrt(widened)));
+	};
+
+	// Off means off — bit-exact, which is what "disabled = the image is identical
+	// to the feature never having existed" has to mean.
+	CHECK(widen(0.30f, 0.0f, 4.0f) == 0.30f);
+	// A flat face has no in-pixel normal variation, so no strength can change it.
+	CHECK(widen(0.30f, 400.0f, 0.0f) == 0.30f);
+	// A turning normal widens, and more turn widens more.
+	const float mild = widen(0.30f, 1.0f, 0.02f);
+	const float hard = widen(0.30f, 1.0f, 0.50f);
+	CHECK(mild > 0.30f);
+	CHECK(hard > mild);
+	// It never sharpens, and never runs past fully rough.
+	CHECK(widen(0.95f, 1.0f, 10.0f) <= 1.0f);
+	CHECK(widen(0.95f, 1.0f, 10.0f) >= 0.95f);
 }

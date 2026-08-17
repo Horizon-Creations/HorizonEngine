@@ -213,6 +213,7 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 | Stufe | Stand | Anmerkung |
 |---|---|---|
 | **A0** | ✅ auf dem Branch | `HE::AAMethod` + `IRenderer::AntiAliasingSettings` + `ResolveAAMethod`, Editor-Preferences-Zeile, Projekt-Config, Push aus Editor **und** gepacktem Spiel, `HE_DUMP_AA` / `HE_DUMP_RENDERSCALE` / `HE_DUMP_SPECAA`. „Off" tauscht den Shader gegen einen Passthrough — der Pass läuft weiter, weil er das Ausgabetarget füllt. Metal headless verifiziert |
+| **A6** | ✅ auf dem Branch | Roughness-Verbreiterung aus der Normal-Varianz im Pixel (Kaplanyan/Filament), in Forward **und** G-Buffer, nie im Resolve. Schalter + Stärke in den Preferences, `HE_DUMP_SPECAA` überschreibt beides headless. Wirkungsnachweis auf gekrümmter Geometrie offen (siehe unten) |
 | **A1** | ✅ auf dem Branch | SMAA in allen fünf Backends, aber **einpassig**: Kantenerkennung, Span-Suche, analytische Coverage und Blend stecken in dem Pass, der vorher FXAA war. Kein Edges-/Weights-Target, also keine neuen Render-Targets, Descriptor-Slots oder Render-Passes in fünf Backends. Verzicht: keine AreaTex → keine Diagonalen, keine Corner-Rounding; Suchreichweite 32 Texel (8 Einzel-, dann Doppelschritte). Qualität = MLAA-Niveau, sichtbar über FXAA. Nächster Ausbau wäre die AreaTex zur Laufzeit zu erzeugen — nicht Binaries zu vendorn |
 
 Zwei Messungen, die den A1-Shader geformt haben (Referenzimplementierung in Python gegen
@@ -225,6 +226,28 @@ synthetische Treppen, damit die Mathematik nicht über 2-Minuten-Renders debuggt
 * **Ein Sample in der Pixelmitte verliert genau die Ecktexel.** Bei einem Ein-Texel-Span liegt
   die Mitte exakt auf dem Nulldurchgang der revektorisierten Linie. Zwei-Punkt-Quadratur über
   die Pixelbreite: 46 → 56 von 60 Spalten.
+
+**A6 (Specular-AA)** ist ebenfalls drin: `heSpecAARoughness` in der geteilten Preamble (greift
+für alle Graph-Materialien auf jedem Backend), plus je eine Kopie im GL-Scene-Shader, im
+GL-G-Buffer-Shader und im Metal-Scene-MSL (das den Built-in-Forward **und** den G-Buffer trägt).
+Zwei Dinge daran sind nicht verhandelbar und im Code kommentiert:
+
+* Die Verbreiterung gehört in **Geometrie-Pässe** (Forward-Shading + G-Buffer), nie in den
+  Deferred-Resolve. Dort ist die „Normale" ein G-Buffer-Texel, dessen Ableitung an jeder
+  Silhouette springt — das würde Halos zeichnen statt zu glätten. Deshalb trägt
+  `heLight.specAA.y` ein Flag „dieser Pass besitzt seine eigene Normale"; Resolve und
+  SSR-Composite löschen es direkt nach dem gemeinsamen Fill.
+* Der Zwischenwert darf nicht `kernel` heißen — das ist in MSL ein reservierter
+  Funktions-Qualifier, und der Metal-Shader ist mit genau diesem Namen nicht mehr
+  kompiliert (`expected unqualified-id`). Steht jetzt in allen Kopien als `kernelRough` da.
+
+**Verifikationslücke A6:** headless nachweisbar ist bisher nur, dass es dort **nichts** tut, wo
+es nichts tun darf — auf den flachen Flächen der Testszene ist das Bild bei Stärke 400
+byte-identisch zu „aus". Eine Headless-Szene mit gekrümmter oder normal-gemappter Geometrie im
+Bild gibt es nicht (`HE_DUMP_MATERIALTEST` rendert schwarz), also ist der positive Effekt nicht
+gemessen. Abgesichert ist stattdessen die Formel selbst (Unit-Test: „aus" ist bit-exakt,
+flache Fläche unveränderlich, drehende Normale verbreitert monoton, verschärft nie) plus ein
+Drift-Test über alle vier Shader-Kopien.
 
 Am Würfel-auf-Boden-Testbild (`HE_DUMP_SSRTEST`, Metal) glättet SMAA die Silhouette
 vergleichbar zu FXAA (572 vs. 602 von 1280 Spalten mit Zwischenwert), fasst dabei aber

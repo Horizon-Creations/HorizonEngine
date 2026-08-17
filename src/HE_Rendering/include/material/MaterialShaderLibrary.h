@@ -115,6 +115,19 @@ public:
         //                 this 0, so the sample folds dead there)
         float cloudShadowA[4] = {};
         float cloudShadowB[4] = {};
+        // Specular anti-aliasing (append-only, v3.0, docs/anti-aliasing-plan.md
+        // A6): widen the roughness by how much the normal varies INSIDE the
+        // pixel, so a glancing highlight on a curved or normal-mapped surface
+        // stops crawling. No edge filter can fix this — the aliasing is in the
+        // shading, not on a silhouette.
+        //   x = strength (0 = off; every legacy fill site leaves this 0, so the
+        //       term folds dead and the image is byte-identical to before)
+        //   y = 1 only where the fragment's OWN normal and its derivatives are
+        //       real: the forward shading pass and the G-buffer pass. The
+        //       deferred resolve must leave this 0 — there the "normal" comes
+        //       from a G-buffer texel, and its derivative jumps at every object
+        //       edge and quantisation step, which would halo instead of smooth.
+        float specAA[4]       = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

@@ -219,6 +219,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 giRefl;         // x = ray-traced GI-reflection intensity, y = max roughness, z = 1 → heGIRefl bound (FORWARD path), w = resolution blur floor
     vec4 cloudShadowA;   // cloud shadows: xy = region origin (world XZ), z = 1/region size, w = slab mid-plane Y
     vec4 cloudShadowB;   // x = strength (0 = off / not bound)
+    vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -471,6 +472,34 @@ vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
 // with the SAME attenuation/cone model as the built-in PBR shaders. Needs the
 // fragment's world position (attenuation + view vector) — the graph codegen
 // passes its vWorldPos varying.
+// ─── Specular anti-aliasing (docs/anti-aliasing-plan.md A6) ──────────────────
+// Widen the roughness by how much the normal turns INSIDE this pixel. A curved
+// or normal-mapped surface packs more than one normal into one pixel; shading it
+// with a single sample makes the highlight jump between frames — aliasing that
+// lives in the shading, where no edge filter can reach it. Feeding the in-pixel
+// normal variance into the roughness (Kaplanyan/Filament's normal filtering)
+// makes that pixel's lobe as wide as the surface it actually covers.
+//
+// SYNC: byte-identical copies live in the GL scene + G-buffer shaders and their
+// Metal twins (heSpecAARoughness / specAARoughness).
+//
+// Guarded twice: strength 0 means the feature is off, and specAA.y is 1 only in
+// the passes where `N` is this fragment's own interpolated normal. In the
+// deferred resolve the normal comes out of a G-buffer texel, and its derivative
+// jumps at every object silhouette — applying it there would draw halos.
+float heSpecAARoughness(vec3 N, float perceptualRough) {
+    if (heLight.specAA.x <= 0.0 || heLight.specAA.y < 0.5) return perceptualRough;
+    vec3  du = dFdx(N);
+    vec3  dv = dFdy(N);
+    float variance = 0.15 * heLight.specAA.x * (dot(du, du) + dot(dv, dv));
+    // NOT named `kernel`: that is a reserved function qualifier in MSL, and this
+    // preamble is cross-compiled to MSL for the Metal backend.
+    float kernelRough = min(2.0 * variance, 0.25);          // cap: never fully diffuse
+    float alpha       = perceptualRough * perceptualRough;  // GGX alpha
+    float widened     = clamp(alpha * alpha + kernelRough, 0.0, 1.0);
+    return max(perceptualRough, sqrt(sqrt(widened)));
+}
+
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
             float specular, float ambientOcclusion) {
     vec3 n = normalize(N);
@@ -495,6 +524,11 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     float rough = clamp(roughness, 0.0, 1.0);
     rough = mix(rough, 0.08, wet);
     rough = mix(rough, 0.85, snowMask);
+    // After the weather mixes: wetness drives roughness DOWN to 0.08, which is
+    // exactly where a crawling highlight is worst, so the widening has to see
+    // the value that will actually be shaded. No-op unless heLight.specAA says
+    // both "on" and "this pass owns its normal" (the deferred resolve does not).
+    rough = heSpecAARoughness(n, rough);
     float metal = clamp(metallic, 0.0, 1.0);
     // Specular drives the DIELECTRIC F0 (Unreal's convention: F0 = 0.08 * spec,
     // so the 0.5 default reproduces the built-in shaders' fixed 0.04). Metals

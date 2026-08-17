@@ -227,7 +227,30 @@ struct SceneUniforms {
 	//   cloudShadowB: x = strength (0 = off)
 	float4   cloudShadowA;
 	float4   cloudShadowB;
+	// Specular AA (docs/anti-aliasing-plan.md A6): x = strength (0 = off).
+	float4   aaParams;
 };
+
+// Widen the roughness by how much the normal turns inside this pixel, so a
+// highlight on a curved or normal-mapped surface stops crawling (Kaplanyan /
+// Filament normal filtering). Only valid where `N` is the fragment's OWN
+// interpolated normal — the forward pass and the G-buffer pass, never the
+// deferred resolve, whose normal comes from a texel and jumps at silhouettes.
+// SYNC: byte-identical twins in the GL scene + G-buffer shaders and in
+// MaterialShaderLibrary's preamble (heSpecAARoughness).
+static float specAARoughness(float3 N, float perceptualRough, float strength)
+{
+	if (strength <= 0.0) return perceptualRough;
+	float3 du = dfdx(N);
+	float3 dv = dfdy(N);
+	float variance = 0.15 * strength * (dot(du, du) + dot(dv, dv));
+	// NOT named `kernel`: that is a reserved function qualifier in MSL, and the
+	// twins are kept identical, so the name is avoided in all of them.
+	float kernelRough = min(2.0 * variance, 0.25);       // cap: never fully diffuse
+	float alpha       = perceptualRough * perceptualRough; // GGX alpha
+	float widened     = clamp(alpha * alpha + kernelRough, 0.0, 1.0);
+	return max(perceptualRough, sqrt(sqrt(widened)));
+}
 
 // GI (Checkpoint B/C): fragmentMain buffer(3). Deliberately separate from
 // SceneUniforms — buffer(1) is claimed by the custom-material lighting path
@@ -577,6 +600,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	albedo *= (1.0 - 0.30 * wet);
 	float wRough = mix(in.roughness, 0.08, wet);
 	wRough = mix(wRough, 0.85, snowMask);
+	// Specular AA (docs/anti-aliasing-plan.md A6) — twin of the GL scene shader.
+	// The forward pass owns its interpolated normal, so the derivatives are real
+	// here. scene.aaParams.x = 0 → exact no-op.
+	wRough = specAARoughness(N, wRough, scene.aaParams.x);
 
 	if (scene.lightCount == 0)
 	{
@@ -734,7 +761,8 @@ struct GBufOut {
 
 fragment GBufOut gbufferMain(VSOut in [[stage_in]],
                              texture2d<float> baseColor [[texture(0)]],
-                             sampler          smp       [[sampler(0)]])
+                             sampler          smp       [[sampler(0)]],
+                             constant SceneUniforms& scene [[buffer(0)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -742,7 +770,10 @@ fragment GBufOut gbufferMain(VSOut in [[stage_in]],
 	float3 N = normalize(in.normal);
 	GBufOut o;
 	o.gb0 = float4(albedo, clamp(in.metallic, 0.0, 1.0));
-	o.gb1 = float4(octEncode(N) * 0.5 + 0.5, clamp(in.roughness, 0.0, 1.0), 0.5);
+	// Specular AA (A6) belongs HERE, not in the resolve: this is the last stage
+	// that still has the fragment's own normal. scene.aaParams.x = 0 → no-op.
+	o.gb1 = float4(octEncode(N) * 0.5 + 0.5,
+	               specAARoughness(N, clamp(in.roughness, 0.0, 1.0), scene.aaParams.x), 0.5);
 	o.gb2 = float4(0.0, 0.0, 0.0, 1.0);
 	o.gb3 = float4(in.position.z, 0.0, 0.0, 0.0);
 	return o;
@@ -5152,9 +5183,12 @@ struct SceneUniforms
 	// 1/size / slab mid-plane Y; B.x = strength (0 = off).
 	glm::vec4 cloudShadowA = glm::vec4(0.0f);
 	glm::vec4 cloudShadowB = glm::vec4(0.0f);
+	// Specular AA (docs/anti-aliasing-plan.md A6): x = strength (0 = off). Every
+	// fill site that leaves this zero keeps its image byte-identical.
+	glm::vec4 aaParams = glm::vec4(0.0f);
 };
 static_assert(sizeof(SceneUniforms) ==
-              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 2 * 16,
+              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 3 * 16,
               "SceneUniforms must stay byte-identical to its MSL twin");
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -10853,6 +10887,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// (strength 0 when the pass didn't run → the shader never samples the map).
 	scene.cloudShadowA = m_cloudShadowParamsA;
 	scene.cloudShadowB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
+	// Specular AA (A6): valid in this forward pass — it shades from the
+	// fragment's own interpolated normal. 0 = off, image identical to before.
+	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
@@ -11463,6 +11500,12 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 		matLight.giProbe[1] = (giActive && m_giIrradianceAtlas && m_giVisibilityAtlas)
 			? 1.0f : 0.0f;
 	}
+	// Specular AA (A6). y = 1 means "this fill feeds a GEOMETRY pass", where the
+	// fragment's own normal and its derivatives exist. The forward pass is one;
+	// the deferred resolve and the SSR composite are NOT and clear it right after
+	// calling this.
+	matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
+	matLight.specAA[1] = 1.0f;
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
@@ -11667,6 +11710,10 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+	// The resolve is not a geometry pass: its normal is a G-buffer texel whose
+	// derivative jumps at every silhouette, so specular AA stays off here. The
+	// G-buffer pass already widened the roughness it stored (A6).
+	matLight.specAA[1] = 0.0f;
 	// SSR / GI reflections: the resolve SKIPS its specular-IBL term — the
 	// dedicated reflection composite after this pass supplies it (sky cubemap
 	// mixed with the SSR hit and/or the ray-traced GI result).
@@ -12126,6 +12173,7 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 #if defined(HE_HAVE_SHADERC)
 			HE::MaterialShaderLibrary::Lighting matLight;
 			FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
+			matLight.specAA[1] = 0.0f;   // fullscreen composite, not a geometry pass (A6)
 			// Inactive sources keep mix weight 0 — the bound dummy (1×1 white,
 			// a = 1) then contributes nothing regardless of its content.
 			matLight.ssr[1]    = ssrOn ? m_ssrIntensity : 0.0f;
@@ -12766,10 +12814,24 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		matLight.ambient[0]  = am.r;          matLight.ambient[1]  = am.g;          matLight.ambient[2]  = am.b;
 		matLight.giParams[0] = static_cast<float>(width);
 		matLight.giParams[1] = static_cast<float>(height);
+		// Specular AA (A6): the G-buffer IS a geometry pass, so graph materials
+		// widen the roughness they store here — the resolve could not, its normal
+		// is already an encoded texel.
+		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
+		matLight.specAA[1] = 1.0f;
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
 #endif
+
+	// Specular AA for the BUILT-IN G-buffer shader (gbufferMain reads
+	// aaParams.x from SceneUniforms at fragment buffer 0). Only this one field
+	// matters here — the G-buffer writes attributes, it does not shade.
+	{
+		SceneUniforms gbScene{};
+		gbScene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
+		[encoder setFragmentBytes:&gbScene length:sizeof(gbScene) atIndex:0];
+	}
 
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 

@@ -109,6 +109,29 @@ uniform vec2      uViewport;         // output size, for the screen-space AO loo
 uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
 uniform float     uWetness;          // 0..1 wet-surface darken + gloss
 uniform float     uSnow;             // 0..1 snow cover on up-facing surfaces
+uniform float     uSpecAA;           // specular-AA strength (0 = off)
+
+// ─── Specular anti-aliasing (docs/anti-aliasing-plan.md A6) ──────────────────
+// A curved or normal-mapped surface packs more than one normal into one pixel;
+// shading it from a single sample makes the highlight jump between frames. That
+// aliasing lives in the SHADING, so no edge filter can reach it. Feeding the
+// in-pixel normal variance into the roughness (Kaplanyan/Filament normal
+// filtering) makes the lobe as wide as the surface the pixel actually covers.
+// SYNC: byte-identical twins in the Metal scene/G-buffer shaders and in
+// MaterialShaderLibrary's preamble (heSpecAARoughness).
+float heSpecAARoughness(vec3 N, float perceptualRough)
+{
+	if (uSpecAA <= 0.0) return perceptualRough;
+	vec3  du = dFdx(N);
+	vec3  dv = dFdy(N);
+	float variance = 0.15 * uSpecAA * (dot(du, du) + dot(dv, dv));
+	// NOT named `kernel`: that is a reserved function qualifier in MSL, and the
+	// twins are kept identical, so the name is avoided in all of them.
+	float kernelRough = min(2.0 * variance, 0.25);          // cap: never fully diffuse
+	float alpha       = perceptualRough * perceptualRough;  // GGX alpha
+	float widened     = clamp(alpha * alpha + kernelRough, 0.0, 1.0);
+	return max(perceptualRough, sqrt(sqrt(widened)));
+}
 
 // ── Ray-traced GI (GL 4.3 compute port; samplers/uniforms are 4.1-safe, the
 // compute kernels that FILL them are gated on m_giSupported). When enabled,
@@ -375,6 +398,10 @@ void main()
 	// Wet = glossier (sharper highlight); snow = matte.
 	float wRough = mix(uRoughness, 0.08, wet);
 	wRough = mix(wRough, 0.85, snowMask);
+	// Specular AA (docs/anti-aliasing-plan.md A6): widen the roughness by how much
+	// this pixel's normal turns inside itself, so a highlight on a curved or
+	// normal-mapped surface stops crawling. uSpecAA.x = 0 → exact no-op.
+	wRough = heSpecAARoughness(N, wRough);
 
 	if (uLightCount == 0)
 	{
@@ -528,6 +555,7 @@ uniform bool      uHasTexture;
 uniform sampler2D uTexture;
 uniform float     uMetallic;
 uniform float     uRoughness;
+uniform float     uSpecAA;          // specular-AA strength (0 = off), see A6
 layout(location = 0) out vec4 oGB0; // rgb BaseColor, a Metallic
 layout(location = 1) out vec4 oGB1; // rg oct Normal, b Roughness, a Specular
 layout(location = 2) out vec4 oGB2; // rgb Emissive, a Material-AO
@@ -539,12 +567,28 @@ vec2 octEncode(vec3 n)
 	vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
 	return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
 }
+// Specular AA (A6) — the G-buffer is the LAST place the fragment's own normal
+// exists, so the widening has to happen here: the resolve only ever sees an
+// encoded texel, whose derivative jumps at every silhouette. SYNC: twin of the
+// scene shader's heSpecAARoughness above.
+float heSpecAARoughness(vec3 N, float perceptualRough)
+{
+	if (uSpecAA <= 0.0) return perceptualRough;
+	vec3  du = dFdx(N);
+	vec3  dv = dFdy(N);
+	float variance = 0.15 * uSpecAA * (dot(du, du) + dot(dv, dv));
+	float kernelRough = min(2.0 * variance, 0.25);
+	float alpha       = perceptualRough * perceptualRough;
+	float widened     = clamp(alpha * alpha + kernelRough, 0.0, 1.0);
+	return max(perceptualRough, sqrt(sqrt(widened)));
+}
 void main()
 {
 	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
 	vec3 N = normalize(vNormal);
 	oGB0 = vec4(albedo, clamp(uMetallic, 0.0, 1.0));
-	oGB1 = vec4(octEncode(N) * 0.5 + 0.5, clamp(uRoughness, 0.0, 1.0), 0.5);
+	oGB1 = vec4(octEncode(N) * 0.5 + 0.5,
+	            heSpecAARoughness(N, clamp(uRoughness, 0.0, 1.0)), 0.5);
 	oGB2 = vec4(0.0, 0.0, 0.0, 1.0);
 }
 )GLSL";
@@ -4807,6 +4851,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
 	m_uWetness          = glGetUniformLocation(m_unlitProgram, "uWetness");
 	m_uSnow             = glGetUniformLocation(m_unlitProgram, "uSnow");
+	m_uSpecAA           = glGetUniformLocation(m_unlitProgram, "uSpecAA");
 	m_uCloudShadowMap   = glGetUniformLocation(m_unlitProgram, "uCloudShadowMap");
 	m_uCloudShadowA     = glGetUniformLocation(m_unlitProgram, "uCloudShadowA");
 	m_uCloudShadowB     = glGetUniformLocation(m_unlitProgram, "uCloudShadowB");
@@ -5313,6 +5358,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstFogHeightFalloff = loc("uFogHeightFalloff");
 	m_uInstWetness          = loc("uWetness");
 	m_uInstSnow             = loc("uSnow");
+	m_uInstSpecAA           = loc("uSpecAA");
 	m_uInstCascadeVP        = loc("uCascadeVP[0]");
 	m_uInstCascadeSplits    = loc("uCascadeSplits");
 	m_uInstCameraFwd        = loc("uCameraFwd");
@@ -5694,7 +5740,9 @@ void OpenGLRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
 	// Resolve against our own capabilities once, here, so the render path only
 	// ever sees a method this backend can actually run.
-	m_aaMethod = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	m_aaMethod           = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	m_specularAA         = s.specularAA;
+	m_specularAAStrength = s.specularAAStrength;
 }
 
 void OpenGLRenderer::EnsureBloomTargets(int width, int height)
@@ -7436,6 +7484,7 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 			m_uGBColor      = glGetUniformLocation(m_gbufferProgram, "uColor");
 			m_uGBMetallic   = glGetUniformLocation(m_gbufferProgram, "uMetallic");
 			m_uGBRoughness  = glGetUniformLocation(m_gbufferProgram, "uRoughness");
+			m_uGBSpecAA     = glGetUniformLocation(m_gbufferProgram, "uSpecAA");
 			m_uGBHasTexture = glGetUniformLocation(m_gbufferProgram, "uHasTexture");
 			m_uGBTexture    = glGetUniformLocation(m_gbufferProgram, "uTexture");
 			glUniform1i(m_uGBTexture, 0);
@@ -10039,6 +10088,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 		glUniform1f(m_uWetness,          GetEnvironment().wetness);
 		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
+		// Specular AA: the forward scene pass owns its own normals, so the
+		// widening is valid here (unlike a deferred resolve — see A6).
+		glUniform1f(m_uSpecAA,           m_specularAA ? m_specularAAStrength : 0.0f);
 		// SSAO occlusion on unit 4 (white fallback when off → ao = 1, no change).
 		// Mutable (not const): in deferred mode SSAO runs AFTER the G-buffer loop
 		// (P5, reads its depth) and updates aoTex/aoActive there — every consumer
@@ -10123,6 +10175,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1f(m_uInstFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			glUniform1f(m_uInstWetness,          GetEnvironment().wetness);
 			glUniform1f(m_uInstSnow,             GetEnvironment().snowAmount);
+			glUniform1f(m_uInstSpecAA,           m_specularAA ? m_specularAAStrength : 0.0f);
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
@@ -10249,6 +10302,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
 				}
 			}
+			// Specular AA (A6). y = 1 says "this fill is for a GEOMETRY pass",
+			// where the fragment's own normal and its derivatives exist. Every
+			// caller of this lambda is one — except the deferred resolve, which
+			// clears y again right after calling it.
+			lit.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
+			lit.specAA[1] = 1.0f;
 		};
 #endif
 
@@ -10467,6 +10526,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform3fv(m_uGBColor, 1, glm::value_ptr(baseColor));
 				glUniform1f(m_uGBMetallic,  cMetallic);
 				glUniform1f(m_uGBRoughness, cRoughness);
+				glUniform1f(m_uGBSpecAA,    m_specularAA ? m_specularAAStrength : 0.0f);
 				glBindVertexArray(vao);
 				glUniform1i(m_uGBHasTexture, tex != 0);
 				glActiveTexture(GL_TEXTURE0);
@@ -10790,6 +10850,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// csmSplits.w = 0 — only the resolve binds the real CSM array.
 				HE::MaterialShaderLibrary::Lighting lit{};
 				fillMatLight(lit);
+				// The resolve is NOT a geometry pass: its "normal" is a G-buffer
+				// texel whose derivative jumps at every silhouette, so specular AA
+				// must stay off here. The G-buffer pass already widened the
+				// roughness it stored (A6).
+				lit.specAA[1] = 0.0f;
 				if (!giShadingActive && shadowFrame.shadows && m_shadowDepthTex)
 				{
 					glm::mat4 zRemap(1.0f);

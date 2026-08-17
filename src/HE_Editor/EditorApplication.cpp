@@ -2065,7 +2065,12 @@ void EditorApplication::OnRender(float dt)
 			static const char* s_aaSpecOv = std::getenv("HE_DUMP_SPECAA");
 			if (s_aaOv     && *s_aaOv)     aa.method      = std::atoi(s_aaOv);
 			if (s_aaScOv   && *s_aaScOv)   aa.renderScale = static_cast<float>(std::atof(s_aaScOv));
-			if (s_aaSpecOv && *s_aaSpecOv) aa.specularAA  = std::atof(s_aaSpecOv) > 0.5;
+			if (s_aaSpecOv && *s_aaSpecOv)
+			{
+				const float s = static_cast<float>(std::atof(s_aaSpecOv));
+				aa.specularAA         = s > 0.0f;
+				if (s > 0.0f) aa.specularAAStrength = s;   // doubles as the strength
+			}
 			renderer()->SetAntiAliasingSettings(aa);
 		}
 		renderer()->SetGISettings(IRenderer::GISettings{
@@ -2827,7 +2832,16 @@ void EditorApplication::dumpFrameHeadless()
 		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
 		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
 		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
-		if (const char* v = std::getenv("HE_DUMP_SPECAA");      v && *v) aa.specularAA  = std::atof(v) > 0.5;
+		// HE_DUMP_SPECAA doubles as the STRENGTH: 0 = off, otherwise that value.
+		// The effect is a fraction of a roughness unit at normal strength, so an
+		// A/B that can only toggle it proves nothing headless — being able to
+		// exaggerate is what makes "does this reach the shader at all?" answerable.
+		if (const char* v = std::getenv("HE_DUMP_SPECAA"); v && *v)
+		{
+			const float s = static_cast<float>(std::atof(v));
+			aa.specularAA         = s > 0.0f;
+			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
+		}
 		r->SetAntiAliasingSettings(aa);
 	}
 	{

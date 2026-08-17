@@ -422,6 +422,8 @@ private:
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
 	int          m_uWetness       = -1;   // weather wet-surface response
 	int          m_uSnow          = -1;   // weather snow cover
+	int          m_uSpecAA        = -1;   // specular-AA strength (0 = off)
+	int          m_uInstSpecAA    = -1;   // same, instanced program
 	int          m_uCloudShadowMap = -1;  // cloud-shadow transmittance map sampler unit (19)
 	int          m_uCloudShadowA   = -1;  // vec4: region origin XZ, 1/size, mid-plane Y
 	int          m_uCloudShadowB   = -1;  // vec4: x = strength (0 = off)
@@ -675,7 +677,7 @@ private:
 	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
 	// Built-in G-buffer program uniform locations (same names as the unlit set).
 	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
-	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1;
+	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1, m_uGBSpecAA = -1;
 	int m_uGBInstViewProj = -1, m_uGBInstColor = -1, m_uGBInstMetallic = -1,
 	    m_uGBInstRoughness = -1, m_uGBInstHasTexture = -1, m_uGBInstTexture = -1;
 	void EnsureGBufferTargets(int width, int height);
@@ -765,6 +767,8 @@ private:
 	// Anti-aliasing method actually in force (already run through
 	// IRenderer::ResolveAAMethod, so it is something this backend can do).
 	HE::AAMethod m_aaMethod       = HE::AAMethod::FXAA;
+	bool         m_specularAA        = true;   // A6 — roughness regularization
+	float        m_specularAAStrength = 1.0f;
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
