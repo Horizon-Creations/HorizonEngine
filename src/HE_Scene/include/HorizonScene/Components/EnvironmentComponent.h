@@ -51,6 +51,22 @@ struct EnvironmentComponent
     // untouched, so shadowed ground reads as "under a cloud", not night.
     bool  cloudShadows        = true;
     float cloudShadowStrength = 0.7f;   // 0 = invisible … 1 = full darkening
+    // Cloud look (3D volumetric mode): 0 = Classic (the original soft look,
+    // byte-identical to before the option existed), 1 = Realistic — HZD-style
+    // Perlin-Worley base shapes (connected cauliflower formations), flat cloud
+    // bases, sharper silhouettes, multi-scattered sun lighting with bright tops
+    // over blue-grey bellies and a silver lining toward the sun.
+    int   cloudStyle = 1;
+    // Clouds shade EACH OTHER (3D mode): extends the sun light-march beyond the
+    // cloud's own body so a tall neighbour tower darkens the clouds behind it.
+    // Slightly more expensive; step count scales with cloudQuality.
+    bool  cloudInterShadows = true;
+    // Cloud life (3D mode, Realistic style): how alive the shapes are over time.
+    // 0 = frozen shapes that only drift with the wind; 1 = natural — cauliflower
+    // lobes boil upward (convection), tops lean downwind (wind shear), and a
+    // slow formation field makes clouds grow, tower and dissolve as they drift;
+    // 2 = time-lapse. Scales the evolution SPEED, not the wind drift.
+    float cloudEvolution = 1.0f;
     // Low-resolution cloud pass (performance): raymarch the clouds at quarter resolution
     // into an offscreen buffer, then bilinear-upsample + composite. Big win in open-sky
     // views (clouds are the dominant per-pixel sky cost). Default OFF = the proven inline

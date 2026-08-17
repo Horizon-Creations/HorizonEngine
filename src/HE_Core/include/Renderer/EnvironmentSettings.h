@@ -95,6 +95,14 @@ struct EnvironmentSettings
     // Darkens only the directional light; strength scales the darkening.
     bool      cloudShadows        = true;
     float     cloudShadowStrength = 0.7f;
+    // Cloud look (3D volumetric mode): 0 = Classic (original soft look),
+    // 1 = Realistic (Perlin-Worley shapes, flat bases, multi-scatter lighting).
+    int       cloudStyle = 1;
+    // Clouds shade each other (3D mode): extended sun light-march.
+    bool      cloudInterShadows = true;
+    // Shape-evolution speed (3D Realistic): 0 = frozen drift … 1 = natural
+    // boiling/shear/formation … 2 = time-lapse.
+    float     cloudEvolution = 1.0f;
     // Cloud appearance (OpenGL 3D path): density scales opacity, fluffiness
     // drives the cauliflower erosion, tint colours the clouds.
     float     cloudDensity    = 1.0f;

@@ -84,7 +84,9 @@ struct SkyFrameParams
 	// w = rainAmount (drives the rainbow). z/w are read ONLY by the full sky
 	// fragment shader; the quarter-res cloud pre-pass shader ignores both.
 	glm::vec4 star2          = glm::vec4(0.6f, 0.0f, 0.0f, 0.0f);
-	glm::vec4 neb2           = glm::vec4(0.5f, 0.0f, 0.0f, 0.0f);    // x = nebulaCoverage
+	// x = nebulaCoverage, y = cloudStyle (0 Classic / 1 Realistic),
+	// z = cloudInterShadows (0/1), w = cloudEvolution (shape-evolution speed).
+	glm::vec4 neb2           = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
 };
 // Byte layout must stay identical to the MSL SkyParams (mat4 + 17 x float4): the
 // whole struct is uploaded with a single setFragmentBytes/memcpy. Guard against

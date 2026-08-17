@@ -850,7 +850,7 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     int envRows = 0;
     for (const auto& fn : HE::api::registry())
         if (std::string(fn.id).rfind("env.", 0) == 0) ++envRows;
-    CHECK(envRows == 2 * (38 + 5 + 3 + 9));   // float + bool + int + colour fields
+    CHECK(envRows == 2 * (39 + 6 + 4 + 9));   // float + bool + int + colour fields
 }
 
 TEST_CASE("Entity query: findByName + exists through the registry")

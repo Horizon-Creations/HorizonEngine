@@ -2883,6 +2883,11 @@ void EditorApplication::dumpFrameHeadless()
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
 			e->cloudShadows        = envF("HE_DUMP_CLOUDSHADOWS", e->cloudShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudShadowStrength = static_cast<float>(envF("HE_DUMP_CLOUDSHADOWSTR", e->cloudShadowStrength));
+			e->cloudStyle          = static_cast<int>(envF("HE_DUMP_CLOUDSTYLE", static_cast<float>(e->cloudStyle)));
+			e->cloudInterShadows   = envF("HE_DUMP_INTERSHADOWS", e->cloudInterShadows ? 1.0f : 0.0f) > 0.5f;
+			e->cloudEvolution      = static_cast<float>(envF("HE_DUMP_CLOUDEVOLUTION", e->cloudEvolution));
+			e->windSpeed           = static_cast<float>(envF("HE_DUMP_WINDSPEED", e->windSpeed));
+			e->windDirection       = static_cast<float>(envF("HE_DUMP_WINDDIR", e->windDirection));
 			e->nebulaIntensity   = static_cast<float>(envF("HE_DUMP_NEBULA",   e->nebulaIntensity));
 			e->nebulaSeed        = static_cast<float>(envF("HE_DUMP_NEBSEED",  e->nebulaSeed));
 			e->nebulaCoverage    = static_cast<float>(envF("HE_DUMP_NEBCOVER", e->nebulaCoverage));

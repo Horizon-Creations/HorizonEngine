@@ -285,6 +285,21 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					Row::sliderFloat("Cloud Height", &env->cloudHeight, 20.0f, 2000.0f, "%.0f"); trackEdit();
 					hint("Lifts the cloud band higher in the sky (clear sky opens toward the "
 					     "horizon); the clouds keep the same size & shape (OpenGL only).");
+					// Cloud look + life (3D only — the dome path keeps the classic formula).
+					const char* cloudStyles[] = { "Classic (soft)", "Realistic (cumulus)" };
+					int cstyle = (env->cloudStyle == 1) ? 1 : 0;
+					if (Row::combo("Cloud Style", &cstyle, cloudStyles, 2)) { env->cloudStyle = cstyle; trackEdit(); }
+					hint("Realistic: connected cauliflower shapes with flat bases, bright "
+					     "sunlit tops over blue-grey bellies and a silver lining.");
+					if (env->cloudStyle == 1)
+					{
+						if (ImGui::Checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
+						hint("Extends the sun march so tall towers darken clouds behind them. "
+						     "Slightly more expensive (scales with Quality).");
+						Row::sliderFloat("Evolution", &env->cloudEvolution, 0.0f, 2.0f); trackEdit();
+						hint("How alive the shapes are: 0 = frozen drift, 1 = natural boiling, "
+						     "growth & wind shear, 2 = time-lapse.");
+					}
 				}
 			}
 			// Cloud quality (performance): scales the raymarch step counts + sun

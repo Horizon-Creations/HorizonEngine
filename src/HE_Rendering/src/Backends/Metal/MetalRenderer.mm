@@ -3454,6 +3454,110 @@ float cloudBillowFbm(float3 p, float farW, texture3d<float> noiseTex, sampler no
 	     + worleyNoise3(p * 4.06, noiseTex, noiseSamp) * 0.125 * farW;
 }
 
+// ── Shared cloud shape field ─────────────────────────────────────────────────
+// Coarse density (presence × vertical profile × billow erosion, no fine octave)
+// of the 3D cloud slab at a world position. ONE shape model for the realistic
+// view march, the sun light-march and the cloud-shadow map, so ground shadows
+// and cloud self-shading always match the shapes overhead.
+//   style 0 (Classic): the original formula — rounded fBm blobs, soft base.
+//   style 1 (Realistic, HZD-style): the low-frequency Worley field carves the
+//     value-noise coverage into CONNECTED cauliflower formations (Perlin-Worley
+//     in spirit), the base is a flat condensation level, tops lean downwind
+//     (wind shear), the erosion noise boils upward (convection) and a slow
+//     FORMATION field makes local coverage breathe — because tower height is
+//     coupled to coverage, clouds visibly grow, tower and dissolve as they
+//     drift. evo scales all evolution SPEEDS (0 = frozen shapes, drift only).
+// (The classic VIEW march below stays untouched/byte-identical — it does not
+// call this; only the classic shadow map shares the classic branch here.)
+float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, float lo,
+                        float time, float3 wind, float fluff, float style, float evo,
+                        texture3d<float> noiseTex, sampler noiseSamp)
+{
+	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+	if (style > 0.5)
+	{
+		// Wind shear: tops lean downwind. World-space offset before noise
+		// scaling; strength follows the actual wind speed (|wind| is per-sec).
+		float wlen = length(wind.xz);
+		if (wlen > 1e-5)
+			pos.xz += wind.xz * ((hf * hf * (0.35 / nscale) * min(wlen * 40.0, 1.0)) / wlen);
+		// COLUMN-WISE coverage (HZD weather-map idea): presence + tower height
+		// are sampled at the slab BASE and at LOW frequency, constant along the
+		// column — that puts a FLAT condensation level under BROAD, coherent
+		// formations (high-frequency column noise degenerates into needle
+		// towers). The 3D body field below fills the envelope with rounded
+		// lumps, the erosion breaks the surface into cauliflower lobes.
+		float3 npc = float3(pos.x, baseY, pos.z) * (nscale * 0.55) + wind * time;
+		// DOMAIN WARP: bend the column field with a low-frequency vector noise
+		// so cells stop reading as same-sized round balls — outlines become
+		// irregular, stretched, organic.
+		npc.x += (starNoise3(npc * 0.35 + 17.0, noiseTex, noiseSamp) - 0.5) * 1.7;
+		npc.z += (starNoise3(npc * 0.35 + 71.0, noiseTex, noiseSamp) - 0.5) * 1.7;
+		// farW = 0 → only the two broad octaves decide WHERE clouds are;
+		// renormalized by the dropped octaves' amplitude (0.75) so the coverage
+		// threshold keeps the same meaning as the 4-octave classic field.
+		float cover = cloudCoverFbm(npc + float3(0.0, time * 0.02 * evo, 0.0), 0.0, noiseTex, noiseSamp)
+		            * (1.0 / 0.75);
+		// Extra MACRO octave: very-low-frequency variation so formations differ
+		// in size — lone puffs next to long banks, not a uniform sprinkle.
+		float macro = starNoise3(npc * 0.20 + 53.0, noiseTex, noiseSamp);
+		cover += (macro - 0.5) * 0.26;
+		// Perlin-Worley base: the low-frequency Worley field CLUSTERS the
+		// coverage around its cell centres (zero-mean, mild — a strong weight
+		// here is what made every cloud the same round ball).
+		float w = worleyNoise3(npc * 0.75, noiseTex, noiseSamp);
+		cover += (w - 0.5) * 0.16;
+		// Slow formation field: local coverage breathes over time (zero-mean).
+		float form = starNoise3(npc * 0.22 + float3(time * 0.013 * evo, 31.0, -time * 0.009 * evo),
+		                        noiseTex, noiseSamp);
+		cover += (form - 0.5) * 0.14;
+		// Slightly early onset: the zero-mean variety terms widen the field's
+		// distribution, which alone would thin the coverage below the slider.
+		float pres = smoothstep(lo - 0.03, lo + 0.17, cover);
+		if (pres <= 0.0) return 0.0;
+		// Tower height varies per formation (macro): some stay flat banks,
+		// others billow into towers — not one uniform dome height.
+		float towerTop = mix(0.28, 1.0, smoothstep(lo, lo + 0.30, cover))
+		               * mix(0.55, 1.25, macro);
+		float rise  = smoothstep(0.0, 0.06, hf);               // FLAT base
+		float crown = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
+		if (crown <= 0.0) return 0.0;
+		// 3D body: rounded interior lumps inside the column envelope. Fuller
+		// where the column is strong, broken toward the formation edges.
+		float3 np   = pos * nscale + wind * time;
+		float body  = cloudCoverFbm(np + float3(0.0, time * 0.02 * evo, 0.0), 1.0, noiseTex, noiseSamp);
+		float bodyD = smoothstep(0.30, 0.60, body + pres * 0.10);
+		float env   = pres * rise * crown * bodyD;             // smooth envelope 0..1
+		if (env <= 0.0) return 0.0;
+		// HZD-style REMAP erosion: the Worley billow carves the envelope from
+		// the OUTSIDE — a thin shell (env < carve) breaks into rounded lobes,
+		// the deep core survives. This is what sculpts the cauliflower
+		// silhouette; a plain multiply only dims, it never re-shapes.
+		float billow = cloudBillowFbm(np * 1.2 + float3(0.0, -time * 0.08 * evo, 0.0), 1.0,
+		                              noiseTex, noiseSamp);
+		float carve  = billow * mix(0.50, 0.78, fluff);
+		return clamp((env - carve) / max(1.0 - carve, 1e-3), 0.0, 1.0);
+	}
+	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
+	// formula (the ground shadows of classic scenes must not change).
+	float3 np = pos * nscale + wind * time;
+	float cover = cloudCoverFbm(np + float3(0.0, time * 0.03, 0.0), 1.0, noiseTex, noiseSamp);
+	float pres  = smoothstep(lo, lo + 0.26, cover);
+	if (pres <= 0.0) return 0.0;
+	float towerTop = mix(0.32, 1.0, smoothstep(lo, lo + 0.30, cover));
+	float rise     = smoothstep(0.0, 0.18, hf);
+	rise *= rise;
+	float crown    = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
+	float vshape   = rise * crown;
+	if (vshape <= 0.0) return 0.0;
+	float billow = cloudBillowFbm(np * 1.2 + float3(time * 0.03, 0.0, 0.0), 1.0, noiseTex, noiseSamp);
+	float erLo   = mix(0.30, 0.14, fluff);
+	float erBite = mix(0.30, 0.62, fluff);
+	float erode  = mix(1.0, smoothstep(erLo, erLo + erBite, billow),
+	                   mix(0.45, 1.0, hf) * (0.55 + 0.45 * fluff));
+	return pres * vshape * erode;
+}
+
 // 3D volumetric clouds (cloud mode 1): a WORLD-ANCHORED slab cloudH world units above
 // the camera, sampled at absolute world positions so clouds parallax as the camera
 // moves. Noise frequency scales with cloudH so angular cloud size is height-invariant.
@@ -3585,6 +3689,152 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	return baseSky * T + L;
 }
 
+// ── Realistic 3D clouds (cloudStyle 1) ───────────────────────────────────────
+// Same slab geometry as applyClouds3D, but shape + lighting rebuilt from the
+// HZD/Nubis playbook against reference photos:
+//  * shapes/evolution from cloudFieldDensity (Perlin-Worley formations, flat
+//    bases, wind shear, convective boil, slow formation field) + a fine
+//    upward-boiling erosion octave for the crisp cauliflower silhouette,
+//  * SUN MARCH over the SAME density field with exponentially growing steps —
+//    with interShadows the reach extends past the cloud's own body, so a tall
+//    tower visibly darkens the clouds behind it,
+//  * Wrenninge-style normalized multi-scatter (3 octaves) keeps thick cores
+//    luminous instead of clamping to black,
+//  * deeper blue-grey shading for the bellies, near-white sunlit tops, and a
+//    strong forward lobe for the silver lining around the sun.
+float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
+                         float coverage, float3 sunColor, float3 wind, float cloudH,
+                         float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint,
+                         float interSh, float evo, float2 fragCoord,
+                         texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
+{
+	outT = 1.0;
+	if (coverage <= 0.0) return baseSky;
+	dir    = normalize(dir);
+	sunDir = normalize(sunDir);
+	if (dir.y < 0.02) return baseSky;
+
+	// Slightly higher minimum step count than classic: the sharper silhouettes
+	// show the IGN dither earlier than the soft classic bodies do.
+	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
+	float qMinN   = (quality < 0.5) ? 14.0 : (quality < 1.5 ? 26.0 : 32.0);
+	float qMaxN   = (quality < 0.5) ? 44.0 : (quality < 1.5 ? 80.0 : 128.0);
+	int   qShadow = (quality < 0.5) ? 3    : (quality < 1.5 ? 4    : 6);
+	if (interSh < 0.5) qShadow = min(qShadow, 3); // short march: own body only
+
+	cloudH      = max(cloudH, 1.0);
+	float thick = cloudH * 1.5;
+	float baseY = camPos.y + cloudH;
+	float tNear = cloudH / dir.y;
+	float tFar  = (cloudH + thick) / dir.y;
+	float maxDist = cloudH * 60.0;
+	tFar = min(tFar, maxDist);
+	if (tFar <= tNear) return baseSky;
+
+	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
+	float ds = (tFar - tNear) / float(N);
+	float jitter = skyIgn(fragCoord);
+
+	float sunY  = clamp(sunDir.y, -0.3, 1.0);
+	float day   = smoothstep(-0.10, 0.10, sunY);
+	float dusk  = smoothstep(-0.14, 0.04, sunY) * (1.0 - smoothstep(0.04, 0.26, sunY));
+	float costh = max(dot(dir, sunDir), 0.0);
+	// Dual lobe + a strong forward peak → silver lining hugging the sun.
+	float phase = mix(hgPhase(costh, 0.65), hgPhase(costh, -0.35), 0.30)
+	            + hgPhase(costh, 0.93) * 0.35;
+
+	float nscale    = 1.6 / cloudH;
+	float elevFloor = clamp((cloudH - 50.0) / 2500.0, 0.0, 0.6);
+	float fluff     = clamp(cloudFluffiness, 0.0, 1.0);
+	float densMul   = clamp(cloudDensity, 0.0, 3.0);
+	float lo        = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
+
+	float  T = 1.0;
+	float3 L = float3(0.0);
+	for (int i = 0; i < N; ++i)
+	{
+		float  t   = tNear + (float(i) + jitter) * ds;
+		float3 pos = camPos + dir * t;
+		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+		float  detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
+		float dens = cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind,
+		                               fluff, 1.0, evo, noiseTex, noiseSamp);
+		if (dens <= 0.002) continue;
+		// Fine cauliflower octave, boiling upward with the convection. Bites
+		// hardest at the silhouette (low density) so the outline breaks into
+		// crisp lobes while the core stays solid.
+		float3 np    = pos * nscale + wind * time;
+		float  bfine = worleyNoise3(np * 2.6 + float3(0.0, -time * 0.10 * evo, 5.0),
+		                            noiseTex, noiseSamp);
+		float  fineW = (0.50 + 0.35 * fluff) * detailFade
+		             * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
+		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
+		dens *= smoothstep(0.015, 0.10, dens); // cut the wispy tail -> crisp lobed silhouette
+		if (dens <= 0.002) continue;
+
+		// Sun march over the same field; the FIRST step is tight so each
+		// cauliflower lobe shades its neighbour (per-lobe relief), the
+		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
+		// (6 steps — interShadows: neighbouring towers darken this cloud).
+		float od = 0.0;
+		{
+			float  st = thick * 0.05;
+			float3 sp = pos;
+			for (int j = 0; j < qShadow; ++j)
+			{
+				sp += sunDir * st;
+				float shf = (sp.y - baseY) / thick;
+				if (shf > 1.35) break;                 // left the slab upward
+				od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
+				                        fluff, 1.0, evo, noiseTex, noiseSamp) * (st / thick) * 10.0;
+				st *= 1.85;
+			}
+		}
+		// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
+		// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
+		// the tops by 1.75× and burn out before the tonemap).
+		float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
+		for (int o = 0; o < 3; ++o)
+		{
+			ms += aa * exp(-od * 5.5 * bb);
+			wsum += aa;
+			aa *= 0.5; bb *= 0.35;
+		}
+		float sun    = ms / wsum;
+		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
+		float lit    = sun * powder;
+		// Blue-grey skylit belly → near-white sunlit top; night/dusk logic kept
+		// from classic so the clouds enter and leave sunset with the sky.
+		float3 dayCol   = mix(float3(0.30, 0.35, 0.46), sunColor * 1.30, lit);
+		float3 nightCol = mix(float3(0.015, 0.018, 0.035), float3(0.13, 0.15, 0.24), lit);
+		float3 cloudCol = mix(nightCol, dayCol, day);
+		float3 duskTop  = sunColor * float3(1.5, 0.85, 0.42);
+		cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
+		cloudCol += baseSky * ((1.0 - day) * (0.30 + 0.50 * lit));
+		cloudCol += sunColor * mix(float3(1.0), float3(1.25, 0.78, 0.42), dusk)
+		          * (phase * sun * 0.9 * max(day, dusk));
+		// Flat dark base → bright crown. Milder than classic's 0.30..1.32 ramp —
+		// the sun march already carries most of the vertical contrast.
+		cloudCol *= mix(0.45, 1.15, smoothstep(0.0, 0.55, hf));
+		cloudCol += float3(0.06, 0.09, 0.15) * ((1.0 - hf) * day * 0.20); // sky bounce under the base
+		cloudCol *= cloudTint;
+		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
+		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
+
+		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
+		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul;
+		float a = 1.0 - exp(-opticalDepth);
+		L += T * a * cloudCol;
+		T *= 1.0 - a;
+		if (T < 0.02) break;
+	}
+	float horizon = smoothstep(elevFloor, elevFloor + 0.14, dir.y);
+	T = 1.0 - (1.0 - T) * horizon;
+	L *= horizon;
+	outT = T;
+	return baseSky * T + L;
+}
+
 // ── Cloud-shadow map pass ────────────────────────────────────────────────────
 // Renders the cloud slab's sun transmittance over a world-space XZ region
 // around the camera into a small R8 target (one fullscreen triangle per frame).
@@ -3617,7 +3867,9 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	float densMul = clamp(p.cloud.y, 0.0, 3.0);
 	float lo      = mix(0.70, 0.22, coverage);
 	float nscale  = 1.6 / cloudH;
-	// Slab entry/exit along the sun ray through the mid-plane point.
+	// Slab entry/exit along the sun ray through the mid-plane point. Density
+	// comes from the SHARED cloudFieldDensity (style/evolution included), so
+	// the ground shadows always match the shapes overhead.
 	float t0 = (baseY - midY) / sd.y;
 	float t1 = (baseY + thick - midY) / sd.y;
 	const int M = 6;
@@ -3626,24 +3878,10 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	for (int i = 0; i < M; ++i)
 	{
 		float3 pos = float3(xz.x, midY, xz.y) + sd * (t0 + (float(i) + 0.5) * ds);
-		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-		float3 np  = pos * nscale + wind * time;
-		float cover = cloudCoverFbm(np + float3(0.0, time * 0.03, 0.0), 1.0, noiseTex, noiseSamp);
-		float pres  = smoothstep(lo, lo + 0.26, cover);
-		if (pres <= 0.0) continue;
-		float towerTop = mix(0.32, 1.0, smoothstep(lo, lo + 0.30, cover));
-		float rise     = smoothstep(0.0, 0.18, hf);
-		rise *= rise;
-		float crown    = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
-		float vshape   = rise * crown;
-		if (vshape <= 0.0) continue;
-		float billow = cloudBillowFbm(np * 1.2 + float3(time * 0.03, 0.0, 0.0), 1.0, noiseTex, noiseSamp);
-		float erLo   = mix(0.30, 0.14, fluff);
-		float erBite = mix(0.30, 0.62, fluff);
-		float erode  = mix(1.0, smoothstep(erLo, erLo + erBite, billow),
-		                   mix(0.45, 1.0, hf) * (0.55 + 0.45 * fluff));
 		// Same optical-depth normalisation as the view march (ds/thick * 7).
-		od += pres * vshape * erode * (ds / thick) * 7.0 * densMul;
+		od += cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind, fluff,
+		                        p.neb2.y, p.neb2.w, noiseTex, noiseSamp)
+		    * (ds / thick) * 7.0 * densMul;
 	}
 	return float4(exp(-od));
 }
@@ -4307,13 +4545,18 @@ float4 cloudsDomeLT(float3 dir, float3 sunDir, float time, float coverage, float
 float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float coverage,
                   float3 sunColor, float3 wind, float cloudH, float cloudFluffiness,
                   float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
+                  float style, float interSh, float evo,
                   texture3d<float> noiseTex, sampler noiseSamp)
 {
 	float3 hazeSky = skyColor(dir, sunDir);   // aerial-perspective reference (quarter-res ok)
 	float  T = 1.0;
-	float3 comp = applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
-	                            cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
-	                            fragCoord, noiseTex, noiseSamp, T);
+	float3 comp = (style > 0.5)
+		? applyClouds3DReal(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
+		                    cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		                    interSh, evo, fragCoord, noiseTex, noiseSamp, T)
+		: applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
+		                cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		                fragCoord, noiseTex, noiseSamp, T);
 	return float4(comp - hazeSky * T, T);     // recover L
 }
 
@@ -4330,7 +4573,8 @@ fragment float4 cloudFragment(SkyOut in [[stage_in]],
 	if (p.cameraPos.w > 0.5)
 		return clouds3DLT(dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                  p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y,
-		                  p.star2.y, p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp);
+		                  p.star2.y, p.cloudTint.xyz, in.position.xy,
+		                  p.neb2.y, p.neb2.z, p.neb2.w, noiseTex, noiseSamp);
 	return cloudsDomeLT(dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
 	                    p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp);
 }
@@ -4473,6 +4717,11 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		col = col * lt.a + lt.rgb;
 		cloudT = lt.a;
 	}
+	else if (p.cameraPos.w > 0.5 && p.neb2.y > 0.5)
+		col = applyClouds3DReal(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
+		                        p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
+		                        p.cloudTint.xyz, p.neb2.z, p.neb2.w, in.position.xy,
+		                        noiseTex, noiseSamp, cloudT);
 	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,

@@ -274,6 +274,7 @@ namespace camera {
     X(windSpeed,           WindSpeed,           "Wind Speed") \
     X(cloudHeight,         CloudHeight,         "Cloud Height") \
     X(cloudShadowStrength, CloudShadowStrength, "Cloud Shadow Strength") \
+    X(cloudEvolution,      CloudEvolution,      "Cloud Evolution") \
     X(cloudDensity,        CloudDensity,        "Cloud Density") \
     X(cloudFluffiness,     CloudFluffiness,     "Cloud Fluffiness") \
     X(contrailAmount,      ContrailAmount,      "Contrail Amount") \
@@ -306,10 +307,12 @@ namespace camera {
     X(autoAdvance,         AutoAdvance,         "Auto Advance Time") \
     X(moonPhaseAuto,       MoonPhaseAuto,       "Moon Phase Auto") \
     X(cloudShadows,        CloudShadows,        "Cloud Shadows") \
+    X(cloudInterShadows,   CloudInterShadows,   "Cloud Inter Shadows") \
     X(lowResClouds,        LowResClouds,        "Low Res Clouds")
 #define HE_ENV_FIELDS_INT(X) \
     X(cloudMode,           CloudMode,           "Cloud Mode") \
     X(cloudQuality,        CloudQuality,        "Cloud Quality") \
+    X(cloudStyle,          CloudStyle,          "Cloud Style") \
     X(nebulaQuality,       NebulaQuality,       "Nebula Quality")
 #define HE_ENV_FIELDS_COLOR(X) \
     X(sunColor,            SunColor,            "Sun Color") \

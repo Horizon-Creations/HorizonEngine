@@ -841,6 +841,9 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	env.nebulaQuality    = 2;
 	env.godRays          = 0.9f;
 	env.shootingStars    = 0.1f;
+	env.cloudStyle       = 0;
+	env.cloudInterShadows = false;
+	env.cloudEvolution   = 1.5f;
 
 	HE::SkyFrameInputs in;
 	in.sunDir         = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -867,7 +870,11 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	CHECK(p.nebulaColor2.w == doctest::Approx(2.0f)); // nebula quality
 	CHECK(p.nebulaColor3.w == doctest::Approx(0.9f)); // god rays
 	CHECK(p.auroraColorTop.w == doctest::Approx(0.1f)); // meteors
+	// neb2 = (nebulaCoverage, cloudStyle, cloudInterShadows, cloudEvolution)
 	CHECK(p.neb2.x == doctest::Approx(0.6f));
+	CHECK(p.neb2.y == doctest::Approx(0.0f));
+	CHECK(p.neb2.z == doctest::Approx(0.0f));
+	CHECK(p.neb2.w == doctest::Approx(1.5f));
 
 	// star2 = (twinkle, cloudQuality, composite-low-res-clouds, rainAmount)
 	CHECK(p.star2.x == doctest::Approx(0.8f));

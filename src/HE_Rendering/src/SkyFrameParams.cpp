@@ -48,7 +48,8 @@ SkyFrameParams BuildSkyFrameParams(const IRenderer::EnvironmentSettings& env,
 	p.star           = glm::vec4(env.starSize, env.starSizeVariation, env.starDensity, env.starGlow);
 	p.star2          = glm::vec4(env.starTwinkle, static_cast<float>(env.cloudQuality),
 	                             in.lowResClouds ? 1.0f : 0.0f, env.rainAmount);
-	p.neb2           = glm::vec4(env.nebulaCoverage, 0.0f, 0.0f, 0.0f);
+	p.neb2           = glm::vec4(env.nebulaCoverage, static_cast<float>(env.cloudStyle),
+	                             env.cloudInterShadows ? 1.0f : 0.0f, env.cloudEvolution);
 	return p;
 }
 
