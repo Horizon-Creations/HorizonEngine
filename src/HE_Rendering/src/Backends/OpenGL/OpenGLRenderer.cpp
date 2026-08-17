@@ -296,6 +296,34 @@ const int LOCAL_SHADOW_LAYERS = 16;
 uniform sampler2DArray uLocalShadowMap;
 uniform mat4 uLocalShadowVP[LOCAL_SHADOW_LAYERS]; // per-layer light view-proj (GL clip)
 
+// Cloud-shadow transmittance map (unit 19): the sky's procedural cloud layer
+// evaluated once per frame over a world-space XZ region around the camera (the
+// sky program's uCloudShadowPass mode). uCloudShadowA: xy = region origin
+// (world XZ), z = 1/region size, w = slab mid-plane Y. uCloudShadowB.x =
+// strength (0 = off).
+uniform sampler2D uCloudShadowMap;
+uniform vec4 uCloudShadowA;
+uniform vec4 uCloudShadowB;
+
+// Cloud-shadow visibility for the directional light (1 = fully lit): project
+// the fragment along L (toward the light) onto the cloud slab's mid-plane and
+// sample the map; edge fade hides the region border. SYNC: mirror of
+// heCloudShadowFactor (MaterialShaderLibrary preamble) and Metal fragmentMain's
+// cloudShadowFactor — change one, change all.
+float cloudShadowFactor(vec3 worldPos, vec3 L)
+{
+	float s = uCloudShadowB.x;
+	if (s <= 0.0 || L.y <= 0.05) return 1.0;
+	float t = (uCloudShadowA.w - worldPos.y) / L.y;
+	if (t <= 0.0) return 1.0;
+	vec2 uv = (worldPos.xz + L.xz * t - uCloudShadowA.xy) * uCloudShadowA.z;
+	vec2 e = min(uv, vec2(1.0) - uv);
+	float edge = smoothstep(0.0, 0.08, min(e.x, e.y));
+	if (edge <= 0.0) return 1.0;
+	float T = texture(uCloudShadowMap, uv).r;
+	return mix(1.0, T, s * edge);
+}
+
 float localShadowFactor(int i, vec3 worldPos, vec3 N)
 {
 	int base = int(uLightParams[i].y);
@@ -445,6 +473,9 @@ void main()
 		{
 			if (uGIEnabled == 1) sh = texture(uGIShadow, gl_FragCoord.xy / uViewport).r;
 			else                 sh = computeShadow(vWorldPos, N, L, dbgCascade);
+			// Cloud shadows multiply on top of both shadow sources — the
+			// geometry shadow and the cloud layer occlude independently.
+			sh *= cloudShadowFactor(vWorldPos, L);
 		}
 		else
 		{
@@ -831,6 +862,8 @@ uniform float     uStarSizeVar;      // star size variation (0 = uniform … 1 =
 uniform float     uStarGlow;         // glow/halo around stars (0 = points only)
 uniform float     uStarTwinkle;      // twinkle amount (0 = steady … 1 = strong blink)
 uniform float     uStarDensity;      // amount of stars (0 = few … 1 = many; 0.5 = default)
+uniform float     uCloudShadowPass;   // 1 = this draw renders the cloud-shadow transmittance map
+uniform vec4      uCloudShadowRegion; // xy = region origin (world XZ), z = region size, w = map size (px)
 out vec4 FragColor;
 //#SKYFUNC#
 
@@ -1560,6 +1593,62 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	L *= horizon;
 	outT = T;
 	return baseSky * T + L;
+}
+
+// ── Cloud-shadow map pass (uCloudShadowPass == 1) ────────────────────────────
+// Sun transmittance of the cloud slab over a world-space XZ region around the
+// camera, one texel = a point on the slab's MID-PLANE, short march along the
+// sun through the slab with the SAME density field applyClouds3D raymarches
+// (coverage fBm → presence → tower profile → billow erosion; fine octave
+// skipped — map texels are ~20 m). The lit shaders project fragments along L
+// onto the mid-plane and sample the map (cloudShadowFactor in kUnlitFS /
+// heCloudShadowFactor in the material preamble). Mirrors the Metal
+// cloudShadowFragment exactly.
+float cloudShadowTransmittance(vec2 fragCoord)
+{
+	vec2 uv = fragCoord / max(uCloudShadowRegion.w, 1.0);
+	vec2 xz = uCloudShadowRegion.xy + uv * uCloudShadowRegion.z;
+	vec3 sd = normalize(uSunDir);
+	if (sd.y <= 0.05) return 1.0;
+	float coverage = clamp(uCloudCoverage, 0.0, 1.0);
+	if (coverage <= 0.0) return 1.0;
+	float cloudH  = max(uCloudHeight, 1.0);
+	float thick   = cloudH * 1.5;
+	float baseY   = uCameraPos.y + cloudH;
+	float midY    = baseY + 0.5 * thick;
+	float fluff   = clamp(uCloudFluffiness, 0.0, 1.0);
+	float densMul = clamp(uCloudDensity, 0.0, 3.0);
+	float lo      = mix(0.70, 0.22, coverage);
+	float nscale  = 1.6 / cloudH;
+	// Slab entry/exit along the sun ray through the mid-plane point.
+	float t0 = (baseY - midY) / sd.y;
+	float t1 = (baseY + thick - midY) / sd.y;
+	const int M = 6;
+	float ds = (t1 - t0) / float(M);
+	float od = 0.0;
+	for (int i = 0; i < M; ++i)
+	{
+		vec3  pos = vec3(xz.x, midY, xz.y) + sd * (t0 + (float(i) + 0.5) * ds);
+		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+		vec3  np  = pos * nscale + uWind * uTime;
+		float cover = cloudCoverFbm(np + vec3(0.0, uTime * 0.03, 0.0), 1.0);
+		float pres  = smoothstep(lo, lo + 0.26, cover);
+		if (pres <= 0.0) continue;
+		float towerTop = mix(0.32, 1.0, smoothstep(lo, lo + 0.30, cover));
+		float rise     = smoothstep(0.0, 0.18, hf);
+		rise *= rise;
+		float crown    = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
+		float vshape   = rise * crown;
+		if (vshape <= 0.0) continue;
+		float billow = cloudBillowFbm(np * 1.2 + vec3(uTime * 0.03, 0.0, 0.0), 1.0);
+		float erLo   = mix(0.30, 0.14, fluff);
+		float erBite = mix(0.30, 0.62, fluff);
+		float erode  = mix(1.0, smoothstep(erLo, erLo + erBite, billow),
+		                   mix(0.45, 1.0, hf) * (0.55 + 0.45 * fluff));
+		// Same optical-depth normalisation as the view march (ds/thick * 7).
+		od += pres * vshape * erode * (ds / thick) * 7.0 * densMul;
+	}
+	return exp(-od);
 }
 
 // Nebula filament line: a single thin iso-contour of a value-noise field.
@@ -2387,6 +2476,13 @@ vec3 sunDisk(vec3 dir, vec3 sunDir)
 
 void main()
 {
+	// Cloud-shadow map pass: reuses this program (the noise texture + cloud
+	// uniforms are already wired) but outputs only the slab transmittance.
+	if (uCloudShadowPass > 0.5)
+	{
+		FragColor = vec4(vec3(cloudShadowTransmittance(gl_FragCoord.xy)), 1.0);
+		return;
+	}
 	vec4 wp1 = uInvViewProj * vec4(vNDC,  1.0, 1.0);
 	vec4 wp0 = uInvViewProj * vec4(vNDC, -1.0, 1.0);
 	// NORMALIZE the reconstructed ray before the celestial/star path. The star + nebula
@@ -4299,6 +4395,9 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uFogHeightFalloff = glGetUniformLocation(m_unlitProgram, "uFogHeightFalloff");
 	m_uWetness          = glGetUniformLocation(m_unlitProgram, "uWetness");
 	m_uSnow             = glGetUniformLocation(m_unlitProgram, "uSnow");
+	m_uCloudShadowMap   = glGetUniformLocation(m_unlitProgram, "uCloudShadowMap");
+	m_uCloudShadowA     = glGetUniformLocation(m_unlitProgram, "uCloudShadowA");
+	m_uCloudShadowB     = glGetUniformLocation(m_unlitProgram, "uCloudShadowB");
 	m_uCascadeVP     = glGetUniformLocation(m_unlitProgram, "uCascadeVP[0]");
 	m_uCascadeSplits = glGetUniformLocation(m_unlitProgram, "uCascadeSplits");
 	m_uCameraFwd     = glGetUniformLocation(m_unlitProgram, "uCameraFwd");
@@ -4511,6 +4610,9 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// baked before the cascade existed simply has no such uniform; l < 0 then
 		// skips it and heLight.giRefl.z never reaches a sampler.)
 		if (GLint l = glGetUniformLocation(prog, "heGIReflFwd"); l >= 0) glUniform1i(l, 18);
+		// Cloud-shadow transmittance map = unit 19 (per-frame bind in DrawScene,
+		// shared with the built-in shaders' uCloudShadowMap).
+		if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
 		glUseProgram(0);
 	};
 
@@ -4673,6 +4775,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 			// heCsm — unit 11, same aliasing rationale as the mesh-material path.
 			if (GLint l = glGetUniformLocation(prog, "heCsm");      l >= 0) glUniform1i(l, 11);
 			if (GLint l = glGetUniformLocation(prog, "heLocalShadow"); l >= 0) glUniform1i(l, 12);
+			// heCloudShadow — unit 19, same rationale (never sampled on the UI
+			// path: cloudShadowB.x stays 0, but the unit must be assigned).
+			if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
 			glUseProgram(0);
 			program = prog;
 		}
@@ -4747,6 +4852,9 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
+	m_uSkinnedCloudShadowMap     = loc("uCloudShadowMap");
+	m_uSkinnedCloudShadowA       = loc("uCloudShadowA");
+	m_uSkinnedCloudShadowB       = loc("uCloudShadowB");
 	m_giLocsSkinned              = FetchGISceneLocs(m_skinnedProgram);
 }
 
@@ -4804,6 +4912,9 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstAO               = loc("uAO");
 	m_uInstViewport         = loc("uViewport");
 	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
+	m_uInstCloudShadowMap   = loc("uCloudShadowMap");
+	m_uInstCloudShadowA     = loc("uCloudShadowA");
+	m_uInstCloudShadowB     = loc("uCloudShadowB");
 	m_giLocsInstanced       = FetchGISceneLocs(m_instancedProgram);
 }
 
@@ -4923,6 +5034,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
+	m_uSkyCloudShadowPass   = glGetUniformLocation(m_skyProgram, "uCloudShadowPass");
+	m_uSkyCloudShadowRegion = glGetUniformLocation(m_skyProgram, "uCloudShadowRegion");
 	m_uSkyCloudTex     = glGetUniformLocation(m_skyProgram, "uCloudTex");
 	m_uSkyLowResClouds = glGetUniformLocation(m_skyProgram, "uLowResClouds");
 	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
@@ -5187,6 +5300,117 @@ void OpenGLRenderer::DestroyCloudTarget()
 	if (m_cloudTex) glDeleteTextures(1, &m_cloudTex);
 	m_cloudFBO = 0; m_cloudTex = 0;
 	m_cloudW = m_cloudH = 0;
+}
+
+// ── Cloud shadows ────────────────────────────────────────────────────────────
+static constexpr int kCloudShadowMapSize = 512;
+
+void OpenGLRenderer::EnsureCloudShadowTarget()
+{
+	if (m_cloudShadowFBO) return;
+	glGenFramebuffers(1, &m_cloudShadowFBO);
+	glGenTextures(1, &m_cloudShadowTex);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_cloudShadowFBO);
+	glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kCloudShadowMapSize, kCloudShadowMapSize,
+	             0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_cloudShadowTex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: cloud-shadow FBO incomplete");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void OpenGLRenderer::DestroyCloudShadowTarget()
+{
+	if (m_cloudShadowFBO) glDeleteFramebuffers(1, &m_cloudShadowFBO);
+	if (m_cloudShadowTex) glDeleteTextures(1, &m_cloudShadowTex);
+	m_cloudShadowFBO = 0; m_cloudShadowTex = 0;
+}
+
+// Render the cloud slab's sun transmittance over a world-space XZ region around
+// the camera (m_skyProgram with uCloudShadowPass = 1 — the sky's own density
+// field, noise texture and cloud uniforms). Called from DrawScene BEFORE the
+// opaque pass; the lit shaders + heLitP sample the result on unit 19. Computes
+// and stores the region + strength every frame (m_cloudShadowParamsA/B);
+// strength 0 = feature off this frame (the shaders never sample the map then).
+// Caller restores the framebuffer/viewport (mirrors the shadow-map pass).
+void OpenGLRenderer::RenderCloudShadowMap()
+{
+	m_cloudShadowParamsB = glm::vec4(0.0f);
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	if (!(env.skyEnabled && env.cloudShadows && env.cloudShadowStrength > 0.0f
+	      && env.cloudCoverage > 0.001f && m_skyProgram))
+	{
+		DestroyCloudShadowTarget(); // freed when toggled off
+		return;
+	}
+	// Shadows are cast along the DOMINANT directional light (the same pick CSM
+	// and the material lighting shadow along), not the raw sky-dome sun.
+	glm::vec3 toward(0.0f, 1.0f, 0.0f), lightColor(0.0f);
+	if (!m_renderWorld.dominantDirectionalLight(toward, lightColor)) return;
+	toward = glm::normalize(toward);
+	// Fade out toward the horizon: near-horizontal projections stretch to
+	// infinity and the direct light is dim there anyway.
+	const float strength = glm::clamp(env.cloudShadowStrength, 0.0f, 1.0f)
+	                     * glm::smoothstep(0.08f, 0.18f, toward.y);
+	if (strength <= 0.001f) return;
+	EnsureCloudShadowTarget();
+	if (!m_cloudShadowFBO) return;
+
+	const float     cloudH = std::max(env.cloudHeight, 1.0f);
+	const float     thick  = cloudH * 1.5f;
+	const glm::vec3 cam    = m_renderWorld.camera.position;
+	const float     midY   = cam.y + cloudH + 0.5f * thick;
+	// Region: covers ±30 cloud-heights around where the camera's own position
+	// projects onto the slab along the light (~6 km at the default height 200).
+	const float half  = cloudH * 30.0f;
+	const float size  = half * 2.0f;
+	const float texel = size / static_cast<float>(kCloudShadowMapSize);
+	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - cam.y);
+	if (glm::length(offs) > half * 4.0f) offs = glm::normalize(offs) * (half * 4.0f);
+	glm::vec2 origin = glm::vec2(cam.x, cam.z) + offs - glm::vec2(half);
+	origin = glm::floor(origin / texel) * texel; // texel snap — no swimming on camera moves
+	m_cloudShadowParamsA = glm::vec4(origin.x, origin.y, 1.0f / size, midY);
+	m_cloudShadowParamsB = glm::vec4(strength, 0.0f, 0.0f, 0.0f);
+
+	// The pass needs only the density-formula uniforms — set them here (the sky
+	// block later in the frame re-sets them all for the sky draw itself).
+	glUseProgram(m_skyProgram);
+	glUniform1f(m_uSkyCloudShadowPass, 1.0f);
+	glUniform4f(m_uSkyCloudShadowRegion, origin.x, origin.y, size,
+	            static_cast<float>(kCloudShadowMapSize));
+	glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(toward));
+	glUniform3fv(m_uSkyCameraPos, 1, glm::value_ptr(cam));
+	glUniform1f(m_uSkyCoverage, env.cloudCoverage);
+	glUniform1f(m_uSkyCloudHeight, env.cloudHeight);
+	glUniform1f(m_uSkyCloudDensity, env.cloudDensity);
+	glUniform1f(m_uSkyCloudFluffiness, env.cloudFluffiness);
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+		skyClock = static_cast<float>(std::atof(ov)); // deterministic headless captures
+	glUniform1f(m_uSkyClock, skyClock);
+	{
+		const glm::vec3 wind = HE::CloudWindVector(env);
+		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+	}
+	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2 (as in the sky pass)
+	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glUniform1i(m_uSkyNoise, 2);
+	glActiveTexture(GL_TEXTURE0);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, m_cloudShadowFBO);
+	glViewport(0, 0, kCloudShadowMapSize, kCloudShadowMapSize);
+	glDisable(GL_DEPTH_TEST);
+	glBindVertexArray(m_fsVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glEnable(GL_DEPTH_TEST);
+	glUniform1f(m_uSkyCloudShadowPass, 0.0f); // the sky draw reuses this program
+	glUseProgram(0);
 }
 
 // Bright-pass the HDR color, then ping-pong blur. Leaves the result in
@@ -6798,6 +7022,8 @@ bool OpenGLRenderer::EnsureDeferredPipelines()
 				// reflection cascade covers the deferred path too — the pre-pass
 				// and trace run before the G-buffer either way.
 				smp("heGIReflFwd", 18);
+				// Cloud-shadow transmittance map — unit 19 (per-frame bind).
+				smp("heCloudShadow", 19);
 				glUseProgram(0);
 			}
 		}
@@ -8473,6 +8699,7 @@ void OpenGLRenderer::Shutdown()
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyCloudTarget();
+	DestroyCloudShadowTarget();
 	DestroyLdrTarget();
 	DestroyGpuTimer();
 	DestroySSAOTargets();
@@ -8822,6 +9049,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// pass can render into the shadow map and then restore it for the main pass.
 	GLint prevFBO = 0;
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+
+	// Cloud-shadow map: rendered BEFORE the opaque pass (the lit shaders sample
+	// it on unit 19). Restores the snapshotted target like the shadow pass.
+	RenderCloudShadowMap();
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(0, 0, pw, ph);
 
 	const bool shadows = m_renderWorld.shadow.enabled && m_shadowFBO != 0;
 	// Local (point/spot) shadow atlas — independent of the directional CSM, so
@@ -9176,7 +9409,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// gate uniform were ever wrong.
 		glActiveTexture(GL_TEXTURE18);
 		glBindTexture(GL_TEXTURE_2D, giReflActive ? giReflTex : m_blackTex);
+		// Cloud-shadow transmittance map on unit 19 — ONE bind for every program
+		// in this pass (built-ins read uCloudShadowMap, graph materials + the
+		// deferred resolve heCloudShadow). White = no shadow when the pass
+		// didn't run; the strength gate is 0 then anyway.
+		glActiveTexture(GL_TEXTURE19);
+		glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex ? m_cloudShadowTex : m_whiteTex);
 		glActiveTexture(GL_TEXTURE0);
+		const glm::vec4 cloudShA = m_cloudShadowParamsA;
+		const glm::vec4 cloudShB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
+		glUniform1i(m_uCloudShadowMap, 19);
+		glUniform4fv(m_uCloudShadowA, 1, glm::value_ptr(cloudShA));
+		glUniform4fv(m_uCloudShadowB, 1, glm::value_ptr(cloudShB));
 		PushGISceneUniforms(m_giLocsUnlit, giShadingActive, giReflActive);
 
 		// Lights + CSM/local-shadow uniforms (clamped to the shader's MAX_LIGHTS).
@@ -9216,6 +9460,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uInstAO, 4);
 			glUniform2f(m_uInstViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uInstSSAOEnabled, aoActive ? 1 : 0);
+			glUniform1i(m_uInstCloudShadowMap, 19);
+			glUniform4fv(m_uInstCloudShadowA, 1, glm::value_ptr(cloudShA));
+			glUniform4fv(m_uInstCloudShadowB, 1, glm::value_ptr(cloudShB));
 			PushGISceneUniforms(m_giLocsInstanced, giShadingActive, giReflActive);
 			// Same lights + CSM block as the unlit program; the shadow ATLASES are
 			// already bound on units 1/11 above (texture units are shared).
@@ -9291,6 +9538,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// Weather surface response (same values as the built-in programs).
 			lit.weather[0] = GetEnvironment().wetness;
 			lit.weather[1] = GetEnvironment().snowAmount;
+			// Cloud shadows — the same region/strength the built-in programs get
+			// (uCloudShadowA/B), so heLitP materials darken identically.
+			{
+				const glm::vec4 csA = m_cloudShadowParamsA;
+				const glm::vec4 csB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
+				std::memcpy(lit.cloudShadowA, glm::value_ptr(csA), 4 * sizeof(float));
+				std::memcpy(lit.cloudShadowB, glm::value_ptr(csB), 4 * sizeof(float));
+			}
 			// DDGI probe grid — the same values PushGISceneUniforms hands
 			// the built-in programs, so heLitP's indirect diffuse matches.
 			lit.giGridOrigin[0] = m_giGridOrigin.x;
@@ -10037,6 +10292,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glActiveTexture(GL_TEXTURE0);
 			glUniform2f(m_uSkinnedViewport, static_cast<float>(pw), static_cast<float>(ph));
 			glUniform1i(m_uSkinnedSSAOEnabled, aoActive ? 1 : 0);
+			glUniform1i(m_uSkinnedCloudShadowMap, 19);
+			glUniform4fv(m_uSkinnedCloudShadowA, 1, glm::value_ptr(cloudShA));
+			glUniform4fv(m_uSkinnedCloudShadowB, 1, glm::value_ptr(cloudShB));
 			PushGISceneUniforms(m_giLocsSkinned, giShadingActive, giReflActive);
 
 			constexpr int kMaxBones = 128;

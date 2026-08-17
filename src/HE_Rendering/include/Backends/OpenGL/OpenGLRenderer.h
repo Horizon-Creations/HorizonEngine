@@ -407,6 +407,9 @@ private:
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
 	int          m_uWetness       = -1;   // weather wet-surface response
 	int          m_uSnow          = -1;   // weather snow cover
+	int          m_uCloudShadowMap = -1;  // cloud-shadow transmittance map sampler unit (19)
+	int          m_uCloudShadowA   = -1;  // vec4: region origin XZ, 1/size, mid-plane Y
+	int          m_uCloudShadowB   = -1;  // vec4: x = strength (0 = off)
 	// Uploaded asset meshes, keyed by asset UUID
 	std::unordered_map<HE::UUID, GpuMesh>         m_meshCache;
 	std::unordered_map<HE::UUID, GpuSkeletalMesh> m_skeletalMeshCache;
@@ -444,6 +447,9 @@ private:
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
+	int          m_uSkinnedCloudShadowMap  = -1;
+	int          m_uSkinnedCloudShadowA    = -1;
+	int          m_uSkinnedCloudShadowB    = -1;
 
 	// ── GPU-instanced pipeline (same-mesh batching via glDrawElementsInstanced) ─
 	// kInstancedVS reads per-instance model matrices from a VBO at attrib locs 4–7
@@ -481,6 +487,9 @@ private:
 	int          m_uInstSSAOEnabled         = -1;
 	int          m_uInstWetness             = -1;
 	int          m_uInstSnow                = -1;
+	int          m_uInstCloudShadowMap      = -1;
+	int          m_uInstCloudShadowA        = -1;
+	int          m_uInstCloudShadowB        = -1;
 
 	// ── GPU weather particles (transform-feedback precipitation) ────────────
 	// A fixed pool of rain/snow drops lives in two ping-pong VBOs (interleaved
@@ -572,6 +581,8 @@ private:
 	int          m_uSkyAuroraFragment = -1; // aurora streak fragmentation
 	int          m_uSkyWind        = -1;  // cloud drift vector
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
+	int          m_uSkyCloudShadowPass   = -1; // 1 = render the cloud-shadow map (transmittance only)
+	int          m_uSkyCloudShadowRegion = -1; // vec4: origin XZ, region size, map size px
 	int          m_uSkyFlash       = -1;  // lightning flash brightness
 	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
 	int          m_uSkyCloudQuality = -1; // cloud raymarch quality: 0 Low, 1 Med, 2 High
@@ -713,6 +724,19 @@ private:
 	int          m_uSkyShootingStars = -1;
 	void         EnsureCloudTarget(int width, int height);
 	void         DestroyCloudTarget();
+	// ── Cloud shadows (EnvironmentSettings.cloudShadows) ────────────────────
+	// One 512² R8 pass per frame (m_skyProgram with uCloudShadowPass=1) renders
+	// the cloud slab's sun transmittance over a world-space XZ region around
+	// the camera; the lit shaders + heLitP sample it on unit 19 and darken the
+	// directional light. m_cloudShadowParams* carry the region/strength the
+	// pass computed this frame (strength 0 = pass skipped).
+	unsigned int m_cloudShadowFBO = 0;
+	unsigned int m_cloudShadowTex = 0;         // R8, kCloudShadowMapSize²
+	glm::vec4    m_cloudShadowParamsA = glm::vec4(0.0f); // xy origin, z 1/size, w mid-plane Y
+	glm::vec4    m_cloudShadowParamsB = glm::vec4(0.0f); // x strength (0 = off this frame)
+	void         EnsureCloudShadowTarget();
+	void         DestroyCloudShadowTarget();
+	void         RenderCloudShadowMap();
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;

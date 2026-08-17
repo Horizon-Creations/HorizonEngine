@@ -41,6 +41,7 @@ IRenderer::EnvironmentSettings makeEnvironmentSettings(EnvironmentComponent& env
         .wetness = env.wetness, .snowAmount = env.snowAmount, .rainAmount = env.rainAmount,
         .cloudMode = env.cloudMode, .cloudHeight = env.cloudHeight,
         .cloudQuality = env.cloudQuality, .lowResClouds = env.lowResClouds,
+        .cloudShadows = env.cloudShadows, .cloudShadowStrength = env.cloudShadowStrength,
         .cloudDensity = env.cloudDensity, .cloudFluffiness = env.cloudFluffiness,
         .cloudTint = env.cloudTint,
         .contrailAmount = env.contrailAmount,

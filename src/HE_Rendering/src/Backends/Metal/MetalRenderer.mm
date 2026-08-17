@@ -221,6 +221,12 @@ struct SceneUniforms {
 	// Metal clip). Spot = 1 layer, point = 6 cube-face layers (+X −X +Y −Y +Z −Z);
 	// a light's first layer is in its LightGPU.params.y.
 	float4x4 localShadowVP[16];
+	// Cloud shadows (texture 16): the sky's cloud layer projected along the sun.
+	//   cloudShadowA: xy = region origin (world XZ), z = 1/region size,
+	//                 w = cloud-slab mid-plane world Y
+	//   cloudShadowB: x = strength (0 = off)
+	float4   cloudShadowA;
+	float4   cloudShadowB;
 };
 
 // GI (Checkpoint B/C): fragmentMain buffer(3). Deliberately separate from
@@ -496,6 +502,29 @@ float3 applyFog(float3 color, float3 camPos, float3 worldPos, float3 sunDir, flo
 	return mix(color, fogCol, clamp(f, 0.0, 1.0));
 }
 
+// Cloud-shadow visibility for the directional light (1 = fully lit): project
+// the fragment along L (toward the light) onto the cloud slab's mid-plane and
+// sample the per-frame transmittance map. Edge fade hides the region border.
+// Samples through a constexpr sampler — the map is bound as a TEXTURE only
+// (slot 16), matching the material preamble's heCloudShadow pin.
+// SYNC: mirror of heCloudShadowFactor (MaterialShaderLibrary.cpp) and the GL
+// kUnlitFS cloudShadowFactor — change one, change all.
+float cloudShadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 L,
+                        texture2d<float> cloudShadowTex)
+{
+	constexpr sampler cs(filter::linear, address::clamp_to_edge);
+	float s = scene.cloudShadowB.x;
+	if (s <= 0.0 || L.y <= 0.05) return 1.0;
+	float t = (scene.cloudShadowA.w - worldPos.y) / L.y;
+	if (t <= 0.0) return 1.0;
+	float2 uv = (worldPos.xz + L.xz * t - scene.cloudShadowA.xy) * scene.cloudShadowA.z;
+	float2 e = min(uv, 1.0 - uv);
+	float edge = smoothstep(0.0, 0.08, min(e.x, e.y));
+	if (edge <= 0.0) return 1.0;
+	float T = cloudShadowTex.sample(cs, uv).r;
+	return mix(1.0, T, s * edge);
+}
+
 // Blinn-Phong over up to 8 scene lights; lightCount == 0 falls back to the
 // fixed "headlight" so unlit scenes don't render black.
 fragment float4 fragmentMain(VSOut in [[stage_in]],
@@ -527,7 +556,13 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
                              texture2d<float> ssrTex      [[texture(9)]],
                              sampler          ssrSmp      [[sampler(9)]],
                              texture2d<float> giReflTex   [[texture(10)]],
-                             sampler          giReflSmp   [[sampler(10)]])
+                             sampler          giReflSmp   [[sampler(10)]],
+                             // Cloud-shadow transmittance map — texture 16, NO
+                             // sampler argument (constexpr sampler in
+                             // cloudShadowFactor): the fragment stage is at
+                             // Metal's 16-sampler cap. Shares the slot with the
+                             // material preamble's heCloudShadow pin.
+                             texture2d<float> cloudShadowTex [[texture(16)]])
 {
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
@@ -648,6 +683,9 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 			sh = (gi.enabled != 0
 				? giShadowTex.sample(giShadowSmp, in.position.xy / scene.viewport.xy).r
 				: shadowFactor(scene, in.worldPos, N, L, viewZ, shadowMap, shadowSmp, dbgCascade));
+			// Cloud shadows multiply on top of both shadow sources — the
+			// geometry shadow and the cloud layer occlude independently.
+			sh *= cloudShadowFactor(scene, in.worldPos, L, cloudShadowTex);
 		}
 		else
 		{
@@ -3547,6 +3585,69 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	return baseSky * T + L;
 }
 
+// ── Cloud-shadow map pass ────────────────────────────────────────────────────
+// Renders the cloud slab's sun transmittance over a world-space XZ region
+// around the camera into a small R8 target (one fullscreen triangle per frame).
+// Each texel = a point on the slab's MID-PLANE; a short march along the sun
+// direction through the slab accumulates the SAME density field applyClouds3D
+// raymarches (coverage fBm → presence → tower profile → billow erosion, fine
+// octave skipped — map texels are ~20 m), so ground shadows line up with the
+// clouds overhead. The lit shaders project fragments along L onto the
+// mid-plane and sample this map (cloudShadowFactor / heCloudShadowFactor).
+// region: xy = region origin (world XZ), z = region world size, w = map size px.
+fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
+                                    constant SkyParams& p [[buffer(0)]],
+                                    constant float4& region [[buffer(1)]],
+                                    texture3d<float> noiseTex [[texture(1)]],
+                                    sampler noiseSamp [[sampler(1)]])
+{
+	float2 uv = in.position.xy / max(region.w, 1.0);
+	float2 xz = region.xy + uv * region.z;
+	float3 sd = normalize(p.sunDir.xyz);
+	if (sd.y <= 0.05) return float4(1.0);
+	float coverage = clamp(p.params.y, 0.0, 1.0);
+	if (coverage <= 0.0) return float4(1.0);
+	float time    = p.params.z;
+	float3 wind   = p.wind.xyz;
+	float cloudH  = max(p.cloud.x, 1.0);
+	float thick   = cloudH * 1.5;
+	float baseY   = p.cameraPos.y + cloudH;
+	float midY    = baseY + 0.5 * thick;
+	float fluff   = clamp(p.cloud.z, 0.0, 1.0);
+	float densMul = clamp(p.cloud.y, 0.0, 3.0);
+	float lo      = mix(0.70, 0.22, coverage);
+	float nscale  = 1.6 / cloudH;
+	// Slab entry/exit along the sun ray through the mid-plane point.
+	float t0 = (baseY - midY) / sd.y;
+	float t1 = (baseY + thick - midY) / sd.y;
+	const int M = 6;
+	float ds = (t1 - t0) / float(M);
+	float od = 0.0;
+	for (int i = 0; i < M; ++i)
+	{
+		float3 pos = float3(xz.x, midY, xz.y) + sd * (t0 + (float(i) + 0.5) * ds);
+		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+		float3 np  = pos * nscale + wind * time;
+		float cover = cloudCoverFbm(np + float3(0.0, time * 0.03, 0.0), 1.0, noiseTex, noiseSamp);
+		float pres  = smoothstep(lo, lo + 0.26, cover);
+		if (pres <= 0.0) continue;
+		float towerTop = mix(0.32, 1.0, smoothstep(lo, lo + 0.30, cover));
+		float rise     = smoothstep(0.0, 0.18, hf);
+		rise *= rise;
+		float crown    = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
+		float vshape   = rise * crown;
+		if (vshape <= 0.0) continue;
+		float billow = cloudBillowFbm(np * 1.2 + float3(time * 0.03, 0.0, 0.0), 1.0, noiseTex, noiseSamp);
+		float erLo   = mix(0.30, 0.14, fluff);
+		float erBite = mix(0.30, 0.62, fluff);
+		float erode  = mix(1.0, smoothstep(erLo, erLo + erBite, billow),
+		                   mix(0.45, 1.0, hf) * (0.55 + 0.45 * fluff));
+		// Same optical-depth normalisation as the view march (ds/thick * 7).
+		od += pres * vshape * erode * (ds / thick) * 7.0 * densMul;
+	}
+	return float4(exp(-od));
+}
+
 // Nebula filament line: a single thin iso-contour of a value-noise field.
 // Level sets of a smooth field are closed loops around its extrema; the web is
 // built from the UNION of several INDEPENDENT single-iso families (different
@@ -4647,7 +4748,14 @@ struct SceneUniforms
 	// Local (point/spot) shadow atlas view-projs (already Metal clip); a light's
 	// first layer index rides in its LightGPU params.y (-1 = casts no shadow).
 	glm::mat4 localShadowVP[16] = {};
+	// Cloud shadows (must mirror the MSL struct): A = region origin XZ /
+	// 1/size / slab mid-plane Y; B.x = strength (0 = off).
+	glm::vec4 cloudShadowA = glm::vec4(0.0f);
+	glm::vec4 cloudShadowB = glm::vec4(0.0f);
 };
+static_assert(sizeof(SceneUniforms) ==
+              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 2 * 16,
+              "SceneUniforms must stay byte-identical to its MSL twin");
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
 struct SSAOPosUniforms
@@ -4970,6 +5078,8 @@ void MetalRenderer::Shutdown()
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
+	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
+	DestroyCloudShadowTarget();
 	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
@@ -5276,6 +5386,17 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: cloud pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_cloudPipeline = (void*)CFBridgingRetain(cloudPso);
+
+		// ── Cloud-shadow pipeline (world-region cloud transmittance → R8, no depth) ──
+		MTLRenderPipelineDescriptor* csDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		csDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		csDesc.fragmentFunction = [skyLib newFunctionWithName:@"cloudShadowFragment"];
+		csDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+		id<MTLRenderPipelineState> csPso = [device newRenderPipelineStateWithDescriptor:csDesc error:&skyError];
+		if (!csPso)
+			throw std::runtime_error(std::string("MetalRenderer: cloud-shadow pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_cloudShadowPipeline = (void*)CFBridgingRetain(csPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -8980,6 +9101,99 @@ void MetalRenderer::EncodeCloudPrepass(void* cmdBufPtr, const glm::mat4& invView
 	[enc endEncoding];
 }
 
+// ── Cloud shadows ────────────────────────────────────────────────────────────
+static constexpr int kCloudShadowMapSize = 512;
+
+void MetalRenderer::EnsureCloudShadowTarget()
+{
+	if (m_cloudShadowTex) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	MTLTextureDescriptor* d = [MTLTextureDescriptor
+		texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+		width:kCloudShadowMapSize height:kCloudShadowMapSize mipmapped:NO];
+	d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModePrivate;
+	m_cloudShadowTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+}
+
+void MetalRenderer::DestroyCloudShadowTarget()
+{
+	if (m_cloudShadowTex) { CFBridgingRelease(m_cloudShadowTex); m_cloudShadowTex = nullptr; }
+}
+
+// Render the cloud slab's sun transmittance over a world-space XZ region around
+// the camera (kSkyMSL cloudShadowFragment — the sky's own density field). Runs
+// right after the shadow map, BEFORE the G-buffer/scene passes, which sample the
+// result at texture 16. Computes and stores the region + strength every frame
+// (m_cloudShadowParamsA/B) for the SceneUniforms/Lighting fills; strength 0 =
+// feature off this frame (the shaders then never sample the map).
+void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
+{
+	m_cloudShadowParamsB = glm::vec4(0.0f);
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	if (!(env.skyEnabled && env.cloudShadows && env.cloudShadowStrength > 0.0f
+	      && env.cloudCoverage > 0.001f && m_cloudShadowPipeline))
+	{
+		DestroyCloudShadowTarget(); // freed when toggled off
+		return;
+	}
+	// Shadows are cast along the DOMINANT directional light (the same pick CSM
+	// and the material lighting shadow along), not the raw sky-dome sun.
+	glm::vec3 toward(0.0f, 1.0f, 0.0f), lightColor(0.0f);
+	if (!m_renderWorld.dominantDirectionalLight(toward, lightColor)) return;
+	toward = glm::normalize(toward);
+	// Fade out toward the horizon: near-horizontal projections stretch to
+	// infinity and the direct light is dim there anyway.
+	const float strength = glm::clamp(env.cloudShadowStrength, 0.0f, 1.0f)
+	                     * glm::smoothstep(0.08f, 0.18f, toward.y);
+	if (strength <= 0.001f) return;
+	EnsureCloudShadowTarget();
+	if (!m_cloudShadowTex) return;
+
+	const float     cloudH = std::max(env.cloudHeight, 1.0f);
+	const float     thick  = cloudH * 1.5f;
+	const glm::vec3 cam    = m_renderWorld.camera.position;
+	const float     midY   = cam.y + cloudH + 0.5f * thick;
+	// Region: covers ±30 cloud-heights around where the camera's own position
+	// projects onto the slab along the light (~6 km at the default height 200).
+	const float half  = cloudH * 30.0f;
+	const float size  = half * 2.0f;
+	const float texel = size / static_cast<float>(kCloudShadowMapSize);
+	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - cam.y);
+	if (glm::length(offs) > half * 4.0f) offs = glm::normalize(offs) * (half * 4.0f);
+	glm::vec2 origin = glm::vec2(cam.x, cam.z) + offs - glm::vec2(half);
+	origin = glm::floor(origin / texel) * texel; // texel snap — no swimming on camera moves
+	m_cloudShadowParamsA = glm::vec4(origin.x, origin.y, 1.0f / size, midY);
+	m_cloudShadowParamsB = glm::vec4(strength, 0.0f, 0.0f, 0.0f);
+
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_cloudShadowTex;
+	pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	pass.colorAttachments[0].clearColor  = MTLClearColorMake(1.0, 1.0, 1.0, 1.0); // T=1 (no shadow)
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_cloudShadowPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
+	// BuildSkyFrameParams supplies everything the density formula needs
+	// (coverage/wind/time/height/density/fluffiness) — sunDir overridden with
+	// the dominant light so the march direction matches the shading.
+	HE::SkyFrameInputs in;
+	in.sunDir    = toward;
+	in.cameraPos = cam;
+	in.time      = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+		in.time = static_cast<float>(std::atof(ov)); // deterministic headless captures
+	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
+	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
+	const glm::vec4 region(origin.x, origin.y, size, static_cast<float>(kCloudShadowMapSize));
+	[enc setFragmentBytes:&region length:sizeof(region) atIndex:1];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+}
+
 void MetalRenderer::SetBloomSettings(const BloomSettings& s)
 {
 	m_bloomEnabled   = s.enabled;
@@ -9904,6 +10118,11 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
+	// (both fragmentMain and the material preamble sample it through an inline
+	// constexpr sampler; sampler indices stop at 15). White dummy when the
+	// pass didn't run, and the strength gate is 0 then anyway.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
 	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
 	// scene pass already set above for the built-in shaders (Metal caps the
 	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
@@ -10108,6 +10327,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:14];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(ssaoActive ? m_ssaoResult : m_dummyTexture) atIndex:15];
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:15];
+	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
+	// (both fragmentMain and the material preamble sample it through an inline
+	// constexpr sampler; sampler indices stop at 15). White dummy when the
+	// pass didn't run, and the strength gate is 0 then anyway.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
 	// The material preamble's DDGI atlases map onto slots 6/7 — the pins the
 	// scene pass already set above for the built-in shaders (Metal caps the
 	// fragment stage at 16 samplers, so they cannot get their own). Nothing to
@@ -10164,6 +10388,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	                           m_ssrMaxRoughness, m_fwdReflGiTex ? 1.0f : 0.0f);
 	scene.reflCfg2 = glm::vec4(m_giReflIntensity, m_giReflMaxRoughness,
 	                           0.0f, m_giReflBlurFloor);
+	// Cloud shadows — region + strength EncodeCloudShadow computed this frame
+	// (strength 0 when the pass didn't run → the shader never samples the map).
+	scene.cloudShadowA = m_cloudShadowParamsA;
+	scene.cloudShadowB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
 	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
@@ -10750,6 +10978,14 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// built-in shaders read (SceneUniforms::weather).
 	matLight.weather[0] = GetEnvironment().wetness;
 	matLight.weather[1] = GetEnvironment().snowAmount;
+	// Cloud shadows — the same region/strength the built-in shaders get
+	// (SceneUniforms::cloudShadowA/B), so heLitP materials darken identically.
+	{
+		const glm::vec4 csA = m_cloudShadowParamsA;
+		const glm::vec4 csB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
+		std::memcpy(matLight.cloudShadowA, &csA[0], 4 * sizeof(float));
+		std::memcpy(matLight.cloudShadowB, &csB[0], 4 * sizeof(float));
+	}
 	// DDGI probe grid — the SAME values BuildGIUniforms hands the built-in
 	// shaders, so heLitP's indirect diffuse matches theirs instead of
 	// falling back to flat ambient while GI is on.
@@ -11002,6 +11238,10 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	bindTex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex, 12);
 	bindTex(m_skyEnvCube, 14);
 	bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15);
+	// Cloud-shadow map: TEXTURE only at 16 — sampler indices stop at 15; the
+	// preamble samples it through an inline constexpr sampler.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture)
+	                    atIndex:16];
 
 	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	++m_counters.draws;
@@ -12467,6 +12707,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			shH = shOff ? (int)m_viewportReqH : ph;
 			EncodeShadowMap((__bridge void*)cmdBuf,
 			                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
+			// sample it at texture 16). Uses the extraction EncodeShadowMap just
+			// ran (dominant light + camera).
+			EncodeCloudShadow((__bridge void*)cmdBuf);
 		}
 
 		// Step the GPU weather-particle pool once per frame (primary only), before the

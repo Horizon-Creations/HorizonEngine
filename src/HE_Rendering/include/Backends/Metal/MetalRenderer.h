@@ -752,6 +752,22 @@ private:
 	void  EncodeCloudPrepass(void* cmdBuf, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                         float time, int width, int height);
 
+	// ── Cloud shadows (EnvironmentSettings.cloudShadows) ────────────────────
+	// One 512² R8 pass per frame renders the cloud slab's sun transmittance
+	// over a world-space XZ region around the camera (cloudShadowFragment in
+	// kSkyMSL — the same density field the sky raymarches). The lit shaders +
+	// heLitP project fragments along the light onto the slab mid-plane and
+	// darken the directional term (SceneUniforms/Lighting cloudShadowA/B,
+	// texture 16). m_cloudShadowParams* carry the region/strength the encode
+	// computed this frame for every fill site; strength 0 = pass skipped.
+	void*     m_cloudShadowPipeline = nullptr; // id<MTLRenderPipelineState> (skyVertex + cloudShadowFragment)
+	void*     m_cloudShadowTex      = nullptr; // id<MTLTexture> R8, kCloudShadowMapSize²
+	glm::vec4 m_cloudShadowParamsA  = glm::vec4(0.0f); // xy origin, z 1/size, w mid-plane Y
+	glm::vec4 m_cloudShadowParamsB  = glm::vec4(0.0f); // x strength (0 = off this frame)
+	void  EnsureCloudShadowTarget();
+	void  DestroyCloudShadowTarget();
+	void  EncodeCloudShadow(void* cmdBuf);
+
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
 	// kernel occlusion estimate, blurred and then sampled by the scene shader to

@@ -45,6 +45,12 @@ struct EnvironmentComponent
     // Scales the view-ray step count and sun light-march steps in both cloud paths.
     // Lower = cheaper (helps on integrated GPUs / Apple Silicon Air); default Medium.
     int   cloudQuality = 1;
+    // Cloud shadows: the procedural cloud layer casts moving shadows onto the
+    // scene (projected along the sun; one small transmittance-map pass per
+    // frame). Darkens only the sun/moon directional light — ambient is
+    // untouched, so shadowed ground reads as "under a cloud", not night.
+    bool  cloudShadows        = true;
+    float cloudShadowStrength = 0.7f;   // 0 = invisible … 1 = full darkening
     // Low-resolution cloud pass (performance): raymarch the clouds at quarter resolution
     // into an offscreen buffer, then bilinear-upsample + composite. Big win in open-sky
     // views (clouds are the dominant per-pixel sky cost). Default OFF = the proven inline

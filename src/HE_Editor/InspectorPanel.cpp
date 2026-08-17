@@ -306,6 +306,14 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			hint("Density thickens, fluffiness breaks the bodies into puffy cauliflower lumps.");
 			Row::sliderFloat("Wind Direction", &env->windDirection, 0.0f, 360.0f, "%.0f\xc2\xb0"); trackEdit();
 			Row::sliderFloat("Wind Speed", &env->windSpeed, 0.0f, 4.0f); trackEdit();
+			// Cloud shadows: the layer projected along the sun onto the scene.
+			if (ImGui::Checkbox("Cast Cloud Shadows", &env->cloudShadows)) trackEdit();
+			hint("The cloud layer casts moving shadows onto the scene (sun-projected; "
+			     "one small map pass per frame). Metal + OpenGL.");
+			if (env->cloudShadows)
+			{
+				Row::sliderFloat("Shadow Strength", &env->cloudShadowStrength, 0.0f, 1.0f); trackEdit();
+			}
 
 			ImGui::TreePop(); } // end Clouds
 
