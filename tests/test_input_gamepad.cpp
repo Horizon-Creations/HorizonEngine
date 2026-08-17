@@ -524,6 +524,29 @@ TEST_CASE("Assets: mouse button name table round-trips, display names exist")
         CHECK_FALSE(HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b)).empty());
 }
 
+TEST_CASE("Assets: an axesX-only entry still registers as a 2D axis")
+{
+    // The editor writes axesX (no axesY yet) for an entry whose ACTION is
+    // declared Axis2D — the loader must register it 2D, or axis2DValue()
+    // answers 0,0 for a mapping that clearly has an X binding.
+    InputMapping m;
+    const char* json = R"({"entries":[
+        {"action":"Input/Move.hasset","axesX":[{"source":"GamepadLeftX","scale":1.0}]}
+    ]})";
+    CHECK(HE::applyInputMappingContext(m, json) == 1);
+
+    GamepadFrame f;
+    f.connected = true;
+    f.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    Input input = inputWithFrame(f);
+    m.tick(input);
+
+    float x = 0.0f, y = 0.0f;
+    m.axis2DValue("Move", x, y);
+    CHECK(x == doctest::Approx(1.0f));
+    CHECK(m.axisValue("Move") == 0.0f); // and NOT as a 1D axis
+}
+
 // ─── End to end: SDL virtual gamepad ─────────────────────────────────────────
 // A real SDL device (no hardware, works headless — verified on macOS) through
 // the REAL plumbing: hot-plug event → Input opens the pad → PollGamepads reads

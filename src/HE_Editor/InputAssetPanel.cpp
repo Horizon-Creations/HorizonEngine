@@ -17,6 +17,7 @@
 #include <SDL3/SDL.h>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -54,6 +55,14 @@ struct MapEntry
 	std::vector<AxisRow>     axes;     // Axis bindings (a 2D action's X)
 	std::vector<AxisRow>     axesY;    // a 2D action's Y — its own list, so the
 	                                   // 1D reader can never half-read one
+	// The referenced action's declared value type, resolved lazily from its
+	// asset: -1 unresolved, -2 unresolvable (action missing), else 0 Button /
+	// 1 Axis / 2 Axis2D. It steers what the Add Binding menu offers — a
+	// Button action gets buttons, an Axis action gets axis sources — and it
+	// makes an Axis 2D entry encode as axesX/axesY even while its Y list is
+	// still empty (the old shape-based rule silently wrote a 1D "axes" then,
+	// and axis2DValue() answered 0,0 at runtime). Reset to -1 on retarget.
+	int valueType = -1;
 };
 struct PanelState
 {
@@ -89,6 +98,7 @@ struct CaptureState
 	bool         prevKeys[SDL_SCANCODE_COUNT] = {};      // last frame's held-key snapshot
 	uint32_t     prevMouse  = 0;                         // …held-mouse-button mask
 	bool         prevPad[SDL_GAMEPAD_BUTTON_COUNT] = {}; // …held-pad-button snapshot
+	float        prevAxes[SDL_GAMEPAD_AXIS_COUNT] = {};  // …raw stick/trigger values
 };
 CaptureState s_capture;
 
@@ -102,7 +112,12 @@ struct DetectedBinding
 	std::string key;           // SDL scancode name
 	std::string mouseButton;   // "left"/"right"/… (HE::mouseButtonName)
 	std::string gamepadButton; // SDL button string ("a"/"dpup"/…)
-	bool any() const { return !key.empty() || !mouseButton.empty() || !gamepadButton.empty(); }
+	int         axisSource = -1; // AxisSource value for a moved stick/trigger
+	bool any() const
+	{
+		return !key.empty() || !mouseButton.empty() || !gamepadButton.empty() ||
+		       axisSource >= 0;
+	}
 };
 
 void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind)
@@ -185,12 +200,16 @@ std::string encodeMapping(const std::vector<MapEntry>& entries)
 			}
 			return arr;
 		};
-		// A Y list is what makes this a 2D entry, so the X list is written under
-		// "axesX" then — a loader reading "axes" must not pick up half of one.
-		if (!e.axesY.empty())
+		// An entry is 2D when its ACTION declares Axis2D — or, for an entry
+		// whose action could not be resolved, when a Y list exists (the old
+		// shape rule, kept as the fallback). Writing axesX for a 2D entry even
+		// while Y is still empty matters: "axes" would register a 1D mapping
+		// and axis2DValue() would answer 0,0 for it at runtime.
+		const bool as2D = e.valueType == 2 || (e.valueType < 0 && !e.axesY.empty());
+		if (as2D)
 		{
-			if (!e.axes.empty()) je["axesX"] = writeAxes(e.axes);
-			je["axesY"] = writeAxes(e.axesY);
+			if (!e.axes.empty())  je["axesX"] = writeAxes(e.axes);
+			if (!e.axesY.empty()) je["axesY"] = writeAxes(e.axesY);
 		}
 		else if (!e.axes.empty())
 			je["axes"] = writeAxes(e.axes);
@@ -602,8 +621,16 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			// a fresh press — that click itself included.
 			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
 			s_capture.prevMouse = mouseMask;
-			if (pad) std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
-			else     std::memset(s_capture.prevPad, 0, sizeof(s_capture.prevPad));
+			if (pad)
+			{
+				std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
+				std::memcpy(s_capture.prevAxes, pad->axes, sizeof(s_capture.prevAxes));
+			}
+			else
+			{
+				std::memset(s_capture.prevPad, 0, sizeof(s_capture.prevPad));
+				std::memset(s_capture.prevAxes, 0, sizeof(s_capture.prevAxes));
+			}
 			s_capture.primed = true;
 		}
 		else
@@ -634,9 +661,26 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 						break;
 					}
 			}
+			// A stick pushed past 0.6 (from below) counts as "this axis" —
+			// raw values on purpose, so it works whatever the deadzone is.
+			if (pad && !detected.any() && !captureWasCancelled)
+			{
+				static const AxisSource kAxisFor[SDL_GAMEPAD_AXIS_COUNT] = {
+					AxisSource::GamepadLeftX,  AxisSource::GamepadLeftY,
+					AxisSource::GamepadRightX, AxisSource::GamepadRightY,
+					AxisSource::GamepadLeftTrigger, AxisSource::GamepadRightTrigger,
+				};
+				for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
+					if (std::fabs(pad->axes[a]) >= 0.6f && std::fabs(s_capture.prevAxes[a]) < 0.6f)
+					{ detected.axisSource = static_cast<int>(kAxisFor[a]); break; }
+			}
 			std::memcpy(s_capture.prevKeys, keyState, sizeof(bool) * numKeys);
 			s_capture.prevMouse = mouseMask;
-			if (pad) std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
+			if (pad)
+			{
+				std::memcpy(s_capture.prevPad, pad->buttons, sizeof(s_capture.prevPad));
+				std::memcpy(s_capture.prevAxes, pad->axes, sizeof(s_capture.prevAxes));
+			}
 		}
 	}
 	// Any structural edit below (add/remove key, axis or entry) can shift the
@@ -682,11 +726,28 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		{
 			for (const auto& a : actions)
 				if (ImGui::Selectable(a.label.c_str(), a.path == e.actionPath))
-				{ e.actionPath = a.path; st.dirty = true; }
+				{ e.actionPath = a.path; e.valueType = -1; st.dirty = true; }
 			ImGui::EndCombo();
 		}
 		ImGui::SameLine();
 		if (EditorWidgets::dangerButton("Remove", ImVec2(100.0f, 0.0f))) removeEntry = i;
+
+		// Resolve the action's declared type once (retried only on retarget).
+		// It steers the whole card: which bindings the add menu offers, and
+		// whether the entry encodes as 1D or 2D axes.
+		if (e.valueType == -1 && !e.actionPath.empty() && ctx.contentManager)
+		{
+			const HE::UUID id = ctx.contentManager->loadAsset(e.actionPath);
+			if (const InputActionAsset* a = ctx.contentManager->getInputAction(id))
+				e.valueType = HE::inputActionIsAxis2D(a->json) ? 2
+				            : HE::inputActionIsAxis(a->json)   ? 1 : 0;
+			else
+				e.valueType = -2;   // missing action: legacy shape-based behaviour
+		}
+		if (e.valueType >= 0)
+			ImGui::TextDisabled(e.valueType == 2 ? "Type: Axis 2D — bind axis sources for X and Y"
+			                  : e.valueType == 1 ? "Type: Axis — bind axis sources"
+			                                     : "Type: Button — bind keys and buttons");
 
 		// ── Keys ─────────────────────────────────────────────────────────────
 		int removeKey = -1;
@@ -904,7 +965,8 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			return remove;
 		};
 
-		const bool is2D = !e.axesY.empty();
+		// 2D by declaration when the action resolves, by shape as fallback.
+		const bool is2D = e.valueType == 2 || !e.axesY.empty();
 		int removeAxis = -1, removeAxisY = -1;
 		if (!e.axes.empty())
 		{
@@ -930,65 +992,90 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		if (removeAxisY >= 0) { e.axesY.erase(e.axesY.begin() + removeAxisY); st.dirty = true; cancelCaptureForThisAsset(); }
 
 		// ── Card footer: grow the entry ──────────────────────────────────────
+		// What the add menu offers is the ACTION's choice, not the user's:
+		// a Button action binds buttons, an Axis/Axis 2D action binds axis
+		// sources. Unresolved (-1/-2) falls back to offering both.
+		const bool offerButtons = e.valueType == 0 || e.valueType < 0;
+		const bool offerAxes1D  = e.valueType == 1 || e.valueType < 0;
+		const bool offerAxes2D  = e.valueType == 2;
+
 		// Apply this frame's Auto Detect result to THIS entry before drawing
-		// the footer, so the pressed button appears in its list immediately.
+		// the footer, so the pressed input appears in its list immediately.
+		// Button entries take buttons; an Axis entry turns a key or pad
+		// button into the POSITIVE half of a new pair row, and a moved stick
+		// or pulled trigger into a source row.
 		if (s_capture.kind == CaptureKind::AnyBinding &&
 		    s_capture.assetPath == assetPath && s_capture.entryIndex == i)
 		{
-			if (detected.any())
+			bool took = false;
+			if (offerButtons)
 			{
-				if      (!detected.key.empty())           e.keys.push_back(detected.key);
-				else if (!detected.mouseButton.empty())   e.mouseButtons.push_back(detected.mouseButton);
-				else if (!detected.gamepadButton.empty()) e.gamepadButtons.push_back(detected.gamepadButton);
-				st.dirty = true;
-				s_capture.kind = CaptureKind::None;
+				if      (!detected.key.empty())           { e.keys.push_back(detected.key); took = true; }
+				else if (!detected.mouseButton.empty())   { e.mouseButtons.push_back(detected.mouseButton); took = true; }
+				else if (!detected.gamepadButton.empty()) { e.gamepadButtons.push_back(detected.gamepadButton); took = true; }
 			}
-			else if (captureWasCancelled)
-				s_capture.kind = CaptureKind::None;
+			else if (offerAxes1D)
+			{
+				if (!detected.key.empty())
+				{
+					AxisRow r; r.positive = detected.key;
+					e.axes.push_back(std::move(r)); took = true;
+				}
+				else if (!detected.gamepadButton.empty())
+				{
+					AxisRow r; r.uiPadRow = true; r.positiveButton = detected.gamepadButton;
+					e.axes.push_back(std::move(r)); took = true;
+				}
+				else if (detected.axisSource >= 0)
+				{
+					AxisRow r; r.source = static_cast<AxisSource>(detected.axisSource);
+					e.axes.push_back(std::move(r)); took = true;
+				}
+			}
+			if (took) { st.dirty = true; s_capture.kind = CaptureKind::None; }
+			else if (captureWasCancelled) s_capture.kind = CaptureKind::None;
 		}
 		const bool detecting = s_capture.kind == CaptureKind::AnyBinding &&
 		                       s_capture.assetPath == assetPath && s_capture.entryIndex == i;
 
 		ImGui::Spacing();
-		// One entry point for every device instead of a button per device: a
-		// searchable list (below) or a press on the actual hardware (right).
+		// One entry point for everything: a searchable, type-aware list — or
+		// (below) a press on the actual hardware.
 		if (ImGui::Button("+ Add Binding", ImVec2(130.0f, 0.0f)))
 		{
 			s_addFilter.clear();
 			ImGui::OpenPopup("##addbinding");
 		}
-		ImGui::SameLine();
-		if (detecting)
+		// Auto Detect makes no sense for a 2D action (which stick half would
+		// a key press mean?) — its quick-adds live in the menu instead.
+		if (!offerAxes2D)
 		{
-			ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
-			if (ImGui::Button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
-				s_capture.kind = CaptureKind::None;
-			ImGui::PopStyleColor(2);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Press a key, click a mouse button or press a\n"
-				                  "gamepad button to bind it. Esc or click to cancel.");
+			ImGui::SameLine();
+			if (detecting)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+				if (ImGui::Button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
+					s_capture.kind = CaptureKind::None;
+				ImGui::PopStyleColor(2);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip(offerButtons
+						? "Press a key, click a mouse button or press a\n"
+						  "gamepad button to bind it. Esc or click to cancel."
+						: "Press a key or pad button (becomes the + half of a\n"
+						  "pair), move a stick or pull a trigger to bind it.\n"
+						  "Esc or click to cancel.");
+			}
+			else if (ImGui::Button("Auto Detect", ImVec2(150.0f, 0.0f)))
+			{
+				beginCapture(assetPath, i, 0, CaptureKind::AnyBinding);
+			}
+			if (!detecting && ImGui::IsItemHovered())
+				ImGui::SetTooltip("Listens on keyboard, mouse AND gamepad at once\n"
+				                  "and binds whatever you press first.");
 		}
-		else if (ImGui::Button("Auto Detect", ImVec2(150.0f, 0.0f)))
-		{
-			beginCapture(assetPath, i, 0, CaptureKind::AnyBinding);
-		}
-		if (!detecting && ImGui::IsItemHovered())
-			ImGui::SetTooltip("Listens on keyboard, mouse AND gamepad at once\n"
-			                  "and adds whatever you press first.");
-		ImGui::SameLine();
-		if (ImGui::Button(is2D ? "+ X Axis" : "+ Axis", ImVec2(110.0f, 0.0f)))
-		{ e.axes.emplace_back(); st.dirty = true; }
-		ImGui::SameLine();
-		// Adding a Y row is what turns the entry into a 2D binding — the same
-		// thing the loader keys on, so the UI and the format agree by shape
-		// rather than by a flag that could disagree with either.
-		if (ImGui::Button("+ Y Axis", ImVec2(110.0f, 0.0f)))
-		{ e.axesY.emplace_back(); st.dirty = true; }
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Makes this a 2D binding — for an Axis 2D action");
 
-		// ── Add Binding popup: one searchable list across all devices ───────
+		// ── Add Binding popup: searchable, shaped by the action's type ──────
 		if (ImGui::BeginPopup("##addbinding"))
 		{
 			ImGui::SetNextItemWidth(260.0f);
@@ -998,32 +1085,115 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::InputTextWithHint("##search", "Search bindings\xE2\x80\xA6", &s_addFilter);
 
 			bool chose = false;
-			ImGui::BeginChild("##addlist", ImVec2(260.0f, 320.0f));
-			ImGui::SeparatorText("Gamepad");
-			for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+			ImGui::BeginChild("##addlist", ImVec2(280.0f, 320.0f));
+
+			// One axis source as a selectable; `into` is which component list
+			// of the entry it lands in.
+			auto axisItem = [&](const char* label, AxisSource src, bool padPair,
+			                    std::vector<AxisRow>& into, const char* idSuffix)
 			{
-				const char* stored = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b));
-				if (!stored || !stored[0]) continue;
-				const std::string label =
-					HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
-				if (!matchesFilter(label, s_addFilter)) continue;
-				if (ImGui::Selectable((label + "##gp").c_str()))
-				{ e.gamepadButtons.emplace_back(stored); st.dirty = true; chose = true; }
+				if (!matchesFilter(label, s_addFilter)) return;
+				if (ImGui::Selectable((std::string(label) + idSuffix).c_str()))
+				{
+					AxisRow r;
+					r.source   = src;
+					r.uiPadRow = padPair;
+					into.push_back(std::move(r));
+					st.dirty = true;
+					chose = true;
+				}
+			};
+			auto axisGroup = [&](std::vector<AxisRow>& into, const char* idSuffix)
+			{
+				axisItem("Left Stick X",    AxisSource::GamepadLeftX,        false, into, idSuffix);
+				axisItem("Left Stick Y",    AxisSource::GamepadLeftY,        false, into, idSuffix);
+				axisItem("Right Stick X",   AxisSource::GamepadRightX,       false, into, idSuffix);
+				axisItem("Right Stick Y",   AxisSource::GamepadRightY,       false, into, idSuffix);
+				axisItem("Left Trigger",    AxisSource::GamepadLeftTrigger,  false, into, idSuffix);
+				axisItem("Right Trigger",   AxisSource::GamepadRightTrigger, false, into, idSuffix);
+				axisItem("Pad Button Pair", AxisSource::Key,                 true,  into, idSuffix);
+				axisItem("Mouse X",         AxisSource::MouseX,              false, into, idSuffix);
+				axisItem("Mouse Y",         AxisSource::MouseY,              false, into, idSuffix);
+				axisItem("Mouse Wheel",     AxisSource::MouseWheel,          false, into, idSuffix);
+				axisItem("Key Pair",        AxisSource::Key,                 false, into, idSuffix);
+			};
+			// A composite drops a ready-made X+Y pair in one click — for the
+			// stick the Y scale is -1 so up is positive, the way gameplay
+			// (and this panel's own help text) expects it.
+			auto composite = [&](const char* label,
+			                     AxisSource sx, const char* px, const char* nx, bool padX,
+			                     AxisSource sy, const char* py, const char* ny, bool padY,
+			                     float scaleY)
+			{
+				if (!matchesFilter(label, s_addFilter)) return;
+				if (ImGui::Selectable((std::string(label) + "##comp").c_str()))
+				{
+					AxisRow x; x.source = sx; x.uiPadRow = padX;
+					if (padX) { x.positiveButton = px; x.negativeButton = nx; }
+					else if (px) { x.positive = px; x.negative = nx; }
+					AxisRow y; y.source = sy; y.uiPadRow = padY; y.scale = scaleY;
+					if (padY) { y.positiveButton = py; y.negativeButton = ny; }
+					else if (py) { y.positive = py; y.negative = ny; }
+					e.axes.push_back(std::move(x));
+					e.axesY.push_back(std::move(y));
+					st.dirty = true;
+					chose = true;
+				}
+			};
+
+			if (offerButtons)
+			{
+				ImGui::SeparatorText("Gamepad");
+				for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
+				{
+					const char* stored = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b));
+					if (!stored || !stored[0]) continue;
+					const std::string label =
+						HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
+					if (!matchesFilter(label, s_addFilter)) continue;
+					if (ImGui::Selectable((label + "##gp").c_str()))
+					{ e.gamepadButtons.emplace_back(stored); st.dirty = true; chose = true; }
+				}
+				ImGui::SeparatorText("Mouse");
+				for (int b = 0; b < kMouseButtonCount; ++b)
+				{
+					const std::string label = HE::mouseButtonDisplayName(b);
+					if (!matchesFilter(label, s_addFilter)) continue;
+					if (ImGui::Selectable((label + "##ms").c_str()))
+					{ e.mouseButtons.push_back(HE::mouseButtonName(b)); st.dirty = true; chose = true; }
+				}
+				ImGui::SeparatorText("Keyboard");
+				for (const std::string& keyName : allKeyNames())
+				{
+					if (!matchesFilter(keyName, s_addFilter)) continue;
+					if (ImGui::Selectable((keyName + "##kb").c_str()))
+					{ e.keys.push_back(keyName); st.dirty = true; chose = true; }
+				}
 			}
-			ImGui::SeparatorText("Mouse");
-			for (int b = 0; b < kMouseButtonCount; ++b)
+			if (offerAxes1D)
 			{
-				const std::string label = HE::mouseButtonDisplayName(b);
-				if (!matchesFilter(label, s_addFilter)) continue;
-				if (ImGui::Selectable((label + "##ms").c_str()))
-				{ e.mouseButtons.push_back(HE::mouseButtonName(b)); st.dirty = true; chose = true; }
+				ImGui::SeparatorText("Axis Sources");
+				axisGroup(e.axes, "##ax");
 			}
-			ImGui::SeparatorText("Keyboard");
-			for (const std::string& keyName : allKeyNames())
+			if (offerAxes2D)
 			{
-				if (!matchesFilter(keyName, s_addFilter)) continue;
-				if (ImGui::Selectable((keyName + "##kb").c_str()))
-				{ e.keys.push_back(keyName); st.dirty = true; chose = true; }
+				ImGui::SeparatorText("Quick Add (X + Y)");
+				composite("Left Stick",  AxisSource::GamepadLeftX, nullptr, nullptr, false,
+				                         AxisSource::GamepadLeftY, nullptr, nullptr, false, -1.0f);
+				composite("Right Stick", AxisSource::GamepadRightX, nullptr, nullptr, false,
+				                         AxisSource::GamepadRightY, nullptr, nullptr, false, -1.0f);
+				composite("D-Pad",       AxisSource::Key, "dpright", "dpleft", true,
+				                         AxisSource::Key, "dpup", "dpdown", true, 1.0f);
+				composite("WASD Keys",   AxisSource::Key, "D", "A", false,
+				                         AxisSource::Key, "W", "S", false, 1.0f);
+				composite("Arrow Keys",  AxisSource::Key, "Right", "Left", false,
+				                         AxisSource::Key, "Up", "Down", false, 1.0f);
+				composite("Mouse Look",  AxisSource::MouseX, nullptr, nullptr, false,
+				                         AxisSource::MouseY, nullptr, nullptr, false, 1.0f);
+				ImGui::SeparatorText("X Axis");
+				axisGroup(e.axes, "##axx");
+				ImGui::SeparatorText("Y Axis");
+				axisGroup(e.axesY, "##axy");
 			}
 			ImGui::EndChild();
 			if (chose) ImGui::CloseCurrentPopup();
