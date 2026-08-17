@@ -416,6 +416,43 @@ public:
                                         glm::mat4* /*outViewProj*/ = nullptr)
     { return nullptr; }
 
+    // ── World preview ──────────────────────────────────────────────────────
+    // Render an ARBITRARY `HorizonWorld` into a dedicated offscreen target —
+    // the only preview path here that takes a world instead of a single asset.
+    // The Class Editor's viewport needs it: a character is a mesh AND colliders
+    // AND a camera boom AND whatever else hangs under its root, and no per-asset
+    // path can show that assembly. The caller owns the world (the editor builds
+    // a scratch one from the class's component blob); this only reads it.
+    //
+    // Deliberate differences from the per-asset previews above:
+    //  • the background is an opaque GRAY with a ground plane and a grid, not
+    //    transparent — this is a scene view in the sense of Unreal's character
+    //    viewport, and a floating mesh with no ground reads as scale-less.
+    //  • the camera orbits a fixed `pivot` (normally the world origin = the
+    //    character's own origin) at `dist` in PLAIN WORLD UNITS. It does NOT
+    //    auto-frame on the content's bounds: the extractor deliberately leaves
+    //    bounds invalid for meshes that are not resident yet, so an auto-fit
+    //    would jump around while assets stream in.
+    //  • lighting is the previews' fixed headlight, not the world's lights — a
+    //    class blob normally contains no light at all, and "your character is
+    //    black" would be the wrong lesson to teach.
+    //
+    // ONE shared target per backend, so exactly one world preview is live at a
+    // time. That matches the call site: asset tabs are exclusive, and ImGui
+    // never executes an inactive tab's content, so only the active tab calls
+    // in a given frame.
+    //
+    // `outViewProj` reports the view-projection used, so the caller can put its
+    // own overlay (origin marker, collider outlines, camera boom) on top in the
+    // same space — same contract as RenderSkeletalPreview. Returns nullptr on
+    // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
+    virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
+                                     uint32_t /*width*/, uint32_t /*height*/,
+                                     float /*yaw*/, float /*pitch*/, float /*dist*/,
+                                     const glm::vec3& /*pivot*/ = glm::vec3(0.0f),
+                                     glm::mat4* /*outViewProj*/ = nullptr)
+    { return nullptr; }
+
     // ── Particle system preview ────────────────────────────────────────────
     // Render a live-simulated particle pool into a small dedicated offscreen
     // target — same conventions as RenderMaterialPreview/RenderSkeletalPreview.

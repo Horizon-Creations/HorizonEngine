@@ -5,6 +5,7 @@
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
+#include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake for the IBL ambient cubemap
 #include <JobSystem/JobSystem.h>              // parallel_for — the bake is per-row parallel
 #include <HorizonRendering/SkyFrameParams.h>  // HE::SkyFrameParams / BuildSkyFrameParams (folds in CloudWindVector)
@@ -4945,6 +4946,12 @@ void MetalRenderer::Shutdown()
 	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
 	m_thumbUISize = 0;
+	// World-preview target (RenderWorldPreview); its pipelines are the skeletal /
+	// mesh preview's, released with those.
+	if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
+	if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
+	m_worldPreviewW = 0;
+	m_worldPreviewH = 0;
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
@@ -7106,21 +7113,16 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	return true;
 }
 
-// The non-graph counterpart: any interleaved pos3/normal3/uv2 buffer, shaded by a
-// small lambert + metallic/roughness-driven highlight. Used for mesh thumbnails and
-// for materials whose only description is their PBR scalars. Same caller contract.
-void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf,
-                                      int indexCount, void* texture, const glm::vec3& center,
-                                      float extent, const glm::vec3& baseColor, float metallic,
-                                      float roughness, float yaw, float pitch, float dist)
+// Build the small unskinned preview pipeline once. Shared by the mesh/material
+// previews and the world preview, so there is exactly one place that knows this
+// shader — a second copy is how two previews start lighting differently.
+bool MetalRenderer::EnsureMeshPreviewPipeline()
 {
-	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	if (m_meshPreviewPipeline) return true;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	if (!enc || !device || !vertexBuf || !indexBuf || indexCount <= 0) return;
-
-	if (!m_meshPreviewPipeline)
+	if (!device) return false;
+	@autoreleasepool
 	{
-		@autoreleasepool
 		{
 			NSError* error = nil;
 			NSString* src = @R"(
@@ -7180,7 +7182,20 @@ fragment float4 meshPreviewFragment(VOut in [[stage_in]],
 				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: mesh-preview shader compile failed");
 		}
 	}
-	if (!m_meshPreviewPipeline) return;
+	return m_meshPreviewPipeline != nullptr;
+}
+
+// The non-graph counterpart: any interleaved pos3/normal3/uv2 buffer, shaded by a
+// small lambert + metallic/roughness-driven highlight. Used for mesh thumbnails and
+// for materials whose only description is their PBR scalars. Same caller contract.
+void MetalRenderer::EncodeMeshPreview(void* renderEncoder, void* vertexBuf, void* indexBuf,
+                                      int indexCount, void* texture, const glm::vec3& center,
+                                      float extent, const glm::vec3& baseColor, float metallic,
+                                      float roughness, float yaw, float pitch, float dist)
+{
+	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
+	if (!enc || !vertexBuf || !indexBuf || indexCount <= 0) return;
+	if (!EnsureMeshPreviewPipeline()) return;
 
 	// Orbit camera auto-framed on the caller's bounds — meshes vary wildly in size
 	// and pivot, so `dist` scales the extent rather than being an absolute distance.
@@ -7637,29 +7652,17 @@ bool MetalRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
 	return CommitAndReadThumbnail((__bridge void*)cb, S, outRgba8);
 }
 
-void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
-                                           const std::vector<glm::mat4>& boneMatrices,
-                                           uint32_t width, uint32_t height,
-                                           float yaw, float pitch, float dist,
-                                           bool showSkeleton,
-                                           glm::mat4* outViewProj)
+// Build the minimal skinning pipeline once — own fixed sun+ambient lighting (no
+// shadow/SSAO/fog/sky-env), same "isolated preview" idea as the material
+// preview. Raw-buffer-indexed (no [[stage_in]]), matching skinnedVertex. Shared
+// by the skeletal preview and the world preview.
+bool MetalRenderer::EnsureSkelPreviewPipeline()
 {
-	const int W = std::clamp(static_cast<int>(width),  32, 2048);
-	const int H = std::clamp(static_cast<int>(height), 32, 2048);
-	if (!m_contentManager) m_contentManager = &cm;
+	if (m_skelPreviewPipeline) return true;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
-	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
-	if (!device || !queue) return nullptr;
-
-	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
-	if (!smesh) return nullptr;
-
-	// ── Lazy minimal skinning pipeline — own fixed sun+ambient lighting (no
-	// shadow/SSAO/fog/sky-env), same "isolated preview" idea as the material
-	// preview. Raw-buffer-indexed (no [[stage_in]]), matching skinnedVertex.
-	if (!m_skelPreviewPipeline)
+	if (!device) return false;
+	@autoreleasepool
 	{
-		@autoreleasepool
 		{
 			NSError* error = nil;
 			NSString* src = @R"(
@@ -7721,7 +7724,26 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 				HE_LOG_ERROR(RHI, "%s", "MetalRenderer: skeletal-preview shader compile failed");
 		}
 	}
-	if (!m_skelPreviewPipeline) return nullptr;
+	return m_skelPreviewPipeline != nullptr;
+}
+
+void* MetalRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
+                                           bool showSkeleton,
+                                           glm::mat4* outViewProj)
+{
+	const int W = std::clamp(static_cast<int>(width),  32, 2048);
+	const int H = std::clamp(static_cast<int>(height), 32, 2048);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+
+	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
+	if (!smesh) return nullptr;
+	if (!EnsureSkelPreviewPipeline()) return nullptr;
 
 	// ── Lazy / resized target: RGBA16F color (same format as m_debugLinePipeline
 	// expects, so the bone overlay below can reuse it verbatim) + depth.
@@ -7908,6 +7930,224 @@ fragment float4 skelPreviewFragment(VOut in [[stage_in]],
 		}
 	}
 	return m_skelPreviewColorTex; // id<MTLTexture> for ImGui::Image
+}
+
+void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                                        uint32_t width, uint32_t height,
+                                        float yaw, float pitch, float dist,
+                                        const glm::vec3& pivot,
+                                        glm::mat4* outViewProj)
+{
+	const int W = std::clamp(static_cast<int>(width),  32, 4096);
+	const int H = std::clamp(static_cast<int>(height), 32, 4096);
+	if (!m_contentManager) m_contentManager = &cm;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
+	if (!device || !queue) return nullptr;
+	if (!EnsureSkelPreviewPipeline()) return nullptr;
+	if (!EnsureMeshPreviewPipeline()) return nullptr;
+
+	// ── Camera. `dist` is in PLAIN WORLD UNITS around `pivot`: no auto-fit on
+	// the content's bounds, because the extractor leaves bounds invalid for
+	// meshes that are not resident yet — an auto-fit would jump while assets
+	// stream in, which looks like the character moving.
+	const float camDist = std::max(0.1f, dist);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = pivot + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, pivot, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(45.0f),
+		static_cast<float>(W) / static_cast<float>(H), 0.05f, camDist * 20.0f + 100.0f);
+	const glm::mat4 viewProj = proj * view;
+	if (outViewProj) *outViewProj = viewProj;
+
+	// ── Snapshot the caller's world. Its OWN extractor, not m_extractor: that
+	// one carries the main scene's day-night state (setDayNight), and a preview
+	// inheriting the scene's sunset tint would be a puzzling surprise.
+	RenderExtractor previewExtractor;
+	previewExtractor.setContentManager(m_contentManager);
+	EditorCameraOverride previewCam;
+	previewCam.active     = true;
+	previewCam.view       = view;
+	previewCam.position   = camPos;
+	previewCam.fovDegrees = 45.0f;
+	previewCam.nearPlane  = 0.05f;
+	previewCam.farPlane   = camDist * 20.0f + 100.0f;
+	RenderWorld snapshot;
+	previewExtractor.extract(world, snapshot,
+	                         static_cast<float>(W) / static_cast<float>(H), &previewCam);
+
+	// ── Lazy / resized target.
+	if (!m_worldPreviewColorTex || m_worldPreviewW != W || m_worldPreviewH != H)
+	{
+		if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
+		if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
+		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:W height:H mipmapped:NO];
+		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		cd.storageMode = MTLStorageModePrivate;
+		m_worldPreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
+			width:W height:H mipmapped:NO];
+		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
+		m_worldPreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		m_worldPreviewW = W;
+		m_worldPreviewH = H;
+	}
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_worldPreviewColorTex;
+
+	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+	rp.colorAttachments[0].texture     = colorTex;
+	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+	// Opaque gray — this is a scene view, not a cut-out asset.
+	rp.colorAttachments[0].clearColor  = MTLClearColorMake(0.22, 0.22, 0.235, 1.0);
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+	rp.depthAttachment.loadAction  = MTLLoadActionClear;
+	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+	rp.depthAttachment.clearDepth  = 1.0;
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
+
+	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
+	// the character stands ON the floor instead of being drawn over it. Extent
+	// follows the camera distance, so the grid never runs out at high zoom.
+	// Drawn through the debug-line pipeline, which is exactly a pos3+color3
+	// vertex buffer with an MVP — the primitive type is a per-draw choice, so
+	// the ground quad goes through it as triangles.
+	if (m_debugLinePipeline)
+	{
+		const float halfExtent = std::max(10.0f, std::ceil(camDist * 2.0f));
+		std::vector<float> verts;
+		HE::buildPreviewGround(halfExtent, verts);
+		const NSUInteger groundVerts = verts.size() / 6;
+		HE::buildPreviewGrid(halfExtent, 1.0f, verts);
+		const NSUInteger totalVerts = verts.size() / 6;
+
+		id<MTLBuffer> lineBuf = [device newBufferWithBytes:verts.data()
+		                                            length:verts.size() * sizeof(float)
+		                                           options:MTLResourceStorageModeShared];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
+		[enc setVertexBuffer:lineBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&viewProj length:sizeof(viewProj) atIndex:1];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:groundVerts];
+		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:groundVerts
+		        vertexCount:(totalVerts - groundVerts)];
+	}
+
+	// ── Static meshes.
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_meshPreviewPipeline];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	for (const RenderObject& obj : snapshot.objects)
+	{
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		if (!mesh || !mesh->vertexBuf || !mesh->indexBuf || mesh->indexCount <= 0) continue;
+		// flags = (hasTexture, camPos) — the shared UnlitUniforms layout has no
+		// camera slot of its own, matching EncodeMeshPreview.
+		UnlitUniforms u;
+		u.mvp   = viewProj * obj.transform;
+		u.model = obj.transform;
+		u.color = glm::vec4(obj.baseColor, 1.0f);
+		u.flags = glm::vec4(mesh->texture ? 1.0f : 0.0f, camPos.x, camPos.y, camPos.z);
+		u.pbr   = glm::vec4(obj.metallic, obj.roughness, 0.0f, 0.0f);
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)mesh->vertexBuf offset:0 atIndex:0];
+		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)(mesh->texture ? mesh->texture : m_dummyTexture) atIndex:0];
+		[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                indexCount:(NSUInteger)mesh->indexCount
+		                 indexType:MTLIndexTypeUInt32
+		               indexBuffer:(__bridge id<MTLBuffer>)mesh->indexBuf
+		         indexBufferOffset:0];
+	}
+
+	// ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
+	constexpr int kMaxBones = 128;
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skelPreviewPipeline];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
+	{
+		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
+		if (!smesh || !smesh->vertexBuf || !smesh->indexBuf || smesh->indexCount <= 0) continue;
+		std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+		const int boneCount = static_cast<int>(std::min(obj.boneMatrices.size(),
+		                                                static_cast<size_t>(kMaxBones)));
+		if (boneCount > 0) std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
+		id<MTLBuffer> boneBuf = [device newBufferWithBytes:boneScratch.data()
+		                                            length:kMaxBones * sizeof(glm::mat4)
+		                                           options:MTLResourceStorageModeShared];
+		UnlitUniforms u;
+		u.mvp   = viewProj * obj.transform;
+		u.model = obj.transform;
+		u.color = glm::vec4(obj.baseColor, 1.0f);
+		u.flags = glm::vec4(smesh->texture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+		u.pbr   = glm::vec4(0.0f);
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
+		[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
+		[enc setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
+		[enc setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+		[enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)(smesh->texture ? smesh->texture : m_dummyTexture) atIndex:0];
+		[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+		                indexCount:(NSUInteger)smesh->indexCount
+		                 indexType:MTLIndexTypeUInt32
+		               indexBuffer:(__bridge id<MTLBuffer>)smesh->indexBuf
+		         indexBufferOffset:0];
+	}
+
+	[enc endEncoding];
+
+	// Headless witness (HE_WORLD_PREVIEW_DUMP=path) — same blit + half-float
+	// readback convention as the sibling previews.
+	const char* dp = std::getenv("HE_WORLD_PREVIEW_DUMP");
+	id<MTLTexture> staging = nil;
+	if (dp && *dp)
+	{
+		MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
+			width:W height:H mipmapped:NO];
+		sd.storageMode = MTLStorageModeManaged; sd.usage = MTLTextureUsageShaderRead;
+		staging = [device newTextureWithDescriptor:sd];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:colorTex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+		           sourceSize:MTLSizeMake(W,H,1) toTexture:staging destinationSlice:0 destinationLevel:0
+		    destinationOrigin:MTLOriginMake(0,0,0)];
+		[blit synchronizeResource:staging];
+		[blit endEncoding];
+	}
+	[cb commit];
+	[cb waitUntilCompleted];
+
+	if (staging)
+	{
+		std::vector<uint16_t> half((size_t)W * H * 4);
+		[staging getBytes:half.data() bytesPerRow:W * 4 * sizeof(uint16_t)
+		       fromRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0];
+		auto h2f = [](uint16_t h) -> float {
+			uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff, f;
+			if (e == 0) { if (m == 0) f = s << 31; else { e = 127 - 15 + 1; while (!(m & 0x400)) { m <<= 1; e--; } m &= 0x3ff; f = (s << 31) | (e << 23) | (m << 13); } }
+			else if (e == 0x1f) f = (s << 31) | (0xffu << 23) | (m << 13);
+			else f = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+			float o; std::memcpy(&o, &f, 4); return o;
+		};
+		if (std::ofstream fo(dp, std::ios::binary); fo)
+		{
+			fo << "P6\n" << W << " " << H << "\n255\n";
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					const uint16_t* pxl = &half[((size_t)y * W + x) * 4];
+					for (int c = 0; c < 3; ++c)
+					{
+						float v = h2f(pxl[c]); v = v < 0 ? 0 : (v > 1 ? 1 : v);
+						uint8_t b = (uint8_t)(v * 255.0f + 0.5f);
+						fo.write(reinterpret_cast<const char*>(&b), 1);
+					}
+				}
+		}
+	}
+	return m_worldPreviewColorTex; // id<MTLTexture> for ImGui::Image
 }
 
 // Encode the particle cloud into an already-open encoder. Shared by the

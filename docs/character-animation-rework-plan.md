@@ -42,6 +42,63 @@ Was damit weiterhin fehlt: echte Verdeckung der Gizmos und ein zweites Mesh im
 Bild (nur die Wurzel wird gezeichnet). Beides wäre der ursprüngliche CP4b, und
 er bleibt möglich, falls das Overlay sich als zu wenig erweist.
 
+### CP4b ist nachgezogen — für GL und Metal (`IRenderer::RenderWorldPreview`)
+
+Der Haken, der eine **beliebige Welt in ein beliebiges Target** zeichnet, ist
+gebaut. Signatur wie die Geschwister-Previews, nur nimmt sie eine
+`HorizonWorld&` statt einer Asset-UUID:
+
+```cpp
+void* RenderWorldPreview(ContentManager&, HorizonWorld&,
+                         uint32_t width, uint32_t height,
+                         float yaw, float pitch, float dist,
+                         const glm::vec3& pivot = glm::vec3(0.0f),
+                         glm::mat4* outViewProj = nullptr);
+```
+
+Bewusste Abweichungen von den Per-Asset-Previews, alle im Header begründet:
+
+* **Opaker grauer Hintergrund mit Boden und Grid**, nicht transparent — das ist
+  eine Szenen-Ansicht im Sinne von Unreals Character-Viewport. Boden, Grid und
+  die Markierung des **eigenen Origins** liegen in
+  `HorizonRendering/WorldPreviewGrid.h`, damit GL und Metal nicht auseinander
+  laufen (getestet in `tests/test_world_preview_grid.cpp`).
+* **Kein Auto-Fit** auf die Bounds: `dist` ist eine echte Weltdistanz um
+  `pivot`. Der Extractor lässt Bounds für noch nicht residente Meshes
+  absichtlich ungültig — ein Auto-Fit würde beim Nachladen springen, und das
+  sähe aus, als bewege sich der Charakter.
+* **Eigener `RenderExtractor`** statt `m_extractor`: auf dem hängt der
+  Tag/Nacht-Zustand der Hauptszene, und eine Vorschau, die den Sonnenuntergang
+  der Welt erbt, ist eine Überraschung ohne Nutzen.
+* **Kein Deferred-Pfad**, sondern die vorhandenen kleinen Preview-Shader
+  (statisch + skinned). Damit gibt es auch keine „mein Charakter ist schwarz"-
+  Falle, wenn der Klassen-Blob gar kein Licht enthält.
+* **Ein einziges Target pro Backend.** Der Aufrufer garantiert die Exklusivität:
+  Asset-Tabs sind exklusiv und ImGui führt den Inhalt eines inaktiven Tabs nicht
+  aus, also fragt pro Frame nur der aktive Tab an.
+
+Nebenbei aufgeräumt: die Pipeline-/Programm-Erzeugung der Mesh- und
+Skinning-Preview lag inline in ihren Zeichenfunktionen und wurde in
+`EnsureMeshPreviewProgram`/`EnsureSkelPreviewPrograms` (GL) bzw.
+`EnsureMeshPreviewPipeline`/`EnsureSkelPreviewPipeline` (Metal) gezogen — sonst
+wäre der Shader ein zweites Mal kopiert worden.
+
+**Offen (Paritäts-Arbeit, bewusst später):**
+
+| Backend | Stand |
+|---|---|
+| OpenGL | ✅ gebaut, **blind** — kein Display in dieser Umgebung |
+| Metal | ✅ gebaut, real-HW-Optik steht aus |
+| D3D11 | ❌ offen |
+| D3D12 | ❌ offen |
+| Vulkan | ❌ offen |
+
+Die drei offenen Backends erben die Default-Implementierung (`nullptr`), das
+Panel fällt dort auf das Per-Asset-Bild + Gizmo-Overlay zurück. Vorlage für den
+Nachzug ist jeweils der eigene `RenderSkeletalPreview` des Backends plus die
+beiden Ensure-Helfer; der Rest — Kamera, Extraktion, Backdrop-Geometrie — ist
+backend-unabhängig und steht schon.
+
 **Nie live verifiziert:** nichts davon ist im laufenden Editor gelaufen. Optik,
 Maus-Gefühl, Kollisions-Popping und der Sync-Graph in PIE stehen aus.
 

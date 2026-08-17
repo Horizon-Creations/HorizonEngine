@@ -52,6 +52,11 @@ public:
 	                            float yaw, float pitch, float dist,
 	                            bool showSkeleton = true,
 	                            glm::mat4* outViewProj = nullptr) override;
+	void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+	                         uint32_t width, uint32_t height,
+	                         float yaw, float pitch, float dist,
+	                         const glm::vec3& pivot = glm::vec3(0.0f),
+	                         glm::mat4* outViewProj = nullptr) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -270,6 +275,21 @@ private:
 	// pipeline targets the backbuffer scene, not an arbitrary offscreen FBO).
 	unsigned int m_skelPreviewLineProgram = 0, m_skelPreviewLineVAO = 0, m_skelPreviewLineVBO = 0;
 	int          m_uSkelPvLineMVP = -1;
+	// Compile the skinning + line programs (and the line VAO/VBO) once. Both the
+	// skeletal preview and the world preview need them, and a second copy of the
+	// compile block is exactly how the two would drift apart.
+	bool EnsureSkelPreviewPrograms();
+	// Same for the unskinned kMeshPreview* program.
+	bool EnsureMeshPreviewProgram();
+
+	// World-preview target (RenderWorldPreview) — its own FBO again, for the same
+	// reason as all the others: the Class Editor's viewport is live at the same
+	// time as thumbnails are being rendered. ONE target, because only one asset
+	// tab is ever active. Unlike the per-asset previews this one clears to an
+	// opaque gray and draws a ground plane + grid, so it reads as a scene view.
+	unsigned int m_worldPreviewFBO = 0, m_worldPreviewColor = 0, m_worldPreviewDepth = 0;
+	int          m_worldPreviewW = 0;
+	int          m_worldPreviewH = 0;
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated FBO; camera-
 	// facing billboard quads via gl_VertexID (no per-vertex buffer, matching the

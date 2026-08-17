@@ -9,6 +9,7 @@
 #include <HorizonRendering/LightPacking.h>   // shared GPU light packing
 #include <HorizonRendering/GiInstanceSurface.h> // shared flat surface for a GI/reflection hit
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
+#include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <glad/glad.h>
@@ -7411,6 +7412,28 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	return true;
 }
 
+// Compile + link the small unskinned preview program once and cache its uniform
+// locations. Shared by the mesh/material previews and the world preview, so
+// there is exactly one place that knows this program's uniform names.
+bool OpenGLRenderer::EnsureMeshPreviewProgram()
+{
+	if (m_meshPreviewProgram) return true;
+	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kMeshPreviewVS);
+	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kMeshPreviewFS);
+	m_meshPreviewProgram = glCreateProgram();
+	glAttachShader(m_meshPreviewProgram, vs);
+	glAttachShader(m_meshPreviewProgram, fs);
+	glLinkProgram(m_meshPreviewProgram);
+	glDeleteShader(vs); glDeleteShader(fs);
+	m_uMeshPvMVP    = glGetUniformLocation(m_meshPreviewProgram, "uMVP");
+	m_uMeshPvModel  = glGetUniformLocation(m_meshPreviewProgram, "uModel");
+	m_uMeshPvColor  = glGetUniformLocation(m_meshPreviewProgram, "uColor");
+	m_uMeshPvHasTex = glGetUniformLocation(m_meshPreviewProgram, "uHasTex");
+	m_uMeshPvCamPos = glGetUniformLocation(m_meshPreviewProgram, "uCamPos");
+	m_uMeshPvPbr    = glGetUniformLocation(m_meshPreviewProgram, "uPbr");
+	return m_meshPreviewProgram != 0;
+}
+
 // The non-graph counterpart: any pos/normal/uv VAO, shaded by the small
 // kMeshPreview* program. Used for mesh thumbnails and for materials whose only
 // description is their PBR scalars. Same caller contract as above.
@@ -7420,23 +7443,7 @@ void OpenGLRenderer::DrawMeshPreviewGeometry(unsigned int vao, int indexCount, u
                                              float roughness, float yaw, float pitch, float dist)
 {
 	if (!vao || indexCount <= 0) return;
-	if (!m_meshPreviewProgram)
-	{
-		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kMeshPreviewVS);
-		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kMeshPreviewFS);
-		m_meshPreviewProgram = glCreateProgram();
-		glAttachShader(m_meshPreviewProgram, vs);
-		glAttachShader(m_meshPreviewProgram, fs);
-		glLinkProgram(m_meshPreviewProgram);
-		glDeleteShader(vs); glDeleteShader(fs);
-		m_uMeshPvMVP    = glGetUniformLocation(m_meshPreviewProgram, "uMVP");
-		m_uMeshPvModel  = glGetUniformLocation(m_meshPreviewProgram, "uModel");
-		m_uMeshPvColor  = glGetUniformLocation(m_meshPreviewProgram, "uColor");
-		m_uMeshPvHasTex = glGetUniformLocation(m_meshPreviewProgram, "uHasTex");
-		m_uMeshPvCamPos = glGetUniformLocation(m_meshPreviewProgram, "uCamPos");
-		m_uMeshPvPbr    = glGetUniformLocation(m_meshPreviewProgram, "uPbr");
-	}
-	if (!m_meshPreviewProgram) return;
+	if (!EnsureMeshPreviewProgram()) return;
 
 	// Orbit camera auto-framed on the caller's bounds — meshes vary wildly in size
 	// and pivot, so `dist` scales the extent rather than being an absolute distance.
@@ -7697,21 +7704,13 @@ void* OpenGLRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_previewColor));
 }
 
-void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
-                                           const std::vector<glm::mat4>& boneMatrices,
-                                           uint32_t width, uint32_t height,
-                                           float yaw, float pitch, float dist,
-                                           bool showSkeleton,
-                                           glm::mat4* outViewProj)
+// Compile the minimal skinning program AND the immediate-mode line program
+// (with its shared VAO/VBO) once — they are built together because every caller
+// that draws a preview mesh also wants to draw lines over it (bone overlay,
+// world-preview grid). One place, so the two previews cannot drift.
+bool OpenGLRenderer::EnsureSkelPreviewPrograms()
 {
-	const int W = std::clamp(static_cast<int>(width),  32, 2048);
-	const int H = std::clamp(static_cast<int>(height), 32, 2048);
-	if (!m_contentManager) m_contentManager = &cm;
-
-	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
-	if (!smesh) return nullptr;
-
-	// ── Lazy minimal skinning + line programs.
+	if (m_skelPreviewProgram && m_skelPreviewLineProgram) return true;
 	if (!m_skelPreviewProgram)
 	{
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSkelPreviewVS);
@@ -7726,7 +7725,9 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 		m_uSkelPvBones  = glGetUniformLocation(m_skelPreviewProgram, "uBoneMatrices");
 		m_uSkelPvColor  = glGetUniformLocation(m_skelPreviewProgram, "uColor");
 		m_uSkelPvHasTex = glGetUniformLocation(m_skelPreviewProgram, "uHasTex");
-
+	}
+	if (!m_skelPreviewLineProgram)
+	{
 		GLuint lvs = CompileStage(GL_VERTEX_SHADER,   kSkelPreviewLineVS);
 		GLuint lfs = CompileStage(GL_FRAGMENT_SHADER, kSkelPreviewLineFS);
 		m_skelPreviewLineProgram = glCreateProgram();
@@ -7746,7 +7747,25 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
 		glBindVertexArray(0);
 	}
-	if (!m_skelPreviewProgram || !m_skelPreviewLineProgram) return nullptr;
+	return m_skelPreviewProgram != 0 && m_skelPreviewLineProgram != 0;
+}
+
+void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
+                                           bool showSkeleton,
+                                           glm::mat4* outViewProj)
+{
+	const int W = std::clamp(static_cast<int>(width),  32, 2048);
+	const int H = std::clamp(static_cast<int>(height), 32, 2048);
+	if (!m_contentManager) m_contentManager = &cm;
+
+	const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(meshId);
+	if (!smesh) return nullptr;
+
+	// ── Lazy minimal skinning + line programs.
+	if (!EnsureSkelPreviewPrograms()) return nullptr;
 
 	// ── Lazy / resized offscreen target.
 	if (!m_skelPreviewFBO || m_skelPreviewW != W || m_skelPreviewH != H)
@@ -7886,6 +7905,166 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
 	glUseProgram(0);
 	return reinterpret_cast<void*>(static_cast<intptr_t>(m_skelPreviewColor));
+}
+
+void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                                         uint32_t width, uint32_t height,
+                                         float yaw, float pitch, float dist,
+                                         const glm::vec3& pivot,
+                                         glm::mat4* outViewProj)
+{
+	const int W = std::clamp(static_cast<int>(width),  32, 4096);
+	const int H = std::clamp(static_cast<int>(height), 32, 4096);
+	if (!m_contentManager) m_contentManager = &cm;
+	if (!EnsureSkelPreviewPrograms()) return nullptr;
+	if (!EnsureMeshPreviewProgram())  return nullptr;
+
+	// ── Camera. `dist` is in PLAIN WORLD UNITS around `pivot`: no auto-fit on
+	// the content's bounds, because the extractor leaves bounds invalid for
+	// meshes that are not resident yet — an auto-fit would jump while assets
+	// stream in, which looks like the character moving.
+	const float camDist = std::max(0.1f, dist);
+	const float cp = std::cos(pitch), sp = std::sin(pitch);
+	const glm::vec3 camPos = pivot + glm::vec3(std::sin(yaw) * cp, sp, std::cos(yaw) * cp) * camDist;
+	const glm::mat4 view = glm::lookAt(camPos, pivot, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::mat4 proj = glm::perspective(glm::radians(45.0f),
+		static_cast<float>(W) / static_cast<float>(H), 0.05f, camDist * 20.0f + 100.0f);
+	const glm::mat4 viewProj = proj * view;
+	if (outViewProj) *outViewProj = viewProj;
+
+	// ── Snapshot the caller's world. Its OWN extractor, not m_extractor: that
+	// one carries the main scene's day-night state (setDayNight), and a preview
+	// inheriting the scene's sunset tint would be a puzzling surprise.
+	RenderExtractor previewExtractor;
+	previewExtractor.setContentManager(m_contentManager);
+	EditorCameraOverride previewCam;
+	previewCam.active     = true;
+	previewCam.view       = view;
+	previewCam.position   = camPos;
+	previewCam.fovDegrees = 45.0f;
+	previewCam.nearPlane  = 0.05f;
+	previewCam.farPlane   = camDist * 20.0f + 100.0f;
+	RenderWorld snapshot;
+	previewExtractor.extract(world, snapshot,
+	                         static_cast<float>(W) / static_cast<float>(H), &previewCam);
+
+	// ── Lazy / resized offscreen target.
+	if (!m_worldPreviewFBO || m_worldPreviewW != W || m_worldPreviewH != H)
+	{
+		if (m_worldPreviewColor) glDeleteTextures(1, &m_worldPreviewColor);
+		if (m_worldPreviewDepth) glDeleteRenderbuffers(1, &m_worldPreviewDepth);
+		if (!m_worldPreviewFBO) glGenFramebuffers(1, &m_worldPreviewFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
+		glGenTextures(1, &m_worldPreviewColor);
+		glBindTexture(GL_TEXTURE_2D, m_worldPreviewColor);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_worldPreviewColor, 0);
+		glGenRenderbuffers(1, &m_worldPreviewDepth);
+		glBindRenderbuffer(GL_RENDERBUFFER, m_worldPreviewDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_worldPreviewDepth);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		m_worldPreviewW = W;
+		m_worldPreviewH = H;
+	}
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
+	glViewport(0, 0, W, H);
+	glClearColor(0.22f, 0.22f, 0.235f, 1.0f); // opaque gray — this is a scene view, not a cut-out asset
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS);
+	glDisable(GL_BLEND); glDisable(GL_CULL_FACE);
+
+	// ── Backdrop: ground plane, then grid + origin marker, both depth-tested so
+	// the character stands ON the floor instead of being drawn over it. Extent
+	// follows the camera distance, so the grid never runs out at high zoom.
+	{
+		const float halfExtent = std::max(10.0f, std::ceil(camDist * 2.0f));
+		std::vector<float> verts;
+		HE::buildPreviewGround(halfExtent, verts);
+		const GLsizei groundVerts = static_cast<GLsizei>(verts.size() / 6);
+		HE::buildPreviewGrid(halfExtent, 1.0f, verts);
+		const GLsizei totalVerts = static_cast<GLsizei>(verts.size() / 6);
+
+		glBindBuffer(GL_ARRAY_BUFFER, m_skelPreviewLineVBO);
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+		             verts.data(), GL_DYNAMIC_DRAW);
+		glUseProgram(m_skelPreviewLineProgram);
+		glUniformMatrix4fv(m_uSkelPvLineMVP, 1, GL_FALSE, glm::value_ptr(viewProj));
+		glBindVertexArray(m_skelPreviewLineVAO);
+		glDrawArrays(GL_TRIANGLES, 0, groundVerts);
+		glLineWidth(1.0f);
+		glDrawArrays(GL_LINES, groundVerts, totalVerts - groundVerts);
+		glBindVertexArray(0);
+	}
+
+	// ── Static meshes.
+	glUseProgram(m_meshPreviewProgram);
+	glUniform3fv(m_uMeshPvCamPos, 1, glm::value_ptr(camPos));
+	glActiveTexture(GL_TEXTURE0);
+	for (const RenderObject& obj : snapshot.objects)
+	{
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		if (!mesh || !mesh->vao || mesh->indexCount <= 0) continue;
+		const glm::mat4 mvp = viewProj * obj.transform;
+		glUniformMatrix4fv(m_uMeshPvMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+		glUniformMatrix4fv(m_uMeshPvModel, 1, GL_FALSE, glm::value_ptr(obj.transform));
+		glUniform3fv(m_uMeshPvColor, 1, glm::value_ptr(obj.baseColor));
+		glUniform2f(m_uMeshPvPbr, obj.metallic, obj.roughness);
+		glUniform1i(m_uMeshPvHasTex, mesh->texture != 0);
+		glBindTexture(GL_TEXTURE_2D, mesh->texture);
+		glBindVertexArray(mesh->vao);
+		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+	}
+	glBindVertexArray(0);
+
+	// ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
+	constexpr int kMaxBones = 128;
+	glUseProgram(m_skelPreviewProgram);
+	glActiveTexture(GL_TEXTURE0);
+	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
+	{
+		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
+		if (!smesh || !smesh->vao || smesh->indexCount <= 0) continue;
+		std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+		const int boneCount = static_cast<int>(std::min(obj.boneMatrices.size(),
+		                                                static_cast<size_t>(kMaxBones)));
+		if (boneCount > 0) std::copy_n(obj.boneMatrices.begin(), boneCount, boneScratch.begin());
+		const glm::mat4 mvp = viewProj * obj.transform;
+		glUniformMatrix4fv(m_uSkelPvMVP,   1, GL_FALSE, glm::value_ptr(mvp));
+		glUniformMatrix4fv(m_uSkelPvModel, 1, GL_FALSE, glm::value_ptr(obj.transform));
+		glUniformMatrix4fv(m_uSkelPvBones, kMaxBones, GL_FALSE, glm::value_ptr(boneScratch[0]));
+		glUniform3fv(m_uSkelPvColor, 1, glm::value_ptr(obj.baseColor));
+		glUniform1i(m_uSkelPvHasTex, smesh->texture != 0);
+		glBindTexture(GL_TEXTURE_2D, smesh->texture);
+		glBindVertexArray(smesh->vao);
+		glDrawElements(GL_TRIANGLES, smesh->indexCount, GL_UNSIGNED_INT, nullptr);
+	}
+	glBindVertexArray(0);
+
+	// Headless witness, same convention as the sibling previews.
+	if (const char* dp = std::getenv("HE_WORLD_PREVIEW_DUMP"); dp && *dp)
+	{
+		std::vector<uint8_t> px((size_t)W * H * 3);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+		if (std::ofstream f(dp, std::ios::binary); f)
+		{
+			f << "P6\n" << W << " " << H << "\n255\n";
+			for (int y = H - 1; y >= 0; --y) // flip to top-down
+				f.write(reinterpret_cast<const char*>(px.data() + (size_t)y * W * 3), (std::streamsize)W * 3);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glUseProgram(0);
+	return reinterpret_cast<void*>(static_cast<intptr_t>(m_worldPreviewColor));
 }
 
 // Compile the billboard program + its instance VAO once. Split out so both the
@@ -8255,6 +8434,11 @@ void OpenGLRenderer::Shutdown()
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
 	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
 	if (m_meshPreviewProgram) { glDeleteProgram(m_meshPreviewProgram);    m_meshPreviewProgram = 0; }
+	// World-preview target (RenderWorldPreview); its programs are the skeletal
+	// preview's, freed with those.
+	if (m_worldPreviewColor) { glDeleteTextures(1, &m_worldPreviewColor);      m_worldPreviewColor = 0; }
+	if (m_worldPreviewDepth) { glDeleteRenderbuffers(1, &m_worldPreviewDepth); m_worldPreviewDepth = 0; }
+	if (m_worldPreviewFBO)   { glDeleteFramebuffers(1, &m_worldPreviewFBO);    m_worldPreviewFBO = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);

@@ -97,6 +97,11 @@ public:
 	                            float yaw, float pitch, float dist,
 	                            bool showSkeleton = true,
 	                            glm::mat4* outViewProj = nullptr) override;
+	void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+	                         uint32_t width, uint32_t height,
+	                         float yaw, float pitch, float dist,
+	                         const glm::vec3& pivot = glm::vec3(0.0f),
+	                         glm::mat4* outViewProj = nullptr) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -569,6 +574,19 @@ private:
 	int   m_skelPreviewW        = 0;
 	int   m_skelPreviewH        = 0;
 	void* m_skelPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	// Build that pipeline once — the skeletal preview and the world preview both
+	// need it, and a second copy of the shader is how the two would drift apart.
+	bool EnsureSkelPreviewPipeline();
+
+	// World-preview target (RenderWorldPreview) — same RGBA16F color + depth as
+	// its siblings, so the debug-line pipeline can draw the ground/grid into it
+	// verbatim. ONE target, because only one asset tab is ever active. Unlike the
+	// per-asset previews this one clears to an opaque gray and draws a ground
+	// plane + grid, so it reads as a scene view rather than a cut-out asset.
+	void* m_worldPreviewColorTex = nullptr; // id<MTLTexture> (retained)
+	void* m_worldPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
+	int   m_worldPreviewW        = 0;
+	int   m_worldPreviewH        = 0;
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated RGBA16F
 	// color + depth texture; camera-facing billboards via vertex_id (no vertex
@@ -599,6 +617,8 @@ private:
 	// have no node graph (built-in PBR): the counterpart of m_skelPreviewPipeline
 	// with the bone buffers removed and a metallic/roughness-driven highlight.
 	void* m_meshPreviewPipeline = nullptr; // id<MTLRenderPipelineState> (retained)
+	// Build that pipeline once; shared with the world preview for the same reason.
+	bool EnsureMeshPreviewPipeline();
 	// Lazily (re)create the thumbnail target at S×S; false if it could not be made.
 	bool EnsureThumbnailTarget(int S);
 	// Blit the thumbnail target to staging on `commandBuffer`, commit, wait and

@@ -23,6 +23,7 @@ add_executable(he_tests
     test_editor_dock_state.cpp
     test_game_instance.cpp
     test_culling.cpp
+    test_world_preview_grid.cpp
     test_gi_bvh.cpp
     test_undo.cpp
     test_editorcamera.cpp
