@@ -117,6 +117,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
@@ -706,10 +707,17 @@ private:
 	                              std::string& vertBody);
 #endif
 
-	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
-	// Tonemap writes to m_ldrColor; this pass reads it, runs FXAA on the gamma-space
-	// luma and writes the antialiased result to the output (viewport or drawable).
-	void* m_fxaaPipeline = nullptr; // id<MTLRenderPipelineState>
+	// ── Anti-aliasing resolve (docs/anti-aliasing-plan.md) ───────────────────
+	// Tonemap writes to m_ldrColor; this pass reads it and writes the final image
+	// to the output (viewport or drawable). The METHOD picks the pipeline — FXAA
+	// on the gamma-space luma, or a passthrough when the user chose Off. The pass
+	// is never skipped: it is what fills the output.
+	HE::AAMethod m_aaMethod = HE::AAMethod::FXAA;
+	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
+	bool  m_specularAA      = true;   // A6 — roughness regularization in shading
+	float m_specularAAStrength = 1.0f;
+	void* m_fxaaPipeline   = nullptr; // id<MTLRenderPipelineState>
+	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off
 	void* m_ldrColor     = nullptr; // id<MTLTexture> (retained), tonemap out / FXAA in
 	int   m_ldrW         = 0;
 	int   m_ldrH         = 0;

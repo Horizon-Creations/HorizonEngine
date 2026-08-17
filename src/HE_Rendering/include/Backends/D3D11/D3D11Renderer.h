@@ -34,6 +34,7 @@ public:
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
     void SetBloomSettings(const BloomSettings& settings) override;
+    void SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
     // Software ray-traced DDGI (CPU BVH + CS 5.0) — mirrors the GL 4.3/Vulkan port.
     void SetGISettings(const GISettings& settings) override;
 

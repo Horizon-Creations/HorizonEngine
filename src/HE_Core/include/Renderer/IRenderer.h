@@ -68,6 +68,23 @@ enum class ThumbnailKind
     SkeletalMesh = 2, // the mesh in bind pose (no clip evaluated)
 };
 
+// ─── Anti-aliasing method (docs/anti-aliasing-plan.md) ──────────────────────
+// The values are PERSISTED in the project config ("AntiAliasing"), so the
+// numbering is frozen — append, never renumber. A backend that cannot do a mode
+// falls back to the best one it has (see IRenderer::Capabilities), which is why
+// the enum is ordered by increasing requirements rather than by quality.
+namespace HE
+{
+enum class AAMethod : int
+{
+    Off     = 0, // straight blit — the post chain still runs, nothing is smoothed
+    FXAA    = 1, // Lottes 3x3 luma edge blend (default; what the engine always did)
+    SMAA    = 2, // edge detect + pattern classification + coverage blend
+    TAA     = 3, // jittered projection + velocity reprojection + history
+    MetalFX = 4, // MTLFXTemporalScaler (Apple Silicon) — TAA quality from the OS
+};
+} // namespace HE
+
 // ─── IRenderer ────────────────────────────────────────────────────────────────
 // Pure interface — lives in HorizonCore so Application can hold a renderer
 // without creating a circular dependency with HorizonRendering.
@@ -111,6 +128,15 @@ public:
         // (§10, GL 4.3+ = Windows/Linux) composites in the shading pass itself,
         // so BOTH render paths work there and there is no SSR to sit under.
         bool supportsGIReflections = false;
+        // Temporal anti-aliasing (docs/anti-aliasing-plan.md, A2+A3): needs a
+        // velocity buffer and a jittered projection, so a backend reports this
+        // only once it writes both. Off/FXAA/SMAA work everywhere and are not
+        // gated. The editor greys out the TAA entry in the AA combo when false
+        // and the backend falls back to SMAA.
+        bool supportsTemporalAA = false;
+        // MetalFX temporal scaling (A5). Metal on Apple Silicon with a macOS
+        // that has MTLFXTemporalScaler; implies supportsTemporalAA (same inputs).
+        bool supportsMetalFX = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the
@@ -202,6 +228,48 @@ public:
         float intensity = 0.6f;   // how strongly the blurred bloom is added back
     };
     virtual void SetBloomSettings(const BloomSettings& /*settings*/) {}
+
+    // ── Anti-aliasing (docs/anti-aliasing-plan.md) ─────────────────────────
+    // Pushed by the editor from its preferences and by the packaged game's
+    // GlobalState read, like bloom/SSAO. Every backend has SOME final post pass
+    // (the one that moves the tonemapped LDR image into the output target), so
+    // "Off" is that pass running a straight blit — never a skipped pass, which
+    // would leave the output target unwritten.
+    //
+    // `method` holds an AAMethod. A backend that lacks the requested mode falls
+    // back to the best it has (TAA/MetalFX → SMAA → FXAA), so a config written on
+    // a Metal machine still opens on a D3D11 one.
+    struct AntiAliasingSettings
+    {
+        int   method    = static_cast<int>(HE::AAMethod::FXAA);
+        // Post-resolve sharpen, temporal modes only (TAA prints softer than the
+        // spatial filters by construction). 0 = none.
+        float sharpness = 0.35f;
+        // Render-resolution multiplier (A4). < 1 renders smaller and upscales
+        // (TAA becomes TAAU), > 1 is supersampling. 1 = off, and off means the
+        // scene targets are exactly the viewport size, as before.
+        float renderScale = 1.0f;
+        // Specular-/normal-map anti-aliasing (A6): widen the roughness by the
+        // normal variance inside the pixel so glancing highlights stop crawling.
+        // Independent of `method` — it fixes shading aliasing, which no edge
+        // filter can see. Off = byte-identical to the feature not existing.
+        bool  specularAA         = true;
+        float specularAAStrength = 1.0f;  // 0 … 2, scales the variance term
+    };
+    virtual void SetAntiAliasingSettings(const AntiAliasingSettings& /*settings*/) {}
+
+    // The one place the fallback chain lives, so five backends cannot disagree
+    // about what "TAA on a machine without TAA" means. `caps` is normally the
+    // backend's own GetCapabilities().
+    static HE::AAMethod ResolveAAMethod(int requested, const Capabilities& caps)
+    {
+        if (requested < 0 || requested > static_cast<int>(HE::AAMethod::MetalFX))
+            return HE::AAMethod::FXAA;
+        HE::AAMethod m = static_cast<HE::AAMethod>(requested);
+        if (m == HE::AAMethod::MetalFX && !caps.supportsMetalFX)     m = HE::AAMethod::TAA;
+        if (m == HE::AAMethod::TAA     && !caps.supportsTemporalAA)  m = HE::AAMethod::SMAA;
+        return m;
+    }
 
     // ── SSAO (screen-space ambient occlusion) ───────────────────────────────
     // Pushed by the editor from its preferences. Backends that implement SSAO

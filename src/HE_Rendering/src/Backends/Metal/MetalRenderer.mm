@@ -886,6 +886,15 @@ fragment float4 fxaaFragment(FXOut in [[stage_in]],
 	float lB = fxLuma(rgbB);
 	return (lB < lMin || lB > lMax) ? float4(rgbA, 1.0) : float4(rgbB, 1.0);
 }
+
+// AA = Off. The resolve pass is what moves the LDR image into the output target,
+// so it still runs — with this passthrough instead of the filter.
+fragment float4 aaBlitFragment(FXOut in [[stage_in]],
+                               texture2d<float> scene [[texture(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	return float4(scene.sample(s, in.uv).rgb, 1.0);
+}
 )MSL";
 
 // In-Game UI 2D pass: quads derived from vertex_id + uniforms.
@@ -5352,6 +5361,7 @@ void MetalRenderer::Shutdown()
 	m_worldPreviewW = 0;
 	m_worldPreviewH = 0;
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
+	if (m_aaBlitPipeline)       { CFBridgingRelease(m_aaBlitPipeline);       m_aaBlitPipeline = nullptr; }
 	if (m_uiPipeline)           { CFBridgingRelease(m_uiPipeline);           m_uiPipeline = nullptr; }
 	if (m_uiFontTexture)        { CFBridgingRelease(m_uiFontTexture);        m_uiFontTexture = nullptr; }
 	for (auto& [k, t] : m_uiFontAtlases) if (t) CFBridgingRelease(t);
@@ -5583,6 +5593,14 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: FXAA pipeline creation failed: ")
 				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
 		m_fxaaPipeline = (void*)CFBridgingRetain(fxPso);
+
+		// AA = Off: same pass, same attachments, passthrough fragment.
+		fxDesc.fragmentFunction = [fxLib newFunctionWithName:@"aaBlitFragment"];
+		id<MTLRenderPipelineState> blitPso = [device newRenderPipelineStateWithDescriptor:fxDesc error:&fxError];
+		if (!blitPso)
+			throw std::runtime_error(std::string("MetalRenderer: AA blit pipeline creation failed: ")
+				+ (fxError ? [[fxError localizedDescription] UTF8String] : "unknown"));
+		m_aaBlitPipeline = (void*)CFBridgingRetain(blitPso);
 
 		// ── UI pipeline (2D colored quads, LDR swapchain format, no depth) ─
 		NSError* uiError = nil;
@@ -9502,6 +9520,20 @@ void MetalRenderer::SetBloomSettings(const BloomSettings& s)
 	m_bloomStrength  = s.intensity;
 }
 
+void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+{
+	// Resolve once, here, against what this backend can do — the render path
+	// then only ever sees a runnable method.
+	HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	// A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
+	// to nothing. Remove this line when the SMAA pipelines exist.
+	if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
+	m_aaMethod          = m;
+	m_aaSharpness       = s.sharpness;
+	m_specularAA        = s.specularAA;
+	m_specularAAStrength = s.specularAAStrength;
+}
+
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in
 // m_bloomColor[0]). Each fullscreen pass is its own encoder. Returns the result
 // texture, or nullptr if bloom is unavailable.
@@ -10092,12 +10124,16 @@ void MetalRenderer::DestroyLdrTarget()
 	m_ldrW = m_ldrH = 0;
 }
 
-// Fullscreen FXAA of the tonemapped LDR image into the bound encoder's target.
+// Fullscreen AA resolve of the tonemapped LDR image into the bound encoder's
+// target. This is the pass that FILLS that target, so it always draws — the AA
+// method only picks the pipeline (FXAA filter vs. straight blit).
 void MetalRenderer::EncodeFxaa(void* renderEncoderPtr, int width, int height)
 {
-	if (!m_fxaaPipeline || !m_ldrColor) return;
+	const bool aaOff = (m_aaMethod == HE::AAMethod::Off);
+	void* pipeline = aaOff ? m_aaBlitPipeline : m_fxaaPipeline;
+	if (!pipeline || !m_ldrColor) return;
 	id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoderPtr;
-	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_fxaaPipeline];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipeline];
 	[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_noDepthState];
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ldrColor atIndex:0];
 	const simd::float2 rcpFrame = { 1.0f / (float)std::max(1, width), 1.0f / (float)std::max(1, height) };

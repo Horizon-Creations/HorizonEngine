@@ -120,6 +120,17 @@ struct EditorConfig
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
 	int   SSAOMethod    = 0;      // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
 
+	// Anti-aliasing (pushed each frame via SetAntiAliasingSettings, see
+	// docs/anti-aliasing-plan.md). `AntiAliasing` holds an HE AAMethod int —
+	// 0 Off, 1 FXAA, 2 SMAA, 3 TAA, 4 MetalFX — and defaults to FXAA because
+	// that is what the engine did before the setting existed. Modes the backend
+	// cannot do are greyed out in Preferences and fall back at push time.
+	int   AntiAliasing        = 1;
+	float AASharpness         = 0.35f; // temporal modes only
+	float RenderScale         = 1.0f;  // < 1 upscales, > 1 supersamples
+	bool  SpecularAA          = true;  // roughness regularization (shading aliasing)
+	float SpecularAAStrength  = 1.0f;
+
 	// GPU weather particles: simulate rain/snow on the GPU (transform feedback / compute)
 	// instead of the CPU pool. Default on; the backend's supportsGpuParticles gates it
 	// (GL + Metal = yes, so it's the path used unless the user turns it off).

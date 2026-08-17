@@ -3143,6 +3143,16 @@ void main()
 }
 )GLSL";
 
+// AA = Off: the resolve pass still has to fill the output target, so it runs
+// this passthrough instead of skipping. Same inputs as FXAA, no filtering.
+static const char* kBlitFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uScene;
+out vec4 FragColor;
+void main() { FragColor = vec4(texture(uScene, vUV).rgb, 1.0); }
+)GLSL";
+
 // Bloom bright-pass: keep only the part of each pixel above a soft-knee
 // threshold (Call-of-Duty-style curve), preserving hue. Feeds the blur chain.
 static const char* kBloomBrightFS = R"GLSL(
@@ -5400,6 +5410,27 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uFxaaRcpFrame = glGetUniformLocation(m_fxaaProgram, "uRcpFrame");
 	}
 
+	// Passthrough program for AA = Off (same VS, same input texture).
+	{
+		GLuint bvs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint bfs = CompileStage(GL_FRAGMENT_SHADER, kBlitFS);
+		m_blitProgram = glCreateProgram();
+		glAttachShader(m_blitProgram, bvs);
+		glAttachShader(m_blitProgram, bfs);
+		glLinkProgram(m_blitProgram);
+		glDeleteShader(bvs);
+		glDeleteShader(bfs);
+		GLint bok = 0;
+		glGetProgramiv(m_blitProgram, GL_LINK_STATUS, &bok);
+		if (!bok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(m_blitProgram, sizeof(log), nullptr, log);
+			throw std::runtime_error(std::string("OpenGLRenderer: blit link failed: ") + log);
+		}
+		m_uBlitScene = glGetUniformLocation(m_blitProgram, "uScene");
+	}
+
 	// Core profile needs a bound VAO for glDrawArrays even with no attributes.
 	glGenVertexArrays(1, &m_fsVAO);
 
@@ -5498,6 +5529,17 @@ void OpenGLRenderer::SetBloomSettings(const BloomSettings& s)
 	m_bloomEnabled   = s.enabled;
 	m_bloomThreshold = s.threshold;
 	m_bloomStrength  = s.intensity;
+}
+
+void OpenGLRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+{
+	// Resolve against our own capabilities once, here, so the render path only
+	// ever sees a method this backend can actually run.
+	HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	// A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
+	// to nothing. Remove this line when the SMAA programs exist.
+	if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
+	m_aaMethod = m;
 }
 
 void OpenGLRenderer::EnsureBloomTargets(int width, int height)
@@ -9079,6 +9121,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_skyProgram)   { glDeleteProgram(m_skyProgram);       m_skyProgram = 0; }
 	if (m_tonemapProgram) { glDeleteProgram(m_tonemapProgram); m_tonemapProgram = 0; }
 	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
+	if (m_blitProgram)    { glDeleteProgram(m_blitProgram);    m_blitProgram = 0; }
 	if (m_uiProgram)      { glDeleteProgram(m_uiProgram);      m_uiProgram = 0; }
 	if (m_uiFontTexture)  { glDeleteTextures(1, &m_uiFontTexture); m_uiFontTexture = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
@@ -9671,15 +9714,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glDrawArrays(GL_TRIANGLES, 0, 3);
 			}
 
-			// FXAA the tonemapped LDR image into the actual output.
+			// AA resolve: move the tonemapped LDR image into the actual output.
+			// The pass ALWAYS runs — it is what fills the output target; the AA
+			// method only decides which program does it.
 			{
-				GpuPassScope _fxaaTimer(this, "FXAA");
+				const bool aaOff = (m_aaMethod == HE::AAMethod::Off);
+				GpuPassScope _fxaaTimer(this, aaOff ? "AA Resolve" : "FXAA");
 				glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 				glViewport(0, 0, pw, ph);
-				glUseProgram(m_fxaaProgram);
+				glUseProgram(aaOff ? m_blitProgram : m_fxaaProgram);
 				glBindTexture(GL_TEXTURE_2D, m_ldrColor);
-				glUniform1i(m_uFxaaScene, 0);
-				glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
+				if (aaOff)
+				{
+					glUniform1i(m_uBlitScene, 0);
+				}
+				else
+				{
+					glUniform1i(m_uFxaaScene, 0);
+					glUniform2f(m_uFxaaRcpFrame, 1.0f / float(pw), 1.0f / float(ph));
+				}
 				glDrawArrays(GL_TRIANGLES, 0, 3);
 			}
 

@@ -72,6 +72,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
@@ -681,13 +682,17 @@ private:
 	void DestroyGBufferTargets();
 	bool EnsureDeferredPipelines(); // true when the G-buffer + resolve programs exist
 
-	// ── FXAA (edge antialiasing) ─────────────────────────────────────────────
+	// ── Anti-aliasing resolve (docs/anti-aliasing-plan.md) ───────────────────
 	// The tonemap pass writes its LDR result into m_ldrColor instead of straight
-	// to the output; this pass reads that texture, runs FXAA on the perceptual
-	// (gamma-space) luma and writes the antialiased result to the output. Always on.
+	// to the output; this pass reads that texture and writes the final image to
+	// the output. WHICH program runs is the AA method: FXAA on the perceptual
+	// (gamma-space) luma, or a straight blit when the user picked Off. The pass
+	// itself is never skipped — it is what fills the output target.
 	unsigned int m_fxaaProgram   = 0;
 	int          m_uFxaaScene    = -1;
 	int          m_uFxaaRcpFrame = -1;
+	unsigned int m_blitProgram   = 0;   // AA = Off: passthrough of m_ldrColor
+	int          m_uBlitScene    = -1;
 	unsigned int m_ldrFBO        = 0;
 	unsigned int m_ldrColor      = 0;   // RGBA8 tonemap output, FXAA input
 	int          m_ldrW          = 0;
@@ -754,6 +759,9 @@ private:
 	void         EnsureCloudShadowTarget();
 	void         DestroyCloudShadowTarget();
 	void         RenderCloudShadowMap();
+	// Anti-aliasing method actually in force (already run through
+	// IRenderer::ResolveAAMethod, so it is something this backend can do).
+	HE::AAMethod m_aaMethod       = HE::AAMethod::FXAA;
 	bool         m_bloomEnabled   = true;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;

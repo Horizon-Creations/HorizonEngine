@@ -221,6 +221,38 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		ImGui::EndDisabled();
 	});
 
+	row("aa", "Post-Processing", [&]{
+		// Modes are AAMethod ints (frozen — see IRenderer.h). The temporal entries
+		// are listed even when unsupported so the combo reads the same everywhere;
+		// picking one on a backend without it falls back at push time (SMAA), and
+		// the hint says so rather than silently doing something else.
+		const bool taaOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsTemporalAA;
+		const bool mfxOK    = ctx.renderer && ctx.renderer->GetCapabilities().supportsMetalFX;
+		const char* kAA[]   = { "Off", "FXAA", "SMAA", "TAA", "MetalFX" };
+		int aaMode = std::clamp(cfg.AntiAliasing, 0, 4);
+		if (Row::combo("Anti-Aliasing", &aaMode, kAA, IM_ARRAYSIZE(kAA)))
+			cfg.AntiAliasing = aaMode;
+		{
+			SubGroup sub(aaMode >= 3);
+			Row::sliderFloat("AA Sharpness", &cfg.AASharpness, 0.0f, 1.0f, "%.2f");
+		}
+		// Render scale is independent of the AA mode: < 1 renders smaller and
+		// upscales (with TAA that becomes TAAU), > 1 is plain supersampling.
+		Row::sliderFloat("Render Scale", &cfg.RenderScale, 0.5f, 2.0f, "%.2f");
+		ImGui::Checkbox("Specular AA", &cfg.SpecularAA);
+		{
+			SubGroup sub(cfg.SpecularAA);
+			Row::sliderFloat("Specular AA Strength", &cfg.SpecularAAStrength, 0.0f, 2.0f, "%.2f");
+		}
+		if (aaMode == 4 && !mfxOK)
+			hint("MetalFX needs Apple Silicon — falls back to TAA.");
+		else if (aaMode >= 3 && !taaOK)
+			hint("This backend has no velocity buffer yet — falls back to SMAA.");
+		else if (aaMode == 0)
+			hint("No edge smoothing at all; the post chain still runs.");
+		else
+			hint("Specular AA fixes crawling highlights — no edge filter can.");
+	});
 	row("bloom", "Post-Processing", [&]{
 		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
 		SubGroup sub(cfg.BloomEnabled);

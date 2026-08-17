@@ -106,7 +106,7 @@ if(HE_VULKAN_ENABLED)
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
         foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
-                      postfx.vert postfx_tonemap.frag postfx_fxaa.frag
+                      postfx.vert postfx_tonemap.frag postfx_fxaa.frag postfx_aa_blit.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag

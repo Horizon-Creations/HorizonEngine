@@ -37,6 +37,7 @@ public:
     void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
     void SetSSAOSettings(const SSAOSettings& settings) override;
     void SetBloomSettings(const BloomSettings& settings) override;
+    void SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
     // Ray-traced DDGI (software BVH + CS 5.0 compute) — pushed every frame by
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;

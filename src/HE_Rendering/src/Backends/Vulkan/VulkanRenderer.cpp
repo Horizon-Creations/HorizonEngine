@@ -465,9 +465,13 @@ void VulkanRenderer::Render()
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
             m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-            // ── FXAA: ldrSRV → viewportFB ─────────────────────────────────
+            // ── AA resolve: ldrSRV → viewportFB ───────────────────────────
+            // Always runs — it is what writes m_viewportImage. The AA method
+            // only decides which pipeline does it (FXAA vs. passthrough).
             { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),0,0};
-              blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, m_fxaaPipe, m_postFxDS[4], p); }
+              const VkPipeline aaPipe = (m_aaMethod == HE::AAMethod::Off && m_aaBlitPipe)
+                                        ? m_aaBlitPipe : m_fxaaPipe;
+              blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, m_postFxDS[4], p); }
             m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
             // ── UI canvas: composite onto viewport image (editor path) ──────
@@ -2397,13 +2401,14 @@ void VulkanRenderer::createPostFXPipelines()
     VkShaderModule vsM  = loadShaderModule("postfx.vert.spv");
     VkShaderModule tmFS = loadShaderModule("postfx_tonemap.frag.spv");
     VkShaderModule fxFS = loadShaderModule("postfx_fxaa.frag.spv");
+    VkShaderModule btFS = loadShaderModule("postfx_aa_blit.frag.spv");
     VkShaderModule brFS = loadShaderModule("postfx_bloom_bright.frag.spv");
     VkShaderModule blFS = loadShaderModule("postfx_bloom_blur.frag.spv");
 
-    if (!vsM || !tmFS || !fxFS || !brFS || !blFS)
+    if (!vsM || !tmFS || !fxFS || !btFS || !brFS || !blFS)
     {
         HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: PostFX shaders missing — no HDR/bloom/FXAA");
-        for (auto m : {vsM,tmFS,fxFS,brFS,blFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
+        for (auto m : {vsM,tmFS,fxFS,btFS,brFS,blFS}) if (m) vkDestroyShaderModule(m_device,m,nullptr);
         return;
     }
 
@@ -2444,8 +2449,9 @@ void VulkanRenderer::createPostFXPipelines()
     makePipe(blFS, m_postFxBlitF16, m_bloomBlurPipe);
     makePipe(tmFS, m_postFxBlitF8,  m_tonemapPipe);
     makePipe(fxFS, m_postFxFinalRP, m_fxaaPipe);
+    makePipe(btFS, m_postFxFinalRP, m_aaBlitPipe);   // AA = Off
 
-    for (auto m : {vsM,tmFS,fxFS,brFS,blFS}) vkDestroyShaderModule(m_device,m,nullptr);
+    for (auto m : {vsM,tmFS,fxFS,btFS,brFS,blFS}) vkDestroyShaderModule(m_device,m,nullptr);
 
     m_postFxReady = true;
     // ── HDR-compatible scene pipelines ────────────────────────────────────────
@@ -2538,7 +2544,7 @@ void VulkanRenderer::createPostFXPipelines()
 void VulkanRenderer::destroyPostFXPipelines()
 {
     m_postFxReady = false;
-    for (auto p : {m_bloomBrightPipe,m_bloomBlurPipe,m_tonemapPipe,m_fxaaPipe})
+    for (auto p : {m_bloomBrightPipe,m_bloomBlurPipe,m_tonemapPipe,m_fxaaPipe,m_aaBlitPipe})
         if (p) vkDestroyPipeline(m_device, p, nullptr);
     m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=VK_NULL_HANDLE;
     if (m_postFxPipeLayout) { vkDestroyPipelineLayout(m_device, m_postFxPipeLayout, nullptr); m_postFxPipeLayout=VK_NULL_HANDLE; }
@@ -6607,6 +6613,15 @@ void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
     m_bloomEnabled   = s.enabled;
     m_bloomThreshold = s.threshold;
     m_bloomStrength  = s.intensity;
+}
+
+void VulkanRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+{
+    HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    // A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
+    // to nothing. Remove this line when the SMAA pipeline exists.
+    if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
+    m_aaMethod = m;
 }
 
 void VulkanRenderer::InvalidateMaterial(const HE::UUID& materialId)

@@ -50,6 +50,7 @@ public:
 	void SetMoonTexture(const void* rgba8Pixels, int width, int height) override;
 	void SetSSAOSettings(const SSAOSettings& s) override;
 	void SetBloomSettings(const BloomSettings& s) override;
+	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
@@ -377,7 +378,12 @@ private:
 	VkPipeline            m_bloomBlurPipe    = VK_NULL_HANDLE;
 	VkPipeline            m_tonemapPipe      = VK_NULL_HANDLE;
 	VkPipeline            m_fxaaPipe         = VK_NULL_HANDLE;
+	VkPipeline            m_aaBlitPipe       = VK_NULL_HANDLE; // AA = Off passthrough
 
+	// Anti-aliasing method in force, already resolved against this backend's
+	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
+	// m_viewportImage, so it always runs — only the pipeline changes.
+	HE::AAMethod m_aaMethod   = HE::AAMethod::FXAA;
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;

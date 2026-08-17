@@ -720,6 +720,16 @@ float4 main(In i) : SV_Target {
     float lB=luma(B); return(lB<lMin||lB>lMax)?float4(A,1):float4(B,1);
 }
 )HLSL";
+// AA = Off (docs/anti-aliasing-plan.md): the resolve pass still runs and fills
+// viewportRT, it just does not filter. Same bindings as the FXAA PS above.
+static const char* kAABlitHLSL12 = R"HLSL(
+Texture2D    uScene : register(t0);
+Texture2D    _dummy : register(t1);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float2 uRcpFrame; float2 _pad; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target { return float4(uScene.Sample(uSamp,i.uv).rgb,1); }
+)HLSL";
 static const char* kBloomBrightHLSL12 = R"HLSL(
 Texture2D    uHDR  : register(t0);
 Texture2D    _dummy: register(t1);
@@ -1140,6 +1150,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  postFxRootSig;
     ComPtr<ID3D12PipelineState>  tonemapPSO;
     ComPtr<ID3D12PipelineState>  fxaaPSO;
+    ComPtr<ID3D12PipelineState>  aaBlitPSO;   // AA = Off passthrough
     ComPtr<ID3D12PipelineState>  bloomBrightPSO;
     ComPtr<ID3D12PipelineState>  bloomBlurPSO;
     bool                         postFxReady = false;
@@ -1151,7 +1162,10 @@ struct D3D12RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
-    bool  fxaaEnabled    = true;
+    // Anti-aliasing method in force, already resolved against this backend's
+    // capabilities (docs/anti-aliasing-plan.md). Off swaps the PSO for the
+    // passthrough — the pass always draws, it is what fills viewportRT.
+    HE::AAMethod aaMethod = HE::AAMethod::FXAA;
 
     D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle(UINT slot) const
     {
@@ -1291,10 +1305,11 @@ struct D3D12RendererImpl
                 return false;
         }
 
-        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB;
+        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB;
         if (!compile(kFSTriangleVS,   "main","vs_5_0",vsB)) return false;
         if (!compile(kTonemapHLSL,    "main","ps_5_0",tmB)) return false;
         if (!compile(kFxaaHLSL12,       "main","ps_5_0",fxB)) return false;
+        if (!compile(kAABlitHLSL12,     "main","ps_5_0",btB)) return false;
         if (!compile(kBloomBrightHLSL12,"main","ps_5_0",brB)) return false;
         if (!compile(kBloomBlurHLSL12,  "main","ps_5_0",blB)) return false;
 
@@ -1318,6 +1333,7 @@ struct D3D12RendererImpl
 
         if (!makePSO(vsB.Get(), tmB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, tonemapPSO))   return false;
         if (!makePSO(vsB.Get(), fxB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, fxaaPSO))      return false;
+        if (!makePSO(vsB.Get(), btB.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, aaBlitPSO))    return false;
         if (!makePSO(vsB.Get(), brB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBrightPSO)) return false;
         if (!makePSO(vsB.Get(), blB.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, bloomBlurPSO))   return false;
 
@@ -1414,7 +1430,7 @@ struct D3D12RendererImpl
         cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
         cl->DrawInstanced(3,1,0,0);
 
-        // ── FXAA: ldrSRV → viewportRT ─────────────────────────────────────
+        // ── AA resolve: ldrSRV → viewportRT (method picks the PSO) ────────
         barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier12(cl, viewportRT.Get(), viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1422,7 +1438,7 @@ struct D3D12RendererImpl
         { D3D12_CPU_DESCRIPTOR_HANDLE vrtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
           cl->OMSetRenderTargets(1, &vrtv, FALSE, nullptr); }
         setVP(w, h);
-        cl->SetPipelineState(fxaaPSO.Get());
+        cl->SetPipelineState(aaMethod == HE::AAMethod::Off ? aaBlitPSO.Get() : fxaaPSO.Get());
         { const float cb[4]={1.0f/float(w),1.0f/float(h),0,0};
           cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
         cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(4)); // t0=ldrSRV
@@ -7179,6 +7195,15 @@ void D3D12Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D12Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+{
+    HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    // A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
+    // to nothing. Remove this line when the SMAA PSOs exist.
+    if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
+    m_impl->aaMethod = m;
 }
 
 void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)

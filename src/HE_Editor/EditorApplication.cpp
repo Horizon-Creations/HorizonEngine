@@ -1107,6 +1107,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
+	m_editorConfig.AntiAliasing                = globalstate.getCustomConfigInt("AntiAliasing",         m_editorConfig.AntiAliasing);
+	m_editorConfig.AASharpness                 = globalstate.getCustomConfigFloat("AASharpness",        m_editorConfig.AASharpness);
+	m_editorConfig.RenderScale                 = globalstate.getCustomConfigFloat("RenderScale",        m_editorConfig.RenderScale);
+	m_editorConfig.SpecularAA                  = globalstate.getCustomConfigBool("SpecularAA",          m_editorConfig.SpecularAA);
+	m_editorConfig.SpecularAAStrength          = globalstate.getCustomConfigFloat("SpecularAAStrength", m_editorConfig.SpecularAAStrength);
 	m_editorConfig.GpuParticles                = globalstate.getCustomConfigBool("GpuParticles",        m_editorConfig.GpuParticles);
 	m_editorConfig.GlobalIlluminationEnabled   = globalstate.getCustomConfigBool("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	m_editorConfig.GIIndirectIntensity         = globalstate.getCustomConfigFloat("GIIndirectIntensity",      m_editorConfig.GIIndirectIntensity);
@@ -2045,6 +2050,24 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		{
+			// Anti-aliasing. Same env-override treatment as GI/SSR below and for the
+			// same reason: this push runs every frame, so an override applied once
+			// would be back to the config value on the next one.
+			IRenderer::AntiAliasingSettings aa;
+			aa.method            = m_editorConfig.AntiAliasing;
+			aa.sharpness         = m_editorConfig.AASharpness;
+			aa.renderScale       = m_editorConfig.RenderScale;
+			aa.specularAA        = m_editorConfig.SpecularAA;
+			aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
+			static const char* s_aaOv    = std::getenv("HE_DUMP_AA");
+			static const char* s_aaScOv  = std::getenv("HE_DUMP_RENDERSCALE");
+			static const char* s_aaSpecOv = std::getenv("HE_DUMP_SPECAA");
+			if (s_aaOv     && *s_aaOv)     aa.method      = std::atoi(s_aaOv);
+			if (s_aaScOv   && *s_aaScOv)   aa.renderScale = static_cast<float>(std::atof(s_aaScOv));
+			if (s_aaSpecOv && *s_aaSpecOv) aa.specularAA  = std::atof(s_aaSpecOv) > 0.5;
+			renderer()->SetAntiAliasingSettings(aa);
+		}
 		renderer()->SetGISettings(IRenderer::GISettings{
 			m_editorConfig.GlobalIlluminationEnabled,
 			m_editorConfig.GIIndirectIntensity,
@@ -2792,6 +2815,21 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 		m_editorConfig.SSAOMethod});
+	{
+		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
+		// the render scale and the specular-AA toggle for this capture only, so
+		// he_shot.py can A/B the modes without touching config.json.
+		IRenderer::AntiAliasingSettings aa;
+		aa.method             = m_editorConfig.AntiAliasing;
+		aa.sharpness          = m_editorConfig.AASharpness;
+		aa.renderScale        = m_editorConfig.RenderScale;
+		aa.specularAA         = m_editorConfig.SpecularAA;
+		aa.specularAAStrength = m_editorConfig.SpecularAAStrength;
+		if (const char* v = std::getenv("HE_DUMP_AA");          v && *v) aa.method      = std::atoi(v);
+		if (const char* v = std::getenv("HE_DUMP_RENDERSCALE"); v && *v) aa.renderScale = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_SPECAA");      v && *v) aa.specularAA  = std::atof(v) > 0.5;
+		r->SetAntiAliasingSettings(aa);
+	}
 	{
 		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
 		// not touch config.json), so he_shot.py can compare GI-on vs GI-off without
@@ -5479,6 +5517,11 @@ void EditorApplication::OnShutdown()
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
+	globalstate.setCustomConfigEntry("AntiAliasing",              m_editorConfig.AntiAliasing);
+	globalstate.setCustomConfigEntry("AASharpness",               m_editorConfig.AASharpness);
+	globalstate.setCustomConfigEntry("RenderScale",               m_editorConfig.RenderScale);
+	globalstate.setCustomConfigEntry("SpecularAA",                m_editorConfig.SpecularAA);
+	globalstate.setCustomConfigEntry("SpecularAAStrength",        m_editorConfig.SpecularAAStrength);
 	globalstate.setCustomConfigEntry("GpuParticles",              m_editorConfig.GpuParticles);
 	globalstate.setCustomConfigEntry("GlobalIlluminationEnabled", m_editorConfig.GlobalIlluminationEnabled);
 	globalstate.setCustomConfigEntry("GIIndirectIntensity",       m_editorConfig.GIIndirectIntensity);

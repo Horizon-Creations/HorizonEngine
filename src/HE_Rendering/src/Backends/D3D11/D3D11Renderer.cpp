@@ -647,6 +647,18 @@ float4 PSMain(VSOut i) : SV_TARGET
 // to D3D12's). FXAA and the two bloom passes stay here: the D3D12 copies declare
 // an extra `Texture2D _dummy : register(t1)` for their root signature.
 
+// AA = Off (docs/anti-aliasing-plan.md). The resolve pass is what fills the
+// viewport target, so it always draws — with this passthrough instead of FXAA.
+static const char* kAABlitHLSL = R"HLSL(
+Texture2D    uScene : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float2 uRcpFrame; float2 _pad; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target {
+    return float4(uScene.Sample(uSamp, i.uv).rgb, 1);
+}
+)HLSL";
+
 // Lottes FXAA — classic 3x3 neighbourhood edge blend, run on the
 // tonemapped LDR image (t0).  cbuffer b0: { rcpFrame.xy }.
 static const char* kFxaaHLSL = R"HLSL(
@@ -906,6 +918,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11VertexShader>      fsVS;
     ComPtr<ID3D11PixelShader>       tonemapPS;
     ComPtr<ID3D11PixelShader>       fxaaPS;
+    ComPtr<ID3D11PixelShader>       aaBlitPS;   // AA = Off passthrough
     ComPtr<ID3D11PixelShader>       bloomBrightPS;
     ComPtr<ID3D11PixelShader>       bloomBlurPS;
     ComPtr<ID3D11SamplerState>      linearSampler;
@@ -938,7 +951,10 @@ struct D3D11RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
-    bool  fxaaEnabled    = true;
+    // Anti-aliasing method in force, already resolved against this backend's
+    // capabilities (docs/anti-aliasing-plan.md). Off runs aaBlitPS instead of
+    // fxaaPS — the pass itself always draws, it is what fills viewportRTV.
+    HE::AAMethod aaMethod = HE::AAMethod::FXAA;
 
     // ── SSAO pipeline ──────────────────────────────────────────────────────
     // Position prepass
@@ -2129,16 +2145,18 @@ struct D3D11RendererImpl
             }
             return true;
         };
-        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB;
+        ComPtr<ID3DBlob> vsB, tmB, fxB, brB, blB, btB;
         if (!compile(kFSTriangleVS,   "main", "vs_5_0", vsB)) return false;
         if (!compile(kTonemapHLSL,    "main", "ps_5_0", tmB)) return false;
         if (!compile(kFxaaHLSL,       "main", "ps_5_0", fxB)) return false;
+        if (!compile(kAABlitHLSL,     "main", "ps_5_0", btB)) return false;
         if (!compile(kBloomBrightHLSL,"main", "ps_5_0", brB)) return false;
         if (!compile(kBloomBlurHLSL,  "main", "ps_5_0", blB)) return false;
 
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &fsVS);
         device->CreatePixelShader (tmB->GetBufferPointer(), tmB->GetBufferSize(), nullptr, &tonemapPS);
         device->CreatePixelShader (fxB->GetBufferPointer(), fxB->GetBufferSize(), nullptr, &fxaaPS);
+        device->CreatePixelShader (btB->GetBufferPointer(), btB->GetBufferSize(), nullptr, &aaBlitPS);
         device->CreatePixelShader (brB->GetBufferPointer(), brB->GetBufferSize(), nullptr, &bloomBrightPS);
         device->CreatePixelShader (blB->GetBufferPointer(), blB->GetBufferSize(), nullptr, &bloomBlurPS);
 
@@ -2161,7 +2179,7 @@ struct D3D11RendererImpl
           bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
           device->CreateBuffer(&bd, nullptr, &postFxCB); }
 
-        postFxReady = fsVS && tonemapPS && fxaaPS && bloomBrightPS && bloomBlurPS
+        postFxReady = fsVS && tonemapPS && fxaaPS && aaBlitPS && bloomBrightPS && bloomBlurPS
                    && linearSampler && noDepthDSS && fsRastState && postFxCB;
         return postFxReady;
     }
@@ -4030,12 +4048,14 @@ void D3D11Renderer::Render()
               p.context->Draw(3, 0);
               ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 
-            // FXAA: ldrSRV → viewportRTV (final output sampled by ImGui).
+            // AA resolve: ldrSRV → viewportRTV (final output sampled by ImGui).
+            // Always drawn — the method only picks the pixel shader.
             { const float cb[4] = { 1.0f / float(p.viewportW),
                                     1.0f / float(p.viewportH), 0, 0 };
               p.updatePostFxCB(cb);
               p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
-              p.context->PSSetShader(p.fxaaPS.Get(), nullptr, 0);
+              p.context->PSSetShader(p.aaMethod == HE::AAMethod::Off
+                                     ? p.aaBlitPS.Get() : p.fxaaPS.Get(), nullptr, 0);
               ID3D11ShaderResourceView* srv = p.ldrSRV.Get();
               p.context->PSSetShaderResources(0, 1, &srv);
               p.context->Draw(3, 0);
@@ -4210,6 +4230,15 @@ void D3D11Renderer::SetBloomSettings(const BloomSettings& s)
     m_impl->bloomEnabled   = s.enabled;
     m_impl->bloomThreshold = s.threshold;
     m_impl->bloomStrength  = s.intensity;
+}
+
+void D3D11Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
+{
+    HE::AAMethod m = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    // A1 has not landed on this backend yet: SMAA falls back to FXAA rather than
+    // to nothing. Remove this line when the SMAA shaders exist.
+    if (m == HE::AAMethod::SMAA) m = HE::AAMethod::FXAA;
+    m_impl->aaMethod = m;
 }
 
 void D3D11Renderer::InvalidateMaterial(const HE::UUID& materialId)

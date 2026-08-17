@@ -1059,6 +1059,19 @@ void GameApplication::OnRender(float deltaTime)
 			gr.bounces      = GlobalState::getInstance().getCustomConfigInt("GIReflBounces", 1);
 			r->SetGIReflectionSettings(gr);
 
+			// Anti-aliasing — same config.json keys the editor's Preferences write
+			// ("AntiAliasing" = AAMethod int, plus sharpness/scale/specular-AA).
+			// Not capability-gated here: the backend runs the shared
+			// IRenderer::ResolveAAMethod fallback itself, so a config authored on a
+			// Metal machine opens sanely in a D3D11 build of the same game.
+			IRenderer::AntiAliasingSettings aa;
+			aa.method             = GlobalState::getInstance().getCustomConfigInt("AntiAliasing", 1);
+			aa.sharpness          = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("AASharpness", 0.35f));
+			aa.renderScale        = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("RenderScale", 1.0f));
+			aa.specularAA         = GlobalState::getInstance().getCustomConfigBool("SpecularAA", true);
+			aa.specularAAStrength = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SpecularAAStrength", 1.0f));
+			r->SetAntiAliasingSettings(aa);
+
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
 			const bool deferredPath =
