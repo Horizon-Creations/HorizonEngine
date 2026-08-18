@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "Diagnostics/GlobalState.h"
 #include "Diagnostics/Logger.h"
+#include "Diagnostics/ProfilerStats.h"
 
 #include <SDL3/SDL.h>
 #include <nlohmann/json.hpp>
@@ -14,6 +15,8 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -28,6 +31,90 @@ std::string timestampStamp()
 	char ts[32]{};
 	std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&t));
 	return ts;
+}
+
+// ─── Per-thread timeline buffers (v3) ────────────────────────────────────────
+// One buffer per thread that ever opens a scope during a capture. The owning
+// thread is the ONLY writer; the profiler's merge is the only other reader, and
+// it takes `mtx` — uncontended in practice, which is why a plain mutex beats a
+// lock-free ring here (a torn POD read is a worse failure than 20 ns).
+//
+// Held by shared_ptr from BOTH the thread_local and the registry: a JobSystem
+// worker that exits mid-capture drops its reference, the registry keeps the spans
+// alive, and the merge never touches a dangling buffer.
+struct ThreadCapture
+{
+	std::mutex                  mtx;          // guards spans/dropped/generation
+	std::vector<ProfThreadSpan> spans;        // completed spans, session-relative
+	std::vector<uint64_t>       openStart;    // absolute start ns per open scope (owner only)
+	std::vector<const char*>    openName;     // parallel to openStart          (owner only)
+	uint64_t                    generation = UINT64_MAX;   // capture this buffer belongs to
+	size_t                      dropped    = 0;            // spans lost to the cap
+	std::string                 label;
+	bool                        isMain     = false;
+};
+
+// Hard per-thread span budget. A 60-second capture at 60 fps with a few hundred
+// job scopes per frame lands well under this; a runaway instrumentation bug hits
+// the cap instead of the swap file. Overflow is COUNTED, never silently dropped.
+constexpr size_t kMaxSpansPerThread = 262144;
+
+std::mutex& registryMutex()
+{
+	static std::mutex m;
+	return m;
+}
+
+std::vector<std::shared_ptr<ThreadCapture>>& registry()
+{
+	static std::vector<std::shared_ptr<ThreadCapture>> v;
+	return v;
+}
+
+// The calling thread's buffer, created and registered on first use. `isMain` is
+// fixed at creation: a thread's role in a capture never changes, and the main
+// thread always reaches this before any worker does (it starts the capture).
+ThreadCapture& threadCapture(bool isMain)
+{
+	thread_local std::shared_ptr<ThreadCapture> tls = [isMain] {
+		auto p     = std::make_shared<ThreadCapture>();
+		p->isMain  = isMain;
+		std::lock_guard<std::mutex> lk(registryMutex());
+		size_t workers = 0;
+		for (const auto& e : registry())
+			if (!e->isMain) ++workers;
+		p->label = isMain ? std::string("Main") : ("Worker " + std::to_string(workers));
+		registry().push_back(p);
+		return p;
+	}();
+	return *tls;
+}
+
+// Drop buffers whose owning thread has exited. A live thread holds a second
+// reference from its thread_local, so use_count()==1 means the registry is the
+// only owner left and nothing will ever touch that buffer again — its spans
+// would otherwise pin up to a quarter-million entries for the rest of the
+// process. Called at capture start, where a copy is being thrown away anyway.
+void pruneDeadThreadBuffers()
+{
+	std::lock_guard<std::mutex> lk(registryMutex());
+	auto& v = registry();
+	v.erase(std::remove_if(v.begin(), v.end(),
+	                       [](const std::shared_ptr<ThreadCapture>& p) { return p.use_count() == 1; }),
+	        v.end());
+}
+
+// Drop everything from an earlier capture. Called on first touch in a new
+// generation so a worker that slept through the previous capture starts clean.
+void resetIfStale(ThreadCapture& tc, uint64_t generation)
+{
+	if (tc.generation == generation) return;
+	tc.openStart.clear();
+	tc.openName.clear();
+	std::lock_guard<std::mutex> lk(tc.mtx);
+	tc.generation = generation;
+	tc.dropped    = 0;
+	tc.spans.clear();
 }
 } // namespace
 
@@ -70,6 +157,7 @@ void EngineProfiler::doStart()
 	m_session        = m_pendingInfo;
 	m_maxFrames      = m_pendingMax;
 	m_frames.clear();
+	m_frameMarks.clear();
 	m_frameCounter   = 0;
 	m_sessionStartNs = nowNs();
 	m_stack.clear();
@@ -78,6 +166,12 @@ void EngineProfiler::doStart()
 	// stack; scopes from any other thread are ignored. Set before publishing
 	// m_recording so worker threads that observe recording also see this id.
 	m_captureThread  = std::this_thread::get_id();
+	pruneDeadThreadBuffers();
+	// Everything a worker reads without its own synchronisation — m_sessionStartNs,
+	// m_captureThread, the generation — is written ABOVE this release store, and a
+	// worker only reads it after the acquire load in beginScope. That edge is the
+	// whole happens-before argument; keep new plain state on this side of it.
+	m_generation.fetch_add(1, std::memory_order_relaxed);
 	m_recording.store(true, std::memory_order_release);
 	HE_LOG_INFO(Profiler, "%s", "Profiler: capture started");
 }
@@ -127,13 +221,26 @@ void EngineProfiler::beginFrame(double deltaMs)
 
 void EngineProfiler::endFrame()
 {
-	m_lastCpuFrameMs = nsToMs(nowNs() - m_frameStartNs);   // always (live HUD)
+	const uint64_t endNs = nowNs();
+	m_lastCpuFrameMs = nsToMs(endNs - m_frameStartNs);     // always (live HUD)
 	if (!m_recording) return;
 
 	// Close any scopes the caller forgot to (defensive; should not happen).
 	while (!m_stack.empty()) endScope();
 
 	m_current.cpuFrameMs = m_lastCpuFrameMs;
+
+	// Frame boundary on the timeline axis (same relative-ns units as the spans),
+	// so the timeline can draw frame separators over the thread lanes. Kept in
+	// lockstep with the m_frames ring below so a mark always has its record.
+	if (!m_singleMode)
+	{
+		if (m_maxFrames != 0 && m_frameMarks.size() >= m_maxFrames)
+			m_frameMarks.erase(m_frameMarks.begin());
+		m_frameMarks.push_back({ m_current.index,
+		                         m_frameStartNs > m_sessionStartNs ? m_frameStartNs - m_sessionStartNs : 0,
+		                         endNs          > m_sessionStartNs ? endNs          - m_sessionStartNs : 0 });
+	}
 
 	// Single-frame capture: stash the one frame for the UI and stop (no dump, not
 	// added to the multi-frame ring).
@@ -163,31 +270,133 @@ void EngineProfiler::pushLive(const ProfLiveFrame& f)
 
 // ─── CPU scopes ──────────────────────────────────────────────────────────────
 
-// Only the capture (main) thread records — scopes opened on worker threads (e.g.
-// the JobSystem pool's "Job::Execute") are ignored so the scope stack stays
-// single-writer. Without this guard, concurrent push_back corrupts the heap.
+// The per-FRAME scope tree (m_stack → m_current.scopes) is main-thread only:
+// scopes opened on worker threads (the JobSystem pool's "Job::Execute") never
+// touch it, so it stays single-writer. Without that guard, concurrent push_back
+// corrupts the heap — the v2.1 crash.
+//
+// The per-THREAD timeline runs for every thread, into that thread's own buffer,
+// which is why worker work is visible at all now. Both paths share one timestamp.
 void EngineProfiler::beginScope(const char* name)
 {
 	if (!m_recording.load(std::memory_order_acquire)) return;
-	if (std::this_thread::get_id() != m_captureThread)  return;
-	m_stack.push_back({ name, nowNs(), static_cast<uint32_t>(m_stack.size()) });
+	const bool     isMain = std::this_thread::get_id() == m_captureThread;
+	const uint64_t now    = nowNs();
+
+	if (m_timelineOn.load(std::memory_order_relaxed))
+	{
+		ThreadCapture& tc = threadCapture(isMain);
+		resetIfStale(tc, m_generation.load(std::memory_order_relaxed));
+		tc.openStart.push_back(now);
+		tc.openName.push_back(name);
+	}
+
+	if (!isMain) return;
+	m_stack.push_back({ name, now, static_cast<uint32_t>(m_stack.size()) });
 }
 
 void EngineProfiler::endScope()
 {
 	if (!m_recording.load(std::memory_order_acquire)) return;
-	if (std::this_thread::get_id() != m_captureThread)  return;
+	const bool     isMain = std::this_thread::get_id() == m_captureThread;
+	const uint64_t now    = nowNs();
+
+	if (m_timelineOn.load(std::memory_order_relaxed))
+	{
+		ThreadCapture& tc  = threadCapture(isMain);
+		const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+		// A scope that OPENED before this capture (or before the timeline was
+		// switched on) has no matching entry here; skip it rather than pairing it
+		// with somebody else's start. ProfileScope latching makes this rare, but a
+		// mid-scope setThreadTimelineEnabled(true) reaches it.
+		if (tc.generation == gen && !tc.openStart.empty())
+		{
+			const uint64_t startNs = tc.openStart.back();
+			const char*    nm      = tc.openName.back();
+			const uint32_t depth   = static_cast<uint32_t>(tc.openStart.size() - 1);
+			tc.openStart.pop_back();
+			tc.openName.pop_back();
+
+			std::lock_guard<std::mutex> lk(tc.mtx);
+			if (tc.spans.size() < kMaxSpansPerThread)
+				tc.spans.push_back({ nm,
+				                     startNs > m_sessionStartNs ? startNs - m_sessionStartNs : 0,
+				                     now     > m_sessionStartNs ? now     - m_sessionStartNs : 0,
+				                     depth });
+			else
+				++tc.dropped;
+		}
+	}
+
+	if (!isMain) return;
 	if (m_stack.empty()) return;
 	const LiveScope s = m_stack.back();
 	m_stack.pop_back();
-	m_current.scopes.push_back({ s.name, nsToMs(nowNs() - s.startNs), s.depth });
+	m_current.scopes.push_back({ s.name, nsToMs(now - s.startNs), s.depth });
+}
+
+// ─── Per-thread timeline access ──────────────────────────────────────────────
+
+std::vector<ProfThreadTimeline> EngineProfiler::timelineSnapshot() const
+{
+	const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+	std::vector<ProfThreadTimeline> out;
+
+	std::lock_guard<std::mutex> reg(registryMutex());
+	for (const auto& tc : registry())
+	{
+		std::lock_guard<std::mutex> lk(tc->mtx);
+		if (tc->generation != gen || tc->spans.empty()) continue;   // stale or idle thread
+		ProfThreadTimeline t;
+		t.label   = tc->label;
+		t.isMain  = tc->isMain;
+		t.dropped = tc->dropped;
+		t.spans   = tc->spans;
+		out.push_back(std::move(t));
+	}
+	// Main lane first, workers after it in registration order — a stable lane
+	// ordering matters more than any particular one: lanes that jump between
+	// snapshots make the timeline unreadable while it updates live.
+	std::stable_sort(out.begin(), out.end(),
+	                 [](const ProfThreadTimeline& a, const ProfThreadTimeline& b)
+	                 { return a.isMain && !b.isMain; });
+	return out;
+}
+
+size_t EngineProfiler::timelineDroppedSpans() const
+{
+	const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+	size_t total = 0;
+	std::lock_guard<std::mutex> reg(registryMutex());
+	for (const auto& tc : registry())
+	{
+		std::lock_guard<std::mutex> lk(tc->mtx);
+		if (tc->generation == gen) total += tc->dropped;
+	}
+	return total;
 }
 
 // ─── Per-frame data ──────────────────────────────────────────────────────────
 
+// Renderer-owned fields only. The scene counters in m_current.stats were pushed
+// earlier in this same frame by the world tick (a different producer at a different
+// point in the loop); assigning the whole struct here would zero them every frame,
+// which is precisely how entities/lights/particles stayed 0 in every dump until v3.
 void EngineProfiler::setRenderStats(const ProfRenderStats& s)
 {
-	if (m_recording) m_current.stats = s;
+	if (!m_recording) return;
+	m_current.stats.drawCalls      = s.drawCalls;
+	m_current.stats.triangles      = s.triangles;
+	m_current.stats.visibleObjects = s.visibleObjects;
+	m_current.stats.totalObjects   = s.totalObjects;
+	m_current.stats.vramUsedMB     = s.vramUsedMB;
+	m_current.stats.vramBudgetMB   = s.vramBudgetMB;
+}
+
+void EngineProfiler::setSceneCounters(const ProfSceneCounters& c)
+{
+	m_sceneCounters = c;                       // cached for the live HUD too
+	if (m_recording) m_current.stats.scene = c;
 }
 
 void EngineProfiler::setGpuTimes(double gpuFrameMs, const std::vector<ProfGpuPass>& passes,
@@ -247,7 +456,9 @@ std::string EngineProfiler::dumpNow()
 		m_dumpsDir = GlobalState::getInstance().getDumpsDir();
 
 	// Per-scope and per-GPU-pass summaries across the whole capture.
-	std::map<std::string, Stat> cpuSummary, gpuSummary;
+	// CPU scopes are summarised by HE::Prof::aggregateScopes below (it adds self
+	// time and p95, which this Stat cannot express); only the GPU passes still use it.
+	std::map<std::string, Stat> gpuSummary;
 	std::map<std::string, bool> gpuApprox;   // a pass name is approx if any sample was
 	std::map<std::string, uint64_t> gpuModeCounts;  // which GPU-timing path produced each frame
 	Stat cpuFrame, gpuFrame, delta;
@@ -258,7 +469,6 @@ std::string EngineProfiler::dumpNow()
 		delta.add(f.deltaMs);
 		if (f.gpuFrameMs >= 0.0) gpuFrame.add(f.gpuFrameMs);
 		if (f.gpuTimingMode && f.gpuTimingMode[0]) gpuModeCounts[f.gpuTimingMode]++;
-		for (const auto& s : f.scopes) cpuSummary[s.name].add(s.ms);
 		double sumExact = 0.0; bool anyExact = false;
 		for (const auto& g : f.gpuPasses)
 		{
@@ -271,7 +481,7 @@ std::string EngineProfiler::dumpNow()
 
 	json j;
 	j["tool"]    = "HorizonEngine EngineProfiler";
-	j["version"] = 1;
+	j["version"] = 2;   // 2 = v3 profiler: per-thread timeline, frameMarks, statistics
 	j["session"] = {
 		{"backend", m_session.backend}, {"gpu", m_session.gpuName},
 		{"os", m_session.os}, {"width", m_session.width}, {"height", m_session.height},
@@ -288,6 +498,57 @@ std::string EngineProfiler::dumpNow()
 	summary["cpuFrameMs"] = cpuFrame.toJson();
 	summary["deltaMs"]    = delta.toJson();
 	if (gpuFrame.n) summary["gpuFrameMs"] = gpuFrame.toJson();
+
+	// ── Tail statistics (v3) ────────────────────────────────────────────────
+	// min/avg/max above answers "how fast on average", which is the question
+	// nobody has. Stutter lives in the tail, so the tail gets its own block:
+	// percentiles per series, benchmark-convention low-percentile FPS, and the
+	// individual hitch frames with the scope that was expensive in each.
+	{
+		std::vector<double> deltas, cpus, gpus;
+		deltas.reserve(m_frames.size()); cpus.reserve(m_frames.size());
+		for (const auto& f : m_frames)
+		{
+			deltas.push_back(f.deltaMs);
+			cpus.push_back(f.cpuFrameMs);
+			if (f.gpuFrameMs >= 0.0) gpus.push_back(f.gpuFrameMs);
+		}
+		auto pctJson = [](const HE::Prof::Percentiles& p) {
+			return json{ {"min", p.min}, {"mean", p.mean}, {"p50", p.p50},
+			             {"p95", p.p95}, {"p99", p.p99}, {"max", p.max},
+			             {"stddev", p.stddev}, {"count", p.count} };
+		};
+		json stats;
+		stats["deltaMs"] = pctJson(HE::Prof::computePercentiles(deltas));
+		stats["cpuMs"]   = pctJson(HE::Prof::computePercentiles(cpus));
+		if (!gpus.empty()) stats["gpuMs"] = pctJson(HE::Prof::computePercentiles(gpus));
+
+		const HE::Prof::FpsLows lows = HE::Prof::computeFpsLows(deltas);
+		stats["fps"] = { {"avg", lows.avgFps}, {"low1Percent", lows.low1Fps},
+		                 {"low01Percent", lows.low01Fps}, {"frames", lows.frames},
+		                 {"note", "1%/0.1% low = AVERAGE of the slowest 1%/0.1% of frames "
+		                          "expressed as FPS (benchmark convention), not the p99 frame time"} };
+		summary["stats"] = stats;
+
+		const std::vector<HE::Prof::Hitch> hitches = HE::Prof::findHitches(m_frames);
+		if (!hitches.empty())
+		{
+			json jh = json::array();
+			for (const HE::Prof::Hitch& h : hitches)
+			{
+				json e = { {"frame", h.frameIndex}, {"deltaMs", h.deltaMs},
+				           {"xMedian", h.ratio} };
+				if (h.worstScope && h.worstScope[0])
+				{ e["worstScope"] = h.worstScope; e["worstScopeMs"] = h.worstScopeMs; }
+				if (h.gpuMs >= 0.0) e["gpuMs"] = h.gpuMs;
+				jh.push_back(std::move(e));
+			}
+			summary["hitches"]     = jh;
+			summary["hitchCount"]  = hitches.size();
+			summary["hitchNote"]   = "frames over 2x the median frame time, worst first "
+			                         "(max 64 listed); worstScope is the costliest depth-0 CPU scope";
+		}
+	}
 	// Honesty guard: on tile-deferred (TBDR / Apple Silicon) GPUs the per-encoder
 	// stage-boundary spans overlap — fragment/tile work drains together near frame
 	// end, so each pass's [startVertex,endFragment] window stretches to ≈ the whole
@@ -313,9 +574,31 @@ std::string EngineProfiler::dumpNow()
 		for (const auto& [name, n] : gpuModeCounts) modes[name] = n;
 		summary["gpuTimingModes"] = modes;
 	}
-	json cpuScopes = json::object();
-	for (const auto& [name, st] : cpuSummary) cpuScopes[name] = st.toJson();
-	summary["cpuScopes"] = cpuScopes;
+	// Per-scope aggregate, now carrying SELF time (inclusive minus direct children)
+	// and p95. Self time is what names the culprit: "Render 9 ms" only says the
+	// renderer is on the call chain, "Render self 8.6 ms" says the cost is its own.
+	{
+		const std::vector<HE::Prof::ScopeAggregate> aggregates = HE::Prof::aggregateScopes(m_frames);
+		json cpuScopes = json::object();
+		for (const HE::Prof::ScopeAggregate& a : aggregates)
+			cpuScopes[a.name] = { {"min", a.minMs}, {"avg", a.avgMs}, {"max", a.maxMs},
+			                      {"p95", a.p95Ms}, {"count", a.count},
+			                      {"totalMs", a.totalMs}, {"selfMs", a.selfMs},
+			                      {"depth", a.minDepth} };
+		summary["cpuScopes"] = cpuScopes;
+
+		// The ranking, pre-sorted by self time, so a reader (or a diff script) does
+		// not have to re-derive it from the object above.
+		json top = json::array();
+		size_t n = 0;
+		for (const HE::Prof::ScopeAggregate& a : aggregates)
+		{
+			if (n++ >= 20) break;
+			top.push_back({ {"scope", a.name}, {"selfMs", a.selfMs},
+			                {"totalMs", a.totalMs}, {"count", a.count} });
+		}
+		summary["topScopesBySelfTime"] = top;
+	}
 	if (!gpuSummary.empty())
 	{
 		json gpuPasses = json::object();
@@ -327,7 +610,78 @@ std::string EngineProfiler::dumpNow()
 		}
 		summary["gpuPasses"] = gpuPasses;
 	}
+
+	// ── Per-thread timeline (v3) ────────────────────────────────────────────
+	// Every lane is summarised (cheap, always useful: "Worker 3 was busy 4% of the
+	// capture" is the parallelism verdict). The raw spans are the expensive part —
+	// hundreds of thousands of them over a long capture — so they get a hard total
+	// budget, oldest-lane-first, and any truncation is written into the dump AND
+	// logged. A silently half-written timeline reads as an idle thread pool.
+	const std::vector<ProfThreadTimeline> lanes = timelineSnapshot();
+	if (!lanes.empty())
+	{
+		constexpr size_t kMaxDumpSpans = 120000;
+		size_t written = 0, omitted = 0;
+
+		json summaryLanes = json::array();
+		json jthreads     = json::array();
+		for (const ProfThreadTimeline& lane : lanes)
+		{
+			// Busy time = union of depth-0 spans; nested spans are already inside
+			// their parent, so summing every depth would count the same nanosecond
+			// once per level and happily report 300% occupancy.
+			double busyMs = 0.0, deepestMs = 0.0;
+			uint32_t maxDepth = 0;
+			for (const ProfThreadSpan& s : lane.spans)
+			{
+				const double ms = nsToMs(s.endNs - s.startNs);
+				if (s.depth == 0) busyMs += ms;
+				if (s.depth > maxDepth) maxDepth = s.depth;
+				if (ms > deepestMs) deepestMs = ms;
+			}
+			summaryLanes.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+			                         {"spans", lane.spans.size()}, {"busyMs", busyMs},
+			                         {"longestSpanMs", deepestMs}, {"maxDepth", maxDepth},
+			                         {"droppedSpans", lane.dropped} });
+
+			json jspans = json::array();
+			for (const ProfThreadSpan& s : lane.spans)
+			{
+				if (written >= kMaxDumpSpans) { ++omitted; continue; }
+				jspans.push_back({ {"n", s.name}, {"s", s.startNs}, {"e", s.endNs}, {"d", s.depth} });
+				++written;
+			}
+			jthreads.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+			                     {"spans", std::move(jspans)} });
+		}
+		summary["threads"] = summaryLanes;
+		if (omitted > 0)
+		{
+			summary["timelineTruncated"] = omitted;
+			summary["timelineNote"] =
+				std::string("timeline truncated: ") + std::to_string(omitted) +
+				" spans omitted from this dump (budget " + std::to_string(kMaxDumpSpans) +
+				"). summary.threads still covers the FULL capture — trust it over threads[].";
+			HE_LOG_WARN(Profiler, "%s",
+			            ("Profiler: timeline truncated in dump — " + std::to_string(omitted) +
+			             " spans omitted").c_str());
+		}
+		const size_t droppedLive = timelineDroppedSpans();
+		if (droppedLive > 0) summary["timelineDroppedAtCapture"] = droppedLive;
+		j["threads"] = std::move(jthreads);
+	}
+
 	j["summary"] = summary;
+
+	// Frame boundaries on the timeline axis, so a reader can line the thread lanes
+	// up with the frames[] entries (both carry the same frame index).
+	if (!m_frameMarks.empty())
+	{
+		json marks = json::array();
+		for (const ProfFrameMark& m : m_frameMarks)
+			marks.push_back({ {"i", m.index}, {"s", m.startNs}, {"e", m.endNs} });
+		j["frameMarks"] = std::move(marks);
+	}
 
 	// Per-frame detail.
 	json frames = json::array();
@@ -359,9 +713,12 @@ std::string EngineProfiler::dumpNow()
 		jf["stats"] = {
 			{"draws", s.drawCalls}, {"tris", s.triangles},
 			{"visible", s.visibleObjects}, {"total", s.totalObjects},
-			{"entities", s.entities}, {"lights", s.lights},
-			{"particles", s.particles}, {"gpuParticles", s.gpuParticles},
-			{"streamingInFlight", s.streamingInFlight},
+			{"entities", s.scene.entities}, {"lights", s.scene.lights},
+			{"particles", s.scene.particles}, {"emitters", s.scene.emitters},
+			{"gpuParticles", s.scene.gpuParticles},
+			{"rigidBodies", s.scene.rigidBodies}, {"audioSources", s.scene.audioSources},
+			{"scripts", s.scene.scripts},
+			{"streamingInFlight", s.scene.streamingInFlight},
 			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
 		};
 		frames.push_back(std::move(jf));

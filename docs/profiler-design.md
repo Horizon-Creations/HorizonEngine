@@ -189,3 +189,91 @@ Backend: `EngineProfiler` bekam `ProfLiveFrame`-Ring (`pushLive`/`liveSnapshot`/
 - **macOS-GL-Timestamps** unzuverlässig → bewusst −1 statt falscher Zahlen.
 - **D3D/Vulkan blind** → Interface ja, Impl später mit HW-Verifikation.
 - **`startupPath`-Form**: endet mit Separator (Content = `startupPath+"Content"`); `parent_path()` liefert dieselbe Deploy-Wurzel wie der Log → verifizieren beim ersten Dump.
+
+---
+
+# Erweiterung v3 (2026-08-18) — „deutlich ausführlicher und visuell ansprechender"
+
+> Auftrag (User): mehr messen, besser darstellen. Die Bestandsaufnahme unten sagt zuerst, **was schon da ist**, damit die Arbeit dort landet, wo wirklich Lücken sind, statt weitere Subsysteme mit Scopes zu bestreuen, die es längst haben.
+
+## Bestandsaufnahme: was v1/v2 schon misst
+- **CPU-Scopes**, verschachtelt, RAII, zero-cost wenn aus: Frame-Schleife (PollEvents/OnRender/Render/GameLogicTick/SwapBuffers), 11 Szene-Systeme, PhysicsStep, AudioSpatial, ScriptUpdate, CollisionDispatch, EnvironmentPush. **Breite ist gut.**
+- **GPU pro Pass** (Metal „detailed" verifiziert exklusiv/additiv, GL-Timer-Queries, Whole-Frame-Fallback), modus-gestempelt, mit TBDR-Overlap-Guard.
+- **Render-Zähler** draws/tris/visible/total.
+- **Dump** (JSON) mit min/avg/max je Scope und Pass, **Live-HUD** + Frametime-Graph, Single-Frame-Capture.
+
+## Die echten Lücken (das ist v3)
+1. **Nur der Main-Thread wird aufgezeichnet.** Der JobSystem-Pool wickelt jede Task in `HE_PROFILE_SCOPE_N("Job::Execute")`, aber `begin/endScope` verwerfen alles, was nicht vom Capture-Thread kommt (v2.1-Crashfix). Damit ist FrustumCuller/RenderExtractor-`parallel_for` — die parallele Hälfte des Frames — komplett unsichtbar. **Das ist die Kopf-Lücke von „ausführlicher".**
+2. **Keine Statistik.** `min/avg/max` beantworten „wie schnell im Schnitt", nicht „wie schlecht im schlechten Fall". Ruckler leben in p99 und 1%-Low, nicht im Mittelwert.
+3. **Keine Self-Time.** Ein Scope-Baum ohne Eigenzeit sagt „Render kostet 9 ms" — nicht, *wo* in Render.
+4. **Tote Zähler.** `entities/lights/particles/gpuParticles/streamingInFlight/vram*` stehen in `ProfRenderStats`, aber `Application.cpp` befüllt sie nie → im Dump immer 0.
+5. **Darstellung ist eine Textliste.** Zwei `PlotLines` und eingerückte `ImGui::Text`-Zeilen mit `ProgressBar`. Kein Flame-Graph, keine Timeline, kein Histogramm, kein Scrubbing, keine Sortierung, kein Top-N.
+
+## Teil A — was man messen kann (und was davon v3 baut)
+
+### A1. Per-Thread-Timeline (BAUEN)
+Der Wechsel vom „Scope-Stack pro Frame" zum **Capture-weiten Ereignisstrom pro Thread**:
+```
+struct ProfThreadSpan { const char* name; uint64_t startNs, endNs; uint32_t depth; };  // session-relativ
+```
+- `thread_local` Ring fester Kapazität pro Thread; ein Thread registriert seinen Puffer beim ersten Scope **einmal** unter Mutex in einer Registry. Danach schreibt **nur er** hinein → single-writer ohne Lock im Hot-Path, genau die Eigenschaft, deren Verletzung v2.1 zum Absturz brachte.
+- Aufgezeichnet werden **abgeschlossene** Spans (im `endScope`), mit absoluten Start/End-Zeitstempeln. Damit ist die Frage „ein Scope überlappt die Frame-Grenze — zu welchem Frame gehört er?" gar nicht erst zu beantworten: die Timeline ist frame-los, Frames sind nur Marker darauf.
+- Der Main-Thread-Pfad (`m_current.scopes`) **bleibt unverändert** — die bestehende Frame-Aufschlüsselung, der Dump und die Tests hängen daran. Die Timeline kommt additiv daneben.
+- **Vertragsumkehr:** der Regressionstest „8 Threads × 5000 Scopes" prüft heute, dass Worker-Scopes *ignoriert* werden. v3 kehrt das um: sie werden *aufgezeichnet*, ohne Korruption. Der Test wird bewusst umgeschrieben, nicht gelöscht — er ist der Wächter über den einzigen Laufzeit-Crash, den dieses System je hatte.
+
+### A2. Statistik statt Mittelwert (BAUEN)
+Über jede Serie (Frametime, CPU, GPU, jeden Scope, jeden Pass): **p50/p95/p99, 1%-Low und 0.1%-Low FPS, Stddev**, plus **Hitch-Erkennung** (Frame > 2× Median → Liste der Ruckler-Frames mit Index und dem teuersten Scope darin). Das ist die Zahl, die man auf einen Screenshot schreibt, wenn man behauptet, etwas sei schneller geworden.
+
+### A3. Self-Time (BAUEN)
+Aus `depth` + Schließreihenfolge rekonstruierbar, ohne die Erfassung anzufassen: Eigenzeit = Inklusivzeit − Σ direkter Kinder. Damit wird die Top-N-Tabelle nach *Eigenzeit* sortierbar — die einzige Sortierung, die auf den Übeltäter zeigt statt auf dessen Elternkette.
+
+### A4. Zähler befüllen (BAUEN)
+`entities/lights/particles/gpuParticles/streamingInFlight` aus vorhandenen Quellen (World-Registry, ContentManager) — **nur wo es schon einen Getter gibt**. Keine `malloc`-Hooks in dieser Runde.
+
+### A5. Was bewusst NICHT gebaut wird (Roadmap)
+- **Allokations-Profiling** (globale `new/delete`-Hooks, Peak-Bytes/Frame, Allokationen pro Scope). Hoher Wert, aber ein eigener Eingriff mit ABI-Risiko über 10 Module.
+- **A/B-Vergleich zweier Captures** (zwei Dumps laden, Δ pro Scope). Reines UI-Feature, sinnvoll erst wenn v3-Dumps existieren.
+- **Cross-Backend-GPU-Queries** (D3D11/D3D12/Vulkan). Auf diesem Mac nicht verifizierbar — vier blinde Backends sind der dokumentierte Session-Fehler ×4.
+- **Per-Objekt-GPU-Zeit.** Auf TBDR architektonisch nicht sinnvoll (siehe v2).
+
+## Teil B — wie man es darstellt
+
+Kein neues Vendoring: **ImPlot ist nicht im Baum** (`EditorDeps` hat nur EngineContent/Fonts/Images), und eine Charting-Bibliothek für vier Diagramme hereinzuziehen passt nicht zum Rest des Editors. Alles wird mit `ImDrawList` gezeichnet — dieselbe Technik wie der bestehende Graph-Editor.
+
+| Ansicht | Zeigt | Warum diese Form |
+|---|---|---|
+| **Flame-/Timeline-Graph** | Main-Thread-Lane + eine Lane je Worker + GPU-Pass-Lane, Rechtecke nach Zeit/Tiefe, Zoom+Pan, Hover-Tooltip | Die einzige Darstellung, in der man *Parallelität* sieht: Lücken zwischen Worker-Balken sind unausgelastete Kerne, ein breiter Main-Balken neben leeren Workern ist ein Serialisierungs-Engpass. Eine Liste kann das nicht. |
+| **Frametime-Graph mit Ruckler-Färbung** | Balken je Frame, eingefärbt gegen 60/120-FPS-Budget, p95/p99-Linien, Klick = Frame in „Frame Detail" laden | Verwandelt den Graph vom Dekor zum Navigationsmittel: der Ausreißer, den man sieht, ist der Frame, den man untersuchen will. |
+| **Histogramm** | Verteilung der Frametimes | Ein Mittelwert von 11 ms bei bimodaler Verteilung (8 ms / 22 ms) fühlt sich an wie 22 ms. Nur das Histogramm zeigt das. |
+| **Top-N-Tabelle** | Scope, Eigenzeit, Inklusivzeit, Anzahl, min/avg/p95/max, Sparkline | Der Arbeits-Bildschirm: sortierbar, sofort ranking-fähig. |
+| **Budget-Balken** | CPU/GPU gegen Zielframezeit, farbcodiert | „Passt es ins Budget" ist eine andere Frage als „wie viele ms" und verdient eine andere Darstellung. |
+
+**Modus-Ehrlichkeit wandert mit.** Der GPU-Lane wird nur bei `detailed`/`gl-timer` additiv (aneinandergereiht) gezeichnet; im `counter`-Modus zeichnet sie ehrlich **überlappende** Spans plus den bestehenden Warntext. Die v2-Lehre (Σ ≈ 3× auf TBDR) darf nicht durch eine hübschere Ansicht verlorengehen — ein Balkendiagramm, das überlappende Spans nebeneinanderlegt, *behauptet* Additivität.
+
+## Teil C — Umsetzungsreihenfolge
+1. **Per-Thread-Timeline** (Erfassung + Merge + Dump-Anteil + Test-Vertragsumkehr).
+2. **Statistik + Self-Time** als reine Funktionen (`ProfilerStats.h`) → headless testbar, Dump-`version` auf 2.
+3. **Zähler befüllen.**
+4. **UI-Überarbeitung** (ImDrawList-Widgets, Layout-Mathe in reine Funktionen ausgelagert und getestet).
+
+## Umsetzungsstatus v3 (2026-08-18) — alle vier Phasen auf dem Branch
+
+**Phase 1 — Per-Thread-Timeline.** `ProfThreadSpan`/`ProfThreadTimeline`/`ProfFrameMark` in `EngineProfiler.h`; `thread_local`-Puffer, per `shared_ptr` in einer Registry gehalten (ein Worker, der mitten im Capture endet, nimmt seine Daten nicht mit), Generation-Stempel gegen Reste alter Captures, per-Puffer-Mutex nur dort, wo der Merge liest. `timelineSnapshot()`, `frameMarks()`, `timelineDroppedSpans()`, `setThreadTimelineEnabled()`. Der Regressionstest (8 Threads × 5000 Scopes) prüft weiter auf Nicht-Korruption, aber mit umgekehrtem Vertrag: Worker-Scopes landen jetzt auf eigenen Lanes.
+
+**Phase 2 — Statistik + Self-Time.** Neuer Header `Diagnostics/ProfilerStats.h`, rein funktional: `computePercentiles` (p50/p95/p99, Stddev, nearest-rank), `computeFpsLows` (1 %/0,1 %-Low nach Benchmark-Konvention, Definition steht im Dump), `findHitches` (gegen den **Median**, mit dem teuersten depth-0-Scope pro Ruckler), `aggregateScopes` (Self-Time aus Tiefe + Schließreihenfolge), `computeHistogram`, `laneOccupancy`. Dump-`version` 2, `summary.stats`, `summary.hitches`, `summary.topScopesBySelfTime`, `summary.threads`, `threads[]`, `frameMarks[]`.
+
+**Phase 3 — Zähler.** `SceneSystems::pushProfilerSceneCounters` füllt entities/lights/particles/emitters/rigidBodies/audioSources/scripts/gpuParticles + `ContentManager::asyncInFlightCount()`. `setRenderStats` merged nur noch die Renderer-Felder — die Wholesale-Zuweisung war die eigentliche Ursache dafür, dass diese Felder seit v1 in jedem Dump 0 waren.
+
+**Phase 4 — Darstellung.** `ProfilerLayout.h` (reine Geometrie: Span→Rechteck, Zoom/Pan/Clamp, Bar-Hit-Test, Tick-Schritte, Namens-Hash) + `ProfilerWidgets.h/.cpp` (ImDrawList: Stat-Tiles, Budget-Bars, Frame-Graph mit Budget-Färbung und p95/p99-Linien, Histogramm, Multi-Lane-Flame-Timeline mit Wheel-Zoom/Drag-Pan/Hover-Tooltip, Sparkline). Panel jetzt fünf Tabs: **Overview** (Tiles, Budget, Frame-Graph, Histogramm, Zähler-Grid), **Timeline**, **Scopes** (Ranking nach Self-Time), **Capture** (+ Hitch-Liste, klickbar → Frame Detail), **Frame Detail** (Scope-Baum jetzt rückwärts gelesen, also Eltern über Kindern).
+
+**Tests:** 1738 Fälle grün, davon 15 neue (`test_profiler_stats.cpp`, `test_profiler_layout.cpp`) plus die erweiterten Profiler-Fälle. Alle Targets bauen.
+
+**Kosten der neuen Ansichten.** `snapshot()` und `timelineSnapshot()` kopieren tief (alle Frames mit ihren Scope-Vektoren, alle Lanes mit bis zu 262144 Spans). Drei Tabs wollen diese Daten, gezeichnet wird mit Editor-Framerate — pro Draw kopiert wären das Megabytes 60×/s, beim Timeline zusätzlich unter dem Lane-Mutex, gegen die schreibenden Worker. Deshalb liegt im Panel ein Cache: fertige Aufnahme einmal holen, laufende alle 250 ms, plus genau ein Refresh beim Stoppen. Der Profiler darf nicht bremsen, was er misst.
+
+**Bekannte Eigenheit (vor-v3, jetzt sichtbar):** „Capture Single Frame" ruft intern `doStart()` und leert damit `m_frames` — die vorherige Benchmark-Aufnahme ist danach weg, also auch Scopes-Tab und Hitch-Liste. Nicht neu, fällt nur jetzt auf. Reihenfolge deshalb: erst Benchmark auswerten, dann Einzelframe.
+
+**Offen — Sichtprüfung durch den User (Sandbox ohne Display):** Editor starten → `View ▸ Performance Profiler`. (1) *Overview* zeigt Tiles/Budget/Graph/Histogramm und die Zähler sind **nicht mehr 0**. (2) *Capture* → „Per-thread timeline" an → Benchmark starten, ein paar Sekunden bewegen, stoppen. (3) *Timeline*: eine „Main"-Lane **und** „Worker N"-Lanes mit `Job::Execute`-Spans; Wheel zoomt unter dem Cursor, Drag pant, „Fit" setzt zurück. (4) *Scopes*: Ranking nach Self-Time plausibel. (5) Der Dump enthält `summary.stats`, `summary.threads`, `frameMarks` und Zähler ≠ 0.
+
+## Teil D — Grenzen dieser Runde
+- **Dump-Größe:** Per-Thread-Spans über 20 000 Frames sprengen das JSON. Die Timeline wird im Dump auf ein hartes Ereignisbudget gedeckelt und die Kappung **protokolliert** (Log + `summary`-Feld), nie still abgeschnitten. Der vollständige Strom bleibt der Live-Ansicht vorbehalten.
+- **Keine Sichtprüfung in dieser Umgebung** (Sandbox ohne Display). Deshalb liegt die gesamte Layout-Mathematik (Span→Rechteck bei Zoom/Viewport, Histogramm-Binning, Perzentile) in reinen Funktionen mit Unit-Tests, und am Ende steht eine Smoke-Test-Liste für den User — wie schon bei v1/v2.

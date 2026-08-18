@@ -7,14 +7,26 @@
 //  • Per-frame render counters + per-pass GPU times pushed by the active backend.
 //  • Dumps a structured JSON report to <deploy>/dumps/ on stop.
 //
-// Single-threaded scope model: the frame loop, scene-system tick and editor UI all
-// run on the main thread, so begin/endFrame, snapshot() and the dump are never
-// called concurrently. Scopes, however, CAN be opened on worker threads — the
-// JobSystem pool wraps every task in HE_PROFILE_SCOPE_N("Job::Execute") — so
-// begin/endScope record ONLY from the capture (main) thread and no-op on any
-// other; this keeps the shared scope stack single-writer (otherwise concurrent
-// push_back corrupts the heap). Worker-thread Tracy zones still work. (A real
-// per-thread job-timeline capture is future work — see docs/profiler-design.md.)
+// Two capture models run side by side, deliberately:
+//
+//  1. PER-FRAME scope tree (m_current.scopes) — main thread ONLY. The frame loop,
+//     scene-system tick and editor UI all run on the main thread, so begin/endFrame,
+//     snapshot() and the dump are never called concurrently. Scopes CAN be opened on
+//     worker threads (the JobSystem pool wraps every task in HE_PROFILE_SCOPE_N),
+//     so this path records only from the capture thread and ignores every other one;
+//     that keeps the shared scope stack single-writer. Concurrent push_back on it
+//     corrupted the heap in v2.1 — this guard is the fix and it stays.
+//
+//  2. PER-THREAD TIMELINE (v3) — every thread, including the workers dropped by (1).
+//     Each thread owns a thread_local buffer of COMPLETED spans carrying absolute
+//     start/end stamps, so it is a capture-wide event stream rather than a per-frame
+//     tree: a span that straddles a frame boundary needs no ownership policy, and
+//     frames are just marks along the same axis. Nothing is shared between threads
+//     on the hot path — the owner is the only writer — and the buffer is a shared_ptr
+//     held by a registry, so it outlives a worker that exits mid-capture. A per-buffer
+//     mutex (uncontended: owner pushing vs. the UI merging) covers the one place a
+//     second thread reads. This is what makes parallel_for work visible at all.
+// Worker-thread Tracy zones are unaffected by either path.
 
 #include "Types/Defines.h"
 #include <atomic>
@@ -45,20 +57,67 @@ struct ProfGpuPass
 	bool        approx = false;
 };
 
+// ─── Per-thread timeline (v3) ────────────────────────────────────────────────
+// One completed CPU span on one thread. Timestamps are nanoseconds RELATIVE to the
+// capture start, so every thread's spans share one axis and can be laid out in
+// parallel lanes. `name` is a static literal (same contract as ProfScopeSample).
+struct ProfThreadSpan
+{
+	const char* name    = "";
+	uint64_t    startNs = 0;
+	uint64_t    endNs   = 0;
+	uint32_t    depth   = 0;   // nesting depth within its own thread
+};
+
+// One thread's lane on the timeline, produced by timelineSnapshot().
+struct ProfThreadTimeline
+{
+	std::string                 label;        // "Main" / "Worker 0" / …
+	bool                        isMain = false;
+	size_t                      dropped = 0;  // spans lost to the per-thread cap
+	std::vector<ProfThreadSpan> spans;        // in completion order
+};
+
+// A frame boundary drawn along the timeline axis (same relative-ns units as spans).
+struct ProfFrameMark
+{
+	uint64_t index   = 0;
+	uint64_t startNs = 0;
+	uint64_t endNs   = 0;
+};
+
+// Scene-side counters, pushed once per world tick by whoever HAS the world — the
+// renderer cannot answer these and HE_Core must not include HE_Scene, so they come
+// in through this seam rather than by reaching into the registry from the frame loop.
+// Everything here is an O(1) storage size or a short walk over one component type;
+// nothing scans the whole scene.
+struct ProfSceneCounters
+{
+	uint32_t entities      = 0;   // live entities in the world registry
+	uint32_t lights        = 0;   // LightComponent
+	uint32_t particles     = 0;   // live CPU particles across all emitters
+	uint32_t emitters      = 0;   // ParticleSystemComponent
+	uint32_t gpuParticles  = 0;   // GPU precipitation pool cap while active
+	uint32_t rigidBodies   = 0;   // RigidBodyComponent (proxy for physics bodies)
+	uint32_t audioSources  = 0;   // AudioSourceComponent
+	uint32_t scripts       = 0;   // ScriptComponent
+	uint32_t streamingInFlight = 0;   // async asset loads not yet drained
+};
+
 // Coarse per-frame counters. Cheap to gather; filled from the renderer + scene.
 struct ProfRenderStats
 {
+	// Renderer-owned (pushed by setRenderStats after the frame is submitted).
 	uint32_t drawCalls      = 0;
 	uint32_t triangles      = 0;
 	uint32_t visibleObjects = 0;
 	uint32_t totalObjects   = 0;
-	uint32_t entities       = 0;
-	uint32_t lights         = 0;
-	uint32_t particles      = 0;   // CPU particle count
-	uint32_t gpuParticles   = 0;   // GPU precip pool cap (if active)
-	uint32_t streamingInFlight = 0;
 	double   vramUsedMB     = 0.0;
 	double   vramBudgetMB   = 0.0;
+	// Scene-owned (pushed by setSceneCounters during the world tick, i.e. EARLIER
+	// in the frame and by a different producer — see setRenderStats on why the two
+	// are merged rather than assigned wholesale).
+	ProfSceneCounters scene;
 };
 
 // Everything captured for a single rendered frame.
@@ -83,6 +142,7 @@ struct ProfLiveFrame
 	double   cpuFrameMs = 0.0;    // CPU frame-loop time
 	double   gpuFrameMs = -1.0;   // whole-frame GPU time (-1 = unavailable)
 	uint32_t draws = 0, triangles = 0, visible = 0, total = 0;
+	uint32_t entities = 0, lights = 0, particles = 0, streamingInFlight = 0;
 };
 
 // Metadata recorded once per capture session (goes into the dump header).
@@ -159,9 +219,35 @@ public:
 	void endScope();
 
 	// ── Per-frame data pushed before endFrame ──────────────────────────────
+	// Renderer counters. Merges only the renderer-owned fields: the scene counters
+	// were already pushed earlier in the same frame by the world tick, and a whole
+	// -struct assignment here would silently zero them (they were dead in the dump
+	// for exactly that kind of reason before v3).
 	void setRenderStats(const ProfRenderStats& s);
+	// Scene counters, from whoever owns the world. Cached even when not recording,
+	// so the editor's live HUD can show them without a capture running.
+	void setSceneCounters(const ProfSceneCounters& c);
+	const ProfSceneCounters& sceneCounters() const { return m_sceneCounters; }
 	void setGpuTimes(double gpuFrameMs, const std::vector<ProfGpuPass>& passes,
 	                 const char* mode = "");
+
+	// ── Per-thread timeline (v3) ───────────────────────────────────────────
+	// Records every thread that opens a scope during a capture, not just the main
+	// one — this is what makes JobSystem parallel_for work (FrustumCuller,
+	// RenderExtractor) visible. On by default while recording; turn it off to get
+	// the v2 behaviour (main-thread frame tree only) and skip the buffers entirely.
+	void setThreadTimelineEnabled(bool on) { m_timelineOn.store(on, std::memory_order_relaxed); }
+	bool threadTimelineEnabled() const     { return m_timelineOn.load(std::memory_order_relaxed); }
+
+	// Merged copy of every registered thread's spans for the CURRENT capture, main
+	// lane first. Safe to call while recording (per-buffer lock); costs a copy, so
+	// the UI should call it on demand, not per frame.
+	std::vector<ProfThreadTimeline> timelineSnapshot() const;
+	// Frame boundaries along the same axis, for drawing frame separators.
+	const std::vector<ProfFrameMark>& frameMarks() const { return m_frameMarks; }
+	// Spans dropped across all threads because a per-thread cap was hit. Non-zero
+	// means the timeline is truncated — reported, never silently swallowed.
+	size_t timelineDroppedSpans() const;
 
 	// ── Live view / export ─────────────────────────────────────────────────
 	const ProfFrameRecord* lastFrame() const;
@@ -189,6 +275,11 @@ private:
 	// ignored (see beginScope/endScope) so the single-threaded scope model holds.
 	std::atomic<bool> m_recording{ false };
 	std::atomic<bool> m_detailedGpu{ false };  // serialized per-pass GPU capture (Metal)
+	std::atomic<bool> m_timelineOn{ true };    // per-thread timeline capture (v3)
+	// Bumped on every doStart. A thread-local buffer carrying an older generation
+	// belongs to a finished capture and is reset on first touch, so a worker that
+	// slept through three captures cannot leak stale spans into the fourth.
+	std::atomic<uint64_t> m_generation{ 0 };
 	bool              m_forceDetailed = false; // detailed forced for a single-frame capture (main thread)
 	std::thread::id   m_captureThread{};
 	Pending         m_pending     = Pending::None;
@@ -207,6 +298,8 @@ private:
 	ProfSessionInfo m_pendingInfo;
 	size_t          m_pendingMax  = 0;
 
+	ProfSceneCounters m_sceneCounters;     // last pushed by the world tick
+
 	ProfSessionInfo m_session;
 	size_t          m_maxFrames   = 0;     // 0 = unlimited (grow)
 	uint64_t        m_frameCounter = 0;
@@ -216,6 +309,7 @@ private:
 	std::vector<LiveScope>       m_stack;
 	ProfFrameRecord              m_current;
 	std::vector<ProfFrameRecord> m_frames;
+	std::vector<ProfFrameMark>   m_frameMarks;   // frame boundaries on the timeline axis
 
 	bool        m_justDumped = false;
 	std::string m_lastDumpPath;

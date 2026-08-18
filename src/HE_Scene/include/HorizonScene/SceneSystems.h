@@ -61,4 +61,14 @@ namespace SceneSystems
     // outside a play session, where those graphs deliberately do not run.
     void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
                        AnimatorHost* sync = nullptr);
+
+    // Publish scene-side counters (entities, lights, live particles, rigid bodies,
+    // audio sources, scripts, in-flight streaming) to the EngineProfiler. Called at
+    // the end of tickWorld; exposed so an app that drives systems itself can still
+    // fill the dump. No-op unless a capture is recording or the live HUD is open.
+    //
+    // It lives here rather than in the frame loop because HE_Core holds the profiler
+    // but must not include HE_Scene, and only this side has the registry.
+    void pushProfilerSceneCounters(HorizonWorld& world, ContentManager& cm,
+                                   bool gpuParticles = false);
 }

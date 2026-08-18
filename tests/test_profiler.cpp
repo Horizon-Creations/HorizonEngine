@@ -154,6 +154,46 @@ TEST_CASE("EngineProfiler records frames, scopes and writes a parseable dump")
     CHECK_FALSE(j["summary"]["gpuPasses"]["Scene"].contains("approx"));
     CHECK(j["summary"]["gpuPasses"]["Sky+Clouds"].value("approx", false));
 
+    // ── v3 additions ────────────────────────────────────────────────────────
+    CHECK(j["version"] == 2);
+
+    // Self time reaches the dump, and the nesting is respected: FrameWork wholly
+    // contains SubTask, so its self time must be strictly below its total.
+    const auto& fw = j["summary"]["cpuScopes"]["FrameWork"];
+    REQUIRE(fw.contains("selfMs"));
+    REQUIRE(fw.contains("p95"));
+    CHECK(fw["count"] == kFrames);
+    CHECK(fw["selfMs"].get<double>() <= fw["totalMs"].get<double>());
+    CHECK(j["summary"]["topScopesBySelfTime"].is_array());
+    CHECK_FALSE(j["summary"]["topScopesBySelfTime"].empty());
+
+    // Tail statistics: percentiles per series + benchmark-convention FPS lows.
+    const auto& st = j["summary"]["stats"];
+    REQUIRE(st.contains("deltaMs"));
+    CHECK(st["deltaMs"]["p50"].get<double>() == doctest::Approx(16.6));
+    CHECK(st["deltaMs"]["p99"].get<double>() == doctest::Approx(16.6));
+    CHECK(st["deltaMs"]["count"] == kFrames);
+    CHECK(st.contains("cpuMs"));
+    CHECK(st["gpuMs"]["p50"].get<double>() == doctest::Approx(2.5));
+    CHECK(st["fps"]["avg"].get<double>() == doctest::Approx(1000.0 / 16.6));
+    // A perfectly even capture has no hitches — the block must be absent, not empty.
+    CHECK_FALSE(j["summary"].contains("hitches"));
+
+    // Per-thread timeline: the main lane is present and summarised, and the frame
+    // marks share the spans' relative-ns axis.
+    REQUIRE(j["summary"].contains("threads"));
+    REQUIRE_FALSE(j["summary"]["threads"].empty());
+    CHECK(j["summary"]["threads"][0]["main"] == true);
+    CHECK(j["summary"]["threads"][0]["spans"].get<size_t>() >= 2 * kFrames);
+    CHECK(j["summary"]["threads"][0]["droppedSpans"] == 0);
+    CHECK_FALSE(j["summary"].contains("timelineTruncated"));   // tiny capture, no cap hit
+    REQUIRE(j.contains("threads"));
+    CHECK(j["threads"][0]["thread"] == "Main");
+    REQUIRE(j.contains("frameMarks"));
+    CHECK(j["frameMarks"].size() == kFrames);
+    for (const auto& m : j["frameMarks"])
+        CHECK(m["e"].get<uint64_t>() >= m["s"].get<uint64_t>());
+
     he_test::removeAllQuiet(deploy);
 }
 
@@ -244,15 +284,24 @@ TEST_CASE("GpuPassAccumulator garbage-collects frames whose completions are lost
     CHECK(acc.inflightCount() == 0);   // frame 0 was GC'd, others completed
 }
 
-TEST_CASE("EngineProfiler ignores scopes opened on non-capture threads")
+TEST_CASE("EngineProfiler records worker scopes on their own timeline lane, not the frame tree")
 {
-    // Regression: the JobSystem pool wraps every task in HE_PROFILE_SCOPE_N, so
-    // during a capture many worker threads call beginScope on the shared scope
-    // stack concurrently. Before the capture-thread restriction this raced and
-    // corrupted the heap (malloc abort). The scope must record ONLY on the thread
-    // that started the capture and silently drop scopes from any other thread.
+    // Regression + v3 contract change, in one case. The JobSystem pool wraps every
+    // task in HE_PROFILE_SCOPE_N, so during a capture many worker threads call
+    // beginScope at once. In v1 they all pushed onto ONE shared scope stack, which
+    // raced and corrupted the heap (malloc abort); v2.1 fixed that by dropping
+    // worker scopes entirely, and this test asserted they were dropped.
+    //
+    // v3 keeps the crash fix but stops throwing the data away: the per-FRAME scope
+    // tree is still main-thread-only (single writer, unchanged), while each thread
+    // additionally records into its OWN buffer, which is what makes parallel_for
+    // work visible. So the assertion inverts on the timeline and holds on the tree:
+    //   frame tree  → MainScope yes, WorkerJob no   (as before)
+    //   timeline    → a lane per worker, carrying WorkerJob   (new)
+    // and still, above all: 8 threads × 5000 scopes must not corrupt the heap.
     setupTempDeploy("threadsafe");
     auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
 
     ProfSessionInfo info;
     prof.requestStart(info);
@@ -281,13 +330,94 @@ TEST_CASE("EngineProfiler ignores scopes opened on non-capture threads")
         if (std::string(s.name) == "MainScope") sawMain = true;
         if (std::string(s.name) == "WorkerJob") sawWorker = true;
     }
-    CHECK(sawMain);            // capture-thread scopes are recorded
-    CHECK_FALSE(sawWorker);    // worker-thread scopes are dropped, not raced
+    CHECK(sawMain);            // capture-thread scopes are in the frame tree
+    CHECK_FALSE(sawWorker);    // worker scopes stay OUT of the single-writer tree
+
+    // …but they are on the timeline, on lanes of their own.
+    const std::vector<ProfThreadTimeline> lanes = prof.timelineSnapshot();
+    size_t workerLanes = 0, workerSpans = 0, mainLanes = 0;
+    bool sawMainOnTimeline = false;
+    for (const ProfThreadTimeline& lane : lanes)
+    {
+        if (lane.isMain) { ++mainLanes; }
+        else             { ++workerLanes; }
+        for (const ProfThreadSpan& s : lane.spans)
+        {
+            CHECK(s.endNs >= s.startNs);                    // no negative-width spans
+            if (std::string(s.name) == "WorkerJob")  { ++workerSpans; CHECK_FALSE(lane.isMain); }
+            if (std::string(s.name) == "MainScope")  { sawMainOnTimeline = true; CHECK(lane.isMain); }
+        }
+    }
+    CHECK(mainLanes == 1);
+    CHECK(workerLanes == 8);
+    CHECK(sawMainOnTimeline);
+    // Every worker span is accounted for: nothing raced away, nothing was dropped
+    // (8 × 5000 is far below the per-thread cap).
+    CHECK(workerSpans == 8 * 5000);
+    CHECK(prof.timelineDroppedSpans() == 0);
 
     prof.requestStop();
     prof.beginFrame(16.6);
     std::string p;
     prof.consumeJustDumped(p);
+}
+
+TEST_CASE("EngineProfiler timeline resets between captures and can be switched off")
+{
+    // A worker buffer survives its capture (shared_ptr in the registry), so the
+    // generation stamp is what stops last capture's spans leaking into this one.
+    setupTempDeploy("timeline_gen");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    { HE_PROFILE_SCOPE_N("FirstCapture"); }
+    prof.endFrame();
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string p; prof.consumeJustDumped(p);
+
+    // Second capture: the previous capture's spans must be gone.
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    { HE_PROFILE_SCOPE_N("SecondCapture"); }
+    prof.endFrame();
+
+    bool sawFirst = false, sawSecond = false;
+    for (const ProfThreadTimeline& lane : prof.timelineSnapshot())
+        for (const ProfThreadSpan& s : lane.spans)
+        {
+            if (std::string(s.name) == "FirstCapture")  sawFirst  = true;
+            if (std::string(s.name) == "SecondCapture") sawSecond = true;
+        }
+    CHECK_FALSE(sawFirst);
+    CHECK(sawSecond);
+
+    // Frame marks share the timeline's relative-ns axis and line up with frames[].
+    REQUIRE_FALSE(prof.frameMarks().empty());
+    for (const ProfFrameMark& m : prof.frameMarks()) CHECK(m.endNs >= m.startNs);
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    prof.consumeJustDumped(p);
+
+    // Switched off: the frame tree still works, the timeline stays empty.
+    prof.setThreadTimelineEnabled(false);
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    { HE_PROFILE_SCOPE_N("NoTimeline"); }
+    prof.endFrame();
+    const ProfFrameRecord* f = prof.lastFrame();
+    REQUIRE(f != nullptr);
+    CHECK_FALSE(f->scopes.empty());
+    CHECK(prof.timelineSnapshot().empty());
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    prof.consumeJustDumped(p);
+    prof.setThreadTimelineEnabled(true);   // restore the default for later cases
 }
 
 TEST_CASE("EngineProfiler single-frame capture records exactly one frame, no dump")
