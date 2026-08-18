@@ -785,15 +785,30 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             if (regular)
             {
                 const std::string fname = dit->path().filename().string();
-                // The Python stdlib (pythonXY.zip + <Exe>._pth) ships only for Python-
-                // language projects. Skip both otherwise — the libpython DLL/dylib/.so
-                // itself is a load-time dependency and is NOT matched here, so it always
-                // ships (its name ends in .dll/.dylib/.so, not .zip/._pth).
-                if (!settings.bundlePythonStdlib)
+                // Everything Python ships only for Python-language projects: the
+                // stdlib (pythonXY.zip + <Exe>._pth), the interpreter itself
+                // (python3XY.dll / libpython3.X.so / .dylib) AND the backend
+                // plugin that loads it.
+                //
+                // The interpreter can be skipped now, which it could not before.
+                // It used to be a LOAD-TIME dependency of HorizonScene, so a game
+                // without it did not start at all — every non-Python game carried
+                // 5-9 MB of CPython to satisfy a link it never used. The backend
+                // is a runtime-loaded plugin now (HorizonPython), so leaving both
+                // out costs exactly the feature the project does not use.
+                if (!settings.bundlePython)
                 {
-                    const bool isZip = fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".zip")  == 0;
-                    const bool isPth = fname.size() > 5 && fname.compare(fname.size() - 5, 5, "._pth") == 0;
-                    if (isZip || isPth) { dit.increment(ec); continue; }
+                    const auto endsWith = [&fname](const char* suf) {
+                        const size_t n = std::strlen(suf);
+                        return fname.size() > n && fname.compare(fname.size() - n, n, suf) == 0;
+                    };
+                    const bool isZip    = endsWith(".zip");
+                    const bool isPth    = endsWith("._pth");
+                    // "python314.dll", "libpython3.14.dylib", "libpython3.12.so.1.0"
+                    const bool isPyLib  = fname.find("python") != std::string::npos
+                                       && fname.find("Horizon") == std::string::npos;
+                    const bool isPlugin = fname.find("HorizonPython") != std::string::npos;
+                    if (isZip || isPth || isPyLib || isPlugin) { dit.increment(ec); continue; }
                 }
                 const auto dst = routeRuntime(fname);
                 // Delete any existing file first (fresh inode): copying over a
@@ -849,7 +864,7 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
         // non-Python game doesn't carry ~15 MB of unused .so. macOS: these are
         // signed framework binaries copied verbatim (signature intact); the .app's
         // final --deep sign re-seals them.
-        if (settings.bundlePythonStdlib)
+        if (settings.bundlePython)
         {
             const auto srcDyn = settings.gameRuntimeDir / "lib-dynload";
             if (std::filesystem::is_directory(srcDyn, ec))

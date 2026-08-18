@@ -17,12 +17,14 @@ class ContentManager;
 // exposed API is identical to Lua's.
 //
 // The interpreter is a process-global singleton (Py_Initialize is process-wide);
-// this backend drives it and must be used from the main thread (GIL). When the
-// engine is built without CPython (HE_HAVE_PYTHON off), all methods are safe
-// no-ops returning failure, so callers need no #ifdefs.
-// NOTE: no HE_API here. HE_API is HE_Core's export macro — inside HorizonScene.dll it
-// expands to dllimport on Windows, which turned this class's OWN vtable/methods into
-// import references (LNK2019/LNK2001). HE_Scene exports via WINDOWS_EXPORT_ALL_SYMBOLS.
+// this backend drives it and must be used from the main thread (GIL).
+//
+// This header is PRIVATE to the HorizonPython plugin. Nothing outside links
+// against this class: the plugin hands the host an IScriptBackend* through the
+// two C functions in Scripting/PythonPluginAbi.h, and that pointer is the only
+// thing that crosses the module boundary. The class therefore needs no export
+// macro at all — which also retires the old warning that used to sit here about
+// HE_API turning its own vtable into dllimport references inside HorizonScene.
 class PyScriptBackend final : public IScriptBackend
 {
 public:
@@ -32,11 +34,8 @@ public:
 	PyScriptBackend(const PyScriptBackend&)            = delete;
 	PyScriptBackend& operator=(const PyScriptBackend&) = delete;
 
-	// True when the engine was built with CPython and the interpreter is ready.
-	static bool available();
-
-	void setPhysicsWorld(PhysicsWorld* pw);
-	void setContentManager(ContentManager* cm);
+	void setPhysicsWorld(PhysicsWorld* pw) override;
+	void setContentManager(ContentManager* cm) override;
 
 	bool   loadScript(const std::string& name, const std::string& source) override;
 	void   unloadScript(const std::string& name) override;

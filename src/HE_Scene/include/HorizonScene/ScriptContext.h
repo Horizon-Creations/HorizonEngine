@@ -2,7 +2,8 @@
 #include <cstdint>
 #include <Scripting/ScriptEngine.h>
 #include <Scripting/ScriptTypes.h>
-#include <HorizonScene/PyScriptBackend.h>
+#include <Scripting/PythonPluginAbi.h>
+#include <Platform/DynLib.h>
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
@@ -151,10 +152,30 @@ private:
     IScriptBackend* backendForId(InstanceId id);
     IScriptBackend* backendForName(const std::string& name);
 
+    // Brings up the CPython backend from the HorizonPython plugin, if it is on
+    // disk. Absent plugin == no Python support, which is an ordinary state.
+    void loadPythonPlugin();
+
+    // Destroys the backend through the plugin's own destroy function: it was
+    // allocated over there, by that module's allocator.
+    // User-provided constructors instead of an NSDMI: GCC refuses to
+    // default-construct a unique_ptr whose deleter is a nested class relying
+    // on a default member initializer (the _DeleterConstraint trait sees it
+    // as not default-constructible; Clang/MSVC accept it).
+    struct PyBackendDeleter
+    {
+        HePythonDestroyFn destroy;
+        PyBackendDeleter() noexcept : destroy(nullptr) {}
+        explicit PyBackendDeleter(HePythonDestroyFn fn) noexcept : destroy(fn) {}
+        void operator()(IScriptBackend* p) const { if (p && destroy) destroy(p); }
+    };
+
     HorizonWorld*   m_world;
     PhysicsWorld*   m_physicsWorld   = nullptr;
     ContentManager* m_contentManager = nullptr;
     ScriptEngine  m_engine;                        // Lua
-    std::unique_ptr<PyScriptBackend> m_py;         // Python (null if unavailable)
+    // The backend only; the plugin MODULE is process-wide and outlives every
+    // context (ScriptContext.cpp explains why unloading it is not allowed).
+    std::unique_ptr<IScriptBackend, PyBackendDeleter> m_py;  // null if unavailable
     IScriptBackend* m_lastBackend = &m_engine;     // whose lastError() to report
 };

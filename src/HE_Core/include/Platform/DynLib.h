@@ -1,12 +1,16 @@
 #pragma once
+#include <Types/Defines.h> // HE_API
 #include <string>
 #include <filesystem>
 
 namespace HE {
 
 // Thin cross-platform wrapper around LoadLibrary/dlopen.
-// Used by GameLogicLoader to load GameLogic.dll at runtime.
-class DynLib {
+// Used by GameLogicLoader to load GameLogic.dll at runtime, and by
+// ScriptContext (HorizonScene) to load the Python plugin — HE_API because
+// HE_Core does not export-all on Windows: without it every out-of-module
+// user hits LNK2019 on ~DynLib/load/getSymbol.
+class HE_API DynLib {
 public:
     DynLib() = default;
     ~DynLib();

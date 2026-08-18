@@ -186,8 +186,11 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	}
 
 	// ── Startup splash ──────────────────────────────────────────────────────
+	// The EDITOR asks for one; it is off by default in HorizonCore so that a
+	// shipped game does not open a window with our logo in it (see SplashConfig).
 	// Same HC_Logo.png the Project Hub and the macOS menu bar load, from the
 	// EditorDeps tree the post-build step drops next to the executable.
+	cfg.splash.enabled  = true;
 	cfg.splash.title    = "Horizon Engine Editor";
 	cfg.splash.subtitle = HE_VERSION_FULL;
 	{

@@ -1,11 +1,14 @@
 #include "doctest.h"
 
 // These tests only compile when the engine was built with CPython embedding.
-// Everything runs through the PyScriptBackend public API (no <Python.h> here),
-// which also proves the interpreter boots and executes end to end.
+// Nothing here includes <Python.h>, and since the backend became the
+// runtime-loaded HorizonPython plugin, nothing here can name its class either:
+// the tests reach it through exactly the ABI the engine uses (see PyBackend
+// below), so they now cover the plugin contract as well as the interpreter.
 #ifdef HE_HAVE_PYTHON
 
-#include <HorizonScene/PyScriptBackend.h>
+#include <Scripting/PythonPluginAbi.h>
+#include <Platform/DynLib.h>
 #include <Types/TypeRegistry.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
@@ -14,6 +17,60 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <limits>
 #include <memory>
+
+// The plugin under test, at the path CMake built it to (HE_PYTHON_PLUGIN_PATH).
+// The engine finds it next to HorizonScene; a test executable lives elsewhere,
+// so it is told rather than made to guess.
+namespace {
+
+// One handle for the whole test run, never unloaded — the same rule the engine
+// follows, and for the same reason: CPython holds pointers into this module and
+// the interpreter is never finalised. Giving each test its own handle made the
+// second one abort with "PyImport_AppendInittab() may not be called after
+// Py_Initialize()", which is exactly the bug this arrangement prevents.
+HE::DynLib& pluginLib()
+{
+    static HE::DynLib lib;
+    return lib;
+}
+
+struct PyBackend
+{
+    IScriptBackend*   be      = nullptr;
+    HePythonDestroyFn destroy = nullptr;
+
+    explicit PyBackend(HorizonWorld& world)
+    {
+        HE::DynLib& lib = pluginLib();
+        if (!lib.isLoaded())
+            REQUIRE_MESSAGE(lib.load(HE_PYTHON_PLUGIN_PATH),
+                            "could not load the HorizonPython plugin");
+        auto create = reinterpret_cast<HePythonCreateFn>(
+            lib.getSymbol(HE::PythonPlugin::kCreateSymbol));
+        destroy = reinterpret_cast<HePythonDestroyFn>(
+            lib.getSymbol(HE::PythonPlugin::kDestroySymbol));
+        REQUIRE(create);
+        REQUIRE(destroy);
+        be = create(&world);
+        REQUIRE(be);
+    }
+    ~PyBackend() { reset(); }
+
+    PyBackend(const PyBackend&)            = delete;
+    PyBackend& operator=(const PyBackend&) = delete;
+
+    // Destroy the backend early, while the library is still mapped — the
+    // teardown-order test below depends on being able to do exactly that.
+    void reset()
+    {
+        if (be && destroy) destroy(be);
+        be = nullptr;
+    }
+
+    IScriptBackend* operator->() const { return be; }
+};
+
+} // namespace
 
 // ─── Test scripts ───────────────────────────────────────────────────────────
 
@@ -67,40 +124,43 @@ static entt::entity makeEntity(HorizonWorld& world, const char* name)
 
 // ─── Boot / availability ────────────────────────────────────────────────────
 
+// Constructing PyBackend already REQUIREs that the plugin loads, that both
+// entry points resolve and that the factory returns a backend — which is the
+// whole availability contract, asserted on every one of these tests rather than
+// once in a boolean.
 TEST_CASE("PyScriptBackend: available and constructs")
 {
-    CHECK(PyScriptBackend::available());
     HorizonWorld world;
-    PyScriptBackend py(world);
-    CHECK(py.loadedScriptCount() == 0);
-    CHECK(py.instanceCount() == 0);
+    PyBackend py(world);
+    CHECK(py->loadedScriptCount() == 0);
+    CHECK(py->instanceCount() == 0);
 }
 
 TEST_CASE("PyScriptBackend: loads a Behavior subclass")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    CHECK(py.loadScript("mover", kMover));
-    CHECK(py.isScriptLoaded("mover"));
-    CHECK(py.loadedScriptCount() == 1);
-    CHECK(py.lastError().empty());
+    PyBackend py(world);
+    CHECK(py->loadScript("mover", kMover));
+    CHECK(py->isScriptLoaded("mover"));
+    CHECK(py->loadedScriptCount() == 1);
+    CHECK(py->lastError().empty());
 }
 
 TEST_CASE("PyScriptBackend: rejects a syntax error")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    CHECK_FALSE(py.loadScript("bad", kBadSyntax));
-    CHECK_FALSE(py.isScriptLoaded("bad"));
-    CHECK_FALSE(py.lastError().empty());
+    PyBackend py(world);
+    CHECK_FALSE(py->loadScript("bad", kBadSyntax));
+    CHECK_FALSE(py->isScriptLoaded("bad"));
+    CHECK_FALSE(py->lastError().empty());
 }
 
 TEST_CASE("PyScriptBackend: rejects source with no Behavior subclass")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    CHECK_FALSE(py.loadScript("plain", kNoBehavior));
-    CHECK_FALSE(py.lastError().empty());
+    PyBackend py(world);
+    CHECK_FALSE(py->loadScript("plain", kNoBehavior));
+    CHECK_FALSE(py->lastError().empty());
 }
 
 // ─── Lifecycle + horizon API round-trip ─────────────────────────────────────
@@ -108,15 +168,15 @@ TEST_CASE("PyScriptBackend: rejects source with no Behavior subclass")
 TEST_CASE("PyScriptBackend: on_start runs and reaches the world")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("mover", kMover));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("mover", kMover));
 
     auto e  = makeEntity(world, "Hero");
-    auto id = py.createInstance("mover", static_cast<uint32_t>(e));
+    auto id = py->createInstance("mover", static_cast<uint32_t>(e));
     REQUIRE(id != IScriptBackend::kInvalidInstance);
-    CHECK(py.instanceCount() == 1);
+    CHECK(py->instanceCount() == 1);
 
-    CHECK(py.callOnStart(id));
+    CHECK(py->callOnStart(id));
     const auto& t = world.registry().get<TransformComponent>(e);
     CHECK(t.position.x == doctest::Approx(7.0f));
     CHECK(t.position.y == doctest::Approx(8.0f));
@@ -126,14 +186,14 @@ TEST_CASE("PyScriptBackend: on_start runs and reaches the world")
 TEST_CASE("PyScriptBackend: on_update integrates dt")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("mover", kMover));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("mover", kMover));
 
     auto e  = makeEntity(world, "Hero");
-    auto id = py.createInstance("mover", static_cast<uint32_t>(e));
-    REQUIRE(py.callOnStart(id));           // → x = 7
-    CHECK(py.callOnUpdate(id, 0.5f));      // → x = 7.5
-    CHECK(py.callOnUpdate(id, 0.25f));     // → x = 7.75
+    auto id = py->createInstance("mover", static_cast<uint32_t>(e));
+    REQUIRE(py->callOnStart(id));           // → x = 7
+    CHECK(py->callOnUpdate(id, 0.5f));      // → x = 7.5
+    CHECK(py->callOnUpdate(id, 0.25f));     // → x = 7.75
 
     const auto& t = world.registry().get<TransformComponent>(e);
     CHECK(t.position.x == doctest::Approx(7.75f));
@@ -142,23 +202,23 @@ TEST_CASE("PyScriptBackend: on_update integrates dt")
 TEST_CASE("PyScriptBackend: missing handler is a no-op success")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("echo", kSpeedEcho)); // no on_update defined
+    PyBackend py(world);
+    REQUIRE(py->loadScript("echo", kSpeedEcho)); // no on_update defined
     auto e  = makeEntity(world, "E");
-    auto id = py.createInstance("echo", static_cast<uint32_t>(e));
-    CHECK(py.callOnUpdate(id, 0.1f));       // no on_update → true, no error
-    CHECK(py.lastError().empty());
+    auto id = py->createInstance("echo", static_cast<uint32_t>(e));
+    CHECK(py->callOnUpdate(id, 0.1f));       // no on_update → true, no error
+    CHECK(py->lastError().empty());
 }
 
 TEST_CASE("PyScriptBackend: a raising handler reports the error")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("boom", kRaises));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("boom", kRaises));
     auto e  = makeEntity(world, "E");
-    auto id = py.createInstance("boom", static_cast<uint32_t>(e));
-    CHECK_FALSE(py.callOnStart(id));
-    CHECK(py.lastError().find("kaboom") != std::string::npos);
+    auto id = py->createInstance("boom", static_cast<uint32_t>(e));
+    CHECK_FALSE(py->callOnStart(id));
+    CHECK(py->lastError().find("kaboom") != std::string::npos);
 }
 
 // ─── Properties ─────────────────────────────────────────────────────────────
@@ -166,10 +226,10 @@ TEST_CASE("PyScriptBackend: a raising handler reports the error")
 TEST_CASE("PyScriptBackend: getScriptProperties reads typed class attributes")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("mover", kMover));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("mover", kMover));
 
-    auto defs = py.getScriptProperties("mover");
+    auto defs = py->getScriptProperties("mover");
     auto find = [&](const char* n) -> const ScriptPropDef* {
         for (auto& d : defs) if (d.name == n) return &d;
         return nullptr;
@@ -196,15 +256,15 @@ TEST_CASE("PyScriptBackend: getScriptProperties reads typed class attributes")
 TEST_CASE("PyScriptBackend: injectProperties overrides before on_start")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("echo", kSpeedEcho));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("echo", kSpeedEcho));
 
     auto e  = makeEntity(world, "E");
-    auto id = py.createInstance("echo", static_cast<uint32_t>(e));
+    auto id = py->createInstance("echo", static_cast<uint32_t>(e));
 
     ScriptPropValue v; v.type = ScriptPropType::Float; v.f = 42.0f;
-    py.injectProperties(id, {{"speed", v}});
-    REQUIRE(py.callOnStart(id));            // echoes self.speed into x
+    py->injectProperties(id, {{"speed", v}});
+    REQUIRE(py->callOnStart(id));            // echoes self.speed into x
 
     const auto& t = world.registry().get<TransformComponent>(e);
     CHECK(t.position.x == doctest::Approx(42.0f));
@@ -215,7 +275,7 @@ TEST_CASE("PyScriptBackend: injectProperties overrides before on_start")
 TEST_CASE("PyScriptBackend: hotReload swaps behavior, preserves instance data")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
+    PyBackend py(world);
 
     static const char* v1 = R"py(
 import horizon
@@ -232,13 +292,13 @@ class S(horizon.Behavior):
         horizon.setPosition(self.entity_id, self.hp + 1, 0.0, 0.0)
 )py";
 
-    REQUIRE(py.loadScript("s", v1));
+    REQUIRE(py->loadScript("s", v1));
     auto e  = makeEntity(world, "E");
-    auto id = py.createInstance("s", static_cast<uint32_t>(e));
-    REQUIRE(py.callOnStart(id));            // self.hp = 100 (data)
+    auto id = py->createInstance("s", static_cast<uint32_t>(e));
+    REQUIRE(py->callOnStart(id));            // self.hp = 100 (data)
 
-    CHECK(py.hotReloadScript("s", v2));     // new class, keep __dict__
-    CHECK(py.callOnUpdate(id, 0.0f));       // v2: x = hp + 1
+    CHECK(py->hotReloadScript("s", v2));     // new class, keep __dict__
+    CHECK(py->callOnUpdate(id, 0.0f));       // v2: x = hp + 1
 
     const auto& t = world.registry().get<TransformComponent>(e);
     CHECK(t.position.x == doctest::Approx(101.0f)); // 100 preserved + v2 code ran
@@ -249,14 +309,14 @@ class S(horizon.Behavior):
 TEST_CASE("PyScriptBackend: unload destroys instances")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
-    REQUIRE(py.loadScript("mover", kMover));
+    PyBackend py(world);
+    REQUIRE(py->loadScript("mover", kMover));
     auto e = makeEntity(world, "E");
-    py.createInstance("mover", static_cast<uint32_t>(e));
-    CHECK(py.instanceCount() == 1);
-    py.unloadScript("mover");
-    CHECK_FALSE(py.isScriptLoaded("mover"));
-    CHECK(py.instanceCount() == 0);
+    py->createInstance("mover", static_cast<uint32_t>(e));
+    CHECK(py->instanceCount() == 1);
+    py->unloadScript("mover");
+    CHECK_FALSE(py->isScriptLoaded("mover"));
+    CHECK(py->instanceCount() == 0);
 }
 
 // ─── Routing through ScriptContext (tag → route → untag) ─────────────────────
@@ -441,15 +501,15 @@ TEST_CASE("ScriptContext: unloaded Python name falls back safely")
 TEST_CASE("PyScriptBackend: non-UTF8 string property is skipped, not a crash")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
+    PyBackend py(world);
     static const char* kSurrogate = R"py(
 import horizon
 class P(horizon.Behavior):
     good = 5
     tag  = '\udce9'
 )py";
-    REQUIRE(py.loadScript("p", kSurrogate));
-    auto defs = py.getScriptProperties("p");   // must return, not segfault
+    REQUIRE(py->loadScript("p", kSurrogate));
+    auto defs = py->getScriptProperties("p");   // must return, not segfault
     bool hasGood = false, hasTag = false;
     for (auto& d : defs) { if (d.name == "good") hasGood = true; if (d.name == "tag") hasTag = true; }
     CHECK(hasGood);       // the encodable property survives
@@ -461,7 +521,7 @@ class P(horizon.Behavior):
 TEST_CASE("PyScriptBackend: out-of-range int properties clamp instead of wrapping")
 {
     HorizonWorld world;
-    PyScriptBackend py(world);
+    PyBackend py(world);
     static const char* kBigInts = R"py(
 import horizon
 class Q(horizon.Behavior):
@@ -469,8 +529,8 @@ class Q(horizon.Behavior):
     col   = 0xFFFFFFFF
     small = 7
 )py";
-    REQUIRE(py.loadScript("q", kBigInts));
-    auto defs = py.getScriptProperties("q");
+    REQUIRE(py->loadScript("q", kBigInts));
+    auto defs = py->getScriptProperties("q");
     auto find = [&](const char* n) -> const ScriptPropDef* {
         for (auto& d : defs) if (d.name == n) return &d; return nullptr;
     };
@@ -478,7 +538,7 @@ class Q(horizon.Behavior):
     REQUIRE(find("col"));   CHECK(find("col")->defaultVal.i == std::numeric_limits<int>::max());
     REQUIRE(find("big"));   CHECK(find("big")->defaultVal.i == 0); // overflowed long long → 0, no wrap
     // A follow-up call proves no stale error leaked from the overflow.
-    CHECK(py.getScriptProperties("q").size() == defs.size());
+    CHECK(py->getScriptProperties("q").size() == defs.size());
 }
 
 // #4: two entities sharing a moduleName across languages each route to their own
@@ -550,7 +610,7 @@ TEST_CASE("PyScriptBackend: finalizer touching freed physics during teardown is 
 {
     HorizonWorld world;
     auto e  = makeEntity(world, "E");
-    auto py = std::make_unique<PyScriptBackend>(world);
+    PyBackend py(world);
 
     static const char* kFinalizer = R"py(
 import horizon
@@ -592,7 +652,7 @@ TEST_CASE("PyScriptBackend: horizon.enums constants + horizon.structs constructo
 
     {
         HorizonWorld world;
-        PyScriptBackend py(world);
+        PyBackend py(world);
         // Report through the entity transform (the harness's readback channel):
         // x = the Bow constant, y = the constructed struct's hp default, z = 1
         // when __type round-trips.
@@ -604,11 +664,11 @@ class Reporter(horizon.Behavior):
         ok = 1.0 if s["__type"] == "Content/T/PlayerStats.hasset" else 0.0
         horizon.setPosition(self.entity_id, float(horizon.enums.Weapon.Bow), s["hp"], ok)
 )";
-        REQUIRE(py.loadScript("reporter", kSrc));
+        REQUIRE(py->loadScript("reporter", kSrc));
         auto e  = makeEntity(world, "Hero");
-        auto id = py.createInstance("reporter", static_cast<uint32_t>(e));
+        auto id = py->createInstance("reporter", static_cast<uint32_t>(e));
         REQUIRE(id != IScriptBackend::kInvalidInstance);
-        REQUIRE(py.callOnStart(id));
+        REQUIRE(py->callOnStart(id));
         const auto& t = world.registry().get<TransformComponent>(e);
         CHECK(t.position.x == doctest::Approx(7.0f));
         CHECK(t.position.y == doctest::Approx(100.0f));

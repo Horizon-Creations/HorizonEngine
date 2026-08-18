@@ -67,6 +67,21 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 	VERBATIM
 )
 
+# The Python plugin, when the engine has one. It goes into the runtime TEMPLATE
+# unconditionally — the template must be able to serve any project — while the
+# exporter decides per project whether it reaches the finished game (see
+# ProjectExporter). Unlike the libraries above, this one is never linked, only
+# loaded by name at runtime, so a game shipped without it simply has no Python.
+if(HE_HAVE_PYTHON)
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_FILE:HorizonPython>
+			"${DEPLOY_GAME}"
+		COMMENT "Deploying the Python plugin to ${DEPLOY_GAME}"
+		VERBATIM)
+	add_dependencies(HorizonGame HorizonPython)
+endif()
+
 # Runtime-loaded shader binaries (Vulkan .spv + D3D12 DXR .cso) live in
 # ${CMAKE_BINARY_DIR}/Shaders and are loaded from <exe dir>/Shaders at runtime
 # — same pattern as the editor deploy (HE_Editor/CMakeLists.txt). Without this
@@ -83,10 +98,12 @@ if(HE_VULKAN_ENABLED OR HE_D3D12_GI_SHADERS)
 endif()
 
 # ── Post-build: bundle the CPython runtime for shipping (Windows) ─────────────
-# HorizonScene links Python3::Python, so HorizonScene.dll has python3XY.dll in its
-# LOAD-TIME import table — a shipped game needs python3XY.dll next to the executable
-# even if it never runs a Python script, plus the stdlib once it does. Without this the
-# game runs on the dev box (PATH/registry) but fails on a clean PC ("python314.dll fehlt").
+# python3XY.dll is a load-time dependency of the PLUGIN (HorizonPython), not of
+# HorizonScene — that was the point of splitting it out. It still has to sit next
+# to the executable for a project that uses Python, plus the stdlib; without it
+# the game runs on the dev box (PATH/registry) and fails on a clean PC
+# ("python314.dll fehlt"). A project that uses no Python ships neither, and the
+# exporter is where that decision is made.
 # he_bundle_python (cmake/BundlePython.cmake) copies the DLL(s) + a curated stdlib zip +
 # a python3XY._pth (isolated path mode). The Editor's exporter carries these flat files
 # next to the exe on a Windows export (see ProjectExporter).
