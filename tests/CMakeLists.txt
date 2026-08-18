@@ -19,6 +19,7 @@ add_executable(he_tests
     test_graph_editor_keys.cpp
     test_editor_input.cpp
     test_editor_row_widgets.cpp
+    test_editor_theme.cpp
     test_report_issue.cpp
     test_notification_store.cpp
     test_editor_dock_state.cpp
@@ -155,6 +156,9 @@ add_executable(he_tests
     # Labelled rows + wrapped hints: ImGui-only by construction (see the file's
     # header), so the panel-width layout invariant can be asserted headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRowWidgets.cpp
+    # The ImGui style, for the same reason: it is ImGui-only by construction, so
+    # "did the theme actually assign every colour slot" is answerable headless.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTheme.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp

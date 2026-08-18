@@ -87,4 +87,12 @@ namespace HE::Ed::Theme
 	inline ImU32 u32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
 }
 
+namespace HE::Ed
+{
+	// Applies the whole ImGui style — shape, spacing and all 67 colour slots.
+	// Called once, before the first frame. Lives in EditorTheme.cpp so it can be
+	// built and asserted on without the editor around it.
+	void applyHorizonDarkTheme();
+}
+
 #endif // __has_include(<imgui.h>)
