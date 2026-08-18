@@ -1,6 +1,10 @@
 #include "ProjectHubPanel.h"
 #include "EditorApplication.h"           // AppContext, ProjectManager, EditorConfig
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
+#include "EditorTheme.h"                 // brand palette — the hub is the first
+                                         // surface after the splash, so it is the
+                                         // one that must not look like a different
+                                         // product than the window that preceded it
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
 #include "HorizonVersion.h"
 #ifdef __APPLE__
@@ -95,7 +99,7 @@ void render(AppContext& ctx)
     // ── Header bar ────────────────────────────────────────────────────────────
     const float headerH = 56.0f;
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.105f));
     ImGui::BeginChild("##HubHeader", ImVec2(vp->Size.x, headerH), false,
         ImGuiWindowFlags_NoScrollbar);
 
@@ -147,7 +151,7 @@ void render(AppContext& ctx)
     // PANEL 1 — Create Project
     // ════════════════════════════════════════════════════════════════════
     ImGui::SetCursorPos(ImVec2(0.0f, bodyY));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.135f));
     ImGui::BeginChild("##PanelCreate", ImVec2(panelW - 1.0f, bodyH), false,
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
@@ -222,7 +226,7 @@ void render(AppContext& ctx)
             ImGui::TextDisabled("C++ needs cmake + a C++ compiler (not found on this machine).");
         }
         ImGui::SetCursorPosX(padding);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.75f, 0.45f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
         ImGui::TextWrapped("Applies to the whole project and can't be changed after it's created.");
         ImGui::PopStyleColor();
     }
@@ -369,7 +373,7 @@ void render(AppContext& ctx)
     // PANEL 2 — Known Projects
     // ════════════════════════════════════════════════════════════════════
     ImGui::SetCursorPos(ImVec2(panelW + 1.0f, bodyY));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.11f, 0.13f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.115f));
     ImGui::BeginChild("##PanelKnown", ImVec2(panelW - 2.0f, bodyH), false,
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
@@ -504,7 +508,7 @@ void render(AppContext& ctx)
     // PANEL 3 — Open Project
     // ════════════════════════════════════════════════════════════════════
     ImGui::SetCursorPos(ImVec2(panelW * 2.0f + 1.0f, bodyY));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.135f));
     ImGui::BeginChild("##PanelOpen", ImVec2(panelW, bodyH), false,
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();

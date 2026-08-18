@@ -1,5 +1,6 @@
 #include "MaterialEditorPanel.h"
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorTheme.h"     // brand palette (labels, the mesh-load bar)
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
 #include "AssetThumbnailCache.h"                // Content-Browser tile, re-rendered on save
@@ -549,7 +550,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			const std::string label = n.s.empty()
 				? std::string("(mesh texture)")
 				: std::filesystem::path(n.s).filename().string();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
@@ -563,7 +564,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			const std::string label = n.s.empty()
 				? std::string("(mesh texture)")
 				: std::filesystem::path(n.s).filename().string();
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.85f, 1.0f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			ImGui::TextWrapped("%s", label.c_str());
 			ImGui::PopStyleColor();
 			if (!n.s.empty() && EditorWidgets::dangerSmallButton("Clear")) { n.s.clear(); committed = true; }
@@ -2060,7 +2061,10 @@ void render(AppContext& ctx, const std::string& assetPath,
 			const ImVec2 org = ImGui::GetCursorScreenPos();
 			const ImVec2 av  = ImGui::GetContentRegionAvail();
 			ImDrawList* pdl = ImGui::GetWindowDrawList();
-			// Vertical gradient backdrop.
+			// Vertical gradient backdrop. Deliberately NOT warmed with the rest of
+			// the editor chrome: this is the surface a material's own colour is
+			// judged against, and a warm backdrop would bias every albedo read
+			// against it. A neutral studio grey is the whole point.
 			pdl->AddRectFilledMultiColor(org, ImVec2(org.x + av.x, org.y + av.y),
 				IM_COL32(58, 62, 74, 255), IM_COL32(58, 62, 74, 255),
 				IM_COL32(22, 24, 30, 255), IM_COL32(22, 24, 30, 255));
@@ -2257,12 +2261,12 @@ void render(AppContext& ctx, const std::string& assetPath,
 				pdl->AddRectFilled(b0, b1, IM_COL32(38, 42, 52, 255), barH * 0.5f);
 				if (frac > 0.0f)
 					pdl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * frac, b1.y),
-					                   IM_COL32(96, 156, 240, 255), barH * 0.5f);
+					                   HE::Ed::Theme::u32(HE::Ed::Theme::AccentHi), barH * 0.5f);
 				const std::string head = "Loading " + st.pendingMeshLabel;
 				const std::string tail = total ? (formatBytes(rd) + " / " + formatBytes(total))
 				                               : std::string("opening…");
 				pdl->AddText(ImVec2(b0.x, b0.y - 22.0f), IM_COL32(226, 230, 238, 255), head.c_str());
-				pdl->AddText(ImVec2(b0.x, b1.y + 8.0f),  IM_COL32(150, 158, 172, 255), tail.c_str());
+				pdl->AddText(ImVec2(b0.x, b1.y + 8.0f),  IM_COL32(163, 156, 145, 255), tail.c_str());
 			}
 		}
 		ImGui::EndChild();
@@ -2271,7 +2275,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 		if (st.previewNodeId != 0)
 		{
 			const MatGraphNode* pn = st.graph.findNode(st.previewNodeId);
-			ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Previewing: %s",
+			ImGui::TextColored(HE::Ed::Theme::TextHeading, "Previewing: %s",
 				pn ? HE::matNodeDesc(pn->type).name : "?");
 			ImGui::SameLine();
 			if (ImGui::SmallButton("Show Material"))

@@ -3,6 +3,7 @@
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
+#include "EditorTheme.h"           // the brand palette every piece of chrome derives from
 #include "LevelScriptPanel.h"      // kTabPath — the level script is a virtual tab
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
@@ -250,41 +251,56 @@ void ApplyHorizonDarkTheme()
 
 	ImVec4* c = s.Colors;
 
-	// One accent, EditorToolbar's armed-blue, spent only on state: selection,
-	// checks, grabs, the focused tab. Everything decorative stays greyscale.
-	const ImVec4 accent      (0.22f, 0.42f, 0.70f, 1.00f);
-	const ImVec4 accentHi    (0.28f, 0.51f, 0.80f, 1.00f);
-	const ImVec4 accentBright(0.42f, 0.62f, 0.90f, 1.00f);
+	// One accent, the logo's amber, spent only on state: selection, checks,
+	// grabs, the focused tab. Everything decorative stays neutral.
+	//
+	// Amber and not gold, deliberately: gold sits 0.08 away from
+	// EditorToolbar::kWarn in RGB and amber sits 0.30 away, so this is the
+	// choice that leaves "needs attention" a colour of its own. The gold is
+	// still here — as the BRIGHT tier, for the marks that answer a question
+	// (a checkmark, a drop target) rather than tint a surface.
+	using namespace HE::Ed::Theme;
+	const ImVec4 accent       = Accent;
+	const ImVec4 accentHi     = AccentHi;
+	const ImVec4 accentBright = AccentBright;
 
-	// Text
-	c[ImGuiCol_Text]         = ImVec4(0.92f, 0.92f, 0.94f, 1.00f);
-	c[ImGuiCol_TextDisabled] = ImVec4(0.42f, 0.42f, 0.46f, 1.00f);
+	// Text. Warm off-white rather than the ivory of the logo: ivory is right
+	// for a wordmark and reads yellowed as 13 px body copy across a panel.
+	c[ImGuiCol_Text]         = Text;
+	c[ImGuiCol_TextDisabled] = TextDim;
 
 	// Backgrounds. Popups sit slightly ABOVE the window shade — elevation is
 	// what makes a context menu look like it belongs to this decade.
-	c[ImGuiCol_WindowBg] = ImVec4(0.105f, 0.105f, 0.11f, 1.00f);
-	c[ImGuiCol_ChildBg]  = ImVec4(0.085f, 0.085f, 0.09f, 1.00f);
-	c[ImGuiCol_PopupBg]  = ImVec4(0.13f,  0.13f,  0.14f, 1.00f);
+	//
+	// Every neutral here is warm(v) of the grey it used to be: same lightness,
+	// blue pulled out, a little red in. Going all the way to the splash's
+	// panel colour would read brown across a full-screen editor; the identity
+	// is carried by the warm off-white text and the amber, not by brown walls.
+	c[ImGuiCol_WindowBg] = warm(0.105f);
+	c[ImGuiCol_ChildBg]  = warm(0.085f);
+	c[ImGuiCol_PopupBg]  = warm(0.13f);
 
-	c[ImGuiCol_Border]       = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
+	c[ImGuiCol_Border]       = warm(0.25f);
 	c[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-	// Frames (inputs, drags, combos, checkboxes)
-	c[ImGuiCol_FrameBg]        = ImVec4(0.16f, 0.16f, 0.175f, 1.00f);
-	c[ImGuiCol_FrameBgHovered] = ImVec4(0.21f, 0.21f, 0.23f,  1.00f);
-	c[ImGuiCol_FrameBgActive]  = ImVec4(0.24f, 0.27f, 0.33f,  1.00f);
+	// Frames (inputs, drags, combos, checkboxes). The ACTIVE one used to be a
+	// blue-tinted grey picked by hand; it is now the same base blended toward
+	// the accent, so it cannot drift away from the rest.
+	c[ImGuiCol_FrameBg]        = warm(0.16f);
+	c[ImGuiCol_FrameBgHovered] = warm(0.21f);
+	c[ImGuiCol_FrameBgActive]  = mix(warm(0.16f), accentHi, 0.18f);
 
 	// Title / menu
-	c[ImGuiCol_TitleBg]          = ImVec4(0.08f, 0.08f, 0.085f, 1.00f);
-	c[ImGuiCol_TitleBgActive]    = ImVec4(0.12f, 0.12f, 0.13f,  1.00f);
-	c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.06f, 0.06f, 0.065f, 1.00f);
-	c[ImGuiCol_MenuBarBg]        = ImVec4(0.10f, 0.10f, 0.105f, 1.00f);
+	c[ImGuiCol_TitleBg]          = warm(0.08f);
+	c[ImGuiCol_TitleBgActive]    = warm(0.12f);
+	c[ImGuiCol_TitleBgCollapsed] = warm(0.06f);
+	c[ImGuiCol_MenuBarBg]        = warm(0.10f);
 
 	// Scrollbars: no boxed track, just a grab that firms up under the mouse.
 	c[ImGuiCol_ScrollbarBg]          = ImVec4(0.00f, 0.00f, 0.00f, 0.12f);
-	c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.26f, 0.26f, 0.29f, 0.85f);
-	c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.33f, 0.33f, 0.37f, 1.00f);
-	c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
+	c[ImGuiCol_ScrollbarGrab]        = warm(0.27f, 0.85f);
+	c[ImGuiCol_ScrollbarGrabHovered] = warm(0.34f);
+	c[ImGuiCol_ScrollbarGrabActive]  = warm(0.42f);
 
 	// The one place the accent is loud on purpose: the mark that answers
 	// "is this on".
@@ -292,43 +308,45 @@ void ApplyHorizonDarkTheme()
 	c[ImGuiCol_SliderGrab]       = ImVec4(accent.x, accent.y, accent.z, 0.90f);
 	c[ImGuiCol_SliderGrabActive] = accentHi;
 
-	c[ImGuiCol_Button]        = ImVec4(0.19f, 0.19f, 0.21f, 1.00f);
-	c[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
-	c[ImGuiCol_ButtonActive]  = ImVec4(accent.x, accent.y, accent.z, 0.80f);
+	c[ImGuiCol_Button]        = warm(0.19f);
+	c[ImGuiCol_ButtonHovered] = warm(0.25f);
+	c[ImGuiCol_ButtonActive]  = alpha(accent, 0.80f);
 
 	// Header drives Selectable rows (outliner, lists, menus) AND CollapsingHeader
-	// (every Details section). Blue-grey rather than full accent: a selected row
-	// should read selected, a section header should not shout on every component.
-	c[ImGuiCol_Header]        = ImVec4(0.24f, 0.28f, 0.36f, 0.65f);
-	c[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.34f, 0.44f, 0.75f);
-	c[ImGuiCol_HeaderActive]  = ImVec4(accent.x, accent.y, accent.z, 0.85f);
+	// (every Details section). A tint, not the full accent: a selected row should
+	// read selected, a section header should not shout on every component. Kept
+	// deliberately weak — a warm tint turns muddy far sooner than the blue one
+	// did, and a brown outliner is not what anyone asked for.
+	c[ImGuiCol_Header]        = mix(warm(0.16f), accentHi, 0.22f, 0.65f);
+	c[ImGuiCol_HeaderHovered] = mix(warm(0.16f), accentHi, 0.32f, 0.75f);
+	c[ImGuiCol_HeaderActive]  = alpha(accent, 0.85f);
 
-	c[ImGuiCol_Separator]        = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
-	c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+	c[ImGuiCol_Separator]        = warm(0.24f);
+	c[ImGuiCol_SeparatorHovered] = alpha(accent, 0.70f);
 	c[ImGuiCol_SeparatorActive]  = accentHi;
 
 	c[ImGuiCol_ResizeGrip]        = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-	c[ImGuiCol_ResizeGripHovered] = ImVec4(accent.x, accent.y, accent.z, 0.60f);
+	c[ImGuiCol_ResizeGripHovered] = alpha(accent, 0.60f);
 	c[ImGuiCol_ResizeGripActive]  = accentHi;
 
-	c[ImGuiCol_Tab]                = ImVec4(0.11f, 0.11f, 0.12f,  1.00f);
-	c[ImGuiCol_TabHovered]         = ImVec4(0.26f, 0.31f, 0.40f,  1.00f);
-	c[ImGuiCol_TabActive]          = ImVec4(0.21f, 0.22f, 0.26f,  1.00f);
-	c[ImGuiCol_TabUnfocused]       = ImVec4(0.09f, 0.09f, 0.10f,  1.00f);
-	c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.14f, 0.16f,  1.00f);
+	c[ImGuiCol_Tab]                = warm(0.11f);
+	c[ImGuiCol_TabHovered]         = mix(warm(0.11f), accentHi, 0.26f);
+	c[ImGuiCol_TabActive]          = mix(warm(0.21f), accentHi, 0.14f);
+	c[ImGuiCol_TabUnfocused]       = warm(0.09f);
+	c[ImGuiCol_TabUnfocusedActive] = warm(0.14f);
 
-	c[ImGuiCol_DockingPreview] = ImVec4(accent.x, accent.y, accent.z, 0.45f);
-	c[ImGuiCol_DockingEmptyBg] = ImVec4(0.08f, 0.08f, 0.085f, 1.00f);
+	c[ImGuiCol_DockingPreview] = alpha(accent, 0.45f);
+	c[ImGuiCol_DockingEmptyBg] = warm(0.08f);
 
-	c[ImGuiCol_PlotLines]            = ImVec4(0.55f, 0.55f, 0.58f, 1.00f);
+	c[ImGuiCol_PlotLines]            = warm(0.56f);
 	c[ImGuiCol_PlotLinesHovered]     = accentBright;
-	c[ImGuiCol_PlotHistogram]        = ImVec4(accent.x, accent.y, accent.z, 0.85f);
+	c[ImGuiCol_PlotHistogram]        = alpha(accent, 0.85f);
 	c[ImGuiCol_PlotHistogramHovered] = accentHi;
-	c[ImGuiCol_TableHeaderBg]        = ImVec4(0.14f, 0.14f, 0.15f, 1.00f);
-	c[ImGuiCol_TableBorderStrong]    = ImVec4(0.24f, 0.24f, 0.27f, 1.00f);
-	c[ImGuiCol_TableBorderLight]     = ImVec4(0.17f, 0.17f, 0.19f, 1.00f);
-	c[ImGuiCol_TextSelectedBg]       = ImVec4(accent.x, accent.y, accent.z, 0.35f);
-	c[ImGuiCol_DragDropTarget]       = ImVec4(accentBright.x, accentBright.y, accentBright.z, 0.90f);
+	c[ImGuiCol_TableHeaderBg]        = warm(0.14f);
+	c[ImGuiCol_TableBorderStrong]    = warm(0.24f);
+	c[ImGuiCol_TableBorderLight]     = warm(0.17f);
+	c[ImGuiCol_TextSelectedBg]       = alpha(accent, 0.35f);
+	c[ImGuiCol_DragDropTarget]       = alpha(accentBright, 0.90f);
 	c[ImGuiCol_NavHighlight]         = accentHi;
 	c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
 #endif // HE_IMGUI_ENABLED

@@ -1,4 +1,5 @@
 #include "EditorWidgets.h"
+#include "EditorTheme.h"      // the brand accent behind primaryButton
 
 #include <imgui_internal.h>   // PushMultiItemsWidths — the same splitter DragFloatN uses
 
@@ -35,12 +36,13 @@ bool filledButton(const char* label, const ImVec2& size,
 
 bool primaryButton(const char* label, const ImVec2& size)
 {
-	// The toolbar's armed-blue: "this is the thing that happens" is the same
-	// statement whether it is a tool or a dialog's confirm.
+	// The brand amber: "this is the thing that happens" is the same statement
+	// whether it is a tool or a dialog's confirm.
+	using namespace HE::Ed::Theme;
 	return filledButton(label, size,
-	                    ImVec4(0.22f, 0.42f, 0.70f, 1.0f),
-	                    ImVec4(0.28f, 0.51f, 0.80f, 1.0f),
-	                    ImVec4(0.18f, 0.35f, 0.60f, 1.0f));
+	                    Accent,
+	                    AccentHi,
+	                    mix(warm(0.10f), Accent, 0.80f));
 }
 
 bool dangerButton(const char* label, const ImVec2& size)

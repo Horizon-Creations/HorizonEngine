@@ -30,21 +30,34 @@ namespace EditorToolbar
 {
 
 // ── Palette ──────────────────────────────────────────────────────────────────
-// The editor theme is deliberately greyscale, so the bars stay greyscale too and
-// spend their one colour on state. Nothing decorative is coloured.
-inline constexpr ImU32 kBarBg     = IM_COL32( 21,  21,  21, 255);
-inline constexpr ImU32 kBarLine   = IM_COL32( 44,  44,  44, 255);
-inline constexpr ImU32 kWellBg    = IM_COL32( 33,  33,  33, 255);
-inline constexpr ImU32 kHoverBg   = IM_COL32(255, 255, 255,  20);
-inline constexpr ImU32 kDownBg    = IM_COL32(255, 255, 255,  38);
-inline constexpr ImU32 kOnBg      = IM_COL32( 56, 108, 178, 255);
-inline constexpr ImU32 kOnBgHover = IM_COL32( 72, 130, 205, 255);
-inline constexpr ImU32 kFg        = IM_COL32(198, 198, 198, 255);
-inline constexpr ImU32 kFgOn      = IM_COL32(255, 255, 255, 255);
-inline constexpr ImU32 kFgDim     = IM_COL32( 96,  96,  96, 255);
+// The bars carry no colour of their own: the surfaces are the warm near-blacks
+// of the editor theme (see EditorTheme.h) and the one colour they spend is the
+// brand amber, on state. Nothing decorative is coloured.
+//
+// These are written out as literals rather than derived from EditorTheme.h at
+// runtime because they are `constexpr ImU32` used in hot per-frame draw code —
+// the comment on each says which theme value it is, and the two are meant to be
+// changed together.
+inline constexpr ImU32 kBarBg     = IM_COL32( 23,  21,  19, 255);  // warm(0.085)
+inline constexpr ImU32 kBarLine   = IM_COL32( 48,  44,  40, 255);  // warm(0.175)
+inline constexpr ImU32 kWellBg    = IM_COL32( 36,  33,  30, 255);  // warm(0.13)
+inline constexpr ImU32 kHoverBg   = IM_COL32(255, 250, 240,  20);
+inline constexpr ImU32 kDownBg    = IM_COL32(255, 250, 240,  38);
+// Armed. Amber at the same luminance the old armed-blue had (~102 / ~123), so
+// the bars did not get louder — only warmer.
+inline constexpr ImU32 kOnBg      = IM_COL32(168, 100,  30, 255);
+inline constexpr ImU32 kOnBgHover = IM_COL32(198, 124,  42, 255);
+inline constexpr ImU32 kFg        = IM_COL32(200, 196, 188, 255);
+inline constexpr ImU32 kFgOn      = IM_COL32(255, 252, 245, 255);
+inline constexpr ImU32 kFgDim     = IM_COL32( 99,  95,  88, 255);
 
 // State colours, shared so "something needs attention" is the same amber
 // everywhere and "this went wrong" the same red.
+//
+// kWarn stays exactly where it was, and that is the constraint the accent was
+// chosen around: the brand's gold sits ~0.08 from it in RGB and would have made
+// every warning look like ordinary chrome, so the accent is the brand's AMBER,
+// ~0.30 away. Do not "unify" these two.
 inline constexpr ImU32 kGood      = IM_COL32( 96, 196, 124, 255);
 inline constexpr ImU32 kWarn      = IM_COL32(230, 176,  86, 255);
 inline constexpr ImU32 kBad       = IM_COL32(222,  92,  92, 255);

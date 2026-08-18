@@ -1,5 +1,6 @@
 #include "ContentBrowserPanel.h"
 #include "EditorToolbar.h"   // shared toolbar strip
+#include "EditorTheme.h"     // brand palette (selected tiles, labels)
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -1279,15 +1280,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			if (isSel)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.26f, 0.46f, 0.78f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.32f, 0.54f, 0.90f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.20f, 0.38f, 0.68f, 1.0f));
+				using namespace HE::Ed::Theme;
+				ImGui::PushStyleColor(ImGuiCol_Button,        mix(warm(0.16f), Accent, 0.62f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, mix(warm(0.16f), AccentHi, 0.78f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  mix(warm(0.16f), Accent, 0.90f));
 			}
 			else
 			{
-				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.18f, 0.18f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.28f, 0.28f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.38f, 0.38f, 0.38f, 1.0f));
+				using namespace HE::Ed::Theme;
+				ImGui::PushStyleColor(ImGuiCol_Button,        warm(0.18f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, warm(0.28f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  warm(0.38f));
 			}
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(k_iconPad, k_iconPad));
 
@@ -1374,7 +1377,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			float textOff = (labelW - ImGui::CalcTextSize(label.c_str()).x) * 0.5f;
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + textOff);
 			if (isSel)
-				ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s", label.c_str());
+				ImGui::TextColored(HE::Ed::Theme::TextHeading, "%s", label.c_str());
 			else
 				ImGui::TextUnformatted(label.c_str());
 
@@ -1528,15 +1531,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 
 			if (isSel)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.26f, 0.46f, 0.78f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.32f, 0.54f, 0.90f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.20f, 0.38f, 0.68f, 1.0f));
+				using namespace HE::Ed::Theme;
+				ImGui::PushStyleColor(ImGuiCol_Button,        mix(warm(0.16f), Accent, 0.62f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, mix(warm(0.16f), AccentHi, 0.78f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  mix(warm(0.16f), Accent, 0.90f));
 			}
 			else
 			{
-				ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.18f, 0.18f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.28f, 0.28f, 0.28f, 1.0f));
-				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.38f, 0.38f, 0.38f, 1.0f));
+				using namespace HE::Ed::Theme;
+				ImGui::PushStyleColor(ImGuiCol_Button,        warm(0.18f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, warm(0.28f));
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  warm(0.38f));
 			}
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(k_iconPad, k_iconPad));
 
@@ -1889,7 +1894,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			float textOff = (labelW - ImGui::CalcTextSize(label.c_str()).x) * 0.5f;
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + textOff);
 			if (isSel)
-				ImGui::TextColored(ImVec4(0.55f, 0.80f, 1.0f, 1.0f), "%s", label.c_str());
+				ImGui::TextColored(HE::Ed::Theme::TextHeading, "%s", label.c_str());
 			else
 				ImGui::TextUnformatted(label.c_str());
 			// A 72px tile truncates almost every real asset name to about ten

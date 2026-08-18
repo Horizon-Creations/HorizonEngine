@@ -2,6 +2,7 @@
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
 #include "EditorWidgets.h"       // dialog placement (stay inside the editor window)
+#include "EditorTheme.h"         // brand palette (the action line)
 #include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
 #include "HorizonVersion.h"
 
@@ -776,7 +777,7 @@ void render(AppContext& ctx, float dt, const UiFlags& flags)
 	ImGui::Separator();
 	if (step->action[0] != '\0')
 	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.80f, 1.0f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextWrapped("%s", actionLine.c_str());
 		ImGui::PopStyleColor();
 	}

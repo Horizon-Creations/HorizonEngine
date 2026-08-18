@@ -2,6 +2,7 @@
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
 #include "ToolchainDialog.h"             // Tools > Status > cmake/compiler "Fix" opens the dialog
 #include "GitController.h"               // Source Control page
+#include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
@@ -654,7 +655,7 @@ void drawRepositorySection(AppContext& ctx)
 	}
 	if (git->blockedByCollabSession())
 	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.80f, 1.0f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextWrapped("You are a guest in a collaboration session. The host "
 		                   "manages source control for this project — your changes "
 		                   "reach the others through the session.");
@@ -1383,7 +1384,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 				const ImVec2 mx = ImGui::GetItemRectMax();
 				ImGui::GetWindowDrawList()->AddRectFilled(
 					ImVec2(mn.x - 6.0f, mn.y + 3.0f), ImVec2(mn.x - 3.0f, mx.y - 3.0f),
-					IM_COL32(72, 130, 205, 255), 2.0f);
+					HE::Ed::Theme::u32(HE::Ed::Theme::AccentHi), 2.0f);
 			}
 			ImGui::Unindent(6.0f);
 			ImGui::PopStyleVar();

@@ -2,6 +2,7 @@
 #include "EditorApplication.h"    // AppContext
 #include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
 #include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
+#include "EditorTheme.h"       // brand palette (emphasis text)
 #include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
 
@@ -674,7 +675,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		EditorWidgets::WrapText wrap;
 		// Explained rather than silently absent: a user who cannot find the
 		// commit button should learn why, not conclude the feature is broken.
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.80f, 1.0f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextWrapped("You are a guest in a collaboration session. The host manages "
 		                   "source control for this project — your changes reach the "
 		                   "others through the session.");

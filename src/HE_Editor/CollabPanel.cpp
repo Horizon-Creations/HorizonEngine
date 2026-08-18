@@ -1,5 +1,6 @@
 #include "CollabPanel.h"
 #include "EditorWidgets.h"    // primary/danger/cancel buttons
+#include "EditorTheme.h"      // brand palette (emphasis text)
 
 #include "CollabController.h"
 
@@ -69,7 +70,7 @@ namespace
 	void CopyableValue(const char* label, const std::string& value, const char* id)
 	{
 		ImGui::TextUnformatted(label);
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.9f, 1.0f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextUnformatted(value.c_str());
 		ImGui::PopStyleColor();
 		ImGui::SameLine();

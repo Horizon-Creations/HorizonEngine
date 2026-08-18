@@ -1,4 +1,5 @@
 #include "EditorUI.h"
+#include "EditorTheme.h"   // brand palette (the editor tab strip)
 #include <algorithm>
 #include <cstdint>
 #include "EditorApplication.h"
@@ -2102,10 +2103,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(4.0f, 2.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_TabRounding,      2.0f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg,   ImVec4(0.11f, 0.11f, 0.13f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Tab,        ImVec4(0.16f, 0.16f, 0.20f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.28f, 0.28f, 0.36f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_TabActive,  ImVec4(0.22f, 0.22f, 0.30f, 1.0f));
+        {
+            using namespace HE::Ed::Theme;
+            ImGui::PushStyleColor(ImGuiCol_WindowBg,   warm(0.115f));
+            ImGui::PushStyleColor(ImGuiCol_Tab,        warm(0.165f));
+            ImGui::PushStyleColor(ImGuiCol_TabHovered, mix(warm(0.165f), AccentHi, 0.26f));
+            ImGui::PushStyleColor(ImGuiCol_TabActive,  mix(warm(0.225f), AccentHi, 0.14f));
+        }
 
         // NoBringToFrontOnFocus for the same reason as the footer: switching tabs
         // must not lift this strip over a floating panel.
