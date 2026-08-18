@@ -411,6 +411,74 @@ TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'
     prof.consumeJustDumped(p);
 }
 
+TEST_CASE("Dump truncates the timeline by time, so every lane keeps the same window")
+{
+    // Regression from a real 4867-frame capture: the dump budget was spent lane by
+    // lane, the main thread's 155k spans consumed all of it, and every worker lane
+    // came out with ZERO spans — which reads as an idle thread pool rather than as
+    // a lane that was never written. The budget is now a shared time cutoff, so a
+    // truncated dump is a consistent prefix of the capture across all lanes.
+    fs::path deploy = setupTempDeploy("truncate");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    REQUIRE(prof.isRecording());
+
+    // Comfortably over the 120k dump budget so the cutoff actually engages.
+    std::atomic<bool> go{ false };
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 6; ++t)
+        workers.emplace_back([&] {
+            while (!go.load(std::memory_order_acquire)) { }
+            for (int i = 0; i < 25000; ++i) { HE_PROFILE_SCOPE_N("BulkWorker"); }
+        });
+    go.store(true, std::memory_order_release);
+    for (int i = 0; i < 25000; ++i) { HE_PROFILE_SCOPE_N("BulkMain"); }
+    for (auto& w : workers) w.join();
+    prof.endFrame();
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string dumpPath;
+    REQUIRE(prof.consumeJustDumped(dumpPath));
+    std::ifstream in(dumpPath);
+    REQUIRE(in.is_open());
+    json j = json::parse(in);
+
+    REQUIRE(j["summary"].contains("timelineTruncated"));
+    REQUIRE(j["summary"].contains("timelineCutoffNs"));
+    const uint64_t cutoff = j["summary"]["timelineCutoffNs"].get<uint64_t>();
+
+    // The point of the fix: more than one lane survives truncation.
+    size_t lanesWithSpans = 0, workerLanesWithSpans = 0;
+    for (const auto& lane : j["threads"])
+    {
+        if (lane["spans"].empty()) continue;
+        ++lanesWithSpans;
+        if (!lane["main"].get<bool>()) ++workerLanesWithSpans;
+        // Everything written is strictly before the shared cutoff.
+        for (const auto& s : lane["spans"])
+            CHECK(s["s"].get<uint64_t>() < cutoff);
+    }
+    CHECK(lanesWithSpans > 1);
+    CHECK(workerLanesWithSpans > 0);
+
+    // summary.threads still describes the WHOLE capture, truncation or not — that
+    // is what makes the totals trustworthy when threads[] is only a prefix.
+    uint64_t summarySpans = 0;
+    for (const auto& t : j["summary"]["threads"]) summarySpans += t["spans"].get<uint64_t>();
+    CHECK(summarySpans == 6 * 25000 + 25000);
+
+    // Frame marks are clipped to the same cutoff, so no separator is drawn over a
+    // stretch of timeline where no lane has data.
+    for (const auto& m : j["frameMarks"]) CHECK(m["s"].get<uint64_t>() < cutoff);
+
+    he_test::removeAllQuiet(deploy);
+}
+
 TEST_CASE("EngineProfiler timeline resets between captures and can be switched off")
 {
     // A worker buffer survives its capture (shared_ptr in the registry), so the

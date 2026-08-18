@@ -614,13 +614,36 @@ std::string EngineProfiler::dumpNow()
 	// ── Per-thread timeline (v3) ────────────────────────────────────────────
 	// Every lane is summarised (cheap, always useful: "Worker 3 was busy 4% of the
 	// capture" is the parallelism verdict). The raw spans are the expensive part —
-	// hundreds of thousands of them over a long capture — so they get a hard total
-	// budget, oldest-lane-first, and any truncation is written into the dump AND
-	// logged. A silently half-written timeline reads as an idle thread pool.
+	// hundreds of thousands over a long capture — so they get a total budget.
+	//
+	// The budget is spent as a TIME CUTOFF, not as a per-lane quota. The first
+	// version wrote lanes in order until the budget ran out, and the main lane ate
+	// all of it: a real 4867-frame dump came out with 155k main-thread spans and
+	// literally zero on any worker, which reads as an idle thread pool — the exact
+	// wrong conclusion, from a lane that was simply never written. Cutting at a
+	// shared timestamp instead gives every lane the same shorter window, so the
+	// dump is a consistent prefix of the capture rather than an arbitrary subset.
+	// Nesting survives for free: a parent starts before its children, so if a child
+	// is in, its parent is too.
 	const std::vector<ProfThreadTimeline> lanes = timelineSnapshot();
 	if (!lanes.empty())
 	{
 		constexpr size_t kMaxDumpSpans = 120000;
+
+		size_t totalSpans = 0;
+		for (const ProfThreadTimeline& lane : lanes) totalSpans += lane.spans.size();
+
+		uint64_t cutoffNs = UINT64_MAX;   // no cutoff = write everything
+		if (totalSpans > kMaxDumpSpans)
+		{
+			std::vector<uint64_t> starts;
+			starts.reserve(totalSpans);
+			for (const ProfThreadTimeline& lane : lanes)
+				for (const ProfThreadSpan& s : lane.spans) starts.push_back(s.startNs);
+			std::nth_element(starts.begin(), starts.begin() + kMaxDumpSpans, starts.end());
+			cutoffNs = starts[kMaxDumpSpans];
+		}
+
 		size_t written = 0, omitted = 0;
 
 		json summaryLanes = json::array();
@@ -647,7 +670,7 @@ std::string EngineProfiler::dumpNow()
 			json jspans = json::array();
 			for (const ProfThreadSpan& s : lane.spans)
 			{
-				if (written >= kMaxDumpSpans) { ++omitted; continue; }
+				if (s.startNs >= cutoffNs) { ++omitted; continue; }
 				jspans.push_back({ {"n", s.name}, {"s", s.startNs}, {"e", s.endNs}, {"d", s.depth} });
 				++written;
 			}
@@ -658,13 +681,19 @@ std::string EngineProfiler::dumpNow()
 		if (omitted > 0)
 		{
 			summary["timelineTruncated"] = omitted;
+			summary["timelineCutoffNs"]  = cutoffNs;
 			summary["timelineNote"] =
-				std::string("timeline truncated: ") + std::to_string(omitted) +
-				" spans omitted from this dump (budget " + std::to_string(kMaxDumpSpans) +
-				"). summary.threads still covers the FULL capture — trust it over threads[].";
+				std::string("timeline truncated at ") +
+				std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms into the capture (" +
+				std::to_string(written) + " spans kept, " + std::to_string(omitted) +
+				" omitted, budget " + std::to_string(kMaxDumpSpans) +
+				"). EVERY lane is cut at the same timestamp, so threads[] is a consistent "
+				"prefix of the capture, not a subset of lanes. summary.threads covers the "
+				"FULL capture — use it for totals.";
 			HE_LOG_WARN(Profiler, "%s",
-			            ("Profiler: timeline truncated in dump — " + std::to_string(omitted) +
-			             " spans omitted").c_str());
+			            ("Profiler: timeline truncated in dump at " +
+			             std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms — " +
+			             std::to_string(omitted) + " spans omitted").c_str());
 		}
 		const size_t droppedLive = timelineDroppedSpans();
 		if (droppedLive > 0) summary["timelineDroppedAtCapture"] = droppedLive;
@@ -674,12 +703,20 @@ std::string EngineProfiler::dumpNow()
 	j["summary"] = summary;
 
 	// Frame boundaries on the timeline axis, so a reader can line the thread lanes
-	// up with the frames[] entries (both carry the same frame index).
+	// up with the frames[] entries (both carry the same frame index). Clipped to the
+	// same cutoff as the spans, so a truncated dump does not draw frame separators
+	// across a stretch of timeline where no lane has any data.
 	if (!m_frameMarks.empty())
 	{
+		const uint64_t markCutoff = j["summary"].contains("timelineCutoffNs")
+		                          ? j["summary"]["timelineCutoffNs"].get<uint64_t>()
+		                          : UINT64_MAX;
 		json marks = json::array();
 		for (const ProfFrameMark& m : m_frameMarks)
+		{
+			if (m.startNs >= markCutoff) continue;
 			marks.push_back({ {"i", m.index}, {"s", m.startNs}, {"e", m.endNs} });
+		}
 		j["frameMarks"] = std::move(marks);
 	}
 
