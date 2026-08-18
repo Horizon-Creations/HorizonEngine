@@ -158,9 +158,15 @@ private:
 
     // Destroys the backend through the plugin's own destroy function: it was
     // allocated over there, by that module's allocator.
+    // User-provided constructors instead of an NSDMI: GCC refuses to
+    // default-construct a unique_ptr whose deleter is a nested class relying
+    // on a default member initializer (the _DeleterConstraint trait sees it
+    // as not default-constructible; Clang/MSVC accept it).
     struct PyBackendDeleter
     {
-        HePythonDestroyFn destroy = nullptr;
+        HePythonDestroyFn destroy;
+        PyBackendDeleter() noexcept : destroy(nullptr) {}
+        explicit PyBackendDeleter(HePythonDestroyFn fn) noexcept : destroy(fn) {}
         void operator()(IScriptBackend* p) const { if (p && destroy) destroy(p); }
     };
 
