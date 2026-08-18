@@ -5027,8 +5027,9 @@ float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float moonPhase)
 // double-compositing would darken every cloud. Geometry in FRONT of the deck
 // needs no work either: the march simply finds no slab within rayLimit.
 struct CloudFrontParams {
-	float4x4 invViewProjFixed; // inverse(clipFix · proj · view): depth → world position
-	float4   viewport;         // xy = pixel size of the target
+	// xy = pixel size of the target; z/w are diagnostics only (HE_CLOUD_FRONT_DEBUG
+	// selects a debug view, HE_CLOUD_FRONT_PROBE feeds view 4 its expected height).
+	float4   viewport;
 };
 
 fragment float4 cloudFrontFragment(SkyOut in [[stage_in]],
@@ -5038,26 +5039,27 @@ fragment float4 cloudFrontFragment(SkyOut in [[stage_in]],
                                    sampler noiseSamp [[sampler(1)]],
                                    texture2d<float> depthTex [[texture(3)]])
 {
-	// ── WIP, do not ship: the reconstruction below is WRONG ──────────────────
-	// Measured on device: the pass runs, hits exactly the geometry pixels
-	// (a debug fill coloured 1.45 % = the terrain patch) and blends correctly,
-	// but the marched clouds come out empty because sceneP is wrong. Cause: the
-	// FORWARD scene pass rasterises with JitteredViewProj(proj·view) — the
-	// UNFIXED, additionally TAA-jittered matrix — while this reconstruction
-	// inverts kMetalClipFix·proj·view. Fix = invert the very matrix the frame
-	// rasterised with (jitter included) and settle the clip-z convention; the
-	// deferred path's ResolveUniforms.depthParams is the precedent to follow.
-	// Second open detail: reading the Depth32Float attachment as texture2d
-	// detects background-vs-geometry correctly here, whereas depth2d returned
-	// 1.0 everywhere — worth understanding before trusting either.
 	const float4 kKeep = float4(0.0, 0.0, 0.0, 1.0);   // L = 0, T = 1 → dst survives untouched
 	if (p.cameraPos.w < 0.5) return kKeep;             // dome clouds are infinitely far — nothing to do
 	if (p.params.y <= 0.0)   return kKeep;             // no coverage
+	// The depth attachment is Depth32Float, and it is read as a plain
+	// texture2d<float> — the same thing the cross-compiled deferred resolve does
+	// with the G-buffer depth (`heGBDepth` is a sampler2D in the canonical GLSL),
+	// so this is the backend's established way to sample it, not an experiment.
 	constexpr sampler dsmp(filter::nearest, address::clamp_to_edge);
 	float2 uv = in.position.xy / max(cf.viewport.xy, float2(1.0));
 	float  d  = depthTex.sample(dsmp, uv).r;
 	if (d >= 1.0) return kKeep;                        // background → the sky pass handled it
-	float4 wp = cf.invViewProjFixed * float4(in.ndc, d, 1.0);
+	// Depth → world position. The scene pass rasterises with the UNFIXED,
+	// GL-convention viewProj (Metal clips z to [0,w], so what lands in the buffer
+	// IS the GL ndc z, no scale and no bias) — p.invViewProj is the inverse of
+	// exactly that matrix, jitter included. Same convention the deferred resolve
+	// reconstructs with; its depthParams spell out the scale-1/bias-0 half.
+	// in.ndc is clip-space xy straight from the fullscreen triangle, already y-up
+	// like the matrix expects — the resolve's y flip exists only because it
+	// derives ndc from a top-left-origin uv, and copying it here would mirror the
+	// ray about the horizon.
+	float4 wp = p.invViewProj * float4(in.ndc, d, 1.0);
 	float3 sceneP = wp.xyz / wp.w;
 	float3 toScene = sceneP - p.cameraPos.xyz;
 	float  sceneDist = length(toScene);
@@ -5076,6 +5078,20 @@ fragment float4 cloudFrontFragment(SkyOut in [[stage_in]],
 		: applyClouds3D(hazeSky, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
 		                p.cloudTint.xyz, in.position.xy, sceneDist, noiseTex, noiseSamp, T);
+	// HE_CLOUD_FRONT_DEBUG: alpha 0 replaces the scene pixel, so each view is
+	// read straight off the dump. 1 = reconstructed distance to the surface
+	// (÷1000, so a known camera/terrain gap is checkable by arithmetic),
+	// 2 = raw depth, 3 = cloud opacity 1−T along the capped ray.
+	int dbg = int(cf.viewport.z);
+	if (dbg == 1) return float4(float3(sceneDist / 1000.0), 0.0);
+	if (dbg == 2) return float4(float3(d), 0.0);
+	if (dbg == 3) return float4(float3(1.0 - T), 0.0);
+	// 4 = planar probe (HE_CLOUD_FRONT_PROBE = the expected world Y): white where
+	// the reconstructed surface lands within 2 m of it, black elsewhere. It has to
+	// test an ABSOLUTE height — a wrong depth scale moves the surface along each
+	// ray, which maps a flat plane to a PARALLEL flat plane, so any "is it flat?"
+	// check (contour bands, derivatives) passes a scale error unnoticed.
+	if (dbg == 4) return float4(float3(step(abs(sceneP.y - cf.viewport.w), 2.0)), 0.0);
 	return float4(comp - hazeSky * T, T);
 }
 
@@ -10061,18 +10077,26 @@ static float skyClockNow()
 // depth sampled (not attached — a pass may not read the attachment it writes).
 // Only geometry pixels are touched; the sky pass already composited the clouds
 // against the background. See cloudFrontFragment for the why.
-void MetalRenderer::EncodeCloudFront(void* cmdBufPtr, const glm::mat4& viewProj,
-                                     const glm::vec3& sunDir, float time, int width, int height)
+bool MetalRenderer::CloudFrontActive() const
 {
-	if (!m_cloudFrontPipeline || !m_hdrColor || !m_hdrDepth) return;
+	if (!m_cloudFrontPipeline || !m_hdrColor || !m_hdrDepth) return false;
 	// A/B switch for the pass (headless verification, and a one-env-var escape
 	// hatch if it ever misbehaves on a driver).
 	static const char* s_off = std::getenv("HE_NO_CLOUD_FRONT");
-	if (s_off && *s_off) return;
+	if (s_off && *s_off) return false;
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
 	// 3D clouds only: dome clouds are painted on the hemisphere, infinitely far,
 	// so geometry occluding them is already the right answer.
-	if (!(env.skyEnabled && env.cloudMode == 1 && env.cloudCoverage > 0.001f)) return;
+	return env.skyEnabled && env.cloudMode == 1 && env.cloudCoverage > 0.001f;
+}
+
+// `viewProj` MUST be the matrix the frame RASTERISED with (jitter included) —
+// its inverse is what turns the sampled depth back into a world position, and a
+// matrix that merely looks equivalent puts the reconstructed ray somewhere else.
+void MetalRenderer::EncodeCloudFront(void* cmdBufPtr, const glm::mat4& viewProj,
+                                     const glm::vec3& sunDir, float time, int width, int height)
+{
+	if (!CloudFrontActive()) return;
 
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -10092,15 +10116,19 @@ void MetalRenderer::EncodeCloudFront(void* cmdBufPtr, const glm::mat4& viewProj,
 	in.time           = time;
 	in.hasMoonTexture = m_moonTexture != nullptr;
 	in.lowResClouds   = false;                 // this pass always marches itself
-	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
+	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(GetEnvironment(), in);
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 
-	// The depth attachment holds Metal-convention z (the raster applies
-	// kMetalClipFix), so the reconstruction needs the FIXED inverse — not the
-	// GL-convention invViewProj the sky uses for its ray directions.
-	struct { glm::mat4 invVP; glm::vec4 viewport; } cf;
-	cf.invVP    = glm::inverse(HE::kMetalClipFix * viewProj);
-	cf.viewport = glm::vec4(static_cast<float>(width), static_cast<float>(height), 0.0f, 0.0f);
+	// Only the viewport: the depth→world reconstruction reuses p.invViewProj
+	// above, which is the inverse of the caller's matrix — the very one the scene
+	// rasterised with. Handing the shader a second matrix would only create a way
+	// for the two to disagree.
+	struct { glm::vec4 viewport; } cf;
+	static const char* s_dbg   = std::getenv("HE_CLOUD_FRONT_DEBUG");
+	static const char* s_probe = std::getenv("HE_CLOUD_FRONT_PROBE");
+	cf.viewport = glm::vec4(static_cast<float>(width), static_cast<float>(height),
+	                        s_dbg   && *s_dbg   ? static_cast<float>(std::atof(s_dbg))   : 0.0f,
+	                        s_probe && *s_probe ? static_cast<float>(std::atof(s_probe)) : 0.0f);
 	[enc setFragmentBytes:&cf length:sizeof(cf) atIndex:1];
 
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -14256,8 +14284,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 			hdrPass.depthAttachment.loadAction  = deferredActive ? MTLLoadActionLoad : MTLLoadActionClear;
-			// Stored, not discarded: the cloud-front pass below samples it.
-			hdrPass.depthAttachment.storeAction = MTLStoreActionStore;
+			// Kept only when the cloud-front pass below is going to sample it —
+			// on a tile GPU a resolved depth write is real bandwidth, and every
+			// frame without 3D clouds has no reader for it.
+			hdrPass.depthAttachment.storeAction =
+				CloudFrontActive() ? MTLStoreActionStore : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			// "Scene" pass = sky + clouds + opaque + skinned + particles + debug.
@@ -14319,8 +14350,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// Clouds over geometry: own pass, samples the depth the scene pass
 			// just stored. Runs before bloom so cloud light blooms like the rest.
+			// Jittered like the raster it reconstructs from (a no-op outside TAA).
 			EncodeCloudFront((__bridge void*)cmdBuf,
-			                 m_renderWorld.camera.projection * m_renderWorld.camera.view,
+			                 JitteredViewProj(m_renderWorld.camera.projection * m_renderWorld.camera.view,
+			                                  sceneW, sceneH),
 			                 m_renderWorld.sunDirection,
 			                 skyClockNow(), sceneW, sceneH);
 

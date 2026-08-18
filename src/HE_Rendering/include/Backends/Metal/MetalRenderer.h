@@ -863,6 +863,10 @@ private:
 	// marches only up to it. Nothing to configure — it follows the same
 	// EnvironmentSettings as the sky's own cloud march.
 	void* m_cloudFrontPipeline = nullptr; // id<MTLRenderPipelineState> (skyVertex + cloudFrontFragment)
+	// Asked BEFORE the scene pass is set up as well as inside the pass itself:
+	// the scene depth only has to be kept (instead of discarded) on the frames
+	// this actually reads it, and one predicate is what keeps those two agreeing.
+	bool  CloudFrontActive() const;
 	void  EncodeCloudFront(void* cmdBuf, const glm::mat4& viewProj, const glm::vec3& sunDir,
 	                       float time, int width, int height);
 

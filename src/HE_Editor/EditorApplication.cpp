@@ -3725,6 +3725,49 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
 	}
 
+	// ── Clouds-over-geometry witness (HE_DUMP_CLOUDFRONT=1) ──────────────────
+	// A wide hilly landscape at y = 0, so the cloud deck can be put ABOVE it
+	// (HE_DUMP_CLOUDHEIGHT) and the camera above that (HE_DUMP_CAMY). The other
+	// landscape witnesses sit at y = 300 and are 100 m across — far too small,
+	// and too high, to ever have a cloud deck between them and the camera.
+	//
+	// The two views this exists for:
+	//   from above  — terrain must be VEILED by the clouds it lies under
+	//   from below  — hills stand IN FRONT of the deck and must stay crisp
+	// The colour is deliberately loud: a cloud veil over it is unmissable, and a
+	// double-composite (the failure mode the pass has to avoid) shows up as the
+	// terrain going dark rather than white.
+	if (const char* cf = std::getenv("HE_DUMP_CLOUDFRONT"); cf && *cf && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+
+		MaterialAsset cm;
+		cm.type = HE::AssetType::Material;
+		cm.name = "CloudFrontGround";
+		cm.baseColor[0] = 0.85f; cm.baseColor[1] = 0.18f; cm.baseColor[2] = 0.15f;
+		cm.roughness = 0.9f;
+		cm.metallic  = 0.0f;
+		const HE::UUID cmId = contentManager().registerMaterial(std::move(cm));
+
+		auto land = m_editorWorld->createEntity("CloudFrontLandscape");
+		reg.emplace<TransformComponent>(land, TransformComponent{});
+		TerrainComponent ctc;
+		ctc.sizeX = ctc.sizeZ = 4000.0f;   // wide enough to fill the frame from 1 km up
+		ctc.resolution  = 129;             // 2ⁿ+1 → no resample
+		// Real relief: the hills are what stand IN FRONT of the deck in the
+		// from-below view, and what the veil has to follow in the from-above one.
+		ctc.heightScale = 160.0f;
+		ctc.seed        = 1337;
+		ctc.octaves     = 5;
+		ctc.frequency   = 1.5f;
+		ctc.dirty       = true;
+		reg.emplace<TerrainComponent>(land, ctc);
+		reg.emplace<MaterialComponent>(land, MaterialComponent{ cmId });
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_CLOUDFRONT witness landscape added");
+	}
+
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
 	r->SetViewportSize(1280, 720);
 	// Warm the material pipelines before rendering (mirrors openScene) so the dump
