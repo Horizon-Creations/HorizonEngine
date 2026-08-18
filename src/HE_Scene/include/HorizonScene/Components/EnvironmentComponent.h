@@ -40,6 +40,11 @@ struct EnvironmentComponent
     // cloudHeight is how far above the camera the 3D layer sits, in world units — tune
     // it to your world's scale (bigger world = larger value).
     int   cloudMode   = 0;
+    // ABSOLUTE world altitude of the cloud deck (its base; the layer is
+    // 1.5x this thick). Absolute, not camera-relative: that is what lets the
+    // camera climb INTO and ABOVE the clouds and look down on them. A scene
+    // whose playfield sits high up must raise this accordingly, or its ground
+    // ends up above the clouds.
     float cloudHeight = 200.0f;
     // Cloud raymarch quality (performance knob): 0 = Low, 1 = Medium, 2 = High.
     // Scales the view-ray step count and sun light-march steps in both cloud paths.

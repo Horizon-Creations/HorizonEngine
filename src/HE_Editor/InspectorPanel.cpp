@@ -282,9 +282,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
 				if (env->cloudMode == 1)
 				{
-					Row::sliderFloat("Cloud Height", &env->cloudHeight, 20.0f, 2000.0f, "%.0f"); trackEdit();
-					hint("Lifts the cloud band higher in the sky (clear sky opens toward the "
-					     "horizon); the clouds keep the same size & shape (OpenGL only).");
+					Row::sliderFloat("Cloud Altitude", &env->cloudHeight, 20.0f, 2000.0f, "%.0f m"); trackEdit();
+					hint("World altitude of the cloud deck — an absolute height, not a "
+					     "distance above the camera: fly up to it and you pass through the "
+					     "clouds and look down on them. Keep it above your playfield.");
 					// Cloud look + life (3D only — the dome path keeps the classic formula).
 					const char* cloudStyles[] = { "Classic (soft)", "Realistic (cumulus)" };
 					int cstyle = (env->cloudStyle == 1) ? 1 : 0;

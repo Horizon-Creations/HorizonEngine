@@ -3748,6 +3748,36 @@ float cloudBillowFbm(float3 p, float farW, texture3d<float> noiseTex, sampler no
 	     + worleyNoise3(p * 4.06, noiseTex, noiseSamp) * 0.125 * farW;
 }
 
+// ── Cloud slab intersection ──────────────────────────────────────────────────
+// Entry/exit distance of a view ray through the cloud deck, for ANY camera
+// position: below it (the normal case), inside it (flying through — the march
+// then starts at the camera) and above it looking down (the ray enters at the
+// TOP, so the near hit is the far plane in Y terms). The deck is at an ABSOLUTE
+// world altitude, which is what makes climbing above it possible at all: while
+// it hung at camera.y + cloudHeight it rose with the viewer and could never be
+// reached. Returns false when the ray never meets the slab in front of the
+// camera. Mirrored verbatim in the GL shader.
+bool cloudSlabRange(float3 camPos, float3 dir, float baseY, float topY, float maxDist,
+                    thread float& tNear, thread float& tFar)
+{
+	if (abs(dir.y) < 1e-4)
+	{
+		// Horizontal ray: either we are inside the deck (march the full
+		// distance through it) or we never enter it.
+		if (camPos.y < baseY || camPos.y > topY) return false;
+		tNear = 0.0;
+		tFar  = maxDist;
+		return true;
+	}
+	float ta = (baseY - camPos.y) / dir.y;
+	float tb = (topY  - camPos.y) / dir.y;
+	tNear = min(ta, tb);
+	tFar  = max(ta, tb);
+	tNear = max(tNear, 0.0);          // inside the slab, or it starts behind us
+	tFar  = min(tFar, maxDist);
+	return tFar > tNear;
+}
+
 // ── Shared cloud shape field ─────────────────────────────────────────────────
 // Coarse density (presence × vertical profile × billow erosion, no fine octave)
 // of the 3D cloud slab at a world position. ONE shape model for the realistic
@@ -3880,8 +3910,6 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	if (dir.y < 0.02) return baseSky;             // at/below horizon → ray misses the slab above
-
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == original counts.
 	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.30 : 0.22); // larger → fewer steps
 	float qMinN   = (quality < 0.5) ? 12.0 : (quality < 1.5 ? 18.0 : 24.0);
@@ -3890,12 +3918,11 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = cloudH * 1.5;                   // TALL slab so cumuli can billow upward (3D)
-	float baseY = camPos.y + cloudH;
-	float tNear = cloudH / dir.y;                 // (baseY - camPos.y)/dir.y, dir.y>0
-	float tFar  = (cloudH + thick) / dir.y;
+	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
-	tFar = min(tFar, maxDist);
-	if (tFar <= tNear) return baseSky;
+	float tNear, tFar;
+	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
+		return baseSky;
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -3991,7 +4018,11 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 			if (T < 0.02) break;
 		}
 	}
-	float horizon = smoothstep(elevFloor, elevFloor + 0.14, dir.y);
+	// Grazing-angle fade, symmetric in |dir.y|: near-horizontal rays cross an
+	// enormous stretch of slab and would otherwise pile into a hard wall of
+	// cloud at the horizon. abs() so it works looking DOWN from above the deck
+	// exactly as it always did looking up from below.
+	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	outT = T;
@@ -4021,8 +4052,6 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	if (coverage <= 0.0) return baseSky;
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	if (dir.y < 0.02) return baseSky;
-
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
 	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
@@ -4033,12 +4062,11 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = cloudH * 1.5;
-	float baseY = camPos.y + cloudH;
-	float tNear = cloudH / dir.y;
-	float tFar  = (cloudH + thick) / dir.y;
+	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;
-	tFar = min(tFar, maxDist);
-	if (tFar <= tNear) return baseSky;
+	float tNear, tFar;
+	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
+		return baseSky;
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4144,7 +4172,11 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		T *= 1.0 - a;
 		if (T < 0.02) break;
 	}
-	float horizon = smoothstep(elevFloor, elevFloor + 0.14, dir.y);
+	// Grazing-angle fade, symmetric in |dir.y|: near-horizontal rays cross an
+	// enormous stretch of slab and would otherwise pile into a hard wall of
+	// cloud at the horizon. abs() so it works looking DOWN from above the deck
+	// exactly as it always did looking up from below.
+	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	outT = T;
@@ -4177,7 +4209,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	float3 wind   = p.wind.xyz;
 	float cloudH  = max(p.cloud.x, 1.0);
 	float thick   = cloudH * 1.5;
-	float baseY   = p.cameraPos.y + cloudH;
+	float baseY   = cloudH;   // ABSOLUTE deck altitude — same slab the view march uses
 	float midY    = baseY + 0.5 * thick;
 	float fluff   = clamp(p.cloud.z, 0.0, 1.0);
 	float densMul = clamp(p.cloud.y, 0.0, 3.0);
@@ -9854,30 +9886,34 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	const float     cloudH = std::max(env.cloudHeight, 1.0f);
 	const float     thick  = cloudH * 1.5f;
 	const glm::vec3 cam    = m_renderWorld.camera.position;
-	// Stable vertical anchor: the shadow slab must NOT ride the live camera Y,
-	// or every jump/hill slides the ground shadows sideways. The anchor sits
-	// still inside a ±0.35 × cloudHeight dead-band and trails at the band edge
-	// beyond it (continuous, no pops) — shadows then change only with sun,
-	// wind or a genuine altitude change. HE_CLOUD_ANCHOR_Y pins it for
-	// deterministic headless A/Bs.
-	if (std::isnan(m_cloudShadowAnchorY)) m_cloudShadowAnchorY = cam.y;
+	// The deck sits at an ABSOLUTE world altitude, so the shadow slab needs no
+	// anchoring trick any more: it simply IS the layer the view march samples,
+	// and the camera cannot influence it by construction (the earlier
+	// camera-relative layer forced a whole dead-band machinery here just to
+	// keep the shadows from sliding when the viewer changed altitude).
+	const float midY = cloudH + 0.5f * thick;
+	// Ground level of the receivers — used ONLY to centre the map where the
+	// shadows actually land (a rough value is fine; the region spans ±30 cloud
+	// heights). Kept off the camera and lightly hysteresised so objects
+	// streaming in and out of the scene bounds cannot make the region — and
+	// with it the map's edge fade — breathe.
 	{
+		HE::AABB sceneBox;
+		for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+		const float groundY = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
+		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = groundY;
 		const float dead = cloudH * 0.35f;
-		const float d    = cam.y - m_cloudShadowAnchorY;
-		if (d >  dead) m_cloudShadowAnchorY = cam.y - dead;
-		if (d < -dead) m_cloudShadowAnchorY = cam.y + dead;
-		static const char* s_anchorOv = std::getenv("HE_CLOUD_ANCHOR_Y");
-		if (s_anchorOv && *s_anchorOv) // hard pin — headless A/B only
-			m_cloudShadowAnchorY = static_cast<float>(std::atof(s_anchorOv));
+		const float d    = groundY - m_cloudShadowGroundY;
+		if (d >  dead) m_cloudShadowGroundY = groundY - dead;
+		if (d < -dead) m_cloudShadowGroundY = groundY + dead;
 	}
-	const float anchorY = m_cloudShadowAnchorY;
-	const float midY    = anchorY + cloudH + 0.5f * thick;
-	// Region: covers ±30 cloud-heights around where the camera's own position
-	// projects onto the slab along the light (~6 km at the default height 200).
+	const float groundY = m_cloudShadowGroundY;
+	// Region: ±30 cloud-heights around where the deck projects down onto the
+	// receivers along the light (~6 km at the default altitude 200).
 	const float half  = cloudH * 30.0f;
 	const float size  = half * 2.0f;
 	const float texel = size / static_cast<float>(kCloudShadowMapSize);
-	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - cam.y);
+	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - groundY);
 	if (glm::length(offs) > half * 4.0f) offs = glm::normalize(offs) * (half * 4.0f);
 	glm::vec2 origin = glm::vec2(cam.x, cam.z) + offs - glm::vec2(half);
 	origin = glm::floor(origin / texel) * texel; // texel snap — no swimming on camera moves
@@ -9895,13 +9931,13 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
 	// BuildSkyFrameParams supplies everything the density formula needs
-	// (coverage/wind/time/height/density/fluffiness) — sunDir overridden with
-	// the dominant light so the march direction matches the shading, and the
-	// camera's Y replaced by the STABLE anchor so the map's slab (baseY =
-	// cameraPos.y + cloudH in cloudShadowFragment) cannot ride the live camera.
+	// (coverage/wind/time/altitude/density/fluffiness) — sunDir overridden with
+	// the dominant light so the march direction matches the shading. cameraPos
+	// only carries the horizontal sample origin now; the map's slab altitude is
+	// absolute (cloudShadowFragment reads it straight from cloud.x).
 	HE::SkyFrameInputs in;
 	in.sunDir    = toward;
-	in.cameraPos = glm::vec3(cam.x, anchorY, cam.z);
+	in.cameraPos = glm::vec3(cam.x, groundY, cam.z);
 	in.time      = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
 		in.time = static_cast<float>(std::atof(ov)); // deterministic headless captures
