@@ -314,9 +314,11 @@ if(HE_BUNDLE_CMAKE)
 	endif()
 endif()
 
-# The editor also links HorizonScene (→ HorizonScene.dll imports python3XY.dll at load),
-# so a distributed editor needs the Python runtime + the MSVC C++ runtime next to it,
-# exactly like the game does.
+# A distributed editor needs the Python runtime + the MSVC C++ runtime next to
+# it. The Python dependency now comes from the HorizonPython plugin rather than
+# from HorizonScene, which no longer links CPython at all — but the editor still
+# gets it unconditionally, because unlike a shipped game it cannot know which
+# language the next project it opens is written in.
 he_bundle_python(HorizonEditor "${DEPLOY_EDITOR}")
 he_bundle_crt(HorizonEditor "${DEPLOY_EDITOR}")
 

@@ -1,10 +1,15 @@
-#include "HorizonScene/PyScriptBackend.h"
+#include "PyScriptBackend.h"
+#include <Scripting/PythonPluginAbi.h>
 #include <Types/TypeRegistry.h>
 #include <functional>
 #include <cstdint>
 #include <Diagnostics/Log.h>
 
-#ifdef HE_HAVE_PYTHON
+// This file is the whole of the HorizonPython plugin, and the plugin is only
+// built when CPython was found (see HE_Python/CMakeLists.txt). There is no
+// "built without Python" branch here any more: that case is now "the plugin is
+// not on disk", which ScriptContext handles by running Lua-only. One answer to
+// the question instead of two that had to agree.
 
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
@@ -876,11 +881,6 @@ PyScriptBackend::~PyScriptBackend()
 	// singleton and may be reused by another backend instance.
 }
 
-bool PyScriptBackend::available()
-{
-	return true; // compiled in
-}
-
 void PyScriptBackend::setPhysicsWorld(PhysicsWorld* pw)
 {
 	m_impl->physics = pw;
@@ -1139,31 +1139,37 @@ bool PyScriptBackend::hotReloadScript(const std::string& name, const std::string
 	return true;
 }
 
-#else // !HE_HAVE_PYTHON — no interpreter compiled in; safe no-op backend
-
-struct PyScriptBackend::Impl {};
-PyScriptBackend::PyScriptBackend(HorizonWorld&) : m_impl(nullptr)
-{ m_lastError = "engine built without Python support"; }
-PyScriptBackend::~PyScriptBackend() = default;
-bool PyScriptBackend::available() { return false; }
-void PyScriptBackend::setPhysicsWorld(PhysicsWorld*) {}
-void PyScriptBackend::setContentManager(ContentManager*) {}
-bool PyScriptBackend::loadScript(const std::string&, const std::string&) { return false; }
-void PyScriptBackend::unloadScript(const std::string&) {}
-bool PyScriptBackend::isScriptLoaded(const std::string&) const { return false; }
-size_t PyScriptBackend::loadedScriptCount() const { return 0; }
-size_t PyScriptBackend::instanceCount() const { return 0; }
-IScriptBackend::InstanceId PyScriptBackend::createInstance(const std::string&, uint32_t) { return kInvalidInstance; }
-void PyScriptBackend::destroyInstance(InstanceId) {}
-bool PyScriptBackend::callOnStart(InstanceId) { return false; }
-bool PyScriptBackend::callOnUpdate(InstanceId, float) { return false; }
-bool PyScriptBackend::callOnCollisionEnter(InstanceId, uint32_t) { return false; }
-bool PyScriptBackend::callOnCollisionExit(InstanceId, uint32_t) { return false; }
-bool PyScriptBackend::callOnBeginOverlap(InstanceId, uint32_t) { return false; }
-bool PyScriptBackend::callOnEndOverlap(InstanceId, uint32_t) { return false; }
-bool PyScriptBackend::callOnUIEvent(InstanceId, UIScriptEvent) { return false; }
-std::vector<ScriptPropDef> PyScriptBackend::getScriptProperties(const std::string&) const { return {}; }
-void PyScriptBackend::injectProperties(InstanceId, const std::unordered_map<std::string, ScriptPropValue>&) {}
-bool PyScriptBackend::hotReloadScript(const std::string&, const std::string&) { return false; }
-
+// ── Plugin entry points ──────────────────────────────────────────────────────
+// The only two symbols this library exports. Everything else the host needs
+// travels over the IScriptBackend vtable. See Scripting/PythonPluginAbi.h for
+// why it is a destroy function rather than `delete` on the caller's side.
+//
+// HE_PYTHON_EXPORT rather than the engine's HE_API: HE_API is HorizonCore's
+// macro and would expand to dllimport here, which is precisely the mistake the
+// old header carried a warning about.
+#if defined(_WIN32)
+#define HE_PYTHON_EXPORT extern "C" __declspec(dllexport)
+#else
+#define HE_PYTHON_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
+
+HE_PYTHON_EXPORT IScriptBackend* heCreatePythonBackend(HorizonWorld* world)
+{
+	if (!world) return nullptr;
+	auto backend = std::make_unique<PyScriptBackend>(*world);
+	// Report "no Python" as an absent backend rather than as one that fails
+	// every call: the host runs Lua-only in that case, and one dead branch is
+	// better than a live object that says no to everything.
+	if (!Py_IsInitialized())
+	{
+		HE_LOG_ERROR(Python, "%s", "CPython did not initialise — Python scripting stays off");
+		return nullptr;
+	}
+	return backend.release();
+}
+
+HE_PYTHON_EXPORT void heDestroyPythonBackend(IScriptBackend* backend)
+{
+	delete backend;
+}
+

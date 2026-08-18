@@ -20,12 +20,18 @@ struct HE_API ExportSettings {
     // executable + dylibs/DLLs) are copied into outputDir so the export is
     // self-contained and runnable on the target machine.
     std::filesystem::path gameRuntimeDir;
-    // Ship the bundled Python stdlib (pythonXY.zip) + its ._pth path file from the
-    // runtime dir, so a game whose scripts use Python runs on a machine without a
-    // system Python. The editor sets this only for Python-language projects; for
-    // every other language the stdlib is skipped (the libpython DLL/dylib/.so still
-    // ships — it's a load-time dependency — but the ~10 MB stdlib does not).
-    bool bundlePythonStdlib = false;
+    // Ship EVERYTHING Python from the runtime dir: the interpreter
+    // (python3XY.dll / libpython3.X.so / .dylib), the stdlib (pythonXY.zip +
+    // <Exe>._pth + lib-dynload) and the HorizonPython backend plugin. The editor
+    // sets it only for Python-language projects; every other language ships none
+    // of it and saves 15-30 MB depending on platform.
+    //
+    // It was called bundlePythonStdlib and covered only the stdlib, because the
+    // interpreter could not be left out: HorizonScene linked it, so a game
+    // without libpython did not start at all. Since the backend became a
+    // runtime-loaded plugin that link is gone, and the flag means what its name
+    // now says.
+    bool bundlePython = false;
     // The engine-wide default-content root (EditorDeps/EngineContent — what
     // ContentManager::engineContentRoot() returns). Its assets are packed into the
     // same .hpak addressed as "Engine/<rest>", exactly the paths the editor stores

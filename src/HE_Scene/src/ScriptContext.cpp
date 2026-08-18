@@ -2,6 +2,13 @@
 #include <Types/TypeRegistry.h>
 #include <functional>
 #include <cstdint>
+#include <filesystem>
+// For thisLibraryDir(): finding the directory this very library was loaded from.
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/ScriptApi.h"
@@ -802,12 +809,140 @@ static const luaL_Reg kHorizonFuncs[] = {
 
 // ─── ScriptContext ────────────────────────────────────────────────────────────
 
+namespace
+{
+// ── The Python plugin is loaded once per process and NEVER unloaded ──────────
+// This is not laziness, it is a requirement, and it cost a crash to find.
+//
+// CPython keeps pointers INTO the plugin module: the inittab entry for the
+// built-in `horizon` module, its init function, its type objects. The
+// interpreter is also deliberately never finalised (Py_Finalize is a
+// process-wide door the engine does not close, because a second ScriptContext
+// may still want it). Unload the library and the live interpreter is left
+// holding addresses in unmapped memory; load it again afterwards and the fresh
+// copy sees its own statics reset, tries to register `horizon` a second time,
+// and CPython aborts the process with
+//   "PyImport_AppendInittab() may not be called after Py_Initialize()".
+//
+// So the handle outlives every ScriptContext. Backends are still created and
+// destroyed per context — only the module stays.
+struct PythonPlugin
+{
+    HE::DynLib        lib;
+    HePythonCreateFn  create  = nullptr;
+    HePythonDestroyFn destroy = nullptr;
+    bool              tried   = false;   // resolution is attempted exactly once
+};
+
+PythonPlugin& pythonPlugin()
+{
+    static PythonPlugin p;
+    return p;
+}
+
+// Where THIS library sits on disk. The Python plugin is deployed next to
+// HorizonScene, and asking the loader where HorizonScene itself came from is
+// the only answer that survives every layout we ship: flat beside the
+// executable, a macOS .app (libraries in Frameworks/ while SDL_GetBasePath
+// points at Resources/), and a developer build tree.
+std::filesystem::path thisLibraryDir()
+{
+#if defined(_WIN32)
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&thisLibraryDir), &mod))
+        return {};
+    wchar_t buf[MAX_PATH]{};
+    if (GetModuleFileNameW(mod, buf, MAX_PATH) == 0) return {};
+    return std::filesystem::path(buf).parent_path();
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<const void*>(&thisLibraryDir), &info) == 0 || !info.dli_fname)
+        return {};
+    return std::filesystem::path(info.dli_fname).parent_path();
+#endif
+}
+} // namespace
+
 ScriptContext::ScriptContext(HorizonWorld& world)
     : m_world(&world)
 {
     registerHorizonApi();
-    if (PyScriptBackend::available())
-        m_py = std::make_unique<PyScriptBackend>(world);
+    loadPythonPlugin();
+}
+
+void ScriptContext::loadPythonPlugin()
+{
+    PythonPlugin& plugin = pythonPlugin();
+
+    // Resolve once per process; every later ScriptContext reuses the answer,
+    // including the answer "there is no plugin".
+    if (!plugin.tried)
+    {
+        plugin.tried = true;
+
+        const std::filesystem::path dir = thisLibraryDir();
+        if (dir.empty())
+        {
+            HE_LOG_WARN(Script, "%s", "Could not determine the engine library directory — "
+                                      "Python scripting unavailable");
+        }
+        else
+        {
+            const std::filesystem::path lib = dir / HE::PythonPlugin::fileName();
+            std::error_code ec;
+            if (!std::filesystem::exists(lib, ec) || ec)
+            {
+                // Not a failure. A build without CPython, and every exported
+                // game whose project does not use Python, has no plugin here.
+                HE_LOG_INFO(Script, "No Python plugin at %s — Lua only", lib.string().c_str());
+            }
+            else if (!plugin.lib.load(lib))
+            {
+                // From here on every exit IS a failure and says so. The
+                // distinction matters: "this project has no Python" and "Python
+                // is here but broken" used to look identical from the outside,
+                // and only the second one is a bug report.
+                HE_LOG_ERROR(Script, "Python plugin present but failed to load: %s — usually "
+                                     "a missing libpython beside it, or an architecture "
+                                     "mismatch", lib.string().c_str());
+            }
+            else
+            {
+                plugin.create = reinterpret_cast<HePythonCreateFn>(
+                    plugin.lib.getSymbol(HE::PythonPlugin::kCreateSymbol));
+                plugin.destroy = reinterpret_cast<HePythonDestroyFn>(
+                    plugin.lib.getSymbol(HE::PythonPlugin::kDestroySymbol));
+                if (!plugin.create || !plugin.destroy)
+                {
+                    HE_LOG_ERROR(Script, "Python plugin %s is missing its entry points — "
+                                         "stale or mismatched build",
+                                 lib.filename().string().c_str());
+                    plugin.create  = nullptr;
+                    plugin.destroy = nullptr;
+                    // Deliberately NOT unloaded — see the note above. Nothing
+                    // ran, but keeping one rule is simpler than two.
+                }
+                else
+                {
+                    HE_LOG_INFO(Script, "Python plugin loaded from %s",
+                                lib.filename().string().c_str());
+                }
+            }
+        }
+    }
+
+    if (!plugin.create) return;   // no Python in this process; Lua only
+
+    IScriptBackend* backend = plugin.create(m_world);
+    if (!backend)
+    {
+        HE_LOG_ERROR(Script, "%s", "Python plugin loaded but the interpreter would not start");
+        return;
+    }
+    m_py = std::unique_ptr<IScriptBackend, PyBackendDeleter>(
+        backend, PyBackendDeleter{plugin.destroy});
 }
 
 void ScriptContext::registerHorizonApi()

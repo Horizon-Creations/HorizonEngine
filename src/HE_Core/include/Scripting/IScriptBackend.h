@@ -13,9 +13,17 @@
 // lifecycle callbacks below. All methods are main-thread only.
 //
 // Implementations: ScriptEngine (Lua, HE_Core) and PyScriptBackend (CPython,
-// HE_Scene). ScriptContext in HE_Scene hosts the backends and routes calls per
-// script language, tagging the language into the high byte of the public
-// InstanceId (Lua == 0, so Lua-only ids are unchanged).
+// shipped as the runtime-loaded HorizonPython plugin). ScriptContext in
+// HE_Scene hosts the backends and routes calls per script language, tagging the
+// language into the high byte of the public InstanceId (Lua == 0, so Lua-only
+// ids are unchanged).
+//
+// This interface is also the plugin ABI: the CPython backend crosses a module
+// boundary as an IScriptBackend*, so anything a host needs to call on it has to
+// be declared here rather than on the concrete class.
+class PhysicsWorld;
+class ContentManager;
+
 class HE_API IScriptBackend
 {
 public:
@@ -69,4 +77,13 @@ public:
     virtual bool hotReloadScript(const std::string& name, const std::string& source) = 0;
 
     virtual const std::string& lastError() const = 0;
+
+    // ── Optional wiring ──────────────────────────────────────────────────────
+    // Defaulted to nothing, because only some backends want them: Lua reaches
+    // physics and content through the shared ScriptApi, the CPython backend
+    // holds its own pointers. They sit here rather than on the concrete class
+    // so a host can own that backend purely as an IScriptBackend* — which is
+    // exactly what lets it be loaded at runtime instead of linked.
+    virtual void setPhysicsWorld(PhysicsWorld* pw)     { (void)pw; }
+    virtual void setContentManager(ContentManager* cm) { (void)cm; }
 };

@@ -1016,11 +1016,13 @@ void startExport(AppContext& ctx)
                 // built-in asset at all and every default primitive renders as the
                 // renderers' fallback cube.
                 es.engineContentDir = ctx.contentManager->engineContentRoot();
-                // Ship the bundled Python stdlib (pythonXY.zip + ._pth) only for
-                // Python-language projects — a non-Python game never inits Python, so
-                // the ~10 MB stdlib is wasted. The libpython dylib/.so still ships
-                // regardless (it's a load-time dependency of HorizonScene).
-                es.bundlePythonStdlib =
+                // Ship the whole Python payload — interpreter, stdlib and the
+                // HorizonPython backend plugin — only for Python-language
+                // projects. A non-Python game never starts an interpreter, and
+                // since the backend stopped being linked into HorizonScene there
+                // is nothing left forcing libpython into the build: leaving it
+                // all out saves 15-30 MB depending on the platform.
+                es.bundlePython =
                     ctx.projectManager &&
                     ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Python;
                 // Precompile node-graph material shaders into the pak for the

@@ -208,11 +208,16 @@ endif()
 if(HE_ENABLE_STB_DXT)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_STB_DXT)
 endif()
-# Compile the Python scripting tests only when CPython is embedded. The tests use
-# only PyScriptBackend's public API (linked via HorizonScene), so no direct
-# libpython link is needed here.
+# Compile the Python scripting tests only when CPython is embedded. They dlopen
+# the HorizonPython plugin through its public ABI, so he_tests still needs no
+# libpython link of its own — but the plugin has to exist, and the test has to
+# be told where it is: the engine finds it next to HorizonScene, and a test
+# executable does not live there.
 if(HE_HAVE_PYTHON)
-    target_compile_definitions(he_tests PRIVATE HE_HAVE_PYTHON)
+    target_compile_definitions(he_tests PRIVATE
+        HE_HAVE_PYTHON
+        HE_PYTHON_PLUGIN_PATH="$<TARGET_FILE:HorizonPython>")
+    add_dependencies(he_tests HorizonPython)
 endif()
 
 # ─── HorizonCode → C++ parity fixtures (plan §10.1) ───────────────────────────

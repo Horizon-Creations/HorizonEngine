@@ -14,7 +14,12 @@ namespace HE
 	// driver) the whole thing quietly does nothing — see SplashScreen::open.
 	struct SplashConfig
 	{
-		bool        enabled = true;
+		// OFF by default, and that default is the point. This struct lives in
+		// HorizonCore, which every host links — a shipped game included. With it
+		// on by default, every exported game opened a window carrying the Horizon
+		// wordmark before its own first frame: the engine advertising itself
+		// inside someone else's product. A host that wants a splash asks for one.
+		bool        enabled = false;
 		std::string title;      // big line under the logo, e.g. "Horizon Engine Editor"
 		std::string subtitle;   // small line under that, e.g. 0.3.0 "Aurora"
 		// Absolute path to a PNG. Empty (or unreadable) → the panel draws without

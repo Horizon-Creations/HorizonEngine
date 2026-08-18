@@ -34,7 +34,6 @@ add_library(HorizonScene SHARED
     src/ScriptApi.cpp
     src/EngineApi.cpp
     src/HcCodegen.cpp
-    src/PyScriptBackend.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
 )
@@ -72,10 +71,12 @@ if(APPLE)
     )
 endif()
 
-if(HE_HAVE_PYTHON)
-    target_link_libraries(HorizonScene PRIVATE Python3::Python)
-    target_compile_definitions(HorizonScene PRIVATE HE_HAVE_PYTHON)
-endif()
+# NOTE: HorizonScene deliberately does NOT link Python3::Python any more. The
+# CPython backend lives in the HorizonPython plugin and is dlopen'd at runtime
+# (see src/HE_Python and Scripting/PythonPluginAbi.h), which is what keeps
+# libpython out of this library's load-time dependencies — and therefore out of
+# every shipped game that does not use Python. Do not add the link back; adding
+# it would silently restore the ~5-9 MB per platform that the split removed.
 
 set_target_properties(HorizonScene PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON

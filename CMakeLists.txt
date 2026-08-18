@@ -704,6 +704,8 @@ if(HE_HAVE_LIBSSH2)
     add_subdirectory(src/HE_ContentSync)
 endif()
 add_subdirectory(src/HE_Scene)
+# After HE_Scene: the Python plugin links it (and is loaded by it at runtime).
+add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
