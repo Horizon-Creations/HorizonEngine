@@ -313,14 +313,33 @@ def render_background(logo_path, theme, scale, photo=None):
     img = Image.alpha_composite(img, arrow)
 
     # caption
+    #
+    # The colour is chosen from the sky BEHIND it rather than fixed, because the
+    # themes do not agree about what is down there. twilight/midnight/aurora all
+    # end dark, so ivory-on-a-black-shadow was right for every theme that
+    # existed — and then alpenglow ended on a bright amber horizon and the one
+    # line that has to be readable (it is the install instruction) turned into
+    # pale text on pale ground. Sampled, not hardcoded, so the next warm theme
+    # does not rediscover this.
     cap = "Drag Horizon Editor to the Applications folder"
     f = font(int(13 * s))
     d = ImageDraw.Draw(img)
     tb = d.textbbox((0, 0), cap, font=f)
     tw = tb[2] - tb[0]
     cy = int(366 * s)
-    d.text(((W - tw) // 2 + 1, cy + 1), cap, font=f, fill=(0, 0, 0, 120))
-    d.text(((W - tw) // 2, cy), cap, font=f, fill=(238, 232, 216, 235))
+    cx = (W - tw) // 2
+
+    band = img.convert("RGB").crop((max(0, cx), cy, min(W, cx + tw), cy + int(16 * s)))
+    px = list(band.getdata()) or [(0, 0, 0)]
+    lum = sum(0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in px) / (len(px) * 255.0)
+
+    if lum > 0.55:
+        # Bright ground: dark ink with a light halo.
+        d.text((cx + 1, cy + 1), cap, font=f, fill=(255, 244, 224, 150))
+        d.text((cx, cy), cap, font=f, fill=(62, 34, 18, 245))
+    else:
+        d.text((cx + 1, cy + 1), cap, font=f, fill=(0, 0, 0, 120))
+        d.text((cx, cy), cap, font=f, fill=(238, 232, 216, 235))
 
     return img.convert("RGB")
 
