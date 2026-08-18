@@ -3904,7 +3904,7 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
                      float coverage, float3 sunColor, float3 wind, float cloudH,
                      float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
-                     texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
+                     float rayLimit, texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
 	if (coverage <= 0.0) return baseSky;
@@ -3923,6 +3923,11 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
 		return baseSky;
+	// Stop at the scene: rayLimit is the distance to the nearest geometry along
+	// this ray (a huge value when nothing is in the way), so a mountain in front
+	// of the deck cuts the march instead of being painted over.
+	tFar = min(tFar, rayLimit);
+	if (tFar <= tNear) return baseSky;
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4045,7 +4050,7 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
                          float coverage, float3 sunColor, float3 wind, float cloudH,
                          float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint,
-                         float interSh, float evo, float2 fragCoord,
+                         float interSh, float evo, float2 fragCoord, float rayLimit,
                          texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -4067,6 +4072,11 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
 		return baseSky;
+	// Stop at the scene: rayLimit is the distance to the nearest geometry along
+	// this ray (a huge value when nothing is in the way), so a mountain in front
+	// of the deck cuts the march instead of being painted over.
+	tFar = min(tFar, rayLimit);
+	if (tFar <= tNear) return baseSky;
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -4901,10 +4911,10 @@ float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float co
 	float3 comp = (style > 0.5)
 		? applyClouds3DReal(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
 		                    cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
-		                    interSh, evo, fragCoord, noiseTex, noiseSamp, T)
+		                    interSh, evo, fragCoord, 1e30, noiseTex, noiseSamp, T)
 		: applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind,
 		                cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
-		                fragCoord, noiseTex, noiseSamp, T);
+		                fragCoord, 1e30, noiseTex, noiseSamp, T);
 	return float4(comp - hazeSky * T, T);     // recover L
 }
 
@@ -5005,6 +5015,70 @@ float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float moonPhase)
 	return float3(0.85, 0.90, 1.0) * (ring * lit * 0.17 * vis);  // dezent, phase-shaped
 }
 
+// ── Clouds in FRONT of geometry (depth-aware composite) ─────────────────────
+// The sky pass only runs where the scene drew nothing, so it can composite
+// clouds against the background but never over geometry. That was fine while
+// the deck hung above the viewer; with an absolute altitude the camera can sit
+// above it and look down at terrain THROUGH the clouds, and distant hills can
+// stand behind a cloud bank. This pass fills exactly that gap: it runs on
+// geometry pixels only, marches from the camera to the scene surface, and
+// blends the result over what is already there (dst·T + L, premultiplied).
+// Background pixels are left untouched — the sky pass already owns them, and
+// double-compositing would darken every cloud. Geometry in FRONT of the deck
+// needs no work either: the march simply finds no slab within rayLimit.
+struct CloudFrontParams {
+	float4x4 invViewProjFixed; // inverse(clipFix · proj · view): depth → world position
+	float4   viewport;         // xy = pixel size of the target
+};
+
+fragment float4 cloudFrontFragment(SkyOut in [[stage_in]],
+                                   constant SkyParams& p [[buffer(0)]],
+                                   constant CloudFrontParams& cf [[buffer(1)]],
+                                   texture3d<float> noiseTex [[texture(1)]],
+                                   sampler noiseSamp [[sampler(1)]],
+                                   texture2d<float> depthTex [[texture(3)]])
+{
+	// ── WIP, do not ship: the reconstruction below is WRONG ──────────────────
+	// Measured on device: the pass runs, hits exactly the geometry pixels
+	// (a debug fill coloured 1.45 % = the terrain patch) and blends correctly,
+	// but the marched clouds come out empty because sceneP is wrong. Cause: the
+	// FORWARD scene pass rasterises with JitteredViewProj(proj·view) — the
+	// UNFIXED, additionally TAA-jittered matrix — while this reconstruction
+	// inverts kMetalClipFix·proj·view. Fix = invert the very matrix the frame
+	// rasterised with (jitter included) and settle the clip-z convention; the
+	// deferred path's ResolveUniforms.depthParams is the precedent to follow.
+	// Second open detail: reading the Depth32Float attachment as texture2d
+	// detects background-vs-geometry correctly here, whereas depth2d returned
+	// 1.0 everywhere — worth understanding before trusting either.
+	const float4 kKeep = float4(0.0, 0.0, 0.0, 1.0);   // L = 0, T = 1 → dst survives untouched
+	if (p.cameraPos.w < 0.5) return kKeep;             // dome clouds are infinitely far — nothing to do
+	if (p.params.y <= 0.0)   return kKeep;             // no coverage
+	constexpr sampler dsmp(filter::nearest, address::clamp_to_edge);
+	float2 uv = in.position.xy / max(cf.viewport.xy, float2(1.0));
+	float  d  = depthTex.sample(dsmp, uv).r;
+	if (d >= 1.0) return kKeep;                        // background → the sky pass handled it
+	float4 wp = cf.invViewProjFixed * float4(in.ndc, d, 1.0);
+	float3 sceneP = wp.xyz / wp.w;
+	float3 toScene = sceneP - p.cameraPos.xyz;
+	float  sceneDist = length(toScene);
+	if (sceneDist < 1e-3) return kKeep;
+	float3 dir = toScene / sceneDist;
+	// Same L/T recovery the low-res pre-pass uses: march with the sky as the
+	// aerial-perspective reference, then subtract it back out so what remains is
+	// the clouds' own light, ready to blend over the scene colour.
+	float3 hazeSky = skyColor(dir, p.sunDir.xyz);
+	float  T = 1.0;
+	float3 comp = (p.neb2.y > 0.5)
+		? applyClouds3DReal(hazeSky, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
+		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
+		                    p.cloudTint.xyz, p.neb2.z, p.neb2.w, in.position.xy, sceneDist,
+		                    noiseTex, noiseSamp, T)
+		: applyClouds3D(hazeSky, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
+		                p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
+		                p.cloudTint.xyz, in.position.xy, sceneDist, noiseTex, noiseSamp, T);
+	return float4(comp - hazeSky * T, T);
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -5080,13 +5154,13 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		float3 comp = applyClouds3DReal(atmoBase, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z,
 		                                p.params.y, p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z,
 		                                p.cloud.y, p.star2.y, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
-		                                in.position.xy, noiseTex, noiseSamp, cloudT);
+		                                in.position.xy, 1e30, noiseTex, noiseSamp, cloudT);
 		col = col * cloudT + (comp - atmoBase * cloudT);
 	}
 	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                    p.sunColor.xyz, p.wind.xyz, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
-		                    p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
+		                    p.cloudTint.xyz, in.position.xy, 1e30, noiseTex, noiseSamp, cloudT);
 	else
 		col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz,
 		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp, cloudT);
@@ -5699,6 +5773,7 @@ void MetalRenderer::Shutdown()
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
+	if (m_cloudFrontPipeline)   { CFBridgingRelease(m_cloudFrontPipeline);   m_cloudFrontPipeline = nullptr; }
 	DestroyCloudShadowTarget();
 	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
@@ -6084,6 +6159,27 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: cloud-shadow pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_cloudShadowPipeline = (void*)CFBridgingRetain(csPso);
+
+		// ── Cloud-front pipeline (clouds over geometry, premultiplied blend) ──
+		// dst·T + L: source rgb is the clouds' own light, source alpha their
+		// transmittance, so whatever the scene already drew is dimmed by T and
+		// the cloud light added on top.
+		MTLRenderPipelineDescriptor* cfDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		cfDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		cfDesc.fragmentFunction = [skyLib newFunctionWithName:@"cloudFrontFragment"];
+		cfDesc.colorAttachments[0].pixelFormat                 = kSceneColorFormat;
+		cfDesc.colorAttachments[0].blendingEnabled             = YES;
+		cfDesc.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+		cfDesc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorOne;
+		cfDesc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorSourceAlpha;
+		cfDesc.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+		cfDesc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorZero;
+		cfDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+		id<MTLRenderPipelineState> cfPso = [device newRenderPipelineStateWithDescriptor:cfDesc error:&skyError];
+		if (!cfPso)
+			throw std::runtime_error(std::string("MetalRenderer: cloud-front pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_cloudFrontPipeline = (void*)CFBridgingRetain(cfPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -9557,7 +9653,9 @@ void MetalRenderer::EnsureHDRTarget(int width, int height)
 
 	MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
-	depthDesc.usage       = MTLTextureUsageRenderTarget;
+	// ShaderRead: the depth-aware cloud pass samples this after the scene pass
+	// to learn how far away each pixel's geometry is.
+	depthDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	depthDesc.storageMode = MTLStorageModePrivate;
 	m_hdrDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
 
@@ -9947,6 +10045,67 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	[enc setFragmentBytes:&region length:sizeof(region) atIndex:1];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 	[enc endEncoding];
+}
+
+// The sky animation clock, one place: wall time unless HE_SKY_TIME pins it for
+// deterministic headless captures (same rule the sky and shadow passes follow).
+static float skyClockNow()
+{
+	float t = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) t = static_cast<float>(std::atof(ov));
+	return t;
+}
+
+// ── Clouds in front of geometry ──────────────────────────────────────────────
+// Its own render pass on the HDR colour AFTER the scene pass, with the scene
+// depth sampled (not attached — a pass may not read the attachment it writes).
+// Only geometry pixels are touched; the sky pass already composited the clouds
+// against the background. See cloudFrontFragment for the why.
+void MetalRenderer::EncodeCloudFront(void* cmdBufPtr, const glm::mat4& viewProj,
+                                     const glm::vec3& sunDir, float time, int width, int height)
+{
+	if (!m_cloudFrontPipeline || !m_hdrColor || !m_hdrDepth) return;
+	// A/B switch for the pass (headless verification, and a one-env-var escape
+	// hatch if it ever misbehaves on a driver).
+	static const char* s_off = std::getenv("HE_NO_CLOUD_FRONT");
+	if (s_off && *s_off) return;
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	// 3D clouds only: dome clouds are painted on the hemisphere, infinitely far,
+	// so geometry occluding them is already the right answer.
+	if (!(env.skyEnabled && env.cloudMode == 1 && env.cloudCoverage > 0.001f)) return;
+
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+	pass.colorAttachments[0].loadAction  = MTLLoadActionLoad;   // blend over the scene
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_cloudFrontPipeline];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_noiseTexture atIndex:1];
+	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrDepth atIndex:3];
+
+	HE::SkyFrameInputs in;
+	in.invViewProj    = glm::inverse(viewProj);
+	in.sunDir         = sunDir;
+	in.cameraPos      = m_renderWorld.camera.position;
+	in.time           = time;
+	in.hasMoonTexture = m_moonTexture != nullptr;
+	in.lowResClouds   = false;                 // this pass always marches itself
+	const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
+	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
+
+	// The depth attachment holds Metal-convention z (the raster applies
+	// kMetalClipFix), so the reconstruction needs the FIXED inverse — not the
+	// GL-convention invViewProj the sky uses for its ray directions.
+	struct { glm::mat4 invVP; glm::vec4 viewport; } cf;
+	cf.invVP    = glm::inverse(HE::kMetalClipFix * viewProj);
+	cf.viewport = glm::vec4(static_cast<float>(width), static_cast<float>(height), 0.0f, 0.0f);
+	[enc setFragmentBytes:&cf length:sizeof(cf) atIndex:1];
+
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	++m_counters.draws;
 }
 
 void MetalRenderer::SetBloomSettings(const BloomSettings& s)
@@ -14097,7 +14256,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 			hdrPass.depthAttachment.loadAction  = deferredActive ? MTLLoadActionLoad : MTLLoadActionClear;
-			hdrPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			// Stored, not discarded: the cloud-front pass below samples it.
+			hdrPass.depthAttachment.storeAction = MTLStoreActionStore;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			// "Scene" pass = sky + clouds + opaque + skinned + particles + debug.
@@ -14156,6 +14316,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				SamplePoint((__bridge void*)sceneEncoder, "Debug");   // closes the Debug interval
 			}
 			[sceneEncoder endEncoding];
+
+			// Clouds over geometry: own pass, samples the depth the scene pass
+			// just stored. Runs before bloom so cloud light blooms like the rest.
+			EncodeCloudFront((__bridge void*)cmdBuf,
+			                 m_renderWorld.camera.projection * m_renderWorld.camera.view,
+			                 m_renderWorld.sunDirection,
+			                 skyClockNow(), sceneW, sceneH);
 
 			// Forward SSR: keep a full-res copy of this frame's HDR (incl. sky
 			// and transparency) — next frame's trace reprojects into it.

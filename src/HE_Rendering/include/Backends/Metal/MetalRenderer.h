@@ -858,6 +858,14 @@ private:
 	// altitude, so nothing here can move the shadows). Hysteresised against
 	// scene-bounds jitter; NaN = re-seed on next use.
 	float     m_cloudShadowGroundY  = std::numeric_limits<float>::quiet_NaN();
+	// Clouds drawn OVER geometry (the case the sky pass structurally cannot
+	// reach): own pass after the scene, samples the stored scene depth and
+	// marches only up to it. Nothing to configure — it follows the same
+	// EnvironmentSettings as the sky's own cloud march.
+	void* m_cloudFrontPipeline = nullptr; // id<MTLRenderPipelineState> (skyVertex + cloudFrontFragment)
+	void  EncodeCloudFront(void* cmdBuf, const glm::mat4& viewProj, const glm::vec3& sunDir,
+	                       float time, int width, int height);
+
 	void  EnsureCloudShadowTarget();
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);
