@@ -86,6 +86,8 @@ struct EnvironmentSettings
     // anchored in the world so they parallax as the camera moves. cloudHeight = the
     // 3D layer's height above the camera in world units. Other backends ignore these.
     int       cloudMode   = 0;
+    // ABSOLUTE world altitude of the cloud deck base (layer is 1.5x as thick).
+    // Camera-independent, so the viewer can fly into and above the clouds.
     float     cloudHeight = 200.0f;
     // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
     int       cloudQuality = 1;

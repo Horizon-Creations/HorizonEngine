@@ -762,11 +762,10 @@ private:
 	unsigned int m_cloudShadowTex = 0;         // R8, kCloudShadowMapSize²
 	glm::vec4    m_cloudShadowParamsA = glm::vec4(0.0f); // xy origin, z 1/size, w mid-plane Y
 	glm::vec4    m_cloudShadowParamsB = glm::vec4(0.0f); // x strength (0 = off this frame)
-	// Stable vertical anchor for the shadow slab (mirrors Metal): the cloud
-	// layer rides camera-relative in Y, so the shadow plane must not follow the
-	// live camera or ground shadows slide on every jump. Dead-band ±0.35 ×
-	// cloudHeight; NaN = re-anchor on next use.
-	float        m_cloudShadowAnchorY = std::numeric_limits<float>::quiet_NaN();
+	// Ground level of the shadow receivers, used only to CENTRE the shadow
+	// map (the deck is at an absolute world altitude). Hysteresised against
+	// scene-bounds jitter; NaN = re-seed on next use.
+	float        m_cloudShadowGroundY = std::numeric_limits<float>::quiet_NaN();
 	void         EnsureCloudShadowTarget();
 	void         DestroyCloudShadowTarget();
 	void         RenderCloudShadowMap();
