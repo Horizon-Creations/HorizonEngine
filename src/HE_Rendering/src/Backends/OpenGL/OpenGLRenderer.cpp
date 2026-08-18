@@ -5880,28 +5880,43 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	const float     cloudH = std::max(env.cloudHeight, 1.0f);
 	const float     thick  = cloudH * 1.5f;
 	const glm::vec3 cam    = m_renderWorld.camera.position;
-	// Stable vertical anchor (mirrors Metal): dead-band ±0.35 × cloudHeight,
-	// trailing at the band edge beyond it — ground shadows stop sliding on
-	// jumps/hills and change only with sun, wind or a real altitude change.
-	// HE_CLOUD_ANCHOR_Y pins it for deterministic headless A/Bs.
-	if (std::isnan(m_cloudShadowAnchorY)) m_cloudShadowAnchorY = cam.y;
+	// Vertical anchor of the shadow slab — tied to the SCENE, never to the
+	// camera (mirrors Metal, see the long note there). The sky's cloud layer
+	// rides camera-relative in Y; inheriting that here slid every ground
+	// shadow by L.xz/L.y · dy on each vertical move. Reference is the bottom
+	// of the scene bounds (ground level) with a ±0.35 × cloudHeight dead-band
+	// against streaming jitter. HE_CLOUD_ANCHOR_Y pins it for headless A/Bs.
+	float refY;
+	{
+		HE::AABB sceneBox;
+		for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+		// Ground level, clamped so the deck can never sink into the scene —
+		// see the Metal note: a stray low object would otherwise drop the
+		// cloud plane under the receivers and silently kill their shadows.
+		refY = sceneBox.isValid()
+			? std::max(sceneBox.min.y, sceneBox.max.y - cloudH)
+			: cam.y; // empty scene: nothing to shadow anyway
+	}
+	if (std::isnan(m_cloudShadowAnchorY)) m_cloudShadowAnchorY = refY;
 	{
 		const float dead = cloudH * 0.35f;
-		const float d    = cam.y - m_cloudShadowAnchorY;
-		if (d >  dead) m_cloudShadowAnchorY = cam.y - dead;
-		if (d < -dead) m_cloudShadowAnchorY = cam.y + dead;
+		const float d    = refY - m_cloudShadowAnchorY;
+		if (d >  dead) m_cloudShadowAnchorY = refY - dead;
+		if (d < -dead) m_cloudShadowAnchorY = refY + dead;
 		static const char* s_anchorOv = std::getenv("HE_CLOUD_ANCHOR_Y");
 		if (s_anchorOv && *s_anchorOv) // hard pin — headless A/B only
 			m_cloudShadowAnchorY = static_cast<float>(std::atof(s_anchorOv));
 	}
 	const float anchorY = m_cloudShadowAnchorY;
 	const float midY    = anchorY + cloudH + 0.5f * thick;
-	// Region: covers ±30 cloud-heights around where the camera's own position
-	// projects onto the slab along the light (~6 km at the default height 200).
+	// Region: ±30 cloud-heights around where the ANCHOR plane projects onto
+	// the slab along the light (~6 km at the default height 200) — measured
+	// from the anchor, not the camera, so the region (and the map's edge fade)
+	// cannot breathe on vertical moves.
 	const float half  = cloudH * 30.0f;
 	const float size  = half * 2.0f;
 	const float texel = size / static_cast<float>(kCloudShadowMapSize);
-	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - cam.y);
+	glm::vec2 offs = glm::vec2(toward.x, toward.z) / std::max(toward.y, 0.05f) * (midY - anchorY);
 	if (glm::length(offs) > half * 4.0f) offs = glm::normalize(offs) * (half * 4.0f);
 	glm::vec2 origin = glm::vec2(cam.x, cam.z) + offs - glm::vec2(half);
 	origin = glm::floor(origin / texel) * texel; // texel snap — no swimming on camera moves
