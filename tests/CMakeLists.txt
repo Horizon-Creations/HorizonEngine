@@ -214,9 +214,24 @@ endif()
 # be told where it is: the engine finds it next to HorizonScene, and a test
 # executable does not live there.
 if(HE_HAVE_PYTHON)
-    target_compile_definitions(he_tests PRIVATE
-        HE_HAVE_PYTHON
-        HE_PYTHON_PLUGIN_PATH="$<TARGET_FILE:HorizonPython>")
+    # The path the direct-ABI test loads the plugin from MUST be the same FILE
+    # the engine's own loader resolves, or the plugin gets mapped twice. On
+    # Windows the loader finds the copy beside he_tests.exe (HorizonScene.dll
+    # is relocated there, see the POST_BUILD block below), and LoadLibrary
+    # dedupes by path — two different paths mean two module instances, and the
+    # second one dies in PyImport_AppendInittab() after Py_Initialize()
+    # (CPython is process-global; the plugin must exist once per process).
+    # On Unix TARGET_FILE already IS the beside-HorizonScene file, and dlopen
+    # dedupes by inode anyway.
+    if(WIN32)
+        target_compile_definitions(he_tests PRIVATE
+            HE_HAVE_PYTHON
+            HE_PYTHON_PLUGIN_PATH="$<TARGET_FILE_DIR:he_tests>/$<TARGET_FILE_NAME:HorizonPython>")
+    else()
+        target_compile_definitions(he_tests PRIVATE
+            HE_HAVE_PYTHON
+            HE_PYTHON_PLUGIN_PATH="$<TARGET_FILE:HorizonPython>")
+    endif()
     add_dependencies(he_tests HorizonPython)
 endif()
 
