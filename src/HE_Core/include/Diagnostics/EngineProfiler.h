@@ -7,14 +7,26 @@
 //  • Per-frame render counters + per-pass GPU times pushed by the active backend.
 //  • Dumps a structured JSON report to <deploy>/dumps/ on stop.
 //
-// Single-threaded scope model: the frame loop, scene-system tick and editor UI all
-// run on the main thread, so begin/endFrame, snapshot() and the dump are never
-// called concurrently. Scopes, however, CAN be opened on worker threads — the
-// JobSystem pool wraps every task in HE_PROFILE_SCOPE_N("Job::Execute") — so
-// begin/endScope record ONLY from the capture (main) thread and no-op on any
-// other; this keeps the shared scope stack single-writer (otherwise concurrent
-// push_back corrupts the heap). Worker-thread Tracy zones still work. (A real
-// per-thread job-timeline capture is future work — see docs/profiler-design.md.)
+// Two capture models run side by side, deliberately:
+//
+//  1. PER-FRAME scope tree (m_current.scopes) — main thread ONLY. The frame loop,
+//     scene-system tick and editor UI all run on the main thread, so begin/endFrame,
+//     snapshot() and the dump are never called concurrently. Scopes CAN be opened on
+//     worker threads (the JobSystem pool wraps every task in HE_PROFILE_SCOPE_N),
+//     so this path records only from the capture thread and ignores every other one;
+//     that keeps the shared scope stack single-writer. Concurrent push_back on it
+//     corrupted the heap in v2.1 — this guard is the fix and it stays.
+//
+//  2. PER-THREAD TIMELINE (v3) — every thread, including the workers dropped by (1).
+//     Each thread owns a thread_local buffer of COMPLETED spans carrying absolute
+//     start/end stamps, so it is a capture-wide event stream rather than a per-frame
+//     tree: a span that straddles a frame boundary needs no ownership policy, and
+//     frames are just marks along the same axis. Nothing is shared between threads
+//     on the hot path — the owner is the only writer — and the buffer is a shared_ptr
+//     held by a registry, so it outlives a worker that exits mid-capture. A per-buffer
+//     mutex (uncontended: owner pushing vs. the UI merging) covers the one place a
+//     second thread reads. This is what makes parallel_for work visible at all.
+// Worker-thread Tracy zones are unaffected by either path.
 
 #include "Types/Defines.h"
 #include <atomic>
@@ -43,6 +55,35 @@ struct ProfGpuPass
 	const char* name   = "";
 	double      ms     = 0.0;
 	bool        approx = false;
+};
+
+// ─── Per-thread timeline (v3) ────────────────────────────────────────────────
+// One completed CPU span on one thread. Timestamps are nanoseconds RELATIVE to the
+// capture start, so every thread's spans share one axis and can be laid out in
+// parallel lanes. `name` is a static literal (same contract as ProfScopeSample).
+struct ProfThreadSpan
+{
+	const char* name    = "";
+	uint64_t    startNs = 0;
+	uint64_t    endNs   = 0;
+	uint32_t    depth   = 0;   // nesting depth within its own thread
+};
+
+// One thread's lane on the timeline, produced by timelineSnapshot().
+struct ProfThreadTimeline
+{
+	std::string                 label;        // "Main" / "Worker 0" / …
+	bool                        isMain = false;
+	size_t                      dropped = 0;  // spans lost to the per-thread cap
+	std::vector<ProfThreadSpan> spans;        // in completion order
+};
+
+// A frame boundary drawn along the timeline axis (same relative-ns units as spans).
+struct ProfFrameMark
+{
+	uint64_t index   = 0;
+	uint64_t startNs = 0;
+	uint64_t endNs   = 0;
 };
 
 // Coarse per-frame counters. Cheap to gather; filled from the renderer + scene.
@@ -163,6 +204,24 @@ public:
 	void setGpuTimes(double gpuFrameMs, const std::vector<ProfGpuPass>& passes,
 	                 const char* mode = "");
 
+	// ── Per-thread timeline (v3) ───────────────────────────────────────────
+	// Records every thread that opens a scope during a capture, not just the main
+	// one — this is what makes JobSystem parallel_for work (FrustumCuller,
+	// RenderExtractor) visible. On by default while recording; turn it off to get
+	// the v2 behaviour (main-thread frame tree only) and skip the buffers entirely.
+	void setThreadTimelineEnabled(bool on) { m_timelineOn.store(on, std::memory_order_relaxed); }
+	bool threadTimelineEnabled() const     { return m_timelineOn.load(std::memory_order_relaxed); }
+
+	// Merged copy of every registered thread's spans for the CURRENT capture, main
+	// lane first. Safe to call while recording (per-buffer lock); costs a copy, so
+	// the UI should call it on demand, not per frame.
+	std::vector<ProfThreadTimeline> timelineSnapshot() const;
+	// Frame boundaries along the same axis, for drawing frame separators.
+	const std::vector<ProfFrameMark>& frameMarks() const { return m_frameMarks; }
+	// Spans dropped across all threads because a per-thread cap was hit. Non-zero
+	// means the timeline is truncated — reported, never silently swallowed.
+	size_t timelineDroppedSpans() const;
+
 	// ── Live view / export ─────────────────────────────────────────────────
 	const ProfFrameRecord* lastFrame() const;
 	std::vector<ProfFrameRecord> snapshot() const;   // copy for UI graphs
@@ -189,6 +248,11 @@ private:
 	// ignored (see beginScope/endScope) so the single-threaded scope model holds.
 	std::atomic<bool> m_recording{ false };
 	std::atomic<bool> m_detailedGpu{ false };  // serialized per-pass GPU capture (Metal)
+	std::atomic<bool> m_timelineOn{ true };    // per-thread timeline capture (v3)
+	// Bumped on every doStart. A thread-local buffer carrying an older generation
+	// belongs to a finished capture and is reset on first touch, so a worker that
+	// slept through three captures cannot leak stale spans into the fourth.
+	std::atomic<uint64_t> m_generation{ 0 };
 	bool              m_forceDetailed = false; // detailed forced for a single-frame capture (main thread)
 	std::thread::id   m_captureThread{};
 	Pending         m_pending     = Pending::None;
@@ -216,6 +280,7 @@ private:
 	std::vector<LiveScope>       m_stack;
 	ProfFrameRecord              m_current;
 	std::vector<ProfFrameRecord> m_frames;
+	std::vector<ProfFrameMark>   m_frameMarks;   // frame boundaries on the timeline axis
 
 	bool        m_justDumped = false;
 	std::string m_lastDumpPath;

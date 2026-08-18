@@ -14,6 +14,8 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -28,6 +30,76 @@ std::string timestampStamp()
 	char ts[32]{};
 	std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&t));
 	return ts;
+}
+
+// ─── Per-thread timeline buffers (v3) ────────────────────────────────────────
+// One buffer per thread that ever opens a scope during a capture. The owning
+// thread is the ONLY writer; the profiler's merge is the only other reader, and
+// it takes `mtx` — uncontended in practice, which is why a plain mutex beats a
+// lock-free ring here (a torn POD read is a worse failure than 20 ns).
+//
+// Held by shared_ptr from BOTH the thread_local and the registry: a JobSystem
+// worker that exits mid-capture drops its reference, the registry keeps the spans
+// alive, and the merge never touches a dangling buffer.
+struct ThreadCapture
+{
+	std::mutex                  mtx;          // guards spans/dropped/generation
+	std::vector<ProfThreadSpan> spans;        // completed spans, session-relative
+	std::vector<uint64_t>       openStart;    // absolute start ns per open scope (owner only)
+	std::vector<const char*>    openName;     // parallel to openStart          (owner only)
+	uint64_t                    generation = UINT64_MAX;   // capture this buffer belongs to
+	size_t                      dropped    = 0;            // spans lost to the cap
+	std::string                 label;
+	bool                        isMain     = false;
+};
+
+// Hard per-thread span budget. A 60-second capture at 60 fps with a few hundred
+// job scopes per frame lands well under this; a runaway instrumentation bug hits
+// the cap instead of the swap file. Overflow is COUNTED, never silently dropped.
+constexpr size_t kMaxSpansPerThread = 262144;
+
+std::mutex& registryMutex()
+{
+	static std::mutex m;
+	return m;
+}
+
+std::vector<std::shared_ptr<ThreadCapture>>& registry()
+{
+	static std::vector<std::shared_ptr<ThreadCapture>> v;
+	return v;
+}
+
+// The calling thread's buffer, created and registered on first use. `isMain` is
+// fixed at creation: a thread's role in a capture never changes, and the main
+// thread always reaches this before any worker does (it starts the capture).
+ThreadCapture& threadCapture(bool isMain)
+{
+	thread_local std::shared_ptr<ThreadCapture> tls = [isMain] {
+		auto p     = std::make_shared<ThreadCapture>();
+		p->isMain  = isMain;
+		std::lock_guard<std::mutex> lk(registryMutex());
+		size_t workers = 0;
+		for (const auto& e : registry())
+			if (!e->isMain) ++workers;
+		p->label = isMain ? std::string("Main") : ("Worker " + std::to_string(workers));
+		registry().push_back(p);
+		return p;
+	}();
+	return *tls;
+}
+
+// Drop everything from an earlier capture. Called on first touch in a new
+// generation so a worker that slept through the previous capture starts clean.
+void resetIfStale(ThreadCapture& tc, uint64_t generation)
+{
+	if (tc.generation == generation) return;
+	tc.openStart.clear();
+	tc.openName.clear();
+	std::lock_guard<std::mutex> lk(tc.mtx);
+	tc.generation = generation;
+	tc.dropped    = 0;
+	tc.spans.clear();
 }
 } // namespace
 
@@ -70,6 +142,7 @@ void EngineProfiler::doStart()
 	m_session        = m_pendingInfo;
 	m_maxFrames      = m_pendingMax;
 	m_frames.clear();
+	m_frameMarks.clear();
 	m_frameCounter   = 0;
 	m_sessionStartNs = nowNs();
 	m_stack.clear();
@@ -78,6 +151,11 @@ void EngineProfiler::doStart()
 	// stack; scopes from any other thread are ignored. Set before publishing
 	// m_recording so worker threads that observe recording also see this id.
 	m_captureThread  = std::this_thread::get_id();
+	// Everything a worker reads without its own synchronisation — m_sessionStartNs,
+	// m_captureThread, the generation — is written ABOVE this release store, and a
+	// worker only reads it after the acquire load in beginScope. That edge is the
+	// whole happens-before argument; keep new plain state on this side of it.
+	m_generation.fetch_add(1, std::memory_order_relaxed);
 	m_recording.store(true, std::memory_order_release);
 	HE_LOG_INFO(Profiler, "%s", "Profiler: capture started");
 }
@@ -127,13 +205,26 @@ void EngineProfiler::beginFrame(double deltaMs)
 
 void EngineProfiler::endFrame()
 {
-	m_lastCpuFrameMs = nsToMs(nowNs() - m_frameStartNs);   // always (live HUD)
+	const uint64_t endNs = nowNs();
+	m_lastCpuFrameMs = nsToMs(endNs - m_frameStartNs);     // always (live HUD)
 	if (!m_recording) return;
 
 	// Close any scopes the caller forgot to (defensive; should not happen).
 	while (!m_stack.empty()) endScope();
 
 	m_current.cpuFrameMs = m_lastCpuFrameMs;
+
+	// Frame boundary on the timeline axis (same relative-ns units as the spans),
+	// so the timeline can draw frame separators over the thread lanes. Kept in
+	// lockstep with the m_frames ring below so a mark always has its record.
+	if (!m_singleMode)
+	{
+		if (m_maxFrames != 0 && m_frameMarks.size() >= m_maxFrames)
+			m_frameMarks.erase(m_frameMarks.begin());
+		m_frameMarks.push_back({ m_current.index,
+		                         m_frameStartNs > m_sessionStartNs ? m_frameStartNs - m_sessionStartNs : 0,
+		                         endNs          > m_sessionStartNs ? endNs          - m_sessionStartNs : 0 });
+	}
 
 	// Single-frame capture: stash the one frame for the UI and stop (no dump, not
 	// added to the multi-frame ring).
@@ -163,24 +254,110 @@ void EngineProfiler::pushLive(const ProfLiveFrame& f)
 
 // ─── CPU scopes ──────────────────────────────────────────────────────────────
 
-// Only the capture (main) thread records — scopes opened on worker threads (e.g.
-// the JobSystem pool's "Job::Execute") are ignored so the scope stack stays
-// single-writer. Without this guard, concurrent push_back corrupts the heap.
+// The per-FRAME scope tree (m_stack → m_current.scopes) is main-thread only:
+// scopes opened on worker threads (the JobSystem pool's "Job::Execute") never
+// touch it, so it stays single-writer. Without that guard, concurrent push_back
+// corrupts the heap — the v2.1 crash.
+//
+// The per-THREAD timeline runs for every thread, into that thread's own buffer,
+// which is why worker work is visible at all now. Both paths share one timestamp.
 void EngineProfiler::beginScope(const char* name)
 {
 	if (!m_recording.load(std::memory_order_acquire)) return;
-	if (std::this_thread::get_id() != m_captureThread)  return;
-	m_stack.push_back({ name, nowNs(), static_cast<uint32_t>(m_stack.size()) });
+	const bool     isMain = std::this_thread::get_id() == m_captureThread;
+	const uint64_t now    = nowNs();
+
+	if (m_timelineOn.load(std::memory_order_relaxed))
+	{
+		ThreadCapture& tc = threadCapture(isMain);
+		resetIfStale(tc, m_generation.load(std::memory_order_relaxed));
+		tc.openStart.push_back(now);
+		tc.openName.push_back(name);
+	}
+
+	if (!isMain) return;
+	m_stack.push_back({ name, now, static_cast<uint32_t>(m_stack.size()) });
 }
 
 void EngineProfiler::endScope()
 {
 	if (!m_recording.load(std::memory_order_acquire)) return;
-	if (std::this_thread::get_id() != m_captureThread)  return;
+	const bool     isMain = std::this_thread::get_id() == m_captureThread;
+	const uint64_t now    = nowNs();
+
+	if (m_timelineOn.load(std::memory_order_relaxed))
+	{
+		ThreadCapture& tc  = threadCapture(isMain);
+		const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+		// A scope that OPENED before this capture (or before the timeline was
+		// switched on) has no matching entry here; skip it rather than pairing it
+		// with somebody else's start. ProfileScope latching makes this rare, but a
+		// mid-scope setThreadTimelineEnabled(true) reaches it.
+		if (tc.generation == gen && !tc.openStart.empty())
+		{
+			const uint64_t startNs = tc.openStart.back();
+			const char*    nm      = tc.openName.back();
+			const uint32_t depth   = static_cast<uint32_t>(tc.openStart.size() - 1);
+			tc.openStart.pop_back();
+			tc.openName.pop_back();
+
+			std::lock_guard<std::mutex> lk(tc.mtx);
+			if (tc.spans.size() < kMaxSpansPerThread)
+				tc.spans.push_back({ nm,
+				                     startNs > m_sessionStartNs ? startNs - m_sessionStartNs : 0,
+				                     now     > m_sessionStartNs ? now     - m_sessionStartNs : 0,
+				                     depth });
+			else
+				++tc.dropped;
+		}
+	}
+
+	if (!isMain) return;
 	if (m_stack.empty()) return;
 	const LiveScope s = m_stack.back();
 	m_stack.pop_back();
-	m_current.scopes.push_back({ s.name, nsToMs(nowNs() - s.startNs), s.depth });
+	m_current.scopes.push_back({ s.name, nsToMs(now - s.startNs), s.depth });
+}
+
+// ─── Per-thread timeline access ──────────────────────────────────────────────
+
+std::vector<ProfThreadTimeline> EngineProfiler::timelineSnapshot() const
+{
+	const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+	std::vector<ProfThreadTimeline> out;
+
+	std::lock_guard<std::mutex> reg(registryMutex());
+	for (const auto& tc : registry())
+	{
+		std::lock_guard<std::mutex> lk(tc->mtx);
+		if (tc->generation != gen || tc->spans.empty()) continue;   // stale or idle thread
+		ProfThreadTimeline t;
+		t.label   = tc->label;
+		t.isMain  = tc->isMain;
+		t.dropped = tc->dropped;
+		t.spans   = tc->spans;
+		out.push_back(std::move(t));
+	}
+	// Main lane first, workers after it in registration order — a stable lane
+	// ordering matters more than any particular one: lanes that jump between
+	// snapshots make the timeline unreadable while it updates live.
+	std::stable_sort(out.begin(), out.end(),
+	                 [](const ProfThreadTimeline& a, const ProfThreadTimeline& b)
+	                 { return a.isMain && !b.isMain; });
+	return out;
+}
+
+size_t EngineProfiler::timelineDroppedSpans() const
+{
+	const uint64_t gen = m_generation.load(std::memory_order_relaxed);
+	size_t total = 0;
+	std::lock_guard<std::mutex> reg(registryMutex());
+	for (const auto& tc : registry())
+	{
+		std::lock_guard<std::mutex> lk(tc->mtx);
+		if (tc->generation == gen) total += tc->dropped;
+	}
+	return total;
 }
 
 // ─── Per-frame data ──────────────────────────────────────────────────────────
@@ -271,7 +448,7 @@ std::string EngineProfiler::dumpNow()
 
 	json j;
 	j["tool"]    = "HorizonEngine EngineProfiler";
-	j["version"] = 1;
+	j["version"] = 2;   // 2 = v3 profiler: per-thread timeline, frameMarks, statistics
 	j["session"] = {
 		{"backend", m_session.backend}, {"gpu", m_session.gpuName},
 		{"os", m_session.os}, {"width", m_session.width}, {"height", m_session.height},
@@ -327,7 +504,78 @@ std::string EngineProfiler::dumpNow()
 		}
 		summary["gpuPasses"] = gpuPasses;
 	}
+
+	// ── Per-thread timeline (v3) ────────────────────────────────────────────
+	// Every lane is summarised (cheap, always useful: "Worker 3 was busy 4% of the
+	// capture" is the parallelism verdict). The raw spans are the expensive part —
+	// hundreds of thousands of them over a long capture — so they get a hard total
+	// budget, oldest-lane-first, and any truncation is written into the dump AND
+	// logged. A silently half-written timeline reads as an idle thread pool.
+	const std::vector<ProfThreadTimeline> lanes = timelineSnapshot();
+	if (!lanes.empty())
+	{
+		constexpr size_t kMaxDumpSpans = 120000;
+		size_t written = 0, omitted = 0;
+
+		json summaryLanes = json::array();
+		json jthreads     = json::array();
+		for (const ProfThreadTimeline& lane : lanes)
+		{
+			// Busy time = union of depth-0 spans; nested spans are already inside
+			// their parent, so summing every depth would count the same nanosecond
+			// once per level and happily report 300% occupancy.
+			double busyMs = 0.0, deepestMs = 0.0;
+			uint32_t maxDepth = 0;
+			for (const ProfThreadSpan& s : lane.spans)
+			{
+				const double ms = nsToMs(s.endNs - s.startNs);
+				if (s.depth == 0) busyMs += ms;
+				if (s.depth > maxDepth) maxDepth = s.depth;
+				if (ms > deepestMs) deepestMs = ms;
+			}
+			summaryLanes.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+			                         {"spans", lane.spans.size()}, {"busyMs", busyMs},
+			                         {"longestSpanMs", deepestMs}, {"maxDepth", maxDepth},
+			                         {"droppedSpans", lane.dropped} });
+
+			json jspans = json::array();
+			for (const ProfThreadSpan& s : lane.spans)
+			{
+				if (written >= kMaxDumpSpans) { ++omitted; continue; }
+				jspans.push_back({ {"n", s.name}, {"s", s.startNs}, {"e", s.endNs}, {"d", s.depth} });
+				++written;
+			}
+			jthreads.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+			                     {"spans", std::move(jspans)} });
+		}
+		summary["threads"] = summaryLanes;
+		if (omitted > 0)
+		{
+			summary["timelineTruncated"] = omitted;
+			summary["timelineNote"] =
+				std::string("timeline truncated: ") + std::to_string(omitted) +
+				" spans omitted from this dump (budget " + std::to_string(kMaxDumpSpans) +
+				"). summary.threads still covers the FULL capture — trust it over threads[].";
+			HE_LOG_WARN(Profiler, "%s",
+			            ("Profiler: timeline truncated in dump — " + std::to_string(omitted) +
+			             " spans omitted").c_str());
+		}
+		const size_t droppedLive = timelineDroppedSpans();
+		if (droppedLive > 0) summary["timelineDroppedAtCapture"] = droppedLive;
+		j["threads"] = std::move(jthreads);
+	}
+
 	j["summary"] = summary;
+
+	// Frame boundaries on the timeline axis, so a reader can line the thread lanes
+	// up with the frames[] entries (both carry the same frame index).
+	if (!m_frameMarks.empty())
+	{
+		json marks = json::array();
+		for (const ProfFrameMark& m : m_frameMarks)
+			marks.push_back({ {"i", m.index}, {"s", m.startNs}, {"e", m.endNs} });
+		j["frameMarks"] = std::move(marks);
+	}
 
 	// Per-frame detail.
 	json frames = json::array();
