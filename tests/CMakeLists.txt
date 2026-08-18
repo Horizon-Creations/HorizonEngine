@@ -346,4 +346,17 @@ if(WIN32)
             $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:he_tests>
         VERBATIM
     )
+    # The Python plugin must sit NEXT TO HorizonScene.dll — and on Windows the
+    # copy above relocates HorizonScene beside the test exe, so the loader's
+    # thisLibraryDir() points HERE, not at src/HE_Scene. Without this copy the
+    # ScriptContext-path Python tests fail with "No Python plugin at …" while
+    # Linux/macOS pass (their rpath loads HorizonScene from its build dir,
+    # where the plugin already is).
+    if(HE_HAVE_PYTHON)
+        add_custom_command(TARGET he_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:HorizonPython> $<TARGET_FILE_DIR:he_tests>
+            VERBATIM
+        )
+    endif()
 endif()
