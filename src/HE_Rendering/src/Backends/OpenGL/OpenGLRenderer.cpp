@@ -1461,6 +1461,19 @@ float cirrusFbm(vec2 p)
 	return v;
 }
 
+// ── Cloud deck: what the altitude does, and what it must NOT do ─────────────
+// cloudHeight is the deck's ABSOLUTE world altitude. Cloud SIZE, slab THICKNESS
+// and the grazing-angle fade are pinned to this reference instead of to the
+// altitude — otherwise raising the slider scales height, cloud size and
+// thickness together, which is a similarity transform: the sky looks
+// unchanged, and the only visible effect is the horizon fade eating the deck
+// from below. (The 1/cloudH size compensation made sense while the layer hung
+// camera-relative; with an absolute altitude it is exactly wrong.) The value
+// is the previous default, so a scene at 200 renders as before and every
+// higher value now genuinely lifts the deck: clouds move up and shrink.
+const float kCloudRefAltitude = 200.0;
+const float kCloudElevFloor   = 0.06;   // was clamp((cloudH-50)/2500) — grew with altitude
+
 // ── Cloud slab intersection ──────────────────────────────────────────────────
 // Entry/exit distance of a view ray through the cloud deck, for ANY camera
 // position: below it, inside it (the march then starts at the camera) and above
@@ -1623,7 +1636,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	int   qShadow = (uCloudQuality <= 0) ? 1    : (uCloudQuality == 1 ? 2    : 3);
 
 	cloudH      = max(cloudH, 1.0);
-	float thick = cloudH * 1.5;                   // TALL slab so cumuli can billow upward (3D)
+	float thick = kCloudRefAltitude * 1.5;                   // TALL slab so cumuli can billow upward (3D)
 	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
 	float tNear, tFar;
@@ -1652,12 +1665,12 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	// same at any height — the height slider must not alter the clouds themselves, only
 	// where the layer sits (the band's elevation, applied via elevFloor below).
 	// (1.6/cloudH = 0.008 at the reference height 200, matching the canonical look.)
-	float nscale = 1.6 / cloudH;
+	float nscale = 1.6 / kCloudRefAltitude;
 	// Cloud-band elevation floor: raising the height lifts the band higher in the sky
 	// (clear sky opens up toward the horizon); lowering it brings clouds down to the
 	// horizon. This is the ONLY thing the height changes about the look — the cloud
 	// bodies are identical. Mapped from the slider's ~20..2000 range.
-	float elevFloor = clamp((cloudH - 50.0) / 2500.0, 0.0, 0.6);
+	float elevFloor = kCloudElevFloor;
 	// Appearance knobs (global uniforms): fluffiness drives the cauliflower erosion,
 	// density scales the opacity/thickness. They tweak the LOOK without moving the
 	// sample positions, so they never re-roll the cloud pattern (unlike the height).
@@ -1808,7 +1821,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float evo = uCloudEvolution;
 
 	cloudH      = max(cloudH, 1.0);
-	float thick = cloudH * 1.5;
+	float thick = kCloudRefAltitude * 1.5;
 	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
@@ -1831,8 +1844,8 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float phase = mix(hgPhase(costh, 0.65), hgPhase(costh, -0.35), 0.30)
 	            + hgPhase(costh, 0.93) * 0.35;
 
-	float nscale    = 1.6 / cloudH;
-	float elevFloor = clamp((cloudH - 50.0) / 2500.0, 0.0, 0.6);
+	float nscale    = 1.6 / kCloudRefAltitude;
+	float elevFloor = kCloudElevFloor;
 	float fluff     = clamp(uCloudFluffiness, 0.0, 1.0);
 	float densMul   = clamp(uCloudDensity, 0.0, 3.0);
 	float lo        = mix(0.70, 0.22, clamp(coverage, 0.0, 1.0));
@@ -1951,7 +1964,7 @@ float cloudShadowTransmittance(vec2 fragCoord)
 	float fluff   = clamp(uCloudFluffiness, 0.0, 1.0);
 	float densMul = clamp(uCloudDensity, 0.0, 3.0);
 	float lo      = mix(0.70, 0.22, coverage);
-	float nscale  = 1.6 / cloudH;
+	float nscale  = 1.6 / kCloudRefAltitude;
 	// Slab entry/exit along the sun ray through the mid-plane point. Density
 	// comes from the SHARED cloudFieldDensity (style/evolution included), so
 	// the ground shadows always match the shapes overhead.
