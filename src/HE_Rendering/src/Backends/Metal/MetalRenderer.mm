@@ -11125,7 +11125,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 		const int t = static_cast<int>(idx % N);
 		HE::BuildSkyEnvFaceRow(N, f, t, sunDir,
 		                       &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-	});
+	}, "SkyEnvBake");
 	for (int f = 0; f < 6; ++f)
 		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
 		          withBytes:&px[(static_cast<size_t>(f) * N * N) * 4]

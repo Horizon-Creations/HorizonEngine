@@ -52,7 +52,7 @@ static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
 		const int t = static_cast<int>(idx % faceN);
 		HE::BuildSkyEnvFaceRow(faceN, f, t, sunDir,
 		                       &px[((static_cast<size_t>(f) * faceN + t) * faceN) * 4]);
-	});
+	}, "SkyEnvBake");
 	return px;
 }
 

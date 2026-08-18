@@ -22,7 +22,7 @@ ThreadPool::ThreadPool(size_t threadCount)
 
             for (;;)
             {
-                std::function<void()> task;
+                Task task;
                 {
                     std::unique_lock<std::mutex> lock(m_mutex);
                     m_cv.wait(lock, [this]{ return m_stop || !m_queue.empty(); });
@@ -30,7 +30,10 @@ ThreadPool::ThreadPool(size_t threadCount)
                     task = std::move(m_queue.front());
                     m_queue.pop();
                 }
-                HE_PROFILE_SCOPE_N("Job::Execute");
+                // Named after the work, not after the mechanism: the profiler's
+                // worker lanes used to be a solid wall of "Job::Execute", which is
+                // a timeline of the fact that jobs ran and of nothing else.
+                HE_PROFILE_SCOPE_DYN(task.name ? task.name : "Job::Execute");
                 // An exception escaping a job used to travel through
                 // std::packaged_task into the caller's future().get() — or, for
                 // fire-and-forget jobs, straight into std::terminate with no clue
@@ -38,7 +41,7 @@ ThreadPool::ThreadPool(size_t threadCount)
                 // failed, before it goes anywhere.
                 try
                 {
-                    task();
+                    task.fn();
                 }
                 catch (const std::exception& e)
                 {

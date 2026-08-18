@@ -257,7 +257,7 @@ namespace
 			if (generation < s_refScan.completed) return;
 			s_refScan.completed = generation;
 			s_refScan.result    = std::move(result);
-		});
+		}, "AssetRefScan");
 		return generation;
 	}
 
@@ -2495,7 +2495,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Bumps the engine-folder version, which is what makes the panel
 				// re-resolve its nodes and show the placeholder.
 				gs->refreshEngineFolder(engineRoot, contentRoot);
-			});
+			}, "EngineFolderRefresh");
 
 			HE_LOG_INFO(Editor, "%s",
 				("Editor: removed the local copy of '" + cacheRel + "' — it will download again when needed").c_str());

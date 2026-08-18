@@ -3,6 +3,8 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/GlobalState.h>
+#include <Diagnostics/ProfilerCaptureFile.h>
+#include <JobSystem/JobSystem.h>
 #include <Renderer/GpuPassAccumulator.h>
 
 #include <nlohmann/json.hpp>
@@ -358,8 +360,124 @@ TEST_CASE("EngineProfiler records worker scopes on their own timeline lane, not 
 
     prof.requestStop();
     prof.beginFrame(16.6);
+    std::string dump;
+    prof.consumeJustDumped(dump);
+}
+
+TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'")
+{
+    // The first real capture produced eight worker lanes carrying nothing but
+    // "Job::Execute" — a timeline of the fact that jobs ran, and of nothing else.
+    // parallel_for now labels its chunks, so a lane says WHAT the pool was doing.
+    setupTempDeploy("jobnames");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    REQUIRE(prof.isRecording());
+
+    // Enough items that the pool is actually fed (parallel_for runs chunk 0 on the
+    // calling thread, so a tiny count would never reach a worker at all).
+    std::atomic<int> sum{ 0 };
+    parallel_for(4096, [&](size_t i) { sum.fetch_add(static_cast<int>(i & 1), std::memory_order_relaxed); },
+                 "TestCullChunk");
+    // A direct submit keeps its own label too.
+    globalPool().submit([]{ /* nothing */ }, "TestDirectJob").get();
+
+    prof.endFrame();
+
+    bool sawNamed = false, sawDirect = false, sawGeneric = false;
+    for (const ProfThreadTimeline& lane : prof.timelineSnapshot())
+    {
+        if (lane.isMain) continue;
+        for (const ProfThreadSpan& s : lane.spans)
+        {
+            const std::string n(s.name ? s.name : "");
+            if (n == "TestCullChunk")  sawNamed  = true;
+            if (n == "TestDirectJob")  sawDirect = true;
+            if (n == "Job::Execute")   sawGeneric = true;
+        }
+    }
+    CHECK(sawNamed);
+    CHECK(sawDirect);
+    // Nothing in this test submits an unnamed task, so the generic label must not
+    // appear at all: if it does, a call site is still going through the default.
+    CHECK_FALSE(sawGeneric);
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
     std::string p;
     prof.consumeJustDumped(p);
+}
+
+TEST_CASE("Dump truncates the timeline by time, so every lane keeps the same window")
+{
+    // Regression from a real 4867-frame capture: the dump budget was spent lane by
+    // lane, the main thread's 155k spans consumed all of it, and every worker lane
+    // came out with ZERO spans — which reads as an idle thread pool rather than as
+    // a lane that was never written. The budget is now a shared time cutoff, so a
+    // truncated dump is a consistent prefix of the capture across all lanes.
+    fs::path deploy = setupTempDeploy("truncate");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    REQUIRE(prof.isRecording());
+
+    // Comfortably over the 120k dump budget so the cutoff actually engages.
+    std::atomic<bool> go{ false };
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 6; ++t)
+        workers.emplace_back([&] {
+            while (!go.load(std::memory_order_acquire)) { }
+            for (int i = 0; i < 25000; ++i) { HE_PROFILE_SCOPE_N("BulkWorker"); }
+        });
+    go.store(true, std::memory_order_release);
+    for (int i = 0; i < 25000; ++i) { HE_PROFILE_SCOPE_N("BulkMain"); }
+    for (auto& w : workers) w.join();
+    prof.endFrame();
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string dumpPath;
+    REQUIRE(prof.consumeJustDumped(dumpPath));
+    std::ifstream in(dumpPath);
+    REQUIRE(in.is_open());
+    json j = json::parse(in);
+
+    REQUIRE(j["summary"].contains("timelineTruncated"));
+    REQUIRE(j["summary"].contains("timelineCutoffNs"));
+    const uint64_t cutoff = j["summary"]["timelineCutoffNs"].get<uint64_t>();
+
+    // The point of the fix: more than one lane survives truncation.
+    size_t lanesWithSpans = 0, workerLanesWithSpans = 0;
+    for (const auto& lane : j["threads"])
+    {
+        if (lane["spans"].empty()) continue;
+        ++lanesWithSpans;
+        if (!lane["main"].get<bool>()) ++workerLanesWithSpans;
+        // Everything written is strictly before the shared cutoff.
+        for (const auto& s : lane["spans"])
+            CHECK(s["s"].get<uint64_t>() < cutoff);
+    }
+    CHECK(lanesWithSpans > 1);
+    CHECK(workerLanesWithSpans > 0);
+
+    // summary.threads still describes the WHOLE capture, truncation or not — that
+    // is what makes the totals trustworthy when threads[] is only a prefix.
+    uint64_t summarySpans = 0;
+    for (const auto& t : j["summary"]["threads"]) summarySpans += t["spans"].get<uint64_t>();
+    CHECK(summarySpans == 6 * 25000 + 25000);
+
+    // Frame marks are clipped to the same cutoff, so no separator is drawn over a
+    // stretch of timeline where no lane has data.
+    for (const auto& m : j["frameMarks"]) CHECK(m["s"].get<uint64_t>() < cutoff);
+
+    he_test::removeAllQuiet(deploy);
 }
 
 TEST_CASE("EngineProfiler timeline resets between captures and can be switched off")
@@ -418,6 +536,127 @@ TEST_CASE("EngineProfiler timeline resets between captures and can be switched o
     prof.beginFrame(16.6);
     prof.consumeJustDumped(p);
     prof.setThreadTimelineEnabled(true);   // restore the default for later cases
+}
+
+TEST_CASE("A written dump loads back into the same structures the live views use")
+{
+    // The viewer reuses every existing view rather than re-implementing them, so
+    // what matters is that a loaded capture is indistinguishable in shape from a
+    // live one: same records, same close-ordered scopes, same lanes.
+    fs::path deploy = setupTempDeploy("roundtrip");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    info.backend = "RoundTripBackend";
+    info.width   = 1920;
+    info.height  = 1080;
+    info.vsync   = false;
+    prof.requestStart(info);
+
+    constexpr int kFrames = 6;
+    for (int i = 0; i < kFrames; ++i)
+    {
+        prof.beginFrame(16.0 + i);
+        {
+            HE_PROFILE_SCOPE_N("Outer");
+            { HE_PROFILE_SCOPE_N("Inner"); }
+        }
+        parallel_for(2048, [](size_t) {}, "RoundTripJob");
+        ProfRenderStats rs;
+        rs.drawCalls = 11; rs.triangles = 2222;
+        prof.setRenderStats(rs);
+        ProfSceneCounters sc;
+        sc.entities = 5; sc.lights = 3;
+        prof.setSceneCounters(sc);
+        prof.setGpuTimes(4.0, { {"Scene", 3.0, false}, {"Sky", 1.0, true} }, "detailed");
+        prof.endFrame();
+    }
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string dumpPath;
+    REQUIRE(prof.consumeJustDumped(dumpPath));
+    REQUIRE(fs::exists(dumpPath));
+
+    HE::Prof::LoadedCapture cap;
+    std::string err;
+    REQUIRE(cap.load(dumpPath, err));
+    CHECK(err.empty());
+
+    CHECK(cap.version == 2);
+    CHECK(cap.session.backend == "RoundTripBackend");
+    CHECK(cap.session.width == 1920);
+    CHECK_FALSE(cap.session.vsync);
+    REQUIRE(cap.frames.size() == kFrames);
+
+    // Frame payload survives, including the nesting depth self-time depends on.
+    const ProfFrameRecord& f0 = cap.frames.front();
+    CHECK(f0.deltaMs == doctest::Approx(16.0));
+    CHECK(f0.gpuFrameMs == doctest::Approx(4.0));
+    CHECK(std::string(f0.gpuTimingMode) == "detailed");
+    CHECK(f0.stats.drawCalls == 11);
+    CHECK(f0.stats.scene.entities == 5);
+    CHECK(f0.stats.scene.lights == 3);
+    bool sawOuter = false, sawInner = false;
+    for (const ProfScopeSample& s : f0.scopes)
+    {
+        if (std::string(s.name) == "Outer") { sawOuter = true; CHECK(s.depth == 0); }
+        if (std::string(s.name) == "Inner") { sawInner = true; CHECK(s.depth == 1); }
+    }
+    CHECK(sawOuter);
+    CHECK(sawInner);
+    // The approx flag is what stops an intra-encoder split being read as ground
+    // truth; it has to survive the trip.
+    bool sawApprox = false;
+    for (const ProfGpuPass& g : f0.gpuPasses)
+        if (std::string(g.name) == "Sky") { sawApprox = g.approx; }
+    CHECK(sawApprox);
+
+    // Lanes: the main thread plus at least one worker carrying the job's NAME,
+    // which is the whole reason the names were added.
+    bool sawMainLane = false, sawJobName = false;
+    for (const ProfThreadTimeline& lane : cap.threads)
+    {
+        if (lane.isMain) sawMainLane = true;
+        for (const ProfThreadSpan& s : lane.spans)
+            if (std::string(s.name) == "RoundTripJob") sawJobName = true;
+    }
+    CHECK(sawMainLane);
+    CHECK(sawJobName);
+    CHECK(cap.frameMarks.size() == kFrames);
+
+    // Derived views are recomputed on load, not read from the file's summary, so a
+    // v1 dump displays like a current one and the panel can never disagree with
+    // the file it is showing.
+    CHECK_FALSE(cap.aggregates.empty());
+    CHECK(cap.deltaStats.count == kFrames);
+    CHECK(cap.deltaStats.p50 > 0.0);
+    CHECK(cap.fps.avgFps > 0.0);
+    CHECK(cap.captureMs() > 0.0);
+    bool foundOuter = false;
+    for (const HE::Prof::ScopeAggregate& a : cap.aggregates)
+        if (a.name == "Outer")
+        {
+            foundOuter = true;
+            CHECK(a.count == kFrames);
+            CHECK(a.selfMs <= a.totalMs);   // Inner was subtracted, not double-counted
+        }
+    CHECK(foundOuter);
+
+    // Garbage in must fail cleanly and leave nothing behind, not half-load.
+    const fs::path junk = deploy / "not_a_dump.json";
+    { std::ofstream o(junk.string()); o << "{\"hello\":1}"; }
+    std::string err2;
+    CHECK_FALSE(cap.load(junk.string(), err2));
+    CHECK_FALSE(err2.empty());
+    CHECK(cap.frames.empty());
+    CHECK(cap.threads.empty());
+
+    std::string err3;
+    CHECK_FALSE(cap.load((deploy / "does_not_exist.json").string(), err3));
+    CHECK_FALSE(err3.empty());
+
+    he_test::removeAllQuiet(deploy);
 }
 
 TEST_CASE("EngineProfiler single-frame capture records exactly one frame, no dump")

@@ -241,7 +241,7 @@ namespace
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
 			obj.landscapeIndex     = d.landscapeIndex;     // → RenderWorld::landscapes
-		});
+		}, "ExtractMeshes");
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
@@ -378,7 +378,7 @@ namespace
 				world[3] = glm::vec4(in.position, 1.0f);
 				obj.transform   = world;
 				obj.worldBounds = kUnitCube.transformed(world);
-			});
+			}, "ExtractParticles");
 		}
 	}
 
