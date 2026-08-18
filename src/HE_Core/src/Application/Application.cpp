@@ -340,6 +340,14 @@ namespace HE
 					lf.visible    = gs.visibleObjects;
 					lf.total      = gs.totalObjects;
 				}
+				// Scene-side counters come from the world tick earlier in this
+				// frame (SceneSystems::pushProfilerSceneCounters); the frame loop
+				// cannot read them itself — HE_Core has no view of the registry.
+				const ProfSceneCounters& sc = profiler.sceneCounters();
+				lf.entities          = sc.entities;
+				lf.lights            = sc.lights;
+				lf.particles         = sc.particles;
+				lf.streamingInFlight = sc.streamingInFlight;
 				profiler.pushLive(lf);
 			}
 

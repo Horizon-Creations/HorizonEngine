@@ -28,10 +28,13 @@
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/LODComponent.h"
+#include "HorizonScene/Components/LightComponent.h"
+#include "HorizonScene/Components/RigidBodyComponent.h"
 #include "ContentManager/ContentManager.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Log.h"
 #include "Diagnostics/Profiler.h"
+#include "Diagnostics/EngineProfiler.h"
 #include <cmath>
 
 namespace {
@@ -115,6 +118,56 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, physics); } // entity-bound emitters only — precipitation is WeatherSystem's own pool
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
+
+    pushProfilerSceneCounters(world, cm, gpuParticles);
+}
+
+// Scene-side profiler counters. The renderer can answer draws/tris/visible, but
+// nothing downstream knows how many entities, lights or live particles produced
+// them — and HE_Core (where the profiler lives) must not include HE_Scene, so the
+// numbers are pushed from here, the one place that holds the world.
+//
+// Cost: entt storage sizes are O(1); only the particle total walks the emitters,
+// of which there are a handful. Skipped entirely unless a capture is recording or
+// the editor's live HUD is open, so an unprofiled frame pays one bool check.
+void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager& cm,
+                                             bool gpuParticles)
+{
+    EngineProfiler& prof = EngineProfiler::instance();
+    if (!prof.isRecording() && !prof.liveEnabled()) return;
+
+    auto& reg = world.registry();
+    ProfSceneCounters c;
+    c.entities     = static_cast<uint32_t>(reg.storage<entt::entity>().in_use());
+    c.lights       = static_cast<uint32_t>(reg.view<LightComponent>().size());
+    c.emitters     = static_cast<uint32_t>(reg.view<ParticleSystemComponent>().size());
+    c.rigidBodies  = static_cast<uint32_t>(reg.view<RigidBodyComponent>().size());
+    c.audioSources = static_cast<uint32_t>(reg.view<AudioSourceComponent>().size());
+    c.scripts      = static_cast<uint32_t>(reg.view<ScriptComponent>().size());
+    for (auto [e, ps] : reg.view<ParticleSystemComponent>().each())
+        c.particles += static_cast<uint32_t>(ps.particles.size());
+
+    // GPU precipitation is a fixed pool, not a simulated count: report the cap that
+    // is actually resident this frame, and 0 when the pool is idle — reporting the
+    // configured maximum while nothing rains would read as 20k particles of cost.
+    if (gpuParticles)
+    {
+        const Entity envEntity = world.environmentEntity();
+        const EnvironmentComponent* env = (envEntity == entt::null)
+            ? nullptr : reg.try_get<EnvironmentComponent>(envEntity);
+        const float amount = env ? std::max(env->rainAmount, env->snowAmount) : 0.0f;
+        if (env && amount > 0.001f)
+        {
+            const bool isSnow = env->snowAmount > env->rainAmount;
+            uint32_t   cap    = 20000;   // same default as pushGpuParticleParams
+            for (auto [e, wc] : reg.view<WeatherComponent>().each())
+            { cap = static_cast<uint32_t>(isSnow ? wc.maxSnowParticles : wc.maxRainParticles); break; }
+            c.gpuParticles = cap;
+        }
+    }
+
+    c.streamingInFlight = static_cast<uint32_t>(cm.asyncInFlightCount());
+    prof.setSceneCounters(c);
 }
 
 void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,

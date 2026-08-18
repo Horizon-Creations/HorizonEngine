@@ -352,6 +352,10 @@ public:
 	std::vector<HE::UUID> pollAsyncResults(size_t maxRegistrations = SIZE_MAX);
 	// True while a background job for this relative path is in flight.
 	bool isAsyncPending(const std::string& relativePath) const;
+	// How many background loads are in flight right now, across all paths. Cheap
+	// (one lock + a set size) and called once per frame by the profiler: a frame
+	// that hitches while this is non-zero is a streaming stall, not a render cost.
+	size_t asyncInFlightCount() const;
 	// Live read progress of an in-flight job: bytes read so far and the file's total
 	// size (0 until the worker has opened the file). False when nothing is in flight
 	// for that path — so a caller can drive a real progress bar for a big asset and

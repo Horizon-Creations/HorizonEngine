@@ -86,20 +86,38 @@ struct ProfFrameMark
 	uint64_t endNs   = 0;
 };
 
+// Scene-side counters, pushed once per world tick by whoever HAS the world — the
+// renderer cannot answer these and HE_Core must not include HE_Scene, so they come
+// in through this seam rather than by reaching into the registry from the frame loop.
+// Everything here is an O(1) storage size or a short walk over one component type;
+// nothing scans the whole scene.
+struct ProfSceneCounters
+{
+	uint32_t entities      = 0;   // live entities in the world registry
+	uint32_t lights        = 0;   // LightComponent
+	uint32_t particles     = 0;   // live CPU particles across all emitters
+	uint32_t emitters      = 0;   // ParticleSystemComponent
+	uint32_t gpuParticles  = 0;   // GPU precipitation pool cap while active
+	uint32_t rigidBodies   = 0;   // RigidBodyComponent (proxy for physics bodies)
+	uint32_t audioSources  = 0;   // AudioSourceComponent
+	uint32_t scripts       = 0;   // ScriptComponent
+	uint32_t streamingInFlight = 0;   // async asset loads not yet drained
+};
+
 // Coarse per-frame counters. Cheap to gather; filled from the renderer + scene.
 struct ProfRenderStats
 {
+	// Renderer-owned (pushed by setRenderStats after the frame is submitted).
 	uint32_t drawCalls      = 0;
 	uint32_t triangles      = 0;
 	uint32_t visibleObjects = 0;
 	uint32_t totalObjects   = 0;
-	uint32_t entities       = 0;
-	uint32_t lights         = 0;
-	uint32_t particles      = 0;   // CPU particle count
-	uint32_t gpuParticles   = 0;   // GPU precip pool cap (if active)
-	uint32_t streamingInFlight = 0;
 	double   vramUsedMB     = 0.0;
 	double   vramBudgetMB   = 0.0;
+	// Scene-owned (pushed by setSceneCounters during the world tick, i.e. EARLIER
+	// in the frame and by a different producer — see setRenderStats on why the two
+	// are merged rather than assigned wholesale).
+	ProfSceneCounters scene;
 };
 
 // Everything captured for a single rendered frame.
@@ -124,6 +142,7 @@ struct ProfLiveFrame
 	double   cpuFrameMs = 0.0;    // CPU frame-loop time
 	double   gpuFrameMs = -1.0;   // whole-frame GPU time (-1 = unavailable)
 	uint32_t draws = 0, triangles = 0, visible = 0, total = 0;
+	uint32_t entities = 0, lights = 0, particles = 0, streamingInFlight = 0;
 };
 
 // Metadata recorded once per capture session (goes into the dump header).
@@ -200,7 +219,15 @@ public:
 	void endScope();
 
 	// ── Per-frame data pushed before endFrame ──────────────────────────────
+	// Renderer counters. Merges only the renderer-owned fields: the scene counters
+	// were already pushed earlier in the same frame by the world tick, and a whole
+	// -struct assignment here would silently zero them (they were dead in the dump
+	// for exactly that kind of reason before v3).
 	void setRenderStats(const ProfRenderStats& s);
+	// Scene counters, from whoever owns the world. Cached even when not recording,
+	// so the editor's live HUD can show them without a capture running.
+	void setSceneCounters(const ProfSceneCounters& c);
+	const ProfSceneCounters& sceneCounters() const { return m_sceneCounters; }
 	void setGpuTimes(double gpuFrameMs, const std::vector<ProfGpuPass>& passes,
 	                 const char* mode = "");
 
@@ -270,6 +297,8 @@ private:
 	ProfFrameRecord m_singleFrame;
 	ProfSessionInfo m_pendingInfo;
 	size_t          m_pendingMax  = 0;
+
+	ProfSceneCounters m_sceneCounters;     // last pushed by the world tick
 
 	ProfSessionInfo m_session;
 	size_t          m_maxFrames   = 0;     // 0 = unlimited (grow)

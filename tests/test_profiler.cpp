@@ -154,6 +154,46 @@ TEST_CASE("EngineProfiler records frames, scopes and writes a parseable dump")
     CHECK_FALSE(j["summary"]["gpuPasses"]["Scene"].contains("approx"));
     CHECK(j["summary"]["gpuPasses"]["Sky+Clouds"].value("approx", false));
 
+    // ── v3 additions ────────────────────────────────────────────────────────
+    CHECK(j["version"] == 2);
+
+    // Self time reaches the dump, and the nesting is respected: FrameWork wholly
+    // contains SubTask, so its self time must be strictly below its total.
+    const auto& fw = j["summary"]["cpuScopes"]["FrameWork"];
+    REQUIRE(fw.contains("selfMs"));
+    REQUIRE(fw.contains("p95"));
+    CHECK(fw["count"] == kFrames);
+    CHECK(fw["selfMs"].get<double>() <= fw["totalMs"].get<double>());
+    CHECK(j["summary"]["topScopesBySelfTime"].is_array());
+    CHECK_FALSE(j["summary"]["topScopesBySelfTime"].empty());
+
+    // Tail statistics: percentiles per series + benchmark-convention FPS lows.
+    const auto& st = j["summary"]["stats"];
+    REQUIRE(st.contains("deltaMs"));
+    CHECK(st["deltaMs"]["p50"].get<double>() == doctest::Approx(16.6));
+    CHECK(st["deltaMs"]["p99"].get<double>() == doctest::Approx(16.6));
+    CHECK(st["deltaMs"]["count"] == kFrames);
+    CHECK(st.contains("cpuMs"));
+    CHECK(st["gpuMs"]["p50"].get<double>() == doctest::Approx(2.5));
+    CHECK(st["fps"]["avg"].get<double>() == doctest::Approx(1000.0 / 16.6));
+    // A perfectly even capture has no hitches — the block must be absent, not empty.
+    CHECK_FALSE(j["summary"].contains("hitches"));
+
+    // Per-thread timeline: the main lane is present and summarised, and the frame
+    // marks share the spans' relative-ns axis.
+    REQUIRE(j["summary"].contains("threads"));
+    REQUIRE_FALSE(j["summary"]["threads"].empty());
+    CHECK(j["summary"]["threads"][0]["main"] == true);
+    CHECK(j["summary"]["threads"][0]["spans"].get<size_t>() >= 2 * kFrames);
+    CHECK(j["summary"]["threads"][0]["droppedSpans"] == 0);
+    CHECK_FALSE(j["summary"].contains("timelineTruncated"));   // tiny capture, no cap hit
+    REQUIRE(j.contains("threads"));
+    CHECK(j["threads"][0]["thread"] == "Main");
+    REQUIRE(j.contains("frameMarks"));
+    CHECK(j["frameMarks"].size() == kFrames);
+    for (const auto& m : j["frameMarks"])
+        CHECK(m["e"].get<uint64_t>() >= m["s"].get<uint64_t>());
+
     he_test::removeAllQuiet(deploy);
 }
 

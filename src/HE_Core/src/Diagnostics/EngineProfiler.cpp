@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "Diagnostics/GlobalState.h"
 #include "Diagnostics/Logger.h"
+#include "Diagnostics/ProfilerStats.h"
 
 #include <SDL3/SDL.h>
 #include <nlohmann/json.hpp>
@@ -362,9 +363,25 @@ size_t EngineProfiler::timelineDroppedSpans() const
 
 // ─── Per-frame data ──────────────────────────────────────────────────────────
 
+// Renderer-owned fields only. The scene counters in m_current.stats were pushed
+// earlier in this same frame by the world tick (a different producer at a different
+// point in the loop); assigning the whole struct here would zero them every frame,
+// which is precisely how entities/lights/particles stayed 0 in every dump until v3.
 void EngineProfiler::setRenderStats(const ProfRenderStats& s)
 {
-	if (m_recording) m_current.stats = s;
+	if (!m_recording) return;
+	m_current.stats.drawCalls      = s.drawCalls;
+	m_current.stats.triangles      = s.triangles;
+	m_current.stats.visibleObjects = s.visibleObjects;
+	m_current.stats.totalObjects   = s.totalObjects;
+	m_current.stats.vramUsedMB     = s.vramUsedMB;
+	m_current.stats.vramBudgetMB   = s.vramBudgetMB;
+}
+
+void EngineProfiler::setSceneCounters(const ProfSceneCounters& c)
+{
+	m_sceneCounters = c;                       // cached for the live HUD too
+	if (m_recording) m_current.stats.scene = c;
 }
 
 void EngineProfiler::setGpuTimes(double gpuFrameMs, const std::vector<ProfGpuPass>& passes,
@@ -424,7 +441,9 @@ std::string EngineProfiler::dumpNow()
 		m_dumpsDir = GlobalState::getInstance().getDumpsDir();
 
 	// Per-scope and per-GPU-pass summaries across the whole capture.
-	std::map<std::string, Stat> cpuSummary, gpuSummary;
+	// CPU scopes are summarised by HE::Prof::aggregateScopes below (it adds self
+	// time and p95, which this Stat cannot express); only the GPU passes still use it.
+	std::map<std::string, Stat> gpuSummary;
 	std::map<std::string, bool> gpuApprox;   // a pass name is approx if any sample was
 	std::map<std::string, uint64_t> gpuModeCounts;  // which GPU-timing path produced each frame
 	Stat cpuFrame, gpuFrame, delta;
@@ -435,7 +454,6 @@ std::string EngineProfiler::dumpNow()
 		delta.add(f.deltaMs);
 		if (f.gpuFrameMs >= 0.0) gpuFrame.add(f.gpuFrameMs);
 		if (f.gpuTimingMode && f.gpuTimingMode[0]) gpuModeCounts[f.gpuTimingMode]++;
-		for (const auto& s : f.scopes) cpuSummary[s.name].add(s.ms);
 		double sumExact = 0.0; bool anyExact = false;
 		for (const auto& g : f.gpuPasses)
 		{
@@ -465,6 +483,57 @@ std::string EngineProfiler::dumpNow()
 	summary["cpuFrameMs"] = cpuFrame.toJson();
 	summary["deltaMs"]    = delta.toJson();
 	if (gpuFrame.n) summary["gpuFrameMs"] = gpuFrame.toJson();
+
+	// ── Tail statistics (v3) ────────────────────────────────────────────────
+	// min/avg/max above answers "how fast on average", which is the question
+	// nobody has. Stutter lives in the tail, so the tail gets its own block:
+	// percentiles per series, benchmark-convention low-percentile FPS, and the
+	// individual hitch frames with the scope that was expensive in each.
+	{
+		std::vector<double> deltas, cpus, gpus;
+		deltas.reserve(m_frames.size()); cpus.reserve(m_frames.size());
+		for (const auto& f : m_frames)
+		{
+			deltas.push_back(f.deltaMs);
+			cpus.push_back(f.cpuFrameMs);
+			if (f.gpuFrameMs >= 0.0) gpus.push_back(f.gpuFrameMs);
+		}
+		auto pctJson = [](const HE::Prof::Percentiles& p) {
+			return json{ {"min", p.min}, {"mean", p.mean}, {"p50", p.p50},
+			             {"p95", p.p95}, {"p99", p.p99}, {"max", p.max},
+			             {"stddev", p.stddev}, {"count", p.count} };
+		};
+		json stats;
+		stats["deltaMs"] = pctJson(HE::Prof::computePercentiles(deltas));
+		stats["cpuMs"]   = pctJson(HE::Prof::computePercentiles(cpus));
+		if (!gpus.empty()) stats["gpuMs"] = pctJson(HE::Prof::computePercentiles(gpus));
+
+		const HE::Prof::FpsLows lows = HE::Prof::computeFpsLows(deltas);
+		stats["fps"] = { {"avg", lows.avgFps}, {"low1Percent", lows.low1Fps},
+		                 {"low01Percent", lows.low01Fps}, {"frames", lows.frames},
+		                 {"note", "1%/0.1% low = AVERAGE of the slowest 1%/0.1% of frames "
+		                          "expressed as FPS (benchmark convention), not the p99 frame time"} };
+		summary["stats"] = stats;
+
+		const std::vector<HE::Prof::Hitch> hitches = HE::Prof::findHitches(m_frames);
+		if (!hitches.empty())
+		{
+			json jh = json::array();
+			for (const HE::Prof::Hitch& h : hitches)
+			{
+				json e = { {"frame", h.frameIndex}, {"deltaMs", h.deltaMs},
+				           {"xMedian", h.ratio} };
+				if (h.worstScope && h.worstScope[0])
+				{ e["worstScope"] = h.worstScope; e["worstScopeMs"] = h.worstScopeMs; }
+				if (h.gpuMs >= 0.0) e["gpuMs"] = h.gpuMs;
+				jh.push_back(std::move(e));
+			}
+			summary["hitches"]     = jh;
+			summary["hitchCount"]  = hitches.size();
+			summary["hitchNote"]   = "frames over 2x the median frame time, worst first "
+			                         "(max 64 listed); worstScope is the costliest depth-0 CPU scope";
+		}
+	}
 	// Honesty guard: on tile-deferred (TBDR / Apple Silicon) GPUs the per-encoder
 	// stage-boundary spans overlap — fragment/tile work drains together near frame
 	// end, so each pass's [startVertex,endFragment] window stretches to ≈ the whole
@@ -490,9 +559,31 @@ std::string EngineProfiler::dumpNow()
 		for (const auto& [name, n] : gpuModeCounts) modes[name] = n;
 		summary["gpuTimingModes"] = modes;
 	}
-	json cpuScopes = json::object();
-	for (const auto& [name, st] : cpuSummary) cpuScopes[name] = st.toJson();
-	summary["cpuScopes"] = cpuScopes;
+	// Per-scope aggregate, now carrying SELF time (inclusive minus direct children)
+	// and p95. Self time is what names the culprit: "Render 9 ms" only says the
+	// renderer is on the call chain, "Render self 8.6 ms" says the cost is its own.
+	{
+		const std::vector<HE::Prof::ScopeAggregate> aggregates = HE::Prof::aggregateScopes(m_frames);
+		json cpuScopes = json::object();
+		for (const HE::Prof::ScopeAggregate& a : aggregates)
+			cpuScopes[a.name] = { {"min", a.minMs}, {"avg", a.avgMs}, {"max", a.maxMs},
+			                      {"p95", a.p95Ms}, {"count", a.count},
+			                      {"totalMs", a.totalMs}, {"selfMs", a.selfMs},
+			                      {"depth", a.minDepth} };
+		summary["cpuScopes"] = cpuScopes;
+
+		// The ranking, pre-sorted by self time, so a reader (or a diff script) does
+		// not have to re-derive it from the object above.
+		json top = json::array();
+		size_t n = 0;
+		for (const HE::Prof::ScopeAggregate& a : aggregates)
+		{
+			if (n++ >= 20) break;
+			top.push_back({ {"scope", a.name}, {"selfMs", a.selfMs},
+			                {"totalMs", a.totalMs}, {"count", a.count} });
+		}
+		summary["topScopesBySelfTime"] = top;
+	}
 	if (!gpuSummary.empty())
 	{
 		json gpuPasses = json::object();
@@ -607,9 +698,12 @@ std::string EngineProfiler::dumpNow()
 		jf["stats"] = {
 			{"draws", s.drawCalls}, {"tris", s.triangles},
 			{"visible", s.visibleObjects}, {"total", s.totalObjects},
-			{"entities", s.entities}, {"lights", s.lights},
-			{"particles", s.particles}, {"gpuParticles", s.gpuParticles},
-			{"streamingInFlight", s.streamingInFlight},
+			{"entities", s.scene.entities}, {"lights", s.scene.lights},
+			{"particles", s.scene.particles}, {"emitters", s.scene.emitters},
+			{"gpuParticles", s.scene.gpuParticles},
+			{"rigidBodies", s.scene.rigidBodies}, {"audioSources", s.scene.audioSources},
+			{"scripts", s.scene.scripts},
+			{"streamingInFlight", s.scene.streamingInFlight},
 			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
 		};
 		frames.push_back(std::move(jf));

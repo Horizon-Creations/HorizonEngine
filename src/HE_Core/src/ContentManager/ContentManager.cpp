@@ -1084,6 +1084,12 @@ bool ContentManager::isAsyncPending(const std::string& relativePath) const
 	return m_pendingPaths.count(relativePath) > 0;
 }
 
+size_t ContentManager::asyncInFlightCount() const
+{
+	std::unique_lock<std::mutex> lock(m_pendingMutex);
+	return m_pendingPaths.size();
+}
+
 // ─── asyncProgress ────────────────────────────────────────────────────────────
 bool ContentManager::asyncProgress(const std::string& relativePath,
                                     std::uint64_t& bytesRead, std::uint64_t& bytesTotal) const
