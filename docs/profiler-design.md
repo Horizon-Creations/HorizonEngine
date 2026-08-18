@@ -268,6 +268,21 @@ Kein neues Vendoring: **ImPlot ist nicht im Baum** (`EditorDeps` hat nur EngineC
 
 **Tests:** 1738 Fälle grün, davon 15 neue (`test_profiler_stats.cpp`, `test_profiler_layout.cpp`) plus die erweiterten Profiler-Fälle. Alle Targets bauen.
 
+## Nachtrag v3.1 (2026-08-18) — aus dem ersten echten Capture gelernt
+
+Der erste 4867-Frame-Capture auf echter Hardware hat drei Sachen aufgedeckt, alle behoben:
+
+**1. Job-Namen.** Die zehn Worker-Lanes trugen ausschließlich `Job::Execute`, also eine Timeline darüber, *dass* Jobs liefen, und über sonst nichts. `ThreadPool::submit` und `parallel_for` nehmen jetzt einen Namen (`HE_PROFILE_SCOPE_DYN`, weil nur Tracys `ZoneScopedN` ein Literal braucht, `ProfileScope` nie). Benannt: `FrustumCull`, `ExtractMeshes`, `ExtractParticles`, `SkyEnvBake`, `AssetLoad`, `AssetLoadPak`, `AssetRefScan`, `EngineFolderRefresh`, `ContentSyncDrain`. **Der Zeiger muss statische Lebensdauer haben** (Spans speichern ihn und lesen ihn erst beim Dumpen/Zeichnen) — steht am Makro und an `submit`.
+
+**2. Dump-Kappung nach Zeit statt nach Lane.** Das Budget wurde Lane für Lane vergeben, die Main-Lane fraß mit 155k Spans alles, und *jede* Worker-Lane kam mit null Spans heraus. Das liest sich wie ein untätiger Thread-Pool. Jetzt bestimmt ein `nth_element` über alle Startzeiten einen gemeinsamen Schnitt (`summary.timelineCutoffNs`), jede Lane wird dort gekappt, `frameMarks` ebenso. Verschachtelung überlebt von selbst, weil ein Elternteil vor seinen Kindern startet.
+
+**3. Aufgenommene Captures ansehen.** Neu `Diagnostics/ProfilerCaptureFile.h/.cpp` (HE_Core, nicht Editor: nlohmann ist da, die Tests linken HorizonCore, ein Spiel-Viewer könnte es unverändert nutzen). `LoadedCapture::load()` parst einen Dump zurück in **dieselben** Strukturen, die eine Live-Aufnahme erzeugt, also läuft der Viewer durch alle fünf Tabs ohne eine Zeile zweiter Zeichencode.
+- **Lebensdauer:** `ProfScopeSample`/`ProfGpuPass`/`ProfThreadSpan` halten `const char*` mit statischer Annahme. Eine Datei hat keine Literale, deshalb besitzt `LoadedCapture` einen Interner (`std::deque<std::string>`, zeigerstabil) und ist nicht kopierbar.
+- **`summary` wird beim Laden ignoriert und alles neu gerechnet.** Ein v1-Dump ohne Statistikblock zeigt sich dadurch identisch zu einem aktuellen, und Datei und Panel können sich nicht widersprechen.
+- **Panel:** Knopf „Open Capture…" im Capture-Tab (SDL-Dialog mit panel-eigenem Ergebnis-Slot, nicht `ctx.dialogBridge` — den leert der Szenen-Handler vorher), Banner über der Tab-Leiste mit Datei, Auflösung, VSync und **GPU-Modus** samt Warnung, dass ein `detailed`-Capture ehrliche Per-Pass-Kosten und bedeutungslose FPS hat. Overview beschriftet die Kacheln dann als Median statt als Live-Wert, ein Klick im Frame-Graph öffnet den Frame. „Start Benchmark Capture" schaltet automatisch zurück auf live.
+- **Verifiziert am echten 30-MB-Dump:** 182 ms Ladezeit, 4867 Frames, 11 Lanes, und die neu gerechneten Werte (p50 16,70 / p95 28,21 / p99 31,28 / 1 % low 30,6 / Render self 82 352 ms) stimmen exakt mit der unabhängigen Auswertung derselben Datei überein.
+- Ein Dump von *vor* dem Zeitschnitt hat kein `timelineCutoffNs`. Der Viewer erkennt das und sagt „per Lane gekappt, leere Worker-Lanes heißen nicht geschrieben, nicht untätig" statt einen Schnitt von 0,0 ms zu behaupten.
+
 **Kosten der neuen Ansichten.** `snapshot()` und `timelineSnapshot()` kopieren tief (alle Frames mit ihren Scope-Vektoren, alle Lanes mit bis zu 262144 Spans). Drei Tabs wollen diese Daten, gezeichnet wird mit Editor-Framerate — pro Draw kopiert wären das Megabytes 60×/s, beim Timeline zusätzlich unter dem Lane-Mutex, gegen die schreibenden Worker. Deshalb liegt im Panel ein Cache: fertige Aufnahme einmal holen, laufende alle 250 ms, plus genau ein Refresh beim Stoppen. Der Profiler darf nicht bremsen, was er misst.
 
 **Bekannte Eigenheit (vor-v3, jetzt sichtbar):** „Capture Single Frame" ruft intern `doStart()` und leert damit `m_frames` — die vorherige Benchmark-Aufnahme ist danach weg, also auch Scopes-Tab und Hitch-Liste. Nicht neu, fällt nur jetzt auf. Reihenfolge deshalb: erst Benchmark auswerten, dann Einzelframe.

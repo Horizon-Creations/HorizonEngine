@@ -3,6 +3,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/GlobalState.h>
+#include <Diagnostics/ProfilerCaptureFile.h>
 #include <JobSystem/JobSystem.h>
 #include <Renderer/GpuPassAccumulator.h>
 
@@ -535,6 +536,127 @@ TEST_CASE("EngineProfiler timeline resets between captures and can be switched o
     prof.beginFrame(16.6);
     prof.consumeJustDumped(p);
     prof.setThreadTimelineEnabled(true);   // restore the default for later cases
+}
+
+TEST_CASE("A written dump loads back into the same structures the live views use")
+{
+    // The viewer reuses every existing view rather than re-implementing them, so
+    // what matters is that a loaded capture is indistinguishable in shape from a
+    // live one: same records, same close-ordered scopes, same lanes.
+    fs::path deploy = setupTempDeploy("roundtrip");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    info.backend = "RoundTripBackend";
+    info.width   = 1920;
+    info.height  = 1080;
+    info.vsync   = false;
+    prof.requestStart(info);
+
+    constexpr int kFrames = 6;
+    for (int i = 0; i < kFrames; ++i)
+    {
+        prof.beginFrame(16.0 + i);
+        {
+            HE_PROFILE_SCOPE_N("Outer");
+            { HE_PROFILE_SCOPE_N("Inner"); }
+        }
+        parallel_for(2048, [](size_t) {}, "RoundTripJob");
+        ProfRenderStats rs;
+        rs.drawCalls = 11; rs.triangles = 2222;
+        prof.setRenderStats(rs);
+        ProfSceneCounters sc;
+        sc.entities = 5; sc.lights = 3;
+        prof.setSceneCounters(sc);
+        prof.setGpuTimes(4.0, { {"Scene", 3.0, false}, {"Sky", 1.0, true} }, "detailed");
+        prof.endFrame();
+    }
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string dumpPath;
+    REQUIRE(prof.consumeJustDumped(dumpPath));
+    REQUIRE(fs::exists(dumpPath));
+
+    HE::Prof::LoadedCapture cap;
+    std::string err;
+    REQUIRE(cap.load(dumpPath, err));
+    CHECK(err.empty());
+
+    CHECK(cap.version == 2);
+    CHECK(cap.session.backend == "RoundTripBackend");
+    CHECK(cap.session.width == 1920);
+    CHECK_FALSE(cap.session.vsync);
+    REQUIRE(cap.frames.size() == kFrames);
+
+    // Frame payload survives, including the nesting depth self-time depends on.
+    const ProfFrameRecord& f0 = cap.frames.front();
+    CHECK(f0.deltaMs == doctest::Approx(16.0));
+    CHECK(f0.gpuFrameMs == doctest::Approx(4.0));
+    CHECK(std::string(f0.gpuTimingMode) == "detailed");
+    CHECK(f0.stats.drawCalls == 11);
+    CHECK(f0.stats.scene.entities == 5);
+    CHECK(f0.stats.scene.lights == 3);
+    bool sawOuter = false, sawInner = false;
+    for (const ProfScopeSample& s : f0.scopes)
+    {
+        if (std::string(s.name) == "Outer") { sawOuter = true; CHECK(s.depth == 0); }
+        if (std::string(s.name) == "Inner") { sawInner = true; CHECK(s.depth == 1); }
+    }
+    CHECK(sawOuter);
+    CHECK(sawInner);
+    // The approx flag is what stops an intra-encoder split being read as ground
+    // truth; it has to survive the trip.
+    bool sawApprox = false;
+    for (const ProfGpuPass& g : f0.gpuPasses)
+        if (std::string(g.name) == "Sky") { sawApprox = g.approx; }
+    CHECK(sawApprox);
+
+    // Lanes: the main thread plus at least one worker carrying the job's NAME,
+    // which is the whole reason the names were added.
+    bool sawMainLane = false, sawJobName = false;
+    for (const ProfThreadTimeline& lane : cap.threads)
+    {
+        if (lane.isMain) sawMainLane = true;
+        for (const ProfThreadSpan& s : lane.spans)
+            if (std::string(s.name) == "RoundTripJob") sawJobName = true;
+    }
+    CHECK(sawMainLane);
+    CHECK(sawJobName);
+    CHECK(cap.frameMarks.size() == kFrames);
+
+    // Derived views are recomputed on load, not read from the file's summary, so a
+    // v1 dump displays like a current one and the panel can never disagree with
+    // the file it is showing.
+    CHECK_FALSE(cap.aggregates.empty());
+    CHECK(cap.deltaStats.count == kFrames);
+    CHECK(cap.deltaStats.p50 > 0.0);
+    CHECK(cap.fps.avgFps > 0.0);
+    CHECK(cap.captureMs() > 0.0);
+    bool foundOuter = false;
+    for (const HE::Prof::ScopeAggregate& a : cap.aggregates)
+        if (a.name == "Outer")
+        {
+            foundOuter = true;
+            CHECK(a.count == kFrames);
+            CHECK(a.selfMs <= a.totalMs);   // Inner was subtracted, not double-counted
+        }
+    CHECK(foundOuter);
+
+    // Garbage in must fail cleanly and leave nothing behind, not half-load.
+    const fs::path junk = deploy / "not_a_dump.json";
+    { std::ofstream o(junk.string()); o << "{\"hello\":1}"; }
+    std::string err2;
+    CHECK_FALSE(cap.load(junk.string(), err2));
+    CHECK_FALSE(err2.empty());
+    CHECK(cap.frames.empty());
+    CHECK(cap.threads.empty());
+
+    std::string err3;
+    CHECK_FALSE(cap.load((deploy / "does_not_exist.json").string(), err3));
+    CHECK_FALSE(err3.empty());
+
+    he_test::removeAllQuiet(deploy);
 }
 
 TEST_CASE("EngineProfiler single-frame capture records exactly one frame, no dump")

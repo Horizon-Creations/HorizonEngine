@@ -10,6 +10,7 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/Log.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/EngineProfiler.cpp
+	src/Diagnostics/ProfilerCaptureFile.cpp
 	src/Diagnostics/CrashHandler.cpp
 	src/JobSystem/JobSystem.cpp
 	src/Platform/DynLib.cpp

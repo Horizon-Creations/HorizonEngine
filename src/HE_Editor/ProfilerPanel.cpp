@@ -3,6 +3,7 @@
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "EditorWidgets.h"               // WrapText
 #include "ProfilerLayout.h"
 #include "ProfilerWidgets.h"
+#include <Diagnostics/ProfilerCaptureFile.h>
 #include <Diagnostics/ProfilerStats.h>
 #include <imgui.h>
 #endif
@@ -51,8 +53,24 @@ struct PanelState
 	bool        haveSelectedFrame = false;
 	double      targetFps       = 60.0;   // the budget everything is coloured against
 	bool        showGpuGraph    = true;
+
+	// ── Viewing a recorded capture ──────────────────────────────────────────
+	// A loaded dump replaces the live profiler as the source for every analysis
+	// view. It is NOT copied into the profiler singleton: a capture on disk is a
+	// past run and must never be confused with what the engine is doing now, and
+	// the loaded strings are owned by the LoadedCapture itself.
+	HE::Prof::LoadedCapture loaded;
+	bool                    viewingLoaded = false;
+	std::string             loadError;
 };
 PanelState g_ui;
+
+// Result slot for the open-file dialog. Deliberately panel-local rather than the
+// shared ctx.dialogBridge, for the same reason CollabPanel keeps its own: the
+// bridge is drained by the scene/project handler in EditorUI, which runs before
+// this window draws and would take a chosen dump for a scene to open.
+std::string       g_pickedPath;
+std::atomic<bool> g_pickReady{ false };
 
 // ── Analysis cache ──────────────────────────────────────────────────────────
 // snapshot() and timelineSnapshot() both DEEP COPY — all captured frames with
@@ -99,6 +117,8 @@ bool cacheIsStale(EngineProfiler& prof, double now, double& lastRefreshField)
 // cannot feed these — it carries no scopes.
 const std::vector<ProfFrameRecord>& analysisFrames(EngineProfiler& prof)
 {
+	if (g_ui.viewingLoaded) return g_ui.loaded.frames;   // a recorded run never changes
+
 	const double now = ImGui::GetTime();
 	if (cacheIsStale(prof, now, g_cache.lastRefresh))
 	{
@@ -113,10 +133,26 @@ const std::vector<ProfFrameRecord>& analysisFrames(EngineProfiler& prof)
 	return g_cache.frames;
 }
 
+// Aggregates and hitches follow the same source as the frames. Calling
+// analysisFrames() first is what keeps the live cache in step; for a loaded
+// capture everything was computed once at load time and never changes.
+const std::vector<HE::Prof::ScopeAggregate>& analysisAggregates(EngineProfiler& prof)
+{
+	analysisFrames(prof);
+	return g_ui.viewingLoaded ? g_ui.loaded.aggregates : g_cache.aggregates;
+}
+
+const std::vector<HE::Prof::Hitch>& analysisHitches(EngineProfiler& prof)
+{
+	analysisFrames(prof);
+	return g_ui.viewingLoaded ? g_ui.loaded.hitches : g_cache.hitches;
+}
+
 // Same deal for the timeline, on its own timer: the Timeline tab is usually open
 // while a capture runs, and its copy is the expensive one.
 void refreshLanes(EngineProfiler& prof)
 {
+	if (g_ui.viewingLoaded) return;   // loaded lanes are fixed
 	const double now = ImGui::GetTime();
 	const bool   due = g_cache.lastLaneRefresh < 0.0 ||
 	                   !prof.isRecording() ||
@@ -170,51 +206,92 @@ void CountersGrid(uint32_t draws, uint32_t tris, uint32_t visible, uint32_t tota
 // ── Overview ────────────────────────────────────────────────────────────────
 void DrawOverview(EngineProfiler& prof)
 {
-	const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
-	if (live.empty()) { ImGui::TextDisabled("Collecting live data…"); return; }
+	// One tab, two sources. Live: the always-on ring, "cur" is this instant.
+	// Loaded: the recorded frames, and "cur" is the capture's median rather than a
+	// live reading — a recorded run has no "now", and showing its last frame as if
+	// it were current is how a viewer starts lying about a file.
+	std::vector<double> deltas;
+	std::vector<float>  bars, cpuSpark, gpuSpark;
+	bool   anyGpu = false;
+	double curDelta = 0.0, curCpu = 0.0, curGpu = -1.0;
+	uint32_t draws = 0, tris = 0, visible = 0, total = 0;
 
-	std::vector<double> deltas; deltas.reserve(live.size());
-	std::vector<float>  bars;   bars.reserve(live.size());
-	std::vector<float>  cpuSpark, gpuSpark;
-	bool anyGpu = false;
-	for (const ProfLiveFrame& f : live)
+	if (g_ui.viewingLoaded)
 	{
-		deltas.push_back(f.deltaMs);
-		bars.push_back(static_cast<float>(f.deltaMs));
-		cpuSpark.push_back(static_cast<float>(f.cpuFrameMs));
-		if (f.gpuFrameMs >= 0.0) { anyGpu = true; gpuSpark.push_back(static_cast<float>(f.gpuFrameMs)); }
+		const HE::Prof::LoadedCapture& lc = g_ui.loaded;
+		if (lc.frames.empty()) { ImGui::TextDisabled("This capture has no frames."); return; }
+		deltas.reserve(lc.frames.size()); bars.reserve(lc.frames.size());
+		for (const ProfFrameRecord& f : lc.frames)
+		{
+			deltas.push_back(f.deltaMs);
+			bars.push_back(static_cast<float>(f.deltaMs));
+			cpuSpark.push_back(static_cast<float>(f.cpuFrameMs));
+			if (f.gpuFrameMs >= 0.0) { anyGpu = true; gpuSpark.push_back(static_cast<float>(f.gpuFrameMs)); }
+		}
+		curDelta = lc.deltaStats.p50;
+		curCpu   = lc.cpuStats.p50;
+		curGpu   = lc.haveGpu ? lc.gpuStats.p50 : -1.0;
+		const ProfFrameRecord& mid = lc.frames[lc.frames.size() / 2];
+		draws = mid.stats.drawCalls; tris = mid.stats.triangles;
+		visible = mid.stats.visibleObjects; total = mid.stats.totalObjects;
 	}
-	const ProfLiveFrame&      cur  = live.back();
-	const HE::Prof::Percentiles pct = HE::Prof::computePercentiles(deltas);
-	const HE::Prof::FpsLows     low = HE::Prof::computeFpsLows(deltas);
+	else
+	{
+		const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
+		if (live.empty()) { ImGui::TextDisabled("Collecting live data…"); return; }
+		deltas.reserve(live.size()); bars.reserve(live.size());
+		for (const ProfLiveFrame& f : live)
+		{
+			deltas.push_back(f.deltaMs);
+			bars.push_back(static_cast<float>(f.deltaMs));
+			cpuSpark.push_back(static_cast<float>(f.cpuFrameMs));
+			if (f.gpuFrameMs >= 0.0) { anyGpu = true; gpuSpark.push_back(static_cast<float>(f.gpuFrameMs)); }
+		}
+		const ProfLiveFrame& lf = live.back();
+		curDelta = lf.deltaMs; curCpu = lf.cpuFrameMs; curGpu = lf.gpuFrameMs;
+		draws = lf.draws; tris = lf.triangles; visible = lf.visible; total = lf.total;
+	}
+
+	const HE::Prof::Percentiles pct = g_ui.viewingLoaded ? g_ui.loaded.deltaStats
+	                                                     : HE::Prof::computePercentiles(deltas);
+	const HE::Prof::FpsLows     low = g_ui.viewingLoaded ? g_ui.loaded.fps
+	                                                     : HE::Prof::computeFpsLows(deltas);
 
 	// ── Stat tiles ──────────────────────────────────────────────────────────
 	const float avail = ImGui::GetContentRegionAvail().x;
 	const float tileW = std::max(96.0f, (avail - ImGui::GetStyle().ItemSpacing.x * 3.0f) / 4.0f);
 	char v0[32], v1[32], v2[32], v3[32], s0[48], s1[48], s2[48], s3[48];
 
-	std::snprintf(v0, sizeof(v0), "%.0f", cur.deltaMs > 0.0 ? 1000.0 / cur.deltaMs : 0.0);
+	// Captions say WHICH number this is: on a loaded capture these are medians over
+	// the whole run, not a live reading, and a tile labelled the same either way
+	// would quietly invite reading a recorded median as the current frame rate.
+	const char* capFps   = g_ui.viewingLoaded ? "FPS (median)"   : "FPS";
+	const char* capFrame = g_ui.viewingLoaded ? "FRAME ms (p50)" : "FRAME ms";
+	const char* capCpu   = g_ui.viewingLoaded ? "CPU ms (p50)"   : "CPU ms";
+	const char* capGpu   = g_ui.viewingLoaded ? "GPU ms (p50)"   : "GPU ms";
+
+	std::snprintf(v0, sizeof(v0), "%.0f", curDelta > 0.0 ? 1000.0 / curDelta : 0.0);
 	std::snprintf(s0, sizeof(s0), "avg %.0f  ·  1%% low %.0f", low.avgFps, low.low1Fps);
-	std::snprintf(v1, sizeof(v1), "%.2f", cur.deltaMs);
+	std::snprintf(v1, sizeof(v1), "%.2f", curDelta);
 	std::snprintf(s1, sizeof(s1), "p95 %.2f  p99 %.2f", pct.p95, pct.p99);
-	std::snprintf(v2, sizeof(v2), "%.2f", cur.cpuFrameMs);
+	std::snprintf(v2, sizeof(v2), "%.2f", curCpu);
 	std::snprintf(s2, sizeof(s2), "frame loop");
-	if (cur.gpuFrameMs >= 0.0) std::snprintf(v3, sizeof(v3), "%.2f", cur.gpuFrameMs);
-	else                       std::snprintf(v3, sizeof(v3), "n/a");
-	std::snprintf(s3, sizeof(s3), cur.gpuFrameMs >= 0.0 ? "whole frame" : "backend has no timer");
+	if (curGpu >= 0.0) std::snprintf(v3, sizeof(v3), "%.2f", curGpu);
+	else               std::snprintf(v3, sizeof(v3), "n/a");
+	std::snprintf(s3, sizeof(s3), curGpu >= 0.0 ? "whole frame" : "backend has no timer");
 
 	// The FPS tile is coloured by the frame budget, so the headline number itself
 	// carries the verdict; the rest stay neutral rather than competing with it.
-	const ImVec4 fpsCol = cur.deltaMs <= budgetMs()          ? ImVec4(0.36f, 0.72f, 0.42f, 1.0f)
-	                    : cur.deltaMs <= budgetMs() * 2.0    ? ImVec4(0.90f, 0.68f, 0.24f, 1.0f)
-	                                                         : ImVec4(0.86f, 0.32f, 0.28f, 1.0f);
-	ProfilerWidgets::StatTile("FPS", v0, s0, {}, fpsCol, tileW);
+	const ImVec4 fpsCol = curDelta <= budgetMs()          ? ImVec4(0.36f, 0.72f, 0.42f, 1.0f)
+	                    : curDelta <= budgetMs() * 2.0    ? ImVec4(0.90f, 0.68f, 0.24f, 1.0f)
+	                                                      : ImVec4(0.86f, 0.32f, 0.28f, 1.0f);
+	ProfilerWidgets::StatTile(capFps, v0, s0, {}, fpsCol, tileW);
 	ImGui::SameLine();
-	ProfilerWidgets::StatTile("FRAME ms", v1, s1, bars, HE::Ed::Theme::TextHeading, tileW);
+	ProfilerWidgets::StatTile(capFrame, v1, s1, bars, HE::Ed::Theme::TextHeading, tileW);
 	ImGui::SameLine();
-	ProfilerWidgets::StatTile("CPU ms", v2, s2, cpuSpark, HE::Ed::Theme::Accent, tileW);
+	ProfilerWidgets::StatTile(capCpu, v2, s2, cpuSpark, HE::Ed::Theme::Accent, tileW);
 	ImGui::SameLine();
-	ProfilerWidgets::StatTile("GPU ms", v3, s3, gpuSpark, HE::Ed::Theme::AccentBright, tileW);
+	ProfilerWidgets::StatTile(capGpu, v3, s3, gpuSpark, HE::Ed::Theme::AccentBright, tileW);
 
 	// ── Budget ──────────────────────────────────────────────────────────────
 	ImGui::Spacing();
@@ -225,22 +302,42 @@ void DrawOverview(EngineProfiler& prof)
 	ImGui::SameLine();
 	ImGui::TextDisabled("budget %.2f ms/frame", budgetMs());
 
-	ProfilerWidgets::BudgetBar("CPU", cur.cpuFrameMs, budgetMs(), ImGui::GetContentRegionAvail().x);
-	if (cur.gpuFrameMs >= 0.0)
-		ProfilerWidgets::BudgetBar("GPU", cur.gpuFrameMs, budgetMs(), ImGui::GetContentRegionAvail().x);
+	ProfilerWidgets::BudgetBar("CPU", curCpu, budgetMs(), ImGui::GetContentRegionAvail().x);
+	if (curGpu >= 0.0)
+		ProfilerWidgets::BudgetBar("GPU", curGpu, budgetMs(), ImGui::GetContentRegionAvail().x);
 
 	// ── Frame-time graph ────────────────────────────────────────────────────
 	ImGui::Spacing();
 	ImGui::TextColored(HE::Ed::Theme::TextHeading, "Frame time");
 	int hovered = -1;
-	ProfilerWidgets::FrameGraph("##ftgraph", bars, budgetMs(), pct.p95, pct.p99, 90.0f, &hovered);
-	if (hovered >= 0 && hovered < static_cast<int>(live.size()))
+	// On a loaded capture a click selects the frame: the spike the reader can see
+	// is the frame they want opened in Frame Detail. Live, the ring's positions
+	// shift under the cursor every frame, so only the tooltip is offered.
+	const int clicked = ProfilerWidgets::FrameGraph("##ftgraph", bars, budgetMs(),
+	                                                pct.p95, pct.p99, 90.0f, &hovered);
+	if (g_ui.viewingLoaded)
 	{
-		const ProfLiveFrame& f = live[static_cast<size_t>(hovered)];
-		ImGui::SetTooltip("frame %.2f ms (%.0f FPS)\nCPU %.2f ms\nGPU %s\ndraws %u · tris %u",
-		                  f.deltaMs, f.deltaMs > 0.0 ? 1000.0 / f.deltaMs : 0.0, f.cpuFrameMs,
-		                  f.gpuFrameMs >= 0.0 ? std::to_string(f.gpuFrameMs).c_str() : "n/a",
-		                  f.draws, f.triangles);
+		const std::vector<ProfFrameRecord>& lf = g_ui.loaded.frames;
+		if (clicked >= 0 && clicked < static_cast<int>(lf.size()))
+		{
+			g_ui.selectedFrame     = lf[static_cast<size_t>(clicked)].index;
+			g_ui.haveSelectedFrame = true;
+		}
+		if (hovered >= 0 && hovered < static_cast<int>(lf.size()))
+		{
+			const ProfFrameRecord& f = lf[static_cast<size_t>(hovered)];
+			ImGui::SetTooltip("frame %llu — %.2f ms (%.0f FPS)\nCPU %.2f ms\nGPU %.2f ms\n"
+			                  "draws %u · tris %u\n(click to open in Frame Detail)",
+			                  static_cast<unsigned long long>(f.index), f.deltaMs,
+			                  f.deltaMs > 0.0 ? 1000.0 / f.deltaMs : 0.0, f.cpuFrameMs,
+			                  f.gpuFrameMs, f.stats.drawCalls, f.stats.triangles);
+		}
+	}
+	else if (hovered >= 0 && hovered < static_cast<int>(bars.size()))
+	{
+		ImGui::SetTooltip("frame %.2f ms (%.0f FPS)", static_cast<double>(bars[static_cast<size_t>(hovered)]),
+		                  bars[static_cast<size_t>(hovered)] > 0.0f
+		                      ? 1000.0 / static_cast<double>(bars[static_cast<size_t>(hovered)]) : 0.0);
 	}
 
 	if (anyGpu)
@@ -258,14 +355,19 @@ void DrawOverview(EngineProfiler& prof)
 
 	ImGui::Spacing();
 	ImGui::TextColored(HE::Ed::Theme::TextHeading, "Counters");
-	CountersGrid(cur.draws, cur.triangles, cur.visible, cur.total, prof.sceneCounters());
+	CountersGrid(draws, tris, visible, total,
+	             g_ui.viewingLoaded ? g_ui.loaded.frames[g_ui.loaded.frames.size() / 2].stats.scene
+	                                : prof.sceneCounters());
 }
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 void DrawTimeline(EngineProfiler& prof)
 {
 	refreshLanes(prof);
-	const std::vector<ProfThreadTimeline>& lanes = g_cache.lanes;
+	const bool loaded = g_ui.viewingLoaded;
+	const std::vector<ProfThreadTimeline>& lanes = loaded ? g_ui.loaded.threads : g_cache.lanes;
+	const std::vector<ProfFrameMark>&      marks = loaded ? g_ui.loaded.frameMarks : prof.frameMarks();
+	const std::vector<HE::Prof::LaneOccupancy>& occ = loaded ? g_ui.loaded.occupancy : g_cache.occupancy;
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Wheel = zoom, drag = pan. One lane per thread; rows are nesting depth. "
@@ -273,8 +375,29 @@ void DrawTimeline(EngineProfiler& prof)
 	}
 	if (ImGui::Button("Fit")) g_ui.timelineView = {};   // invalid → refit to the capture
 	ImGui::SameLine();
-	const size_t dropped = prof.timelineDroppedSpans();
-	if (dropped > 0)
+	// A loaded dump carries only as much timeline as the writer's budget allowed.
+	// Saying so is the whole point: a lane that stops halfway looks like a thread
+	// that went quiet, which is exactly the wrong reading.
+	if (loaded && g_ui.loaded.timelineTruncated)
+	{
+		EditorWidgets::WrapText wrap;
+		if (g_ui.loaded.timelineCutoffKnown)
+			ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f),
+			                   "Timeline in this file stops at %.1f ms (%llu spans omitted when it "
+			                   "was written). Every lane is cut at the same instant.",
+			                   static_cast<double>(g_ui.loaded.timelineCutoffNs) * 1e-6,
+			                   static_cast<unsigned long long>(g_ui.loaded.timelineOmitted));
+		else
+			// Written before the dump cut by time: the budget was spent lane by
+			// lane, so an empty worker lane here means "never written", NOT "idle".
+			// Saying which kind of truncation this is decides how the view is read.
+			ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f),
+			                   "Older dump: its timeline was truncated per lane (%llu spans omitted), "
+			                   "so empty worker lanes mean 'not written', not 'idle'. Re-record to get "
+			                   "a timeline cut at one shared instant.",
+			                   static_cast<unsigned long long>(g_ui.loaded.timelineOmitted));
+	}
+	else if (const size_t dropped = loaded ? 0 : prof.timelineDroppedSpans(); dropped > 0)
 	{
 		// Truncation is stated, never silent: a capped lane looks exactly like an
 		// idle one, and reading "this worker did nothing" off a full buffer is the
@@ -289,7 +412,7 @@ void DrawTimeline(EngineProfiler& prof)
 		ImGui::TextDisabled("%zu lanes · %zu spans", lanes.size(), spans);
 	}
 
-	ProfilerWidgets::TimelineView("##timeline", lanes, prof.frameMarks(), g_cache.occupancy,
+	ProfilerWidgets::TimelineView("##timeline", lanes, marks, occ,
 	                              g_ui.timelineView,
 	                              std::max(160.0f, ImGui::GetContentRegionAvail().y - 4.0f));
 }
@@ -306,7 +429,7 @@ void DrawScopes(EngineProfiler& prof)
 		return;
 	}
 
-	const std::vector<HE::Prof::ScopeAggregate>& agg = g_cache.aggregates;
+	const std::vector<HE::Prof::ScopeAggregate>& agg = analysisAggregates(prof);
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("%zu frames. Self = time in the scope's own body, excluding anything it "
@@ -486,7 +609,7 @@ void DrawFrameDetail(const ProfFrameRecord& f)
 void DrawHitches(EngineProfiler& prof)
 {
 	if (analysisFrames(prof).empty()) return;
-	const std::vector<HE::Prof::Hitch>& hitches = g_cache.hitches;
+	const std::vector<HE::Prof::Hitch>& hitches = analysisHitches(prof);
 
 	ImGui::Separator();
 	ImGui::TextColored(HE::Ed::Theme::TextHeading, "Hitches");
@@ -530,6 +653,87 @@ void DrawHitches(EngineProfiler& prof)
 	}
 	ImGui::EndTable();
 }
+
+// ── Loaded-capture banner ───────────────────────────────────────────────────
+// Drawn above the tab bar, so no tab can be read as live data by accident. It
+// carries the things that change how every number below it must be read: which
+// file, what resolution, whether vsync was on, and which GPU-timing mode ran.
+void DrawLoadedBanner()
+{
+	const HE::Prof::LoadedCapture& lc = g_ui.loaded;
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.20f, 0.16f, 0.06f, 0.55f));
+	ImGui::BeginChild("##loadedBanner", ImVec2(0, ImGui::GetTextLineHeight() * 3.6f), true);
+	{
+		EditorWidgets::WrapText wrap;
+		ImGui::TextColored(HE::Ed::Theme::AccentBright, "Viewing recorded capture: %s",
+		                   lc.fileName.c_str());
+		ImGui::TextDisabled("%s · %ux%u · %zu frames · vsync %s%s",
+		                    lc.session.backend.c_str(), lc.session.width, lc.session.height,
+		                    lc.frames.size(), lc.session.vsync ? "ON" : "off",
+		                    lc.version < 2 ? " · v1 dump (no thread timeline)" : "");
+		// The mode decides whether the per-pass GPU numbers may be summed, and
+		// whether the frame times mean anything at all. Detailed serializes the
+		// GPU, so a capture taken that way has honest per-pass costs and
+		// meaningless FPS — worth saying once, at the top, for the whole file.
+		if (!lc.gpuTimingModes.empty())
+		{
+			std::string modes;
+			for (const auto& [name, n] : lc.gpuTimingModes)
+			{
+				if (!modes.empty()) modes += ", ";
+				modes += name + " (" + std::to_string(n) + " frames)";
+			}
+			const bool detailed = lc.gpuTimingModes.count("detailed") > 0;
+			if (detailed)
+				ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.2f, 1.0f),
+				                   "GPU mode: %s — the GPU was serialized, so per-pass costs are "
+				                   "reliable but frame times and FPS are NOT shipping numbers.",
+				                   modes.c_str());
+			else
+				ImGui::TextDisabled("GPU mode: %s", modes.c_str());
+		}
+	}
+	ImGui::EndChild();
+	ImGui::PopStyleColor();
+	if (ImGui::Button("Back to live"))
+	{
+		g_ui.viewingLoaded     = false;
+		g_ui.haveSelectedFrame = false;
+		g_ui.timelineView      = {};
+		g_cache.primed         = false;      // force the live cache to refill
+		g_cache.lastLaneRefresh = -1.0;
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s", lc.path.c_str());
+	ImGui::Separator();
+}
+
+// Drain the open-file dialog's result and parse it. Called once per frame from
+// the window body so the parse happens on the main thread, not in the SDL callback.
+void PollPendingLoad()
+{
+	if (!g_pickReady.exchange(false, std::memory_order_acq_rel)) return;
+	if (g_pickedPath.empty()) return;
+
+	// Synchronous parse. A 30 MB dump takes about a second, which is a visible
+	// hitch but happens once, on an explicit click, in a diagnostics panel.
+	// Threading it would mean owning the interner across threads for no real gain.
+	std::string err;
+	if (g_ui.loaded.load(g_pickedPath, err))
+	{
+		g_ui.viewingLoaded     = true;
+		g_ui.loadError.clear();
+		g_ui.haveSelectedFrame = false;
+		g_ui.timelineView      = {};   // refit to the loaded capture's extent
+	}
+	else
+	{
+		g_ui.loadError = err;
+		g_ui.viewingLoaded = false;
+		HE_LOG_ERROR(Editor, "%s", ("Profiler: " + err).c_str());
+	}
+	g_pickedPath.clear();
+}
 } // namespace
 #endif // HE_IMGUI_ENABLED
 
@@ -544,6 +748,9 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
     // Feed the live HUD only while the window is actually visible (not collapsed).
     prof.setLiveEnabled(visible);
     if (!visible) { ImGui::End(); return; }
+
+    PollPendingLoad();
+    if (g_ui.viewingLoaded) DrawLoadedBanner();
 
     if (ImGui::BeginTabBar("##profTabs"))
     {
@@ -571,7 +778,14 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
             else
             {
                 if (ImGui::Button("Start Benchmark Capture  (F9)", ImVec2(-1, 0)) && ctx.toggleProfilerCapture)
+                {
+                    // Recording something new means you want to look at the new
+                    // thing: leaving a loaded file in front of a running capture
+                    // is how a stale file gets read as this run's result.
+                    g_ui.viewingLoaded     = false;
+                    g_ui.haveSelectedFrame = false;
                     ctx.toggleProfilerCapture();
+                }
                 ImGui::TextDisabled("Benchmark = vsync-off multi-frame capture → JSON dump.");
 
                 // Single-frame capture: one frame in full detail (forces detailed GPU),
@@ -622,6 +836,38 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
                                 : (ctx.globalState ? ctx.globalState->getDumpsDir() : std::string("(starts on first capture)"));
                 ImGui::TextDisabled("%s", dir.c_str());
             }
+
+            // ── Open a recorded capture ─────────────────────────────────────
+            // Until now a dump could only be read as raw JSON outside the engine,
+            // which is a strange place to end up for a tool whose whole job is
+            // showing this data. Loading one puts it through the same five tabs.
+            ImGui::Separator();
+            if (ImGui::Button("Open Capture..."))
+            {
+                static SDL_DialogFileFilter filters[] = {
+                    { "Profiler capture", "json" },
+                };
+                std::string dir = !prof.dumpsDir().empty()
+                                ? prof.dumpsDir()
+                                : (ctx.globalState ? ctx.globalState->getDumpsDir() : std::string());
+                SDL_ShowOpenFileDialog(
+                    [](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+                    {
+                        // Panel-local slot, not ctx.dialogBridge — that one is
+                        // drained by the scene/project handler in EditorUI, which
+                        // runs before this window draws and would take a chosen
+                        // dump for a scene to open.
+                        if (filelist && filelist[0]) g_pickedPath = filelist[0];
+                        g_pickReady.store(true, std::memory_order_release);
+                    },
+                    nullptr,
+                    ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+                    filters, 1, dir.empty() ? nullptr : dir.c_str(), false);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("View a dump from a previous run in these tabs.");
+            if (!g_ui.loadError.empty())
+                ImGui::TextColored(ImVec4(0.86f, 0.32f, 0.28f, 1.0f), "%s", g_ui.loadError.c_str());
 
             DrawHitches(prof);
             ImGui::EndTabItem();
