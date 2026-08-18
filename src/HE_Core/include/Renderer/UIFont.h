@@ -40,6 +40,14 @@ struct BakedUIFont
 // The engine-wide default UI font (Roboto Condensed Bold), baked lazily.
 HE_API const BakedUIFont& sharedUIFont();
 
+// The same font baked at an arbitrary pixel size, for callers that draw it at a
+// FIXED small size and would otherwise scale the 64 px shared atlas down — which
+// is where text turns mushy. Not cached: this is for the handful of one-off
+// consumers (the startup splash) that bake once and keep the result.
+// The TTF bytes stay private to this translation unit; nobody else has to
+// re-embed the font or pull in a second stb_truetype implementation.
+HE_API BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH);
+
 // ── Per-element font cache ────────────────────────────────────────────────────
 // Bakes imported Font assets (TTF bytes) at a given pixel size and hands the
 // renderer a stable atlas key it uploads once. Key 0 == the shared default font.

@@ -49,6 +49,16 @@ const BakedUIFont& sharedUIFont()
     return s_font;
 }
 
+BakedUIFont bakeDefaultUIFont(float bakePx, int atlasW, int atlasH)
+{
+    BakedUIFont f;
+    f.bakePx = std::clamp(bakePx, 6.0f, 256.0f);
+    f.atlasW = std::clamp(atlasW, 64, 4096);
+    f.atlasH = std::clamp(atlasH, 64, 4096);
+    bakeInto(Roboto_data, f);
+    return f;
+}
+
 namespace UIFontCache
 {
     namespace

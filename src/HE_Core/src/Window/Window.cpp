@@ -39,6 +39,7 @@ namespace HE
 
         // Choose SDL window flags and set GL attributes only for OpenGL
         SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
+        if (props.startHidden) flags |= SDL_WINDOW_HIDDEN;
         switch (props.api)
         {
         case RendererBackend::OpenGL:
@@ -224,6 +225,16 @@ namespace HE
     void Window::SetBorderless(bool borderless)
     {
         if (m_window) SDL_SetWindowBordered(m_window, !borderless);
+    }
+
+    void Window::Show()
+    {
+        if (!m_window) return;
+        SDL_ShowWindow(m_window);
+        // Raise as well as show: the splash it was hidden behind was
+        // always-on-top, and on macOS the newly shown window does not
+        // necessarily come forward on its own.
+        SDL_RaiseWindow(m_window);
     }
 
     bool        Window::ShouldClose()    const { return m_shouldClose; }

@@ -21,6 +21,13 @@ namespace HE
         // Window::Init uses this to set the correct SDL window flags
         // and to skip GL context creation for D3D / Vulkan.
         RendererBackend api    = RendererBackend::OpenGL;
+        // Create the window without showing it, so the caller decides when it
+        // first appears. Used by the startup splash: the primary window exists
+        // (the renderer needs a surface to initialise against) for a full second
+        // before there is anything drawn in it, and an empty black rectangle in
+        // front of the splash is precisely what the splash is there to avoid.
+        // Application::Run shows it once OnInit returns.
+        bool            startHidden = false;
     };
 
     class HE_API Window
@@ -42,6 +49,9 @@ namespace HE
         void        SetVSync(bool enabled);
         void        SetFullscreen(bool fullscreen);
         void        SetBorderless(bool borderless);
+        // Reveal a window created with WindowProps::startHidden, and put it in
+        // front — the splash it was hiding behind was always-on-top.
+        void        Show();
 
         bool        ShouldClose() const;
         // Veto a close request that PollEvents() already registered this frame.

@@ -1,5 +1,6 @@
 add_library(HorizonCore SHARED
 	src/Application/Application.cpp
+	src/Application/SplashScreen.cpp
 	src/Application/GameLoop.cpp
 	src/Application/GameLogicLoader.cpp
 	src/Application/Input.cpp

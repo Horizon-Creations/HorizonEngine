@@ -183,6 +183,21 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 		else if (s == "D3D11")               cfg.backend = HE::RendererBackend::D3D11;
 		else if (s == "D3D12")               cfg.backend = HE::RendererBackend::D3D12;
 	}
+
+	// ── Startup splash ──────────────────────────────────────────────────────
+	// Same HC_Logo.png the Project Hub and the macOS menu bar load, from the
+	// EditorDeps tree the post-build step drops next to the executable.
+	cfg.splash.title    = "Horizon Engine Editor";
+	cfg.splash.subtitle = HE_VERSION_FULL;
+	{
+		const char* basePath = SDL_GetBasePath();
+		cfg.splash.logoPath = std::string(basePath ? basePath : "") + "Images/HC_Logo.png";
+	}
+	// A headless dump run has nobody to show it to, and on CI there may be no
+	// display to put it on at all.
+	if (const char* p = std::getenv("HE_DUMP_PATH"); p && *p)
+		cfg.splash.enabled = false;
+
 	return cfg;
 }
 
@@ -703,6 +718,7 @@ void EditorApplication::OnInit()
 			("EditorApplication: frame dump armed → " + m_dumpPath).c_str());
 	}
 #ifdef HE_IMGUI_ENABLED
+	splashStatus("Building the editor interface", 0.45f);
 	HE_LOG_INFO(Editor, "%s", "EditorApplication::OnInit — initialising ImGui");
 	m_vsync = GetConfig().windowprops.vsync;
 	IMGUI_CHECKVERSION();
@@ -1151,6 +1167,7 @@ void EditorApplication::OnInit()
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
+	splashStatus("Loading icons", 0.6f);
 	// ── Load HC_Logo ──────────────────────────────────────────────────────────
 	{
 		const char* basePath = SDL_GetBasePath();
@@ -1267,6 +1284,7 @@ void EditorApplication::OnInit()
 		}
 	}
 
+	splashStatus("Creating the world", 0.7f);
 	// Create the editor world and register it with the base Application
 	m_editorWorld = std::make_unique<HorizonWorld>();
 	// Route the world's HorizonCode through the app-wide runtime so widgets, the
@@ -1380,6 +1398,9 @@ void EditorApplication::OnInit()
 			}
 			// Index every .hasset's (UUID → path) so scene component references
 			// (mesh/material UUIDs) resolve after a reload without a bulk preload.
+			// (splashStatus is a no-op once the editor is up — this callback also
+			// runs every time a project is opened later.)
+			splashStatus("Indexing project content", 0.8f);
 			const size_t indexed = contentManager().scanContentDirectory();
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: indexed " + std::to_string(indexed) + " content assets").c_str());
@@ -1410,12 +1431,15 @@ void EditorApplication::OnInit()
 		m_currentScenePath.clear();
 		if (!sceneAbsPath.empty())
 		{
+			splashStatus("Loading scene " +
+			             std::filesystem::path(sceneAbsPath).stem().string(), 0.9f);
 			SceneSerializer serializer;
 			bool ok = serializer.load(*m_editorWorld, sceneAbsPath, SerializeFormat::JSON);
 			if (ok)
 			{
 				m_currentScenePath = sceneAbsPath;
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
 				HE_LOG_INFO(Editor, "%s",
 					("EditorApplication: startup scene loaded from " + sceneAbsPath).c_str());
@@ -1437,6 +1461,9 @@ void EditorApplication::OnInit()
 	// If a project was previously opened, load it now (triggers the callback above)
 	if (!m_globalState->getLastProjectPath().empty())
 	{
+		splashStatus("Opening " +
+		             std::filesystem::path(m_globalState->getLastProjectPath())
+		                 .stem().string(), 0.75f);
 		if (m_projectManager.loadProject(m_globalState->getLastProjectPath()))
 		{
 			m_projectLoaded         = true;

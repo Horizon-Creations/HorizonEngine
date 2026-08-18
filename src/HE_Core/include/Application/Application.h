@@ -4,6 +4,7 @@
 #include "Application/GameLoop.h"
 #include "Application/GameLogicLoader.h"
 #include "Application/Input.h"
+#include "Application/SplashScreen.h"
 #include "Window/Window.h"
 #include "Renderer/IRenderer.h"
 #include "Renderer/RendererFactory.h"
@@ -26,6 +27,13 @@ namespace HE
 		HE::RendererBackend backend = HE::RendererBackend::OpenGL;
 
 		HE::WindowProps windowprops;
+
+		// The little branded window that stands in for the app while it starts.
+		// Leave `enabled` false (the default is on, but with no title and no
+		// logo path it draws an empty panel) to start without one. Paths are
+		// supplied by the application, not discovered here — HorizonCore has no
+		// business knowing where an editor keeps its artwork.
+		HE::SplashConfig splash;
 
 		// GameLoop tuning
 		float    fixedTimestep = 1.0f / 60.0f;
@@ -73,6 +81,20 @@ namespace HE
 		// Override to supply a concrete renderer. Called once before OnInit().
 		// Link against HorizonRendering and use RendererFactory::Create() here.
 		virtual std::unique_ptr<IRenderer> CreateRenderer() { return nullptr; }
+
+		// ── Startup splash ─────────────────────────────────────────────────
+		// Name the step OnInit is about to run, for the splash window. Free
+		// after the splash closes (and when there never was one), so callers do
+		// not have to guard it. `progress` is 0..1; negative leaves the bar.
+		//
+		// The steps Run() owns — window, renderer, "starting" — are reported
+		// here; a subclass only has to describe its own OnInit. Keep the text
+		// short and in the present participle ("Loading project"): it is a
+		// caption, not a log line.
+		void splashStatus(const std::string& text, float progress = -1.0f)
+		{
+			m_splash.setStatus(text, progress);
+		}
 
 		// ── Engine systems exposed to subclasses ───────────────────────────
 		Window*          window()       const { return m_window.get(); }
@@ -129,12 +151,19 @@ namespace HE
 		static constexpr uint64_t  kHitchWarmupFrames = 10;
 
 	private:
+		// Takes the splash down and puts the engine's own GL context back —
+		// destroying the splash's 2D renderer can leave no context current.
+		void closeSplash();
+
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture
 		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
 		std::unique_ptr<Window>    m_window;
 		std::unique_ptr<IRenderer> m_renderer;
+		// Opened at the very top of Run(), closed before the main loop. A
+		// closed splash swallows setStatus, so splashStatus() stays callable.
+		SplashScreen               m_splash;
 		Input                      m_input;
 		GameLoop                   m_loop;
 		GameLogicLoader            m_logicLoader;

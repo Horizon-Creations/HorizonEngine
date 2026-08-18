@@ -61,6 +61,26 @@ namespace HE
 		HE::Log::closeLogFile();
 	}
 
+	void Application::closeSplash()
+	{
+		if (!m_splash.isOpen()) return;
+		const bool wasGL = m_splash.usedGL();
+		m_splash.close();
+		// Destroying the splash's 2D renderer destroys whatever context it made
+		// current, and on the OpenGL backend that can leave NO context bound —
+		// the engine's next GL call would then go nowhere. Re-binding ours is
+		// unconditional rather than gated on wasGL: on the platforms without a
+		// native framebuffer the "software" renderer still reaches GL through
+		// SDL's texture-framebuffer fallback, and it does not say so.
+		if (m_window && m_window->GetGLContext())
+		{
+			SDL_GL_MakeCurrent(m_window->GetNativeWindow(),
+			                   static_cast<SDL_GLContext>(m_window->GetGLContext()));
+			if (wasGL)
+				HE_LOG_INFO(Core, "%s", "Splash closed — GL context restored");
+		}
+	}
+
 	int Application::Run(int argc, char** argv)
 	{
 		if (argc > 1 && argv)
@@ -81,8 +101,18 @@ namespace HE
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
+		// The splash goes up before anything else can take a second: on this
+		// machine the Metal renderer alone needs ~1.2 s (a Debug build ~80 s),
+		// and until now that time was spent staring at an empty window.
+		m_splash.open(cfg.splash);
+		m_splash.setStatus("Opening window", 0.05f);
+
 		WindowProps wp = cfg.windowprops;
 		wp.api = cfg.backend;
+		// Hold the primary window back while the splash is up. Nothing draws
+		// into it until the first frame anyway, and the renderer initialises
+		// against a hidden window just as well as a visible one.
+		wp.startHidden = wp.startHidden || m_splash.isOpen();
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
@@ -142,6 +172,7 @@ namespace HE
 			default: break;
 		}
 
+		m_splash.setStatus("Initialising renderer", 0.15f);
 		m_renderer = CreateRenderer();
 		try
 		{
@@ -162,13 +193,22 @@ namespace HE
 		}
 		catch (const std::exception& e)
 		{
+			// Before the message box, not after: the splash is always-on-top and
+			// would sit squarely over the one dialog that explains why there is
+			// no editor. RAII would take it down too late.
+			closeSplash();
 			HE_LOG_CRIT(Core, "%s", e.what());
 			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Renderer Init Failed", e.what(), nullptr);
 			return 1;
 		}
 
+		m_splash.setStatus("Starting up", 0.35f);
 		OnInit();
 		HE_LOG_INFO(Core, "%s", "OnInit complete — entering main loop");
+
+		m_splash.setStatus("Ready", 1.0f);
+		closeSplash();
+		if (wp.startHidden) m_window->Show();
 
 		m_running = true;
 		m_vsyncEnabled = cfg.windowprops.vsync;
