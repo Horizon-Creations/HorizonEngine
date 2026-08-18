@@ -90,6 +90,20 @@ ThreadCapture& threadCapture(bool isMain)
 	return *tls;
 }
 
+// Drop buffers whose owning thread has exited. A live thread holds a second
+// reference from its thread_local, so use_count()==1 means the registry is the
+// only owner left and nothing will ever touch that buffer again — its spans
+// would otherwise pin up to a quarter-million entries for the rest of the
+// process. Called at capture start, where a copy is being thrown away anyway.
+void pruneDeadThreadBuffers()
+{
+	std::lock_guard<std::mutex> lk(registryMutex());
+	auto& v = registry();
+	v.erase(std::remove_if(v.begin(), v.end(),
+	                       [](const std::shared_ptr<ThreadCapture>& p) { return p.use_count() == 1; }),
+	        v.end());
+}
+
 // Drop everything from an earlier capture. Called on first touch in a new
 // generation so a worker that slept through the previous capture starts clean.
 void resetIfStale(ThreadCapture& tc, uint64_t generation)
@@ -152,6 +166,7 @@ void EngineProfiler::doStart()
 	// stack; scopes from any other thread are ignored. Set before publishing
 	// m_recording so worker threads that observe recording also see this id.
 	m_captureThread  = std::this_thread::get_id();
+	pruneDeadThreadBuffers();
 	// Everything a worker reads without its own synchronisation — m_sessionStartNs,
 	// m_captureThread, the generation — is written ABOVE this release store, and a
 	// worker only reads it after the acquire load in beginScope. That edge is the

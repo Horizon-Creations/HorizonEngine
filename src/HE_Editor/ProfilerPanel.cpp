@@ -44,17 +44,97 @@ namespace
 struct PanelState
 {
 	L::TimeView timelineView;
-	int         selectedFrame = -1;     // index into the captured frames, -1 = latest
-	double      targetFps     = 60.0;   // the budget everything is coloured against
-	bool        showGpuGraph  = true;
+	// The frame's own index, NOT its position in the snapshot: while a capture is
+	// recording, the ring drops the oldest frames and every position shifts under
+	// the selection. Resolved to a position at draw time.
+	uint64_t    selectedFrame    = 0;
+	bool        haveSelectedFrame = false;
+	double      targetFps       = 60.0;   // the budget everything is coloured against
+	bool        showGpuGraph    = true;
 };
 PanelState g_ui;
 
+// ── Analysis cache ──────────────────────────────────────────────────────────
+// snapshot() and timelineSnapshot() both DEEP COPY — all captured frames with
+// their scope vectors, every thread lane with up to a quarter-million spans. Three
+// tabs want that data, and drawing runs at editor frame rate, so calling them per
+// draw would copy megabytes 60x a second and (for the timeline) hold each lane's
+// mutex against the worker threads still writing into it: the profiler would
+// visibly slow down the thing it is measuring.
+//
+// So the copies happen on change, not on draw. A finished capture is fetched once
+// (the frame count stops moving); a running one refreshes on a slow timer, which
+// is plenty for a view of thousands of frames.
+struct AnalysisCache
+{
+	size_t                                framesSeen  = 0;
+	bool                                  wasRecording = false;
+	bool                                  primed      = false;
+	double                                lastRefresh = -1.0;
+	std::vector<ProfFrameRecord>          frames;
+	std::vector<HE::Prof::ScopeAggregate> aggregates;
+	std::vector<HE::Prof::Hitch>          hitches;
+
+	std::vector<ProfThreadTimeline>            lanes;
+	std::vector<HE::Prof::LaneOccupancy>       occupancy;
+	double                                lastLaneRefresh = -1.0;
+};
+AnalysisCache g_cache;
+
+constexpr double kRefreshSeconds = 0.25;   // while recording; instant otherwise
+
 double budgetMs() { return g_ui.targetFps > 0.0 ? 1000.0 / g_ui.targetFps : 16.666; }
 
-// Frames the analysis views work on: a finished benchmark capture if there is one,
-// otherwise nothing (the live ring has no scopes, so it cannot feed these).
-std::vector<ProfFrameRecord> analysisFrames(EngineProfiler& prof) { return prof.snapshot(); }
+bool cacheIsStale(EngineProfiler& prof, double now, double& lastRefreshField)
+{
+	const bool   recording = prof.isRecording();
+	const size_t count     = prof.recordedFrames();
+	if (!g_cache.primed)                     return true;
+	if (count != g_cache.framesSeen)         return recording ? (now - lastRefreshField >= kRefreshSeconds) : true;
+	if (recording != g_cache.wasRecording)   return true;   // capture just stopped: refresh once, exactly
+	return false;
+}
+
+// Frames the analysis views work on: the captured benchmark frames. The live ring
+// cannot feed these — it carries no scopes.
+const std::vector<ProfFrameRecord>& analysisFrames(EngineProfiler& prof)
+{
+	const double now = ImGui::GetTime();
+	if (cacheIsStale(prof, now, g_cache.lastRefresh))
+	{
+		g_cache.frames       = prof.snapshot();
+		g_cache.aggregates   = HE::Prof::aggregateScopes(g_cache.frames);
+		g_cache.hitches      = HE::Prof::findHitches(g_cache.frames);
+		g_cache.framesSeen   = prof.recordedFrames();
+		g_cache.wasRecording = prof.isRecording();
+		g_cache.lastRefresh  = now;
+		g_cache.primed       = true;
+	}
+	return g_cache.frames;
+}
+
+// Same deal for the timeline, on its own timer: the Timeline tab is usually open
+// while a capture runs, and its copy is the expensive one.
+void refreshLanes(EngineProfiler& prof)
+{
+	const double now = ImGui::GetTime();
+	const bool   due = g_cache.lastLaneRefresh < 0.0 ||
+	                   !prof.isRecording() ||
+	                   (now - g_cache.lastLaneRefresh) >= kRefreshSeconds;
+	if (!due) return;
+	// Not recording: only re-copy when the capture size actually changed, so an
+	// idle panel sitting on a finished capture costs nothing at all.
+	if (!prof.isRecording() && g_cache.lastLaneRefresh >= 0.0 &&
+	    g_cache.framesSeen == prof.recordedFrames() && !g_cache.lanes.empty())
+		return;
+
+	g_cache.lanes = prof.timelineSnapshot();
+	double captureMs = 0.0;
+	if (!prof.frameMarks().empty())
+		captureMs = static_cast<double>(prof.frameMarks().back().endNs) * 1e-6;
+	g_cache.occupancy = HE::Prof::laneOccupancy(g_cache.lanes, captureMs);
+	g_cache.lastLaneRefresh = now;
+}
 
 void CountersGrid(uint32_t draws, uint32_t tris, uint32_t visible, uint32_t total,
                   const ProfSceneCounters& sc)
@@ -184,7 +264,8 @@ void DrawOverview(EngineProfiler& prof)
 // ── Timeline ────────────────────────────────────────────────────────────────
 void DrawTimeline(EngineProfiler& prof)
 {
-	const std::vector<ProfThreadTimeline> lanes = prof.timelineSnapshot();
+	refreshLanes(prof);
+	const std::vector<ProfThreadTimeline>& lanes = g_cache.lanes;
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("Wheel = zoom, drag = pan. One lane per thread; rows are nesting depth. "
@@ -208,14 +289,7 @@ void DrawTimeline(EngineProfiler& prof)
 		ImGui::TextDisabled("%zu lanes · %zu spans", lanes.size(), spans);
 	}
 
-	// Capture wall time for the utilisation column: the last frame mark's end is
-	// the honest denominator (the timeline axis starts at capture start = 0).
-	double captureMs = 0.0;
-	if (!prof.frameMarks().empty())
-		captureMs = static_cast<double>(prof.frameMarks().back().endNs) * 1e-6;
-	const std::vector<HE::Prof::LaneOccupancy> occ = HE::Prof::laneOccupancy(lanes, captureMs);
-
-	ProfilerWidgets::TimelineView("##timeline", lanes, prof.frameMarks(), occ,
+	ProfilerWidgets::TimelineView("##timeline", lanes, prof.frameMarks(), g_cache.occupancy,
 	                              g_ui.timelineView,
 	                              std::max(160.0f, ImGui::GetContentRegionAvail().y - 4.0f));
 }
@@ -223,7 +297,7 @@ void DrawTimeline(EngineProfiler& prof)
 // ── Scopes table ────────────────────────────────────────────────────────────
 void DrawScopes(EngineProfiler& prof)
 {
-	const std::vector<ProfFrameRecord> frames = analysisFrames(prof);
+	const std::vector<ProfFrameRecord>& frames = analysisFrames(prof);
 	if (frames.empty())
 	{
 		EditorWidgets::WrapText wrap;
@@ -232,7 +306,7 @@ void DrawScopes(EngineProfiler& prof)
 		return;
 	}
 
-	const std::vector<HE::Prof::ScopeAggregate> agg = HE::Prof::aggregateScopes(frames);
+	const std::vector<HE::Prof::ScopeAggregate>& agg = g_cache.aggregates;
 	{
 		EditorWidgets::WrapText wrap;
 		ImGui::TextDisabled("%zu frames. Self = time in the scope's own body, excluding anything it "
@@ -411,9 +485,8 @@ void DrawFrameDetail(const ProfFrameRecord& f)
 // ── Hitch list (Capture tab) ────────────────────────────────────────────────
 void DrawHitches(EngineProfiler& prof)
 {
-	const std::vector<ProfFrameRecord> frames = analysisFrames(prof);
-	if (frames.empty()) return;
-	const std::vector<HE::Prof::Hitch> hitches = HE::Prof::findHitches(frames);
+	if (analysisFrames(prof).empty()) return;
+	const std::vector<HE::Prof::Hitch>& hitches = g_cache.hitches;
 
 	ImGui::Separator();
 	ImGui::TextColored(HE::Ed::Theme::TextHeading, "Hitches");
@@ -443,10 +516,11 @@ void DrawHitches(EngineProfiler& prof)
 		std::snprintf(id, sizeof(id), "%llu##hitch", static_cast<unsigned long long>(h.frameIndex));
 		if (ImGui::Selectable(id, false, ImGuiSelectableFlags_SpanAllColumns))
 		{
-			// Frame index → position in the ring. The ring drops the oldest frames,
-			// so the index is NOT the array position once it wraps.
-			for (size_t i = 0; i < frames.size(); ++i)
-				if (frames[i].index == h.frameIndex) { g_ui.selectedFrame = static_cast<int>(i); break; }
+			// Store the frame's own index, not its position: the ring drops the
+			// oldest frames while a capture runs, so a position saved now points at
+			// a different frame a second later. Frame Detail resolves it on draw.
+			g_ui.selectedFrame     = h.frameIndex;
+			g_ui.haveSelectedFrame = true;
 		}
 		ImGui::TableNextColumn(); ImGui::Text("%.2f", h.deltaMs);
 		ImGui::TableNextColumn(); ImGui::Text("%.1fx", h.ratio);
@@ -556,16 +630,30 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
         // ── Frame Detail: selected frame, else single-frame capture, else last ──
         if (ImGui::BeginTabItem("Frame Detail"))
         {
-            const std::vector<ProfFrameRecord> frames = analysisFrames(prof);
+            const std::vector<ProfFrameRecord>& frames = analysisFrames(prof);
             const ProfFrameRecord* single = prof.singleFrame();
             const ProfFrameRecord* f      = nullptr;
-            if (g_ui.selectedFrame >= 0 && g_ui.selectedFrame < static_cast<int>(frames.size()))
+            if (g_ui.haveSelectedFrame)
             {
-                f = &frames[static_cast<size_t>(g_ui.selectedFrame)];
-                ImGui::TextDisabled("Source: frame picked from the hitch list");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("clear")) g_ui.selectedFrame = -1;
+                // Resolve by frame index, not position — see the hitch list.
+                for (const ProfFrameRecord& r : frames)
+                    if (r.index == g_ui.selectedFrame) { f = &r; break; }
+                if (f)
+                {
+                    ImGui::TextDisabled("Source: frame %llu, picked from the hitch list",
+                                        static_cast<unsigned long long>(g_ui.selectedFrame));
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("clear")) g_ui.haveSelectedFrame = false;
+                }
+                else
+                {
+                    // The ring dropped it out from under the selection while recording.
+                    ImGui::TextDisabled("Frame %llu has scrolled out of the capture ring.",
+                                        static_cast<unsigned long long>(g_ui.selectedFrame));
+                    g_ui.haveSelectedFrame = false;
+                }
             }
+            if (f) { /* selection resolved above */ }
             else if (single) { f = single;              ImGui::TextDisabled("Source: single-frame capture"); }
             else if (!frames.empty()) { f = &frames.back(); ImGui::TextDisabled("Source: last benchmark frame"); }
 

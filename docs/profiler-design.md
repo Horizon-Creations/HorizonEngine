@@ -268,6 +268,10 @@ Kein neues Vendoring: **ImPlot ist nicht im Baum** (`EditorDeps` hat nur EngineC
 
 **Tests:** 1738 Fälle grün, davon 15 neue (`test_profiler_stats.cpp`, `test_profiler_layout.cpp`) plus die erweiterten Profiler-Fälle. Alle Targets bauen.
 
+**Kosten der neuen Ansichten.** `snapshot()` und `timelineSnapshot()` kopieren tief (alle Frames mit ihren Scope-Vektoren, alle Lanes mit bis zu 262144 Spans). Drei Tabs wollen diese Daten, gezeichnet wird mit Editor-Framerate — pro Draw kopiert wären das Megabytes 60×/s, beim Timeline zusätzlich unter dem Lane-Mutex, gegen die schreibenden Worker. Deshalb liegt im Panel ein Cache: fertige Aufnahme einmal holen, laufende alle 250 ms, plus genau ein Refresh beim Stoppen. Der Profiler darf nicht bremsen, was er misst.
+
+**Bekannte Eigenheit (vor-v3, jetzt sichtbar):** „Capture Single Frame" ruft intern `doStart()` und leert damit `m_frames` — die vorherige Benchmark-Aufnahme ist danach weg, also auch Scopes-Tab und Hitch-Liste. Nicht neu, fällt nur jetzt auf. Reihenfolge deshalb: erst Benchmark auswerten, dann Einzelframe.
+
 **Offen — Sichtprüfung durch den User (Sandbox ohne Display):** Editor starten → `View ▸ Performance Profiler`. (1) *Overview* zeigt Tiles/Budget/Graph/Histogramm und die Zähler sind **nicht mehr 0**. (2) *Capture* → „Per-thread timeline" an → Benchmark starten, ein paar Sekunden bewegen, stoppen. (3) *Timeline*: eine „Main"-Lane **und** „Worker N"-Lanes mit `Job::Execute`-Spans; Wheel zoomt unter dem Cursor, Drag pant, „Fit" setzt zurück. (4) *Scopes*: Ranking nach Self-Time plausibel. (5) Der Dump enthält `summary.stats`, `summary.threads`, `frameMarks` und Zähler ≠ 0.
 
 ## Teil D — Grenzen dieser Runde
