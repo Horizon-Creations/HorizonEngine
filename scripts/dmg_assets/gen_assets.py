@@ -135,6 +135,14 @@ THEMES = {
     "aurora":   ([(0.0, (6, 9, 26)), (0.50, (10, 18, 44)),
                   (0.80, (13, 30, 54)), (1.0, (8, 15, 32))],
                  (90, 200, 190), 85, 150, (120, 230, 190)),
+    # 0.4.0 "Alpenglow" — the rose-and-amber light on a mountain face after the
+    # sun has already set: deep blue overhead, warm rose through the middle, a
+    # hot amber horizon. No sun disc, because an alpenglow has none — the light
+    # is reflected. Few stars, since the sky is still bright.
+    "alpenglow": ([(0.0, (18, 20, 48)), (0.38, (58, 40, 74)),
+                   (0.68, (150, 84, 92)), (0.86, (216, 132, 84)),
+                   (1.0, (248, 196, 128))],
+                  (255, 186, 110), 175, 45, (255, 200, 130)),
 }
 
 # Themes listed here also get northern-lights curtains over the sky. The base

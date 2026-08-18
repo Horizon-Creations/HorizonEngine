@@ -21,6 +21,7 @@ zwei Stellen sichtbar:
 | **0.3.3** | **Aurora**  | Collab-Protokoll v7, Aufräumen der Portfreigabe, Lösch-Rückfrage         | `aurora` |
 | **0.3.4** | **Aurora**  | Assets anlegen/löschen/umbenennen über die Collab-Sitzung (Protokoll v8) | `aurora` |
 | **0.3.5** | **Aurora**  | Content-Management (Suche, Mehrfachauswahl, Referenz-Scan), grosse Assets in der Sitzung, Benachrichtigungen (Protokoll v13) | `aurora` |
+| **0.4.0** | **Alpenglow** ✅ | Charakter-Release: Animations-State-Machines + Sync-Graphen, Kamera-Rig, Gamepad, HorizonCode-Vererbung, Anti-Aliasing, volumetrische Wolken, Startfenster + Marken-Theme | `alpenglow` ✅ |
 
 Ein Patch behält den Codenamen seines Minor-Release — der Name gehört zu 0.3,
 nicht zu 0.3.x. Was ein Patch trotzdem braucht, ist der Versions-Bump selbst:
@@ -67,7 +68,8 @@ Abend/Nacht über; **dramatische Himmelsereignisse** sind den großen Meilenstei
 |------------------|---------------------|---------------------|--------------------------------------------|------------------|
 | Erste Builds     | 0.2.0 *(vergeben)*  | **Sunrise** ✅      | der „Aufgang" — erstes gebrandetes Release | `sunrise` ✅     |
 | Licht-Release    | 0.3.0 *(vergeben)*  | **Aurora** ✅ ★     | Deferred + DDGI = die Engine lernt Licht   | `aurora` ✅      |
-| Rest der 0.x     | 0.4+                | **Alpenglow**, **Daybreak**, **Morning Star** | Morgen-Pool weiterzählen | (neu anlegen)    |
+| Rest der 0.x     | 0.4 *(vergeben)*    | **Alpenglow** ✅    | rosa Bergleuchten — der Charakter-Release   | `alpenglow` ✅   |
+| Rest der 0.x     | 0.5+                | **Daybreak**, **Morning Star** | Morgen-Pool weiterzählen        | (neu anlegen)    |
 | Erstes Stable    | **1.0**             | **Golden Hour**     | warmes, reifes Licht — alle Plattformen da | sunset (geplant) |
 | Reifer Höhepunkt | 2.0                 | **Zenith**          | Sonne am höchsten — Leistungs-/Feature-Peak| (neu: „day")     |
 | Übergang         | 2.x                 | **Sunset**          | Abendlicht                                  | `sunset` (geplant)|

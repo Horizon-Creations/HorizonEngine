@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.3.5 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.4.0 LANGUAGES CXX)
 
 # ─── Architecture guard ──────────────────────────────────────────────────────
 # This engine is built and shipped as x64. If CMake is configured from an x86
@@ -685,7 +685,7 @@ endfunction()
 # FORCE so editing this line always wins over a value already stored in the CMake
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
-set(HE_VERSION_CODENAME "Aurora" CACHE STRING "Sky-themed codename for this release" FORCE)
+set(HE_VERSION_CODENAME "Alpenglow" CACHE STRING "Sky-themed codename for this release" FORCE)
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"
