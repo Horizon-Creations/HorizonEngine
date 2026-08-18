@@ -256,6 +256,20 @@ Kein neues Vendoring: **ImPlot ist nicht im Baum** (`EditorDeps` hat nur EngineC
 3. **Zähler befüllen.**
 4. **UI-Überarbeitung** (ImDrawList-Widgets, Layout-Mathe in reine Funktionen ausgelagert und getestet).
 
+## Umsetzungsstatus v3 (2026-08-18) — alle vier Phasen auf dem Branch
+
+**Phase 1 — Per-Thread-Timeline.** `ProfThreadSpan`/`ProfThreadTimeline`/`ProfFrameMark` in `EngineProfiler.h`; `thread_local`-Puffer, per `shared_ptr` in einer Registry gehalten (ein Worker, der mitten im Capture endet, nimmt seine Daten nicht mit), Generation-Stempel gegen Reste alter Captures, per-Puffer-Mutex nur dort, wo der Merge liest. `timelineSnapshot()`, `frameMarks()`, `timelineDroppedSpans()`, `setThreadTimelineEnabled()`. Der Regressionstest (8 Threads × 5000 Scopes) prüft weiter auf Nicht-Korruption, aber mit umgekehrtem Vertrag: Worker-Scopes landen jetzt auf eigenen Lanes.
+
+**Phase 2 — Statistik + Self-Time.** Neuer Header `Diagnostics/ProfilerStats.h`, rein funktional: `computePercentiles` (p50/p95/p99, Stddev, nearest-rank), `computeFpsLows` (1 %/0,1 %-Low nach Benchmark-Konvention, Definition steht im Dump), `findHitches` (gegen den **Median**, mit dem teuersten depth-0-Scope pro Ruckler), `aggregateScopes` (Self-Time aus Tiefe + Schließreihenfolge), `computeHistogram`, `laneOccupancy`. Dump-`version` 2, `summary.stats`, `summary.hitches`, `summary.topScopesBySelfTime`, `summary.threads`, `threads[]`, `frameMarks[]`.
+
+**Phase 3 — Zähler.** `SceneSystems::pushProfilerSceneCounters` füllt entities/lights/particles/emitters/rigidBodies/audioSources/scripts/gpuParticles + `ContentManager::asyncInFlightCount()`. `setRenderStats` merged nur noch die Renderer-Felder — die Wholesale-Zuweisung war die eigentliche Ursache dafür, dass diese Felder seit v1 in jedem Dump 0 waren.
+
+**Phase 4 — Darstellung.** `ProfilerLayout.h` (reine Geometrie: Span→Rechteck, Zoom/Pan/Clamp, Bar-Hit-Test, Tick-Schritte, Namens-Hash) + `ProfilerWidgets.h/.cpp` (ImDrawList: Stat-Tiles, Budget-Bars, Frame-Graph mit Budget-Färbung und p95/p99-Linien, Histogramm, Multi-Lane-Flame-Timeline mit Wheel-Zoom/Drag-Pan/Hover-Tooltip, Sparkline). Panel jetzt fünf Tabs: **Overview** (Tiles, Budget, Frame-Graph, Histogramm, Zähler-Grid), **Timeline**, **Scopes** (Ranking nach Self-Time), **Capture** (+ Hitch-Liste, klickbar → Frame Detail), **Frame Detail** (Scope-Baum jetzt rückwärts gelesen, also Eltern über Kindern).
+
+**Tests:** 1738 Fälle grün, davon 15 neue (`test_profiler_stats.cpp`, `test_profiler_layout.cpp`) plus die erweiterten Profiler-Fälle. Alle Targets bauen.
+
+**Offen — Sichtprüfung durch den User (Sandbox ohne Display):** Editor starten → `View ▸ Performance Profiler`. (1) *Overview* zeigt Tiles/Budget/Graph/Histogramm und die Zähler sind **nicht mehr 0**. (2) *Capture* → „Per-thread timeline" an → Benchmark starten, ein paar Sekunden bewegen, stoppen. (3) *Timeline*: eine „Main"-Lane **und** „Worker N"-Lanes mit `Job::Execute`-Spans; Wheel zoomt unter dem Cursor, Drag pant, „Fit" setzt zurück. (4) *Scopes*: Ranking nach Self-Time plausibel. (5) Der Dump enthält `summary.stats`, `summary.threads`, `frameMarks` und Zähler ≠ 0.
+
 ## Teil D — Grenzen dieser Runde
 - **Dump-Größe:** Per-Thread-Spans über 20 000 Frames sprengen das JSON. Die Timeline wird im Dump auf ein hartes Ereignisbudget gedeckelt und die Kappung **protokolliert** (Log + `summary`-Feld), nie still abgeschnitten. Der vollständige Strom bleibt der Live-Ansicht vorbehalten.
 - **Keine Sichtprüfung in dieser Umgebung** (Sandbox ohne Display). Deshalb liegt die gesamte Layout-Mathematik (Span→Rechteck bei Zoom/Viewport, Histogramm-Binning, Perzentile) in reinen Funktionen mit Unit-Tests, und am Ende steht eine Smoke-Test-Liste für den User — wie schon bei v1/v2.

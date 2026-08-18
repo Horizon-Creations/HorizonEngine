@@ -132,6 +132,7 @@ add_executable(HorizonEditor WIN32
 	TutorialPanel.cpp
 	TutorialSteps.cpp
 	ProfilerPanel.cpp
+	ProfilerWidgets.cpp
 	EnvironmentPanel.cpp
 	EditorSettingsPanel.cpp
 	ToolchainDialog.cpp

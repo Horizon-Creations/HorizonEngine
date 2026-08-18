@@ -36,6 +36,7 @@ add_executable(he_tests
     test_debug_draw.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
+    test_profiler_layout.cpp
     test_audio.cpp
     test_rendermanager.cpp
     test_prefab.cpp
