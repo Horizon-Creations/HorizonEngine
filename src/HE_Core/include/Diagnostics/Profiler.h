@@ -29,13 +29,27 @@
 #  define HE_PROF_SCOPE_IMPL(name)   ((void)0)   // compiled out — zero overhead
 #endif
 
+// HE_PROFILE_SCOPE_DYN(name) — like HE_PROFILE_SCOPE_N, but `name` may be a
+// runtime `const char*` instead of a literal. Used where the label is chosen by
+// the caller and forwarded, e.g. a thread-pool task naming itself after the work
+// it was submitted for ("FrustumCull") rather than the generic "Job::Execute".
+//
+// The pointer must have STATIC lifetime: both the EngineProfiler frame samples and
+// the per-thread timeline spans store the `const char*` itself and read it later,
+// at dump/draw time. String literals only — never a std::string's c_str(), never a
+// stack buffer. (Tracy copies the text, so only the in-engine profiler cares, but
+// the rule is the same at every call site so there is one rule.)
 #ifdef TRACY_ENABLE
 #  include <tracy/Tracy.hpp>
+#  include <cstring>
 #  define HE_PROFILE_FRAME()         FrameMark
 #  define HE_PROFILE_SCOPE()         ZoneScoped;            HE_PROF_SCOPE_IMPL(__FUNCTION__)
 #  define HE_PROFILE_SCOPE_N(name)   ZoneScopedN(name);     HE_PROF_SCOPE_IMPL(name)
+#  define HE_PROFILE_SCOPE_DYN(name) ZoneScoped; ZoneName(name, std::strlen(name)); \
+                                     HE_PROF_SCOPE_IMPL(name)
 #else
 #  define HE_PROFILE_FRAME()
 #  define HE_PROFILE_SCOPE()         HE_PROF_SCOPE_IMPL(__FUNCTION__)
 #  define HE_PROFILE_SCOPE_N(name)   HE_PROF_SCOPE_IMPL(name)
+#  define HE_PROFILE_SCOPE_DYN(name) HE_PROF_SCOPE_IMPL(name)
 #endif

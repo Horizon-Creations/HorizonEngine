@@ -15,14 +15,22 @@ public:
     explicit ThreadPool(size_t threadCount);
     ~ThreadPool();
 
+    // `name` labels the task on the profiler's per-thread timeline. It MUST be a
+    // string literal / static storage: the profiler stores the pointer in a span
+    // and reads it later, at dump or draw time.
+    //
+    // It exists because the worker lanes were previously a solid wall of
+    // "Job::Execute" — technically a timeline, practically unreadable. A lane that
+    // says FrustumCull / ExtractMeshes / SkyEnvBake answers "what is the pool
+    // doing"; one that says Job::Execute only answers "something".
     template<typename F>
-    std::future<void> submit(F&& f)
+    std::future<void> submit(F&& f, const char* name = "Job::Execute")
     {
         auto task = std::make_shared<std::packaged_task<void()>>(std::forward<F>(f));
         std::future<void> fut = task->get_future();
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            m_queue.push([task]{ (*task)(); });
+            m_queue.push(Task{ [task]{ (*task)(); }, name });
         }
         m_cv.notify_one();
         return fut;
@@ -31,8 +39,14 @@ public:
     size_t threadCount() const { return m_threads.size(); }
 
 private:
-    std::vector<std::thread>          m_threads;
-    std::queue<std::function<void()>> m_queue;
+    struct Task
+    {
+        std::function<void()> fn;
+        const char*           name;   // static storage — see submit()
+    };
+
+    std::vector<std::thread> m_threads;
+    std::queue<Task>         m_queue;
     std::mutex                        m_mutex;
     std::condition_variable           m_cv;
     bool                              m_stop = false;
@@ -49,8 +63,12 @@ HE_API ThreadPool& globalPool();
 // test — aren't drowned by per-task queue/future overhead. The calling thread runs
 // the first chunk itself instead of blocking idle, so N items cost ~N/(workers+1)
 // per thread with only `workers` tasks enqueued.
+//
+// `name` labels every chunk on the profiler's worker lanes (string literal —
+// see ThreadPool::submit). Give each call site its own: on the timeline the name
+// IS the identity of the work, and the default tells you nothing.
 template<typename F>
-void parallel_for(size_t count, F&& f)
+void parallel_for(size_t count, F&& f, const char* name = "ParallelFor")
 {
     if (count == 0) return;
     if (count == 1) { f(size_t{0}); return; }
@@ -69,7 +87,7 @@ void parallel_for(size_t count, F&& f)
         const size_t end = std::min(count, begin + chunkSize);
         futures.push_back(pool.submit([&f, begin, end]{
             for (size_t i = begin; i < end; ++i) f(i);
-        }));
+        }, name));
     }
     // Run the first chunk inline rather than leave the caller idle.
     const size_t end0 = std::min(count, chunkSize);

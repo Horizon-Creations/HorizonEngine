@@ -62,5 +62,5 @@ void FrustumCuller::cull(const RenderWorld& world, const glm::mat4& viewProj,
 		const HE::AABB& bounds = world.objects[i].worldBounds;
 		if (bounds.isValid())
 			outVisible[i] = frustum.intersects(bounds) ? 1u : 0u;
-	});
+	}, "FrustumCull");
 }

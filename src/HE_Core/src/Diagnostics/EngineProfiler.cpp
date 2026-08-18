@@ -271,7 +271,7 @@ void EngineProfiler::pushLive(const ProfLiveFrame& f)
 // ─── CPU scopes ──────────────────────────────────────────────────────────────
 
 // The per-FRAME scope tree (m_stack → m_current.scopes) is main-thread only:
-// scopes opened on worker threads (the JobSystem pool's "Job::Execute") never
+// scopes opened on worker threads (the JobSystem pool names each task) never
 // touch it, so it stays single-writer. Without that guard, concurrent push_back
 // corrupts the heap — the v2.1 crash.
 //

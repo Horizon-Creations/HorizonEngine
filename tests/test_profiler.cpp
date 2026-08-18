@@ -3,6 +3,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/GlobalState.h>
+#include <JobSystem/JobSystem.h>
 #include <Renderer/GpuPassAccumulator.h>
 
 #include <nlohmann/json.hpp>
@@ -355,6 +356,54 @@ TEST_CASE("EngineProfiler records worker scopes on their own timeline lane, not 
     // (8 × 5000 is far below the per-thread cap).
     CHECK(workerSpans == 8 * 5000);
     CHECK(prof.timelineDroppedSpans() == 0);
+
+    prof.requestStop();
+    prof.beginFrame(16.6);
+    std::string dump;
+    prof.consumeJustDumped(dump);
+}
+
+TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'")
+{
+    // The first real capture produced eight worker lanes carrying nothing but
+    // "Job::Execute" — a timeline of the fact that jobs ran, and of nothing else.
+    // parallel_for now labels its chunks, so a lane says WHAT the pool was doing.
+    setupTempDeploy("jobnames");
+    auto& prof = EngineProfiler::instance();
+    prof.setThreadTimelineEnabled(true);
+
+    ProfSessionInfo info;
+    prof.requestStart(info);
+    prof.beginFrame(16.6);
+    REQUIRE(prof.isRecording());
+
+    // Enough items that the pool is actually fed (parallel_for runs chunk 0 on the
+    // calling thread, so a tiny count would never reach a worker at all).
+    std::atomic<int> sum{ 0 };
+    parallel_for(4096, [&](size_t i) { sum.fetch_add(static_cast<int>(i & 1), std::memory_order_relaxed); },
+                 "TestCullChunk");
+    // A direct submit keeps its own label too.
+    globalPool().submit([]{ /* nothing */ }, "TestDirectJob").get();
+
+    prof.endFrame();
+
+    bool sawNamed = false, sawDirect = false, sawGeneric = false;
+    for (const ProfThreadTimeline& lane : prof.timelineSnapshot())
+    {
+        if (lane.isMain) continue;
+        for (const ProfThreadSpan& s : lane.spans)
+        {
+            const std::string n(s.name ? s.name : "");
+            if (n == "TestCullChunk")  sawNamed  = true;
+            if (n == "TestDirectJob")  sawDirect = true;
+            if (n == "Job::Execute")   sawGeneric = true;
+        }
+    }
+    CHECK(sawNamed);
+    CHECK(sawDirect);
+    // Nothing in this test submits an unnamed task, so the generic label must not
+    // appear at all: if it does, a call site is still going through the default.
+    CHECK_FALSE(sawGeneric);
 
     prof.requestStop();
     prof.beginFrame(16.6);

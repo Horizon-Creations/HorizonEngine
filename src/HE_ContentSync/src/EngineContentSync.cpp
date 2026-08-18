@@ -205,7 +205,7 @@ void EngineContentSync::enqueueDownload(const std::string& relativePath, HE::UUI
 		}
 	}
 	if (startDraining)
-		globalPool().submit([this] { drainQueue(); });
+		globalPool().submit([this] { drainQueue(); }, "ContentSyncDrain");
 }
 
 void EngineContentSync::drainQueue()

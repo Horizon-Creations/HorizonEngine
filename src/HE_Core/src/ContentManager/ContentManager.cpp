@@ -981,7 +981,7 @@ void ContentManager::loadAssetAsync(const std::string& relativePath,
 
 		std::unique_lock<std::mutex> lock(sink->mutex);
 		sink->results.push(std::move(result));
-	});
+	}, "AssetLoad");
 }
 
 // ─── pollAsyncResults ─────────────────────────────────────────────────────────
@@ -1198,7 +1198,7 @@ void ContentManager::loadAssetAsync(HE::UUID id, std::function<void(HE::UUID)> c
 
 		std::unique_lock<std::mutex> lock(sink->mutex);
 		sink->results.push(std::move(result));
-	});
+	}, "AssetLoadPak");
 }
 
 // ─── registerRemoteAsset ───────────────────────────────────────────────────────
