@@ -3776,12 +3776,13 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 		if (wlen > 1e-5)
 			pos.xz += wind.xz * ((hf * hf * (0.35 / nscale) * min(wlen * 40.0, 1.0)) / wlen);
 		// COLUMN-WISE coverage (HZD weather-map idea): presence + tower height
-		// are sampled at the slab BASE and at LOW frequency, constant along the
-		// column — that puts a FLAT condensation level under BROAD, coherent
-		// formations (high-frequency column noise degenerates into needle
-		// towers). The 3D body field below fills the envelope with rounded
-		// lumps, the erosion breaks the surface into cauliflower lobes.
-		float3 npc = float3(pos.x, baseY, pos.z) * (nscale * 0.55) + wind * time;
+		// are sampled at LOW frequency on a FIXED noise slice, constant along
+		// the column — a true 2D weather map. Fixed (not baseY): the slab rides
+		// camera-relative in Y, and sampling the columns at baseY made the
+		// whole cloud PATTERN morph when the camera climbed — and the ground
+		// shadows with it. The 3D body/erosion below still vary with height.
+		float3 npc = float3(pos.x, 0.0, pos.z) * (nscale * 0.55) + wind * time;
+		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
 		// irregular, stretched, organic.
@@ -9853,7 +9854,24 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	const float     cloudH = std::max(env.cloudHeight, 1.0f);
 	const float     thick  = cloudH * 1.5f;
 	const glm::vec3 cam    = m_renderWorld.camera.position;
-	const float     midY   = cam.y + cloudH + 0.5f * thick;
+	// Stable vertical anchor: the shadow slab must NOT ride the live camera Y,
+	// or every jump/hill slides the ground shadows sideways. The anchor sits
+	// still inside a ±0.35 × cloudHeight dead-band and trails at the band edge
+	// beyond it (continuous, no pops) — shadows then change only with sun,
+	// wind or a genuine altitude change. HE_CLOUD_ANCHOR_Y pins it for
+	// deterministic headless A/Bs.
+	if (std::isnan(m_cloudShadowAnchorY)) m_cloudShadowAnchorY = cam.y;
+	{
+		const float dead = cloudH * 0.35f;
+		const float d    = cam.y - m_cloudShadowAnchorY;
+		if (d >  dead) m_cloudShadowAnchorY = cam.y - dead;
+		if (d < -dead) m_cloudShadowAnchorY = cam.y + dead;
+		static const char* s_anchorOv = std::getenv("HE_CLOUD_ANCHOR_Y");
+		if (s_anchorOv && *s_anchorOv) // hard pin — headless A/B only
+			m_cloudShadowAnchorY = static_cast<float>(std::atof(s_anchorOv));
+	}
+	const float anchorY = m_cloudShadowAnchorY;
+	const float midY    = anchorY + cloudH + 0.5f * thick;
 	// Region: covers ±30 cloud-heights around where the camera's own position
 	// projects onto the slab along the light (~6 km at the default height 200).
 	const float half  = cloudH * 30.0f;
@@ -9878,10 +9896,12 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:1];
 	// BuildSkyFrameParams supplies everything the density formula needs
 	// (coverage/wind/time/height/density/fluffiness) — sunDir overridden with
-	// the dominant light so the march direction matches the shading.
+	// the dominant light so the march direction matches the shading, and the
+	// camera's Y replaced by the STABLE anchor so the map's slab (baseY =
+	// cameraPos.y + cloudH in cloudShadowFragment) cannot ride the live camera.
 	HE::SkyFrameInputs in;
 	in.sunDir    = toward;
-	in.cameraPos = cam;
+	in.cameraPos = glm::vec3(cam.x, anchorY, cam.z);
 	in.time      = static_cast<float>(SDL_GetTicks()) / 1000.0f;
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
 		in.time = static_cast<float>(std::atof(ov)); // deterministic headless captures

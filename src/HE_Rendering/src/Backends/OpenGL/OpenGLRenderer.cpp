@@ -1486,11 +1486,13 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 		if (wlen > 1e-5)
 			pos.xz += wind.xz * ((hf * hf * (0.35 / nscale) * min(wlen * 40.0, 1.0)) / wlen);
 		// COLUMN-WISE coverage (HZD weather-map idea): presence + tower height
-		// are sampled at the slab BASE and at LOW frequency, constant along the
-		// column — that puts a FLAT condensation level under BROAD, coherent
-		// formations. The 3D body field below fills the envelope with rounded
-		// lumps, the erosion breaks the surface into cauliflower lobes.
-		vec3 npc = vec3(pos.x, baseY, pos.z) * (nscale * 0.55) + wind * time;
+		// are sampled at LOW frequency on a FIXED noise slice, constant along
+		// the column — a true 2D weather map. Fixed (not baseY): the slab rides
+		// camera-relative in Y, and sampling the columns at baseY made the
+		// whole cloud PATTERN morph when the camera climbed — and the ground
+		// shadows with it. The 3D body/erosion below still vary with height.
+		vec3 npc = vec3(pos.x, 0.0, pos.z) * (nscale * 0.55) + wind * time;
+		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
 		// irregular, stretched, organic.
@@ -5878,7 +5880,22 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	const float     cloudH = std::max(env.cloudHeight, 1.0f);
 	const float     thick  = cloudH * 1.5f;
 	const glm::vec3 cam    = m_renderWorld.camera.position;
-	const float     midY   = cam.y + cloudH + 0.5f * thick;
+	// Stable vertical anchor (mirrors Metal): dead-band ±0.35 × cloudHeight,
+	// trailing at the band edge beyond it — ground shadows stop sliding on
+	// jumps/hills and change only with sun, wind or a real altitude change.
+	// HE_CLOUD_ANCHOR_Y pins it for deterministic headless A/Bs.
+	if (std::isnan(m_cloudShadowAnchorY)) m_cloudShadowAnchorY = cam.y;
+	{
+		const float dead = cloudH * 0.35f;
+		const float d    = cam.y - m_cloudShadowAnchorY;
+		if (d >  dead) m_cloudShadowAnchorY = cam.y - dead;
+		if (d < -dead) m_cloudShadowAnchorY = cam.y + dead;
+		static const char* s_anchorOv = std::getenv("HE_CLOUD_ANCHOR_Y");
+		if (s_anchorOv && *s_anchorOv) // hard pin — headless A/B only
+			m_cloudShadowAnchorY = static_cast<float>(std::atof(s_anchorOv));
+	}
+	const float anchorY = m_cloudShadowAnchorY;
+	const float midY    = anchorY + cloudH + 0.5f * thick;
 	// Region: covers ±30 cloud-heights around where the camera's own position
 	// projects onto the slab along the light (~6 km at the default height 200).
 	const float half  = cloudH * 30.0f;
@@ -5900,7 +5917,11 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
 	glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(toward));
-	glUniform3fv(m_uSkyCameraPos, 1, glm::value_ptr(cam));
+	// Camera Y replaced by the STABLE anchor: the map shader derives its slab
+	// (baseY = uCameraPos.y + cloudH) from this, and it must not ride the
+	// live camera (see the anchor block above).
+	const glm::vec3 anchoredCam(cam.x, anchorY, cam.z);
+	glUniform3fv(m_uSkyCameraPos, 1, glm::value_ptr(anchoredCam));
 	glUniform1f(m_uSkyCoverage, env.cloudCoverage);
 	glUniform1f(m_uSkyCloudHeight, env.cloudHeight);
 	glUniform1f(m_uSkyCloudDensity, env.cloudDensity);

@@ -16,6 +16,7 @@
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <mutex>
 
@@ -852,6 +853,13 @@ private:
 	void*     m_cloudShadowTex      = nullptr; // id<MTLTexture> R8, kCloudShadowMapSize²
 	glm::vec4 m_cloudShadowParamsA  = glm::vec4(0.0f); // xy origin, z 1/size, w mid-plane Y
 	glm::vec4 m_cloudShadowParamsB  = glm::vec4(0.0f); // x strength (0 = off this frame)
+	// Stable vertical anchor for the shadow slab. The sky's cloud layer rides
+	// CAMERA-relative in Y, so tying the shadow plane to the live camera made
+	// the ground shadows slide whenever the camera moved up/down (jumping,
+	// hills). The anchor follows the camera only outside a dead-band of
+	// ±0.35 × cloudHeight — inside it the shadows are rock-stable and change
+	// only with sun or wind. NaN = re-anchor on next use.
+	float     m_cloudShadowAnchorY  = std::numeric_limits<float>::quiet_NaN();
 	void  EnsureCloudShadowTarget();
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);

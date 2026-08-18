@@ -13,6 +13,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
+#include <limits>
 #include <unordered_map>
 #include <string>
 
@@ -761,6 +762,11 @@ private:
 	unsigned int m_cloudShadowTex = 0;         // R8, kCloudShadowMapSize²
 	glm::vec4    m_cloudShadowParamsA = glm::vec4(0.0f); // xy origin, z 1/size, w mid-plane Y
 	glm::vec4    m_cloudShadowParamsB = glm::vec4(0.0f); // x strength (0 = off this frame)
+	// Stable vertical anchor for the shadow slab (mirrors Metal): the cloud
+	// layer rides camera-relative in Y, so the shadow plane must not follow the
+	// live camera or ground shadows slide on every jump. Dead-band ±0.35 ×
+	// cloudHeight; NaN = re-anchor on next use.
+	float        m_cloudShadowAnchorY = std::numeric_limits<float>::quiet_NaN();
 	void         EnsureCloudShadowTarget();
 	void         DestroyCloudShadowTarget();
 	void         RenderCloudShadowMap();
