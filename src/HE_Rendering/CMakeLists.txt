@@ -116,6 +116,7 @@ if(HE_VULKAN_ENABLED)
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
+                      mesh_preview.vert mesh_preview.frag
                       ui.vert ui.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")

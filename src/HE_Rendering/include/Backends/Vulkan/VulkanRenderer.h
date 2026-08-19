@@ -60,6 +60,51 @@ public:
 
 	FrameGpuStats GetFrameGpuStats() const override;
 
+	// Build the node-graph material pipelines ahead of their first draw. Only the
+	// variant whose render pass already exists is warmable here — see the comment
+	// on the definition.
+	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+
+	// ── Content-Browser tiles ────────────────────────────────────────────────
+	// Rendered into a PRIVATE image and read back as tightly packed TOP-DOWN
+	// RGBA8. Callable BEFORE the first Render(): they create their own image /
+	// view / framebuffers / render pass / pipeline and depend on nothing that
+	// Render() builds (m_viewportImage is still VK_NULL_HANDLE at that point).
+	// Each one records a one-shot command buffer and waits for the queue, so it
+	// is synchronous and safe to call outside a frame.
+	bool RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+	                          uint32_t size, std::vector<uint8_t>& outRgba8) override;
+	bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects, uint32_t size,
+	                           std::vector<uint8_t>& outRgba8) override;
+	bool RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+	                             const std::vector<ParticlePreviewInstance>& particles,
+	                             uint32_t size, std::vector<uint8_t>& outRgba8) override;
+
+	// ── Interactive asset previews (P1c) ─────────────────────────────────────
+	// Render into a PRIVATE, PER-ENTRY-POINT target and return the ImGui handle
+	// that target was registered with ONCE, at creation. Three separate targets,
+	// not one shared with the thumbnails: a Content-Browser tile rendered into a
+	// preview's image would replace whatever editor panel is showing it, and two
+	// open panels would fight over one image (the same reason OpenGLRenderer.cpp
+	// keeps m_previewFBO / m_skelPreviewFBO / m_particlePreviewFBO apart).
+	//
+	// Like the thumbnails these run BEFORE the first Render() (EditorApplication
+	// calls RenderMaterialPreview at :3786, the first Render() is at :4057), so
+	// they create their own resources, never call createViewportResources(), and
+	// touch nothing indexed by m_currentFrame.
+	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId, uint32_t size,
+	                            float yaw, float pitch, float dist,
+	                            int shape, const HE::UUID& meshId) override;
+	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+	                            const std::vector<glm::mat4>& boneMatrices,
+	                            uint32_t width, uint32_t height,
+	                            float yaw, float pitch, float dist,
+	                            bool showSkeleton, glm::mat4* outViewProj) override;
+	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId,
+	                            const HE::UUID& materialId,
+	                            const std::vector<ParticlePreviewInstance>& particles,
+	                            uint32_t size, float yaw, float pitch, float dist) override;
+
 	// ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
 	// pixels to a sampled VkImage (+ view + linear sampler), then hands the view +
 	// sampler to the editor-installed registrar (m_imguiTexRegistrar) which calls
@@ -107,9 +152,17 @@ private:
 	// cross-compiler (HE_HAVE_SHADERC) is absent; GetOrBuildMaterialPipeline returns null.
 	void           createMaterialResources();
 	void           destroyMaterialResources();
+	// `rpOverride` builds the SAME graph-material shaders against a render pass
+	// that is neither the swapchain's nor PostFX's — the material preview's
+	// R8G8B8A8 target. It is a separate cache variant (a fixed salt, never the
+	// handle value, which is not stable across recreation): the LDR variant is
+	// keyed on the bare hash and is built for m_renderPass, whose format differs,
+	// so handing it to the preview pass would be a render-pass-compatibility
+	// violation at draw time.
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
 	                                           const std::string& vertBody, bool hdr,
-	                                           bool transparent);
+	                                           bool transparent,
+	                                           VkRenderPass rpOverride = VK_NULL_HANDLE);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -773,6 +826,11 @@ private:
 		VkDescriptorSet albedoSet  = VK_NULL_HANDLE;  // set=2, owned by m_albedoPool
 		bool           hasTex      = false;
 		int            indexCount  = 0;
+		// Bind-pose bounds, computed from the stored vertex positions on upload
+		// exactly like the static GpuMesh's (HE::AABB::fromPositions). Without it
+		// there is nothing to frame an orbit camera on, which is why the skeletal
+		// thumbnail and the skeletal preview both used to be unimplemented here.
+		HE::AABB       localBounds;
 	};
 
 	// Two pipelines to match the two render passes (swapchain vs. HDR RGBA16F).
@@ -804,6 +862,13 @@ private:
 	// with LOAD_OP_LOAD is opened on m_viewportImage after FXAA completes.
 	void createUIPipeline();
 	void runUIPass(VkCommandBuffer cmd, int width, int height);
+	// Same, but over an EXPLICIT object list instead of m_renderWorld.uiObjects.
+	// RenderWidgetThumbnail runs out-of-frame, so GL's trick of swapping the
+	// caller's vector into m_renderWorld.uiObjects for one pass would write a
+	// member the in-flight frame is reading — an overload keeps the tile's list
+	// entirely on the stack.
+	void runUIPass(VkCommandBuffer cmd, int width, int height,
+	               const std::vector<UIRenderObject>& objects);
 
 	// Pipeline that targets the swapchain render pass (m_renderPass, BGRA8/etc.).
 	VkPipeline       m_uiPipeline          = VK_NULL_HANDLE;
@@ -834,6 +899,261 @@ private:
 	VkDescriptorPool      m_uiAtlasDescPool = VK_NULL_HANDLE;
 	VkSampler             m_uiFontSampler   = VK_NULL_HANDLE;
 	std::unordered_map<uint32_t, UIFontAtlas> m_uiFontAtlases;
+
+	// ── Content-Browser thumbnails ──────────────────────────────────────────
+	// Everything below is reachable BEFORE the first Render(): the editor asks
+	// for tiles while the Content Browser first populates, and m_viewportImage /
+	// m_hdrImage / the whole PostFX + SSAO chain only exist once Render() has
+	// run (createViewportResources has exactly one call site, inside Render()).
+	// So this path owns a PRIVATE image and MUST NOT call
+	// createViewportResources() — that would retire the ImGui-visible viewport
+	// image and rebuild PostFX/SSAO underneath the editor.
+	//
+	// Colour format is VK_FORMAT_R8G8B8A8_UNORM. It is a Vulkan-mandatory colour-
+	// attachment format, it is already the byte order IRenderer promises (so no
+	// R↔B swap on readback, unlike a BGRA target), and it matches m_uiViewportRP
+	// — which lets the widget tile reuse that render pass and its pipeline
+	// instead of duplicating the whole UI pipeline against a private one.
+	bool ensureThumbnailTarget(int S);
+	void destroyThumbnailTarget();    // size-dependent objects only (resize path)
+	void destroyThumbnailResources(); // everything, from Shutdown
+	// The colour+depth render pass every tile AND every preview renders through.
+	// ONE object, many framebuffers: Vulkan render-pass compatibility is decided
+	// by attachment count / formats / sample counts, all of which are identical
+	// across those targets — so the mesh and particle pipelines built for it in
+	// P1b bind unchanged inside a preview's framebuffer, and only the graph
+	// material needs a pipeline variant of its own.
+	bool ensurePreviewRenderPass();
+	// One-shot primary command buffer from m_cmdPool, submitted with a null fence
+	// + vkQueueWaitIdle — the recipe CaptureViewport and the texture uploads use.
+	// beginThumbnailCmd() does the vkDeviceWaitIdle before recording.
+	VkCommandBuffer beginThumbnailCmd();
+	void            endThumbnailCmd(VkCommandBuffer cmd);
+	// Record the image→staging copy; call after endThumbnailCmd has waited to
+	// map and hand back tightly packed RGBA8. NO vertical flip: kVulkanClipFix
+	// already flips clip-space Y and Vulkan's framebuffer row 0 IS the top row,
+	// so the pair lands on exactly what GL produces AFTER its `S-1-y` flip.
+	// GL's flip corrects for GL's bottom-up framebuffer and is GL-only.
+	void recordThumbnailReadback(VkCommandBuffer cmd, int S, VkImageLayout from);
+	bool mapThumbnailReadback(int S, std::vector<uint8_t>& outRgba8);
+	// Clear the colour image to (0,0,0,0) and leave it in COLOR_ATTACHMENT_OPTIMAL
+	// — needed by the widget tile, whose render pass (m_uiViewportRP) is
+	// LOAD_OP_LOAD. The mesh/particle pass clears through LOAD_OP_CLEAR instead.
+	void clearThumbnailColor(VkCommandBuffer cmd);
+	bool ensureMeshPreviewPipeline();
+	// The procedural preview primitive (0 sphere / 1 cube / 2 plane). ONE shared
+	// buffer pair rebuilt when the requested shape changes, mirroring GL's single
+	// m_previewVAO + m_previewShape: the Material Editor's shape switch and the
+	// Content Browser's always-sphere tile therefore thrash it against each other
+	// exactly as they do on GL. Safe because every path here ends in
+	// vkQueueWaitIdle, so the buffers being replaced are never in flight.
+	bool ensurePreviewMesh(int shape);
+	// Draw one pos/normal/uv mesh orbit-framed on the caller's bounds. Port of
+	// OpenGLRenderer::DrawMeshPreviewGeometry; the caller owns the render pass.
+	void drawMeshPreviewGeometry(VkCommandBuffer cmd, int S, VkBuffer vb, VkBuffer ib,
+	                             uint32_t indexCount, VkImageView texture,
+	                             const glm::vec3& center, float extent,
+	                             const glm::vec3& baseColor, float metallic, float roughness,
+	                             float yaw, float pitch, float dist);
+	bool ensureParticlePreviewPipeline();
+	void drawParticlePreviewGeometry(VkCommandBuffer cmd, int S, VkImageView texture,
+	                                 const std::vector<ParticlePreviewInstance>& particles,
+	                                 float yaw, float pitch, float dist);
+
+	// Shared private target (all three tile kinds render into this one image).
+	VkImage        m_thumbImage      = VK_NULL_HANDLE;
+	VkDeviceMemory m_thumbMemory     = VK_NULL_HANDLE;
+	VkImageView    m_thumbView       = VK_NULL_HANDLE;
+	VkImage        m_thumbDepthImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_thumbDepthMem   = VK_NULL_HANDLE;
+	VkImageView    m_thumbDepthView  = VK_NULL_HANDLE;
+	VkRenderPass   m_thumbRenderPass = VK_NULL_HANDLE; // colour CLEAR + depth CLEAR → TRANSFER_SRC
+	VkFramebuffer  m_thumbFB         = VK_NULL_HANDLE; // colour + depth, m_thumbRenderPass
+	VkFramebuffer  m_thumbUIFB       = VK_NULL_HANDLE; // colour only,    m_uiViewportRP
+	VkBuffer       m_thumbStageBuf   = VK_NULL_HANDLE; // cached readback staging (S×S×4)
+	VkDeviceMemory m_thumbStageMem   = VK_NULL_HANDLE;
+	int            m_thumbSize       = 0;
+
+	// Mesh/material tile pipeline (shaders/mesh_preview.{vert,frag} → .spv).
+	// Its own descriptor pool — never m_descPool (maxSets = 2, owned by the scene)
+	// and never m_matPool[m_currentFrame] (vkResetDescriptorPool'd every frame).
+	VkDescriptorSetLayout m_meshPvDSL     = VK_NULL_HANDLE; // b0 UBO(FS) + b1 sampler2D(FS)
+	VkPipelineLayout      m_meshPvLayout  = VK_NULL_HANDLE; // + 128 B push constants (VS)
+	VkPipeline            m_meshPvPipe    = VK_NULL_HANDLE;
+	VkDescriptorPool      m_thumbDescPool = VK_NULL_HANDLE;
+	VkDescriptorSet       m_meshPvSet     = VK_NULL_HANDLE;
+	VkBuffer              m_meshPvUBO     = VK_NULL_HANDLE; // 96 B, host-visible, mapped
+	VkDeviceMemory        m_meshPvUBOMem  = VK_NULL_HANDLE;
+	void*                 m_meshPvUBOPtr  = nullptr;
+	bool                  m_meshPvTried   = false; // one attempt per session, like the GI pipelines
+
+	// Procedural preview primitive (HE::buildPreviewMesh), shared by the material
+	// tile and the material preview — see ensurePreviewMesh.
+	VkBuffer       m_previewSphereVB   = VK_NULL_HANDLE;
+	VkDeviceMemory m_previewSphereVMem = VK_NULL_HANDLE;
+	VkBuffer       m_previewSphereIB   = VK_NULL_HANDLE;
+	VkDeviceMemory m_previewSphereIMem = VK_NULL_HANDLE;
+	uint32_t       m_previewSphereIdx  = 0;
+	int            m_previewShape      = -1; // -1 = nothing built yet
+
+	// Particle tile pipeline (runtime-compiled billboard GLSL — see the .cpp).
+	VkDescriptorSetLayout m_particlePvDSL    = VK_NULL_HANDLE; // b0 sampler2D(FS)
+	VkPipelineLayout      m_particlePvLayout = VK_NULL_HANDLE; // + 112 B push constants (VS+FS)
+	VkPipeline            m_particlePvPipe   = VK_NULL_HANDLE;
+	VkDescriptorSet       m_particlePvSet    = VK_NULL_HANDLE;
+	VkBuffer              m_particlePvVB     = VK_NULL_HANDLE; // host-visible instance stream
+	VkDeviceMemory        m_particlePvVBMem  = VK_NULL_HANDLE;
+	void*                 m_particlePvVBPtr  = nullptr;
+	uint32_t              m_particlePvCap    = 0; // particles the current VB can hold
+	bool                  m_particlePvTried  = false;
+
+	// ── Interactive asset previews (P1c) ────────────────────────────────────
+	// Everything here is the preview counterpart of the thumbnail block above.
+	// It differs in exactly two ways, and both come from the panels' usage:
+	//
+	//  1. THE IMGUI HANDLE IS REGISTERED ONCE, when the target is created, and
+	//     cached. ImGui's Vulkan backend owns a FIXED pool of 64 descriptors
+	//     (EditorApplication.cpp:836) and the registrar has no counterpart that
+	//     frees one, so a per-call ImGui_ImplVulkan_AddTexture would exhaust it
+	//     in about a second — the panels call these every frame, ungated.
+	//  2. THE REQUESTED SIZE IS BUCKETED UP to a multiple of 64 before it is
+	//     compared against the live target, because the panels pass
+	//     ImGui::GetContentRegionAvail(), which moves by a pixel as the user
+	//     drags a splitter. Recreating means a new descriptor and, with no free
+	//     path, a permanent one. See previewBucket().
+	//
+	// The PROJECTION still uses the REQUESTED aspect, not the bucket's: ImGui
+	// rescales the bucketed image into the requested box, so a projection built
+	// on W/H is what makes a sphere come out round on screen. The VIEWPORT does
+	// cover the whole bucketed extent — narrowing it to W×H would leave the rest
+	// of the texture cleared, and ImGui::Image maps UV 0..1 across all of it.
+	struct PreviewTarget
+	{
+		VkImage        color     = VK_NULL_HANDLE;
+		VkDeviceMemory colorMem  = VK_NULL_HANDLE;
+		VkImageView    colorView = VK_NULL_HANDLE;
+		VkImage        depth     = VK_NULL_HANDLE;
+		VkDeviceMemory depthMem  = VK_NULL_HANDLE;
+		VkImageView    depthView = VK_NULL_HANDLE;
+		VkFramebuffer  fb        = VK_NULL_HANDLE; // over m_thumbRenderPass
+		// Readback staging for the HE_*_PREVIEW_DUMP PPM only — allocated the
+		// first time a dump is actually asked for, so an ordinary editor session
+		// never pays for it.
+		VkBuffer       stageBuf  = VK_NULL_HANDLE;
+		VkDeviceMemory stageMem  = VK_NULL_HANDLE;
+		void*          imguiTex  = nullptr;        // registered once, at creation
+		int            w = 0, h = 0;               // BUCKETED extent
+	};
+	PreviewTarget m_matPreview;      // RenderMaterialPreview
+	PreviewTarget m_skelPreview;     // RenderSkeletalPreview  (NOT square)
+	PreviewTarget m_particlePreview; // RenderParticlePreview
+
+	static int previewBucket(int v) { return ((v + 63) / 64) * 64; }
+	bool ensurePreviewTarget(PreviewTarget& t, int w, int h);
+	void destroyPreviewTarget(PreviewTarget& t);
+	void destroyPreviewResources(); // everything below, from Shutdown
+	// Open the shared render pass on a preview target (clear + full-extent
+	// viewport/scissor).
+	void beginPreviewPass(VkCommandBuffer cmd, const PreviewTarget& t);
+	// Close it: end the pass, record the HE_*_PREVIEW_DUMP copy if `dumpEnv` is
+	// set (it MUST happen here — this is the only point where the image is still
+	// in TRANSFER_SRC_OPTIMAL, the pass's finalLayout), then transition to the
+	// SHADER_READ_ONLY_OPTIMAL that ImGui_ImplVulkan_AddTexture was told to
+	// expect. Returns the dump path to hand writePreviewDump after the queue
+	// wait, or nullptr.
+	const char* endPreviewPass(VkCommandBuffer cmd, PreviewTarget& t, const char* dumpEnv);
+	// Headless pixel witness, pinned format: "P6\n<W> <H>\n255\n" then W*H*3 RGB
+	// bytes, TOP-DOWN, tightly packed. NO vertical flip and NO R/B swap — the
+	// target is R8G8B8A8_UNORM and Vulkan's framebuffer row 0 IS the top row
+	// (GL's `H-1-y` flip corrects for GL's bottom-up framebuffer and is a GL-only
+	// fix-up; adding one here would mirror the image).
+	static const char* previewDumpPath(const char* envVar);
+	bool recordPreviewDump(VkCommandBuffer cmd, PreviewTarget& t);
+	void writePreviewDump(const PreviewTarget& t, const char* path);
+	// Linear CLAMP_TO_EDGE sampler the three ImGui handles are registered with.
+	// Not m_albedoSampler: that one REPEATs, and ImGui's edge texels would then
+	// filter against the opposite edge of the preview.
+	VkSampler m_previewSampler = VK_NULL_HANDLE;
+	bool ensurePreviewSampler();
+
+	// Node-graph project textures (heTexP0..3), cached by GL's exact key ("hi:lo"
+	// for a baked UUID, else the loose path) so the two caches can be merged
+	// mechanically later. PREVIEW-ONLY on purpose: DrawScene still binds the
+	// white default at bindings 4-7, because uploadTextureImage submits and
+	// vkQueueWaitIdle's, which inside DrawScene's recording would be a hang
+	// rather than a hitch. The preview path resolves every view BEFORE it opens a
+	// command buffer, so it can afford them.
+	struct GraphTexVk
+	{
+		VkImage        image = VK_NULL_HANDLE;
+		VkDeviceMemory mem   = VK_NULL_HANDLE;
+		VkImageView    view  = VK_NULL_HANDLE;
+	};
+	std::unordered_map<std::string, GraphTexVk> m_graphTexCache;
+	VkImageView resolveGraphTexture(const HE::UUID& id, const std::string& path);
+
+	// ── Material preview (graph materials only, like OpenGL) ────────────────
+	// One descriptor set + one UBO trio, rewritten per call. Safe to rewrite in
+	// place because every preview ends in vkQueueWaitIdle, so no submission still
+	// references them. NEVER m_matPool[m_currentFrame] (reset wholesale each
+	// frame) and never the m_matLightBuf/m_matObjBuf/m_matParBuf rings (owned by
+	// the other in-flight frame).
+	struct HostBuffer
+	{
+		VkBuffer       buf    = VK_NULL_HANDLE;
+		VkDeviceMemory mem    = VK_NULL_HANDLE;
+		void*          mapped = nullptr;
+	};
+	bool makeHostBuffer(VkDeviceSize size, VkBufferUsageFlags usage, HostBuffer& out);
+	void destroyHostBuffer(HostBuffer& b);
+
+	VkDescriptorSet m_matPvSet = VK_NULL_HANDLE; // m_matSetLayout, from m_thumbDescPool
+	HostBuffer      m_matPvLightBuf;             // HeLighting
+	HostBuffer      m_matPvObjBuf;               // U (176 B)
+	HostBuffer      m_matPvParBuf;               // HeParams (256 B)
+	bool            m_matPvReady = false;
+	bool ensureMaterialPreviewResources();
+
+	// ── Skeletal preview ────────────────────────────────────────────────────
+	// Its own pipeline rather than m_skinnedPipeline: that one targets
+	// m_renderPass (a different colour format, so not render-pass-compatible) and
+	// reads set 0 / set 1 out of the per-frame scene UBO and bone rings this path
+	// may not touch. The two shader strings are runtime-compiled through
+	// he::shaderc — the same route the particle tile takes, and for the same
+	// reason (a new .glsl file would need a CMakeLists entry to ever become a
+	// .spv, and CMakeLists is off-limits). They are ports of GL's kSkelPreviewVS
+	// / kSkelPreviewFS, whose shading differs from the mesh preview's on purpose
+	// (ambient 0.35 vs 0.32, 0.65·diffuse vs 0.68, no specular).
+	VkDescriptorSetLayout m_skelPvDSL    = VK_NULL_HANDLE; // b0 UBO(FS) b1 tex(FS) b2 bones UBO(VS)
+	VkPipelineLayout      m_skelPvLayout = VK_NULL_HANDLE; // + 128 B push constants (VS)
+	VkPipeline            m_skelPvPipe   = VK_NULL_HANDLE;
+	VkDescriptorSet       m_skelPvSet    = VK_NULL_HANDLE;
+	HostBuffer            m_skelPvUBO;   // SkelPreviewCB
+	HostBuffer            m_skelPvBones; // 128 × mat4
+	bool                  m_skelPvTried  = false;
+	bool ensureSkelPreviewPipeline();
+
+	// Bone overlay (joint crosses + parent→child segments), the port of
+	// OpenGLRenderer.cpp:8665-8714. Reuses the PRECOMPILED debug_line shaders and
+	// m_debugPipelineLayout — only the pipeline (this render pass) and the
+	// buffers are new, so no shader is added. lineWidth stays 1.0: the device is
+	// created with no core features enabled, so `wideLines` is off and GL's
+	// glLineWidth(2.0) cannot be matched.
+	VkPipeline      m_skelLinePipe = VK_NULL_HANDLE;
+	VkDescriptorSet m_skelLineSet  = VK_NULL_HANDLE; // m_debugDSLayout, from m_thumbDescPool
+	HostBuffer      m_skelLineUBO;                   // DebugCB { mat4 uVP }
+	HostBuffer      m_skelLineVB;                    // pos3+color3, grown on demand
+	uint32_t        m_skelLineVerts = 0;             // vertices the current VB can hold
+	bool            m_skelLineTried = false;
+	bool ensureSkelLinePipeline();
+	// Build the overlay's vertices and upload them. Call BEFORE the command
+	// buffer is opened: growing the vertex buffer destroys the old one, which
+	// must not happen while a recorded command buffer still references it.
+	// Returns the vertex count (0 = nothing to draw).
+	uint32_t buildSkelBoneOverlay(const HE::UUID& meshId,
+	                              const std::vector<glm::mat4>& boneScratch,
+	                              float extent, const glm::mat4& mvpVk);
+	void drawSkelBoneOverlay(VkCommandBuffer cmd, uint32_t vertexCount);
 
 	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
 	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than

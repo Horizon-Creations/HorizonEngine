@@ -232,13 +232,15 @@ geschrieben; er läuft nicht.
 
 | Feature | GL | D3D11 | D3D12 | Vulkan |
 |---|:--:|:--:|:--:|:--:|
-| Material-Vorschau | JA | -- | -- | -- |
-| Skeletal-Vorschau (Bone-Overlay) | JA | -- | -- | -- |
-| Partikel-Vorschau | JA | -- | -- | -- |
-| Asset-Thumbnails | JA | -- | -- | -- |
-| Partikel-Thumbnails | JA | -- | -- | -- |
-| Widget-Thumbnails | JA | -- | -- | -- |
-| `WarmupMaterials` | JA | -- | -- | -- |
+| Material-Vorschau (D3D: PBR-Fallback bis A4 steht) | JA | ~ | ~ | JA |
+| Skeletal-Vorschau (Bone-Overlay) | JA | JA | JA | JA |
+| Partikel-Vorschau | JA | JA | JA | JA |
+| Asset-Thumbnails — Mesh | JA | JA | JA | JA |
+| Asset-Thumbnails — Material (nur PBR-Fallback, Graph-Shader fehlt: A4) | JA | ~ | ~ | ~ |
+| Asset-Thumbnails — Skeletal | JA | JA | JA | JA |
+| Partikel-Thumbnails | JA | JA | JA | JA |
+| Widget-Thumbnails | JA | JA | JA | JA |
+| `WarmupMaterials` | JA | JA | JA | JA |
 | `InvalidateMaterial/Mesh/Texture` | JA | ~ | ~ | ~ |
 | Multi-Window | JA | -- | -- | JA |
 | Per-Pass-GPU-Timing | JA | -- | -- | -- |
@@ -427,6 +429,173 @@ Validator, der neue Shader stillschweigend überspringt, ist schlechter als kein
 liest sich wie ein bestandener Test.
 
 ### P1 — Editor-Integration nachziehen (D3D11, D3D12, Vulkan)
+
+> **Stand 2026-08-19: P1a und P1b ERLEDIGT und per Bild-A/B abgenommen. P1c/P1d/P1e offen.**
+>
+> Umgesetzt auf **allen drei** Zielbackends: `WarmupMaterials`, `RenderAssetThumbnail`,
+> `RenderWidgetThumbnail`, `RenderParticleThumbnail`. Neu und geteilt:
+> `include/HorizonRendering/PreviewFraming.h` (Framing-Konstanten, `boundsCenter/Extent`,
+> `meshOrbit`), `HE::hlsl::kMeshPreviewHLSL` für D3D11+D3D12 und
+> `shaders/mesh_preview.{vert,frag}` für Vulkan — Portierungen von GLs
+> `kMeshPreviewVS/FS`.
+>
+> **Das Abnahme-Gate, und es ist diesmal ein Bild und keine Log-Zeile:**
+> `HE_DUMP_THUMB` ruft *alle drei* Thumbnail-Einstiegspunkte über
+> `AssetThumbnailCache` auf und schreibt die zurückgegebenen PIXEL als PPM. Vorher
+> meldete jedes der drei Backends **6 fehlende Kacheln**, jetzt **0**; statt 2 Kacheln
+> (die beiden CPU-erzeugten) entstehen **8**.
+>
+> Gegen OpenGL, 128×128, subpixelgenau verglichen (`maxdiff` = größte Abweichung
+> eines einzelnen Kanalwertes, 0–255):
+>
+> | Kachel | D3D11 | D3D12 | Vulkan | Befund |
+> |---|:--:|:--:|:--:|---|
+> | `mesh` | **byte-gleich** | **byte-gleich** | **byte-gleich** | Framing, Clip-Space, Shader, Readback stimmen |
+> | `particles` | **byte-gleich** | **byte-gleich** | **byte-gleich** | |
+> | `material_pbr` | 1 Subpixel, maxdiff 1 | dito | dito | Rundung, kein Befund |
+> | `material` | 60 % ≠ | 60 % ≠ | 60 % ≠ | erwartet — siehe A4 unten |
+> | `material_function` | 64 % ≠ | 64 % ≠ | 64 % ≠ | erwartet — siehe A4 unten |
+> | `widget` | maxdiff 106 | maxdiff 106 | maxdiff 220 | erwartet — siehe UI-Alpha unten |
+>
+> `mesh` und `particles` sind auf allen drei Backends **byte-identisch** mit OpenGL,
+> `material_pbr` weicht in **genau einem** Subpixel um **1** ab. Das ist der eigentliche
+> Beleg dieser Phase: Framing-Header, Clip-Space-Fix, portierter Shader und
+> Readback-Vertrag sind gleichzeitig richtig — jeder einzelne Fehler darin hätte eine
+> sichtbare Abweichung erzeugt.
+>
+> Die drei Zielbackends sind **untereinander byte-gleich** — einzige Ausnahme 24 Pixel
+> (0,1 %) in einem 8×4-Feld der Vulkan-Widget-Kachel, Glyphen-Kantenglättung.
+> OpenGL ist in allen acht Kacheln unverändert; der Port hat die Referenz nicht angefasst.
+>
+> **Die GL-Referenz ist kalt erzeugt.** Der Vergleich wurde mit beiseitegeschobenem
+> `%APPDATA%\HorizonCreations\HorizonEngine\glprogcache` wiederholt (Log: „built a
+> material program from canonical GLSL" ×2, „binary cache" ×0). Kalt und warm liefern
+> in allen sechs Kacheln dasselbe Bild — die Referenzseite hängt also nicht am
+> `glProgramBinary`-Pfad, und die Byte-Gleichheit oben gilt gegen beide.
+> Anmerkung zur Sauberkeit des A/B: der Vorher-Lauf hatte zusätzlich `HE_DUMP_PREVIEW=1`
+> gesetzt, der Nachher-Lauf nicht. Das Gate 6→0 stammt aus den Thumb-Läufen beider
+> Seiten, auf die diese Variable nachweislich nicht wirkt (anderer Codepfad, und ohne
+> backendseitigen PPM-Writer schreibt sie ohnehin nichts).
+>
+> **Die beiden Abweichungen sind benannt, nicht übersehen:**
+> 1. **`material` / `material_function`** zeigen dieselbe Kugel in identischer Lage und
+>    Größe, aber flach im `baseColor` des Materials statt im Graph-Shader. Ursache ist
+>    die A4-Lücke: D3D11 und Vulkan binden vier Kopien der weißen Default-Textur an
+>    `heTexP0..3`, D3D12 legt die Slots als NULL-SRVs an (samplen als 0,0,0,0). Ein
+>    Graph-Material wäre dort weiß bzw. schwarz — **schlechter** als die ehrliche
+>    PBR-Ersatzkugel. Deshalb zeichnen alle drei bewusst nur den Fallback. Das wird
+>    mit dem Graph-Textur-Cache geschlossen, nicht hier.
+> 2. **`widget`** unterscheidet sich um eine gleichmäßige Alpha-Verschiebung im Panel.
+>    Das ist **keine** Regression dieses Ports: GLs UI-Pass mischt mit
+>    `glBlendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`, was auch Alpha erfasst — Metal
+>    (`MetalRenderer.mm:6019`), D3D11, D3D12 und Vulkan setzen alle
+>    `sourceAlpha = ONE / destAlpha = ZERO`. **Bei diesem Detail ist GL der Ausreißer
+>    und die drei Zielbackends stimmen jetzt mit Metal überein.** Wer das angleicht,
+>    muss entscheiden welche der beiden Seiten recht hat, und das ist eine Änderung am
+>    gemeinsamen UI-Pass, nicht am Thumbnail-Pfad.
+>
+> **Drei Nebenbefunde waren ein einziger Bug — inzwischen behoben.** Sie standen vor
+> P1c und sind deshalb sofort mit erledigt worden:
+> D3D11 beendete den Headless-Lauf mit `0xC0000374` (Heap-Korruption), D3D12 mit
+> `0xC0000005`, und Vulkan leakte 10 Objekte an `vkDestroyDevice`.
+>
+> Ursache war `EditorApplication.cpp:965`: `m_backend` wurde dort **nach** der
+> ImGui-Initialisierung noch einmal aus der persistierten Konfiguration gelesen.
+> `CreateRenderer()` (`:210`) hatte es zuvor korrekt aus `GetConfig().backend` gesetzt —
+> und nur das kennt die `HE_DUMP_RHI`-Übersteuerung. Sobald beide auseinanderliefen, war
+> ImGui auf dem einen Backend initialisiert, während jedes spätere `switch (m_backend)`
+> den Zweig des anderen nahm: `NewFrame`, `RenderDrawData` und vor allem der Shutdown,
+> der dann ein ImGui-Backend über die Datenstruktur eines anderen fuhr. Daher drei
+> verschiedene Symptome aus einer Zeile. Das verräterische Zeichen stand die ganze Zeit
+> im Log: „Failed to initialize OpenGL loader!" in einem D3D11-Lauf.
+>
+> Der Fix ist die **Streichung** der Zuweisung; `:210` ist jetzt einziger Schreiber.
+> Bewusst **nicht** über `setSelectedRHI(m_backend)` geradegezogen — `writeConfig()`
+> würde die Übersteuerung sonst in die `config.json` des Nutzers schreiben und sein
+> gespeichertes Backend bei jedem Headless-Lauf still ändern.
+>
+> Beleg, volle Matrix persistiertes RHI × `HE_DUMP_RHI`, alle 16 Zellen:
+> **16/16 exit 0, 0 Leaks, 0-mal „Failed to initialize OpenGL loader"** (vorher stürzten
+> die Zellen mit ungleichem Paar ab bzw. leakten). Die acht Thumbnail-Kacheln sind auf
+> allen vier Backends unverändert.
+>
+> Das war zugleich eine **Falle für P1c**: derselbe verfälschte Wert landet über
+> `EditorApplication.cpp:4545` in `AppContext.backend`, und die Vorschau-Panels leiten
+> daraus ihr `flipY` ab (`ctx.backend == OpenGL`). Unter `HE_DUMP_RHI` hätte also jede
+> Vorschau auf genau den drei Zielbackends kopfüber gestanden — in genau den Läufen, mit
+> denen man sie abnimmt.
+>
+> Zusätzlich abgesichert: `D3D12DescriptorHeapAllocator::Alloc`
+> (`EditorApplication.cpp:119`) gibt bei erschöpftem Heap jetzt Null-Handles zurück,
+> statt im Release-Build (wo `IM_ASSERT` leer ist) einen Index aus dem Nichts zu nehmen
+> und den daraus gebauten Deskriptor hinter den Heap zeigen zu lassen.
+>
+> `HeValidateShaders` deckt jetzt **44** HLSL-Jobs statt 36, alle grün. Testsuite
+> 1738/1739 — der eine Fehlschlag ist `test_input_gamepad.cpp:612` (SDL-Virtual-Pad),
+> und `tests/CMakeLists.txt:98` linkt bewusst **kein** GPU-Backend, kann also nicht
+> von dieser Änderung stammen.
+>
+> **P1c ist inzwischen ebenfalls erledigt — siehe den Block direkt darunter.** Offen
+> bleiben P1d (Multi-Window auf D3D11/D3D12) und P1e. `SetShadowDebug` ist dabei **hart
+> blockiert** — keines der drei Backends hat ein Kaskaden-Array, das man tönen könnte
+> (`D3D11Renderer.cpp:3596`, `D3D12Renderer.cpp:5559`, `VulkanRenderer.cpp:3822`), es
+> hängt also hinter CSM. `InvalidateTexture` bleibt bewusst aus: keines der drei hat
+> einen texturschlüssel-basierten Cache, den es leeren könnte — der Override wäre ein
+> korrekt aussehender No-Op und würde eine Matrixzelle umlegen, ohne etwas zu tun.
+> (Vulkan hat inzwischen einen Graph-Textur-Cache, aber nur für den Vorschau-Pfad.)
+
+> **Stand 2026-08-19, Nachtrag: P1c ERLEDIGT und per Bild-A/B abgenommen.**
+>
+> `RenderMaterialPreview`, `RenderSkeletalPreview` und `RenderParticlePreview` auf allen
+> drei Zielbackends, dazu die Voraussetzung `localBounds` am Skeletal-Mesh-Struct — womit
+> auch der `ThumbnailKind::SkeletalMesh`-Zweig aus P1b nachgezogen ist, der vorher `false`
+> zurückgab.
+>
+> **Abnahme über `HE_PREVIEW_DUMP`**, das die drei Backends jetzt ebenso implementieren
+> wie GL und Metal (vorher gab es auf ihnen **keinen** Pixel-Zeugen für eine Vorschau —
+> der Frame-Dump taugt nicht dafür, weil `EditorApplication.cpp:2748` den
+> Overlay-Callback auf `nullptr` setzt und ImGui damit nie im Bild ist). 512×512, gegen
+> OpenGL:
+>
+> | Backend | maxdiff | Befund |
+> |---|:--:|---|
+> | **Vulkan** | **1** | zeichnet das **echte Graph-Material** — praktisch pixelgleich mit GL |
+> | D3D11 | 214 | PBR-Ersatzkugel, A4/X4509 (unten) |
+> | D3D12 | 214 | dito, **byte-gleich mit D3D11** |
+>
+> Vulkan ist damit das erste Zielbackend, das eine Node-Graph-Material-Vorschau so
+> anzeigt wie die Referenz. D3D11 und D3D12 zeichnen dieselbe Kugel in derselben Lage,
+> Größe und Kameraführung — nur die Graph-Shading fehlt.
+>
+> Drei Festlegungen, die alle drei gleich umsetzen, damit sie nicht auseinanderlaufen:
+> 1. **Ein persistentes ImGui-Handle pro Vorschau-Target**, registriert nur beim
+>    (Neu-)Anlegen. Die Panels rufen die Einstiegspunkte **jeden Frame** ungetaktet auf
+>    (`SkeletalMeshEditorPanel.cpp:228`, `LevelScriptPanel.cpp:1846`,
+>    `ParticleGraphEditorPanel.cpp:284`) — eine Registrierung pro Aufruf hätte die
+>    64 Deskriptoren in etwa einer Sekunde aufgebraucht. So kostet P1c **drei**.
+> 2. **Angeforderte Größe auf Vielfache von 64 aufgerundet**, damit das Ziehen eines
+>    Splitters nicht pro Pixel ein Target neu anlegt (und einen Deskriptor verliert).
+>    Die Projektion nimmt trotzdem das **angeforderte** Seitenverhältnis: `ImGui::Image`
+>    skaliert die gerundete Textur auf den Bereich, und nur so bleibt eine Kugel im
+>    Endbild rund.
+> 3. **Ein Klemmbereich pro Einstiegspunkt.** Die Skelett-Vorschau geht bis 2048, die
+>    anderen bis 1024 — genau wie GL (`OpenGLRenderer.cpp:8588`). Steht jetzt als
+>    `HE::clampSkeletalPreviewSize` im geteilten Header, nachdem zwei Backends es
+>    zunächst unterschiedlich gemacht hatten.
+>
+> Skinning ist auf allen drei **echt**, keine Bind-Pose-Notlösung: der Szenen-Skinning-Pfad
+> ist aus einem Aufruf außerhalb des Frames nicht erreichbar (sein PS liest Shadow-Map,
+> AO, GI-Atlanten), deshalb bekam jede Vorschau ein eigenes kleines Skinning-Programm —
+> dieselbe Entscheidung, die GL mit `kSkelPreviewVS` getroffen hat.
+>
+> Gesamtstand nach P1a–P1c, alle vier Backends: **exit 0, 8/8 Kacheln, 0 fehlende,
+> Vorschau-PPM vorhanden, 0 Leaks.** Testsuite 1739/1739. `HeValidateShaders` deckt jetzt
+> **91** eingebettete Shader ab (vorher 75).
+>
+> Bekannte Abweichungen, alle benannt: der Bone-Overlay ist 1 px statt GLs 2 px (weder
+> D3D noch Vulkan-ohne-`wideLines` kennen `glLineWidth`), und `HE_DUMP_PREVIEW_STRESS`
+> fordert Größen wie 200/216/232 an, die auf 256 aufrunden — dessen PPM ist also nicht
+> maßgleich mit GLs. Der reguläre 512er-Schuss, auf dem das Gate steht, ist es.
 
 Der geschlossenste Block der Matrix: elf Features, auf allen drei Zielbackends fehlend, und
 **GL ist überall die portable Referenz** — kein Apple-Mechanismus, kein neuer Shader.

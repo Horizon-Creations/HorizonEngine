@@ -51,6 +51,54 @@ public:
     // (read back k_frameCount frames late so it never stalls) + CPU counters.
     FrameGpuStats GetFrameGpuStats() const override;
 
+    // Build the node-graph material PSOs ahead of their first draw. Only the
+    // (non-HDR, opaque) variant — neither `usingHDR` nor RenderSorter::isTransparent
+    // can be keyed correctly before the first frame; see the definition's comment.
+    void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+
+    // Content-Browser tiles, rendered into a PRIVATE target and read back as
+    // tightly packed TOP-DOWN RGBA8. Callable before the first Render(): they own
+    // their target, their descriptor heaps and their own allocator/command-list
+    // pair, and depend on no Render()-created resource. All cached in
+    // D3D12RendererImpl and torn down in Shutdown().
+    bool RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind, const HE::UUID& assetId,
+                              uint32_t size, std::vector<uint8_t>& outRgba8) override;
+    bool RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects, uint32_t size,
+                               std::vector<uint8_t>& outRgba8) override;
+    bool RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                 const std::vector<ParticlePreviewInstance>& particles,
+                                 uint32_t size, std::vector<uint8_t>& outRgba8) override;
+
+    // ── Interactive asset previews (P1c) ──────────────────────────────────────
+    // Unlike the tiles above these return an ImGui texture handle rather than
+    // pixels: the editor panel samples the target directly, every frame, for as
+    // long as its tab is open. Each preview owns a SEPARATE target — sharing one
+    // would mean a Content-Browser tile, or the second preview the Class Editor
+    // draws in the same frame, replacing what the first one is showing.
+    //
+    // The returned handle is registered with the editor's ImGui SRV heap ONCE per
+    // target lifetime and cached, because that heap is a fixed 64 descriptors and
+    // DestroyImGuiTexture never gives one back. The requested size is rounded up to
+    // a multiple of 64 before it is compared against the live target, so dragging a
+    // panel splitter does not recreate the target (and leak a descriptor) on every
+    // pixel of movement. Returns nullptr when the asset cannot be resolved or the
+    // ImGui heap is exhausted; the panel then shows its placeholder.
+    //
+    // Callable before the first Render(), like the tile paths: own target, own
+    // heaps, own allocator/command-list pair.
+    void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId, uint32_t size,
+                                float yaw, float pitch, float dist,
+                                int shape, const HE::UUID& meshId) override;
+    void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                const std::vector<glm::mat4>& boneMatrices,
+                                uint32_t width, uint32_t height,
+                                float yaw, float pitch, float dist,
+                                bool showSkeleton, glm::mat4* outViewProj) override;
+    void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId,
+                                const HE::UUID& materialId,
+                                const std::vector<ParticlePreviewInstance>& particles,
+                                uint32_t size, float yaw, float pitch, float dist) override;
+
     // ImGui editor textures (content-browser icons + logo). Uploads the RGBA8
     // pixels to a GPU texture, then hands the resource to the editor-installed
     // registrar (m_imguiTexRegistrar) which builds the ImGui SRV. Returns the

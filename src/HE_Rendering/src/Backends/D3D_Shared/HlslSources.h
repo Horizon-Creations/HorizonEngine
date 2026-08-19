@@ -884,4 +884,89 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 }
 )HLSL";
 
+// ─── Mesh preview / thumbnail shader ────────────────────────────────────────
+// Port of kMeshPreviewVS/kMeshPreviewFS (OpenGLRenderer.cpp:690-741). Shared by
+// D3D11 and D3D12; `shaders/mesh_preview.vert`/`.frag` is the Vulkan twin.
+//
+// Why a dedicated shader rather than reusing kSceneHLSL with lightCount = 0:
+// a Content-Browser tile is not a scene. It has no sun, no shadow map, no
+// SSAO and no sky, and the scene shader reads all four. Feeding it zeros
+// shades differently by construction — which would make an A/B against
+// OpenGL impossible to read, because "correct port, different shader" and
+// "broken port" produce the same verdict. The whole point of the tile chain
+// is that the picture can be compared.
+//
+// The fixed studio light (uSun.w == 0) is what every cached tile on disk was
+// rendered with, so a tile does not change the day someone puts a sky behind
+// a preview. uSun.w > 0 arms the world's real sun for the world preview.
+//
+// Register map, chosen to be identical on both backends so one string serves
+// both: b0 holds everything (one CB), t0 is the albedo, s0 a linear-wrap
+// sampler. No shadow map, no second table — the D3D12 root signature for this
+// pass is a 2-entry one built next to the PSO, not the scene's.
+inline constexpr const char* kMeshPreviewHLSL = R"HLSL(
+cbuffer MeshPreviewCB : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;     // rgb = base colour, w unused
+    float4   uCamPos;    // xyz = camera position, w unused
+    float4   uPbr;       // x = metallic, y = roughness, z = hasTexture, w unused
+    float4   uSun;       // xyz points TOWARD the light, w > 0 arms it
+    float4   uSunColor;  // rgb
+    float4   uAmbient;   // rgb
+};
+
+Texture2D    uTex     : register(t0);
+SamplerState uTexSamp : register(s0);
+
+struct VSIn
+{
+    float3 pos    : POSITION;
+    float3 normal : NORMAL;
+    float2 uv     : TEXCOORD0;
+};
+
+struct VSOut
+{
+    float4 pos      : SV_POSITION;
+    float3 normal   : NORMAL;
+    float2 uv       : TEXCOORD0;
+    float3 worldPos : TEXCOORD1;
+};
+
+VSOut VSMain(VSIn i)
+{
+    VSOut o;
+    o.normal   = mul((float3x3)uModel, i.normal);
+    o.uv       = i.uv;
+    o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
+    o.pos      = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.32, 0.32, 0.32);
+
+    float3 N = normalize(i.normal);
+    float3 V = normalize(uCamPos.xyz - i.worldPos);
+    float3 H = normalize(L + V);
+    float  diff  = max(dot(N, L), 0.0);
+    float  rough = clamp(uPbr.y, 0.05, 1.0);
+    float  spec  = pow(max(dot(N, H), 0.0), lerp(128.0, 8.0, rough))
+                 * (1.0 - rough) * lerp(0.25, 1.0, saturate(uPbr.x));
+
+    // uPbr.z carries GL's `uHasTex` bool — HLSL has no bool in a cbuffer that
+    // maps cleanly from C++, so it rides as a float the C++ side sets to 0/1.
+    float3 albedo = (uPbr.z > 0.5) ? uTex.Sample(uTexSamp, i.uv).rgb * uColor.rgb
+                                   : uColor.rgb;
+    float3 lightIn = amb + lc * (lit ? diff : 0.68 * diff);
+    return float4(albedo * lightIn + spec.xxx * lc, 1.0);
+}
+)HLSL";
+
 } // namespace HE::hlsl

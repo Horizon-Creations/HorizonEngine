@@ -25,6 +25,8 @@
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
+#include <HorizonRendering/PreviewFraming.h>  // shared thumbnail/preview camera + framing constants
+#include <material/PreviewMesh.h>             // procedural sphere/cube/plane for material tiles
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include <SDL3/SDL.h>
 #include <d3d11.h>
@@ -43,6 +45,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cmath>
+#include <fstream>   // HE_*_PREVIEW_DUMP PPM writer (mirrors the GL reference)
 #include <Diagnostics/Logger.h>
 
 using Microsoft::WRL::ComPtr;
@@ -860,6 +863,153 @@ float4 UIPSMain(UIOut i) : SV_TARGET
 }
 )HLSL";
 
+// ─── Particle-preview billboards (RenderParticleThumbnail) ───────────────────
+// Port of OpenGLRenderer's kParticlePreviewVS/FS. Camera-facing quads, one
+// INSTANCE per already-simulated particle; the six corner vertices come from
+// SV_VertexID (GL uses gl_VertexID the same way) so there is no per-vertex
+// buffer at all — the only vertex stream is the per-instance one, byte-identical
+// to GL's 8-float stride: pos3 + size1 + color3 + alpha1, read here as two
+// float4s. This shader only draws; simulation lives in ParticleSystem::stepPool.
+static const char* kParticlePreviewHLSL = R"HLSL(
+cbuffer ParticlePreviewCB : register(b0)
+{
+    float4x4 uViewProj;
+    float4   uCamRight; // xyz = camera right (view row 0)
+    float4   uCamUp;    // xyz = camera up    (view row 1)
+    float4   uFlags;    // x = hasTexture (0/1)
+};
+
+Texture2D    uTex     : register(t0);
+SamplerState uTexSamp : register(s0);
+
+struct VSIn
+{
+    float4 posSize    : POSITION; // xyz = world position, w = billboard size
+    float4 colorAlpha : COLOR;    // rgb = tint, a = alpha
+    uint   vid        : SV_VertexID;
+};
+
+struct VSOut
+{
+    float4 pos   : SV_POSITION;
+    float3 color : COLOR0;
+    float  alpha : COLOR1;
+    float2 uv    : TEXCOORD0;
+};
+
+VSOut VSMain(VSIn i)
+{
+    // Two triangles, same winding order as the GL kCorners[] table. Expressed as
+    // arithmetic on the vertex index rather than a static array so FXC never has
+    // to emit a dynamically indexed constant table for six literals.
+    uint   v  = i.vid % 6u;
+    uint   c  = (v == 0u || v == 3u) ? 0u : ((v == 1u) ? 1u : ((v == 2u || v == 4u) ? 2u : 3u));
+    float2 corner = float2((c == 1u || c == 2u) ? 1.0 : -1.0,
+                           (c == 2u || c == 3u) ? 1.0 : -1.0);
+
+    float3 worldPos = i.posSize.xyz
+                    + (uCamRight.xyz * corner.x + uCamUp.xyz * corner.y) * (i.posSize.w * 0.5);
+    VSOut o;
+    o.pos   = mul(uViewProj, float4(worldPos, 1.0));
+    o.uv    = corner * 0.5 + 0.5;
+    o.color = i.colorAlpha.rgb;
+    o.alpha = i.colorAlpha.a;
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    bool   hasTex = uFlags.x > 0.5;
+    float4 texc   = hasTex ? uTex.Sample(uTexSamp, i.uv) : float4(1.0, 1.0, 1.0, 1.0);
+    // No texture -> soft circular sprite instead of a flat square, so a bare
+    // particle system still reads as "particles" rather than "confetti".
+    float  shape  = hasTex ? texc.a : smoothstep(1.0, 0.0, length(i.uv * 2.0 - 1.0));
+    return float4(i.color * texc.rgb, i.alpha * shape);
+}
+)HLSL";
+
+// ─── Skeletal-mesh preview (RenderSkeletalPreview) ───────────────────────────
+// Port of OpenGLRenderer's kSkelPreviewVS/FS. Deliberately NOT kSkinnedHLSL +
+// the scene PS: that pair needs perFrameCB, the shadow map, the AO/GI SRVs and
+// the sampler set a frame binds — none of which exist when a preview is asked
+// for BEFORE the first Render(). This one is self-contained (b0 + b2 + t0/s0),
+// so the skinning actually runs out of frame instead of degrading to bind pose.
+//
+// b0 is byte-identical to HE::hlsl::kMeshPreviewHLSL's MeshPreviewCB, so the
+// C++ side fills the SAME MeshPreviewCB struct and binds the SAME meshPvCB for
+// both the skinned and unskinned preview draws. b2 matches kSkinnedHLSL's
+// BonesCB, so the existing 8192-byte bonesCB is reused unchanged.
+//
+// The PS mirrors GL's kSkelPreviewFS exactly and NOT kMeshPreviewHLSL's PSMain:
+// the skeletal one has no specular lobe, ambient 0.35 (not 0.32) and a 0.65
+// unlit-diffuse factor (not 0.68). Two shaders that look interchangeable but
+// are not — sharing one would shift every skeletal preview off GL.
+static const char* kSkelPreviewHLSL = R"HLSL(
+cbuffer MeshPreviewCB : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;     // rgb = base colour
+    float4   uCamPos;    // unused here (no specular), kept so b0 matches kMeshPreviewHLSL
+    float4   uPbr;       // z = hasTexture (GL's uHasTex); x/y unused here
+    float4   uSun;       // xyz points TOWARD the light, w > 0 arms it
+    float4   uSunColor;  // rgb
+    float4   uAmbient;   // rgb
+};
+
+cbuffer BonesCB : register(b2)
+{
+    float4x4 uBoneMatrices[128];
+};
+
+Texture2D    uTex     : register(t0);
+SamplerState uTexSamp : register(s0);
+
+struct SkinIn
+{
+    float3 pos     : POSITION;
+    float3 normal  : NORMAL;
+    float2 uv      : TEXCOORD0;
+    uint4  boneIds : BLENDINDICES;
+    float4 boneWgt : BLENDWEIGHT;
+};
+
+struct VSOut
+{
+    float4 pos    : SV_POSITION;
+    float3 normal : NORMAL;
+    float2 uv     : TEXCOORD0;
+};
+
+VSOut VSMainSkinned(SkinIn i)
+{
+    float4x4 skin = i.boneWgt.x * uBoneMatrices[i.boneIds.x]
+                  + i.boneWgt.y * uBoneMatrices[i.boneIds.y]
+                  + i.boneWgt.z * uBoneMatrices[i.boneIds.z]
+                  + i.boneWgt.w * uBoneMatrices[i.boneIds.w];
+    float4 sp = mul(skin, float4(i.pos, 1.0));
+    VSOut o;
+    o.normal = mul((float3x3)uModel, mul((float3x3)skin, i.normal));
+    o.uv     = i.uv;
+    o.pos    = mul(uMVP, sp);
+    return o;
+}
+
+float4 PSMain(VSOut i) : SV_TARGET
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.35, 0.35, 0.35);
+
+    float3 N    = normalize(i.normal);
+    float  diff = max(dot(N, L), 0.0);
+    float3 albedo = (uPbr.z > 0.5) ? uTex.Sample(uTexSamp, i.uv).rgb * uColor.rgb
+                                   : uColor.rgb;
+    return float4(albedo * (amb + lc * (lit ? diff : 0.65 * diff)), 1.0);
+}
+)HLSL";
+
 namespace
 {
     // GPU mesh uploaded on first sight, mirroring the GL/Metal backends.
@@ -882,6 +1032,13 @@ namespace
         ComPtr<ID3D11Buffer>             ib;
         ComPtr<ID3D11ShaderResourceView> srv;        // albedo texture (may be null)
         int                              indexCount  = 0;
+        // BIND-POSE bounds, computed from the stored vertex positions exactly like
+        // GpuMesh's (the loose-asset branch of resolveMesh). Without it there is
+        // nothing to frame a skeletal preview or thumbnail on — the orbit camera
+        // takes its centre and its distance scale from these. A posed mesh can of
+        // course leave this box; the camera is deliberately NOT re-fitted per pose,
+        // or the subject would drift while an animation scrubs (GL does the same).
+        HE::AABB                         localBounds;
     };
 
     // Constant-buffer layouts must match the HLSL cbuffers exactly (16-byte rules).
@@ -3325,6 +3482,10 @@ struct D3D11RendererImpl
 
         GpuSkeletalMesh mesh;
         mesh.indexCount = static_cast<int>(asset->indices.size());
+        // Bind-pose bounds from the stored positions — the same call the loose
+        // static-mesh path makes. SkeletalMeshAsset ships no baked boundsMin/Max
+        // (unlike StaticMeshAsset's cooked branch), so there is only this one path.
+        mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
         mesh.vb       = makeVB(interleaved.data(), static_cast<UINT>(interleaved.size() * sizeof(float)));
         mesh.boneIdVb = makeVB(boneIds.data(),    static_cast<UINT>(boneIds.size()  * sizeof(uint32_t)));
         mesh.boneWgtVb= makeVB(boneWgts.data(),   static_cast<UINT>(boneWgts.size() * sizeof(float)));
@@ -3351,6 +3512,844 @@ struct D3D11RendererImpl
 
         return &skeletalMeshCache.emplace(assetId, std::move(mesh)).first->second;
     }
+
+    // ─── Content-Browser thumbnails ──────────────────────────────────────────
+    // Everything below is reachable BEFORE the first Render(): the editor asks for
+    // tiles while the content browser first populates, and viewportTex/hdrTex/
+    // ldrTex/bloomTex[] are only created inside Render(). So this path owns a
+    // PRIVATE target and touches no Render()-created resource, and it sets every
+    // piece of pipeline state it depends on rather than inheriting a frame's — the
+    // immediate context's IA topology defaults to UNDEFINED (a silently dropped
+    // draw) and its rasterizer default to CULL_BACK (half a silhouette missing).
+
+    ComPtr<ID3D11Texture2D>        thumbTex;      // R8G8B8A8_UNORM (never _SRGB)
+    ComPtr<ID3D11RenderTargetView> thumbRTV;
+    ComPtr<ID3D11Texture2D>        thumbDepthTex; // D32_FLOAT
+    ComPtr<ID3D11DepthStencilView> thumbDSV;
+    ComPtr<ID3D11Texture2D>        thumbStaging;  // CPU-readable copy target
+    int thumbSize = 0;
+
+    // Mesh/material tile pipeline (HE::hlsl::kMeshPreviewHLSL).
+    ComPtr<ID3D11VertexShader> meshPvVS;
+    ComPtr<ID3D11PixelShader>  meshPvPS;
+    ComPtr<ID3D11InputLayout>  meshPvIL;
+    ComPtr<ID3D11Buffer>       meshPvCB;
+    bool meshPvTried = false; // one-shot: never re-attempt a failed compile per tile
+
+    // The material tile's / material preview's procedural primitive
+    // (HE::buildPreviewMesh: 0 sphere, 1 cube, 2 plane). ONE shared pair of
+    // buffers rebuilt when the requested shape changes, exactly like GL's single
+    // m_previewVAO + m_previewShape — the thumbnail path always wants shape 0 and
+    // rebuilds if the Material Editor left a cube behind.
+    ComPtr<ID3D11Buffer> previewSphereVB;
+    ComPtr<ID3D11Buffer> previewSphereIB;
+    UINT                 previewSphereIdx   = 0;
+    int                  previewShapeBuilt  = -1; // -1 = nothing built yet
+
+    // Particle tile pipeline (kParticlePreviewHLSL).
+    ComPtr<ID3D11VertexShader> particlePvVS;
+    ComPtr<ID3D11PixelShader>  particlePvPS;
+    ComPtr<ID3D11InputLayout>  particlePvIL;
+    ComPtr<ID3D11Buffer>       particlePvCB;
+    ComPtr<ID3D11Buffer>       particlePvInstVB; // dynamic, grown on demand
+    UINT                       particlePvInstCap = 0;
+    ComPtr<ID3D11BlendState>   particlePvBlend;  // SRC_ALPHA/INV_SRC_ALPHA on ALL FOUR channels
+    bool particlePvTried = false;
+
+    // Must match kMeshPreviewHLSL's cbuffer at b0, in order (224 B).
+    struct MeshPreviewCB
+    {
+        glm::mat4 mvp;
+        glm::mat4 model;
+        glm::vec4 color;
+        glm::vec4 camPos;
+        glm::vec4 pbr;      // x=metallic y=roughness z=hasTexture w=0
+        glm::vec4 sun;      // w = 0 → the shader's fixed studio light (GL parity)
+        glm::vec4 sunColor;
+        glm::vec4 ambient;
+    };
+    static_assert(sizeof(MeshPreviewCB) == 224, "MeshPreviewCB must match kMeshPreviewHLSL b0");
+
+    // Must match kParticlePreviewHLSL's cbuffer at b0 (112 B).
+    struct ParticlePreviewCB
+    {
+        glm::mat4 viewProj;
+        glm::vec4 camRight;
+        glm::vec4 camUp;
+        glm::vec4 flags; // x = hasTexture
+    };
+    static_assert(sizeof(ParticlePreviewCB) == 112, "ParticlePreviewCB must match kParticlePreviewHLSL b0");
+
+    // Lazily (re)create the shared thumbnail target at S×S. Its own texture, not
+    // the viewport's: a tile rendered into the viewport target would replace what
+    // the scene view is showing — and on the first run the viewport target does
+    // not exist yet at all.
+    bool ensureThumbnailTarget(int S)
+    {
+        if (thumbRTV && thumbDSV && thumbStaging && thumbSize == S) return true;
+        thumbSize = 0;
+        thumbRTV.Reset(); thumbTex.Reset();
+        thumbDSV.Reset(); thumbDepthTex.Reset();
+        thumbStaging.Reset();
+        if (!device || S <= 0) return false;
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = static_cast<UINT>(S);
+        td.MipLevels = td.ArraySize = 1;
+        td.Format             = DXGI_FORMAT_R8G8B8A8_UNORM; // never _SRGB: the caller wants raw bytes
+        td.SampleDesc.Count   = 1;
+        td.Usage              = D3D11_USAGE_DEFAULT;
+        td.BindFlags          = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &thumbTex))) return false;
+        if (FAILED(device->CreateRenderTargetView(thumbTex.Get(), nullptr, &thumbRTV))) return false;
+
+        D3D11_TEXTURE2D_DESC dd = td;
+        dd.Format    = DXGI_FORMAT_D32_FLOAT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(device->CreateTexture2D(&dd, nullptr, &thumbDepthTex))) return false;
+        if (FAILED(device->CreateDepthStencilView(thumbDepthTex.Get(), nullptr, &thumbDSV))) return false;
+
+        // Cached staging copy: the content browser asks for many tiles in a row and
+        // a per-tile CreateTexture2D is pure overhead at a fixed size.
+        D3D11_TEXTURE2D_DESC sd = td;
+        sd.Usage          = D3D11_USAGE_STAGING;
+        sd.BindFlags      = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&sd, nullptr, &thumbStaging))) return false;
+
+        thumbSize = S;
+        return true;
+    }
+
+    // Bind + clear the thumbnail target. Clear colour is FULLY TRANSPARENT — the
+    // Content Browser composites the tile over its own backdrop.
+    void beginThumbnailPass(int S)
+    {
+        const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetRenderTargets(1, thumbRTV.GetAddressOf(), thumbDSV.Get());
+        context->ClearRenderTargetView(thumbRTV.Get(), clear);
+        context->ClearDepthStencilView(thumbDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        D3D11_VIEWPORT vp{};
+        vp.Width = vp.Height = static_cast<float>(S);
+        vp.MaxDepth = 1.0f;
+        context->RSSetViewports(1, &vp);
+        context->RSSetState(rasterState.Get()); // CULL_NONE — GL disables culling here
+    }
+
+    // Unbind everything the tile bound. A texture still bound as an RTV reads back
+    // black, and a stale SRV on t0 trips the debug layer on the next pass.
+    void endThumbnailPass()
+    {
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        context->PSSetShaderResources(0, 1, &nullSrv);
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);
+        context->OMSetDepthStencilState(nullptr, 0);
+    }
+
+    // Read the tile back as tightly packed, TOP-DOWN RGBA8. D3D11 render targets
+    // are already top-down (row 0 = top), so unlike GL there is NO flip here — but
+    // the mapped RowPitch is not necessarily S*4, so the rows are de-striped.
+    bool readThumbnailTarget(int S, std::vector<uint8_t>& outRgba8)
+    {
+        if (!thumbTex || !thumbStaging) return false;
+        context->CopyResource(thumbStaging.Get(), thumbTex.Get());
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(thumbStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+        const size_t rowBytes = static_cast<size_t>(S) * 4;
+        outRgba8.assign(rowBytes * static_cast<size_t>(S), 0);
+        const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
+        for (int y = 0; y < S; ++y)
+            std::memcpy(outRgba8.data() + static_cast<size_t>(y) * rowBytes,
+                        src + static_cast<size_t>(y) * mapped.RowPitch, rowBytes);
+        context->Unmap(thumbStaging.Get(), 0);
+        return true;
+    }
+
+    // Compile the small pos/normal/uv preview program once (shared with D3D12 via
+    // HlslSources.h, and behaviourally with GL's kMeshPreview* program).
+    bool ensureMeshPreviewPipeline()
+    {
+        if (meshPvVS && meshPvPS && meshPvIL && meshPvCB) return true;
+        if (meshPvTried) return false;
+        meshPvTried = true;
+        if (!device) return false;
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* entry, const char* profile, ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(kMeshPreviewHLSL, strlen(kMeshPreviewHLSL), "meshPreview",
+                                  nullptr, nullptr, entry, profile, flags, 0, &out, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D11 mesh-preview '") + entry + "' failed: "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> vsb, psb;
+        if (!compile("VSMain", "vs_5_0", vsb)) return false;
+        if (!compile("PSMain", "ps_5_0", psb)) return false;
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &meshPvVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &meshPvPS)))
+            return false;
+
+        // Same interleaved 32-byte pos/normal/uv vertex the scene meshes and
+        // HE::buildPreviewMesh both produce.
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        if (FAILED(device->CreateInputLayout(layout, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &meshPvIL)))
+            return false;
+
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = sizeof(MeshPreviewCB);
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&bd, nullptr, &meshPvCB))) return false;
+        return true;
+    }
+
+    // Upload the preview primitive for `shape`, reusing the cached buffers when the
+    // shape is unchanged. Geometry comes from HE::buildPreviewMesh, shared with the
+    // GL and Metal paths so the three backends can never draw different spheres.
+    // IMMUTABLE buffers, hence the full recreate on a shape change — the primitive
+    // switches only when the Material Editor's shape combo moves, not per frame.
+    bool ensurePreviewShape(int shape)
+    {
+        shape = std::clamp(shape, 0, 2);
+        if (previewSphereVB && previewSphereIB && previewSphereIdx && previewShapeBuilt == shape)
+            return true;
+        previewSphereVB.Reset();
+        previewSphereIB.Reset();
+        previewSphereIdx  = 0;
+        previewShapeBuilt = -1;
+
+        std::vector<float>    verts;
+        std::vector<uint32_t> idx;
+        HE::buildPreviewMesh(shape, verts, idx);
+        if (verts.empty() || idx.empty()) return false;
+
+        D3D11_BUFFER_DESC vbd{};
+        vbd.ByteWidth = static_cast<UINT>(verts.size() * sizeof(float));
+        vbd.Usage     = D3D11_USAGE_IMMUTABLE;
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA vinit{}; vinit.pSysMem = verts.data();
+        if (FAILED(device->CreateBuffer(&vbd, &vinit, &previewSphereVB))) return false;
+
+        D3D11_BUFFER_DESC ibd{};
+        ibd.ByteWidth = static_cast<UINT>(idx.size() * sizeof(uint32_t));
+        ibd.Usage     = D3D11_USAGE_IMMUTABLE;
+        ibd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA iinit{}; iinit.pSysMem = idx.data();
+        if (FAILED(device->CreateBuffer(&ibd, &iinit, &previewSphereIB))) return false;
+
+        previewSphereIdx  = static_cast<UINT>(idx.size());
+        previewShapeBuilt = shape;
+        return true;
+    }
+
+    // Draw one pos/normal/uv mesh into whatever target is bound, orbit-framed on
+    // the caller's bounds. Port of OpenGLRenderer::DrawMeshPreviewGeometry; the
+    // caller owns target, viewport and clear.
+    void drawMeshPreviewGeometry(ID3D11Buffer* vb, ID3D11Buffer* ib, UINT indexCount,
+                                 ID3D11ShaderResourceView* texture,
+                                 const glm::vec3& center, float extent,
+                                 const glm::vec3& baseColor, float metallic, float roughness,
+                                 float yaw, float pitch, float dist,
+                                 float fovDegrees = HE::kPreviewFovDegrees)
+    {
+        if (!vb || !ib || indexCount == 0) return;
+        if (!ensureMeshPreviewPipeline()) return;
+
+        // meshOrbit returns an OpenGL-convention projection (depth -1..1); D3D11
+        // pre-multiplies exactly ONE fix-up. glm::perspective must NOT be called
+        // here — GLM_FORCE_DEPTH_ZERO_TO_ONE is private to this target, so it
+        // would remap the depth a second time.
+        const HE::PreviewCamera cam = HE::meshOrbit(center, extent, yaw, pitch, dist,
+                                                    1.0f, fovDegrees);
+        const glm::mat4 model(1.0f);
+
+        MeshPreviewCB cb{};
+        cb.mvp      = HE::kD3DClipFix * cam.proj * cam.view * model;
+        cb.model    = model;
+        cb.color    = glm::vec4(baseColor, 1.0f);
+        cb.camPos   = glm::vec4(cam.position, 1.0f);
+        cb.pbr      = glm::vec4(metallic, roughness, texture ? 1.0f : 0.0f, 0.0f);
+        cb.sun      = glm::vec4(0.0f); // w = 0 → fixed studio light, exactly like GL
+        cb.sunColor = glm::vec4(1.0f);
+        cb.ambient  = glm::vec4(0.32f, 0.32f, 0.32f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(context->Map(meshPvCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, &cb, sizeof(cb)); context->Unmap(meshPvCB.Get(), 0); }
+
+        const UINT stride = 32u, offset = 0u;
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(meshPvIL.Get());
+        context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+        context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+        context->VSSetShader(meshPvVS.Get(), nullptr, 0);
+        context->PSSetShader(meshPvPS.Get(), nullptr, 0);
+        context->VSSetConstantBuffers(0, 1, meshPvCB.GetAddressOf());
+        context->PSSetConstantBuffers(0, 1, meshPvCB.GetAddressOf());
+        ID3D11ShaderResourceView* srv = texture ? texture : dummyTexture.Get();
+        context->PSSetShaderResources(0, 1, &srv);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf()); // linear-wrap
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(nullptr, bf, 0xFFFFFFFF); // PSMain writes alpha 1 where it draws
+        context->OMSetDepthStencilState(depthState.Get(), 0); // LESS + depth write
+        context->DrawIndexed(indexCount, 0, 0);
+    }
+
+    bool ensureParticlePreviewPipeline()
+    {
+        if (particlePvVS && particlePvPS && particlePvIL && particlePvCB && particlePvBlend) return true;
+        if (particlePvTried) return false;
+        particlePvTried = true;
+        if (!device) return false;
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* entry, const char* profile, ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(kParticlePreviewHLSL, strlen(kParticlePreviewHLSL), "particlePreview",
+                                  nullptr, nullptr, entry, profile, flags, 0, &out, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D11 particle-preview '") + entry + "' failed: "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> vsb, psb;
+        if (!compile("VSMain", "vs_5_0", vsb)) return false;
+        if (!compile("PSMain", "ps_5_0", psb)) return false;
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &particlePvVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &particlePvPS)))
+            return false;
+
+        // Per-INSTANCE only (there is no per-vertex stream — the corners come from
+        // SV_VertexID). 32 bytes, byte-identical to GL's instance buffer.
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+        };
+        if (FAILED(device->CreateInputLayout(layout, 2, vsb->GetBufferPointer(), vsb->GetBufferSize(), &particlePvIL)))
+            return false;
+
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = sizeof(ParticlePreviewCB);
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&bd, nullptr, &particlePvCB))) return false;
+
+        // NOT the scene's alphaBlendState: that one is SrcBlendAlpha=ONE /
+        // DestBlendAlpha=ZERO, so the destination alpha would become the LAST
+        // particle's alpha instead of accumulating. GL's glBlendFunc(SRC_ALPHA,
+        // ONE_MINUS_SRC_ALPHA) applies to all four channels, and the tile's alpha
+        // is what the Content Browser composites with — so match it exactly.
+        D3D11_BLEND_DESC bld{};
+        auto& rt = bld.RenderTarget[0];
+        rt.BlendEnable    = TRUE;
+        rt.SrcBlend       = D3D11_BLEND_SRC_ALPHA;
+        rt.DestBlend      = D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp        = D3D11_BLEND_OP_ADD;
+        rt.SrcBlendAlpha  = D3D11_BLEND_SRC_ALPHA;
+        rt.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOpAlpha   = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(device->CreateBlendState(&bld, &particlePvBlend))) return false;
+        return true;
+    }
+
+    // Port of OpenGLRenderer::DrawParticlePreviewGeometry. The caller owns target,
+    // viewport and clear.
+    void drawParticlePreviewGeometry(ID3D11ShaderResourceView* texture,
+                                     const std::vector<ParticlePreviewInstance>& particles,
+                                     float yaw, float pitch, float dist)
+    {
+        if (particles.empty() || !ensureParticlePreviewPipeline()) return;
+
+        // Orbit camera auto-framed on the LIVE particles' bounds (an emitter's
+        // extent depends on velocity/gravity/lifetime, unlike a fixed mesh). Each
+        // particle is a BILLBOARD of radius size*0.5, so the bounds must include
+        // that radius — framing on the centres alone crops every quad by half its
+        // width. The 0.1 floor on the extent is GL's, and it is load-bearing:
+        // HE::meshOrbit only floors at 0.05, so a tight cloud of small sprites
+        // would otherwise frame closer here than on OpenGL.
+        glm::vec3 bmin(1e30f), bmax(-1e30f);
+        for (const auto& q : particles)
+        {
+            const glm::vec3 r(q.size * 0.5f);
+            bmin = glm::min(bmin, q.position - r);
+            bmax = glm::max(bmax, q.position + r);
+        }
+        const bool      valid  = bmin.x <= bmax.x;
+        const glm::vec3 center = valid ? (bmin + bmax) * 0.5f : glm::vec3(0.0f);
+        const float     extent = valid ? std::max(glm::length(bmax - bmin) * 0.5f, 0.1f) : 1.0f;
+
+        const HE::PreviewCamera cam = HE::meshOrbit(center, extent, yaw, pitch, dist);
+        ParticlePreviewCB cb{};
+        cb.viewProj = HE::kD3DClipFix * cam.proj * cam.view; // one fix-up, see drawMeshPreviewGeometry
+        // Camera-facing basis for billboard expansion (right = view row 0, up = row 1).
+        cb.camRight = glm::vec4(cam.view[0][0], cam.view[1][0], cam.view[2][0], 0.0f);
+        cb.camUp    = glm::vec4(cam.view[0][1], cam.view[1][1], cam.view[2][1], 0.0f);
+        cb.flags    = glm::vec4(texture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE mc{};
+        if (SUCCEEDED(context->Map(particlePvCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mc)))
+        { std::memcpy(mc.pData, &cb, sizeof(cb)); context->Unmap(particlePvCB.Get(), 0); }
+
+        // Instance stream: pos3 + size1 + color3 + alpha1, same 8 floats as GL.
+        const UINT count = static_cast<UINT>(particles.size());
+        if (particlePvInstCap < count)
+        {
+            particlePvInstVB.Reset();
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = count * 32u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_VERTEX_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &particlePvInstVB))) { particlePvInstCap = 0; return; }
+            particlePvInstCap = count;
+        }
+        std::vector<float> inst;
+        inst.reserve(static_cast<size_t>(count) * 8);
+        for (const auto& q : particles)
+            inst.insert(inst.end(), { q.position.x, q.position.y, q.position.z, q.size,
+                                      q.color.x, q.color.y, q.color.z, q.alpha });
+        D3D11_MAPPED_SUBRESOURCE mi{};
+        if (FAILED(context->Map(particlePvInstVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mi))) return;
+        std::memcpy(mi.pData, inst.data(), inst.size() * sizeof(float));
+        context->Unmap(particlePvInstVB.Get(), 0);
+
+        const UINT stride = 32u, offset = 0u;
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(particlePvIL.Get());
+        context->IASetVertexBuffers(0, 1, particlePvInstVB.GetAddressOf(), &stride, &offset);
+        context->IASetIndexBuffer(nullptr, DXGI_FORMAT_R32_UINT, 0);
+        context->VSSetShader(particlePvVS.Get(), nullptr, 0);
+        context->PSSetShader(particlePvPS.Get(), nullptr, 0);
+        context->VSSetConstantBuffers(0, 1, particlePvCB.GetAddressOf());
+        context->PSSetConstantBuffers(0, 1, particlePvCB.GetAddressOf());
+        ID3D11ShaderResourceView* srv = texture ? texture : dummyTexture.Get();
+        context->PSSetShaderResources(0, 1, &srv);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(particlePvBlend.Get(), bf, 0xFFFFFFFF);
+        context->OMSetDepthStencilState(depthReadOnlyState.Get(), 0); // test on, write off (GL: glDepthMask(FALSE))
+        context->DrawInstanced(6, count, 0, 0);
+    }
+
+    // ─── Interactive asset previews ──────────────────────────────────────────
+    // Same "callable before the first Render()" contract as the thumbnails above
+    // (EditorApplication calls RenderMaterialPreview long before r->Render()), but
+    // three DIFFERENCES from a tile:
+    //   • a persistent target PER PREVIEW, never the thumbnail's. One shared target
+    //     would mean a Content-Browser tile — or a second open panel — silently
+    //     replacing whatever the Material Editor is showing this frame.
+    //   • the target is BIND_SHADER_RESOURCE as well as BIND_RENDER_TARGET, because
+    //     the return value IS its SRV. The thumbnail target needs no SRV: it is only
+    //     ever copied to staging and read back.
+    //   • yaw/pitch/dist come from the caller (the panel's orbit), where a tile uses
+    //     the fixed kThumb* three-quarter shot.
+
+    struct PreviewTarget
+    {
+        ComPtr<ID3D11Texture2D>          tex;
+        ComPtr<ID3D11RenderTargetView>   rtv;
+        ComPtr<ID3D11ShaderResourceView> srv;      // ← THE ImGui handle, created once with the target
+        ComPtr<ID3D11Texture2D>          depthTex;
+        ComPtr<ID3D11DepthStencilView>   dsv;
+        ComPtr<ID3D11Texture2D>          staging;  // HE_*_PREVIEW_DUMP only, allocated on first dump
+        int w = 0, h = 0;
+    };
+
+    PreviewTarget matPreview;      // RenderMaterialPreview
+    PreviewTarget skelPreview;     // RenderSkeletalPreview  (the only non-square one)
+    PreviewTarget particlePreview; // RenderParticlePreview
+
+    // Skinned preview pipeline (kSkelPreviewHLSL). Reuses meshPvCB at b0 (identical
+    // layout) and the scene's bonesCB at b2 (identical 128×mat4 BonesCB).
+    ComPtr<ID3D11VertexShader> skelPvVS;
+    ComPtr<ID3D11PixelShader>  skelPvPS;
+    ComPtr<ID3D11InputLayout>  skelPvIL;
+    bool skelPvTried = false;
+
+    // One-shot log for the graph-material fallback (see RenderMaterialPreview). The
+    // Material Editor calls that entry point EVERY frame its panel is open, so a
+    // per-call log would be a line per frame forever.
+    bool matPreviewFallbackLogged = false;
+
+    // Round a requested preview edge UP to a multiple of 64. The panels pass
+    // ImGui::GetContentRegionAvail(), which moves by a pixel as the user drags a
+    // splitter; without the bucket every such pixel would destroy and recreate the
+    // target — and the SRV with it, which is a leak on the backends whose ImGui
+    // descriptor supply is fixed and whose DestroyImGuiTexture is a no-op. D3D11
+    // has no such heap, but all three backends bucket identically so a dumped
+    // preview has the same dimensions everywhere.
+    static int bucketPreview(int v) { return ((std::max(v, 1) + 63) / 64) * 64; }
+
+    // Lazily (re)create a preview target at W×H. Only called with already-clamped,
+    // already-bucketed dimensions.
+    bool ensurePreviewTarget(PreviewTarget& t, int W, int H)
+    {
+        if (t.rtv && t.srv && t.dsv && t.w == W && t.h == H) return true;
+        t = PreviewTarget{};
+        if (!device || W <= 0 || H <= 0) return false;
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width  = static_cast<UINT>(W);
+        td.Height = static_cast<UINT>(H);
+        td.MipLevels = td.ArraySize = 1;
+        // Never _SRGB: ImGui composites this straight into an already-encoded UI,
+        // exactly as the GL path's GL_RGBA8 texture does.
+        td.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &t.tex)))                     return false;
+        if (FAILED(device->CreateRenderTargetView(t.tex.Get(), nullptr, &t.rtv)))      return false;
+        if (FAILED(device->CreateShaderResourceView(t.tex.Get(), nullptr, &t.srv)))    return false;
+
+        D3D11_TEXTURE2D_DESC dd = td;
+        dd.Format    = DXGI_FORMAT_D32_FLOAT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(device->CreateTexture2D(&dd, nullptr, &t.depthTex)))                return false;
+        if (FAILED(device->CreateDepthStencilView(t.depthTex.Get(), nullptr, &t.dsv))) return false;
+
+        t.w = W;
+        t.h = H;
+        return true;
+    }
+
+    // Bind + clear a preview target. Clear colour is FULLY TRANSPARENT and depth
+    // 1.0 with a LESS compare — the editor composites the result over its own
+    // backdrop, so anything opaque here would show as a black card.
+    void beginPreviewPass(const PreviewTarget& t)
+    {
+        const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ID3D11RenderTargetView* rtv = t.rtv.Get();
+        context->OMSetRenderTargets(1, &rtv, t.dsv.Get());
+        context->ClearRenderTargetView(t.rtv.Get(), clear);
+        context->ClearDepthStencilView(t.dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+        D3D11_VIEWPORT vp{};
+        vp.Width    = static_cast<float>(t.w);
+        vp.Height   = static_cast<float>(t.h);
+        vp.MaxDepth = 1.0f;
+        context->RSSetViewports(1, &vp);
+        context->RSSetState(rasterState.Get()); // CULL_NONE — GL disables culling here
+    }
+
+    // Unbind everything. MANDATORY before returning the handle: a texture still
+    // bound as an RTV cannot be sampled, so ImGui would draw nothing at all.
+    void endPreviewPass()
+    {
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        context->PSSetShaderResources(0, 1, &nullSrv);
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);
+        context->OMSetDepthStencilState(nullptr, 0);
+    }
+
+    // Headless pixel witness: write the preview target to $envName as a binary PPM,
+    // byte-for-byte the format OpenGLRenderer writes, so the two can be diffed
+    // directly. Header "P6\n<W> <H>\n255\n" then W*H*3 tightly packed RGB, TOP-DOWN.
+    // No flip: a D3D render target is already top-down (row 0 = top); GL's flip is a
+    // GL-only correction. No channel swap either — the target is R8G8B8A8_UNORM, so
+    // the bytes are already R,G,B,A and only the alpha is dropped.
+    //
+    // This is the ONLY pixel witness a preview has on this backend: the frame dump
+    // cannot stand in for it, because the editor sets the ImGui overlay callback to
+    // nullptr in the dump path and the frame therefore never contains a panel.
+    void dumpPreviewTarget(PreviewTarget& t, const char* envName)
+    {
+        const char* path = std::getenv(envName);
+        if (!path || !*path || !t.tex) return;
+
+        if (!t.staging)
+        {
+            D3D11_TEXTURE2D_DESC sd{};
+            t.tex->GetDesc(&sd);
+            sd.Usage          = D3D11_USAGE_STAGING;
+            sd.BindFlags      = 0;
+            sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            sd.MiscFlags      = 0;
+            if (FAILED(device->CreateTexture2D(&sd, nullptr, &t.staging))) return;
+        }
+        context->CopyResource(t.staging.Get(), t.tex.Get());
+
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(context->Map(t.staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return;
+        std::vector<uint8_t> rgb(static_cast<size_t>(t.w) * t.h * 3);
+        const uint8_t* src = static_cast<const uint8_t*>(m.pData);
+        for (int y = 0; y < t.h; ++y)
+        {
+            const uint8_t* row = src + static_cast<size_t>(y) * m.RowPitch;
+            uint8_t*       out = rgb.data() + static_cast<size_t>(y) * t.w * 3;
+            for (int x = 0; x < t.w; ++x)
+            {
+                out[x * 3 + 0] = row[x * 4 + 0];
+                out[x * 3 + 1] = row[x * 4 + 1];
+                out[x * 3 + 2] = row[x * 4 + 2];
+            }
+        }
+        context->Unmap(t.staging.Get(), 0);
+
+        if (std::ofstream f(path, std::ios::binary); f)
+        {
+            f << "P6\n" << t.w << " " << t.h << "\n255\n";
+            f.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
+        }
+    }
+
+    // Compile the skinned preview program once. Separate from createSkinnedPipeline:
+    // that one pairs kSkinnedHLSL's VS with the SCENE pixel shader, which needs
+    // perFrameCB + the shadow/AO/GI SRVs a frame binds and is therefore unusable
+    // before the first Render().
+    bool ensureSkelPreviewPipeline()
+    {
+        if (skelPvVS && skelPvPS && skelPvIL) return true;
+        if (skelPvTried) return false;
+        skelPvTried = true;
+        if (!device || !bonesCB) return false;   // b2 comes from createSkinnedPipeline
+        if (!ensureMeshPreviewPipeline()) return false; // b0 == meshPvCB
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* entry, const char* profile, ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(kSkelPreviewHLSL, strlen(kSkelPreviewHLSL), "skelPreview",
+                                  nullptr, nullptr, entry, profile, flags, 0, &out, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D11 skeletal-preview '") + entry + "' failed: "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> vsb, psb;
+        if (!compile("VSMainSkinned", "vs_5_0", vsb)) return false;
+        if (!compile("PSMain",        "ps_5_0", psb)) return false;
+        if (FAILED(device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &skelPvVS)) ||
+            FAILED(device->CreatePixelShader (psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &skelPvPS)))
+            return false;
+
+        // Same three-stream layout resolveSkeletalMesh uploads: slot 0 interleaved
+        // pos/normal/uv, slot 1 bone IDs, slot 2 bone weights. Built from THIS VS's
+        // blob rather than reusing skinnedLayout, so the two can never drift.
+        const D3D11_INPUT_ELEMENT_DESC layout[] = {
+            { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "BLENDINDICES", 0, DXGI_FORMAT_R32G32B32A32_UINT,  1,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "BLENDWEIGHT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 2,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        if (FAILED(device->CreateInputLayout(layout, 5, vsb->GetBufferPointer(), vsb->GetBufferSize(), &skelPvIL)))
+            return false;
+        return true;
+    }
+
+    // Draw a skeletal mesh, skinned by `boneMatrices` (bind pose when empty), with
+    // the caller's already-built view-projection. Port of the draw half of
+    // OpenGLRenderer::RenderSkeletalPreview; the caller owns target/viewport/clear.
+    void drawSkelPreviewGeometry(const GpuSkeletalMesh& sm, const glm::mat4& viewProj,
+                                 const std::vector<glm::mat4>& boneScratch)
+    {
+        // The bone streams are required, not optional: with slot 1/2 unbound the VS
+        // reads zero weights, every skin matrix collapses to 0 and the mesh vanishes
+        // into a point — which looks like "the preview is broken", not "upload failed".
+        if (!sm.vb || !sm.ib || !sm.boneIdVb || !sm.boneWgtVb || sm.indexCount <= 0) return;
+        if (!ensureSkelPreviewPipeline()) return;
+
+        MeshPreviewCB cb{};
+        cb.mvp      = viewProj;              // model is identity, so mvp == viewProj
+        cb.model    = glm::mat4(1.0f);
+        cb.color    = glm::vec4(0.75f, 0.75f, 0.75f, 1.0f); // GL's uColor for this preview
+        cb.camPos   = glm::vec4(0.0f);       // unused by this PS (no specular lobe)
+        cb.pbr      = glm::vec4(0.0f, 0.0f, sm.srv ? 1.0f : 0.0f, 0.0f); // z = hasTexture
+        cb.sun      = glm::vec4(0.0f);       // w = 0 → the shader's fixed studio light (GL parity)
+        cb.sunColor = glm::vec4(1.0f);
+        cb.ambient  = glm::vec4(0.35f, 0.35f, 0.35f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(context->Map(meshPvCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, &cb, sizeof(cb)); context->Unmap(meshPvCB.Get(), 0); }
+        if (SUCCEEDED(context->Map(bonesCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        { std::memcpy(m.pData, boneScratch.data(), boneScratch.size() * sizeof(glm::mat4)); context->Unmap(bonesCB.Get(), 0); }
+
+        ID3D11Buffer* vbs[3]     = { sm.vb.Get(), sm.boneIdVb.Get(), sm.boneWgtVb.Get() };
+        const UINT    strides[3] = { 32u, 16u, 16u };
+        const UINT    offsets[3] = { 0u, 0u, 0u };
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(skelPvIL.Get());
+        context->IASetVertexBuffers(0, 3, vbs, strides, offsets);
+        context->IASetIndexBuffer(sm.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+        context->VSSetShader(skelPvVS.Get(), nullptr, 0);
+        context->PSSetShader(skelPvPS.Get(), nullptr, 0);
+        context->VSSetConstantBuffers(0, 1, meshPvCB.GetAddressOf());
+        context->VSSetConstantBuffers(2, 1, bonesCB.GetAddressOf());
+        context->PSSetConstantBuffers(0, 1, meshPvCB.GetAddressOf());
+        ID3D11ShaderResourceView* srv = sm.srv ? sm.srv.Get() : dummyTexture.Get();
+        context->PSSetShaderResources(0, 1, &srv);
+        context->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(nullptr, bf, 0xFFFFFFFF); // PSMain writes alpha 1 where it draws
+        context->OMSetDepthStencilState(depthState.Get(), 0); // LESS + depth write
+        context->DrawIndexed(static_cast<UINT>(sm.indexCount), 0, 0);
+    }
+
+#if defined(HE_HAVE_SHADERC)
+    // Draw one primitive (or a picked static mesh) shaded by a NODE-GRAPH material.
+    // Port of OpenGLRenderer::DrawMaterialPreviewGeometry; the caller owns target,
+    // viewport and clear, and has already resolved the graph shader sources.
+    // Returns false when the material's HLSL will not build — see the A4 / X4509
+    // note at RenderMaterialPreview, which is the case that fires on this backend.
+    bool drawMaterialPreviewGeometry(const HE::UUID& materialId, uint64_t matHash,
+                                     const std::string& matFrag, const std::string& matVertBody,
+                                     float yaw, float pitch, float dist,
+                                     int shape, const HE::UUID& meshId, ContentManager* cm)
+    {
+        MatShaders* sh = GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, /*transparent=*/false);
+        if (!sh || !sh->vs || !sh->ps || !sh->il) return false;
+
+        // Geometry: a picked STATIC MESH wins over `shape`, auto-framed on its own
+        // bounds so `dist` means the same thing for a teapot as for the unit sphere.
+        // A mesh that is not resident falls back to the primitive (GL parity — the
+        // caller never has to pre-check).
+        const GpuMesh* gm = (meshId != HE::UUID{}) ? resolveMesh(meshId, cm) : nullptr;
+        ID3D11Buffer* vb = nullptr; ID3D11Buffer* ib = nullptr; UINT indexCount = 0;
+        glm::vec3 center(0.0f);
+        float     extent = 1.0f; // what `dist` is measured in, so it frames alike
+        if (gm && gm->vbuf && gm->ibuf && gm->indexCount > 0)
+        {
+            vb = gm->vbuf.Get(); ib = gm->ibuf.Get(); indexCount = gm->indexCount;
+            center = HE::boundsCenter(gm->localBounds);
+            extent = HE::boundsExtent(gm->localBounds);
+        }
+        else
+        {
+            if (!ensurePreviewShape(shape)) return false;
+            vb = previewSphereVB.Get(); ib = previewSphereIB.Get(); indexCount = previewSphereIdx;
+        }
+        if (!vb || !ib || indexCount == 0) return false;
+
+        // 32°, not the kPreviewFovDegrees 35° the built-in path uses — GL's graph
+        // preview is a 32° shot and the editor's `dist` defaults are tuned to it.
+        // ONE ClipSpace fix-up on meshOrbit's GL-convention projection; never
+        // glm::perspective here (GLM_FORCE_DEPTH_ZERO_TO_ONE is private to this
+        // target and would remap the depth a second time).
+        const HE::PreviewCamera cam = HE::meshOrbit(center, extent, yaw, pitch, dist, 1.0f, 32.0f);
+        const glm::mat4 model(1.0f);
+        const glm::mat4 viewProj = HE::kD3DClipFix * cam.proj * cam.view;
+
+        const MaterialAsset* ma = cm ? cm->getMaterial(materialId) : nullptr;
+
+        // HeLighting (b0 PS / b8 WPO VS): the preview's OWN studio light, exactly
+        // the numbers GL's DrawMaterialPreviewGeometry writes — NOT the frame's
+        // fillMatLight, which does not run before the first Render() and would in
+        // any case light the preview with the open level's sun.
+        {
+            HE::MaterialShaderLibrary::Lighting lit{};
+            const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
+            lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
+            lit.sunDir[3] = 0.0f; // graph Time input — pinned at 0 so a dump is deterministic
+            lit.sunColor[0] = lit.sunColor[1] = lit.sunColor[2] = 1.05f;
+            lit.ambient[0]  = lit.ambient[1]  = lit.ambient[2]  = 0.28f;
+            lit.camPos[0] = cam.position.x; lit.camPos[1] = cam.position.y; lit.camPos[2] = cam.position.z;
+            // The studio sun as the single array light, so heLitP() previews shade.
+            lit.lightPos[0][3]   = 0.0f; // directional
+            lit.lightDir[0][0]   = -sd.x; lit.lightDir[0][1] = -sd.y; lit.lightDir[0][2] = -sd.z;
+            lit.lightColor[0][0] = lit.lightColor[0][1] = lit.lightColor[0][2] = 1.05f;
+            lit.lightColor[0][3] = 1.0f;
+            lit.counts[0]        = 1.0f;
+            // giParams stays zero: no GI masks are bound here, and heLitP() skips
+            // the mask samples entirely when giParams.z is 0.
+            D3D11_MAPPED_SUBRESOURCE lm{};
+            if (SUCCEEDED(context->Map(m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
+            { std::memcpy(lm.pData, &lit, sizeof(lit)); context->Unmap(m_matLightCB.Get(), 0); }
+        }
+
+        // U block (b1 VS, std140 176 B) — same struct the scene's drawDC writes.
+        {
+            struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
+            static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+            MatU u;
+            u.mvp   = viewProj * model;
+            u.model = model;
+            u.color = glm::vec4(ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
+                                   : glm::vec3(1.0f), 1.0f);
+            u.flags = glm::vec4(0.0f); // GL's obj.flags — hasTex stays 0 in the preview
+            u.pbr   = glm::vec4(ma ? ma->metallic  : 0.0f,
+                                ma ? ma->roughness : 0.5f,
+                                ma ? ma->opacity   : 1.0f, 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mu{};
+            if (SUCCEEDED(context->Map(m_matObjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mu)))
+            { std::memcpy(mu.pData, &u, sizeof(u)); context->Unmap(m_matObjCB.Get(), 0); }
+        }
+
+        // HeParams (b3 PS / b9 WPO VS, 16 vec4, zero-padded).
+        {
+            float padded[64] = { 0.0f };
+            if (ma && !ma->shaderParamData.empty())
+                std::memcpy(padded, ma->shaderParamData.data(),
+                            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+            D3D11_MAPPED_SUBRESOURCE mp{};
+            if (SUCCEEDED(context->Map(m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+            { std::memcpy(mp.pData, padded, sizeof(padded)); context->Unmap(m_matParamCB.Get(), 0); }
+        }
+
+        const UINT stride = 32u, offset = 0u;
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetInputLayout(sh->il.Get());
+        context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+        context->IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+        context->VSSetShader(sh->vs.Get(), nullptr, 0);
+        context->PSSetShader(sh->ps.Get(), nullptr, 0);
+        context->PSSetConstantBuffers(0, 1, m_matLightCB.GetAddressOf()); // b0 HeLighting
+        context->VSSetConstantBuffers(8, 1, m_matLightCB.GetAddressOf()); // b8 HeLighting (WPO VS)
+        context->VSSetConstantBuffers(1, 1, m_matObjCB.GetAddressOf());   // b1 U
+        context->PSSetConstantBuffers(3, 1, m_matParamCB.GetAddressOf()); // b3 HeParams
+        context->VSSetConstantBuffers(9, 1, m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+        // heTex0 (t2) + heTexP0..3 (t4..t7). GL binds the material's real graph
+        // textures here via ResolveGraphTexture; D3D11 has NO graph-texture cache
+        // yet (the same A4 gap the scene path carries — see the heTex0 TODO in
+        // drawDC), so all five are the 1×1 white default and a graph that samples a
+        // project texture previews flat. Closing that gap closes this too.
+        ID3D11ShaderResourceView* white5[5] = {
+            dummyTexture.Get(), dummyTexture.Get(), dummyTexture.Get(),
+            dummyTexture.Get(), dummyTexture.Get() };
+        context->PSSetShaderResources(2, 1, &white5[0]);
+        context->PSSetShaderResources(4, 4, &white5[1]);
+        ID3D11SamplerState* matSamp = m_matSampler.Get();
+        ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
+        context->PSSetSamplers(2, 1, &matSamp);
+        context->PSSetSamplers(4, 4, matSamp4);
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        context->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);
+        context->OMSetDepthStencilState(depthState.Get(), 0); // LESS + depth write
+        context->DrawIndexed(indexCount, 0, 0);
+        return true;
+    }
+#endif // HE_HAVE_SHADERC
 };
 
 D3D11Renderer::D3D11Renderer()  : m_impl(new D3D11RendererImpl{}) {}
@@ -3423,6 +4422,34 @@ void D3D11Renderer::Shutdown()
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
     m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
     m_impl->debugCB.Reset(); m_impl->debugIL.Reset();
+    // Thumbnail + preview targets and their pipelines. Released HERE rather than
+    // left to ~D3D11RendererImpl so they go before device.Reset() below, and so a
+    // re-Initialize() rebuilds them against the NEW device instead of handing out a
+    // stale SRV. The `*Tried` one-shot flags are cleared for the same reason.
+    //
+    // ONLY resources with a lazy ensure*() path belong in this block. Anything
+    // built exclusively by createResources() (skinnedVS/skinnedLayout/bonesCB,
+    // debugReady) must NOT be reset here: nothing would rebuild it, and the scene's
+    // skinned pass and debug-line pass both gate on exactly those.
+    m_impl->skeletalMeshCache.clear();
+    m_impl->thumbTex.Reset();   m_impl->thumbRTV.Reset();
+    m_impl->thumbDepthTex.Reset(); m_impl->thumbDSV.Reset();
+    m_impl->thumbStaging.Reset(); m_impl->thumbSize = 0;
+    m_impl->matPreview      = D3D11RendererImpl::PreviewTarget{};
+    m_impl->skelPreview     = D3D11RendererImpl::PreviewTarget{};
+    m_impl->particlePreview = D3D11RendererImpl::PreviewTarget{};
+    m_impl->meshPvVS.Reset(); m_impl->meshPvPS.Reset();
+    m_impl->meshPvIL.Reset(); m_impl->meshPvCB.Reset();
+    m_impl->meshPvTried = false;
+    m_impl->skelPvVS.Reset(); m_impl->skelPvPS.Reset(); m_impl->skelPvIL.Reset();
+    m_impl->skelPvTried = false;
+    m_impl->particlePvVS.Reset(); m_impl->particlePvPS.Reset();
+    m_impl->particlePvIL.Reset(); m_impl->particlePvCB.Reset();
+    m_impl->particlePvInstVB.Reset(); m_impl->particlePvInstCap = 0;
+    m_impl->particlePvBlend.Reset(); m_impl->particlePvTried = false;
+    m_impl->previewSphereVB.Reset(); m_impl->previewSphereIB.Reset();
+    m_impl->previewSphereIdx = 0;    m_impl->previewShapeBuilt = -1;
+    m_impl->matPreviewFallbackLogged = false;
     // GI resources (accel buffers, targets, atlases, pipelines).
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
@@ -4346,6 +5373,418 @@ void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (m_impl && meshId != HE::UUID{})
         m_impl->pendingMeshInval.push_back(meshId);
+}
+
+// ─── Material pipeline warm-up ──────────────────────────────────────────────
+// Build each node-graph material's VS/PS NOW so the first draw doesn't stall on a
+// synchronous SPIRV-Cross + D3DCompile inside the frame. Built-in-PBR materials
+// resolve no graph shader and are skipped; cache hits are free.
+//
+// Unlike D3D12/Vulkan there is exactly ONE variant per material here: D3D11 has no
+// PSO, so blend/depth/RT-format are separate states set at draw time and the
+// opaque and transparent draws share the same shader objects. Hence no
+// hdr × transparent matrix — one GetOrBuildMaterialShaders call per material.
+void D3D11Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+#if defined(HE_HAVE_SHADERC)
+    auto& p = *m_impl;
+    // m_matReady gates the DRAW path, so warming without it would build shaders
+    // that can never be used.
+    if (!p.m_matReady || !m_contentManager) return;
+
+    int built = 0;
+    for (const HE::UUID& id : materialIds)
+    {
+        uint64_t hash = 0; std::string frag, vertBody;
+        if (!p.m_matShaderLib.resolveShaders(*m_contentManager, id, hash, frag, vertBody))
+            continue; // built-in PBR — nothing to build
+        // GetOrBuildMaterialShaders keys on hash ^ (transparent ? magic : 0), so the
+        // non-transparent variant's key IS the hash. Checked here (not just inside)
+        // so an already-warm material isn't counted as newly built.
+        if (p.m_materialShaders.count(hash)) continue;
+        if (p.GetOrBuildMaterialShaders(hash, frag, vertBody, false)) ++built;
+    }
+    if (built > 0)
+        HE_LOG_INFO(RHI, "%s",
+            ("D3D11Renderer: warmed up " + std::to_string(built) + " material program(s)").c_str());
+#else
+    (void)materialIds;
+#endif
+}
+
+// ─── Content-Browser asset thumbnails ───────────────────────────────────────
+bool D3D11Renderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
+                                         const HE::UUID& assetId, uint32_t size,
+                                         std::vector<uint8_t>& outRgba8)
+{
+    auto& p = *m_impl;
+    const int S = HE::clampThumbnailSize(size);
+    // Adopt the ContentManager: thumbnails are requested BEFORE the first Render(),
+    // so SetContentManager may not have run yet and resolveMesh would find nothing.
+    if (!m_contentManager) m_contentManager = &cm;
+    if (assetId == HE::UUID{}) return false;
+    if (!p.ensureThumbnailTarget(S)) return false;
+
+    p.beginThumbnailPass(S);
+
+    bool drew = false;
+    if (kind == ThumbnailKind::StaticMesh)
+    {
+        if (const GpuMesh* mesh = p.resolveMesh(assetId, m_contentManager))
+        {
+            p.drawMeshPreviewGeometry(mesh->vbuf.Get(), mesh->ibuf.Get(), mesh->indexCount,
+                                      mesh->texture.Get(),
+                                      HE::boundsCenter(mesh->localBounds),
+                                      HE::boundsExtent(mesh->localBounds),
+                                      glm::vec3(HE::kMeshTileBaseColor),
+                                      HE::kMeshTileMetallic, HE::kMeshTileRoughness,
+                                      HE::kThumbYaw, HE::kThumbPitch, HE::kMeshFrameDist);
+            drew = true;
+        }
+    }
+    else if (kind == ThumbnailKind::Material)
+    {
+        // Built-in PBR fallback sphere for EVERY material, graph ones included.
+        //
+        // Deliberately NOT the graph-material shader path that DrawScene uses. That
+        // path binds four copies of `dummyTexture` to heTexP0..3 (see the TODO at the
+        // heTex0 selection in drawDC) because D3D11 has no graph-texture cache yet —
+        // the A4 graph-texture-cache gap. A graph material rendered through it would
+        // come out untextured-white and would NOT match the OpenGL tile, which is a
+        // worse outcome than a flat-shaded sphere: it looks like a working feature
+        // producing wrong pixels. A PBR sphere is the correct tile for a built-in
+        // material and an honest approximation for a graph one. Close this the day
+        // heTexP0..3 resolve real project textures.
+        if (p.ensurePreviewShape(0 /*sphere*/))
+        {
+            const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+            // Same base-texture selection as the scene's override path (getMaterial →
+            // textureIds[0]/texturePaths[0] → SRV), mirroring GL's ResolveGraphTexture.
+            ID3D11ShaderResourceView* baseTex = nullptr;
+            p.resolveMaterialOverride(assetId, m_contentManager, baseTex);
+            p.drawMeshPreviewGeometry(p.previewSphereVB.Get(), p.previewSphereIB.Get(),
+                                      p.previewSphereIdx, baseTex,
+                                      glm::vec3(0.0f), 1.0f,
+                                      ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
+                                         : glm::vec3(0.8f),
+                                      ma ? ma->metallic  : 0.0f,
+                                      ma ? ma->roughness : 0.5f,
+                                      HE::kThumbYaw, HE::kThumbPitch, HE::kMatFallbackDist);
+            drew = true;
+        }
+    }
+    else if (kind == ThumbnailKind::SkeletalMesh)
+    {
+        // BIND POSE, drawn by the UNSKINNED program: the stored vertex positions
+        // already are the bind pose, so no bone matrices and no skinning shader are
+        // needed. Slot 0 of a GpuSkeletalMesh is the same 32-byte pos/normal/uv
+        // vertex meshPvIL describes; the bone ID/weight streams in slots 1 and 2 are
+        // simply not bound. Exactly what GL does with the extra VAO attributes.
+        if (const GpuSkeletalMesh* mesh = p.resolveSkeletalMesh(assetId, m_contentManager))
+        {
+            p.drawMeshPreviewGeometry(mesh->vb.Get(), mesh->ib.Get(),
+                                      static_cast<UINT>(mesh->indexCount),
+                                      mesh->srv.Get(),
+                                      HE::boundsCenter(mesh->localBounds),
+                                      HE::boundsExtent(mesh->localBounds),
+                                      glm::vec3(HE::kMeshTileBaseColor),
+                                      HE::kMeshTileMetallic, HE::kMeshTileRoughness,
+                                      HE::kThumbYaw, HE::kThumbPitch, HE::kMeshFrameDist);
+            drew = true;
+        }
+    }
+
+    if (drew) drew = p.readThumbnailTarget(S, outRgba8);
+    p.endThumbnailPass();
+    return drew;
+}
+
+// ─── UI widget thumbnails ───────────────────────────────────────────────────
+bool D3D11Renderer::RenderWidgetThumbnail(const std::vector<UIRenderObject>& uiObjects,
+                                          uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+    auto& p = *m_impl;
+    const int S = HE::clampThumbnailSize(size);
+    if (uiObjects.empty() || !p.ensureThumbnailTarget(S)) return false;
+
+    p.beginThumbnailPass(S);
+
+    // renderUIPass draws m_renderWorld.uiObjects into whatever is bound, so the tile
+    // borrows that list for one pass and puts the frame's own back. SWAPPING (not
+    // copying) out is what keeps the scene's objects intact.
+    std::vector<UIRenderObject> saved;
+    saved.swap(p.m_renderWorld.uiObjects);
+    p.m_renderWorld.uiObjects = uiObjects;
+    p.renderUIPass(p.context.Get(), S, S);
+    p.m_renderWorld.uiObjects.swap(saved);
+
+    const bool ok = p.readThumbnailTarget(S, outRgba8);
+    p.endThumbnailPass();
+    return ok;
+}
+
+// ─── Particle-system thumbnails ─────────────────────────────────────────────
+bool D3D11Renderer::RenderParticleThumbnail(ContentManager& cm, const HE::UUID& materialId,
+                                            const std::vector<ParticlePreviewInstance>& particles,
+                                            uint32_t size, std::vector<uint8_t>& outRgba8)
+{
+    auto& p = *m_impl;
+    const int S = HE::clampThumbnailSize(size);
+    if (!m_contentManager) m_contentManager = &cm;
+    if (particles.empty() || !p.ensureParticlePreviewPipeline()) return false;
+    if (!p.ensureThumbnailTarget(S)) return false;
+
+    // The material's base texture, or null → the shader's soft circular sprite.
+    // resolveMaterialOverride returns false only while the asset is still loading.
+    ID3D11ShaderResourceView* tex = nullptr;
+    if (!p.resolveMaterialOverride(materialId, m_contentManager, tex)) tex = nullptr;
+
+    p.beginThumbnailPass(S);
+    // Same fixed three-quarter framing as the mesh tiles, so a grid of assets
+    // reads as one set.
+    p.drawParticlePreviewGeometry(tex, particles, HE::kThumbYaw, HE::kThumbPitch, HE::kParticleDist);
+    const bool ok = p.readThumbnailTarget(S, outRgba8);
+    p.endThumbnailPass();
+    return ok;
+}
+
+// ─── Interactive material preview ───────────────────────────────────────────
+// The Material Editor's viewport. Same subject as the Content-Browser tile, but
+// with the panel's orbit instead of the fixed three-quarter shot and a handle
+// returned instead of pixels.
+//
+// KNOWN GAP — A4 / X4509 sampler-register cap. The node-graph material PIXEL
+// shader does not compile on D3D11 (or D3D12): the shared material preamble uses
+// sampler bindings 16/17/18/31/32/33, SPIRV-Cross maps binding N to register(sN),
+// and ps_5_0 caps at 16 samplers, so FXC rejects it with X4509. Metal was given a
+// pin table for exactly this wall; HLSL was given none. Vulkan is unaffected.
+// So the graph path below is attempted honestly and then falls back to the SAME
+// built-in-PBR sphere RenderAssetThumbnail's Material branch draws — an
+// approximate sphere beats a blank editor viewport, and it is the same
+// approximation the tiles already ship. This preview will match OpenGL the day
+// the sampler-cap gap lands; do NOT try to fix that here (it is five files across
+// two modules and landscape graph materials need 17 samplers, which cannot fit
+// ps_5_0 at all).
+void* D3D11Renderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                           uint32_t size, float yaw, float pitch, float dist,
+                                           int shape, const HE::UUID& meshId)
+{
+    auto& p = *m_impl;
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!p.device || !m_contentManager) return nullptr;
+    // Clamp per the IRenderer contract FIRST, then bucket — a bucket applied to an
+    // unclamped size could land above the contract's ceiling.
+    const int S = D3D11RendererImpl::bucketPreview(HE::clampPreviewSize(size));
+
+#if defined(HE_HAVE_SHADERC)
+    // A built-in-PBR material has no node-graph program and OpenGL returns nullptr
+    // for it BEFORE allocating a target — the editor then shows its placeholder,
+    // and the Content-Browser tile path is what covers that case. Mirror exactly:
+    // returning a sphere here where GL returns nothing would make the two backends
+    // disagree about whether a preview exists at all.
+    uint64_t matHash = 0; std::string matFrag, matVertBody;
+    const bool hasGraph = p.m_matReady
+        && p.m_matShaderLib.resolveShaders(*m_contentManager, materialId, matHash, matFrag, matVertBody);
+#else
+    const bool hasGraph = false;
+#endif
+    if (!hasGraph) return nullptr;
+
+    if (!p.ensurePreviewTarget(p.matPreview, S, S)) return nullptr;
+    p.beginPreviewPass(p.matPreview);
+
+    bool drew = false;
+#if defined(HE_HAVE_SHADERC)
+    drew = p.drawMaterialPreviewGeometry(materialId, matHash, matFrag, matVertBody,
+                                         yaw, pitch, dist, shape, meshId, m_contentManager);
+#endif
+    if (!drew)
+    {
+        // ── The X4509 fallback. Built-in-PBR shading on the requested primitive,
+        // with the CALLER's yaw/pitch/dist (a tile's fixed angles would defeat the
+        // panel's orbit) und mit demselben 32°-Schuss wie der Graph-Pfad darüber:
+        // sonst springt die Kugel in ihrer Größe, sobald A4/X4509 behoben ist und
+        // der Graph-Pfad übernimmt. D3D12 macht es genauso.
+        if (!p.matPreviewFallbackLogged)
+        {
+            p.matPreviewFallbackLogged = true;
+            HE_LOG_WARN(RHI, "%s",
+                "D3D11Renderer: node-graph material preview shader unavailable "
+                "(A4 / X4509 ps_5_0 sampler-register cap) — falling back to the built-in PBR "
+                "primitive. Logged once per session.");
+        }
+        // `meshId` still wins over `shape` here — the Material Editor's mesh picker
+        // has to keep working while the graph shader is unavailable, and the harness
+        // drives exactly this via HE_DUMP_PREVIEWMESH. Auto-framed on the mesh's own
+        // bounds so `dist` means the same thing as for the unit primitive; a mesh
+        // that is not resident falls back to the primitive, as everywhere else.
+        const GpuMesh* gm = (meshId != HE::UUID{}) ? p.resolveMesh(meshId, m_contentManager) : nullptr;
+        const bool     useMesh = gm && gm->vbuf && gm->ibuf && gm->indexCount > 0;
+        if (useMesh || p.ensurePreviewShape(shape))
+        {
+            const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+            ID3D11ShaderResourceView* baseTex = nullptr;
+            p.resolveMaterialOverride(materialId, m_contentManager, baseTex);
+            // The material's own texture wins; a mesh drawn without one keeps its
+            // baked albedo rather than going flat.
+            if (!baseTex && useMesh) baseTex = gm->texture.Get();
+            p.drawMeshPreviewGeometry(useMesh ? gm->vbuf.Get() : p.previewSphereVB.Get(),
+                                      useMesh ? gm->ibuf.Get() : p.previewSphereIB.Get(),
+                                      useMesh ? gm->indexCount : p.previewSphereIdx,
+                                      baseTex,
+                                      useMesh ? HE::boundsCenter(gm->localBounds) : glm::vec3(0.0f),
+                                      useMesh ? HE::boundsExtent(gm->localBounds) : 1.0f,
+                                      ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
+                                         : glm::vec3(0.8f),
+                                      ma ? ma->metallic  : 0.0f,
+                                      ma ? ma->roughness : 0.5f,
+                                      yaw, pitch, dist, 32.0f);
+            drew = true;
+        }
+    }
+
+    if (drew) p.dumpPreviewTarget(p.matPreview, "HE_PREVIEW_DUMP");
+    p.endPreviewPass();
+    // The cached SRV, created once with the target — never a per-call registration.
+    return drew ? static_cast<void*>(p.matPreview.srv.Get()) : nullptr;
+}
+
+// ─── Interactive skeletal-mesh preview ──────────────────────────────────────
+// The only preview here that is NOT square: the Skeletal Mesh Editor sizes its
+// target to the pane so the mesh fills it edge to edge, and the projection takes
+// its aspect from the same numbers.
+void* D3D11Renderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
+                                           const std::vector<glm::mat4>& boneMatrices,
+                                           uint32_t width, uint32_t height,
+                                           float yaw, float pitch, float dist,
+                                           bool showSkeleton, glm::mat4* outViewProj)
+{
+    auto& p = *m_impl;
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!p.device || !m_contentManager) return nullptr;
+
+    const GpuSkeletalMesh* smesh = p.resolveSkeletalMesh(meshId, m_contentManager);
+    if (!smesh || !smesh->vb || !smesh->ib || smesh->indexCount <= 0) return nullptr;
+    if (!p.ensureSkelPreviewPipeline()) return nullptr;
+
+    // Bucket the two axes INDEPENDENTLY, so ordinary splitter drag does not
+    // recreate the target (and, on the descriptor-limited backends, leak one) for
+    // every pixel of movement.
+    //
+    // Die Projektion nimmt trotzdem das ANGEFORDERTE Seitenverhältnis, nicht das
+    // des gerundeten Ziels. `ImGui::Image` zeichnet die Textur auf die Größe des
+    // Bereichs, skaliert die W×H-Textur also auf w×h — und zwar auf beiden Achsen
+    // unterschiedlich stark, sobald die Rundung die Seitenverhältnisse trennt.
+    // Eine Kugel bleibt im Endbild genau dann rund, wenn die Projektion mit w/h
+    // gebaut wurde: das Rendering ist dann für den Bucket „vorverzerrt" und die
+    // Skalierung hebt das exakt auf. Mit W/H wäre sie im Ziel rund und auf dem
+    // Schirm oval. Vulkan und D3D12 machen es genauso.
+    const int W = D3D11RendererImpl::bucketPreview(HE::clampSkeletalPreviewSize(width));
+    const int H = D3D11RendererImpl::bucketPreview(HE::clampSkeletalPreviewSize(height));
+    if (!p.ensurePreviewTarget(p.skelPreview, W, H)) return nullptr;
+
+    // Orbit camera auto-framed on the BIND-POSE bounds (see GpuSkeletalMesh::
+    // localBounds — deliberately not re-fitted per pose).
+    const HE::PreviewCamera cam = HE::meshOrbit(HE::boundsCenter(smesh->localBounds),
+                                                HE::boundsExtent(smesh->localBounds),
+                                                yaw, pitch, dist,
+                                                static_cast<float>(HE::clampSkeletalPreviewSize(width)) /
+                                                static_cast<float>(HE::clampSkeletalPreviewSize(height)));
+    // ONE ClipSpace fix-up on meshOrbit's GL-convention projection.
+    const glm::mat4 viewProj = HE::kD3DClipFix * cam.proj * cam.view;
+    // Handed out in THIS backend's clip convention (the fix-up included), because
+    // that is the space a caller's own overlay has to be drawn in on D3D11 — the
+    // debug-line path here expects exactly this matrix.
+    if (outViewProj) *outViewProj = viewProj;
+
+    // 128-entry identity scratch: an empty/short boneMatrices then yields the bind
+    // pose, matching GL. kMaxBones is the BonesCB array length, not a guess.
+    constexpr size_t kMaxBones = 128;
+    std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+    const size_t boneCount = std::min(boneMatrices.size(), kMaxBones);
+    if (boneCount > 0) std::copy_n(boneMatrices.begin(), boneCount, boneScratch.begin());
+
+    p.beginPreviewPass(p.skelPreview);
+    p.drawSkelPreviewGeometry(*smesh, viewProj, boneScratch);
+
+    // ── Bone overlay: joint markers (three axis-aligned crosses) + parent→child
+    // segments, drawn through the EXISTING debug-line pipeline rather than a third
+    // line shader. World joint transform = boneMatrix * inverse(inverseBindMatrix),
+    // since a bone matrix is defined as globalJointXform * invBind
+    // (composeBoneMatrices, AnimationEval.cpp).
+    //
+    // GL draws these at glLineWidth(2.0); D3D11 has no line-width state at all, so
+    // the overlay is 1 px here. That is a real, unavoidable difference.
+    if (showSkeleton)
+    {
+        if (const SkeletalMeshAsset* asset = m_contentManager->getSkeletalMesh(meshId))
+        {
+            std::vector<glm::vec3> jointWorld(asset->skeleton.size(), glm::vec3(0.0f));
+            for (size_t i = 0; i < asset->skeleton.size(); ++i)
+            {
+                const glm::mat4 invBind = glm::make_mat4(asset->skeleton[i].inverseBindMatrix.data());
+                const glm::mat4 world =
+                    (i < boneScratch.size() ? boneScratch[i] : glm::mat4(1.0f)) * glm::inverse(invBind);
+                jointWorld[i] = glm::vec3(world[3]);
+            }
+
+            const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
+            const float markerSize =
+                std::max(HE::boundsExtent(smesh->localBounds) * 0.015f, 0.005f);
+            std::vector<DebugLine> lines;
+            lines.reserve(asset->skeleton.size() * 4);
+            for (size_t i = 0; i < asset->skeleton.size(); ++i)
+            {
+                const glm::vec3 j = jointWorld[i];
+                lines.push_back({ j - glm::vec3(markerSize, 0, 0), j + glm::vec3(markerSize, 0, 0), jointColor });
+                lines.push_back({ j - glm::vec3(0, markerSize, 0), j + glm::vec3(0, markerSize, 0), jointColor });
+                lines.push_back({ j - glm::vec3(0, 0, markerSize), j + glm::vec3(0, 0, markerSize), jointColor });
+                const int32_t parent = asset->skeleton[i].parent;
+                if (parent >= 0 && static_cast<size_t>(parent) < jointWorld.size())
+                    lines.push_back({ jointWorld[parent], j, boneColor });
+            }
+            // drawDebugLines grows its vertex buffer on demand, so a dense skeleton
+            // is fine. It restores the SCENE's shaders/CBs on the way out, which is
+            // inert here — endPreviewPass unbinds the target immediately after.
+            p.drawDebugLines(p.context.Get(), viewProj, lines);
+        }
+    }
+
+    p.dumpPreviewTarget(p.skelPreview, "HE_SKEL_PREVIEW_DUMP");
+    p.endPreviewPass();
+    return static_cast<void*>(p.skelPreview.srv.Get());
+}
+
+// ─── Interactive particle preview ───────────────────────────────────────────
+// The Particle Graph Editor owns the simulation (ParticleSystem::stepPool, in
+// HE_Scene) and hands over one fully-resolved instance per live particle; this
+// only draws them. `meshId` is ignored, exactly as on OpenGL — the preview is
+// always camera-facing billboards.
+void* D3D11Renderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /*meshId*/,
+                                           const HE::UUID& materialId,
+                                           const std::vector<ParticlePreviewInstance>& particles,
+                                           uint32_t size, float yaw, float pitch, float dist)
+{
+    auto& p = *m_impl;
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!p.device) return nullptr;
+    if (!p.ensureParticlePreviewPipeline()) return nullptr;
+
+    const int S = D3D11RendererImpl::bucketPreview(HE::clampPreviewSize(size));
+    if (!p.ensurePreviewTarget(p.particlePreview, S, S)) return nullptr;
+
+    // The material's base texture, or null → the shader's soft circular sprite.
+    ID3D11ShaderResourceView* tex = nullptr;
+    if (!p.resolveMaterialOverride(materialId, m_contentManager, tex)) tex = nullptr;
+
+    p.beginPreviewPass(p.particlePreview);
+    // An EMPTY pool still returns a valid (fully transparent) handle rather than
+    // nullptr — GL parity, and it is what keeps the panel from flickering to its
+    // "unavailable" placeholder on the frames between bursts.
+    p.drawParticlePreviewGeometry(tex, particles, yaw, pitch, dist);
+    p.dumpPreviewTarget(p.particlePreview, "HE_PARTICLE_PREVIEW_DUMP");
+    p.endPreviewPass();
+    return static_cast<void*>(p.particlePreview.srv.Get());
 }
 
 IRenderer::FrameGpuStats D3D11Renderer::GetFrameGpuStats() const
