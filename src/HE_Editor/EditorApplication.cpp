@@ -118,7 +118,22 @@ struct D3D12DescriptorHeapAllocator
 
 	void Alloc(D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
 	{
-		IM_ASSERT(FreeIndices.Size > 0);
+		// Erschöpfter Heap gibt Null-Handles zurück, statt zu behaupten, er habe
+		// noch einen. `FreeIndices.back()` auf einem leeren ImVector liefert im
+		// Release-Build (IM_ASSERT ist dort leer) einen Index aus dem Nichts, und
+		// der daraus gebaute Deskriptor zeigt hinter den Heap — ein
+		// CreateShaderResourceView darauf schreibt in fremden Speicher, ohne dass
+		// irgendwo ein Fehler auftaucht. Die Aufrufer haben alle einen
+		// Null-Pfad ("preview unavailable on this backend"), also ist die leere
+		// Kachel die ehrliche Antwort.
+		if (FreeIndices.Size <= 0)
+		{
+			HE_LOG_WARN(Editor, "%s",
+				"EditorApplication: ImGui-SRV-Heap erschöpft — Textur bleibt leer");
+			out_cpu->ptr = 0;
+			out_gpu->ptr = 0;
+			return;
+		}
 		int idx   = FreeIndices.back(); FreeIndices.pop_back();
 		out_cpu->ptr = HeapStartCpu.ptr + (SIZE_T)(idx * Increment);
 		out_gpu->ptr = HeapStartGpu.ptr + (UINT64)(idx * Increment);
@@ -962,7 +977,27 @@ void EditorApplication::OnInit()
 #endif
 	}
 #endif // HE_IMGUI_ENABLED
-	m_backend      = m_globalState->getSelectedRHI();
+	// NICHT wieder aus der Konfiguration lesen. `m_backend` steht bereits auf dem
+	// Backend, mit dem der Renderer TATSÄCHLICH erzeugt wurde — CreateRenderer()
+	// (:210) setzt es aus GetConfig().backend, und das berücksichtigt die
+	// HE_DUMP_RHI-Übersteuerung; Application::CreateRenderer läuft vor OnInit.
+	// `getSelectedRHI()` kennt dagegen nur config.json.
+	//
+	// Wurde hier neu gelesen, liefen die beiden auseinander, sobald HE_DUMP_RHI
+	// gesetzt war: ImGui war oben auf dem übersteuerten Backend initialisiert
+	// worden, jedes spätere `switch (m_backend)` nahm aber den Zweig des
+	// persistierten. Der Shutdown fuhr dann das eine ImGui-Backend über die
+	// Daten des anderen — auf D3D11 Heap-Korruption (0xC0000374), auf D3D12
+	// eine Zugriffsverletzung (0xC0000005), auf Vulkan zehn nie zerstörte
+	// Objekte. Ebenso lief der Frame durch das falsche NewFrame/RenderDrawData,
+	// und die Vorschau-Panels leiten aus demselben Wert ihr `flipY` ab
+	// (`ctx.backend == OpenGL`) — die Vorschau stand also kopfüber.
+	//
+	// Bewusst NICHT über setSelectedRHI(m_backend) geradegezogen: writeConfig()
+	// würde die HE_DUMP_RHI-Übersteuerung in die config.json des Nutzers
+	// schreiben und sein gespeichertes Backend bei jedem Headless-Lauf
+	// stillschweigend ändern. Seit dieser Änderung ist :210 der einzige
+	// Schreiber von m_backend.
 	m_backend_name = getRHIName(m_backend);
 
 	GlobalState& globalstate = GlobalState::getInstance();

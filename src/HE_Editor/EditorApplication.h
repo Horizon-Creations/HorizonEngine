@@ -517,7 +517,10 @@ private:
 	bool m_projectLoaded     = false;
 	bool m_contentRefreshPending = false;
 	bool m_contentRefreshDone    = false;
-	HE::RendererBackend m_backend;
+	// Einziger Schreiber ist CreateRenderer() (EditorApplication.cpp:210), das vor
+	// OnInit läuft. Initialisierer trotzdem, damit ein Pfad, der den Renderer nie
+	// erzeugt, nicht auf einem unbestimmten Wert weiterschaltet.
+	HE::RendererBackend m_backend = HE::RendererBackend::OpenGL;
 	std::string m_backend_name;
 	ProjectManager m_projectManager;
 	EditorConfig m_editorConfig;
