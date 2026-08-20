@@ -34,7 +34,12 @@ bool listed(const std::vector<NT>& v, NT t)
 // spawned off such a pin has to inherit it, or it is born without a definition —
 // no field/entry pins, and every panel that resolves it says "definition
 // missing" (the add menu already gets this right by construction).
-struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false; std::string typeName; };
+struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false;
+                 // Which container the dragged pin carries, RESOLVED — the menu
+                 // matches on the kind because Graph::connect does (an array
+                 // does not join a set).
+                 HC::ContainerKind ctr = HC::ContainerKind::None;
+                 std::string typeName; };
 
 DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 {
@@ -44,7 +49,8 @@ DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 	d.isExec = srcPin < rr.dataIn0;
 	if (d.isExec) return d;
 	auto take = [&d](const HC::PinDesc& pd)
-	{ d.type = pd.type; d.array = pd.isArray; if (pd.typeName) d.typeName = pd.typeName; };
+	{ d.type = pd.type; d.array = pd.isArray; d.ctr = pd.kind();
+	  if (pd.typeName) d.typeName = pd.typeName; };
 	if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
 		take(sig.dataOuts[srcPin - rr.dataOut0]);
 	else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
@@ -68,7 +74,7 @@ int seedSpawnedNode(HC::Graph& graph, int id, const DragPin& dp, bool srcInput)
 	}
 	HC::syncTypeSignatures(graph);   // user-type nodes gain their field/entry pins
 	nn = graph.findNode(id);
-	return nn ? HcEditorUtil::dragMatchPinOn(*nn, dp.type, dp.array, srcInput, dp.isExec) : -1;
+	return nn ? HcEditorUtil::dragMatchPinOn(*nn, dp.type, dp.ctr, srcInput, dp.isExec) : -1;
 }
 
 // 'B' → ImGuiKey_B. The letter keys are one contiguous run in ImGui's enum, so
@@ -332,7 +338,8 @@ std::string variableTypeLabel(const HC::Variable& v)
 		? std::filesystem::path(v.className).stem().string()
 		: ((v.type == PT::Enum || v.type == PT::Struct) && !v.typeName.empty())
 		? std::filesystem::path(v.typeName).stem().string()
-		: std::string(pinTypeName(v.type))) + (v.isArray ? "[]" : "");
+		: std::string(pinTypeName(v.type))) +
+		HcEditorUtil::containerSuffix(v.isArray, v.container, v.keyType);
 }
 
 bool loadClassGraph(ContentManager* content, const std::string& path, HC::Graph& out)
@@ -705,6 +712,10 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				                       drop, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				// The container half travels with the type — a Get/Set node that
+				// kept only `isArray` would draw an ARRAY pin for a set or a map.
+				nn->container = v.container; nn->keyType = v.keyType;
+				nn->keyTypeName = v.keyTypeName;
 				nn->typeName = v.typeName;
 				created = id; ImGui::CloseCurrentPopup();
 			}
@@ -822,11 +833,11 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	// pick in this same frame (the menu keeps rendering past a pick).
 	const HC::Node src = *sn;
 
-	// Classify the dragged pin (exec vs data; data type + array-ness).
+	// Classify the dragged pin (exec vs data; data type + which container).
 	const DragPin dp = classifyDragPin(src, srcPin);
 	const bool isExecPin = dp.isExec;
 	const PT   dragType  = dp.type;
-	const bool dragArray = dp.array;
+	const auto dragCtr   = dp.ctr;
 
 	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
 	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
@@ -851,7 +862,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		HC::inferUserTypeNames(graph); };   // learns its definition from the wire
 
 	// ── Ref output: the target class's public members lead ────────────────
-	if (!isExecPin && !srcInput && dragType == PT::Ref && !dragArray)
+	if (!isExecPin && !srcInput && dragType == PT::Ref && dragCtr == HC::ContainerKind::None)
 	{
 		auto wire = [&](int newId){
 			HC::Node* nn = graph.findNode(newId);
@@ -993,7 +1004,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (listed(h.menus->dragExcluded, t)) continue;
 			if (std::find(refOffered.begin(), refOffered.end(), t) != refOffered.end())
 				continue;   // the "Reference" section above already offers it
-			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragArray, srcInput, isExecPin);
+			const int pin = HcEditorUtil::dragMatchPin(t, dragType, dragCtr, srcInput, isExecPin);
 			if (pin < 0 || !matches(HC::nodeDisplayName(t))) continue;
 			if (!gh) { ImGui::TextDisabled("Nodes"); gh = true; }
 			// The hint is live here too: the same key hit MID-DRAG skips this
@@ -1023,7 +1034,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			// restriction, and skipping it here would make the first half a
 			// decoration you can drag around.
 			if (h.menus && !HcEditorUtil::apiGroupAllowed(fn.id, h.menus->apiGroups)) continue;
-			const int pin = HcEditorUtil::dragMatchApiPin(fn, dragType, dragArray, srcInput, isExecPin);
+			const int pin = HcEditorUtil::dragMatchApiPin(fn, dragType, dragCtr, srcInput, isExecPin);
 			const char* shown = fn.displayName ? fn.displayName : fn.id;
 			if (pin < 0 || !matches(shown)) continue;
 			if (!eh) { ImGui::TextDisabled("Engine"); eh = true; }
@@ -1049,13 +1060,17 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		{
 			const HC::Variable& v = *vp;
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
-			const bool setOk = (isExecPin && !srcInput) ||
-				(!isExecPin && !srcInput && v.type == dragType && v.isArray == dragArray);
-			const bool getOk = !isExecPin && srcInput && v.type == dragType && v.isArray == dragArray;
+			const bool sameShape = v.type == dragType && v.kind() == dragCtr;
+			const bool setOk = (isExecPin && !srcInput) || (!isExecPin && !srcInput && sameShape);
+			const bool getOk = !isExecPin && srcInput && sameShape;
 			auto add = [&](bool get){
 				const int id = addNode(graph, get ? NT::GetVariable : NT::SetVariable, pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				// The container half travels with the type — a Get/Set node that
+				// kept only `isArray` would draw an ARRAY pin for a set or a map.
+				nn->container = v.container; nn->keyType = v.keyType;
+				nn->keyTypeName = v.keyTypeName;
 				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				const PinRanges r = pinRanges(*nn);
 				wireAt(id, get ? r.dataOut0 : (isExecPin ? r.execIn0 : r.dataIn0));
@@ -1222,6 +1237,59 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		return true;
 	}
 
+	case NT::SetMake:
+	case NT::SetAdd:
+	case NT::SetRemove:
+	case NT::SetContains:
+	case NT::SetLength:
+	case NT::SetClear:
+	case NT::SetToArray:
+	case NT::ForEachSet:
+	{
+		const PT before = n.propType;
+		if (HcEditorUtil::drawTypePicker("Element", h.content, n.propType, &n.s) && n.propType != before)
+		{
+			g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
+				[&](const HC::Link& l){ return l.srcNode == n.id || l.dstNode == n.id; }), g.links.end());
+			edit(true);
+		}
+		ImGui::TextDisabled("Element type of the set.\nIterates in the order elements were first added.");
+		return true;
+	}
+
+	case NT::MapMake:
+	case NT::MapSet:
+	case NT::MapRemove:
+	case NT::MapContains:
+	case NT::MapLength:
+	case NT::MapClear:
+	case NT::MapGet:
+	case NT::MapKeys:
+	case NT::MapValues:
+	case NT::ForEachMap:
+	{
+		// A map node needs BOTH halves picked; either one changing re-lays the
+		// pins, so both drop the node's links the way the element picker does.
+		bool retyped = false;
+		const PT beforeKey = n.keyType;
+		const std::string beforeKeyDef = n.keyTypeName;
+		if (HcEditorUtil::drawKeyTypePicker("Key", n.keyType, n.keyTypeName) &&
+		    (n.keyType != beforeKey || n.keyTypeName != beforeKeyDef))
+			retyped = true;
+		const PT before = n.propType;
+		if (HcEditorUtil::drawTypePicker("Value", h.content, n.propType, &n.s) && n.propType != before)
+			retyped = true;
+		if (retyped)
+		{
+			g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
+				[&](const HC::Link& l){ return l.srcNode == n.id || l.dstNode == n.id; }), g.links.end());
+			edit(true);
+		}
+		ImGui::TextDisabled("Key and value types of the map.\n"
+		                    "Iterates in the order keys were first inserted.");
+		return true;
+	}
+
 	// ── Literal values ───────────────────────────────────────────────────────
 	// Dragged widgets report the drag frames as uncommitted and the release as
 	// committed, so a host that snapshots for undo gets ONE entry per drag.
@@ -1339,11 +1407,19 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 				{
 					const PT before = n.propType; const bool wasArr = n.isArray;
 					const std::string beforeTn = n.typeName;
+					const auto wasCtr = n.container;
+					const PT wasKey = n.keyType;
+					const std::string beforeKeyTn = n.keyTypeName;
 					n.s        = v.name;
 					n.propType = v.type;      // node takes the variable's type…
-					n.isArray  = v.isArray;   // …and its array-ness
+					n.isArray  = v.isArray;   // …and its container-ness…
+					n.container = v.container;// …WHICH container…
+					n.keyType = v.keyType;    // …and, for a map, its key
+					n.keyTypeName = v.keyTypeName;
 					n.typeName = v.typeName;  // …and its enum/struct definition
-					if (n.propType != before || n.isArray != wasArr || n.typeName != beforeTn)
+					if (n.propType != before || n.isArray != wasArr || n.typeName != beforeTn ||
+					    n.container != wasCtr || n.keyType != wasKey ||
+					    n.keyTypeName != beforeKeyTn)
 					{
 						const PinRanges r = pinRanges(n);
 						const int valuePin = n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0;
@@ -1528,6 +1604,10 @@ void drawQuickPickPopup(const Host& h)
 				                       s_pick.pos, h.currentGraph);
 				HC::Node* nn = graph.findNode(id);
 				nn->s = v.name; nn->propType = v.type; nn->isArray = v.isArray;
+				// The container half travels with the type — a Get/Set node that
+				// kept only `isArray` would draw an ARRAY pin for a set or a map.
+				nn->container = v.container; nn->keyType = v.keyType;
+				nn->keyTypeName = v.keyTypeName;
 				nn->typeName = v.typeName;   // Enum/Struct: WHICH definition (like the add menu)
 				selectNode(h, id);
 				h.onEdit(true);

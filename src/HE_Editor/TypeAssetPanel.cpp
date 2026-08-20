@@ -479,21 +479,47 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			typeNamePicker(f, st.dirty, ctx, st.relPath);
 		}
 		ImGui::SameLine();
-		if (ImGui::Checkbox("Array", &f.isArray))
+		ImGui::SetNextItemWidth(150.0f);
+		if (HcEditorUtil::drawContainerPicker("##ctr", f.isArray, f.container))
 		{
-			// The payload changes shape: a scalar default and a slot list can't
-			// both live in one Value, so switching starts the new one clean.
+			// The payload changes shape: a scalar default, a slot list and a
+			// key/value pair list can't all live in one Value, so switching
+			// starts the new one clean.
 			f.defaultValue = {};
 			f.defaultValue.type = f.type;
 			f.defaultValue.isArray = f.isArray;
+			f.defaultValue.container = f.container;
 			f.defaultValue.typeName = f.typeName;
 			st.dirty = true;
 		}
+		if (f.kind() == HorizonCode::ContainerKind::Map)
+		{
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(150.0f);
+			if (HcEditorUtil::drawKeyTypePicker("Key", f.keyType, f.keyTypeName))
+			{
+				f.defaultValue.keys.clear();
+				f.defaultValue.items.clear();
+				st.dirty = true;
+			}
+		}
 
 		// Row 3: default value.
-		if (f.isArray)
+		if (f.kind() == HorizonCode::ContainerKind::Map)
 		{
-			ImGui::TextDisabled("Default elements");
+			// A Map's authored default is deliberately NOT editable here yet —
+			// see docs/horizoncode-containers-plan.md §3. The field declares the
+			// type; a graph fills it. Seeded map defaults DO work at the HorizonCode
+			// variable level and in a hand-written .hasset, so the storage and the
+			// round trip are real; what is missing is only this editor.
+			EditorWidgets::WrapText wrap;
+			ImGui::TextDisabled("Default: empty (a map's starting pairs are not authorable here yet)");
+		}
+		else if (f.isArray)
+		{
+			ImGui::TextDisabled(f.kind() == HorizonCode::ContainerKind::Set
+			                        ? "Default elements (duplicates collapse to the first)"
+			                        : "Default elements");
 			if (HcEditorUtil::drawArraySlotsEditor(f.defaultValue.items, f.type, f.typeName))
 				st.dirty = true;
 		}

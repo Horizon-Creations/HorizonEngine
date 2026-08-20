@@ -241,7 +241,8 @@ const char* kVarPayload = "HE_LSGRAPH_VAR";
 // id-based widget nodes under "UI" are its only widget access.
 const HGH::MenuOpts kMenus = {
 	/*addCategories*/ { "Flow", "Events", "Reference", "UI",
-	                    "Literals", "Math", "Logic", "String", "Array", "Debug" },
+	                    "Literals", "Math", "Logic", "String",
+	                    "Array", "Set", "Map", "Debug" },
 	/*addExcluded*/   { NT::Event, NT::FunctionEntry, NT::FunctionCall,
 	                    NT::GetVariable, NT::SetVariable,
 	                    NT::GetProperty, NT::SetProperty,
@@ -678,22 +679,25 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
 	}
 
-	// Single value vs an array of the type. Toggling re-types the matching Get/Set
-	// nodes' value pins and drops their now-mismatched links.
-	bool arr = v->isArray;
-	if (ImGui::Checkbox("Array", &arr))
+	// Single value, or a container of the type. Changing it re-types the matching
+	// Get/Set nodes' value pins and drops their now-mismatched links.
+	if (HcEditorUtil::drawContainerPicker("Container", v->isArray, v->container) ||
+	    (v->kind() == HC::ContainerKind::Map &&
+	     HcEditorUtil::drawKeyTypePicker("Key", v->keyType, v->keyTypeName)))
 	{
-		v->isArray = arr;
+		// The authored slots belong to the OLD shape (a map's keys most of all).
+		v->defaultItems.clear();
+		v->defaultKeys.clear();
 		for (auto& n : graph.nodes)
 			if ((n.type == NT::GetVariable || n.type == NT::SetVariable) && n.s == v->name)
 			{
-				n.isArray = arr;
+				n.isArray = v->isArray; n.container = v->container;
+				n.keyType = v->keyType; n.keyTypeName = v->keyTypeName;
 				const PinRanges r = HGH::pinRanges(n);
 				HGH::removePinLinks(graph, n.id, n.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
 			}
 		edited = true;
 	}
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
 
 	if (!v->isArray)
 	{
@@ -1269,7 +1273,13 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			const int id = addNode(graph, type, g.ge.addMenuGraphPos);
 			HC::Node* nn = graph.findNode(id);
 			nn->s = g.dropVar;
-			if (v) { nn->propType = v->type; nn->isArray = v->isArray; }
+			if (v)
+			{
+				nn->propType = v->type; nn->isArray = v->isArray;
+				nn->typeName = v->typeName;
+				nn->container = v->container;   // Array vs Set vs Map, and its key
+				nn->keyType = v->keyType; nn->keyTypeName = v->keyTypeName;
+			}
 			g.selectedNode = id;
 			edited = true;
 		};

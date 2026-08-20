@@ -163,7 +163,7 @@ namespace
 			out += "  ";
 			if (p.name && *p.name) { out += p.name; out += ": "; }
 			out += tooltipTypeName(p.type);
-			if (p.isArray) out += "[]";
+			out += containerSuffix(p.isArray, p.container, p.keyType);
 			out += '\n';
 		}
 	}
@@ -466,6 +466,76 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		ImGui::EndCombo();
 	}
 	return changed;
+}
+
+bool drawContainerPicker(const char* label, bool& isArray,
+                         HorizonCode::ContainerKind& container)
+{
+	using CK = HorizonCode::ContainerKind;
+	// The stored pair is (isArray, container); the picker works on the RESOLVED
+	// kind so the legacy "isArray without a kind" row shows as Array, and every
+	// write sets both fields together.
+	const CK cur = HorizonCode::containerKindOf(isArray, container);
+	int idx = cur == CK::Array ? 1 : cur == CK::Set ? 2 : cur == CK::Map ? 3 : 0;
+	const int before = idx;
+	if (ImGui::Combo(label, &idx, "Single value\0Array\0Set\0Map\0") && idx != before)
+	{
+		container = idx == 1 ? CK::Array : idx == 2 ? CK::Set : idx == 3 ? CK::Map : CK::None;
+		isArray   = idx != 0;
+		return true;
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Array: an ordered list, reached by index.\n"
+		                  "Set: no duplicates, iterated in the order elements were first added.\n"
+		                  "Map: keyed values, iterated in the order keys were first inserted.");
+	return false;
+}
+
+bool drawKeyTypePicker(const char* label, HorizonCode::PinType& keyType,
+                       std::string& keyTypeName)
+{
+	using P = HorizonCode::PinType;
+	bool changed = false;
+	const std::string cur = (keyType == P::Enum && !keyTypeName.empty())
+		? std::filesystem::path(keyTypeName).stem().string()
+		: valueTypeName(keyType);
+	if (ImGui::BeginCombo(label, cur.c_str()))
+	{
+		// Only the types with a cheap, exact identity — see isValidMapKeyType.
+		const P keys[] = { P::String, P::Int, P::Ref };
+		for (P k : keys)
+			if (ImGui::Selectable(valueTypeName(k), keyType == k && keyTypeName.empty()))
+			{ keyType = k; keyTypeName.clear(); changed = true; }
+		const auto enums = HE::TypeRegistry::instance().enums();
+		if (!enums.empty())
+		{
+			ImGui::Separator();
+			ImGui::TextDisabled("Enums");
+			for (const auto& d : enums)
+				if (ImGui::Selectable((d.name + "##k").c_str(),
+				        keyType == P::Enum && keyTypeName == d.assetPath))
+				{ keyType = P::Enum; keyTypeName = d.assetPath; changed = true; }
+		}
+		ImGui::EndCombo();
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Map keys may be Int, String, Enum or Object.\n"
+		                  "Float is not a key type: equality on floats is not something\n"
+		                  "keyed data can rest on.");
+	return changed;
+}
+
+std::string containerSuffix(bool isArray, HorizonCode::ContainerKind container,
+                            HorizonCode::PinType keyType)
+{
+	switch (HorizonCode::containerKindOf(isArray, container))
+	{
+		case HorizonCode::ContainerKind::Array: return "[]";
+		case HorizonCode::ContainerKind::Set:   return "{}";
+		case HorizonCode::ContainerKind::Map:
+			return std::string("{") + valueTypeName(keyType) + ":}";
+		default: return {};
+	}
 }
 
 std::uint32_t nodeHeaderColor(const HorizonCode::Node& n)
@@ -1106,6 +1176,19 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 bool drawArrayDefaultEditor(HorizonCode::Variable& v)
 {
 	ImGui::SeparatorText("Default");
+	if (v.kind() == HorizonCode::ContainerKind::Map)
+	{
+		// A map's authored pairs are not editable here yet — see
+		// docs/horizoncode-containers-plan.md §3. The declaration is complete
+		// (the storage, the JSON and the seeding all handle authored pairs);
+		// what is missing is a two-column slot editor. A graph fills the map.
+		EditorWidgets::WrapText wrap;
+		ImGui::TextDisabled("Starts empty — a map's pairs are not authorable here yet. "
+		                    "Fill it with Map Set.");
+		return false;
+	}
+	if (v.kind() == HorizonCode::ContainerKind::Set)
+		ImGui::TextDisabled("Duplicates collapse to the first occurrence.");
 	return drawArraySlotsEditor(v.defaultItems, v.type, v.typeName);
 }
 
@@ -1265,7 +1348,7 @@ bool drawSceneParamPicker(HorizonCode::Node& n, ContentManager* cm)
 }
 
 int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
-                   bool dragArray, bool srcIsInput, bool srcIsExec)
+                   HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec)
 {
 	const HorizonCode::NodeSig s = HorizonCode::signatureOf(n);
 	const int eIn = (int)s.execIns.size(), eOut = (int)s.execOuts.size();
@@ -1281,19 +1364,19 @@ int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
 	{
 		for (size_t i = 0; i < s.dataOuts.size(); ++i)
 			if (HorizonCode::canConvertPinType(s.dataOuts[i].type, dragType) &&
-			    s.dataOuts[i].isArray == dragArray)
+			    s.dataOuts[i].kind() == dragCtr)
 				return eIn + eOut + dIn + (int)i;
 		return -1;
 	}
 	for (size_t i = 0; i < s.dataIns.size(); ++i)  // dragged data-out → a matching data-in
 		if (HorizonCode::canConvertPinType(dragType, s.dataIns[i].type) &&
-		    s.dataIns[i].isArray == dragArray)
+		    s.dataIns[i].kind() == dragCtr)
 			return eIn + eOut + (int)i;
 	return -1;
 }
 
 int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
-                 bool dragArray, bool srcIsInput, bool srcIsExec)
+                 HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec)
 {
 	// Probe a fresh node's signature: this answers "would this node TYPE fit at
 	// all", which is what the menu listing needs. propType is seeded with the
@@ -1302,16 +1385,27 @@ int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
 	// grows pins once it is bound to a definition, so the host wires through
 	// dragMatchPinOn on the spawned node instead.
 	HorizonCode::Node tpl;
-	tpl.type = t; tpl.propType = dragType; tpl.isArray = dragArray;
-	return dragMatchPinOn(tpl, dragType, dragArray, srcIsInput, srcIsExec);
+	tpl.type = t; tpl.propType = dragType;
+	tpl.isArray = dragCtr != HorizonCode::ContainerKind::None;
+	tpl.container = dragCtr;
+	// A Map node's KEY is not derivable from the drag (its value type is what
+	// the wire carries), so a bare probe keeps the default String key and a map
+	// pin only matches a String-keyed drag. The spawned node re-matches through
+	// dragMatchPinOn once its pickers are set.
+	return dragMatchPinOn(tpl, dragType, dragCtr, srcIsInput, srcIsExec);
 }
 
 int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
-                    bool dragArray, bool srcIsInput, bool srcIsExec)
+                    HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec)
 {
 	// EngineCall unified pins: [execIn?][execOut?][params…][results…].
 	const int e = fn.isExec ? 1 : 0;
 	if (srcIsExec) return fn.isExec ? (srcIsInput ? e : 0) : -1;
+	// Registry params are scalar-or-array; a Set/Map drag matches nothing here.
+	if (dragCtr == HorizonCode::ContainerKind::Set ||
+	    dragCtr == HorizonCode::ContainerKind::Map)
+		return -1;
+	const bool dragArray = dragCtr == HorizonCode::ContainerKind::Array;
 	if (srcIsInput)
 	{
 		for (size_t i = 0; i < fn.results.size(); ++i)

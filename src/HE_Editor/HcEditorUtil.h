@@ -7,6 +7,7 @@
 
 class ContentManager;
 namespace HorizonCode { enum class PinType : std::uint8_t; enum class NodeType : std::uint8_t;
+                        enum class ContainerKind : std::uint8_t;
                         struct Graph; struct Node; struct Variable; struct Value; }
 namespace HE::api { struct ApiFn; }
 
@@ -123,6 +124,28 @@ namespace HcEditorUtil
 	bool drawTypePicker(const char* label, ContentManager* cm,
 	                    HorizonCode::PinType& type, std::string* className,
 	                    std::string* typeName = nullptr);
+
+	// Single value / Array / Set / Map. Writes BOTH halves of the pair the engine
+	// stores (see HorizonCode::ContainerKind): `isArray` says "is a container",
+	// `container` says which — so the two can never drift apart in the editor.
+	// Returns true when changed.
+	bool drawContainerPicker(const char* label, bool& isArray,
+	                         HorizonCode::ContainerKind& container);
+
+	// The KEY type of a map: Int, String, Enum or Object, and nothing else
+	// (HorizonCode::isValidMapKeyType — Float and the composites have no
+	// identity a keyed lookup can rest on). Enum keys additionally name their
+	// definition asset in `keyTypeName`.
+	bool drawKeyTypePicker(const char* label, HorizonCode::PinType& keyType,
+	                       std::string& keyTypeName);
+
+	// A pin/variable's shape as a suffix: "[]" for an array, "{}" for a set,
+	// "{Key:}" for a map, "" for a scalar. One spelling, used everywhere a type
+	// is shown, so the three kinds never read alike.
+	// `keyType` is only read for a map; the forward-declared PinType has no
+	// enumerators here, so it is a required argument rather than a default.
+	std::string containerSuffix(bool isArray, HorizonCode::ContainerKind container,
+	                            HorizonCode::PinType keyType);
 
 	// Interface editor for a HorizonCode function: edit the FunctionEntry's typed
 	// Inputs (params) and Outputs (results). On any change it re-syncs the matching
@@ -242,15 +265,22 @@ namespace HcEditorUtil
 	// dragged type) that accepts the dragged pin, or -1. srcIsInput = the drag
 	// started on an input pin (so the new node must OUTPUT into it); srcIsExec =
 	// the dragged pin is an exec pin (data type is ignored then).
+	//
+	// `dragCtr` is the dragged pin's CONTAINER KIND, resolved (never the raw
+	// `container` field). It has to be the kind and not a bool: Graph::connect
+	// refuses an array↔set wire, so a menu that matched on "is a container"
+	// would keep offering nodes whose pin the drop then cannot join.
 	int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
-	                 bool dragArray, bool srcIsInput, bool srcIsExec);
+	                 HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec);
 	// Same match, but against a node that already EXISTS — its definition-bound
 	// pins are the real ones, which a bare template probe does not have.
 	int dragMatchPinOn(const HorizonCode::Node& n, HorizonCode::PinType dragType,
-	                   bool dragArray, bool srcIsInput, bool srcIsExec);
+	                   HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec);
 	// Same for an HE::api registry entry (an EngineCall node built from it).
+	// The registry has no Set/Map parameters at all, so an api pin matches only a
+	// scalar or an array drag.
 	int dragMatchApiPin(const HE::api::ApiFn& fn, HorizonCode::PinType dragType,
-	                    bool dragArray, bool srcIsInput, bool srcIsExec);
+	                    HorizonCode::ContainerKind dragCtr, bool srcIsInput, bool srcIsExec);
 
 	// "Return from <fn>" picker for a FunctionReturn node's details — lists the
 	// functions declared in the graph (those with a FunctionEntry). Sets the node's

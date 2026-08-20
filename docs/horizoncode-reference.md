@@ -110,6 +110,34 @@ yaw/pitch, FOV) while `Sine`/`Cosine`/`Tangent` take radians — convert with
 **Make Array**, **Array Length**, **Array Get**, **Array Append**, **Array Set**,
 **Array Insert**, **Array Remove**, **Array Contains**, **Array Index Of**.
 Array pins draw as a 2×2 grid to distinguish a list-of-T from a scalar T.
+**For Each** walks one, Body per element (Element + Index), then Done.
+
+### Sets (pure, copy-semantics)
+**Make Set**, **Set Add**, **Set Remove**, **Set Contains**, **Set Length**,
+**Set Clear**, **Set To Array**, **For Each Set**.
+
+A set holds no duplicates and **iterates in the order elements were first
+added**. Adding one it already has changes nothing — it does *not* move to the
+back — and removing one keeps the order of the rest.
+
+### Maps (pure, copy-semantics)
+**Make Map**, **Map Set**, **Map Remove**, **Map Contains**, **Map Length**,
+**Map Clear**, **Map Get**, **Map Keys**, **Map Values**, **For Each Map**.
+
+Keys may be **Int, String, Enum or Object** — the types with a cheap, exact
+identity. Float is not a key type (equality on floats is not something keyed
+data can rest on) and neither are Vec/Color/Transform/Struct.
+
+A map **iterates in the order keys were first inserted**. `Map Set` on a key it
+already holds updates the value *in place* and keeps that key's position;
+`Map Remove` keeps the order of the rest; `Map Keys` and `Map Values` come out
+index-parallel. **Map Get** takes a Default input, so "no entry yet" is an
+ordinary answer rather than a warning.
+
+The order is the same in the editor's interpreter and in the C++ a packaged
+build runs — both are vector-backed, and a parity fixture asserts it. See
+`docs/horizoncode-containers-plan.md` for why insertion order was chosen and
+what a container can and cannot nest with.
 
 ### Widgets
 | Node | Purpose |

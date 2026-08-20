@@ -166,6 +166,16 @@ compares the container kind, not only the `PinType`.
 
 ## 3. Deliberately not built
 
+* **The editor's authored-default editor for a MAP.** A Set variable and a Set
+  struct field get the same slot list an Array has; a Map declares its key and
+  value types and starts **empty**, filled by `Map Set`. Everything underneath
+  is finished — `Variable::defaultKeys` and `StructField::defaultValue.keys`
+  persist, round-trip through JSON, seed an instance and lower to a C++ literal,
+  and there are tests for all four — so this is a two-column slot widget and
+  nothing more. It was cut rather than half-built: a pair editor needs its own
+  key-uniqueness handling and reordering, and the rest of the feature is worth
+  more finished than that widget is.
+
 * **Directly nested containers** (`Set<Array<T>>`, `Map<K, Set<V>>`). A pin
   carries one element type and one container kind, so a nested container is not
   expressible without a second type system on every pin. Nesting goes through a

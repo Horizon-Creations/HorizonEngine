@@ -1128,7 +1128,7 @@ int addGraphNode(State& st, NT type, const ImVec2& graphPos)
 const HGH::MenuOpts kMenus = {
 	/*addCategories*/ { "Property", "Flow", "Events", "Reference",
 	                    "Literals", "Math", "Logic", "String",
-	                    "Widget", "UI", "Array", "Debug" },
+	                    "Widget", "UI", "Array", "Set", "Map", "Debug" },
 	/*addExcluded*/   { NT::Event, NT::FunctionEntry,
 	                    NT::GetVariable, NT::SetVariable },
 	/*dragExcluded*/  { NT::Event, NT::FunctionEntry, NT::FunctionCall,
@@ -1422,22 +1422,25 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 					{ v->access = vaccess; commitEdit(st, ctx); }
 			}
 
-			// Single value vs an array of the type. Toggling re-types the matching
-			// Get/Set nodes' value pins and drops now-mismatched links.
-			bool arr = v->isArray;
-			if (ImGui::Checkbox("Array", &arr))
+			// Single value, or a container of the type. Changing it re-types the
+			// matching Get/Set nodes' value pins and drops now-mismatched links.
+			if (HcEditorUtil::drawContainerPicker("Container", v->isArray, v->container) ||
+			    (v->kind() == HorizonCode::ContainerKind::Map &&
+			     HcEditorUtil::drawKeyTypePicker("Key", v->keyType, v->keyTypeName)))
 			{
-				v->isArray = arr;
+				// The authored slots belong to the OLD shape.
+				v->defaultItems.clear();
+				v->defaultKeys.clear();
 				for (auto& gn : st.graph.nodes)
 					if ((gn.type == NT::GetVariable || gn.type == NT::SetVariable) && gn.s == v->name)
 					{
-						gn.isArray = arr;
+						gn.isArray = v->isArray; gn.container = v->container;
+						gn.keyType = v->keyType; gn.keyTypeName = v->keyTypeName;
 						const HGH::PinRanges r = HGH::pinRanges(gn);
 						HGH::removePinLinks(st.graph, gn.id, gn.type == NT::GetVariable ? r.dataOut0 : r.dataIn0);
 					}
 				commitEdit(st, ctx);
 			}
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hold a list of values instead of a single one.");
 
 			if (!v->isArray)
 			{
@@ -1864,6 +1867,12 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			nn->s = st.gDropVar;
 			nn->propType = v ? v->type : PT::Float;
 			nn->isArray = v ? v->isArray : false;
+			if (v)
+			{
+				nn->typeName = v->typeName;
+				nn->container = v->container;   // Array vs Set vs Map, and its key
+				nn->keyType = v->keyType; nn->keyTypeName = v->keyTypeName;
+			}
 			st.selectedGraphNode = id;
 			st.selectedVar.clear();
 			commitEdit(st, ctx);

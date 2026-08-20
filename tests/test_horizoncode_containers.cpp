@@ -412,6 +412,41 @@ TEST_CASE("Maps must agree on the key type")
     CHECK_FALSE(g.connect(mk, 0, len, 0));
 }
 
+TEST_CASE("A generic For Each Set / For Each Map adopts the container it is wired to")
+{
+    EnumFixture fx;
+    // A loop node dropped from the menu is generic: Float elements, String keys.
+    // Wiring a container in has to retype BOTH halves, or every wire off the
+    // Key output is silently mistyped.
+    Graph g;
+    Node loopN; loopN.type = NodeType::ForEachMap;
+    loopN.isArray = true; loopN.container = ContainerKind::Map;
+    const int loop = g.addNode(std::move(loopN));
+
+    Node src; src.type = NodeType::MapMake; src.propType = PinType::Int;
+    src.isArray = true; src.container = ContainerKind::Map;
+    src.keyType = PinType::Enum; src.keyTypeName = kWeapon;
+    const int m = g.addNode(std::move(src));
+
+    adoptForEachElementType(g, m, 0, loop, 3);
+    const Node* l = g.findNode(loop);
+    REQUIRE(l != nullptr);
+    CHECK(l->keyType == PinType::Enum);
+    CHECK(l->keyTypeName == kWeapon);
+    CHECK(l->propType == PinType::Int);
+    CHECK(g.connect(m, 0, loop, 3));   // …and the wire now typechecks
+
+    // A SET does not teach a For Each Map anything — the kinds differ.
+    Graph g2;
+    Node ls; ls.type = NodeType::ForEachMap;
+    ls.isArray = true; ls.container = ContainerKind::Map;
+    const int loop2 = g2.addNode(std::move(ls));
+    const int s = setNode(g2, NodeType::SetMake);
+    adoptForEachElementType(g2, s, 0, loop2, 3);
+    CHECK(g2.findNode(loop2)->propType == PinType::Float);   // untouched
+    CHECK_FALSE(g2.connect(s, 0, loop2, 3));
+}
+
 TEST_CASE("Only Int, String, Enum and Ref may key a map")
 {
     CHECK(isValidMapKeyType(PinType::Int));

@@ -579,11 +579,13 @@ TEST_CASE("codegen parity: foreach_arrays")
 
 TEST_CASE("codegen parity: containers (Set/Map, and their ITERATION ORDER)")
 {
-	// ParityPair::var() runs through checkParity(), which now compares the
-	// container kind and — for a map — the keys IN ORDER. So every assertion
-	// below is doubly load-bearing: it checks the value AND that the two
-	// backends produced the same one. A hash-backed or sorted generated
-	// container fails here rather than in a shipped build.
+	// Every p.fire() ends in checkParity(), which compares the two backends'
+	// WHOLE variable snapshots through valueEq — and valueEq now compares the
+	// container kind and, for a map, the keys IN ORDER. So a hash-backed or
+	// sorted generated container fails there, at the fire, before any assertion
+	// below is even reached. What p.var() then reads is the interpreted side of
+	// a pair already proven identical; the checks below pin down WHICH value
+	// that is.
 	ParityPair p("fix/containers");
 
 	p.fire("SetOps");
