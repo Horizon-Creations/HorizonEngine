@@ -15,8 +15,12 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <filesystem>   // the save-backed container round trip needs a sandbox root
 #include <limits>
 #include <memory>
+#include <system_error>
 
 // The plugin under test, at the path CMake built it to (HE_PYTHON_PLUGIN_PATH).
 // The engine finds it next to HorizonScene; a test executable lives elsewhere,
@@ -629,7 +633,9 @@ class F(horizon.Behavior):
     CHECK(true);
 }
 
-#endif // HE_HAVE_PYTHON
+// NOTE: the #endif used to sit HERE, above a test case that constructs a
+// PyBackend — so a build without CPython would have failed to compile this file
+// rather than skipping it. It closes at the end of the file now.
 
 TEST_CASE("PyScriptBackend: horizon.enums constants + horizon.structs constructors")
 {
@@ -678,3 +684,110 @@ class Reporter(horizon.Behavior):
     reg.removeType(weapon.assetPath);
     reg.removeType(stats.assetPath);
 }
+
+TEST_CASE("PyScriptBackend: Set and Map fields cross into Python and back, in order")
+{
+    // Python needs no `__keys` sidecar the way Lua does: a dict is
+    // insertion-ordered by the language, so a map's order survives the round
+    // trip exactly. A Set crosses as a LIST, not a `set` — a `set` would throw
+    // the order away, which is the one thing the container promises to keep.
+    namespace save = HE::api::save;
+    using P = HorizonCode::PinType;
+    using CK = HorizonCode::ContainerKind;
+    using V = HorizonCode::Value;
+    auto& reg = HE::TypeRegistry::instance();
+    const char* kBag = "Content/T/PyBag.hasset";
+    const auto root = std::filesystem::temp_directory_path() / "he_py_ctr_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    save::close();
+
+    HE::StructDef bag;
+    bag.name = "PyBag"; bag.assetPath = kBag;
+    {
+        HE::StructField tags; tags.name = "tags"; tags.type = P::String;
+        tags.isArray = true; tags.container = CK::Set;
+        tags.defaultValue.isArray = true; tags.defaultValue.container = CK::Set;
+        HE::StructField ammo; ammo.name = "ammo"; ammo.type = P::Int;
+        ammo.isArray = true; ammo.container = CK::Map; ammo.keyType = P::String;
+        ammo.defaultValue.isArray = true; ammo.defaultValue.container = CK::Map;
+        bag.fields = { tags, ammo };
+    }
+    reg.registerStruct(bag);
+
+    ContentManager cm;
+    {
+        HE::StructDef tpl;
+        HE::StructField b; b.name = "bag"; b.type = P::Struct; b.typeName = kBag;
+        tpl.fields = { b };
+        SaveGameTemplateAsset a;
+        a.name = "PyBagTemplate"; a.path = "mem://py_bag_tpl";
+        a.json = HE::TypeRegistry::structToJson(tpl);
+        cm.registerSaveGameTemplate(std::move(a));
+        save::setDefaultTemplate("mem://py_bag_tpl");
+    }
+    REQUIRE(save::create("pybag", &cm));
+    {
+        V v = save::getStructV("bag");
+        REQUIRE(v.items.size() == 2);
+        v.items[0] = V::ofSet(P::String);
+        v.items[0].items = { V::ofString("zeta"), V::ofString("alpha") };
+        v.items[1] = V::ofMap(P::String, P::Int);
+        v.items[1].keys  = { V::ofString("zeta"), V::ofString("alpha") };
+        v.items[1].items = { V::ofInt(9), V::ofInt(1) };
+        REQUIRE(save::setStructV("bag", v));
+    }
+
+    {
+        HorizonWorld world;
+        PyBackend py(world);
+        // x = 1 when the set arrived as an ordered list, y = 1 when the dict
+        // iterated in insertion order (NOT alphabetically), z = its first value.
+        static const char* kSrc = R"(
+import horizon
+class Bagger(horizon.Behavior):
+    def on_start(self):
+        b = horizon.save.getStruct("bag")
+        ordered = 1.0 if b["tags"] == ["zeta", "alpha"] else 0.0
+        keys = list(b["ammo"].keys())
+        keyorder = 1.0 if keys == ["zeta", "alpha"] else 0.0
+        first = float(b["ammo"]["zeta"])
+        b["tags"].append("zeta")   # a duplicate — the set drops it
+        b["tags"].append("mid")
+        b["ammo"]["omega"] = 5
+        horizon.save.setStruct("bag", b)
+        horizon.setPosition(self.entity_id, ordered, keyorder, first)
+)";
+        REQUIRE(py->loadScript("bagger", kSrc));
+        auto e  = makeEntity(world, "Bag");
+        auto id = py->createInstance("bagger", static_cast<uint32_t>(e));
+        REQUIRE(id != IScriptBackend::kInvalidInstance);
+        REQUIRE(py->callOnStart(id));
+        const auto& t = world.registry().get<TransformComponent>(e);
+        CHECK(t.position.x == doctest::Approx(1.0f));
+        CHECK(t.position.y == doctest::Approx(1.0f));
+        CHECK(t.position.z == doctest::Approx(9.0f));
+    }
+
+    const V back = save::getStructV("bag");
+    REQUIRE(back.items.size() == 2);
+    CHECK(back.items[0].kind() == CK::Set);
+    REQUIRE(back.items[0].items.size() == 3);          // "zeta" appended twice, kept once
+    CHECK(back.items[0].items[0].s == "zeta");
+    CHECK(back.items[0].items[1].s == "alpha");
+    CHECK(back.items[0].items[2].s == "mid");
+    CHECK(back.items[1].kind() == CK::Map);
+    REQUIRE(back.items[1].keys.size() == 3);
+    CHECK(back.items[1].keys[0].s == "zeta");          // dict insertion order,
+    CHECK(back.items[1].keys[1].s == "alpha");         // straight through
+    CHECK(back.items[1].keys[2].s == "omega");
+    CHECK(back.items[1].items[2].i == 5);
+
+    save::close();
+    save::setDefaultTemplate("");
+    reg.removeType(kBag);
+    std::filesystem::remove_all(root, ec);
+}
+
+#endif // HE_HAVE_PYTHON

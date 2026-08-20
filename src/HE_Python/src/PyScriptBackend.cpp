@@ -318,6 +318,29 @@ PyObject* pyVec3List(const glm::vec3& v)
 PyObject* pyFieldValueToObj(const HorizonCode::Value& v, int depth)
 {
 	using P = HorizonCode::PinType;
+	// A MAP crosses as a plain dict: Python dicts are INSERTION-ORDERED by the
+	// language, so the map's order survives exactly, with no sidecar of the kind
+	// the Lua boundary needs.
+	if (v.kind() == HorizonCode::ContainerKind::Map)
+	{
+		PyObject* d = PyDict_New();
+		const size_t n = std::min(v.keys.size(), v.items.size());
+		for (size_t i = 0; i < n; ++i)
+		{
+			HorizonCode::Value key = v.keys[i];
+			key.isArray = false; key.container = HorizonCode::ContainerKind::None;
+			HorizonCode::Value val = v.items[i];
+			val.isArray = false; val.container = HorizonCode::ContainerKind::None;
+			PyObject* k = pyFieldValueToObj(key, depth + 1);
+			PyObject* x = pyFieldValueToObj(val, depth + 1);
+			PyDict_SetItem(d, k, x);
+			Py_XDECREF(k); Py_XDECREF(x);
+		}
+		return d;
+	}
+	// Array AND Set: an ordered list. A `set` would lose the order the container
+	// exists to keep — the declared type says which it is, and a list coming
+	// back into a set is de-duplicated there.
 	if (v.isArray)
 	{
 		PyObject* l = PyList_New((Py_ssize_t)v.items.size());
@@ -325,6 +348,7 @@ PyObject* pyFieldValueToObj(const HorizonCode::Value& v, int depth)
 		{
 			HorizonCode::Value item = v.items[i];
 			item.isArray = false;
+			item.container = HorizonCode::ContainerKind::None;
 			PyList_SetItem(l, (Py_ssize_t)i, pyFieldValueToObj(item, depth + 1));
 		}
 		return l;
@@ -405,18 +429,65 @@ PyObject* pyStructValueToDict(const HorizonCode::Value& v, int depth)
 HorizonCode::Value pyObjToFieldValue(PyObject* o, const HE::StructField& f, int depth)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
+	using CK = HorizonCode::ContainerKind;
+	// A SCALAR view of the field, for decoding one element or one key.
+	auto scalarField = [&f](P t, const std::string& tn)
+	{
+		HE::StructField e = f;
+		e.isArray = false; e.container = CK::None;
+		e.type = t; e.typeName = tn;
+		return e;
+	};
+	if (f.kind() == CK::Map)
+	{
+		V map; map.isArray = true; map.container = CK::Map;
+		map.type = f.type; map.typeName = f.typeName;
+		map.keyType = f.keyType; map.keyTypeName = f.keyTypeName;
+		if (o && PyDict_Check(o) && depth <= 16)
+		{
+			// PyDict_Next walks in INSERTION order, which is the map's order —
+			// so the round trip through Python is exact, not merely
+			// content-preserving.
+			const HE::StructField kf = scalarField(f.keyType, f.keyTypeName);
+			const HE::StructField vf = scalarField(f.type, f.typeName);
+			PyObject *k = nullptr, *x = nullptr;
+			Py_ssize_t pos = 0;
+			while (PyDict_Next(o, &pos, &k, &x))
+			{
+				V key = pyObjToFieldValue(k, kf, depth + 1);
+				bool dup = false;
+				for (const V& have : map.keys)
+					if (HorizonCode::scalarValueEquals(have, key, f.keyType)) { dup = true; break; }
+				if (dup) continue;   // two Python keys collapsing onto one engine key
+				map.keys.push_back(std::move(key));
+				map.items.push_back(pyObjToFieldValue(x, vf, depth + 1));
+			}
+		}
+		return map;
+	}
 	if (f.isArray)
 	{
-		V arr; arr.isArray = true; arr.type = f.type; arr.typeName = f.typeName;
+		V arr; arr.isArray = true; arr.container = f.kind();
+		arr.type = f.type; arr.typeName = f.typeName;
 		if (o && PySequence_Check(o) && !PyUnicode_Check(o) && depth <= 16)
 		{
-			HE::StructField elem = f; elem.isArray = false;
+			const HE::StructField elem = scalarField(f.type, f.typeName);
 			const Py_ssize_t n = PySequence_Size(o);
 			for (Py_ssize_t i = 0; i < n; ++i)
 			{
 				PyObject* it = PySequence_GetItem(o, i);
-				arr.items.push_back(pyObjToFieldValue(it, elem, depth + 1));
+				V item = pyObjToFieldValue(it, elem, depth + 1);
 				Py_XDECREF(it);
+				if (arr.container == CK::Set)
+				{
+					// A list from a script may repeat; a set keeps the FIRST
+					// occurrence, exactly like Set Add.
+					bool dup = false;
+					for (const V& have : arr.items)
+						if (HorizonCode::scalarValueEquals(have, item, f.type)) { dup = true; break; }
+					if (dup) continue;
+				}
+				arr.items.push_back(std::move(item));
 			}
 		}
 		return arr;
@@ -696,10 +767,26 @@ void bootstrapUserTypes()
 	std::function<std::string(const HorizonCode::Value&)> lit =
 		[&](const HorizonCode::Value& v) -> std::string {
 		using P = HorizonCode::PinType;
+		// A MAP is a dict literal, in the AUTHORED key order — Python keeps it.
+		if (v.kind() == HorizonCode::ContainerKind::Map)
+		{
+			const size_t n = std::min(v.keys.size(), v.items.size());
+			if (n == 0) return "{}";
+			auto scalar = [](HorizonCode::Value x)
+			{ x.isArray = false; x.container = HorizonCode::ContainerKind::None; return x; };
+			std::string t = "{";
+			for (size_t i = 0; i < n; ++i)
+			{
+				if (i) t += ",";
+				t += lit(scalar(v.keys[i])) + ":" + lit(scalar(v.items[i]));
+			}
+			return t + "}";
+		}
 		if (v.isArray)
 		{
 			// The authored slots (see the Lua twin in ScriptContext.cpp — the
 			// two generators MUST agree on what a fresh struct looks like).
+			// A Set is a LIST here too: `set` would drop the order.
 			if (v.items.empty()) return "[]";
 			std::string t = "[";
 			for (size_t i = 0; i < v.items.size(); ++i)
@@ -707,6 +794,7 @@ void bootstrapUserTypes()
 				if (i) t += ",";
 				HorizonCode::Value item = v.items[i];
 				item.isArray = false;
+				item.container = HorizonCode::ContainerKind::None;
 				t += lit(item);
 			}
 			return t + "]";

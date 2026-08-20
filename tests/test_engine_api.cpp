@@ -1139,6 +1139,92 @@ TEST_CASE("save v2: write/load round-trip through Saves/<id>.json, list/exists/d
     CHECK(save::list().empty());
 }
 
+TEST_CASE("save v2: Set and Map fields survive the disk round trip IN ORDER")
+{
+    // A save is a StructDef, so a container field goes through the same encoder
+    // every struct field does. What is worth asserting is the ORDER: written as
+    // a JSON object, a map's keys would come back alphabetised (nlohmann's
+    // object is a sorted std::map) and the whole insertion-order contract would
+    // be quietly broken by persistence alone.
+    namespace save = HE::api::save;
+    using P = HorizonCode::PinType;
+    using CK = HorizonCode::ContainerKind;
+    const char* kBagDef = "Content/T/SaveBag.hasset";
+    const auto root = std::filesystem::temp_directory_path() / "he_api_save_ctr_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    save::close();
+
+    HE::StructDef bag;
+    bag.name = "SaveBag"; bag.assetPath = kBagDef;
+    {
+        HE::StructField tags;
+        tags.name = "tags"; tags.type = P::String;
+        tags.isArray = true; tags.container = CK::Set;
+        tags.defaultValue.isArray = true; tags.defaultValue.container = CK::Set;
+        HE::StructField ammo;
+        ammo.name = "ammo"; ammo.type = P::Int;
+        ammo.isArray = true; ammo.container = CK::Map; ammo.keyType = P::String;
+        ammo.defaultValue.isArray = true; ammo.defaultValue.container = CK::Map;
+        bag.fields = { tags, ammo };
+    }
+    HE::TypeRegistry::instance().registerStruct(bag);
+
+    ContentManager cm;
+    {
+        HE::StructDef tpl;
+        HE::StructField b; b.name = "bag"; b.type = P::Struct; b.typeName = kBagDef;
+        tpl.fields = { b };
+        SaveGameTemplateAsset a;
+        a.name = "BagTemplate";
+        a.path = "mem://save_bag_template";
+        a.json = HE::TypeRegistry::structToJson(tpl);
+        cm.registerSaveGameTemplate(std::move(a));
+        save::setDefaultTemplate("mem://save_bag_template");
+    }
+
+    REQUIRE(save::create("bagrun", &cm));
+    {
+        HE::api::Value v = save::getStructV("bag");
+        REQUIRE(v.items.size() == 2);
+        v.items[0] = HorizonCode::Value::ofSet(P::String);
+        v.items[0].items = { HorizonCode::Value::ofString("zeta"),
+                             HorizonCode::Value::ofString("alpha"),
+                             HorizonCode::Value::ofString("zeta") };   // a duplicate
+        v.items[1] = HorizonCode::Value::ofMap(P::String, P::Int);
+        v.items[1].keys  = { HorizonCode::Value::ofString("zeta"),
+                             HorizonCode::Value::ofString("alpha") };
+        v.items[1].items = { HorizonCode::Value::ofInt(9), HorizonCode::Value::ofInt(1) };
+        REQUIRE(save::setStructV("bag", v));
+    }
+    REQUIRE(save::write());
+    save::close();
+    REQUIRE(save::load("bagrun", &cm));
+
+    const HE::api::Value back = save::getStructV("bag");
+    REQUIRE(back.items.size() == 2);
+    // The set kept its first-occurrence order and dropped the duplicate on the
+    // way back in — a hand-edited save cannot smuggle one past the decoder.
+    CHECK(back.items[0].kind() == CK::Set);
+    REQUIRE(back.items[0].items.size() == 2);
+    CHECK(back.items[0].items[0].s == "zeta");
+    CHECK(back.items[0].items[1].s == "alpha");
+    // The map came back in the order it was written, NOT alphabetised.
+    CHECK(back.items[1].kind() == CK::Map);
+    REQUIRE(back.items[1].keys.size() == 2);
+    CHECK(back.items[1].keys[0].s == "zeta");
+    CHECK(back.items[1].keys[1].s == "alpha");
+    REQUIRE(back.items[1].items.size() == 2);
+    CHECK(back.items[1].items[0].i == 9);
+    CHECK(back.items[1].items[1].i == 1);
+
+    save::close();
+    save::setDefaultTemplate("");
+    HE::TypeRegistry::instance().removeType(kBagDef);
+    std::filesystem::remove_all(root, ec);
+}
+
 TEST_CASE("entity save-state: guarded round-trip through the active save")
 {
     SaveTestRig rig;

@@ -9,6 +9,8 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <filesystem>   // the save-backed container round trips need a sandbox root
+#include <system_error>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -491,4 +493,166 @@ TEST_CASE("ScriptContext: horizon.enums constants + horizon.structs constructors
 
     reg.removeType(weapon.assetPath);
     reg.removeType(stats.assetPath);
+}
+
+TEST_CASE("ScriptContext: Set and Map fields cross into Lua and back, in order")
+{
+    // Lua tables have no order of their own, so a HorizonCode map crosses as the
+    // pairs PLUS a `__keys` array carrying the iteration order. This drives both
+    // directions through the real boundary: the engine seeds a save field, Lua
+    // reads it, rewrites it, and the engine reads what came back.
+    namespace save = HE::api::save;
+    using P = HorizonCode::PinType;
+    using CK = HorizonCode::ContainerKind;
+    using V = HorizonCode::Value;
+    auto& reg = HE::TypeRegistry::instance();
+    const char* kBag = "Content/T/LuaBag.hasset";
+    const auto root = std::filesystem::temp_directory_path() / "he_lua_ctr_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    save::close();
+
+    HE::StructDef bag;
+    bag.name = "LuaBag"; bag.assetPath = kBag;
+    {
+        HE::StructField tags; tags.name = "tags"; tags.type = P::String;
+        tags.isArray = true; tags.container = CK::Set;
+        tags.defaultValue.isArray = true; tags.defaultValue.container = CK::Set;
+        HE::StructField ammo; ammo.name = "ammo"; ammo.type = P::Int;
+        ammo.isArray = true; ammo.container = CK::Map; ammo.keyType = P::String;
+        ammo.defaultValue.isArray = true; ammo.defaultValue.container = CK::Map;
+        bag.fields = { tags, ammo };
+    }
+    reg.registerStruct(bag);
+
+    ContentManager cm;
+    {
+        HE::StructDef tpl;
+        HE::StructField b; b.name = "bag"; b.type = P::Struct; b.typeName = kBag;
+        tpl.fields = { b };
+        SaveGameTemplateAsset a;
+        a.name = "LuaBagTemplate"; a.path = "mem://lua_bag_tpl";
+        a.json = HE::TypeRegistry::structToJson(tpl);
+        cm.registerSaveGameTemplate(std::move(a));
+        save::setDefaultTemplate("mem://lua_bag_tpl");
+    }
+    REQUIRE(save::create("luabag", &cm));
+    {
+        V v = save::getStructV("bag");
+        REQUIRE(v.items.size() == 2);
+        v.items[0] = V::ofSet(P::String);
+        v.items[0].items = { V::ofString("zeta"), V::ofString("alpha") };
+        v.items[1] = V::ofMap(P::String, P::Int);
+        v.items[1].keys  = { V::ofString("zeta"), V::ofString("alpha") };
+        v.items[1].items = { V::ofInt(9), V::ofInt(1) };
+        REQUIRE(save::setStructV("bag", v));
+    }
+
+    {
+        HorizonWorld world;
+        ScriptContext ctx(world);
+        auto& engine = ctx.engine();
+        REQUIRE(engine.exec(
+            "local b = horizon.save.getStruct(\"bag\")\n"
+            // A set arrives as an ordered 1-based list.
+            "_G._t1 = b.tags[1] == \"zeta\" and 1 or 0\n"
+            "_G._t2 = b.tags[2] == \"alpha\" and 1 or 0\n"
+            // A map arrives keyed, AND carries its order in __keys.
+            "_G._byKey = b.ammo[\"zeta\"]\n"
+            "_G._k1 = b.ammo.__keys[1] == \"zeta\" and 1 or 0\n"
+            "_G._k2 = b.ammo.__keys[2] == \"alpha\" and 1 or 0\n"
+            // Write back: append to both, and keep __keys in step.
+            "table.insert(b.tags, \"zeta\")\n"        // a duplicate — the set drops it
+            "table.insert(b.tags, \"mid\")\n"
+            "b.ammo[\"omega\"] = 5\n"
+            "table.insert(b.ammo.__keys, \"omega\")\n"
+            "horizon.save.setStruct(\"bag\", b)\n"));
+        CHECK(engine.getGlobalNumber("_t1") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_t2") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_byKey") == doctest::Approx(9.0));
+        CHECK(engine.getGlobalNumber("_k1") == doctest::Approx(1.0));
+        CHECK(engine.getGlobalNumber("_k2") == doctest::Approx(1.0));
+    }
+
+    const V back = save::getStructV("bag");
+    REQUIRE(back.items.size() == 2);
+    CHECK(back.items[0].kind() == CK::Set);
+    REQUIRE(back.items[0].items.size() == 3);          // the repeated "zeta" collapsed
+    CHECK(back.items[0].items[0].s == "zeta");
+    CHECK(back.items[0].items[1].s == "alpha");
+    CHECK(back.items[0].items[2].s == "mid");
+    CHECK(back.items[1].kind() == CK::Map);
+    REQUIRE(back.items[1].keys.size() == 3);
+    CHECK(back.items[1].keys[0].s == "zeta");          // __keys decided the order,
+    CHECK(back.items[1].keys[1].s == "alpha");         // not Lua's hash order and
+    CHECK(back.items[1].keys[2].s == "omega");         // not the alphabet
+    REQUIRE(back.items[1].items.size() == 3);
+    CHECK(back.items[1].items[0].i == 9);
+    CHECK(back.items[1].items[2].i == 5);
+
+    save::close();
+    save::setDefaultTemplate("");
+    reg.removeType(kBag);
+    std::filesystem::remove_all(root, ec);
+}
+
+TEST_CASE("ScriptContext: a Lua map table with no __keys still crosses deterministically")
+{
+    // A table a script built by hand carries no order. `pairs` order is a hash
+    // artefact, so the boundary SORTS the keys instead — arbitrary, but the same
+    // on every run, which is the property a map actually needs.
+    namespace save = HE::api::save;
+    using P = HorizonCode::PinType;
+    using CK = HorizonCode::ContainerKind;
+    auto& reg = HE::TypeRegistry::instance();
+    const char* kBag = "Content/T/LuaBag2.hasset";
+    const auto root = std::filesystem::temp_directory_path() / "he_lua_ctr_test2";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    save::close();
+
+    HE::StructDef bag;
+    bag.name = "LuaBag2"; bag.assetPath = kBag;
+    HE::StructField ammo; ammo.name = "ammo"; ammo.type = P::Int;
+    ammo.isArray = true; ammo.container = CK::Map; ammo.keyType = P::String;
+    ammo.defaultValue.isArray = true; ammo.defaultValue.container = CK::Map;
+    bag.fields = { ammo };
+    reg.registerStruct(bag);
+
+    ContentManager cm;
+    {
+        HE::StructDef tpl;
+        HE::StructField b; b.name = "bag"; b.type = P::Struct; b.typeName = kBag;
+        tpl.fields = { b };
+        SaveGameTemplateAsset a;
+        a.name = "LuaBag2Template"; a.path = "mem://lua_bag2_tpl";
+        a.json = HE::TypeRegistry::structToJson(tpl);
+        cm.registerSaveGameTemplate(std::move(a));
+        save::setDefaultTemplate("mem://lua_bag2_tpl");
+    }
+    REQUIRE(save::create("luabag2", &cm));
+
+    {
+        HorizonWorld world;
+        ScriptContext ctx(world);
+        REQUIRE(ctx.engine().exec(
+            "horizon.save.setStruct(\"bag\", { __type = \"Content/T/LuaBag2.hasset\",\n"
+            "  ammo = { zeta = 9, alpha = 1, mid = 5 } })\n"));
+    }
+
+    const HorizonCode::Value back = save::getStructV("bag");
+    REQUIRE(back.items.size() == 1);
+    REQUIRE(back.items[0].keys.size() == 3);
+    CHECK(back.items[0].keys[0].s == "alpha");
+    CHECK(back.items[0].keys[1].s == "mid");
+    CHECK(back.items[0].keys[2].s == "zeta");
+    CHECK(back.items[0].items[0].i == 1);   // values follow their own keys
+    CHECK(back.items[0].items[2].i == 9);
+
+    save::close();
+    save::setDefaultTemplate("");
+    reg.removeType(kBag);
+    std::filesystem::remove_all(root, ec);
 }

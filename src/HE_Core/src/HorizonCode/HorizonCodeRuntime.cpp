@@ -226,14 +226,21 @@ void Runtime::retainOnlyReachableFrom(InstanceId root)
         if (!i) continue;
         // i->vars covers the interpreted store — and, for compiled instances,
         // the overflow store (undeclared names can hold Refs too).
+        auto mark = [&](const HorizonCode::Value& v)
+        {
+            if (v.ref != 0 && !keep.count(v.ref) && find(v.ref))
+            { keep.insert(v.ref); stack.push_back(v.ref); }
+        };
         for (const auto& [name, val] : i->vars)
         {
+            // A map's KEYS are typed separately from its values, so an object
+            // held only as a key has to be marked through keyType — otherwise
+            // the sweep frees it and the map keeps a key to nothing.
+            if (val.keyType == PinType::Ref && val.kind() == HorizonCode::ContainerKind::Map)
+                for (const auto& k : val.keys) mark(k);
             if (val.type != PinType::Ref) continue;
-            if (val.ref != 0 && !keep.count(val.ref) && find(val.ref))
-            { keep.insert(val.ref); stack.push_back(val.ref); }
-            for (const auto& item : val.items)   // Ref arrays
-                if (item.ref != 0 && !keep.count(item.ref) && find(item.ref))
-                { keep.insert(item.ref); stack.push_back(item.ref); }
+            mark(val);
+            for (const auto& item : val.items) mark(item);   // Ref arrays / sets / map values
         }
         if (i->compiled)
         {

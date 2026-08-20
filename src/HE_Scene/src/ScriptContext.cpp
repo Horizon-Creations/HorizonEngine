@@ -1,5 +1,6 @@
 #include "HorizonScene/ScriptContext.h"
 #include <Types/TypeRegistry.h>
+#include <algorithm>   // sort — the deterministic key order of an unordered Lua map
 #include <functional>
 #include <cstdint>
 #include <filesystem>
@@ -435,6 +436,39 @@ static glm::vec3 luaToVec3(lua_State* L, int idx, const glm::vec3& def)
 static void luaPushFieldValue(lua_State* L, const HorizonCode::Value& v, int depth)
 {
     using P = HorizonCode::PinType;
+    // A MAP crosses as a plain key→value table PLUS a `__keys` array holding the
+    // iteration order. Lua tables have no order of their own, and the whole
+    // point of a HorizonCode map is that it has one — without the sidecar a
+    // script could read the pairs but never the sequence, and a value handed
+    // back would come home shuffled.
+    if (v.kind() == HorizonCode::ContainerKind::Map)
+    {
+        const size_t n = std::min(v.keys.size(), v.items.size());
+        lua_createtable(L, 0, (int)n + 1);
+        for (size_t i = 0; i < n; ++i)
+        {
+            HorizonCode::Value key = v.keys[i]; key.isArray = false;
+            key.container = HorizonCode::ContainerKind::None;
+            HorizonCode::Value val = v.items[i]; val.isArray = false;
+            val.container = HorizonCode::ContainerKind::None;
+            luaPushFieldValue(L, key, depth + 1);
+            luaPushFieldValue(L, val, depth + 1);
+            lua_rawset(L, -3);
+        }
+        lua_createtable(L, (int)n, 0);
+        for (size_t i = 0; i < n; ++i)
+        {
+            HorizonCode::Value key = v.keys[i]; key.isArray = false;
+            key.container = HorizonCode::ContainerKind::None;
+            luaPushFieldValue(L, key, depth + 1);
+            lua_rawseti(L, -2, (int)i + 1);
+        }
+        lua_setfield(L, -2, "__keys");
+        return;
+    }
+    // Array AND Set: an ordered list. A set's items ARE its iteration order, so
+    // the two look the same from Lua — the declared type decides which it is,
+    // and a list coming back into a set is de-duplicated there.
     if (v.isArray)
     {
         lua_createtable(L, (int)v.items.size(), 0);
@@ -442,6 +476,7 @@ static void luaPushFieldValue(lua_State* L, const HorizonCode::Value& v, int dep
         {
             HorizonCode::Value item = v.items[i];
             item.isArray = false;
+            item.container = HorizonCode::ContainerKind::None;
             luaPushFieldValue(L, item, depth + 1);
             lua_rawseti(L, -2, (int)i + 1);
         }
@@ -499,18 +534,105 @@ static void luaPushStructTable(lua_State* L, const HorizonCode::Value& v, int de
 static HorizonCode::Value luaToFieldValue(lua_State* L, int idx, const HE::StructField& f, int depth)
 {
     using P = HorizonCode::PinType; using V = HorizonCode::Value;
-    if (f.isArray)
+    using CK = HorizonCode::ContainerKind;
+    // A SCALAR view of the field, for decoding one element or one key.
+    auto scalarField = [&f](P t, const std::string& tn)
     {
-        V arr; arr.isArray = true; arr.type = f.type; arr.typeName = f.typeName;
+        HE::StructField e = f;
+        e.isArray = false; e.container = CK::None;
+        e.type = t; e.typeName = tn;
+        return e;
+    };
+    if (f.kind() == CK::Map)
+    {
+        V map; map.isArray = true; map.container = CK::Map;
+        map.type = f.type; map.typeName = f.typeName;
+        map.keyType = f.keyType; map.keyTypeName = f.keyTypeName;
         if (lua_istable(L, idx) && depth <= 16)
         {
-            HE::StructField elem = f; elem.isArray = false;
+            const HE::StructField kf = scalarField(f.keyType, f.keyTypeName);
+            const HE::StructField vf = scalarField(f.type, f.typeName);
+            auto take = [&](const V& key)
+            {
+                for (const V& have : map.keys)
+                    if (HorizonCode::scalarValueEquals(have, key, f.keyType)) return;
+                luaPushFieldValue(L, key, depth + 1);   // look the value up by this key
+                lua_rawget(L, idx);
+                map.keys.push_back(key);
+                map.items.push_back(luaToFieldValue(L, lua_gettop(L), vf, depth + 1));
+                lua_pop(L, 1);
+            };
+            lua_getfield(L, idx, "__keys");
+            if (lua_istable(L, -1))
+            {
+                // The order the engine handed out, or one the script built on
+                // purpose: authoritative.
+                const int order = lua_gettop(L);
+                const int n = (int)lua_rawlen(L, order);
+                for (int i = 1; i <= n; ++i)
+                {
+                    lua_rawgeti(L, order, i);
+                    take(luaToFieldValue(L, lua_gettop(L), kf, depth + 1));
+                    lua_pop(L, 1);
+                }
+                lua_pop(L, 1);
+            }
+            else
+            {
+                lua_pop(L, 1);
+                // A table a script built by hand, with no order attached. `pairs`
+                // order is a hash-table artefact and would differ between runs,
+                // so the keys are SORTED instead: arbitrary, but the same every
+                // time, which is the property the map actually needs.
+                std::vector<V> keys;
+                lua_pushnil(L);
+                while (lua_next(L, idx) != 0)
+                {
+                    lua_pop(L, 1);                       // drop the value, keep the key
+                    // Read a COPY of the key: lua_tostring converts a numeric
+                    // key IN PLACE, and mutating the table's key mid-traversal
+                    // is what breaks lua_next.
+                    lua_pushvalue(L, -1);
+                    const bool sidecar = lua_type(L, -1) == LUA_TSTRING &&
+                                         std::string(lua_tostring(L, -1)) == "__keys";
+                    if (!sidecar)
+                        keys.push_back(luaToFieldValue(L, lua_gettop(L), kf, depth + 1));
+                    lua_pop(L, 1);
+                }
+                std::sort(keys.begin(), keys.end(), [&](const V& a, const V& b)
+                {
+                    return f.keyType == P::String ? a.s < b.s
+                         : f.keyType == P::Ref    ? a.ref < b.ref
+                                                  : a.i < b.i;   // Int and Enum
+                });
+                for (const V& k : keys) take(k);
+            }
+        }
+        return map;
+    }
+    if (f.isArray)
+    {
+        V arr; arr.isArray = true; arr.container = f.kind();
+        arr.type = f.type; arr.typeName = f.typeName;
+        if (lua_istable(L, idx) && depth <= 16)
+        {
+            const HE::StructField elem = scalarField(f.type, f.typeName);
             const int n = (int)lua_rawlen(L, idx);
             for (int i = 1; i <= n; ++i)
             {
                 lua_rawgeti(L, idx, i);
-                arr.items.push_back(luaToFieldValue(L, lua_gettop(L), elem, depth + 1));
+                V item = luaToFieldValue(L, lua_gettop(L), elem, depth + 1);
                 lua_pop(L, 1);
+                if (arr.container == CK::Set)
+                {
+                    // A list from a script may repeat; a set keeps the FIRST
+                    // occurrence, exactly like Set Add.
+                    bool dup = false;
+                    for (const V& have : arr.items)
+                        if (HorizonCode::scalarValueEquals(have, item, f.type)) { dup = true; break; }
+                    if (dup) continue;
+                }
+                arr.items.push_back(std::move(item));
             }
         }
         return arr;
@@ -702,6 +824,25 @@ static void registerUserTypes(lua_State* L)
     std::function<std::string(const HorizonCode::Value&)> lit =
         [&](const HorizonCode::Value& v) -> std::string {
         using P = HorizonCode::PinType;
+        // A MAP constructor emits the same shape luaPushFieldValue does: the
+        // pairs plus a `__keys` array carrying the authored order.
+        if (v.kind() == HorizonCode::ContainerKind::Map)
+        {
+            const size_t n = std::min(v.keys.size(), v.items.size());
+            if (n == 0) return "{__keys={}}";
+            auto scalar = [](HorizonCode::Value x)
+            { x.isArray = false; x.container = HorizonCode::ContainerKind::None; return x; };
+            std::string t = "{";
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (i) t += ",";
+                t += "[" + lit(scalar(v.keys[i])) + "]=" + lit(scalar(v.items[i]));
+            }
+            t += ",__keys={";
+            for (size_t i = 0; i < n; ++i)
+            { if (i) t += ","; t += lit(scalar(v.keys[i])); }
+            return t + "}}";
+        }
         if (v.isArray)
         {
             // The authored slots, not an unconditional empty table (the value
@@ -713,6 +854,7 @@ static void registerUserTypes(lua_State* L)
                 if (i) t += ",";
                 HorizonCode::Value item = v.items[i];
                 item.isArray = false;
+                item.container = HorizonCode::ContainerKind::None;
                 t += lit(item);
             }
             return t + "}";

@@ -25,7 +25,20 @@ namespace
 		char buf[256];
 		if (v.isArray)
 		{
-			std::string s = "[";
+			// Kind-tagged so a failing diff names WHAT diverged: "[…]" array,
+			// "set[…]", "map[k→v, …]" in iteration order.
+			if (v.kind() == HorizonCode::ContainerKind::Map)
+			{
+				std::string s = "map[";
+				const size_t n = std::min(v.keys.size(), v.items.size());
+				for (size_t i = 0; i < n; ++i)
+				{
+					if (i) s += ", ";
+					s += valueStr(v.keys[i]) + "->" + valueStr(v.items[i]);
+				}
+				return s + "]";
+			}
+			std::string s = v.kind() == HorizonCode::ContainerKind::Set ? "set[" : "[";
 			for (size_t i = 0; i < v.items.size(); ++i)
 			{
 				if (i) s += ", ";
@@ -84,9 +97,25 @@ namespace
 			return false;
 		if (a.isArray)
 		{
+			// The container KIND is part of the value: a set and an array with
+			// the same elements are different things, and without this two
+			// divergent containers would compare equal and the parity claim
+			// would be fiction.
+			if (a.kind() != b.kind()) return false;
 			if (a.items.size() != b.items.size()) return false;
 			for (size_t i = 0; i < a.items.size(); ++i)
 				if (!valueEq(a.items[i], b.items[i], /*inArray=*/true)) return false;
+			if (a.kind() == HorizonCode::ContainerKind::Map)
+			{
+				// Keys compared IN ORDER — that order IS the map's iteration
+				// order, which is exactly what the two backends promise to
+				// agree on. A set-comparison here would hide the divergence
+				// this fixture family exists to catch.
+				if (a.keyType != b.keyType) return false;
+				if (a.keys.size() != b.keys.size()) return false;
+				for (size_t i = 0; i < a.keys.size(); ++i)
+					if (!valueEq(a.keys[i], b.keys[i], /*inArray=*/true)) return false;
+			}
 			return true;
 		}
 		if (a.type == PinType::Struct)
@@ -546,6 +575,74 @@ TEST_CASE("codegen parity: foreach_arrays")
 	CHECK(p.var("oob").f == 0.0f);             // out-of-range Get → element default
 	p.fire("Nested");
 	CHECK(p.var("nestedSum").f == 324.0f);     // (5+6+7)^2
+}
+
+TEST_CASE("codegen parity: containers (Set/Map, and their ITERATION ORDER)")
+{
+	// ParityPair::var() runs through checkParity(), which now compares the
+	// container kind and — for a map — the keys IN ORDER. So every assertion
+	// below is doubly load-bearing: it checks the value AND that the two
+	// backends produced the same one. A hash-backed or sorted generated
+	// container fails here rather than in a shipped build.
+	ParityPair p("fix/containers");
+
+	p.fire("SetOps");
+	// Adding "b" twice left it at its FIRST position, and "c" behind "a".
+	const Value tags = p.var("tags");
+	CHECK(tags.kind() == HorizonCode::ContainerKind::Set);
+	REQUIRE(tags.items.size() == 3);
+	CHECK(tags.items[0].s == "b");
+	CHECK(tags.items[1].s == "a");
+	CHECK(tags.items[2].s == "c");
+	// Removing the MIDDLE element keeps the order of the rest.
+	const Value after = p.var("tagsAfter");
+	REQUIRE(after.items.size() == 2);
+	CHECK(after.items[0].s == "b");
+	CHECK(after.items[1].s == "c");
+	const Value arr = p.var("tagsArr");
+	CHECK(arr.kind() == HorizonCode::ContainerKind::Array);
+	REQUIRE(arr.items.size() == 2);
+	CHECK(arr.items[0].s == "b");
+	CHECK(p.var("tagCount").i == 3);
+	CHECK(p.var("hasA").b == false);
+	CHECK(p.var("clearedTags").i == 0);
+
+	p.fire("MapOps");
+	// "b" was written twice: it keeps slot 0 and takes the LAST value.
+	const Value keys = p.var("keys");
+	REQUIRE(keys.items.size() == 2);
+	CHECK(keys.items[0].s == "b");
+	CHECK(keys.items[1].s == "a");
+	const Value vals = p.var("vals");
+	REQUIRE(vals.items.size() == 2);
+	CHECK(vals.items[0].i == 3);       // updated in place, not appended
+	CHECK(vals.items[1].i == 2);
+	CHECK(p.var("hitB").i == 3);
+	CHECK(p.var("missZ").i == -1);     // absent key → the Default pin
+	const Value keysAfter = p.var("keysAfter");
+	REQUIRE(keysAfter.items.size() == 1);
+	CHECK(keysAfter.items[0].s == "a");
+	CHECK(p.var("stillHasB").b == false);
+	CHECK(p.var("emptyLen").i == 0);   // an unwired Map input is an EMPTY map
+	CHECK(p.var("clearedLen").i == 0);
+
+	p.fire("Iterate");
+	// The seeded declarations: the set's duplicate collapsed to its first
+	// occurrence, and both containers iterate in the order they were AUTHORED —
+	// "zeta" before "alpha", which sorting would have reversed.
+	CHECK(p.var("setOrder").s == "zetaalpha");
+	CHECK(p.var("mapOrder").s == "zeta9alpha1");
+
+	p.fire("EnumContainers");
+	const Value moods = p.var("moods");
+	REQUIRE(moods.items.size() == 2);  // Angry added twice
+	CHECK(moods.items[0].i == 5);      // Angry, inserted first
+	CHECK(moods.items[1].i == 0);      // Calm — NOT sorted ahead of it
+	const Value moodHp = p.var("moodHp");
+	REQUIRE(moodHp.keys.size() == 2);
+	CHECK(moodHp.keys[0].i == 5);
+	CHECK(moodHp.keys[1].i == 1);
+	CHECK(p.var("angryHp").i == 11);
 }
 
 TEST_CASE("codegen parity: events_multi (order, elem filter, shared per-fire cache)")

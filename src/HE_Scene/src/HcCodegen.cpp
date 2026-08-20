@@ -70,9 +70,24 @@ PinRanges pinRanges(const Node& n)
 struct TypeRef
 {
     PinType     t   = PT::Float;
-    bool        arr = false;
+    bool        arr = false;      // "is a container" — see ContainerKind
     std::string typeName;
     std::string cpp;
+    // Which container, and — for a Map, whose `t`/`typeName`/`cpp` describe the
+    // VALUE — the key. Appended last with defaults so the many brace-initialized
+    // TypeRefs above and below stay as they were.
+    HorizonCode::ContainerKind ctr = HorizonCode::ContainerKind::None;
+    PinType     keyT = PT::String;
+    std::string keyTypeName;
+    std::string keyCpp;
+
+    HorizonCode::ContainerKind kind() const
+    { return HorizonCode::containerKindOf(arr, ctr); }
+    // The key half of a map, as a TypeRef of its own — what every key pin, key
+    // literal and key conversion below is built from.
+    TypeRef key() const { return TypeRef{ keyT, false, keyTypeName, keyCpp }; }
+    // The element/value half: the same type with the container stripped off.
+    TypeRef elem() const { return TypeRef{ t, false, typeName, cpp }; }
 };
 
 // ── user-defined struct types (plan §6, extended) ────────────────────────────
@@ -161,8 +176,14 @@ std::string cppScalar(const TypeRef& tr)
 }
 std::string cppType(const TypeRef& tr)
 {
-    if (tr.arr) return "hc::Array<" + cppScalar(tr) + ">";
-    return cppScalar(tr);
+    switch (tr.kind())
+    {
+        case HorizonCode::ContainerKind::Array: return "hc::Array<" + cppScalar(tr) + ">";
+        case HorizonCode::ContainerKind::Set:   return "hc::Set<" + cppScalar(tr) + ">";
+        case HorizonCode::ContainerKind::Map:
+            return "hc::Map<" + cppScalar(tr.key()) + ", " + cppScalar(tr) + ">";
+        default: return cppScalar(tr);
+    }
 }
 
 std::string floatLit(float f)
@@ -236,7 +257,8 @@ std::string structLit(const Value& v, const TypeTable& tt, const TypeRef& want)
     for (size_t i = 0; i < st->def.fields.size(); ++i)
     {
         const HE::StructField& f = st->def.fields[i];
-        const TypeRef ft{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName) };
+        const TypeRef ft{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName),
+                          f.container, f.keyType, f.keyTypeName, tt.cppOf(f.keyTypeName) };
         out += (i ? ", " : " ");
         out += i < v.items.size() ? valueLit(v.items[i], tt, ft) : zeroLit(ft);
     }
@@ -247,18 +269,35 @@ std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want)
 {
     if (want.arr)
     {
-        // Array literal of the element type (the items are scalars of it).
-        const TypeRef elem{ want.t, false, want.typeName, want.cpp };
-        std::string out = cppType(want) + "{";
-        for (size_t i = 0; i < v.items.size(); ++i)
+        // One list of scalar literals of `as` — the shape every container
+        // literal is built from (the items/keys are scalars of their type).
+        auto listOf = [&](const std::vector<Value>& src, const TypeRef& as)
         {
-            Value item = v.items[i];
-            item.isArray = false;
-            if (item.type != want.t) item.type = want.t;   // seeded slots carry the element type
-            out += (i ? ", " : " ");
-            out += valueLit(item, tt, elem);
+            std::string out = "hc::Array<" + cppScalar(as) + ">{";
+            for (size_t i = 0; i < src.size(); ++i)
+            {
+                Value item = src[i];
+                item.isArray = false;
+                item.container = HorizonCode::ContainerKind::None;
+                if (item.type != as.t) item.type = as.t;   // seeded slots carry the element type
+                out += (i ? ", " : " ");
+                out += valueLit(item, tt, as);
+            }
+            return out + (src.empty() ? "}" : " }");
+        };
+        switch (want.kind())
+        {
+            case HorizonCode::ContainerKind::Set:
+                // Aggregate init: hc::Set's single member IS the item list.
+                return cppType(want) + "{ " + listOf(v.items, want.elem()) + " }";
+            case HorizonCode::ContainerKind::Map:
+                // Keys first, values second — the member order of hc::Map, and
+                // index-parallel exactly like the Value it came from.
+                return cppType(want) + "{ " + listOf(v.keys, want.key()) + ", " +
+                       listOf(v.items, want.elem()) + " }";
+            default:
+                return listOf(v.items, want.elem());
         }
-        return out + (v.items.empty() ? "}" : " }");
     }
     switch (want.t)
     {
@@ -334,7 +373,15 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
     const bool sameDef = from.t != PT::Struct || from.typeName == to.typeName;
     if (from.arr || to.arr)
     {
-        if (from.arr && to.arr && from.t == to.t && sameDef) return e;
+        // Containers convert into their own kind only — and a map has to agree
+        // on the key as well. Graph::connect refuses everything else, so the
+        // zero is only reachable through a stale node.
+        const bool sameKey = to.kind() != HorizonCode::ContainerKind::Map ||
+                             (from.keyT == to.keyT &&
+                              (from.keyT != PT::Enum || from.keyTypeName == to.keyTypeName));
+        if (from.arr && to.arr && from.kind() == to.kind() && from.t == to.t &&
+            sameDef && sameKey)
+            return e;
         return zeroLit(to);   // unwireable; only reachable via stale nodes
     }
     const bool sameEnum = from.t != PT::Enum || from.typeName == to.typeName;
@@ -386,6 +433,11 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
 // the Value boundaries: event args, host reads, undeclared variables).
 std::string coerceCall(const std::string& valueExpr, const TypeRef& to)
 {
+    if (to.kind() == HorizonCode::ContainerKind::Set)
+        return "hc::coerceSet<" + cppScalar(to) + ">(" + valueExpr + ")";
+    if (to.kind() == HorizonCode::ContainerKind::Map)
+        return "hc::coerceMap<" + cppScalar(to.key()) + ", " + cppScalar(to) + ">(" +
+               valueExpr + ")";
     if (to.arr) return "hc::coerceArray<" + cppScalar(to) + ">(" + valueExpr + ")";
     // An Enum target is NOT coerce<int>: `coerce(v, Enum)` refuses Bool (§3.3).
     if (to.t == PT::Enum)
@@ -394,8 +446,14 @@ std::string coerceCall(const std::string& valueExpr, const TypeRef& to)
 }
 std::string fromValueCall(const std::string& vecExpr, size_t k, const TypeRef& to)
 {
-    if (to.arr) return "hc::fromValueArray<" + cppScalar(to) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
-    return "hc::fromValue<" + cppScalar(to) + ">(" + vecExpr + ", " + std::to_string(k) + ")";
+    const std::string at = ", " + std::to_string(k) + ")";
+    if (to.kind() == HorizonCode::ContainerKind::Set)
+        return "hc::fromValueSet<" + cppScalar(to) + ">(" + vecExpr + at;
+    if (to.kind() == HorizonCode::ContainerKind::Map)
+        return "hc::fromValueMap<" + cppScalar(to.key()) + ", " + cppScalar(to) + ">(" +
+               vecExpr + at;
+    if (to.arr) return "hc::fromValueArray<" + cppScalar(to) + ">(" + vecExpr + at;
+    return "hc::fromValue<" + cppScalar(to) + ">(" + vecExpr + at;
 }
 
 // Box a typed C++ expression back into a Value (Set{Property,External},
@@ -404,9 +462,12 @@ std::string fromValueCall(const std::string& vecExpr, size_t k, const TypeRef& t
 // (they are plain ints in C++), for structs the generated converter sets it.
 std::string toValueCall(const std::string& expr, const TypeRef& from, const std::string& ns)
 {
-    if (from.t == PT::Enum)
-        return from.arr ? "hc::toEnumValueArray(" + expr + ")"
-                        : "hc::toEnumValue((int)(" + expr + "), " + strLit(from.typeName) + ")";
+    // Set/Map have their own hc::toValue overloads, which already strip the
+    // definition path off enum elements the way toEnumValueArray does.
+    const bool plainArray = from.kind() == HorizonCode::ContainerKind::Array;
+    if (from.t == PT::Enum && !from.arr)
+        return "hc::toEnumValue((int)(" + expr + "), " + strLit(from.typeName) + ")";
+    if (from.t == PT::Enum && plainArray) return "hc::toEnumValueArray(" + expr + ")";
     if (from.t == PT::Struct && !from.arr) return ns + "::toValue(" + expr + ")";
     return "hc::toValue(" + expr + ")";
 }
@@ -661,7 +722,8 @@ std::string emitStructHeader(const TypeTable& tt, const std::string& path, const
     const StructType& st = tt.byPath.at(path);
 
     auto fieldType = [&tt](const HE::StructField& f)
-    { return TypeRef{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName) }; };
+    { return TypeRef{ f.type, f.isArray, f.typeName, tt.cppOf(f.typeName),
+                      f.container, f.keyType, f.keyTypeName, tt.cppOf(f.keyTypeName) }; };
 
     std::string h;
     h += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
@@ -724,7 +786,14 @@ std::string emitStructHeader(const TypeTable& tt, const std::string& path, const
         {
             const TypeRef ft = fieldType(st.def.fields[i]);
             std::string boxed = toValueCall("s." + st.members[i], ft, ns);
-            if (ft.arr && !ft.typeName.empty())
+            // TypeRegistry::fieldDefault stamps a container FIELD's Value and
+            // its elements with the field's definition path (and a map's keys
+            // with the key definition), so the generated converter has to do
+            // the same or the two seeds are not identical Values.
+            if (ft.kind() == HorizonCode::ContainerKind::Map)
+                boxed = "hc::tagMap(" + boxed + ", " + strLit(ft.typeName) + ", " +
+                        strLit(ft.keyTypeName) + ")";
+            else if (ft.arr && !ft.typeName.empty())
                 boxed = "hc::tagArray(" + boxed + ", " + strLit(ft.typeName) + ")";
             h += "    v.items.push_back(" + boxed + ");\n";
         }
@@ -741,8 +810,18 @@ std::string emitStructHeader(const TypeTable& tt, const std::string& path, const
             const TypeRef ft = fieldType(f);
             const std::string k = std::to_string(i);
             std::string read;
-            if (f.isArray) read = "hc::itemArray<" + cppScalar(ft) + ">(v.items, " + k + ")";
-            else           read = "hc::item<" + cppScalar(ft) + ">(v.items, " + k + ")";
+            switch (ft.kind())
+            {
+            case HorizonCode::ContainerKind::Set:
+                read = "hc::itemSet<" + cppScalar(ft) + ">(v.items, " + k + ")"; break;
+            case HorizonCode::ContainerKind::Map:
+                read = "hc::itemMap<" + cppScalar(ft.key()) + ", " + cppScalar(ft) +
+                       ">(v.items, " + k + ")"; break;
+            case HorizonCode::ContainerKind::Array:
+                read = "hc::itemArray<" + cppScalar(ft) + ">(v.items, " + k + ")"; break;
+            default:
+                read = "hc::item<" + cppScalar(ft) + ">(v.items, " + k + ")"; break;
+            }
             h += "    s." + st.members[i] + " = " + read + ";\n";
         }
         h += "    return s;\n}\n";
@@ -917,8 +996,10 @@ private:
     // type table (Struct pins get their generated C++ name here).
     TypeRef trOf(const HorizonCode::PinDesc& d) const
     {
-        const std::string tn = d.typeName ? d.typeName : "";
-        return { d.type, d.isArray, tn, m_tt.cppOf(tn) };
+        const std::string tn  = d.typeName    ? d.typeName    : "";
+        const std::string ktn = d.keyTypeName ? d.keyTypeName : "";
+        return { d.type, d.isArray, tn, m_tt.cppOf(tn),
+                 d.container, d.keyType, ktn, m_tt.cppOf(ktn) };
     }
     TypeRef dataInType(const Node& n, int idx) const
     {
@@ -933,8 +1014,28 @@ private:
         return trOf(s.dataOuts[idx]);
     }
     // Variables/params carry their own definition path rather than a pin desc.
-    TypeRef trOf(PinType t, bool isArray, const std::string& typeName) const
-    { return { t, isArray, typeName, m_tt.cppOf(typeName) }; }
+    TypeRef trOf(PinType t, bool isArray, const std::string& typeName,
+                 HorizonCode::ContainerKind ctr = HorizonCode::ContainerKind::None,
+                 PinType keyT = PT::String, const std::string& keyTypeName = {}) const
+    { return { t, isArray, typeName, m_tt.cppOf(typeName),
+               ctr, keyT, keyTypeName, m_tt.cppOf(keyTypeName) }; }
+    // The declaration shapes that carry containers, spelled once each — the
+    // three-argument form silently drops the kind, so anything holding a
+    // declaration goes through these instead.
+    TypeRef trOf(const HorizonCode::Variable& v) const
+    { return trOf(v.type, v.isArray, v.typeName, v.container, v.keyType, v.keyTypeName); }
+    TypeRef trOf(const HorizonCode::FuncParam& p) const
+    { return trOf(p.type, p.isArray, p.typeName, p.container, p.keyType, p.keyTypeName); }
+    TypeRef trOf(const HE::StructField& f) const
+    { return trOf(f.type, f.isArray, f.typeName, f.container, f.keyType, f.keyTypeName); }
+    // A node's OWN container shape (Get/SetVariable mirror their variable's;
+    // the Set/Map ops set theirs explicitly).
+    TypeRef nodeType(const Node& n) const
+    { return trOf(n.propType, n.isArray, n.typeName, n.container, n.keyType, n.keyTypeName); }
+    // The same, forced to a container of `k` — the Set/Map node lowering, where
+    // the kind comes from the node TYPE rather than from a stored flag.
+    TypeRef ctrType(const Node& n, HorizonCode::ContainerKind k) const
+    { return trOf(n.propType, true, n.typeName, k, n.keyType, n.keyTypeName); }
 
     std::unordered_map<std::string, std::string> m_varMember;  // instance var → v_*
     std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
@@ -1334,16 +1435,21 @@ private:
                 case NT::FunctionCall:
                 case NT::CallExternal:
                     for (size_t k = 0; k < n.results.size(); ++k)
-                        s.push_back({ field((int)k), trOf(n.results[k].type, n.results[k].isArray,
-                                                          n.results[k].typeName) });
+                        s.push_back({ field((int)k), trOf(n.results[k]) });
                     break;
                 case NT::EngineCall:
                     if (n.hasArg)
                         for (size_t k = 0; k < n.results.size(); ++k)
-                            s.push_back({ field((int)k), trOf(n.results[k].type, n.results[k].isArray,
-                                                              n.results[k].typeName) });
+                            s.push_back({ field((int)k), trOf(n.results[k]) });
+                    break;
+                case NT::ForEachMap:
+                    // Key + Value + Index, in pin order (the Key is data-out 0).
+                    s.push_back({ field(0), trOf(n.keyType, false, n.keyTypeName) });
+                    s.push_back({ field(1), trOf(n.propType, false, n.typeName) });
+                    s.push_back({ field(2), { PT::Int, false } });
                     break;
                 case NT::ForEach:
+                case NT::ForEachSet:
                     s.push_back({ field(0), trOf(n.propType, false, n.typeName) });
                     s.push_back({ field(1), { PT::Int, false } });
                     break;
@@ -1363,7 +1469,9 @@ private:
             // lowers to straight-line code whose statement count is fixed at
             // generation time, so the 4096-step abort is unreachable and the
             // whole counter (and every HC_STEP with it) is dead weight.
-            if (n.type == NT::ForEach || n.type == NT::FunctionCall) m_guard = true;
+            if (n.type == NT::ForEach || n.type == NT::ForEachSet ||
+                n.type == NT::ForEachMap || n.type == NT::FunctionCall)
+                m_guard = true;
         }
     }
 
@@ -1450,7 +1558,7 @@ private:
         if (!v || v->scope != 0 || v->access != 0) return {};
         const auto it = cls.publicVar.find(var);
         if (it == cls.publicVar.end()) return {};
-        typeOut = trOf(v->type, v->isArray, v->typeName);
+        typeOut = trOf(*v);
         return it->second;
     }
     // Same, against THIS class (a Get Self target).
@@ -1469,7 +1577,7 @@ private:
         if (!v || v->scope != 0 || v->access != 0) return {};
         const auto it = m_publicVar.find(var);
         if (it == m_publicVar.end()) return {};
-        typeOut = trOf(v->type, v->isArray, v->typeName);
+        typeOut = trOf(*v);
         return it->second;
     }
 
@@ -1568,18 +1676,18 @@ private:
         case NT::GetVariable:
         {
             const Variable* v = m_g.findVariable(n.s);
-            const TypeRef pin = trOf(n.propType, n.isArray, n.typeName);
+            const TypeRef pin = nodeType(n);
             if (v && v->scope != 0)
             {
                 // §13.4: locals are stack locals of the owning function only.
                 if (v->scope != fnCtx)
                     throw FallbackError{ "local '" + n.s + "' read outside its function", n.id };
-                return convertExpr(m_localName.at(n.s), trOf(v->type, v->isArray, v->typeName), pin);
+                return convertExpr(m_localName.at(n.s), trOf(*v), pin);
             }
             // This class's own, or a base class's — both are members here.
             if (const VarRef iv = instanceVar(n.s); iv.decl)
                 return convertExpr(iv.member,
-                                   trOf(iv.decl->type, iv.decl->isArray, iv.decl->typeName), pin);
+                                   trOf(*iv.decl), pin);
             // Undeclared: through the Context → the Runtime store (overflow for
             // compiled instances) so §3.4's dynamic-store semantics stay exact.
             return coerceCall("hc::getVariableCtx(m_ctx, " + strLit(n.s) + ")", pin);
@@ -1643,6 +1751,8 @@ private:
         case NT::FunctionCall:
         case NT::CallExternal:
         case NT::ForEach:
+        case NT::ForEachSet:
+        case NT::ForEachMap:
             return slotRef(n, outIdx);
         case NT::EngineCall:
         {
@@ -1681,6 +1791,44 @@ private:
         case NT::ArrayIndexOf:
             return std::string(n.propType == PT::Struct ? "hc::arrIndexOfNever(" : "hc::arrIndexOf(") +
                    input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        // ── Set<T> ───────────────────────────────────────────────────────────
+        // Straight onto hc::Set's ops, which reproduce the three ordering rules.
+        // A struct element never compares equal (scalarValueEquals has no Struct
+        // case), and hc::sameElem answers the same way for a type with no
+        // operator== — so nothing needs a *Never variant here.
+        case NT::SetMake:
+        case NT::SetClear:
+            return zeroLit(out);   // an empty set of the element type
+        case NT::SetLength:
+            return "hc::setLength(" + input(n, 0, fnCtx) + ")";
+        case NT::SetAdd:
+            return "hc::setAdd(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::SetRemove:
+            return "hc::setRemove(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::SetContains:
+            return "hc::setContains(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::SetToArray:
+            return "hc::setToArray(" + input(n, 0, fnCtx) + ")";
+        // ── Map<K,V> ─────────────────────────────────────────────────────────
+        case NT::MapMake:
+        case NT::MapClear:
+            return zeroLit(out);
+        case NT::MapLength:
+            return "hc::mapLength(" + input(n, 0, fnCtx) + ")";
+        case NT::MapSet:
+            return "hc::mapSet(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+                   input(n, 2, fnCtx) + ")";
+        case NT::MapRemove:
+            return "hc::mapRemove(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::MapContains:
+            return "hc::mapContains(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";
+        case NT::MapGet:
+            return "hc::mapGet(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ", " +
+                   input(n, 2, fnCtx) + ")";
+        case NT::MapKeys:
+            return "hc::mapKeys(" + input(n, 0, fnCtx) + ")";
+        case NT::MapValues:
+            return "hc::mapValues(" + input(n, 0, fnCtx) + ")";
         case NT::IsValid:
             return "hc::isValidRef(m_ctx, " + input(n, 0, fnCtx) + ")";
         case NT::Cast:
@@ -1767,7 +1915,7 @@ private:
             for (size_t i = 0; i < st->def.fields.size(); ++i)
             {
                 const HE::StructField& f = st->def.fields[i];
-                const TypeRef ft = trOf(f.type, f.isArray, f.typeName);
+                const TypeRef ft = trOf(f);
                 e += (i ? ", " : " ");
                 const int idx = fieldPinIndex(n, f.name);
                 const bool authored = idx >= 0 &&
@@ -1801,7 +1949,7 @@ private:
                              : zeroLit(out));
             if (fi < 0) return src;   // field gone from the definition → unchanged copy
             const HE::StructField& f = st->def.fields[(size_t)fi];
-            const TypeRef ft = trOf(f.type, f.isArray, f.typeName);
+            const TypeRef ft = trOf(f);
             return "([&]{ " + st->cpp + " s__ = " + src + "; s__." + structMember(*st, (size_t)fi) +
                    " = " + convertExpr(input(n, 1, fnCtx), dataInType(n, 1), ft) + "; return s__; }())";
         }
@@ -1853,7 +2001,7 @@ private:
         if (fi < 0) return zeroLit(out);   // field gone from the definition → typed zero
         const HE::StructField& f = st->def.fields[(size_t)fi];
         return convertExpr("(" + input(n, 0, fnCtx) + ")." + structMember(*st, (size_t)fi),
-                           trOf(f.type, f.isArray, f.typeName), out);
+                           trOf(f), out);
     }
 
     // ── statements (exec walk = runExecChain, §3.2) ──────────────────────────
@@ -1881,6 +2029,7 @@ private:
             // exec-outs; Return and Delay (latent — resumes via resumeFrom) are
             // terminal. Mirrors Runner::runExecChain's list exactly.
             if (n->type == NT::Branch || n->type == NT::Sequence || n->type == NT::ForEach ||
+                n->type == NT::ForEachSet || n->type == NT::ForEachMap ||
                 n->type == NT::FunctionReturn || n->type == NT::Delay ||
                 n->type == NT::DoOnce || n->type == NT::FlipFlop ||
                 n->type == NT::SwitchOnEnum || n->type == NT::Cast)
@@ -2010,21 +2159,47 @@ private:
             break;
         }
         case NT::ForEach:
+        case NT::ForEachSet:
+        case NT::ForEachMap:
         {
+            // One loop shape for all three: read the container ONCE into a local
+            // (the interpreter evaluates its input once too), then walk it by
+            // index. A set's items and a map's key/value pairs ARE their
+            // iteration order, so this walk IS the insertion order both backends
+            // promise — nothing here sorts and nothing hashes.
+            const bool isMap = n.type == NT::ForEachMap;
+            const HorizonCode::ContainerKind ck =
+                n.type == NT::ForEach ? HorizonCode::ContainerKind::Array
+                : isMap               ? HorizonCode::ContainerKind::Map
+                                      : HorizonCode::ContainerKind::Set;
             const std::string arr = "arr" + std::to_string(n.id);
             const std::string idx = "i" + std::to_string(n.id);
+            const std::string span = n.type == NT::ForEach ? arr + ".size()"
+                                   : isMap                 ? arr + ".keys.size()"
+                                                           : arr + ".items.size()";
             b.line("{");
             ++b.indent;
-            b.line("const " + cppType(trOf(n.propType, true, n.typeName)) + " " + arr + " = " +
+            b.line("const " + cppType(ctrType(n, ck)) + " " + arr + " = " +
                    input(n, 0, fnCtx) + ";");
             b.line("if (++rs.depth <= hc::kMaxDepth)");
             b.line("{");
             ++b.indent;
-            b.line("for (size_t " + idx + " = 0; " + idx + " < " + arr + ".size(); ++" + idx + ")");
+            b.line("for (size_t " + idx + " = 0; " + idx + " < " + span + "; ++" + idx + ")");
             b.line("{");
             ++b.indent;
-            b.line(slotRef(n, 0) + " = " + arr + "[" + idx + "];");
-            b.line(slotRef(n, 1) + " = (int)" + idx + ";");
+            if (isMap)
+            {
+                b.line(slotRef(n, 0) + " = " + arr + ".keys[" + idx + "];");
+                b.line(slotRef(n, 1) + " = " + arr + ".values[" + idx + "];");
+                b.line(slotRef(n, 2) + " = (int)" + idx + ";");
+            }
+            else
+            {
+                b.line(slotRef(n, 0) + " = " +
+                       (n.type == NT::ForEach ? arr + "[" + idx + "]"
+                                              : arr + ".items[" + idx + "]") + ";");
+                b.line(slotRef(n, 1) + " = (int)" + idx + ";");
+            }
             chain(n, r.execOut0 + 0, fnCtx, b);   // Body
             --b.indent;
             b.line("}");
@@ -2039,7 +2214,7 @@ private:
         case NT::SetVariable:
         {
             const Variable* v = m_g.findVariable(n.s);
-            const TypeRef pin = trOf(n.propType, n.isArray, n.typeName);
+            const TypeRef pin = nodeType(n);
             if (v && v->scope != 0)
             {
                 if (v->scope != fnCtx)
@@ -2050,12 +2225,12 @@ private:
                 }
                 b.line(m_localName.at(n.s) + " = " +
                        convertExpr(input(n, 0, fnCtx), pin,
-                                   trOf(v->type, v->isArray, v->typeName)) + ";");
+                                   trOf(*v)) + ";");
             }
             else if (const VarRef iv = instanceVar(n.s); iv.decl)
                 b.line(iv.member + " = " +
                        convertExpr(input(n, 0, fnCtx), pin,
-                                   trOf(iv.decl->type, iv.decl->isArray, iv.decl->typeName)) + ";");
+                                   trOf(*iv.decl)) + ";");
             else
                 // §3.4: Set on an undeclared name creates a store entry — routed
                 // through the Context to the Runtime's (overflow) store.
@@ -2165,14 +2340,14 @@ private:
             for (size_t i = 0; i < n.params.size(); ++i)   // args first (§3.4)
             {
                 const std::string a = "a" + id + "_" + std::to_string(i);
-                const TypeRef tr = trOf(n.params[i].type, n.params[i].isArray, n.params[i].typeName);
+                const TypeRef tr = trOf(n.params[i]);
                 b.line("const " + cppType(tr) + " " + a + " = " + input(n, (int)i + 1, fnCtx) + ";");
                 argNames.push_back(a);
             }
             for (size_t i = 0; i < n.results.size(); ++i)
             {
                 const std::string r = "r" + id + "_" + std::to_string(i);
-                const TypeRef tr = trOf(n.results[i].type, n.results[i].isArray, n.results[i].typeName);
+                const TypeRef tr = trOf(n.results[i]);
                 b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
                 resNames.push_back(r);
             }
@@ -2198,16 +2373,14 @@ private:
                 for (size_t i = 0; i < argNames.size(); ++i)
                     b.line(av + ".push_back(" +
                            toValueCall(argNames[i],
-                                       trOf(n.params[i].type, n.params[i].isArray,
-                                            n.params[i].typeName), m_opt.namespaceName) + ");");
+                                       trOf(n.params[i]), m_opt.namespaceName) + ");");
                 b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, " +
                        (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + id) +
                        ", " + strLit(n.s) + ", " + av + ");");
                 for (size_t i = 0; i < resNames.size(); ++i)
                     b.line(resNames[i] + " = " +
                            fromValueCall("rr" + id, i,
-                                         trOf(n.results[i].type, n.results[i].isArray,
-                                              n.results[i].typeName)) + ";");
+                                         trOf(n.results[i])) + ";");
                 --b.indent;
                 b.line("}");
             }
@@ -2242,8 +2415,7 @@ private:
             for (size_t i = 0; i < entry->params.size(); ++i)
             {
                 const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
-                const TypeRef tr = trOf(entry->params[i].type, entry->params[i].isArray,
-                                        entry->params[i].typeName);
+                const TypeRef tr = trOf(entry->params[i]);
                 // The call node mirrors the entry (synced) — pin type == param type.
                 b.line("const " + cppType(tr) + " " + a + " = " +
                        (i < n.params.size() ? input(n, (int)i, fnCtx) : zeroLit(tr)) + ";");
@@ -2252,8 +2424,7 @@ private:
             for (size_t i = 0; i < entry->results.size(); ++i)
             {
                 const std::string rn = "r" + std::to_string(n.id) + "_" + std::to_string(i);
-                const TypeRef tr = trOf(entry->results[i].type, entry->results[i].isArray,
-                                        entry->results[i].typeName);
+                const TypeRef tr = trOf(entry->results[i]);
                 b.line(cppType(tr) + " " + rn + " = " + zeroLit(tr) + ";");   // typed default results
                 resNames.push_back(rn);
             }
@@ -2281,8 +2452,7 @@ private:
                 for (size_t i = 0; i < count; ++i)
                     b.line("r_" + std::to_string(i) + " = " +
                            convertExpr(input(n, (int)i, fnCtx), dataInType(n, (int)i),
-                                       trOf(fn->results[i].type, fn->results[i].isArray,
-                                            fn->results[i].typeName)) + ";");
+                                       trOf(fn->results[i])) + ";");
             }
             // NO `return;`. Return has no exec-out, so the interpreter ends only
             // the chain it sits in (`runExecChain` finds no next link) — it does
@@ -2382,7 +2552,7 @@ private:
     }
 
     // ── class emission ────────────────────────────────────────────────────────
-    TypeRef varType(const Variable& v) const { return trOf(v.type, v.isArray, v.typeName); }
+    TypeRef varType(const Variable& v) const { return trOf(v); }
 
     std::string memberDefault(const Variable& v) const
     { return valueLit(HorizonCode::variableDefaultValue(v), m_tt, varType(v)); }
@@ -2437,10 +2607,10 @@ private:
         std::string sig = rsParam(rsUsed);
         auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
         for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i].type, fn.params[i].isArray, fn.params[i].typeName)) +
+            add(cppType(trOf(fn.params[i])) +
                 " p_" + std::to_string(i));
         for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i].type, fn.results[i].isArray, fn.results[i].typeName)) +
+            add(cppType(trOf(fn.results[i])) +
                 "& r_" + std::to_string(i));
         return sig;
     }
@@ -2529,10 +2699,10 @@ private:
         auto add = [&](const std::string& type, const std::string& name)
         { if (!sig.empty()) sig += ", "; sig += type + " " + uniqueName(cppIdent(name), used); };
         for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i].type, fn.params[i].isArray, fn.params[i].typeName)),
+            add(cppType(trOf(fn.params[i])),
                 fn.params[i].name.empty() ? "p" + std::to_string(i) : fn.params[i].name);
         for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i].type, fn.results[i].isArray, fn.results[i].typeName)) + "&",
+            add(cppType(trOf(fn.results[i])) + "&",
                 fn.results[i].name.empty() ? "r" + std::to_string(i) : fn.results[i].name);
         return sig;
     }
@@ -2927,7 +3097,19 @@ private:
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
                          strLit(v.typeName) + ", " +
-                         toValueCall(memberDefault(v), tr, ns) + "),\n";
+                         toValueCall(memberDefault(v), tr, ns) +
+                         // The container kind and (for a map) the key type ride
+                         // along: the GC reads keyType to reach objects held only
+                         // as map KEYS, which `type` — the value side — never
+                         // mentions. Written only when it is not the default, so
+                         // scalar and array slots emit exactly as before.
+                         (tr.kind() == HorizonCode::ContainerKind::Set ||
+                          tr.kind() == HorizonCode::ContainerKind::Map
+                              ? ", hc::ContainerKind::" +
+                                std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
+                                ", hc::PinType::" + pinName(v.keyType)
+                              : std::string()) +
+                         "),\n";
                 }
                 c += "    };\n    return k;\n}\n\n";
             }
@@ -3076,16 +3258,14 @@ private:
                 if (rsOn) c += "        RunState rs;\n";
                 for (size_t i = 0; i < fn->params.size(); ++i)
                 {
-                    const TypeRef tr = trOf(fn->params[i].type, fn->params[i].isArray,
-                                            fn->params[i].typeName);
+                    const TypeRef tr = trOf(fn->params[i]);
                     c += "        " + cppType(tr) + " p" + std::to_string(i) + " = " +
                          coerceCall("hc::arg(args, " + std::to_string(i) + ")", tr) + ";\n";
                 }
                 std::vector<TypeRef> resTypes;
                 for (size_t i = 0; i < fn->results.size(); ++i)
                 {
-                    resTypes.push_back(trOf(fn->results[i].type, fn->results[i].isArray,
-                                            fn->results[i].typeName));
+                    resTypes.push_back(trOf(fn->results[i]));
                     c += "        " + cppType(resTypes[i]) + " r" + std::to_string(i) + " = " +
                          zeroLit(resTypes[i]) + ";\n";
                 }

@@ -8,6 +8,8 @@
 #include <cstring>
 #include <iterator>   // make_move_iterator — concatSlots
 #include <string>
+#include <type_traits>   // the element-equality detection behind Set/Map
+#include <utility>
 #include <vector>
 
 // ── hc:: — the runtime support library for GENERATED HorizonCode C++ ─────────
@@ -19,6 +21,8 @@
 
 namespace hc {
 
+using HorizonCode::ContainerKind;
+using HorizonCode::containerKindOf;
 using HorizonCode::Context;
 using HorizonCode::PinType;
 using HorizonCode::Value;
@@ -262,6 +266,8 @@ template <typename T> inline T item(const std::vector<Value>& items, size_t k)
 { return k < items.size() ? coerce<T>(items[k]) : zeroOf<T>(); }
 template <typename T> inline Array<T> itemArray(const std::vector<Value>& items, size_t k)
 { return k < items.size() ? rawArray<T>(items[k]) : Array<T>{}; }
+// Set/Map are declared further down (they need the array helpers), so these two
+// live there — see itemSet / itemMap.
 inline int itemEnum(const std::vector<Value>& items, size_t k)
 { return k < items.size() ? coerceEnum(items[k]) : 0; }
 
@@ -309,6 +315,216 @@ template <typename T> inline int arrIndexOf(const Array<T>& a, const T& key)
 // still evaluated (pure-EngineCall dispatch counts are part of the trace, §3.4).
 template <typename T> inline bool arrContainsNever(const Array<T>&, const T&) { return false; }
 template <typename T> inline int  arrIndexOfNever (const Array<T>&, const T&) { return -1; }
+
+// ── Set<T> / Map<K,V> ────────────────────────────────────────────────────────
+// INSERTION-ORDERED, and vector-backed for exactly that reason: the interpreter
+// keeps a container in `Value::items` (plus a parallel `Value::keys` for a map),
+// so laying the generated side out the same way makes the two iterate
+// identically by CONSTRUCTION. std::set / std::unordered_map would each iterate
+// in an order of their own and the parity harness would (correctly) call that a
+// divergence. See ContainerKind in HorizonCode.h for the three ordering rules.
+//
+// Every op is pure and takes its container BY VALUE, like the array ops: the
+// nodes return a new container rather than mutating the one they were handed.
+template <typename T>
+struct Set
+{
+    Array<T> items;   // iteration order = the order elements were first added
+    size_t size() const { return items.size(); }
+};
+
+template <typename K, typename V>
+struct Map
+{
+    Array<K> keys;     // iteration order = the order keys were first inserted
+    Array<V> values;   // index-parallel to keys
+    size_t size() const { return keys.size(); }
+};
+
+// Element identity. `scalarValueEquals` (HorizonCode.cpp) has no Struct case, so
+// a struct element never matches anything there — mirrored here by answering
+// false for any element type that has no operator== of its own, which is what a
+// generated struct is.
+template <typename T, typename = void>
+struct HasEquality : std::false_type {};
+template <typename T>
+struct HasEquality<T, std::void_t<decltype(std::declval<const T&>() == std::declval<const T&>())>>
+    : std::true_type {};
+
+template <typename T> inline bool sameElem(const T& a, const T& b)
+{
+    if constexpr (HasEquality<T>::value) return a == b;
+    else { (void)a; (void)b; return false; }
+}
+template <typename T> inline int indexOfElem(const Array<T>& a, const T& key)
+{
+    for (size_t i = 0; i < a.size(); ++i) if (sameElem(a[i], key)) return (int)i;
+    return -1;
+}
+
+// The element parameters are NON-DEDUCING (std::type_identity_t): the container
+// argument alone fixes T, so a string literal on the value pin converts to
+// std::string instead of failing to deduce `const char[2]` against T.
+template <typename T> using Same = std::type_identity_t<T>;
+
+template <typename T> inline Set<T> setAdd(Set<T> s, const Same<T>& v)
+{
+    // Already present → unchanged, and NOT moved to the back.
+    if (indexOfElem(s.items, v) < 0) s.items.push_back(v);
+    return s;
+}
+template <typename T> inline Set<T> setRemove(Set<T> s, const Same<T>& v)
+{
+    const int at = indexOfElem(s.items, v);
+    if (at >= 0) s.items.erase(s.items.begin() + at);   // the rest keeps its order
+    return s;
+}
+template <typename T> inline bool setContains(const Set<T>& s, const Same<T>& v)
+{ return indexOfElem(s.items, v) >= 0; }
+template <typename T> inline int setLength(const Set<T>& s) { return (int)s.items.size(); }
+template <typename T> inline Set<T> setClear(const Set<T>&) { return Set<T>{}; }
+template <typename T> inline Array<T> setToArray(const Set<T>& s) { return s.items; }
+
+template <typename K, typename V>
+inline Map<K, V> mapSet(Map<K, V> m, const Same<K>& k, const Same<V>& v)
+{
+    const int at = indexOfElem(m.keys, k);
+    if (at >= 0) m.values[(size_t)at] = v;   // update IN PLACE, key keeps its slot
+    else { m.keys.push_back(k); m.values.push_back(v); }
+    return m;
+}
+template <typename K, typename V> inline Map<K, V> mapRemove(Map<K, V> m, const Same<K>& k)
+{
+    const int at = indexOfElem(m.keys, k);
+    if (at >= 0)
+    {
+        m.keys.erase(m.keys.begin() + at);
+        if ((size_t)at < m.values.size()) m.values.erase(m.values.begin() + at);
+    }
+    return m;
+}
+template <typename K, typename V> inline bool mapContains(const Map<K, V>& m, const Same<K>& k)
+{ return indexOfElem(m.keys, k) >= 0; }
+template <typename K, typename V> inline int mapLength(const Map<K, V>& m)
+{ return (int)m.keys.size(); }
+template <typename K, typename V> inline Map<K, V> mapClear(const Map<K, V>&)
+{ return Map<K, V>{}; }
+template <typename K, typename V>
+inline V mapGet(const Map<K, V>& m, const Same<K>& k, const Same<V>& def)
+{
+    const int at = indexOfElem(m.keys, k);
+    // A miss is an ordinary answer, not a warning like arrGet's — the Default
+    // pin exists precisely for it.
+    return (at >= 0 && (size_t)at < m.values.size()) ? m.values[(size_t)at] : def;
+}
+template <typename K, typename V> inline Array<K> mapKeys(const Map<K, V>& m)
+{
+    Array<K> out = m.keys;
+    out.resize(m.keys.size() < m.values.size() ? m.keys.size() : m.values.size());
+    return out;
+}
+template <typename K, typename V> inline Array<V> mapValues(const Map<K, V>& m)
+{
+    Array<V> out = m.values;
+    out.resize(m.keys.size() < m.values.size() ? m.keys.size() : m.values.size());
+    return out;
+}
+
+// ── Set/Map ⇄ Value ──────────────────────────────────────────────────────────
+// Element boxing goes through the SAME toValue/raw the array helpers use, so a
+// struct element runs the generated converter and an enum element its ADL
+// overload. Container `Value`s carry no element typeName of their own — the
+// interpreter's own builders don't set one either (see toEnumValueArray).
+// An ENUM element's ADL toValue bakes its definition path; inside a container it
+// must not, because the interpreter's own container builders leave it empty
+// (same rule as toEnumValueArray). Struct elements keep theirs, again like an
+// array of structs.
+inline Value untagEnums(Value v)
+{
+    for (Value& it : v.items) if (it.type == PinType::Enum) it.typeName.clear();
+    for (Value& k  : v.keys)  if (k.type  == PinType::Enum) k.typeName.clear();
+    return v;
+}
+template <typename T> inline Value toValue(const Set<T>& s)
+{
+    Value v; v.isArray = true; v.container = ContainerKind::Set; v.type = tagOf<T>();
+    v.items.reserve(s.items.size());
+    for (const T& e : s.items) v.items.push_back(toValue(e));
+    return untagEnums(std::move(v));
+}
+template <typename K, typename V> inline Value toValue(const Map<K, V>& m)
+{
+    Value v; v.isArray = true; v.container = ContainerKind::Map;
+    v.type = tagOf<V>(); v.keyType = tagOf<K>();
+    const size_t n = m.keys.size() < m.values.size() ? m.keys.size() : m.values.size();
+    v.keys.reserve(n); v.items.reserve(n);
+    for (size_t i = 0; i < n; ++i)
+    { v.keys.push_back(toValue(m.keys[i])); v.items.push_back(toValue(m.values[i])); }
+    return untagEnums(std::move(v));
+}
+
+// ← Value. A Value that is not the right container reads as an EMPTY one, which
+// is what the interpreter's coerce leaves a mismatched pin with. Duplicates that
+// arrive through a dynamic boundary (a script's table, a hand-edited save)
+// collapse to their FIRST occurrence — the same rule Set Add / Map Set follow.
+template <typename T> inline Set<T> rawSet(const Value& v)
+{
+    Set<T> s;
+    if (v.kind() != ContainerKind::Set) return s;
+    for (const Value& it : v.items)
+    {
+        T e = raw<T>(it);
+        if (indexOfElem(s.items, e) < 0) s.items.push_back(std::move(e));
+    }
+    return s;
+}
+template <typename K, typename V> inline Map<K, V> rawMap(const Value& v)
+{
+    Map<K, V> m;
+    if (v.kind() != ContainerKind::Map) return m;
+    const size_t n = v.keys.size() < v.items.size() ? v.keys.size() : v.items.size();
+    for (size_t i = 0; i < n; ++i)
+    {
+        K k = raw<K>(v.keys[i]);
+        const int at = indexOfElem(m.keys, k);
+        if (at >= 0) m.values[(size_t)at] = raw<V>(v.items[i]);   // last write wins
+        else { m.keys.push_back(std::move(k)); m.values.push_back(raw<V>(v.items[i])); }
+    }
+    return m;
+}
+template <typename T> inline Set<T> coerceSet(const Value& v) { return rawSet<T>(v); }
+template <typename K, typename V> inline Map<K, V> coerceMap(const Value& v)
+{ return rawMap<K, V>(v); }
+template <typename T> inline Set<T> fromValueSet(const std::vector<Value>& r, size_t k)
+{ return k < r.size() ? rawSet<T>(r[k]) : Set<T>{}; }
+template <typename K, typename V>
+inline Map<K, V> fromValueMap(const std::vector<Value>& r, size_t k)
+{ return k < r.size() ? rawMap<K, V>(r[k]) : Map<K, V>{}; }
+
+// Struct field reads, alongside item / itemArray.
+template <typename T> inline Set<T> itemSet(const std::vector<Value>& items, size_t k)
+{ return k < items.size() ? rawSet<T>(items[k]) : Set<T>{}; }
+template <typename K, typename V>
+inline Map<K, V> itemMap(const std::vector<Value>& items, size_t k)
+{ return k < items.size() ? rawMap<K, V>(items[k]) : Map<K, V>{}; }
+
+// tagArray's map counterpart: TypeRegistry::fieldDefault stamps a container
+// field's Value and its elements with the field's definition path, and a map's
+// KEYS with the key definition. Empty paths are left alone.
+inline Value tagMap(Value v, const char* typeName, const char* keyTypeName)
+{
+    if (typeName && *typeName)
+    {
+        v.typeName = typeName;
+        for (Value& it : v.items) it.typeName = typeName;
+    }
+    if (keyTypeName && *keyTypeName)
+    {
+        v.keyTypeName = keyTypeName;
+        for (Value& k : v.keys) k.typeName = keyTypeName;
+    }
+    return v;
+}
 
 // ── host / engine seams (null-tolerant, §3.4 "unbound Context → no-op") ─────
 inline Value getProperty(const Context& c, int elem, const char* prop)
@@ -383,6 +599,15 @@ struct VarSlot
     Value       def;         // the declared default, re-assigned on reseed
     Value (*get)(const HorizonCode::CompiledInstance*);
     void  (*set)(HorizonCode::CompiledInstance*, const Value&);
+    // Appended last, with defaults, so every slot() call written before Set/Map
+    // existed still compiles unchanged. `isArray` says "is a container" and
+    // these say which — and, for a map, what keys it. keyType matters to the
+    // GC: an object held only as a map KEY is reachable, and `type` describes
+    // the value side alone.
+    ContainerKind container = ContainerKind::None;
+    PinType       keyType = PinType::String;
+
+    ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
 // coerce<T> is a function template, so it cannot be partially specialized for
@@ -391,6 +616,10 @@ template <typename T> struct CoerceTo
 { static T from(const Value& v) { return coerce<T>(v); } };
 template <typename T> struct CoerceTo<Array<T>>
 { static Array<T> from(const Value& v) { return coerceArray<T>(v); } };
+template <typename T> struct CoerceTo<Set<T>>
+{ static Set<T> from(const Value& v) { return coerceSet<T>(v); } };
+template <typename K, typename V> struct CoerceTo<Map<K, V>>
+{ static Map<K, V> from(const Value& v) { return coerceMap<K, V>(v); } };
 
 template <auto M> struct SlotAccess;
 template <class C, class T, T C::*M>
@@ -404,10 +633,12 @@ struct SlotAccess<M>
 
 template <auto M>
 inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
-                    const char* typeName, Value def)
+                    const char* typeName, Value def,
+                    ContainerKind container = ContainerKind::None,
+                    PinType keyType = PinType::String)
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
-                    &SlotAccess<M>::get, &SlotAccess<M>::set };
+                    &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -464,8 +695,15 @@ inline void collectVarRefs(const VarSlots& slots, const HorizonCode::CompiledIns
 {
     for (const VarSlot& s : slots)
     {
-        if (s.type != PinType::Ref) continue;
+        // A map's KEYS are typed separately from its values (`type` is the value
+        // side), so an object held only as a key needs its own look — matching
+        // Runtime::retainOnlyReachableFrom on the interpreted side.
+        const bool refKeys = s.kind() == ContainerKind::Map && s.keyType == PinType::Ref;
+        if (s.type != PinType::Ref && !refKeys) continue;
         const Value v = s.get(self);
+        if (refKeys)
+            for (const Value& k : v.keys) if (k.ref != 0u) out.push_back(k.ref);
+        if (s.type != PinType::Ref) continue;
         if (!v.isArray) { if (v.ref != 0u) out.push_back(v.ref); }
         else for (const Value& it : v.items) if (it.ref != 0u) out.push_back(it.ref);
     }

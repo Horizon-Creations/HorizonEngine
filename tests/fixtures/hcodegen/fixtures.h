@@ -227,6 +227,56 @@ struct Fx
         g.variables.push_back(std::move(v));
     }
 
+    // ── Set / Map ────────────────────────────────────────────────────────────
+    // Both flags are always set together — see ContainerKind in HorizonCode.h.
+    using CK = HorizonCode::ContainerKind;
+    void setVarDecl(const std::string& name, PT t, std::vector<Value> items = {},
+                    const std::string& tn = {})
+    {
+        Variable v; v.name = name; v.type = t; v.isArray = true; v.container = CK::Set;
+        v.typeName = tn; v.defaultItems = std::move(items);
+        g.variables.push_back(std::move(v));
+    }
+    void mapVarDecl(const std::string& name, PT keyT, PT valT,
+                    std::vector<Value> keys = {}, std::vector<Value> values = {},
+                    const std::string& keyTn = {}, const std::string& tn = {})
+    {
+        Variable v; v.name = name; v.type = valT; v.isArray = true; v.container = CK::Map;
+        v.keyType = keyT; v.keyTypeName = keyTn; v.typeName = tn;
+        v.defaultKeys = std::move(keys); v.defaultItems = std::move(values);
+        g.variables.push_back(std::move(v));
+    }
+    int setOp(NT t, PT elem, const std::string& tn = {})
+    { Node n; n.type = t; n.propType = elem; n.typeName = tn;
+      n.isArray = true; n.container = CK::Set; return add(n); }
+    int mapOp(NT t, PT keyT, PT valT, const std::string& keyTn = {}, const std::string& tn = {})
+    { Node n; n.type = t; n.propType = valT; n.typeName = tn;
+      n.isArray = true; n.container = CK::Map;
+      n.keyType = keyT; n.keyTypeName = keyTn; return add(n); }
+    int getSetVar(const std::string& name, PT elem, const std::string& tn = {})
+    { Node n; n.type = NT::GetVariable; n.s = name; n.propType = elem; n.typeName = tn;
+      n.isArray = true; n.container = CK::Set; return add(n); }
+    int setSetVar(const std::string& name, PT elem, const std::string& tn = {})
+    { Node n; n.type = NT::SetVariable; n.s = name; n.propType = elem; n.typeName = tn;
+      n.isArray = true; n.container = CK::Set; return add(n); }
+    int getMapVar(const std::string& name, PT keyT, PT valT,
+                  const std::string& keyTn = {}, const std::string& tn = {})
+    { Node n; n.type = NT::GetVariable; n.s = name; n.propType = valT; n.typeName = tn;
+      n.isArray = true; n.container = CK::Map; n.keyType = keyT; n.keyTypeName = keyTn;
+      return add(n); }
+    int setMapVar(const std::string& name, PT keyT, PT valT,
+                  const std::string& keyTn = {}, const std::string& tn = {})
+    { Node n; n.type = NT::SetVariable; n.s = name; n.propType = valT; n.typeName = tn;
+      n.isArray = true; n.container = CK::Map; n.keyType = keyT; n.keyTypeName = keyTn;
+      return add(n); }
+    int forEachSet(PT elem, const std::string& tn = {})
+    { Node n; n.type = NT::ForEachSet; n.propType = elem; n.typeName = tn;
+      n.isArray = true; n.container = CK::Set; return add(n); }
+    int forEachMap(PT keyT, PT valT, const std::string& keyTn = {}, const std::string& tn = {})
+    { Node n; n.type = NT::ForEachMap; n.propType = valT; n.typeName = tn;
+      n.isArray = true; n.container = CK::Map; n.keyType = keyT; n.keyTypeName = keyTn;
+      return add(n); }
+
     HE::hccg::ClassSource doneKey(const std::string& key, const std::string& name)
     {
         HorizonCode::syncFunctionSignatures(g);
@@ -1966,6 +2016,266 @@ inline HE::hccg::ClassSource fxInputActions()
     return f.done("input_actions", "PlayerCharacter");
 }
 
+// ── Set<T> / Map<K,V> ────────────────────────────────────────────────────────
+// The fixture that pins the ORDERING CONTRACT (docs/horizoncode-containers-plan.md
+// §1.2). Every case here is one where a hash-backed or sorted container would
+// give a different answer than the interpreter's vectors — which is exactly the
+// divergence this harness exists to catch:
+//   • re-adding an element a set already has does not move it to the back
+//   • re-inserting a key a map already has updates in place and keeps its slot
+//   • removal preserves the relative order of everything else
+//   • Keys and Values come out index-parallel, in insertion order
+//   • the loops walk that same order
+// Deliberately built with keys whose insertion order is NOT their sorted order
+// ("z" before "a", Angry(5) before Calm(0)), so "it happens to match" is not a
+// way for a wrong implementation to pass.
+inline HE::hccg::ClassSource fxContainers()
+{
+    Fx f;
+    f.setVarDecl("tags", PT::String);
+    f.setVarDecl("tagsAfter", PT::String);
+    f.arrVar("tagsArr", PT::String, {});
+    f.var("tagCount", PT::Int);
+    f.var("hasA", PT::Bool);
+    f.var("clearedTags", PT::Int);
+    f.mapVarDecl("scores", PT::String, PT::Int);
+    f.arrVar("keys", PT::String, {});
+    f.arrVar("vals", PT::Int, {});
+    f.var("hitB", PT::Int);
+    f.var("missZ", PT::Int);
+    f.arrVar("keysAfter", PT::String, {});
+    f.var("stillHasB", PT::Bool);
+    f.var("emptyLen", PT::Int);
+    f.var("clearedLen", PT::Int);
+    // Seeded declarations: the duplicate in the set collapses to its FIRST
+    // occurrence, and the map's authored order survives (an alphabetical
+    // "alpha, zeta" would be the JSON-object bug this feature must not have).
+    f.setVarDecl("seedSet", PT::String,
+                 { Value::ofString("zeta"), Value::ofString("alpha"), Value::ofString("zeta") });
+    f.mapVarDecl("seedMap", PT::String, PT::Int,
+                 { Value::ofString("zeta"), Value::ofString("alpha") },
+                 { Value::ofInt(9), Value::ofInt(1) });
+    f.var("setOrder", PT::String);
+    f.var("mapOrder", PT::String);
+    // Enum elements/keys: the one type that is a plain int in generated C++ but
+    // a tagged Value at the boundary, so its container boxing has its own path.
+    f.setVarDecl("moods", PT::Enum, {}, kMoodEnum);
+    f.mapVarDecl("moodHp", PT::Enum, PT::Int, {}, {}, kMoodEnum);
+    f.var("angryHp", PT::Int);
+
+    // ── Set ops ──────────────────────────────────────────────────────────────
+    const int evS = f.event("SetOps");
+    const int sTags = f.setSetVar("tags", PT::String);
+    {
+        const int mk = f.setOp(NT::SetMake, PT::String);
+        int prev = mk;
+        for (const char* s : { "b", "a", "b", "c" })   // the second "b" is a no-op
+        {
+            const int a = f.setOp(NT::SetAdd, PT::String);
+            f.data(prev, 0, a, 0);
+            f.data(f.constS(s), 0, a, 1);
+            prev = a;
+        }
+        f.data(prev, 0, sTags, 0);
+    }
+    f.exec(evS, sTags);
+    const int sAfter = f.setSetVar("tagsAfter", PT::String);
+    {
+        const int rm = f.setOp(NT::SetRemove, PT::String);
+        f.data(f.getSetVar("tags", PT::String), 0, rm, 0);
+        f.data(f.constS("a"), 0, rm, 1);              // → b, c
+        f.data(rm, 0, sAfter, 0);
+    }
+    f.exec(sTags, sAfter);
+    const int sArr = f.setVar("tagsArr", PT::String, true);
+    {
+        const int ta = f.setOp(NT::SetToArray, PT::String);
+        f.data(f.getSetVar("tagsAfter", PT::String), 0, ta, 0);
+        f.data(ta, 0, sArr, 0);
+    }
+    f.exec(sAfter, sArr);
+    const int sCount = f.setVar("tagCount", PT::Int);
+    {
+        const int len = f.setOp(NT::SetLength, PT::String);
+        f.data(f.getSetVar("tags", PT::String), 0, len, 0);
+        f.data(len, 0, sCount, 0);
+    }
+    f.exec(sArr, sCount);
+    const int sHas = f.setVar("hasA", PT::Bool);
+    {
+        const int c = f.setOp(NT::SetContains, PT::String);
+        f.data(f.getSetVar("tagsAfter", PT::String), 0, c, 0);
+        f.data(f.constS("a"), 0, c, 1);               // removed above → false
+        f.data(c, 0, sHas, 0);
+    }
+    f.exec(sCount, sHas);
+    const int sCleared = f.setVar("clearedTags", PT::Int);
+    {
+        const int cl = f.setOp(NT::SetClear, PT::String);
+        f.data(f.getSetVar("tags", PT::String), 0, cl, 0);
+        const int len = f.setOp(NT::SetLength, PT::String);
+        f.data(cl, 0, len, 0);
+        f.data(len, 0, sCleared, 0);
+    }
+    f.exec(sHas, sCleared);
+
+    // ── Map ops ──────────────────────────────────────────────────────────────
+    const int evM = f.event("MapOps");
+    const int sScores = f.setMapVar("scores", PT::String, PT::Int);
+    {
+        const int mk = f.mapOp(NT::MapMake, PT::String, PT::Int);
+        int prev = mk;
+        const struct { const char* k; int v; } pairs[] =
+            { { "b", 1 }, { "a", 2 }, { "b", 3 } };   // "b" updates IN PLACE
+        for (const auto& p : pairs)
+        {
+            const int st = f.mapOp(NT::MapSet, PT::String, PT::Int);
+            f.data(prev, 0, st, 0);
+            f.data(f.constS(p.k), 0, st, 1);
+            f.data(f.constI(p.v), 0, st, 2);
+            prev = st;
+        }
+        f.data(prev, 0, sScores, 0);
+    }
+    f.exec(evM, sScores);
+    const int sKeys = f.setVar("keys", PT::String, true);
+    {
+        const int k = f.mapOp(NT::MapKeys, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, k, 0);
+        f.data(k, 0, sKeys, 0);
+    }
+    f.exec(sScores, sKeys);
+    const int sVals = f.setVar("vals", PT::Int, true);
+    {
+        const int v = f.mapOp(NT::MapValues, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, v, 0);
+        f.data(v, 0, sVals, 0);
+    }
+    f.exec(sKeys, sVals);
+    const int sHit = f.setVar("hitB", PT::Int);
+    {
+        const int gg = f.mapOp(NT::MapGet, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, gg, 0);
+        f.data(f.constS("b"), 0, gg, 1);
+        f.data(f.constI(-1), 0, gg, 2);
+        f.data(gg, 0, sHit, 0);
+    }
+    f.exec(sVals, sHit);
+    const int sMiss = f.setVar("missZ", PT::Int);
+    {
+        const int gg = f.mapOp(NT::MapGet, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, gg, 0);
+        f.data(f.constS("zz"), 0, gg, 1);
+        f.data(f.constI(-1), 0, gg, 2);               // absent → the Default pin
+        f.data(gg, 0, sMiss, 0);
+    }
+    f.exec(sHit, sMiss);
+    const int sKA = f.setVar("keysAfter", PT::String, true);
+    {
+        const int rm = f.mapOp(NT::MapRemove, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, rm, 0);
+        f.data(f.constS("b"), 0, rm, 1);              // → just "a"
+        const int k = f.mapOp(NT::MapKeys, PT::String, PT::Int);
+        f.data(rm, 0, k, 0);
+        f.data(k, 0, sKA, 0);
+        const int has = f.mapOp(NT::MapContains, PT::String, PT::Int);
+        f.data(rm, 0, has, 0);
+        f.data(f.constS("b"), 0, has, 1);
+        const int sSt = f.setVar("stillHasB", PT::Bool);
+        f.data(has, 0, sSt, 0);
+        f.exec(sMiss, sKA);
+        f.exec(sKA, sSt);
+        // An UNWIRED Map input: its zero is an empty map, so Length is 0 —
+        // not whatever a scalar zero would read out of the wrong field.
+        const int len = f.mapOp(NT::MapLength, PT::String, PT::Int);
+        const int sEl = f.setVar("emptyLen", PT::Int);
+        f.data(len, 0, sEl, 0);
+        f.exec(sSt, sEl);
+        const int cl = f.mapOp(NT::MapClear, PT::String, PT::Int);
+        f.data(f.getMapVar("scores", PT::String, PT::Int), 0, cl, 0);
+        const int len2 = f.mapOp(NT::MapLength, PT::String, PT::Int);
+        f.data(cl, 0, len2, 0);
+        const int sCl = f.setVar("clearedLen", PT::Int);
+        f.data(len2, 0, sCl, 0);
+        f.exec(sEl, sCl);
+    }
+
+    // ── Iteration ────────────────────────────────────────────────────────────
+    // Both loops append what they visit to a string, so the ASSERTION is the
+    // order itself: "zetaalpha", not a multiset that any order would satisfy.
+    const int evI = f.event("Iterate");
+    const int fes = f.forEachSet(PT::String);
+    f.data(f.getSetVar("seedSet", PT::String), 0, fes, 0);
+    f.exec(evI, fes);
+    {
+        const int s = f.setVar("setOrder", PT::String);
+        const int cat = f.op(NT::Concat);
+        f.data(f.getVar("setOrder", PT::String), 0, cat, 0);
+        f.data(fes, 0, cat, 1);           // Element
+        f.data(cat, 0, s, 0);
+        f.exec(fes, s, 0);                // Body
+    }
+    const int fem = f.forEachMap(PT::String, PT::Int);
+    f.data(f.getMapVar("seedMap", PT::String, PT::Int), 0, fem, 0);
+    f.exec(fes, fem, 1);                  // Done → the map loop
+    {
+        const int s = f.setVar("mapOrder", PT::String);
+        const int cat1 = f.op(NT::Concat);
+        f.data(f.getVar("mapOrder", PT::String), 0, cat1, 0);
+        f.data(fem, 0, cat1, 1);          // Key
+        const int ts = f.op(NT::ToString);
+        f.data(fem, 1, ts, 0);            // Value
+        const int cat2 = f.op(NT::Concat);
+        f.data(cat1, 0, cat2, 0);
+        f.data(ts, 0, cat2, 1);
+        f.data(cat2, 0, s, 0);
+        f.exec(fem, s, 0);                // Body
+    }
+
+    // ── Enum elements and enum keys ──────────────────────────────────────────
+    const int evE = f.event("EnumContainers");
+    const int sMoods = f.setSetVar("moods", PT::Enum, kMoodEnum);
+    {
+        const int mk = f.setOp(NT::SetMake, PT::Enum, kMoodEnum);
+        const int a1 = f.setOp(NT::SetAdd, PT::Enum, kMoodEnum);
+        f.data(mk, 0, a1, 0);
+        f.data(f.constEnum(kMoodEnum, 5), 0, a1, 1);      // Angry
+        const int a2 = f.setOp(NT::SetAdd, PT::Enum, kMoodEnum);
+        f.data(a1, 0, a2, 0);
+        f.data(f.constEnum(kMoodEnum, 0), 0, a2, 1);      // Calm — AFTER Angry
+        const int a3 = f.setOp(NT::SetAdd, PT::Enum, kMoodEnum);
+        f.data(a2, 0, a3, 0);
+        f.data(f.constEnum(kMoodEnum, 5), 0, a3, 1);      // Angry again → no-op
+        f.data(a3, 0, sMoods, 0);
+    }
+    f.exec(evE, sMoods);
+    const int sMoodHp = f.setMapVar("moodHp", PT::Enum, PT::Int, kMoodEnum);
+    {
+        const int mk = f.mapOp(NT::MapMake, PT::Enum, PT::Int, kMoodEnum);
+        const int s1 = f.mapOp(NT::MapSet, PT::Enum, PT::Int, kMoodEnum);
+        f.data(mk, 0, s1, 0);
+        f.data(f.constEnum(kMoodEnum, 5), 0, s1, 1);
+        f.data(f.constI(11), 0, s1, 2);
+        const int s2 = f.mapOp(NT::MapSet, PT::Enum, PT::Int, kMoodEnum);
+        f.data(s1, 0, s2, 0);
+        f.data(f.constEnum(kMoodEnum, 1), 0, s2, 1);      // Happy
+        f.data(f.constI(22), 0, s2, 2);
+        f.data(s2, 0, sMoodHp, 0);
+    }
+    f.exec(sMoods, sMoodHp);
+    const int sAngry = f.setVar("angryHp", PT::Int);
+    {
+        const int gg = f.mapOp(NT::MapGet, PT::Enum, PT::Int, kMoodEnum);
+        f.data(f.getMapVar("moodHp", PT::Enum, PT::Int, kMoodEnum), 0, gg, 0);
+        f.data(f.constEnum(kMoodEnum, 5), 0, gg, 1);
+        f.data(f.constI(-1), 0, gg, 2);
+        f.data(gg, 0, sAngry, 0);
+    }
+    f.exec(sMoodHp, sAngry);
+
+    return f.done("containers");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -1980,7 +2290,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxCastTarget(), fxCasts(),
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
-        fxInputActions(),
+        fxInputActions(), fxContainers(),
     };
 }
 
