@@ -35,14 +35,22 @@ struct Harness
 	GraphEditor::QuickSpawnCtx lastSpawn;
 	int  addMenuCalls = 0;
 	int  nextId = 1;
+	// Give every node a SECOND input pin (id 2, one row below the first). The
+	// hit-test cases need two neighbouring targets to prove the nearest centre
+	// wins; the shortcut cases leave it off and keep the original two-pin node.
+	bool twoInputs = false;
+	// Pin ids the host was asked to clear (Alt+click on a pin).
+	std::vector<int> clearedPins;
 
 	// Two pins per node: one exec-in (id 0) and one exec-out (id 1).
-	static std::vector<GraphEditor::Pin> pinsOf()
+	std::vector<GraphEditor::Pin> pinsOf() const
 	{
-		return {
+		std::vector<GraphEditor::Pin> p = {
 			{ 0, "In",  IM_COL32_WHITE, true,  true },
 			{ 1, "Out", IM_COL32_WHITE, false, true },
 		};
+		if (twoInputs) p.push_back({ 2, "In2", IM_COL32_WHITE, true, true });
+		return p;
 	}
 
 	Harness()
@@ -57,7 +65,8 @@ struct Harness
 		model.setPos  = [this](int id, float x, float y){ for (auto& n : nodes) if (n.id == id) { n.x = x; n.y = y; } };
 		model.title   = [](int id){ return "N" + std::to_string(id); };
 		model.headerColor = [](int){ return IM_COL32(80, 80, 90, 255); };
-		model.pins    = [](int){ return pinsOf(); };
+		model.pins    = [this](int){ return pinsOf(); };
+		model.clearPinLinks = [this](int, int pin, bool){ clearedPins.push_back(pin); };
 		model.links   = [this]{ return links; };
 		model.connect = [this](int oN, int oP, int iN, int iP){ links.push_back({ oN, oP, iN, iP }); return true; };
 		model.removeNode = [this](int id){
@@ -381,4 +390,163 @@ TEST_CASE("GraphEditor shortcuts: a text field takes the keyboard away")
 	ctx.frame(h);
 
 	CHECK(h.spawnCalls == 0);
+}
+
+// ── Hit geometry ─────────────────────────────────────────────────────────────
+// The same headless canvas, driven at the pixel level instead of the key level.
+// A pin is drawn as a 5 px dot centred ON the node's edge, so half of it hangs
+// over empty canvas — and the pin test used to run only for a cursor INSIDE the
+// node rectangle, which made that outer half dead. On an input pin that is the
+// half the cursor arrives from, so the pins hardest to hit were the ones a wire
+// ends at. Nothing here can be seen in a screenshot; the mouse is the only
+// instrument that can tell a live target from a dead one.
+
+namespace
+{
+// Centre of a node's Nth input pin, in screen space: the left edge, half a row
+// below the title bar. Same rule the canvas lays pins out with.
+ImVec2 inputPin(const Ctx& c, const Harness& h, const TestNode& n, int row)
+{
+	return c.toScreen(h, n.x,
+		n.y + GraphEditor::kTitleH + (static_cast<float>(row) + 0.5f) * GraphEditor::kRowH);
+}
+ImVec2 outputPin(const Ctx& c, const Harness& h, const TestNode& n, int row)
+{
+	return c.toScreen(h, n.x + GraphEditor::kNodeW,
+		n.y + GraphEditor::kTitleH + (static_cast<float>(row) + 0.5f) * GraphEditor::kRowH);
+}
+} // namespace
+
+TEST_CASE("GraphEditor hit-test: the outer half of an input pin is live")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n3 = h.find(3);
+	REQUIRE(n3 != nullptr);
+	// 8 px LEFT of the pin's centre: inside the hit radius, outside the node
+	// box. Before the pin test moved out of the node loop this press fell
+	// through to the canvas and started a box-select.
+	const ImVec2 pin = inputPin(ctx, h, *n3, 0);
+	REQUIRE(8.0f < GraphEditor::pinHitRadius(h.state.zoom));
+	ctx.mouse(ImVec2(pin.x - 8.0f, pin.y));
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+
+	REQUIRE(h.state.linkSrcNode == 3);
+	CHECK(h.state.linkSrcPin == 0);
+	CHECK(h.state.linkSrcInput);
+	CHECK_FALSE(h.state.boxSel);        // the same press must not do both
+
+	// Drop it on node 1's output → a real link, oriented output→input.
+	const TestNode* n1 = h.find(1);
+	REQUIRE(n1 != nullptr);
+	ctx.mouse(outputPin(ctx, h, *n1, 0));
+	ctx.frame(h);
+	ctx.button(false);
+	ctx.frame(h);
+
+	REQUIRE(h.links.size() == 2);
+	CHECK(h.links.back() == std::array<int,4>{ 1, 1, 3, 0 });
+}
+
+TEST_CASE("GraphEditor hit-test: a click between two pins takes the closer one")
+{
+	Ctx ctx;
+	Harness h;
+	h.twoInputs = true;                 // two input rows, kRowH apart
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n2 = h.find(2);
+	REQUIRE(n2 != nullptr);
+	const ImVec2 first  = inputPin(ctx, h, *n2, 0);
+	const ImVec2 second = inputPin(ctx, h, *n2, 1);
+	REQUIRE(second.y - first.y == doctest::Approx(GraphEditor::kRowH));
+
+	// 12 px below the first pin is 8 px above the second: both are within reach
+	// at low zoom, and the closer centre has to win.
+	ctx.mouse(ImVec2(first.x, first.y + 12.0f));
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+
+	REQUIRE(h.state.linkSrcNode == 2);
+	CHECK(h.state.linkSrcPin == 2);     // the second input, not the first
+	ctx.button(false);
+	ctx.frame(h);
+}
+
+TEST_CASE("GraphEditor hit-test: pins stay separable when the canvas is zoomed out")
+{
+	Ctx ctx;
+	Harness h;
+	h.twoInputs = true;
+	h.state.zoom = 0.4f;                // rows only 8 px apart on screen
+	ctx.settle(h, emptySpot(ctx, h));
+
+	// The floor keeps the target hittable at all, which necessarily makes the
+	// two circles overlap — the point of the nearest-centre rule.
+	REQUIRE(GraphEditor::pinHitRadius(0.4f) > GraphEditor::kRowH * 0.4f);
+
+	const TestNode* n2 = h.find(2);
+	REQUIRE(n2 != nullptr);
+	const ImVec2 second = inputPin(ctx, h, *n2, 1);
+	ctx.mouse(ImVec2(second.x, second.y + 1.0f));
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+
+	REQUIRE(h.state.linkSrcNode == 2);
+	CHECK(h.state.linkSrcPin == 2);
+	ctx.button(false);
+	ctx.frame(h);
+}
+
+TEST_CASE("GraphEditor hit-test: the node border belongs to the node")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n2 = h.find(2);
+	REQUIRE(n2 != nullptr);
+	// Just outside the top-left corner of the box, and far enough above the
+	// first pin row that no pin is in reach — a click here used to deselect.
+	const ImVec2 corner = ctx.toScreen(h, n2->x, n2->y);
+	ctx.mouse(ImVec2(corner.x - 2.0f, corner.y + 2.0f));
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	ctx.button(false);
+	ctx.frame(h);
+
+	CHECK(h.state.selected == 2);
+	CHECK(h.state.linkSrcNode == 0);
+}
+
+TEST_CASE("GraphEditor hit-test: Alt+click on a pin still clears its links")
+{
+	Ctx ctx;
+	Harness h;
+	ctx.settle(h, emptySpot(ctx, h));
+
+	const TestNode* n2 = h.find(2);
+	REQUIRE(n2 != nullptr);
+	const ImVec2 pin = inputPin(ctx, h, *n2, 0);
+	ctx.mouse(ImVec2(pin.x - 6.0f, pin.y));
+	ctx.frame(h);
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Alt, true);
+	ctx.frame(h);
+	ctx.button(true);
+	ctx.frame(h);
+	ctx.button(false);
+	ImGui::GetIO().AddKeyEvent(ImGuiMod_Alt, false);
+	ctx.frame(h);
+
+	REQUIRE(h.clearedPins.size() == 1);
+	CHECK(h.clearedPins.front() == 0);
+	CHECK(h.state.linkSrcNode == 0);    // clearing is not the start of a drag
+	CHECK(h.state.dragNode == 0);       // …and it must not move the node either
 }

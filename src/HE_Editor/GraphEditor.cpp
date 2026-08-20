@@ -32,6 +32,18 @@ ImU32 categoryColor(const char* category)
     return IM_COL32(110, 110, 70, 255);
 }
 
+float pinHitRadius(float zoom)
+{
+    // Grows with the zoom like the dot itself, but never below a radius the
+    // hand can actually aim at. 10 px at zoom 1 against a 5 px dot: double the
+    // visible target, and exactly half of kRowH — so at zoom 1 the circles of
+    // two neighbouring rows touch without overlapping, which is the largest a
+    // pin can get before it starts arguing with the pin below it. Below zoom 1
+    // the floor does make them overlap; that is what the nearest-centre rule in
+    // pinAt is for.
+    return std::max(kPinR * zoom + 5.0f, kRowH * 0.5f);
+}
+
 namespace
 {
 // Exec-less nodes (pure getters / literals) draw compactly: no colored header
@@ -377,23 +389,76 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         drawLink(dl, *a, *b, exec ? IM_COL32(235,235,235,220) : col, exec ? 3.0f : 2.0f);
     }
 
-    // ── Pin hit-test (topmost node first) ────────────────────────────────────
+    // ── Pin hit-test (nearest centre wins) ───────────────────────────────────
+    // NOT "first circle the cursor happens to be inside": the hit radius is
+    // wider than the gap between two rows at low zoom, so the circles overlap
+    // and a first-match test would hand every click in the overlap to whichever
+    // node was drawn last. Nearest centre is the rule that lets the targets grow
+    // without any pin stealing its neighbour's clicks.
+    //
+    // Ties (a cursor exactly between two pins) go to the topmost node, which is
+    // why the walk is still back-to-front and the comparison strict.
     auto pinAt = [&](const ImVec2& m, int& outNode, int& outPin, bool& outInput) -> bool
     {
-        const float r = kPinR * st.zoom + 4.0f;
+        const float r = pinHitRadius(st.zoom);
+        float best = std::numeric_limits<float>::max();
+        bool  found = false;
         for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
             for (size_t i = 0; i < it->pins.size(); ++i)
             {
                 const ImVec2 pp = it->pinPos[i];
                 const float dx = m.x - pp.x, dy = m.y - pp.y;
-                if (dx*dx + dy*dy <= r*r)
-                { outNode = it->id; outPin = it->pins[i].id; outInput = it->pins[i].input; return true; }
+                const float d2 = dx*dx + dy*dy;
+                if (d2 > r*r || d2 >= best) continue;
+                best = d2;
+                outNode = it->id; outPin = it->pins[i].id; outInput = it->pins[i].input;
+                found = true;
             }
-        return false;
+        return found;
     };
 
-    // ── Nodes ────────────────────────────────────────────────────────────────
+    // ── Pin grab, BEFORE the node loop ───────────────────────────────────────
+    // A pin sits centred on the node's edge, so half of its hit circle is
+    // outside the node rectangle. This used to live inside the node loop behind
+    // an `overNode` test, which made that outer half dead — on an INPUT pin
+    // that is the half the cursor comes from, which is why inputs were the
+    // hardest thing in the editor to hit. The test runs over all nodes here, so
+    // where the cursor is relative to any node's box no longer matters.
     bool consumed = false;
+    if (interact && st.linkSrcNode == 0 && st.dragNode == 0 && !st.boxSel &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        int pn = 0, pp2 = 0; bool pin_in = false;
+        if (pinAt(mouse, pn, pp2, pin_in))
+        {
+            st.linkGrab = false;
+            if (ImGui::GetIO().KeyAlt) { if (model.clearPinLinks) { model.clearPinLinks(pn, pp2, pin_in); changed = true; } }
+            else if (pin_in)
+            {
+                // Grab-and-drag: clicking a CONNECTED input pin detaches its
+                // link and re-anchors the drag to the source, so you can drop
+                // it elsewhere to rewire or on empty canvas to delete it.
+                int srcN = 0, srcP = 0; bool found = false;
+                for (const auto& l : links)
+                    if (l[2] == pn && l[3] == pp2) { srcN = l[0]; srcP = l[1]; found = true; break; }
+                if (found)
+                {
+                    if (model.clearPinLinks) model.clearPinLinks(pn, pp2, true);
+                    st.linkSrcNode = srcN; st.linkSrcPin = srcP; st.linkSrcInput = false;
+                    st.linkGrab = true; changed = true;
+                }
+                else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = true; }
+            }
+            else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = false; }
+            // The same press must not also start a box-select or drop a
+            // quick-spawn node: both of those read "no node under the cursor" as
+            // "empty canvas", and a pin grab off the outer half of a pin is
+            // exactly that case.
+            consumed = true;
+        }
+    }
+
+    // ── Nodes ────────────────────────────────────────────────────────────────
     int hoverNodeNow = 0; // topmost node under the cursor (nodes draw back-to-front)
     for (const Drawn& n : nodes)
     {
@@ -542,8 +607,10 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             ImGui::PopID();
         }
 
-        const bool overNode = mouse.x >= n.pos.x && mouse.x <= br.x &&
-                              mouse.y >= n.pos.y && mouse.y <= br.y;
+        // Grown by kNodeHitPad: the border pixel itself belongs to the node, not
+        // to the canvas behind it.
+        const bool overNode = mouse.x >= n.pos.x - kNodeHitPad && mouse.x <= br.x + kNodeHitPad &&
+                              mouse.y >= n.pos.y - kNodeHitPad && mouse.y <= br.y + kNodeHitPad;
         if (overNode) hoverNodeNow = n.id;
 
         // Double-click a node (open a referenced function, …).
@@ -566,56 +633,31 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             consumed = true;
         }
 
-        // Body click → select + start move.
-        if (interact && st.linkSrcNode == 0 && st.dragNode == 0 && !st.boxSel &&
+        // Body click → select + start move. A pin grab was already resolved
+        // above and consumed the press, so this is the "not a pin" case.
+        if (interact && !consumed && st.linkSrcNode == 0 && st.dragNode == 0 && !st.boxSel &&
             overNode && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
         {
-            int pn = 0, pp2 = 0; bool pin_in = false;
-            if (pinAt(mouse, pn, pp2, pin_in) && pn == n.id)
+            const bool add = ImGui::GetIO().KeyShift && model.multiSelect;
+            const bool inSel =
+                std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
+            st.selectClickNode = 0;
+            if (add)
             {
-                st.linkGrab = false;
-                if (ImGui::GetIO().KeyAlt) { if (model.clearPinLinks) { model.clearPinLinks(pn, pp2, pin_in); changed = true; } }
-                else if (pin_in)
-                {
-                    // Grab-and-drag: clicking a CONNECTED input pin detaches its
-                    // link and re-anchors the drag to the source, so you can drop
-                    // it elsewhere to rewire or on empty canvas to delete it.
-                    int srcN = 0, srcP = 0; bool found = false;
-                    for (const auto& l : links)
-                        if (l[2] == pn && l[3] == pp2) { srcN = l[0]; srcP = l[1]; found = true; break; }
-                    if (found)
-                    {
-                        if (model.clearPinLinks) model.clearPinLinks(pn, pp2, true);
-                        st.linkSrcNode = srcN; st.linkSrcPin = srcP; st.linkSrcInput = false;
-                        st.linkGrab = true; changed = true;
-                    }
-                    else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = true; }
-                }
-                else { st.linkSrcNode = pn; st.linkSrcPin = pp2; st.linkSrcInput = false; }
+                if (!inSel) st.selection.push_back(n.id);
             }
-            else
+            else if (inSel)
             {
-                const bool add = ImGui::GetIO().KeyShift && model.multiSelect;
-                const bool inSel =
-                    std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
-                st.selectClickNode = 0;
-                if (add)
-                {
-                    if (!inSel) st.selection.push_back(n.id);
-                }
-                else if (inSel)
-                {
-                    // Clicked a node already in the multi-selection: keep the whole
-                    // group so the drag moves all of it. A click with no drag
-                    // collapses to just this node (on mouse release).
-                    st.selectClickNode = n.id;
-                }
-                else { st.selection.clear(); st.selection.push_back(n.id); }
-                st.selected = n.id;
-                float gx = 0, gy = 0; model.getPos(n.id, gx, gy);
-                st.dragNode = n.id; st.dragStartMouse = mouse; st.dragStartPos = ImVec2(gx, gy);
-                st.dragMoved = false;
+                // Clicked a node already in the multi-selection: keep the whole
+                // group so the drag moves all of it. A click with no drag
+                // collapses to just this node (on mouse release).
+                st.selectClickNode = n.id;
             }
+            else { st.selection.clear(); st.selection.push_back(n.id); }
+            st.selected = n.id;
+            float gx = 0, gy = 0; model.getPos(n.id, gx, gy);
+            st.dragNode = n.id; st.dragStartMouse = mouse; st.dragStartPos = ImVec2(gx, gy);
+            st.dragMoved = false;
             consumed = true;
         }
     }

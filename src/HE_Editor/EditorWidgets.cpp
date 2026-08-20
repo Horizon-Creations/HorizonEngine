@@ -1,10 +1,12 @@
 #include "EditorWidgets.h"
 #include "EditorApplication.h"      // AppContext
 #include "EditorUndo.h"
+#include "HcEditorUtil.h"           // listAssets + the picker's search filter
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Logger.h>
 #include <imgui_internal.h>          // OpenPopupStack — which windows are modal
+#include <misc/cpp/imgui_stdlib.h>   // InputText over a std::string (picker search)
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cfloat>
@@ -41,6 +43,15 @@ namespace
 			default:                                  return cm.assetType(id) == want;
 		}
 	}
+
+	// ── Asset-picker popup state ─────────────────────────────────────────────
+	// One popup is open at a time (ImGui guarantees it for a popup opened from
+	// an item), so one set of these is enough — keyed by the slot's id suffix so
+	// a stale list can never be drawn under a different slot's popup.
+	std::string                        s_pickerOwner;
+	std::vector<HcEditorUtil::ClassRef> s_pickerItems;
+	std::string                        s_pickerQuery;
+	bool                               s_pickerFocus = false;
 }
 
 AssetDrop acceptAssetDrop(AppContext& ctx, HE::AssetType want, const char* rejectNoun)
@@ -90,14 +101,82 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		ImGui::TextUnformatted(label);
 		ImGui::SameLine();
 	}
-	ImGui::Button((shown + "##" + idSuffix).c_str());
 
 	SlotAction action = SlotAction::None;
+	const std::string popupId = std::string("##pickasset_") + idSuffix;
+
+	// The slot button now OPENS A PICKER as well as accepting a drop. Dropping
+	// was the only way to fill a slot, and a drop needs a Content Browser to
+	// drag from — which the asset tabs (the HorizonCode class Viewport, the
+	// widget designer) do not have next to them, since they fill the whole tab
+	// area. In those panels an empty Mesh slot was simply unfillable.
+	if (ImGui::Button((shown + "##" + idSuffix).c_str()))
+	{
+		// Scanned once, when the popup opens: the walk sniffs every .hasset
+		// header under both content roots, which is fine once and wasteful
+		// sixty times a second.
+		s_pickerOwner = idSuffix ? idSuffix : "";
+		s_pickerItems = HcEditorUtil::listAssets(ctx.contentManager, want);
+		s_pickerQuery.clear();
+		s_pickerFocus = true;
+		ImGui::OpenPopup(popupId.c_str());
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Click to pick an asset, or drop one from the Content Browser");
+
 	if (const AssetDrop drop = acceptAssetDrop(ctx, want, rejectNoun))
 	{
 		if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
 		target = drop.id;
 		action = SlotAction::Assigned;
+	}
+
+	if (ImGui::BeginPopup(popupId.c_str()))
+	{
+		ImGui::SetNextItemWidth(280.0f);
+		if (s_pickerFocus) { ImGui::SetKeyboardFocusHere(); s_pickerFocus = false; }
+		ImGui::InputTextWithHint("##q", "Search", &s_pickerQuery);
+
+		ImGui::BeginChild("##list", ImVec2(280.0f, 220.0f), false);
+		if (target != HE::UUID{} &&
+		    ImGui::Selectable("(none)", false))
+		{
+			if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+			target = HE::UUID{};
+			action = SlotAction::Cleared;
+			ImGui::CloseCurrentPopup();
+		}
+		int shownCount = 0;
+		if (s_pickerOwner == (idSuffix ? idSuffix : ""))
+			for (const auto& a : s_pickerItems)
+			{
+				if (!HcEditorUtil::assetMatchesQuery(a.label, a.path, s_pickerQuery)) continue;
+				++shownCount;
+				if (ImGui::Selectable((a.label + "##" + a.path).c_str()) && ctx.contentManager)
+				{
+					const HE::UUID id = ctx.contentManager->loadAsset(a.path);
+					// Type-checked exactly like a drop: the scan sniffs headers,
+					// and a header that lied would otherwise put a wrong-typed
+					// UUID into the slot.
+					if (id != HE::UUID{} && resolveAsset(*ctx.contentManager, id, want, nullptr))
+					{
+						if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+						target = id;
+						action = SlotAction::Assigned;
+					}
+					else
+						HE_LOG_WARN(Editor, "Editor: could not load asset '%s'", a.path.c_str());
+					ImGui::CloseCurrentPopup();
+				}
+				// The list shows the file stem, so the path is what the hover is
+				// for — two assets called "Idle" are told apart by nothing else.
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", a.path.c_str());
+			}
+		if (shownCount == 0)
+			ImGui::TextDisabled(s_pickerItems.empty() ? "(no assets of this type in the project)"
+			                                          : "(nothing matches)");
+		ImGui::EndChild();
+		ImGui::EndPopup();
 	}
 
 	if (showClear && target != HE::UUID{})

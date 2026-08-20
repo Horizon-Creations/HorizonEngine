@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/Enums.h>
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,6 +26,44 @@ namespace HcEditorUtil
 		std::uint64_t bytes = 0;
 	};
 	std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type);
+
+	// Does this asset match what someone typed into a picker's search box?
+	// Case-insensitive, and every whitespace-separated term has to appear in
+	// either the display name or the path — so "char idle" finds
+	// "Characters/Hero/Idle" without anyone having to type it in order. An
+	// empty query matches everything, which is what an untouched search field
+	// has to mean.
+	//
+	// Pure string work on purpose: it is the rule that decides whether an asset
+	// is reachable at all in a searchable dropdown, and it is the one piece of
+	// such a dropdown that can be asserted without a window. Inline so a test
+	// can reach it without linking the rest of this unit (which wants ImGui and
+	// a ContentManager).
+	inline bool assetMatchesQuery(const std::string& label, const std::string& path,
+	                              const std::string& query)
+	{
+		const auto lower = [](std::string s)
+		{
+			for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			return s;
+		};
+		const std::string hay = lower(label) + '\n' + lower(path);
+		const std::string q   = lower(query);
+
+		// Term by term, all of them required. Splitting on whitespace instead of
+		// matching the query as one string is what makes "char idle" find
+		// "Characters/Hero/Idle": nobody remembers a path in order, they
+		// remember two words out of it.
+		for (size_t i = 0; i < q.size(); )
+		{
+			while (i < q.size() && std::isspace(static_cast<unsigned char>(q[i]))) ++i;
+			const size_t start = i;
+			while (i < q.size() && !std::isspace(static_cast<unsigned char>(q[i]))) ++i;
+			if (i == start) break;   // trailing whitespace, no term left
+			if (hay.find(q.substr(start, i - start)) == std::string::npos) return false;
+		}
+		return true;   // no terms at all (an untouched search box) matches everything
+	}
 	// Convenience wrapper for the Create Object class picker.
 	std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm);
 	// Every .hescene under the project root, as project-relative paths (e.g.

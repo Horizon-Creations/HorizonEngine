@@ -147,6 +147,7 @@ add_executable(HorizonEditor WIN32
 	HcGraphHost.cpp
 	HcGraphShortcuts.cpp
 	GraphEditor.cpp
+	PreviewPick.cpp
 	CollabActivityBar.cpp
 	CollabController.cpp
 	CollabDocSync.cpp

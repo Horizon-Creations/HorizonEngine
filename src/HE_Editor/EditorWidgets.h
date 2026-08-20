@@ -47,6 +47,13 @@ enum class SlotAction { None, Assigned, Cleared };
 // panel shows many slots in one window. Passing label = nullptr draws the
 // button alone.
 //
+// CLICKING the button opens a searchable picker over every asset of `want` in
+// the project — the same scan the Content Browser filters by type with. That
+// exists because a drop needs something to drag FROM: the asset tabs (the
+// HorizonCode class Viewport, the widget designer) fill the whole tab area and
+// have no Content Browser beside them, which left every slot in them empty for
+// good. Both routes end in the same assignment, undo snapshot included.
+//
 // Both the assign and the clear take an undo snapshot BEFORE mutating: the slot
 // points a component at an asset, which is a scene edit. `undo = false` is for
 // slots that hold panel-local preview state (a scrub clip is not a scene edit).

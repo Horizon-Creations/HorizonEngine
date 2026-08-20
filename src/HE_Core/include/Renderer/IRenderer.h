@@ -6,6 +6,8 @@
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
 #include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>   // worldPreviewProjection (below)
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -45,6 +47,43 @@ struct WorldPreviewEnv
     float cloudCoverage = 0.35f;   // feeds the same overcast dimming the scene uses
     bool  grid          = true;    // ground plane + grid + origin marker
 };
+
+// ─── World-preview projection ───────────────────────────────────────────────
+// THE projection every RenderWorldPreview builds, and the one its caller has to
+// be able to rebuild: the panel draws gizmos, collider outlines and its picking
+// ray in the same space the backend just rendered in, and a second, subtly
+// different copy of this rule puts the handles next to the object instead of on
+// it. One function, called by the backends and by the editor.
+//
+// The clamp is the part that is not just glm::perspective. `fovDegrees` is a
+// VERTICAL angle, so on a wide pane the horizontal angle is the one that grows:
+// a scene camera's 60° vertical becomes 100° horizontal at 3:1, and a ~100°
+// lens is a wide-angle lens — straight edges near the border stretch, and the
+// stretch slides across the object as the camera moves, which is exactly the
+// "the view is curved" an asset viewport gets reported for. Capping the
+// HORIZONTAL angle (and letting the vertical one narrow to keep it) is the
+// standard Hor+ rule; below the cap nothing changes at all.
+//
+// Narrowing is safe for culling: the drawn frustum only ever SHRINKS against
+// the one the extractor culls with, so nothing visible can be culled away.
+constexpr float kWorldPreviewMaxHorizontalFov = 75.0f;
+
+inline float worldPreviewVerticalFov(float fovDegrees, float aspect)
+{
+    constexpr float kDeg2Rad = 3.14159265358979323846f / 180.0f;
+    if (!(aspect > 0.0f)) return fovDegrees;
+    const float maxTanX = std::tan(kWorldPreviewMaxHorizontalFov * 0.5f * kDeg2Rad);
+    const float tanY    = std::tan(fovDegrees * 0.5f * kDeg2Rad);
+    if (tanY * aspect <= maxTanX) return fovDegrees;   // the pane is not wide enough to matter
+    return 2.0f * std::atan(maxTanX / aspect) / kDeg2Rad;
+}
+
+inline glm::mat4 worldPreviewProjection(const EditorCameraOverride& camera, float aspect)
+{
+    return glm::perspective(
+        glm::radians(worldPreviewVerticalFov(camera.fovDegrees, aspect)),
+        aspect, camera.nearPlane, camera.farPlane);
+}
 
 // One fully-resolved particle for RenderParticlePreview — position/size/color/
 // alpha already interpolated over the particle's lifetime by the caller (the

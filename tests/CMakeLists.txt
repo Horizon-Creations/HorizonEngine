@@ -17,6 +17,7 @@ add_executable(he_tests
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
     test_graph_editor_keys.cpp
+    test_preview_pick.cpp
     test_editor_input.cpp
     test_editor_row_widgets.cpp
     test_editor_theme.cpp
@@ -156,6 +157,11 @@ add_executable(he_tests
     # target stays out of this — it is the backends that drag the GPU in, not
     # ImGui itself.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GraphEditor.cpp
+    # Where a click in an offscreen 3D pane lands. Pure projection + slab math
+    # by construction (no ImGui, no entt, no ContentManager) precisely so the
+    # class Viewport's picking can be asserted — that pane is the one thing in
+    # the editor that cannot be screenshotted headless.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PreviewPick.cpp
     # Labelled rows + wrapped hints: ImGui-only by construction (see the file's
     # header), so the panel-width layout invariant can be asserted headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRowWidgets.cpp

@@ -8813,12 +8813,13 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	if (!EnsureMeshPreviewPipeline()) return nullptr;
 
 	// ── Camera: the caller's, verbatim. Only the projection is built here,
-	// because only here is the target's aspect known.
+	// because only here is the target's aspect known — through the shared rule,
+	// so the panel drawing gizmos over this picture builds the same matrix
+	// instead of a lookalike.
 	const float aspect = static_cast<float>(W) / static_cast<float>(H);
 	const glm::vec3 camPos = camera.position;
 	const glm::mat4 view = camera.view;
-	const glm::mat4 proj = glm::perspective(glm::radians(camera.fovDegrees), aspect,
-	                                        camera.nearPlane, camera.farPlane);
+	const glm::mat4 proj = worldPreviewProjection(camera, aspect);
 	const glm::mat4 viewProj = proj * view;
 	if (outViewProj) *outViewProj = viewProj;
 

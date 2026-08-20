@@ -48,6 +48,14 @@ public:
 	float     flySpeed()    const         { return m_flySpeed; }
 	void      setFlySpeed(float s)        { m_flySpeed = s > 0.0f ? s : m_flySpeed; }
 
+	// Field of view (VERTICAL, degrees). The scene view keeps the wide default;
+	// an asset preview wants a narrower lens, because it looks at ONE object
+	// from close up and a wide angle bends everything near the border — which,
+	// as the camera moves, reads as the picture warping rather than as the lens
+	// it actually is. Also feeds focusOn() and the pan scale, so a preview
+	// camera frames and pans consistently with what it draws.
+	void      setFovDegrees(float deg)    { m_fov = glm::clamp(deg, 10.0f, 120.0f); }
+
 	// ── View persistence (save/restore the last editor camera between sessions) ──
 	float     yaw()           const { return m_yaw; }
 	float     pitch()         const { return m_pitch; }

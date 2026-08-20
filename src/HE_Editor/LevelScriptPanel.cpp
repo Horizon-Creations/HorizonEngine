@@ -22,6 +22,7 @@
 #include "EditorCamera.h"             // the viewport camera — the Scene window's, per tab
 #include "EditorViewportNav.h"        // and the Scene window's navigation grammar, shared
 #include "EditorTransformGizmo.h"     // …and its move/rotate/scale gizmo
+#include "PreviewPick.h"              // click-to-select in an offscreen 3D pane
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonCode/HorizonCode.h>
@@ -33,6 +34,7 @@
 #include <Types/Enums.h>
 #include <map>
 #include <memory>
+#include <unordered_map>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -1406,6 +1408,11 @@ struct ClassState
 	// Whether the mouse is over the preview image, read off the image itself —
 	// nothing may be laid over it, or ImGuizmo refuses to grab a handle.
 	bool         previewHovered = false;
+	// Did the RENDERER draw the world last frame (as opposed to the per-asset
+	// fallback)? The camera has to be driven BEFORE the render — the picture is
+	// made from it — and at that point this frame's answer does not exist yet.
+	// It is a property of the backend, so last frame's cannot be stale.
+	bool         previewWorldPath = false;
 	// Which operation the gizmo is on (W/E/R), per tab. The class viewport has
 	// no toolbar of its own; this is the same state the Scene window's bar edits.
 	ViewportToolbar::State previewGizmo;
@@ -1675,6 +1682,18 @@ void drawSubtreeGizmos(entt::registry& reg, Entity root, Entity selected,
 	}
 }
 
+// The aspect ratio the renderer will use for a pane of this size. Not plain
+// av.x / av.y: RenderWorldPreview allocates a whole-pixel target clamped to
+// [32, 4096] and builds its projection from THAT, so the sub-pixel remainder
+// would be a matrix the picture was not drawn with — and a gizmo built from it
+// sits a fraction off the object.
+float previewAspect(const ImVec2& av)
+{
+	const float W = std::clamp(std::floor(av.x), 32.0f, 4096.0f);
+	const float H = std::clamp(std::floor(av.y), 32.0f, 4096.0f);
+	return W / H;
+}
+
 // The whole assembly, drawn by the renderer from the class's OWN scratch world:
 // gray backdrop with a ground plane, a grid and the class's origin marked, and
 // every component's mesh where its transform actually puts it. Returns false on
@@ -1701,6 +1720,13 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 	// three-quarter view eight metres out, which for a character is a speck.
 	if (!st.previewCamFramed)
 	{
+		// A studio lens, not the scene's. The scene camera's 60° vertical is a
+		// wide angle for a viewport that looks at one character from two metres
+		// away: everything away from the centre stretches, and the stretch
+		// travels across the model as the camera moves. 45° is the angle asset
+		// viewers use, and the framing below is derived from it, so the class
+		// still fills the pane.
+		st.previewCam.setFovDegrees(45.0f);
 		st.previewCam.focusOn(origin + glm::vec3(0.0f, 1.0f, 0.0f), 1.4f);
 		st.previewCamFramed = true;
 	}
@@ -1736,20 +1762,25 @@ bool drawWorldPreview(AppContext& ctx, ClassState& st, entt::registry& reg,
 // root: the gizmo writes back in PARENT space, and this world's parent chain
 // ends at that root.
 //
-// Drawn AFTER the navigation was read, so a fly drag cannot grab a handle —
-// which is also why it is not part of drawWorldPreview.
+// Drawn after the picture, so it sits on top of it — and after the navigation
+// was read, so a fly drag cannot grab a handle.
 void drawWorldPreviewGizmo(ClassState& st, const ImVec2& av, const ImVec2& org,
                            bool hovered, bool navigating)
 {
 	if (!st.compWorld) return;
 	EditorTransformGizmo::handleOperationKeys(st.previewGizmo, hovered, navigating);
 
-	// The projection is recovered from the view-projection the renderer reported
-	// rather than rebuilt from fov/aspect/near/far: rebuilding it would be a
-	// second copy of the renderer's framing rule, and the first time the two
-	// disagreed the handles would sit next to the object instead of on it.
+	// The renderer's own projection rule, called directly. It used to be
+	// RECOVERED as `previewViewProj * inverse(view)` — algebraically the
+	// projection only while the view that produced previewViewProj is the view
+	// being divided out, which stops being true the moment the camera moves and
+	// leaves a residual rotation inside something ImGuizmo reads as a
+	// projection. Sharing the rule (worldPreviewProjection) gets the same "one
+	// definition of the framing" the reconstruction was there for, without a
+	// matrix whose meaning depends on when it was built.
 	const glm::mat4 view = st.previewCam.viewMatrix();
-	const glm::mat4 proj = st.previewViewProj * glm::inverse(view);
+	const glm::mat4 proj = worldPreviewProjection(st.previewCam.makeOverride(),
+	                                              previewAspect(av));
 	// The Scene window's predicate, literally: Alt+LMB is orbit here too now, so
 	// the manipulator must let go of the button for it.
 	bool changed = false;
@@ -1767,14 +1798,18 @@ void drawWorldPreviewGizmo(ClassState& st, const ImVec2& av, const ImVec2& org,
 // selection. Shared code, not a lookalike: two navigation implementations would
 // answer the same gesture differently the first time either was fixed.
 bool driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& reg,
-                             const glm::vec3& origin, bool hovered)
+                             const glm::vec3& origin, bool hovered, float viewportH)
 {
 	EditorCamera::Input cin;
 	// Owner = this tab's state, so the editor's per-frame "the scene viewport is
 	// not drawn, drop its capture" guard cannot end a look that started here.
+	// The pane height is passed in rather than read off the last submitted item:
+	// this runs BEFORE the image exists (see drawComponentPreview), and pan
+	// speed is measured against the pane, not against whatever widget happened
+	// to be drawn last.
 	const bool navigating = EditorViewportNav::gather(
 		ctx, &st, hovered, ImGui::GetIO().DeltaTime,
-		std::max(1.0f, ImGui::GetItemRectSize().y), cin);
+		std::max(1.0f, viewportH), cin);
 
 	// F frames the selection, exactly as in the Scene window — the class world's
 	// transforms are already propagated by the extractor, so the world matrix is
@@ -1795,15 +1830,177 @@ bool driveWorldPreviewCamera(AppContext& ctx, ClassState& st, entt::registry& re
 	return navigating;
 }
 
+// ── Click-to-select ──────────────────────────────────────────────────────────
+// Local-space bounds of a mesh asset, cached by UUID — the same two on-disk
+// forms the scene's picker reads (a cooked asset carries interleaved vertices
+// at stride 8, a loose one the plain position array). Returns nullptr while the
+// asset is not loaded, deliberately WITHOUT caching that: a box computed from
+// an asset that was not there yet would outlive the load.
+const HE::AABB* previewMeshBounds(ContentManager& cm, const HE::UUID& id)
+{
+	static std::unordered_map<HE::UUID, HE::AABB> s_cache;
+	if (id == HE::UUID{}) return nullptr;
+	auto it = s_cache.find(id);
+	if (it == s_cache.end())
+	{
+		HE::AABB box;
+		if (const StaticMeshAsset* m = cm.getStaticMesh(id))
+		{
+			if (m->cooked)
+				for (uint32_t i = 0; i < m->vertexCount; ++i)
+					box.expand({ m->interleaved[i * 8 + 0],
+					             m->interleaved[i * 8 + 1],
+					             m->interleaved[i * 8 + 2] });
+			else
+				box = HE::AABB::fromPositions(m->vertices.data(), m->vertices.size() / 3);
+		}
+		else if (const SkeletalMeshAsset* s = cm.getSkeletalMesh(id))
+			box = HE::AABB::fromPositions(s->vertices.data(), s->vertices.size() / 3);
+		else
+			return nullptr;
+		it = s_cache.emplace(id, box).first;
+	}
+	return it->second.isValid() ? &it->second : nullptr;
+}
+
+// What one entity of the class subtree occupies, in ITS OWN space. Everything
+// the viewport draws for it counts: its mesh, and the collider outline the
+// overlay puts over it — a collider IS the thing you are placing when you place
+// a collider, so it has to be clickable even on an entity with no mesh.
+HE::AABB previewPickBox(AppContext& ctx, entt::registry& reg, Entity e)
+{
+	HE::AABB box;
+	if (ctx.contentManager)
+	{
+		if (const auto* m = reg.try_get<MeshComponent>(e))
+		{
+			if (const HE::AABB* b = previewMeshBounds(*ctx.contentManager, m->meshAssetId))
+				box.expand(*b);
+			else
+			{
+				// The fallback cube the renderer draws for a mesh slot with no
+				// asset. Clicking what is on screen has to work even when what
+				// is on screen is the placeholder.
+				box.expand(glm::vec3(-0.5f)); box.expand(glm::vec3(0.5f));
+			}
+		}
+		if (const auto* sm = reg.try_get<SkeletalMeshComponent>(e))
+			if (const HE::AABB* b = previewMeshBounds(*ctx.contentManager, sm->meshAssetId))
+				box.expand(*b);
+	}
+	if (const auto* col = reg.try_get<ColliderComponent>(e))
+	{
+		if (col->shape == ColliderShape::Box)
+		{
+			const glm::vec3 h = glm::max(col->halfExtents, glm::vec3(0.01f));
+			box.expand(-h); box.expand(h);
+		}
+		else
+		{
+			// Same convention as the overlay: a capsule's `height` is the total
+			// one, hemispheres included.
+			const float r  = std::max(0.01f, col->radius);
+			const float hy = col->shape == ColliderShape::Capsule
+			                 ? std::max(r, col->height * 0.5f) : r;
+			box.expand(glm::vec3(-r, -hy, -r)); box.expand(glm::vec3(r, hy, r));
+		}
+	}
+	if (!box.isValid())
+	{
+		// Everything with nothing to draw — a camera at the end of its boom, a
+		// bare child transform — still has to be reachable, or the tree stays
+		// the only way to point at it. A small box on its origin, which is what
+		// the overlay marks those with anyway.
+		constexpr float kMarker = 0.12f;
+		box.expand(glm::vec3(-kMarker)); box.expand(glm::vec3(kMarker));
+	}
+	return box;
+}
+
+// A click in the picture selects what is under it. Without this the viewport
+// was a picture you could only look at: selecting happened in the tree on the
+// left, and a drag on the image landed on the NAVIGATION gestures instead — so
+// trying to move a component moved the camera, and the grid sliding past is
+// what you saw for it.
+//
+// Deliberately no InvisibleButton over the image (see drawWorldPreview): an
+// ImGui item there would make ImGuizmo refuse every handle. Hover comes off the
+// image itself and the click off the global mouse state, gated on that hover.
+//
+// Runs AFTER the gizmo so ImGuizmo::IsOver() is this frame's answer: a press
+// that is grabbing a handle must not also re-select something behind it.
+void pickComponentUnderCursor(AppContext& ctx, ClassState& st, entt::registry& reg,
+                              const ImVec2& av, const ImVec2& org, bool navigating)
+{
+	if (!st.compWorld || !st.previewHovered || navigating) return;
+	ImGuiIO& io = ImGui::GetIO();
+	if (io.KeyAlt) return;                       // Alt+LMB is the orbit gesture
+	if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) return;
+	if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+
+	std::vector<PreviewPick::Candidate> cands;
+	for (auto [e, t] : reg.view<TransformComponent>().each())
+	{
+		PreviewPick::Candidate c;
+		c.id    = static_cast<std::uint32_t>(entt::to_integral(e));
+		// The matrix the extractor just propagated for the render, so the boxes
+		// sit exactly where the picture put the meshes.
+		c.world = t.worldMatrix;
+		c.box   = previewPickBox(ctx, reg, e);
+		cands.push_back(std::move(c));
+	}
+
+	std::uint32_t hit = 0;
+	// The renderer's own view-projection for THIS frame's picture — the same
+	// matrix the collider overlay is drawn with, so the ray goes where the eye
+	// went.
+	if (!PreviewPick::pickAtScreen(cands, st.previewViewProj,
+	                               glm::vec2(org.x, org.y), glm::vec2(av.x, av.y),
+	                               glm::vec2(io.MousePos.x, io.MousePos.y), hit))
+		return;   // a click on the backdrop keeps the selection: there is no
+		          // "nothing selected" state here, and snapping back to the root
+		          // on every stray click would be worse than doing nothing.
+
+	const Entity e = static_cast<Entity>(hit);
+	if (!reg.valid(e)) return;
+	st.compSel = e;
+	// The whole entity, not one of its component rows: the viewport can resolve
+	// which THING was clicked, not which of its components — and the whole
+	// entity is what the gizmo about to appear moves.
+	st.compFocus.clear();
+}
+
 void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 {
 	ImVec2 av = ImVec2(std::max(64.0f, ImGui::GetContentRegionAvail().x),
 	                   std::max(64.0f, ImGui::GetContentRegionAvail().y));
 	const ImVec2 org = ImGui::GetCursorScreenPos();
 
+	// ── Camera FIRST, picture second ─────────────────────────────────────────
+	// The renderer draws from whatever the camera IS when RenderWorldPreview is
+	// called, so reading this frame's gestures afterwards left the picture one
+	// frame behind the mouse — and worse, the gizmo and the pick ray, which
+	// have to agree with the picture pixel for pixel, were then built from a
+	// camera the picture had never seen.
+	//
+	// Both gates are last frame's answers, which is the only kind ImGui has:
+	// IsItemHovered is resolved against the previous frame's layout anyway, and
+	// WHICH of the two paths draws is a property of the backend, so it cannot
+	// change between frames.
+	bool navigating = false;
+	if (st.previewWorldPath)
+	{
+		glm::vec3 camOrigin(0.0f);
+		if (reg.valid(st.compRoot))
+			if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
+				camOrigin = t->position;
+		navigating = driveWorldPreviewCamera(ctx, st, reg, camOrigin, st.previewHovered, av.y);
+	}
+
 	// The whole class, out of its own world. Everything below is the fallback
 	// for the backends that have no world-preview path yet.
 	const bool drewWorld = drawWorldPreview(ctx, st, reg, av, org);
+	st.previewWorldPath = drewWorld;
 
 	// The MESH is the root's, not the selection's. The renderer draws it at
 	// identity, so root space is the space of the picture — and that is the only
@@ -1884,15 +2081,12 @@ void drawComponentPreview(AppContext& ctx, ClassState& st, entt::registry& reg)
 	if (drewWorld)
 	{
 		// The real thing: identical controls to the Scene window. Deliberately
-		// NO invisible button over the image — see drawWorldPreview.
-		glm::vec3 origin(0.0f);
-		if (reg.valid(st.compRoot))
-			if (const auto* t = reg.try_get<TransformComponent>(st.compRoot))
-				origin = t->position;
-		const bool navigating =
-			driveWorldPreviewCamera(ctx, st, reg, origin, st.previewHovered);
-		// After the navigation, so a fly drag cannot grab a gizmo handle.
+		// NO invisible button over the image — see drawWorldPreview. The
+		// navigation for this frame was already read above.
 		drawWorldPreviewGizmo(st, av, org, st.previewHovered, navigating);
+		// After the gizmo, so a press that is grabbing a handle is not also a
+		// pick — ImGuizmo::IsOver() is current only once Manipulate has run.
+		pickComponentUnderCursor(ctx, st, reg, av, org, navigating);
 		return;
 	}
 

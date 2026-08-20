@@ -224,6 +224,26 @@ constexpr float kTitleH = 24.0f;
 constexpr float kRowH   = 20.0f;
 constexpr float kPinR   = 5.0f;
 
+// ── Hit geometry ─────────────────────────────────────────────────────────────
+// What the mouse has to hit is deliberately BIGGER than what the eye sees. A
+// pin is a 5 px dot sitting exactly ON the node's edge, so aiming at one is
+// aiming at a 10 px target that is half outside the box — and the input pins,
+// which is where a wire ends up, are the ones a cursor arrives at from the
+// empty side. The visible radius stays kPinR; the hit radius is this, and
+// overlapping hit circles are resolved by NEAREST CENTRE (see pinAt), which is
+// what keeps a fatter target from stealing its neighbour's clicks.
+//
+// The screen-space floor matters at low zoom: rows are kRowH * zoom apart, so
+// at zoom 0.3 the whole node is 6 px tall per row and a radius that shrank with
+// it would be unhittable. Overlap there is expected and correct — the nearest
+// centre still picks the pin the user aimed at.
+float pinHitRadius(float zoom);
+
+// Grow applied to a node's rectangle for hover/click tests. The frame is drawn
+// at 1 px and clicking exactly ON the border used to fall through to the canvas
+// (deselect, or the start of a box-select), which reads as "the click missed".
+constexpr float kNodeHitPad = 3.0f;
+
 // Standard category → header color and pin-type → color helpers, so both
 // editors share one palette. Hosts map their own categories/types onto these.
 ImU32 categoryColor(const char* category);
