@@ -48,6 +48,7 @@ add_executable(he_tests
     test_engine_api.cpp
     test_type_registry.cpp
     test_horizoncode_types.cpp
+    test_horizoncode_containers.cpp
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp

@@ -232,8 +232,9 @@ Value fieldDefault(const TypeRegistry& reg, const StructField& f,
 {
     if (f.isArray)
     {
-        // The authored slots seed the array; no slots = an empty one.
-        Value v; v.type = f.type; v.isArray = true; v.typeName = f.typeName;
+        // The authored slots seed the container; no slots = an empty one.
+        Value v; v.type = f.type; v.isArray = true; v.container = f.kind();
+        v.typeName = f.typeName;
         v.items = f.defaultValue.items;
         for (Value& it : v.items)
         {
@@ -256,6 +257,39 @@ Value fieldDefault(const TypeRegistry& reg, const StructField& f,
             {
                 it = reg.makeDefaultValue(f.typeName);   // elements use their own defaults
             }
+        }
+        if (v.container == HorizonCode::ContainerKind::Map)
+        {
+            v.keyType = f.keyType; v.keyTypeName = f.keyTypeName;
+            v.keys = f.defaultValue.keys;
+            for (Value& k : v.keys)
+            {
+                k.isArray = false; k.container = HorizonCode::ContainerKind::None;
+                k.type = f.keyType; k.typeName = f.keyTypeName;
+                if (f.keyType == PinType::Enum)
+                {
+                    EnumDef ed;
+                    const std::string entry = k.s;
+                    k.i = 0;
+                    if (reg.getEnum(f.keyTypeName, ed))
+                    {
+                        if (const EnumEntry* e = ed.findEntry(entry)) k.i = e->value;
+                        // An entry the definition no longer has DROPS the pair
+                        // (below) rather than falling back to the first one —
+                        // a fallback would silently merge two keys into one.
+                        else k.s.clear();
+                    }
+                }
+            }
+            // Keep only the pairs that exist on both sides, and drop enum keys
+            // whose entry name no longer resolves.
+            std::vector<Value> ks, vs;
+            for (size_t i = 0; i < v.keys.size() && i < v.items.size(); ++i)
+            {
+                if (f.keyType == PinType::Enum && v.keys[i].s.empty()) continue;
+                ks.push_back(v.keys[i]); vs.push_back(v.items[i]);
+            }
+            v.keys = std::move(ks); v.items = std::move(vs);
         }
         return v;
     }
@@ -292,6 +326,12 @@ Value TypeRegistry::makeDefaultValue(const std::string& structAssetPath) const
 {
     std::unordered_set<std::string> visiting;
     return structDefault(*this, structAssetPath, visiting);
+}
+
+Value TypeRegistry::makeFieldDefault(const StructField& f) const
+{
+    std::unordered_set<std::string> visiting;
+    return fieldDefault(*this, f, visiting);
 }
 
 // ─── JSON round-trip ─────────────────────────────────────────────────────────
@@ -409,6 +449,37 @@ std::string TypeRegistry::structToJson(const StructDef& def)
                  { "type", static_cast<int>(f.type) },
                  { "isArray", f.isArray },
                  { "typeName", f.typeName } };
+        // "container" is written only for Set/Map, so an array field keeps the
+        // exact bytes it had before containers existed.
+        if (f.container != HorizonCode::ContainerKind::None &&
+            f.container != HorizonCode::ContainerKind::Array)
+        {
+            jf["container"] = static_cast<int>(f.container);
+            if (f.container == HorizonCode::ContainerKind::Map)
+            {
+                jf["keyType"] = static_cast<int>(f.keyType);
+                if (!f.keyTypeName.empty()) jf["keyTypeName"] = f.keyTypeName;
+                // Parallel array, never a JSON object — nlohmann's object is a
+                // sorted std::map and would silently reorder the keys, and the
+                // map's iteration order IS its insertion order.
+                // Struct VALUES carry no slot payload (same rule as an array of
+                // structs, below), so a map of them seeds empty — persisting
+                // keys without values would only produce pairs the loader drops.
+                if (f.type != PinType::Struct && !f.defaultValue.keys.empty())
+                {
+                    json ks = json::array();
+                    StructField kf; kf.type = f.keyType; kf.typeName = f.keyTypeName;
+                    for (const Value& k : f.defaultValue.keys)
+                    {
+                        kf.defaultValue = k;
+                        kf.defaultValue.type = f.keyType;
+                        json d = defaultToJson(kf);
+                        if (!d.is_null()) ks.push_back(std::move(d));
+                    }
+                    if (!ks.empty()) jf["keys"] = std::move(ks);
+                }
+            }
+        }
         if (f.isArray)
         {
             // Authored starting elements. Each slot uses the SCALAR encoding of
@@ -417,7 +488,10 @@ std::string TypeRegistry::structToJson(const StructDef& def)
             if (f.type != PinType::Struct && !f.defaultValue.items.empty())
             {
                 json arr = json::array();
-                StructField elem = f; elem.isArray = false;
+                // A SCALAR view of the field — both flags cleared, or kind()
+                // would still say Set/Map while encoding one element.
+                StructField elem = f;
+                elem.isArray = false; elem.container = HorizonCode::ContainerKind::None;
                 for (const Value& it : f.defaultValue.items)
                 {
                     elem.defaultValue = it;
@@ -452,22 +526,46 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
             f.type     = static_cast<PinType>(e.value("type", 1));
             f.isArray  = e.value("isArray", false);
             f.typeName = e.value("typeName", std::string{});
+            f.container = static_cast<HorizonCode::ContainerKind>(
+                e.value("container", static_cast<int>(HorizonCode::ContainerKind::None)));
+            // A kind present means container, full stop — the two-field state
+            // "Map but not a container" must not survive a load.
+            if (f.container != HorizonCode::ContainerKind::None) f.isArray = true;
+            f.keyType = static_cast<PinType>(e.value("keyType", static_cast<int>(PinType::String)));
+            f.keyTypeName = e.value("keyTypeName", std::string{});
             if (auto d = e.find("default"); d != e.end())
             {
                 if (f.isArray)
                 {
                     f.defaultValue = {};
                     f.defaultValue.isArray = true;
+                    f.defaultValue.container = f.kind();
                     f.defaultValue.type = f.type;
                     f.defaultValue.typeName = f.typeName;
+                    f.defaultValue.keyType = f.keyType;
+                    f.defaultValue.keyTypeName = f.keyTypeName;
+                    // One authored slot, decoded through a SCALAR view of the
+                    // field (both flags cleared, or elem.kind() would still say
+                    // Set/Map and the slot would decode as a container).
+                    auto slotOf = [&f](const json& slot, PinType t, const std::string& tn)
+                    {
+                        StructField elem = f;
+                        elem.isArray = false; elem.container = HorizonCode::ContainerKind::None;
+                        elem.type = t; elem.typeName = tn;
+                        elem.defaultValue = {};
+                        defaultFromJson(slot, elem);
+                        elem.defaultValue.isArray = false;
+                        elem.defaultValue.container = HorizonCode::ContainerKind::None;
+                        return std::move(elem.defaultValue);
+                    };
                     if (d->is_array())
                         for (const json& slot : *d)
-                        {
-                            StructField elem = f; elem.isArray = false; elem.defaultValue = {};
-                            defaultFromJson(slot, elem);
-                            elem.defaultValue.isArray = false;
-                            f.defaultValue.items.push_back(std::move(elem.defaultValue));
-                        }
+                            f.defaultValue.items.push_back(slotOf(slot, f.type, f.typeName));
+                    if (f.kind() == HorizonCode::ContainerKind::Map)
+                        if (auto k = e.find("keys"); k != e.end() && k->is_array())
+                            for (const json& slot : *k)
+                                f.defaultValue.keys.push_back(
+                                    slotOf(slot, f.keyType, f.keyTypeName));
                 }
                 else
                 {
@@ -478,6 +576,9 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
             {
                 f.defaultValue.type = f.type;
                 f.defaultValue.isArray = f.isArray;
+                f.defaultValue.container = f.container;
+                f.defaultValue.keyType = f.keyType;
+                f.defaultValue.keyTypeName = f.keyTypeName;
             }
             if (!f.name.empty()) out.fields.push_back(std::move(f));
         }

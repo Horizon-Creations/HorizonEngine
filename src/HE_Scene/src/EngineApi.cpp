@@ -764,60 +764,17 @@ bool resolveTemplate(::ContentManager* cm, const std::string& path, HE::StructDe
     return true;
 }
 
-// Seed a fresh field vector from the schema defaults (same resolution rules as
-// struct defaults: enum defaults by entry name, nested structs recursive).
+// Seed a fresh field vector from the schema defaults. A SaveGameTemplate IS a
+// StructDef, so this is field-for-field the same seeding the type registry does
+// for a struct — and it USED to spell the rule out a second time here, which
+// meant every new field shape (containers, most recently) had to be remembered
+// in two places. It asks the registry now; the two cannot disagree.
 std::vector<Value> seedFields(const HE::StructDef& schema)
 {
     auto& reg = HE::TypeRegistry::instance();
     std::vector<Value> out;
     out.reserve(schema.fields.size());
-    for (const HE::StructField& f : schema.fields)
-    {
-        if (f.isArray)
-        {
-            // Authored slots seed the array (mirrors TypeRegistry::fieldDefault —
-            // the two MUST agree: same template, same starting values).
-            Value v; v.isArray = true; v.type = f.type; v.typeName = f.typeName;
-            v.items = f.defaultValue.items;
-            for (Value& it : v.items)
-            {
-                it.isArray = false; it.type = f.type; it.typeName = f.typeName;
-                if (f.type == P::Enum)
-                {
-                    HE::EnumDef ed;
-                    const std::string entry = it.s;
-                    it.i = 0;
-                    if (reg.getEnum(f.typeName, ed))
-                    {
-                        if (const HE::EnumEntry* e = ed.findEntry(entry)) it.i = e->value;
-                        else if (!ed.entries.empty())                     it.i = ed.entries.front().value;
-                    }
-                }
-                else if (f.type == P::Struct)
-                    it = reg.makeDefaultValue(f.typeName);
-            }
-            out.push_back(std::move(v));
-        }
-        else if (f.type == P::Struct)
-            out.push_back(reg.makeDefaultValue(f.typeName));
-        else if (f.type == P::Enum)
-        {
-            Value v; v.type = P::Enum; v.typeName = f.typeName;
-            HE::EnumDef ed;
-            if (reg.getEnum(f.typeName, ed))
-            {
-                if (const HE::EnumEntry* e = ed.findEntry(f.defaultValue.s)) v.i = e->value;
-                else if (!ed.entries.empty()) v.i = ed.entries.front().value;
-            }
-            out.push_back(std::move(v));
-        }
-        else
-        {
-            Value v = f.defaultValue;
-            v.type = f.type;
-            out.push_back(std::move(v));
-        }
-    }
+    for (const HE::StructField& f : schema.fields) out.push_back(reg.makeFieldDefault(f));
     return out;
 }
 
@@ -857,6 +814,21 @@ nlohmann::json scalarToJson(const Value& v)
 nlohmann::json valueToJson(const Value& v)
 {
     if (!v.isArray) return scalarToJson(v);
+    if (v.kind() == HorizonCode::ContainerKind::Map)
+    {
+        // PARALLEL ARRAYS, never a JSON object keyed by the map's own keys: the
+        // keys are not all strings (Int/Enum/Ref are legal), and nlohmann's
+        // object is a sorted std::map — it would silently alphabetize them and
+        // the save would come back in a different iteration order than it went
+        // out, which is the one thing a map here promises not to do.
+        nlohmann::json ks = nlohmann::json::array(), vs = nlohmann::json::array();
+        const size_t n = std::min(v.keys.size(), v.items.size());
+        for (size_t i = 0; i < n; ++i)
+        { ks.push_back(scalarToJson(v.keys[i])); vs.push_back(scalarToJson(v.items[i])); }
+        return nlohmann::json{ { "keys", std::move(ks) }, { "values", std::move(vs) } };
+    }
+    // Array and Set share the encoding: an ordered list. A set is re-deduped on
+    // the way back in, so a hand-edited save cannot smuggle a duplicate in.
     nlohmann::json a = nlohmann::json::array();
     for (const Value& it : v.items) a.push_back(scalarToJson(it));
     return a;
@@ -912,11 +884,46 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
 }
 Value valueFromJson(const nlohmann::json& j, const HE::StructField& f)
 {
+    using CK = HorizonCode::ContainerKind;
     if (!f.isArray) return scalarFromJson(j, f.type, f.typeName);
-    Value v; v.isArray = true; v.type = f.type; v.typeName = f.typeName;
+    Value v; v.isArray = true; v.container = f.kind();
+    v.type = f.type; v.typeName = f.typeName;
+    if (v.container == CK::Map)
+    {
+        v.keyType = f.keyType; v.keyTypeName = f.keyTypeName;
+        const auto ks = j.is_object() ? j.value("keys",   nlohmann::json::array())
+                                      : nlohmann::json::array();
+        const auto vs = j.is_object() ? j.value("values", nlohmann::json::array())
+                                      : nlohmann::json::array();
+        const size_t n = std::min(ks.size(), vs.size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            Value key = scalarFromJson(ks[i], f.keyType, f.keyTypeName);
+            // Last write wins on a repeated key, first position kept — the same
+            // rule a sequence of Map Set nodes follows.
+            bool dup = false;
+            for (size_t k = 0; k < v.keys.size(); ++k)
+                if (HorizonCode::scalarValueEquals(v.keys[k], key, f.keyType))
+                { v.items[k] = scalarFromJson(vs[i], f.type, f.typeName); dup = true; break; }
+            if (dup) continue;
+            v.keys.push_back(std::move(key));
+            v.items.push_back(scalarFromJson(vs[i], f.type, f.typeName));
+        }
+        return v;
+    }
     if (j.is_array())
         for (const auto& e : j)
-            v.items.push_back(scalarFromJson(e, f.type, f.typeName));
+        {
+            Value it = scalarFromJson(e, f.type, f.typeName);
+            if (v.container == CK::Set)
+            {
+                bool dup = false;
+                for (const Value& have : v.items)
+                    if (HorizonCode::scalarValueEquals(have, it, f.type)) { dup = true; break; }
+                if (dup) continue;   // a set keeps the FIRST occurrence
+            }
+            v.items.push_back(std::move(it));
+        }
     return v;
 }
 

@@ -53,12 +53,26 @@ struct StructField
 {
     std::string          name;
     HorizonCode::PinType type = HorizonCode::PinType::Float;
-    bool                 isArray = false;
+    bool                 isArray = false;   // the field holds a CONTAINER of `type`
     std::string          typeName;      // Enum/Struct fields: referenced def asset path
-    // Seeds new instances. A scalar field holds one Value of `type`; an ARRAY
-    // field uses the Value's own array payload (isArray + items), so a field can
-    // ship authored starting elements instead of always beginning empty.
+    // Seeds new instances. A scalar field holds one Value of `type`; a CONTAINER
+    // field uses the Value's own container payload (isArray + items, plus `keys`
+    // for a map), so a field can ship authored starting elements instead of
+    // always beginning empty.
     HorizonCode::Value   defaultValue;
+    // Which container (HorizonCode::ContainerKind) — None + isArray reads as
+    // Array, which is every field declared before Set/Map existed. For a MAP,
+    // `type`/`typeName` are the VALUE side and these name the key.
+    //
+    // A container field is also how a container NESTS: a pin carries one element
+    // type and one kind, so Map<string, Array<int>> is not expressible directly,
+    // but Map<string, Loadout> with an array field on Loadout is.
+    HorizonCode::ContainerKind container = HorizonCode::ContainerKind::None;
+    HorizonCode::PinType       keyType = HorizonCode::PinType::String;
+    std::string                keyTypeName;
+
+    HorizonCode::ContainerKind kind() const
+    { return HorizonCode::containerKindOf(isArray, container); }
 };
 
 // HE_API for the same reason as EnumDef above: findField is out-of-line.
@@ -113,6 +127,13 @@ public:
     // in definition order, nested structs seeded recursively). Empty Value
     // (type Float) when the def is missing.
     HorizonCode::Value makeDefaultValue(const std::string& structAssetPath) const;
+
+    // The starting Value of ONE field — exactly what makeDefaultValue puts into
+    // a struct's slot for it. Public because the savegame seeder needs the same
+    // answer for a template's fields (a SaveGameTemplate IS a StructDef), and
+    // the two used to spell the rule out separately and had to be kept in step
+    // by hand; containers made that a third copy waiting to drift.
+    HorizonCode::Value makeFieldDefault(const StructField& f) const;
 
     // ── JSON round-trip (the CHUNK_STDF / CHUNK_ENDF payloads) ───────────────
     // Definitions persist name-keyed and type-named (never positional), so a

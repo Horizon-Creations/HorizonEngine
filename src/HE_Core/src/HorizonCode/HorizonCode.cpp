@@ -19,6 +19,51 @@ namespace HorizonCode {
 
 using T = NodeType;
 using P = PinType;
+using CK = ContainerKind;
+
+// ── Container helpers (Set / Map) ────────────────────────────────────────────
+// Sets and maps iterate in INSERTION ORDER (see ContainerKind in the header), so
+// both are plain parallel vectors and every lookup here is a linear scan by
+// value equality. That is deliberate: a hash index would have to be rebuilt on
+// every copy — the container nodes are PURE and copy their input — and the graphs
+// that hold thousands of entries are the ones that should be in C++ anyway.
+// Generated code uses the same shape (hc::Set/hc::Map), which is what makes the
+// two backends order-identical by construction rather than by agreement.
+namespace
+{
+// Index of `needle` among `hay`, or -1.
+int indexOfValue(const std::vector<Value>& hay, const Value& needle, PinType t)
+{
+    for (size_t i = 0; i < hay.size(); ++i)
+        if (scalarValueEquals(hay[i], needle, t)) return (int)i;
+    return -1;
+}
+
+// Drop later duplicates, keeping the FIRST occurrence's position — the rule a
+// Set Add follows, applied to a whole list (a seeded default, a boundary
+// conversion, an array a script handed over).
+void dedupeSetItems(Value& set)
+{
+    std::vector<Value> out;
+    for (Value& it : set.items)
+        if (indexOfValue(out, it, set.type) < 0) out.push_back(std::move(it));
+    set.items = std::move(out);
+}
+
+// Same for a map: a repeated key keeps its first position and takes the LAST
+// value written to it, which is what a sequence of Map Set calls would leave.
+void dedupeMapKeys(Value& map)
+{
+    std::vector<Value> ks, vs;
+    for (size_t i = 0; i < map.keys.size() && i < map.items.size(); ++i)
+    {
+        const int at = indexOfValue(ks, map.keys[i], map.keyType);
+        if (at < 0) { ks.push_back(std::move(map.keys[i])); vs.push_back(std::move(map.items[i])); }
+        else        { vs[(size_t)at] = std::move(map.items[i]); }
+    }
+    map.keys = std::move(ks); map.items = std::move(vs);
+}
+} // namespace
 
 // ── Node signatures ──────────────────────────────────────────────────────────
 
@@ -48,6 +93,14 @@ void signatureInto(const Node& n, NodeSig& s)
     // param/result/field lists, which carry their own paths.
     auto defOf = [](const std::string& t) -> const char* { return t.empty() ? nullptr : t.c_str(); };
     const char* const tn = defOf(n.typeName);
+    // A Map node's KEY definition (Enum keys), the same way `tn` is the value's.
+    const char* const ktn = defOf(n.keyTypeName);
+    // One pin mirroring a declared param/result — container fields and all.
+    // Spelled once instead of at each of the six mirror sites below, which is
+    // also what keeps them from drifting the next time a field is added.
+    auto paramPin = [&defOf](const FuncParam& p) -> PinDesc
+    { return { p.name.c_str(), p.type, p.isArray, defOf(p.typeName),
+               p.container, p.keyType, defOf(p.keyTypeName) }; };
     switch (n.type)
     {
     case T::Event:
@@ -80,21 +133,17 @@ void signatureInto(const Node& n, NodeSig& s)
         break;
     case T::FunctionEntry:
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params)
-            s.dataOuts.push_back({ p.name.c_str(), p.type, p.isArray, defOf(p.typeName) });
+        for (const auto& p : n.params) s.dataOuts.push_back(paramPin(p));
         break;
     case T::FunctionCall:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        for (const auto& p : n.params)
-            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, defOf(p.typeName) });
-        for (const auto& r : n.results)
-            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, defOf(r.typeName) });
+        for (const auto& p : n.params)  s.dataIns.push_back(paramPin(p));
+        for (const auto& r : n.results) s.dataOuts.push_back(paramPin(r));
         break;
     case T::FunctionReturn:
         s.execIns = { { "", P::Exec } };
-        for (const auto& r : n.results)
-            s.dataIns.push_back({ r.name.c_str(), r.type, r.isArray, defOf(r.typeName) });
+        for (const auto& r : n.results) s.dataIns.push_back(paramPin(r));
         break;
     case T::Branch:
         s.execIns  = { { "", P::Exec } };
@@ -115,13 +164,14 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataOuts = { { "Value", n.propType, false, tn } }; // pass the set value through
         break;
     case T::GetVariable:
-        s.dataOuts = { { "Value", n.propType, n.isArray, tn } };
+        s.dataOuts = { { "Value", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
         break;
     case T::SetVariable:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
-        s.dataIns  = { { "Value", n.propType, n.isArray, tn } };
-        s.dataOuts = { { "Value", n.propType, n.isArray, tn } }; // pass the set value through
+        s.dataIns  = { { "Value", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
+        // pass the set value through
+        s.dataOuts = { { "Value", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
         break;
     case T::ShowSelf:
     case T::HideSelf:
@@ -169,10 +219,8 @@ void signatureInto(const Node& n, NodeSig& s)
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
         s.dataIns  = { { "Target", P::Ref } };
-        for (const auto& p : n.params)
-            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, defOf(p.typeName) });
-        for (const auto& r : n.results)
-            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, defOf(r.typeName) });
+        for (const auto& p : n.params)  s.dataIns.push_back(paramPin(p));
+        for (const auto& r : n.results) s.dataOuts.push_back(paramPin(r));
         break;
     case T::EmitEvent:
         s.execIns  = { { "", P::Exec } };
@@ -184,10 +232,8 @@ void signatureInto(const Node& n, NodeSig& s)
         // pure calls (getters/math) are compact data nodes. params → data-ins,
         // results → data-outs (mirrored on the node from the ApiFn descriptor).
         if (n.hasArg) { s.execIns = { { "", P::Exec } }; s.execOuts = { { "", P::Exec } }; }
-        for (const auto& p : n.params)
-            s.dataIns.push_back({ p.name.c_str(), p.type, p.isArray, defOf(p.typeName) });
-        for (const auto& r : n.results)
-            s.dataOuts.push_back({ r.name.c_str(), r.type, r.isArray, defOf(r.typeName) });
+        for (const auto& p : n.params)  s.dataIns.push_back(paramPin(p));
+        for (const auto& r : n.results) s.dataOuts.push_back(paramPin(r));
         break;
     case T::GetGameInstance: s.dataOuts = { { "Game Instance", P::Ref } }; break;
     case T::GetSelf:         s.dataOuts = { { "Self", P::Ref } };          break;
@@ -239,6 +285,98 @@ void signatureInto(const Node& n, NodeSig& s)
         s.dataIns  = { { "Array", n.propType, true, tn } };
         s.dataOuts = { { "Element", n.propType, false, tn }, { "Index", P::Int } };
         break;
+
+    // ── Set<T> ───────────────────────────────────────────────────────────────
+    // Every container pin is ContainerKind::Set; the element pins are scalars of
+    // the same type, exactly as with the Array nodes.
+#define HC_SET_PIN(label) PinDesc{ label, n.propType, true, tn, HorizonCode::ContainerKind::Set }
+    case T::SetMake:
+        s.dataOuts = { HC_SET_PIN("Set") };
+        break;
+    case T::SetLength:
+        s.dataIns  = { HC_SET_PIN("Set") };
+        s.dataOuts = { { "Length", P::Int } };
+        break;
+    case T::SetClear:
+        s.dataIns  = { HC_SET_PIN("Set") };
+        s.dataOuts = { HC_SET_PIN("Set") };
+        break;
+    case T::SetAdd:
+    case T::SetRemove:
+        s.dataIns  = { HC_SET_PIN("Set"), { "Value", n.propType, false, tn } };
+        s.dataOuts = { HC_SET_PIN("Set") };
+        break;
+    case T::SetContains:
+        s.dataIns  = { HC_SET_PIN("Set"), { "Value", n.propType, false, tn } };
+        s.dataOuts = { { "Contains", P::Bool } };
+        break;
+    case T::SetToArray:
+        s.dataIns  = { HC_SET_PIN("Set") };
+        s.dataOuts = { { "Array", n.propType, true, tn } };
+        break;
+    case T::ForEachSet:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Body", P::Exec }, { "Done", P::Exec } };
+        s.dataIns  = { HC_SET_PIN("Set") };
+        s.dataOuts = { { "Element", n.propType, false, tn }, { "Index", P::Int } };
+        break;
+#undef HC_SET_PIN
+
+    // ── Map<K,V> ─────────────────────────────────────────────────────────────
+    // `propType`/`tn` are the VALUE type, `keyType`/`ktn` the key — so a map pin
+    // needs both, and the key pins are scalars of the latter.
+#define HC_MAP_PIN(label) PinDesc{ label, n.propType, true, tn, \
+                                   HorizonCode::ContainerKind::Map, n.keyType, ktn }
+#define HC_KEY_PIN(label) PinDesc{ label, n.keyType, false, ktn }
+    case T::MapMake:
+        s.dataOuts = { HC_MAP_PIN("Map") };
+        break;
+    case T::MapLength:
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { { "Length", P::Int } };
+        break;
+    case T::MapClear:
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { HC_MAP_PIN("Map") };
+        break;
+    case T::MapSet:
+        s.dataIns  = { HC_MAP_PIN("Map"), HC_KEY_PIN("Key"),
+                       { "Value", n.propType, false, tn } };
+        s.dataOuts = { HC_MAP_PIN("Map") };
+        break;
+    case T::MapRemove:
+        s.dataIns  = { HC_MAP_PIN("Map"), HC_KEY_PIN("Key") };
+        s.dataOuts = { HC_MAP_PIN("Map") };
+        break;
+    case T::MapContains:
+        s.dataIns  = { HC_MAP_PIN("Map"), HC_KEY_PIN("Key") };
+        s.dataOuts = { { "Contains", P::Bool } };
+        break;
+    case T::MapGet:
+        // "Default" is a full pin, not an implicit type zero: a miss on a map of
+        // scores wants -1 far more often than it wants 0, and the alternative
+        // (Contains → Branch → Get) is three nodes for one lookup.
+        s.dataIns  = { HC_MAP_PIN("Map"), HC_KEY_PIN("Key"),
+                       { "Default", n.propType, false, tn } };
+        s.dataOuts = { { "Value", n.propType, false, tn } };
+        break;
+    case T::MapKeys:
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { { "Keys", n.keyType, true, ktn } };
+        break;
+    case T::MapValues:
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { { "Values", n.propType, true, tn } };
+        break;
+    case T::ForEachMap:
+        s.execIns  = { { "", P::Exec } };
+        s.execOuts = { { "Body", P::Exec }, { "Done", P::Exec } };
+        s.dataIns  = { HC_MAP_PIN("Map") };
+        s.dataOuts = { HC_KEY_PIN("Key"), { "Value", n.propType, false, tn },
+                       { "Index", P::Int } };
+        break;
+#undef HC_MAP_PIN
+#undef HC_KEY_PIN
     case T::Delay:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "Completed", P::Exec } };
@@ -478,6 +616,24 @@ const char* nodeDisplayName(NodeType t)
         case T::ArrayContains:return "Array Contains";
         case T::ArrayIndexOf: return "Array Index Of";
         case T::ForEach:      return "For Each";
+        case T::SetMake:      return "Make Set";
+        case T::SetAdd:       return "Set Add";
+        case T::SetRemove:    return "Set Remove";
+        case T::SetContains:  return "Set Contains";
+        case T::SetLength:    return "Set Length";
+        case T::SetClear:     return "Set Clear";
+        case T::SetToArray:   return "Set To Array";
+        case T::ForEachSet:   return "For Each Set";
+        case T::MapMake:      return "Make Map";
+        case T::MapSet:       return "Map Set";
+        case T::MapRemove:    return "Map Remove";
+        case T::MapContains:  return "Map Contains";
+        case T::MapLength:    return "Map Length";
+        case T::MapClear:     return "Map Clear";
+        case T::MapGet:       return "Map Get";
+        case T::MapKeys:      return "Map Keys";
+        case T::MapValues:    return "Map Values";
+        case T::ForEachMap:   return "For Each Map";
         case T::Delay:        return "Delay";
         case T::IsValid:      return "Is Valid";
         // Deliberately NOT "Cast To <Class>": this string is the node's key on
@@ -658,6 +814,51 @@ const char* nodeTooltip(NodeType t)
         case T::ForEach:
             return "Runs Body once per array element (Element + Index data outputs),\n"
                    "then continues from Done.";
+        case T::SetMake:
+            return "Outputs a new empty set of the chosen element type. A set holds no\n"
+                   "duplicates and iterates in the order elements were first added.";
+        case T::SetAdd:
+            return "Outputs a COPY of the set with Value added. Adding an element the set\n"
+                   "already has changes nothing — it keeps its original position.";
+        case T::SetRemove:
+            return "Outputs a COPY of the set without Value. The order of the rest is kept.";
+        case T::SetContains:
+            return "True when the set holds an element equal to Value.";
+        case T::SetLength:
+            return "Outputs the number of elements in the input set.";
+        case T::SetClear:
+            return "Outputs an empty set of the same element type.";
+        case T::SetToArray:
+            return "Outputs the set's elements as an array, in iteration order (the order\n"
+                   "they were first added).";
+        case T::ForEachSet:
+            return "Runs Body once per set element (Element + Index data outputs), in the\n"
+                   "order elements were first added, then continues from Done.";
+        case T::MapMake:
+            return "Outputs a new empty map of the chosen key and value types. Keys may be\n"
+                   "Int, String, Enum or Object; the map iterates in insertion order.";
+        case T::MapSet:
+            return "Outputs a COPY of the map with Key set to Value. A key the map already\n"
+                   "has is updated IN PLACE and keeps its position.";
+        case T::MapRemove:
+            return "Outputs a COPY of the map without Key. The order of the rest is kept.";
+        case T::MapContains:
+            return "True when the map holds the given Key.";
+        case T::MapLength:
+            return "Outputs the number of key/value pairs in the input map.";
+        case T::MapClear:
+            return "Outputs an empty map of the same key and value types.";
+        case T::MapGet:
+            return "Outputs the value stored under Key, or the Default input when the map\n"
+                   "does not hold that key.";
+        case T::MapKeys:
+            return "Outputs the map's keys as an array, in insertion order.";
+        case T::MapValues:
+            return "Outputs the map's values as an array, in the SAME order as Map Keys —\n"
+                   "index i of one belongs to index i of the other.";
+        case T::ForEachMap:
+            return "Runs Body once per key/value pair (Key + Value + Index data outputs),\n"
+                   "in insertion order, then continues from Done.";
         case T::IsValid:
             return "True when the Target reference points to a live instance — the guard\n"
                    "to run before touching an object that may have been destroyed.";
@@ -776,6 +977,12 @@ const char* nodeCategory(NodeType t)
         case T::ArrayMake: case T::ArrayLength: case T::ArrayGet: case T::ArrayAdd:
         case T::ArraySet: case T::ArrayInsert: case T::ArrayRemove:
         case T::ArrayContains: case T::ArrayIndexOf: case T::ForEach: return "Array";
+        case T::SetMake: case T::SetAdd: case T::SetRemove: case T::SetContains:
+        case T::SetLength: case T::SetClear: case T::SetToArray:
+        case T::ForEachSet: return "Set";
+        case T::MapMake: case T::MapSet: case T::MapRemove: case T::MapContains:
+        case T::MapLength: case T::MapClear: case T::MapGet: case T::MapKeys:
+        case T::MapValues: case T::ForEachMap: return "Map";
         case T::MakeStruct: case T::BreakStruct:
         case T::GetStructField: case T::SetStructField: return "Structs";
         case T::ConstEnum: case T::SwitchOnEnum:
@@ -873,9 +1080,25 @@ Value variableDefaultValue(const Variable& v)
     if (v.isArray)
     {
         // Seed from the editor-authored slots (each already a scalar of v.type).
-        Value r; r.isArray = true; r.type = v.type;
+        Value r; r.isArray = true; r.container = v.kind(); r.type = v.type;
         r.items = v.defaultItems;
-        for (Value& it : r.items) { it.isArray = false; it.type = v.type; }
+        for (Value& it : r.items) { it.isArray = false; it.container = CK::None; it.type = v.type; }
+        if (r.container == CK::Map)
+        {
+            r.keyType = v.keyType; r.keyTypeName = v.keyTypeName;
+            r.keys = v.defaultKeys;
+            for (Value& k : r.keys) { k.isArray = false; k.container = CK::None; k.type = v.keyType; }
+            // A hand-edited asset could carry lists of different lengths, and a
+            // map whose keys and values disagree is not a map at all — truncate
+            // to the pairs that exist rather than reading past one of them.
+            const size_t n = std::min(r.keys.size(), r.items.size());
+            r.keys.resize(n); r.items.resize(n);
+            dedupeMapKeys(r);
+        }
+        else if (r.container == CK::Set)
+        {
+            dedupeSetItems(r);
+        }
         return r;
     }
     switch (v.type)
@@ -974,13 +1197,38 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
 {
     Node* dst = g.findNode(dstNode);
     const Node* src = g.findNode(srcNode);
-    if (!dst || !src || dst->type != NodeType::ForEach) return;
-    // ForEach unified pins: execIn 0, Body 1, Done 2, Array-in 3, Element-out 4.
+    // The three loop nodes share this: each is generic until its container input
+    // is wired, and each has that input as its FIRST data-in. ForEach Map
+    // additionally adopts the key type — its Key output is as generic as the
+    // Value one, and leaving it at the default String would silently mistype
+    // every wire off it.
+    if (!dst || !src ||
+        (dst->type != NodeType::ForEach && dst->type != NodeType::ForEachSet &&
+         dst->type != NodeType::ForEachMap))
+        return;
+    // Unified pins of all three: execIn 0, Body 1, Done 2, container-in 3.
     if (dstPin != 3) return;
     PinDesc sd;
     if (!dataPinDescOf(*src, /*input=*/false, srcPin - pinRanges(*src).dataOut0, sd) ||
         !sd.isArray)
         return;
+    // Only a container of the loop's OWN kind teaches it anything — a set does
+    // not tell a For Each Map what its keys are.
+    const ContainerKind want = dst->type == NodeType::ForEach    ? ContainerKind::Array
+                             : dst->type == NodeType::ForEachSet ? ContainerKind::Set
+                                                                 : ContainerKind::Map;
+    if (sd.kind() != want) return;
+    if (want == ContainerKind::Map &&
+        (sd.keyType != dst->keyType ||
+         (sd.keyTypeName && *sd.keyTypeName && dst->keyTypeName != sd.keyTypeName)))
+    {
+        dst->keyType     = sd.keyType;
+        dst->keyTypeName = sd.keyTypeName ? sd.keyTypeName : "";
+        // The Key output (data-out 0) changed type — its wires no longer typecheck.
+        g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
+            [&](const Link& l){ return l.srcNode == dstNode && l.srcPin == 4; }),
+            g.links.end());
+    }
 
     const PinType elem = sd.type;
     const std::string elemDef = sd.typeName ? sd.typeName : "";
@@ -992,9 +1240,12 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
         // (no field pins, "definition missing" in every panel that looks it up).
         if (elem == PinType::Enum || elem == PinType::Struct) dst->typeName = elemDef;
         else                                                  dst->typeName.clear();
-        // The Element output changed type: drop its links (they no longer typecheck).
+        // The Element output changed type: drop its links (they no longer
+        // typecheck). It is data-out 0 (pin 4) on the array/set loops and
+        // data-out 1 (pin 5) on the map one, whose data-out 0 is the Key.
+        const int elemPin = want == ContainerKind::Map ? 5 : 4;
         g.links.erase(std::remove_if(g.links.begin(), g.links.end(),
-            [&](const Link& l){ return l.srcNode == dstNode && l.srcPin == 4; }),
+            [&](const Link& l){ return l.srcNode == dstNode && l.srcPin == elemPin; }),
             g.links.end());
     }
     // Object arrays: carry the element class along so the Element pin offers the
@@ -1005,7 +1256,8 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
         std::string cls;
         if (src->type == NodeType::GetVariable || src->type == NodeType::SetVariable)
         { if (const Variable* v = g.findVariable(src->s)) cls = v->className; }
-        else if (src->type != NodeType::ForEach)
+        else if (src->type != NodeType::ForEach && src->type != NodeType::ForEachSet &&
+                 src->type != NodeType::ForEachMap)
             cls = src->s;
         if (!cls.empty()) dst->s = cls;
     }
@@ -1041,8 +1293,26 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
         // type (Runner::evalInput), and generated C++ emits the cast — so a
         // Float output feeding an Int input needs no node in between.
         if (!canConvertPinType(dataPinType(*s, false, si), dataPinType(*d, true, di)) ||
-            dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // array ≠ scalar
+            dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // container ≠ scalar
             return false;
+        // Containers of different KINDS never join: an array is ordered and
+        // indexable, a set deduplicates, a map is keyed — and coerce passes a
+        // container through untouched, so an accepted wire would be a
+        // reinterpretation rather than a conversion. A map additionally has to
+        // agree on the KEY (and, for enum keys, on its definition).
+        {
+            PinDesc sd{}, dd{};
+            dataPinDescOf(*s, false, si, sd);
+            dataPinDescOf(*d, true,  di, dd);
+            if (sd.kind() != dd.kind()) return false;
+            if (sd.kind() == ContainerKind::Map)
+            {
+                if (sd.keyType != dd.keyType) return false;
+                const std::string_view ka = sd.keyTypeName ? sd.keyTypeName : "";
+                const std::string_view kb = dd.keyTypeName ? dd.keyTypeName : "";
+                if (!ka.empty() && !kb.empty() && ka != kb) return false;
+            }
+        }
         // User-defined types connect only to the SAME definition: a Struct pin
         // for PlayerStats must not accept an Inventory, and enums likewise. An
         // EMPTY typeName is the generic boundary (e.g. the save.setStruct
@@ -1193,6 +1463,17 @@ nlohmann::json nodeToJsonObj(const Node& n)
             nlohmann::json pe = { { "name", p.name }, { "type", (int)p.type } };
             if (p.isArray) pe["arr"] = true;
             if (!p.typeName.empty()) pe["typeName"] = p.typeName;
+            // "ctr" is written only for Set/Map — an Array param keeps exactly
+            // the bytes it had before containers existed.
+            if (p.container != ContainerKind::None && p.container != ContainerKind::Array)
+            {
+                pe["ctr"] = (int)p.container;
+                if (p.container == ContainerKind::Map)
+                {
+                    pe["keyType"] = (int)p.keyType;
+                    if (!p.keyTypeName.empty()) pe["keyTypeName"] = p.keyTypeName;
+                }
+            }
             a.push_back(std::move(pe));
         }
         return a;
@@ -1201,6 +1482,15 @@ nlohmann::json nodeToJsonObj(const Node& n)
     if (!n.results.empty()) e["results"] = dumpParams(n.results);
     if (n.subgraph)         e["subgraph"] = n.subgraph;
     if (n.isArray)          e["arr"]     = true;
+    if (n.container != ContainerKind::None && n.container != ContainerKind::Array)
+    {
+        e["ctr"] = (int)n.container;
+        if (n.container == ContainerKind::Map)
+        {
+            e["keyType"] = (int)n.keyType;
+            if (!n.keyTypeName.empty()) e["keyTypeName"] = n.keyTypeName;
+        }
+    }
     if (!n.typeName.empty()) e["typeName"] = n.typeName;
     if (!n.pinDefaults.empty())
     {
@@ -1226,6 +1516,25 @@ nlohmann::json variableToJsonObj(const Variable& v)
         nlohmann::json items = nlohmann::json::array();
         for (const Value& it : v.defaultItems) items.push_back(scalarValueToJson(it, v.type));
         e["items"] = std::move(items);
+    }
+    if (v.container != ContainerKind::None && v.container != ContainerKind::Array)
+    {
+        e["ctr"] = (int)v.container;
+        if (v.container == ContainerKind::Map)
+        {
+            e["keyType"] = (int)v.keyType;
+            if (!v.keyTypeName.empty()) e["keyTypeName"] = v.keyTypeName;
+            // Parallel to "items", NEVER a JSON object: nlohmann's object is a
+            // sorted std::map, so an object would silently alphabetize the keys
+            // and the persisted order would stop being the insertion order the
+            // whole feature is built on. Keys are also not all strings.
+            if (!v.defaultKeys.empty())
+            {
+                nlohmann::json keys = nlohmann::json::array();
+                for (const Value& k : v.defaultKeys) keys.push_back(scalarValueToJson(k, v.keyType));
+                e["keys"] = std::move(keys);
+            }
+        }
     }
     if (v.type == PinType::Transform)
         e["xform"] = { v.tpos.x, v.tpos.y, v.tpos.z, v.trot.x, v.trot.y, v.trot.z,
@@ -1277,6 +1586,12 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
             p.type = (PinType)pe.value("type", (int)P::Float);
             p.isArray = pe.value("arr", false);
             p.typeName = pe.value("typeName", std::string());
+            p.container = (ContainerKind)pe.value("ctr", (int)ContainerKind::None);
+            // A kind present means container, full stop: the two-field state
+            // "Set but not a container" must not survive a load.
+            if (p.container != ContainerKind::None) p.isArray = true;
+            p.keyType = (PinType)pe.value("keyType", (int)P::String);
+            p.keyTypeName = pe.value("keyTypeName", std::string());
             ps.push_back(std::move(p));
         }
     };
@@ -1284,6 +1599,10 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     loadParams(e.value("results", nlohmann::json::array()), n.results);
     n.subgraph = e.value("subgraph", 0);
     n.isArray  = e.value("arr", false);
+    n.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
+    if (n.container != ContainerKind::None) n.isArray = true;   // see loadParams
+    n.keyType = (PinType)e.value("keyType", (int)P::String);
+    n.keyTypeName = e.value("keyTypeName", std::string());
     n.typeName = e.value("typeName", std::string());
     if (const auto& pd = e.value("pinDefaults", nlohmann::json::array()); pd.is_array())
         for (const auto& entry : pd)
@@ -1308,9 +1627,16 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     v.access = e.value("access", 0);
     v.scope  = e.value("scope", 0);
     v.isArray = e.value("arr", false);
+    v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
+    if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
+    v.keyType = (PinType)e.value("keyType", (int)P::String);
+    v.keyTypeName = e.value("keyTypeName", std::string());
     if (v.isArray)
         if (const auto& items = e.value("items", nlohmann::json::array()); items.is_array())
             for (const auto& it : items) v.defaultItems.push_back(scalarValueFromJson(it, v.type));
+    if (v.container == ContainerKind::Map)
+        if (const auto& keys = e.value("keys", nlohmann::json::array()); keys.is_array())
+            for (const auto& k : keys) v.defaultKeys.push_back(scalarValueFromJson(k, v.keyType));
     v.className = e.value("className", std::string());
     v.typeName  = e.value("typeName", std::string());
     if (const auto& sd = e.value("structDefaults", nlohmann::json::object()); sd.is_object())
@@ -2035,8 +2361,11 @@ namespace
 constexpr int kMaxSteps = 4096;
 constexpr int kMaxDepth = 64;
 
-// Element-type equality for Contains / IndexOf (scalar values only).
-bool valueEquals(const Value& a, const Value& b, PinType t)
+} // namespace
+
+// Element-type equality for Contains / IndexOf, set membership and map keys
+// (scalar values only). Public — see the declaration in HorizonCode.h.
+bool scalarValueEquals(const Value& a, const Value& b, PinType t)
 {
     switch (t)
     {
@@ -2055,6 +2384,8 @@ bool valueEquals(const Value& a, const Value& b, PinType t)
     }
 }
 
+namespace
+{
 // ── THE coercion rule. Two other places implement it and MUST match: ─────────
 //   • HorizonCodeGenSupport.h `hc::coerce*` — the generated-C++ backend. It is a
 //     DELIBERATE duplicate, not an oversight: generated code must produce the
@@ -2219,6 +2550,7 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         if (!n) return;
         execNode(*n, depth);
         if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
+            n->type == T::ForEachSet || n->type == T::ForEachMap ||
             n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop ||
             n->type == T::SwitchOnEnum || n->type == T::Cast)
             return; // they steer their own exec-outs internally (Delay: later)
@@ -2396,6 +2728,34 @@ void Runner::execNode(const Node& n, int depth)
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
+    case T::ForEachSet:
+    {
+        // Identical to ForEach — the set's items ARE its iteration order (see
+        // ContainerKind). A separate node rather than a mode on ForEach so no
+        // graph that already wires a ForEach can change shape underneath it.
+        const Value set = evalInput(n, 0, depth + 1);
+        const PinRanges r = pinRanges(n);
+        for (size_t i = 0; i < set.items.size(); ++i)
+        {
+            m_execOutputs[n.id] = { set.items[i], Value::ofInt((int)i) };
+            runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+        }
+        runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
+        break;
+    }
+    case T::ForEachMap:
+    {
+        const Value map = evalInput(n, 0, depth + 1);
+        const PinRanges r = pinRanges(n);
+        const size_t count = std::min(map.keys.size(), map.items.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            m_execOutputs[n.id] = { map.keys[i], map.items[i], Value::ofInt((int)i) };
+            runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+        }
+        runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
+        break;
+    }
     case T::Print:
         HE_LOG_INFO(HorizonCode, "%s",
             ("[Widget] " + coerce(evalInput(n, 0, depth + 1), P::String).s).c_str());
@@ -2462,6 +2822,21 @@ Value Runner::evalInput(const Node& n, int dataInIndex, int depth)
     // Unwired: the pin's inline default (editor-authored) before the type's zero.
     if (auto it = n.pinDefaults.find(dataInIndex); it != n.pinDefaults.end())
         return coerce(it->second, dataPinType(n, true, dataInIndex));
+    // The zero of a CONTAINER pin is the empty container of its kind, not a
+    // scalar zero — "Map Length of an unwired Map" has to be 0, not garbage, and
+    // generated C++ starts such a pin at an empty hc::Map for the same reason.
+    PinDesc d{};
+    if (dataPinDescOf(n, true, dataInIndex, d) && d.isArray)
+    {
+        Value v; v.isArray = true; v.container = d.kind(); v.type = d.type;
+        if (d.typeName) v.typeName = d.typeName;
+        if (v.container == CK::Map)
+        {
+            v.keyType = d.keyType;
+            if (d.keyTypeName) v.keyTypeName = d.keyTypeName;
+        }
+        return v;
+    }
     Value v; v.type = dataPinType(n, true, dataInIndex);
     return v;
 }
@@ -2642,7 +3017,7 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         const Value arr = evalInput(n, 0, depth + 1);
         const Value key = coerce(evalInput(n, 1, depth + 1), n.propType);
         for (const Value& v : arr.items)
-            if (valueEquals(v, key, n.propType)) return Value::ofBool(true);
+            if (scalarValueEquals(v, key, n.propType)) return Value::ofBool(true);
         return Value::ofBool(false);
     }
     case T::ArrayIndexOf:
@@ -2650,9 +3025,119 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         const Value arr = evalInput(n, 0, depth + 1);
         const Value key = coerce(evalInput(n, 1, depth + 1), n.propType);
         for (size_t i = 0; i < arr.items.size(); ++i)
-            if (valueEquals(arr.items[i], key, n.propType)) return Value::ofInt((int)i);
+            if (scalarValueEquals(arr.items[i], key, n.propType)) return Value::ofInt((int)i);
         return Value::ofInt(-1);                           // not found
     }
+
+    // ── Set<T> ───────────────────────────────────────────────────────────────
+    // Pure and copy-semantic like the Array nodes: each op re-stamps the copy's
+    // kind and element type, so a set arriving from a dynamic boundary (a script
+    // handing over a list) still leaves as a well-formed set.
+    case T::SetMake:
+        return Value::ofSet(n.propType, n.typeName);
+    case T::SetLength:
+        return Value::ofInt((int)evalInput(n, 0, depth + 1).items.size());
+    case T::SetClear:
+        return Value::ofSet(n.propType, n.typeName);
+    case T::SetAdd:
+    {
+        Value set = evalInput(n, 0, depth + 1);
+        set.isArray = true; set.container = CK::Set; set.type = n.propType;
+        const Value v = coerce(evalInput(n, 1, depth + 1), n.propType);
+        // Already present → unchanged, and specifically NOT moved to the back:
+        // insertion order means the order of FIRST insertion.
+        if (indexOfValue(set.items, v, n.propType) < 0) set.items.push_back(v);
+        return set;
+    }
+    case T::SetRemove:
+    {
+        Value set = evalInput(n, 0, depth + 1);
+        set.isArray = true; set.container = CK::Set; set.type = n.propType;
+        const Value v = coerce(evalInput(n, 1, depth + 1), n.propType);
+        if (const int at = indexOfValue(set.items, v, n.propType); at >= 0)
+            set.items.erase(set.items.begin() + at);       // the rest keeps its order
+        return set;
+    }
+    case T::SetContains:
+    {
+        const Value set = evalInput(n, 0, depth + 1);
+        const Value v = coerce(evalInput(n, 1, depth + 1), n.propType);
+        return Value::ofBool(indexOfValue(set.items, v, n.propType) >= 0);
+    }
+    case T::SetToArray:
+    {
+        Value arr = evalInput(n, 0, depth + 1);
+        arr.isArray = true; arr.container = CK::Array; arr.type = n.propType;
+        arr.keys.clear();
+        return arr;                                        // items are already in order
+    }
+
+    // ── Map<K,V> ─────────────────────────────────────────────────────────────
+    case T::MapMake:
+    case T::MapClear:
+        return Value::ofMap(n.keyType, n.propType, n.keyTypeName, n.typeName);
+    case T::MapLength:
+        return Value::ofInt((int)evalInput(n, 0, depth + 1).items.size());
+    case T::MapSet:
+    {
+        Value map = evalInput(n, 0, depth + 1);
+        map.isArray = true; map.container = CK::Map; map.type = n.propType;
+        map.keyType = n.keyType; map.keyTypeName = n.keyTypeName;
+        const Value k = coerce(evalInput(n, 1, depth + 1), n.keyType);
+        const Value v = coerce(evalInput(n, 2, depth + 1), n.propType);
+        if (const int at = indexOfValue(map.keys, k, n.keyType); at >= 0)
+            map.items[(size_t)at] = v;                     // update IN PLACE, key keeps its slot
+        else { map.keys.push_back(k); map.items.push_back(v); }
+        return map;
+    }
+    case T::MapRemove:
+    {
+        Value map = evalInput(n, 0, depth + 1);
+        map.isArray = true; map.container = CK::Map; map.type = n.propType;
+        map.keyType = n.keyType; map.keyTypeName = n.keyTypeName;
+        const Value k = coerce(evalInput(n, 1, depth + 1), n.keyType);
+        if (const int at = indexOfValue(map.keys, k, n.keyType); at >= 0)
+        {
+            map.keys.erase(map.keys.begin() + at);
+            if ((size_t)at < map.items.size()) map.items.erase(map.items.begin() + at);
+        }
+        return map;
+    }
+    case T::MapContains:
+    {
+        const Value map = evalInput(n, 0, depth + 1);
+        const Value k = coerce(evalInput(n, 1, depth + 1), n.keyType);
+        return Value::ofBool(indexOfValue(map.keys, k, n.keyType) >= 0);
+    }
+    case T::MapGet:
+    {
+        const Value map = evalInput(n, 0, depth + 1);
+        const Value k = coerce(evalInput(n, 1, depth + 1), n.keyType);
+        const int at = indexOfValue(map.keys, k, n.keyType);
+        // A miss is NOT a warning like Array Get's: the Default pin exists
+        // precisely so that "no entry yet" is an ordinary, expected answer.
+        if (at >= 0 && (size_t)at < map.items.size()) return map.items[(size_t)at];
+        return coerce(evalInput(n, 2, depth + 1), n.propType);
+    }
+    case T::MapKeys:
+    {
+        const Value map = evalInput(n, 0, depth + 1);
+        Value r = Value::ofArray(n.keyType, n.keyTypeName);
+        r.items = map.keys;
+        r.items.resize(std::min(map.keys.size(), map.items.size()));
+        return r;
+    }
+    case T::MapValues:
+    {
+        const Value map = evalInput(n, 0, depth + 1);
+        Value r = Value::ofArray(n.propType, n.typeName);
+        // Truncated to the pairs that exist, so Keys and Values are always
+        // index-parallel even if a hand-edited asset was not.
+        r.items = map.items;
+        r.items.resize(std::min(map.keys.size(), map.items.size()));
+        return r;
+    }
+
     case T::GetProperty:
     {
         Value v = m_ctx.getProperty ? m_ctx.getProperty(n.elem, n.s) : Value{};
@@ -2701,7 +3186,9 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     }
     case T::FunctionCall:
     case T::CallExternal:
-    case T::ForEach: // Element + Index of the current iteration (cached per pass)
+    case T::ForEach:    // Element + Index of the current iteration (cached per pass)
+    case T::ForEachSet: // ditto
+    case T::ForEachMap: // Key + Value + Index of the current pair
     {
         // A (local or cross-instance) call's return value: read the cached results.
         auto it = m_execOutputs.find(n.id);

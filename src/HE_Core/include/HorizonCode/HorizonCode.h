@@ -42,6 +42,46 @@ class CompiledInstance;
 enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform,
                                Enum, Struct, Vec3, Vec4 };
 
+// ── Containers ───────────────────────────────────────────────────────────────
+// A pin/variable/value is a scalar or a CONTAINER of its type. `isArray` is the
+// "is it a container at all" flag — it predates Set/Map and every graph and
+// asset on disk written before them carries it alone — and `container` says
+// WHICH kind. The legacy row is `isArray == true, container == None`, which
+// reads as Array; containerKindOf() is the single place that resolves it, and
+// fromJson forces `isArray` true whenever a kind is present, so the
+// inconsistent state is not representable after a load.
+//
+// Widening the existing flag rather than replacing it is deliberate: a site
+// that has not learned about Set/Map still takes the CONTAINER path and sees
+// the payload in `items`, instead of the scalar path where it would read `f`
+// off a map and lose the data silently.
+//
+// ITERATION ORDER IS INSERTION ORDER, for sets and maps, in the interpreter and
+// in generated C++ alike (docs/horizoncode-containers-plan.md §1.2). Re-adding
+// an element a set already has is a no-op; re-inserting a key a map already has
+// updates the value IN PLACE and keeps the key's position; removal preserves
+// the relative order of the rest. Both backends are vector-backed, so this is
+// structural rather than a rule two implementations have to remember —
+// std::unordered_map (and a JSON object, whose nlohmann default is a sorted
+// std::map) would break it.
+enum class ContainerKind : uint8_t { None = 0, Array, Set, Map };
+
+inline ContainerKind containerKindOf(bool isArray, ContainerKind c)
+{
+    if (c != ContainerKind::None) return c;
+    return isArray ? ContainerKind::Array : ContainerKind::None;
+}
+
+// May `t` key a Map? Int, String, Enum and Ref — types with a cheap, exact
+// identity. Float is out (equality on floats is not an equivalence anyone wants
+// keyed data to rest on), Bool is out (a two-slot map is a struct), and the
+// composites are out for both reasons at once.
+inline bool isValidMapKeyType(PinType t)
+{
+    return t == PinType::Int || t == PinType::String ||
+           t == PinType::Enum || t == PinType::Ref;
+}
+
 struct Value
 {
     PinType     type = PinType::Float;
@@ -61,10 +101,17 @@ struct Value
     uint32_t    ref = 0;   // instance handle when type == Ref (0 = none)
     // Transform payload (type == Transform): rotation in euler degrees, identity scale.
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
-    // Array payload: when isArray, `type` is the element type and `items` holds the
-    // elements (each a scalar Value of `type`). An array is never scalar-coerced.
+    // Container payload: when isArray, `type` is the ELEMENT type and `items`
+    // holds the elements (each a scalar Value of `type`). A container is never
+    // scalar-coerced. For a MAP `items` holds the VALUES and the parallel
+    // `keys` holds the keys — that way anything iterating `items` without
+    // knowing about maps still sees a plain list of values.
     bool               isArray = false;
+    ContainerKind      container = ContainerKind::None;
     std::vector<Value> items;
+    std::vector<Value> keys;                       // Map only, parallel to items
+    PinType            keyType = PinType::String;  // Map only: the key's type
+    std::string        keyTypeName;                // Map with Enum keys: the definition asset
     // User-defined types (type == Enum/Struct): the definition asset's
     // project-relative path (HE::TypeRegistry key). Enum values ride in `i`;
     // a scalar Struct value holds its field values in `items` in DEFINITION
@@ -84,6 +131,19 @@ struct Value
     static Value ofRef(uint32_t id)          { Value r; r.type = PinType::Ref;    r.ref = id; return r; }
     static Value ofTransform(const glm::vec3& p, const glm::vec3& r_, const glm::vec3& s_)
     { Value r; r.type = PinType::Transform; r.tpos = p; r.trot = r_; r.tscl = s_; return r; }
+
+    // Empty containers. Both flags are always set together — see ContainerKind.
+    static Value ofArray(PinType elem, std::string tn = {})
+    { Value r; r.isArray = true; r.container = ContainerKind::Array; r.type = elem;
+      r.typeName = std::move(tn); return r; }
+    static Value ofSet(PinType elem, std::string tn = {})
+    { Value r; r.isArray = true; r.container = ContainerKind::Set; r.type = elem;
+      r.typeName = std::move(tn); return r; }
+    static Value ofMap(PinType key, PinType val, std::string keyTn = {}, std::string tn = {})
+    { Value r; r.isArray = true; r.container = ContainerKind::Map; r.type = val;
+      r.keyType = key; r.keyTypeName = std::move(keyTn); r.typeName = std::move(tn); return r; }
+
+    ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
 enum class NodeType : uint8_t
@@ -222,6 +282,44 @@ enum class NodeType : uint8_t
     MakeVector2, MakeVector3, MakeVector4,
     BreakVector2, BreakVector3, BreakVector4,
 
+    // ── Set<T> ───────────────────────────────────────────────────────────────
+    // A collection with no duplicates. `propType` is the element type (+
+    // `typeName` for Enum/Struct elements), exactly like the Array nodes; the
+    // container pins carry ContainerKind::Set.
+    //
+    // Pure, copy semantics, like Array: each op returns a NEW set rather than
+    // mutating the one it was handed, so a graph's data flow stays a data flow.
+    // ITERATION IS INSERTION ORDER — Set Add of an element the set already has
+    // is a no-op that does NOT move it to the back, and Set Remove keeps the
+    // relative order of the rest.
+    SetMake,      // → empty Set of the element type
+    SetAdd,       // Set + Value → Set with the value (no-op if present)
+    SetRemove,    // Set + Value → Set without it (no-op if absent)
+    SetContains,  // Set + Value → Bool
+    SetLength,    // Set → Int
+    SetClear,     // Set → empty Set of the same element type
+    SetToArray,   // Set → Array of the elements, in iteration order
+    ForEachSet,   // exec: Body per element (Element + Index), then Done
+
+    // ── Map<K,V> ─────────────────────────────────────────────────────────────
+    // `propType`/`typeName` are the VALUE type; the key type rides in the
+    // node's `keyType`/`keyTypeName` (Int, String, Enum or Ref — see
+    // isValidMapKeyType). Pure and copy-semantic like the Set nodes.
+    //
+    // ITERATION IS INSERTION ORDER — Map Set on a key the map already has
+    // updates the value IN PLACE and keeps the key's position, and Map Remove
+    // keeps the relative order of the rest.
+    MapMake,      // → empty Map
+    MapSet,       // Map + Key + Value → Map (insert or update in place)
+    MapRemove,    // Map + Key → Map without that pair
+    MapContains,  // Map + Key → Bool
+    MapLength,    // Map → Int
+    MapClear,     // Map → empty Map of the same key/value types
+    MapGet,       // Map + Key + Default → Value (the default when absent)
+    MapKeys,      // Map → Array of keys, in iteration order
+    MapValues,    // Map → Array of values, in the SAME order as MapKeys
+    ForEachMap,   // exec: Body per pair (Key + Value + Index), then Done
+
     COUNT
 };
 
@@ -233,9 +331,17 @@ struct FuncParam
 {
     std::string name;
     PinType     type = PinType::Float;
-    bool        isArray = false;   // the pin carries an array of `type`
+    bool        isArray = false;   // the pin carries a CONTAINER of `type`
     // Enum/Struct params: the definition asset's path (HE::TypeRegistry key).
     std::string typeName;
+    // Which container (see ContainerKind): None + isArray reads as Array, which
+    // is every signature written before Set/Map existed. For a Map, `type` is
+    // the VALUE type and these name the key.
+    ContainerKind container = ContainerKind::None;
+    PinType       keyType = PinType::String;
+    std::string   keyTypeName;
+
+    ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
 // A user-defined graph variable: named, typed, persistent per running instance.
@@ -245,14 +351,22 @@ struct Variable
 {
     std::string name;
     PinType     type = PinType::Float;
-    bool        isArray = false;   // when true the variable holds an array of `type`
+    bool        isArray = false;   // when true the variable holds a CONTAINER of `type`
     float       f[4] = {};
     std::string s;
     // Transform default (type == Transform): rotation in euler degrees, identity scale.
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
-    // Array default (isArray): the editor-authored slots that seed the instance's
-    // array on creation. Each item is a scalar Value of `type`.
+    // Container default (isArray): the editor-authored slots that seed the
+    // instance's container on creation. Each item is a scalar Value of `type`;
+    // for a MAP `defaultKeys` is parallel to it and holds the keys.
     std::vector<Value> defaultItems;
+    std::vector<Value> defaultKeys;
+    // Which container (see ContainerKind); for a Map, `type` is the VALUE type
+    // and these name the key. None + isArray reads as Array — every variable
+    // declared before Set/Map existed.
+    ContainerKind container = ContainerKind::None;
+    PinType       keyType = PinType::String;
+    std::string   keyTypeName;
     int         access = 0;   // 0 public (readable via a reference), 1 private
     // Scope: 0 = instance variable (persistent per running instance, seeded by
     // the Runtime — today's behavior). Non-zero = FUNCTION-LOCAL: the id of the
@@ -277,6 +391,8 @@ struct Variable
     // variableDefaultValue: the definition's defaults first, then these on top;
     // a name the definition no longer has simply doesn't apply.
     std::unordered_map<std::string, Value> structDefaults;
+
+    ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
 struct Node
@@ -320,6 +436,16 @@ struct Node
     // Struct/Enum nodes (Make/Break/SetField/ConstEnum/SwitchOnEnum/IntToEnum…):
     // the definition asset's path (HE::TypeRegistry key).
     std::string typeName;
+    // Which container the node's container pins carry (see ContainerKind).
+    // Get/SetVariable mirror their variable's; the Array nodes leave it None
+    // (which reads as Array) so nothing authored before Set/Map moves; the
+    // Set/Map nodes set it explicitly. `keyType`/`keyTypeName` type a Map node's
+    // KEY — its `propType`/`typeName` are the value type.
+    ContainerKind container = ContainerKind::None;
+    PinType       keyType = PinType::String;
+    std::string   keyTypeName;
+
+    ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
 
 // Links connect unified pin indices (see pin ranges below).
@@ -330,8 +456,17 @@ struct Link { int srcNode = 0, srcPin = 0, dstNode = 0, dstPin = 0; };
 // typeName: the Enum/Struct definition asset behind a pin of those types —
 // borrowed from the node's own strings (never the signature scratch), null for
 // every built-in type. Graph::connect requires matching typeNames.
+// container/keyType/keyTypeName mirror the pin's ContainerKind and — for a Map
+// pin, whose `type` is the VALUE type — its key. Left at the defaults every pin
+// that is a scalar or a plain array has always had, so the brace-initializer
+// lists below (and in every other signatureOf-style builder) stay as they were.
 struct PinDesc { const char* name; PinType type; bool isArray = false;
-                 const char* typeName = nullptr; };
+                 const char* typeName = nullptr;
+                 ContainerKind container = ContainerKind::None;
+                 PinType       keyType = PinType::String;
+                 const char*   keyTypeName = nullptr;
+
+                 ContainerKind kind() const { return containerKindOf(isArray, container); } };
 struct NodeSig { std::vector<PinDesc> execIns, execOuts, dataIns, dataOuts; };
 HE_API NodeSig signatureOf(const Node& n);
 
@@ -558,6 +693,13 @@ HE_API std::string eventName(EventId id);
 // coerce passes an array through untouched, so an element-wise reinterpretation
 // would read the wrong field of every item.
 HE_API bool canConvertPinType(PinType from, PinType to);
+
+// Equality of two SCALAR values of type `t` — the rule behind Array Contains,
+// Set membership and Map key identity. Public because the boundaries need the
+// same answer the interpreter gives: the savegame decoder dedupes a set with
+// it, and generated C++ mirrors it (hc::sameScalar). Types with no meaningful
+// identity (Struct) compare unequal, which is also why they cannot key a map.
+HE_API bool scalarValueEquals(const Value& a, const Value& b, PinType t);
 
 HE_API void inferUserTypeNames(Graph& g);
 
