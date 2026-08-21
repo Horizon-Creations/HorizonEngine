@@ -3895,6 +3895,24 @@ void EditorApplication::dumpFrameHeadless()
 		}
 	}
 
+	// ── Paint again after the edit (HE_DUMP_LAYERREPAINT) ────────────────────
+	// The FIRST paint always goes through registerTexture — the witness paints
+	// before the terrain's first updateTerrains. Every later paint takes the
+	// other branch: replaceTexture + a DEFERRED InvalidateTexture. This exercises
+	// that second branch, which is the only "runs once" asymmetry in the
+	// weightmap path. Works with or without HE_DUMP_LAYEREDIT.
+	if (const char* rp = std::getenv("HE_DUMP_LAYERREPAINT"); rp && *rp && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		for (auto [te, tc] : reg.view<TerrainComponent>().each())
+		{
+			TerrainPaint::paint(tc, 30.0f, -25.0f, /*layer*/1, 14.0f, 5.0f, 1.0f);
+			HE_LOG_INFO(Editor, "%s",
+				"EditorApplication: HE_DUMP_LAYERREPAINT painted again after the edit");
+		}
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+	}
+
 	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
 	// render the test material's preview sphere and let the backend dump it.
 	if (const char* pv = std::getenv("HE_DUMP_PREVIEW"); pv && *pv && s_matTestId != HE::UUID{})

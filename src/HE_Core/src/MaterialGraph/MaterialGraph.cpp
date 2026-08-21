@@ -607,9 +607,18 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                 sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
                 wsum += (i ? " + " : "") + w;
             }
+            // A texel whose weights sum to nothing falls back to LAYER 0 rather
+            // than to black. That is the same answer the 1x1 (1,0,0,0) default
+            // weightmap gives an unpainted terrain, and it is what keeps a
+            // painted landscape readable when a layer is REMOVED from the
+            // material: everything painted with the dropped layer used to divide
+            // its zero sum by the 1e-4 floor and come out as a black hole.
+            const std::string layer0 = names.empty()
+                ? std::string("vec3(0.0)") : inputExpr(c, sc, n, 0, F::Vec3);
             decl = "vec4 " + v + "_w = texture(heLandscapeWeights, vUV);"
-                 + " float " + v + "_s = max(" + wsum + ", 1e-4);"
-                 + " vec3 " + v + " = (" + sum + ") / " + v + "_s;";
+                 + " float " + v + "_s = " + wsum + ";"
+                 + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
+                 + layer0 + ";";
             break;
         }
         case MatNodeType::Add:

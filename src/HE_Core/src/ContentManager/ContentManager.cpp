@@ -693,6 +693,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			// re-applied from oldValues below, the rest must follow the parent.
 			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
+			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
 			inst->blendMode            = gen.blendMode;
 			inst->customShaderVertGlsl = gen.vertexBody;
 			applyApproxSurface(*inst, g, &ov); // GI-hit colours FOR THE PERMUTATION (switches taken)
@@ -712,6 +713,11 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->graphParamTooltips   = parent->graphParamTooltips;
 		inst->graphTexturePaths    = parent->graphTexturePaths;
 		inst->graphTextureIds      = parent->graphTextureIds;
+		// Same shader = same layer declaration. Without this an INSTANCE of a
+		// landscape material advertised no paint layers at all, so the Landscape
+		// panel refused to paint with it ("needs a material with a Landscape
+		// Layer Blend node") even though its shader samples the weightmap.
+		inst->graphLayerNames      = parent->graphLayerNames;
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;

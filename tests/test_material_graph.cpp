@@ -1108,9 +1108,19 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	// (the weightmap spans the whole terrain; detail tiling is per layer).
 	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
 	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
-	// Normalised by the weight sum, so a partly painted texel doesn't darken.
-	CHECK(gen.glsl.find("max(") != std::string::npos);
+	// Normalised by the weight sum, so a partly painted texel doesn't darken…
 	CHECK(gen.glsl.find("1e-4") != std::string::npos);
+	// …and a texel with NO weight at all falls back to layer 0 instead of
+	// dividing zero by the floor and coming out black (which is what a region
+	// painted with a since-removed layer used to do).
+	const size_t tern = gen.glsl.find("> 1e-4 ? (");
+	REQUIRE(tern != std::string::npos);
+	const size_t colon = gen.glsl.find(" : ", tern);
+	REQUIRE(colon != std::string::npos);
+	const std::string elseExpr =
+		gen.glsl.substr(colon + 3, gen.glsl.find(';', colon) - colon - 3);
+	// …and that fallback is exactly what layer 0 contributes to the blend.
+	CHECK(gen.glsl.find("(" + elseExpr + " * ") != std::string::npos);
 	// Exactly the three declared layers are advertised to the landscape tool.
 	REQUIRE(gen.layerNames.size() == 3);
 	CHECK(gen.layerNames[0] == "Grass");

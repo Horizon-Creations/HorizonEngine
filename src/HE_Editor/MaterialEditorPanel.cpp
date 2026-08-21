@@ -512,18 +512,32 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			}
 			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
 				ImGui::TextDisabled("4 layers max (one RGBA weightmap)");
-			// Rebuild `s`; dropping a layer also drops the links on the pins that
-			// no longer exist, otherwise they would silently re-target.
+			// Rebuild `s`. The link surgery below happens ONLY for an explicit ×:
+			// this runs every frame while the user types, and clearing a name
+			// field to retype it (select-all, delete) makes
+			// matLandscapeLayerNames drop that entry for a frame — dropping pins
+			// on that would permanently cut the links of layers the user never
+			// touched. A transiently shorter list is harmless on its own: the
+			// links keep their pin index and reappear with the name.
 			std::string joined;
 			for (size_t i = 0; i < names.size(); ++i)
 				joined += (i ? "\n" : "") + names[i];
 			if (joined != n.s)
 			{
 				n.s = joined;
-				const int keep = static_cast<int>(names.size());
-				if (g)
-					for (int pin = keep; pin < HE::kMatMaxLandscapeLayers; ++pin)
+				// Removing layer k means layer k+1 BECOMES layer k, so the links
+				// have to slide down with the names. Dropping only the tail pin
+				// (what this used to do) left every layer after the removed one
+				// wired to its predecessor's colour under the next name's label.
+				if (g && removeAt >= 0)
+				{
+					g->disconnectInput(n.id, removeAt);
+					for (auto& l : g->links)
+						if (l.dstNode == n.id && l.dstPin > removeAt) --l.dstPin;
+					for (int pin = static_cast<int>(names.size());
+					     pin < HE::kMatMaxLandscapeLayers; ++pin)
 						g->disconnectInput(n.id, pin);
+				}
 			}
 			break;
 		}
