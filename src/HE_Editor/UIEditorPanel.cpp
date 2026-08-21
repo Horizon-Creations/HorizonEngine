@@ -108,15 +108,6 @@ struct State
 AssetPanelState<State> s_states;
 
 // ── Layout math (via UIWidgetTree's shared layout, mirrors the runtime) ───────
-ImVec2 anchorPoint(uint8_t a)
-{
-	static const ImVec2 pts[9] = {
-		{0.0f,0.0f},{0.5f,0.0f},{1.0f,0.0f},
-		{0.0f,0.5f},{0.5f,0.5f},{1.0f,0.5f},
-		{0.0f,1.0f},{0.5f,1.0f},{1.0f,1.0f} };
-	return pts[a > 8 ? 0 : a];
-}
-
 struct Rect { ImVec2 mn, mx; };
 
 // Element rect in CANVAS units — thin wrapper over the shared layout helper so
@@ -279,13 +270,13 @@ int addElementAt(State& st, UIWidgetType type, int parentId, const ImVec2* canva
 	if (canvasPt)
 	{
 		// anchor TopLeft, pivot 0.5: position = drop point relative to parent TL.
-		e->anchor = 0;
+		HE::uiSetAnchorPreset(*e, 0);
 		e->posX = canvasPt->x - parent.mn.x;
 		e->posY = canvasPt->y - parent.mn.y;
 	}
 	else
 	{
-		e->anchor = 4; // MiddleCenter
+		HE::uiSetAnchorPreset(*e, 5); // MiddleCenter
 		e->posX = 0.0f; e->posY = 0.0f;
 	}
 	return st.tree.add(std::move(e));
@@ -568,36 +559,123 @@ void drawDetails(State& st, AppContext& ctx)
 
 	// Layout — shared base fields.
 	ImGui::SeparatorText("Layout");
-	edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
-	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
-	committed |= ImGui::IsItemDeactivatedAfterEdit();
+
+	// A stretched axis is not authored as "position and size": the element has
+	// no size of its own there, it has two margins from the anchored edges. So
+	// the two fields ARE the margins on that axis, and stay position/size on
+	// the axis that is still a point. This is what "anchored to a whole side"
+	// means in practice, and it is why the fields have to change with the
+	// anchor rather than the anchor quietly redefining what they mean.
+	const bool stretchX = n->anchorMaxX > n->anchorMinX + 1e-4f;
+	const bool stretchY = n->anchorMaxY > n->anchorMinY + 1e-4f;
+	{
+		float left, right, top, bottom;
+		HE::uiAnchorInsetsX(*n, left, right);
+		HE::uiAnchorInsetsY(*n, top, bottom);
+
+		if (stretchX && stretchY)
+		{
+			float lt[2] = { left, top }, rb[2] = { right, bottom };
+			bool changed = ImGui::DragFloat2("Offset TL", lt, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			changed |= ImGui::DragFloat2("Offset BR", rb, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			if (changed)
+			{
+				HE::uiSetAnchorInsetsX(*n, lt[0], rb[0]);
+				HE::uiSetAnchorInsetsY(*n, lt[1], rb[1]);
+				edit = true;
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Distance from each anchored edge of the parent.\n"
+				                  "All four at 0 = exactly the anchored area.");
+		}
+		else if (stretchX)
+		{
+			float lr[2] = { left, right };
+			if (ImGui::DragFloat2("Left/Right", lr, 1.0f))
+			{ HE::uiSetAnchorInsetsX(*n, lr[0], lr[1]); edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			edit |= ImGui::DragFloat("Position Y", &n->posY, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		else if (stretchY)
+		{
+			edit |= ImGui::DragFloat("Position X", &n->posX, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			edit |= ImGui::DragFloat("Width", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			float tb[2] = { top, bottom };
+			if (ImGui::DragFloat2("Top/Bottom", tb, 1.0f))
+			{ HE::uiSetAnchorInsetsY(*n, tb[0], tb[1]); edit = true; }
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		else
+		{
+			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 
-	// Anchor: 3×3 grid of toggle cells, UMG-style.
+	// Anchor: the UMG 4×4 grid. The first three rows and columns are the nine
+	// points the anchor has always been; the fourth of each stretches the
+	// element across that whole axis of its parent — a complete side, and both
+	// together the whole available space. Each cell draws what it does: a dot,
+	// a bar along the side it spans, or a filled square.
 	ImGui::TextUnformatted("Anchor");
 	ImGui::SameLine(80.0f);
 	ImGui::BeginGroup();
-	for (int row = 0; row < 3; ++row)
 	{
-		for (int col = 0; col < 3; ++col)
+		const int   current = HE::uiAnchorPresetOf(*n);
+		const float cell    = 22.0f;
+		ImDrawList* dl      = ImGui::GetWindowDrawList();
+		for (int row = 0; row < 4; ++row)
 		{
-			if (col > 0) ImGui::SameLine();
-			const int a = row * 3 + col;
-			const bool active = n->anchor == a;
-			if (active) ImGui::PushStyleColor(ImGuiCol_Button,
-				ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-			char id[16]; std::snprintf(id, sizeof id, "##a%d", a);
-			if (ImGui::Button(id, ImVec2(18, 18)))
+			for (int col = 0; col < 4; ++col)
 			{
-				n->anchor = static_cast<uint8_t>(a);
-				committed = true;
+				if (col > 0) ImGui::SameLine();
+				const int a = row * 4 + col;
+				const bool active = current == a;
+				if (active) ImGui::PushStyleColor(ImGuiCol_Button,
+					ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+				char id[16]; std::snprintf(id, sizeof id, "##a%d", a);
+				if (ImGui::Button(id, ImVec2(cell, cell)))
+				{
+					// Keep the element where it is: only what happens when the
+					// parent resizes changes.
+					HE::uiReanchorKeepingRect(st.tree, *n, a);
+					committed = true;
+				}
+				if (active) ImGui::PopStyleColor();
+
+				// The marker: 0..1 inside the cell, mapping the anchor rect.
+				float x0, y0, x1, y1;
+				HE::uiAnchorPresetRect(a, x0, y0, x1, y1);
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				const float pad = 5.0f;
+				const ImVec2 in0(mn.x + pad, mn.y + pad), in1(mx.x - pad, mx.y - pad);
+				const ImVec2 p0(in0.x + x0 * (in1.x - in0.x), in0.y + y0 * (in1.y - in0.y));
+				const ImVec2 p1(in0.x + x1 * (in1.x - in0.x), in0.y + y1 * (in1.y - in0.y));
+				const ImU32 markCol = IM_COL32(255, 170, 40, active ? 255 : 190);
+				if (x0 == x1 && y0 == y1) dl->AddCircleFilled(p0, 2.5f, markCol);
+				else if (x0 == x1)        dl->AddLine(p0, p1, markCol, 2.0f);
+				else if (y0 == y1)        dl->AddLine(p0, p1, markCol, 2.0f);
+				else                      dl->AddRectFilled(p0, p1, IM_COL32(255, 170, 40, active ? 200 : 120));
 			}
-			if (active) ImGui::PopStyleColor();
 		}
 	}
 	ImGui::EndGroup();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Where in the parent this element hangs.\n"
+		                  "The last row and column stretch it across that whole\n"
+		                  "side; the bottom-right cell fills the parent entirely.\n"
+		                  "Re-anchoring keeps the element exactly where it is.");
 
 	int layer = n->layer;
 	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
@@ -947,15 +1025,29 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		const ImVec2 mn = toScreen(selRect.mn), mx = toScreen(selRect.mx);
 		dl->AddRect(mn, mx, IM_COL32(255, 170, 40, 255), 0, 0, 2.0f);
 
-		// Anchor marker inside the parent rect.
-		const Rect parent = parentCanvasRect(st.tree, sel->parentId);
-		const ImVec2 ap = anchorPoint(sel->anchor);
-		const ImVec2 apos = toScreen(ImVec2(
-			parent.mn.x + ap.x * (parent.mx.x - parent.mn.x),
-			parent.mn.y + ap.y * (parent.mx.y - parent.mn.y)));
-		dl->AddCircle(apos, 5.0f, IM_COL32(255, 170, 40, 200), 0, 1.5f);
-		dl->AddLine(ImVec2(apos.x - 8, apos.y), ImVec2(apos.x + 8, apos.y), IM_COL32(255,170,40,160));
-		dl->AddLine(ImVec2(apos.x, apos.y - 8), ImVec2(apos.x, apos.y + 8), IM_COL32(255,170,40,160));
+		// Anchor marker inside the parent rect: a crosshair while the anchor is
+		// a point, the anchored rectangle itself once it spans a side — that
+		// outline IS the thing the element now follows when the parent resizes,
+		// so it has to be visible rather than inferred from the details panel.
+		const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *sel);
+		const ImVec2 amn = toScreen(ImVec2(ar.x, ar.y));
+		const ImVec2 amx = toScreen(ImVec2(ar.x + ar.w, ar.y + ar.h));
+		if (ar.w <= 0.01f && ar.h <= 0.01f)
+		{
+			dl->AddCircle(amn, 5.0f, IM_COL32(255, 170, 40, 200), 0, 1.5f);
+			dl->AddLine(ImVec2(amn.x - 8, amn.y), ImVec2(amn.x + 8, amn.y), IM_COL32(255,170,40,160));
+			dl->AddLine(ImVec2(amn.x, amn.y - 8), ImVec2(amn.x, amn.y + 8), IM_COL32(255,170,40,160));
+		}
+		else
+		{
+			// Inflated by a hair so it reads as the frame around the element
+			// rather than as a second outline drawn on top of it.
+			dl->AddRect(ImVec2(amn.x - 2.0f, amn.y - 2.0f), ImVec2(amx.x + 2.0f, amx.y + 2.0f),
+			            IM_COL32(255, 170, 40, 150), 0, 0, 1.5f);
+			const ImVec2 corners[4] = { amn, ImVec2(amx.x, amn.y), ImVec2(amn.x, amx.y), amx };
+			for (const ImVec2& c : corners)
+				dl->AddCircleFilled(c, 3.0f, IM_COL32(255, 170, 40, 200));
+		}
 
 		// Handles: corners + edge midpoints.
 		const ImVec2 hpos[8] = {
@@ -1030,7 +1122,13 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				handleDelta(st.resizeHandle, d, dMin, dMax);
 				float nx = st.dragStartSize[0] - dMin.x + dMax.x;
 				float ny = st.dragStartSize[1] - dMin.y + dMax.y;
-				nx = std::max(1.0f, nx); ny = std::max(1.0f, ny);
+				// The floor is on the RESULTING rect, not on the field: on a
+				// stretched axis the field is the difference to the anchored
+				// span and is normally negative (an inset), so clamping it at 1
+				// would make those handles unusable.
+				const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2);
+				nx = std::max(1.0f - ar.w, nx);
+				ny = std::max(1.0f - ar.h, ny);
 				n2->sizeX = nx;
 				n2->sizeY = ny;
 				n2->posX = st.dragStartPos[0] + dMin.x * (1.0f - n2->pivotX) + dMax.x * n2->pivotX;

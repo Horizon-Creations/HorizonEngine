@@ -171,10 +171,20 @@ public:
     std::string name;
 
     // Layout — SHARED by every element (anchor/sizing is the same for all).
+    //
+    // The anchor is a RECTANGLE in the parent's space, both corners in 0..1 —
+    // the same model UMG uses. On an axis where min == max it is a POINT: the
+    // element keeps its size and pos is the offset from that point (what a
+    // 9-point anchor always was). Where max > min the element is anchored to a
+    // SPAN of the parent — a whole side, or the whole rect — and grows and
+    // shrinks with it; pos/size then read as the offset and the size RELATIVE
+    // to that span (size 0 = exactly the anchored span, negative = inset).
+    // uiAnchorPreset* in UIWidgetTree.h names the sixteen useful rectangles.
     float   posX = 0.0f,  posY = 0.0f;
     float   sizeX = 120.0f, sizeY = 32.0f;
     float   pivotX = 0.5f, pivotY = 0.5f;
-    uint8_t anchor = 0;         // 9-point (0 = TopLeft … 8 = BottomRight)
+    float   anchorMinX = 0.0f, anchorMinY = 0.0f;
+    float   anchorMaxX = 0.0f, anchorMaxY = 0.0f;
     int     layer  = 0;
     bool    visible = true;
 
@@ -251,7 +261,9 @@ protected:
     {
         dst.id = id; dst.parentId = parentId; dst.name = name;
         dst.posX = posX; dst.posY = posY; dst.sizeX = sizeX; dst.sizeY = sizeY;
-        dst.pivotX = pivotX; dst.pivotY = pivotY; dst.anchor = anchor;
+        dst.pivotX = pivotX; dst.pivotY = pivotY;
+        dst.anchorMinX = anchorMinX; dst.anchorMinY = anchorMinY;
+        dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;

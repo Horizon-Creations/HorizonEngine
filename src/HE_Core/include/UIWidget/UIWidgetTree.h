@@ -64,11 +64,55 @@ HE_API bool        uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& o
 HE_API std::string                 uiElementToJson(const UIElement& e);
 HE_API std::unique_ptr<UIElement>  uiElementFromJson(const std::string& json);
 
+// ── Anchors (shared by the editor and the runtime) ──────────────────────────
+// The anchor is a rectangle in the parent's space (UIElement::anchorMin/Max).
+// These name the sixteen rectangles worth having a button for — the same grid
+// UMG shows: index = row * 4 + col, where col 0/1/2 is left/centre/right and
+// col 3 stretches across the parent's whole width; row 0/1/2 is top/middle/
+// bottom and row 3 stretches down its whole height. So 0 is the top-left
+// point, 15 fills the parent, 3 is the whole top side, 12 the whole left side.
+inline constexpr int kUIAnchorPresetCount = 16;
+inline constexpr int kUIAnchorFill = 15;
+HE_API void uiAnchorPresetRect(int preset, float& minX, float& minY, float& maxX, float& maxY);
+// Which preset an element's anchor rect is, or -1 for a rectangle none of them
+// name (nothing writes one today, but the model allows it and the editor must
+// not claim it is something it is not).
+HE_API int  uiAnchorPresetOf(const UIElement& e);
+// Set the anchor rect, leaving pos/size alone: the element's rect MOVES, the
+// way it does in UMG when you re-anchor without holding the layout.
+HE_API void uiSetAnchorPreset(UIElement& e, int preset);
+// Re-anchor and keep the element exactly where it is: pos/size are recomputed
+// against the new anchor rect, so the only thing that changes is what the
+// element does when its parent resizes. This is what the editor's anchor grid
+// uses — an anchor change that teleports the element is a change nobody can
+// aim.
+HE_API void uiReanchorKeepingRect(const UIWidgetTree& tree, UIElement& e, int preset);
+
+// The legacy 9-point anchor (0 = TopLeft … 8 = BottomRight), as the on-disk
+// "anchor" field still spells it. Reading maps it to a point rectangle;
+// writing keeps old documents byte-identical.
+HE_API void uiAnchorFromLegacyPoint(UIElement& e, int ninePoint);
+HE_API int  uiAnchorLegacyPointOf(const UIElement& e); // -1 = not a 9-point anchor
+
 // ── Layout (shared by the editor and the runtime) ───────────────────────────
-// Element rect in CANVAS units, resolved through the parent chain: the anchor
-// point lies inside the parent rect (roots anchor to the canvas), position is
-// the offset from it, pivot shifts the rect so the pivot point lands there.
+// Element rect in CANVAS units, resolved through the parent chain (roots anchor
+// to the canvas). The anchor rectangle is resolved inside the parent's rect;
+// position is the offset from it, pivot shifts the rect so the pivot point
+// lands there, and on a stretched axis the size adds to the anchored span.
 HE_API UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e);
+
+// The element's anchor rectangle itself, in canvas units — what the editor
+// draws and what the insets below are measured against.
+HE_API UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e);
+
+// ── Insets (how a stretched axis is authored) ───────────────────────────────
+// On a stretched axis "position and size" is a clumsy way to say "how far in
+// from each anchored edge", so the editor shows the two insets instead. Both
+// helpers are no-ops on an axis that is not stretched.
+HE_API void uiAnchorInsetsX(const UIElement& e, float& left, float& right);
+HE_API void uiAnchorInsetsY(const UIElement& e, float& top, float& bottom);
+HE_API void uiSetAnchorInsetsX(UIElement& e, float left, float right);
+HE_API void uiSetAnchorInsetsY(UIElement& e, float top, float bottom);
 // False when the element or any ancestor is invisible.
 HE_API bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e);
 // Let every element that auto-sizes fit itself to its content. Call BEFORE

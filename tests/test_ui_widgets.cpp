@@ -580,7 +580,8 @@ TEST_CASE("WidgetManager button click fires OnClicked -> SetProperty")
     t.find(txt)->setProp("Text", HE::UIPropValue::ofString(""));
     const int btn = t.add(HE::UIWidgetType::Button);
     t.find(btn)->setProp("Text", HE::UIPropValue::ofString(""));
-    t.find(btn)->anchor = 0; t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
+    HE::uiSetAnchorPreset(*t.find(btn), 0);
+    t.find(btn)->pivotX = 0; t.find(btn)->pivotY = 0;
     t.find(btn)->posX = 0; t.find(btn)->posY = 0;
     t.find(btn)->sizeX = 200; t.find(btn)->sizeY = 50;
 
@@ -617,7 +618,8 @@ TEST_CASE("WidgetManager checkbox click toggles its checked visual")
     HE::UIWidgetTree t;
     const int cb = t.add(HE::UIWidgetType::CheckBox);
     t.find(cb)->setProp("Label", HE::UIPropValue::ofString(""));
-    t.find(cb)->anchor = 0; t.find(cb)->pivotX = 0; t.find(cb)->pivotY = 0;
+    HE::uiSetAnchorPreset(*t.find(cb), 0);
+    t.find(cb)->pivotX = 0; t.find(cb)->pivotY = 0;
     t.find(cb)->posX = 0; t.find(cb)->posY = 0; t.find(cb)->sizeX = 200; t.find(cb)->sizeY = 28;
     registerWidget(cm, t);
 
@@ -1109,7 +1111,10 @@ TEST_CASE("uiWidgetTreeFromJson loads a hand-written OLD-format document")
     REQUIRE(t.elements.size() == 2);
     CHECK(t.find(1) != nullptr);
     CHECK(t.find(2)->parentId == 1);
-    CHECK(t.find(2)->anchor == 4);
+    // The 9-point "anchor" field still reads as the point anchor it named.
+    CHECK(HE::uiAnchorLegacyPointOf(*t.find(2)) == 4);
+    CHECK(t.find(2)->anchorMinX == doctest::Approx(0.5f));
+    CHECK(t.find(2)->anchorMaxY == doctest::Approx(0.5f));
     CHECK(t.find(2)->layer == 1);
     CHECK_FALSE(t.find(2)->visible);
     CHECK(t.find(1)->hitTestable);                             // absent key → default
@@ -1170,4 +1175,275 @@ TEST_CASE("uiHcValueToProp passes ARRAYS through uncoerced")
     arrF.b       = true;
     CHECK(HE::uiHcValueToProp(arrF, HE::UIPropType::Int).i == 7);
     CHECK(HE::uiHcValueToProp(arrF, HE::UIPropType::Bool).b == true);
+}
+
+// ═══ Anchors ═════════════════════════════════════════════════════════════════
+// An anchor used to be one of nine POINTS: an element hung off it and kept its
+// own size, so a menu bar meant to span its parent had to be resized by hand
+// every time the parent changed. The anchor is a RECTANGLE now — a point when
+// its two corners meet, a whole side when it spans one axis, the whole parent
+// when it spans both — and an element anchored to a span grows with it.
+
+namespace
+{
+    // A tree with one panel, so a child has a parent whose size can change
+    // under it. Returns the panel's id.
+    int panelTree(HE::UIWidgetTree& t, float w = 400.0f, float h = 300.0f)
+    {
+        t.canvasWidth = 1000.0f; t.canvasHeight = 800.0f;
+        const int p = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& pe = *t.find(p);
+        HE::uiSetAnchorPreset(pe, 0);          // top-left point
+        pe.pivotX = pe.pivotY = 0.0f;
+        pe.posX = 100.0f; pe.posY = 50.0f;
+        pe.sizeX = w;     pe.sizeY = h;
+        return p;
+    }
+}
+
+TEST_CASE("uiElementRect: a point anchor lays out exactly as it always did")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+    const int c = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(c);
+    e.parentId = p;
+    HE::uiSetAnchorPreset(e, 5);               // middle centre
+    e.pivotX = e.pivotY = 0.5f;
+    e.posX = 0.0f; e.posY = 0.0f;
+    e.sizeX = 100.0f; e.sizeY = 40.0f;
+
+    // Parent spans (100,50)-(500,350); its centre is (300,200).
+    const HE::UIWidgetRect r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(250.0f));
+    CHECK(r.y == doctest::Approx(180.0f));
+    CHECK(r.w == doctest::Approx(100.0f));
+    CHECK(r.h == doctest::Approx(40.0f));
+
+    // A point anchor ignores the parent's size: it only moves with the point.
+    t.find(p)->sizeX = 800.0f;
+    const HE::UIWidgetRect r2 = HE::uiElementRect(t, e);
+    CHECK(r2.w == doctest::Approx(100.0f));
+    CHECK(r2.x == doctest::Approx(450.0f));
+}
+
+TEST_CASE("uiElementRect: an element anchored to a whole side grows with it")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+    const int c = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& e = *t.find(c);
+    e.parentId = p;
+    HE::uiSetAnchorPreset(e, 3);               // the parent's whole TOP side
+    e.pivotX = e.pivotY = 0.0f;
+    HE::uiSetAnchorInsetsX(e, 20.0f, 30.0f);   // 20 in from the left, 30 from the right
+    e.posY = 0.0f; e.sizeY = 48.0f;            // the Y axis is still a point
+
+    HE::UIWidgetRect r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(120.0f));     // parent.x + 20
+    CHECK(r.w == doctest::Approx(350.0f));     // parent.w - 20 - 30
+    CHECK(r.y == doctest::Approx(50.0f));
+    CHECK(r.h == doctest::Approx(48.0f));
+
+    // The whole point: widen the parent and the bar follows, margins intact.
+    t.find(p)->sizeX = 900.0f;
+    r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(120.0f));
+    CHECK(r.w == doctest::Approx(850.0f));
+    CHECK(r.h == doctest::Approx(48.0f));      // …and nothing happened to Y
+
+    // The insets read back as they were set, whatever the pivot is.
+    e.pivotX = 0.3f;
+    HE::uiSetAnchorInsetsX(e, 12.0f, 34.0f);
+    float left = 0.0f, right = 0.0f;
+    HE::uiAnchorInsetsX(e, left, right);
+    CHECK(left  == doctest::Approx(12.0f));
+    CHECK(right == doctest::Approx(34.0f));
+    r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(112.0f));
+    CHECK(r.w == doctest::Approx(900.0f - 12.0f - 34.0f));
+}
+
+TEST_CASE("uiElementRect: the fill anchor takes the whole available space")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+    const int c = t.add(HE::UIWidgetType::Image);
+    HE::UIElement& e = *t.find(c);
+    e.parentId = p;
+    HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+    HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+    HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+
+    HE::UIWidgetRect r = HE::uiElementRect(t, e);
+    const HE::UIWidgetRect pr = HE::uiElementRect(t, *t.find(p));
+    CHECK(r.x == doctest::Approx(pr.x));
+    CHECK(r.y == doctest::Approx(pr.y));
+    CHECK(r.w == doctest::Approx(pr.w));
+    CHECK(r.h == doctest::Approx(pr.h));
+
+    // With a margin all round, and through a parent resize.
+    HE::uiSetAnchorInsetsX(e, 10.0f, 10.0f);
+    HE::uiSetAnchorInsetsY(e, 10.0f, 10.0f);
+    t.find(p)->sizeX = 640.0f; t.find(p)->sizeY = 480.0f;
+    r = HE::uiElementRect(t, e);
+    CHECK(r.w == doctest::Approx(620.0f));
+    CHECK(r.h == doctest::Approx(460.0f));
+
+    // A root element fills the CANVAS the same way — "the whole available
+    // space" is the canvas for anything not inside a panel.
+    const int root = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& re = *t.find(root);
+    HE::uiSetAnchorPreset(re, HE::kUIAnchorFill);
+    HE::uiSetAnchorInsetsX(re, 0.0f, 0.0f);
+    HE::uiSetAnchorInsetsY(re, 0.0f, 0.0f);
+    const HE::UIWidgetRect rr = HE::uiElementRect(t, re);
+    CHECK(rr.x == doctest::Approx(0.0f));
+    CHECK(rr.y == doctest::Approx(0.0f));
+    CHECK(rr.w == doctest::Approx(t.canvasWidth));
+    CHECK(rr.h == doctest::Approx(t.canvasHeight));
+}
+
+TEST_CASE("uiElementRect: a stretched element carries its children along")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+    const int bar = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& b = *t.find(bar);
+    b.parentId = p;
+    HE::uiSetAnchorPreset(b, 3);                  // whole top side
+    HE::uiSetAnchorInsetsX(b, 0.0f, 0.0f);
+    b.pivotY = 0.0f; b.posY = 0.0f; b.sizeY = 60.0f;
+
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(btn);
+    e.parentId = bar;
+    HE::uiSetAnchorPreset(e, 6);                  // its parent's top-RIGHT corner
+    e.pivotX = 1.0f; e.pivotY = 0.0f;
+    e.posX = -10.0f; e.posY = 10.0f;
+    e.sizeX = 80.0f; e.sizeY = 30.0f;
+
+    HE::UIWidgetRect r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(410.0f));        // parent right (500) - 10 - 80
+    t.find(p)->sizeX = 900.0f;
+    r = HE::uiElementRect(t, e);
+    CHECK(r.x == doctest::Approx(910.0f));        // the bar grew, the button rode along
+}
+
+TEST_CASE("uiAnchorPreset: the sixteen rectangles name themselves")
+{
+    HE::UIWidgetTree t;
+    const int c = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& e = *t.find(c);
+    for (int p = 0; p < HE::kUIAnchorPresetCount; ++p)
+    {
+        HE::uiSetAnchorPreset(e, p);
+        CHECK(HE::uiAnchorPresetOf(e) == p);
+    }
+    // The nine points keep the legacy numbering the "anchor" field spells.
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+        {
+            HE::uiSetAnchorPreset(e, row * 4 + col);
+            CHECK(HE::uiAnchorLegacyPointOf(e) == row * 3 + col);
+        }
+    // A span has no 9-point name — and must not be given one.
+    HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+    CHECK(HE::uiAnchorLegacyPointOf(e) == -1);
+    HE::uiSetAnchorPreset(e, 3);
+    CHECK(HE::uiAnchorLegacyPointOf(e) == -1);
+    // A rectangle none of them names stays unnamed rather than being rounded
+    // to the nearest button.
+    e.anchorMinX = 0.2f; e.anchorMaxX = 0.7f;
+    CHECK(HE::uiAnchorPresetOf(e) == -1);
+    // Out of range is the top-left point, never a crash.
+    HE::uiSetAnchorPreset(e, 99);
+    CHECK(HE::uiAnchorPresetOf(e) == 0);
+}
+
+TEST_CASE("uiReanchorKeepingRect: re-anchoring does not move the element")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+    const int c = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(c);
+    e.parentId = p;
+    e.pivotX = 0.25f; e.pivotY = 0.75f;
+    e.posX = 40.0f; e.posY = 30.0f;
+    e.sizeX = 120.0f; e.sizeY = 32.0f;
+
+    const HE::UIWidgetRect before = HE::uiElementRect(t, e);
+    for (int preset = 0; preset < HE::kUIAnchorPresetCount; ++preset)
+    {
+        HE::uiReanchorKeepingRect(t, e, preset);
+        const HE::UIWidgetRect after = HE::uiElementRect(t, e);
+        CHECK(after.x == doctest::Approx(before.x));
+        CHECK(after.y == doctest::Approx(before.y));
+        CHECK(after.w == doctest::Approx(before.w));
+        CHECK(after.h == doctest::Approx(before.h));
+        CHECK(HE::uiAnchorPresetOf(e) == preset);
+    }
+    // …and once it is anchored to the whole parent, THEN the parent's size
+    // starts to matter.
+    HE::uiReanchorKeepingRect(t, e, HE::kUIAnchorFill);
+    t.find(p)->sizeX = 800.0f;
+    const HE::UIWidgetRect grown = HE::uiElementRect(t, e);
+    CHECK(grown.w == doctest::Approx(before.w + 400.0f));
+}
+
+TEST_CASE("UIWidgetTree JSON: a span anchor round-trips, a point one stays old-format")
+{
+    HE::UIWidgetTree t;
+    const int a = t.add(HE::UIWidgetType::Panel);
+    HE::uiSetAnchorPreset(*t.find(a), 5);            // the middle-centre POINT
+    const std::string pointOnly = HE::uiWidgetTreeToJson(t);
+    // Nothing new is written for a document of point anchors — an existing
+    // asset saves byte-identical to what earlier versions wrote, down to the
+    // 9-point number (grid preset 5 is the old anchor 4).
+    CHECK(pointOnly.find("anchorMin") == std::string::npos);
+    CHECK(pointOnly.find("\"anchor\": 4") != std::string::npos);
+
+    const int b = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& be = *t.find(b);
+    HE::uiSetAnchorPreset(be, HE::kUIAnchorFill);
+    HE::uiSetAnchorInsetsX(be, 8.0f, 12.0f);
+    HE::uiSetAnchorInsetsY(be, 4.0f, 6.0f);
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(HE::uiAnchorPresetOf(*r.find(a)) == 5);
+    CHECK(HE::uiAnchorPresetOf(*r.find(b)) == HE::kUIAnchorFill);
+    float left = 0.0f, right = 0.0f;
+    HE::uiAnchorInsetsX(*r.find(b), left, right);
+    CHECK(left  == doctest::Approx(8.0f));
+    CHECK(right == doctest::Approx(12.0f));
+
+    // The single-element form collaboration sends carries it too.
+    const std::unique_ptr<HE::UIElement> one =
+        HE::uiElementFromJson(HE::uiElementToJson(be));
+    REQUIRE(one != nullptr);
+    CHECK(HE::uiAnchorPresetOf(*one) == HE::kUIAnchorFill);
+}
+
+TEST_CASE("WidgetManager: a filled element is hit across the whole viewport")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(btn);
+    e.setProp("Text", HE::UIPropValue::ofString(""));
+    HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+    HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+    HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    // The far corner of the viewport is inside it, which for the old
+    // point-anchored 120×32 default it never was.
+    CHECK(wm.processPointer(1920.0f, 1080.0f, 1900.0f, 1050.0f, true, true));
+    CHECK(wm.processPointer(1920.0f, 1080.0f,   20.0f,   20.0f, true, true));
 }

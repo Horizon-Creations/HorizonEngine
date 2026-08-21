@@ -4045,7 +4045,7 @@ void EditorApplication::dumpFrameHeadless()
 			{
 				pe->posX = 256.0f; pe->posY = 256.0f;
 				pe->sizeX = 400.0f; pe->sizeY = 260.0f;
-				pe->anchor = 0;
+				HE::uiSetAnchorPreset(*pe, 0);
 			}
 			const int textId = tree.add(HE::UIWidgetType::Text);
 			if (HE::UIElement* te = tree.find(textId))
