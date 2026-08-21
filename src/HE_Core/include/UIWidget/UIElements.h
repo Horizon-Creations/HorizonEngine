@@ -82,7 +82,7 @@ public:
 
     // Element size implied by the current text/font (see autoSize). Callers apply
     // it before layout so the rect the glyphs lay out in already fits them.
-    void applyAutoSize() override;
+    void applyAutoSize(float resolvedWidth) override;
 
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
                 float, std::vector<UIRenderObject>&) const override;

@@ -107,8 +107,10 @@ HE_API UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElemen
 
 // ── Insets (how a stretched axis is authored) ───────────────────────────────
 // On a stretched axis "position and size" is a clumsy way to say "how far in
-// from each anchored edge", so the editor shows the two insets instead. Both
-// helpers are no-ops on an axis that is not stretched.
+// from each anchored edge", so the editor shows the two insets instead. The
+// conversion is defined on any axis — on a point anchor the two insets simply
+// describe the element's offset and size from that one point, which is not a
+// useful way to author it, so only the editor's stretched fields use them.
 HE_API void uiAnchorInsetsX(const UIElement& e, float& left, float& right);
 HE_API void uiAnchorInsetsY(const UIElement& e, float& top, float& bottom);
 HE_API void uiSetAnchorInsetsX(UIElement& e, float left, float right);

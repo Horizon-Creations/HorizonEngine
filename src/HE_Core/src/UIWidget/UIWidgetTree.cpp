@@ -230,8 +230,12 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
 
 void uiApplyAutoSize(UIWidgetTree& tree)
 {
+    // The width handed over is the one the anchor already decides. Where the
+    // anchor is a point that is just the element's own size (nothing changes);
+    // where it stretches, it is the span the parent gives it, which is what a
+    // wrapping text has to be measured against.
     for (auto& e : tree.elements)
-        if (e) e->applyAutoSize();
+        if (e) e->applyAutoSize(uiElementRect(tree, *e).w);
 }
 
 bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)

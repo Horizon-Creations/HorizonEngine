@@ -1016,19 +1016,19 @@ TEST_CASE("UIText auto-size grows the element with the font size")
     t.text = "Hello";
     t.autoSize = true;
     t.fontSize = 20.0f;
-    t.applyAutoSize();
+    t.applyAutoSize(t.sizeX);
     const float w20 = t.sizeX, h20 = t.sizeY;
     CHECK(w20 > 0.0f);
     CHECK(h20 > 0.0f);
 
     t.fontSize = 60.0f;
-    t.applyAutoSize();
+    t.applyAutoSize(t.sizeX);
     CHECK(t.sizeX > w20);
     CHECK(t.sizeY > h20);
 
     // More lines → taller, same width class.
     t.text = "Hello\nWorld";
-    t.applyAutoSize();
+    t.applyAutoSize(t.sizeX);
     CHECK(t.sizeY > 60.0f);
 
     // Off = the authored box is left alone.
@@ -1036,7 +1036,7 @@ TEST_CASE("UIText auto-size grows the element with the font size")
     fixed.autoSize = false;
     fixed.fontSize = 80.0f;
     const float sx = fixed.sizeX, sy = fixed.sizeY;
-    fixed.applyAutoSize();
+    fixed.applyAutoSize(fixed.sizeX);
     CHECK(fixed.sizeX == doctest::Approx(sx));
     CHECK(fixed.sizeY == doctest::Approx(sy));
 }
@@ -1049,7 +1049,7 @@ TEST_CASE("UIText auto-size with WordWrap keeps the authored width")
     t.wordWrap = true;
     t.sizeX    = 120.0f;
     t.fontSize = 18.0f;
-    t.applyAutoSize();
+    t.applyAutoSize(t.sizeX);
     CHECK(t.sizeX == doctest::Approx(120.0f)); // width is the wrap column
     CHECK(t.sizeY > 18.0f);                    // height grew to hold the lines
 }
@@ -1423,6 +1423,40 @@ TEST_CASE("UIWidgetTree JSON: a span anchor round-trips, a point one stays old-f
         HE::uiElementFromJson(HE::uiElementToJson(be));
     REQUIRE(one != nullptr);
     CHECK(HE::uiAnchorPresetOf(*one) == HE::kUIAnchorFill);
+}
+
+TEST_CASE("uiApplyAutoSize: content does not resize an axis the anchor stretches")
+{
+    HE::UIWidgetTree t;
+    const int p = panelTree(t);
+
+    const int fixed = t.add(HE::UIWidgetType::Text);
+    { HE::UIElement& e = *t.find(fixed);
+      e.parentId = p;
+      HE::uiSetAnchorPreset(e, 0);
+      e.setProp("Text", HE::UIPropValue::ofString("a short label"));
+      e.setProp("AutoSize", HE::UIPropValue::ofBool(true)); }
+
+    const int spanning = t.add(HE::UIWidgetType::Text);
+    { HE::UIElement& e = *t.find(spanning);
+      e.parentId = p;
+      HE::uiSetAnchorPreset(e, 3);                 // the parent's whole top side
+      HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+      e.setProp("Text", HE::UIPropValue::ofString("a short label"));
+      e.setProp("AutoSize", HE::UIPropValue::ofBool(true)); }
+
+    HE::uiApplyAutoSize(t);
+
+    // The point-anchored one fits its text, as it always did…
+    const HE::UIWidgetRect a = HE::uiElementRect(t, *t.find(fixed));
+    CHECK(a.w > 1.0f);
+    CHECK(a.w < 400.0f);
+    // …the anchored-to-a-side one keeps the side's width. Measured against its
+    // parent rather than a fixed number, so the font never decides the case.
+    const HE::UIWidgetRect b = HE::uiElementRect(t, *t.find(spanning));
+    const HE::UIWidgetRect pr = HE::uiElementRect(t, *t.find(p));
+    CHECK(b.w == doctest::Approx(pr.w));
+    CHECK(b.h > 1.0f);          // the height is still the text's own
 }
 
 TEST_CASE("WidgetManager: a filled element is hit across the whole viewport")

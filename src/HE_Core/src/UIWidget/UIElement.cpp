@@ -359,18 +359,26 @@ void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
 // font size; the width tracks the widest line unless WordWrap owns it (then the
 // authored width IS the wrap column). A small padding keeps descenders and the
 // last glyph's side bearing off the edge.
-void UIText::applyAutoSize()
+void UIText::applyAutoSize(float resolvedWidth)
 {
     if (!autoSize) return;
     HE::UITextLayout opts;
     opts.centerH = align == 1;
     opts.wrap    = wordWrap;
-    const float wrapW = wordWrap ? std::max(1.0f, sizeX) : 0.0f;
+    // The wrap column is the width the element ACTUALLY has: on a stretched
+    // axis sizeX is the difference to the anchored span (often negative), so it
+    // would wrap the text at one unit.
+    const float wrapW = wordWrap ? std::max(1.0f, resolvedWidth) : 0.0f;
     const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
     const glm::vec2 m = f ? HE::measureUIText(*f, text, fontSize, wrapW, opts)
                           : HE::measureUIText(text, fontSize, wrapW, opts);
-    if (!wordWrap) sizeX = m.x + fontSize * 0.25f;
-    sizeY = m.y + fontSize * 0.35f;
+    // An axis the anchor stretches belongs to the parent — content does not get
+    // to resize it, or a label anchored across a side would come out one text
+    // width WIDER than the side it is anchored to.
+    const bool stretchX = anchorMaxX > anchorMinX + 1e-4f;
+    const bool stretchY = anchorMaxY > anchorMinY + 1e-4f;
+    if (!wordWrap && !stretchX) sizeX = m.x + fontSize * 0.25f;
+    if (!stretchY)              sizeY = m.y + fontSize * 0.35f;
 }
 
 void UIText::render(const UIWidgetRect& px, const UIElementRenderState&,

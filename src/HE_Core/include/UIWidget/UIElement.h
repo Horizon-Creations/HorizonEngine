@@ -248,7 +248,13 @@ public:
     // the user asked for it. Run once per frame over the tree (uiApplyAutoSize)
     // BEFORE layout, so a text/font change taken at runtime — from a HorizonCode
     // Set Property, say — is reflected in the same frame. No-op by default.
-    virtual void applyAutoSize() {}
+    //
+    // `resolvedWidth` is the element's laid-out width in canvas units. On an
+    // axis the anchor STRETCHES, the parent decides the size and content must
+    // not touch it — but a wrapping text still has to know how wide it may run,
+    // and there the field alone no longer says (it is the difference to the
+    // anchored span, not the width).
+    virtual void applyAutoSize(float resolvedWidth) { (void)resolvedWidth; }
 
     // Type-specific JSON (base fields are handled by the tree serializer).
     virtual void writeJson(nlohmann::json&) const {}
