@@ -7,6 +7,7 @@
 #include "EditorToolbar.h"       // shared toolbar strip
 #include "EditorWidgets.h"    // danger buttons for deletion     // shared per-tab state map
 #include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
+#include "InputMappingModel.h"    // the decoded asset + where a pressed input lands
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Application/InputAssets.h>
@@ -30,40 +31,16 @@ namespace
 {
 
 // ── Decoded models ────────────────────────────────────────────────────────────
-// One axis contribution. `source` decides whether the key columns mean
-// anything: a mouse or stick row has no keys, it takes the device value
-// instead. A Key-source row may hold keys, pad buttons, or both — the UI
-// edits one kind per row (the source combo shows "Pad Buttons" for a row
-// whose pair is buttons), but the format allows both side by side.
-struct AxisRow
-{
-	std::string positive, negative;             // SDL scancode names
-	std::string positiveButton, negativeButton; // SDL gamepad button names
-	float       scale = 1.0f;
-	AxisSource  source = AxisSource::Key;
-	// UI-only, not serialized: whether the source combo shows this Key-source
-	// row as "Pad Buttons". Needed because a row with both pairs still empty
-	// is otherwise indistinguishable from a plain key row.
-	bool        uiPadRow = false;
-};
-struct MapEntry
-{
-	std::string actionPath;            // content-relative InputAction path
-	std::vector<std::string> keys;     // Button bindings (SDL scancode names)
-	std::vector<std::string> gamepadButtons; // pad bindings (SDL button names)
-	std::vector<std::string> mouseButtons;   // mouse bindings ("left"/"right"/…)
-	std::vector<AxisRow>     axes;     // Axis bindings (a 2D action's X)
-	std::vector<AxisRow>     axesY;    // a 2D action's Y — its own list, so the
-	                                   // 1D reader can never half-read one
-	// The referenced action's declared value type, resolved lazily from its
-	// asset: -1 unresolved, -2 unresolvable (action missing), else 0 Button /
-	// 1 Axis / 2 Axis2D. It steers what the Add Binding menu offers — a
-	// Button action gets buttons, an Axis action gets axis sources — and it
-	// makes an Axis 2D entry encode as axesX/axesY even while its Y list is
-	// still empty (the old shape-based rule silently wrote a 1D "axes" then,
-	// and axis2DValue() answered 0,0 at runtime). Reset to -1 on retarget.
-	int valueType = -1;
-};
+// The entry/axis model, its JSON codec and the rule for where a pressed input
+// lands live in InputMappingModel — ImGui-free, so "which row did that press
+// bind to" is answerable in a test. This file is the drawing and the device
+// polling around it.
+using HE::Ed::AxisRow;
+using HE::Ed::MapEntry;
+using HE::Ed::DetectedBinding;
+using HE::Ed::BindSlot;
+using HE::Ed::decodeMapping;
+using HE::Ed::encodeMapping;
 struct PanelState
 {
 	bool  loaded = false;
@@ -80,21 +57,24 @@ struct PanelState
 };
 AssetPanelState<PanelState> s_states;
 
-// ── "Press a key to bind" capture ───────────────────────────────────────────
-// At most one key field across all open tabs can be "listening" at a time.
-// It's identified by (assetPath, entryIndex, subIndex, kind) rather than a
+// ── "Press it to bind it" capture ───────────────────────────────────────────
+// At most one binding field across all open tabs can be "listening" at a time.
+// It's identified by (assetPath, entryIndex, subIndex, slot) rather than a
 // pointer into the entry's vectors, since those can reallocate/shift while
-// the capture is waiting (multiple frames) for a key press.
-// AnyBinding is the "Auto Detect" capture: it listens on ALL devices at once —
-// keyboard, mouse buttons AND gamepad buttons — and appends whatever is
-// pressed first to the entry's matching binding list.
-enum class CaptureKind { None, Key, AxisPositive, AxisNegative, AnyBinding };
+// the capture is waiting (multiple frames) for a press.
+//
+// EVERY binding row carries a Bind button, not just the key fields: the whole
+// device sweep below runs for all of them, and BindSlot decides which flavour
+// of press the armed row can take (a pad row waits for a pad button, and a key
+// press is simply ignored rather than written where it cannot work). The
+// card-level "Auto Detect" (BindSlot::EntryAny) is the one that appends a NEW
+// binding and takes whatever answers first.
 struct CaptureState
 {
 	std::string  assetPath;
 	int          entryIndex = -1;
 	int          subIndex   = -1;
-	CaptureKind  kind       = CaptureKind::None;
+	BindSlot     slot       = BindSlot::None;
 	bool         primed     = false;                    // snapshot-only first frame
 	bool         prevKeys[SDL_SCANCODE_COUNT] = {};      // last frame's held-key snapshot
 	uint32_t     prevMouse  = 0;                         // …held-mouse-button mask
@@ -107,116 +87,18 @@ CaptureState s_capture;
 // (ImGui closes the previous), so one filter string serves all tabs.
 std::string s_addFilter;
 
-// What one frame of an AnyBinding capture found (at most one of the three).
-struct DetectedBinding
-{
-	std::string key;           // SDL scancode name
-	std::string mouseButton;   // "left"/"right"/… (HE::mouseButtonName)
-	std::string gamepadButton; // SDL button string ("a"/"dpup"/…)
-	int         axisSource = -1; // AxisSource value for a moved stick/trigger
-	bool any() const
-	{
-		return !key.empty() || !mouseButton.empty() || !gamepadButton.empty() ||
-		       axisSource >= 0;
-	}
-};
-
-void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind)
+void beginCapture(const std::string& assetPath, int entryIndex, int subIndex, BindSlot slot)
 {
 	s_capture.assetPath  = assetPath;
 	s_capture.entryIndex = entryIndex;
 	s_capture.subIndex   = subIndex;
-	s_capture.kind       = kind;
+	s_capture.slot       = slot;
 	s_capture.primed     = false;
 }
 
 bool sniffType(const std::string& path, HE::AssetType type)
 {
 	return EditorAssetTypeCache::is(path, type);
-}
-
-void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
-{
-	out.clear();
-	const auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-	if (!j.is_object() || !j.contains("entries") || !j["entries"].is_array()) return;
-	for (const auto& e : j["entries"])
-	{
-		if (!e.is_object()) continue;
-		MapEntry me;
-		me.actionPath = e.value("action", "");
-		if (e.contains("keys") && e["keys"].is_array())
-			for (const auto& k : e["keys"])
-				if (k.is_string()) me.keys.push_back(k.get<std::string>());
-		if (e.contains("gamepadButtons") && e["gamepadButtons"].is_array())
-			for (const auto& gb : e["gamepadButtons"])
-				if (gb.is_string()) me.gamepadButtons.push_back(gb.get<std::string>());
-		if (e.contains("mouseButtons") && e["mouseButtons"].is_array())
-			for (const auto& mb : e["mouseButtons"])
-				if (mb.is_string()) me.mouseButtons.push_back(mb.get<std::string>());
-		auto readAxes = [](const nlohmann::json& arr, std::vector<AxisRow>& into)
-		{
-			for (const auto& a : arr)
-			{
-				if (!a.is_object()) continue;
-				AxisRow r;
-				r.positive       = a.value("positive", "");
-				r.negative       = a.value("negative", "");
-				r.positiveButton = a.value("positiveButton", "");
-				r.negativeButton = a.value("negativeButton", "");
-				r.scale          = a.value("scale", 1.0f);
-				r.source         = HE::axisSourceFromName(a.value("source", "Key"));
-				r.uiPadRow       = !r.positiveButton.empty() || !r.negativeButton.empty();
-				into.push_back(std::move(r));
-			}
-		};
-		if (e.contains("axes")  && e["axes"].is_array())  readAxes(e["axes"],  me.axes);
-		if (e.contains("axesX") && e["axesX"].is_array()) readAxes(e["axesX"], me.axes);
-		if (e.contains("axesY") && e["axesY"].is_array()) readAxes(e["axesY"], me.axesY);
-		out.push_back(std::move(me));
-	}
-}
-
-std::string encodeMapping(const std::vector<MapEntry>& entries)
-{
-	nlohmann::json j; j["entries"] = nlohmann::json::array();
-	for (const auto& e : entries)
-	{
-		nlohmann::json je; je["action"] = e.actionPath;
-		if (!e.keys.empty()) je["keys"] = e.keys;
-		if (!e.gamepadButtons.empty()) je["gamepadButtons"] = e.gamepadButtons;
-		if (!e.mouseButtons.empty())   je["mouseButtons"]   = e.mouseButtons;
-		auto writeAxes = [](const std::vector<AxisRow>& rows)
-		{
-			nlohmann::json arr = nlohmann::json::array();
-			for (const auto& a : rows)
-			{
-				nlohmann::json ja = { {"positive", a.positive}, {"negative", a.negative},
-				                      {"scale", a.scale},
-				                      {"source", HE::axisSourceName(a.source)} };
-				// Written only when set — old contexts round-trip byte-stable.
-				if (!a.positiveButton.empty()) ja["positiveButton"] = a.positiveButton;
-				if (!a.negativeButton.empty()) ja["negativeButton"] = a.negativeButton;
-				arr.push_back(std::move(ja));
-			}
-			return arr;
-		};
-		// An entry is 2D when its ACTION declares Axis2D — or, for an entry
-		// whose action could not be resolved, when a Y list exists (the old
-		// shape rule, kept as the fallback). Writing axesX for a 2D entry even
-		// while Y is still empty matters: "axes" would register a 1D mapping
-		// and axis2DValue() would answer 0,0 for it at runtime.
-		const bool as2D = e.valueType == 2 || (e.valueType < 0 && !e.axesY.empty());
-		if (as2D)
-		{
-			if (!e.axes.empty())  je["axesX"] = writeAxes(e.axes);
-			if (!e.axesY.empty()) je["axesY"] = writeAxes(e.axesY);
-		}
-		else if (!e.axes.empty())
-			je["axes"] = writeAxes(e.axes);
-		j["entries"].push_back(std::move(je));
-	}
-	return j.dump();
 }
 
 // A "(?)" marker that shows an explanatory tooltip on hover.
@@ -243,6 +125,47 @@ void helpMarker(const char* desc)
 	}
 }
 
+// Is THIS row the one the single global capture is pointed at?
+bool captureIsOn(const std::string& assetPath, int entryIndex, int subIndex, BindSlot slot)
+{
+	return s_capture.slot == slot && s_capture.assetPath == assetPath &&
+	       s_capture.entryIndex == entryIndex && s_capture.subIndex == subIndex;
+}
+
+// The Bind button of one binding row, filling the card's bind column. Armed it
+// turns amber and says what it is waiting for; clicking it again (or Esc)
+// cancels. Every binding row in the card gets one — keys, pad buttons, mouse
+// buttons and both halves of an axis pair — because "bind this one" is the
+// question each row asks, and the card-level Auto Detect can only ever answer
+// it by appending a new row.
+void bindButtonCell(const std::string& assetPath, int entryIndex, int subIndex,
+                    BindSlot slot, const char* armedLabel, const char* armedTip)
+{
+	if (captureIsOn(assetPath, entryIndex, subIndex, slot))
+	{
+		// The armed state in the editor's warn amber, full cell width, and the
+		// how-to-cancel in the tooltip rather than crammed into the label.
+		ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+		if (ImGui::Button(armedLabel, ImVec2(-FLT_MIN, 0.0f)))
+			s_capture.slot = BindSlot::None;
+		ImGui::PopStyleColor(2);
+		if (ImGui::IsItemHovered())
+			// A mouse row cannot be cancelled by clicking: the click IS the
+			// binding it is waiting for, wherever it lands.
+			ImGui::SetTooltip(slot == BindSlot::MouseButton
+				? "%s\nPress Esc to cancel."
+				: "%s\nClick again or press Esc to cancel.", armedTip);
+	}
+	else
+	{
+		if (ImGui::Button("Bind", ImVec2(-FLT_MIN, 0.0f)))
+			beginCapture(assetPath, entryIndex, subIndex, slot);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s", armedTip);
+	}
+}
+
 // One key binding as TWO table cells — the name field in the current column,
 // the Bind button in the next — so every field and every button in a section
 // lines up on the same two rails instead of each row finding its own width.
@@ -251,22 +174,12 @@ void helpMarker(const char* desc)
 //
 // The text box still accepts free-typed SDL scancode names (red outline +
 // tooltip when the name doesn't resolve); "Bind" captures the next physical
-// key press instead. `capturedName`/`captureCancelled` are this frame's poll
-// result (computed once per render(), see the call site) — applied here only
-// if this field is the one s_capture is currently pointed at.
+// key press instead. The capture result is applied by the caller (one apply
+// site for every slot, see render()), so this only draws.
 void keyBindCells(const char* id, const char* hintText, std::string& value, bool& dirty,
-                  const std::string& assetPath, int entryIndex, int subIndex, CaptureKind kind,
-                  const std::string& capturedName, bool captureCancelled)
+                  const std::string& assetPath, int entryIndex, int subIndex, BindSlot slot)
 {
 	ImGui::PushID(id);
-
-	const bool mine = s_capture.kind == kind && s_capture.assetPath == assetPath &&
-	                   s_capture.entryIndex == entryIndex && s_capture.subIndex == subIndex;
-	if (mine)
-	{
-		if (!capturedName.empty()) { value = capturedName; dirty = true; s_capture.kind = CaptureKind::None; }
-		else if (captureCancelled)  { s_capture.kind = CaptureKind::None; }
-	}
 
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	if (ImGui::InputTextWithHint("##name", hintText, &value)) dirty = true;
@@ -298,22 +211,8 @@ void keyBindCells(const char* id, const char* hintText, std::string& value, bool
 	}
 
 	ImGui::TableNextColumn();
-	if (mine)
-	{
-		// The armed state in the editor's warn amber, full cell width, and the
-		// how-to-cancel in the tooltip rather than crammed into the label.
-		ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
-		if (ImGui::Button("Press a key\xE2\x80\xA6", ImVec2(-FLT_MIN, 0.0f)))
-			s_capture.kind = CaptureKind::None;
-		ImGui::PopStyleColor(2);
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Press the key you want to bind.\nClick again or press Esc to cancel.");
-	}
-	else if (ImGui::Button("Bind", ImVec2(-FLT_MIN, 0.0f)))
-	{
-		beginCapture(assetPath, entryIndex, subIndex, kind);
-	}
+	bindButtonCell(assetPath, entryIndex, subIndex, slot,
+	               "Press a key\xE2\x80\xA6", "Press the key you want to bind.");
 
 	ImGui::PopID();
 }
@@ -482,7 +381,7 @@ void InputAssetPanel::forget(const std::string& path)
 	s_states.forget(path);
 	// A key-capture aimed at the closing tab would otherwise stay armed and bind
 	// the next keypress into a state that no longer exists.
-	if (s_capture.assetPath == path) s_capture.kind = CaptureKind::None;
+	if (s_capture.assetPath == path) s_capture.slot = BindSlot::None;
 }
 
 void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
@@ -606,15 +505,14 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 
 	// Poll the live device state once per frame while a field on THIS tab is
 	// listening. s_capture is global across all open tabs; only the tab it
-	// targets does anything with the poll result below. A Key-field capture
-	// polls the keyboard alone; an AnyBinding ("Auto Detect") capture listens
-	// on mouse buttons and gamepad buttons as well.
-	std::string capturedKeyName;
+	// targets does anything with the poll result below. Every device is swept
+	// for every slot: the sweep is the same work whatever is armed, and which
+	// of its findings may be TAKEN is the slot's decision (bindSlotAccepts) —
+	// a pad-button row simply sits there while you press keys at it.
 	bool captureWasCancelled = false;
 	DetectedBinding detected;
-	if (s_capture.kind != CaptureKind::None && s_capture.assetPath == assetPath)
+	if (s_capture.slot != BindSlot::None && s_capture.assetPath == assetPath)
 	{
-		const bool any = s_capture.kind == CaptureKind::AnyBinding;
 		int numKeys = 0;
 		const bool* keyState = SDL_GetKeyboardState(&numKeys);
 		numKeys = std::min(numKeys, static_cast<int>(SDL_SCANCODE_COUNT));
@@ -622,7 +520,6 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		// Mouse: SDL's mask orders left/MIDDLE/right — translate to our
 		// left/right/middle indices (same trap as Input::ProcessMouseEvent).
 		uint32_t mouseMask = 0;
-		if (any)
 		{
 			const SDL_MouseButtonFlags mb = SDL_GetMouseState(nullptr, nullptr);
 			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_LEFT))   mouseMask |= 1u << 0;
@@ -631,7 +528,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_X1))     mouseMask |= 1u << 3;
 			if (mb & SDL_BUTTON_MASK(SDL_BUTTON_X2))     mouseMask |= 1u << 4;
 		}
-		const GamepadFrame* pad = any && ctx.appInput ? &ctx.appInput->gamepad() : nullptr;
+		const GamepadFrame* pad = ctx.appInput ? &ctx.appInput->gamepad() : nullptr;
 
 		if (!s_capture.primed)
 		{
@@ -660,11 +557,11 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				{
 					if (sc == SDL_SCANCODE_ESCAPE) captureWasCancelled = true;
 					else if (const char* n = SDL_GetScancodeName(static_cast<SDL_Scancode>(sc)); n && n[0])
-					{ capturedKeyName = n; detected.key = n; }
+						detected.key = n;
 					break;
 				}
 			}
-			if (any && !detected.any() && !captureWasCancelled)
+			if (!detected.any() && !captureWasCancelled)
 			{
 				for (int b = 0; b < 5; ++b)
 					if ((mouseMask & (1u << b)) && !(s_capture.prevMouse & (1u << b)))
@@ -705,7 +602,21 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	// Any structural edit below (add/remove key, axis or entry) can shift the
 	// indices s_capture is pointed at — just drop an in-flight capture rather
 	// than risk it landing on the wrong field.
-	auto cancelCaptureForThisAsset = [&]() { if (s_capture.assetPath == assetPath) s_capture.kind = CaptureKind::None; };
+	auto cancelCaptureForThisAsset = [&]() { if (s_capture.assetPath == assetPath) s_capture.slot = BindSlot::None; };
+
+	// One apply site for every Bind button on the page: the armed row takes
+	// whatever the sweep found that its slot can hold, and nothing else in the
+	// card has to know a capture existed. Esc always cancels.
+	auto applyCaptureTo = [&](MapEntry& e, int entryIndex) -> bool
+	{
+		if (s_capture.slot == BindSlot::None || s_capture.assetPath != assetPath ||
+		    s_capture.entryIndex != entryIndex)
+			return false;
+		if (captureWasCancelled) { s_capture.slot = BindSlot::None; return false; }
+		if (!HE::Ed::applyDetected(e, s_capture.slot, s_capture.subIndex, detected)) return false;
+		s_capture.slot = BindSlot::None;
+		return true;
+	};
 
 	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;
@@ -721,6 +632,10 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 	{
 		MapEntry& e = st.entries[i];
 		ImGui::PushID(i);
+
+		// Take this frame's press BEFORE the card is drawn, so a freshly bound
+		// input shows up in its row (or its new row) the same frame.
+		if (applyCaptureTo(e, i)) st.dirty = true;
 
 		// One entry, one card: its own bordered, padded, auto-sized region. The
 		// old layout ran every entry into the next with a hairline between two
@@ -785,7 +700,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					ImGui::TableNextRow();
 					ImGui::TableNextColumn();
 					keyBindCells("key", "Key name", e.keys[k], st.dirty, assetPath, i, k,
-					             CaptureKind::Key, capturedKeyName, captureWasCancelled);
+					             BindSlot::Key);
 					ImGui::TableNextColumn();
 					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeKey = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this key");
@@ -805,8 +720,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			if (ImGui::BeginTable("##padbuttons", 3, ImGuiTableFlags_SizingStretchProp))
 			{
 				ImGui::TableSetupColumn("##name",   ImGuiTableColumnFlags_WidthStretch);
-				// The bind column stays, empty, so the picker sits on the same
-				// rail as the key fields above it.
+				// The picker sits on the same rail as the key fields above it,
+				// and the bind column carries the same Bind button they do —
+				// for a pad, pressing the button beats hunting for its name.
 				ImGui::TableSetupColumn("##bind",   ImGuiTableColumnFlags_WidthFixed, bindW);
 				ImGui::TableSetupColumn("##remove", ImGuiTableColumnFlags_WidthFixed, removeW);
 				for (int k = 0; k < static_cast<int>(e.gamepadButtons.size()); ++k)
@@ -817,6 +733,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					if (padButtonCombo("##btn", e.gamepadButtons[k], "Select a button\xE2\x80\xA6"))
 						st.dirty = true;
 					ImGui::TableNextColumn();
+					bindButtonCell(assetPath, i, k, BindSlot::PadButton,
+					               "Press a button\xE2\x80\xA6",
+					               "Press the gamepad button you want in this row.");
 					ImGui::TableNextColumn();
 					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removePadButton = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this button");
@@ -852,6 +771,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					if (mouseButtonComboCell("##mbtn", e.mouseButtons[k], "Select a button\xE2\x80\xA6"))
 						st.dirty = true;
 					ImGui::TableNextColumn();
+					bindButtonCell(assetPath, i, k, BindSlot::MouseButton,
+					               "Click a button\xE2\x80\xA6",
+					               "Click the mouse button you want in this row.");
 					ImGui::TableNextColumn();
 					if (EditorWidgets::dangerButton("\xc3\x97", ImVec2(-FLT_MIN, 0.0f))) removeMouseButton = k;
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this button");
@@ -941,27 +863,44 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					ImGui::TableNextColumn();
 					if (keyed)
 						keyBindCells("pos", "+ key", a.positive, st.dirty, assetPath, i, rowBase + k,
-						             CaptureKind::AxisPositive, capturedKeyName, captureWasCancelled);
+						             BindSlot::AxisKeyPos);
 					else if (padded)
 					{
 						if (padButtonCombo("##posbtn", a.positiveButton, "+ button\xE2\x80\xA6"))
 							st.dirty = true;
 						ImGui::TableNextColumn();
+						ImGui::PushID("posbind");
+						bindButtonCell(assetPath, i, rowBase + k, BindSlot::AxisPadPos,
+						               "Press a button\xE2\x80\xA6",
+						               "Press the gamepad button for the + half of this pair.");
+						ImGui::PopID();
 					}
 					else
 					{
 						ImGui::TextDisabled("\xe2\x80\x94");
 						ImGui::TableNextColumn();
+						// A device row has no pair to bind, but it does have a
+						// device: this rebinds WHICH stick or trigger it reads.
+						ImGui::PushID("srcbind");
+						bindButtonCell(assetPath, i, rowBase + k, BindSlot::AxisSource,
+						               "Move a stick\xE2\x80\xA6",
+						               "Move the stick or pull the trigger this row should read.");
+						ImGui::PopID();
 					}
 					ImGui::TableNextColumn();
 					if (keyed)
 						keyBindCells("neg", "\xe2\x88\x92 key", a.negative, st.dirty, assetPath, i, rowBase + k,
-						             CaptureKind::AxisNegative, capturedKeyName, captureWasCancelled);
+						             BindSlot::AxisKeyNeg);
 					else if (padded)
 					{
 						if (padButtonCombo("##negbtn", a.negativeButton, "\xe2\x88\x92 button\xE2\x80\xA6"))
 							st.dirty = true;
 						ImGui::TableNextColumn();
+						ImGui::PushID("negbind");
+						bindButtonCell(assetPath, i, rowBase + k, BindSlot::AxisPadNeg,
+						               "Press a button\xE2\x80\xA6",
+						               "Press the gamepad button for the \xe2\x88\x92 half of this pair.");
+						ImGui::PopID();
 					}
 					else
 					{
@@ -999,13 +938,13 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			           "Keys are still capped at \xc2\xb1" "1 together; a mouse row is "
 			           "added on top uncapped, because a fast flick has to be able to "
 			           "turn further than a held key.");
-			removeAxis = drawAxisTable(e.axes, "##axes", 2000, 0);
+			removeAxis = drawAxisTable(e.axes, "##axes", 2000, HE::Ed::kAxisRowBaseX);
 		}
 		if (is2D)
 		{
 			ImGui::Spacing();
 			ImGui::TextDisabled("Axes \xe2\x80\x94 Y");
-			removeAxisY = drawAxisTable(e.axesY, "##axesY", 3000, 500);
+			removeAxisY = drawAxisTable(e.axesY, "##axesY", 3000, HE::Ed::kAxisRowBaseY);
 		}
 		if (removeAxis >= 0) { e.axes.erase(e.axes.begin() + removeAxis); st.dirty = true; cancelCaptureForThisAsset(); }
 		if (removeAxisY >= 0) { e.axesY.erase(e.axesY.begin() + removeAxisY); st.dirty = true; cancelCaptureForThisAsset(); }
@@ -1018,44 +957,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		const bool offerAxes1D  = e.valueType == 1 || e.valueType < 0;
 		const bool offerAxes2D  = e.valueType == 2;
 
-		// Apply this frame's Auto Detect result to THIS entry before drawing
-		// the footer, so the pressed input appears in its list immediately.
-		// Button entries take buttons; an Axis entry turns a key or pad
-		// button into the POSITIVE half of a new pair row, and a moved stick
-		// or pulled trigger into a source row.
-		if (s_capture.kind == CaptureKind::AnyBinding &&
-		    s_capture.assetPath == assetPath && s_capture.entryIndex == i)
-		{
-			bool took = false;
-			if (offerButtons)
-			{
-				if      (!detected.key.empty())           { e.keys.push_back(detected.key); took = true; }
-				else if (!detected.mouseButton.empty())   { e.mouseButtons.push_back(detected.mouseButton); took = true; }
-				else if (!detected.gamepadButton.empty()) { e.gamepadButtons.push_back(detected.gamepadButton); took = true; }
-			}
-			else if (offerAxes1D)
-			{
-				if (!detected.key.empty())
-				{
-					AxisRow r; r.positive = detected.key;
-					e.axes.push_back(std::move(r)); took = true;
-				}
-				else if (!detected.gamepadButton.empty())
-				{
-					AxisRow r; r.uiPadRow = true; r.positiveButton = detected.gamepadButton;
-					e.axes.push_back(std::move(r)); took = true;
-				}
-				else if (detected.axisSource >= 0)
-				{
-					AxisRow r; r.source = static_cast<AxisSource>(detected.axisSource);
-					e.axes.push_back(std::move(r)); took = true;
-				}
-			}
-			if (took) { st.dirty = true; s_capture.kind = CaptureKind::None; }
-			else if (captureWasCancelled) s_capture.kind = CaptureKind::None;
-		}
-		const bool detecting = s_capture.kind == CaptureKind::AnyBinding &&
-		                       s_capture.assetPath == assetPath && s_capture.entryIndex == i;
+		// The card-level Auto Detect appends; every row's own Bind replaces.
+		// Both go through the same apply at the top of this entry.
+		const bool detecting = captureIsOn(assetPath, i, 0, BindSlot::EntryAny);
 
 		ImGui::Spacing();
 		// One entry point for everything: a searchable, type-aware list — or
@@ -1075,7 +979,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
 				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
 				if (ImGui::Button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
-					s_capture.kind = CaptureKind::None;
+					s_capture.slot = BindSlot::None;
 				ImGui::PopStyleColor(2);
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip(offerButtons
@@ -1087,11 +991,12 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			}
 			else if (ImGui::Button("Auto Detect", ImVec2(150.0f, 0.0f)))
 			{
-				beginCapture(assetPath, i, 0, CaptureKind::AnyBinding);
+				beginCapture(assetPath, i, 0, BindSlot::EntryAny);
 			}
 			if (!detecting && ImGui::IsItemHovered())
 				ImGui::SetTooltip("Listens on keyboard, mouse AND gamepad at once\n"
-				                  "and binds whatever you press first.");
+				                  "and ADDS whatever you press first. To replace one\n"
+				                  "binding instead, use the Bind button in its row.");
 		}
 
 		// ── Add Binding popup: searchable, shaped by the action's type ──────

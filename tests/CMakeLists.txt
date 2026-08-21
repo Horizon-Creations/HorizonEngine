@@ -127,6 +127,11 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorAssetTypeCache.cpp
+    # The Input Mapping panel's model: the decoded asset, its JSON codec and the
+    # rule for which row a pressed input lands in. ImGui-free by construction
+    # (the panel does the drawing and the device polling), so "did that press
+    # bind to the row it was aimed at" is answerable without a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InputMappingModel.cpp
     # The tutorial curriculum + its completion predicates are deliberately
     # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
     # tables can be asserted here without a window.

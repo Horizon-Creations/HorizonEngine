@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <Application/Input.h>
 #include <Application/InputMapping.h>
+#include "InputMappingModel.h"   // the editor-side model: where a pressed input lands
 
 // Helper: inject a synthetic key-down or key-up into an Input instance.
 namespace {
@@ -439,4 +440,236 @@ TEST_CASE("InputAssets: malformed mapping JSON binds nothing")
     CHECK(HE::applyInputMappingContext(im,
         R"({"entries":[{"action":"IA_X.hasset","keys":["NoSuchKey_123"]}]})") == 0);
     CHECK(im.actionCount() == 0);
+}
+
+// ─── Editor: binding by pressing the thing ───────────────────────────────────
+// The Input Mapping panel used to carry a single Bind button per key field and
+// one card-level Auto Detect that could only ever APPEND. Every binding row has
+// its own Bind now, and which row a press lands in is what these pin — the
+// panel around it is ImGui and cannot be asserted headless.
+
+using HE::Ed::AxisRow;
+using HE::Ed::BindSlot;
+using HE::Ed::DetectedBinding;
+using HE::Ed::MapEntry;
+
+namespace {
+    DetectedBinding key(const char* n)   { DetectedBinding d; d.key = n; return d; }
+    DetectedBinding pad(const char* n)   { DetectedBinding d; d.gamepadButton = n; return d; }
+    DetectedBinding mouse(const char* n) { DetectedBinding d; d.mouseButton = n; return d; }
+    DetectedBinding stick(AxisSource s)
+    { DetectedBinding d; d.axisSource = static_cast<int>(s); return d; }
+
+    // A Button entry with one of each kind of binding.
+    MapEntry buttonEntry()
+    {
+        MapEntry e;
+        e.actionPath = "Input/IA_Fire.hasset";
+        e.valueType  = 0;
+        e.keys           = { "Space", "F" };
+        e.gamepadButtons = { "a", "x" };
+        e.mouseButtons   = { "left" };
+        return e;
+    }
+}
+
+TEST_CASE("InputBinding: every row binds its own slot, not the first one")
+{
+    MapEntry e = buttonEntry();
+
+    // Second key row, not the first: the whole point of a per-row Bind.
+    CHECK(HE::Ed::applyDetected(e, BindSlot::Key, 1, key("G")));
+    CHECK(e.keys[0] == "Space");
+    CHECK(e.keys[1] == "G");
+    CHECK(e.keys.size() == 2);        // replaced, not appended
+
+    CHECK(HE::Ed::applyDetected(e, BindSlot::PadButton, 1, pad("dpup")));
+    CHECK(e.gamepadButtons[0] == "a");
+    CHECK(e.gamepadButtons[1] == "dpup");
+
+    CHECK(HE::Ed::applyDetected(e, BindSlot::MouseButton, 0, mouse("right")));
+    CHECK(e.mouseButtons[0] == "right");
+    CHECK(e.mouseButtons.size() == 1);
+}
+
+TEST_CASE("InputBinding: a row only takes the device it can hold")
+{
+    MapEntry e = buttonEntry();
+
+    // A key press at a pad row would have to be written as a pad-button name —
+    // it is refused instead, and the row keeps waiting.
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::PadButton, 0, key("Space")));
+    CHECK(e.gamepadButtons[0] == "a");
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::Key, 0, pad("b")));
+    CHECK(e.keys[0] == "Space");
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::MouseButton, 0, key("Space")));
+    CHECK(e.mouseButtons[0] == "left");
+
+    // Nothing pressed at all is not a binding either.
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::Key, 0, DetectedBinding{}));
+    CHECK_FALSE(HE::Ed::bindSlotAccepts(BindSlot::None, key("Space")));
+}
+
+TEST_CASE("InputBinding: a row index that no longer exists binds nothing")
+{
+    MapEntry e = buttonEntry();
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::Key, 7, key("G")));
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::Key, -1, key("G")));
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::AxisKeyPos, 0, key("G")));
+    CHECK(e.keys.size() == 2);
+}
+
+TEST_CASE("InputBinding: the X and Y axis lists never answer for each other")
+{
+    MapEntry e;
+    e.valueType = 2;
+    AxisRow x; x.uiPadRow = true; x.positiveButton = "dpright"; x.negativeButton = "dpleft";
+    AxisRow y; y.uiPadRow = true; y.positiveButton = "dpup";    y.negativeButton = "dpdown";
+    e.axes.push_back(x);
+    e.axesY.push_back(y);
+
+    // Row indices are rowBase-encoded, exactly as the panel addresses them.
+    CHECK(HE::Ed::applyDetected(e, BindSlot::AxisPadPos, HE::Ed::kAxisRowBaseX + 0, pad("b")));
+    CHECK(e.axes[0].positiveButton == "b");
+    CHECK(e.axesY[0].positiveButton == "dpup");     // the Y row is untouched
+
+    CHECK(HE::Ed::applyDetected(e, BindSlot::AxisPadNeg, HE::Ed::kAxisRowBaseY + 0, pad("y")));
+    CHECK(e.axesY[0].negativeButton == "y");
+    CHECK(e.axes[0].negativeButton == "dpleft");
+
+    // …and the key halves of a key-source pair.
+    AxisRow k; e.axes.push_back(k);
+    CHECK(HE::Ed::applyDetected(e, BindSlot::AxisKeyPos, HE::Ed::kAxisRowBaseX + 1, key("D")));
+    CHECK(HE::Ed::applyDetected(e, BindSlot::AxisKeyNeg, HE::Ed::kAxisRowBaseX + 1, key("A")));
+    CHECK(e.axes[1].positive == "D");
+    CHECK(e.axes[1].negative == "A");
+}
+
+TEST_CASE("InputBinding: rebinding an axis row's device drops the pair it no longer reads")
+{
+    MapEntry e;
+    e.valueType = 1;
+    AxisRow r; r.positive = "D"; r.negative = "A"; r.positiveButton = "dpright";
+    e.axes.push_back(r);
+
+    // A stick press at the pair fields is not a pair binding…
+    CHECK_FALSE(HE::Ed::applyDetected(e, BindSlot::AxisKeyPos, 0, stick(AxisSource::GamepadLeftX)));
+    // …but at the row's source it rebinds which device the row reads. The
+    // runtime reads a Key row's pairs whatever the source says, so they have to
+    // go with it or they would keep binding invisibly.
+    CHECK(HE::Ed::applyDetected(e, BindSlot::AxisSource, 0, stick(AxisSource::GamepadLeftX)));
+    CHECK(e.axes[0].source == AxisSource::GamepadLeftX);
+    CHECK(e.axes[0].positive.empty());
+    CHECK(e.axes[0].negative.empty());
+    CHECK(e.axes[0].positiveButton.empty());
+    CHECK_FALSE(e.axes[0].uiPadRow);
+}
+
+TEST_CASE("InputBinding: the card's Auto Detect still appends, on any device")
+{
+    MapEntry b = buttonEntry();
+    CHECK(HE::Ed::applyDetected(b, BindSlot::EntryAny, 0, key("G")));
+    CHECK(b.keys.size() == 3);
+    CHECK(b.keys[2] == "G");
+    CHECK(HE::Ed::applyDetected(b, BindSlot::EntryAny, 0, mouse("middle")));
+    CHECK(b.mouseButtons.size() == 2);
+    CHECK(HE::Ed::applyDetected(b, BindSlot::EntryAny, 0, pad("dpdown")));
+    CHECK(b.gamepadButtons.size() == 3);
+
+    // An Axis entry turns a press into the + half of a NEW pair row, and a
+    // moved stick into a source row.
+    MapEntry a; a.valueType = 1;
+    CHECK(HE::Ed::applyDetected(a, BindSlot::EntryAny, 0, key("W")));
+    REQUIRE(a.axes.size() == 1);
+    CHECK(a.axes[0].positive == "W");
+    CHECK(HE::Ed::applyDetected(a, BindSlot::EntryAny, 0, pad("dpup")));
+    REQUIRE(a.axes.size() == 2);
+    CHECK(a.axes[1].uiPadRow);
+    CHECK(a.axes[1].positiveButton == "dpup");
+    CHECK(HE::Ed::applyDetected(a, BindSlot::EntryAny, 0, stick(AxisSource::GamepadRightY)));
+    REQUIRE(a.axes.size() == 3);
+    CHECK(a.axes[2].source == AxisSource::GamepadRightY);
+    // A mouse click has no meaning on an axis entry — nothing is added.
+    CHECK_FALSE(HE::Ed::applyDetected(a, BindSlot::EntryAny, 0, mouse("left")));
+    CHECK(a.axes.size() == 3);
+}
+
+TEST_CASE("InputBinding: several entries bind independently and survive a save")
+{
+    std::vector<MapEntry> entries;
+    MapEntry jump;  jump.actionPath = "Input/IA_Jump.hasset";  jump.valueType = 0;
+    jump.keys = { "Space" };
+    MapEntry fire;  fire.actionPath = "Input/IA_Fire.hasset";  fire.valueType = 0;
+    fire.gamepadButtons = { "a" };
+    fire.mouseButtons   = { "left" };
+    MapEntry move;  move.actionPath = "Input/IA_Move.hasset";  move.valueType = 2;
+    { AxisRow x; x.positive = "D"; x.negative = "A"; move.axes.push_back(x);
+      AxisRow y; y.positive = "W"; y.negative = "S"; move.axesY.push_back(y); }
+    entries = { jump, fire, move };
+
+    // Three Bind buttons in three different cards, one after the other.
+    CHECK(HE::Ed::applyDetected(entries[0], BindSlot::Key, 0, key("Return")));
+    CHECK(HE::Ed::applyDetected(entries[1], BindSlot::PadButton, 0, pad("rightshoulder")));
+    CHECK(HE::Ed::applyDetected(entries[2], BindSlot::AxisKeyNeg,
+                                HE::Ed::kAxisRowBaseY + 0, key("X")));
+
+    // Each landed in its own entry and nowhere else.
+    CHECK(entries[0].keys[0] == "Return");
+    CHECK(entries[1].gamepadButtons[0] == "rightshoulder");
+    CHECK(entries[1].mouseButtons[0] == "left");
+    CHECK(entries[2].axes[0].positive == "D");
+    CHECK(entries[2].axesY[0].negative == "X");
+
+    // Through the asset's JSON and back, which is what Save writes.
+    std::vector<MapEntry> back;
+    HE::Ed::decodeMapping(HE::Ed::encodeMapping(entries), back);
+    REQUIRE(back.size() == 3);
+    CHECK(back[0].keys[0] == "Return");
+    CHECK(back[1].gamepadButtons[0] == "rightshoulder");
+    CHECK(back[1].mouseButtons[0] == "left");
+    CHECK(back[2].axes[0].negative == "A");
+    CHECK(back[2].axesY[0].negative == "X");
+
+    // …and the runtime binds what came back: a 2D entry has to encode as
+    // axesX/axesY or axis2DValue() answers 0,0 for it.
+    InputMapping im;
+    CHECK(HE::applyInputMappingContext(im, HE::Ed::encodeMapping(entries)) == 3);
+}
+
+TEST_CASE("InputBinding: the mapping codec round-trips every binding kind")
+{
+    const std::string json =
+        R"({"entries":[{"action":"Input/IA_Look.hasset",)"
+        R"("keys":["Space"],"gamepadButtons":["a"],"mouseButtons":["right"],)"
+        R"("axesX":[{"positive":"D","negative":"A","scale":1.0,"source":"Key"}],)"
+        R"("axesY":[{"positive":"","negative":"","scale":-1.0,"source":"GamepadRightY"}]}]})";
+    std::vector<MapEntry> e;
+    HE::Ed::decodeMapping(json, e);
+    REQUIRE(e.size() == 1);
+    CHECK(e[0].keys[0] == "Space");
+    CHECK(e[0].gamepadButtons[0] == "a");
+    CHECK(e[0].mouseButtons[0] == "right");
+    REQUIRE(e[0].axes.size() == 1);
+    REQUIRE(e[0].axesY.size() == 1);
+    CHECK(e[0].axesY[0].source == AxisSource::GamepadRightY);
+    CHECK(e[0].axesY[0].scale == doctest::Approx(-1.0f));
+
+    // The decoder cannot know the action's type; the 2D shape carries it here
+    // (the panel resolves it from the asset), and re-encoding must keep the two
+    // lists apart rather than collapsing them into a 1D "axes".
+    e[0].valueType = 2;
+    std::vector<MapEntry> back;
+    HE::Ed::decodeMapping(HE::Ed::encodeMapping(e), back);
+    REQUIRE(back.size() == 1);
+    REQUIRE(back[0].axes.size() == 1);
+    REQUIRE(back[0].axesY.size() == 1);
+    CHECK(back[0].axes[0].positive == "D");
+    CHECK(back[0].axesY[0].source == AxisSource::GamepadRightY);
+
+    // Garbage decodes to nothing rather than to half an entry.
+    std::vector<MapEntry> none;
+    HE::Ed::decodeMapping("not json", none);
+    CHECK(none.empty());
+    HE::Ed::decodeMapping(R"({"entries":[1,2,3]})", none);
+    CHECK(none.empty());
 }

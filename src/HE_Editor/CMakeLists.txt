@@ -110,6 +110,7 @@ add_executable(HorizonEditor WIN32
 	UIEditorPanel.cpp
 	LevelScriptPanel.cpp
 	InputAssetPanel.cpp
+	InputMappingModel.cpp
 	TypeAssetPanel.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
