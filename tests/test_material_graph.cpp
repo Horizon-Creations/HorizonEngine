@@ -1135,6 +1135,37 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	CHECK(pg.glsl.find("heLandscapeWeights") == std::string::npos);
 }
 
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
+{
+	// The registry sweep above builds this node with NO layer wired; the
+	// zero-weight fallback only takes its real shape (layer 0's expression in the
+	// ternary's else branch) once a layer is connected. Both backends compile the
+	// same canonical GLSL through glslang, so this is what proves the OpenGL
+	// variant of the blend as well.
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock\nSand";
+	for (int i = 0; i < 3; ++i)
+	{
+		const int c = g.addNode(HE::MatNodeType::ConstColor);
+		g.findNode(c)->p[i] = 1.0f;
+		CHECK(g.connect(c, 0, lb, i));
+	}
+	CHECK(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(g).glsl;
+	const uint64_t    hash = std::hash<std::string>{}(glsl);
+	const auto& msl = lib.fragment(hash, glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, "MSL compile failed: ", msl.log);
+	const auto& gl = lib.fragment(hash, glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
+}
+#endif
+
 // ═══ Container semantics shared with the other graph systems ═════════════════
 
 TEST_CASE("MaterialGraph::connect REPLACES an existing link on the same input pin")
