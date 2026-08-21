@@ -147,6 +147,13 @@ namespace IMGUIZMO_NAMESPACE
    // return true if any gizmo is in moving state
    IMGUI_API bool IsUsingAny();
 
+   // HE-PATCH(gizmo-lag): screen position (pixels) the gizmo's origin currently
+   // sits at — the centre of its screen-square handle, and the point every hit
+   // test is measured from. Valid after Manipulate(); exposed so the editor's
+   // headless test can assert that drawing and picking use THIS frame's matrix
+   // rather than the one the previous frame produced.
+   IMGUI_API ImVec2 GetGizmoScreenOrigin();
+
    // enable/disable the gizmo. Stay in the state until next call to Enable.
    // gizmo is rendered with gray half transparent color when disabled
    IMGUI_API void Enable(bool enable);

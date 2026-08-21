@@ -37,16 +37,6 @@ bool manipulate(HorizonWorld& world, Entity entity,
 	ImGuizmo::SetDrawlist();
 	ImGuizmo::SetRect(rectMin.x, rectMin.y, rectMax.x - rectMin.x, rectMax.y - rectMin.y);
 
-	// Pre-state for undo — captured ONLY on the frame a gizmo drag is about to
-	// begin (mouse pressed over the gizmo), NOT every frame. capturePre()
-	// serializes the WHOLE world (expensive with terrain), so a per-frame call
-	// drops the editor to ~15 ms the moment anything is selected.
-	// IsOver()+MouseClicked fires once, just before Manipulate first mutates the
-	// transform this frame.
-	if (undo && !ImGuizmo::IsUsing() && ImGuizmo::IsOver()
-	    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-		undo->capturePre();
-
 	// For rotation, optionally drop ImGuizmo's outer screen-space ring (rotate
 	// about the view axis) — it's the confusing white circle.
 	ImGuizmo::OPERATION effectiveOp = tb.op;
@@ -69,10 +59,18 @@ bool manipulate(HorizonWorld& world, Entity entity,
 	                     nullptr, tb.activeSnap());
 	s_world = gizmoWorld;
 
-	// Undo session: one entry per drag.
+	// Undo session: one entry per drag. The pre-state is taken on the frame the
+	// drag STARTS — ImGuizmo activates a handle without moving it (the motion
+	// branch runs from the next frame on), so the world is still untouched here.
+	// It used to hang off IsOver()+MouseClicked BEFORE Manipulate, which answers
+	// from the context of the previous frame: after a camera move the handle the
+	// click actually landed on was not the one that test saw, and the drag then
+	// went onto the stack with no pre-state at all. capturePre() serializes the
+	// WHOLE world (expensive with terrain), so it must stay on this one edge and
+	// never run per frame.
 	if (undo)
 	{
-		if (ImGuizmo::IsUsing() && !s_wasUsing) undo->stashPre();
+		if (ImGuizmo::IsUsing() && !s_wasUsing) { undo->capturePre(); undo->stashPre(); }
 		if (!ImGuizmo::IsUsing() && s_wasUsing) undo->commitPending();
 	}
 	s_wasUsing = ImGuizmo::IsUsing();

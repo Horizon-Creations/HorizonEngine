@@ -956,7 +956,12 @@ namespace IMGUIZMO_NAMESPACE
       gContext.mWidth = width;
       gContext.mHeight = height;
       gContext.mXMax = gContext.mX + gContext.mWidth;
-      gContext.mYMax = gContext.mY + gContext.mXMax;
+      // HE-PATCH(gizmo-lag): upstream reads `mY + mXMax` here — the viewport's
+      // bottom edge computed from its RIGHT edge. IsInContextRect() is the only
+      // reader (bounds-anchor visibility), so it never mattered for the
+      // move/rotate/scale handles, but a rect whose height exceeds x+width had
+      // a dead strip along the bottom.
+      gContext.mYMax = gContext.mY + gContext.mHeight;
       gContext.mDisplayRatio = width / height;
    }
 
@@ -1018,6 +1023,12 @@ namespace IMGUIZMO_NAMESPACE
    bool IsUsingAny()
    {
       return gContext.mbUsing || gContext.mbUsingBounds;
+   }
+
+   // HE-PATCH(gizmo-lag): see ImGuizmo.h.
+   ImVec2 GetGizmoScreenOrigin()
+   {
+      return gContext.mScreenSquareCenter;
    }
 
    bool IsOver()
@@ -2771,6 +2782,21 @@ namespace IMGUIZMO_NAMESPACE
 
       gContext.mOperation = operation;
       gContext.mHoveredHandleType = (!gContext.mbUsing && !gContext.mbUsingBounds) ? type : MT_NONE;
+      // HE-PATCH(gizmo-lag): the Handle* calls above have just moved `matrix`,
+      // but every Draw* below — and every hit test derived from the same
+      // context — still works off the matrix ComputeContext saw at the top of
+      // this call, i.e. the PREVIOUS frame's result. The host renders the
+      // object from the transform this frame wrote, so the gizmo and its grab
+      // handles trailed the object by one frame of mouse movement. Refresh the
+      // context from the manipulated matrix so both agree within the frame.
+      // This is exactly the state next frame's ComputeContext would compute
+      // from the same matrix, so nothing that survives the frame changes; the
+      // drag-start data (mMatrixOrigin, mTranslationPlan, mRotationVectorSource,
+      // mScale) lives outside ComputeContext and is left alone.
+      if (manipulated)
+      {
+         ComputeContext(view, projection, matrix, (operation & SCALE) ? LOCAL : mode);
+      }
       if (!gContext.mbUsingBounds)
       {
          DrawRotationGizmo(operation, type);

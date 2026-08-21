@@ -18,6 +18,7 @@ add_executable(he_tests
     test_horizoncode_shortcuts.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
+    test_gizmo_pick.cpp
     test_editor_input.cpp
     test_editor_row_widgets.cpp
     test_editor_theme.cpp
@@ -168,6 +169,11 @@ add_executable(he_tests
     # The ImGui style, for the same reason: it is ImGui-only by construction, so
     # "did the theme actually assign every colour slot" is answerable headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTheme.cpp
+    # The transform gizmo, for the same reason as GraphEditor above: ImGuizmo is
+    # ImGui and maths, nothing else, so where its handles can be GRABBED is
+    # answerable headless — the one property of the viewport that no screenshot
+    # dump can show.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imguizmo/ImGuizmo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -183,6 +189,7 @@ target_include_directories(he_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include
     ${CMAKE_SOURCE_DIR}/src/HE_Editor
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imguizmo
 )
 # The HorizonRendering sources above are compiled straight into the test exe
 # instead of linking the DLL. Define HE_RENDERING_BUILD_DLL so HE_RENDERING_API
