@@ -467,6 +467,7 @@ namespace
 			    && glm::distance(glm::vec3(t.worldMatrix[3]), out.camera.position) > light.cullDistance)
 				continue;
 			LightData l;
+			l.entityId     = static_cast<uint32_t>(e); // owner → shadow-map self-exclusion
 			l.position     = glm::vec3(t.worldMatrix[3]);
 			// Lights shine along their local -Z (third column of the world matrix)
 			l.direction    = -glm::normalize(glm::vec3(t.worldMatrix[2]));
@@ -607,6 +608,7 @@ namespace
 	{
 		out.shadow.localLayerCount = 0;
 		for (LightData& l : out.lights) l.shadowLayer = -1;
+		for (uint32_t& owner : out.shadow.localOwnerEntity) owner = kNoOwnerEntity;
 
 		constexpr int kMaxShaderLights = 8;
 		const int lightWindow = std::min<int>(static_cast<int>(out.lights.size()), kMaxShaderLights);
@@ -647,7 +649,8 @@ namespace
 				const glm::vec3 up  = std::abs(dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
 				const glm::mat4 view = glm::lookAt(l.position, l.position + dir, up);
 				const glm::mat4 proj = glm::perspective(fovy, 1.0f, nearP, farP);
-				out.shadow.localViewProj[layer] = proj * view;
+				out.shadow.localViewProj[layer]     = proj * view;
+				out.shadow.localOwnerEntity[layer] = l.entityId;
 				l.shadowLayer = static_cast<int16_t>(layer);
 				layer += 1;
 			}
@@ -664,7 +667,8 @@ namespace
 				for (int f = 0; f < 6; ++f)
 				{
 					const glm::mat4 view = glm::lookAt(l.position, l.position + kFaceDir[f], kFaceUp[f]);
-					out.shadow.localViewProj[layer + f] = proj * view;
+					out.shadow.localViewProj[layer + f]     = proj * view;
+					out.shadow.localOwnerEntity[layer + f] = l.entityId;
 				}
 				l.shadowLayer = static_cast<int16_t>(layer);
 				layer += 6;

@@ -3663,12 +3663,108 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_LOCALSHADOW witness scene added");
 	}
 
+	// ── Light-on-the-same-entity witness (HE_DUMP_LIGHTONMESH=…) ─────────────
+	// Two identical cubes left/right of ONE point light that sits on its own
+	// entity: both must be lit the same. The mode string then attaches a SECOND
+	// light to the RIGHT cube's own entity — the case where an entity carries a
+	// LightComponent AND a MeshComponent (a lamp model with its lamp light):
+	//   "control" — nothing attached (the A/B baseline)
+	//   "point"   — a tiny point light (intensity 0.01, range 1) on the cube, so
+	//               it changes nothing about the illumination; if the cube goes
+	//               dark, merely HAVING a light on the entity is what did it
+	//   "dir"     — a directional light on the cube instead. Directional light
+	//               ignores position, so "the mesh can't light its own convex
+	//               hull from its own pivot" cannot explain a dark result.
+	//   "…shadow" — the attached light also casts shadows (isolates the local
+	//               shadow atlas from the light window/cluster bookkeeping).
+	if (const char* lm = std::getenv("HE_DUMP_LIGHTONMESH"); lm && *lm && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const std::string mode(lm);
+		// Isolate the witness the way LOCALSHADOW does: no pre-existing scene
+		// light may cast, so the atlas holds only what this scene puts in it.
+		for (auto [e, plc] : reg.view<LightComponent>().each())
+			plc.castsShadow = false;
+
+		auto slab = m_editorWorld->createEntity("LightOnMeshFloor");
+		TransformComponent ftc;
+		ftc.position = glm::vec3(0.0f, 399.0f, -8.0f); // high above any loaded scene content
+		ftc.scale    = glm::vec3(24.0f, 0.25f, 24.0f);
+		reg.emplace<TransformComponent>(slab, ftc);
+		reg.emplace<MeshComponent>(slab, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto cube = [&](const char* name, float x)
+		{
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = glm::vec3(x, 400.5f, -8.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+		cube("LightOnMeshLeft", -3.0f);              // control cube
+		const Entity right = cube("LightOnMeshRight", 3.0f); // carries the attached light
+
+		// The one light that actually illuminates the scene — its OWN entity.
+		// "lamp" drops it: there the ONLY light in the scene is the one sitting on
+		// the right cube's entity, which is the "a lamp model carries its own
+		// light" case in its purest form.
+		const bool lamp = mode.rfind("lamp", 0) == 0;
+		if (!lamp)
+		{
+			auto lightE = m_editorWorld->createEntity("LightOnMeshKeyLight");
+			TransformComponent ktc;
+			ktc.position = glm::vec3(0.0f, 403.0f, -5.0f);
+			LightComponent klc;
+			klc.type      = HE::LightType::Point;
+			klc.intensity = 2.0f;
+			klc.range     = 25.0f;
+			// "…ks": the key light casts shadows too, so the atlas holds TWO
+			// layers and a mixed-up layer index would show as one cube going dark.
+			klc.castsShadow = mode.find("ks") != std::string::npos;
+			reg.emplace<TransformComponent>(lightE, ktc);
+			reg.emplace<LightComponent>(lightE, klc);
+		}
+
+		if (mode.rfind("control", 0) != 0)
+		{
+			LightComponent alc;
+			alc.castsShadow = mode.find("shadow") != std::string::npos;
+			if (mode.rfind("dir", 0) == 0)
+			{
+				alc.type      = HE::LightType::Directional;
+				alc.intensity = 1.5f;
+				// Left at the default rotation ON PURPOSE: the light then travels
+				// along -Z and lands on the camera-facing (+Z) faces of BOTH
+				// cubes, so the two stay geometrically identical and the only
+				// difference between them is which entity owns the light.
+			}
+			else
+			{
+				alc.type      = HE::LightType::Point;
+				// "lamp" = a light that is meant to light the room from a mesh
+				// entity; the other modes keep it negligible so that PRESENCE,
+				// not brightness, is the only variable.
+				alc.intensity = lamp ? 2.0f : 0.01f;
+				alc.range     = lamp ? 25.0f : 1.0f;
+			}
+			reg.emplace<LightComponent>(right, alc);
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_LIGHTONMESH witness scene added (" + mode + ")").c_str());
+	}
+
 	// ── Landscape layer-blend witness (HE_DUMP_LANDSCAPELAYERS=1) ────────────
 	// A flat landscape with a THREE-LAYER material (red / green / blue) and a
 	// painted weightmap: a green disc in the middle of a red field, with a blue
 	// stripe. Proves the whole chain — layer-blend codegen → per-draw weightmap
 	// binding → painted weights — lands on pixels, and the three colours make a
 	// wrong channel obvious at a glance.
+	//
+	// HE_DUMP_LAYEREDIT (below, AFTER WarmupMaterials) then re-authors that
+	// material's layers the way the Material Editor does — the "the blend works
+	// exactly once" case.
+	HE::UUID s_layerMatId{};
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -3700,6 +3796,7 @@ void EditorApplication::dumpFrameHeadless()
 		lm.blendMode            = gen.blendMode;
 		lm.graphLayerNames      = gen.layerNames;
 		const HE::UUID lmId = contentManager().registerMaterial(std::move(lm));
+		s_layerMatId = lmId;
 
 		auto land = m_editorWorld->createEntity("LayerLandscape");
 		TransformComponent ltf;
@@ -3731,6 +3828,72 @@ void EditorApplication::dumpFrameHeadless()
 	// exercises the warmed path — the draw loop then hits the cache instead of
 	// cross-compiling mid-encoder.
 	if (m_editorWorld) r->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
+
+	// ── Re-author the landscape layers AFTER the warmup (HE_DUMP_LAYEREDIT) ──
+	// The reported bug is "the layer blend works exactly once — edit the layers
+	// afterwards and the landscape is white". In the editor that edit lands on an
+	// ALREADY-WARMED scene, so the mutation has to happen after WarmupMaterials
+	// or the witness would exercise the warm path instead of the lazy one.
+	// Mirrors MaterialEditorPanel::applyGraph: reload the graph from the asset's
+	// own JSON, change it, regenerate, write the results back in place.
+	//   recolor — repaint layer 0 (smallest possible edit)
+	//   add     — append a fourth layer with its own colour
+	//   remove  — drop the middle layer, dropping its link like the node UI does
+	if (const char* le = std::getenv("HE_DUMP_LAYEREDIT");
+	    le && *le && s_layerMatId != HE::UUID{})
+	{
+		MaterialAsset* mat = contentManager().getMaterialMutable(s_layerMatId);
+		HE::MaterialGraph g;
+		if (mat && HE::materialGraphFromJson(mat->nodeGraphJson, g))
+		{
+			HE::MatGraphNode* lb = nullptr;
+			for (auto& n : g.nodes)
+				if (n.type == HE::MatNodeType::LandscapeLayerBlend) { lb = &n; break; }
+			const std::string mode(le);
+			if (lb && mode == "recolor")
+			{
+				// The colour feeding pin 0 goes red → yellow.
+				for (const auto& l : g.links)
+					if (l.dstNode == lb->id && l.dstPin == 0)
+						if (HE::MatGraphNode* c = g.findNode(l.srcNode))
+						{ c->p[0] = 0.95f; c->p[1] = 0.85f; c->p[2] = 0.10f; }
+			}
+			else if (lb && mode == "add")
+			{
+				lb->s += "\nYellow";
+				const int c = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(c)->p[0] = 0.95f; g.findNode(c)->p[1] = 0.85f; g.findNode(c)->p[2] = 0.10f;
+				g.connect(c, 0, lb->id, 3);
+			}
+			else if (lb && mode == "remove")
+			{
+				lb->s = "Red\nGreen";                 // drop the third layer…
+				g.disconnectInput(lb->id, 2);         // …and the link on its pin
+			}
+			if (mode == "noshader")
+			{
+				// Control: what a landscape looks like when the material's custom
+				// shader is GONE and the renderer falls back to built-in PBR. That
+				// fallback shades MaterialAsset::baseColor, which defaults to white
+				// — the signature to compare any "the landscape went white" report
+				// against.
+				mat->customShaderFragGlsl.clear();
+				mat->customShaderGBufGlsl.clear();
+			}
+			else
+			{
+				const HE::MatShaderGen gen = HE::generateFragment(g);
+				mat->nodeGraphJson        = HE::materialGraphToJson(g);
+				mat->customShaderFragGlsl = gen.glsl;
+				mat->customShaderGBufGlsl = gen.glslGBuffer;
+				mat->customShaderVertGlsl = gen.vertexBody;
+				mat->blendMode            = gen.blendMode;
+				mat->graphLayerNames      = gen.layerNames;
+			}
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_LAYEREDIT re-authored the layers (" + mode + ")").c_str());
+		}
+	}
 
 	// Witness the material-preview offscreen path (HE_DUMP_PREVIEW + HE_PREVIEW_DUMP):
 	// render the test material's preview sphere and let the backend dump it.

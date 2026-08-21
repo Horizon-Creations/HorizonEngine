@@ -14,7 +14,18 @@ struct CameraData {
     glm::vec3 position   = glm::vec3(0.0f);
 };
 
+// "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
+// the sentinel has to be a value the registry never hands out.
+inline constexpr uint32_t kNoOwnerEntity = 0xFFFFFFFFu;
+
 struct LightData {
+    // The entity the LightComponent sits on. Only used to keep that entity's OWN
+    // mesh out of this light's shadow map: a light authored onto a mesh entity (a
+    // lamp model carrying its lamp light) sits INSIDE that mesh, so the mesh fills
+    // the light's depth map at z≈0 and the light shadows itself out completely —
+    // the whole scene stays unlit by it. Put the light on a child entity when the
+    // model really is supposed to occlude it.
+    uint32_t  entityId     = kNoOwnerEntity;
     glm::vec3 position     = glm::vec3(0.0f);
     glm::vec3 direction    = glm::vec3(0.0f, -1.0f, 0.0f); // directional/spot: -Z of the light's world matrix
     glm::vec3 color        = glm::vec3(1.0f);
@@ -62,6 +73,10 @@ struct ShadowData {
     static constexpr int kMaxLocalShadowLayers = 16;
     int       localLayerCount = 0;
     glm::mat4 localViewProj[kMaxLocalShadowLayers] = {};
+    // Per layer: the entity that OWNS the light this layer belongs to (see
+    // LightData::entityId). The depth pass skips that entity's own geometry for
+    // this layer only. kNoOwnerEntity = skip nothing (all CSM cascades).
+    uint32_t  localOwnerEntity[kMaxLocalShadowLayers] = {};
 };
 
 // One live particle's raw GPU-instanced draw data — position/size (still CPU-lerped,

@@ -9889,7 +9889,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// (NOT m_visible/m_sortedIndices — those hold the camera cull the
 			// geometry pass consumes). Sorting keeps draws grouped by mesh id so
 			// the per-mesh resolve memoisation stays valid.
-			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp)
+			// `skipEntity` keeps ONE entity's geometry out of this layer: the entity
+			// the local light itself sits on. Without it a light authored onto a mesh
+			// entity renders that mesh at z≈0 into its own depth map and shadows
+			// itself out completely. kNoOwnerEntity (every cascade) skips nothing.
+			// Mirrors the Metal backend's encodeDepthLayer.
+			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp,
+			                            uint32_t skipEntity)
 			{
 				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
@@ -9901,6 +9907,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				{
 					const RenderObject& obj = m_renderWorld.objects[idx];
 					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
+					if (obj.entityId == skipEntity) continue; // the light's own mesh
 					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
 					                   glm::value_ptr(vp * obj.transform));
 					if (!shMeshValid || obj.meshAssetId != shMeshId)
@@ -9919,13 +9926,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
 				for (int c = 0; c < cascades; ++c)
-					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c]);
+					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c],
+					                 kNoOwnerEntity);
 			}
 			if (localShadows)
 			{
 				glViewport(0, 0, m_localShadowSize, m_localShadowSize);
 				for (int v = 0; v < nLocalLayers; ++v)
-					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v]);
+					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v],
+					                 m_renderWorld.shadow.localOwnerEntity[v]);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);

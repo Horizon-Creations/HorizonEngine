@@ -6372,7 +6372,12 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 
 		// Depth-only render of every shadow caster into one layer of `target`,
 		// shared by the CSM cascades and the local (point/spot) shadow views.
-		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj)
+		// `skipEntity` keeps ONE entity's geometry out of this layer: the entity the
+		// local light itself sits on. Without it a light authored onto a mesh entity
+		// renders that mesh at z≈0 into its own depth map and shadows itself out
+		// completely. kNoOwnerEntity (every cascade) skips nothing.
+		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
+		                            uint32_t skipEntity)
 		{
 			m_culler.cull(m_renderWorld, viewProj, m_visible);
 			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -6398,6 +6403,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			{
 				const RenderObject& obj = m_renderWorld.objects[idx];
 				if (!obj.castsShadow) continue; // billboards (precip/particles) cast no shadow
+				if (obj.entityId == skipEntity) continue; // the light's own mesh
 				UnlitUniforms u;
 				u.mvp = lightClip * obj.transform;
 
@@ -6424,10 +6430,11 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 
 		for (int c = 0; c < cascades; ++c)
 			encodeDepthLayer(m_shadowDepthTex, c, m_shadowSize,
-			                 m_renderWorld.shadow.cascadeViewProj[c]);
+			                 m_renderWorld.shadow.cascadeViewProj[c], kNoOwnerEntity);
 		for (int v = 0; v < localLayers; ++v)
 			encodeDepthLayer(m_localShadowTex, v, m_localShadowSize,
-			                 m_renderWorld.shadow.localViewProj[v]);
+			                 m_renderWorld.shadow.localViewProj[v],
+			                 m_renderWorld.shadow.localOwnerEntity[v]);
 	}
 }
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
