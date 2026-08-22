@@ -170,6 +170,12 @@ namespace HE
 		HorizonWorld*              m_world    = nullptr;
 		// Secondary windows keyed by their SDL window ID
 		std::unordered_map<uint32_t, std::unique_ptr<Window>> m_secondaryWindows;
+		// Das Backend, mit dem Run() das Primärfenster tatsächlich geöffnet hat.
+		// createSecondaryWindow braucht es, und GetConfig() dort erneut aufzurufen
+		// wäre dieselbe Falle, die in EditorApplication schon einmal zugeschnappt
+		// ist: die Konfiguration kennt Übersteuerungen wie HE_DUMP_RHI nicht
+		// zuverlässig, das hier ist der Wert, der wirklich benutzt wurde.
+		RendererBackend            m_windowApi = RendererBackend::OpenGL;
 		ContentManager			   m_contentManager;
 	};
 }

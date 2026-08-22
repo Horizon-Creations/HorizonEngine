@@ -22,6 +22,13 @@ const char* rhiName(HE::RendererBackend api)
 		default:                          return "unknown";
 	}
 }
+
+// Zustand des Zweitfenster-Zeugen (HE_DUMP_SECONDWINDOW). Dateilokal statt als
+// Member, weil es reine Diagnostik ist und die Application-Schnittstelle nichts
+// davon wissen muss — dieselbe Linie, die die HE_DUMP_*-Haken im Editor ziehen.
+HE::WindowHandle s_secondWindow{};
+int  s_secondWindowFrames = 0;
+bool s_secondWindowDone   = false;
 } // namespace
 
 namespace HE
@@ -109,6 +116,7 @@ namespace HE
 
 		WindowProps wp = cfg.windowprops;
 		wp.api = cfg.backend;
+		m_windowApi = cfg.backend;   // createSecondaryWindow braucht denselben Wert
 		// Hold the primary window back while the splash is up. Nothing draws
 		// into it until the first frame anyway, and the renderer initialises
 		// against a hidden window just as well as a visible one.
@@ -246,6 +254,69 @@ namespace HE
 				m_window->PollEvents();
 			}
 			if (m_window->ShouldClose()) break;
+
+			// ── Zeuge für den Zweitfenster-Pfad (HE_DUMP_SECONDWINDOW=<Frames>) ──
+			// Ohne das ist AttachWindow/RenderWindow/DetachWindow auf KEINEM Backend
+			// je gelaufen: createSecondaryWindow hat im ganzen Baum keinen Aufrufer.
+			// Der Frame-Dump taugt nicht als Beleg — er erfasst nur das Primärfenster.
+			// Was dieser Zeuge belegt, ist deshalb bewusst kein Bild, sondern der
+			// Lebenszyklus: Swapchain angelegt, N Frames präsentiert, sauber wieder
+			// abgeräumt, und auf D3D12/Vulkan null Validierungsfehler dabei. Mehr
+			// kann die API von sich aus zeigen; ein schwarzes Clear liesse sich von
+			// „nie aufgerufen" ohnehin nicht unterscheiden, weshalb die Backends in
+			// eine auffaellige Farbe loeschen.
+			if (!s_secondWindowDone)
+			{
+				if (const char* sw = std::getenv("HE_DUMP_SECONDWINDOW"); sw && *sw)
+				{
+					const int rawFrames  = std::atoi(sw);
+					// HE_DUMP_SECONDWINDOW=0 ist der KONTROLLLAUF: dieselbe Schleife,
+					// dieselbe Frame-Zahl, derselbe saubere Ausstieg — nur ohne
+					// Zweitfenster. Ohne diesen Vergleich lässt sich nicht sagen, ob
+					// eine Validierungsmeldung vom Zweitfenster kommt oder ohnehin im
+					// Hauptpfad steht; genau daran wäre die Abnahme sonst gescheitert.
+					const bool controlOnly = (rawFrames == 0);
+					const int  wantFrames  = controlOnly ? 10 : std::max(1, rawFrames);
+					if (controlOnly)
+					{
+						if (++s_secondWindowFrames >= wantFrames)
+						{
+							s_secondWindowDone = true;
+							HE_LOG_INFO(Core, "Zweitfenster-Zeuge: Kontrolllauf ohne Fenster, %d Frame(s)",
+							            s_secondWindowFrames);
+							if (const char* keep = std::getenv("HE_DUMP_SECONDWINDOW_KEEP"); !(keep && *keep && *keep != '0'))
+								Quit();
+						}
+					}
+					else if (!s_secondWindow.id)
+					{
+						WindowProps p;
+						p.title  = "HorizonEngine — Zweitfenster-Zeuge";
+						p.width  = 640;
+						p.height = 360;
+						s_secondWindow = createSecondaryWindow(p);
+						HE_LOG_INFO(Core, "%s", s_secondWindow.id
+							? "Zweitfenster-Zeuge: Fenster erzeugt"
+							: "Zweitfenster-Zeuge: createSecondaryWindow lieferte nichts");
+						if (!s_secondWindow.id) s_secondWindowDone = true;
+					}
+					else if (++s_secondWindowFrames >= wantFrames)
+					{
+						destroyWindow(s_secondWindow);
+						s_secondWindowDone = true;
+						HE_LOG_INFO(Core, "Zweitfenster-Zeuge: %d Frame(s) praesentiert, Fenster geschlossen",
+						            s_secondWindowFrames);
+						// Sauber beenden statt den Prozess abschiessen zu lassen: stdout ist
+						// gepuffert und geht bei einem Kill verloren (reproduzierbar bei ~8 kB),
+						// und genau die Zeilen, die dieser Zeuge erzeugt, stehen am Ende.
+						// HE_DUMP_SECONDWINDOW_KEEP=1 laesst den Editor offen, wenn jemand die
+						// Farbe des Zweitfensters von Hand sehen will.
+						if (const char* keep = std::getenv("HE_DUMP_SECONDWINDOW_KEEP"); !(keep && *keep && *keep != '0'))
+							Quit();
+					}
+				}
+				else s_secondWindowDone = true;
+			}
 
 			// Snapshot pad state right after event polling so hot-plug from
 			// this batch is reflected and every consumer in the frame sees the
@@ -400,7 +471,15 @@ namespace HE
             HE_LOG_WARN(Core, "%s", "createSecondaryWindow called before Run() — ignoring");
             return {};
         }
-        auto win = std::make_unique<Window>(props, /*isPrimary=*/false);
+        // Das Backend MUSS gesetzt werden, sonst greift der Default OpenGL
+        // (WindowProps::api, Window.h:23) und jedes Zweitfenster bekommt
+        // SDL_WINDOW_OPENGL samt eigenem GL-Kontext — auch unter D3D oder
+        // Vulkan. Auf Vulkan fehlt dann SDL_WINDOW_VULKAN, die Surface-Erzeugung
+        // schlägt fehl, und der Wurf aus createWindowData verlässt einen Pfad,
+        // der kein try/catch hat. Run() macht es fürs Primärfenster genauso.
+        WindowProps p = props;
+        p.api = m_windowApi;
+        auto win = std::make_unique<Window>(p, /*isPrimary=*/false);
         uint32_t id = win->GetWindowId();
         if (m_renderer) m_renderer->AttachWindow(win.get());
         m_secondaryWindows[id] = std::move(win);

@@ -458,6 +458,12 @@ private:
 		std::vector<VkFramebuffer> framebuffers;
 		VkCommandPool            cmdPool     = VK_NULL_HANDLE;
 		std::vector<VkCommandBuffer> cmdBufs;
+		// Wie beim Primärfenster (m_imagesInFlight): cmdBufs und renderDone sind pro
+		// SWAPCHAIN-BILD indiziert, frameFence dagegen pro Frame-Slot. Die Frame-Fence
+		// sagt deshalb nichts darüber, ob das Kommandopuffer dieses BILDES fertig ist.
+		// Ohne diese Tabelle meldet die Validierung „is in use" beim Reset, beim Begin
+		// und beim Submit — gemessen, sobald der Zweitfenster-Pfad das erste Mal lief.
+		std::vector<VkFence>     imagesInFlight;
 		VkSemaphore imageReady[2]{};
 		VkSemaphore renderDone[2]{};
 		VkFence     frameFence[2]{};

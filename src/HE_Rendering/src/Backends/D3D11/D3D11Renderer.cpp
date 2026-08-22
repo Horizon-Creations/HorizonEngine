@@ -1088,6 +1088,24 @@ struct D3D11RendererImpl
     bool vsync = true;
     int  width = 0, height = 0;
 
+    // ── Multi-window (P1d) ──────────────────────────────────────────────────
+    // One DXGI swapchain + RTV per secondary window, keyed by SDL_Window* like the
+    // GL/Vulkan/Metal backends. No depth buffer: RenderWindow() only clears and
+    // presents, and Vulkan's secondary render pass has a single attachment too
+    // (VulkanRenderer.cpp:1238-1247).
+    //
+    // Two declaration orders matter here, because members die in reverse order:
+    //  * this map is declared AFTER `device`, so every secondary swapchain is
+    //    released before the device is;
+    //  * `swapchain` is declared before `rtv`, so the RTV — which holds a
+    //    reference to back buffer 0 — is released before the swapchain it views.
+    struct SecondaryWindow
+    {
+        ComPtr<IDXGISwapChain>         swapchain;
+        ComPtr<ID3D11RenderTargetView> rtv;
+    };
+    std::unordered_map<SDL_Window*, SecondaryWindow> secondaryWindows;
+
     // ── Scene pipeline ──────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>   vs;
     ComPtr<ID3D11VertexShader>       vsInstanced; // A3: instanced geometry VS (reads t3 structured buffer)
@@ -4459,6 +4477,13 @@ void D3D11Renderer::Shutdown()
     m_impl->giShadowCB.Reset(); m_impl->giCountCB.Reset(); m_impl->giTemporalCB.Reset();
     m_impl->giBlurCB.Reset(); m_impl->giProbeCB.Reset();
     m_impl->giLinearClamp.Reset();
+    // Secondary-window swapchains + RTVs (P1d). Belt and braces: Application::Run
+    // already DetachWindow()s every secondary window before calling Shutdown()
+    // (Application.cpp:379-383), so this is normally empty. It is cleared HERE
+    // rather than left to ~D3D11RendererImpl so the swapchains go before
+    // device.Reset() below, and so a re-Initialize() starts from an empty map
+    // instead of holding swapchains built against the old device.
+    m_impl->secondaryWindows.clear();
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
     m_impl->depthTex.Reset();
@@ -5296,6 +5321,183 @@ void D3D11Renderer::SetVSync(bool enabled)
 
 void* D3D11Renderer::GetDevice()  const { return m_impl->device.Get(); }
 void* D3D11Renderer::GetContext() const { return m_impl->context.Get(); }
+
+// ─── Multi-window support (P1d) ──────────────────────────────────────────────
+// A secondary window gets its own DXGI swapchain + RTV; RenderWindow() clears it
+// and presents it. There is deliberately NO scene rendering: GL, Vulkan and Metal
+// all stop at clear+present as well (OpenGLRenderer.cpp:11898 still carries a
+// literal "TODO: secondary-window draw calls"), so this is parity with the other
+// backends rather than a half-finished port.
+//
+// Nothing throws out of these three. Application::createSecondaryWindow (and
+// destroyWindow) run OUTSIDE the render loop's try/catch, so an exception here
+// would take the process down — every failure logs and leaves the window
+// unattached instead, after which RenderWindow()/DetachWindow() no-op on the map
+// lookup. That is why GL's `throw` is not copied here.
+
+void D3D11Renderer::AttachWindow(HE::Window* window)
+{
+    if (!window || !m_impl->device) return;
+    SDL_Window* sdlWin = window->GetNativeWindow();
+    if (!sdlWin) return;
+    if (m_impl->secondaryWindows.count(sdlWin)) return; // already attached
+
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(sdlWin), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (!hwnd)
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: could not get HWND for secondary window");
+        return;
+    }
+
+    // The primary swapchain came out of D3D11CreateDeviceAndSwapChain (Initialize()),
+    // so this backend never kept an IDXGIFactory around. Walk to one:
+    // device → IDXGIDevice → adapter → factory.
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(m_impl->device.As(&dxgiDevice)) || !dxgiDevice)
+    {
+        HE_LOG_ERROR(RHI, "%s",
+                     "D3D11Renderer: QueryInterface(IDXGIDevice) failed — secondary window not attached");
+        return;
+    }
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(adapter.GetAddressOf())) || !adapter)
+    {
+        HE_LOG_ERROR(RHI, "%s",
+                     "D3D11Renderer: IDXGIDevice::GetAdapter failed — secondary window not attached");
+        return;
+    }
+    ComPtr<IDXGIFactory> factory;
+    if (FAILED(adapter->GetParent(__uuidof(IDXGIFactory),
+                                  reinterpret_cast<void**>(factory.GetAddressOf()))) || !factory)
+    {
+        HE_LOG_ERROR(RHI, "%s",
+                     "D3D11Renderer: could not obtain IDXGIFactory — secondary window not attached");
+        return;
+    }
+
+    // Swapchain description: the same fields Initialize() passes for the primary,
+    // only with this window's HWND and size.
+    //
+    // The size is the LOGICAL (points) size from GetWidth/GetHeight, NOT
+    // SDL_GetWindowSizeInPixels the way Vulkan's secondary path does it:
+    // Window.cpp:58-62 spells out that the D3D backends size from the logical
+    // window while GL/Vulkan/Metal size from the pixel drawable, and both D3D
+    // primaries follow that. Using the pixel size here would double the swapchain
+    // on a HiDPI display.
+    DXGI_SWAP_CHAIN_DESC scd{};
+    scd.BufferCount                        = 1;
+    scd.BufferDesc.Width                   = static_cast<UINT>(window->GetWidth());
+    scd.BufferDesc.Height                  = static_cast<UINT>(window->GetHeight());
+    scd.BufferDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scd.BufferDesc.RefreshRate.Numerator   = 60;
+    scd.BufferDesc.RefreshRate.Denominator = 1;
+    scd.BufferUsage                        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scd.OutputWindow                       = hwnd;
+    scd.SampleDesc.Count                   = 1;
+    scd.Windowed                           = TRUE;
+    scd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
+
+    // Built into a local and only moved into the map once BOTH objects exist, so a
+    // failure half-way through cannot leave a zombie entry that RenderWindow()
+    // would then pick up (Vulkan's `m_extraWindows[sdlWin]` inserts first).
+    D3D11RendererImpl::SecondaryWindow sw;
+    if (FAILED(factory->CreateSwapChain(m_impl->device.Get(), &scd, sw.swapchain.GetAddressOf()))
+        || !sw.swapchain)
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: CreateSwapChain failed for secondary window");
+        return;
+    }
+
+    // RTV over back buffer 0 — mirrors createRTV(), which cannot simply be called:
+    // it reads the PRIMARY `swapchain` member and writes the PRIMARY `rtv` member.
+    ComPtr<ID3D11Texture2D> bb;
+    if (FAILED(sw.swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                       reinterpret_cast<void**>(bb.GetAddressOf()))) || !bb)
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: GetBuffer(0) failed for secondary window");
+        return;
+    }
+    if (FAILED(m_impl->device->CreateRenderTargetView(bb.Get(), nullptr, sw.rtv.GetAddressOf()))
+        || !sw.rtv)
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: CreateRenderTargetView failed for secondary window");
+        return;
+    }
+
+    // No depth buffer is created on purpose: a clear+present pass needs none.
+
+    // Secondary-window RESIZE is not wired up at the Application level yet:
+    // Window::PollEvents only tracks the PRIMARY window's size — every window event
+    // it handles is gated on `event.window.windowID == SDL_GetWindowID(m_window)`
+    // (Window.cpp:150-166) — so a secondary Window's GetWidth/GetHeight stay frozen
+    // at their creation values and there is nothing here to react to.
+    // Resizing the OS window therefore stretches the presented back buffer. Wiring
+    // a real ResizeBuffers path needs an Application-level size event first.
+
+    m_impl->secondaryWindows.emplace(sdlWin, std::move(sw));
+    HE_LOG_INFO(RHI, "%s", "D3D11Renderer: secondary window attached");
+}
+
+void D3D11Renderer::DetachWindow(HE::Window* window)
+{
+    if (!window) return;
+    auto it = m_impl->secondaryWindows.find(window->GetNativeWindow());
+    if (it == m_impl->secondaryWindows.end()) return; // not attached
+
+    // RTV first, then the swapchain it views into. Deliberately no ClearState() or
+    // Flush() on the way out: that immediate context is the PRIMARY's, and
+    // ClearState() would wipe the primary's bound pipeline state along with it.
+    it->second.rtv.Reset();
+    it->second.swapchain.Reset();
+    m_impl->secondaryWindows.erase(it);
+    HE_LOG_INFO(RHI, "%s", "D3D11Renderer: secondary window detached");
+}
+
+void D3D11Renderer::RenderWindow(HE::Window* window)
+{
+    if (!window || !m_impl->context) return;
+    auto it = m_impl->secondaryWindows.find(window->GetNativeWindow());
+    if (it == m_impl->secondaryWindows.end()) return; // not attached
+    auto& sw = it->second;
+    if (!sw.swapchain || !sw.rtv) return;
+
+    // NOT black, on purpose. A black clear is pixel-identical to a window that was
+    // never drawn into at all — on every backend — so a black secondary window
+    // could not distinguish "this override ran" from "this override never ran",
+    // and the feature would be unverifiable. This slate blue IS the witness that
+    // AttachWindow/RenderWindow actually executed.
+    const float clearColor[4] = { 0.16f, 0.22f, 0.34f, 1.0f };
+    m_impl->context->OMSetRenderTargets(1, sw.rtv.GetAddressOf(), nullptr);
+    m_impl->context->ClearRenderTargetView(sw.rtv.Get(), clearColor);
+    // No RSSetViewports: ClearRenderTargetView ignores viewport and scissor and
+    // fills the whole view, which is exactly what the witness colour needs.
+
+    // The overlay callback is deliberately NOT injected here. That callback renders
+    // ImGui::GetDrawData() — the MAIN viewport's draw data, sized by the PRIMARY
+    // window's DisplaySize — so calling it here would paint a clipped duplicate of
+    // the main editor UI into this window. The editor's detached panels are served
+    // by ImGui's own multi-viewport backends instead (ImGuiConfigFlags_ViewportsEnable,
+    // EditorApplication.cpp:616), which create and present their own per-viewport
+    // swapchains and never route through this API.
+    // Vulkan's secondary path reaches the same conclusion and drops the callback
+    // for the same reason; the long note at VulkanRenderer.cpp:1372-1393 has the
+    // measured detail (its secondary render pass has no depth attachment, so the
+    // injected ImGui pipeline tripped renderpass-compatibility validation).
+
+    // The renderer has to present: Window::SwapBuffers() is a no-op unless the API
+    // is OpenGL (Window.cpp:178-183), so Application's post-RenderWindow
+    // SwapBuffers() does nothing for D3D.
+    // Note: with VSync on this blocks a second time per frame, on top of the
+    // primary's Present in Render() — an open secondary window roughly halves the
+    // frame rate. Reading m_impl->vsync is still the correct behaviour.
+    sw.swapchain->Present(m_impl->vsync ? 1 : 0, 0);
+
+    // Unbind before returning. The immediate context is shared with the primary
+    // path, which ends Render() with the primary swapchain RTV bound; leaving a
+    // secondary window's RTV bound is a real cross-window hazard.
+    m_impl->context->OMSetRenderTargets(0, nullptr, nullptr);
+}
 
 void* D3D11Renderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)
 {

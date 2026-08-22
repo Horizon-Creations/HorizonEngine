@@ -1206,6 +1206,41 @@ struct D3D12RendererImpl
     int                               width = 0, height = 0;
     ComPtr<ID3D12InfoQueue>           infoQueue;  // drained to Logger each frame when gpuDebug
 
+    // ── P1d: secondary-window swapchains ────────────────────────────────────
+    // One real DXGI swapchain, its OWN RTV heap, and its OWN allocator/command-list
+    // pair per attached window.
+    //
+    // The frame's cmdList / cmdAllocators[] are deliberately NOT borrowed: Render()
+    // owns those together with the fenceValues[] bookkeeping that decides when each
+    // slot may be reset (:8509-8512), and a second Reset()/Close() cycle riding on
+    // them inside the same frame would reset an allocator whose commands are still
+    // in flight. The preview pair (previewAllocator/previewCmdList) was the other
+    // candidate and is rejected too: it is scratch shared by every Content-Browser
+    // tile and every interactive preview the editor draws in the same frame, so
+    // hanging a per-frame present path off it couples two unrelated lifetimes for no
+    // gain. An allocator plus a list is a few KB — one per window is the cheap,
+    // uncoupled option.
+    struct SecondaryWindow
+    {
+        ComPtr<IDXGISwapChain3>           swapchain;
+        ComPtr<ID3D12DescriptorHeap>      rtvHeap;
+        ComPtr<ID3D12Resource>            buffers[k_frameCount];
+        ComPtr<ID3D12CommandAllocator>    allocator;
+        ComPtr<ID3D12GraphicsCommandList> cmdList;
+        UINT rtvDescSize = 0;
+        UINT width = 0, height = 0;
+
+        // NOT D3D12RendererImpl::rtvHandle() — that helper reads the PRIMARY's
+        // rtvHeap and would hand back the main window's descriptors.
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv(UINT index) const
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(index) * rtvDescSize;
+            return h;
+        }
+    };
+    std::unordered_map<SDL_Window*, SecondaryWindow> secondaryWindows;
+
     // ── GPU frame timing (timestamp query heap) ─────────────────────────────
     // Two timestamps per frame-in-flight slot (list begin/end), resolved into a
     // persistently-mapped READBACK buffer at end-of-list. A slot is only read the
@@ -7384,6 +7419,11 @@ void D3D12Renderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: shutdown — waiting for GPU");
     m_impl->waitForAllFrames();
+    // P1d secondary windows FIRST, before device/queue go: their swapchains hold a
+    // reference on cmdQueue, and a swapchain outliving the queue it was created on
+    // is a runtime fault. Application::Run normally detaches them all before calling
+    // Shutdown (Application.cpp:433); this covers the path where it did not.
+    m_impl->secondaryWindows.clear();
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
     m_impl->meshCache.clear();
@@ -9273,6 +9313,254 @@ void* D3D12Renderer::RenderParticlePreview(ContentManager& cm, const HE::UUID& /
         p.writePreviewDump(p.partPv, dp);
 
     return registerPreviewTexture(m_imguiTexRegistrar, p.partPv, "particle");
+}
+
+// ─── Multi-window support (P1d) ──────────────────────────────────────────────
+//
+// SCOPE, STATED PLAINLY: this creates a real per-window DXGI swapchain and CLEARS
+// + PRESENTS it. It draws no scene content, because no backend does —
+// OpenGLRenderer::RenderWindow carries a literal "// TODO: secondary-window draw
+// calls" (:11906), VulkanRenderer::renderWindowData (:1333) only begins a clear
+// render pass, and MetalRenderer does the same. Matching that is the target here.
+//
+// RESIZE — NOT IMPLEMENTED, AND ON PURPOSE. Window::PollEvents filters
+// SDL_EVENT_WINDOW_RESIZED / PIXEL_SIZE_CHANGED on the PRIMARY window's windowID
+// (Window.cpp:163-172), so a secondary Window's GetWidth()/GetHeight()
+// stay frozen at their creation values forever. A ResizeBuffers path keyed off
+// those getters would therefore never fire even once; dragging the second window's
+// edge stretches the presented image instead. Making it real means routing the
+// secondary windows' SDL events to them first, which is a change in HE_Core and
+// outside this backend.
+
+void D3D12Renderer::AttachWindow(HE::Window* window)
+{
+    auto& p = *m_impl;
+    if (!window || !p.device || !p.cmdQueue) return;
+
+    SDL_Window* sdlWin = window->GetNativeWindow();
+    if (!sdlWin || p.secondaryWindows.count(sdlWin)) return; // already attached
+
+    // NOTHING below may throw. Application::createSecondaryWindow calls AttachWindow
+    // (Application.cpp:466), and its caller — the HE_DUMP_SECONDWINDOW witness block
+    // (~:279) — sits ABOVE the try/catch that wraps Render() (~:308), so an exception
+    // here escapes Run() entirely and kills the editor. Initialize() throws because a
+    // dead PRIMARY window is fatal; a dead SECOND window is not. Every failure path
+    // therefore logs and returns leaving NO map entry, after which RenderWindow and
+    // DetachWindow both no-op on the missing key and the app just has no second
+    // window. This is the same hazard the German note in createSecondaryWindow
+    // describes for Vulkan's createWindowData.
+    SDL_PropertiesID props = SDL_GetWindowProperties(sdlWin);
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (!hwnd)
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary window has no HWND — not attached");
+        return;
+    }
+
+    // LOGICAL points, NOT SDL_GetWindowSizeInPixels: Window.cpp:59-62 records that
+    // GL/Vulkan/Metal size their drawable from the pixel size while D3D uses the
+    // logical size, and the D3D12 primary swapchain does exactly this (:7365-7366).
+    // On a HiDPI display the pixel size is 2x these, and using it would create a
+    // swapchain twice the window.
+    const UINT w = (std::max)(1u, window->GetWidth());
+    const UINT h = (std::max)(1u, window->GetHeight());
+
+    // The primary's factory (:7339) is a LOCAL inside Initialize and was never kept,
+    // so there is nothing to reuse — make one. A DXGI factory is not bound to a
+    // device or to a swapchain, so a second one is harmless.
+    ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: CreateDXGIFactory2 failed for secondary window");
+        return;
+    }
+
+    D3D12RendererImpl::SecondaryWindow sw;
+    sw.width = w;
+    sw.height = h;
+
+    // Format / buffer count / swap effect are copied from the primary (:7363-7370)
+    // so both chains behave identically. ALLOW_TEARING reuses the capability the
+    // primary already queried at startup rather than re-querying: the PRESENT flag
+    // is only legal on a chain CREATED with the matching flag, so the two must agree.
+    DXGI_SWAP_CHAIN_DESC1 scd{};
+    scd.BufferCount      = k_frameCount;
+    scd.Flags            = p.allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    scd.Width            = w;
+    scd.Height           = h;
+    scd.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    scd.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scd.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scd.SampleDesc.Count = 1;
+
+    // CreateSwapChainForHwnd yields an IDXGISwapChain1; the cast to IDXGISwapChain3
+    // is what makes GetCurrentBackBufferIndex() available — same two-step as :7373-7377.
+    ComPtr<IDXGISwapChain1> sc1;
+    if (FAILED(factory->CreateSwapChainForHwnd(p.cmdQueue.Get(), hwnd, &scd, nullptr, nullptr, &sc1)) ||
+        FAILED(sc1.As(&sw.swapchain)))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: CreateSwapChainForHwnd failed for secondary window — not attached");
+        return;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.NumDescriptors = k_frameCount;
+    hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    if (FAILED(p.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&sw.rtvHeap))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary RTV heap creation failed — not attached");
+        return;
+    }
+    sw.rtvDescSize = p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    for (UINT i = 0; i < k_frameCount; ++i)
+    {
+        if (FAILED(sw.swapchain->GetBuffer(i, IID_PPV_ARGS(&sw.buffers[i]))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary GetBuffer failed — not attached");
+            return;
+        }
+        p.device->CreateRenderTargetView(sw.buffers[i].Get(), nullptr, sw.rtv(i));
+    }
+
+    if (FAILED(p.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+               IID_PPV_ARGS(&sw.allocator))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary command allocator creation failed — not attached");
+        return;
+    }
+    if (FAILED(p.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+               sw.allocator.Get(), nullptr, IID_PPV_ARGS(&sw.cmdList))))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary command list creation failed — not attached");
+        return;
+    }
+    sw.cmdList->Close(); // created OPEN; kept closed between frames, like previewCmdList (:5922)
+
+    // No waitForAllFrames() here: swapchain/heap/allocator creation does not need an
+    // idle queue, and stalling the frame that opened the window would be a free cost.
+    p.secondaryWindows.emplace(sdlWin, std::move(sw));
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: secondary window attached");
+}
+
+void D3D12Renderer::DetachWindow(HE::Window* window)
+{
+    auto& p = *m_impl;
+    if (!window) return;
+    auto it = p.secondaryWindows.find(window->GetNativeWindow());
+    if (it == p.secondaryWindows.end()) return;
+
+    // Drain BEFORE releasing anything. The last frame's clear list and its Present
+    // can both still be in flight over these back buffers, and releasing a resource
+    // an executing command list still references is a use-after-free the D3D12
+    // runtime reports as a device removal — i.e. it would look like a GPU hang, not
+    // like a window bug.
+    p.waitForAllFrames();
+    p.secondaryWindows.erase(it); // ComPtr dtors drop list, allocator, RTV heap, buffers, swapchain
+    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: secondary window detached");
+}
+
+void D3D12Renderer::RenderWindow(HE::Window* window)
+{
+    auto& p = *m_impl;
+    if (!window) return;
+    auto it = p.secondaryWindows.find(window->GetNativeWindow());
+    if (it == p.secondaryWindows.end()) return; // never attached, or attach failed
+    auto& sw = it->second;
+    if (!sw.swapchain || !sw.cmdList || !sw.allocator) return;
+
+    // ── SYNCHRONISATION, and what it costs ───────────────────────────────────
+    // Application::Run calls RenderWindow on the MAIN thread immediately after
+    // Render() returns (Application.cpp:323-327), so we are outside the frame's own
+    // recording — but the frame's work is still IN FLIGHT on the shared cmdQueue.
+    //
+    // waitForAllFrames() (:2687) is this file's established out-of-frame idiom, used
+    // at six sites (e.g. beginPreviewList :5965, the thumbnail submit :6031): signal
+    // one new monotonic value on the shared fence, block the CPU until the GPU
+    // reaches it, then stamp every fenceValues[] slot with it.
+    //
+    // LEADING drain: makes allocator->Reset() legal (an allocator may only be reset
+    // once every command it recorded has completed) and guarantees the back buffer
+    // we are about to write is no longer being read by a pending present.
+    //
+    // Cost: a FULL GPU drain, twice per frame per secondary window, on the main
+    // thread. The pipeline is emptied and CPU and GPU are serialised. Stamping every
+    // fenceValues[] slot with a value the GPU has already passed also makes the next
+    // frame's waitForFrame() a no-op — that is additive-only (the frame's own signal
+    // at :8509-8512 is a plain monotonic signal-and-advance, so nothing is skipped),
+    // but it does mean the frame loop loses its overlap. Acceptable for a
+    // clear-and-present witness window; it would be the wrong design the moment this
+    // path draws anything, which is when it should get its own queue/fence instead.
+    p.waitForAllFrames();
+
+    const UINT bb = sw.swapchain->GetCurrentBackBufferIndex(); // re-read every frame, never cached
+    if (FAILED(sw.allocator->Reset()) || FAILED(sw.cmdList->Reset(sw.allocator.Get(), nullptr)))
+    {
+        HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: secondary command list reset failed — skipping frame");
+        return;
+    }
+
+    ID3D12GraphicsCommandList* cl   = sw.cmdList.Get();
+    ID3D12Resource*            back = sw.buffers[bb].Get();
+
+    // The swapchain hands its buffers back in COMMON, which is numerically PRESENT,
+    // so this is also correct on the very first frame.
+    p.barrier12(cl, back, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = sw.rtv(bb);
+    cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+
+    // DELIBERATELY NOT BLACK. The acceptance witness for this path is a lifecycle
+    // log rather than a picture (Application.cpp:258-267 spells that out), and a
+    // BLACK clear cannot be told apart from "the window was created and RenderWindow
+    // never ran at all" — an undrawn window is black too. This slate blue makes the
+    // two cases distinguishable by eye. D3D11's secondary path clears to the SAME
+    // RGBA, so the two D3D backends can be compared frame-for-frame.
+    const float clearColor[4] = { 0.16f, 0.22f, 0.34f, 1.0f };
+    cl->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+
+    // NO OVERLAY CALLBACK HERE — deliberate, not an omission. m_overlayCallback
+    // renders ImGui::GetDrawData(), which is the MAIN viewport's draw data, and the
+    // editor's D3D12 branch takes drawData->DisplaySize — the PRIMARY window's size —
+    // verbatim for its viewport and scissor (EditorApplication.cpp:892-902). Injected
+    // here it would paint a clipped duplicate of the main editor UI into the second
+    // window. Detached editor panels are served properly by ImGui's OWN multi-viewport
+    // backends instead, enabled via ImGuiConfigFlags_ViewportsEnable
+    // (EditorApplication.cpp:616), which create and drive their own OS windows.
+    // Vulkan's secondary path used to inject it and no longer does, for this reason
+    // plus a render-pass mismatch it hit once the call actually ran — see the note in
+    // VulkanRenderer::renderWindowData. GL and Metal never injected it.
+    //
+    // NO TIMESTAMP QUERIES HERE either. tsQueryHeap/tsReadback belong to the frame's
+    // whole-frame GPU timer: its slots are indexed by frameIndex and reaped
+    // k_frameCount frames later (:8448-8452). An EndQuery/ResolveQueryData from this
+    // path would overwrite a slot the frame owns, so a secondary-window change would
+    // surface as a bogus number in the profiler rather than as a window bug.
+
+    p.barrier12(cl, back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    if (FAILED(cl->Close())) return;
+
+    ID3D12CommandList* lists[] = { cl };
+    p.cmdQueue->ExecuteCommandLists(1, lists);
+
+    // The RENDERER must present. Application calls Window::SwapBuffers right after
+    // this returns, but that is a no-op for anything other than OpenGL
+    // (Window.cpp:179-183), so nothing reaches the screen unless we do it here.
+    // Sync interval mirrors the primary (:8459-8464): PRESENT_ALLOW_TEARING is only
+    // valid unsynced AND on a chain created with the matching flag, hence the gate
+    // on p.allowTearing, which also decided scd.Flags in AttachWindow.
+    if (p.vsync) sw.swapchain->Present(1, 0);
+    else         sw.swapchain->Present(0, p.allowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+
+    // TRAILING drain, placed after BOTH Execute and Present so the signal it issues
+    // is ordered behind the present's own queue work. Note honestly what this one is
+    // and is not: because the allocator is private to this window, the NEXT call's
+    // leading drain already covers allocator reuse, so this drain is not required for
+    // correctness of the clear. It is here to keep the SHARED fence bookkeeping
+    // conservative — after it, fenceValues[] describes a genuinely idle GPU, which is
+    // the invariant every other out-of-frame path in this file leaves behind.
+    p.waitForAllFrames();
 }
 
 IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const

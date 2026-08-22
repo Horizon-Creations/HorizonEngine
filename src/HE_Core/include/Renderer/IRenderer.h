@@ -142,8 +142,13 @@ public:
     // Overlay callback: called by the backend at the correct point inside the
     // active render pass / command list so an overlay (e.g. ImGui) can inject
     // its draw calls without the renderer knowing about the overlay library.
-    // context is a backend-specific pointer (cmdList for D3D12, VkCommandBuffer*
-    // for Vulkan, nullptr for OpenGL/D3D11 which read state from globals).
+    // context is a backend-specific pointer (ID3D12GraphicsCommandList* for D3D12,
+    // the VkCommandBuffer HANDLE ITSELF for Vulkan — not its address — and nullptr
+    // for OpenGL/D3D11, which read state from globals). Der Vulkan-Halbsatz stand
+    // hier bis 2026-08 falsch als „VkCommandBuffer*"; er beschrieb den einen
+    // Aufrufer, der es falsch machte (der Zweitfenster-Pfad), statt den Vertrag,
+    // den der Primärpfad und der Editor tatsächlich einhalten. Da VkCommandBuffer
+    // selbst ein Zeigertyp ist, kompilieren beide Formen anstandslos.
     using OverlayCallback = std::function<void(void* context)>;
 
     virtual ~IRenderer() = default;

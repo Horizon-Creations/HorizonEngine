@@ -11904,7 +11904,10 @@ void OpenGLRenderer::RenderWindow(HE::Window* window)
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	// TODO: secondary-window draw calls
-	// SwapBuffers is called by Application::Run after this method returns
+	// SwapBuffers is called by Application::Run directly after this returns, on
+	// THIS window — der Kontext muss also stehen bleiben. Zurückgesetzt wird er
+	// zu Beginn des nächsten Render() (siehe dort), nicht hier: hier wäre er
+	// genau eine Zeile zu früh weg.
 }
 
 void* OpenGLRenderer::CreateImGuiTexture(const void* rgba8Pixels, int width, int height)

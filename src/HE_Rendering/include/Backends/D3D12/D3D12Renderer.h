@@ -106,6 +106,19 @@ public:
     void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
     void  DestroyImGuiTexture(void* handle) override;
 
+    // ── Multi-window (P1d) ────────────────────────────────────────────────────
+    // A real per-window DXGI swapchain + its own RTV heap and its own
+    // allocator/command-list pair; RenderWindow CLEARS and PRESENTS it. It does
+    // NOT draw scene content — no backend does (GL carries a literal
+    // "TODO: secondary-window draw calls", Vulkan/Metal only clear), so this is
+    // parity, not a shortfall. AttachWindow never throws: it is reached from
+    // Application::createSecondaryWindow, which is called from OUTSIDE Run()'s
+    // try/catch, so a failure logs and leaves the window unattached instead of
+    // tearing down the app. See the definitions for the full rationale.
+    void AttachWindow(HE::Window* window) override;
+    void DetachWindow(HE::Window* window) override;
+    void RenderWindow(HE::Window* window) override;
+
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);

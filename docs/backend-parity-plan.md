@@ -242,7 +242,7 @@ geschrieben; er läuft nicht.
 | Widget-Thumbnails | JA | JA | JA | JA |
 | `WarmupMaterials` | JA | JA | JA | JA |
 | `InvalidateMaterial/Mesh/Texture` | JA | ~ | ~ | ~ |
-| Multi-Window | JA | -- | -- | JA |
+| Multi-Window (alle vier: Swapchain + Clear + Present, **kein** Szeneninhalt) | JA | JA | JA | JA |
 | Per-Pass-GPU-Timing | JA | -- | -- | -- |
 | Detailed-Capture (1 Command-Buffer/Pass) | JA | ~ | -- | -- |
 
@@ -609,6 +609,77 @@ leer, sobald jemand das Backend umstellt.
 - P1d — Multi-Window auf D3D11/D3D12 (`AttachWindow`/`DetachWindow`/`RenderWindow`).
   Vulkan hat es bereits. Achtung: Metals Variante legt nur die Swapchain an und rendert
   **keinen Inhalt** — Zielzustand ist GL, nicht Metal.
+
+> **Stand 2026-08-22: P1d ERLEDIGT — aber die Vorgabe oben war in beide Richtungen falsch,
+> und das ist der interessantere Teil.**
+>
+> „Zielzustand ist GL, nicht Metal" trägt nicht: GLs `RenderWindow`
+> (`OpenGLRenderer.cpp:11898`) löscht schwarz und trägt wörtlich
+> `// TODO: secondary-window draw calls`. Metal tut dasselbe. **Kein** Backend zeichnet
+> Szeneninhalt in ein Zweitfenster. Der ehrliche Zielzustand ist deshalb: eigene Swapchain
+> pro Fenster, löschen, präsentieren — mehr gibt es nirgends abzuschreiben.
+>
+> Umgesetzt auf D3D11 und D3D12, bewusst mit **auffälliger Farbe statt Schwarz**
+> (RGBA 0.16/0.22/0.34): ein schwarzes Clear ist von „der Override lief nie" nicht zu
+> unterscheiden, das Feature wäre also unprüfbar geblieben. Ebenso bewusst **ohne
+> Overlay-Injektion** — siehe unten, das ist keine Auslassung sondern ein Befund.
+>
+> **Drei Fehler, die erst sichtbar wurden, weil dieser Pfad zum ersten Mal überhaupt lief:**
+> 1. `Application::createSecondaryWindow` setzte `props.api` nicht, der Default ist OpenGL
+>    (`Window.h:23`). Jedes Zweitfenster bekam also `SDL_WINDOW_OPENGL` samt GL-Kontext —
+>    auf jedem Backend. Auf Vulkan fehlte dadurch `SDL_WINDOW_VULKAN`, die Surface-Erzeugung
+>    schlug fehl, und der Wurf verließ einen Pfad ohne `try/catch`. **Die API war auf keinem
+>    Nicht-GL-Backend jemals aufrufbar.**
+> 2. Vulkans Zweitfenster reichte `&cmd` an den Overlay-Callback, der Primärpfad `cmd`
+>    (`:596`), und der Editor castet auf `VkCommandBuffer` (`EditorApplication.cpp:912`).
+>    Da `VkCommandBuffer` selbst ein Zeigertyp ist, kompilierten beide Formen. Der
+>    Vertragskommentar in `IRenderer.h` beschrieb die **falsche** Variante.
+> 3. Nach Behebung von (1) und (2) lief die Injektion erstmals — und war *inhaltlich*
+>    falsch: 15 Validierungsfehler, weil der Zweitfenster-Render-Pass nur ein Attachment
+>    hat, ImGuis Pipeline aber gegen den Primär-Pass **mit Tiefe** gebaut wurde
+>    („pDepthStencilAttachment ... VK_ATTACHMENT_UNUSED while the second is 1"). Deshalb
+>    fliegt die Injektion überall raus: der Callback zeichnet ohnehin die Draw-Daten des
+>    HAUPT-Viewports, ins Zweitfenster gespiegelt gäbe das ein abgeschnittenes Duplikat.
+>    Abgedockte Editor-Panels bedient ImGui über seine eigenen Viewport-Backends
+>    (`ImGuiConfigFlags_ViewportsEnable`), nicht über diese API.
+> 4. Vulkans `renderWindowData` wartete auf `frameFence[frameIndex]`, griff aber auf
+>    `cmdBufs[imageIndex]` zu — verschiedene Indexräume. Der Primärpfad löst genau das mit
+>    `m_imagesInFlight` und einem Kommentar dazu (`:341-346`); dem Zweitfenster-Pfad fehlte
+>    die Tabelle. Ergebnis waren „is in use"-Meldungen bei Reset, Begin und Submit.
+>
+> **Abnahme über `HE_DUMP_SECONDWINDOW=<Frames>`** (neu, `Application.cpp`): legt ein
+> Zweitfenster an, präsentiert N Frames, räumt ab und beendet sauber. `=0` ist der
+> **Kontrolllauf** — gleiche Schleife, gleiche Frame-Zahl, kein Fenster. Ohne diesen
+> Vergleich ließe sich nicht sagen, ob eine Validierungsmeldung vom Zweitfenster kommt oder
+> ohnehin im Hauptpfad steht; genau daran wäre die Abnahme sonst gescheitert.
+>
+> | Backend | attach/detach | exit | Validierung mit Fenster | Kontrolllauf |
+> |---|:--:|:--:|:--:|:--:|
+> | OpenGL | 1/1 | 0 | 0 | 0 |
+> | D3D11 | 1/1 | 0 | 0 | 0 |
+> | D3D12 | 1/1 | 0 | 0 | 0 |
+> | Vulkan | 1/1 | 0 | 26 | **28** |
+>
+> Vorher meldeten D3D11 und D3D12 **null** attach/detach — die Overrides existierten nicht.
+> Vulkans 26 sind vollständig im Kontrolllauf enthalten (28 ohne Fenster, gleiche Kategorien):
+> ein **vorbestehendes** Problem des Hauptpfads, das nur nie jemand gesehen hat, weil Vulkan
+> headless nie über die Hauptschleife lief. Eigene Aufgabe, nicht P1d.
+>
+> Was der Zeuge belegt, ist bewusst **kein Bild**, sondern der Lebenszyklus: Swapchain
+> angelegt, N Frames präsentiert, sauber abgeräumt, keine zusätzlichen Validierungsfehler.
+> Ein Pixelbeleg bräuchte ein `CaptureWindow` auf vier Backends; das steht in keinem
+> Verhältnis zu einem Clear.
+>
+> **Ehrliche Einordnung, damit die Matrixzelle nicht mehr verspricht als sie hält:** die
+> Engine-Multi-Window-API hat bis heute **keinen Aufrufer** — `createSecondaryWindow` wird
+> nirgends im Baum benutzt. Abgedockte Editor-Fenster laufen über ImGui-Viewports, die auf
+> D3D11 und D3D12 ohnehin schon funktionieren. P1d schließt die Lücke in der Matrix und
+> repariert vier echte Fehler auf dem Weg; einen sichtbaren Unterschied im Editor gibt es
+> heute nicht.
+>
+> **Widerlegt:** die Vermutung, GLs `RenderWindow` lasse den falschen Kontext aktuell.
+> `Render()` stellt den Primärkontext gleich zu Beginn wieder her (`:11276-11278`) — GL war
+> hier korrekt, der Kommentar dort sagt es jetzt auch.
 - P1e — `SetShadowDebug` (Cascade-Tint) und Per-Pass-GPU-Timing. Letzteres ist auf D3D12
   Timestamp-Queries pro Pass, auf Vulkan `vkCmdWriteTimestamp` — Whole-Frame-Timing steht
   überall schon, die Slot-Verwaltung ist die eigentliche Arbeit.

@@ -17,6 +17,14 @@ public:
     void* CreateImGuiTexture(const void* rgba8Pixels, int width, int height) override;
     void  DestroyImGuiTexture(void* handle) override;
 
+    // Multi-window (P1d): one DXGI swapchain + RTV per secondary window, cleared
+    // and presented by RenderWindow(). The per-window state lives in
+    // D3D11RendererImpl, not here — this header is included by editor code and
+    // must stay free of d3d11.h / wrl.
+    void AttachWindow(HE::Window* window) override;
+    void DetachWindow(HE::Window* window) override;
+    void RenderWindow(HE::Window* window) override;
+
     // Native handle accessors
     // Cast to ID3D11Device* / ID3D11DeviceContext* at the call site.
     void* GetDevice()  const;

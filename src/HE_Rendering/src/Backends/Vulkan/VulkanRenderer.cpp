@@ -1290,6 +1290,7 @@ void VulkanRenderer::createWindowData(SDL_Window* sdlWin, uint32_t w, uint32_t h
     cpci.queueFamilyIndex = m_graphicsFamily;
     cpci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     vkCheck(vkCreateCommandPool(m_device, &cpci, nullptr, &wd.cmdPool), "secondary vkCreateCommandPool");
+    wd.imagesInFlight.assign(wd.framebuffers.size(), VK_NULL_HANDLE);
     wd.cmdBufs.resize(wd.framebuffers.size());
     VkCommandBufferAllocateInfo cbai{};
     cbai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1340,6 +1341,17 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
         vkCheck(acq, "secondary vkAcquireNextImageKHR");
 
+    // Dieses Bild kann noch von einem FRÜHEREN Frame in Benutzung sein — die
+    // Frame-Fence oben deckt das nicht ab, weil cmdBufs und renderDone pro Bild
+    // indiziert sind und die Fence pro Frame-Slot. Derselbe Griff wie im
+    // Primärpfad (:343-346).
+    if (imageIndex < wd.imagesInFlight.size())
+    {
+        if (wd.imagesInFlight[imageIndex] != VK_NULL_HANDLE)
+            vkWaitForFences(m_device, 1, &wd.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+        wd.imagesInFlight[imageIndex] = wd.frameFence[fi];
+    }
+
     vkResetFences(m_device, 1, &wd.frameFence[fi]);
 
     VkCommandBuffer cmd = wd.cmdBufs[imageIndex];
@@ -1357,8 +1369,28 @@ void VulkanRenderer::renderWindowData(WindowData& wd)
     rpbi.clearValueCount   = 1;
     rpbi.pClearValues      = &clear;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    // Overlay injection point for secondary windows (same context pointer convention)
-    if (m_overlayCallback) m_overlayCallback(static_cast<void*>(&cmd));
+    // KEIN Overlay-Callback in Zweitfenstern — bewusst, und gemessen.
+    //
+    // Hier stand `m_overlayCallback(static_cast<void*>(&cmd))`, während der
+    // Primärpfad (:596) `cmd` übergibt und der Editor daraus
+    // `static_cast<VkCommandBuffer>(nativeContext)` macht (EditorApplication.cpp:912).
+    // Weil VkCommandBuffer selbst ein Zeigertyp ist, kompilierten beide Formen; der
+    // Fehler wäre erst beim ersten Aufruf aufgefallen, und den gab es nie, weil
+    // niemand createSecondaryWindow benutzte.
+    //
+    // Nachdem der Aufruf durch den Zweitfenster-Zeugen erstmals wirklich lief, war
+    // die Zeile auch inhaltlich falsch: dieser Render-Pass hat nur EIN Attachment
+    // (:1238-1247), ImGuis Pipeline wurde aber gegen den Primär-Pass MIT Tiefe
+    // gebaut. Die Validierung meldet genau das — „pDepthStencilAttachment ... the
+    // first is VK_ATTACHMENT_UNUSED while the second is 1" — fünfzehnmal pro Lauf.
+    //
+    // Das Overlay gehört ohnehin nicht hierher: der Callback zeichnet
+    // `ImGui::GetDrawData()`, also die Draw-Daten des HAUPT-Viewports, bemaßt mit
+    // dessen DisplaySize. Ins Zweitfenster injiziert ergäbe das ein abgeschnittenes
+    // Duplikat der Haupt-Oberfläche. Abgedockte Editor-Panels bedient ImGui über
+    // seine eigenen Viewport-Backends (ImGuiConfigFlags_ViewportsEnable,
+    // EditorApplication.cpp:616), nicht über diese API. D3D11 und D3D12 lassen den
+    // Callback aus demselben Grund weg.
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 
