@@ -30,6 +30,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/AssetRefScan.h>    // "what still points at this?" for the delete dialogs
 #include <ContentManager/Assets.h>
+#include <HorizonScene/Components/MaterialComponent.h> // placing a mesh follows its MREF material
 #include <JobSystem/JobSystem.h>            // globalPool — the reference scan runs off the frame thread
 #include <UIWidget/UIWidgetTree.h>       // starter tree for freshly created UI widgets
 #include <HorizonCode/HorizonCode.h>     // starter graph for freshly created HorizonCode classes
@@ -2788,13 +2789,39 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						const HE::UUID id = ctx.contentManager->loadAsset(rel);
 						if (const StaticMeshAsset* mesh = ctx.contentManager->getStaticMesh(id))
 						{
+							// Copied out BEFORE any further loadAsset: the asset stores live
+							// in vector-backed SlotMaps, so registering another asset can
+							// reallocate them and dangle `mesh`.
+							const std::string meshName = mesh->name;
+							const std::string matRel   = mesh->materialPath;
+
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
-							Entity e = ctx.world->createEntity(mesh->name);
+							Entity e = ctx.world->createEntity(meshName);
 							ctx.world->addComponent(e, TransformComponent{});
 							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
+							// …and the material the mesh itself names (chunk MREF — what an
+							// import writes). Without a MaterialComponent the draw carries NO
+							// material at all (RenderExtractor sets matId only from this
+							// component); the mesh's own reference is then read for one thing
+							// only, uploading its base-colour texture. Everything an imported
+							// PBR material actually is — the generated shader, its normal and
+							// ORM maps, the alpha-mask cutout — stays inert, so an imported
+							// tree arrives untextured-looking and its leaf cards render as
+							// solid quads. Placing the link here is what makes the import's
+							// material reference mean something.
+							if (!matRel.empty())
+							{
+								const HE::UUID matId = ctx.contentManager->loadAsset(matRel);
+								if (matId != HE::UUID{})
+									ctx.world->addComponent(e, MaterialComponent{ matId });
+								else
+									HE_LOG_WARN(Editor, "%s",
+										("Editor: '" + meshName + "' names material '" + matRel
+										 + "', which did not load — placed without it").c_str());
+							}
 							ctx.world->markHierarchyDirty();
 							HE_LOG_INFO(Editor, "%s",
-								("Editor: added '" + mesh->name + "' to scene").c_str());
+								("Editor: added '" + meshName + "' to scene").c_str());
 						}
 						else
 							HE_LOG_WARN(Editor, "%s",

@@ -1,4 +1,5 @@
 #include "ViewportPanel.h"
+#include <HorizonScene/Components/MaterialComponent.h> // a spawned mesh follows its MREF material
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "EditorInput.h"                 // pointer-device grammar (trackpad swipe vs mouse wheel)
@@ -337,14 +338,38 @@ void render(AppContext& ctx, float dt)
 							if (ctx.undoSys) ctx.undoSys->snapshotNow();
 							if (mesh)
 							{
-								Entity e = ctx.world->createEntity(mesh->name);
+								// Copied out BEFORE the material load below: the asset stores
+								// are vector-backed SlotMaps, so registering another asset can
+								// reallocate them and dangle `mesh`.
+								const std::string meshName = mesh->name;
+								const std::string matRel   = mesh->materialPath;
+
+								Entity e = ctx.world->createEntity(meshName);
 								TransformComponent tc; tc.position = spawnPos;
 								ctx.world->addComponent(e, tc);
 								ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });
+								// …and the material the mesh names (chunk MREF), exactly as the
+								// Content Browser's "Add to Scene" does. Without it the draw
+								// carries no material at all — RenderExtractor takes matId only
+								// from this component — so the generated PBR shader, the normal
+								// and ORM maps and the alpha-mask cutout an import writes are
+								// all inert and only the base-colour texture survives. Dropping
+								// and right-clicking the same asset must not give two results,
+								// and dropping is the gesture people reach for first.
+								if (!matRel.empty())
+								{
+									const HE::UUID matId = ctx.contentManager->loadAsset(matRel);
+									if (matId != HE::UUID{})
+										ctx.world->addComponent(e, MaterialComponent{ matId });
+									else
+										HE_LOG_WARN(Editor, "%s",
+											("Editor: '" + meshName + "' names material '" + matRel
+											 + "', which did not load — spawned without it").c_str());
+								}
 								ctx.world->markHierarchyDirty();
 								ctx.selectedEntity = e; // select the freshly spawned mesh
 								HE_LOG_INFO(Editor, "%s",
-									("Editor: spawned '" + mesh->name + "' into the scene via drag-drop").c_str());
+									("Editor: spawned '" + meshName + "' into the scene via drag-drop").c_str());
 							}
 							else
 							{

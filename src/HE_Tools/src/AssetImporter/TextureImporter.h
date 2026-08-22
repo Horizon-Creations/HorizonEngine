@@ -11,6 +11,13 @@ class TextureImporter {
 public:
 	struct ImportSettings {
 		bool flipVertically = true;  // match GL-style bottom-left UV origin
+		// Colour data (base colour, emissive) vs. data (normal, ORM, masks). Recorded
+		// on the asset as TextureAsset::srgb. NOTE: no backend samples that flag yet —
+		// every texture is uploaded as linear RGBA8 — so setting it changes nothing
+		// today. It is written anyway because the glTF is the only place that knows,
+		// and a later colour-correct upload path must not require re-importing every
+		// texture in every project to find out.
+		bool srgb = false;
 	};
 
 	// Returns the imported asset (already written to disk) or nullptr.

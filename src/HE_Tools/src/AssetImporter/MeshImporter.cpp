@@ -21,11 +21,26 @@ void logError(const std::string& msg)
 // Appends one primitive's geometry to the merged mesh, transformed by `world`.
 // The per-vertex work itself is Importer::appendPrimitive — shared with
 // SkeletalMeshImporter, which reads the same streams (plus JOINTS_0/WEIGHTS_0).
+//
+// The UV set is chosen PER PRIMITIVE from its own material, because that is the
+// set the material's textures are addressed by — an Unreal bake puts them on
+// TEXCOORD_1. A mesh carries one UV stream, but each primitive owns a contiguous
+// range of it, so this is exact rather than a compromise.
 void appendPrimitive(StaticMeshAsset& mesh, const cgltf_primitive& prim,
-                     const glm::mat4& world, float uniformScale)
+                     const glm::mat4& world, float uniformScale,
+                     const std::filesystem::path& sourcePath)
 {
 	Importer::MeshVertexStreams streams{ mesh.vertices, mesh.normals, mesh.uvs };
-	Importer::appendPrimitive(prim, world, uniformScale, streams, mesh.indices);
+	const int wanted = Importer::gltfMaterialUvSet(prim.material);
+	const auto attrs = Importer::appendPrimitive(prim, world, uniformScale, streams,
+	                                             mesh.indices, wanted);
+	if (attrs.position && attrs.uvSet != wanted)
+		HE_LOG_WARN(Tool, "%s",
+			("MeshImporter: " + sourcePath.filename().string() + ": material '"
+			 + (prim.material && prim.material->name ? prim.material->name : "?")
+			 + "' samples TEXCOORD_" + std::to_string(wanted)
+			 + " but the mesh has no such UV set — fell back to TEXCOORD_"
+			 + std::to_string(attrs.uvSet) + ", its textures will be misplaced").c_str());
 }
 
 // True if any appended normal is still the (0,0,0) placeholder.
@@ -111,14 +126,14 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 		cgltf_node_transform_world(&node, m);
 		const glm::mat4 world = glm::make_mat4(m);
 		for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p)
-			appendPrimitive(*mesh, node.mesh->primitives[p], world, settings.uniformScale);
+			appendPrimitive(*mesh, node.mesh->primitives[p], world, settings.uniformScale, sourcePath);
 	}
 	// glTFs without a node hierarchy: take the meshes directly
 	if (mesh->vertices.empty())
 		for (cgltf_size mi = 0; mi < data->meshes_count; ++mi)
 			for (cgltf_size p = 0; p < data->meshes[mi].primitives_count; ++p)
 				appendPrimitive(*mesh, data->meshes[mi].primitives[p],
-				                glm::mat4(1.0f), settings.uniformScale);
+				                glm::mat4(1.0f), settings.uniformScale, sourcePath);
 
 	if (mesh->vertices.empty())
 	{
@@ -130,16 +145,17 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (settings.generateNormals && hasMissingNormals(*mesh))
 		generateNormals(*mesh);
 
-	// Material + base color texture. The names the two sidecars fall back to stay
-	// derived from the SOURCE stem, never from the mesh's (possibly re-imported and
-	// renamed) own name — a re-import redirects them through outputs.material /
-	// outputs.texture instead, so that ordinary imports keep writing exactly the
-	// file names the asset compiler's up-to-date probe already expects.
+	// Materials + textures. EVERY glTF material becomes its own asset; the mesh binds
+	// the first primitive's, because a mesh asset carries exactly one material
+	// reference. The stem passed here is only a fallback for UNNAMED materials and
+	// embedded images — and it stays derived from the SOURCE, never from the mesh's
+	// (possibly re-imported and renamed) own name, so ordinary imports keep writing
+	// exactly the file names the asset compiler's up-to-date probe already expects.
 	if (settings.importMaterials)
-		mesh->materialPath = Importer::importBaseColorMaterial(
-			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
-	// No material resolved — importMaterials is off, or the glTF's base-colour image
-	// is no longer on disk next to it. saveAsset writes chunk MREF unconditionally
+		mesh->materialPath = Importer::importGltfMaterials(
+			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs).primary;
+	// No material resolved — importMaterials is off, or the glTF declares none.
+	// saveAsset writes chunk MREF unconditionally
 	// from this freshly built asset, so leaving the field empty BLANKS the reference
 	// every scene using the mesh resolves its material through; meshSidecarAssets
 	// would afterwards return nothing, so not even the next re-import could find the

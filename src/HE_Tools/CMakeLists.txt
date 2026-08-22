@@ -27,6 +27,7 @@ add_library(HorizonImporters STATIC
     src/AssetImporter/ImporterCommon.cpp
     src/AssetImporter/TextureImporter.cpp
     src/AssetImporter/MeshImporter.cpp
+    src/AssetImporter/GltfMaterialImport.cpp
     src/AssetImporter/SkeletalMeshImporter.cpp
     src/AssetImporter/AnimationClipImporter.cpp
     src/AssetImporter/MaterialImporter.cpp

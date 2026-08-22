@@ -115,10 +115,19 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
         {
             // Positions/normals/UVs (including the glTF→engine V flip) are the
             // static importer's code path; only the skin streams are extra here.
+            // The UV set follows the primitive's own material — see MeshImporter.
+            const cgltf_primitive& prim = node.mesh->primitives[pi];
+            const int wantedUv = Importer::gltfMaterialUvSet(prim.material);
             const auto attrs = Importer::appendPrimitive(
-                node.mesh->primitives[pi], world, settings.uniformScale,
-                streams, mesh->indices);
+                prim, world, settings.uniformScale,
+                streams, mesh->indices, wantedUv);
             if (!attrs.position) continue;
+            if (attrs.uvSet != wantedUv)
+                HE_LOG_WARN(Tool, "%s",
+                    ("SkeletalMeshImporter: " + sourcePath.filename().string()
+                     + ": a material samples TEXCOORD_" + std::to_string(wantedUv)
+                     + " but the mesh has no such UV set — fell back to TEXCOORD_"
+                     + std::to_string(attrs.uvSet) + ", its textures will be misplaced").c_str());
 
             Importer::appendSkinning(attrs, mesh->boneIDs, mesh->boneWeights);
         }
@@ -164,18 +173,18 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     // `materialPath` lands in chunk MREF, which every renderer resolves as a
     // MATERIAL reference (ContentManager::resolveMaterialRef). This used to store
     // the base-color TEXTURE path directly, so the lookup always came back empty
-    // and skinned meshes rendered untextured; import the same texture+material
-    // pair the static MeshImporter writes instead.
+    // and skinned meshes rendered untextured; import the same materials+textures
+    // the static MeshImporter writes instead.
     //
-    // The names the two sidecars fall back to stay derived from the SOURCE stem,
-    // never from the mesh's own (possibly renamed) name — a re-import redirects
-    // them through outputs.material / outputs.texture instead, so ordinary imports
-    // keep writing exactly the file names they always have.
+    // The stem passed here is only a fallback for UNNAMED materials and embedded
+    // images, and it stays derived from the SOURCE, never from the mesh's own
+    // (possibly renamed) name — so ordinary imports keep writing exactly the file
+    // names they always have.
     if (settings.importMaterials)
-        mesh->materialPath = Importer::importBaseColorMaterial(
-            data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
-    // Nothing resolved — importMaterials is off, or the glTF's base-colour image is
-    // gone from next to it. MREF is written unconditionally from this freshly built
+        mesh->materialPath = Importer::importGltfMaterials(
+            data, sourcePath, contentRoot, relativeOutputDir, stem, outputs).primary;
+    // Nothing resolved — importMaterials is off, or the glTF declares no materials.
+    // MREF is written unconditionally from this freshly built
     // asset, so an empty field here BLANKS the material reference of every scene that
     // uses the character; meshSidecarAssets would then return nothing, leaving no way
     // for a later re-import to find the sidecar again. outputs.material is that same

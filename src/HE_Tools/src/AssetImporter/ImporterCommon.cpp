@@ -216,12 +216,14 @@ GltfPrimitiveAttributes appendPrimitive(const cgltf_primitive& prim,
                                         const glm::mat4&       world,
                                         float                  uniformScale,
                                         MeshVertexStreams      out,
-                                        std::vector<uint32_t>& indices)
+                                        std::vector<uint32_t>& indices,
+                                        int                    uvSet)
 {
 	if (prim.type != cgltf_primitive_type_triangles)
 		return {};
 
 	GltfPrimitiveAttributes attrs;
+	const cgltf_accessor*   uv0 = nullptr;   // fallback when the wanted set is absent
 	for (cgltf_size i = 0; i < prim.attributes_count; ++i)
 	{
 		const cgltf_attribute& attr = prim.attributes[i];
@@ -229,12 +231,19 @@ GltfPrimitiveAttributes appendPrimitive(const cgltf_primitive& prim,
 		{
 		case cgltf_attribute_type_position: attrs.position = attr.data; break;
 		case cgltf_attribute_type_normal:   attrs.normal   = attr.data; break;
-		case cgltf_attribute_type_texcoord: if (attr.index == 0) attrs.uv      = attr.data; break;
+		case cgltf_attribute_type_texcoord:
+			if (attr.index == uvSet) { attrs.uv = attr.data; attrs.uvSet = uvSet; }
+			if (attr.index == 0)     uv0 = attr.data;
+			break;
 		case cgltf_attribute_type_joints:   if (attr.index == 0) attrs.joints  = attr.data; break;
 		case cgltf_attribute_type_weights:  if (attr.index == 0) attrs.weights = attr.data; break;
 		default: break;
 		}
 	}
+	// The material asks for a set this primitive does not carry. TEXCOORD_0 is the
+	// only sane fallback — leaving the UVs at (0,0) would collapse the whole
+	// primitive onto one texel — and the returned uvSet tells the caller to say so.
+	if (!attrs.uv && uv0) { attrs.uv = uv0; attrs.uvSet = 0; }
 	if (!attrs.position)
 		return {};
 
@@ -312,121 +321,6 @@ void appendSkinning(const GltfPrimitiveAttributes& attrs,
 		boneIDs.insert(boneIDs.end(), { jids[0], jids[1], jids[2], jids[3] });
 		boneWeights.insert(boneWeights.end(), { wts[0], wts[1], wts[2], wts[3] });
 	}
-}
-
-namespace
-{
-// Finds the first base-color texture in the glTF and imports it. Returns the
-// asset path of the written texture, or empty. `explicitPath` (from
-// OutputTargets::texture) pins the output onto a file that already exists.
-std::string importBaseColorTexture(const cgltf_data* data,
-                                   const std::filesystem::path& sourcePath,
-                                   const std::filesystem::path& contentRoot,
-                                   const std::filesystem::path& relativeOutputDir,
-                                   const std::string& meshStem,
-                                   const std::string& explicitPath)
-{
-	const cgltf_texture* texture = nullptr;
-	for (cgltf_size m = 0; m < data->materials_count && !texture; ++m)
-	{
-		const cgltf_material& mat = data->materials[m];
-		if (mat.has_pbr_metallic_roughness && mat.pbr_metallic_roughness.base_color_texture.texture)
-			texture = mat.pbr_metallic_roughness.base_color_texture.texture;
-	}
-	if (!texture || !texture->image)
-		return {};
-
-	const cgltf_image* img = texture->image;
-
-	if (img->uri && std::strncmp(img->uri, "data:", 5) != 0)
-	{
-		// External file referenced relative to the glTF. Its asset is named after
-		// the IMAGE file, not the mesh — so the redirect has to go through
-		// TextureImporter rather than being applied to the result here.
-		char decoded[1024];
-		std::strncpy(decoded, img->uri, sizeof(decoded) - 1);
-		decoded[sizeof(decoded) - 1] = '\0';
-		cgltf_decode_uri(decoded);
-		const std::filesystem::path texFile = sourcePath.parent_path() / decoded;
-		auto tex = TextureImporter::import(texFile, contentRoot, relativeOutputDir,
-		                                   TextureImporter::ImportSettings{},
-		                                   OutputTargets{ explicitPath, {}, {} });
-		return tex ? tex->path : std::string{};
-	}
-
-	if (img->buffer_view && img->buffer_view->buffer && img->buffer_view->buffer->data)
-	{
-		// Embedded in the binary buffer (.glb or data URI)
-		const auto* bytes = static_cast<const uint8_t*>(img->buffer_view->buffer->data)
-		                  + img->buffer_view->offset;
-		auto tex = TextureImporter::decodeFromMemory(bytes, img->buffer_view->size);
-		if (!tex)
-			return {};
-		const ResolvedOutput out =
-			resolveOutput(explicitPath, relativeOutputDir, meshStem + "_basecolor");
-		tex->type = HE::AssetType::Texture;
-		tex->name = out.name;
-		tex->path = out.path;
-		if (!Importer::writeAsset(*tex, contentRoot))
-			return {};
-		return tex->path;
-	}
-	return {};
-}
-} // namespace
-
-std::string importBaseColorMaterial(const cgltf_data*            data,
-                                    const std::filesystem::path& sourcePath,
-                                    const std::filesystem::path& contentRoot,
-                                    const std::filesystem::path& relativeOutputDir,
-                                    const std::string&           meshStem,
-                                    const OutputTargets&         outputs)
-{
-	// The texture is refreshed either way: it is derived data with nothing
-	// authorable in it, and on a re-import `outputs.texture` pins it onto the very
-	// asset the existing material already references — so the new image bytes reach
-	// the renderer even when the material below is left alone.
-	const std::string texPath = importBaseColorTexture(
-		data, sourcePath, contentRoot, relativeOutputDir, meshStem, outputs.texture);
-	if (texPath.empty())
-		return {};
-
-	// A re-import pins `outputs.material` onto the material sidecar the mesh already
-	// names — and everything below builds a BRAND NEW MaterialAsset: one shader path,
-	// one texture, defaults for all the rest. Writing that over a material the artist
-	// has since opened in the Material Editor destroys its content while looking
-	// perfectly healthy: writeAsset keeps the file's UUID, so nothing dangles, and the
-	// editor only refreshes the folder afterwards (it does not reload an already
-	// resident MaterialAsset), so the viewport keeps rendering the authored graph from
-	// memory and the loss first surfaces on the NEXT project load — the node graph, the
-	// generated shaders, the param values and their name/group/tooltip tables, a
-	// material INSTANCE's parentMaterialPath, the blend mode, the WPO body and the GI
-	// approximation, all gone. So a material that is already on disk is left exactly as
-	// it is.
-	// A first import is unaffected (the file does not exist yet), and a sidecar the user
-	// DELETED is regenerated, same as importOutputsUpToDate treats a missing sidecar.
-	// The same clobber is still reachable by importing the source a second time through
-	// the menu instead of Reimport: that path passes no outputs at all and is then
-	// indistinguishable here from the asset compiler's rebuild, which MUST rewrite the
-	// material (its mtime is what importOutputsUpToDate measures — never refreshing it
-	// makes every compiler run re-import every mesh, forever).
-	std::error_code matEc;
-	if (!outputs.material.empty()
-	    && std::filesystem::is_regular_file(contentRoot / outputs.material, matEc))
-		return outputs.material;
-
-	const ResolvedOutput out =
-		resolveOutput(outputs.material, relativeOutputDir, meshStem + "_mat");
-
-	MaterialAsset mat;
-	mat.type       = HE::AssetType::Material;
-	mat.name       = out.name;
-	mat.path       = out.path;
-	mat.shaderPath = "builtin/unlit";
-	mat.texturePaths.push_back(texPath);
-	if (!Importer::writeAsset(mat, contentRoot))
-		return {};
-	return mat.path;
 }
 
 // ─── Source routing ──────────────────────────────────────────────────────────
@@ -648,9 +542,42 @@ std::vector<std::string> meshSidecarAssets(const std::filesystem::path& meshAsse
 	size_t                   moff = 0;
 	if (!HAsset::Reader::readString(mtrl->data, moff, shaderPath)) return out;
 	if (!HAsset::Reader::readVec(mtrl->data, moff, texturePaths))  return out;
-	for (const std::string& tex : texturePaths)
-		if (!tex.empty())
+	const auto add = [&out](const std::string& tex)
+	{
+		if (!tex.empty() && std::find(out.begin(), out.end(), tex) == out.end())
 			out.push_back(tex);
+	};
+	for (const std::string& tex : texturePaths)
+		add(tex);
+	// …and the NODE-GRAPH textures, which is where an imported PBR material keeps its
+	// normal / ORM / emissive maps — texturePaths above holds only the legacy heTex0
+	// slot (the base colour). Without them, importOutputsUpToDate calls a mesh current
+	// after its normal map was deleted, and the asset compiler never regenerates it.
+	//
+	// Reading them means walking the MTRL tail up to that field, so the offsets below
+	// MIRROR ContentManager's Material branch (both the reader and buildMaterialChunk).
+	// A field inserted there before graphTexturePaths has to be inserted here too — a
+	// mismatch makes this read a different field, which the bounds-checked readers
+	// answer with an empty list rather than a crash: sidecars silently stop being
+	// tracked. Everything up to graphTexturePaths is skipped, not interpreted.
+	float    skipF = 0.0f;
+	uint32_t paramFloats = 0;
+	std::string skipS;
+	for (int k = 0; k < 6; ++k)                                      // baseColor rgb, metallic, roughness, opacity
+		if (!HAsset::Reader::readPOD(mtrl->data, moff, skipF)) return out;
+	if (!HAsset::Reader::readString(mtrl->data, moff, skipS)) return out;  // customShaderFragGlsl
+	if (!HAsset::Reader::readString(mtrl->data, moff, skipS)) return out;  // nodeGraphJson
+	if (!HAsset::Reader::readPOD(mtrl->data, moff, paramFloats)) return out;
+	// Same bound ContentManager applies — a corrupt count must not walk the offset
+	// past the buffer (the readers would then simply stop, but the cap keeps the
+	// two sides reading the same bytes).
+	if (paramFloats > 16 * 4) return out;
+	for (uint32_t i = 0; i < paramFloats; ++i)
+		if (!HAsset::Reader::readPOD(mtrl->data, moff, skipF)) return out;
+	std::vector<std::string> graphTextures;
+	if (!HAsset::Reader::readVec(mtrl->data, moff, graphTextures)) return out;
+	for (const std::string& tex : graphTextures)
+		add(tex);
 
 	return out;
 }

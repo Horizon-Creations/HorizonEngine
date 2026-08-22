@@ -11,7 +11,7 @@
 
 namespace
 {
-	std::unique_ptr<TextureAsset> fromPixels(stbi_uc* pixels, int w, int h)
+	std::unique_ptr<TextureAsset> fromPixels(stbi_uc* pixels, int w, int h, bool srgb)
 	{
 		if (!pixels)
 			return nullptr;
@@ -21,6 +21,7 @@ namespace
 		asset->width    = static_cast<size_t>(w);
 		asset->height   = static_cast<size_t>(h);
 		asset->channels = 4;
+		asset->srgb     = srgb;
 		asset->data.assign(pixels, pixels + static_cast<size_t>(w) * h * 4);
 		stbi_image_free(pixels);
 		return asset;
@@ -35,7 +36,7 @@ std::unique_ptr<TextureAsset> TextureImporter::decodeFromMemory(
 	stbi_uc* pixels = stbi_load_from_memory(
 		static_cast<const stbi_uc*>(bytes), static_cast<int>(size),
 		&w, &h, &comp, STBI_rgb_alpha);
-	return fromPixels(pixels, w, h);
+	return fromPixels(pixels, w, h, settings.srgb);
 }
 
 std::unique_ptr<TextureAsset> TextureImporter::import(
@@ -49,7 +50,7 @@ std::unique_ptr<TextureAsset> TextureImporter::import(
 	int w = 0, h = 0, comp = 0;
 	stbi_uc* pixels = stbi_load(sourcePath.string().c_str(), &w, &h, &comp, STBI_rgb_alpha);
 
-	auto asset = fromPixels(pixels, w, h);
+	auto asset = fromPixels(pixels, w, h, settings.srgb);
 	if (!asset)
 	{
 		HE_LOG_ERROR(Tool, "%s",

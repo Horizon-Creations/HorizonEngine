@@ -12,6 +12,7 @@
 struct cgltf_data;
 struct cgltf_accessor;
 struct cgltf_primitive;
+struct cgltf_material;
 
 // Shared plumbing for all asset importers.
 //
@@ -92,10 +93,29 @@ namespace Importer
 	{
 		const cgltf_accessor* position = nullptr;   // null → primitive was skipped
 		const cgltf_accessor* normal   = nullptr;
-		const cgltf_accessor* uv       = nullptr;   // TEXCOORD_0
+		const cgltf_accessor* uv       = nullptr;   // TEXCOORD_<uvSet>
 		const cgltf_accessor* joints   = nullptr;   // JOINTS_0
 		const cgltf_accessor* weights  = nullptr;   // WEIGHTS_0
+		// The TEXCOORD set `uv` actually came from. Lower than the requested set
+		// means the primitive does not carry that set and 0 was used instead — the
+		// caller reports it, because the material then samples the wrong UVs.
+		int                   uvSet    = 0;
 	};
+
+	// Which glTF UV set a material's textures sample: the `texCoord` on its texture
+	// views (and KHR_texture_transform's own texcoord override, which wins where it
+	// is present). 0 for a material with no textures, and for a null material.
+	//
+	// This is NOT always 0 in practice. Unreal's glTF exporter BAKES a material into
+	// textures addressed by the mesh's second, non-overlapping UV set — baking needs
+	// a set with no overlap, which is the lightmap UV — and then declares
+	// "texCoord": 1 on every texture view. Reading TEXCOORD_0 for such an export
+	// samples the baked atlas with the original tiling UVs: not subtly off, but
+	// unrecognisable.
+	//
+	// A material whose channels disagree about the set cannot be satisfied by a mesh
+	// with ONE UV stream; the base-colour channel's set wins and the caller is warned.
+	int gltfMaterialUvSet(const cgltf_material* material);
 
 	// The three parallel per-vertex arrays both mesh assets carry. StaticMeshAsset
 	// and SkeletalMeshAsset declare them separately (they share no base class), so
@@ -112,11 +132,19 @@ namespace Importer
 	// onto the vertices just appended. Non-triangle primitives and primitives
 	// without POSITION are skipped; the returned attributes then carry a null
 	// `position` and the caller must not append anything else for them.
+	//
+	// `uvSet` selects which TEXCOORD_n to read — normally gltfMaterialUvSet() of the
+	// primitive's own material, so each primitive contributes the UVs ITS material
+	// samples. That is exact rather than a compromise: a primitive's vertices are
+	// appended contiguously, so the choice is per vertex range, not per mesh. A
+	// primitive lacking the requested set falls back to TEXCOORD_0 and says so
+	// through the returned `uvSet`.
 	GltfPrimitiveAttributes appendPrimitive(const cgltf_primitive& prim,
 	                                        const glm::mat4&       world,
 	                                        float                  uniformScale,
 	                                        MeshVertexStreams      out,
-	                                        std::vector<uint32_t>& indices);
+	                                        std::vector<uint32_t>& indices,
+	                                        int                    uvSet = 0);
 
 	// Appends the 4 joint indices + 4 weights per vertex of the primitive that
 	// appendPrimitive() just consumed, keeping both arrays index-parallel to the
@@ -125,25 +153,50 @@ namespace Importer
 	                    std::vector<uint32_t>&         boneIDs,
 	                    std::vector<float>&            boneWeights);
 
-	// Imports the first base-color texture found in the glTF plus a MaterialAsset
-	// referencing it, both written next to the mesh. Returns the MATERIAL's asset
-	// path — the value that belongs in StaticMeshAsset/SkeletalMeshAsset's
-	// `materialPath` (chunk MREF), which every renderer resolves as a material
-	// reference. Empty when the glTF has no base-color texture, or when writing
-	// the texture or the material failed.
-	// `outputs.material` / `outputs.texture` redirect the two sidecars onto files
-	// that already exist (a re-import of a mesh whose sidecars were renamed);
-	// `outputs.asset` is not read here — it belongs to the mesh itself.
+	// The result of importing every material a glTF declares.
+	struct GltfMaterialImport
+	{
+		// Content-relative path of the material the MESH binds (chunk MREF) — the
+		// first primitive's, in the order the mesh importers bake geometry. Empty
+		// when the glTF declares no materials, or when writing that one failed.
+		std::string              primary;
+		// Every material, index-parallel to `cgltf_data::materials`. An entry is
+		// empty when that material failed to write.
+		std::vector<std::string> paths;
+		// The ones that were written but could not be bound, because a mesh asset
+		// holds exactly one material reference (the engine has no submesh concept)
+		// and an entity one MaterialComponent. They are NOT assignable by hand — the
+		// primitives they belong to are baked into the same buffer as the bound
+		// material's — so the import reports them as unusable-on-this-mesh rather
+		// than as a to-do. They exist as assets, which is what makes a DCC re-export
+		// per material, or a later mesh-sections feature, able to pick them up.
+		std::vector<std::string> unbound;
+	};
+
+	// Imports EVERY material of the glTF as its own MaterialAsset — each with a PBR
+	// node graph (base colour, metallic, roughness, normal, occlusion, emissive, the
+	// glTF factors folded in as constants, alphaMode as the blend mode) plus the GLSL
+	// that graph generates — and every IMAGE it references as a TextureAsset, imported
+	// once no matter how many materials or channels share it.
+	//
+	// The caller puts `primary` into StaticMeshAsset/SkeletalMeshAsset's `materialPath`
+	// (chunk MREF), which every renderer resolves as a material reference.
+	//
+	// `outputs.material` / `outputs.texture` redirect the bound material and its
+	// base-colour texture onto files that already exist (a re-import of a mesh whose
+	// sidecars were renamed) — only for a single-material glTF, since there is exactly
+	// one such recorded sidecar to redirect; every other material is named after the
+	// glTF material, which is stable across re-imports. `outputs.asset` is not read
+	// here — it belongs to the mesh itself.
 	// A redirected MATERIAL that exists is returned untouched rather than rewritten:
-	// the material generated here carries a shader path and one texture, so writing it
-	// over one the artist has authored in the Material Editor would silently replace
-	// its graph, params, parent and blend mode. The texture is refreshed either way.
-	std::string importBaseColorMaterial(const cgltf_data*            data,
-	                                    const std::filesystem::path& sourcePath,
-	                                    const std::filesystem::path& contentRoot,
-	                                    const std::filesystem::path& relativeOutputDir,
-	                                    const std::string&           meshStem,
-	                                    const OutputTargets&         outputs = {});
+	// the generated material would overwrite a graph the artist has since authored in
+	// the Material Editor. Textures are refreshed either way.
+	GltfMaterialImport importGltfMaterials(const cgltf_data*            data,
+	                                       const std::filesystem::path& sourcePath,
+	                                       const std::filesystem::path& contentRoot,
+	                                       const std::filesystem::path& relativeOutputDir,
+	                                       const std::string&           meshStem,
+	                                       const OutputTargets&         outputs = {});
 
 	// ─── Source routing ───────────────────────────────────────────────────────
 
