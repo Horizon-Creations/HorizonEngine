@@ -17,6 +17,7 @@
 #include <memory>
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/EngineProfiler.h>      // per-pass GPU timing gate (recording / live HUD)
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/RenderConstants.h>
@@ -418,6 +419,10 @@ void VulkanRenderer::Render()
 
             if (m_bloomEnabled)
             {
+                // Only the enabled branch is timed. The `else if` below still runs
+                // a bright-pass blit (to scrub NaN out of bloom[0]) — billing that
+                // as "Bloom" would report a cost for a pass the user turned off.
+                GpuPassScope _bloomTimer(this, cmd, "Bloom");
                 // ── Bloom bright pass ──────────────────────────────────────
                 { const float p[4]={m_bloomThreshold,m_bloomKnee,0,0};
                   blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
@@ -460,7 +465,8 @@ void VulkanRenderer::Render()
             }
 
             // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
-            { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
+            { GpuPassScope _tonemapTimer(this, cmd, "Tonemap");
+              const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
               blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
             m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -482,10 +488,13 @@ void VulkanRenderer::Render()
             // Always runs — it is what writes m_viewportImage. The AA method
             // only decides which pipeline does it (FXAA vs. passthrough).
             { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),0,0};
-              const VkPipeline aaPipe =
-                  (m_aaMethod == HE::AAMethod::Off  && m_aaBlitPipe) ? m_aaBlitPipe :
-                  (m_aaMethod == HE::AAMethod::SMAA && m_smaaPipe)   ? m_smaaPipe   :
-                                                                       m_fxaaPipe;
+              // Same three-way split for the pipeline AND the row name, so the row
+              // names the pipeline that actually ran (incl. the fallbacks to FXAA
+              // when the blit/SMAA pipeline is missing). Mirrors GL's naming.
+              const bool aaOff  = (m_aaMethod == HE::AAMethod::Off  && m_aaBlitPipe);
+              const bool aaSmaa = (m_aaMethod == HE::AAMethod::SMAA && m_smaaPipe);
+              const VkPipeline aaPipe = aaOff ? m_aaBlitPipe : (aaSmaa ? m_smaaPipe : m_fxaaPipe);
+              GpuPassScope _aaTimer(this, cmd, aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
               blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, m_postFxDS[4], p); }
             m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -498,6 +507,10 @@ void VulkanRenderer::Render()
                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
                 m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+                // Timed HERE, at the frame call site — NEVER inside runUIPass, which
+                // RenderWidgetThumbnail also calls out of frame on its own one-shot
+                // command buffer (that stamp would corrupt this frame's slot).
+                GpuPassScope _uiTimer(this, cmd, "UI");
                 VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 uirpbi.renderPass        = m_uiViewportRP;
                 uirpbi.framebuffer       = m_uiViewportFB;
@@ -553,6 +566,10 @@ void VulkanRenderer::Render()
                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
                 m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+                // Timed HERE, at the frame call site — NEVER inside runUIPass, which
+                // RenderWidgetThumbnail also calls out of frame on its own one-shot
+                // command buffer (that stamp would corrupt this frame's slot).
+                GpuPassScope _uiTimer(this, cmd, "UI");
                 VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
                 uirpbi.renderPass        = m_uiViewportRP;
                 uirpbi.framebuffer       = m_uiViewportFB;
@@ -585,6 +602,9 @@ void VulkanRenderer::Render()
         // UI canvas — inline in the swapchain pass (game / non-editor path).
         if (m_uiPipeline && !m_renderWorld.uiObjects.empty())
         {
+            // Frame call site — see the viewport paths above for why the scope is
+            // never placed inside runUIPass.
+            GpuPassScope _uiTimer(this, cmd, "UI");
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiPipeline);
             VkViewport uivp = { 0, 0, float(m_swapExtent.width), float(m_swapExtent.height), 0, 1 };
             VkRect2D   uisc = { {0,0}, {m_swapExtent.width, m_swapExtent.height} };
@@ -3022,6 +3042,11 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
+    // Timed only past every early return, so a frame that renders no shadow map
+    // reports NO "Shadow" row rather than a 0 ms one (a 0 ms row would claim the
+    // pass ran and cost nothing). Mirrors OpenGLRenderer.cpp's shadow scope.
+    GpuPassScope _shadowTimer(this, cmd, "Shadow");
+
     const glm::mat4 lightClip = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
 
     VkClearValue clear{};
@@ -3584,6 +3609,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // D3D12/OpenGL ordering. The render pass is already active (begun in Render());
     // the sky pipeline uses dynamic viewport/scissor, so set them for its triangle.
     {
+        // NOTE: unlike OpenGL (which draws the skybox LAST, so it is depth-rejected
+        // behind opaque geometry), this backend draws it FIRST — so this row is
+        // legitimately far larger here than the GL "Sky+Clouds" row, and it comes
+        // BEFORE "Opaque" in the list. Backend difference, not a stamp error.
+        GpuPassScope _skyTimer(this, cmd, "Sky+Clouds");
         VkViewport svp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
         VkRect2D   ssc{ { 0, 0 }, { width, height } };
         vkCmdSetViewport(cmd, 0, 1, &svp);
@@ -4002,9 +4032,20 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 drawOne(dc.transform);
         };
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
-        for (const DrawCall* dc : opaqueDCs) drawDCVk(*dc);
+        {
+            GpuPassScope _opaqueTimer(this, cmd, "Opaque");
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
+            for (const DrawCall* dc : opaqueDCs) drawDCVk(*dc);
+        }
+
+        // "Transparent" spans from here to the end of this lambda: the blended
+        // draw loop, the SKINNED mesh loop and the debug-line overlay. OpenGL
+        // bills skinned geometry to "Opaque", but this backend records the
+        // skinned loop AFTER the transparent loop and timed spans must not nest —
+        // so it lands in this row instead of being left untimed. (Debug lines are
+        // inside GL's "Transparent" scope too.)
+        GpuPassScope _transparentTimer(this, cmd, "Transparent");
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
             ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
@@ -9964,6 +10005,10 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
 
+    // Past every early return — see the "Shadow" scope: a skipped SSAO must be an
+    // ABSENT row, not a 0 ms one.
+    GpuPassScope _ssaoTimer(this, cmd, "SSAO");
+
     const glm::mat4 view     = m_renderWorld.camera.view;
     const glm::mat4 proj     = m_renderWorld.camera.projection;
     const glm::mat4 clipProj = HE::kVulkanClipFix * proj; // clip-space proj (no view)
@@ -10845,7 +10890,8 @@ void VulkanRenderer::gpuTimerInit()
 
     VkQueryPoolCreateInfo qpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
     qpci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
-    qpci.queryCount = kGpuTimerRing * 2;   // begin/end per ring slot
+    // Per slot: frame begin/end + a fixed block of 2 stamps per timed pass.
+    qpci.queryCount = kGpuTimerRing * kSlotStamps;
     if (vkCreateQueryPool(m_device, &qpci, nullptr, &m_tsQueryPool) != VK_SUCCESS)
     {
         m_tsQueryPool = VK_NULL_HANDLE;
@@ -10856,8 +10902,15 @@ void VulkanRenderer::gpuTimerInit()
 
 void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
 {
+    // Cleared unconditionally, BEFORE the support check: otherwise these would
+    // survive on the previous frame's values on a device without timestamps.
+    m_tsPerPass  = false;
+    m_tsOpenPass = -1;
+    m_tsFrameCmd = VK_NULL_HANDLE;
+
     if (!m_tsSupported) return;
     const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
+    const uint32_t base = slot * kSlotStamps;
 
     // This slot was written kGpuTimerRing frames ago; with only
     // k_maxFramesInFlight frames in flight its submit has been fence-waited, so
@@ -10865,7 +10918,7 @@ void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
     if (m_tsPending[slot])
     {
         uint64_t r[4] = {};   // {value, availability} × {begin, end}
-        const VkResult res = vkGetQueryPoolResults(m_device, m_tsQueryPool, slot * 2, 2,
+        const VkResult res = vkGetQueryPoolResults(m_device, m_tsQueryPool, base, 2,
             sizeof(r), r, 2 * sizeof(uint64_t),
             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
         if (res == VK_SUCCESS && r[1] && r[3])
@@ -10876,23 +10929,107 @@ void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
             fs.gpuFrameMs = (t1 > t0)
                 ? static_cast<double>(t1 - t0) * static_cast<double>(m_tsPeriodNs) * 1e-6
                 : 0.0;
-            fs.gpuTimingMode = "whole-frame";   // no per-pass breakdown on Vulkan yet
+
+            // Per-pass block of the SAME slot — read all-or-nothing. A partial
+            // read would break the exclusive+additive claim the profiler panel
+            // makes for "vulkan-timer", so anything short of a fully available
+            // block falls back to whole-frame-only for this reap.
+            const uint32_t np = m_tsPassCount[slot];
+            if (np > 0)
+            {
+                uint64_t pr[2 * 2 * kTimedPasses] = {};
+                const uint32_t nq = 2 * np;
+                const VkResult pres = vkGetQueryPoolResults(m_device, m_tsQueryPool,
+                    base + 2, nq, nq * 2 * sizeof(uint64_t), pr, 2 * sizeof(uint64_t),
+                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+                bool allAvail = (pres == VK_SUCCESS);
+                for (uint32_t q = 0; allAvail && q < nq; ++q)
+                    allAvail = (pr[q * 2 + 1] != 0);
+                if (allAvail)
+                {
+                    fs.passes.reserve(np);
+                    for (uint32_t p = 0; p < np; ++p)
+                    {
+                        const uint64_t p0 = pr[(p * 2 + 0) * 2] & m_tsValidMask;
+                        const uint64_t p1 = pr[(p * 2 + 1) * 2] & m_tsValidMask;
+                        const double ms = (p1 > p0)
+                            ? static_cast<double>(p1 - p0) * static_cast<double>(m_tsPeriodNs) * 1e-6
+                            : 0.0;
+                        fs.passes.push_back({ m_tsPassName[slot][p], ms, /*approx=*/false });
+                    }
+                }
+            }
+            // Records what RAN, not what was requested.
+            fs.gpuTimingMode = fs.passes.empty() ? "whole-frame" : "vulkan-timer";
             m_lastGpuStats = fs;                // CPU counters merged by GetFrameGpuStats
         }
         m_tsPending[slot] = false;   // reset below invalidates the old results either way
     }
 
-    vkCmdResetQueryPool(cmd, m_tsQueryPool, slot * 2, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool, slot * 2);
+    // Latch the profiler decision ONCE for the whole frame (after the reap, which
+    // still needs the PREVIOUS use's pass count for this slot). Every gpuPassBegin/
+    // gpuPassEnd below reads only this member, so a mid-frame toggle can never
+    // leave an open pass without its close stamp. Profiler closed → m_tsPerPass is
+    // false, gpuPassBegin returns false immediately, no extra stamps are recorded
+    // and no rows are emitted: whole-frame timing behaves exactly as before.
+    //
+    // isRecording() ONLY — the same condition as OpenGL's m_gpuPerPass
+    // (OpenGLRenderer.cpp:11742, `m_gpuTimingActive && rec`). The live HUD alone
+    // does NOT turn per-pass stamping on: whole-frame timing already runs ungated
+    // here, and an open HUD must not cost ~18 extra timestamps every frame.
+    EngineProfiler& prof = EngineProfiler::instance();
+    m_tsPerPass          = prof.isRecording();
+    m_tsCurSlot          = slot;
+    m_tsPassCount[slot]  = 0;
+
+    // The WHOLE fixed block, every frame: vkCmdResetQueryPool must not be
+    // recorded inside a render pass, and this is the one point guaranteed to run
+    // before any render pass begins. Lazy per-pass resets are therefore
+    // impossible — hence the fixed kTimedPasses cap.
+    vkCmdResetQueryPool(cmd, m_tsQueryPool, base, kSlotStamps);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool, base);
+    m_tsFrameCmd = cmd;
 }
 
 void VulkanRenderer::gpuTimerEnd(VkCommandBuffer cmd)
 {
+    m_tsFrameCmd = VK_NULL_HANDLE;   // cleared on every path, incl. unsupported
+    m_tsPerPass  = false;
+    m_tsOpenPass = -1;
     if (!m_tsSupported) return;
     const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool, slot * 2 + 1);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool,
+                        slot * kSlotStamps + 1);
     m_tsPending[slot] = true;
     ++m_tsFrameIdx;
+}
+
+// Both stamps are BOTTOM_OF_PIPE — see the header note: a TOP_OF_PIPE open
+// latches before the preceding pass has drained, producing overlapping spans
+// whose sum silently exceeds the frame time.
+bool VulkanRenderer::gpuPassBegin(VkCommandBuffer cmd, const char* name)
+{
+    if (!m_tsPerPass || m_tsFrameCmd == VK_NULL_HANDLE) return false;
+    // Identity guard: RenderWidgetThumbnail records UI work on its OWN one-shot
+    // command buffer out of frame — stamping that would corrupt this frame's slot.
+    if (cmd != m_tsFrameCmd) return false;
+    if (m_tsOpenPass >= 0)   return false;   // no nesting: spans must stay exclusive
+    uint32_t& n = m_tsPassCount[m_tsCurSlot];
+    if (n >= kTimedPasses)   return false;   // over the cap: drop, never write OOB
+    const uint32_t idx = n++;
+    m_tsPassName[m_tsCurSlot][idx] = name;
+    m_tsOpenPass = static_cast<int>(idx);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool,
+                        m_tsCurSlot * kSlotStamps + 2 + 2 * idx);
+    return true;
+}
+
+void VulkanRenderer::gpuPassEnd(VkCommandBuffer cmd)
+{
+    if (m_tsOpenPass < 0) return;
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool,
+                        m_tsCurSlot * kSlotStamps + 3 + 2 * static_cast<uint32_t>(m_tsOpenPass));
+    m_tsOpenPass = -1;
 }
 
 IRenderer::FrameGpuStats VulkanRenderer::GetFrameGpuStats() const

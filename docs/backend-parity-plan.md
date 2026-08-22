@@ -243,7 +243,8 @@ geschrieben; er läuft nicht.
 | `WarmupMaterials` | JA | JA | JA | JA |
 | `InvalidateMaterial/Mesh/Texture` | JA | ~ | ~ | ~ |
 | Multi-Window (alle vier: Swapchain + Clear + Present, **kein** Szeneninhalt) | JA | JA | JA | JA |
-| Per-Pass-GPU-Timing | JA | -- | -- | -- |
+| Per-Pass-GPU-Timing | JA | JA | JA | JA |
+| Shadow-Cascade-Debug (`SetShadowDebug`) — hängt hinter CSM | JA | -- | -- | -- |
 | Detailed-Capture (1 Command-Buffer/Pass) | JA | ~ | -- | -- |
 
 **Keine Lücke, anders gelöst:** D3D12 hat kein `GetViewportTexture`-Override, löst dasselbe
@@ -683,6 +684,63 @@ leer, sobald jemand das Backend umstellt.
 - P1e — `SetShadowDebug` (Cascade-Tint) und Per-Pass-GPU-Timing. Letzteres ist auf D3D12
   Timestamp-Queries pro Pass, auf Vulkan `vkCmdWriteTimestamp` — Whole-Frame-Timing steht
   überall schon, die Slot-Verwaltung ist die eigentliche Arbeit.
+
+> **Stand 2026-08-22: P1e zur Hälfte erledigt. Per-Pass-Timing steht, `SetShadowDebug`
+> bleibt hart blockiert.**
+>
+> **Per-Pass-GPU-Timing** auf D3D11, D3D12 und Vulkan, jeweils als Erweiterung des
+> vorhandenen Whole-Frame-Rings, nicht als zweiter Mechanismus daneben. Gemeinsam neu:
+> `HE::kMaxTimedPasses` (16) neben `kGpuTimerRing`, und die Modus-Whitelist in
+> `ProfilerPanel.cpp` kennt jetzt `d3d11-timer`, `d3d12-timer` und `vulkan-timer` — die
+> zu vergessen wäre der stillste Fehler dieser Phase gewesen: die Zahlen blieben richtig,
+> würden aber als nicht-additive „per-encoder spans" gelabelt und nicht mehr summiert.
+>
+> **Abnahme über `HE_DUMP_PROFILE=<Frames>`** (neu, `Application.cpp`) plus
+> `scripts/he_profile_ab.py`. Der Zeuge nimmt nach einem Vorlauf N Frames auf und schreibt
+> die normale `profile_<stamp>.json`. Verglichen werden **Namen, Modus und Plausibilität —
+> nicht die Zeiten**, die zwischen Backends und GPUs nichts miteinander zu tun haben.
+>
+> Der Zeuge unterschied **vor** der Änderung sauber: OpenGL lieferte `gl-timer` mit Pässen
+> in 20/20 Frames, die drei Ziele `whole-frame` und **gar kein** `gpu`-Array. Danach:
+>
+> | Backend | Modus | Frames mit Pässen | Ring-Vorlauf |
+> |---|---|:--:|:--:|
+> | OpenGL | `gl-timer` | 20/20 | 0 |
+> | D3D11 | `d3d11-timer` | 20/20 | 0 |
+> | D3D12 | `d3d12-timer` | 17/17 | 3 |
+> | Vulkan | `vulkan-timer` | 16/16 | 4 |
+>
+> Der Vorlauf ist kein Fehler: Ergebnisse werden `kGpuTimerRing` Frames später abgeholt,
+> damit das Auslesen die Pipeline nicht anhält. OpenGL und D3D11 umgehen ihn mit einem
+> Same-Frame-Reap im Detail-Modus, D3D12 und Vulkan haben kein Gegenstück — bewusst nicht
+> nachgerüstet, weil das den bestehenden Whole-Frame-Pfad mit verändert hätte.
+>
+> Das Gate ist auf allen dreien `EngineProfiler::isRecording()`, **einmal pro Frame
+> gelatcht** (genau wie GL) — ein Umschalten mitten im Frame kann also kein `Begin` ohne
+> sein `End` hinterlassen. Bei geschlossenem Profiler wird keine einzige Query erzeugt.
+>
+> **Was diese Abnahme NICHT belegt, und das ist die wichtigere Zeile:** im
+> Headless-Lauf ohne geladenes Projekt melden die drei Ziele nur `Sky+Clouds` und `UI`,
+> OpenGL dagegen alle neun. Ursache ist nicht die Instrumentierung, sondern die Platzierung:
+> GLs Scopes liegen **außerhalb** der Early-Returns und messen deshalb auch einen leeren
+> Opaque-Pass, die der drei Ziele liegen **innerhalb**, und bei leerer Szene kehrt
+> `DrawScene` vorher zurück. Ebenso existieren Bloom/Tonemap/AA nur im HDR-Viewport-Zweig,
+> den ein projektloser Lauf nicht nimmt. Die vollständige Neunerliste ist damit
+> **ungeprüft**; belegt ist der Mechanismus (Modus, echte Pass-Zeilen, Additivität,
+> Kostenfreiheit bei geschlossenem Profiler), nicht die Deckungsgleichheit der Pass-Sätze.
+> Wer das schließen will, braucht einen Zeugen, der ein Projekt mit Geometrie lädt.
+>
+> **`SetShadowDebug` bleibt hart blockiert**, unabhängig nachgemessen: Kaskaden-Bezeichner
+> kommen in OpenGL **94-mal** und in Metal **73-mal** vor, in D3D11 und D3D12 je **einmal**
+> und in Vulkan **gar nicht**. Alle drei halten `csmSplits.w` auf 0 und binden ein
+> Null-/Dummy-Kaskaden-Array. Es gibt keinen Kaskadenindex zum Einfärben. Das ist keine
+> Paritätslücke, sondern ein fehlendes Feature (CSM) mit offenem Umfang — es gehört in eine
+> eigene Phase und nicht in P1e.
+>
+> Nebenbei behoben: `ProfSessionInfo.backend` las `getSelectedRHI()` und trug damit unter
+> `HE_DUMP_RHI` das falsche Etikett — jede Aufnahme hätte behauptet, vom persistierten
+> Backend zu stammen, und ein Backend-Vergleich hätte zwei Dateien mit demselben Namen
+> verglichen. Dieselbe Falle wie in `EditorApplication::OnInit`.
 
 **Verifikation:** Editor unter jedem Backend starten, Content-Browser öffnen — Thumbnails
 müssen erscheinen und wie unter GL aussehen. `HE_DUMP_THUMB` / `HE_DUMP_PREVIEW` /

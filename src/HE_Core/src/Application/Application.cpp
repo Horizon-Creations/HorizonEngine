@@ -29,6 +29,11 @@ const char* rhiName(HE::RendererBackend api)
 HE::WindowHandle s_secondWindow{};
 int  s_secondWindowFrames = 0;
 bool s_secondWindowDone   = false;
+
+// Zustand des Profiler-Zeugen (HE_DUMP_PROFILE), aus demselben Grund dateilokal.
+int  s_profileWitnessFrame = 0;
+bool s_profileWitnessArmed = false;
+bool s_profileWitnessDone  = false;
 } // namespace
 
 namespace HE
@@ -425,8 +430,56 @@ namespace HE
 			// If a capture just stopped, a dump was written — log its path.
 			std::string dumpPath;
 			if (profiler.consumeJustDumped(dumpPath) && !dumpPath.empty())
+			{
 				HE_LOG_INFO(Core, "%s",
 				            ("Profiler dump written: " + dumpPath).c_str());
+				// Der Profiler-Zeuge ist fertig, sobald die Datei steht.
+				if (s_profileWitnessArmed) Quit();
+			}
+
+			// ── Profiler-Zeuge (HE_DUMP_PROFILE=<Frames>) ────────────────────────
+			// Nimmt N Frames auf und schreibt die übliche profile_<stamp>.json. Damit
+			// ist Per-Pass-GPU-Timing headless vergleichbar: welche Pass-NAMEN meldet
+			// ein Backend, in welchem gpuTimingMode. Die Zeiten selbst sind zwischen
+			// Backends nicht vergleichbar — die Zusicherung ist Namen, Modus und
+			// Plausibilität, nicht Gleichheit.
+			// Muss in der Hauptschleife stehen, nicht in dumpFrameHeadless: dort läuft
+			// weder profiler.beginFrame/endFrame noch der GetFrameGpuStats-Abgriff
+			// oben, das Zeitmess-Gate der Backends wäre also für jeden dort erzeugten
+			// Frame aus.
+			if (const char* pf = std::getenv("HE_DUMP_PROFILE"); pf && *pf && !s_profileWitnessDone)
+			{
+				const int wantFrames = std::max(1, std::atoi(pf));
+				// Vorlauf, bevor aufgezeichnet wird: der Ring der Timer-Slots
+				// (kGpuTimerRing) muss einmal gefüllt sein, sonst enthalten die ersten
+				// Frames noch keine GPU-Ergebnisse.
+				// Untergrenze 5 = kGpuTimerRing (4) + 1. Die Konstante selbst steht in
+				// HorizonRendering und ist von hier aus nicht erreichbar — HorizonCore
+				// darf nicht auf das Rendering-Modul zeigen. Wandert der Ring, muss
+				// diese Zahl mit; sie ist bewusst großzügig, der Default liegt weit
+				// darüber.
+				int warmup = 30;
+				if (const char* w = std::getenv("HE_DUMP_PROFILE_WARMUP"); w && *w)
+					warmup = std::max(5, std::atoi(w));
+				if (++s_profileWitnessFrame == warmup)
+				{
+					// Detaillierte GPU-Aufnahme anfordern: das ist es, was auf den
+					// Backends mit asynchronem Ring das Auslesen im selben Frame
+					// erzwingt, statt Werte eines fremden Frames zu melden.
+					profiler.setDetailedGpuCapture(true);
+					s_profileWitnessArmed = true;
+					toggleProfilerCapture();
+					HE_LOG_INFO(Core, "Profiler-Zeuge: Aufnahme gestartet (%d Frame(s) angefordert)", wantFrames);
+				}
+				else if (s_profileWitnessArmed && profiler.isRecording()
+				         && static_cast<int>(profiler.recordedFrames()) >= wantFrames)
+				{
+					s_profileWitnessDone = true;
+					toggleProfilerCapture();   // stoppt + schreibt die Datei
+					HE_LOG_INFO(Core, "Profiler-Zeuge: %zu Frame(s) aufgezeichnet",
+					            profiler.recordedFrames());
+				}
+			}
 
 			HE_PROFILE_FRAME();
 
@@ -536,7 +589,12 @@ namespace HE
             setVSync(false);
 
             ProfSessionInfo info;
-            info.backend = rhiName(m_globalState->getSelectedRHI());
+            // Das TATSÄCHLICH benutzte Backend, nicht das persistierte. `getSelectedRHI()`
+            // kennt nur die config.json und liegt daneben, sobald HE_DUMP_RHI im Spiel ist —
+            // die Aufnahme trüge dann den falschen Namen, und ein Backend-Vergleich
+            // vergliche zwei Dateien mit demselben Etikett. Dieselbe Falle wie in
+            // EditorApplication::OnInit, dort schon behoben.
+            info.backend = rhiName(m_windowApi);
 #ifdef __APPLE__
             info.os = "macOS";
 #elif defined(_WIN32)

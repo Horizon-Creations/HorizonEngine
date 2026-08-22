@@ -19,4 +19,12 @@ inline constexpr int kShadowMapResolution = 2048;
 // Vulkan, D3D11) — the ring *payload* is per-API and stays backend-side.
 inline constexpr int kGpuTimerRing = 4;
 
+// Obergrenze der pro Frame einzeln gemessenen Pässe. Ein Backend legt seine
+// Query-Kapazität danach an, statt sie mitwachsen zu lassen: auf Vulkan muss der
+// Query-Pool zurückgesetzt werden, bevor der erste Render-Pass beginnt, und zu
+// diesem Zeitpunkt ist noch unbekannt, wie viele Pässe der Frame haben wird.
+// Pässe jenseits der Grenze werden verworfen, nie außerhalb des Bereichs
+// geschrieben. OpenGL misst heute 13 — 16 lässt Luft, ohne den Pool aufzublähen.
+inline constexpr int kMaxTimedPasses = 16;
+
 } // namespace HE

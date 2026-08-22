@@ -51,8 +51,10 @@ public:
     void InvalidateMaterial(const HE::UUID& materialId) override;
     void InvalidateMesh(const HE::UUID& meshId) override;
 
-    // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
-    // + this frame's CPU draw/triangle/visibility counters.
+    // D3D11 timestamp timing (ringed, never stalls): whole frame plus — while the
+    // profiler is recording — a per-pass breakdown from timestamp PAIRS inside the
+    // same disjoint window (mode "d3d11-timer"; "whole-frame" when no rows ran).
+    // Plus this frame's CPU draw/triangle/visibility counters.
     FrameGpuStats GetFrameGpuStats() const override;
 
     // Build the node-graph material VS/PS ahead of their first draw (one variant

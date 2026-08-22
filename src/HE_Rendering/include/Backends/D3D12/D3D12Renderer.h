@@ -48,7 +48,15 @@ public:
     void InvalidateMesh(const HE::UUID& meshId) override;
 
     // Whole-frame GPU time from a per-frame-in-flight timestamp query pair
-    // (read back k_frameCount frames late so it never stalls) + CPU counters.
+    // (read back k_frameCount frames late so it never stalls) + CPU counters,
+    // plus a per-pass breakdown from extra timestamp pairs in the same heap
+    // slot (Shadow / SSAO / Opaque / Sky+Clouds / Transparent / Bloom /
+    // Tonemap / FXAA|SMAA|AA Resolve / UI). The whole-frame pair is recorded
+    // unconditionally; the per-pass stamps only while the profiler is
+    // RECORDING, latched once per frame in Render(). gpuTimingMode reports
+    // "d3d12-timer" only when per-pass rows are actually in hand — the rows
+    // arrive k_frameCount frames late, so it reads "whole-frame" for the first
+    // few frames of a capture and again once the capture stops.
     FrameGpuStats GetFrameGpuStats() const override;
 
     // Build the node-graph material PSOs ahead of their first draw. Only the

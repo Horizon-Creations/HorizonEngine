@@ -1314,7 +1314,7 @@ struct D3D11RendererImpl
         return raw;
     }
 
-    // ── Profiler GPU timing (whole-frame) ─────────────────────────────────────
+    // ── Profiler GPU timing (whole-frame + per-pass) ──────────────────────────
     // One D3D11_QUERY_TIMESTAMP pair inside a TIMESTAMP_DISJOINT per frame, kept
     // in a small ring so a slot is only read back HE::kGpuTimerRing frames after
     // it was issued — GetData(flags=0) at that age never blocks in practice, and
@@ -1323,9 +1323,26 @@ struct D3D11RendererImpl
     // path otherwise, mirroring the GL backend). The ring DEPTH is shared with
     // GL/Vulkan; the payload below is D3D11-specific (a DISJOINT query per slot,
     // which nobody else has — see gpuTimerReap's disjoint-frame rejection).
+    //
+    // P1e: the SAME slot now also carries the per-pass breakdown. D3D11 has no
+    // GL_TIME_ELAPSED equivalent, so a pass costs TWO timestamp queries that
+    // bracket it. They sit inside the SAME disjoint window as the whole-frame
+    // pair and therefore share its Frequency AND its disjoint-frame rejection —
+    // a second DISJOINT query would be redundant and could disagree with it.
+    // The passes are strictly sequential siblings (no nesting, see
+    // gpuTimerBeginPass), so their sum is exclusive and additive, which is what
+    // the profiler panel promises for the "d3d11-timer" mode literal.
     struct GpuTimerSlot
     {
         ComPtr<ID3D11Query> disjoint, tsStart, tsEnd;
+        // Per-pass timestamp pairs. Created lazily on first use of an index and
+        // then reused for the life of the slot (mirrors GL's growing query pool);
+        // HE::kMaxTimedPasses caps them, extra passes are dropped, never written
+        // out of range.
+        ComPtr<ID3D11Query> passBegin[HE::kMaxTimedPasses];
+        ComPtr<ID3D11Query> passEnd  [HE::kMaxTimedPasses];
+        const char*         passName [HE::kMaxTimedPasses] = {};
+        int                 passCount = 0;  // passes CLOSED during this use
         bool pending = false; // issued, result not consumed yet
     };
     GpuTimerSlot gpuSlots[HE::kGpuTimerRing];
@@ -1335,6 +1352,8 @@ struct D3D11RendererImpl
     bool     gpuTimingActive = false;
     bool     gpuWasActive    = false;
     bool     gpuDetailed     = false;
+    bool     gpuPerPass      = false; // per-pass timestamps this frame (recording only)
+    int      gpuPassOpen     = -1;    // index of the pass whose begin is issued (-1 = none)
     IRenderer::FrameGpuStats lastGpuStats;
     // CPU counters merged into GetFrameGpuStats (scene draws only, like GL:
     // instanced batches count per instance drawn, tris scaled accordingly).
@@ -1361,14 +1380,40 @@ struct D3D11RendererImpl
             slot.pending = false; // slot is about to be reused — drop the sample
             return;
         }
+        // Per-pass pairs, read BEFORE the slot is released: they were issued
+        // between tsStart and tsEnd, so once those two are readable these are too.
+        // A single unreadable pass query voids the whole breakdown (a partial one
+        // would no longer sum to the frame) — the whole-frame number still stands.
+        struct RawPass { const char* name; UINT64 a, b; };
+        RawPass raw[HE::kMaxTimedPasses];
+        int  rawCount = 0;
+        bool passesOk = true;
+        for (int i = 0; i < slot.passCount && i < HE::kMaxTimedPasses; ++i)
+        {
+            UINT64 a = 0, b = 0;
+            if (!fetch(slot.passBegin[i].Get(), &a, sizeof(a)) ||
+                !fetch(slot.passEnd[i].Get(),   &b, sizeof(b)))
+            { passesOk = false; break; }
+            raw[rawCount++] = { slot.passName[i], a, b };
+        }
         slot.pending = false;
         // Disjoint frames (clock change / power event) yield garbage deltas —
-        // keep the previous reading rather than publishing one.
+        // keep the previous reading rather than publishing one. The per-pass
+        // deltas ride the same clock, so this rejects them together.
         if (dj.Disjoint || dj.Frequency == 0 || t1 < t0) return;
-        lastGpuStats.gpuFrameMs    = static_cast<double>(t1 - t0) * 1000.0
-                                   / static_cast<double>(dj.Frequency);
-        lastGpuStats.passes.clear(); // whole-frame timing: no per-pass breakdown
-        lastGpuStats.gpuTimingMode = "whole-frame";
+        const double toMs = 1000.0 / static_cast<double>(dj.Frequency);
+        lastGpuStats.gpuFrameMs = static_cast<double>(t1 - t0) * toMs;
+        lastGpuStats.passes.clear();
+        if (passesOk && rawCount > 0)
+        {
+            lastGpuStats.passes.reserve(static_cast<size_t>(rawCount));
+            for (int i = 0; i < rawCount; ++i)
+                lastGpuStats.passes.push_back({ raw[i].name,
+                    (raw[i].b > raw[i].a) ? static_cast<double>(raw[i].b - raw[i].a) * toMs : 0.0,
+                    /*approx=*/false }); // exact: a real timestamp pair, not an encoder span
+        }
+        // The mode reports what RAN: only claim per-pass when rows are present.
+        lastGpuStats.gpuTimingMode = lastGpuStats.passes.empty() ? "whole-frame" : "d3d11-timer";
     }
 
     void gpuTimerBeginFrame()
@@ -1379,6 +1424,10 @@ struct D3D11RendererImpl
         const bool rec  = prof.isRecording();
         const bool live = prof.liveEnabled();
         gpuTimingActive = device && (rec || live);
+        // Per-pass timestamps only while RECORDING (the live HUD shows the frame
+        // total only) — same split as GL, so a live-HUD-only frame stays on the
+        // cheap whole-frame path and reports "whole-frame".
+        gpuPerPass  = gpuTimingActive && rec;
         // Same-frame reap (one Flush + spin) for detailed / single-frame capture:
         // the profiler reads that frame's stats immediately, so the async ring
         // would attribute a different frame's GPU time to it (mirrors GL's glFinish).
@@ -1387,6 +1436,9 @@ struct D3D11RendererImpl
         const bool freshActivation = gpuTimingActive && !gpuWasActive;
         gpuWasActive = gpuTimingActive;
         gpuCurSlot   = -1;
+        // Cleared BEFORE the early return: a mid-frame toggle-off would otherwise
+        // strand the index and mute the next activation's first pass.
+        gpuPassOpen  = -1;
         if (!gpuTimingActive) return;
 
         if (!gpuTimerInit)
@@ -1417,10 +1469,68 @@ struct D3D11RendererImpl
         const int idx = static_cast<int>(gpuFrameIdx % HE::kGpuTimerRing);
         GpuTimerSlot& slot = gpuSlots[idx];
         gpuTimerReap(slot, /*block=*/false); // issued HE::kGpuTimerRing frames ago
+        slot.passCount = 0;                  // recycle AFTER the reap consumed it
         gpuCurSlot = idx;
         context->Begin(slot.disjoint.Get());
         context->End(slot.tsStart.Get()); // timestamps have no Begin, only End
     }
+
+    // Bracket one pass with a timestamp pair. Returns true iff a begin was issued
+    // (the caller must then close it — use GpuPassScope, never a bare call).
+    bool gpuTimerBeginPass(const char* name)
+    {
+        if (!gpuPerPass || gpuCurSlot < 0) return false;
+        // No nesting: the rows must stay exclusive siblings or the sum silently
+        // stops being additive. An inner Begin is a no-op, like GL's.
+        if (gpuPassOpen >= 0) return false;
+        GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        const int i = slot.passCount;
+        if (i >= HE::kMaxTimedPasses) return false; // over cap → drop, never overflow
+        if (!slot.passBegin[i] || !slot.passEnd[i])
+        {
+            const D3D11_QUERY_DESC tq{ D3D11_QUERY_TIMESTAMP, 0 };
+            if (FAILED(device->CreateQuery(&tq, &slot.passBegin[i])) ||
+                FAILED(device->CreateQuery(&tq, &slot.passEnd[i])))
+            {
+                slot.passBegin[i].Reset();
+                slot.passEnd[i].Reset();
+                return false; // no query pair → this pass simply goes untimed
+            }
+        }
+        slot.passName[i] = name; // static literal, owned by the caller
+        gpuPassOpen      = i;
+        context->End(slot.passBegin[i].Get());
+        return true;
+    }
+
+    void gpuTimerEndPass()
+    {
+        if (gpuPassOpen < 0 || gpuCurSlot < 0) return;
+        GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        context->End(slot.passEnd[gpuPassOpen].Get());
+        // Committed only now, so a pass that never closed can never be reaped.
+        slot.passCount = gpuPassOpen + 1;
+        gpuPassOpen    = -1;
+    }
+
+    // RAII pass timer, shaped like OpenGLRenderer::GpuPassScope: an early return
+    // can never leave a begin without its end. end() closes it early so two
+    // SIBLING passes can share one C++ scope without nesting (and without
+    // re-indenting the region); it is idempotent, so the destructor cannot
+    // double-end.
+    struct GpuPassScope
+    {
+        D3D11RendererImpl* r;
+        bool               active;
+        // The Begin runs in the constructor BODY, not the init list: only a
+        // function body is a complete-class context for the enclosing impl.
+        GpuPassScope(D3D11RendererImpl* r_, const char* name)
+            : r(r_), active(false) { active = r->gpuTimerBeginPass(name); }
+        void end() { if (active) { r->gpuTimerEndPass(); active = false; } }
+        ~GpuPassScope() { end(); }
+        GpuPassScope(const GpuPassScope&)            = delete;
+        GpuPassScope& operator=(const GpuPassScope&) = delete;
+    };
 
     void gpuTimerEndFrame()
     {
@@ -1440,6 +1550,8 @@ struct D3D11RendererImpl
         for (GpuTimerSlot& s : gpuSlots) s = GpuTimerSlot{};
         gpuTimerInit = false;
         gpuWasActive = false;
+        gpuPerPass   = false;
+        gpuPassOpen  = -1;
         lastGpuStats = IRenderer::FrameGpuStats{};
     }
 
@@ -4513,7 +4625,10 @@ void D3D11Renderer::DrawScene(int width, int height)
 
     // Sky is independent of scene geometry — always draw it here so it renders
     // even when objects/sortedIndices are empty (early returns below).
+    // Timed as its own row under GL's name; unlike GL (where the sky is a sibling
+    // AFTER the opaque geometry) D3D11 draws it first, so it leads the breakdown.
     {
+        D3D11RendererImpl::GpuPassScope _skyTimer(&p, "Sky+Clouds");
         ID3D11DeviceContext* skyCtx = p.context.Get();
         const glm::mat4 skyVP = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
         p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment);
@@ -4685,6 +4800,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         if (io.output.id == kShadowMapTarget)
         {
             if (!shadows) return;
+            D3D11RendererImpl::GpuPassScope _shadowTimer(&p, "Shadow"); // closes at this branch's return
             // Save the active render target so we can restore it after the shadow pass.
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
@@ -4758,6 +4874,9 @@ void D3D11Renderer::DrawScene(int width, int height)
 
         ID3D11ShaderResourceView* aoSRV = p.whiteSRV.Get(); // default: unoccluded
         if (!giShadingActive && p.ssaoEnabled && p.ssaoReady) {
+            // Timed only when it actually runs — an always-present 0 ms SSAO row
+            // would claim the pass ran and cost nothing.
+            D3D11RendererImpl::GpuPassScope _ssaoTimer(&p, "SSAO");
             // Save and restore render target around SSAO passes
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
@@ -4773,6 +4892,15 @@ void D3D11Renderer::DrawScene(int width, int height)
             D3D11_VIEWPORT vp{}; vp.Width = float(width); vp.Height = float(height); vp.MaxDepth = 1.0f;
             ctx->RSSetViewports(1, &vp);
         }
+
+        // ── Opaque ───────────────────────────────────────────────────────────
+        // Opened here, not at the draw loop, so the post-SSAO state rebind and
+        // the per-frame CB refills below are attributed to the pass they serve —
+        // otherwise that GPU work falls out of every row and the breakdown stops
+        // summing to the frame. Mirrors GL, which begins "Opaque" at the same
+        // point (right after the SSAO block, before the scene-state rebind).
+        // Closed explicitly before the transparent pass: siblings, never nested.
+        D3D11RendererImpl::GpuPassScope _opaqueTimer(&p, "Opaque");
 
         // Re-bind scene shaders after SSAO (SSAO pass changes shaders/samplers)
         ctx->IASetInputLayout(p.inputLayout.Get());
@@ -5114,6 +5242,14 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->IASetInputLayout(p.inputLayout.Get());
         }
 
+        // ── Transparent ──────────────────────────────────────────────────────
+        // Blended geometry + debug lines, exactly what GL's "Transparent" row
+        // covers. Unconditional WITHIN the graph pass (like GL's), so nothing
+        // blended being visible still yields the row — but note DrawScene returns
+        // before the graph on an empty scene, and then Shadow/SSAO/Opaque/
+        // Transparent are all absent for that frame, not zero.
+        _opaqueTimer.end(); // sibling boundary
+        D3D11RendererImpl::GpuPassScope _transparentTimer(&p, "Transparent");
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
@@ -5172,8 +5308,13 @@ void D3D11Renderer::Render()
             // Bloom bright-pass + ping-pong blur → bloomTex[0] (or dummyTexture if disabled).
             const uint32_t bw = std::max(1u, p.viewportW / 2);
             const uint32_t bh = std::max(1u, p.viewportH / 2);
-            ID3D11ShaderResourceView* bloomResult =
-                p.bloomEnabled ? p.runBloom(bw, bh) : p.dummyTexture.Get();
+            // Timed only when bloom actually runs (GL gates its row the same way).
+            ID3D11ShaderResourceView* bloomResult = p.dummyTexture.Get();
+            if (p.bloomEnabled)
+            {
+                D3D11RendererImpl::GpuPassScope _bloomTimer(&p, "Bloom");
+                bloomResult = p.runBloom(bw, bh);
+            }
 
             // Restore full-res viewport for the tonemap and FXAA passes.
             p.context->RSSetViewports(1, &vvp);
@@ -5187,7 +5328,8 @@ void D3D11Renderer::Render()
             p.context->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
 
             // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
-            { const float cb[4] = { p.exposure,
+            { D3D11RendererImpl::GpuPassScope _tonemapTimer(&p, "Tonemap");
+              const float cb[4] = { p.exposure,
                                     p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
               p.updatePostFxCB(cb);
               p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
@@ -5199,13 +5341,19 @@ void D3D11Renderer::Render()
 
             // AA resolve: ldrSRV → viewportRTV (final output sampled by ImGui).
             // Always drawn — the method only picks the pixel shader.
-            { const float cb[4] = { 1.0f / float(p.viewportW),
+            // The ROW is named off the method the same way GL names its own
+            // (AA Resolve / SMAA / FXAA), so HE_DUMP_AA cannot make the row lie.
+            { const bool aaOff  = (p.aaMethod == HE::AAMethod::Off);
+              const bool aaSmaa = (p.aaMethod == HE::AAMethod::SMAA);
+              D3D11RendererImpl::GpuPassScope _aaTimer(
+                  &p, aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
+              const float cb[4] = { 1.0f / float(p.viewportW),
                                     1.0f / float(p.viewportH), 0, 0 };
               p.updatePostFxCB(cb);
               p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
-              p.context->PSSetShader(p.aaMethod == HE::AAMethod::Off  ? p.aaBlitPS.Get()
-                                   : p.aaMethod == HE::AAMethod::SMAA ? p.smaaPS.Get()
-                                                                      : p.fxaaPS.Get(), nullptr, 0);
+              p.context->PSSetShader(aaOff  ? p.aaBlitPS.Get()
+                                   : aaSmaa ? p.smaaPS.Get()
+                                            : p.fxaaPS.Get(), nullptr, 0);
               ID3D11ShaderResourceView* srv = p.ldrSRV.Get();
               p.context->PSSetShaderResources(0, 1, &srv);
               p.context->Draw(3, 0);
@@ -5221,7 +5369,11 @@ void D3D11Renderer::Render()
         // UI canvas pass: draw onto the final composited viewport target (after tonemap/FXAA).
         p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
         p.context->RSSetViewports(1, &vvp);
-        p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+        // Timed HERE, not inside renderUIPass: RenderWidgetThumbnail calls that
+        // same function OUT of frame, which would open a pass in a slot no frame
+        // owns and corrupt the breakdown.
+        { D3D11RendererImpl::GpuPassScope _uiTimer(&p, "UI");
+          p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH)); }
         { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 
         // ImGui overlay → swapchain RT (clear first so it's a clean dark bg).
@@ -5243,7 +5395,9 @@ void D3D11Renderer::Render()
         p.context->RSSetViewports(1, &vp);
         DrawScene(p.width, p.height);
         // UI canvas pass: swapchain RT + scene viewport already bound.
-        p.renderUIPass(p.context.Get(), p.width, p.height);
+        // Timed at the call site, see the viewport branch above.
+        { D3D11RendererImpl::GpuPassScope _uiTimer(&p, "UI");
+          p.renderUIPass(p.context.Get(), p.width, p.height); }
     }
 
     if (m_overlayCallback) m_overlayCallback(nullptr);

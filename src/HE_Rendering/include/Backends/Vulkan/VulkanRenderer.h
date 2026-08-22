@@ -1162,21 +1162,58 @@ private:
 	void drawSkelBoneOverlay(VkCommandBuffer cmd, uint32_t vertexCount);
 
 	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
-	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than
+	// Per ring slot: two frame timestamps (begin/end) + a FIXED block of
+	// 2 × kTimedPasses per-pass timestamps. The ring is deeper than
 	// k_maxFramesInFlight so the slot reused each frame finished at least one
 	// fence-wait ago — its readback (availability-checked, no RESULT_WAIT)
 	// never stalls. GetFrameGpuStats therefore reports 1–N frames late,
 	// matching the OpenGL backend's async timer ring.
+	//
+	// The per-pass block is FIXED (not grown on demand) because
+	// vkCmdResetQueryPool may not be recorded inside a render pass: the only
+	// point that is reliably outside one is gpuTimerBegin, and there the number
+	// of passes this frame is still unknown. So the whole slot is reset up
+	// front and passes beyond the cap are dropped rather than written OOB.
+	//
+	// Whole-frame timing stays UNGATED (as before). Only the per-pass stamps are
+	// gated on the profiler, latched ONCE per frame in gpuTimerBegin so a
+	// mid-frame toggle can never leave a pass opened without its close stamp.
 	void gpuTimerInit();                       // after device creation
 	void gpuTimerBegin(VkCommandBuffer cmd);   // reap oldest slot + start stamp
 	void gpuTimerEnd(VkCommandBuffer cmd);     // end stamp + advance the ring
+	// Per-pass stamps. BOTH stamps use VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: a
+	// TOP_OF_PIPE open would latch before the PRECEDING pass had drained, giving
+	// overlapping, non-additive spans that still look plausible. (The frame-open
+	// stamp may use TOP_OF_PIPE only because nothing precedes it.)
+	bool gpuPassBegin(VkCommandBuffer cmd, const char* name); // true if a pass was opened
+	void gpuPassEnd(VkCommandBuffer cmd);
 	static constexpr uint32_t kGpuTimerRing = HE::kGpuTimerRing;
+	static constexpr uint32_t kTimedPasses  = static_cast<uint32_t>(HE::kMaxTimedPasses);
+	static constexpr uint32_t kSlotStamps   = 2u + 2u * kTimedPasses; // per ring slot
 	VkQueryPool m_tsQueryPool = VK_NULL_HANDLE;
 	bool        m_tsSupported = false;
 	float       m_tsPeriodNs  = 0.0f;               // ns per timestamp tick
 	uint64_t    m_tsValidMask = 0;                  // queue timestampValidBits mask
 	bool        m_tsPending[kGpuTimerRing] = {};    // slot has unread results
 	uint64_t    m_tsFrameIdx  = 0;
+	// ── per-pass state ──────────────────────────────────────────────────────
+	bool            m_tsPerPass   = false;          // per-pass stamps this frame (latched)
+	uint32_t        m_tsCurSlot   = 0;              // ring slot this frame writes into
+	VkCommandBuffer m_tsFrameCmd  = VK_NULL_HANDLE; // the frame cmd buffer stamps belong to
+	int             m_tsOpenPass  = -1;             // index of the open pass (-1 = none)
+	uint32_t        m_tsPassCount[kGpuTimerRing]              = {}; // passes stamped per slot
+	const char*     m_tsPassName [kGpuTimerRing][kTimedPasses] = {}; // static literals
+	// RAII pass timer: pairs begin/end across early returns so an unbalanced
+	// open (→ a pass whose close stamp never lands) is impossible.
+	struct GpuPassScope
+	{
+		VulkanRenderer* r; VkCommandBuffer cmd; bool active;
+		GpuPassScope(VulkanRenderer* r_, VkCommandBuffer c, const char* name)
+			: r(r_), cmd(c), active(r_->gpuPassBegin(c, name)) {}
+		~GpuPassScope() { if (active) r->gpuPassEnd(cmd); }
+		GpuPassScope(const GpuPassScope&)            = delete;
+		GpuPassScope& operator=(const GpuPassScope&) = delete;
+	};
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;

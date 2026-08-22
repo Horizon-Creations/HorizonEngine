@@ -48,6 +48,7 @@
 #include <cmath>
 #include <functional> // A4: std::hash<std::string> for the WPO custom-vertex cache key
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/EngineProfiler.h>  // per-pass GPU timing gate (isRecording latch)
 
 using Microsoft::WRL::ComPtr;
 
@@ -1242,16 +1243,82 @@ struct D3D12RendererImpl
     std::unordered_map<SDL_Window*, SecondaryWindow> secondaryWindows;
 
     // ── GPU frame timing (timestamp query heap) ─────────────────────────────
-    // Two timestamps per frame-in-flight slot (list begin/end), resolved into a
-    // persistently-mapped READBACK buffer at end-of-list. A slot is only read the
-    // next time that slot is reused — i.e. after waitForFrame(slot) — so the value
-    // consumed is k_frameCount frames old and the readback never stalls the CPU.
-    ComPtr<ID3D12QueryHeap> tsQueryHeap;              // 2 × k_frameCount timestamps
-    ComPtr<ID3D12Resource>  tsReadback;               // 2 × k_frameCount × uint64
+    // ONE query heap, sliced per frame-in-flight slot. Slot layout (k_tsPerFrame
+    // queries, the ONLY stride in this file — every allocation and every index
+    // below derives from it, never from a literal 2):
+    //     base + 0                  whole-frame begin   (ungated, every frame)
+    //     base + 1                  whole-frame end     (ungated, every frame)
+    //     base + 2 + 2*i            pass i begin        (per-pass, profiler-gated)
+    //     base + 2 + 2*i + 1        pass i end
+    // Everything is resolved into a persistently-mapped READBACK buffer at
+    // end-of-list. A slot is only read the next time that slot is reused — i.e.
+    // after waitForFrame(slot) — so the value consumed is k_frameCount frames old
+    // and the readback never stalls the CPU. The flip side, stated plainly: the
+    // first k_frameCount frames after the profiler starts recording have no
+    // per-pass results yet and honestly report "whole-frame" (unlike GL, which
+    // does glFinish + same-frame reap under detailedGpuCapture(); D3D12 does NOT
+    // add that stall).
+    static constexpr UINT k_tsPassPairs = static_cast<UINT>(HE::kMaxTimedPasses);
+    static constexpr UINT k_tsPerFrame  = 2 + 2 * k_tsPassPairs;
+    static UINT tsBase(UINT fi) { return fi * k_tsPerFrame; }
+
+    ComPtr<ID3D12QueryHeap> tsQueryHeap;              // k_tsPerFrame × k_frameCount timestamps
+    ComPtr<ID3D12Resource>  tsReadback;               // k_tsPerFrame × k_frameCount × uint64
     const uint64_t*         tsReadbackPtr = nullptr;  // READBACK buffers may stay mapped
     UINT64                  tsFrequency   = 0;        // ticks/s; 0 → timing unavailable
     bool                    tsPending[k_frameCount]{};
     double                  lastGpuFrameMs = -1.0;    // newest reaped whole-frame time
+
+    // ── Per-pass GPU timing (profiler trace) ────────────────────────────────
+    // Latched ONCE per frame in Render() so a mid-frame profiler toggle can never
+    // leave a begin without its end. Costs nothing while the profiler is closed:
+    // tsPerPass stays false, tsBeginPass returns false on its first test, and the
+    // RAII scopes below never record a single EndQuery.
+    bool tsPerPass = false;                       // per-pass stamps this frame
+    bool tsInFrame = false;                       // between cmdList->Reset() and Close()
+    bool tsPassOpen = false;                      // a pass scope is currently open (no nesting)
+    UINT tsPassCount[k_frameCount]{};             // passes recorded into each slot
+    const char* tsPassNames[k_frameCount][k_tsPassPairs]{}; // static literals only
+    std::vector<IRenderer::GpuPassTime> lastGpuPasses;      // newest reaped per-pass rows
+
+    // Begin a timed pass on the FRAME command list. No-ops (returns false) unless
+    // the profiler latched per-pass timing on this frame AND we are inside the
+    // frame's Reset/Close window — the thumbnail / preview / secondary-window paths
+    // share the device but own their allocators and lists, and an EndQuery from one
+    // of them would overwrite a slot the frame owns.
+    bool tsBeginPass(ID3D12GraphicsCommandList* cl, const char* name)
+    {
+        if (!tsPerPass || !tsInFrame || !cl) return false;
+        if (tsPassOpen) return false;                              // no nesting: sum stays exclusive
+        UINT& n = tsPassCount[frameIndex];
+        if (n >= k_tsPassPairs) return false;                      // capacity: drop, never overflow
+        cl->EndQuery(tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, tsBase(frameIndex) + 2 + 2 * n);
+        tsPassNames[frameIndex][n] = name ? name : "";
+        tsPassOpen = true;
+        return true;
+    }
+    void tsEndPass(ID3D12GraphicsCommandList* cl)
+    {
+        if (!tsPassOpen || !cl) return;
+        UINT& n = tsPassCount[frameIndex];
+        cl->EndQuery(tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, tsBase(frameIndex) + 2 + 2 * n + 1);
+        ++n;
+        tsPassOpen = false;
+    }
+    // RAII pass timer (mirrors OpenGLRenderer::GpuPassScope): pairs begin/end
+    // across early returns, so an unbalanced begin is impossible.
+    struct PassScope
+    {
+        D3D12RendererImpl*         p;
+        ID3D12GraphicsCommandList* cl;
+        bool                       active;
+        PassScope(D3D12RendererImpl* p_, ID3D12GraphicsCommandList* cl_, const char* name)
+            : p(p_), cl(cl_), active(p_->tsBeginPass(cl_, name)) {}
+        ~PassScope() { if (active) p->tsEndPass(cl); }
+        PassScope(const PassScope&)            = delete;
+        PassScope& operator=(const PassScope&) = delete;
+    };
+
     // CPU counters (draws/tris this frame, cull results) merged by GetFrameGpuStats.
     uint32_t statDraws = 0, statTris = 0, statVisible = 0, statTotal = 0;
 
@@ -1264,7 +1331,7 @@ struct D3D12RendererImpl
         }
         D3D12_QUERY_HEAP_DESC qd{};
         qd.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-        qd.Count = 2 * k_frameCount;
+        qd.Count = k_tsPerFrame * k_frameCount;   // STRIDE SITE 1/6
         if (FAILED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&tsQueryHeap))))
         {
             tsFrequency = 0;
@@ -1273,7 +1340,7 @@ struct D3D12RendererImpl
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width            = 2ull * k_frameCount * sizeof(uint64_t);
+        rd.Width            = static_cast<UINT64>(k_tsPerFrame) * k_frameCount * sizeof(uint64_t); // STRIDE SITE 2/6
         rd.Height           = 1;
         rd.DepthOrArraySize = 1;
         rd.MipLevels        = 1;
@@ -1686,67 +1753,83 @@ struct D3D12RendererImpl
         barrier12(cl, hdrRT.Get(), hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         hdrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-        // ── Bloom bright pass: hdrSRV → bloomRT[0] ─────────────────────────
-        barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
-        bloomState[0] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        setRTV(bloomRtvHeap[0]); setVP(bw, bh);
-        cl->SetPipelineState(bloomBrightPSO.Get());
-        { const float cb[4]={bloomThreshold,bloomKnee,0,0};
-          cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
-        cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
-        cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(0)); // t1=dummy
-        cl->DrawInstanced(3,1,0,0);
-
-        // ── 10 ping-pong blur passes ────────────────────────────────────────
-        cl->SetPipelineState(bloomBlurPSO.Get());
-        bool horiz = true;
-        for (int pass = 0; pass < 10; ++pass)
+        // ── Bloom bright pass + 10 ping-pong blur passes ───────────────────
         {
-            const int dst = horiz?1:0, src = horiz?0:1;
-            barrier12(cl, bloomRT[dst].Get(), bloomState[dst], D3D12_RESOURCE_STATE_RENDER_TARGET);
-            bloomState[dst] = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            barrier12(cl, bloomRT[src].Get(), bloomState[src], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            bloomState[src] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            setRTV(bloomRtvHeap[dst]); setVP(bw, bh);
-            const float cb[4]={tw,th,horiz?1.0f:0.0f,0.0f};
-            cl->SetGraphicsRoot32BitConstants(0,4,cb,0);
-            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(static_cast<UINT>(2+src))); // t0=bloom[src]
+            PassScope _bloom(this, cl, "Bloom");
+            // Bloom bright pass: hdrSRV → bloomRT[0]
+            barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_RENDER_TARGET);
+            bloomState[0] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            setRTV(bloomRtvHeap[0]); setVP(bw, bh);
+            cl->SetPipelineState(bloomBrightPSO.Get());
+            { const float cb[4]={bloomThreshold,bloomKnee,0,0};
+              cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
             cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(0)); // t1=dummy
             cl->DrawInstanced(3,1,0,0);
-            horiz = !horiz;
+
+            cl->SetPipelineState(bloomBlurPSO.Get());
+            bool horiz = true;
+            for (int pass = 0; pass < 10; ++pass)
+            {
+                const int dst = horiz?1:0, src = horiz?0:1;
+                barrier12(cl, bloomRT[dst].Get(), bloomState[dst], D3D12_RESOURCE_STATE_RENDER_TARGET);
+                bloomState[dst] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                barrier12(cl, bloomRT[src].Get(), bloomState[src], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                bloomState[src] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+                setRTV(bloomRtvHeap[dst]); setVP(bw, bh);
+                const float cb[4]={tw,th,horiz?1.0f:0.0f,0.0f};
+                cl->SetGraphicsRoot32BitConstants(0,4,cb,0);
+                cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(static_cast<UINT>(2+src))); // t0=bloom[src]
+                cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(0)); // t1=dummy
+                cl->DrawInstanced(3,1,0,0);
+                horiz = !horiz;
+            }
+            // After 10 passes: bloom result in bloomRT[0] (slot 2), currently RT.
+            // Transition to SRV so tonemap can sample it.
+            barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            bloomState[0] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         }
-        // After 10 passes: bloom result in bloomRT[0] (slot 2), currently RT.
-        // Transition to SRV so tonemap can sample it.
-        barrier12(cl, bloomRT[0].Get(), bloomState[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        bloomState[0] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
         // ── Tonemap: (hdrSRV, bloomSRV[0]) → ldrRT ─────────────────────────
-        barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        setRTV(ldrRtvHeap); setVP(w, h);
-        cl->SetPipelineState(tonemapPSO.Get());
-        { const float cb[4]={exposure, bloomEnabled?bloomStrength:0.0f, 0,0};
-          cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
-        cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
-        cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
-        cl->DrawInstanced(3,1,0,0);
+        {
+            PassScope _tonemap(this, cl, "Tonemap");
+            barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            setRTV(ldrRtvHeap); setVP(w, h);
+            cl->SetPipelineState(tonemapPSO.Get());
+            { const float cb[4]={exposure, bloomEnabled?bloomStrength:0.0f, 0,0};
+              cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
+            cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
+            cl->DrawInstanced(3,1,0,0);
+        }
 
         // ── AA resolve: ldrSRV → viewportRT (method picks the PSO) ────────
-        barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        barrier12(cl, viewportRT.Get(), viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        { D3D12_CPU_DESCRIPTOR_HANDLE vrtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-          cl->OMSetRenderTargets(1, &vrtv, FALSE, nullptr); }
-        setVP(w, h);
-        cl->SetPipelineState(aaMethod == HE::AAMethod::Off  ? aaBlitPSO.Get()
-                           : aaMethod == HE::AAMethod::SMAA ? smaaPSO.Get()
-                                                            : fxaaPSO.Get());
-        { const float cb[4]={1.0f/float(w),1.0f/float(h),0,0};
-          cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
-        cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(4)); // t0=ldrSRV
-        cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(0)); // t1=dummy
-        cl->DrawInstanced(3,1,0,0);
+        // The pass ALWAYS runs — it is what fills the output target; the AA method
+        // only decides which PSO does it. The row is named off the method exactly
+        // as OpenGL names its own (AA Resolve / SMAA / FXAA), read from the SAME
+        // aaMethod the PSO selection below reads, so the label can never disagree
+        // with what actually ran.
+        {
+            const bool aaOff  = (aaMethod == HE::AAMethod::Off);
+            const bool aaSmaa = (aaMethod == HE::AAMethod::SMAA);
+            PassScope _aa(this, cl, aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
+            barrier12(cl, ldrRT.Get(), ldrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            barrier12(cl, viewportRT.Get(), viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            { D3D12_CPU_DESCRIPTOR_HANDLE vrtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+              cl->OMSetRenderTargets(1, &vrtv, FALSE, nullptr); }
+            setVP(w, h);
+            cl->SetPipelineState(aaOff  ? aaBlitPSO.Get()
+                               : aaSmaa ? smaaPSO.Get()
+                                        : fxaaPSO.Get());
+            { const float cb[4]={1.0f/float(w),1.0f/float(h),0,0};
+              cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
+            cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(4)); // t0=ldrSRV
+            cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(0)); // t1=dummy
+            cl->DrawInstanced(3,1,0,0);
+        }
 
         // Transition viewport RT to PSR so ImGui can sample it.
         barrier12(cl, viewportRT.Get(), viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -5753,8 +5836,11 @@ struct D3D12RendererImpl
     // stalled tile can never desynchronise the frame ring.
     //
     // NOTE: these paths NEVER EndQuery/ResolveQueryData on tsQueryHeap. That heap
-    // is a 2×k_frameCount ring owned by Render(); writing a stray pair out of frame
-    // would corrupt GetFrameGpuStats (:7315) and surface as a profiler bug.
+    // is a k_tsPerFrame×k_frameCount ring owned by Render() — whole-frame pair plus
+    // the per-pass stamps — and writing a stray stamp out of frame would corrupt
+    // GetFrameGpuStats and surface as a profiler bug. Enforced, not just documented:
+    // tsBeginPass refuses unless D3D12RendererImpl::tsInFrame is latched, and that
+    // latch only exists between the frame's cmdList->Reset() and Close().
     ComPtr<ID3D12Resource>       previewRT;        // R8G8B8A8_UNORM (never _SRGB), kept in RENDER_TARGET
     ComPtr<ID3D12Resource>       previewDepth;     // D32_FLOAT, kept in DEPTH_WRITE
     ComPtr<ID3D12Resource>       previewReadback;  // READBACK heap, row-pitch aligned
@@ -7567,6 +7653,10 @@ void D3D12Renderer::Shutdown()
     if (m_impl->tsReadbackPtr) { m_impl->tsReadback->Unmap(0, nullptr); m_impl->tsReadbackPtr = nullptr; }
     m_impl->tsReadback.Reset();
     m_impl->tsQueryHeap.Reset();
+    // Per-pass state must die with the heap: a later GetFrameGpuStats would
+    // otherwise still publish rows (and "d3d12-timer") for a torn-down timer.
+    m_impl->tsPerPass = m_impl->tsInFrame = m_impl->tsPassOpen = false;
+    m_impl->lastGpuPasses.clear();
     m_impl->cmdList.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
     {
@@ -7607,6 +7697,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // it always renders even when objects/sortedIndices is empty.
     {
         const glm::mat4 svp = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+        // Sky + volumetric clouds are one draw here (the cloud raymarch lives in the
+        // sky PS), so they share GL's single "Sky+Clouds" row.
+        D3D12RendererImpl::PassScope _sky(&p, cl, "Sky+Clouds");
         p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment);
     }
 
@@ -7765,7 +7858,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // ── Shadow pass: depth from the light's POV ─────────────────────────
         if (io.output.id == kShadowMapTarget)
         {
-            if (!shadows) return;
+            if (!shadows) return;   // NOT timed: no shadow work is recorded at all
+            // Ends (EndQuery) at this branch's return, RTV-restore included.
+            D3D12RendererImpl::PassScope _shadow(&p, cl, "Shadow");
             transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                        D3D12_RESOURCE_STATE_DEPTH_WRITE);
             D3D12_CPU_DESCRIPTOR_HANDLE sdsv = p.dsvHandle(1);
@@ -7873,6 +7968,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // Skipped entirely when GI shades this frame (probe indirect replaces AO).
         if (!giShadingActive && p.ssaoEnabled && p.ssaoReady)
         {
+            D3D12RendererImpl::PassScope _ssao(&p, cl, "SSAO");
             if (p.ssaoW != width || p.ssaoH != height)
                 p.createSSAOTargets(width, height);
             p.runSSAO(cl, p.frameIndex, opaqueDCs,
@@ -8145,6 +8241,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         auto* scenePso = p.usingHDR && p.hdrPso ? p.hdrPso.Get() : p.pso.Get();
         auto* transePso = p.usingHDR && p.hdrTransparentPso ? p.hdrTransparentPso.Get() : p.transparentPSO.Get();
+
+        // ── "Opaque": built-in + graph-material + skinned draws ─────────────
+        // Opened unconditionally (like GL's), so the row is present every frame
+        // rather than blinking in and out with the draw set.
+        {
+        D3D12RendererImpl::PassScope _opaque(&p, cl, "Opaque");
         activeScenePso = scenePso; // A4: graph-material draws in the opaque pass restore THIS
         cl->SetPipelineState(scenePso);
         for (const DrawCall* dc : opaqueDCs) drawDC12(*dc);
@@ -8227,7 +8329,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
             cl->SetPipelineState(scenePso);
         }
+        }   // end "Opaque"
 
+        // ── "Transparent": blended draws + debug lines ──────────────────────
+        // Same grouping and the same unconditional open as GL's "Transparent"
+        // row (transparency + debug lines; D3D12 has no CPU/GPU particle pass).
+        {
+        D3D12RendererImpl::PassScope _transparent(&p, cl, "Transparent");
         if (!transparentDCs.empty() && transePso) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
@@ -8247,6 +8355,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
         }
+        }   // end "Transparent"
     });
 }
 
@@ -8298,20 +8407,57 @@ void D3D12Renderer::Render()
 
     // Reap this slot's timestamps from k_frameCount frames ago: the fence wait
     // above guarantees the resolve completed, so the mapped read never stalls.
+    // tsPassCount[frameIndex] still holds THAT frame's pass count (it is cleared
+    // below, after this read) and tsPassNames[frameIndex] its names.
     if (p.tsPending[p.frameIndex] && p.tsReadbackPtr && p.tsFrequency)
     {
-        const uint64_t t0 = p.tsReadbackPtr[2 * p.frameIndex];
-        const uint64_t t1 = p.tsReadbackPtr[2 * p.frameIndex + 1];
+        const UINT     rb = D3D12RendererImpl::tsBase(p.frameIndex);   // STRIDE SITE 3/6
+        const uint64_t t0 = p.tsReadbackPtr[rb];
+        const uint64_t t1 = p.tsReadbackPtr[rb + 1];
         p.lastGpuFrameMs = (t1 > t0)
             ? static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(p.tsFrequency)
             : 0.0;
+        // Per-pass rows for the same slot. Rebuilt from scratch every reap, so the
+        // list empties on its own within k_frameCount frames of the profiler
+        // closing — GetFrameGpuStats then falls back to "whole-frame" rather than
+        // republishing stale rows.
+        p.lastGpuPasses.clear();
+        const UINT n = p.tsPassCount[p.frameIndex];
+        p.lastGpuPasses.reserve(n);
+        for (UINT i = 0; i < n; ++i)
+        {
+            const uint64_t b = p.tsReadbackPtr[rb + 2 + 2 * i];
+            const uint64_t e = p.tsReadbackPtr[rb + 2 + 2 * i + 1];
+            p.lastGpuPasses.push_back({ p.tsPassNames[p.frameIndex][i],
+                                        (e > b) ? static_cast<double>(e - b) * 1000.0
+                                                      / static_cast<double>(p.tsFrequency)
+                                                : 0.0,
+                                        /*approx=*/false });
+        }
         p.tsPending[p.frameIndex] = false;
     }
 
+    // ── Per-pass gate, latched ONCE for this frame ─────────────────────────
+    // Read the profiler exactly here and nowhere else in the frame, so a toggle
+    // that flips mid-frame can never leave a pass begun and not ended. Only
+    // isRecording() matters: the live HUD's ProfLiveFrame carries no per-pass
+    // field, so per-pass stamps while merely "live" would be dead work (this is
+    // also the net effect of OpenGLRenderer::GpuTimerBeginFrame's two flags).
+    // The whole-frame pair below stays UNGATED, exactly as before this change.
+    p.tsPerPass = p.tsQueryHeap && p.tsReadback && p.tsFrequency
+                  && EngineProfiler::instance().isRecording();
+
     p.cmdAllocators[p.frameIndex]->Reset();
     p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
+    // Unconditional (NOT inside the reap branch above): the slot's pass cursor
+    // must restart even on the first k_frameCount frames and when timestamps are
+    // unavailable, or the query indices would drift.
+    p.tsPassCount[p.frameIndex] = 0;
+    p.tsPassOpen = false;
+    p.tsInFrame  = true;   // ONLY between here and cmdList->Close() may passes stamp
     if (p.tsQueryHeap)
-        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex);
+        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                            D3D12RendererImpl::tsBase(p.frameIndex));   // STRIDE SITE 4/6
 
     // CPU counters restart each frame; DrawScene fills them back in.
     p.statDraws = p.statTris = p.statVisible = p.statTotal = 0;
@@ -8356,8 +8502,16 @@ void D3D12Renderer::Render()
                 p.cmdList->RSSetViewports(1, &uivp);
                 p.cmdList->RSSetScissorRects(1, &uisc);
             }
-            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+            // The "UI" scope sits at the CALL SITE, never inside renderUIPass12:
+            // RenderWidgetThumbnail calls that same function out of frame with a
+            // hardcoded frame index, and timing it there would stamp into a slot
+            // the frame owns. (tsInFrame would already refuse it — this keeps the
+            // two facts from ever needing to agree.)
+            {
+                D3D12RendererImpl::PassScope _ui(&p, p.cmdList.Get(), "UI");
+                p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                                 static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+            }
             // Transition back to PSR so ImGui can sample viewportRT.
             p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                         p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -8392,8 +8546,11 @@ void D3D12Renderer::Render()
                 p.cmdList->RSSetViewports(1, &uivp);
                 p.cmdList->RSSetScissorRects(1, &uisc);
             }
-            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+            {   // "UI" at the call site — see the note in the HDR branch above.
+                D3D12RendererImpl::PassScope _ui(&p, p.cmdList.Get(), "UI");
+                p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                                 static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+            }
 
             p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
                         p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -8434,7 +8591,10 @@ void D3D12Renderer::Render()
             p.cmdList->RSSetViewports(1, &uivp);
             p.cmdList->RSSetScissorRects(1, &uisc);
         }
-        p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
+        {   // "UI" at the call site — see the note in the HDR viewport branch above.
+            D3D12RendererImpl::PassScope _ui(&p, p.cmdList.Get(), "UI");
+            p.renderUIPass12(p.cmdList.Get(), p.frameIndex, p.width, p.height);
+        }
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
@@ -8445,12 +8605,18 @@ void D3D12Renderer::Render()
     p.cmdList->ResourceBarrier(1, &swapBarrier);
     if (p.tsQueryHeap && p.tsReadback)
     {
-        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 * p.frameIndex + 1);
+        const UINT rb = D3D12RendererImpl::tsBase(p.frameIndex);   // STRIDE SITE 5/6
+        p.cmdList->EndQuery(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, rb + 1);
+        // Resolve ONLY the contiguous sub-range actually written this frame —
+        // the whole-frame pair plus the 2 stamps of each pass that ran — never the
+        // whole widened heap, whose unwritten slots hold garbage from older frames.
+        const UINT written = 2 + 2 * p.tsPassCount[p.frameIndex];   // STRIDE SITE 6/6
         p.cmdList->ResolveQueryData(p.tsQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-            2 * p.frameIndex, 2, p.tsReadback.Get(),
-            static_cast<UINT64>(2 * p.frameIndex) * sizeof(uint64_t));
+            rb, written, p.tsReadback.Get(),
+            static_cast<UINT64>(rb) * sizeof(uint64_t));
         p.tsPending[p.frameIndex] = true;
     }
+    p.tsInFrame = false;   // out-of-frame paths may not stamp past this point
     p.cmdList->Close();
 
     ID3D12CommandList* lists[] = { p.cmdList.Get() };
@@ -9533,10 +9699,12 @@ void D3D12Renderer::RenderWindow(HE::Window* window)
     // VulkanRenderer::renderWindowData. GL and Metal never injected it.
     //
     // NO TIMESTAMP QUERIES HERE either. tsQueryHeap/tsReadback belong to the frame's
-    // whole-frame GPU timer: its slots are indexed by frameIndex and reaped
-    // k_frameCount frames later (:8448-8452). An EndQuery/ResolveQueryData from this
-    // path would overwrite a slot the frame owns, so a secondary-window change would
-    // surface as a bogus number in the profiler rather than as a window bug.
+    // GPU timer — whole-frame pair AND per-pass stamps: its slots are indexed by
+    // frameIndex and reaped k_frameCount frames later. An EndQuery/ResolveQueryData
+    // from this path would overwrite a slot the frame owns, so a secondary-window
+    // change would surface as a bogus number in the profiler rather than as a window
+    // bug. RenderWindow runs AFTER Render() returned, i.e. after tsInFrame was
+    // cleared, so tsBeginPass would refuse anyway — but do not add one here.
 
     p.barrier12(cl, back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     if (FAILED(cl->Close())) return;
@@ -9570,7 +9738,14 @@ IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const
     // counters are this frame's — mirrors OpenGL's merge in GetFrameGpuStats.
     FrameGpuStats s;
     s.gpuFrameMs     = m_impl->lastGpuFrameMs;
-    s.gpuTimingMode  = m_impl->lastGpuFrameMs >= 0.0 ? "whole-frame" : "";
+    s.passes         = m_impl->lastGpuPasses;
+    // The mode records what RAN, not what was requested: "d3d12-timer" only while
+    // real per-pass rows are in hand. The rows are rebuilt on every reap, so they
+    // drain to empty within k_frameCount frames of the profiler stopping and the
+    // mode drops back to "whole-frame" by itself.
+    s.gpuTimingMode  = !s.passes.empty()              ? "d3d12-timer"
+                       : m_impl->lastGpuFrameMs >= 0.0 ? "whole-frame"
+                                                       : "";
     s.drawCalls      = m_impl->statDraws;
     s.triangles      = m_impl->statTris;
     s.visibleObjects = m_impl->statVisible;

@@ -511,10 +511,18 @@ void DrawFrameDetail(const ProfFrameRecord& f)
 	if (!f.gpuPasses.empty())
 	{
 		const std::string gpuMode = f.gpuTimingMode ? f.gpuTimingMode : "";
-		// "detailed" (Metal, serialized cmd-buffer/pass) and "gl-timer" (GL timer
-		// queries) are both exclusive + additive per-pass, so the sum is meaningful;
+		// "detailed" (Metal, serialized cmd-buffer/pass), "gl-timer" (GL timer
+		// queries) und die drei Timestamp-Paar-Modi (D3D11/D3D12/Vulkan) sind alle
+		// exklusiv + additiv pro Pass, die Summe ist also aussagekräftig;
 		// "counter" spans overlap on TBDR and must NOT be summed.
-		const bool detailed = gpuMode == "detailed" || gpuMode == "gl-timer";
+		//
+		// Diese Liste ist die einzige Stelle, an der ein neuer Modus eingetragen
+		// werden muss — und sie zu vergessen fällt NICHT auf: die Zahlen bleiben
+		// richtig, werden aber unter „per-encoder spans" gelabelt und nicht mehr
+		// summiert. Ein stiller Rückschritt, deshalb steht die Warnung hier.
+		const bool detailed = gpuMode == "detailed"    || gpuMode == "gl-timer"
+		                   || gpuMode == "d3d11-timer" || gpuMode == "d3d12-timer"
+		                   || gpuMode == "vulkan-timer";
 		const double gref = f.gpuFrameMs > 0.0 ? f.gpuFrameMs : 1.0;
 		ImGui::Separator();
 		ImGui::TextUnformatted(detailed ? "GPU passes (exclusive, additive)"
