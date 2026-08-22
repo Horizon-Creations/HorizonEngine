@@ -123,6 +123,44 @@ kSSRRoughMixFS    HLSL SM5.0 OK / SPIR-V OK / GLSL 410 OK
 **SSR auf D3D/Vulkan ist damit Verdrahtungsarbeit, keine Shader-Entwicklung.** Das ist die
 größte Einzelkorrektur an der Aufwandsschätzung in diesem Dokument.
 
+> **Korrektur 2026-08-22: Der Absatz oben gilt für Vulkan — für D3D ist er FALSCH.**
+>
+> Die Prüfung damals hat nur den **Cross-Compile** gemessen, nicht die Übersetzung des
+> Ergebnisses. `Compiled.ok` bedeutet „SPIRV-Cross hat HLSL erzeugt", nicht „FXC nimmt es
+> an". Genau diese Lücke hat §1.1 (der tote GI-Stack) schon einmal ausgenutzt, und sie hat
+> hier ein zweites Mal zugeschlagen.
+>
+> Nachgemessen: das generierte HLSL auf Platte geschrieben und durch `fxc /T ps_5_0`
+> geschickt. **Alle vier Shader fallen durch:**
+>
+> | Shader | SPIR-V (Vulkan) | GLSL 410 | `ps_5_0` | Grund |
+> |---|:--:|:--:|:--:|---|
+> | `ssrTrace` | OK | OK | **X3511** | Loop über `steps` nicht abrollbar (115 Iterationen) |
+> | `ssrBlur` | OK | OK | **X4567** | `cbuffer register(b23)`, `ps_5_0` hat b0–b13 |
+> | `ssrRoughMix` | OK | OK | **X4567** | dito |
+> | `ssrComposite` | OK | OK | **X4567 + Sampler** | b23 **und** 19 Sampler, `ps_5_0` hat s0–s15 |
+>
+> Ursache ist dieselbe wie bei A4: SPIRV-Cross bildet GLSL-Binding N stumpf auf
+> `register(sN)`/`register(bN)` ab, Metal hat dafür eine Pin-Tabelle
+> (`compileMslPinned`), HLSL hat **keine**. `ShaderCompiler.cpp` setzt für `HlslSm50` nur
+> `shader_model=50`; `add_hlsl_resource_binding` kommt im ganzen Baum nicht vor.
+>
+> **Das verbindet zwei Baustellen:** ein Resource-Remap für das HLSL-Ziel löst A4
+> (Graph-Materialien auf D3D) **und** drei der vier SSR-Shader auf einen Schlag. Damit ist
+> es die Arbeit mit der größten Hebelwirkung im ganzen Plan — nicht mehr nur „A4".
+>
+> **Aber Umnummerieren allein reicht für `ssrComposite` nicht.** Der braucht 19 verschiedene
+> Sampler; `ps_5_0` kennt 16. Da hilft keine Tabelle. Entweder teilen sich mehrere Texturen
+> einen `SamplerState` (SPIRV-Cross erzeugt aus GLSLs kombinierten Samplern je ein eigenes
+> Paar, obwohl fast alle linear-clamp sind), oder der Pfad geht auf D3D12 über `dxc` und
+> SM 6.x statt `fxc`/SM 5.0. Das ist eine Entwurfsentscheidung, keine Fleißarbeit.
+>
+> `ssrTrace` ist davon unabhängig: der Loop braucht ein `[loop]`-Attribut statt
+> Abrollen — betrifft aber die geteilte GLSL-Quelle und damit auch Metal.
+>
+> Belegt mit einem Wegwerf-Programm gegen `he_materialshader` + `he_shadercompiler`;
+> die erzeugten `.hlsl` liegen dem Befund zugrunde, nicht eine Ableitung.
+
 Für den *Forward*-SSR kommt hinzu: der Konsument ist bereits in jedes Zielbackend
 einkompiliert (`heSSRFwd`, `MaterialShaderLibrary.cpp:257`, Mix-Zweig `:504-508`), er ist nur
 beweisbar unerreichbar, weil `heLight.ssr` außerhalb von Metal nirgends geschrieben wird. Die
@@ -771,6 +809,51 @@ Scope-Erweiterung: wer nur D3D und Vulkan will, lässt P2 für GL einfach weg.
 **Verifikation:** `HE_DUMP_SSR=1`, `HE_DUMP_SSRTEST`, `HE_DUMP_SSRTESTWALL`,
 `HE_DUMP_SSRQUALITY`, `HE_DUMP_SSRTESTROUGH` — die Testszenen existieren bereits und sind
 auf Metal eingefahren. Pro Backend gegen den Metal-Referenzshot.
+
+> **Stand 2026-08-22: P2 auf Vulkan verdrahtet — aber NICHT bildlich belegt. D3D blockiert.**
+>
+> **D3D11/D3D12 stehen still**, aus dem in §1.3 nachgetragenen Grund: die erzeugte HLSL
+> übersteht `fxc /T ps_5_0` nicht. Das ist keine Verdrahtung mehr, sondern hängt am
+> HLSL-Resource-Remap, den auch A4 braucht.
+>
+> **Auf Vulkan steht die Kette:** `SetSSRSettings`, `supportsScreenSpaceReflections` (nur
+> wenn die Pipelines wirklich gebaut wurden), ein MRT-Reflection-Prepass, Trace → Blur →
+> RoughMix an den vorhandenen `MaterialShaderLibrary::ssr*(SpirV)`-Accessoren, und
+> `heLight.ssr` im Lighting-ABI-Fill. Vier neue Profiler-Zeilen (`SSRPrepass`, `SSRTrace`,
+> `SSRBlur`, `SSRMix`). Ausgeschaltet: zwei bool-Tests pro Frame, kein Render-Pass, keine
+> Barriere, kein Copy.
+>
+> **Zwei Abweichungen vom Plan, beide begründet:**
+> * Der Prepass hat **zwei** Attachments, nicht Metals drei. `kSSRTraceFS` liest genau
+>   `heGB1` und `heGBDepth`; Metals dritte (View-Position) existiert nur, weil Metal den
+>   Pass in seinen SSAO-Positions-Pass faltet. Hier wäre sie ein Vollbild-RGBA16F, das
+>   niemand sampelt.
+> * **`ssrComposite` ist nicht verdrahtbar** und das liegt nicht am Shader. Er braucht mit
+>   Präambel 21 Deskriptoren, darunter `heGB0/1/2` — einen echten G-Buffer — und
+>   `heSkyEnv` als vorgefilterte Sky-Cubemap. Vulkan hat weder das eine (P4) noch das
+>   andere (P3). Er ist zudem strukturell ein Deferred-Pass: er *addiert* den
+>   Specular-Term nach, den der Resolve ausgelassen hat, und ein Forward-Shader hat seinen
+>   eigenen schon angewandt.
+>
+> **Was fehlt, und das ist die entscheidende Zeile:** die vorhandenen SSR-Testszenen
+> **belegen auf Vulkan nichts**. Gemessen: `HE_DUMP_SSRTEST` mit `HE_DUMP_SSR=1` und `=0`
+> liefert ein **byte-gleiches** Bild. Die Szenen bauen einfache `MaterialAsset`s, die durch
+> `shaders/scene.frag` laufen — und der hat keinen Reflexions-Eingang (sein eigener
+> Drift-Kopf sagt das, die Bindings enden bei 7). Metal funktioniert dort, weil Metal
+> `ssrTex` in seinen **eigenen** eingebauten Fragment-Shader gelegt hat. Der Vulkan-Weg
+> erreicht damit heute nur Node-Graph-Materialien über `heSSRFwd`.
+> Verdrahtet und fehlerfrei ist also belegt; **dass Pixel anders aussehen, nicht.** Wer das
+> schließen will, braucht entweder eine Graph-Material-Spiegelszene als Zeugen oder einen
+> Reflexions-Eingang in `scene.frag` — Letzteres ist die eigentliche Metal-Parität.
+>
+> **Nebenbefund, und er betrifft die vorherige Phase:** Vulkan meldete in den
+> Headless-Läufen **17** Validierungsfehler, die ich zuvor übersehen hatte — meine
+> P1-Abnahmen haben nur `has not been destroyed` gezählt (Leaks, korrekt null) und daraus
+> fälschlich „sauber" gelesen. Ursache war `m_thumbImage` aus P1b: der Widget-Kachel-Pfad
+> leiht sich `m_uiViewportRP`, dessen `finalLayout` `SHADER_READ_ONLY_OPTIMAL` ist, aber
+> das Bild wurde ohne `VK_IMAGE_USAGE_SAMPLED_BIT` angelegt. Reiner Vertragsbruch, kein
+> Pixelfehler — deshalb waren alle acht Kacheln trotzdem byte-gleich. Eine Zeile behebt es.
+> **Jetzt: 0 Validierungsfehler auf allen vier Backends.**
 
 ### P3 — Himmel und Wetter nachziehen
 

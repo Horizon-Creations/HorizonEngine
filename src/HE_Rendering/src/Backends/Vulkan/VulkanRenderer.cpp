@@ -108,6 +108,11 @@ void VulkanRenderer::Initialize(HE::Window* window)
     createSSAOPipeline();        HE_LOG_INFO(RHI, "%s", "VulkanRenderer: SSAO pipeline created");
     createSkinnedPipeline();     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: skinned pipeline created");
     createUIPipeline();          HE_LOG_INFO(RHI, "%s", "VulkanRenderer: UI pipeline created");
+    // SSR pipelines only — no render targets, no per-frame work. Built here and
+    // not on the first enabled frame because GetCapabilities() reports the
+    // result and the editor DISABLES the SSR checkbox on it: a build deferred
+    // until "SSR is on" could never be reached. See createSSRPipelines.
+    createSSRPipelines();
 	m_shaderManager = VulkanShaderManager();
 }
 
@@ -133,6 +138,11 @@ void VulkanRenderer::Shutdown()
     // SSAO viewport-size targets (already freed by destroyViewportResources below,
     // but call explicitly in case viewport was never created).
     destroySSAOTargets();
+    // SSR: viewport-size targets first (their framebuffers hang off the render
+    // passes destroySSRPipelines destroys, and a framebuffer must not outlive
+    // its render pass).
+    destroySSRTargets();
+    destroySSRPipelines();
     destroyGiAccel();
     destroyGiTargets();
     destroyGiProbeAtlas();
@@ -295,6 +305,8 @@ void VulkanRenderer::Render()
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
+    m_ssrRanThisFrame  = false;  // cleared each frame; set true only inside runSSR()
+    m_ssrResultView    = VK_NULL_HANDLE; // ditto — DrawScene binds white when null
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
 
     // Drop caches for materials/meshes edited since last frame, before any recording — the
@@ -381,6 +393,20 @@ void VulkanRenderer::Render()
             if (!m_giRanThisFrame)
                 runSSAO(cmd, m_viewportW, m_viewportH);
 
+            // ── Screen-space reflections (plan P2) ─────────────────────────
+            // BEFORE the scene pass, unlike Metal's deferred composite: the
+            // forward consumer is heLitP inside the shading pass, so the
+            // reflection has to already exist when shading runs. Extracts the
+            // scene itself like runSSAO.
+            //
+            // The enabled test is HERE, at the frame's own level, and not only
+            // inside runSSR: with SSR off this frame must record no render
+            // pass, no barrier and no copy AT ALL, and that guarantee should be
+            // readable from the frame, not from three call levels down. Both
+            // functions still guard themselves as well.
+            if (m_ssrEnabled && m_ssrReady)
+                runSSR(cmd, m_viewportW, m_viewportH);
+
             // ── Scene → HDR RT (RGBA16F) ───────────────────────────────────
             VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
             hdrpbi.renderPass  = m_postFxSceneRP;
@@ -398,6 +424,15 @@ void VulkanRenderer::Render()
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
             m_hdrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+            // Forward SSR needs a colour source at trace time and the current
+            // frame's HDR does not exist yet when it runs — snapshot THIS
+            // frame's for the NEXT one (Metal does the same, in the same spot).
+            // Returns the HDR image to SHADER_READ_ONLY, so m_hdrLayout below
+            // stays correct. Gated at the call site for the same reason as
+            // runSSR above: SSR off means not one recorded command.
+            if (m_ssrEnabled && m_ssrReady)
+                copyHdrToSSRHistory(cmd, m_viewportW, m_viewportH);
 
             // Helper: run one fullscreen blit pass.
             auto blitPass = [&](VkRenderPass rp, VkFramebuffer fb, uint32_t bw, uint32_t bh,
@@ -659,6 +694,13 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // extension gate. If pipeline creation fails at runtime, runGi() leaves
     // m_giRanThisFrame false and rendering falls back to CSM+SSAO.
     c.supportsGlobalIllumination = true;
+    // Screen-space reflections (plan P2): true only when all four pipelines
+    // (pre-pass + trace + blur + roughness mix) actually built — a missing
+    // shaderc, a cross-compile failure or a vkCreateGraphicsPipelines failure
+    // leaves this false and the editor greys the toggle out, which is the
+    // honest answer. NEVER unconditional: the SSR shaders are compiled at
+    // runtime and their success is not a compile-time fact.
+    c.supportsScreenSpaceReflections = m_ssrReady;
     return c;
 }
 
@@ -1953,11 +1995,132 @@ void VulkanRenderer::createMaterialResources()
         }
     }
 
+    // ── 1x1x6 CUBE for heSkyEnv (binding 15) ─────────────────────────────────
+    // The preamble declares heSkyEnv as a samplerCube and the generated SPIR-V
+    // references it (verified with glslangValidator + spirv-dis on the preamble
+    // + a heLitP call: bindings 13/15/16/17/18/31/32/33 are all in the module),
+    // so the pipeline layout has to declare a CUBE here — a 2D view fails
+    // against the arrayed/cube image type in the SPIR-V, exactly like heCsm
+    // above. Two copies, one per frame in flight: the forward SSR path REFILLS
+    // this per frame (see runSSR's tail) and the other frame may still be
+    // sampling the previous contents.
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        ici.imageType     = VK_IMAGE_TYPE_2D;
+        ici.format        = VK_FORMAT_R8G8B8A8_UNORM;
+        ici.extent        = { 1, 1, 1 };
+        ici.mipLevels     = 1;
+        ici.arrayLayers   = 6;
+        ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(m_device, &ici, nullptr, &m_matSkyCube[i]) != VK_SUCCESS)
+        {
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 material path disabled — sky cube image failed");
+            return;
+        }
+        VkMemoryRequirements req{};
+        vkGetImageMemoryRequirements(m_device, m_matSkyCube[i], &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize  = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &m_matSkyCubeMem[i]) != VK_SUCCESS) return;
+        vkBindImageMemory(m_device, m_matSkyCube[i], m_matSkyCubeMem[i], 0);
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image            = m_matSkyCube[i];
+        vci.viewType         = VK_IMAGE_VIEW_TYPE_CUBE;
+        vci.format           = VK_FORMAT_R8G8B8A8_UNORM;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        if (vkCreateImageView(m_device, &vci, nullptr, &m_matSkyCubeView[i]) != VK_SUCCESS) return;
+
+        // Host-visible staging for the per-frame refill (6 RGBA8 texels).
+        VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bci.size  = 6 * 4;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(m_device, &bci, nullptr, &m_matSkyCubeStage[i]) != VK_SUCCESS) return;
+        VkMemoryRequirements breq{};
+        vkGetBufferMemoryRequirements(m_device, m_matSkyCubeStage[i], &breq);
+        VkMemoryAllocateInfo bmai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        bmai.allocationSize  = breq.size;
+        bmai.memoryTypeIndex = findMemoryType(breq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(m_device, &bmai, nullptr, &m_matSkyCubeStageMem[i]) != VK_SUCCESS) return;
+        vkBindBufferMemory(m_device, m_matSkyCubeStage[i], m_matSkyCubeStageMem[i], 0);
+        if (vkMapMemory(m_device, m_matSkyCubeStageMem[i], 0, breq.size, 0,
+                        &m_matSkyCubeStagePtr[i]) != VK_SUCCESS) return;
+        std::memset(m_matSkyCubeStagePtr[i], 0, 6 * 4);
+    }
+    // Clear both to black once and park them in SHADER_READ_ONLY: with SSR off
+    // heLight.fog.z stays 0, heLitP never samples them, and the descriptor
+    // still has to name a valid layout.
+    {
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool        = m_cmdPool;
+        cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        VkCommandBuffer oneCB = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(m_device, &cbai, &oneCB);
+        VkCommandBufferBeginInfo oneBI{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        oneBI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(oneCB, &oneBI);
+        const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bar.image            = m_matSkyCube[i];
+            bar.subresourceRange = range;
+            bar.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+            bar.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.srcAccessMask    = 0;
+            bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+            const VkClearColorValue black{ { 0.0f, 0.0f, 0.0f, 1.0f } };
+            vkCmdClearColorImage(oneCB, m_matSkyCube[i],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+            bar.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            bar.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(oneCB, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+        }
+        vkEndCommandBuffer(oneCB);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &oneCB;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_graphicsQueue);
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &oneCB);
+    }
+
     // ── Descriptor set 0 layout: canonical bindings 0-7 (matches the generated SPIR-V)
     //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
     //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
     //    harmless for the standard (non-WPO) vertex, which references none of them. ──
-    VkDescriptorSetLayoutBinding b[13]{};
+    //
+    // ── 2026-08-22 (parity plan P2d): bindings 13-18 and 31-33 were MISSING ──
+    // The shared lighting preamble declares heLocalShadow(13), heSkyEnv(15),
+    // heAO(16), heGIIrradiance(17), heGIVisibility(18), heSSRFwd(31),
+    // heGIReflFwd(32) and heCloudShadow(33), and every LIT graph material
+    // statically references all of them through heLitP — confirmed by running
+    // the preamble plus a heLitP call through glslangValidator and reading the
+    // OpDecorate Binding list out of the module. A pipeline layout that stops
+    // at 12 is therefore inconsistent with the shader it is built for. That had
+    // to be fixed before heSSRFwd could be wired at all: writing
+    // heLight.ssr.x = 1 against an undeclared descriptor is worse than the dead
+    // code it replaces. 14 (heLandscapeWeights) is emitted by the GRAPH, not
+    // the preamble, and is declared here for the same reason.
+    // All of the new ones except 31 are DEFAULTS behind gates that stay 0
+    // (fog.w, giProbe.y, giRefl.z, cloudShadowB.x) — this change deliberately
+    // does NOT start feeding them real data, which would alter graph-material
+    // shading and belongs to plan P1.
+    VkDescriptorSetLayoutBinding b[22]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
         b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
     };
@@ -1974,8 +2137,17 @@ void VulkanRenderer::createMaterialResources()
     setB(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
     setB(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
     setB(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCsm (CSM fallback, 2D array)
+    setB(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLocalShadow (2D array)
+    setB(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLandscapeWeights
+    setB(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSkyEnv (CUBE)
+    setB(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heAO
+    setB(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIIrradiance
+    setB(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIVisibility
+    setB(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSSRFwd  ← plan P2d
+    setB(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIReflFwd
+    setB(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCloudShadow
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 13;
+    slci.bindingCount = 22;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -1994,8 +2166,9 @@ void VulkanRenderer::createMaterialResources()
     }
 
     // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
-    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9) and 5 samplers
-    // (b2/b4..7), so the pool must cover k_matMaxDraws sets worth of each.
+    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9) and 17
+    // samplers (b2, b4-b7, b10-b18, b31-b33), so the pool must cover
+    // k_matMaxDraws sets worth of each.
     auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size  = size;
@@ -2015,8 +2188,8 @@ void VulkanRenderer::createMaterialResources()
     for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
     {
         VkDescriptorPoolSize ps[2] = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8u * k_matMaxDraws }, // b2,b4-b7,b10-b12
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,          5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 17u * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
@@ -2065,6 +2238,15 @@ void VulkanRenderer::destroyMaterialResources()
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_matSkyCubeStagePtr[i]) { vkUnmapMemory(m_device, m_matSkyCubeStageMem[i]); m_matSkyCubeStagePtr[i] = nullptr; }
+        if (m_matSkyCubeStage[i])    { vkDestroyBuffer(m_device, m_matSkyCubeStage[i], nullptr);    m_matSkyCubeStage[i]    = VK_NULL_HANDLE; }
+        if (m_matSkyCubeStageMem[i]) { vkFreeMemory(m_device, m_matSkyCubeStageMem[i], nullptr);    m_matSkyCubeStageMem[i] = VK_NULL_HANDLE; }
+        if (m_matSkyCubeView[i])     { vkDestroyImageView(m_device, m_matSkyCubeView[i], nullptr); m_matSkyCubeView[i]     = VK_NULL_HANDLE; }
+        if (m_matSkyCube[i])         { vkDestroyImage(m_device, m_matSkyCube[i], nullptr);         m_matSkyCube[i]         = VK_NULL_HANDLE; }
+        if (m_matSkyCubeMem[i])      { vkFreeMemory(m_device, m_matSkyCubeMem[i], nullptr);        m_matSkyCubeMem[i]      = VK_NULL_HANDLE; }
+    }
 #endif
 }
 
@@ -2668,7 +2850,12 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
 
     const VkImageUsageFlags RTf = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     const uint32_t bw = std::max(1u, w/2), bh = std::max(1u, h/2);
-    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w,  h,  RTf, m_hdrImage,     m_hdrMemory,     m_hdrView);
+    // TRANSFER_SRC on the HDR target alone: the forward SSR chain keeps a copy
+    // of the previous frame's resolved HDR to reflect into (copyHdrToSSRHistory).
+    // A usage bit costs nothing when SSR is off — no copy is recorded and the
+    // rendered frame is unchanged — but it has to be declared at creation.
+    makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, w,  h,
+            RTf | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, m_hdrImage, m_hdrMemory, m_hdrView);
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[0],m_bloomMemory[0],m_bloomView[0]);
     makeImg(VK_FORMAT_R16G16B16A16_SFLOAT, bw, bh, RTf, m_bloomImage[1],m_bloomMemory[1],m_bloomView[1]);
     makeImg(VK_FORMAT_R8G8B8A8_UNORM,      w,  h,  RTf, m_ldrImage,     m_ldrMemory,     m_ldrView);
@@ -2743,6 +2930,11 @@ void VulkanRenderer::destroyPostFXResources()
 void VulkanRenderer::destroyViewportResources()
 {
     destroySSAOTargets();
+    // SSR targets are viewport-sized too. This is the ONLY place they are
+    // dropped outside Shutdown, and both callers (the resize path in Render()
+    // and createViewportResources) have already issued vkDeviceWaitIdle — which
+    // is what lets ensureSSRTargets create their replacements mid-recording.
+    destroySSRTargets();
     destroyPostFXResources();
     if (m_viewportFramebuffer) { vkDestroyFramebuffer(m_device, m_viewportFramebuffer, nullptr); m_viewportFramebuffer = VK_NULL_HANDLE; }
     if (m_viewportRenderPass)  { vkDestroyRenderPass (m_device, m_viewportRenderPass, nullptr);  m_viewportRenderPass = VK_NULL_HANDLE; }
@@ -3729,6 +3921,43 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.camPos[0] = m_renderWorld.camera.position.x;
         lit.camPos[1] = m_renderWorld.camera.position.y;
         lit.camPos[2] = m_renderWorld.camera.position.z;
+        // ── Forward SSR (parity plan P2d) ────────────────────────────────────
+        // heSSRFwd has been compiled into every backend's graph materials since
+        // the preamble grew bindings 31/32, but nothing outside Metal ever set
+        // heLight.ssr.x, so the mix branch constant-folded away — the library
+        // says so itself. This is the write that turns it live.
+        //
+        // fog.z is set WITH it, and that is not incidental: heLitP's SSR mix
+        // sits INSIDE the `heSkyEnv is valid` branch, so without fog.z the
+        // sample is still unreachable. The cube bound at 15 carries the flat
+        // scene ambient, which makes that branch's ambDiff identical to the
+        // fallback it replaces (`ambient * diffuseColor`). fog.x stays 0, so
+        // heApplyFog is unaffected.
+        //
+        // ── READ THIS BEFORE DIFFING AN SSR A/B ──────────────────────────────
+        // Turning fog.z on ALSO introduces the ambient-SPECULAR term, which on
+        // this backend was previously exactly vec3(0.0) for every graph
+        // material (there is no sky cubemap here — scene.frag evaluates
+        // skyColor() analytically instead, see its drift header). So a graph
+        // material picks up `envSpec * fresnelSpec * (1 - 0.6*rough)` whether
+        // or not SSR found anything: with the default ambient (0.08,0.09,0.13)
+        // that is ~0.08 linear radiance on a metallic mirror and ~0.005 on a
+        // rough dielectric. Where SSR DOES hit at full intensity the reflection
+        // replaces that ambient entirely, so the addition only survives on miss
+        // pixels — but an HE_DUMP_SSR=1 vs =0 diff on a graph-material scene
+        // therefore shows MORE THAN REFLECTED PIXELS, and the extra is a
+        // uniform brightening of every lit graph surface, concentrated on the
+        // smooth/metallic ones. It disappears the moment this backend grows a
+        // real prefiltered sky cubemap (plan P3), which is what fog.z is
+        // actually asserting.
+        if (m_ssrRanThisFrame && m_ssrResultView)
+        {
+            lit.ssr[0] = 1.0f;                 // heSSRFwd is bound this frame
+            lit.ssr[1] = m_ssrIntensity;
+            lit.ssr[2] = m_ssrMaxRoughness;
+            lit.ssr[3] = 0.0f;                 // forward NEVER skips ambSpec
+            lit.fog[2] = 1.0f;
+        }
         if (m_matLightBuf[m_currentFrame].mapped)
             std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
     }
@@ -3867,7 +4096,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // (needs a UUID→view cache); bound to the white default for now.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[13]{};
+                            VkWriteDescriptorSet w[22]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3909,7 +4138,33 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo csmII{ m_albedoSampler, m_whiteArrayView,
                                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
-                            vkUpdateDescriptorSets(m_device, 13, w, 0, nullptr);
+                            // heLocalShadow (13): also a sampler2DArray, also
+                            // absent on this backend (no local shadow atlas) —
+                            // the 1-layer white array view keeps it valid and
+                            // lightParams[i].y = 0 means it is never sampled.
+                            wr(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
+                            wr(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heLandscapeWeights
+                            // heSkyEnv (15): flat ambient in a 1x1x6 cube — see
+                            // m_matSkyCube. Only ever sampled while SSR runs
+                            // (heLight.fog.z), and then it reproduces heLitP's
+                            // own no-cubemap ambient-diffuse fallback exactly.
+                            VkDescriptorImageInfo skyII{ m_albedoSampler,
+                                m_matSkyCubeView[m_currentFrame],
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heAO (fog.w = 0)
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIIrradiance
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIVisibility
+                            // heSSRFwd (31) — plan P2d. THIS is the binding the
+                            // forward SSR result lands on; heLight.ssr.x below
+                            // is what stops the sample folding to dead code.
+                            VkDescriptorImageInfo ssrII{ m_albedoSampler,
+                                m_ssrResultView ? m_ssrResultView : m_whiteAlbedoView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &ssrII);
+                            wr(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIReflFwd (giRefl.z = 0)
+                            wr(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heCloudShadow (cloudShadowB.x = 0)
+                            vkUpdateDescriptorSets(m_device, 22, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3928,7 +4183,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // Restore the pass's scene pipeline for subsequent built-in draws.
                         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
                         // The material path bound set 0 via m_matPipelineLayout, which is NOT
-                        // compatible with m_scenePipelineLayout for set 0 (10-binding material set
+                        // compatible with m_scenePipelineLayout for set 0 (22-binding material set
                         // vs 4-binding scene set) → binding it disturbed the scene's per-frame set 0.
                         // Re-bind it so any built-in draw after a graph material reads the correct
                         // per-frame UBO (view-proj/lighting/shadow/AO), not the material descriptors.
@@ -5144,6 +5399,20 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
     m_giLightRadius         = std::clamp(s.lightRadius, 0.0f, 10.0f);
     m_giRaysPerProbe        = std::clamp(s.raysPerProbe, 8, 1024);
     m_giProbeBudgetPerFrame = std::clamp(s.probeBudgetPerFrame, 1, 4096);
+}
+
+// ── Screen-space reflections (docs/ssr-plan.md, plan P2a) ───────────────────
+// Pure state. Nothing is created here: the pipelines were built once at
+// Initialize (see createSSRPipelines for why that cannot be deferred) and the
+// render targets are allocated by the first ENABLED frame in runSSR().
+void VulkanRenderer::SetSSRSettings(const SSRSettings& s)
+{
+    m_ssrEnabled      = s.enabled;
+    m_ssrIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+    m_ssrMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+    m_ssrMaxDistance  = std::max(0.01f, s.maxDistance);
+    m_ssrThickness    = std::max(1e-4f, s.thickness);
+    m_ssrQuality      = std::clamp(s.quality, 0, 2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6804,17 +7073,17 @@ namespace
 // path ends in vkQueueWaitIdle, so nothing in flight still references them):
 //   mesh tile      1 UBO + 1 sampler
 //   particle tile          1 sampler
-//   material preview  5 UBO + 8 sampler   (the 13-binding m_matSetLayout)
+//   material preview  5 UBO + 17 sampler  (the 22-binding m_matSetLayout)
 //   skeletal preview  2 UBO + 1 sampler
 //   bone-overlay lines 1 UBO
-// = 9 UBO, 11 samplers, 5 sets. Sized with a little headroom rather than exactly,
+// = 9 UBO, 20 samplers, 5 sets. Sized with a little headroom rather than exactly,
 // because an allocation failure here is silent (the feature just stops drawing).
 bool thumbEnsureDescPool(VkDevice dev, VkDescriptorPool& pool)
 {
     if (pool) return true;
     VkDescriptorPoolSize sizes[2] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         12 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 26 },
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = 8;
@@ -6968,6 +7237,20 @@ bool VulkanRenderer::ensureThumbnailTarget(int S)
     // lets the widget tile reuse that render pass and m_uiViewportPipeline.
     // TRANSFER_DST is for the widget path's vkCmdClearColorImage (its render pass
     // is LOAD_OP_LOAD and cannot clear); TRANSFER_SRC for the readback copy.
+    //
+    // SAMPLED is NOT because anything samples this image — nothing does, the tile
+    // is read back to the CPU. It is here because reusing m_uiViewportRP for the
+    // widget tile also inherits that pass's `finalLayout =
+    // SHADER_READ_ONLY_OPTIMAL` (it was written for the editor viewport, which
+    // ImGui samples afterwards), and SHADER_READ_ONLY_OPTIMAL is only a legal
+    // layout for an image created with SAMPLED or INPUT_ATTACHMENT. Without the
+    // bit, BOTH ends of the widget path are invalid:
+    //   * vkCmdBeginRenderPass(m_uiViewportRP, m_thumbUIFB) — attachment 0's
+    //     finalLayout needs a usage this image does not have, and
+    //   * recordThumbnailReadback(..., SHADER_READ_ONLY_OPTIMAL) — a barrier
+    //     whose oldLayout is incompatible with the usage flags.
+    // The mesh/particle tiles never hit it: m_thumbRenderPass ends in
+    // TRANSFER_SRC_OPTIMAL, which COLOR_ATTACHMENT|TRANSFER_SRC already covers.
     {
         VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ici.imageType     = VK_IMAGE_TYPE_2D;
@@ -6979,7 +7262,8 @@ bool VulkanRenderer::ensureThumbnailTarget(int S)
         ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
         ici.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
                           | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                          | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+                          | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                          | VK_IMAGE_USAGE_SAMPLED_BIT;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(m_device, &ici, nullptr, &m_thumbImage) != VK_SUCCESS) return false;
 
@@ -8649,7 +8933,7 @@ void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
         std::memcpy(m_matPvParBuf.mapped, padded, sizeof(padded));
     }
 
-    // ── Descriptor set: the same 13 bindings DrawScene writes per graph draw.
+    // ── Descriptor set: the same 22 bindings DrawScene writes per graph draw.
     // Rewritten in place, which is safe because the previous preview ended in
     // vkQueueWaitIdle — no submission still references this set.
     {
@@ -8666,7 +8950,12 @@ void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
         // 1-layer array view — a plain 2D view fails validation against it.
         VkDescriptorImageInfo  csmII { m_albedoSampler, m_whiteArrayView,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[13]{};
+        // heSkyEnv (15) is a samplerCube, same reasoning as heCsm: the default
+        // MUST be a CUBE view. The preview's fill leaves fog.z at 0, so it is
+        // never sampled — it only has to exist and be in a valid layout.
+        VkDescriptorImageInfo  skyII { m_albedoSampler, m_matSkyCubeView[0],
+                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[22]{};
         auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                       const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
             w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -8690,7 +8979,16 @@ void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
         wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIShadow
         wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGILocal
         wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &csmII);   // heCsm
-        vkUpdateDescriptorSets(m_device, 13, w, 0, nullptr);
+        wr(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &csmII);   // heLocalShadow (2D array)
+        wr(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heLandscapeWeights
+        wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &skyII);   // heSkyEnv (CUBE)
+        wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heAO
+        wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIIrradiance
+        wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIVisibility
+        wr(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heSSRFwd (ssr.x = 0 here)
+        wr(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIReflFwd
+        wr(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heCloudShadow
+        vkUpdateDescriptorSets(m_device, 22, w, 0, nullptr);
     }
 
     VkCommandBuffer cmd = beginThumbnailCmd();
@@ -10101,6 +10399,1057 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // ssaoBlurRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
     // It is now safe for the scene pass to sample it at binding=3.
     m_ssaoRanThisFrame = true;  // blurRT is valid; DrawScene will enable AO sampling
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Screen-space reflections — FORWARD variant (docs/ssr-plan.md; parity plan P2)
+// ─────────────────────────────────────────────────────────────────────────────
+// This mirrors MetalRenderer::EncodeForwardSSR (MetalRenderer.mm:12818), NOT
+// Metal's deferred/tile chain: that one composites the reflection back over a
+// resolved G-buffer, and this backend has neither a G-buffer nor a deferred
+// path (parity plan P4). The forward shape is:
+//
+//   pre-pass  → oct-encoded world normal + NDC depth (the heGB1/heGBDepth pair
+//               the trace kernel expects, produced by geometry alone)
+//   trace     → half-res world-space march against that depth, sampling LAST
+//               frame's HDR copy through prevViewProj (cfg2.z = 1)
+//   blur      → separable 5-tap pairs, tier-dependent
+//   roughMix  → bakes the sharp/wide lerp into ONE texture, because the FORWARD
+//               consumer (heSSRFwd, preamble binding 31) samples exactly one
+//
+// The consumer is heLitP() in the shared lighting preamble, so the result
+// reaches NODE-GRAPH materials. The built-in PBR path goes through
+// shaders/scene.frag, which has no reflection input at all — see the drift
+// header in that file; adding one is a shader change, not a wiring change.
+namespace
+{
+// Pre-pass push block. Declared OUTSIDE the HE_HAVE_SHADERC guard because
+// runSSR() names it unconditionally — that function still has to compile
+// without the cross-compiler, it just early-outs on m_ssrReady (which can only
+// be true when the pipelines built, which needs shaderc).
+struct SSRPrepassPush { glm::mat4 mvp; glm::mat4 model; };
+static_assert(sizeof(SSRPrepassPush) == 128, "SSR pre-pass push block must be 128 B");
+} // namespace
+
+#if defined(HE_HAVE_SHADERC)
+namespace
+{
+// Reflection pre-pass (plan P2b) — the Vulkan twin of MetalRenderer.mm's
+// reflPosVertex/reflPosFragment (:1327-1348).
+//
+// TWO attachments, not Metal's three. Metal's colour(0) is the VIEW-SPACE
+// POSITION and it is there only because Metal folds this pre-pass into its
+// SSAO position pass, which needs it. kSSRTraceFS reads exactly heGB1 (rg oct
+// normal, b roughness) and heGBDepth — a view-position target would be a
+// full-res RGBA16F nothing ever samples.
+//
+// Sibling render pass rather than a widened m_ssaoPosRenderPass: that pass's
+// fragment stage is shaders/ssao_pos.frag, a build-time .spv this change may
+// not edit, so it cannot be made to write the extra attachments — a widened
+// pass would leave them undefined whenever SSAO ran without SSR, and would
+// cost the SSAO-only path an attachment it never uses.
+//
+// Roughness is written as 0, exactly like Metal's forward pre-pass: a
+// geometry-only pre-pass has no material data. The per-pixel roughness fade
+// lives in heLitP with the real shading values (kLightingPreamble's ssr.x
+// branch), which is why feeding a real roughness here would double-apply it.
+constexpr const char* kSSRPrepassVertGlsl = R"(#version 450
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(push_constant) uniform Push { mat4 mvp; mat4 model; } pc;
+layout(location = 0) out vec3 vWorldNormal;
+void main()
+{
+    gl_Position  = pc.mvp * vec4(aPos, 1.0);
+    vWorldNormal = mat3(pc.model) * aNormal;
+}
+)";
+
+// heOctEncode is a byte-for-byte copy of the preamble's encoder, so the
+// decode kSSRTraceFS performs round-trips exactly (the same reason every
+// backend keeps its own copy — each shader string is its own translation unit).
+constexpr const char* kSSRPrepassFragGlsl = R"(#version 450
+layout(location = 0) in vec3 vWorldNormal;
+layout(location = 0) out vec4 oAttr; // rg = oct normal * 0.5 + 0.5, b = roughness (0)
+layout(location = 1) out float oNdc; // NDC depth — exactly what heGBDepth carries
+vec2 heOctEncode(vec3 n)
+{
+    vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    vec2 signP = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    return (n.z <= 0.0) ? ((1.0 - abs(p.yx)) * signP) : p;
+}
+void main()
+{
+    vec3 n = vWorldNormal;
+    n = (dot(n, n) > 1e-12) ? normalize(n) : vec3(0.0, 0.0, 1.0);
+    oAttr = vec4(heOctEncode(n) * 0.5 + 0.5, 0.0, 1.0);
+    oNdc  = gl_FragCoord.z;
+}
+)";
+} // namespace
+#endif
+
+// Built ONCE, from Initialize — deliberately not on the first enabled frame.
+// GetCapabilities().supportsScreenSpaceReflections reports m_ssrReady, and the
+// editor DISABLES the SSR checkbox on that flag (EditorSettingsPanel.cpp:275).
+// A build deferred to "first time SSR is on" can therefore never happen: the
+// user has no way to turn it on. Nothing here allocates render-target memory or
+// costs a single command per frame — the targets are the first ENABLED frame's
+// job (ensureSSRTargets), so "disabled is free" still holds for the frame.
+void VulkanRenderer::createSSRPipelines()
+{
+#if defined(HE_HAVE_SHADERC)
+    if (!m_device) return;
+
+    // ── The three shared SSR shaders this backend can use (plan P2c). For the
+    //    SpirV backend Compiled.source is empty and Compiled.spirv carries the
+    //    words. ssrComposite is NOT built — see runSSR's header comment. ─────
+    using Backend = HE::MaterialShaderLibrary::Backend;
+    const HE::MaterialShaderLibrary::Compiled& tc = m_matShaderLib.ssrTrace(Backend::SpirV);
+    const HE::MaterialShaderLibrary::Compiled& bc = m_matShaderLib.ssrBlur(Backend::SpirV);
+    const HE::MaterialShaderLibrary::Compiled& mc = m_matShaderLib.ssrRoughMix(Backend::SpirV);
+    if (!tc.ok || !bc.ok || !mc.ok || tc.spirv.empty() || bc.spirv.empty() || mc.spirv.empty())
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: SSR shader cross-compile failed — "
+            "SSR unsupported this session\n") + tc.log + bc.log + mc.log).c_str());
+        destroySSRPipelines();
+        return;
+    }
+    const he::shaderc::Result pv = he::shaderc::compile(
+        kSSRPrepassVertGlsl, he::shaderc::Stage::Vertex, he::shaderc::Target::SpirvBinary);
+    const he::shaderc::Result pf = he::shaderc::compile(
+        kSSRPrepassFragGlsl, he::shaderc::Stage::Fragment, he::shaderc::Target::SpirvBinary);
+    if (!pv.ok || !pf.ok || pv.spirv.empty() || pf.spirv.empty())
+    {
+        HE_LOG_WARN(RHI, "%s",
+            "VulkanRenderer: SSR pre-pass shader compile failed — SSR unsupported this session");
+        destroySSRPipelines();
+        return;
+    }
+
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return mod;
+    };
+    // Fullscreen (attribute-less) vertex — the same one every post-FX pass uses.
+    // Its vUV output goes unconsumed: all four SSR fragment shaders address
+    // themselves through gl_FragCoord, which is legal (a VS may write outputs
+    // the FS does not declare).
+    VkShaderModule fsVS    = loadShaderModule("postfx.vert.spv");
+    VkShaderModule prepVS  = makeModule(pv.spirv);
+    VkShaderModule prepFS  = makeModule(pf.spirv);
+    VkShaderModule traceFS = makeModule(tc.spirv);
+    VkShaderModule blurFS  = makeModule(bc.spirv);
+    VkShaderModule mixFS   = makeModule(mc.spirv);
+    struct ModGuard {
+        VkDevice d; VkShaderModule m[6];
+        ~ModGuard() { for (VkShaderModule s : m) if (s) vkDestroyShaderModule(d, s, nullptr); }
+    } guard{ m_device, { fsVS, prepVS, prepFS, traceFS, blurFS, mixFS } };
+    if (!fsVS || !prepVS || !prepFS || !traceFS || !blurFS || !mixFS)
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: SSR shader modules failed — SSR unsupported");
+        destroySSRPipelines();
+        return;
+    }
+
+    auto fail = [&](const char* what) {
+        HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: SSR ") + what
+                                + " failed — SSR unsupported this session").c_str());
+        destroySSRPipelines();
+        return false;
+    };
+
+    // ── Render pass: reflection pre-pass (2 colour + depth) ─────────────────
+    {
+        VkAttachmentDescription atts[3]{};
+        atts[0].format         = VK_FORMAT_R16G16B16A16_SFLOAT; // heGB1 (oct normal)
+        atts[1].format         = VK_FORMAT_R32_SFLOAT;          // heGBDepth (NDC)
+        for (int i = 0; i < 2; ++i)
+        {
+            atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
+            atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[i].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[i].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            atts[i].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        atts[2].format         = VK_FORMAT_D16_UNORM;
+        atts[2].samples        = VK_SAMPLE_COUNT_1_BIT;
+        atts[2].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[2].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[2].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[2].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[2].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference colorRefs[2] = {
+            { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        };
+        VkAttachmentReference depthRef{ 2, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount    = 2;
+        sub.pColorAttachments       = colorRefs;
+        sub.pDepthStencilAttachment = &depthRef;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                              | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                              | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 3; rpci.pAttachments  = atts;
+        rpci.subpassCount    = 1; rpci.pSubpasses    = &sub;
+        rpci.dependencyCount = 2; rpci.pDependencies = deps;
+        if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_ssrPrepassRP) != VK_SUCCESS)
+            { fail("pre-pass render pass"); return; }
+    }
+
+    // ── Render passes: trace (2 × RGBA16F) and blur/mix (1 × RGBA16F) ───────
+    // LOAD_OP_DONT_CARE everywhere: every one of these writes its whole target.
+    // initialLayout UNDEFINED lets the same image be re-entered as a target
+    // later in the chain (m_ssrPing is written three times a frame) without any
+    // layout bookkeeping — its previous contents are always dead by then.
+    auto makeFsRP = [&](uint32_t attCount, VkRenderPass& rp) -> bool {
+        VkAttachmentDescription atts[2]{};
+        for (uint32_t i = 0; i < attCount; ++i)
+        {
+            atts[i].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[i].samples        = VK_SAMPLE_COUNT_1_BIT;
+            atts[i].loadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[i].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[i].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[i].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+            atts[i].finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        VkAttachmentReference refs[2] = {
+            { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+            { 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = attCount;
+        sub.pColorAttachments    = refs;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[0].dstSubpass    = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0;
+        deps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = attCount; rpci.pAttachments  = atts;
+        rpci.subpassCount    = 1;        rpci.pSubpasses    = &sub;
+        rpci.dependencyCount = 2;        rpci.pDependencies = deps;
+        return vkCreateRenderPass(m_device, &rpci, nullptr, &rp) == VK_SUCCESS;
+    };
+    if (!makeFsRP(2, m_ssrTraceRP)) { fail("trace render pass"); return; }
+    if (!makeFsRP(1, m_ssrBlurRP))  { fail("blur render pass");  return; }
+
+    // ── Samplers ────────────────────────────────────────────────────────────
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW =
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_ssrLinear) != VK_SUCCESS)
+            { fail("linear sampler"); return; }
+        // NEAREST for the attribute/depth pair and for the history: an
+        // INTERPOLATED oct normal decodes to garbage at every silhouette, and
+        // an interpolated NDC depth invents surfaces between them. Same reason
+        // Metal point-samples m_reflNormTex / m_reflDepthTex. R32_SFLOAT is
+        // also not guaranteed to support linear filtering at all.
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_ssrPoint) != VK_SUCCESS)
+            { fail("point sampler"); return; }
+    }
+
+    // ── Descriptor set layouts. The binding NUMBERS come straight out of the
+    //    GLSL sources in MaterialShaderLibrary.cpp — those are the truth, the
+    //    SPIR-V carries them verbatim (no remap table exists for this target,
+    //    unlike Metal's compileMslPinned). ────────────────────────────────────
+    //    trace    : 19 heSceneColor, 20 heGB1, 22 heGBDepth, 23 HeSSRTrace,
+    //               24 heSSRHistRad, 25 heSSRHistPos
+    //    blur     : 19 heSSRIn,  23 HeSSRBlur
+    //    roughMix : 19 heNarrow, 20 heWide, 21 heAttr, 23 HeSSRBlur
+    auto makeDSL = [&](std::initializer_list<uint32_t> texBindings,
+                       VkDescriptorSetLayout& dsl) -> bool {
+        VkDescriptorSetLayoutBinding binds[8]{};
+        uint32_t n = 0;
+        for (uint32_t b : texBindings)
+        {
+            binds[n].binding         = b;
+            binds[n].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            binds[n].descriptorCount = 1;
+            binds[n].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+            ++n;
+        }
+        // Binding 23 is DYNAMIC so one set serves every pass in the chain.
+        binds[n].binding         = 23;
+        binds[n].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        binds[n].descriptorCount = 1;
+        binds[n].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        ++n;
+        VkDescriptorSetLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        ci.bindingCount = n;
+        ci.pBindings    = binds;
+        return vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &dsl) == VK_SUCCESS;
+    };
+    if (!makeDSL({ 19, 20, 22, 24, 25 }, m_ssrTraceDSL)) { fail("trace set layout"); return; }
+    if (!makeDSL({ 19 },                 m_ssrBlurDSL))  { fail("blur set layout");  return; }
+    if (!makeDSL({ 19, 20, 21 },         m_ssrMixDSL))   { fail("mix set layout");   return; }
+
+    auto makePL = [&](VkDescriptorSetLayout dsl, VkPipelineLayout& pl) -> bool {
+        VkPipelineLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        ci.setLayoutCount = 1;
+        ci.pSetLayouts    = &dsl;
+        return vkCreatePipelineLayout(m_device, &ci, nullptr, &pl) == VK_SUCCESS;
+    };
+    if (!makePL(m_ssrTraceDSL, m_ssrTracePL)) { fail("trace pipeline layout"); return; }
+    if (!makePL(m_ssrBlurDSL,  m_ssrBlurPL))  { fail("blur pipeline layout");  return; }
+    if (!makePL(m_ssrMixDSL,   m_ssrMixPL))   { fail("mix pipeline layout");   return; }
+    {
+        VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SSRPrepassPush) };
+        VkPipelineLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        ci.pushConstantRangeCount = 1;
+        ci.pPushConstantRanges    = &pcr;
+        if (vkCreatePipelineLayout(m_device, &ci, nullptr, &m_ssrPrepassPL) != VK_SUCCESS)
+            { fail("pre-pass pipeline layout"); return; }
+    }
+
+    // ── Pipelines ───────────────────────────────────────────────────────────
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1; vps.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+    auto makePipe = [&](VkShaderModule vs, VkShaderModule fs,
+                        const VkPipelineVertexInputStateCreateInfo& vi,
+                        const VkPipelineDepthStencilStateCreateInfo& ds,
+                        VkPipelineLayout layout, VkRenderPass rp,
+                        uint32_t attCount, VkPipeline& out) -> bool {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vs; stages[0].pName = "main";
+        stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs; stages[1].pName = "main";
+        VkPipelineColorBlendAttachmentState cba[2]{};
+        for (uint32_t i = 0; i < attCount; ++i)
+            cba[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                                  | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = attCount; cb.pAttachments = cba;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount          = 2;
+        pci.pStages             = stages;
+        pci.pVertexInputState   = &vi;
+        pci.pInputAssemblyState = &ia;
+        pci.pViewportState      = &vps;
+        pci.pRasterizationState = &rs;
+        pci.pMultisampleState   = &ms;
+        pci.pDepthStencilState  = &ds;
+        pci.pColorBlendState    = &cb;
+        pci.pDynamicState       = &dyn;
+        pci.layout              = layout;
+        pci.renderPass          = rp;
+        return vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out)
+               == VK_SUCCESS;
+    };
+
+    // Pre-pass: the same aPos/aNormal/aUV vertex layout as the scene pass.
+    VkVertexInputBindingDescription vbind{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription vattrs[3] = {
+        { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0  },
+        { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 },
+        { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 },
+    };
+    VkPipelineVertexInputStateCreateInfo prepVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    prepVI.vertexBindingDescriptionCount   = 1; prepVI.pVertexBindingDescriptions   = &vbind;
+    prepVI.vertexAttributeDescriptionCount = 3; prepVI.pVertexAttributeDescriptions = vattrs;
+    VkPipelineDepthStencilStateCreateInfo prepDS{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    prepDS.depthTestEnable  = VK_TRUE;
+    prepDS.depthWriteEnable = VK_TRUE;
+    prepDS.depthCompareOp   = VK_COMPARE_OP_LESS;
+    if (!makePipe(prepVS, prepFS, prepVI, prepDS, m_ssrPrepassPL, m_ssrPrepassRP, 2, m_ssrPrepassPipe))
+        { fail("pre-pass pipeline"); return; }
+
+    VkPipelineVertexInputStateCreateInfo fsVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineDepthStencilStateCreateInfo fsDS{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    if (!makePipe(fsVS, traceFS, fsVI, fsDS, m_ssrTracePL, m_ssrTraceRP, 2, m_ssrTracePipe))
+        { fail("trace pipeline"); return; }
+    if (!makePipe(fsVS, blurFS, fsVI, fsDS, m_ssrBlurPL, m_ssrBlurRP, 1, m_ssrBlurPipe))
+        { fail("blur pipeline"); return; }
+    if (!makePipe(fsVS, mixFS, fsVI, fsDS, m_ssrMixPL, m_ssrBlurRP, 1, m_ssrMixPipe))
+        { fail("roughness-mix pipeline"); return; }
+
+    // ── Binding-23 UBO rings + the descriptor pool the sets come from ───────
+    {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        const VkDeviceSize align = std::max<VkDeviceSize>(
+            props.limits.minUniformBufferOffsetAlignment, 4);
+        auto alignUp = [&](VkDeviceSize v) { return ((v + align - 1) / align) * align; };
+        m_ssrBlurUboStride  = alignUp(sizeof(HE::MaterialShaderLibrary::SSRBlurUniforms));
+        m_ssrTraceUboStride = alignUp(sizeof(HE::MaterialShaderLibrary::SSRTraceUniforms));
+
+        auto makeUBO = [&](VkDeviceSize size, VkBuffer& buf, VkDeviceMemory& mem, void*& ptr) -> bool {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = size;
+            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
+            VkMemoryRequirements req{};
+            vkGetBufferMemoryRequirements(m_device, buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) return false;
+            vkBindBufferMemory(m_device, buf, mem, 0);
+            return vkMapMemory(m_device, mem, 0, size, 0, &ptr) == VK_SUCCESS;
+        };
+        if (!makeUBO(static_cast<VkDeviceSize>(k_maxFramesInFlight) * m_ssrTraceUboStride,
+                     m_ssrTraceUBO, m_ssrTraceUBOMem, m_ssrTraceUBOPtr))
+            { fail("trace UBO"); return; }
+        if (!makeUBO(static_cast<VkDeviceSize>(k_maxFramesInFlight) * k_ssrUboSlots * m_ssrBlurUboStride,
+                     m_ssrBlurUBO, m_ssrBlurUBOMem, m_ssrBlurUBOPtr))
+            { fail("blur UBO"); return; }
+    }
+    {
+        // 2 trace sets (5 textures each) + 4 blur sets (1 each) + 1 mix set (3).
+        VkDescriptorPoolSize ps[2] = {
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * 5 + 4 * 1 + 3 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 7 },
+        };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets       = 7;
+        dpci.poolSizeCount = 2;
+        dpci.pPoolSizes    = ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_ssrDescPool) != VK_SUCCESS)
+            { fail("descriptor pool"); return; }
+    }
+
+    m_ssrReady = true;
+    HE_LOG_INFO(RHI, "%s", "VulkanRenderer: SSR pipelines ready (forward variant)");
+#endif
+}
+
+void VulkanRenderer::destroySSRPipelines()
+{
+    if (!m_device) return;
+    m_ssrReady = false;
+    if (m_ssrPrepassPipe) { vkDestroyPipeline(m_device, m_ssrPrepassPipe, nullptr); m_ssrPrepassPipe = VK_NULL_HANDLE; }
+    if (m_ssrTracePipe)   { vkDestroyPipeline(m_device, m_ssrTracePipe,   nullptr); m_ssrTracePipe   = VK_NULL_HANDLE; }
+    if (m_ssrBlurPipe)    { vkDestroyPipeline(m_device, m_ssrBlurPipe,    nullptr); m_ssrBlurPipe    = VK_NULL_HANDLE; }
+    if (m_ssrMixPipe)     { vkDestroyPipeline(m_device, m_ssrMixPipe,     nullptr); m_ssrMixPipe     = VK_NULL_HANDLE; }
+    if (m_ssrPrepassPL)   { vkDestroyPipelineLayout(m_device, m_ssrPrepassPL, nullptr); m_ssrPrepassPL = VK_NULL_HANDLE; }
+    if (m_ssrTracePL)     { vkDestroyPipelineLayout(m_device, m_ssrTracePL,   nullptr); m_ssrTracePL   = VK_NULL_HANDLE; }
+    if (m_ssrBlurPL)      { vkDestroyPipelineLayout(m_device, m_ssrBlurPL,    nullptr); m_ssrBlurPL    = VK_NULL_HANDLE; }
+    if (m_ssrMixPL)       { vkDestroyPipelineLayout(m_device, m_ssrMixPL,     nullptr); m_ssrMixPL     = VK_NULL_HANDLE; }
+    if (m_ssrDescPool)    { vkDestroyDescriptorPool(m_device, m_ssrDescPool,  nullptr); m_ssrDescPool  = VK_NULL_HANDLE; }
+    m_ssrTraceSet[0] = m_ssrTraceSet[1] = VK_NULL_HANDLE;
+    for (VkDescriptorSet& s : m_ssrBlurSet) s = VK_NULL_HANDLE;
+    m_ssrMixSet = VK_NULL_HANDLE;
+    if (m_ssrTraceDSL)    { vkDestroyDescriptorSetLayout(m_device, m_ssrTraceDSL, nullptr); m_ssrTraceDSL = VK_NULL_HANDLE; }
+    if (m_ssrBlurDSL)     { vkDestroyDescriptorSetLayout(m_device, m_ssrBlurDSL,  nullptr); m_ssrBlurDSL  = VK_NULL_HANDLE; }
+    if (m_ssrMixDSL)      { vkDestroyDescriptorSetLayout(m_device, m_ssrMixDSL,   nullptr); m_ssrMixDSL   = VK_NULL_HANDLE; }
+    if (m_ssrPrepassRP)   { vkDestroyRenderPass(m_device, m_ssrPrepassRP, nullptr); m_ssrPrepassRP = VK_NULL_HANDLE; }
+    if (m_ssrTraceRP)     { vkDestroyRenderPass(m_device, m_ssrTraceRP,   nullptr); m_ssrTraceRP   = VK_NULL_HANDLE; }
+    if (m_ssrBlurRP)      { vkDestroyRenderPass(m_device, m_ssrBlurRP,    nullptr); m_ssrBlurRP    = VK_NULL_HANDLE; }
+    if (m_ssrLinear)      { vkDestroySampler(m_device, m_ssrLinear, nullptr); m_ssrLinear = VK_NULL_HANDLE; }
+    if (m_ssrPoint)       { vkDestroySampler(m_device, m_ssrPoint,  nullptr); m_ssrPoint  = VK_NULL_HANDLE; }
+    if (m_ssrTraceUBOPtr) { vkUnmapMemory(m_device, m_ssrTraceUBOMem); m_ssrTraceUBOPtr = nullptr; }
+    if (m_ssrTraceUBO)    { vkDestroyBuffer(m_device, m_ssrTraceUBO, nullptr); m_ssrTraceUBO = VK_NULL_HANDLE; }
+    if (m_ssrTraceUBOMem) { vkFreeMemory(m_device, m_ssrTraceUBOMem, nullptr); m_ssrTraceUBOMem = VK_NULL_HANDLE; }
+    if (m_ssrBlurUBOPtr)  { vkUnmapMemory(m_device, m_ssrBlurUBOMem); m_ssrBlurUBOPtr = nullptr; }
+    if (m_ssrBlurUBO)     { vkDestroyBuffer(m_device, m_ssrBlurUBO, nullptr); m_ssrBlurUBO = VK_NULL_HANDLE; }
+    if (m_ssrBlurUBOMem)  { vkFreeMemory(m_device, m_ssrBlurUBOMem, nullptr); m_ssrBlurUBOMem = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::destroySSRTargets()
+{
+    if (!m_device) return;
+    // The framebuffer of a group lives on its FIRST image (prepass: attr,
+    // trace: histRad[i]); the others contribute only a view.
+    SSRImage* all[] = { &m_ssrAttr, &m_ssrNdc, &m_ssrPrepassDepth, &m_ssrColorHist,
+                        &m_ssrHistRad[0], &m_ssrHistPos[0], &m_ssrHistRad[1], &m_ssrHistPos[1],
+                        &m_ssrPing, &m_ssrRefl, &m_ssrRough };
+    for (SSRImage* im : all)
+    {
+        if (im->fb)     { vkDestroyFramebuffer(m_device, im->fb,     nullptr); im->fb     = VK_NULL_HANDLE; }
+        if (im->view)   { vkDestroyImageView  (m_device, im->view,   nullptr); im->view   = VK_NULL_HANDLE; }
+        if (im->image)  { vkDestroyImage      (m_device, im->image,  nullptr); im->image  = VK_NULL_HANDLE; }
+        if (im->memory) { vkFreeMemory        (m_device, im->memory, nullptr); im->memory = VK_NULL_HANDLE; }
+    }
+    m_ssrW = m_ssrH = m_ssrTW = m_ssrTH = 0;
+    m_ssrHistIdx        = 0;
+    m_ssrHistValid      = false;
+    m_ssrColorHistValid = false;
+    m_ssrResultView     = VK_NULL_HANDLE;
+    m_ssrRanThisFrame   = false;
+    // The sets referencing the dead views are freed with the pool reset the
+    // next ensureSSRTargets() performs (the pool has no FREE bit).
+    m_ssrTraceSet[0] = m_ssrTraceSet[1] = VK_NULL_HANDLE;
+    for (VkDescriptorSet& s : m_ssrBlurSet) s = VK_NULL_HANDLE;
+    m_ssrMixSet = VK_NULL_HANDLE;
+}
+
+void VulkanRenderer::ensureSSRTargets(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    if (!m_ssrReady || w == 0 || h == 0) return;
+    if (m_ssrW == w && m_ssrH == h && m_ssrAttr.fb) return;
+    // Targets are only ever DESTROYED under a vkDeviceWaitIdle (Shutdown and
+    // destroyViewportResources, which the resize path calls after waiting), so
+    // by the time a size change reaches here the old set is already gone and
+    // this call is a no-op. Creating fresh images mid-recording is safe —
+    // nothing in flight can reference them.
+    destroySSRTargets();
+    m_ssrW  = w;                       m_ssrH  = h;
+    m_ssrTW = std::max(1u, w / 2u);    m_ssrTH = std::max(1u, h / 2u);
+
+    auto fmem = [&](uint32_t bits, VkMemoryPropertyFlags f) { return findMemoryType(bits, f); };
+    const VkImageUsageFlags colorRT = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                    | VK_IMAGE_USAGE_SAMPLED_BIT;
+    auto mk = [&](VkFormat fmt, uint32_t iw, uint32_t ih, VkImageUsageFlags usage,
+                  VkImageAspectFlags aspect, SSRImage& im) {
+        ssaoMakeImage(m_device, 0, fmt, iw, ih, usage, aspect,
+                      im.image, im.memory, im.view, fmem);
+    };
+    mk(VK_FORMAT_R16G16B16A16_SFLOAT, w, h, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrAttr);
+    mk(VK_FORMAT_R32_SFLOAT,          w, h, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrNdc);
+    mk(VK_FORMAT_D16_UNORM,           w, h, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+       VK_IMAGE_ASPECT_DEPTH_BIT, m_ssrPrepassDepth);
+    mk(VK_FORMAT_R16G16B16A16_SFLOAT, w, h,
+       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+       VK_IMAGE_ASPECT_COLOR_BIT, m_ssrColorHist);
+    for (int i = 0; i < 2; ++i)
+    {
+        mk(VK_FORMAT_R16G16B16A16_SFLOAT, m_ssrTW, m_ssrTH, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrHistRad[i]);
+        mk(VK_FORMAT_R16G16B16A16_SFLOAT, m_ssrTW, m_ssrTH, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrHistPos[i]);
+    }
+    mk(VK_FORMAT_R16G16B16A16_SFLOAT, m_ssrTW, m_ssrTH, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrPing);
+    mk(VK_FORMAT_R16G16B16A16_SFLOAT, m_ssrTW, m_ssrTH, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrRefl);
+    mk(VK_FORMAT_R16G16B16A16_SFLOAT, m_ssrTW, m_ssrTH, colorRT, VK_IMAGE_ASPECT_COLOR_BIT, m_ssrRough);
+
+    auto makeFB = [&](VkRenderPass rp, const VkImageView* views, uint32_t n,
+                      uint32_t fw, uint32_t fh, VkFramebuffer& fb) -> bool {
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass = rp; fci.attachmentCount = n; fci.pAttachments = views;
+        fci.width = fw; fci.height = fh; fci.layers = 1;
+        return vkCreateFramebuffer(m_device, &fci, nullptr, &fb) == VK_SUCCESS;
+    };
+    {
+        VkImageView atts[3] = { m_ssrAttr.view, m_ssrNdc.view, m_ssrPrepassDepth.view };
+        if (!makeFB(m_ssrPrepassRP, atts, 3, w, h, m_ssrAttr.fb)) { destroySSRTargets(); return; }
+    }
+    for (int i = 0; i < 2; ++i)
+    {
+        VkImageView atts[2] = { m_ssrHistRad[i].view, m_ssrHistPos[i].view };
+        if (!makeFB(m_ssrTraceRP, atts, 2, m_ssrTW, m_ssrTH, m_ssrHistRad[i].fb))
+            { destroySSRTargets(); return; }
+    }
+    for (SSRImage* im : { &m_ssrPing, &m_ssrRefl, &m_ssrRough })
+        if (!makeFB(m_ssrBlurRP, &im->view, 1, m_ssrTW, m_ssrTH, im->fb))
+            { destroySSRTargets(); return; }
+
+    // ── Descriptor sets. Written ONCE here and read for the rest of the
+    //    targets' lifetime: nothing rewrites them per frame, so there is no
+    //    in-flight-write hazard against the other frame in flight. The per-pass
+    //    values that DO change ride in the binding-23 dynamic offset. ────────
+    vkResetDescriptorPool(m_device, m_ssrDescPool, 0);
+    auto alloc = [&](VkDescriptorSetLayout dsl, VkDescriptorSet& set) -> bool {
+        VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        ai.descriptorPool     = m_ssrDescPool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts        = &dsl;
+        return vkAllocateDescriptorSets(m_device, &ai, &set) == VK_SUCCESS;
+    };
+    for (int i = 0; i < 2; ++i)
+        if (!alloc(m_ssrTraceDSL, m_ssrTraceSet[i])) { destroySSRTargets(); return; }
+    for (int i = 0; i < 4; ++i)
+        if (!alloc(m_ssrBlurDSL, m_ssrBlurSet[i]))   { destroySSRTargets(); return; }
+    if (!alloc(m_ssrMixDSL, m_ssrMixSet))            { destroySSRTargets(); return; }
+
+    auto texW = [](VkWriteDescriptorSet& w, VkDescriptorSet set, uint32_t binding,
+                   const VkDescriptorImageInfo* ii) {
+        w = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet = set; w.dstBinding = binding; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = ii;
+    };
+    auto uboW = [](VkWriteDescriptorSet& w, VkDescriptorSet set,
+                   const VkDescriptorBufferInfo* bi) {
+        w = VkWriteDescriptorSet{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet = set; w.dstBinding = 23; w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        w.pBufferInfo = bi;
+    };
+    const VkImageLayout ro = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorBufferInfo traceBI{ m_ssrTraceUBO, 0,
+        sizeof(HE::MaterialShaderLibrary::SSRTraceUniforms) };
+    VkDescriptorBufferInfo blurBI { m_ssrBlurUBO, 0,
+        sizeof(HE::MaterialShaderLibrary::SSRBlurUniforms) };
+
+    // Trace set i: writes histRad[i]/histPos[i], so it READS the other pair.
+    VkDescriptorImageInfo colorII{ m_ssrLinear, m_ssrColorHist.view, ro };
+    VkDescriptorImageInfo attrII { m_ssrPoint,  m_ssrAttr.view,      ro };
+    VkDescriptorImageInfo ndcII  { m_ssrPoint,  m_ssrNdc.view,       ro };
+    VkDescriptorImageInfo histRadII[2] = {
+        { m_ssrPoint, m_ssrHistRad[0].view, ro }, { m_ssrPoint, m_ssrHistRad[1].view, ro } };
+    VkDescriptorImageInfo histPosII[2] = {
+        { m_ssrPoint, m_ssrHistPos[0].view, ro }, { m_ssrPoint, m_ssrHistPos[1].view, ro } };
+    for (int i = 0; i < 2; ++i)
+    {
+        VkWriteDescriptorSet w[6]{};
+        texW(w[0], m_ssrTraceSet[i], 19, &colorII);
+        texW(w[1], m_ssrTraceSet[i], 20, &attrII);
+        texW(w[2], m_ssrTraceSet[i], 22, &ndcII);
+        texW(w[3], m_ssrTraceSet[i], 24, &histRadII[1 - i]);
+        texW(w[4], m_ssrTraceSet[i], 25, &histPosII[1 - i]);
+        uboW(w[5], m_ssrTraceSet[i], &traceBI);
+        vkUpdateDescriptorSets(m_device, 6, w, 0, nullptr);
+    }
+    // Blur sets, one per possible INPUT: 0/1 = histRad[0]/[1], 2 = ping, 3 = refl.
+    const VkImageView blurSrc[4] = { m_ssrHistRad[0].view, m_ssrHistRad[1].view,
+                                     m_ssrPing.view, m_ssrRefl.view };
+    for (int i = 0; i < 4; ++i)
+    {
+        VkDescriptorImageInfo ii{ m_ssrLinear, blurSrc[i], ro };
+        VkWriteDescriptorSet w[2]{};
+        texW(w[0], m_ssrBlurSet[i], 19, &ii);
+        uboW(w[1], m_ssrBlurSet[i], &blurBI);
+        vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
+    }
+    {
+        VkDescriptorImageInfo narrowII{ m_ssrLinear, m_ssrRefl.view,  ro };
+        VkDescriptorImageInfo wideII  { m_ssrLinear, m_ssrRough.view, ro };
+        VkDescriptorImageInfo aII     { m_ssrLinear, m_ssrAttr.view,  ro };
+        VkWriteDescriptorSet w[4]{};
+        texW(w[0], m_ssrMixSet, 19, &narrowII);
+        texW(w[1], m_ssrMixSet, 20, &wideII);
+        texW(w[2], m_ssrMixSet, 21, &aII);
+        uboW(w[3], m_ssrMixSet, &blurBI);
+        vkUpdateDescriptorSets(m_device, 4, w, 0, nullptr);
+    }
+
+    // The history pair is SAMPLED on the very first trace (as "previous")
+    // before anything has written it. Its CONTENT is ignored there
+    // (m_ssrHistValid gates the EMA to 0), but its LAYOUT is checked at draw
+    // time regardless — park all four in SHADER_READ_ONLY once, here.
+    {
+        VkImageMemoryBarrier b[4]{};
+        VkImage imgs[4] = { m_ssrHistRad[0].image, m_ssrHistRad[1].image,
+                            m_ssrHistPos[0].image, m_ssrHistPos[1].image };
+        for (int i = 0; i < 4; ++i)
+        {
+            b[i].sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b[i].oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+            b[i].newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b[i].image            = imgs[i];
+            b[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b[i].srcAccessMask    = 0;
+            b[i].dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 4, b);
+    }
+}
+
+// ── The frame's SSR chain (plan P2b + P2c) ──────────────────────────────────
+// Runs BEFORE the HDR scene pass: its output is an INPUT to shading, not a
+// composite over it. That is the whole structural difference from Metal's
+// deferred variant, and the reason kSSRCompositeFS is not built here — that
+// shader reads heGB0/heGB1/heGB2 (a full G-buffer) and heSkyEnv (a real
+// prefiltered sky cubemap), neither of which exists on this backend, and it
+// re-adds a specular term the forward shader has already applied.
+void VulkanRenderer::runSSR(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    m_ssrRanThisFrame = false;
+    m_ssrResultView   = VK_NULL_HANDLE;
+    if (!m_ssrEnabled || !m_ssrReady || !m_world) return;
+    if (w == 0 || h == 0) return;
+
+    // Own extract/cull/sort, exactly like runSSAO and EncodeShadowMap — the
+    // extractor is deterministic, so this is the same draw set DrawScene will
+    // build. (Cost: the geometry is walked once more when SSAO also runs;
+    // sharing one pre-pass between them means widening m_ssaoPosRenderPass,
+    // which shaders/ssao_pos.frag cannot feed. See the pre-pass comment.)
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    m_extractor.setContentManager(m_contentManager);
+    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+    if (m_renderWorld.objects.empty()) return;
+    for (RenderObject& obj : m_renderWorld.objects)
+        if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
+            obj.worldBounds = mesh->localBounds.transformed(obj.transform);
+    m_culler.cull(m_renderWorld, m_visible);
+    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    if (m_sortedIndices.empty()) return;
+
+    ensureSSRTargets(cmd, w, h);
+    if (!m_ssrAttr.fb || !m_ssrHistRad[0].fb) return;
+    // Frame 1 has no previous HDR to reflect: it only seeds the copy (see
+    // copyHdrToSSRHistory, which runs whether or not the chain below did).
+    if (!m_ssrColorHistValid) return;
+
+    const uint32_t tw = m_ssrTW, th = m_ssrTH;
+    const glm::mat4 view     = m_renderWorld.camera.view;
+    // The CLIP-space view-proj — the same matrix the pre-pass rasterizes with,
+    // so heWorldAt's invViewProj inverts exactly what produced gl_FragCoord.z.
+    const glm::mat4 viewProj = HE::kVulkanClipFix * m_renderWorld.camera.projection * view;
+    const glm::vec3 camFwd   = -glm::normalize(glm::vec3(glm::inverse(view)[2]));
+
+    // ── 1. Reflection pre-pass: oct world normal + NDC depth ────────────────
+    {
+        GpuPassScope _t(this, cmd, "SSRPrepass");
+        VkClearValue cv[3]{};
+        cv[0].color        = { { 0.5f, 0.5f, 0.0f, 1.0f } }; // oct(0,0,1)*0.5+0.5
+        cv[1].color        = { { 1.0f, 0.0f, 0.0f, 0.0f } }; // NDC 1 = background
+        cv[2].depthStencil = { 1.0f, 0 };
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass        = m_ssrPrepassRP;
+        rpbi.framebuffer       = m_ssrAttr.fb;
+        rpbi.renderArea.extent = { w, h };
+        rpbi.clearValueCount   = 3;
+        rpbi.pClearValues      = cv;
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrPrepassPipe);
+        VkViewport vp{ 0, 0, static_cast<float>(w), static_cast<float>(h), 0, 1 };
+        VkRect2D   sc{ { 0, 0 }, { w, h } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        for (uint32_t idx : m_sortedIndices)
+        {
+            const RenderObject& obj = m_renderWorld.objects[idx];
+            // Same filter as the SSAO pre-pass: precipitation / particles are
+            // camera-facing billboards whose normals would be nonsense here.
+            if (!obj.contributesAO) continue;
+            const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+            const GpuMesh& gm   = mesh ? *mesh : m_cube;
+            if (!gm.indexCount) continue;
+            SSRPrepassPush pc{ viewProj * obj.transform, obj.transform };
+            vkCmdPushConstants(cmd, m_ssrPrepassPL, VK_SHADER_STAGE_VERTEX_BIT,
+                               0, sizeof(pc), &pc);
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &off);
+            vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+        }
+        vkCmdEndRenderPass(cmd);
+    }
+
+    const int cur  = m_ssrHistIdx;
+    const int prev = 1 - cur;
+
+    // ── 2. Trace (half res) ─────────────────────────────────────────────────
+    {
+        GpuPassScope _t(this, cmd, "SSRTrace");
+        // Temporal accumulation is the High tier only, same as Metal: the EMA
+        // needs the per-frame jitter rotation that cfg2.x/cfg2.w drive.
+        const bool temporal = m_ssrQuality >= 2;
+        float hist = 0.0f;
+        if (temporal && m_ssrHistValid)
+        {
+            float delta = 0.0f;
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                    delta = std::max(delta, std::abs(viewProj[c][r] - m_ssrPrevViewProj[c][r]));
+            hist = delta > 1e-5f ? 0.55f : 0.85f; // damp the blend while the camera moves
+        }
+        m_ssrFrameSeed += 1.0f;
+
+        HE::MaterialShaderLibrary::SSRTraceUniforms tu;
+        const glm::mat4 ivp = glm::inverse(viewProj);
+        std::memcpy(tu.viewProj,     &viewProj[0][0],          16 * sizeof(float));
+        std::memcpy(tu.invViewProj,  &ivp[0][0],               16 * sizeof(float));
+        std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
+        tu.camPos[0] = m_renderWorld.camera.position.x;
+        tu.camPos[1] = m_renderWorld.camera.position.y;
+        tu.camPos[2] = m_renderWorld.camera.position.z;
+        tu.camFwd[0] = camFwd.x; tu.camFwd[1] = camFwd.y; tu.camFwd[2] = camFwd.z;
+        tu.cfg[0] = m_ssrMaxDistance;
+        tu.cfg[1] = m_ssrThickness;
+        tu.cfg[2] = m_ssrMaxRoughness;
+        tu.cfg[3] = static_cast<float>(m_ssrQuality <= 0 ? 16 : (m_ssrQuality == 1 ? 32 : 64));
+        // conv: Vulkan's NDC y points DOWN and its depth range is already
+        // [0,1], so the uv→NDC y sign is +1 (Metal passes -1, its y points up)
+        // and the depth needs neither scale nor bias (GL would need 2 / -1).
+        tu.conv[0] =  1.0f;
+        tu.conv[1] =  1.0f;
+        tu.conv[2] =  0.0f;
+        tu.conv[3] =  0.1f; // edge-fade width, same as Metal
+        tu.vp[0] = static_cast<float>(tw);
+        tu.vp[1] = static_cast<float>(th);
+        tu.cfg2[0] = m_ssrFrameSeed;
+        tu.cfg2[1] = hist;
+        tu.cfg2[2] = 1.0f;                       // FORWARD: colour from the previous frame
+        tu.cfg2[3] = temporal ? 1.0f : 0.0f;     // glossy cone jitter (High)
+
+        const VkDeviceSize tOff =
+            static_cast<VkDeviceSize>(m_currentFrame) * m_ssrTraceUboStride;
+        std::memcpy(static_cast<uint8_t*>(m_ssrTraceUBOPtr) + tOff, &tu, sizeof(tu));
+
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass        = m_ssrTraceRP;
+        rpbi.framebuffer       = m_ssrHistRad[cur].fb;
+        rpbi.renderArea.extent = { tw, th };
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrTracePipe);
+        const uint32_t dynOff = static_cast<uint32_t>(tOff);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrTracePL,
+                                0, 1, &m_ssrTraceSet[cur], 1, &dynOff);
+        VkViewport vp{ 0, 0, static_cast<float>(tw), static_cast<float>(th), 0, 1 };
+        VkRect2D   sc{ { 0, 0 }, { tw, th } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        ++m_statDraws;
+    }
+
+    // ── 3. Separable blur (Medium and High) ─────────────────────────────────
+    auto blurPass = [&](int srcSet, const SSRImage& dst, uint32_t slot, float dx, float dy) {
+        HE::MaterialShaderLibrary::SSRBlurUniforms bu;
+        bu.dir[0] = dx;
+        bu.dir[1] = dy;
+        bu.dir[2] = 1.0f / static_cast<float>(tw);
+        bu.dir[3] = 1.0f / static_cast<float>(th);
+        const VkDeviceSize off =
+            (static_cast<VkDeviceSize>(m_currentFrame) * k_ssrUboSlots + slot) * m_ssrBlurUboStride;
+        std::memcpy(static_cast<uint8_t*>(m_ssrBlurUBOPtr) + off, &bu, sizeof(bu));
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass        = m_ssrBlurRP;
+        rpbi.framebuffer       = dst.fb;
+        rpbi.renderArea.extent = { tw, th };
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrBlurPipe);
+        const uint32_t dynOff = static_cast<uint32_t>(off);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrBlurPL,
+                                0, 1, &m_ssrBlurSet[srcSet], 1, &dynOff);
+        VkViewport vp{ 0, 0, static_cast<float>(tw), static_cast<float>(th), 0, 1 };
+        VkRect2D   sc{ { 0, 0 }, { tw, th } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        ++m_statDraws;
+    };
+    const float ix = 1.0f / static_cast<float>(tw);
+    const float iy = 1.0f / static_cast<float>(th);
+    if (m_ssrQuality >= 1)
+    {
+        GpuPassScope _t(this, cmd, "SSRBlur");
+        // Every pass reads ONE image and writes a DIFFERENT one — a level that
+        // wrote back into its own source would be a read-write hazard on the
+        // same image (the mistake Metal's GI-refl chain documents at :13290).
+        blurPass(cur, m_ssrPing, 0, ix,   0.0f); // trace → ping   (horizontal)
+        blurPass(2,   m_ssrRefl, 1, 0.0f, iy);   // ping  → refl   (vertical)
+        if (m_ssrQuality == 1)
+        {
+            blurPass(3, m_ssrPing, 2, ix,   0.0f);
+            blurPass(2, m_ssrRefl, 3, 0.0f, iy);
+        }
+        else
+        {
+            // High: a second, WIDE pass (3-texel spacing) into m_ssrRough — the
+            // glossy end of the roughness mix below.
+            blurPass(3, m_ssrPing,  2, 3.0f * ix, 0.0f);
+            blurPass(2, m_ssrRough, 3, 0.0f,      3.0f * iy);
+        }
+    }
+
+    // ── 4. Roughness mix (High) ─────────────────────────────────────────────
+    // The FORWARD consumer samples ONE texture, so the sharp/wide lerp the
+    // deferred composite does per pixel has to be baked in here — that is
+    // exactly what kSSRRoughMixFS exists for. heAttr.b (roughness) is 0 out of
+    // a geometry-only pre-pass, so the lerp reduces to heBlur.dir.y, the
+    // RESOLUTION floor: at half res even a mirror needs some blur or its
+    // stair-steps are what the viewer sees. Metal's forward GI-reflection path
+    // uses the shader the same way, against the same rough-0 attribute target.
+    if (m_ssrQuality >= 2)
+    {
+        GpuPassScope _t(this, cmd, "SSRMix");
+        HE::MaterialShaderLibrary::SSRBlurUniforms mu;
+        mu.dir[0] = m_ssrMaxRoughness; // documented as the cutoff; unread by the shader
+        mu.dir[1] = 0.35f;             // resolution floor for half res (Metal's resDiv≥2 value)
+        mu.dir[2] = ix;
+        mu.dir[3] = iy;
+        const VkDeviceSize off =
+            (static_cast<VkDeviceSize>(m_currentFrame) * k_ssrUboSlots + 4u) * m_ssrBlurUboStride;
+        std::memcpy(static_cast<uint8_t*>(m_ssrBlurUBOPtr) + off, &mu, sizeof(mu));
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass        = m_ssrBlurRP;
+        rpbi.framebuffer       = m_ssrPing.fb; // the blur chain is finished with ping
+        rpbi.renderArea.extent = { tw, th };
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrMixPipe);
+        const uint32_t dynOff = static_cast<uint32_t>(off);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_ssrMixPL,
+                                0, 1, &m_ssrMixSet, 1, &dynOff);
+        VkViewport vp{ 0, 0, static_cast<float>(tw), static_cast<float>(th), 0, 1 };
+        VkRect2D   sc{ { 0, 0 }, { tw, th } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        ++m_statDraws;
+    }
+
+    // ── 5. Refill the 1x1x6 heSkyEnv stand-in (graph-material binding 15) ───
+    // heLitP's forward SSR mix lives inside the `fog.z` (heSkyEnv valid) branch
+    // and DrawScene sets fog.z only when this chain ran, so the cube has to
+    // hold something honest by then. The flat scene ambient makes that branch's
+    // ambient DIFFUSE identical to the fallback it replaces; the ambient
+    // SPECULAR — the term the reflection mixes into — is what appears.
+    // Per-frame-in-flight copy: the other frame may still be sampling the
+    // previous contents. Recorded outside any render pass.
+#if defined(HE_HAVE_SHADERC)
+    if (m_matSkyCube[m_currentFrame] && m_matSkyCubeStagePtr[m_currentFrame])
+    {
+        auto to8 = [](float v) {
+            return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+        };
+        const uint8_t px[4] = { to8(m_renderWorld.ambient.r), to8(m_renderWorld.ambient.g),
+                                to8(m_renderWorld.ambient.b), 255 };
+        uint8_t texels[6 * 4];
+        for (int f = 0; f < 6; ++f) std::memcpy(texels + f * 4, px, 4);
+        std::memcpy(m_matSkyCubeStagePtr[m_currentFrame], texels, sizeof(texels));
+
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image            = m_matSkyCube[m_currentFrame];
+        bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        bar.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED; // whole image is rewritten
+        bar.newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcAccessMask    = 0;
+        bar.dstAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+        // FRAGMENT_SHADER as the source stage, not top-of-pipe: the previous
+        // user of THIS index sampled it two frames ago. The frame fence has
+        // already retired that work, so this is belt-and-braces, but it costs
+        // nothing and keeps the write-after-read explicit.
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+        VkBufferImageCopy region{};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6 };
+        region.imageExtent      = { 1, 1, 1 };
+        vkCmdCopyBufferToImage(cmd, m_matSkyCubeStage[m_currentFrame],
+                               m_matSkyCube[m_currentFrame],
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        bar.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bar);
+    }
+#endif
+
+    m_ssrResultView = (m_ssrQuality >= 2) ? m_ssrPing.view
+                    : (m_ssrQuality >= 1) ? m_ssrRefl.view
+                                          : m_ssrHistRad[cur].view;
+    m_ssrHistIdx      = prev; // next frame reads back what this one just wrote
+    m_ssrHistValid    = true;
+    m_ssrPrevViewProj = viewProj;
+    m_ssrRanThisFrame = true;
+}
+
+// Keep a full-res copy of THIS frame's resolved HDR (sky and transparency
+// included) — next frame's trace reprojects its hits into it through
+// prevViewProj. Mirrors MetalRenderer.mm:14174-14202, and like it runs right
+// after the scene pass and before bloom. Costs nothing while SSR is off.
+void VulkanRenderer::copyHdrToSSRHistory(VkCommandBuffer cmd, uint32_t w, uint32_t h)
+{
+    if (!m_ssrEnabled || !m_ssrReady) return;
+    if (!m_ssrColorHist.image || !m_hdrImage) return;
+    if (w != m_ssrW || h != m_ssrH || w == 0 || h == 0) return;
+
+    auto barrier = [&](VkImage img, VkImageLayout from, VkImageLayout to,
+                       VkAccessFlags srcA, VkAccessFlags dstA,
+                       VkPipelineStageFlags srcS, VkPipelineStageFlags dstS) {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = from; b.newLayout = to;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img;
+        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask = srcA; b.dstAccessMask = dstA;
+        vkCmdPipelineBarrier(cmd, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    // The HDR image is in SHADER_READ_ONLY at this point (the caller moved it
+    // there for the bloom bright pass) and is put straight back, so the
+    // post-FX chain's own layout bookkeeping (m_hdrLayout) stays true. The
+    // source scope names the SCENE PASS's colour write as well as the shader
+    // read, so the transfer sees the finished image without relying on the
+    // preceding barrier to chain.
+    barrier(m_hdrImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+    // UNDEFINED as the source layout every time: the copy overwrites the whole
+    // image, so discarding is correct and there is no layout to track.
+    // srcStage is FRAGMENT_SHADER, NOT top-of-pipe: THIS frame's trace read
+    // this image a few passes ago, and a transfer write racing that read is a
+    // write-after-read hazard. Only the execution dependency is needed for a
+    // WAR, which is why srcAccessMask stays 0.
+    barrier(m_ssrColorHist.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    VkImageCopy region{};
+    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.extent         = { w, h, 1 };
+    vkCmdCopyImage(cmd, m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   m_ssrColorHist.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    barrier(m_ssrColorHist.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    barrier(m_hdrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    m_ssrColorHistValid = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

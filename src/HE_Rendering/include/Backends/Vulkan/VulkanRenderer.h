@@ -52,6 +52,7 @@ public:
 	void SetBloomSettings(const BloomSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
+	void SetSSRSettings(const SSRSettings& s) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
@@ -247,7 +248,13 @@ private:
 	// the draw path never calls it, so behaviour is identical to the built-in PBR path.
 	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
 	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
-	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).
+	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex)
+	//   b10/b11 heGIShadow/heGILocal | b12 heCsm (2D array) | b13 heLocalShadow (2D array)
+	//   b14 heLandscapeWeights | b15 heSkyEnv (CUBE) | b16 heAO | b17/b18 DDGI atlases
+	//   b31 heSSRFwd | b32 heGIReflFwd | b33 heCloudShadow.
+	// 13-18 and 31-33 were added with the forward-SSR wiring (parity plan P2d):
+	// every LIT graph material references them through heLitP, so a layout that
+	// stopped at b12 did not match the module it was built for.
 	HE::MaterialShaderLibrary m_matShaderLib;
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
@@ -286,6 +293,24 @@ private:
 	// heCsm sampler is arrayed (sampler2DArray), so its default descriptor must
 	// be an array view (a plain 2D view fails validation against that SPIR-V).
 	VkImageView     m_whiteArrayView   = VK_NULL_HANDLE;
+	// ── 1x1x6 CUBE bound at graph-material binding 15 (heSkyEnv) ─────────────
+	// The shared lighting preamble declares heSkyEnv as a samplerCube and the
+	// generated SPIR-V references it, so SOMETHING cube-shaped has to sit in
+	// that slot or the pipeline layout does not match the module. This backend
+	// has no procedural sky cubemap (scene.frag evaluates skyColor()
+	// analytically — see its drift header), so the cube carries a single flat
+	// colour: RenderWorld::ambient, i.e. EXACTLY the value heLitP's no-cubemap
+	// fallback (`ambDiff = diffuseColor * heLight.ambient.rgb`) would have used.
+	// Filled + gated on (heLight.fog.z = 1) ONLY while SSR runs, because the
+	// forward SSR mix in heLitP lives inside that gate; with SSR off fog.z
+	// stays 0 and the cube is never sampled. Two copies, one per frame in
+	// flight — the fill is a per-frame staging copy.
+	VkImage         m_matSkyCube[2]      = {};
+	VkDeviceMemory  m_matSkyCubeMem[2]   = {};
+	VkImageView     m_matSkyCubeView[2]  = {};
+	VkBuffer        m_matSkyCubeStage[2] = {};
+	VkDeviceMemory  m_matSkyCubeStageMem[2] = {};
+	void*           m_matSkyCubeStagePtr[2] = {};
 
 	// ── MaterialComponent override + hot-reload (A2) ─────────────────────────
 	// Override-material textures cached by material UUID (parallel to the baked per-mesh
@@ -622,6 +647,115 @@ private:
 	float    m_ssaoIntensity= 1.5f;
 	int      m_ssaoMethod   = 0;
 	uint32_t m_ssaoW = 0, m_ssaoH = 0;
+
+	// ── Screen-space reflections (docs/ssr-plan.md, FORWARD variant) ─────────
+	// Mirrors MetalRenderer::EncodeForwardSSR, not its deferred/tile chain:
+	// this backend has no G-buffer and no deferred path (plan P4), so the
+	// reflection is produced as a texture the SHADING pass samples, not as an
+	// additive composite over a resolved G-buffer.
+	//
+	//   1. reflection pre-pass  — its own sibling render pass (m_ssrPrepassRP),
+	//      MRT: oct-encoded world normal (heGB1) + NDC depth (heGBDepth).
+	//      NOT a widened m_ssaoPosRenderPass: that pass's fragment shader is
+	//      shaders/ssao_pos.frag (a build artefact this change may not touch),
+	//      so it cannot be made to write the extra attachments, and widening
+	//      would cost the SSAO path an unused RT even with SSR off.
+	//   2. ssrTrace  (half res) — world-space march, MRT: radiance + receiver
+	//      position, the temporal history pair the NEXT frame reads back.
+	//   3. ssrBlur   (half res) — separable 5-tap, run in pairs.
+	//   4. ssrRoughMix          — bakes the sharp/wide lerp into ONE texture,
+	//      which is what the forward consumer (heSSRFwd, binding 31) samples.
+	//
+	// Everything here is created on the FIRST frame SSR is enabled; disabled
+	// costs one bool test in Render().
+	// Lazy; viewport-size-dependent. Takes the frame command buffer because the
+	// two history pairs are SAMPLED before they are ever written (frame 1 reads
+	// "previous"), so they need a one-time UNDEFINED → SHADER_READ_ONLY barrier.
+	void ensureSSRTargets(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	void createSSRPipelines();                     // one attempt at Initialize
+	void destroySSRPipelines();
+	void destroySSRTargets();
+	void runSSR(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	void copyHdrToSSRHistory(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+
+	struct SSRImage
+	{
+		VkImage        image  = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		VkImageView    view   = VK_NULL_HANDLE;
+		VkFramebuffer  fb     = VK_NULL_HANDLE;
+	};
+
+	// Settings pushed by the editor / packaged game (IRenderer::SSRSettings).
+	bool  m_ssrEnabled      = false;
+	float m_ssrIntensity    = 1.0f;
+	float m_ssrMaxRoughness = 0.6f;
+	float m_ssrMaxDistance  = 30.0f;
+	float m_ssrThickness    = 0.5f;
+	int   m_ssrQuality      = 1;    // 0 = 16 steps, 1 = 32 + blur, 2 = 64 + glossy
+
+	// Pipeline-level objects. Built once at Initialize (NOT on first enable):
+	// GetCapabilities().supportsScreenSpaceReflections must report the real
+	// built state from frame 0 or the editor's checkbox stays greyed forever
+	// and the feature can never be switched on. No render target memory and no
+	// per-frame work is created here — see ensureSSRTargets for that.
+	bool m_ssrReady = false; // all four pipelines built → capability is true
+	VkRenderPass m_ssrPrepassRP = VK_NULL_HANDLE; // attr RGBA16F + ndc R32F + D16
+	VkRenderPass m_ssrTraceRP   = VK_NULL_HANDLE; // radiance RGBA16F + histPos RGBA16F
+	VkRenderPass m_ssrBlurRP    = VK_NULL_HANDLE; // one RGBA16F (blur + roughMix)
+	VkPipelineLayout m_ssrPrepassPL = VK_NULL_HANDLE; // push const: mvp + model
+	VkPipeline       m_ssrPrepassPipe = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_ssrTraceDSL = VK_NULL_HANDLE; // 19/20/22/23/24/25
+	VkDescriptorSetLayout m_ssrBlurDSL  = VK_NULL_HANDLE; // 19/23
+	VkDescriptorSetLayout m_ssrMixDSL   = VK_NULL_HANDLE; // 19/20/21/23
+	VkPipelineLayout m_ssrTracePL = VK_NULL_HANDLE;
+	VkPipelineLayout m_ssrBlurPL  = VK_NULL_HANDLE;
+	VkPipelineLayout m_ssrMixPL   = VK_NULL_HANDLE;
+	VkPipeline m_ssrTracePipe = VK_NULL_HANDLE;
+	VkPipeline m_ssrBlurPipe  = VK_NULL_HANDLE;
+	VkPipeline m_ssrMixPipe   = VK_NULL_HANDLE;
+	VkSampler  m_ssrLinear = VK_NULL_HANDLE; // linear clamp-to-edge
+	VkSampler  m_ssrPoint  = VK_NULL_HANDLE; // NEAREST: lerped oct normals decode to garbage
+
+	// Viewport-size-dependent targets (created on first enabled frame).
+	uint32_t m_ssrW = 0, m_ssrH = 0;   // full res: pre-pass + colour history
+	uint32_t m_ssrTW = 0, m_ssrTH = 0; // half res: trace + blur chain
+	SSRImage m_ssrAttr;        // rg oct normal, b roughness (0) — fb owns all 3 atts
+	SSRImage m_ssrNdc;         // R32F NDC depth
+	SSRImage m_ssrPrepassDepth;// D16_UNORM
+	SSRImage m_ssrColorHist;   // LAST frame's resolved HDR (the trace's colour source)
+	SSRImage m_ssrHistRad[2];  // trace radiance ping-pong (fb owns rad+pos)
+	SSRImage m_ssrHistPos[2];  // trace receiver world pos ping-pong
+	SSRImage m_ssrPing, m_ssrRefl, m_ssrRough; // blur chain
+	int      m_ssrHistIdx   = 0;
+	bool     m_ssrHistValid = false;      // fresh textures: first frame skips the EMA
+	bool     m_ssrColorHistValid = false; // frame 1 seeds the copy, frame 2 traces
+	bool     m_ssrRanThisFrame = false;   // cleared at Render() top
+	VkImageView m_ssrResultView = VK_NULL_HANDLE; // this frame's heSSRFwd (null = none)
+	glm::mat4 m_ssrPrevViewProj{ 1.0f };
+	float     m_ssrFrameSeed = 0.0f;
+	// Own descriptor pool — m_matPool[m_currentFrame] is reset wholesale each
+	// frame and these sets are written ONCE at target creation and then only
+	// read, which is also what keeps them safe across k_maxFramesInFlight.
+	VkDescriptorPool m_ssrDescPool  = VK_NULL_HANDLE;
+	VkDescriptorSet  m_ssrTraceSet[2] = {}; // by history parity (prev = 1 - cur)
+	VkDescriptorSet  m_ssrBlurSet[4]  = {}; // input: histRad0 / histRad1 / ping / refl
+	VkDescriptorSet  m_ssrMixSet      = VK_NULL_HANDLE; // narrow=refl, wide=rough, attr
+	// UBO rings. Binding 23 is a DYNAMIC uniform buffer so ONE descriptor set
+	// can serve every blur pass in the chain: the per-pass `dir` lives in its
+	// own slot and the dynamic offset selects it. Slots are indexed
+	// (m_currentFrame * k_ssrUboSlots + pass) so the OTHER in-flight frame's
+	// contents are never overwritten — this is the whole reason the sets can be
+	// written once at creation and never touched again.
+	static constexpr uint32_t k_ssrUboSlots = 8; // 6 blur passes + roughMix + spare
+	VkDeviceSize   m_ssrBlurUboStride  = 256; // ≥ minUniformBufferOffsetAlignment
+	VkDeviceSize   m_ssrTraceUboStride = 512; // sizeof(SSRTraceUniforms) = 288, aligned up
+	VkBuffer       m_ssrTraceUBO    = VK_NULL_HANDLE;
+	VkDeviceMemory m_ssrTraceUBOMem = VK_NULL_HANDLE;
+	void*          m_ssrTraceUBOPtr = nullptr;
+	VkBuffer       m_ssrBlurUBO     = VK_NULL_HANDLE;
+	VkDeviceMemory m_ssrBlurUBOMem  = VK_NULL_HANDLE;
+	void*          m_ssrBlurUBOPtr  = nullptr;
 
 	// ── Global Illumination (software ray tracing, Checkpoint VK-A) ──────────
 	// The CPU-built HE::GiBvh (same module + unit tests as the GL 4.3 port and
