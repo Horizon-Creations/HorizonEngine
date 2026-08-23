@@ -2231,17 +2231,56 @@ struct D3D12RendererImpl
     // ── A4: node-graph material PSOs ─────────────────────────────────────────
     // Graph materials (Material-Node editor) render through per-material PSOs the engine
     // builds at draw time from MaterialShaderLibrary HLSL (SPIRV-Cross). They share ONE
-    // root signature + a dedicated 5-slot white SRV heap, and per frame in flight a
-    // HeLighting CB (filled once/frame) + U ring + HeParams ring (one 256-B slot per draw).
+    // root signature + a dedicated SRV heap (k_matSrvCount slots, layout below), and per
+    // frame in flight a HeLighting CB (filled once/frame) + U ring + HeParams ring (one
+    // 256-B slot per draw).
     // All of this is inert (never touched) when HE_HAVE_SHADERC is off: m_matReady stays
     // false and the draw path skips it, so behaviour equals today's built-in PBR path.
-    // Canonical SPIRV-Cross HLSL register mapping (shader_model=50, binding→register):
+    // Register mapping: shaderc::compileHlslPinned PINS the fragment stage's
+    // texture/sampler registers (MaterialShaderLibrary::fragment carries the table) —
+    // textures keep their GLSL binding number, samplers are COMPACTED into s0..s15
+    // because ps_5_0 caps at 16 sampler slots and the preamble reaches binding 33.
     //   b0 HeLighting(FS) | b1 U(VS) | b3 HeParams(FS) | b8/b9 HeLighting/HeParams(WPO VS)
-    //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7).
+    //   t2  heTex0        /s2   t4..t7 heTexP0..3 /s4..s7   t10 heGIShadow /s10
+    //   t11 heGILocal     /s11  t12 heCsm[]       /s12      t13 heLocalShadow[] /s13
+    //   t15 heSkyEnvCube  /s15  t16 heAO          /s0       t17 heGIIrradiance  /s1
+    //   t18 heGIVisibility/s3   t31 heSSRFwd      /s8       t32 heGIReflFwd     /s9
+    //   t33 heCloudShadow /s14
+    // t14 is deliberately absent (landscape weightmap — the material preamble never
+    // declares it), which together with the t3 / t8-t9 / t19-t30 holes is why the SRV
+    // table is SIX descriptor ranges rather than one.
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     ComPtr<ID3D12RootSignature>  m_matRootSig;
-    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // 5 slots, all null RGBA8 (heTex0 + heTexP0..3)
+    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // k_matSrvCount slots — see k_matSrv* below
+
+    // m_matSrvHeap slot layout. NAMED because the descriptor writes are spread over five
+    // functions (createMaterialResources, createSSAOPipeline, createSSAOTargets,
+    // createGiTargets, ensureGiProbeAtlases) and a hard-coded `h.ptr += 5 * inc` in any of
+    // them silently publishes a texture into the wrong shader register — which does not
+    // fail, it just shades wrong. Every write goes through matSrvCpu(k_matSrv*).
+    static constexpr UINT k_matSrvTex0     = 0;  // t2  heTex0
+    static constexpr UINT k_matSrvTexP0    = 1;  // t4..t7 heTexP0..3  → slots 1..4
+    static constexpr UINT k_matSrvGIShadow = 5;  // t10 heGIShadow      (REAL: giResultTex)
+    static constexpr UINT k_matSrvGILocal  = 6;  // t11 heGILocal       (REAL: giLocalMaskTex)
+    static constexpr UINT k_matSrvCsm      = 7;  // t12 heCsm           (null Texture2DArray)
+    static constexpr UINT k_matSrvLocalSh  = 8;  // t13 heLocalShadow   (null Texture2DArray)
+    static constexpr UINT k_matSrvSkyEnv   = 9;  // t15 heSkyEnv        (null TextureCube)
+    static constexpr UINT k_matSrvAO       = 10; // t16 heAO            (REAL: ssaoBlurRT / white)
+    static constexpr UINT k_matSrvGIIrr    = 11; // t17 heGIIrradiance  (REAL: giIrrTex)
+    static constexpr UINT k_matSrvGIVis    = 12; // t18 heGIVisibility  (REAL: giVisTex)
+    static constexpr UINT k_matSrvSSRFwd   = 13; // t31 heSSRFwd        (null → .a = 0)
+    static constexpr UINT k_matSrvGIRefl   = 14; // t32 heGIReflFwd     (null → .a = 0)
+    static constexpr UINT k_matSrvCloud    = 15; // t33 heCloudShadow   (null, gate stays 0)
+    static constexpr UINT k_matSrvCount    = 16;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE matSrvCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot)
+               * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return h;
+    }
     ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
     ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
@@ -3350,9 +3389,9 @@ struct D3D12RendererImpl
         createSSAOPipeline();
         createSkinnedPipeline();
         createUIPipeline();
-        // A4: build the material-graph root signature, white SRV heap and per-frame UBO
-        // rings once (no-op when HE_HAVE_SHADERC is off). Failure leaves m_matReady false,
-        // so the draw path silently stays on the built-in PBR path.
+        // A4: build the material-graph root signature, the shared material SRV heap and
+        // the per-frame UBO rings once (no-op when HE_HAVE_SHADERC is off). Failure
+        // leaves m_matReady false, so the draw path silently stays on built-in PBR.
         createMaterialResources();
         // GI up front rather than on the first GI draw — same reasoning as D3D11:
         // the shader compile belongs in init, and a failure must clear giSupported
@@ -3770,6 +3809,13 @@ struct D3D12RendererImpl
     {
         waitForAllFrames();
         ssaoPosRT.Reset(); ssaoPosDepth.Reset(); ssaoRT.Reset(); ssaoBlurRT.Reset();
+        // Park the material heap's t16 (heAO) on the 1×1 white texture for the window in
+        // which ssaoBlurRT does not exist — including the early-returns below, where it
+        // never will. A descriptor left pointing at the resource just released is what
+        // GPU-based validation flags, and the value it would read (0 = fully occluded)
+        // is the wrong default anyway. Overwritten with the new ssaoBlurRT at the tail.
+        if (m_matSrvHeap && ssaoWhiteTex)
+            srvIntoHeapSlot(ssaoWhiteTex.Get(), DXGI_FORMAT_R8_UNORM, matSrvCpu(k_matSrvAO));
 
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -3851,6 +3897,11 @@ struct D3D12RendererImpl
             sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             sv.Texture2D.MipLevels = 1;
             device->CreateShaderResourceView(ssaoBlurRT.Get(), &sv, sceneSrvCpu(1));
+            // ...and the material heap's t16 (heAO), which graph materials read instead —
+            // they bind m_matSrvHeap, so sceneSrvHeap[1] is out of reach for them. Same
+            // resource, same frame, second descriptor. heLight.fog.w gates the sample.
+            if (m_matSrvHeap)
+                device->CreateShaderResourceView(ssaoBlurRT.Get(), &sv, matSrvCpu(k_matSrvAO));
         }
 
         ssaoW = w; ssaoH = h;
@@ -4746,7 +4797,7 @@ struct D3D12RendererImpl
         for (UINT s = 17; s <= 19; ++s) srvInto(giHistTex[1].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
 
         // Publish the blurred mask to the shader-visible slots the scene pass
-        // (sceneSrvHeap[4], t4) and graph materials (m_matSrvHeap[5], t10)
+        // (sceneSrvHeap[4], t4) and graph materials (m_matSrvHeap, k_matSrvGIShadow = t10)
         // sample. giResultTex is stable between resizes, so these writes only
         // happen here — behind the waitForAllFrames above.
         if (sceneSrvHeap)
@@ -4757,14 +4808,14 @@ struct D3D12RendererImpl
         }
         if (m_matSrvHeap)
         {
-            const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
-            h.ptr += static_cast<SIZE_T>(5) * inc; // slot 5 = t10 (heGIShadow)
-            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT, h);
-            // Slot 6 = t11 (heGILocal): the REAL per-pixel local-light mask
-            // (giParams.z still gates sampling when GI is off this frame).
-            h.ptr += inc;
-            srvIntoHeapSlot(giLocalMaskTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, h);
+            // t10 (heGIShadow) + t11 (heGILocal): the REAL ray-traced sun mask and the
+            // REAL per-pixel local-light mask (giParams.z still gates sampling when GI
+            // is off this frame). Addressed by NAME — this heap's layout grew past the
+            // point where `+= 5 * inc` was safe to eyeball.
+            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT,
+                            matSrvCpu(k_matSrvGIShadow));
+            srvIntoHeapSlot(giLocalMaskTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
+                            matSrvCpu(k_matSrvGILocal));
         }
     }
 
@@ -4900,6 +4951,18 @@ struct D3D12RendererImpl
         {
             srvIntoHeapSlot(giIrrTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, sceneSrvCpu(5));
             srvIntoHeapSlot(giVisTex.Get(), DXGI_FORMAT_R16G16_FLOAT,       sceneSrvCpu(6));
+        }
+        // Same two atlases into the MATERIAL heap (t17 heGIIrradiance / t18
+        // heGIVisibility). A graph material cannot reach sceneSrvHeap — only one
+        // CBV_SRV_UAV heap is bound at a time — so it needs its own descriptors, and
+        // heGIIrradianceAt() is line-for-line sampleDDGIIrradiance, same octahedral
+        // atlas layout and same GI_PROBE_OCT = kGIProbeOctSize = 8. giProbe.y gates it.
+        if (m_matSrvHeap)
+        {
+            srvIntoHeapSlot(giIrrTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
+                            matSrvCpu(k_matSrvGIIrr));
+            srvIntoHeapSlot(giVisTex.Get(), DXGI_FORMAT_R16G16_FLOAT,
+                            matSrvCpu(k_matSrvGIVis));
         }
     }
 
@@ -6780,8 +6843,15 @@ struct D3D12RendererImpl
     }
 
     // Draw the real graph-material shader, the way OpenGL's
-    // DrawMaterialPreviewGeometry does. Returns false when the pipeline could not
-    // be built — TODAY THAT IS THE NORMAL OUTCOME ON THIS BACKEND, see the caller.
+    // DrawMaterialPreviewGeometry does. Shared by the Material Editor preview and the
+    // Content-Browser material tile so the two shade identically — they differ only in
+    // the target they render into and in the camera they are handed.
+    //
+    // Returns false when the material has no node graph (built-in PBR — nothing to
+    // preview) or when the PSO genuinely fails to build. EVERY early-out happens before
+    // any root signature, descriptor heap or PSO is bound, so a false return leaves the
+    // command list exactly as the caller set it up and the fallback draw can go straight
+    // in behind it.
     bool drawGraphMaterialPreview(ID3D12GraphicsCommandList* cl, const HE::UUID& materialId,
                                   ContentManager* cm,
                                   const D3D12_VERTEX_BUFFER_VIEW& vbv,
@@ -6828,9 +6898,12 @@ struct D3D12RendererImpl
         // The STUDIO light, not the scene's — value for value what GL's
         // DrawMaterialPreviewGeometry writes, so the same graph shades the same on
         // both backends regardless of what the open level's sun happens to be.
-        // giParams stays 0, which is what makes heLitP() skip its screen-space mask
-        // samples (there are no GI masks in a preview pass), and csmSplits stays 0
-        // so the CSM fallback is inert too.
+        // Zero-initialised, and that is load-bearing: EVERY "is this bound" gate in the
+        // block — giParams.z, csmSplits.w, fog.z/.w, giProbe.y, ssr.x, giRefl.z,
+        // cloudShadowB.x — stays 0, so heLitP() skips every screen-space, cascade, sky,
+        // AO, probe and reflection sample. A preview pass has none of those buffers (it
+        // is not the scene), and the descriptors behind them in m_matSrvHeap are the
+        // frame's, not this pass's. Only the fields set below are live.
         HE::MaterialShaderLibrary::Lighting lit{};
         const glm::vec3 sd = glm::normalize(glm::vec3(0.45f, 0.75f, 0.55f));
         lit.sunDir[0] = sd.x; lit.sunDir[1] = sd.y; lit.sunDir[2] = sd.z;
@@ -7077,7 +7150,7 @@ struct D3D12RendererImpl
 //
 // Graph materials render through per-material PSOs built at draw time from
 // MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature + a dedicated
-// 5-slot white SRV heap, and per frame in flight: a HeLighting CB (filled once/frame)
+// SRV heap (k_matSrvCount slots), and per frame in flight: a HeLighting CB (once/frame)
 // plus U and HeParams rings (one 256-B slot per draw). Mirrors the Vulkan A4 path
 // (VulkanRenderer::createMaterialResources + GetOrBuildMaterialPipeline). No-op when
 // HE_HAVE_SHADERC is off (m_matReady stays false, so the draw path skips it).
@@ -7085,9 +7158,14 @@ struct D3D12RendererImpl
 void D3D12RendererImpl::createMaterialResources()
 {
 #if defined(HE_HAVE_SHADERC)
-    // Root signature: root CBVs b0/b1/b3/b8/b9 + one SRV table for t2 + t4..t7 + static
-    // samplers s2 + s4..s7 (linear-wrap). Registers match SPIRV-Cross HLSL (binding→register,
-    // shader_model=50, no remap — verified in ShaderCompiler.cpp / spirv_hlsl.cpp).
+    // Root signature: root CBVs b0/b1/b3/b8/b9 + one SRV table covering EVERY texture
+    // register the shared lighting preamble declares + one static sampler per PINNED
+    // sampler register. Registers come from shaderc::compileHlslPinned's table
+    // (MaterialShaderLibrary.cpp) — textures keep their GLSL binding, samplers are
+    // compacted into s0..s15. On D3D12 a shader that declares a resource the root
+    // signature does not cover is a root-signature MISMATCH: the debug layer reports it
+    // and the runtime may drop the draw, so "covers everything declared" is not optional
+    // here the way "reads black" is on D3D11.
     D3D12_ROOT_PARAMETER params[6]{};
     auto cbv = [&](int i, UINT reg) {
         params[i].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -7100,50 +7178,65 @@ void D3D12RendererImpl::createMaterialResources()
     cbv(3, 8); // b8 HeLighting (WPO VS)
     cbv(4, 9); // b9 HeParams   (WPO VS)
 
-    // Texture table: t2 (heTex0), t4..t7 (heTexP0..3), t10..t11 (heGIShadow +
-    // heGILocal, Material-ABI v2.1) and t12 (heCsm, Texture2DArray, v2.2) —
-    // four ranges → 8 consecutive heap slots. t3 is intentionally skipped
-    // (SPIRV-Cross leaves it unused for the mesh path); t8/t9 belong to the WPO
-    // custom-vertex UBOs. heCsmShadow() samples t12 behind csmSplits.w > 0 but
-    // is STATICALLY referenced, so the root signature must cover it — the heap
-    // slot holds a null Texture2DArray view (D3D12 keeps csmSplits.w = 0, so
-    // it is never actually sampled; mirrors "bind a dummy" in the preamble docs).
-    D3D12_DESCRIPTOR_RANGE texRanges[4]{};
-    texRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[0].NumDescriptors                    = 1;
-    texRanges[0].BaseShaderRegister                = 2; // t2
-    texRanges[0].RegisterSpace                     = 0;
-    texRanges[0].OffsetInDescriptorsFromTableStart = 0; // heap slot 0
-    texRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[1].NumDescriptors                    = 4;
-    texRanges[1].BaseShaderRegister                = 4; // t4..t7
-    texRanges[1].RegisterSpace                     = 0;
-    texRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slots 1..4
-    texRanges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[2].NumDescriptors                    = 2;
-    texRanges[2].BaseShaderRegister                = 10; // t10..t11 (GI masks)
-    texRanges[2].RegisterSpace                     = 0;
-    texRanges[2].OffsetInDescriptorsFromTableStart = 5; // heap slots 5..6
-    texRanges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[3].NumDescriptors                    = 1;
-    texRanges[3].BaseShaderRegister                = 12; // t12 (heCsm array, dummy)
-    texRanges[3].RegisterSpace                     = 0;
-    texRanges[3].OffsetInDescriptorsFromTableStart = 7; // heap slot 7
+    // Texture table — one descriptor range per CONTIGUOUS register run, all offsetting
+    // into the one m_matSrvHeap (k_matSrv* names it). The runs are what they are because
+    // the register space has holes: t3 is unused by the mesh path, t8/t9 are the WPO
+    // custom-vertex UBOs (b8/b9 — not textures), and t14 is the landscape weightmap,
+    // which the material preamble never declares. A range must not cover a register the
+    // shader does not declare AND the heap slot behind it must still be a valid
+    // descriptor, so the holes become range boundaries rather than padding.
+    //
+    //   t2            heTex0             slot 0
+    //   t4..t7        heTexP0..3         slots 1..4
+    //   t10..t13      GI masks + shadow arrays  slots 5..8
+    //   t15           heSkyEnv (cube)    slot 9
+    //   t16..t18      AO + DDGI atlases  slots 10..12
+    //   t31..t33      SSR/GIRefl/cloud   slots 13..15
+    //
+    // Everything the preamble declares is STATICALLY referenced even where a runtime gate
+    // (csmSplits.w, fog.z/.w, ssr.x, giRefl.z, cloudShadowB.x) folds the sample away, so
+    // the root signature has to cover the lot regardless of whether this backend has the
+    // feature. Where it does not, the heap slot holds a TYPED null (see below).
+    D3D12_DESCRIPTOR_RANGE texRanges[6]{};
+    auto texRange = [&](int i, UINT baseReg, UINT count, UINT firstSlot) {
+        texRanges[i].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        texRanges[i].NumDescriptors                    = count;
+        texRanges[i].BaseShaderRegister                = baseReg;
+        texRanges[i].RegisterSpace                     = 0;
+        texRanges[i].OffsetInDescriptorsFromTableStart = firstSlot;
+    };
+    texRange(0,  2, 1, k_matSrvTex0);     // t2      heTex0
+    texRange(1,  4, 4, k_matSrvTexP0);    // t4..t7  heTexP0..3
+    texRange(2, 10, 4, k_matSrvGIShadow); // t10..13 heGIShadow/heGILocal/heCsm/heLocalShadow
+    texRange(3, 15, 1, k_matSrvSkyEnv);   // t15     heSkyEnv (TextureCube)
+    texRange(4, 16, 3, k_matSrvAO);       // t16..18 heAO/heGIIrradiance/heGIVisibility
+    texRange(5, 31, 3, k_matSrvSSRFwd);   // t31..33 heSSRFwd/heGIReflFwd/heCloudShadow
     params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[5].DescriptorTable.NumDescriptorRanges = 4;
+    params[5].DescriptorTable.NumDescriptorRanges = 6;
     params[5].DescriptorTable.pDescriptorRanges   = texRanges;
     params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // s2 + s4..s7 linear-wrap (tiling material textures); s10..s12 linear-clamp
-    // (screen-space GI masks + CSM dummy must not wrap at the viewport edge).
-    D3D12_STATIC_SAMPLER_DESC samp[8]{};
-    const UINT sregs[8] = { 2, 4, 5, 6, 7, 10, 11, 12 };
-    for (int i = 0; i < 8; ++i)
+    // Static samplers, one per PINNED sampler register — s0..s15, all sixteen of them.
+    //
+    // Static, not a sampler heap: none of these needs to vary per draw, a static sampler
+    // costs no descriptor heap and no root slot, and D3D12_MAX_STATIC_SAMPLERS is 2032 —
+    // sixteen is nowhere near it. The real cap in play is ps_5_0's SIXTEEN sampler slots,
+    // and the pin table uses s0..s15 exactly: there is no room for a seventeenth, which
+    // is why heCloudShadow shares rather than claims one on Metal.
+    //
+    // WRAP only for the four tiling graph textures + heTex0 (s2, s4..s7): everything else
+    // is a screen-space buffer, a shadow array or a cubemap, and wrapping any of those
+    // bleeds the opposite edge in at the viewport border. LINEAR everywhere including AO
+    // (the built-in scene path uses POINT for its AO at s1, but heAO is sampled at exact
+    // full-res texel centres via gl_FragCoord/giParams.xy, where the two agree).
+    D3D12_STATIC_SAMPLER_DESC samp[16]{};
+    for (UINT i = 0; i < 16; ++i)
     {
+        const bool wrap = (i == 2) || (i >= 4 && i <= 7); // s2 heTex0, s4..s7 heTexP0..3
         samp[i].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samp[i].AddressU = samp[i].AddressV = samp[i].AddressW =
-            (i < 5) ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        samp[i].ShaderRegister   = sregs[i];
+            wrap ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samp[i].ShaderRegister   = i;
         samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
         samp[i].MaxLOD           = D3D12_FLOAT32_MAX;
     }
@@ -7151,7 +7244,7 @@ void D3D12RendererImpl::createMaterialResources()
     D3D12_ROOT_SIGNATURE_DESC rsd{};
     rsd.NumParameters     = 6;
     rsd.pParameters       = params;
-    rsd.NumStaticSamplers = 8;
+    rsd.NumStaticSamplers = 16;
     rsd.pStaticSamplers   = samp;
     rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> sig, err;
@@ -7164,14 +7257,29 @@ void D3D12RendererImpl::createMaterialResources()
         return;
     }
 
-    // Dedicated 5-slot shader-visible SRV heap, all null RGBA8 → heTex0 + heTexP0..3 sample
-    // as (0,0,0,0) this increment. TODO A4-followup: real heTex0 (material/mesh texture) +
-    // heTexP0..3 (graph project textures). Kept separate from sceneSrvHeap so the material
-    // draw doesn't disturb the A1/A2/A3 mesh-texture slot allocator; the draw path switches
-    // the bound descriptor heap to this one and restores sceneSrvHeap afterwards.
+    // Dedicated k_matSrvCount-slot shader-visible SRV heap. Kept separate from
+    // sceneSrvHeap so the material draw doesn't disturb the A1/A2/A3 mesh-texture slot
+    // allocator; the draw path switches the bound descriptor heap to this one and
+    // restores sceneSrvHeap afterwards. That separation is also WHY the shared
+    // resources need a SECOND descriptor here: only one CBV_SRV_UAV heap can be bound
+    // at a time, so the AO/GI views living in sceneSrvHeap are unreachable from a
+    // material draw and are re-published into this heap at their creation sites.
+    //
+    // Every slot is initialised to a TYPED null here and the real views overwrite them
+    // later (they may never exist — SSAO off, GI off). Two things about the nulls:
+    //   • the DIMENSION must match the declaration or the debug layer errors: heCsm and
+    //     heLocalShadow are sampler2DArray → TEXTURE2DARRAY, heSkyEnv is samplerCube →
+    //     TEXTURECUBE. Not cosmetic, and not something a wrong value shows as an image.
+    //   • a null SRV reads (0,0,0,0), i.e. BLACK — never white. So a null is only a
+    //     correct DEFAULT where zero is the neutral value. heSSRFwd/heGIReflFwd are
+    //     mixed by `mix(envSpec, rgb, a * gate * fade)`, so .a = 0 folds them away on
+    //     its own; heCloudShadow's .r = 0 would mean FULLY SHADOWED and is safe only
+    //     because cloudShadowB.x is never set on this backend; and heAO's .r = 0 would
+    //     mean FULLY OCCLUDED — which is why the AO slot below binds the 1×1 white
+    //     ssaoWhiteTex rather than a null whenever the real AO target is absent.
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 8; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm dummy (t12)
+        hd.NumDescriptors = k_matSrvCount;
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
@@ -7180,36 +7288,86 @@ void D3D12RendererImpl::createMaterialResources()
             m_matRootSig.Reset();
             return;
         }
+        // t2 + t4..t7 — heTex0 and the graph project textures. Still null RGBA8: this
+        // backend has no graph-texture cache, so they sample (0,0,0,0) and the U block's
+        // flags stays 0 = "no texture". TODO A4-followup: resolve them for real, which is
+        // the last known difference from the OpenGL material tiles.
         D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
         nullSrv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
         nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         nullSrv.Texture2D.MipLevels     = 1;
-        const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
-        for (int i = 0; i < 5; ++i) { device->CreateShaderResourceView(nullptr, &nullSrv, h); h.ptr += inc; }
-        // Slots 5..6: null GI-mask views (rewritten to the ray-traced mask + a
-        // white local mask when the GI targets are created; heLitP additionally
-        // gates its samples on giParams.z, which stays 0 until then).
+        for (UINT i = 0; i < 5; ++i)
+            device->CreateShaderResourceView(nullptr, &nullSrv, matSrvCpu(k_matSrvTex0 + i));
+
+        // One typed null 2D view, by format, into one slot.
+        auto null2D = [&](UINT slot, DXGI_FORMAT fmt)
         {
-            D3D12_SHADER_RESOURCE_VIEW_DESC maskSrv = nullSrv;
-            maskSrv.Format = DXGI_FORMAT_R16_FLOAT;
-            device->CreateShaderResourceView(nullptr, &maskSrv, h); h.ptr += inc;
-            maskSrv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            device->CreateShaderResourceView(nullptr, &maskSrv, h); h.ptr += inc;
-        }
-        // Slot 7: null Texture2DArray for heCsm (t12) — the preamble declares a
-        // sampler2DArray, so the view DIMENSION must match even though D3D12
-        // never enables the CSM fallback (csmSplits.w stays 0).
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv = nullSrv;
+            sv.Format = fmt;
+            device->CreateShaderResourceView(nullptr, &sv, matSrvCpu(slot));
+        };
+        // t10/t11 GI masks — rewritten to the ray-traced sun mask + the per-pixel
+        // local-light mask when the GI targets are created; giParams.z gates them too.
+        null2D(k_matSrvGIShadow, DXGI_FORMAT_R16_FLOAT);
+        null2D(k_matSrvGILocal,  DXGI_FORMAT_R8G8B8A8_UNORM);
+        // t31/t32 forward reflection cascade — this backend has NO SSR pass and NO
+        // ray-traced GI-reflection pass, and ssr.x / giRefl.z are never set, so these
+        // stay null for the whole session. Zero radiance AND zero confidence: correct
+        // twice over (black, not "some plausible reflection").
+        null2D(k_matSrvSSRFwd, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        null2D(k_matSrvGIRefl, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        // t33 cloud-shadow transmittance — no cloud-shadow pass on this backend, and
+        // cloudShadowB.x (the strength) is never written, so heCloudShadowFactor()
+        // returns 1.0 before it ever reaches the texture. See the caveat above.
+        null2D(k_matSrvCloud, DXGI_FORMAT_R8_UNORM);
+        // t17/t18 DDGI probe atlases — real views land here in ensureGiProbeAtlases();
+        // giProbe.y gates the lookup until then. Formats match the atlas formats so the
+        // null and the real view are interchangeable.
+        null2D(k_matSrvGIIrr, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        null2D(k_matSrvGIVis, DXGI_FORMAT_R16G16_FLOAT);
+
+        // t12/t13 shadow ARRAYS. D3D12 has ONE 2D shadow map (shadowDepth), not a
+        // cascade array and not a 16-layer local atlas, so both are dummies — but the
+        // preamble declares sampler2DArray, so the DIMENSION has to match anyway.
+        // csmSplits.w stays 0 and lightParams[i].y stays 0, so neither is ever sampled.
         {
-            D3D12_SHADER_RESOURCE_VIEW_DESC csmSrv{};
-            csmSrv.Format                        = DXGI_FORMAT_R32_FLOAT;
-            csmSrv.ViewDimension                 = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-            csmSrv.Shader4ComponentMapping       = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            csmSrv.Texture2DArray.MipLevels      = 1;
-            csmSrv.Texture2DArray.ArraySize      = 1;
-            device->CreateShaderResourceView(nullptr, &csmSrv, h);
+            D3D12_SHADER_RESOURCE_VIEW_DESC arrSrv{};
+            arrSrv.Format                   = DXGI_FORMAT_R32_FLOAT;
+            arrSrv.ViewDimension            = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            arrSrv.Shader4ComponentMapping  = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            arrSrv.Texture2DArray.MipLevels = 1;
+            arrSrv.Texture2DArray.ArraySize = 1;
+            device->CreateShaderResourceView(nullptr, &arrSrv, matSrvCpu(k_matSrvCsm));
+            device->CreateShaderResourceView(nullptr, &arrSrv, matSrvCpu(k_matSrvLocalSh));
         }
+        // t15 heSkyEnv — a samplerCube. D3D12 has no prefiltered sky ENVIRONMENT
+        // cubemap at all (skyEnvHeap is the sky PASS's moon texture + 3D cloud noise,
+        // not an environment map), so this is a null TEXTURECUBE and fog.z stays 0 →
+        // heLitP falls back to the flat ambient constant, which is what it did before.
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC cubeSrv{};
+            cubeSrv.Format                     = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            cubeSrv.ViewDimension              = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            cubeSrv.Shader4ComponentMapping    = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            cubeSrv.TextureCube.MipLevels      = 1;
+            device->CreateShaderResourceView(nullptr, &cubeSrv, matSrvCpu(k_matSrvSkyEnv));
+        }
+        // t16 heAO — 1×1 WHITE to start with; createSSAOTargets() repoints it at the real
+        // ssaoBlurRT and parks it back on white whenever that target goes away. White
+        // because a null reads 0 = fully OCCLUDED, which would black out the entire
+        // indirect term the moment fog.w is set. createSSAOPipeline() runs before this
+        // (createPipeline orders them), so ssaoWhiteTex normally exists by now.
+        //
+        // The null branch is the exception, and it is safe for a DIFFERENT reason than
+        // the white one: ssaoWhiteTex only fails to exist when createSSAOPipeline() bailed,
+        // which leaves ssaoReady false, which makes fillMatLight pass aoActive = false, so
+        // fog.w is 0 and the sample never happens. The descriptor still has to be valid —
+        // hence a typed null rather than an uninitialised slot.
+        if (ssaoWhiteTex)
+            srvIntoHeapSlot(ssaoWhiteTex.Get(), DXGI_FORMAT_R8_UNORM, matSrvCpu(k_matSrvAO));
+        else
+            null2D(k_matSrvAO, DXGI_FORMAT_R8_UNORM);
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
@@ -7789,7 +7947,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // light window from the dominant directional light (was sun-only sky values
     // before — graph materials never saw point/spot lights on D3D12 and stayed
     // sun-lit at night). Mirrors the D3D11 fillMatLight.
-    auto fillMatLight = [&](bool giActive)
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightPtr[p.frameIndex])) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -7821,9 +7979,39 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
         // csmSplits stays 0 — D3D12 has a single shadow map, no cascade array,
         // so the preamble's heCsmShadow() fallback is inert here (t12 = dummy).
+        //
+        // fog.z stays 0 as well: heSkyEnv (t15) is a null cube because this backend has
+        // no prefiltered sky environment map, so heLitP keeps its flat-ambient fallback.
+        // fog.w is the heAO gate — set on exactly the condition fillPerFrame uses for the
+        // built-in shaders, so a graph material and a built-in material standing next to
+        // each other are occluded by the same buffer instead of only one of them being.
+        // The AO descriptor (t16) is white whenever ssaoBlurRT does not exist, so a stale
+        // true here still reads "unoccluded" rather than black.
+        lit.fog[3] = aoActive ? 1.0f : 0.0f;
+        // DDGI probe field: same grid values fillPerFrame hands the built-in shaders, and
+        // heGIIrradianceAt() is line-for-line their sampleDDGIIrradiance. giProbe.y is the
+        // gate; without the grid origin/counts beside it the lookup would run against
+        // zeros, which shades but shades wrong — so the three always move together.
+        lit.giGridOrigin[0] = p.giGridOrigin.x;
+        lit.giGridOrigin[1] = p.giGridOrigin.y;
+        lit.giGridOrigin[2] = p.giGridOrigin.z;
+        lit.giGridOrigin[3] = D3D12RendererImpl::kGIProbeSpacing;
+        lit.giGridCounts[0] = static_cast<float>(p.giGridCounts.x);
+        lit.giGridCounts[1] = static_cast<float>(p.giGridCounts.y);
+        lit.giGridCounts[2] = static_cast<float>(p.giGridCounts.z);
+        lit.giGridCounts[3] = static_cast<float>(p.giProbesPerRow);
+        lit.giProbe[0]      = p.giIndirectIntensity;
+        // giActive is the caller's giShadingActive, which already requires giProbeGridBuilt
+        // AND both atlases — and dispatchGiProbeUpdate (which fits the grid) runs BEFORE
+        // the backbuffer branch's fillMatLight, so the grid values above are the fitted
+        // ones by the time this can ever be 1. The two atlas checks are belt-and-braces.
+        lit.giProbe[1]      = (giActive && p.giIrrTex && p.giVisTex) ? 1.0f : 0.0f;
+        // ssr.*, giRefl.* and cloudShadowB.x all stay 0: no SSR pass, no ray-traced
+        // reflection pass and no cloud-shadow pass on this backend, so t31/t32/t33 are
+        // permanent nulls and every one of those samples folds away.
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
-    fillMatLight(false);
+    fillMatLight(false, p.ssaoEnabled && p.ssaoReady);
 #endif
 
     cl->SetGraphicsRootSignature(p.rootSig.Get());
@@ -8025,7 +8213,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // GI is not shading — GI replaces AO entirely.
         fillPerFrame(giShadingActive, !giShadingActive && p.ssaoEnabled && p.ssaoReady);
 #if defined(HE_HAVE_SHADERC)
-        fillMatLight(giShadingActive);
+        // Same two decisions, byte for byte, for the graph materials.
+        fillMatLight(giShadingActive, !giShadingActive && p.ssaoEnabled && p.ssaoReady);
 #endif
 
         // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
@@ -8083,7 +8272,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             !dc.paramOverride.empty() ? &dc.paramOverride
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
-                        // Switch to the material root sig + white SRV heap + material PSO.
+                        // Switch to the material root sig + material SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
                         cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
@@ -9142,26 +9331,51 @@ bool D3D12Renderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind,
     }
     else
     {
-        // Built-in PBR fallback sphere for EVERY material, graph ones included.
+        // Graph material → the REAL shader; built-in PBR material → the fallback
+        // sphere. Same order, same two constants and the same reasoning as GL's
+        // RenderAssetThumbnail (OpenGLRenderer.cpp:8379), so a material tile is the
+        // same picture on both backends.
         //
-        // Deliberately NOT the graph-material PSO path that DrawScene uses (:6455).
-        // That path binds m_matSrvHeap, whose slots [0..4] — heTex0 and heTexP0..3 —
-        // are NULL SRVs (:5626, :5635-5642) and therefore sample as (0,0,0,0): this
-        // backend has no graph-texture cache yet, the A4 graph-texture-cache gap. A
-        // graph material rendered through it would come out BLACK and would NOT
-        // match the OpenGL tile, which is worse than a flat-shaded sphere: it looks
-        // like a working feature producing wrong pixels. A PBR sphere is the correct
-        // tile for a built-in material and an honest approximation for a graph one.
-        // Close this the day heTexP0..3 resolve real project textures.
-        const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
-        p.drawMeshPreviewGeometry(cl, p.previewSphereVbv, p.previewSphereIbv,
-                                  p.previewSphereIdx, tileTex,
-                                  glm::vec3(0.0f), 1.0f,
-                                  ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
-                                     : glm::vec3(0.8f),
-                                  ma ? ma->metallic  : 0.0f,
-                                  ma ? ma->roughness : 0.5f,
-                                  HE::kThumbYaw, HE::kThumbPitch, HE::kMatFallbackDist);
+        // The graph attempt is first and the fallback only runs when it declines.
+        // drawGraphMaterialPreview declines for exactly two reasons: the material has
+        // no node graph (a built-in-PBR material — the fallback IS the right tile for
+        // it), or the PSO genuinely failed to build. It used to decline for a third
+        // reason — the material pixel shader could not COMPILE on D3D at all, because
+        // the shared preamble's samplers ran past ps_5_0's 16-slot cap (X4509) — and
+        // this branch was hard-wired to the fallback because of it. That is fixed:
+        // shaderc::compileHlslPinned pins the sampler registers into s0..s15, and the
+        // root signature + m_matSrvHeap now cover every register the preamble declares.
+        //
+        // kMatGraphDist at 32°, NOT kMatFallbackDist at 35°: the two paths have
+        // different FOVs and each distance is tuned against its own, so swapping them
+        // crops the sphere. The fallback below keeps its own pair.
+        const HE::PreviewCamera cam = HE::meshOrbit(glm::vec3(0.0f), 1.0f,
+                                                    HE::kThumbYaw, HE::kThumbPitch,
+                                                    HE::kMatGraphDist, 1.0f,
+                                                    /*fovDegrees=*/32.0f);
+        if (!p.drawGraphMaterialPreview(cl, assetId, m_contentManager,
+                                        p.previewSphereVbv, p.previewSphereIbv,
+                                        p.previewSphereIdx, cam))
+        {
+            // Built-in PBR sphere: the correct tile for a material with no graph, and
+            // the honest approximation when a graph's PSO could not be built.
+            //
+            // KNOWN REMAINING DIFFERENCE from the OpenGL tile even on the graph path:
+            // heTex0 and heTexP0..3 are null SRVs here (no graph-texture cache on this
+            // backend), so any graph that samples a project texture reads (0,0,0,0)
+            // where GL reads the texture. Everything else — the graph's own maths, the
+            // studio light, the framing — now matches. Close it the day heTexP0..3
+            // resolve real project textures.
+            const MaterialAsset* ma = m_contentManager->getMaterial(assetId);
+            p.drawMeshPreviewGeometry(cl, p.previewSphereVbv, p.previewSphereIbv,
+                                      p.previewSphereIdx, tileTex,
+                                      glm::vec3(0.0f), 1.0f,
+                                      ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
+                                         : glm::vec3(0.8f),
+                                      ma ? ma->metallic  : 0.0f,
+                                      ma ? ma->roughness : 0.5f,
+                                      HE::kThumbYaw, HE::kThumbPitch, HE::kMatFallbackDist);
+        }
     }
 
     return p.endThumbnailPass(cl, S, outRgba8);
@@ -9320,27 +9534,28 @@ void* D3D12Renderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& m
 
     if (!p.drawGraphMaterialPreview(cl, materialId, m_contentManager, vbv, ibv, indexCount, cam))
     {
-        // ── A4 / X4509 SAMPLER-CAP GAP ───────────────────────────────────────
-        // The node-graph pixel shader does not COMPILE on D3D11/D3D12 today: the
-        // shared material preamble binds samplers at 16/17/18/31/32/33, SPIRV-Cross
-        // maps binding N to register(sN), and ps_5_0 caps at 16 samplers → X4509.
-        // (Metal was given a pin table for exactly this wall; HLSL was given none.
-        // Vulkan is unaffected and draws the real graph.) So GetOrBuildMaterialPSO
-        // returns null, caches the null so it is not retried per frame, and we land
-        // here EVERY time on this backend.
+        // ── PSO BUILD FAILURE ────────────────────────────────────────────────
+        // Reaching here is now the EXCEPTION, not the rule. It used to be the rule:
+        // the node-graph pixel shader could not compile on D3D at all, because the
+        // shared material preamble declares samplers up to binding 33, SPIRV-Cross
+        // mapped binding N onto register(sN), and ps_5_0 caps at s15 → X4509 on every
+        // graph material. shaderc::compileHlslPinned now pins the fragment stage's
+        // registers (textures keep their binding, samplers compact into s0..s15) and
+        // this backend's material root signature + m_matSrvHeap cover the whole set,
+        // so GetOrBuildMaterialPSO succeeds and the branch above draws the real graph.
         //
-        // Fall back to the same built-in-PBR shading the Content-Browser material
-        // tile uses, on the SAME geometry and the SAME camera. A blank Material
-        // Editor viewport is worse than an approximate sphere, and the silhouette,
-        // framing and base colour are all still right — only the graph's own
-        // shading is missing. This preview will match OpenGL the day the sampler
-        // cap is fixed; nothing here needs to change then, the graph path above
-        // simply starts succeeding.
+        // materialHasGraph() already returned nullptr for a built-in-PBR material
+        // further up, so what is left is a genuine failure: a cross-compile error, a
+        // shader the driver rejects, or a PSO the device refuses. Fall back to the
+        // same built-in-PBR shading the Content-Browser material tile uses, on the
+        // SAME geometry and the SAME camera — a blank Material Editor viewport is
+        // worse than an approximate sphere, and the silhouette, framing and base
+        // colour are all still right.
         if (!p.matPvFallbackLogged)
         {
             p.matPvFallbackLogged = true;
             HE_LOG_WARN(RHI, "%s",
-                "D3D12Renderer: node-graph material preview unavailable (A4/X4509 sampler cap) "
+                "D3D12Renderer: node-graph material preview PSO could not be built "
                 "— falling back to built-in PBR shading");
         }
         // Same base-texture + PBR-scalar selection the Content-Browser material tile

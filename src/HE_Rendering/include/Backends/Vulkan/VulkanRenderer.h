@@ -1254,6 +1254,23 @@ private:
 	bool            m_matPvReady = false;
 	bool ensureMaterialPreviewResources();
 
+	// Everything a NODE-GRAPH material draw needs, prepared before any command
+	// buffer is open: shader resolve, pipeline build, geometry and the heTexP0..3
+	// uploads all submit + vkQueueWaitIdle internally, so none of them may happen
+	// inside a recording. Fills the three preview UBOs and rewrites m_matPvSet.
+	//
+	// Shared by BOTH graph-material entry points — the interactive preview and
+	// the Content-Browser tile. They differ only in the framing constant they
+	// pass and in what they do when this returns VK_NULL_HANDLE, which is the
+	// answer for "this material has no node graph" (a built-in PBR material) as
+	// well as for a genuine build failure: the preview draws nothing, the tile
+	// falls back to a shaded sphere. Keeping the 22 descriptor writes and the
+	// studio-light fill in ONE place is the point — two copies would drift.
+	VkPipeline prepareGraphMaterialDraw(const HE::UUID& materialId,
+	                                    float yaw, float pitch, float dist,
+	                                    int shape, const HE::UUID& meshId,
+	                                    VkBuffer& vbOut, VkBuffer& ibOut, uint32_t& idxOut);
+
 	// ── Skeletal preview ────────────────────────────────────────────────────
 	// Its own pipeline rather than m_skinnedPipeline: that one targets
 	// m_renderPass (a different colour format, so not render-pass-compatible) and

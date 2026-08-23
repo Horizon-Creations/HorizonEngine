@@ -183,12 +183,34 @@ größte Einzelkorrektur an der Aufwandsschätzung in diesem Dokument.
 > > EIN `SamplerState` viele Texturen bedienen kann — das funktioniert nachweislich
 > > (gemessen), ist aber eine Änderung an jedem Backend und gehört in eine eigene Phase.
 > >
-> > **Noch offen an diesem Faden:** die sechs verschobenen Ressourcen werden von D3D11 und
-> > D3D12 noch **gar nicht gebunden** — sie waren es nie, weil der Shader nie übersetzte
-> > (beide binden heute nur Slots 0, 1, 2, 4, 10). Der Shader läuft, sampelt dort aber ins
-> > Leere. Und die Material-**Kacheln** zeigen weiterhin den PBR-Ersatz, weil der P1b-Code
-> > ihn bewusst zeichnet, solange der Graph-Pfad nicht baute; diese Entscheidung ist jetzt
-> > überholt und kann umgedreht werden.
+> > **Beide losen Enden inzwischen geschlossen — und das Ergebnis ist das deutlichste
+> > dieser ganzen Arbeit.** D3D11 und D3D12 binden jetzt die vollständige Präambel
+> > (Typen exakt: `heCsm`/`heLocalShadow` als `Texture2DArray`, `heSkyEnv` als
+> > `TextureCube`, echte Ressource wo vorhanden, sonst getypter Default in der Richtung,
+> > die den Term im Shader wegfaltet — weiß für AO, schwarz für SSR/GI-Reflexion). D3D12
+> > hat dafür Root-Signature und Heap von 8 auf 16 Slots erweitert, mit sechs
+> > Deskriptor-Bereichen, weil der Registerraum Löcher hat. Und die Material-Kachel
+> > nimmt auf beiden jetzt den Graph-Pfad.
+> >
+> > Kacheln gegen OpenGL, vorher → nachher:
+> >
+> > | Kachel | D3D11 | D3D12 |
+> > |---|---|---|
+> > | `material` | 60,0 % → **0,0 %** | 60,0 % → **0,0 %** |
+> > | `material_function` | 63,6 % → **0,0 %** | 63,6 % → **0,0 %** |
+> >
+> > Die Material-**Vorschau** trifft auf allen drei Zielbackends **maxdiff = 1**. D3D11 und
+> > D3D12 zeichneten dort vorher eine grüne PBR-Ersatzkugel.
+> >
+> > Zwei Punkte, die bewusst offen bleiben:
+> > * **D3D11 und D3D12 laufen bei zwei Gates auseinander.** D3D12 setzt `fog.w` (AO) und
+> >   `giProbe.y` (DDGI) für Graph-Materialien so, wie es die eingebauten Shader dort schon
+> >   tun und wie OpenGL es tut; D3D11 lässt beide zu, weil es `giGridOrigin`/`giGridCounts`
+> >   nie füllt und ein geöffnetes Probe-Gate ohne Gitter Müll schattiert. In der
+> >   Kachelszene zeigt sich der Unterschied nicht (beide 0,0 %). D3D12s Wahl ist die
+> >   GL-treue; D3D11 zieht nach, sobald es das Gitter füllt.
+> > * **Landschafts-Graph-Materialien** scheitern weiterhin auf D3D — das ist der
+> >   Sampler-Deckel, nicht diese Arbeit. Siehe den Umbau unten.
 >
 > **Aber Umnummerieren allein reicht für `ssrComposite` nicht.** Der braucht 19 verschiedene
 > Sampler; `ps_5_0` kennt 16. Da hilft keine Tabelle. Entweder teilen sich mehrere Texturen

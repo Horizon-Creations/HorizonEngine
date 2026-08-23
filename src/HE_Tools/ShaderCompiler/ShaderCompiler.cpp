@@ -102,6 +102,22 @@ bool spirvToSource(const std::vector<uint32_t>& spirv, Target target,
             case Target::GlslEs300:
             {
                 spirv_cross::CompilerGLSL c(spirv);
+                // Getrennte `texture2D` + `sampler` wieder zu `sampler2D`
+                // zusammenlegen. Desktop-GLSL 410 und GLSL-ES 300 kennen den
+                // getrennten Typ nicht, Vulkan-GLSL und HLSL dagegen schon — und
+                // getrennt zu schreiben ist der einzige Weg, unter Shader Model 5.0
+                // mehr als 16 Texturen zu sampeln, weil sich dort viele Texturen
+                // EINEN SamplerState teilen duerfen (gemessen), waehrend ein
+                // kombinierter Sampler pro Textur ein eigenes s-Register verbraucht.
+                //
+                // Fuer eine Quelle, die ohnehin nur kombinierte Sampler benutzt, ist
+                // der Aufruf ein No-Op: es gibt nichts zu kombinieren. Deshalb steht
+                // er hier unbedingt und nicht hinter einem Schalter.
+                c.build_combined_image_samplers();
+                // Die erzeugten Kombinationen brauchen Namen, sonst emittiert
+                // SPIRV-Cross leere Bezeichner.
+                for (const auto& remap : c.get_combined_image_samplers())
+                    c.set_name(remap.combined_id, c.get_name(remap.image_id));
                 spirv_cross::CompilerGLSL::Options o;
                 o.version = (target == Target::Glsl410) ? 410u : 300u;
                 o.es      = (target == Target::GlslEs300);

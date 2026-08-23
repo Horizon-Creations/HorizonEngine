@@ -8155,6 +8155,10 @@ bool VulkanRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
     float       extent = 1.0f;
     float       metallic = HE::kMeshTileMetallic, roughness = HE::kMeshTileRoughness;
     float       dist = HE::kMeshFrameDist;
+    // Non-null when the Material branch below resolved a node graph: the tile is
+    // then drawn with the REAL graph shader and m_matPvSet instead of the
+    // built-in mesh-preview pipeline.
+    VkPipeline  graphPipe = VK_NULL_HANDLE;
 
     if (kind == ThumbnailKind::StaticMesh)
     {
@@ -8167,33 +8171,44 @@ bool VulkanRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
     }
     else if (kind == ThumbnailKind::Material)
     {
-        // The BUILT-IN PBR fallback sphere for EVERY material, graph ones included.
+        // GRAPH FIRST, built-in PBR sphere second — the exact order GL has
+        // (:8375-8418) and that D3D11/D3D12 now run since the HLSL resource
+        // remap. The old comment here claimed the graph path was unusable
+        // because heTexP0..3 had nothing to bind; resolveGraphTexture and the
+        // "hi:lo" UUID cache closed that, and the interactive preview proves
+        // the graph path carries on this backend.
         //
-        // Deliberately NOT the graph-material pipeline DrawScene uses. That path
-        // binds the white default to heTexP0..3 (see the TODO next to the heTex0
-        // selection in DrawScene) because this backend has no graph-texture cache
-        // yet — the A4 graph-texture-cache gap. A graph material rendered through
-        // it would come out untextured-white and would NOT match the OpenGL tile,
-        // which is worse than a flat-shaded sphere: it looks like a working
-        // feature producing wrong pixels. A PBR sphere is the correct tile for a
-        // built-in material and an honest approximation for a graph one. Close
-        // this the day heTexP0..3 resolve real project textures.
-        if (!ensurePreviewMesh(0 /*sphere*/)) return false;
-        vb = m_previewSphereVB; ib = m_previewSphereIB; indexCount = m_previewSphereIdx;
-        const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(assetId) : nullptr;
-        // Same base-texture selection as the scene's override path (getMaterial →
-        // textureIds[0]/texturePaths[0] → view), mirroring GL's ResolveGraphTexture.
-        const MaterialTexVk* ovr = nullptr;
-        if (resolveMaterialOverride(assetId, ovr) && ovr) tex = ovr->view;
-        center    = glm::vec3(0.0f);
-        extent    = 1.0f;
-        baseColor = ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
-                       : glm::vec3(0.8f);
-        metallic  = ma ? ma->metallic  : 0.0f;
-        roughness = ma ? ma->roughness : 0.5f;
-        // Wider FOV than GL's graph path, hence the shorter distance — both land on
-        // the same apparent sphere size (see the constants in PreviewFraming.h).
-        dist      = HE::kMatFallbackDist;
+        // NOTE the framing constant: the graph path is drawn at 32° FOV and so
+        // takes kMatGraphDist, the fallback sphere at 35° and so takes
+        // kMatFallbackDist. Each is tuned to its OWN field of view (both land on
+        // ~90 % sphere coverage); crossing them over is a visibly wrong sphere
+        // size in the tile diff, not a rounding difference.
+        graphPipe = prepareGraphMaterialDraw(assetId, HE::kThumbYaw, HE::kThumbPitch,
+                                             HE::kMatGraphDist, 0 /*sphere*/, HE::UUID{},
+                                             vb, ib, indexCount);
+        if (graphPipe == VK_NULL_HANDLE)
+        {
+            // No node graph (a built-in PBR material), or the graph would not
+            // build. A shaded sphere is the RIGHT answer for the former and the
+            // honest approximation for the latter — GL keeps it for the same
+            // reason, so every material asset still produces a tile.
+            if (!ensurePreviewMesh(0 /*sphere*/)) return false;
+            vb = m_previewSphereVB; ib = m_previewSphereIB; indexCount = m_previewSphereIdx;
+            const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(assetId) : nullptr;
+            // Same base-texture selection as the scene's override path (getMaterial →
+            // textureIds[0]/texturePaths[0] → view), mirroring GL's ResolveGraphTexture.
+            const MaterialTexVk* ovr = nullptr;
+            if (resolveMaterialOverride(assetId, ovr) && ovr) tex = ovr->view;
+            center    = glm::vec3(0.0f);
+            extent    = 1.0f;
+            baseColor = ma ? glm::vec3(ma->baseColor[0], ma->baseColor[1], ma->baseColor[2])
+                           : glm::vec3(0.8f);
+            metallic  = ma ? ma->metallic  : 0.0f;
+            roughness = ma ? ma->roughness : 0.5f;
+            // Wider FOV than the graph path, hence the shorter distance — both land
+            // on the same apparent sphere size (see the constants in PreviewFraming.h).
+            dist      = HE::kMatFallbackDist;
+        }
     }
     else if (kind == ThumbnailKind::SkeletalMesh)
     {
@@ -8798,42 +8813,46 @@ bool VulkanRenderer::ensureMaterialPreviewResources()
 #endif
 }
 
-// ─── RenderMaterialPreview ──────────────────────────────────────────────────
-// The REAL graph-material shader, exactly like OpenGL — this backend has no
-// sampler-register ceiling to hit (the D3D11/D3D12 twins fall back to a built-in
-// PBR sphere because ps_5_0 caps at 16 samplers and the shared material preamble
-// binds 16/17/18/31/32/33). That makes this the closest of the four to GL's
-// picture and the most useful HE_PREVIEW_DUMP to diff against it.
-void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
-                                            uint32_t size, float yaw, float pitch, float dist,
-                                            int shape, const HE::UUID& meshId)
+// ─── Graph-material draw preparation (interactive preview + tile) ───────────
+// The REAL graph-material shader, exactly like OpenGL. This backend never had a
+// sampler-register ceiling to hit — the D3D11/D3D12 twins fell back to a
+// built-in PBR sphere only until the HLSL resource remap landed, because
+// ps_5_0 caps at 16 samplers and the shared material preamble binds
+// 16/17/18/31/32/33.
+//
+// See the header for why both graph-material entry points funnel through here.
+VkPipeline VulkanRenderer::prepareGraphMaterialDraw(const HE::UUID& materialId,
+                                                    float yaw, float pitch, float dist,
+                                                    int shape, const HE::UUID& meshId,
+                                                    VkBuffer& vbOut, VkBuffer& ibOut,
+                                                    uint32_t& idxOut)
 {
+    vbOut = VK_NULL_HANDLE; ibOut = VK_NULL_HANDLE; idxOut = 0;
 #if defined(HE_HAVE_SHADERC)
-    // Adopt the ContentManager: previews run BEFORE the first Render(), so
-    // SetContentManager may not have happened and resolveShaders would find nothing.
-    if (!m_contentManager) m_contentManager = &cm;
-    if (!m_device) return nullptr;
+    if (!m_device || !m_contentManager) return VK_NULL_HANDLE;
 
     // PROBE FIRST, before allocating anything — a built-in-PBR material has no
-    // node-graph program and gets no preview at all on GL either (:8464-8470).
-    // The Content-Browser TILE is the path that falls back to a shaded sphere.
+    // node-graph program. GL's PREVIEW returns nothing at all in that case
+    // (:8464-8470) while GL's TILE falls back to a shaded sphere (:8375-8418);
+    // both callers here mirror their GL twin, which is the whole reason this
+    // returns a handle instead of drawing something itself.
     uint64_t shKey = 0; std::string shFrag, shVert;
     if (!m_matReady || !m_matShaderLib.resolveShaders(*m_contentManager, materialId,
                                                       shKey, shFrag, shVert))
-        return nullptr;
+        return VK_NULL_HANDLE;
 
-    const int req = HE::clampPreviewSize(size);   // 32..1024, shared with every backend
-    const int S   = previewBucket(req);
-    if (!ensurePreviewTarget(m_matPreview, S, S)) return nullptr;
-    if (!ensureMaterialPreviewResources())        return nullptr;
+    if (!ensurePreviewRenderPass())        return VK_NULL_HANDLE;
+    if (!ensureMaterialPreviewResources()) return VK_NULL_HANDLE;
 
-    // The graph pipeline built against OUR render pass, a cache variant of its own
-    // (see GetOrBuildMaterialPipeline): the LDR variant targets m_renderPass, whose
-    // colour format differs, so it is not compatible with this framebuffer.
+    // The graph pipeline built against the PREVIEW render pass, a cache variant of
+    // its own (see GetOrBuildMaterialPipeline): the LDR variant targets
+    // m_renderPass, whose colour format differs, so it is not compatible with
+    // these framebuffers. The tile and the preview share m_thumbRenderPass, so
+    // they also share this one pipeline variant.
     // transparent = false mirrors GL, which previews with blending disabled.
     VkPipeline pipe = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, /*hdr=*/false,
                                                  /*transparent=*/false, m_thumbRenderPass);
-    if (pipe == VK_NULL_HANDLE) return nullptr;
+    if (pipe == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 
     // ── Geometry: a picked STATIC MESH, else the procedural primitive. Both feed
     // the same interleaved pos3/normal3/uv2 stream the material vertex declares,
@@ -8855,19 +8874,20 @@ void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
     }
     else
     {
-        if (!ensurePreviewMesh(shape)) return nullptr;
+        if (!ensurePreviewMesh(shape)) return VK_NULL_HANDLE;
         vb = m_previewSphereVB; ib = m_previewSphereIB; idxCount = m_previewSphereIdx;
     }
-    if (!vb || !ib || idxCount == 0) return nullptr;
+    if (!vb || !ib || idxCount == 0) return VK_NULL_HANDLE;
 
     const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
 
     // ── heTexP0..3: the graph's picked project textures, resolved BEFORE the
-    // command buffer opens (each may upload synchronously). This is the ONE place
-    // on this backend that binds them for real — DrawScene still binds the white
-    // default at bindings 4-7, because an upload inside its recording would be a
-    // hang rather than a hitch. Without them a textured graph material previews
-    // flat white here and the OpenGL A/B is meaningless.
+    // command buffer opens (each may upload synchronously). This is the only
+    // route on this backend that binds them for real — DrawScene still binds the
+    // white default at bindings 4-7, because an upload inside its recording would
+    // be a hang rather than a hitch. Without them a textured graph material comes
+    // out flat white and the OpenGL A/B is meaningless, which is exactly why the
+    // Content-Browser tile could not use the graph path before this existed.
     VkImageView texP[4] = { m_whiteAlbedoView, m_whiteAlbedoView,
                             m_whiteAlbedoView, m_whiteAlbedoView };
     if (ma)
@@ -8990,6 +9010,40 @@ void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& 
         wr(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heCloudShadow
         vkUpdateDescriptorSets(m_device, 22, w, 0, nullptr);
     }
+
+    vbOut = vb; ibOut = ib; idxOut = idxCount;
+    return pipe;
+#else
+    (void)materialId; (void)yaw; (void)pitch; (void)dist; (void)shape; (void)meshId;
+    return VK_NULL_HANDLE; // no cross-compiler → no graph material to draw
+#endif
+}
+
+// ─── RenderMaterialPreview ──────────────────────────────────────────────────
+// Graph materials only: a built-in-PBR material has no node-graph program and
+// gets no interactive preview here or on GL (:8464-8470). The Content-Browser
+// TILE is the path that falls back to a shaded sphere.
+void* VulkanRenderer::RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
+                                            uint32_t size, float yaw, float pitch, float dist,
+                                            int shape, const HE::UUID& meshId)
+{
+#if defined(HE_HAVE_SHADERC)
+    // Adopt the ContentManager: previews run BEFORE the first Render(), so
+    // SetContentManager may not have happened and resolveShaders would find nothing.
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!m_device) return nullptr;
+
+    // Prepared BEFORE the target is allocated, so a built-in material costs no
+    // image at all — the ordering the probe-first comment inside asks for.
+    VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+    uint32_t idxCount = 0;
+    VkPipeline pipe = prepareGraphMaterialDraw(materialId, yaw, pitch, dist,
+                                               shape, meshId, vb, ib, idxCount);
+    if (pipe == VK_NULL_HANDLE) return nullptr;
+
+    const int req = HE::clampPreviewSize(size);   // 32..1024, shared with every backend
+    const int S   = previewBucket(req);
+    if (!ensurePreviewTarget(m_matPreview, S, S)) return nullptr;
 
     VkCommandBuffer cmd = beginThumbnailCmd();
     if (!cmd) return nullptr;
