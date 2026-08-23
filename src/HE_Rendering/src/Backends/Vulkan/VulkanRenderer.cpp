@@ -8246,9 +8246,31 @@ bool VulkanRenderer::RenderAssetThumbnail(ContentManager& cm, ThumbnailKind kind
     rpbi.clearValueCount = 2;
     rpbi.pClearValues    = clears;
     vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    drawMeshPreviewGeometry(cmd, S, vb, ib, indexCount, tex, center, extent,
-                            baseColor, metallic, roughness,
-                            HE::kThumbYaw, HE::kThumbPitch, dist);
+    if (graphPipe != VK_NULL_HANDLE)
+    {
+        // The graph tile. prepareGraphMaterialDraw already built the camera into
+        // the U block and wrote m_matPvSet, so there is nothing left but to bind
+        // and draw. Viewport/scissor are dynamic in the material pipeline (unlike
+        // the mesh-preview one, where drawMeshPreviewGeometry sets them), so they
+        // have to be set here.
+        VkViewport vp{ 0.0f, 0.0f, static_cast<float>(S), static_cast<float>(S), 0.0f, 1.0f };
+        VkRect2D   sc{ { 0, 0 }, { static_cast<uint32_t>(S), static_cast<uint32_t>(S) } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor (cmd, 0, 1, &sc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphPipe);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_matPipelineLayout,
+                                0, 1, &m_matPvSet, 0, nullptr);
+        const VkDeviceSize goff = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &goff);
+        vkCmdBindIndexBuffer(cmd, ib, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+    }
+    else
+    {
+        drawMeshPreviewGeometry(cmd, S, vb, ib, indexCount, tex, center, extent,
+                                baseColor, metallic, roughness,
+                                HE::kThumbYaw, HE::kThumbPitch, dist);
+    }
     vkCmdEndRenderPass(cmd);
     // The render pass ends in TRANSFER_SRC_OPTIMAL, so the copy needs no barrier.
     recordThumbnailReadback(cmd, S, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
