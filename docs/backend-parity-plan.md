@@ -212,6 +212,47 @@ größte Einzelkorrektur an der Aufwandsschätzung in diesem Dokument.
 > > * **Landschafts-Graph-Materialien** scheitern weiterhin auf D3D — das ist der
 > >   Sampler-Deckel, nicht diese Arbeit. Siehe den Umbau unten.
 >
+> > **Stand 2026-08-22, Nachtrag: der Sampler-Deckel ist weg.**
+> >
+> > Die geteilte Präambel und die Material-Graph-Codegen benutzen jetzt **getrennte
+> > Texturen und geteilte Sampler** statt kombinierter `sampler2D`. Ein kombinierter
+> > kostet unter SM 5.0 ein Textur- **und** ein Sampler-Register; getrennt teilen sich
+> > beliebig viele Texturen einen Sampler. Zwei reichen für alles:
+> > `heSampWrap` (linear/REPEAT) für `heTex0` und `heTexP0..3`, weil die Kachelung eines
+> > UV-Knotens ohne Repeat bedeutungslos wäre, und `heSampClamp` (linear/CLAMP) für die
+> > elf Präambel-Texturen und die Weightmap — alles Bildschirm-, Schatten-, Atlas- oder
+> > Umgebungsdaten, bei denen ein Wrap die gegenüberliegende Kante hereinholte.
+> >
+> > | Material | vorher | fxc vorher | nachher | fxc nachher |
+> > |---|:--:|:--:|:--:|:--:|
+> > | einfach | 15 Sampler | OK | **2** | OK |
+> > | **Landschaft** | 17 Sampler | **X4500** | **2** | **OK** |
+> >
+> > Selbst nachgemessen mit `fxc /T ps_5_0`. **14 der 16 Register sind jetzt frei**, die
+> > Texturseite reicht ohnehin bis t127 — der Deckel ist keiner mehr.
+> >
+> > **OpenGL merkt davon nichts**, und das war die Bedingung: der GLSL-Pfad des
+> > Cross-Compilers legt getrennte Sampler wieder zusammen (GLSL 410 kennt den Typ
+> > nicht), und die gerenderten Kacheln sind **pixelgleich** mit dem Stand davor
+> > (maxdiff 0 auf allen sechs). Der erzeugte GLSL-Quelltext ist *nicht* byte-gleich —
+> > `build_combined_image_samplers()` ordnet die Uniforms nach Erstbenutzung statt nach
+> > Deklaration — aber Name und Typ jeder Uniform stimmen überein, die Sampling-Zeilen
+> > stehen unverändert an denselben Zeilennummern, und GL bindet ohnehin über
+> > `glGetUniformLocation`. Das Bild ist das Gate, nicht der Text.
+> >
+> > **Vulkan war das einzige Backend, das brach** — als einziges deklariert es den
+> > Deskriptor-**Typ** explizit: 17 Bindings von `COMBINED_IMAGE_SAMPLER` auf
+> > `SAMPLED_IMAGE`, dazu 34/35 als `SAMPLER`, Pools und alle Schreibstellen
+> > entsprechend. Danach wieder 0 Validierungsfehler.
+> >
+> > Sechs Zusicherungen in `tests/test_material_graph.cpp` prüften die alte Schreibweise
+> > und wurden auf die neue gezogen — sie beschreiben eine Konvention, die sich
+> > absichtlich geändert hat.
+> >
+> > Endstand Kacheln gegen OpenGL auf allen drei Zielbackends: `mesh`, `material`,
+> > `material_function` und `particles` **byte-identisch**, `material_pbr` ein Subpixel
+> > um eins. Übrig bleibt `widget` — dort ist GL der Ausreißer gegenüber Metal.
+>
 > **Aber Umnummerieren allein reicht für `ssrComposite` nicht.** Der braucht 19 verschiedene
 > Sampler; `ps_5_0` kennt 16. Da hilft keine Tabelle. Entweder teilen sich mehrere Texturen
 > einen `SamplerState` (SPIRV-Cross erzeugt aus GLSLs kombinierten Samplern je ein eigenes

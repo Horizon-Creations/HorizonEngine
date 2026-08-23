@@ -59,8 +59,13 @@ TEST_CASE("MaterialGraph codegen emits the expected constructs")
 	for (auto& n : g3.nodes) if (n.type == MatNodeType::Output) outId = n.id;
 	CHECK(g3.connect(texN, 0, outId, 0));
 	const std::string texGlsl = HE::generateFragmentGlsl(g3);
-	CHECK(texGlsl.find("uniform sampler2D heTex0") != std::string::npos);
-	CHECK(texGlsl.find("texture(heTex0") != std::string::npos);
+	// Getrennte Textur + geteilter Sampler, nicht mehr ein kombinierter sampler2D:
+	// ein kombinierter kostet unter Shader Model 5.0 ein eigenes Sampler-Register,
+	// und bei 16 verfuegbaren war damit Schluss — ein Landschafts-Material brauchte
+	// ein siebzehntes und liess sich auf D3D gar nicht uebersetzen. Getrennt teilen
+	// sich beliebig viele Texturen einen Sampler.
+	CHECK(texGlsl.find("uniform texture2D heTex0") != std::string::npos);
+	CHECK(texGlsl.find("texture(sampler2D(heTex0, heSampWrap)") != std::string::npos);
 }
 
 TEST_CASE("MaterialGraph guards: cycles, missing output, output not deletable")
@@ -309,9 +314,10 @@ TEST_CASE("MaterialGraph v4: extra inputs + project-texture slots")
 	REQUIRE(gen.textures.size() == 2);          // grass, rock (dedup)
 	CHECK(gen.textures[0] == "Tex/grass.hasset");
 	CHECK(gen.textures[1] == "Tex/rock.hasset");
-	CHECK(gen.glsl.find("uniform sampler2D heTex0")   != std::string::npos); // legacy default used
-	CHECK(gen.glsl.find("uniform sampler2D heTexP0")  != std::string::npos);
-	CHECK(gen.glsl.find("uniform sampler2D heTexP1")  != std::string::npos);
+	// Getrennte Texturen; der Sampler ist geteilt (siehe oben, SM-5.0-Sampler-Deckel).
+	CHECK(gen.glsl.find("uniform texture2D heTex0")   != std::string::npos); // legacy default used
+	CHECK(gen.glsl.find("uniform texture2D heTexP0")  != std::string::npos);
+	CHECK(gen.glsl.find("uniform texture2D heTexP1")  != std::string::npos);
 	CHECK(gen.glsl.find("binding = 4)")               != std::string::npos); // first project tex
 }
 
@@ -1106,8 +1112,10 @@ TEST_CASE("Landscape Layer Blend emits a normalised weightmap blend")
 	const HE::MatShaderGen gen = HE::generateFragment(g);
 	// The sampler is declared at the reserved binding and sampled at the RAW UV
 	// (the weightmap spans the whole terrain; detail tiling is per layer).
-	CHECK(gen.glsl.find("binding = 14) uniform sampler2D heLandscapeWeights") != std::string::npos);
-	CHECK(gen.glsl.find("texture(heLandscapeWeights, vUV)") != std::string::npos);
+	// Die Weightmap klemmt (heSampClamp) statt zu wiederholen — sie spannt das ganze
+	// Terrain, ein Wrap holte die gegenüberliegende Kante herein.
+	CHECK(gen.glsl.find("binding = 14) uniform texture2D heLandscapeWeights") != std::string::npos);
+	CHECK(gen.glsl.find("texture(sampler2D(heLandscapeWeights, heSampClamp), vUV)") != std::string::npos);
 	// Normalised by the weight sum, so a partly painted texel doesn't darken.
 	CHECK(gen.glsl.find("max(") != std::string::npos);
 	CHECK(gen.glsl.find("1e-4") != std::string::npos);

@@ -251,15 +251,36 @@ private:
 	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex)
 	//   b10/b11 heGIShadow/heGILocal | b12 heCsm (2D array) | b13 heLocalShadow (2D array)
 	//   b14 heLandscapeWeights | b15 heSkyEnv (CUBE) | b16 heAO | b17/b18 DDGI atlases
-	//   b31 heSSRFwd | b32 heGIReflFwd | b33 heCloudShadow.
+	//   b31 heSSRFwd | b32 heGIReflFwd | b33 heCloudShadow
+	//   b34 heSampWrap (SAMPLER) | b35 heSampClamp (SAMPLER).
 	// 13-18 and 31-33 were added with the forward-SSR wiring (parity plan P2d):
 	// every LIT graph material references them through heLitP, so a layout that
 	// stopped at b12 did not match the module it was built for.
+	//
+	// ── 2026-08-23: SEPARATE textures + SHARED samplers ──
+	// Every texture binding above is now VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, not
+	// COMBINED_IMAGE_SAMPLER, and the two sampler STATES moved into their own
+	// bindings 34/35. The shared preamble changed because a combined `sampler2D`
+	// costs one t- AND one s-register on D3D, and shader model 5.0's sixteen
+	// s-registers were exhausted exactly — a landscape graph material
+	// (heLandscapeWeights as the seventeenth) could not compile at all. GL/D3D
+	// never noticed the split (SPIRV-Cross recombines for GLSL; the D3D
+	// registers landed where those backends already publish them); Vulkan is the
+	// only backend that declares the descriptor TYPE, so it is the only one that
+	// had to change. This is plumbing ONLY — the two samplers reproduce the
+	// states the combined descriptors already carried.
 	HE::MaterialShaderLibrary m_matShaderLib;
 	std::unordered_map<uint64_t, VkPipeline> m_materialPipelines; // key = hash ^ hdr-bit
 	VkDescriptorSetLayout m_matSetLayout      = VK_NULL_HANDLE;
 	VkPipelineLayout      m_matPipelineLayout = VK_NULL_HANDLE;
 	VkDescriptorPool      m_matPool[2]        = {};  // per frame; reset whole each frame
+	// The two shared sampler STATES the preamble declares at bindings 34/35.
+	// Both mirror m_albedoSampler's filtering exactly (LINEAR/LINEAR, mipmap
+	// LINEAR, maxLod CLAMP_NONE) — which is the state every combined material
+	// descriptor used to carry — and differ only in address mode, so no texture
+	// on this path samples differently than it did before the split.
+	VkSampler m_matSampWrap  = VK_NULL_HANDLE; // b34 heSampWrap  — linear, REPEAT
+	VkSampler m_matSampClamp = VK_NULL_HANDLE; // b35 heSampClamp — linear, CLAMP_TO_EDGE
 	struct MatFrameBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* mapped = nullptr; };
 	MatFrameBuf m_matLightBuf[2];   // HeLighting (64 B, filled once per frame)
 	MatFrameBuf m_matObjBuf[2];     // U ring      (k_matMaxDraws × 256 B, one slot per draw)

@@ -221,52 +221,94 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 cloudShadowB;   // x = strength (0 = off / not bound)
     vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
 } heLight;
+// ── The two SHARED samplers ──────────────────────────────────────────────────
+// Every texture below (and every texture MaterialGraph's generated fragment
+// declares) is a SEPARATE `texture2D` / `texture2DArray` / `textureCube`, sampled
+// through `texture(sampler2D(heFoo, heSampX), uv)`. That is the whole point of
+// this preamble's resource model, and it is not a style choice:
+//
+// A COMBINED `sampler2D` costs one texture register AND one sampler register on
+// D3D. Shader model 5.0 has s0..s15, so sixteen combined samplers exhaust the
+// budget exactly — which is why a LANDSCAPE graph material (heLandscapeWeights
+// would be the seventeenth) could not compile on D3D11/D3D12 at all, and why
+// renumbering could not save it: FXC rejects two SamplerState on one register
+// (X4500) and SPIRV-Cross emits one sampler per binding even when two are pinned
+// to the same slot. Separate textures lift the cap because many Texture2D may
+// share ONE SamplerState — measured: 17 textures now cost 17 t-registers and TWO
+// s-registers.
+//
+// Only two states are actually needed, which is exactly what the renderers
+// already create (D3D11 m_matSampler/m_matClamp, D3D12's static sampler table):
+//   heSampWrap  — linear + REPEAT. The tiling graph textures only: heTex0 and
+//                 heTexP0..3 (declared by MaterialGraph's generated fragment,
+//                 which is why the declaration lives here — the preamble is the
+//                 one place both files can agree on it). A UV node's Tiling is
+//                 meaningless without repeat.
+//   heSampClamp — linear + CLAMP. Everything in this preamble: screen-space
+//                 buffers, the shadow arrays, the probe atlases, the sky
+//                 cubemap, the cloud-shadow map, and the landscape weightmap.
+//                 Wrapping any of those bleeds the opposite edge in at the
+//                 viewport/atlas border.
+// No POINT-filtered state: the material path samples every screen-space buffer
+// at exact full-res texel centres (gl_FragCoord / giParams.xy), where linear and
+// point agree. (The BUILT-IN scene shaders do use a point sampler for their AO —
+// a different pipeline, not this one.)
+//
+// Bindings 34/35 sit above everything else the material system declares (0..33),
+// so they can never collide with a texture binding. On D3D they are PINNED down
+// to s0/s1 (MaterialShaderLibrary::fragment's HLSL table); GL never sees them at
+// all — SPIRV-Cross recombines separate texture+sampler back into `sampler2D`
+// for GLSL 4.10, which has no separate type, and names the result after the
+// TEXTURE. That is what keeps the GL output byte-identical, and it is why the
+// texture names below must never be renamed.
+layout(set = 0, binding = 34) uniform sampler heSampWrap;
+layout(set = 0, binding = 35) uniform sampler heSampClamp;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
 // 8/9 belong to the WPO custom vertex's UBOs (kWpoUniforms). Bound to 1x1
 // white when GI is off; heLight.giParams.z additionally gates the samples.
-layout(set = 0, binding = 10) uniform sampler2D heGIShadow;
-layout(set = 0, binding = 11) uniform sampler2D heGILocal;
+layout(set = 0, binding = 10) uniform texture2D heGIShadow;
+layout(set = 0, binding = 11) uniform texture2D heGILocal;
 // CSM depth array (binding 12): the SAME cascade shadow map the built-in PBR
 // shaders sample, so graph materials are shadowed identically when GI is off.
 // Backends without a cascade array bind a dummy and keep csmSplits.w = 0.
-layout(set = 0, binding = 12) uniform sampler2DArray heCsm;
+layout(set = 0, binding = 12) uniform texture2DArray heCsm;
 // Local (point/spot) shadow atlas (binding 13): the SAME 16-layer depth array
 // the built-in PBR shaders sample. A light's base layer is lightParams[i].y-1
 // (0 = no shadow), so unfilled Lighting blocks never sample this.
-layout(set = 0, binding = 13) uniform sampler2DArray heLocalShadow;
+layout(set = 0, binding = 13) uniform texture2DArray heLocalShadow;
 // Procedural sky environment cubemap (binding 15 — 14 is the landscape
 // weightmap): the SAME prefiltered sky the built-in PBR shaders use for
 // image-based ambient. Graph materials had only a flat ambient constant, so
 // they never picked up sky colour or reflections and read visibly "deader"
 // than a built-in material beside them. heLight.fog.z gates the samples.
-layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
+layout(set = 0, binding = 15) uniform textureCube heSkyEnv;
 // Screen-space ambient occlusion result (binding 16), the same SSAO/HBAO/GTAO
 // buffer the built-in shaders read. Gated by heLight.fog.w.
-layout(set = 0, binding = 16) uniform sampler2D heAO;
+layout(set = 0, binding = 16) uniform texture2D heAO;
 // ── DDGI probe irradiance ─────────────────────────────────────────────────────
 // Octahedral probe atlases (bindings 17/18): the SAME two textures the built-in
 // PBR shaders sample. Graph materials previously had no probe lookup at all — the
 // ray-traced GI SHADOW reached them, but the indirect BOUNCE (colour bleeding off
 // nearby lit surfaces) did not, so a custom material sat in flat ambient while a
 // built-in one beside it picked up the room.
-layout(set = 0, binding = 17) uniform sampler2D heGIIrradiance;
-layout(set = 0, binding = 18) uniform sampler2D heGIVisibility;
+layout(set = 0, binding = 17) uniform texture2D heGIIrradiance;
+layout(set = 0, binding = 18) uniform texture2D heGIVisibility;
 // FORWARD-path reflection results (bindings 31/32, Metal material slots 9/10 —
 // the last two free sampler slots after the P0 slot consolidation). The
 // deferred path composites reflections in its own fullscreen pass instead and
 // never sets the gates (ssr.x / giRefl.z); every backend without the feature
 // binds a dummy and the branches fold dead. Sampled per gl_FragCoord like heAO.
-layout(set = 0, binding = 31) uniform sampler2D heSSRFwd;    // rgb radiance, a confidence
-layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a confidence
+layout(set = 0, binding = 31) uniform texture2D heSSRFwd;    // rgb radiance, a confidence
+layout(set = 0, binding = 32) uniform texture2D heGIReflFwd; // rgb radiance, a confidence
 // Cloud-shadow transmittance map (binding 33): the sky's procedural cloud layer
 // evaluated once per frame over a world-space XZ region around the camera (its
 // own tiny pass in each backend, using the SAME cloud density the sky shader
-// raymarches). Metal texture 16 with an INLINE constexpr sampler — the material
-// fragment stage sits at Metal's 16-sampler cap, so this texture deliberately
-// consumes no sampler slot (ShaderCompiler MslOptions::constexprLinearSamplers).
+// raymarches). Metal texture 16. This one used to need an inline constexpr
+// sampler to stay off Metal's 16-sampler cap; sharing heSampClamp costs it no
+// sampler slot either, so the special case is gone (see kMaterialMslOptions).
 // GL assigns unit 19 by name. Gated by heLight.cloudShadowB.x (0 = off).
-layout(set = 0, binding = 33) uniform sampler2D heCloudShadow;
+layout(set = 0, binding = 33) uniform texture2D heCloudShadow;
 // Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
 // the backends' octEncode; kept a copy here for the same reason they keep theirs:
 // each shader string is its own compilation unit.
@@ -322,7 +364,7 @@ vec3 heGIIrradianceAt(vec3 P, vec3 N) {
         vec2 tileOrigin = vec2(float(tileX), float(tileY)) * kOct;
 
         vec2 visUV = (tileOrigin + (heOctEncode(-dirToProbe) * 0.5 + 0.5) * kOct) / atlasSizeTexels;
-        vec2 visSample = texture(heGIVisibility, visUV).rg;
+        vec2 visSample = texture(sampler2D(heGIVisibility, heSampClamp), visUV).rg;
         float mean = visSample.x, mean2 = visSample.y;
         float variance = abs(mean2 - mean * mean);
         float chebyshev = 1.0;
@@ -335,7 +377,7 @@ vec3 heGIIrradianceAt(vec3 P, vec3 N) {
         weight *= max(chebyshev, 0.05);
 
         vec2 irrUV = (tileOrigin + (heOctEncode(N) * 0.5 + 0.5) * kOct) / atlasSizeTexels;
-        sumColor  += texture(heGIIrradiance, irrUV).rgb * weight;
+        sumColor  += texture(sampler2D(heGIIrradiance, heSampClamp), irrUV).rgb * weight;
         sumWeight += weight;
     }
     return sumColor / max(sumWeight, 1e-4);
@@ -355,14 +397,14 @@ vec3 heApplyFog(vec3 color, vec3 worldPos) {
     float t    = (abs(k) > 1e-4) ? (1.0 - exp(-k)) / k : 1.0; // mean height attenuation
     float optical = heLight.fog.x * dist * exp(-heLight.fog.y * heLight.camPos.y) * t;
     float f = 1.0 - exp(-optical);
-    vec3 fogCol = texture(heSkyEnv, ray / max(dist, 1e-4)).rgb;
+    vec3 fogCol = texture(samplerCube(heSkyEnv, heSampClamp), ray / max(dist, 1e-4)).rgb;
     return mix(color, fogCol, clamp(f, 0.0, 1.0));
 }
 // Screen-space GI sun-visibility for the current fragment (1 = fully lit).
 // gl_FragCoord-based, so even the legacy worldPos-less heLit() can use it.
 float heGISun() {
     if (heLight.giParams.z <= 0.5) return 1.0;
-    return texture(heGIShadow, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r;
+    return texture(sampler2D(heGIShadow, heSampClamp), gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r;
 }
 // CSM visibility — mirror of the built-in shaders' shadowFactor(): planar
 // view-distance cascade pick, normal-offset + slope-scaled bias, 3x3 PCF with
@@ -379,7 +421,7 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
     vec4 lp = heLight.csmVP[c] * vec4(worldPos + n * (0.06 * float(c + 1)), 1.0);
     vec3 p  = lp.xyz / lp.w;
     vec2 uv = p.xy * 0.5 + 0.5;
-    vec2 texel = 1.0 / vec2(textureSize(heCsm, 0).xy);
+    vec2 texel = 1.0 / vec2(textureSize(sampler2DArray(heCsm, heSampClamp), 0).xy);
     if (p.z > 1.0 || any(lessThan(uv, texel)) || any(greaterThan(uv, vec2(1.0) - texel)))
         return 1.0;
     float ndl  = clamp(dot(n, L), 0.0, 1.0);
@@ -387,7 +429,7 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
     float vis = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            float cd = texture(heCsm, vec3(uv + vec2(x, y) * texel, float(c))).r;
+            float cd = texture(sampler2DArray(heCsm, heSampClamp), vec3(uv + vec2(x, y) * texel, float(c))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
     return vis / 9.0;
@@ -416,7 +458,7 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
     if (lp.w <= 0.0) return 1.0;             // behind the light's near plane
     vec3 p  = lp.xyz / lp.w;
     vec2 uv = p.xy * 0.5 + 0.5;
-    vec2 texel = 1.0 / vec2(textureSize(heLocalShadow, 0).xy);
+    vec2 texel = 1.0 / vec2(textureSize(sampler2DArray(heLocalShadow, heSampClamp), 0).xy);
     if (p.z > 1.0 || p.z < 0.0
         || any(lessThan(uv, texel)) || any(greaterThan(uv, vec2(1.0) - texel)))
         return 1.0;
@@ -424,7 +466,7 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
     float vis = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            float cd = texture(heLocalShadow, vec3(uv + vec2(x, y) * texel, float(layer))).r;
+            float cd = texture(sampler2DArray(heLocalShadow, heSampClamp), vec3(uv + vec2(x, y) * texel, float(layer))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
     return vis / 9.0;
@@ -444,7 +486,7 @@ float heCloudShadowFactor(vec3 worldPos, vec3 L) {
     vec2 e = min(uv, vec2(1.0) - uv);
     float edge = smoothstep(0.0, 0.08, min(e.x, e.y));
     if (edge <= 0.0) return 1.0;
-    float T = texture(heCloudShadow, uv).r;
+    float T = texture(sampler2D(heCloudShadow, heSampClamp), uv).r;
     return mix(1.0, T, s * edge);
 }
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
@@ -549,8 +591,8 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     {
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
-        ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
-        vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
+        ambDiff = texture(samplerCube(heSkyEnv, heSampClamp), Nup).rgb    * diffuseColor;
+        vec3 envSpec = texture(samplerCube(heSkyEnv, heSampClamp), Rrough).rgb;
         // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
         // heLitP twin of the deferred composite's cascade. The trace textures
         // carry no per-pixel roughness in the forward path (the prepass has no
@@ -559,13 +601,13 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         // without the passes — dead code after constant folding.
         if (heLight.giRefl.z > 0.5)
         {
-            vec4 rr = texture(heGIReflFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+            vec4 rr = texture(sampler2D(heGIReflFwd, heSampClamp), gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
             float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.7, heLight.giRefl.y, rough);
             envSpec = mix(envSpec, rr.rgb, rr.a * heLight.giRefl.x * fade);
         }
         if (heLight.ssr.x > 0.5)
         {
-            vec4 r = texture(heSSRFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
+            vec4 r = texture(sampler2D(heSSRFwd, heSampClamp), gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
             float fade = 1.0 - smoothstep(heLight.ssr.z * 0.7, heLight.ssr.z, rough);
             envSpec = mix(envSpec, r.rgb, r.a * heLight.ssr.y * fade);
         }
@@ -586,7 +628,7 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // same split as the built-in shaders' SSAO handling. The material's own
     // Ambient Occlusion pin multiplies on top of the screen-space result.
     float ssao = (heLight.fog.w > 0.5)
-        ? texture(heAO, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r : 1.0;
+        ? texture(sampler2D(heAO, heSampClamp), gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r : 1.0;
     float ao = clamp(ambientOcclusion, 0.0, 1.0) * ssao;
 
     // With GI active the probe field REPLACES the sky's diffuse ambient (and AO is
@@ -633,11 +675,11 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
             vec2 giUV = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
             if (type == 0)
             {
-                sh = texture(heGIShadow, giUV).r;
+                sh = texture(sampler2D(heGIShadow, heSampClamp), giUV).r;
             }
             else if (localIdx < 4)
             {
-                vec4 lm = texture(heGILocal, giUV);
+                vec4 lm = texture(sampler2D(heGILocal, heSampClamp), giUV);
                 sh = lm[localIdx];
             }
         }
@@ -950,7 +992,7 @@ float heClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
     if (lp.w <= 0.0) return 1.0;
     vec3 p  = lp.xyz / lp.w;
     vec2 suv = p.xy * 0.5 + 0.5;
-    vec2 texel = 1.0 / vec2(textureSize(heLocalShadow, 0).xy);
+    vec2 texel = 1.0 / vec2(textureSize(sampler2DArray(heLocalShadow, heSampClamp), 0).xy);
     if (p.z > 1.0 || p.z < 0.0
         || any(lessThan(suv, texel)) || any(greaterThan(suv, vec2(1.0) - texel)))
         return 1.0;
@@ -958,7 +1000,7 @@ float heClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
     float vis = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            float cd = texture(heLocalShadow, vec3(suv + vec2(x, y) * texel, float(layer))).r;
+            float cd = texture(sampler2DArray(heLocalShadow, heSampClamp), vec3(suv + vec2(x, y) * texel, float(layer))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
     return vis / 9.0;
@@ -1023,7 +1065,7 @@ vec3 heClusterLighting(vec3 P, vec3 Nin, vec3 baseColor, float metallic,
         if (heLight.giParams.z > 0.5) {
             int ch = int(params.z) - 1;
             if (ch >= 0) {
-                vec4 lm = texture(heGILocal, uv);
+                vec4 lm = texture(sampler2D(heGILocal, heSampClamp), uv);
                 sh = min(sh, lm[ch]);
             }
         }
@@ -1082,17 +1124,25 @@ void main() {
 
 namespace
 {
-// MSL options shared by every pipeline that injects kLightingPreamble: the
-// cloud-shadow map (binding 33) samples through an INLINE constexpr sampler so
-// it consumes a texture slot (16) but no sampler slot — the material fragment
-// stage is exactly AT Metal's 16-sampler cap, and a 17th sampler argument would
-// fail the whole pipeline build. Harmless for sources that never reference the
-// sampler (the remap is a no-op then).
+// MSL options shared by every pipeline that injects kLightingPreamble.
+//
+// This used to force the cloud-shadow map (binding 33) through an INLINE
+// constexpr sampler, so it consumed a texture slot but no sampler slot: with
+// COMBINED samplers the material fragment stage sat exactly at Metal's
+// 16-sampler cap and a seventeenth sampler argument failed the pipeline build.
+//
+// The preamble now declares SEPARATE textures and samplers, so heCloudShadow
+// shares heSampClamp like every other preamble texture and the whole stage needs
+// two sampler slots instead of sixteen. The remap has nothing left to target
+// (binding 33 is a texture now, not a sampler) and is gone rather than left as a
+// silent no-op — a no-op here would be a trap for whoever next adds a combined
+// sampler at that binding and wonders why it is not constexpr.
+//
+// The struct survives because compileResolveVariant still sets
+// framebufferFetchSubpasses on it for the tile variant.
 he::shaderc::MslOptions kMaterialMslOptions()
 {
-    he::shaderc::MslOptions opts;
-    opts.constexprLinearSamplers = { { 0u, 33u } };
-    return opts;
+    return {};
 }
 
 // Shared compile for the four resolve variants. Metal pins: everything the
@@ -1136,7 +1186,25 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         { Stage::Fragment, 0, 16, 15 },   // screen-space AO
         { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
         { Stage::Fragment, 0, 18, 7 },    // DDGI visibility atlas
-        { Stage::Fragment, 0, 33, 16 },   // cloud-shadow map → texture 16 (constexpr sampler)
+        { Stage::Fragment, 0, 33, 16 },   // cloud-shadow map → texture 16
+        // The preamble's two shared samplers. Load-bearing for exactly the reason
+        // the 31/32 note above gives: unpinned, spirv-cross auto-assigns them from
+        // 0 and collides with the reserved heGB0 pin, and the whole pipeline then
+        // fails to build (the renderer silently stays forward).
+        //
+        // NOT 0/1 as in fragment(): this pipeline's G-buffer inputs are still
+        // COMBINED samplers pinned to texture/sampler 0..3, so the sampler slots
+        // differ per pipeline exactly like the texture slots already do. 4 and 13
+        // are the two the map above leaves free (5..12, 14, 15 are the inherited
+        // scene-pass binds; 16 is a texture-only slot).
+        //
+        // Only heSampClamp is actually reached from here — this pass samples the
+        // preamble's screen-space/shadow/env textures and nothing that tiles — so
+        // heSampWrap is eliminated as unused and its pin is inert. It is listed
+        // anyway: if the resolve ever grows a wrapping sample, an unpinned sampler
+        // is the silent-pipeline-failure case above.
+        { Stage::Fragment, 0, 34, 4 },    // heSampWrap  (unused here → eliminated)
+        { Stage::Fragment, 0, 35, 13 },   // heSampClamp
     };
     if (!tile)
     {
@@ -1514,7 +1582,7 @@ void main() {
     if (heLight.fog.z > 0.5)
     {
         vec3 Rrough  = normalize(mix(reflect(-V, n), n, rough));
-        vec3 envSpec = texture(heSkyEnv, Rrough).rgb;
+        vec3 envSpec = texture(samplerCube(heSkyEnv, heSampClamp), Rrough).rgb;
         // Ray-traced GI reflections UNDER the SSR mix (gi-reflections-plan §6):
         // the traced result replaces the cubemap wherever a scene ray hit, and
         // a confident screen-space hit still wins below — so SSR supplies the
@@ -1545,7 +1613,7 @@ void main() {
     // material-AO × screen-space AO; the GI branch adds it unoccluded.
     if (heLight.giProbe.y <= 0.5)
     {
-        float ssao = (heLight.fog.w > 0.5) ? texture(heAO, uv).r : 1.0;
+        float ssao = (heLight.fog.w > 0.5) ? texture(sampler2D(heAO, heSampClamp), uv).r : 1.0;
         ambSpec *= clamp(g2.a, 0.0, 1.0) * ssao;
     }
     // Fog transmittance (mirror of heApplyFog's factor): the resolve fogged the
@@ -1682,7 +1750,16 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
               { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
               { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
               { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
-              { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
+              { Stage::Fragment, 0, 16, 15 },   // screen-space AO (scene-pass slot)
+              // The preamble's shared samplers — this pass reaches heSkyEnv and
+              // heAO through heSampClamp. 12/13 because 0..7 are this pipeline's
+              // own G-buffer/SSR/GI inputs and 14/15 are the inherited scene-pass
+              // slots. Unpinned they would auto-assign from 0 and collide with the
+              // heGB0 pin, failing the pipeline build. heSampWrap is unused here
+              // (nothing tiles) and its pin is inert — listed for the same reason
+              // as in compileResolveVariant.
+              { Stage::Fragment, 0, 34, 12 },   // heSampWrap  (unused here)
+              { Stage::Fragment, 0, 35, 13 } }));// heSampClamp
     else
         out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     return m_ssrCache.emplace(key, std::move(out)).first->second;
@@ -1823,20 +1900,23 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
     Compiled out;
     if (backend == Backend::Metal)
     {
-        // ── Fragment sampler budget ──────────────────────────────────────────
-        // Metal caps a fragment stage at 16 SAMPLERS, i.e. indices 0..15, and the
-        // material pipeline is currently AT that limit:
+        // ── Fragment TEXTURE map ─────────────────────────────────────────────
+        // Metal caps a fragment stage at 16 samplers (indices 0..15) but allows
+        // far more textures, and this pipeline used to sit exactly AT the sampler
+        // cap because every texture was a COMBINED sampler that claimed both.
+        // The preamble now declares separate textures and samplers (see the "two
+        // SHARED samplers" note at kLightingPreamble), so the list below is a
+        // TEXTURE map only — the stage needs two sampler slots in total, and
+        // slots 2..15 of the sampler space are free.
         //   0      heTex0 (legacy/mesh texture)
         //   1-4    heTexP0..3 (node-graph project textures)
         //   6,7    DDGI irradiance / visibility  (shared with the scene pass)
-        //   9,10   GI sun + local shadow masks
+        //   9,10   forward SSR / GI reflection results
+        //   5,8    GI sun + local shadow masks   (shared with the scene pass)
         //   11     CSM array          12  local point/spot shadow atlas
         //   13     landscape weightmap
         //   14     sky env cubemap    15  screen-space AO
-        // A new sampler MUST reuse one of these (or a scene-pass slot the shared
-        // encoder already binds, as 6/7 do) — pinning a 17th makes the whole
-        // pipeline fail to build, and the renderer then falls back to built-in
-        // PBR for EVERY graph material without anything looking obviously broken.
+        //   16     cloud-shadow transmittance
         //
         // Pin the lighting UBO to the fragment slot the engine binds it at (buffer 1;
         // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
@@ -1876,14 +1956,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // state pinned once on the encoder, like the GI/CSM slots above.
               { Stage::Fragment, 0, 15, 14 },
               { Stage::Fragment, 0, 16, 15 },
-              // DDGI probe atlases (bindings 17/18) → MSL 6/7, NOT 16/17: Metal
-              // caps a fragment stage at 16 SAMPLERS (0..15), and slots 0-4 +
-              // 9-15 are already spoken for — pinning these any higher makes the
-              // whole material pipeline fail to build, silently dropping every
-              // graph material back to the built-in PBR shader.
-              // 6/7 are where the SCENE pass already binds these exact two
-              // atlases for the built-in shaders, and both pipelines share one
-              // encoder, so the material pipeline just reads them in place.
+              // DDGI probe atlases (bindings 17/18) → MSL 6/7. These are where the
+              // SCENE pass already binds these exact two atlases for the built-in
+              // shaders, and both pipelines share one encoder, so the material
+              // pipeline just reads them in place — no per-frame rebind.
+              // (They were forced down here when every texture also claimed a
+              // sampler slot and 0..15 was the whole budget. That pressure is gone
+              // — the stage needs two samplers now — but the pins stay: sharing
+              // the scene pass's binds is why the renderer has nothing to do here.)
               { Stage::Fragment, 0, 17, 6 },
               { Stage::Fragment, 0, 18, 7 },
               // FORWARD reflection results (bindings 31/32) → MSL 9/10, the two
@@ -1892,73 +1972,125 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               { Stage::Fragment, 0, 31, 9 },
               { Stage::Fragment, 0, 32, 10 },
               // Cloud-shadow transmittance map (binding 33) → MSL TEXTURE 16.
-              // Textures go up to 30; only SAMPLERS are capped at 16 — this one
-              // uses an inline constexpr sampler (kMaterialMslOptions below), so
-              // the sampler budget stays untouched. Per-frame bind shared with
-              // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } },
+              // Textures go up to 30; only SAMPLERS are capped at 16. This one
+              // used to need an inline constexpr sampler to avoid claiming a
+              // seventeenth sampler slot; with separate samplers it just uses the
+              // shared one like everything else. Per-frame bind shared with the
+              // built-in shaders (fragmentMain's cloudShadowTex, slot 16).
+              { Stage::Fragment, 0, 33, 16 },
+              // ── the two shared samplers ──────────────────────────────────
+              // MslPin sets msl_texture and msl_sampler from the same field; for a
+              // sampler-only resource only msl_sampler is read, so these two claim
+              // SAMPLER indices 0 and 1 and no texture slot (heTex0 keeps texture 0).
+              //
+              // 0/1 deliberately: the encoders already bind m_linearSampler at both
+              // (the scene material path binds 0..15, the graph-texture loop binds
+              // 1..4), so no renderer has to change for the shaders to build. The
+              // pins MUST exist — an unpinned sampler is auto-assigned from index 0
+              // and collides with the reserved heTex0 pin, which fails the whole
+              // pipeline build and silently drops every graph material back to
+              // built-in PBR.
+              //
+              // Metal's 16-sampler cap was the twin of D3D's and is equally gone:
+              // this stage now needs TWO sampler slots instead of sixteen, so 2..15
+              // are free. (Follow-up, renderer-side: heSampWrap wants a REPEAT
+              // sampler at index 0 — Metal binds linear/clamp-to-edge there today,
+              // so a UV node's Tiling still clamps on Metal exactly as it did
+              // before this change. Not a regression, just a cap that is now
+              // liftable.)
+              { Stage::Fragment, 0, 34, 0 },    // heSampWrap  → sampler 0
+              { Stage::Fragment, 0, 35, 1 } },  // heSampClamp → sampler 1
             kMaterialMslOptions()));
     }
     else if (backend == Backend::HLSL)
     {
-        // ── Fragment sampler budget, D3D edition ─────────────────────────────
-        // Same wall as Metal above, different bricks. SPIRV-Cross maps GLSL
-        // `binding = N` straight onto `register(sN)`, and shader model 5.0 stops
-        // at s15 — so the preamble's bindings 16, 17, 18, 31, 32 and 33 land on
-        // registers that do not exist and FXC rejects the whole shader with
-        // X4509. That is why NO node-graph material has ever rendered as authored
-        // on D3D11 or D3D12: every one of them failed to compile and fell back to
-        // built-in PBR, logged once as "A4 material PS compile failed".
+        // ── Fragment register map, D3D edition ───────────────────────────────
+        // SPIRV-Cross maps GLSL `binding = N` straight onto `register(tN)` and
+        // `register(sN)`. Shader model 5.0 offers t0..t127 but only s0..s15, so
+        // TEXTURES were never the constraint and SAMPLERS always were.
         //
-        // It stayed hidden for the same reason §1.1's dead GI stack did: the
-        // cross-compile SUCCEEDS. `Result::ok` only means SPIRV-Cross emitted
-        // HLSL; the rejection happens one step later, inside D3DCompile.
+        // This table used to be a sixteen-row compaction: with COMBINED samplers
+        // every texture cost a sampler register too, the preamble plus the graph's
+        // own textures came to exactly sixteen, and the six that sat above s15 had
+        // to be squeezed into the six free slots below it. It fit with zero
+        // headroom — and heLandscapeWeights (binding 14) was a seventeenth, so a
+        // LANDSCAPE graph material could not compile on D3D at all. Renumbering
+        // could not help: FXC rejects two SamplerState on one register (X4500) and
+        // SPIRV-Cross emits one per binding even when both are pinned to the same
+        // slot.
         //
-        // The budget works out to exactly 16, which is why this table is a fixed
-        // list and not a heuristic:
-        //     2        heTex0                  4..7  heTexP0..3
-        //     10,11    GI sun / local masks    12    CSM array
-        //     13       local shadow atlas      15    sky env cubemap
-        //     16       screen-space AO         17,18 DDGI irradiance / visibility
-        //     31,32    forward SSR / GI refl   33    cloud-shadow transmittance
-        // Sixteen bindings, sixteen registers. Ten of them already sit below s16
-        // and keep their number, so only six move — and the six free registers
-        // below the cap (s0, s1, s3, s8, s9, s14) are exactly enough.
+        // The preamble now declares SEPARATE textures and samplers (see the "two
+        // SHARED samplers" note at kLightingPreamble), so many Texture2D share one
+        // SamplerState and the compaction is gone. Only the two shared samplers
+        // need a register:
+        //     binding 34  heSampWrap  → s2   (heTex0, heTexP0..3 — tiling, REPEAT)
+        //     binding 35  heSampClamp → s0   (everything else — CLAMP)
+        // Measured on a lit landscape graph material: 17 t-registers, 2
+        // s-registers, FXC /T ps_5_0 clean. Fourteen of the sixteen sampler
+        // registers are now FREE — the budget stopped being a budget.
         //
-        // TEXTURES are not the constraint (t0..t127), so every SRV keeps its
-        // binding number; only the SAMPLER half is compacted. That keeps the
-        // renderers' t-register bind points readable against the GLSL.
+        // s2 and s0 rather than the tidier s0/s1 SO THAT THE RENDERERS NEED NO
+        // CHANGE. Both D3D backends already publish a sixteen-slot sampler array
+        // whose only REPEAT entries are s2 and s4..s7 (D3D11 m_matSampler at
+        // s2/s4..s7 with m_matClamp everywhere else; D3D12's static-sampler loop
+        // uses `wrap = (i == 2) || (i >= 4 && i <= 7)`). Landing heSampWrap on s2
+        // and heSampClamp on s0 means the existing binds are already correct —
+        // pick s0/s1 instead and every tiling graph texture silently CLAMPS until
+        // someone rewrites both renderers.
         //
-        // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) would be a
-        // seventeenth. There is no room and no way to make room by renumbering —
-        // FXC rejects two SamplerState declarations on one register (X4500,
-        // measured), and SPIRV-Cross emits one per binding even when both are
-        // pinned to the same slot, so the trick Metal uses (an inline constexpr
-        // sampler, kMaterialMslOptions) has no HLSL counterpart at SM 5.0.
-        // A landscape graph material therefore still fails here — but now with a
-        // specific, nameable limit instead of every material failing. Closing it
-        // means declaring separate textures and samplers in the shared preamble
-        // so one SamplerState can serve many textures (measured to work), which
-        // is a change to every backend and belongs in its own phase.
+        // Every TEXTURE keeps its binding number as its t-register, which is what
+        // SPIRV-Cross picks anyway when no pin is registered for it — so the
+        // preamble's textures (10..13, 15..18, 31..33) need no rows at all and the
+        // full map lives in this comment instead:
+        //     t2  heTex0            t4..t7 heTexP0..3      t14 heLandscapeWeights
+        //     t10 heGIShadow        t11 heGILocal          t12 heCsm[]
+        //     t13 heLocalShadow[]   t15 heSkyEnvCube       t16 heAO
+        //     t17 heGIIrradiance    t18 heGIVisibility     t31 heSSRFwd
+        //     t32 heGIReflFwd       t33 heCloudShadow
+        //
+        // A row that only restates a default is NOT harmless here, which is why
+        // the table is short. `kHlslPinUnused` does not mean "leave this register
+        // class alone" once a row exists: compileHlslPinned value-initialises the
+        // HLSLResourceBinding and only overwrites the classes that ARE pinned, so
+        // an unpinned class in a registered row asks for register 0. For a class
+        // the shader does not use that is inert — but for one it DOES use, every
+        // such binding lands on register 0 at once. (Measured: with rows for
+        // bindings 2/4..7/14 left `kHlslPinUnused` in the sampler column, a legacy
+        // fragment put all six of its combined samplers on s0 → FXC X4500 ×6.)
+        //
+        // BACK-COMPAT — that is exactly what the six rows below are for. A material
+        // PACKAGED before this change ships its generated fragment verbatim
+        // (customShaderFragGlsl is serialized and packaged materials have the graph
+        // stripped, so nothing regenerates it), and a hand-written escape-hatch
+        // fragment may do the same: both declare COMBINED `sampler2D heTex0` /
+        // `heTexPn` / `heLandscapeWeights`, which DO claim a sampler register. Left
+        // to the default they would claim s2, s4..s7 and s14 — and s2 is where
+        // heSampWrap now lives, so old content would stop compiling. Moving them
+        // one slot along keeps every one of them building.
+        //
+        // What that costs old content: heTexP3 lands on s8 and heLandscapeWeights
+        // on s13, both CLAMP in the renderers' sampler arrays. Only five REPEAT
+        // registers exist (s2, s4..s7) and heSampWrap takes one, so a legacy
+        // fragment using all four project textures loses tiling on its fourth.
+        // heLandscapeWeights should clamp anyway — it spans the terrain once. This
+        // is the one place old and new content genuinely cannot both be right
+        // without the renderer growing another REPEAT sampler, which is the
+        // per-backend descriptor work this change deliberately does not do.
         static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
             //          stage             set  bind  srv  samp  cbv
-            { Stage::Fragment, 0,  2,  2,  2, kHlslPinUnused }, // heTex0
-            { Stage::Fragment, 0,  4,  4,  4, kHlslPinUnused }, // heTexP0
-            { Stage::Fragment, 0,  5,  5,  5, kHlslPinUnused }, // heTexP1
-            { Stage::Fragment, 0,  6,  6,  6, kHlslPinUnused }, // heTexP2
-            { Stage::Fragment, 0,  7,  7,  7, kHlslPinUnused }, // heTexP3
-            { Stage::Fragment, 0, 10, 10, 10, kHlslPinUnused }, // heGIShadow
-            { Stage::Fragment, 0, 11, 11, 11, kHlslPinUnused }, // heGILocal
-            { Stage::Fragment, 0, 12, 12, 12, kHlslPinUnused }, // heCsm
-            { Stage::Fragment, 0, 13, 13, 13, kHlslPinUnused }, // heLocalShadow
-            { Stage::Fragment, 0, 15, 15, 15, kHlslPinUnused }, // heSkyEnv
-            // ── the six that have to move ──────────────────────────────────
-            { Stage::Fragment, 0, 16, 16,  0, kHlslPinUnused }, // heAO           → s0
-            { Stage::Fragment, 0, 17, 17,  1, kHlslPinUnused }, // heGIIrradiance → s1
-            { Stage::Fragment, 0, 18, 18,  3, kHlslPinUnused }, // heGIVisibility → s3
-            { Stage::Fragment, 0, 31, 31,  8, kHlslPinUnused }, // heSSRFwd       → s8
-            { Stage::Fragment, 0, 32, 32,  9, kHlslPinUnused }, // heGIReflFwd    → s9
-            { Stage::Fragment, 0, 33, 33, 14, kHlslPinUnused }, // heCloudShadow  → s14
+            // ── the two shared samplers: the only s-registers a freshly
+            //    generated fragment needs at all ──
+            { Stage::Fragment, 0, 34, kHlslPinUnused,  2, kHlslPinUnused }, // heSampWrap  → s2
+            { Stage::Fragment, 0, 35, kHlslPinUnused,  0, kHlslPinUnused }, // heSampClamp → s0
+            // ── legacy combined-sampler bindings (see BACK-COMPAT above) ──
+            //    Inert for a freshly generated fragment: it has only a TEXTURE at
+            //    these bindings, so the sampler column is never consumed.
+            { Stage::Fragment, 0,  2,  2,  4, kHlslPinUnused }, // heTex0             s2→s4 (repeat)
+            { Stage::Fragment, 0,  4,  4,  5, kHlslPinUnused }, // heTexP0            s4→s5 (repeat)
+            { Stage::Fragment, 0,  5,  5,  6, kHlslPinUnused }, // heTexP1            s5→s6 (repeat)
+            { Stage::Fragment, 0,  6,  6,  7, kHlslPinUnused }, // heTexP2            s6→s7 (repeat)
+            { Stage::Fragment, 0,  7,  7,  8, kHlslPinUnused }, // heTexP3            s7→s8 (CLAMP)
+            { Stage::Fragment, 0, 14, 14, 13, kHlslPinUnused }, // heLandscapeWeights s14→s13 (clamp)
         };
         out = toCompiled(compileHlslPinned(injected, Stage::Fragment, kHlslMaterialPins));
     }

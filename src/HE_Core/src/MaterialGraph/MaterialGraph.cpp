@@ -524,6 +524,28 @@ std::string textureSampler(EmitCtx& c, const MatGraphNode& n)
     return "heTexP" + std::to_string(slot);
 }
 
+// Sampling expression for a SEPARATE texture: the graph's textures are declared
+// `uniform texture2D` (not `sampler2D`) and combined with one of the two shared
+// samplers the lighting preamble declares — see the "two SHARED samplers" note in
+// MaterialShaderLibrary's kLightingPreamble for why.
+//
+// In short: a combined `sampler2D` burns a D3D sampler register PER TEXTURE, and
+// shader model 5.0 has only sixteen. That is what stopped a LANDSCAPE material
+// (heLandscapeWeights makes seventeen) from compiling on D3D at all. Separate
+// textures let all of them share one SamplerState. GLSL 4.10 has no separate
+// type, so the cross-compiler recombines them back into `sampler2D` and names the
+// result after the TEXTURE — which is why these names must never change: OpenGL
+// binds these uniforms BY NAME.
+//
+// `heSampWrap` (linear + REPEAT) for the graph's own textures: a UV node's Tiling
+// is meaningless without repeat. The landscape weightmap uses `heSampClamp`
+// instead — it spans the whole terrain exactly once, and wrapping it would fold
+// the far edge back over the near one.
+std::string sampleTex(const std::string& tex, const std::string& samp, const std::string& uv)
+{
+    return "texture(sampler2D(" + tex + ", " + samp + "), " + uv + ")";
+}
+
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
@@ -565,7 +587,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         case MatNodeType::TextureSample:
         {
             const std::string sampler = textureSampler(c, n);
-            decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
+            decl = "vec4 " + v + " = "
+                 + sampleTex(sampler, "heSampWrap", inputExpr(c, sc, n, 0, F::Vec2)) + ";";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
         }
@@ -578,7 +601,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
             c.usesNormalPerturb = true;
             const float strength = n.p[0] > 0.0f ? n.p[0] : 1.0f;
             decl = "vec2 " + v + "_uv = " + uvInput(c, sc, n, 0) + ";"
-                 + " vec3 " + v + "_t = texture(" + sampler + ", " + v + "_uv).xyz * 2.0 - 1.0;"
+                 + " vec3 " + v + "_t = " + sampleTex(sampler, "heSampWrap", v + "_uv")
+                 + ".xyz * 2.0 - 1.0;"
                  + " " + v + "_t.xy *= " + fmtF(strength) + ";"
                  + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
                  + "_t), vWorldPos, " + v + "_uv);";
@@ -607,7 +631,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                 sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
                 wsum += (i ? " + " : "") + w;
             }
-            decl = "vec4 " + v + "_w = texture(heLandscapeWeights, vUV);"
+            decl = "vec4 " + v + "_w = "
+                 + sampleTex("heLandscapeWeights", "heSampClamp", "vUV") + ";"
                  + " float " + v + "_s = max(" + wsum + ", 1e-4);"
                  + " vec3 " + v + " = (" + sum + ") / " + v + "_s;";
             break;
@@ -1032,16 +1057,27 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     }
 
     std::string src; // shared declaration block (appended to either header)
+    // SEPARATE textures (`texture2D`, not `sampler2D`) — they sample through the two
+    // shared samplers the lighting preamble declares (heSampWrap / heSampClamp; see
+    // sampleTex above). The preamble is injected ahead of this block by
+    // MaterialShaderLibrary::injectPreamble, which is the only place both files can
+    // agree on those declarations, so nothing here declares a sampler of its own.
     if (c.usesTexture)
-        src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
+        src += "layout(set = 0, binding = 2) uniform texture2D heTex0;\n"; // legacy/mesh texture
     if (c.usesLandscapeWeights)
         // Binding 14 — the first free slot after the shared preamble's shadow/GI
         // pins (see MaterialShaderLibrary's MSL binding map). Bound per DRAW from
         // the terrain chunk's parent landscape, not per material.
-        src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
+        //
+        // This is the texture that made the separate-sampler rewrite necessary: as a
+        // COMBINED sampler it was the seventeenth on a shader model 5.0 stage that
+        // has sixteen sampler registers, so a landscape graph material could not
+        // compile on D3D11/D3D12 at all. It now costs a texture register and no
+        // sampler register of its own.
+        src += "layout(set = 0, binding = 14) uniform texture2D heLandscapeWeights;\n";
     for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
         src += "layout(set = 0, binding = " + std::to_string(4 + i)
-             + ") uniform sampler2D heTexP" + std::to_string(i) + ";\n";
+             + ") uniform texture2D heTexP" + std::to_string(i) + ";\n";
     if (!c.params.empty())
         src += "layout(std140, set = 0, binding = 3) uniform HeParams { vec4 v["
              + std::to_string(kMatMaxParams) + "]; } heParams;\n";

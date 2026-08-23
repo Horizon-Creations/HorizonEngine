@@ -2120,34 +2120,97 @@ void VulkanRenderer::createMaterialResources()
     // (fog.w, giProbe.y, giRefl.z, cloudShadowB.x) — this change deliberately
     // does NOT start feeding them real data, which would alter graph-material
     // shading and belongs to plan P1.
-    VkDescriptorSetLayoutBinding b[22]{};
+    //
+    // ── 2026-08-23: SEPARATE textures + two SHARED samplers ───────────────────
+    // Every texture binding below is SAMPLED_IMAGE now, and the sampler STATE
+    // lives in its own binding: 34 heSampWrap, 35 heSampClamp. The bindings did
+    // NOT move — only the GLSL type did, from sampler2D/sampler2DArray/
+    // samplerCube to texture2D/texture2DArray/textureCube.
+    //
+    // Why the preamble changed: a COMBINED sampler2D costs one texture register
+    // AND one sampler register on D3D, so shader model 5.0's sixteen s-registers
+    // were exhausted exactly and a LANDSCAPE graph material (heLandscapeWeights
+    // as the seventeenth) could not compile there at all. Separate textures let
+    // many of them share one sampler state — measured: 17 t-registers and TWO
+    // s-registers. GL and D3D absorbed the split without renderer changes (GL's
+    // cross-compiler recombines texture+sampler back into sampler2D for GLSL
+    // 4.10; the D3D s-registers are pinned to where those backends already
+    // publish them). Vulkan is the ONLY backend where the descriptor type is
+    // declared explicitly, so it is the only one that had to be adapted — and a
+    // stale COMBINED_IMAGE_SAMPLER here is a type MISMATCH, which surfaces as
+    // "[Set 0, Binding 35, variable heSampClamp] is invalid" at draw time, not
+    // as a renumbering error.
+    //
+    // Both samplers reproduce m_albedoSampler's filtering exactly (that is the
+    // state every combined descriptor on this path already carried), so nothing
+    // samples differently: heSampWrap is bit-for-bit m_albedoSampler's state,
+    // and heSampClamp differs from it only in address mode. CLAMP is correct for
+    // everything it serves — the screen-space buffers, shadow arrays, probe
+    // atlases, sky cube, cloud shadow and the landscape weightmap all bleed the
+    // opposite edge in when wrapped — and changes no pixel today, because those
+    // bindings are either 1x1 dummies or sampled at exact texel centres
+    // (gl_FragCoord.xy / giParams.xy), where the address mode is never reached.
+    //
+    // Created here rather than reusing m_albedoSampler so both states live
+    // together and are destroyed together with the rest of the material
+    // resources. The filtering fields MUST stay identical to m_albedoSampler's
+    // (see its creation): a default-constructed VkSamplerCreateInfo leaves
+    // maxLod at 0, which would clamp every mipmapped heTexP to mip 0 and move
+    // the preview/tile pixels this change is required not to touch.
+    {
+        VkSamplerCreateInfo msci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        msci.magFilter    = VK_FILTER_LINEAR;
+        msci.minFilter    = VK_FILTER_LINEAR;
+        msci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        msci.maxLod       = VK_LOD_CLAMP_NONE;
+        msci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        msci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        msci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        if (vkCreateSampler(m_device, &msci, nullptr, &m_matSampWrap) != VK_SUCCESS)
+        {
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: heSampWrap (b34) sampler failed");
+            return;
+        }
+        msci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        msci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        msci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &msci, nullptr, &m_matSampClamp) != VK_SUCCESS)
+        {
+            HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: heSampClamp (b35) sampler failed");
+            return;
+        }
+    }
+
+    VkDescriptorSetLayoutBinding b[24]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
         b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
     };
-    setB(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeLighting
-    setB(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // U (per object)
-    setB(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTex0
-    setB(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_FRAGMENT_BIT); // HeParams
-    setB(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP0
-    setB(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP1
-    setB(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP2
-    setB(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP3
-    setB(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeLighting (WPO VS)
-    setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
-    setB(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
-    setB(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
-    setB(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCsm (CSM fallback, 2D array)
-    setB(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLocalShadow (2D array)
-    setB(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLandscapeWeights
-    setB(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSkyEnv (CUBE)
-    setB(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heAO
-    setB(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIIrradiance
-    setB(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIVisibility
-    setB(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSSRFwd  ← plan P2d
-    setB(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIReflFwd
-    setB(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heCloudShadow
+    setB(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,       VK_SHADER_STAGE_FRAGMENT_BIT); // HeLighting
+    setB(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,       VK_SHADER_STAGE_VERTEX_BIT);   // U (per object)
+    setB(2, 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,        VK_SHADER_STAGE_FRAGMENT_BIT); // heTex0
+    setB(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,       VK_SHADER_STAGE_FRAGMENT_BIT); // HeParams
+    setB(4, 4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,        VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP0
+    setB(5, 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,        VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP1
+    setB(6, 6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,        VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP2
+    setB(7, 7, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,        VK_SHADER_STAGE_FRAGMENT_BIT); // heTexP3
+    setB(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,       VK_SHADER_STAGE_VERTEX_BIT);   // HeLighting (WPO VS)
+    setB(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,       VK_SHADER_STAGE_VERTEX_BIT);   // HeParams   (WPO VS)
+    setB(10, 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIShadow (GI sun mask)
+    setB(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heGILocal (GI local mask)
+    setB(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heCsm (CSM fallback, 2D array)
+    setB(13, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heLocalShadow (2D array)
+    setB(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heLandscapeWeights
+    setB(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heSkyEnv (CUBE)
+    setB(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heAO
+    setB(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIIrradiance
+    setB(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIVisibility
+    setB(19, 31, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heSSRFwd  ← plan P2d
+    setB(20, 32, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heGIReflFwd
+    setB(21, 33, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT); // heCloudShadow
+    setB(22, 34, VK_DESCRIPTOR_TYPE_SAMPLER,       VK_SHADER_STAGE_FRAGMENT_BIT); // heSampWrap  (linear, REPEAT)
+    setB(23, 35, VK_DESCRIPTOR_TYPE_SAMPLER,       VK_SHADER_STAGE_FRAGMENT_BIT); // heSampClamp (linear, CLAMP)
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 22;
+    slci.bindingCount = 24;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2166,9 +2229,11 @@ void VulkanRenderer::createMaterialResources()
     }
 
     // Per-frame descriptor pool (reset whole each frame — no FREE bit) + UBO buffers.
-    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9) and 17
-    // samplers (b2, b4-b7, b10-b18, b31-b33), so the pool must cover
-    // k_matMaxDraws sets worth of each.
+    // Each allocated set consumes 5 UBO descriptors (b0/b1/b3/b8/b9), 17 SAMPLED
+    // IMAGEs (b2, b4-b7, b10-b18, b31-b33) and 2 SAMPLERs (b34/b35), so the pool
+    // must cover k_matMaxDraws sets worth of each. The image/sampler split is
+    // load-bearing: an undersized pool does not fail here, it fails
+    // vkAllocateDescriptorSets at whichever later frame first runs out.
     auto makeBuf = [&](VkDeviceSize size, MatFrameBuf& mb) -> bool {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size  = size;
@@ -2187,13 +2252,14 @@ void VulkanRenderer::createMaterialResources()
     const VkDeviceSize ringSize = static_cast<VkDeviceSize>(k_matMaxDraws) * k_matSlotStride;
     for (uint32_t f = 0; f < k_maxFramesInFlight; ++f)
     {
-        VkDescriptorPoolSize ps[2] = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,          5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 17u * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
+        VkDescriptorPoolSize ps[3] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  17u * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_SAMPLER,         2u * k_matMaxDraws }, // b34,b35
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 2;
+        dpci.poolSizeCount = 3;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -2237,6 +2303,9 @@ void VulkanRenderer::destroyMaterialResources()
     }
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
+    // The two shared preamble sampler states (b34 heSampWrap / b35 heSampClamp).
+    if (m_matSampWrap)       { vkDestroySampler(m_device, m_matSampWrap,  nullptr);             m_matSampWrap  = VK_NULL_HANDLE; }
+    if (m_matSampClamp)      { vkDestroySampler(m_device, m_matSampClamp, nullptr);             m_matSampClamp = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
@@ -4090,13 +4159,23 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkImageView tex0View = m_whiteAlbedoView;
                             if (matOvr) { if (matOvr->view) tex0View = matOvr->view; }
                             else if (m.albedoView) tex0View = m.albedoView;
-                            VkDescriptorImageInfo tex0II{ m_albedoSampler, tex0View,
+                            // SEPARATE textures + shared samplers (see createMaterialResources):
+                            // every image write below is a SAMPLED_IMAGE and therefore carries
+                            // sampler = VK_NULL_HANDLE. imageLayout is still required and still
+                            // read — only the sampler member is ignored for this descriptor type.
+                            // The sampler STATES go in as their own two descriptors at b34/b35.
+                            VkDescriptorImageInfo tex0II{ VK_NULL_HANDLE, tex0View,
                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             // TODO A4-followup: heTexP0-3 = the graph's picked project textures
                             // (needs a UUID→view cache); bound to the white default for now.
-                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
+                            VkDescriptorImageInfo whiteII{ VK_NULL_HANDLE, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[22]{};
+                            // b34/b35: sampler-only descriptors — imageView/imageLayout ignored.
+                            VkDescriptorImageInfo sampWrapII { m_matSampWrap,  VK_NULL_HANDLE,
+                                                               VK_IMAGE_LAYOUT_UNDEFINED };
+                            VkDescriptorImageInfo sampClampII{ m_matSampClamp, VK_NULL_HANDLE,
+                                                               VK_IMAGE_LAYOUT_UNDEFINED };
+                            VkWriteDescriptorSet w[24]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4107,64 +4186,70 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 w[idx].pBufferInfo     = bi;
                                 w[idx].pImageInfo      = ii;
                             };
-                            wr(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr);
-                            wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
-                            wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &tex0II);
-                            wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
-                            wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
-                            wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
+                            wr(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBI, nullptr);
+                            wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &objBI,   nullptr);
+                            wr(2, 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &tex0II);
+                            wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &parBI,   nullptr);
+                            wr(4, 4, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII);
+                            wr(5, 5, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII);
+                            wr(6, 6, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII);
+                            wr(7, 7, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII);
+                            wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBI, nullptr); // WPO VS
+                            wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &parBI,   nullptr); // WPO VS
                             // GI screen-space masks for heLitP(): sun mask + per-pixel
                             // local-light mask when GI ran this frame (white fallbacks
                             // otherwise; giParams.z gates sampling anyway). The local
                             // mask is a storage image and lives in GENERAL.
-                            VkDescriptorImageInfo giSunII{ m_albedoSampler,
+                            VkDescriptorImageInfo giSunII{ VK_NULL_HANDLE,
                                 (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
-                            VkDescriptorImageInfo giLocalII{ m_albedoSampler,
+                            wr(10, 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giSunII);
+                            VkDescriptorImageInfo giLocalII{ VK_NULL_HANDLE,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? m_giLocalMask.view : m_whiteAlbedoView,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
                                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
-                            // heCsm (binding 12, sampler2DArray): Vulkan's shadow map is a
+                            wr(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giLocalII);
+                            // heCsm (binding 12, texture2DArray): Vulkan's shadow map is a
                             // single 2D map, so the CSM fallback stays off (csmSplits.w = 0)
                             // and the 1-layer white ARRAY view keeps the descriptor valid —
                             // a 2D view here would fail validation against the arrayed image
                             // type in the SPIR-V.
-                            VkDescriptorImageInfo csmII{ m_albedoSampler, m_whiteArrayView,
+                            VkDescriptorImageInfo csmII{ VK_NULL_HANDLE, m_whiteArrayView,
                                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
-                            // heLocalShadow (13): also a sampler2DArray, also
+                            wr(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &csmII);
+                            // heLocalShadow (13): also a texture2DArray, also
                             // absent on this backend (no local shadow atlas) —
                             // the 1-layer white array view keeps it valid and
                             // lightParams[i].y = 0 means it is never sampled.
-                            wr(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
-                            wr(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heLandscapeWeights
+                            wr(13, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &csmII);
+                            wr(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heLandscapeWeights
                             // heSkyEnv (15): flat ambient in a 1x1x6 cube — see
                             // m_matSkyCube. Only ever sampled while SSR runs
                             // (heLight.fog.z), and then it reproduces heLitP's
                             // own no-cubemap ambient-diffuse fallback exactly.
-                            VkDescriptorImageInfo skyII{ m_albedoSampler,
+                            VkDescriptorImageInfo skyII{ VK_NULL_HANDLE,
                                 m_matSkyCubeView[m_currentFrame],
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heAO (fog.w = 0)
-                            wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIIrradiance
-                            wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIVisibility
+                            wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &skyII);
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heAO (fog.w = 0)
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heGIIrradiance
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heGIVisibility
                             // heSSRFwd (31) — plan P2d. THIS is the binding the
                             // forward SSR result lands on; heLight.ssr.x below
                             // is what stops the sample folding to dead code.
-                            VkDescriptorImageInfo ssrII{ m_albedoSampler,
+                            VkDescriptorImageInfo ssrII{ VK_NULL_HANDLE,
                                 m_ssrResultView ? m_ssrResultView : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &ssrII);
-                            wr(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heGIReflFwd (giRefl.z = 0)
-                            wr(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII); // heCloudShadow (cloudShadowB.x = 0)
-                            vkUpdateDescriptorSets(m_device, 22, w, 0, nullptr);
+                            wr(19, 31, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &ssrII);
+                            wr(20, 32, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heGIReflFwd (giRefl.z = 0)
+                            wr(21, 33, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heCloudShadow (cloudShadowB.x = 0)
+                            // The two shared sampler STATES. heSampWrap (34) serves the
+                            // tiling graph textures heTex0/heTexP0..3 and reproduces
+                            // m_albedoSampler exactly, so they sample as they always did;
+                            // heSampClamp (35) serves every preamble texture above.
+                            wr(22, 34, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampWrapII);
+                            wr(23, 35, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampClampII);
+                            vkUpdateDescriptorSets(m_device, 24, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -7071,23 +7156,36 @@ namespace
 //
 // Five sets live here, allocated once each and rewritten per call (safe: every
 // path ends in vkQueueWaitIdle, so nothing in flight still references them):
-//   mesh tile      1 UBO + 1 sampler
-//   particle tile          1 sampler
-//   material preview  5 UBO + 17 sampler  (the 22-binding m_matSetLayout)
-//   skeletal preview  2 UBO + 1 sampler
+//   mesh tile      1 UBO + 1 combined
+//   particle tile          1 combined
+//   material preview  5 UBO + 17 sampled image + 2 sampler (the 24-binding m_matSetLayout)
+//   skeletal preview  2 UBO + 1 combined
 //   bone-overlay lines 1 UBO
-// = 9 UBO, 20 samplers, 5 sets. Sized with a little headroom rather than exactly,
-// because an allocation failure here is silent (the feature just stops drawing).
+// = 9 UBO, 3 combined, 17 sampled images, 2 samplers, 5 sets. Sized with a
+// little headroom rather than exactly, because an allocation failure here is
+// silent (the feature just stops drawing).
+//
+// The image/sampler SPLIT is what the material preview needs: its set stopped
+// being combined-image-sampler when the shared preamble moved to separate
+// textures + heSampWrap/heSampClamp, and a pool with no SAMPLED_IMAGE or SAMPLER
+// descriptors fails its vkAllocateDescriptorSets outright — silently, since the
+// tile then falls back to the shaded PBR sphere and the preview returns nothing.
+// The COMBINED count is deliberately LEFT at the headroom it already had rather
+// than recomputed down to the three sets that still use it: this tally is a
+// comment, not a computed value, and over-sizing a once-created pool is free
+// while under-sizing it fails in a shape that looks nothing like its cause.
 bool thumbEnsureDescPool(VkDevice dev, VkDescriptorPool& pool)
 {
     if (pool) return true;
-    VkDescriptorPoolSize sizes[2] = {
+    VkDescriptorPoolSize sizes[4] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         12 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 26 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 26 }, // unchanged headroom
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          20 }, // material preview: 17 + headroom
+        { VK_DESCRIPTOR_TYPE_SAMPLER,                 4 }, // material preview: b34/b35
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = 8;
-    dpci.poolSizeCount = 2;
+    dpci.poolSizeCount = 4;
     dpci.pPoolSizes    = sizes;
     return vkCreateDescriptorPool(dev, &dpci, nullptr, &pool) == VK_SUCCESS;
 }
@@ -8839,8 +8937,11 @@ bool VulkanRenderer::ensureMaterialPreviewResources()
 // The REAL graph-material shader, exactly like OpenGL. This backend never had a
 // sampler-register ceiling to hit — the D3D11/D3D12 twins fell back to a
 // built-in PBR sphere only until the HLSL resource remap landed, because
-// ps_5_0 caps at 16 samplers and the shared material preamble binds
-// 16/17/18/31/32/33.
+// ps_5_0 capped at 16 samplers and every preamble texture was a COMBINED one.
+// That ceiling is gone on both sides now: the preamble declares separate
+// textures plus the two shared samplers heSampWrap/heSampClamp, so D3D spends
+// two s-registers instead of seventeen. Vulkan pays for that with descriptor
+// TYPES it has to declare — see the set-0 layout in createMaterialResources.
 //
 // See the header for why both graph-material entry points funnel through here.
 VkPipeline VulkanRenderer::prepareGraphMaterialDraw(const HE::UUID& materialId,
@@ -8975,29 +9076,41 @@ VkPipeline VulkanRenderer::prepareGraphMaterialDraw(const HE::UUID& materialId,
         std::memcpy(m_matPvParBuf.mapped, padded, sizeof(padded));
     }
 
-    // ── Descriptor set: the same 22 bindings DrawScene writes per graph draw.
+    // ── Descriptor set: the same 24 bindings DrawScene writes per graph draw.
     // Rewritten in place, which is safe because the previous preview ended in
     // vkQueueWaitIdle — no submission still references this set.
+    //
+    // SEPARATE textures + shared samplers (see createMaterialResources): every
+    // image write is a SAMPLED_IMAGE and carries sampler = VK_NULL_HANDLE, with
+    // imageLayout still required; the two sampler STATES are their own
+    // descriptors at b34/b35. This is the write site BOTH graph-material entry
+    // points share — RenderMaterialPreview and the Content-Browser tile in
+    // RenderAssetThumbnail — so it covers two of the three paths on its own.
     {
         VkDescriptorBufferInfo lightBI{ m_matPvLightBuf.buf, 0,
                                         sizeof(HE::MaterialShaderLibrary::Lighting) };
         VkDescriptorBufferInfo objBI  { m_matPvObjBuf.buf,   0, sizeof(MatPreviewUBlock) };
         VkDescriptorBufferInfo parBI  { m_matPvParBuf.buf,   0, 256 };
-        VkDescriptorImageInfo  whiteII{ m_albedoSampler, m_whiteAlbedoView,
+        VkDescriptorImageInfo  whiteII{ VK_NULL_HANDLE, m_whiteAlbedoView,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  pII[4];
         for (int i = 0; i < 4; ++i)
-            pII[i] = { m_albedoSampler, texP[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        // heCsm is a sampler2DArray in the SPIR-V, so its default MUST be the
+            pII[i] = { VK_NULL_HANDLE, texP[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        // heCsm is a texture2DArray in the SPIR-V, so its default MUST be the
         // 1-layer array view — a plain 2D view fails validation against it.
-        VkDescriptorImageInfo  csmII { m_albedoSampler, m_whiteArrayView,
+        VkDescriptorImageInfo  csmII { VK_NULL_HANDLE, m_whiteArrayView,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        // heSkyEnv (15) is a samplerCube, same reasoning as heCsm: the default
+        // heSkyEnv (15) is a textureCube, same reasoning as heCsm: the default
         // MUST be a CUBE view. The preview's fill leaves fog.z at 0, so it is
         // never sampled — it only has to exist and be in a valid layout.
-        VkDescriptorImageInfo  skyII { m_albedoSampler, m_matSkyCubeView[0],
+        VkDescriptorImageInfo  skyII { VK_NULL_HANDLE, m_matSkyCubeView[0],
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[22]{};
+        // b34/b35: sampler-only descriptors — imageView/imageLayout ignored.
+        VkDescriptorImageInfo  sampWrapII { m_matSampWrap,  VK_NULL_HANDLE,
+                                            VK_IMAGE_LAYOUT_UNDEFINED };
+        VkDescriptorImageInfo  sampClampII{ m_matSampClamp, VK_NULL_HANDLE,
+                                            VK_IMAGE_LAYOUT_UNDEFINED };
+        VkWriteDescriptorSet w[24]{};
         auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                       const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
             w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -9008,29 +9121,35 @@ VkPipeline VulkanRenderer::prepareGraphMaterialDraw(const HE::UUID& materialId,
             w[idx].pBufferInfo     = bi;
             w[idx].pImageInfo      = ii;
         };
-        wr(0,  0,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr);
-        wr(1,  1,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
-        wr(2,  2,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heTex0 (flags.x = 0)
-        wr(3,  3,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
-        wr(4,  4,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &pII[0]);
-        wr(5,  5,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &pII[1]);
-        wr(6,  6,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &pII[2]);
-        wr(7,  7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &pII[3]);
-        wr(8,  8,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
-        wr(9,  9,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
-        wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIShadow
-        wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGILocal
-        wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &csmII);   // heCsm
-        wr(13, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &csmII);   // heLocalShadow (2D array)
-        wr(14, 14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heLandscapeWeights
-        wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &skyII);   // heSkyEnv (CUBE)
-        wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heAO
-        wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIIrradiance
-        wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIVisibility
-        wr(19, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heSSRFwd (ssr.x = 0 here)
-        wr(20, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heGIReflFwd
-        wr(21, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII); // heCloudShadow
-        vkUpdateDescriptorSets(m_device, 22, w, 0, nullptr);
+        wr(0,  0,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBI, nullptr);
+        wr(1,  1,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &objBI,   nullptr);
+        wr(2,  2,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heTex0 (flags.x = 0)
+        wr(3,  3,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &parBI,   nullptr);
+        wr(4,  4,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &pII[0]);
+        wr(5,  5,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &pII[1]);
+        wr(6,  6,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &pII[2]);
+        wr(7,  7,  VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &pII[3]);
+        wr(8,  8,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBI, nullptr); // WPO VS
+        wr(9,  9,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &parBI,   nullptr); // WPO VS
+        wr(10, 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGIShadow
+        wr(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGILocal
+        wr(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &csmII);   // heCsm
+        wr(13, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &csmII);   // heLocalShadow (2D array)
+        wr(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heLandscapeWeights
+        wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &skyII);   // heSkyEnv (CUBE)
+        wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heAO
+        wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGIIrradiance
+        wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGIVisibility
+        wr(19, 31, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heSSRFwd (ssr.x = 0 here)
+        wr(20, 32, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGIReflFwd
+        wr(21, 33, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heCloudShadow
+        // The two shared sampler STATES. heSampWrap (34) is what heTexP0..3 —
+        // the only REAL textures on this path — sample through, and it
+        // reproduces m_albedoSampler's state exactly, so the tile and the
+        // preview keep the pixels they had before the split.
+        wr(22, 34, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampWrapII);
+        wr(23, 35, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampClampII);
+        vkUpdateDescriptorSets(m_device, 24, w, 0, nullptr);
     }
 
     vbOut = vb; ibOut = ib; idxOut = idxCount;
