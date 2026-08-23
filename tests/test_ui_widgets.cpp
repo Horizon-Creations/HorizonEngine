@@ -1425,6 +1425,160 @@ TEST_CASE("UIWidgetTree JSON: a span anchor round-trips, a point one stays old-f
     CHECK(HE::uiAnchorPresetOf(*one) == HE::kUIAnchorFill);
 }
 
+// ═══ Canvas scale modes ══════════════════════════════════════════════════════
+// The runtime used to scale the canvas per axis so it always covered the
+// viewport exactly — which distorts every element the moment the screen's
+// aspect differs from the authored one. Every mode but Stretch scales both axes
+// by ONE factor and hands the layout a canvas as large as the screen actually
+// is, so nothing is squashed and an edge-anchored element still reaches the
+// edge.
+
+TEST_CASE("uiResolveCanvas: Stretch is the old per-axis fit")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    REQUIRE(t.scaleMode == HE::UICanvasScaleMode::Stretch);
+
+    const HE::UIWidgetCanvas c = HE::uiResolveCanvas(t, 2560.0f, 1080.0f);
+    CHECK(c.width  == doctest::Approx(1920.0f));   // the canvas IS the authored one
+    CHECK(c.height == doctest::Approx(1080.0f));
+    CHECK(c.scaleX == doctest::Approx(2560.0f / 1920.0f));
+    CHECK(c.scaleY == doctest::Approx(1.0f));
+    CHECK(c.scaleX != doctest::Approx(c.scaleY));  // …and that is the distortion
+}
+
+TEST_CASE("uiResolveCanvas: the uniform modes never distort")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    const float vw = 2560.0f, vh = 1080.0f;   // 21:9, wider than authored
+
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+    HE::UIWidgetCanvas c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.scaleX == doctest::Approx(c.scaleY));
+    CHECK(c.scaleX == doctest::Approx(1.0f));                 // min(1.333, 1.0)
+    CHECK(c.width  == doctest::Approx(2560.0f));              // the canvas GREW sideways
+    CHECK(c.height == doctest::Approx(1080.0f));
+
+    t.scaleMode = HE::UICanvasScaleMode::FillOutside;
+    c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.scaleX == doctest::Approx(c.scaleY));
+    CHECK(c.scaleX == doctest::Approx(2560.0f / 1920.0f));     // max
+    CHECK(c.width  == doctest::Approx(1920.0f));
+    CHECK(c.height == doctest::Approx(810.0f));               // less canvas vertically
+
+    t.scaleMode = HE::UICanvasScaleMode::MatchWidth;
+    c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.width == doctest::Approx(1920.0f));               // authored width fits
+
+    t.scaleMode = HE::UICanvasScaleMode::MatchHeight;
+    c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.height == doctest::Approx(1080.0f));              // authored height fits
+
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    c = HE::uiResolveCanvas(t, vw, vh);
+    CHECK(c.scaleX == doctest::Approx(1.0f));
+    CHECK(c.width  == doctest::Approx(vw));                   // one unit = one pixel
+    CHECK(c.height == doctest::Approx(vh));
+
+    // A degenerate viewport resolves to something usable rather than dividing
+    // by zero — the editor asks for one every time a panel is dragged shut.
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+    c = HE::uiResolveCanvas(t, 0.0f, 0.0f);
+    CHECK(c.scaleX > 0.0f);
+    CHECK(c.width  > 0.0f);
+}
+
+TEST_CASE("Canvas scale: a square stays square, and the edge stays the edge")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+
+    // A square badge in the middle…
+    const int badge = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(badge);
+      HE::uiSetAnchorPreset(e, 5);
+      e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 200.0f; }
+    // …and a bar pinned to the whole bottom side.
+    const int bar = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(bar);
+      HE::uiSetAnchorPreset(e, 11);                  // bottom row, stretched width
+      HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+      e.pivotY = 1.0f; e.posY = 0.0f; e.sizeY = 80.0f; }
+
+    const float vw = 2560.0f, vh = 1080.0f;
+    const HE::UIWidgetCanvas c = HE::uiResolveCanvas(t, vw, vh);
+
+    const HE::UIWidgetRect b = HE::uiElementRect(t, *t.find(badge), &c);
+    CHECK(b.w * c.scaleX == doctest::Approx(b.h * c.scaleY));  // square on screen
+    CHECK(b.w * c.scaleX == doctest::Approx(200.0f));          // and its authored size
+
+    const HE::UIWidgetRect r = HE::uiElementRect(t, *t.find(bar), &c);
+    CHECK(r.x * c.scaleX == doctest::Approx(0.0f));            // reaches the left edge
+    CHECK((r.x + r.w) * c.scaleX == doctest::Approx(vw));      // …and the right one
+    CHECK((r.y + r.h) * c.scaleY == doctest::Approx(vh));      // sits on the bottom
+    CHECK(r.h * c.scaleY == doctest::Approx(80.0f));           // authored thickness
+
+    // Under Stretch the same bar is just as wide, but the badge is an egg.
+    t.scaleMode = HE::UICanvasScaleMode::Stretch;
+    const HE::UIWidgetCanvas s = HE::uiResolveCanvas(t, vw, vh);
+    const HE::UIWidgetRect bs = HE::uiElementRect(t, *t.find(badge), &s);
+    CHECK(bs.w * s.scaleX != doctest::Approx(bs.h * s.scaleY));
+}
+
+TEST_CASE("UIWidgetTree JSON: the scale mode survives, Stretch writes nothing")
+{
+    HE::UIWidgetTree t;
+    t.add(HE::UIWidgetType::Panel);
+    CHECK(HE::uiWidgetTreeToJson(t).find("scaleMode") == std::string::npos);
+
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("scaleMode") != std::string::npos);
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, r));
+    CHECK(r.scaleMode == HE::UICanvasScaleMode::FitInside);
+
+    // A copy carries it (the runtime holds a deep copy per live widget).
+    HE::UIWidgetTree copy = t;
+    CHECK(copy.scaleMode == HE::UICanvasScaleMode::FitInside);
+
+    // Nonsense in the file reads as the default rather than as an enum that
+    // does not exist.
+    HE::UIWidgetTree bad;
+    REQUIRE(HE::uiWidgetTreeFromJson(
+        R"J({"canvasWidth":800.0,"canvasHeight":600.0,"scaleMode":99,"nextId":1,"elements":[]})J", bad));
+    CHECK(bad.scaleMode == HE::UICanvasScaleMode::Stretch);
+}
+
+TEST_CASE("WidgetManager: the hit test follows the canvas scale mode")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1920.0f; t.canvasHeight = 1080.0f;
+    t.scaleMode = HE::UICanvasScaleMode::FitInside;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(btn);
+    e.setProp("Text", HE::UIPropValue::ofString(""));
+    HE::uiSetAnchorPreset(e, 0);                    // top-left point anchor
+    e.pivotX = e.pivotY = 0.0f;
+    e.posX = 0.0f; e.posY = 0.0f;
+    e.sizeX = 200.0f; e.sizeY = 100.0f;
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    // On a 21:9 screen the uniform factor is 1.0, so the button covers exactly
+    // its authored 200x100 pixels — a per-axis stretch would have made it 266
+    // wide and the point at (240, 50) would have been inside it.
+    CHECK(wm.processPointer(2560.0f, 1080.0f, 190.0f, 50.0f, true, true));
+    CHECK_FALSE(wm.processPointer(2560.0f, 1080.0f, 240.0f, 50.0f, true, true));
+}
+
 TEST_CASE("uiApplyAutoSize: content does not resize an axis the anchor stretches")
 {
     HE::UIWidgetTree t;

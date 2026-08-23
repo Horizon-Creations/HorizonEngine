@@ -268,8 +268,11 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		for (auto& w : m_instances)
 		{
 			if (!w.visible) continue;
-			const float sx = vpWidth  / w.tree.canvasWidth;
-			const float sy = vpHeight / w.tree.canvasHeight;
+			// Same resolution the draw uses (see extract) — a hit test on a
+			// differently-scaled canvas is a button that is not where it looks.
+			const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+			const float sx = canvas.scaleX;
+			const float sy = canvas.scaleY;
 			for (const auto& ep : w.tree.elements)
 			{
 				const HE::UIElement& e = *ep;
@@ -279,7 +282,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// hover cursor (so decorative elements can drive the cursor too).
 				if (!e.hitTestable) continue;
 				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
-				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e);
+				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
 				const float x0 = r.x * sx, y0 = r.y * sy;
 				const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
 				if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1)
@@ -369,9 +372,9 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		{
 			if (auto* s = dynamic_cast<HE::UISlider*>(w.tree.find(w.draggingSlider)))
 			{
-				const float sx = vpWidth / w.tree.canvasWidth;
-				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *s);
-				const float mouseCanvasX = mouseX / sx;
+				const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *s, &canvas);
+				const float mouseCanvasX = mouseX / canvas.scaleX;
 				float t = r.w > 0.0f ? (mouseCanvasX - r.x) / r.w : 0.0f;
 				t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
 				const float nv = s->minValue + t * (s->maxValue - s->minValue);
@@ -477,13 +480,18 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 	for (Instance* wp : sorted)
 	{
 		Instance& w = *wp;
-		const float sx = vpWidth  / w.tree.canvasWidth;
-		const float sy = vpHeight / w.tree.canvasHeight;
+		// The widget's scale mode decides how the authored canvas meets this
+		// viewport — and how many canvas units the screen is worth. Everything
+		// below (layout, auto-size wrap column, the pixel conversion) has to go
+		// through the SAME resolution, or the picture and the hit test drift.
+		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		const float sx = canvas.scaleX;
+		const float sy = canvas.scaleY;
 
 		// Auto-sizing elements fit themselves BEFORE the rects are resolved, so a
 		// text/font change made this frame (script, HorizonCode Set Property) is
 		// already reflected in the layout below.
-		HE::uiApplyAutoSize(w.tree);
+		HE::uiApplyAutoSize(w.tree, &canvas);
 
 		// Draw elements of this widget, painter-ordered by (layer, depth).
 		struct Item { const HE::UIElement* e; int key; HE::UIWidgetRect r; };
@@ -492,7 +500,8 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		{
 			const HE::UIElement& e = *ep;
 			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
-			items.push_back({ &e, elementSortKey(w.tree, e), HE::uiElementRect(w.tree, e) });
+			items.push_back({ &e, elementSortKey(w.tree, e),
+			                  HE::uiElementRect(w.tree, e, &canvas) });
 		}
 		std::stable_sort(items.begin(), items.end(),
 			[](const Item& a, const Item& b){ return a.key < b.key; });

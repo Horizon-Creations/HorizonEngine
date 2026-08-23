@@ -94,14 +94,68 @@ namespace
         outMin = ref + pos - pivot * outSize;
     }
 
-    UIWidgetRect parentRectOf(const UIWidgetTree& tree, const UIElement& e)
+    UIWidgetRect parentRectOf(const UIWidgetTree& tree, const UIElement& e,
+                              const UIWidgetCanvas* canvas)
     {
-        UIWidgetRect parent{ 0.0f, 0.0f, tree.canvasWidth, tree.canvasHeight };
+        UIWidgetRect parent{ 0.0f, 0.0f,
+                             canvas ? canvas->width  : tree.canvasWidth,
+                             canvas ? canvas->height : tree.canvasHeight };
         if (e.parentId != 0)
             if (const UIElement* p = tree.find(e.parentId))
-                parent = uiElementRect(tree, *p);
+                parent = uiElementRect(tree, *p, canvas);
         return parent;
     }
+}
+
+const char* uiCanvasScaleModeName(UICanvasScaleMode m)
+{
+    switch (m)
+    {
+    case UICanvasScaleMode::Stretch:       return "Stretch";
+    case UICanvasScaleMode::FitInside:     return "Fit Inside";
+    case UICanvasScaleMode::FillOutside:   return "Fill Outside";
+    case UICanvasScaleMode::MatchWidth:    return "Match Width";
+    case UICanvasScaleMode::MatchHeight:   return "Match Height";
+    case UICanvasScaleMode::ConstantPixel: return "Constant Pixel";
+    }
+    return "Stretch";
+}
+
+UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight)
+{
+    const float vw = std::max(1.0f, vpWidth), vh = std::max(1.0f, vpHeight);
+    const float rw = std::max(1.0f, tree.canvasWidth), rh = std::max(1.0f, tree.canvasHeight);
+    const float sx = vw / rw, sy = vh / rh;
+
+    UIWidgetCanvas c;
+    if (tree.scaleMode == UICanvasScaleMode::Stretch)
+    {
+        // The authored canvas IS the layout canvas; the two axes take whatever
+        // factor they need to cover the viewport.
+        c.scaleX = sx; c.scaleY = sy;
+        c.width  = rw; c.height = rh;
+        return c;
+    }
+
+    float s = 1.0f;
+    switch (tree.scaleMode)
+    {
+    case UICanvasScaleMode::FitInside:     s = std::min(sx, sy); break;
+    case UICanvasScaleMode::FillOutside:   s = std::max(sx, sy); break;
+    case UICanvasScaleMode::MatchWidth:    s = sx; break;
+    case UICanvasScaleMode::MatchHeight:   s = sy; break;
+    case UICanvasScaleMode::ConstantPixel: s = 1.0f; break;
+    case UICanvasScaleMode::Stretch:       break; // handled above
+    }
+    s = std::max(s, 1e-4f);
+    // One factor for both axes, and a canvas as big as the screen really is in
+    // those units. Nothing is distorted and nothing is letterboxed: a wider
+    // screen simply HAS more canvas, which is exactly what an element anchored
+    // to its right edge needs.
+    c.scaleX = c.scaleY = s;
+    c.width  = vw / s;
+    c.height = vh / s;
+    return c;
 }
 
 void uiAnchorPresetRect(int preset, float& minX, float& minY, float& maxX, float& maxY)
@@ -136,7 +190,7 @@ void uiSetAnchorPreset(UIElement& e, int preset)
 void uiReanchorKeepingRect(const UIWidgetTree& tree, UIElement& e, int preset)
 {
     const UIWidgetRect keep   = uiElementRect(tree, e);
-    const UIWidgetRect parent = parentRectOf(tree, e);
+    const UIWidgetRect parent = parentRectOf(tree, e, nullptr);
     uiSetAnchorPreset(e, preset);
 
     // Invert solveAxis for the new span: size becomes the difference to the
@@ -179,9 +233,10 @@ int uiAnchorLegacyPointOf(const UIElement& e)
     return -1;
 }
 
-UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e)
+UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e,
+                                 const UIWidgetCanvas* canvas)
 {
-    const UIWidgetRect parent = parentRectOf(tree, e);
+    const UIWidgetRect parent = parentRectOf(tree, e, canvas);
     UIWidgetRect a;
     a.x = parent.x + e.anchorMinX * parent.w;
     a.y = parent.y + e.anchorMinY * parent.h;
@@ -190,9 +245,10 @@ UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e)
     return a;
 }
 
-UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e)
+UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
+                           const UIWidgetCanvas* canvas)
 {
-    const UIWidgetRect parent = parentRectOf(tree, e);
+    const UIWidgetRect parent = parentRectOf(tree, e, canvas);
     const float lox = parent.x + e.anchorMinX * parent.w;
     const float hix = parent.x + e.anchorMaxX * parent.w;
     const float loy = parent.y + e.anchorMinY * parent.h;
@@ -228,14 +284,14 @@ void uiSetAnchorInsetsY(UIElement& e, float top, float bottom)
     e.posY  = top + e.pivotY * e.sizeY;
 }
 
-void uiApplyAutoSize(UIWidgetTree& tree)
+void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
 {
     // The width handed over is the one the anchor already decides. Where the
     // anchor is a point that is just the element's own size (nothing changes);
     // where it stretches, it is the span the parent gives it, which is what a
     // wrapping text has to be measured against.
     for (auto& e : tree.elements)
-        if (e) e->applyAutoSize(uiElementRect(tree, *e).w);
+        if (e) e->applyAutoSize(uiElementRect(tree, *e, canvas).w);
 }
 
 bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
@@ -326,6 +382,10 @@ std::string uiWidgetTreeToJson(const UIWidgetTree& tree)
     nlohmann::json j;
     j["canvasWidth"]  = tree.canvasWidth;
     j["canvasHeight"] = tree.canvasHeight;
+    // Only written once it is not the default, so every widget authored before
+    // scale modes existed saves byte-identical.
+    if (tree.scaleMode != UICanvasScaleMode::Stretch)
+        j["scaleMode"] = static_cast<int>(tree.scaleMode);
     j["nextId"]       = tree.nextId;
 
     nlohmann::json je = nlohmann::json::array();
@@ -342,6 +402,11 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out)
     UIWidgetTree t;
     t.canvasWidth  = j.value("canvasWidth",  1920.0f);
     t.canvasHeight = j.value("canvasHeight", 1080.0f);
+    {
+        const int sm = j.value("scaleMode", 0);
+        t.scaleMode = (sm >= 0 && sm <= static_cast<int>(UICanvasScaleMode::ConstantPixel))
+            ? static_cast<UICanvasScaleMode>(sm) : UICanvasScaleMode::Stretch;
+    }
     t.nextId       = j.value("nextId", 1);
 
     for (const auto& o : j.value("elements", nlohmann::json::array()))

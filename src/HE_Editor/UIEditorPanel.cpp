@@ -67,6 +67,13 @@ struct State
 	float  zoom = 1.0f;
 	ImVec2 pan  = ImVec2(0.0f, 0.0f);
 
+	// Preview screen size (Details → Canvas). 0 = draw the authored canvas; a
+	// real size lays the tree out exactly as the runtime would on that screen,
+	// which is the only way to SEE what a scale mode does. View state, never
+	// saved with the asset.
+	int    previewIndex = 0;
+	float  previewW = 0.0f, previewH = 0.0f;
+
 	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element.
 	int    dragMode = 0;
 	int    resizeHandle = -1;        // 0..7: corners+edges (see handleOffsets)
@@ -111,21 +118,26 @@ AssetPanelState<State> s_states;
 struct Rect { ImVec2 mn, mx; };
 
 // Element rect in CANVAS units — thin wrapper over the shared layout helper so
-// the editor and runtime agree pixel-for-pixel.
-Rect elementCanvasRect(const UIWidgetTree& tree, const UIElement& e)
+// the editor and runtime agree pixel-for-pixel. `canvas` null = the authored
+// canvas; a resolved one lays the tree out for a specific screen (preview).
+Rect elementCanvasRect(const UIWidgetTree& tree, const UIElement& e,
+                       const HE::UIWidgetCanvas* canvas = nullptr)
 {
-	const HE::UIWidgetRect r = HE::uiElementRect(tree, e);
+	const HE::UIWidgetRect r = HE::uiElementRect(tree, e, canvas);
 	return { { r.x, r.y }, { r.x + r.w, r.y + r.h } };
 }
 
 // Parent rect in CANVAS units (canvas root for parentId 0). Used to place the
 // anchor marker and drop point.
-Rect parentCanvasRect(const UIWidgetTree& tree, int parentId)
+Rect parentCanvasRect(const UIWidgetTree& tree, int parentId,
+                      const HE::UIWidgetCanvas* canvas = nullptr)
 {
-	Rect parent{ {0.0f, 0.0f}, { tree.canvasWidth, tree.canvasHeight } };
+	Rect parent{ {0.0f, 0.0f},
+	             { canvas ? canvas->width  : tree.canvasWidth,
+	               canvas ? canvas->height : tree.canvasHeight } };
 	if (parentId != 0)
 		if (const UIElement* p = tree.find(parentId))
-			parent = elementCanvasRect(tree, *p);
+			parent = elementCanvasRect(tree, *p, canvas);
 	return parent;
 }
 
@@ -542,6 +554,66 @@ void drawDetails(State& st, AppContext& ctx)
 		edit |= ImGui::DragFloat("Height", &st.tree.canvasHeight, 1.0f, 64.0f, 4320.0f);
 		if (edit) { st.dirty = true; }
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+
+		// How the canvas above meets a screen that is not exactly this size.
+		if (ImGui::BeginCombo("Scale", HE::uiCanvasScaleModeName(st.tree.scaleMode)))
+		{
+			for (int m = 0; m <= static_cast<int>(HE::UICanvasScaleMode::ConstantPixel); ++m)
+			{
+				const auto mode = static_cast<HE::UICanvasScaleMode>(m);
+				if (ImGui::Selectable(HE::uiCanvasScaleModeName(mode), st.tree.scaleMode == mode))
+				{
+					st.tree.scaleMode = mode;
+					st.dirty = true;
+					commitEdit(st, ctx);
+				}
+			}
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(
+				"Stretch fits both axes SEPARATELY: the canvas always covers the\n"
+				"screen exactly, and everything on it is distorted as soon as the\n"
+				"screen's aspect differs from the size above.\n\n"
+				"Every other mode scales both axes by ONE factor — nothing is\n"
+				"distorted — and treats the size above as a reference for how big\n"
+				"things appear. The canvas is then as large as the screen really\n"
+				"is, so an element anchored to an edge stays on that edge.");
+
+		ImGui::Spacing();
+		ImGui::TextDisabled("Preview");
+		ImGui::SetNextItemWidth(140.0f);
+		{
+			// The designer draws the AUTHORED canvas; this is what that canvas
+			// turns into on a real screen. Purely a view setting, never saved.
+			static const struct { const char* label; float w, h; } kPreviews[] = {
+				{ "Authored size", 0.0f, 0.0f },
+				{ "1280 x 720",   1280.0f,  720.0f },
+				{ "1920 x 1080",  1920.0f, 1080.0f },
+				{ "2560 x 1080",  2560.0f, 1080.0f },   // 21:9
+				{ "3840 x 2160",  3840.0f, 2160.0f },
+				{ "1080 x 1920",  1080.0f, 1920.0f },   // portrait
+			};
+			const int count = static_cast<int>(sizeof(kPreviews) / sizeof(kPreviews[0]));
+			st.previewIndex = std::clamp(st.previewIndex, 0, count - 1);
+			if (ImGui::BeginCombo("##previewsize", kPreviews[st.previewIndex].label))
+			{
+				for (int i = 0; i < count; ++i)
+					if (ImGui::Selectable(kPreviews[i].label, st.previewIndex == i))
+						st.previewIndex = i;
+				ImGui::EndCombo();
+			}
+			st.previewW = kPreviews[st.previewIndex].w;
+			st.previewH = kPreviews[st.previewIndex].h;
+			if (st.previewIndex != 0)
+			{
+				const HE::UIWidgetCanvas c =
+					HE::uiResolveCanvas(st.tree, st.previewW, st.previewH);
+				ImGui::TextDisabled("Canvas %.0f x %.0f units, scale %.2f x %.2f",
+				                    c.width, c.height, c.scaleX, c.scaleY);
+			}
+		}
+
 		ImGui::Spacing();
 		ImGui::TextWrapped("Select an element on the canvas or in the hierarchy "
 		                   "to edit its properties.");
@@ -934,11 +1006,23 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	const bool hovered = ImGui::IsItemHovered();
 	const ImVec2 mouse = ImGui::GetMousePos();
 
+	// What the designer lays out in: the authored canvas, or — once a preview
+	// screen is picked in Details → Canvas — exactly what the runtime resolves
+	// for that screen. Under a uniform scale mode that canvas has a DIFFERENT
+	// size than the authored one, and seeing that is the entire point: it is
+	// where an edge-anchored element proves it still reaches the edge.
+	const bool previewing = st.previewIndex != 0 && st.previewW > 0.0f && st.previewH > 0.0f;
+	const HE::UIWidgetCanvas previewCanvas = previewing
+		? HE::uiResolveCanvas(st.tree, st.previewW, st.previewH)
+		: HE::UIWidgetCanvas{};
+	const HE::UIWidgetCanvas* layoutCanvas = previewing ? &previewCanvas : nullptr;
+	const float canvasW = previewing ? previewCanvas.width  : st.tree.canvasWidth;
+	const float canvasH = previewing ? previewCanvas.height : st.tree.canvasHeight;
+
 	// Fit scale, then user zoom / pan.
-	const float fit = std::min(avail.x / st.tree.canvasWidth,
-	                           avail.y / st.tree.canvasHeight) * 0.92f;
+	const float fit = std::min(avail.x / canvasW, avail.y / canvasH) * 0.92f;
 	const float s = std::max(0.02f, fit * st.zoom);
-	const ImVec2 canvasPx(st.tree.canvasWidth * s, st.tree.canvasHeight * s);
+	const ImVec2 canvasPx(canvasW * s, canvasH * s);
 	const ImVec2 cTL(origin.x + (avail.x - canvasPx.x) * 0.5f + st.pan.x,
 	                 origin.y + (avail.y - canvasPx.y) * 0.5f + st.pan.y);
 
@@ -955,9 +1039,9 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.zoom = std::clamp(st.zoom * (1.0f + wheel * 0.1f), 0.15f, 8.0f);
 			const float s2 = std::max(0.02f, fit * st.zoom);
 			// keep the canvas point under the cursor fixed
-			st.pan.x += mouse.x - (origin.x + (avail.x - st.tree.canvasWidth * s2) * 0.5f
+			st.pan.x += mouse.x - (origin.x + (avail.x - canvasW * s2) * 0.5f
 			                       + st.pan.x + before.x * s2);
-			st.pan.y += mouse.y - (origin.y + (avail.y - st.tree.canvasHeight * s2) * 0.5f
+			st.pan.y += mouse.y - (origin.y + (avail.y - canvasH * s2) * 0.5f
 			                       + st.pan.y + before.y * s2);
 		}
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
@@ -986,7 +1070,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 
 	// Auto-sizing elements fit themselves before the rects resolve, so the
 	// designer shows the same box the runtime will (see uiApplyAutoSize).
-	HE::uiApplyAutoSize(st.tree);
+	HE::uiApplyAutoSize(st.tree, layoutCanvas);
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
@@ -1002,7 +1086,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (!p) break;
 			c = p;
 		}
-		items.push_back({ &n, n.layer * 256 + depth, depth, elementCanvasRect(st.tree, n) });
+		items.push_back({ &n, n.layer * 256 + depth, depth,
+		                  elementCanvasRect(st.tree, n, layoutCanvas) });
 	}
 	std::stable_sort(items.begin(), items.end(),
 		[](const DrawItem& a, const DrawItem& b){ return a.layer < b.layer; });
@@ -1021,7 +1106,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	UIElement* sel = st.tree.find(st.selected);
 	if (sel)
 	{
-		const Rect selRect = elementCanvasRect(st.tree, *sel);
+		const Rect selRect = elementCanvasRect(st.tree, *sel, layoutCanvas);
 		const ImVec2 mn = toScreen(selRect.mn), mx = toScreen(selRect.mx);
 		dl->AddRect(mn, mx, IM_COL32(255, 170, 40, 255), 0, 0, 2.0f);
 
@@ -1029,7 +1114,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		// a point, the anchored rectangle itself once it spans a side — that
 		// outline IS the thing the element now follows when the parent resizes,
 		// so it has to be visible rather than inferred from the details panel.
-		const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *sel);
+		const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *sel, layoutCanvas);
 		const ImVec2 amn = toScreen(ImVec2(ar.x, ar.y));
 		const ImVec2 amx = toScreen(ImVec2(ar.x + ar.w, ar.y + ar.h));
 		if (ar.w <= 0.01f && ar.h <= 0.01f)
@@ -1126,7 +1211,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				// stretched axis the field is the difference to the anchored
 				// span and is normally negative (an inset), so clamping it at 1
 				// would make those handles unusable.
-				const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2);
+				const HE::UIWidgetRect ar = HE::uiElementAnchorRect(st.tree, *n2, layoutCanvas);
 				nx = std::max(1.0f - ar.w, nx);
 				ny = std::max(1.0f - ar.h, ny);
 				n2->sizeX = nx;
