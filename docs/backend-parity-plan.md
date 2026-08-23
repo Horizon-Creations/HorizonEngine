@@ -149,6 +149,47 @@ größte Einzelkorrektur an der Aufwandsschätzung in diesem Dokument.
 > (Graph-Materialien auf D3D) **und** drei der vier SSR-Shader auf einen Schlag. Damit ist
 > es die Arbeit mit der größten Hebelwirkung im ganzen Plan — nicht mehr nur „A4".
 >
+> > **Stand 2026-08-22: Remap gebaut, A4 auf D3D behoben.**
+> >
+> > `he::shaderc::compileHlslPinned` + `HlslPin` ist das HLSL-Gegenstück zu `MslPin`, das
+> > es für Metal seit jeher gibt. Die Pin-Tabelle für Material-Fragmente steht in
+> > `MaterialShaderLibrary::fragment` neben der Metal-Tabelle.
+> >
+> > Die Rechnung geht exakt auf, deshalb ist es eine feste Liste und keine Heuristik: ein
+> > beleuchtetes Graph-Material referenziert **16** Sampler-Bindings — `heTex0`,
+> > `heTexP0..3`, die beiden GI-Masken, CSM, Schatten-Atlas, Sky-Cube, AO, die beiden
+> > DDGI-Atlanten, Forward-SSR, Forward-GI-Reflection und die Wolkenschatten. Zehn liegen
+> > schon unter s16 und behalten ihre Nummer; **sechs müssen umziehen**, und unterhalb der
+> > Grenze sind genau sechs Register frei (s0, s1, s3, s8, s9, s14). Texturen sind nie das
+> > Problem (t0..t127), nur Sampler — deshalb wird ausschließlich die Sampler-Hälfte
+> > verdichtet.
+> >
+> > **Beleg:** „A4 material PS compile failed" erscheint auf D3D11 und D3D12 **nicht mehr**
+> > (vorher bei jedem Graph-Material), und der Szenen-Frame ändert sich auf beiden —
+> > D3D11, D3D12 und Vulkan liefern denselben Bildmittelwert, zeichnen also dasselbe.
+> > Vorher zeichneten alle drei den eingebauten PBR-Ersatz. Die Mechanik selbst wurde
+> > vorab isoliert nachgewiesen: derselbe Shader ohne Pins wird von `fxc /T ps_5_0`
+> > abgelehnt, mit Pins übersetzt er.
+> >
+> > **Was weiterhin NICHT geht, und warum es nicht am Umnummerieren liegt:**
+> > `heLandscapeWeights` (Binding 14) wäre das **siebzehnte**. Es gibt kein freies
+> > Register mehr, und man kann auch keins schaffen: FXC lehnt zwei `SamplerState` auf
+> > demselben Register ab (X4500, gemessen), und SPIRV-Cross erzeugt pro Binding einen
+> > eigenen — auch wenn man beide auf denselben Slot pinnt (ebenfalls gemessen). Metals
+> > Ausweg, einen Sampler inline als constexpr zu erzeugen, hat unter SM 5.0 kein
+> > Gegenstück. Ein Landschafts-Graph-Material scheitert also weiterhin auf D3D, jetzt
+> > aber mit einer **benennbaren** Grenze statt pauschal.
+> > Der Weg dorthin wäre, in der geteilten Präambel Texturen und Sampler zu trennen, damit
+> > EIN `SamplerState` viele Texturen bedienen kann — das funktioniert nachweislich
+> > (gemessen), ist aber eine Änderung an jedem Backend und gehört in eine eigene Phase.
+> >
+> > **Noch offen an diesem Faden:** die sechs verschobenen Ressourcen werden von D3D11 und
+> > D3D12 noch **gar nicht gebunden** — sie waren es nie, weil der Shader nie übersetzte
+> > (beide binden heute nur Slots 0, 1, 2, 4, 10). Der Shader läuft, sampelt dort aber ins
+> > Leere. Und die Material-**Kacheln** zeigen weiterhin den PBR-Ersatz, weil der P1b-Code
+> > ihn bewusst zeichnet, solange der Graph-Pfad nicht baute; diese Entscheidung ist jetzt
+> > überholt und kann umgedreht werden.
+>
 > **Aber Umnummerieren allein reicht für `ssrComposite` nicht.** Der braucht 19 verschiedene
 > Sampler; `ps_5_0` kennt 16. Da hilft keine Tabelle. Entweder teilen sich mehrere Texturen
 > einen `SamplerState` (SPIRV-Cross erzeugt aus GLSLs kombinierten Samplern je ein eigenes

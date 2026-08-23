@@ -210,6 +210,68 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
     return r;
 }
 
+Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins,
+                         std::vector<HlslPin>* unusedPins)
+{
+    Result r;
+    std::lock_guard<std::mutex> lock(g_glslangMutex);
+    glslang::InitializeProcess();
+    if (glslToSpirv(glsl, stage, r.spirv, r.log))
+    {
+        try
+        {
+            spirv_cross::CompilerHLSL c(r.spirv);
+            spirv_cross::CompilerHLSL::Options o;
+            o.shader_model = 50;
+            c.set_hlsl_options(o);
+            for (const HlslPin& p : pins)
+            {
+                spirv_cross::HLSLResourceBinding b{};
+                b.stage = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
+                        : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
+                                                       : spv::ExecutionModelGLCompute;
+                b.desc_set = p.set;
+                b.binding  = p.binding;
+                // A class left unpinned keeps SPIRV-Cross's own choice, which for
+                // everything below the SM 5.0 limits is already the binding number.
+                if (p.srv     != kHlslPinUnused) b.srv.register_binding     = p.srv;
+                if (p.sampler != kHlslPinUnused) b.sampler.register_binding = p.sampler;
+                if (p.cbv     != kHlslPinUnused) b.cbv.register_binding     = p.cbv;
+                c.add_hlsl_resource_binding(b);
+            }
+            r.source = c.compile();
+            r.ok = true;
+
+            // Which pins the shader never asked for. A table that has drifted from
+            // the preamble is otherwise invisible: SPIRV-Cross ignores a pin for a
+            // binding the shader dropped, and the result still compiles — until the
+            // day the register it was guarding is handed to something else.
+            if (unusedPins)
+            {
+                unusedPins->clear();
+                for (const HlslPin& p : pins)
+                {
+                    const auto model = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
+                                     : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
+                                                                    : spv::ExecutionModelGLCompute;
+                    if (!c.is_hlsl_resource_binding_used(model, p.set, p.binding))
+                        unusedPins->push_back(p);
+                }
+            }
+        }
+        catch (const std::exception& e)
+        {
+            r.log += "SPIRV-Cross(HLSL pinned): ";
+            r.log += e.what();
+            r.log += '\n';
+        }
+    }
+    glslang::FinalizeProcess();
+    reportShaderResult("Pinned-HLSL shader compile", r.ok, r.log, glsl.size());
+    return r;
+}
+
 MultiResult compileMany(const std::string& glsl, Stage stage,
                         const std::vector<Target>& targets)
 {

@@ -77,6 +77,41 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
                         const std::vector<MslPin>& pins,
                         const MslOptions& opts = {});
 
+// ─── HLSL register pinning — the D3D twin of MslPin ──────────────────────────
+// SPIRV-Cross maps GLSL `binding = N` straight onto `register(tN)`, `register(sN)`
+// and `register(bN)`. Shader model 5.0 offers only s0..s15 and b0..b13, so every
+// binding above those limits is simply unreachable — the emitted HLSL looks fine
+// and FXC then rejects it with X4509 (sampler) or X4567 (cbuffer).
+//
+// That is not hypothetical: it is why node-graph materials never rendered as
+// authored on D3D11/D3D12 (the shared lighting preamble reaches binding 33), and
+// why three of the four SSR shaders would not build there either. Metal hit the
+// same wall and was given MslPin; the HLSL side was given nothing, and because the
+// failure happens one step AFTER the cross-compile, `Result::ok` stayed true and
+// hid it.
+//
+// A pin left at kHlslPinUnused keeps SPIRV-Cross's own choice for that register
+// class, so a table only has to name what actually has to move.
+inline constexpr uint32_t kHlslPinUnused = 0xFFFFFFFFu;
+
+struct HlslPin
+{
+    Stage    stage;                    // which stage the resource is used in
+    uint32_t set     = 0;              // GLSL: layout(set = ...)
+    uint32_t binding = 0;              // GLSL: layout(binding = ...)
+    uint32_t srv     = kHlslPinUnused; // → register(t…)  textures / SRVs
+    uint32_t sampler = kHlslPinUnused; // → register(s…)  0..15 on SM 5.0
+    uint32_t cbv     = kHlslPinUnused; // → register(b…)  0..13 on SM 5.0
+};
+
+// Compile canonical GLSL to HLSL SM 5.0 with explicit register assignments.
+// `unusedPins` (optional) receives the pins SPIRV-Cross never consumed, which is
+// how a caller notices its table has drifted from the shader — a pin for a binding
+// the shader dropped is silently ignored otherwise.
+Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins,
+                         std::vector<HlslPin>* unusedPins = nullptr);
+
 // Convenience: compile once to SPIR-V, then emit several targets from it (cheaper
 // than re-parsing the GLSL per target). Returns SPIR-V + a source per requested target,
 // in the same order as `targets`. `out[i].ok == false` on a per-target failure.

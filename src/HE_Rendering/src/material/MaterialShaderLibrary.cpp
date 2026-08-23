@@ -1899,6 +1899,69 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               { Stage::Fragment, 0, 33, 16 } },
             kMaterialMslOptions()));
     }
+    else if (backend == Backend::HLSL)
+    {
+        // ── Fragment sampler budget, D3D edition ─────────────────────────────
+        // Same wall as Metal above, different bricks. SPIRV-Cross maps GLSL
+        // `binding = N` straight onto `register(sN)`, and shader model 5.0 stops
+        // at s15 — so the preamble's bindings 16, 17, 18, 31, 32 and 33 land on
+        // registers that do not exist and FXC rejects the whole shader with
+        // X4509. That is why NO node-graph material has ever rendered as authored
+        // on D3D11 or D3D12: every one of them failed to compile and fell back to
+        // built-in PBR, logged once as "A4 material PS compile failed".
+        //
+        // It stayed hidden for the same reason §1.1's dead GI stack did: the
+        // cross-compile SUCCEEDS. `Result::ok` only means SPIRV-Cross emitted
+        // HLSL; the rejection happens one step later, inside D3DCompile.
+        //
+        // The budget works out to exactly 16, which is why this table is a fixed
+        // list and not a heuristic:
+        //     2        heTex0                  4..7  heTexP0..3
+        //     10,11    GI sun / local masks    12    CSM array
+        //     13       local shadow atlas      15    sky env cubemap
+        //     16       screen-space AO         17,18 DDGI irradiance / visibility
+        //     31,32    forward SSR / GI refl   33    cloud-shadow transmittance
+        // Sixteen bindings, sixteen registers. Ten of them already sit below s16
+        // and keep their number, so only six move — and the six free registers
+        // below the cap (s0, s1, s3, s8, s9, s14) are exactly enough.
+        //
+        // TEXTURES are not the constraint (t0..t127), so every SRV keeps its
+        // binding number; only the SAMPLER half is compacted. That keeps the
+        // renderers' t-register bind points readable against the GLSL.
+        //
+        // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) would be a
+        // seventeenth. There is no room and no way to make room by renumbering —
+        // FXC rejects two SamplerState declarations on one register (X4500,
+        // measured), and SPIRV-Cross emits one per binding even when both are
+        // pinned to the same slot, so the trick Metal uses (an inline constexpr
+        // sampler, kMaterialMslOptions) has no HLSL counterpart at SM 5.0.
+        // A landscape graph material therefore still fails here — but now with a
+        // specific, nameable limit instead of every material failing. Closing it
+        // means declaring separate textures and samplers in the shared preamble
+        // so one SamplerState can serve many textures (measured to work), which
+        // is a change to every backend and belongs in its own phase.
+        static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
+            //          stage             set  bind  srv  samp  cbv
+            { Stage::Fragment, 0,  2,  2,  2, kHlslPinUnused }, // heTex0
+            { Stage::Fragment, 0,  4,  4,  4, kHlslPinUnused }, // heTexP0
+            { Stage::Fragment, 0,  5,  5,  5, kHlslPinUnused }, // heTexP1
+            { Stage::Fragment, 0,  6,  6,  6, kHlslPinUnused }, // heTexP2
+            { Stage::Fragment, 0,  7,  7,  7, kHlslPinUnused }, // heTexP3
+            { Stage::Fragment, 0, 10, 10, 10, kHlslPinUnused }, // heGIShadow
+            { Stage::Fragment, 0, 11, 11, 11, kHlslPinUnused }, // heGILocal
+            { Stage::Fragment, 0, 12, 12, 12, kHlslPinUnused }, // heCsm
+            { Stage::Fragment, 0, 13, 13, 13, kHlslPinUnused }, // heLocalShadow
+            { Stage::Fragment, 0, 15, 15, 15, kHlslPinUnused }, // heSkyEnv
+            // ── the six that have to move ──────────────────────────────────
+            { Stage::Fragment, 0, 16, 16,  0, kHlslPinUnused }, // heAO           → s0
+            { Stage::Fragment, 0, 17, 17,  1, kHlslPinUnused }, // heGIIrradiance → s1
+            { Stage::Fragment, 0, 18, 18,  3, kHlslPinUnused }, // heGIVisibility → s3
+            { Stage::Fragment, 0, 31, 31,  8, kHlslPinUnused }, // heSSRFwd       → s8
+            { Stage::Fragment, 0, 32, 32,  9, kHlslPinUnused }, // heGIReflFwd    → s9
+            { Stage::Fragment, 0, 33, 33, 14, kHlslPinUnused }, // heCloudShadow  → s14
+        };
+        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, kHlslMaterialPins));
+    }
     else
     {
         out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
