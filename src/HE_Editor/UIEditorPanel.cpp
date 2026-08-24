@@ -1080,16 +1080,10 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::WidgetRef:
 	{
-		// The embedded widget is grafted in at runtime, so the designer can only
-		// show the slot it will fill and which asset that is — with the name,
-		// because an unnamed dashed box is indistinguishable from an empty one.
-		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 150));
-		const std::string p = propStringOr(n, "Widget", "");
-		const std::string label = p.empty()
-			? std::string("(no widget)")
-			: std::filesystem::path(p).stem().string();
-		dl->AddText(nullptr, 12.0f * std::max(0.6f, s), ImVec2(mn.x + 4, mn.y + 4),
-		            IM_COL32(190, 230, 200, 200), label.c_str());
+		// Just the outline of the slot: the embedded widget itself is drawn on
+		// top of this by the caller, which is also the one that knows whether
+		// the reference resolved (and writes the name when it did not).
+		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 110));
 		break;
 	}
 	case UIWidgetType::VerticalBox:
@@ -1224,6 +1218,112 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 }
 
+// ── Embedded widgets in the designer ─────────────────────────────────────────
+// A WidgetRef is grafted in by the RUNTIME, so the designer used to show only
+// the slot it would fill. That made a page of embedded rows an arrangement of
+// empty boxes. This draws the referenced widget where it will actually be: its
+// tree is laid out against a canvas the size of the ref element's rect, which
+// is exactly what the runtime does when it anchors that asset's roots inside it.
+//
+// The parsed trees are cached by path and re-read whenever the asset's JSON
+// changes, so editing the embedded widget in another tab shows up here without
+// re-parsing it every frame in every ref.
+const HE::UIWidgetTree* embeddedTreeFor(AppContext& ctx, const std::string& path)
+{
+	if (path.empty() || !ctx.contentManager) return nullptr;
+	const HE::UUID id = ctx.contentManager->loadAsset(path);
+	const UIWidgetAsset* asset = id == HE::UUID{} ? nullptr : ctx.contentManager->getWidget(id);
+	if (!asset) return nullptr;
+
+	struct Cached { std::string json; HE::UIWidgetTree tree; bool ok = false; };
+	static std::unordered_map<std::string, Cached> s_cache;
+	Cached& c = s_cache[path];
+	if (c.json != asset->treeJson)
+	{
+		c.json = asset->treeJson;
+		c.ok   = HE::uiWidgetTreeFromJson(asset->treeJson, c.tree);
+	}
+	return c.ok ? &c.tree : nullptr;
+}
+
+// One element of a tree, with the two things every element needs resolved
+// first: its picture (from the thumbnail cache) and the inherited opacity /
+// disabled dim. Shared by the page itself and by everything embedded in it.
+void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
+                   const UIElement& n, const ImVec2& mn, const ImVec2& mx, float s)
+{
+	void* texHandle = nullptr;
+	if (n.hasTextureSlot() && !n.texture.empty() && n.material.empty() && ctx.contentManager)
+		texHandle = AssetThumbnailCache::get(ctx.contentManager->contentRoot() + "/" + n.texture);
+	const float alpha = HE::uiElementEffectiveOpacity(tree, n);
+	const float dim   = HE::uiElementEffectiveEnabled(tree, n) ? 1.0f : HE::kUIDisabledDim;
+	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim);
+}
+
+// Draw `tree` into the rect [mn, mx] — the whole tree, in paint order, with the
+// same clipping rule the runtime uses. `depth` bounds the recursion so a circle
+// of widgets embedding each other cannot hang the editor.
+void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
+                      const ImVec2& mn, const ImVec2& mx, float s, int depth)
+{
+	constexpr int kMaxDepth = 4;
+	if (depth > kMaxDepth) return;
+
+	// The canvas the embedded roots anchor in IS the ref element's rect, in the
+	// host's canvas units — that is the runtime's rule, expressed here in the
+	// pixels the designer already has.
+	HE::UIWidgetCanvas canvas;
+	canvas.scaleX = canvas.scaleY = 1.0f;
+	canvas.width  = std::max(1.0f, (mx.x - mn.x) / std::max(0.0001f, s));
+	canvas.height = std::max(1.0f, (mx.y - mn.y) / std::max(0.0001f, s));
+	auto toScreen = [&](float x, float y) { return ImVec2(mn.x + x * s, mn.y + y * s); };
+
+	// A copy, because auto-size mutates the tree it measures and the cached one
+	// must stay as the asset wrote it.
+	HE::UIWidgetTree laid = tree;
+	HE::uiApplyAutoSize(laid, &canvas);
+	HE::uiUpdateScrollExtents(laid);
+
+	struct Item { const UIElement* n; int key; HE::UIWidgetRect r; };
+	std::vector<Item> items;
+	for (const auto& ep : laid.elements)
+	{
+		const UIElement& e = *ep;
+		if (!HE::uiElementEffectiveVisible(laid, e)) continue;
+		int d = 0;
+		for (const UIElement* c = &e; c->parentId != 0 && d < 255; ++d)
+		{
+			const UIElement* p = laid.find(c->parentId);
+			if (!p) break;
+			c = p;
+		}
+		items.push_back({ &e, e.layer * 256 + d, HE::uiElementRect(laid, e, &canvas) });
+	}
+	std::stable_sort(items.begin(), items.end(),
+		[](const Item& a, const Item& b){ return a.key < b.key; });
+
+	for (const Item& it : items)
+	{
+		const ImVec2 emn = toScreen(it.r.x, it.r.y);
+		const ImVec2 emx = toScreen(it.r.x + it.r.w, it.r.y + it.r.h);
+		HE::UIWidgetRect clip{};
+		const bool clipped = HE::uiElementClipRect(laid, *it.n, clip, &canvas);
+		if (clipped)
+		{
+			if (clip.w <= 0.0f || clip.h <= 0.0f) continue;
+			dl->PushClipRect(toScreen(clip.x, clip.y),
+			                 toScreen(clip.x + clip.w, clip.y + clip.h), true);
+		}
+		drawElementIn(dl, ctx, laid, *it.n, emn, emx, s);
+		// …and a widget inside the embedded widget, one level further down.
+		if (it.n->type() == UIWidgetType::WidgetRef)
+			if (const HE::UIWidgetTree* sub =
+				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
+				drawEmbeddedTree(dl, ctx, *sub, emn, emx, s, depth + 1);
+		if (clipped) dl->PopClipRect();
+	}
+}
+
 void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1339,21 +1439,27 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const ImVec2 cmx = toScreen(ImVec2(clip.x + clip.w, clip.y + clip.h));
 			dl->PushClipRect(cmn, cmx, true);
 		}
-		// A picture on the element is drawn as a picture: the thumbnail cache
-		// already holds one for every texture asset, so the designer shows what
-		// the runtime will instead of a coloured box standing in for it.
-		void* texHandle = nullptr;
-		if (it.n->hasTextureSlot() && !it.n->texture.empty() && it.n->material.empty() &&
-		    ctx.contentManager)
-			texHandle = AssetThumbnailCache::get(
-				ctx.contentManager->contentRoot() + "/" + it.n->texture);
-		// Inherited opacity and the disabled dim, the same two the runtime
-		// applies — a menu authored at half opacity has to LOOK half in the
-		// designer, or the slider is a number without a picture.
-		const float alpha = HE::uiElementEffectiveOpacity(st.tree, *it.n);
-		const float dim   = HE::uiElementEffectiveEnabled(st.tree, *it.n)
-			? 1.0f : HE::kUIDisabledDim;
-		drawElementPreview(dl, *it.n, mn, mx, s, texHandle, alpha, dim);
+		// The element itself: its picture from the thumbnail cache, and the
+		// inherited opacity / disabled dim the runtime applies — a menu authored
+		// at half opacity has to LOOK half here too.
+		drawElementIn(dl, ctx, st.tree, *it.n, mn, mx, s);
+		// A WidgetRef shows the widget it embeds, laid out in its slot exactly
+		// as the runtime will graft it in. Only when the reference does NOT
+		// resolve does the slot fall back to naming what it is missing.
+		if (it.n->type() == UIWidgetType::WidgetRef)
+		{
+			const std::string wp = it.n->getProp("Widget").s;
+			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
+				drawEmbeddedTree(dl, ctx, *sub, mn, mx, s, 0);
+			else
+			{
+				const std::string label = wp.empty()
+					? std::string("(no widget)")
+					: std::filesystem::path(wp).stem().string() + " (missing)";
+				dl->AddText(nullptr, 12.0f * std::max(0.6f, s), ImVec2(mn.x + 4, mn.y + 4),
+				            IM_COL32(190, 230, 200, 200), label.c_str());
+			}
+		}
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();
@@ -1420,6 +1526,24 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			                  hov ? IM_COL32(255, 210, 120, 255) : IM_COL32(255, 170, 40, 255));
 		}
 		} // end of the freely-placed (non-box-child) branch
+	}
+
+	// The cursor says what the handle under it does — a plain arrow over a
+	// resize grip is the editor claiming there is nothing to grab. Handles are
+	// 0..3 corners (TL, TR, BL, BR) then 4..7 edges (T, B, L, R); while a drag
+	// is running the cursor follows the handle being HELD, not the one hovered.
+	{
+		static const ImGuiMouseCursor kHandleCursor[8] = {
+			ImGuiMouseCursor_ResizeNWSE, ImGuiMouseCursor_ResizeNESW,
+			ImGuiMouseCursor_ResizeNESW, ImGuiMouseCursor_ResizeNWSE,
+			ImGuiMouseCursor_ResizeNS,   ImGuiMouseCursor_ResizeNS,
+			ImGuiMouseCursor_ResizeEW,   ImGuiMouseCursor_ResizeEW };
+		const int active = (st.dragMode == 2 && st.resizeHandle >= 0)
+			? st.resizeHandle : (hovered ? hoveredHandle : -1);
+		if (active >= 0 && active < 8)
+			ImGui::SetMouseCursor(kHandleCursor[active]);
+		else if (st.dragMode == 1)
+			ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);   // moving it
 	}
 
 	// ── Mouse interaction ─────────────────────────────────────────────────────
@@ -2519,6 +2643,12 @@ void render(AppContext& ctx, const std::string& assetPath,
 			ImGui::Separator();
 			for (UIWidgetType t : HE::uiWidgetTypeRegistry())
 			{
+				// WidgetRef is not offered as a bare type: every widget of the
+				// project is listed by name under "User Defined" below, and an
+				// empty reference you then have to point somewhere is the same
+				// thing with an extra step. It stays in the REGISTRY, though —
+				// that is what loads the type back out of a saved widget.
+				if (t == UIWidgetType::WidgetRef) continue;
 				// A plain click adds (centered on the canvas or under the selected
 				// panel); dragging the button onto the canvas/hierarchy places it there.
 				const bool clicked = ImGui::Button(typeName(t), ImVec2(-1.0f, 0));
