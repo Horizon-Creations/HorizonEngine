@@ -7837,11 +7837,12 @@ void VulkanRenderer::createUIPipeline()
         vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_uiAtlasDescPool), "ui atlas desc pool");
     }
 
-    // Push constant layout: UIPush (64 bytes) visible to both stages.
+    // Push constant layout: UIPush (80 bytes) visible to both stages.
     VkPushConstantRange pcr{};
     pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset     = 0;
-    pcr.size       = 64; // vec4 rect + vec4 color + vec4 uvRect + vec2 viewport + vec2 params
+    // vec4 rect + vec4 color + vec4 uvRect + vec2 viewport + vec2 params + vec4 rotation
+    pcr.size       = 80;
 
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     plci.setLayoutCount         = 1;
@@ -7980,7 +7981,8 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
     // Caller is responsible for binding the correct pipeline and setting
     // viewport/scissor before calling. This function only loops over UI objects
     // and issues draw calls — it does NOT begin/end a render pass.
-    struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport; glm::vec2 params; };
+    struct UIPush { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport;
+                    glm::vec2 params; glm::vec4 rotation; };
 
     // The atlas set must be bound for EVERY draw (the fragment shader statically
     // uses the sampler even for solid quads). Default to the shared font (key 0);
@@ -8039,6 +8041,7 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
         push.uvRect   = glm::vec4(obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
         push.viewport = glm::vec2(float(width), float(height));
         push.params   = glm::vec2(obj.type == 2 ? 1.0f : 0.0f, 0.0f);
+        push.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
         vkCmdPushConstants(cmd, m_uiPipeLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UIPush), &push);

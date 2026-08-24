@@ -451,6 +451,14 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
 				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
 				HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+				// Rotated? Then the pointer is turned back into the element's
+				// own unrotated space and the test stays a plain rectangle —
+				// a tilted button has to be clickable where it LOOKS, and its
+				// corners are the parts that move the furthest.
+				float mcx = mouseX / sx, mcy = mouseY / sy;
+				if (HE::UIRotation rot; HE::uiElementRotation(w.tree, e, rot, &canvas))
+					HE::uiUnrotatePoint(rot, mcx, mcy, mcx, mcy);
+				const float testX = mcx * sx, testY = mcy * sy;
 				// A clipping ancestor cuts the hit area down with the picture:
 				// the half of a list row that hangs out of its box is not
 				// visible, so it must not be clickable either.
@@ -465,7 +473,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				}
 				const float x0 = r.x * sx, y0 = r.y * sy;
 				const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
-				if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1)
+				if (testX < x0 || testX > x1 || testY < y0 || testY > y1)
 					continue;
 				const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 				if (!topW || key >= topKey)
@@ -973,6 +981,28 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 				const glm::vec4 r(clip.x * sx, clip.y * sy,
 				                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
 				for (size_t i = firstQuad; i < out.size(); ++i) out[i].clipRect = r;
+			}
+
+			// Rotation, folded down the chain: the quads are shifted so the
+			// element's own pivot lands where its ancestors' rotations carried
+			// it, and then everything turns about that point. Stamped like the
+			// clip above, so no widget type has to know rotation exists.
+			{
+				HE::UIRotation rot;
+				if (HE::uiElementRotation(w.tree, e, rot, &canvas))
+				{
+					const float shiftX = (rot.dstX - rot.srcX) * sx;
+					const float shiftY = (rot.dstY - rot.srcY) * sy;
+					const float rad = rot.degrees * 3.14159265358979323846f / 180.0f;
+					const glm::vec2 pivot(rot.dstX * sx, rot.dstY * sy);
+					for (size_t i = firstQuad; i < out.size(); ++i)
+					{
+						out[i].position.x += shiftX;
+						out[i].position.y += shiftY;
+						out[i].rotation      = rad;
+						out[i].rotationPivot = pivot;
+					}
+				}
 			}
 
 			// Focus ring: four hairlines around the element the keyboard or

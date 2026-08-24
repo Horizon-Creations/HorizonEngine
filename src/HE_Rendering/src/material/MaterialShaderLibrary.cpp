@@ -837,6 +837,12 @@ void main() {
     vec4 uvr  = u.model[1];
     vec2 vp   = max(u.model[2].xy, vec2(1.0));
     vec2 sp   = rect.xy + corner * rect.zw;
+    // Render rotation rides in the spare row: {angle(rad), pivotX, pivotY, _}.
+    if (u.model[3].x != 0.0) {
+        float sa = sin(u.model[3].x), ca = cos(u.model[3].x);
+        vec2 d = sp - u.model[3].yz;
+        sp = u.model[3].yz + vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+    }
     gl_Position = vec4(sp.x / vp.x * 2.0 - 1.0,
                        1.0 - sp.y / vp.y * 2.0, 0.0, 1.0);
     vNormal   = vec3(0.0, 0.0, 1.0);

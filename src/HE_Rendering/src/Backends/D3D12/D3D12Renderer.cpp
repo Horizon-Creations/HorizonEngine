@@ -662,6 +662,7 @@ cbuffer UICB : register(b0) {
     float2 uViewport;
     float  uMode;      // 0 = solid color, 1 = font-atlas glyph
     float  _upad;
+    float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
@@ -671,6 +672,12 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     static const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
     float2 uv = c[vid];
     float2 sp = uRect.xy + uv * uRect.zw;
+    if (uRotation.x != 0.0f)
+    {
+        float sa = sin(uRotation.x), ca = cos(uRotation.x);
+        float2 d = sp - uRotation.yz;
+        sp = uRotation.yz + float2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+    }
     UIOut o;
     o.clip = float4(sp.x/uViewport.x*2.0f-1.0f, 1.0f-sp.y/uViewport.y*2.0f, 0.0f, 1.0f);
     o.uv = uv;
@@ -2722,8 +2729,9 @@ struct D3D12RendererImpl
         int boundSlot = std::max(defaultSlot, 0);
         cmd->SetGraphicsRootDescriptorTable(1, uiAtlasGpu(static_cast<UINT>(boundSlot)));
 
+        // 256-byte CB slots (k_uiCBSlot), so the added row costs nothing.
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
-                      glm::vec2 vp; float mode; float pad; };
+                      glm::vec2 vp; float mode; float pad; glm::vec4 rotation; };
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -2774,6 +2782,7 @@ struct D3D12RendererImpl
             cb.vp     = glm::vec2(float(w), float(h));
             cb.mode   = obj.type == 2 ? 1.0f : 0.0f;
             cb.pad    = 0.0f;
+            cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
             std::memcpy(m_uiCBPtr[fi] + static_cast<size_t>(qi) * k_uiCBSlot, &cb, sizeof(cb));
             D3D12_GPU_VIRTUAL_ADDRESS addr = m_uiCB[fi]->GetGPUVirtualAddress()
                                            + static_cast<UINT64>(qi) * k_uiCBSlot;

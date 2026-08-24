@@ -4641,6 +4641,8 @@ static const char* kUIVS = R"GLSL(
 uniform vec4 uRect;
 uniform vec2 uViewport;
 uniform vec4 uUVRect;
+// { angle(radians), pivotX(px), pivotY(px), unused }; angle 0 = upright.
+uniform vec4 uRotation;
 out vec2 vUV;
 out vec2 vLocal;
 void main()
@@ -4648,6 +4650,12 @@ void main()
     const vec2 c[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 uv = c[gl_VertexID];
     vec2 sp = uRect.xy + uv * uRect.zw;
+    if (uRotation.x != 0.0)
+    {
+        float sa = sin(uRotation.x), ca = cos(uRotation.x);
+        vec2 d = sp - uRotation.yz;
+        sp = uRotation.yz + vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+    }
     vUV = mix(uUVRect.xy, uUVRect.zw, uv);
     vLocal = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     gl_Position = vec4(sp.x / uViewport.x * 2.0 - 1.0,
@@ -5721,6 +5729,7 @@ void OpenGLRenderer::CreateTonemapPipeline()
 		m_uUIViewport = glGetUniformLocation(m_uiProgram, "uViewport");
 		m_uUIColor    = glGetUniformLocation(m_uiProgram, "uColor");
 		m_uUIUVRect   = glGetUniformLocation(m_uiProgram, "uUVRect");
+		m_uUIRotation = glGetUniformLocation(m_uiProgram, "uRotation");
 		m_uUIMode     = glGetUniformLocation(m_uiProgram, "uMode");
 		m_uUICornerRadius = glGetUniformLocation(m_uiProgram, "uCornerRadius");
 		// Font atlas always samples from texture unit 0 (bound in RenderUIPass).
@@ -7343,6 +7352,8 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			u.model[0] = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 			u.model[1] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
 			u.model[2] = glm::vec4(static_cast<float>(pw), static_cast<float>(ph), 0.0f, 0.0f);
+			// Render rotation for the material path, same row the UI vertex reads.
+			u.model[3] = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 			u.color    = obj.color;
 			glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(u), &u);
@@ -7436,6 +7447,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
+		glUniform4f(m_uUIRotation, obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
 		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

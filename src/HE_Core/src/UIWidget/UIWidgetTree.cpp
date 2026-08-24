@@ -457,6 +457,82 @@ float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)
     return a;
 }
 
+bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
+                       UIRotation& out, const UIWidgetCanvas* canvas)
+{
+    // Anything to do at all? Walk the chain once looking for a non-zero angle;
+    // almost every element in almost every widget leaves here.
+    float total = e.rotation;
+    {
+        int guard = 0;
+        const UIElement* cur = &e;
+        while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+        {
+            const UIElement* p = tree.find(cur->parentId);
+            if (!p) break;
+            total += p->rotation;
+            cur = p;
+        }
+        if (std::fabs(total) < 1e-4f && std::fabs(e.rotation) < 1e-4f)
+        {
+            // A chain that cancels out to zero degrees still MOVES the element
+            // (two opposite rotations about different points are a
+            // translation), so only a chain with no rotation at all is free.
+            bool any = false;
+            int g2 = 0;
+            const UIElement* c2 = &e;
+            while (c2->parentId != 0 && g2++ < static_cast<int>(tree.elements.size()) + 1)
+            {
+                const UIElement* p = tree.find(c2->parentId);
+                if (!p) break;
+                if (std::fabs(p->rotation) > 1e-4f) { any = true; break; }
+                c2 = p;
+            }
+            if (!any) return false;
+        }
+    }
+
+    const UIWidgetRect r = uiElementRect(tree, e, canvas);
+    out.degrees = total;
+    out.srcX = r.x + e.pivotX * r.w;
+    out.srcY = r.y + e.pivotY * r.h;
+
+    // Carry that pivot up through every rotating ancestor, innermost first —
+    // each one turns it about its OWN pivot in the unrotated layout.
+    float px = out.srcX, py = out.srcY;
+    int guard = 0;
+    const UIElement* cur = &e;
+    while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+    {
+        const UIElement* p = tree.find(cur->parentId);
+        if (!p) break;
+        if (std::fabs(p->rotation) > 1e-4f)
+        {
+            const UIWidgetRect pr = uiElementRect(tree, *p, canvas);
+            const float ax = pr.x + p->pivotX * pr.w;
+            const float ay = pr.y + p->pivotY * pr.h;
+            const float a  = p->rotation * 3.14159265358979323846f / 180.0f;
+            const float c = std::cos(a), s = std::sin(a);
+            const float dx = px - ax, dy = py - ay;
+            px = ax + dx * c - dy * s;
+            py = ay + dx * s + dy * c;
+        }
+        cur = p;
+    }
+    out.dstX = px;
+    out.dstY = py;
+    return true;
+}
+
+void uiUnrotatePoint(const UIRotation& r, float x, float y, float& outX, float& outY)
+{
+    const float a = -r.degrees * 3.14159265358979323846f / 180.0f;
+    const float c = std::cos(a), s = std::sin(a);
+    const float dx = x - r.dstX, dy = y - r.dstY;
+    outX = r.srcX + dx * c - dy * s;
+    outY = r.srcY + dx * s + dy * c;
+}
+
 bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.enabled) return false;
@@ -511,6 +587,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
+    if (e.rotation != 0.0f)  o["rotation"] = e.rotation;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
     e.writeJson(o); // type-specific fields
@@ -550,6 +627,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->renderOpacity = o.value("renderOpacity", 1.0f);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
+    e->rotation      = o.value("rotation", 0.0f);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
     e->readJson(o); // type-specific fields

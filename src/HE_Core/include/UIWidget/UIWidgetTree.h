@@ -169,6 +169,28 @@ HE_API bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement&
 // ancestor's, which is what makes one value on a root panel fade a whole menu.
 HE_API float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e);
 
+// ── Rotation ─────────────────────────────────────────────────────────────────
+// A chain of rotations about different points is again ONE rotation about a
+// point, which is what makes this expressible in two numbers per quad instead
+// of a matrix: a point p of the element ends up at
+//     p' = R(degrees) * (p - src) + dst
+// where `src` is the element's own pivot in the unrotated layout, and `dst` is
+// where every ancestor's rotation carried that pivot to. Both in canvas units.
+struct UIRotation
+{
+    float degrees = 0.0f;
+    float srcX = 0.0f, srcY = 0.0f;
+    float dstX = 0.0f, dstY = 0.0f;
+};
+// False when nothing in the chain rotates — the overwhelmingly common case, and
+// the one every caller shortcuts on.
+HE_API bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
+                              UIRotation& out, const UIWidgetCanvas* canvas = nullptr);
+// Undo it: a point on screen back into the element's unrotated layout space, so
+// a hit test can go on comparing against a plain rectangle.
+HE_API void uiUnrotatePoint(const UIRotation& r, float x, float y,
+                            float& outX, float& outY);
+
 // False when the element or any ancestor is disabled — inert and drawn dimmed.
 HE_API bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e);
 

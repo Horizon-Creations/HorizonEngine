@@ -2665,6 +2665,162 @@ TEST_CASE("UIElement: opacity and enabled round-trip and are scriptable")
     CHECK(e.clone()->renderOpacity == doctest::Approx(0.0f));
 }
 
+// ═══ Rotation ════════════════════════════════════════════════════════════════
+// A render transform: layout stays unrotated (a tilted element does not shove
+// its neighbours around) and the finished rect is turned about the pivot. It is
+// inherited, and a chain of rotations about different points is again ONE
+// rotation about a point — which is why two numbers per quad are enough.
+
+TEST_CASE("uiElementRotation: nothing rotating costs nothing")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    const int c = t.add(HE::UIWidgetType::Panel);
+    t.find(c)->parentId = p;
+
+    HE::UIRotation r;
+    CHECK_FALSE(HE::uiElementRotation(t, *t.find(c), r));
+    CHECK_FALSE(HE::uiElementRotation(t, *t.find(p), r));
+}
+
+TEST_CASE("uiElementRotation: a quarter turn about the pivot, and back")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    const int e = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& el = *t.find(e);
+    HE::uiSetAnchorPreset(el, 0);
+    el.pivotX = el.pivotY = 0.0f;          // top-left corner is the centre of the turn
+    el.posX = 100.0f; el.posY = 100.0f; el.sizeX = 200.0f; el.sizeY = 100.0f;
+    el.rotation = 90.0f;
+
+    HE::UIRotation r;
+    REQUIRE(HE::uiElementRotation(t, el, r));
+    CHECK(r.degrees == doctest::Approx(90.0f));
+    // Nothing above it rotates, so the pivot stays where it is.
+    CHECK(r.srcX == doctest::Approx(100.0f));
+    CHECK(r.srcY == doctest::Approx(100.0f));
+    CHECK(r.dstX == doctest::Approx(r.srcX));
+    CHECK(r.dstY == doctest::Approx(r.srcY));
+
+    // A point 200 to the right of the pivot ends up 200 BELOW it (clockwise, y
+    // down) — and unrotating that point gives the original back.
+    float ux = 0.0f, uy = 0.0f;
+    HE::uiUnrotatePoint(r, 100.0f, 300.0f, ux, uy);
+    CHECK(ux == doctest::Approx(300.0f));
+    CHECK(uy == doctest::Approx(100.0f));
+}
+
+TEST_CASE("uiElementRotation: it is inherited, and the angles add up")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    const int outer = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(outer);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+      e.rotation = 30.0f; }
+    const int inner = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(inner);
+      e.parentId = outer;
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 50.0f; e.posY = 0.0f; e.sizeX = 50.0f; e.sizeY = 50.0f;
+      e.rotation = 60.0f; }
+
+    HE::UIRotation r;
+    REQUIRE(HE::uiElementRotation(t, *t.find(inner), r));
+    CHECK(r.degrees == doctest::Approx(90.0f));          // 30 + 60
+    // Its own pivot is at (50, 0) unrotated; the parent's 30° about the origin
+    // carries it to (50cos30, 50sin30).
+    CHECK(r.srcX == doctest::Approx(50.0f));
+    CHECK(r.srcY == doctest::Approx(0.0f));
+    CHECK(r.dstX == doctest::Approx(50.0f * std::cos(30.0f * 3.14159265f / 180.0f)));
+    CHECK(r.dstY == doctest::Approx(50.0f * std::sin(30.0f * 3.14159265f / 180.0f)));
+
+    // A child that does not rotate itself still inherits the parent's turn.
+    const int plain = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(plain);
+      e.parentId = outer; e.rotation = 0.0f; }
+    HE::UIRotation r2;
+    REQUIRE(HE::uiElementRotation(t, *t.find(plain), r2));
+    CHECK(r2.degrees == doctest::Approx(30.0f));
+
+    // Layout itself is untouched: the rect is the unrotated one.
+    const HE::UIWidgetRect rect = HE::uiElementRect(t, *t.find(inner));
+    CHECK(rect.x == doctest::Approx(50.0f));
+    CHECK(rect.y == doctest::Approx(0.0f));
+}
+
+TEST_CASE("WidgetManager: rotation reaches the quads and the pointer follows it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::UIElement& e = *t.find(btn);
+    e.setProp("Text", HE::UIPropValue::ofString(""));
+    HE::uiSetAnchorPreset(e, 0);
+    e.pivotX = e.pivotY = 0.0f;
+    e.posX = 100.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 40.0f;
+    registerWidget(cm, t);
+
+    WidgetManager upright;
+    REQUIRE(upright.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    upright.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    for (const UIRenderObject& o : out) CHECK(o.rotation == doctest::Approx(0.0f));
+    // A wide, short button covering x 100..300, y 100..140. This point is
+    // inside it upright…
+    CHECK(upright.processPointer(400.0f, 400.0f, 280.0f, 120.0f, true, true));
+    // …and this one is not.
+    CHECK_FALSE(upright.processPointer(400.0f, 400.0f, 80.0f, 280.0f, true, true));
+
+    // Turned a quarter about its top-left corner, both statements swap.
+    e.rotation = 90.0f;
+    registerWidget(cm, t);
+    WidgetManager turned;
+    REQUIRE(turned.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    turned.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    bool anyRotated = false;
+    for (const UIRenderObject& o : out)
+        if (o.rotation != 0.0f)
+        {
+            anyRotated = true;
+            CHECK(o.rotation == doctest::Approx(90.0f * 3.14159265f / 180.0f));
+            CHECK(o.rotationPivot.x == doctest::Approx(100.0f));
+            CHECK(o.rotationPivot.y == doctest::Approx(100.0f));
+        }
+    CHECK(anyRotated);
+    // Turned about its top-left corner it now covers x 60..100, y 100..300 —
+    // so the two statements above swap over.
+    CHECK_FALSE(turned.processPointer(400.0f, 400.0f, 280.0f, 120.0f, true, true));
+    CHECK(turned.processPointer(400.0f, 400.0f, 80.0f, 280.0f, true, true));
+}
+
+TEST_CASE("UIElement: rotation round-trips and is scriptable")
+{
+    HE::UIWidgetTree t;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    CHECK(HE::uiWidgetTreeToJson(t).find("rotation") == std::string::npos);
+
+    t.find(p)->rotation = 45.0f;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(r.find(p)->rotation == doctest::Approx(45.0f));
+
+    HE::UIElement& e = *t.find(p);
+    e.setPropAny("Rotation", HE::UIPropValue::ofFloat(-90.0f));
+    CHECK(e.getPropAny("Rotation").f == doctest::Approx(-90.0f));
+    CHECK(e.clone()->rotation == doctest::Approx(-90.0f));
+}
+
 // ═══ 9-slice ═════════════════════════════════════════════════════════════════
 // One 64x64 texture has to be able to be a frame, a button and a panel at any
 // size. Stretched as a single quad it smears; sliced, the corners keep their

@@ -33,4 +33,12 @@ struct UIRenderObject {
     // rects of every clipping ancestor), applied by the backends as a scissor —
     // one state change per RUN of equally-clipped quads, not per quad.
     glm::vec4   clipRect{ 0.0f, 0.0f, 0.0f, 0.0f };
+    // Render rotation: every corner is turned by `rotation` radians about
+    // `rotationPivot` (screen pixels) after the rect is built. 0 = upright,
+    // which is what every quad carried before rotation existed. A chain of
+    // rotations about different points is again one rotation about a point, so
+    // an inherited rotation needs no more than this (the producer folds the
+    // chain and shifts the rect; see uiElementRotation).
+    float       rotation = 0.0f;
+    glm::vec2   rotationPivot{ 0.0f, 0.0f };
 };

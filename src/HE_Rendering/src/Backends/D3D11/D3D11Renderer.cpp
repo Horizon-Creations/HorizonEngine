@@ -836,6 +836,7 @@ cbuffer UICB : register(b0) {
     float2 uViewport;  // w, h in pixels
     float  uMode;      // 0 = solid quad, 1 = font-atlas glyph
     float  _upad;
+    float4 uRotation;  // { angle(radians), pivotX, pivotY, unused }
 };
 Texture2D    uFontAtlas : register(t0);
 SamplerState uSamp      : register(s0);
@@ -845,6 +846,12 @@ UIOut UIVSMain(uint vid : SV_VertexID)
     static const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
     float2 uv = c[vid];
     float2 sp = uRect.xy + uv * uRect.zw;
+    if (uRotation.x != 0.0f)
+    {
+        float sa = sin(uRotation.x), ca = cos(uRotation.x);
+        float2 d = sp - uRotation.yz;
+        sp = uRotation.yz + float2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+    }
     UIOut o;
     o.clip = float4(sp.x / uViewport.x * 2.0f - 1.0f,
                     1.0f - sp.y / uViewport.y * 2.0f,
@@ -3185,9 +3192,10 @@ struct D3D11RendererImpl
         dev.CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &uiVS);
         dev.CreatePixelShader (psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &uiPS);
 
-        // cbuffer: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) + pad(4) = 64 bytes
+        // cbuffer: rect(16) + color(16) + uvRect(16) + viewport(8) + mode(4) +
+        // pad(4) + rotation(16) = 80 bytes
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth      = 64u;
+        bd.ByteWidth      = 80u;
         bd.Usage          = D3D11_USAGE_DYNAMIC;
         bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -3247,7 +3255,8 @@ struct D3D11RendererImpl
         ctx->PSSetShaderResources(0, 1, &atlas);
         uint32_t boundAtlasKey = 0;
 
-        struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport; float mode; float pad; };
+        struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport;
+                          float mode; float pad; glm::vec4 rotation; };
 
         // Clipping is a scissor rectangle, set only when it CHANGES — a widget
         // tree emits its quads in tree order, so equally-clipped quads arrive in
@@ -3296,6 +3305,7 @@ struct D3D11RendererImpl
             cb.viewport = glm::vec2(float(width), float(height));
             cb.mode     = obj.type == 2 ? 1.0f : 0.0f;
             cb.pad      = 0.0f;
+            cb.rotation = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
             D3D11_MAPPED_SUBRESOURCE mr{};
             if (SUCCEEDED(ctx->Map(uiCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
             {

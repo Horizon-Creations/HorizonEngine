@@ -1190,14 +1190,21 @@ static const char* kUIMSL = R"MSL(
 #include <metal_stdlib>
 using namespace metal;
 struct UIVert { float4 position [[position]]; float2 uv; float2 luv; };
+// rot = { angle(radians), pivotX(px), pivotY(px), unused }; angle 0 = upright.
 vertex UIVert uiVertex(uint vid [[vertex_id]],
                        constant float4& rect     [[buffer(0)]],
                        constant float2& viewport [[buffer(1)]],
-                       constant float4& uvrect   [[buffer(2)]])
+                       constant float4& uvrect   [[buffer(2)]],
+                       constant float4& rot      [[buffer(3)]])
 {
     const float2 c[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
     float2 uv = c[vid];
     float2 sp = rect.xy + uv * rect.zw;
+    if (rot.x != 0.0) {
+        float s = sin(rot.x), co = cos(rot.x);
+        float2 d = sp - rot.yz;
+        sp = rot.yz + float2(d.x * co - d.y * s, d.x * s + d.y * co);
+    }
     float2 ndc = float2(sp.x / viewport.x * 2.0 - 1.0,
                         1.0 - sp.y / viewport.y * 2.0);
     UIVert o;
@@ -11050,6 +11057,8 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			u.model[0] = glm::vec4(obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 			u.model[1] = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
 			u.model[2] = glm::vec4(vp.x, vp.y, 0.0f, 0.0f);
+			// Render rotation for the material path, same row the UI vertex reads.
+			u.model[3] = glm::vec4(obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f);
 			u.color    = obj.color;
 			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 			[enc setFragmentBytes:&matLight length:sizeof(matLight)
@@ -11121,8 +11130,10 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		// shape = { mode, cornerRadius, rectW, rectH } (see uiFragment).
 		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
 		const simd::float4 shape = { mode, obj.cornerRadius, obj.size.x, obj.size.y };
+		const simd::float4 rot = { obj.rotation, obj.rotationPivot.x, obj.rotationPivot.y, 0.0f };
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
+		[enc setVertexBytes:&rot   length:sizeof(rot)   atIndex:3];
 		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];
 		[enc setFragmentBytes:&shape length:sizeof(shape) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];

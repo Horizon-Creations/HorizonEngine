@@ -212,6 +212,13 @@ public:
     // enforced in the hit test, not left to the widget types.
     bool    enabled = true;
 
+    // Rotation in degrees, clockwise, about this element's pivot. It is a
+    // RENDER transform: layout is computed unrotated (so a rotated element does
+    // not shove its siblings around) and the finished rect is turned. It is
+    // inherited — a rotated panel turns everything inside it, or a tilted card
+    // would come apart into a tilted background with upright text on it.
+    float   rotation = 0.0f;
+
     // Only read when the PARENT is a layout container: 0 = keep my own size on
     // the box's axis, > 0 = take a share of whatever space is left over, split
     // between the filling children in proportion. Ignored everywhere else, and
@@ -332,7 +339,7 @@ protected:
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.renderOpacity = renderOpacity; dst.enabled = enabled;
-        dst.slotFill = slotFill;
+        dst.slotFill = slotFill; dst.rotation = rotation;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
         dst.textureW = textureW; dst.textureH = textureH;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;

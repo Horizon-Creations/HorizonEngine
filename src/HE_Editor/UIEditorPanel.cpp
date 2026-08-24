@@ -832,6 +832,12 @@ void drawDetails(State& st, AppContext& ctx)
 	if (ImGui::Checkbox("Enabled", &n->enabled)) committed = true;
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Off = greyed out and inert, this element and everything in it.");
+	edit |= ImGui::DragFloat("Rotation", &n->rotation, 0.5f, -360.0f, 360.0f, "%.1f\xc2\xb0");
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Turns this element AND its children about its pivot.\n"
+		                  "Layout is computed unrotated, so a tilted element does\n"
+		                  "not shove its neighbours around.");
 	edit |= ImGui::SliderFloat("Opacity", &n->renderOpacity, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	if (ImGui::IsItemHovered())
