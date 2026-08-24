@@ -230,6 +230,63 @@ public:
     float       fontSize = 18.0f;
     glm::vec4   backColor{ 0.10f, 0.10f, 0.10f, 1.0f };
     glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    glm::vec4   selectionColor{ 0.25f, 0.45f, 0.80f, 0.75f };
+    // 0 = no limit. Counted in CHARACTERS, not bytes — a limit of 8 that lets
+    // through two accented letters fewer is a limit nobody can explain.
+    int         maxLength = 0;
+    // Draw every character as a dot (a password field). The text itself is
+    // stored as typed; only the drawing changes.
+    bool        password = false;
+    // Off = the field shows its text but takes no input: typing, deleting and
+    // pasting do nothing, while focusing, selecting and copying still work.
+    // That is a read-only field, not a disabled one — a disabled element is
+    // greyed out and inert altogether (see UIElement::enabled).
+    bool        editable = true;
+    // Off = no selection can be made at all. The caret still moves, and
+    // Select All and shift-arrows simply do nothing.
+    bool        selectable = true;
+
+    // ── Editing state (runtime, never serialized) ────────────────────────────
+    // Byte offsets into `text`, always on character boundaries. caret is where
+    // typing lands; selAnchor is the other end of the selection, equal to caret
+    // when nothing is selected. Both live here rather than in the manager
+    // because they belong to the field, and a widget holds its own live copy.
+    size_t      caret = 0;
+    size_t      selAnchor = 0;
+
+    bool   hasSelection() const { return caret != selAnchor; }
+    size_t selMin() const { return caret < selAnchor ? caret : selAnchor; }
+    size_t selMax() const { return caret < selAnchor ? selAnchor : caret; }
+    std::string selectedText() const
+    { return hasSelection() ? text.substr(selMin(), selMax() - selMin()) : std::string(); }
+    // Drop the selected run and put the caret where it was. False when there
+    // was nothing selected.
+    bool deleteSelection()
+    {
+        if (!hasSelection()) return false;
+        const size_t a = selMin(), b = selMax();
+        text.erase(a, b - a);
+        caret = selAnchor = a;
+        return true;
+    }
+    // Keep the two offsets inside the text and on character boundaries —
+    // anything that edits `text` from the outside (a script, a Set Property)
+    // can leave them pointing anywhere.
+    void clampCaret()
+    {
+        caret     = uiUtf8Clamp(text, caret);
+        selAnchor = uiUtf8Clamp(text, selAnchor);
+    }
+    // Where a click that landed `localX` pixels into the text area puts the
+    // caret. Needs the same pixel scale the drawing uses.
+    size_t caretAtX(float localX, float pxScaleY) const;
+    // Characters (not bytes) currently in the field — what maxLength counts.
+    int    charCount() const
+    {
+        int n = 0;
+        for (size_t i = 0; i < text.size(); i = uiUtf8Next(text, i)) ++n;
+        return n;
+    }
 
     UITextInput() { sizeX = 240.0f; sizeY = 32.0f; }
     UIWidgetType type() const override { return UIWidgetType::TextInput; }

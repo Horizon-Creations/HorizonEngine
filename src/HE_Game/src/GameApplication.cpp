@@ -919,9 +919,50 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		}
 		if (event.type == SDL_EVENT_KEY_DOWN)
 		{
-			if (event.key.key == SDLK_BACKSPACE) { m_world->widgets().inputBackspace(); return true; }
-			if (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)
-				{ m_world->widgets().inputSubmit(); return true; }
+			// The full editing grammar, not just "append and backspace": caret
+			// keys, shift to select, and the clipboard (which SDL owns, hence
+			// the copy in and out here rather than inside the widget layer).
+			WidgetManager& wm = m_world->widgets();
+			using TE = WidgetManager::TextEdit;
+			const bool shift = (event.key.mod & SDL_KMOD_SHIFT) != 0;
+			const bool ctrl  = (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) != 0;
+			switch (event.key.key)
+			{
+			case SDLK_BACKSPACE: wm.inputBackspace(); return true;
+			case SDLK_DELETE:    wm.editFocusedText(TE::Delete, false); return true;
+			case SDLK_LEFT:      wm.editFocusedText(TE::Left,  shift);  return true;
+			case SDLK_RIGHT:     wm.editFocusedText(TE::Right, shift);  return true;
+			case SDLK_HOME:      wm.editFocusedText(TE::Home,  shift);  return true;
+			case SDLK_END:       wm.editFocusedText(TE::End,   shift);  return true;
+			case SDLK_RETURN:
+			case SDLK_KP_ENTER:  wm.inputSubmit(); return true;
+			case SDLK_A: if (ctrl) { wm.editFocusedText(TE::SelectAll, false); return true; } break;
+			case SDLK_C:
+				if (ctrl)
+				{
+					const std::string sel = wm.focusedSelection();
+					if (!sel.empty()) SDL_SetClipboardText(sel.c_str());
+					return true;
+				}
+				break;
+			case SDLK_X:
+				if (ctrl)
+				{
+					const std::string sel = wm.focusedSelection();
+					if (!sel.empty()) { SDL_SetClipboardText(sel.c_str()); wm.deleteFocusedSelection(); }
+					return true;
+				}
+				break;
+			case SDLK_V:
+				if (ctrl)
+				{
+					if (char* clip = SDL_GetClipboardText())
+					{ wm.inputText(clip); SDL_free(clip); }
+					return true;
+				}
+				break;
+			default: break;
+			}
 			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
 		}
 	}

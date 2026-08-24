@@ -1198,7 +1198,16 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
 		const std::string txt = propStringOr(n, "Text", "");
 		const bool placeholder = txt.empty();
-		const std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
+		std::string shown = placeholder ? propStringOr(n, "Placeholder", "") : txt;
+		// A password field shows dots here too, or the designer is the one
+		// place the secret is on screen.
+		if (!placeholder && propBoolOr(n, "Password", false))
+		{
+			std::string dots;
+			for (size_t i = 0; i < shown.size(); i = HE::uiUtf8Next(shown, i))
+				dots += "\xE2\x80\xA2";
+			shown.swap(dots);
+		}
 		if (!shown.empty())
 		{
 			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;

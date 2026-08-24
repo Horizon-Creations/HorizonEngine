@@ -154,7 +154,12 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Placeholder", UIPropType::String },
             { "FontSize", UIPropType::Float },
             { "Back Color", UIPropType::Color },
-            { "Text Color", UIPropType::Color } } },
+            { "Text Color", UIPropType::Color },
+            { "Selection Color", UIPropType::Color },
+            { "Max Length", UIPropType::Int },
+            { "Password", UIPropType::Bool },
+            { "Editable", UIPropType::Bool },
+            { "Selectable", UIPropType::Bool } } },
         { UIWidgetType::ComboBox, {
             { "Options", UIPropType::StringList },
             { "Selected Index", UIPropType::Int },
@@ -2298,6 +2303,258 @@ TEST_CASE("WidgetRef: text inside an embedded widget scales with it")
         if (o.type == 2) embeddedGlyphH = std::max(embeddedGlyphH, o.size.y);
     REQUIRE(embeddedGlyphH > 0.0f);
     CHECK(embeddedGlyphH == doctest::Approx(glyphH * 0.5f).epsilon(0.02));
+}
+
+// ═══ Text field editing ══════════════════════════════════════════════════════
+// The field could append and backspace, nothing else: no caret, no selection,
+// no way to fix a typo in the middle of a name. All of it is byte offsets on
+// character boundaries, so an accented letter moves as one thing.
+
+namespace
+{
+    // A widget with one focused text field, ready to be typed into.
+    struct TextFieldFixture
+    {
+        TempWidgetDir dir;
+        ContentManager cm{ dir.path.string() };
+        HE::UIWidgetTree authored;
+        WidgetManager wm;
+        int elem = 0, widget = 0;
+
+        explicit TextFieldFixture(const std::string& initial = "",
+                                  int maxLength = 0, bool editable = true,
+                                  bool selectable = true)
+        {
+            authored.canvasWidth = 400.0f; authored.canvasHeight = 200.0f;
+            authored.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+            elem = authored.add(HE::UIWidgetType::TextInput);
+            auto* e = dynamic_cast<HE::UITextInput*>(authored.find(elem));
+            e->text = initial;
+            e->maxLength = maxLength;
+            e->editable = editable;
+            e->selectable = selectable;
+            HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+            e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 40.0f;
+            registerWidget(cm, authored);
+            widget = wm.createWidget(cm, "mem://w.hasset");
+            REQUIRE(widget != 0);
+            // Click it to take the focus, at the far right so the caret lands
+            // at the end of the text.
+            REQUIRE(wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, true, true));
+            wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, false, true);
+            REQUIRE(wm.hasFocusedTextField());
+        }
+        const HE::UITextInput* field() const
+        {
+            const HE::UIWidgetTree* t = wm.tree(widget);
+            return t ? dynamic_cast<const HE::UITextInput*>(t->find(elem)) : nullptr;
+        }
+        std::string text() const { const auto* f = field(); return f ? f->text : std::string(); }
+        size_t caret() const     { const auto* f = field(); return f ? f->caret : 0; }
+    };
+}
+
+TEST_CASE("uiUtf8: cursor movement never lands inside a character")
+{
+    const std::string s = "aä€b";       // 1 + 2 + 3 + 1 bytes
+    CHECK(HE::uiUtf8Next(s, 0) == 1);
+    CHECK(HE::uiUtf8Next(s, 1) == 3);   // over the 2-byte ä
+    CHECK(HE::uiUtf8Next(s, 3) == 6);   // over the 3-byte €
+    CHECK(HE::uiUtf8Next(s, 6) == 7);
+    CHECK(HE::uiUtf8Next(s, 7) == 7);   // at the end it stays
+    CHECK(HE::uiUtf8Prev(s, 7) == 6);
+    CHECK(HE::uiUtf8Prev(s, 6) == 3);
+    CHECK(HE::uiUtf8Prev(s, 3) == 1);
+    CHECK(HE::uiUtf8Prev(s, 0) == 0);
+    // A byte offset in the middle of a character snaps back to its start.
+    CHECK(HE::uiUtf8Clamp(s, 2) == 1);
+    CHECK(HE::uiUtf8Clamp(s, 4) == 3);
+    CHECK(HE::uiUtf8Clamp(s, 99) == s.size());
+}
+
+TEST_CASE("UITextInput: selection, deletion and the character count")
+{
+    HE::UITextInput ti;
+    ti.text = "hello";
+    ti.caret = 1; ti.selAnchor = 4;
+    CHECK(ti.hasSelection());
+    CHECK(ti.selMin() == 1);
+    CHECK(ti.selMax() == 4);
+    CHECK(ti.selectedText() == "ell");
+    CHECK(ti.deleteSelection());
+    CHECK(ti.text == "ho");
+    CHECK(ti.caret == 1);
+    CHECK_FALSE(ti.hasSelection());
+    CHECK_FALSE(ti.deleteSelection());
+
+    // maxLength counts characters, not bytes.
+    ti.text = "aä€";
+    CHECK(ti.charCount() == 3);
+    CHECK(ti.text.size() == 6);
+
+    // Offsets left pointing anywhere by a script are pulled back onto
+    // boundaries rather than splitting a character.
+    ti.caret = 2; ti.selAnchor = 99;
+    ti.clampCaret();
+    CHECK(ti.caret == 1);
+    CHECK(ti.selAnchor == 6);
+}
+
+TEST_CASE("Text field: typing lands at the caret, not at the end")
+{
+    TextFieldFixture f("hello");
+    using TE = WidgetManager::TextEdit;
+    REQUIRE(f.text() == "hello");
+    CHECK(f.caret() == 5);                       // clicked past the end
+
+    // Move into the middle and type there.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    CHECK(f.caret() == 0);
+    CHECK(f.wm.editFocusedText(TE::Right, false));
+    f.wm.inputText("X");
+    CHECK(f.text() == "hXello");
+    CHECK(f.caret() == 2);
+
+    // Backspace takes the character BEFORE the caret, not the last one.
+    f.wm.inputBackspace();
+    CHECK(f.text() == "hello");
+    // …and Delete the one after it.
+    CHECK(f.wm.editFocusedText(TE::Delete, false));
+    CHECK(f.text() == "hllo");
+    CHECK(f.caret() == 1);
+
+    // End, and the edges do nothing but say so.
+    CHECK(f.wm.editFocusedText(TE::End, false));
+    CHECK(f.caret() == 4);
+    CHECK_FALSE(f.wm.editFocusedText(TE::Right, false));
+    CHECK_FALSE(f.wm.editFocusedText(TE::Delete, false));
+}
+
+TEST_CASE("Text field: selecting, replacing, and the clipboard's half of it")
+{
+    TextFieldFixture f("hello world");
+    using TE = WidgetManager::TextEdit;
+
+    CHECK(f.wm.editFocusedText(TE::SelectAll, false));
+    CHECK(f.wm.focusedSelection() == "hello world");
+    // Typing over a selection replaces it.
+    f.wm.inputText("bye");
+    CHECK(f.text() == "bye");
+    CHECK(f.wm.focusedSelection().empty());
+
+    // Shift-arrows extend from the caret; a plain arrow collapses to the near
+    // end instead of moving off it.
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    CHECK(f.wm.editFocusedText(TE::Right, true));
+    CHECK(f.wm.editFocusedText(TE::Right, true));
+    CHECK(f.wm.focusedSelection() == "by");
+    CHECK(f.wm.editFocusedText(TE::Right, false));
+    CHECK(f.wm.focusedSelection().empty());
+    CHECK(f.caret() == 2);
+
+    // The cut half: hand out the selection, then drop it.
+    CHECK(f.wm.editFocusedText(TE::SelectAll, false));
+    CHECK(f.wm.focusedSelection() == "bye");
+    CHECK(f.wm.deleteFocusedSelection());
+    CHECK(f.text().empty());
+    CHECK_FALSE(f.wm.deleteFocusedSelection());
+}
+
+TEST_CASE("Text field: multi-byte characters move and delete as one")
+{
+    TextFieldFixture f("aäb");
+    using TE = WidgetManager::TextEdit;
+    CHECK(f.text().size() == 4);                 // a + 2-byte ä + b
+
+    CHECK(f.wm.editFocusedText(TE::Home, false));
+    CHECK(f.wm.editFocusedText(TE::Right, false));
+    CHECK(f.caret() == 1);
+    CHECK(f.wm.editFocusedText(TE::Right, false));
+    CHECK(f.caret() == 3);                       // stepped OVER the ä, not into it
+    f.wm.inputBackspace();
+    CHECK(f.text() == "ab");                     // the whole ä went
+
+    // Typing one is one character too.
+    f.wm.inputText("ü");
+    CHECK(f.text() == "aüb");
+    CHECK(f.caret() == 3);
+}
+
+TEST_CASE("Text field: Max Length counts characters, and stops typing")
+{
+    TextFieldFixture f("", /*maxLength=*/3);
+    f.wm.inputText("ab");
+    f.wm.inputText("cd");                        // only "c" fits
+    CHECK(f.text() == "abc");
+    f.wm.inputText("x");
+    CHECK(f.text() == "abc");
+
+    // Characters, not bytes: three accented letters fit just as three plain
+    // ones do.
+    TextFieldFixture g("", 3);
+    g.wm.inputText("äöüß");
+    CHECK(g.text() == "äöü");
+}
+
+TEST_CASE("Text field: Editable and Selectable are switches, not decoration")
+{
+    using TE = WidgetManager::TextEdit;
+    // Read-only: shows and selects, takes nothing in.
+    TextFieldFixture ro("locked", 0, /*editable=*/false, /*selectable=*/true);
+    ro.wm.inputText("x");
+    CHECK(ro.text() == "locked");
+    ro.wm.inputBackspace();
+    CHECK(ro.text() == "locked");
+    CHECK_FALSE(ro.wm.editFocusedText(TE::Delete, false));
+    CHECK(ro.wm.editFocusedText(TE::SelectAll, false));      // …but selecting works
+    CHECK(ro.wm.focusedSelection() == "locked");
+    CHECK_FALSE(ro.wm.deleteFocusedSelection());             // and cutting does not
+    CHECK(ro.text() == "locked");
+    // The caret still moves — that is what makes it readable rather than dead.
+    CHECK(ro.wm.editFocusedText(TE::Home, false));
+    CHECK(ro.caret() == 0);
+
+    // Selection off: typing works, selecting does not.
+    TextFieldFixture ns("abc", 0, true, /*selectable=*/false);
+    CHECK_FALSE(ns.wm.editFocusedText(TE::SelectAll, false));
+    CHECK(ns.wm.focusedSelection().empty());
+    CHECK(ns.wm.editFocusedText(TE::Home, false));
+    CHECK(ns.wm.editFocusedText(TE::Right, true));           // shift does not extend
+    CHECK(ns.wm.focusedSelection().empty());
+    CHECK(ns.caret() == 1);
+    ns.wm.inputText("Z");
+    CHECK(ns.text() == "aZbc");
+}
+
+TEST_CASE("UITextInput: the new switches round-trip, defaults write nothing")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::TextInput);
+    auto* ti = dynamic_cast<HE::UITextInput*>(t.find(id));
+    REQUIRE(ti != nullptr);
+    CHECK(ti->editable);
+    CHECK(ti->selectable);
+    CHECK_FALSE(ti->password);
+    const std::string plain = HE::uiWidgetTreeToJson(t);
+    CHECK(plain.find("password") == std::string::npos);
+    CHECK(plain.find("editable") == std::string::npos);
+    CHECK(plain.find("selectable") == std::string::npos);
+    CHECK(plain.find("maxLength") == std::string::npos);
+
+    ti->password = true; ti->editable = false; ti->selectable = false;
+    ti->maxLength = 12;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    auto* back = dynamic_cast<HE::UITextInput*>(r.find(id));
+    REQUIRE(back != nullptr);
+    CHECK(back->password);
+    CHECK_FALSE(back->editable);
+    CHECK_FALSE(back->selectable);
+    CHECK(back->maxLength == 12);
+    // …and by name, so a script can lock a field while a dialog is busy.
+    back->setPropAny("Editable", HE::UIPropValue::ofBool(true));
+    CHECK(back->editable);
+    CHECK(back->getPropAny("Password").b);
 }
 
 TEST_CASE("UICheckBox: the tick box is sized by the label, not by the element")

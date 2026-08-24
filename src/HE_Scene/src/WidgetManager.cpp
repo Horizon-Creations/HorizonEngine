@@ -357,6 +357,12 @@ void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) w->visible
 void WidgetManager::hideWidget(int id)  { if (Instance* w = find(id)) w->visible = false; }
 void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) w->zOrder = z; }
 
+const HE::UIWidgetTree* WidgetManager::tree(int widgetId) const
+{
+	const Instance* w = find(widgetId);
+	return w ? &w->tree : nullptr;
+}
+
 bool WidgetManager::isAlive(int id) const   { return find(id) != nullptr; }
 bool WidgetManager::isVisible(int id) const
 {
@@ -539,7 +545,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// Slider: start dragging (value updated below).
 				if (e && e->type() == HE::UIWidgetType::Slider)
 					w.draggingSlider = hot;
-				// TextInput: focus it.
+				// TextInput: focus it, and put the caret where the click was —
+				// a field you can only ever append to is not a field.
 				if (e && e->type() == HE::UIWidgetType::TextInput)
 				{
 					if (w.focusedElem != hot)
@@ -548,6 +555,7 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 						m_focusWidget = w.id;
 						fireP(&HorizonCode::Runtime::fireOnFocused, hot);
 					}
+					setCaretFromPointer(vpWidth, vpHeight, mouseX);
 				}
 				else if (w.focusedElem != 0)
 				{
@@ -600,31 +608,163 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	return topW != nullptr;
 }
 
+// The focused text field, or nullptr. Every editing entry point starts here,
+// and each one re-clamps: a script can have rewritten the text since the last
+// keystroke, leaving the caret pointing past the end of it.
+HE::UITextInput* WidgetManager::focusedTextField(Instance*& outWidget)
+{
+	outWidget = nullptr;
+	if (m_focusWidget == 0) return nullptr;
+	Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return nullptr;
+	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
+	if (!ti) return nullptr;
+	ti->clampCaret();
+	outWidget = w;
+	return ti;
+}
+
 void WidgetManager::inputText(const std::string& utf8)
 {
-	if (m_focusWidget == 0) return;
-	Instance* w = find(m_focusWidget);
-	if (!w || w->focusedElem == 0) return;
-	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
-	if (!ti) return;
-	ti->text += utf8;
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti || utf8.empty()) return;
+	// A read-only field shows its text and lets it be selected and copied, but
+	// takes nothing in.
+	if (!ti->editable) return;
+
+	// Typing over a selection replaces it — the thing every text field does and
+	// this one could not, because it only ever appended.
+	ti->deleteSelection();
+
+	std::string add = utf8;
+	if (ti->maxLength > 0)
+	{
+		// Counted in CHARACTERS: a limit of 8 that lets through two accented
+		// letters fewer is a limit nobody can explain.
+		int room = ti->maxLength - ti->charCount();
+		if (room <= 0) return;
+		size_t cut = 0;
+		while (cut < add.size() && room > 0) { cut = HE::uiUtf8Next(add, cut); --room; }
+		add.resize(cut);
+		if (add.empty()) return;
+	}
+	ti->text.insert(ti->caret, add);
+	ti->caret += add.size();
+	ti->selAnchor = ti->caret;
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 }
 
 void WidgetManager::inputBackspace()
 {
-	if (m_focusWidget == 0) return;
-	Instance* w = find(m_focusWidget);
-	if (!w || w->focusedElem == 0) return;
-	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
-	if (!ti || ti->text.empty()) return;
-	// Drop one UTF-8 code point (trailing continuation bytes 10xxxxxx).
-	size_t n = ti->text.size();
-	do { --n; } while (n > 0 && (static_cast<unsigned char>(ti->text[n]) & 0xC0) == 0x80);
-	ti->text.erase(n);
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti || !ti->editable) return;
+	if (!ti->deleteSelection())
+	{
+		if (ti->caret == 0) return;               // nothing before it
+		const size_t from = HE::uiUtf8Prev(ti->text, ti->caret);
+		ti->text.erase(from, ti->caret - from);
+		ti->caret = ti->selAnchor = from;
+	}
 	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
 	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+}
+
+bool WidgetManager::editFocusedText(TextEdit op, bool extendSelection)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti) return false;
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+
+	// Selection off: the caret still moves, it just never drags an anchor
+	// behind it, so Select All and shift-arrows have nothing to do.
+	const bool extend = extendSelection && ti->selectable;
+
+	switch (op)
+	{
+	case TextEdit::Delete:
+	{
+		if (!ti->editable) return false;
+		if (!ti->deleteSelection())
+		{
+			if (ti->caret >= ti->text.size()) return false;   // nothing after it
+			const size_t to = HE::uiUtf8Next(ti->text, ti->caret);
+			ti->text.erase(ti->caret, to - ti->caret);
+		}
+		rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+		return true;
+	}
+	case TextEdit::SelectAll:
+		if (ti->text.empty() || !ti->selectable) return false;
+		ti->selAnchor = 0;
+		ti->caret     = ti->text.size();
+		return true;
+	case TextEdit::Left:
+	case TextEdit::Right:
+	case TextEdit::Home:
+	case TextEdit::End:
+	{
+		const size_t before = ti->caret;
+		// Without shift, a plain arrow COLLAPSES a selection to its near end
+		// rather than moving off the caret — what every text field does.
+		if (!extend && ti->hasSelection() &&
+		    (op == TextEdit::Left || op == TextEdit::Right))
+		{
+			ti->caret = op == TextEdit::Left ? ti->selMin() : ti->selMax();
+			ti->selAnchor = ti->caret;
+			return true;
+		}
+		switch (op)
+		{
+		case TextEdit::Left:  ti->caret = HE::uiUtf8Prev(ti->text, ti->caret); break;
+		case TextEdit::Right: ti->caret = HE::uiUtf8Next(ti->text, ti->caret); break;
+		case TextEdit::Home:  ti->caret = 0; break;
+		case TextEdit::End:   ti->caret = ti->text.size(); break;
+		default: break;
+		}
+		if (!extend) ti->selAnchor = ti->caret;
+		return ti->caret != before || (!extend && ti->selAnchor != before);
+	}
+	}
+	return false;
+}
+
+std::string WidgetManager::focusedSelection() const
+{
+	const Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return {};
+	const auto* ti = dynamic_cast<const HE::UITextInput*>(w->tree.find(w->focusedElem));
+	return ti ? ti->selectedText() : std::string();
+}
+
+bool WidgetManager::deleteFocusedSelection()
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti || !ti->editable || !ti->deleteSelection()) return false;
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
+	return true;
+}
+
+bool WidgetManager::setCaretFromPointer(float vpWidth, float vpHeight, float mouseX)
+{
+	Instance* w = nullptr;
+	HE::UITextInput* ti = focusedTextField(w);
+	if (!ti) return false;
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *ti, &canvas);
+	float us = 1.0f, vs = 1.0f;
+	HE::uiElementUnitScale(w->tree, *ti, us, vs, &canvas);
+	// Same 6-unit padding the field draws its text with, in pixels.
+	constexpr float kPad = 6.0f;
+	const float localX = mouseX - (r.x * canvas.scaleX + kPad);
+	ti->caret = ti->caretAtX(localX, canvas.scaleY * vs);
+	ti->selAnchor = ti->caret;
+	return true;
 }
 
 void WidgetManager::inputSubmit()

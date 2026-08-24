@@ -33,6 +33,12 @@ public:
     void hideWidget(int id);
     void setZOrder(int id, int z);
 
+    // Read-only view of a live widget's element tree (nullptr = no such
+    // widget). The manager owns a deep copy per widget; this is how a caller
+    // looks at the live state — the caret in a text field, what a script last
+    // wrote into a label — without being able to swap the tree out under it.
+    const HE::UIWidgetTree* tree(int widgetId) const;
+
     bool isAlive(int id) const;
     bool isVisible(int id) const;
     int  zOrder(int id) const;
@@ -57,9 +63,25 @@ public:
 
     // Keyboard routing for the focused TextInput (the apps call these). All are
     // no-ops when no TextInput is focused.
-    void inputText(const std::string& utf8); // append text, fire OnTextChanged
-    void inputBackspace();                    // drop last char, fire OnTextChanged
+    void inputText(const std::string& utf8); // insert at the caret, replacing any selection
+    void inputBackspace();                    // delete the selection, else the character before
     void inputSubmit();                       // fire OnTextCommitted
+
+    // ── Caret + selection ────────────────────────────────────────────────────
+    // The one field that is really EDITED rather than pressed: it needs a caret
+    // you can move, a selection you can extend and a way to get text in and out
+    // of the system clipboard. The clipboard itself stays with the app (SDL
+    // owns it) — this side hands over the selected text and takes a paste.
+    enum class TextEdit { Left, Right, Home, End, Delete, SelectAll };
+    // True when something changed (and OnTextChanged fired where it applies).
+    bool editFocusedText(TextEdit op, bool extendSelection);
+    // What is selected in the focused field, for a copy or a cut.
+    std::string focusedSelection() const;
+    // Drop it (the second half of a cut). False when nothing was selected.
+    bool deleteFocusedSelection();
+    // Put the caret where a click landed. `mouseX` is in render-target pixels,
+    // like every other pointer coordinate here.
+    bool setCaretFromPointer(float vpWidth, float vpHeight, float mouseX);
     // True while a TextInput has keyboard focus — the apps use it to decide
     // whether to route text/keys here instead of to gameplay/camera.
     bool hasFocusedTextField() const { return m_focusWidget != 0; }
@@ -172,6 +194,11 @@ private:
     // and not clipped entirely out of sight.
     bool isFocusable(const Instance& w, const HE::UIElement& e,
                      const HE::UIWidgetCanvas& canvas) const;
+
+    // The focused text field (nullptr when none), with its caret re-clamped: a
+    // script may have rewritten the text since the last keystroke and left the
+    // caret pointing past the end of it. Every editing entry point starts here.
+    HE::UITextInput* focusedTextField(Instance*& outWidget);
 
     // ── Embedded-widget translation ──────────────────────────────────────────
     // Which script owns an element, and what that script calls it. For anything

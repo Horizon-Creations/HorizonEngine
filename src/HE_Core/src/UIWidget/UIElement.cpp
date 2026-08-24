@@ -65,6 +65,37 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
+// ── UTF-8 cursor movement ────────────────────────────────────────────────────
+namespace
+{
+    // A continuation byte is 10xxxxxx: never a character boundary.
+    bool isUtf8Cont(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+}
+
+size_t uiUtf8Prev(const std::string& s, size_t i)
+{
+    if (i == 0) return 0;
+    if (i > s.size()) i = s.size();
+    --i;
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
+size_t uiUtf8Next(const std::string& s, size_t i)
+{
+    if (i >= s.size()) return s.size();
+    ++i;
+    while (i < s.size() && isUtf8Cont(s[i])) ++i;
+    return i;
+}
+
+size_t uiUtf8Clamp(const std::string& s, size_t i)
+{
+    if (i >= s.size()) return s.size();
+    while (i > 0 && isUtf8Cont(s[i])) --i;
+    return i;
+}
+
 const char* uiCursorName(UICursor c)
 {
     switch (c)
@@ -223,12 +254,19 @@ const UIPropTable& UIProgressBar::propTable() const
 
 const UIPropTable& UITextInput::propTable() const
 {
+    // Caret and selection are runtime state, not properties: they are where the
+    // player is, not what the field is.
     static const UIPropTable t = {
         uiprop::slot<&UITextInput::text>       ({ "Text", UIPropType::String }),
         uiprop::slot<&UITextInput::placeholder>({ "Placeholder", UIPropType::String }),
         uiprop::slot<&UITextInput::fontSize>   ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
         uiprop::slot<&UITextInput::backColor>  ({ "Back Color", UIPropType::Color }),
         uiprop::slot<&UITextInput::textColor>  ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UITextInput::selectionColor>({ "Selection Color", UIPropType::Color }),
+        uiprop::slot<&UITextInput::maxLength>  ({ "Max Length", UIPropType::Int }),
+        uiprop::slot<&UITextInput::password>   ({ "Password", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::editable>   ({ "Editable", UIPropType::Bool }),
+        uiprop::slot<&UITextInput::selectable> ({ "Selectable", UIPropType::Bool }),
     };
     return t;
 }
@@ -602,15 +640,92 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const float pad = 6.0f;
     const glm::vec2 tp{ px.x + pad, px.y };
     const glm::vec2 ts{ px.w - 2 * pad, px.h };
+    const float sizePx = fontSize * pxScaleY;
+
     if (text.empty() && !st.focused)
-        emitText(*this, placeholder, tp, ts, fontSize * pxScaleY,
-                 glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f), false, out);
-    else
     {
-        std::string shown = text;
-        if (st.focused) shown += "|"; // caret
-        emitText(*this, shown, tp, ts, fontSize * pxScaleY, textColor, false, out);
+        emitText(*this, placeholder, tp, ts, sizePx,
+                 glm::vec4(glm::vec3(textColor) * 0.5f, textColor.a * 0.7f), false, out);
+        return;
     }
+
+    // A password field is drawn as dots, one per character — the text itself is
+    // stored as typed, only this changes.
+    auto shownFor = [&](const std::string& s)
+    {
+        if (!password) return s;
+        std::string dots;
+        for (size_t i = 0; i < s.size(); i = uiUtf8Next(s, i)) dots += "\xE2\x80\xA2"; // •
+        return dots;
+    };
+    // Width of the run up to a byte offset, in the same terms the glyphs are
+    // emitted with — this is what puts the caret and the selection where the
+    // characters actually are.
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    auto widthTo = [&](size_t byteEnd)
+    {
+        const std::string run = shownFor(text.substr(0, std::min(byteEnd, text.size())));
+        if (run.empty()) return 0.0f;
+        HE::UITextLayout opts;
+        return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
+                  : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
+    };
+
+    // Selection behind the text, so the glyphs stay readable on top of it.
+    if (st.focused && selectable && hasSelection())
+    {
+        const float x0 = widthTo(selMin()), x1 = widthTo(selMax());
+        const float h  = std::min(px.h - 4.0f, sizePx * 1.25f);
+        quad(out, tp.x + x0, px.y + (px.h - h) * 0.5f, std::max(1.0f, x1 - x0), h,
+             selectionColor);
+    }
+
+    emitText(*this, shownFor(text), tp, ts, sizePx, textColor, false, out);
+
+    // The caret: a thin bar at its offset, not a "|" glued to the end of the
+    // string — that could only ever be at the end, which is why the field had
+    // no way to edit anywhere else.
+    if (st.focused)
+    {
+        const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
+        quad(out, tp.x + widthTo(caret), px.y + (px.h - h) * 0.5f,
+             std::max(1.0f, sizePx * 0.08f), h, textColor);
+    }
+}
+
+// Byte offset in `text` nearest to a point `localX` pixels into the field's
+// text area — what a click has to answer to put the caret where it was aimed.
+size_t UITextInput::caretAtX(float localX, float pxScaleY) const
+{
+    const float sizePx = fontSize * pxScaleY;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    HE::UITextLayout opts;
+    auto widthTo = [&](size_t byteEnd)
+    {
+        std::string run = text.substr(0, std::min(byteEnd, text.size()));
+        if (password)
+        {
+            std::string dots;
+            for (size_t i = 0; i < run.size(); i = uiUtf8Next(run, i)) dots += "\xE2\x80\xA2";
+            run.swap(dots);
+        }
+        if (run.empty()) return 0.0f;
+        return (f ? HE::measureUIText(*f, run, sizePx, 0.0f, opts)
+                  : HE::measureUIText(run, sizePx, 0.0f, opts)).x;
+    };
+    if (localX <= 0.0f) return 0;
+    // Walk the boundaries and take the one whose midpoint the click passed —
+    // clicking the left half of a character puts the caret before it.
+    size_t best = 0;
+    for (size_t i = 0; i < text.size(); )
+    {
+        const size_t next = uiUtf8Next(text, i);
+        const float a = widthTo(i), b = widthTo(next);
+        if (localX < (a + b) * 0.5f) return i;
+        best = next;
+        i = next;
+    }
+    return best;
 }
 
 // ── ComboBox ─────────────────────────────────────────────────────────────────
@@ -787,6 +902,13 @@ void UITextInput::writeJson(nlohmann::json& j) const
 {
     j["text"] = text; j["placeholder"] = placeholder; j["fontSize"] = fontSize;
     j["backColor"] = colJson(backColor); j["textColor"] = colJson(textColor);
+    // Only once used, so a field authored before these existed saves unchanged.
+    if (maxLength > 0) j["maxLength"] = maxLength;
+    if (password)      j["password"] = true;
+    if (!editable)     j["editable"] = false;
+    if (!selectable)   j["selectable"] = false;
+    if (selectionColor != glm::vec4(0.25f, 0.45f, 0.80f, 0.75f))
+        j["selectionColor"] = colJson(selectionColor);
 }
 void UITextInput::readJson(const nlohmann::json& j)
 {
@@ -794,6 +916,13 @@ void UITextInput::readJson(const nlohmann::json& j)
     fontSize = j.value("fontSize", fontSize);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
     textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    selectionColor = colFrom(j.value("selectionColor", nlohmann::json()), selectionColor);
+    maxLength  = j.value("maxLength", 0);
+    password   = j.value("password", false);
+    editable   = j.value("editable", true);
+    selectable = j.value("selectable", true);
+    // The authored text decides where the caret starts, not a stale offset.
+    caret = selAnchor = text.size();
 }
 
 void UIComboBox::writeJson(nlohmann::json& j) const
