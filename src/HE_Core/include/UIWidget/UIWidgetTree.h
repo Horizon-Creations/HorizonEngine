@@ -164,6 +164,14 @@ HE_API void uiSetAnchorInsetsX(UIElement& e, float left, float right);
 HE_API void uiSetAnchorInsetsY(UIElement& e, float top, float bottom);
 // False when the element or any ancestor is invisible.
 HE_API bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e);
+
+// The rect this element is cut off at, in canvas units: the intersection of the
+// rects of every ancestor whose clipChildren is on (an element's own flag clips
+// its CHILDREN, never itself). False = no clipping ancestor, `out` untouched.
+// An empty intersection comes back as a rect with w or h <= 0, which means the
+// element is entirely hidden — the caller skips drawing and hit-testing it.
+HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
+                              UIWidgetRect& out, const UIWidgetCanvas* canvas = nullptr);
 // Let every element that auto-sizes fit itself to its content. Call BEFORE
 // uiElementRect so the rects already reflect the new sizes; cheap enough to run
 // each frame (only text elements with AutoSize on do any work).

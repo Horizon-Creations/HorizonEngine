@@ -203,6 +203,14 @@ public:
     bool        hitTestable = true;
     UICursor    hoverCursor = UICursor::Default;
 
+    // Cut this element's descendants off at its own rect — pixels outside are
+    // neither drawn nor hit-tested. Off by default: a widget whose children
+    // stick out is a perfectly good design, and clipping costs a scissor change
+    // per run of quads. This is what makes a list that is longer than its box,
+    // or a text that overflows its field, look like one instead of spilling
+    // across the screen.
+    bool        clipChildren = false;
+
     virtual ~UIElement() = default;
 
     virtual UIWidgetType type() const = 0;
@@ -273,6 +281,7 @@ protected:
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
+        dst.clipChildren = clipChildren;
     }
 };
 

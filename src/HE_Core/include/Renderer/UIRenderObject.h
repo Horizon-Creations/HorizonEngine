@@ -23,4 +23,10 @@ struct UIRenderObject {
     // Glyph quads (type 2): which baked font atlas to sample. 0 = shared default
     // font; other keys index UIFontCache (an imported Font asset).
     uint32_t    fontAtlasKey = 0;
+    // Scissor rectangle in screen pixels {x, y, w, h}: pixels outside it are not
+    // drawn. w <= 0 means unclipped, which is what every quad carried before
+    // clipping existed. Set by the UI producer (WidgetManager intersects the
+    // rects of every clipping ancestor), applied by the backends as a scissor —
+    // one state change per RUN of equally-clipped quads, not per quad.
+    glm::vec4   clipRect{ 0.0f, 0.0f, 0.0f, 0.0f };
 };

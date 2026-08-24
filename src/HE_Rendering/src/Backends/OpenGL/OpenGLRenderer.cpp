@@ -7282,8 +7282,33 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 #if defined(HE_HAVE_SHADERC)
 	bool uiLightUploaded = false;       // HeLighting uploaded once per UI pass
 #endif
+	// Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
+	// emits its quads in tree order, so equally-clipped quads arrive in runs.
+	// GL's origin is bottom-left, the UI's is top-left, hence the flip.
+	glm::vec4 appliedClip(-1.0f);
+	bool scissorOn = false;
+	auto applyClip = [&](const glm::vec4& c)
+	{
+		if (c == appliedClip) return;
+		appliedClip = c;
+		if (c.z <= 0.0f)
+		{
+			if (scissorOn) { glDisable(GL_SCISSOR_TEST); scissorOn = false; }
+			return;
+		}
+		if (!scissorOn) { glEnable(GL_SCISSOR_TEST); scissorOn = true; }
+		const float x0 = std::clamp(c.x, 0.0f, static_cast<float>(pw));
+		const float y0 = std::clamp(c.y, 0.0f, static_cast<float>(ph));
+		const float x1 = std::clamp(c.x + c.z, 0.0f, static_cast<float>(pw));
+		const float y1 = std::clamp(c.y + c.w, 0.0f, static_cast<float>(ph));
+		glScissor(static_cast<GLint>(x0), static_cast<GLint>(ph - y1),
+		          static_cast<GLsizei>(std::max(0.0f, x1 - x0)),
+		          static_cast<GLsizei>(std::max(0.0f, y1 - y0)));
+	};
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
+		applyClip(obj.clipRect);
 #if defined(HE_HAVE_SHADERC)
 		// Custom material on an image quad → material program (the solid path below
 		// stays the fallback when the material has no custom shader / failed).
@@ -7386,6 +7411,9 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 
+	// Leave the state as it was found: the scissor test is global and nothing
+	// after this pass asked for one.
+	if (scissorOn) glDisable(GL_SCISSOR_TEST);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glDisable(GL_BLEND);

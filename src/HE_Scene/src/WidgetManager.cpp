@@ -282,7 +282,19 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// hover cursor (so decorative elements can drive the cursor too).
 				if (!e.hitTestable) continue;
 				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
-				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+				HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+				// A clipping ancestor cuts the hit area down with the picture:
+				// the half of a list row that hangs out of its box is not
+				// visible, so it must not be clickable either.
+				HE::UIWidgetRect clip{};
+				if (HE::uiElementClipRect(w.tree, e, clip, &canvas))
+				{
+					const float cx0 = std::max(r.x, clip.x), cy0 = std::max(r.y, clip.y);
+					const float cx1 = std::min(r.x + r.w, clip.x + clip.w);
+					const float cy1 = std::min(r.y + r.h, clip.y + clip.h);
+					if (cx1 <= cx0 || cy1 <= cy0) continue;   // fully cut off
+					r.x = cx0; r.y = cy0; r.w = cx1 - cx0; r.h = cy1 - cy0;
+				}
 				const float x0 = r.x * sx, y0 = r.y * sy;
 				const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
 				if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1)
@@ -524,8 +536,34 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			const auto matIt = w.materials.find(e.id);
 			const HE::UUID matId = matIt != w.materials.end() ? matIt->second : HE::UUID{};
 
+			// Cut off by a clipping ancestor? An element with nothing left of it
+			// is dropped here rather than handed to the backend to scissor
+			// away — that covers both an empty clip rect (clippers that do not
+			// overlap each other) and a rect that simply misses this element,
+			// which is every row of a list that is scrolled out of view.
+			HE::UIWidgetRect clip{};
+			const bool clipped = HE::uiElementClipRect(w.tree, e, clip, &canvas);
+			if (clipped)
+			{
+				if (clip.w <= 0.0f || clip.h <= 0.0f) continue;
+				if (it.r.x + it.r.w <= clip.x || it.r.x >= clip.x + clip.w ||
+				    it.r.y + it.r.h <= clip.y || it.r.y >= clip.y + clip.h) continue;
+			}
+
 			// The element draws itself (quads + glyphs) into `out`.
+			const size_t firstQuad = out.size();
 			e.render(px, st, matId, sy, out);
+
+			// Every quad the element just emitted inherits the clip. Stamped
+			// here rather than passed into render(), so no widget type has to
+			// know clipping exists — a type that emits five quads gets it right
+			// by construction.
+			if (clipped)
+			{
+				const glm::vec4 r(clip.x * sx, clip.y * sy,
+				                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
+				for (size_t i = firstQuad; i < out.size(); ++i) out[i].clipRect = r;
+			}
 		}
 	}
 }

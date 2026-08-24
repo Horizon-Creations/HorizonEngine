@@ -1102,6 +1102,10 @@ struct D3D11RendererImpl
     ComPtr<ID3D11BlendState>        uiBlend;    // alpha blend
     ComPtr<ID3D11DepthStencilState> uiDepth;    // depth test off
     ComPtr<ID3D11SamplerState>      uiSampler;  // linear + clamp, for the font atlas
+    // Scissor is a RASTERIZER property in D3D11, so clipping needs a state of
+    // its own (cull none like every other 2D pass, scissor on). Bound only while
+    // a clipped run is being drawn; the pass restores whatever was set before.
+    ComPtr<ID3D11RasterizerState>   uiScissorRast;
     // R8 font atlases uploaded lazily from UIFontCache (key 0 = shared default
     // font). Atlas bitmaps are immutable once baked, so a one-time upload per
     // key is safe; failed bakes are NOT cached so a late-baking font still lands.
@@ -3213,6 +3217,13 @@ struct D3D11RendererImpl
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
         dd.StencilEnable  = FALSE;
         dev.CreateDepthStencilState(&dd, &uiDepth);
+
+        D3D11_RASTERIZER_DESC rd{};
+        rd.FillMode        = D3D11_FILL_SOLID;
+        rd.CullMode        = D3D11_CULL_NONE;
+        rd.ScissorEnable   = TRUE;
+        rd.DepthClipEnable = TRUE;
+        dev.CreateRasterizerState(&rd, &uiScissorRast);
     }
 
     void renderUIPass(ID3D11DeviceContext* ctx, int width, int height)
@@ -3237,8 +3248,40 @@ struct D3D11RendererImpl
         uint32_t boundAtlasKey = 0;
 
         struct UICBData { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect; glm::vec2 viewport; float mode; float pad; };
+
+        // Clipping is a scissor rectangle, set only when it CHANGES — a widget
+        // tree emits its quads in tree order, so equally-clipped quads arrive in
+        // runs. The rasterizer state is swapped in for clipped runs only and the
+        // one the pass was entered with is restored at the end, because this
+        // pass deliberately inherits whatever the scene left set.
+        ComPtr<ID3D11RasterizerState> prevRast;
+        ctx->RSGetState(prevRast.GetAddressOf());
+        glm::vec4 appliedClip(-1.0f);
+        bool scissorRastBound = false;
+        auto applyClip = [&](const glm::vec4& c)
+        {
+            if (c == appliedClip) return;
+            appliedClip = c;
+            if (c.z <= 0.0f)
+            {
+                if (scissorRastBound) { ctx->RSSetState(prevRast.Get()); scissorRastBound = false; }
+                return;
+            }
+            const float x0 = std::clamp(c.x, 0.0f, static_cast<float>(width));
+            const float y0 = std::clamp(c.y, 0.0f, static_cast<float>(height));
+            const float x1 = std::clamp(c.x + c.z, 0.0f, static_cast<float>(width));
+            const float y1 = std::clamp(c.y + c.w, 0.0f, static_cast<float>(height));
+            const D3D11_RECT r{ static_cast<LONG>(x0), static_cast<LONG>(y0),
+                                static_cast<LONG>(std::max(x0, x1)),
+                                static_cast<LONG>(std::max(y0, y1)) };
+            ctx->RSSetScissorRects(1, &r);
+            if (!scissorRastBound && uiScissorRast)
+            { ctx->RSSetState(uiScissorRast.Get()); scissorRastBound = true; }
+        };
+
         for (const UIRenderObject& obj : m_renderWorld.uiObjects)
         {
+            applyClip(obj.clipRect);
             // A glyph quad may use an imported font's atlas — bind it on t0.
             if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
             {
@@ -3262,7 +3305,8 @@ struct D3D11RendererImpl
             ctx->Draw(4, 0);
         }
 
-        // Restore: no atlas SRV, opaque blend, depth on
+        // Restore: rasterizer as found, no atlas SRV, opaque blend, depth on
+        if (scissorRastBound) ctx->RSSetState(prevRast.Get());
         { ID3D11ShaderResourceView* nullSrv = nullptr; ctx->PSSetShaderResources(0, 1, &nullSrv); }
         ctx->OMSetBlendState(nullptr, blendFactor, 0xFFFFFFFF);
         ctx->OMSetDepthStencilState(nullptr, 0);

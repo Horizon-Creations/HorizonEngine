@@ -7991,8 +7991,38 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
                             0, 1, &atlasSet, 0, nullptr);
     uint32_t boundAtlasKey = 0;
 
+    // Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
+    // emits its quads in tree order, so equally-clipped quads arrive in runs.
+    // The UI pipeline declares scissor dynamic, so this needs no pipeline of its
+    // own; the rect is clamped because Vulkan requires it inside the framebuffer.
+    glm::vec4 appliedClip(-1.0f);
+    auto applyClip = [&](const glm::vec4& c)
+    {
+        if (c == appliedClip) return;
+        appliedClip = c;
+        VkRect2D s{};
+        if (c.z <= 0.0f)
+        {
+            s.offset = { 0, 0 };
+            s.extent = { static_cast<uint32_t>(std::max(0, width)),
+                         static_cast<uint32_t>(std::max(0, height)) };
+        }
+        else
+        {
+            const float x0 = std::clamp(c.x, 0.0f, static_cast<float>(width));
+            const float y0 = std::clamp(c.y, 0.0f, static_cast<float>(height));
+            const float x1 = std::clamp(c.x + c.z, 0.0f, static_cast<float>(width));
+            const float y1 = std::clamp(c.y + c.w, 0.0f, static_cast<float>(height));
+            s.offset = { static_cast<int32_t>(x0), static_cast<int32_t>(y0) };
+            s.extent = { static_cast<uint32_t>(std::max(0.0f, x1 - x0)),
+                         static_cast<uint32_t>(std::max(0.0f, y1 - y0)) };
+        }
+        vkCmdSetScissor(cmd, 0, 1, &s);
+    };
+
     for (const UIRenderObject& obj : m_renderWorld.uiObjects)
     {
+        applyClip(obj.clipRect);
         // A glyph quad may use an imported font's atlas — bind its set.
         if (obj.type == 2 && obj.fontAtlasKey != boundAtlasKey)
         {
@@ -8014,6 +8044,8 @@ void VulkanRenderer::runUIPass(VkCommandBuffer cmd, int width, int height)
                            0, sizeof(UIPush), &push);
         vkCmdDraw(cmd, 4, 1, 0, 0);
     }
+    // The scissor is command-buffer state: hand it back covering everything.
+    applyClip(glm::vec4(0.0f));
 }
 
 // The descriptor set (R8 atlas image + immutable sampler) for a font key

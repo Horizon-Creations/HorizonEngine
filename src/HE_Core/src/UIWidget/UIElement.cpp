@@ -230,6 +230,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
 {
     if (n == "Visible")      { out = UIPropValue::ofBool(e.visible);            return true; }
     if (n == "Hit Testable") { out = UIPropValue::ofBool(e.hitTestable);        return true; }
+    if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
     if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
     if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
     if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
@@ -243,6 +244,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
 {
     if (n == "Visible")      { e.visible     = v.b; return true; }
     if (n == "Hit Testable") { e.hitTestable = v.b; return true; }
+    if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
     if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
     if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
     if (n == "Layer")        { e.layer = v.i; return true; }
@@ -264,6 +266,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     std::vector<UIPropDesc> out = properties();
     out.push_back({ "Visible",      UIPropType::Bool });
     out.push_back({ "Hit Testable", UIPropType::Bool });
+    out.push_back({ "Clip Children",UIPropType::Bool });
     out.push_back({ "Position",     UIPropType::Vec2 });
     out.push_back({ "Size",         UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });

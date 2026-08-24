@@ -294,6 +294,37 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
         if (e) e->applyAutoSize(uiElementRect(tree, *e, canvas).w);
 }
 
+bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
+                       UIWidgetRect& out, const UIWidgetCanvas* canvas)
+{
+    bool any = false;
+    UIWidgetRect acc{};
+    // Walk up. The chain is short (a UI tree is shallow) and bounded by the
+    // element count, so a cycle in a hand-edited file cannot hang this.
+    int guard = 0;
+    const UIElement* cur = &e;
+    while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+    {
+        const UIElement* p = tree.find(cur->parentId);
+        if (!p) break;
+        if (p->clipChildren)
+        {
+            const UIWidgetRect r = uiElementRect(tree, *p, canvas);
+            if (!any) { acc = r; any = true; }
+            else
+            {
+                const float x0 = std::max(acc.x, r.x), y0 = std::max(acc.y, r.y);
+                const float x1 = std::min(acc.x + acc.w, r.x + r.w);
+                const float y1 = std::min(acc.y + acc.h, r.y + r.h);
+                acc.x = x0; acc.y = y0; acc.w = x1 - x0; acc.h = y1 - y0;
+            }
+        }
+        cur = p;
+    }
+    if (any) out = acc;
+    return any;
+}
+
 bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
 {
     if (!e.visible) return false;
@@ -336,6 +367,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (!e.material.empty()) o["material"] = e.material;
     if (!e.font.empty())     o["font"]     = e.font;
     if (!e.hitTestable)      o["hitTestable"] = false;
+    if (e.clipChildren)      o["clipChildren"] = true;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
     e.writeJson(o); // type-specific fields
@@ -369,7 +401,8 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->visible  = o.value("visible", true);
     e->material = o.value("material", std::string());
     e->font     = o.value("font", std::string());
-    e->hitTestable = o.value("hitTestable", true);
+    e->hitTestable  = o.value("hitTestable", true);
+    e->clipChildren = o.value("clipChildren", false);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
     e->readJson(o); // type-specific fields

@@ -2724,9 +2724,35 @@ struct D3D12RendererImpl
 
         struct UICB { glm::vec4 rect; glm::vec4 color; glm::vec4 uvRect;
                       glm::vec2 vp; float mode; float pad; };
+
+        // Clipping is a scissor rectangle, set only when it CHANGES — a widget
+        // tree emits its quads in tree order, so equally-clipped quads arrive in
+        // runs. Clamped to the target, which D3D12 requires.
+        glm::vec4 appliedClip(-1.0f);
+        auto applyClip = [&](const glm::vec4& c)
+        {
+            if (c == appliedClip) return;
+            appliedClip = c;
+            D3D12_RECT r{};
+            if (c.z <= 0.0f)
+                r = D3D12_RECT{ 0, 0, static_cast<LONG>(w), static_cast<LONG>(h) };
+            else
+            {
+                const float x0 = std::clamp(c.x, 0.0f, static_cast<float>(w));
+                const float y0 = std::clamp(c.y, 0.0f, static_cast<float>(h));
+                const float x1 = std::clamp(c.x + c.z, 0.0f, static_cast<float>(w));
+                const float y1 = std::clamp(c.y + c.w, 0.0f, static_cast<float>(h));
+                r = D3D12_RECT{ static_cast<LONG>(x0), static_cast<LONG>(y0),
+                                static_cast<LONG>(std::max(x0, x1)),
+                                static_cast<LONG>(std::max(y0, y1)) };
+            }
+            cmd->RSSetScissorRects(1, &r);
+        };
+
         int qi = 0;
         for (const UIRenderObject& obj : m_renderWorld.uiObjects) {
             if (qi >= static_cast<int>(k_maxUIQuads)) break;
+            applyClip(obj.clipRect);
             if (obj.type == 2)
             {
                 // A glyph may use an imported font's atlas; unknown keys fall back
@@ -2755,6 +2781,8 @@ struct D3D12RendererImpl
             cmd->DrawInstanced(4, 1, 0, 0);
             ++qi;
         }
+        // The scissor is command-list state: hand it back covering everything.
+        applyClip(glm::vec4(0.0f));
     }
 
     bool createPipeline()

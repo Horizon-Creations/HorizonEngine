@@ -1579,6 +1579,162 @@ TEST_CASE("WidgetManager: the hit test follows the canvas scale mode")
     CHECK_FALSE(wm.processPointer(2560.0f, 1080.0f, 240.0f, 50.0f, true, true));
 }
 
+// ═══ Clipping ════════════════════════════════════════════════════════════════
+// "Clip children" cuts a subtree off at the clipping element's own rect. It is
+// what a list longer than its box, a text wider than its field and eventually a
+// scroll box all rest on — and it has to hold for the POINTER too, or half a
+// row is invisible but still clickable.
+
+TEST_CASE("uiElementClipRect: only a clipping ancestor clips, and they intersect")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+
+    auto addBox = [&](int parent, float x, float y, float w, float h, bool clip)
+    {
+        const int id = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *t.find(id);
+        e.parentId = parent;
+        HE::uiSetAnchorPreset(e, 0);
+        e.pivotX = e.pivotY = 0.0f;
+        e.posX = x; e.posY = y; e.sizeX = w; e.sizeY = h;
+        e.clipChildren = clip;
+        return id;
+    };
+
+    const int outer = addBox(0,     0.0f,   0.0f, 400.0f, 400.0f, true);
+    const int inner = addBox(outer, 100.0f, 0.0f, 400.0f, 200.0f, true);
+    const int leaf  = addBox(inner, 0.0f,   0.0f, 400.0f, 400.0f, false);
+    const int loose = addBox(0,     0.0f,   0.0f, 100.0f, 100.0f, false);
+
+    HE::UIWidgetRect c{};
+    // Nothing above it clips → not clipped at all.
+    CHECK_FALSE(HE::uiElementClipRect(t, *t.find(loose), c));
+    // An element's OWN flag never clips itself.
+    CHECK_FALSE(HE::uiElementClipRect(t, *t.find(outer), c));
+    // One clipping ancestor: its rect.
+    REQUIRE(HE::uiElementClipRect(t, *t.find(inner), c));
+    CHECK(c.x == doctest::Approx(0.0f));
+    CHECK(c.w == doctest::Approx(400.0f));
+    // Two of them: the intersection, not the nearest one.
+    REQUIRE(HE::uiElementClipRect(t, *t.find(leaf), c));
+    CHECK(c.x == doctest::Approx(100.0f));         // inner starts at 100…
+    CHECK(c.w == doctest::Approx(300.0f));         // …and outer ends at 400
+    CHECK(c.y == doctest::Approx(0.0f));
+    CHECK(c.h == doctest::Approx(200.0f));         // inner is the shorter one
+}
+
+TEST_CASE("uiElementClipRect: disjoint clippers hide the element entirely")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+    auto addBox = [&](int parent, float x, float w, bool clip)
+    {
+        const int id = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *t.find(id);
+        e.parentId = parent;
+        HE::uiSetAnchorPreset(e, 0);
+        e.pivotX = e.pivotY = 0.0f;
+        e.posX = x; e.posY = 0.0f; e.sizeX = w; e.sizeY = 100.0f;
+        e.clipChildren = clip;
+        return id;
+    };
+    const int a = addBox(0, 0.0f,   100.0f, true);
+    const int b = addBox(a, 300.0f, 100.0f, true);   // starts past a's right edge
+    const int c = addBox(b, 0.0f,   100.0f, false);
+
+    HE::UIWidgetRect r{};
+    REQUIRE(HE::uiElementClipRect(t, *t.find(c), r));
+    CHECK(r.w <= 0.0f);     // nothing survives → the caller drops the element
+}
+
+TEST_CASE("WidgetManager: clipped quads carry the scissor, clipped pixels are dead")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;   // 1 unit = 1 pixel
+
+    const int box = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+      e.clipChildren = true; }
+
+    // A button twice as tall as the box it sits in: the lower half is cut off.
+    const int btn = t.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *t.find(btn);
+      e.parentId = box;
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f; }
+
+    // …and one entirely below it, which must not be drawn at all.
+    const int gone = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(gone);
+      e.parentId = box;
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 400.0f; e.sizeX = 50.0f; e.sizeY = 50.0f; }
+
+    registerWidget(cm, t);
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(1000.0f, 1000.0f, out);
+
+    int clipped = 0, unclipped = 0;
+    for (const UIRenderObject& o : out)
+    {
+        if (o.clipRect.z > 0.0f)
+        {
+            ++clipped;
+            CHECK(o.clipRect.x == doctest::Approx(0.0f));
+            CHECK(o.clipRect.y == doctest::Approx(0.0f));
+            CHECK(o.clipRect.z == doctest::Approx(200.0f));
+            CHECK(o.clipRect.w == doctest::Approx(100.0f));
+        }
+        else ++unclipped;
+    }
+    CHECK(clipped   >= 1);   // the button's quads inherited the box's rect
+    CHECK(unclipped >= 1);   // the box itself is not clipped by anything
+
+    // An element completely outside its clipper is not emitted at all: the
+    // panel below the box would have been one more unclipped-looking quad.
+    for (const UIRenderObject& o : out)
+        CHECK(o.position.y < 400.0f);
+
+    // The pointer obeys the same cut: inside the box the button answers, in the
+    // half that is clipped away it does not.
+    CHECK(wm.processPointer(1000.0f, 1000.0f, 100.0f,  50.0f, true, true));
+    CHECK_FALSE(wm.processPointer(1000.0f, 1000.0f, 100.0f, 150.0f, true, true));
+}
+
+TEST_CASE("UIElement: clipChildren round-trips and is scriptable")
+{
+    HE::UIWidgetTree t;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    CHECK_FALSE(t.find(p)->clipChildren);              // off by default
+    CHECK(HE::uiWidgetTreeToJson(t).find("clipChildren") == std::string::npos);
+
+    t.find(p)->clipChildren = true;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(r.find(p)->clipChildren);
+
+    // Reachable by name, like every other base property (HorizonCode, scripts).
+    HE::UIElement& e = *t.find(p);
+    e.setPropAny("Clip Children", HE::UIPropValue::ofBool(false));
+    CHECK_FALSE(e.clipChildren);
+    CHECK_FALSE(e.getPropAny("Clip Children").b);
+    e.setPropAny("Clip Children", HE::UIPropValue::ofBool(true));
+    CHECK(e.getPropAny("Clip Children").b);
+    // …and a clone carries it (the runtime holds a deep copy).
+    CHECK(e.clone()->clipChildren);
+}
+
 TEST_CASE("uiApplyAutoSize: content does not resize an axis the anchor stretches")
 {
     HE::UIWidgetTree t;

@@ -10989,8 +10989,34 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 	bool basicBound = false;        // solid/glyph pipeline currently set?
 	void* boundMaterial = nullptr;  // material PSO currently set
 	uint32_t boundAtlasKey = 0;     // font atlas currently bound at texture(0)
+
+	// Clipping is a scissor rectangle, set only when it CHANGES — a widget tree
+	// emits its quads in tree order, so equally-clipped quads arrive in runs.
+	// Metal asserts on a scissor outside the render target, hence the clamp.
+	glm::vec4 appliedClip(-1.0f);
+	auto applyClip = [&](const glm::vec4& c)
+	{
+		if (c == appliedClip) return;
+		appliedClip = c;
+		MTLScissorRect s;
+		if (c.z <= 0.0f)   // unclipped: the whole target
+			s = MTLScissorRect{ 0, 0, (NSUInteger)std::max(1, width), (NSUInteger)std::max(1, height) };
+		else
+		{
+			const float x0 = std::clamp(c.x, 0.0f, (float)width);
+			const float y0 = std::clamp(c.y, 0.0f, (float)height);
+			const float x1 = std::clamp(c.x + c.z, 0.0f, (float)width);
+			const float y1 = std::clamp(c.y + c.w, 0.0f, (float)height);
+			s = MTLScissorRect{ (NSUInteger)x0, (NSUInteger)y0,
+			                    (NSUInteger)std::max(0.0f, x1 - x0),
+			                    (NSUInteger)std::max(0.0f, y1 - y0) };
+		}
+		[enc setScissorRect:s];
+	};
+
 	for (const UIRenderObject& obj : m_renderWorld.uiObjects)
 	{
+		applyClip(obj.clipRect);
 		// Custom material on an image quad → material pipeline (solid path below
 		// stays the fallback when the material has no custom shader / failed).
 		void* matPso = obj.type == 0 && obj.materialAssetId != HE::UUID{}
@@ -11071,6 +11097,9 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 		[enc setFragmentBytes:&shape length:sizeof(shape) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	}
+	// Hand the encoder back in the state it was given in: the scissor is
+	// encoder-wide, and whatever draws after this pass never asked for one.
+	applyClip(glm::vec4(0.0f));
 }
 
 // ─── Frame encoding ───────────────────────────────────────────────────────────

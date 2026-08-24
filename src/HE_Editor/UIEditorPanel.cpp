@@ -786,6 +786,12 @@ void drawDetails(State& st, AppContext& ctx)
 	if (ImGui::Checkbox("Hit-testable", &n->hitTestable)) committed = true;
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Off = transparent to the mouse (pointer passes through).");
+	if (ImGui::Checkbox("Clip children", &n->clipChildren)) committed = true;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Cut everything inside this element off at its own edge.\n"
+		                  "Clipped pixels are neither drawn nor clickable — this is\n"
+		                  "what makes a list longer than its box look like a list\n"
+		                  "in a box instead of spilling across the screen.");
 	if (ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor)))
 	{
 		for (int c = 0; c < (int)HE::UICursor::COUNT; ++c)
@@ -1096,7 +1102,21 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	for (const DrawItem& it : items)
 	{
 		const ImVec2 mn = toScreen(it.r.mn), mx = toScreen(it.r.mx);
+		// A clipping ancestor cuts this element off in the designer exactly as
+		// it will at runtime (the scissor there, an ImGui clip rect here) —
+		// otherwise "Clip children" is a setting whose effect you cannot see
+		// until you press play.
+		HE::UIWidgetRect clip{};
+		const bool clipped = HE::uiElementClipRect(st.tree, *it.n, clip, layoutCanvas);
+		if (clipped)
+		{
+			if (clip.w <= 0.0f || clip.h <= 0.0f) continue;
+			const ImVec2 cmn = toScreen(ImVec2(clip.x, clip.y));
+			const ImVec2 cmx = toScreen(ImVec2(clip.x + clip.w, clip.y + clip.h));
+			dl->PushClipRect(cmn, cmx, true);
+		}
 		drawElementPreview(dl, *it.n, mn, mx, s);
+		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();
 
