@@ -139,6 +139,21 @@ HE_API int  uiAnchorLegacyPointOf(const UIElement& e); // -1 = not a 9-point anc
 // calls below is what makes anchors resolve against the REAL screen; leaving it
 // out lays out on the authored canvas, which is what the designer wants.
 HE_API UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight);
+// The same rule without a tree: an authored canvas, a mode, and the pixel size
+// it has to meet. Used for the tree above and for a WidgetRef's slot, which is
+// the embedded widget's screen and follows exactly the same rule.
+HE_API UIWidgetCanvas uiResolveCanvasFor(float authoredW, float authoredH,
+                                         UICanvasScaleMode mode,
+                                         float vpWidth, float vpHeight);
+
+// How much an element's OWN numbers (position, size, padding, spacing) are
+// scaled before they are used. 1 everywhere except inside an embedded widget:
+// there they are in the units that widget was authored on, and the WidgetRef's
+// rect is what they have to be fitted into. Only the nearest WidgetRef ancestor
+// matters — its own rect already carries the scaling of everything above it.
+HE_API void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
+                               float& outScaleX, float& outScaleY,
+                               const UIWidgetCanvas* canvas = nullptr);
 
 // Element rect in CANVAS units, resolved through the parent chain (roots anchor
 // to the canvas). The anchor rectangle is resolved inside the parent's rect;

@@ -120,6 +120,9 @@ const UIPropTable& UIBoxBase::propTable() const
     static const UIPropTable t = {
         uiprop::slot<&UIBoxBase::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIBoxBase::sizeToContent>({ "Size To Content", UIPropType::Bool }),
+        uiprop::slot<&UIBoxBase::minSizeX>({ "Min Width",  UIPropType::Float }),
+        uiprop::slot<&UIBoxBase::minSizeY>({ "Min Height", UIPropType::Float }),
     };
     return t;
 }
@@ -131,6 +134,9 @@ const UIPropTable& UIScrollBox::propTable() const
     static const UIPropTable t = {
         uiprop::slot<&UIScrollBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIScrollBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIScrollBox::sizeToContent>({ "Size To Content", UIPropType::Bool }),
+        uiprop::slot<&UIScrollBox::minSizeX>({ "Min Width",  UIPropType::Float }),
+        uiprop::slot<&UIScrollBox::minSizeY>({ "Min Height", UIPropType::Float }),
         uiprop::slot<&UIScrollBox::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
         uiprop::slot<&UIScrollBox::barColor>({ "Bar Color", UIPropType::Color }),
     };
@@ -631,9 +637,20 @@ void UIPanel::writeJson(nlohmann::json& j) const { j["color"] = colJson(color); 
 void UIPanel::readJson(const nlohmann::json& j)  { color = colFrom(j.value("color", nlohmann::json()), color); }
 
 void UIBoxBase::writeJson(nlohmann::json& j) const
-{ j["padding"] = padding; j["spacing"] = spacing; }
+{
+    j["padding"] = padding; j["spacing"] = spacing;
+    // Written only once used, so a box authored before this existed stays
+    // byte-identical.
+    if (sizeToContent) j["sizeToContent"] = true;
+    if (minSizeX > 0.0f || minSizeY > 0.0f) j["minSize"] = { minSizeX, minSizeY };
+}
 void UIBoxBase::readJson(const nlohmann::json& j)
-{ padding = j.value("padding", padding); spacing = j.value("spacing", spacing); }
+{
+    padding = j.value("padding", padding); spacing = j.value("spacing", spacing);
+    sizeToContent = j.value("sizeToContent", false);
+    if (const auto& m = j.value("minSize", nlohmann::json::array()); m.size() >= 2)
+    { minSizeX = m[0].get<float>(); minSizeY = m[1].get<float>(); }
+}
 
 // The offset and the measured content extent are runtime state: a menu that
 // reopens where it was last scrolled to is a bug, not a feature.

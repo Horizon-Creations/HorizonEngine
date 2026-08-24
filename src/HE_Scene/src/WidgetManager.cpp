@@ -227,6 +227,12 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 
 		w.embeds.push_back(em);
 		ref->embedded = true;
+		// What its elements measure in, and by which rule that meets this slot.
+		// Without it a widget authored for 1920x1080 dropped into a 400x300 slot
+		// would keep its absolute offsets and hang out of its own frame.
+		ref->contentW    = sub.canvasWidth;
+		ref->contentH    = sub.canvasHeight;
+		ref->contentMode = sub.scaleMode;
 
 		// …and the widget it just brought in may embed further widgets.
 		chain.push_back(ref->widgetPath);

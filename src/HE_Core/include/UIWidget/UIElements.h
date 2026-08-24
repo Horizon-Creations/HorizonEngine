@@ -1,5 +1,9 @@
 #pragma once
 #include <UIWidget/UIElement.h>
+// For UICanvasScaleMode: a WidgetRef's rect is the embedded widget's screen, so
+// it carries that widget's scale mode. (No cycle: UIWidgetTree.h includes
+// UIElement.h only.)
+#include <UIWidget/UIWidgetTree.h>
 
 // Concrete widget element types. Each declares its own data + properties +
 // events; the property tables (propTable), render() and JSON live in
@@ -295,6 +299,15 @@ class HE_API UIWidgetRef final : public UIElement
 public:
     std::string widgetPath;        // content-relative path of the widget asset
     bool        embedded = false;  // transient: the runtime grafted it in
+    // The canvas the embedded asset was AUTHORED on and the scale mode it was
+    // authored with, both filled in when it is grafted. This element's rect is
+    // that widget's SCREEN: the same rule that maps a canvas onto a viewport
+    // maps it in here, so its own scale mode decides what happens when the slot
+    // is a different size — Stretch scales it into the slot, ConstantPixel
+    // leaves its units alone and lets its anchors do the placing. 0 = nothing
+    // embedded → no scaling at all.
+    float             contentW = 0.0f, contentH = 0.0f;
+    UICanvasScaleMode contentMode = UICanvasScaleMode::Stretch;
 
     UIWidgetRef() { sizeX = 300.0f; sizeY = 200.0f; hitTestable = false; }
     UIWidgetType type() const override { return UIWidgetType::WidgetRef; }
@@ -320,6 +333,18 @@ class HE_API UIBoxBase : public UIElement
 public:
     float padding = 0.0f;  // inset on all four sides, canvas units
     float spacing = 4.0f;  // gap between two children
+
+    // ── Size to content ──────────────────────────────────────────────────────
+    // While this is on, the box's size is not authored: it is measured from
+    // what is inside it (children plus spacing plus padding) every frame, and
+    // the two Min values are the floor it cannot shrink below. That makes a
+    // menu grow and shrink with the number of entries in it instead of being a
+    // fixed rectangle that a sixth entry falls out of.
+    //
+    // A FILLING child cannot be measured (its size is a share of what is left
+    // over, which is what this is computing), so it counts as nothing.
+    bool  sizeToContent = false;
+    float minSizeX = 0.0f, minSizeY = 0.0f;
 
     bool laysOutChildren() const override { return true; }
     const UIPropTable& propTable() const override;

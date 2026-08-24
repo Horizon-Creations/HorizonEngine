@@ -762,8 +762,16 @@ void drawDetails(State& st, AppContext& ctx)
 		{
 			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			// A container that sizes itself to its content owns those two
+			// numbers: showing them editable would be offering a value that is
+			// overwritten before it is ever drawn.
+			const bool measured = n->getProp("Size To Content").b;
+			ImGui::BeginDisabled(measured);
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::EndDisabled();
+			if (measured)
+				ImGui::TextDisabled("Measured from the content (Min Width/Height below).");
 		}
 	}
 	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
@@ -1275,14 +1283,15 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	constexpr int kMaxDepth = 4;
 	if (depth > kMaxDepth) return;
 
-	// The canvas the embedded roots anchor in IS the ref element's rect, in the
-	// host's canvas units — that is the runtime's rule, expressed here in the
-	// pixels the designer already has.
-	HE::UIWidgetCanvas canvas;
-	canvas.scaleX = canvas.scaleY = 1.0f;
-	canvas.width  = std::max(1.0f, (mx.x - mn.x) / std::max(0.0001f, s));
-	canvas.height = std::max(1.0f, (mx.y - mn.y) / std::max(0.0001f, s));
-	auto toScreen = [&](float x, float y) { return ImVec2(mn.x + x * s, mn.y + y * s); };
+	// The ref element's rect is this widget's SCREEN, so its own canvas meets it
+	// by exactly the rule a real screen uses — the same call, and therefore the
+	// same answer the runtime gives. Stretch scales it into the slot;
+	// ConstantPixel leaves its units alone and lets its anchors do the placing.
+	const float slotW = std::max(1.0f, mx.x - mn.x);
+	const float slotH = std::max(1.0f, mx.y - mn.y);
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(tree, slotW, slotH);
+	auto toScreen = [&](float x, float y)
+	{ return ImVec2(mn.x + x * canvas.scaleX, mn.y + y * canvas.scaleY); };
 
 	// A copy, because auto-size mutates the tree it measures and the cached one
 	// must stay as the asset wrote it.
@@ -1320,12 +1329,14 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 			dl->PushClipRect(toScreen(clip.x, clip.y),
 			                 toScreen(clip.x + clip.w, clip.y + clip.h), true);
 		}
-		drawElementIn(dl, ctx, laid, *it.n, emn, emx, s);
+		// Font sizes and corner radii scale with the EMBEDDED widget's factor,
+		// not the page's: inside here, one of its units is canvas.scale pixels.
+		drawElementIn(dl, ctx, laid, *it.n, emn, emx, canvas.scaleY);
 		// …and a widget inside the embedded widget, one level further down.
 		if (it.n->type() == UIWidgetType::WidgetRef)
 			if (const HE::UIWidgetTree* sub =
 				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
-				drawEmbeddedTree(dl, ctx, *sub, emn, emx, s, depth + 1);
+				drawEmbeddedTree(dl, ctx, *sub, emn, emx, canvas.scaleY, depth + 1);
 		if (clipped) dl->PopClipRect();
 	}
 }

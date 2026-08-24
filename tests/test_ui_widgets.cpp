@@ -167,13 +167,22 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
         // box in every saved widget.
         { UIWidgetType::VerticalBox, {
             { "Padding", UIPropType::Float },
-            { "Spacing", UIPropType::Float } } },
+            { "Spacing", UIPropType::Float },
+            { "Size To Content", UIPropType::Bool },
+            { "Min Width", UIPropType::Float },
+            { "Min Height", UIPropType::Float } } },
         { UIWidgetType::HorizontalBox, {
             { "Padding", UIPropType::Float },
-            { "Spacing", UIPropType::Float } } },
+            { "Spacing", UIPropType::Float },
+            { "Size To Content", UIPropType::Bool },
+            { "Min Width", UIPropType::Float },
+            { "Min Height", UIPropType::Float } } },
         { UIWidgetType::ScrollBox, {
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float },
+            { "Size To Content", UIPropType::Bool },
+            { "Min Width", UIPropType::Float },
+            { "Min Height", UIPropType::Float },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color } } },
         { UIWidgetType::WidgetRef, {
@@ -1829,6 +1838,103 @@ TEST_CASE("Layout box: boxes nest, and a box draws nothing itself")
     CHECK(out.size() == 1);
 }
 
+TEST_CASE("Layout box: Size To Content measures the box, Min is the floor")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f,
+                                    /*padding=*/10.0f, /*spacing=*/5.0f);
+    auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(box));
+    REQUIRE(b != nullptr);
+    b->sizeToContent = true;
+    b->minSizeX = b->minSizeY = 0.0f;
+    // The children are 50x50 each (boxWithChildren makes them square).
+    HE::uiApplyAutoSize(t);
+    // 3 x 50 + 2 gaps of 5 + 2 x 10 padding.
+    CHECK(b->sizeY == doctest::Approx(3 * 50.0f + 2 * 5.0f + 20.0f));
+    // Across: the widest child plus the padding.
+    CHECK(b->sizeX == doctest::Approx(50.0f + 20.0f));
+
+    // One entry more and it grows; one hidden and it shrinks. That is the point
+    // — a menu is not a rectangle a sixth entry falls out of.
+    const std::vector<int> kids = t.childrenOf(box);
+    t.find(kids[0])->visible = false;
+    HE::uiApplyAutoSize(t);
+    CHECK(b->sizeY == doctest::Approx(2 * 50.0f + 5.0f + 20.0f));
+
+    // The floor holds.
+    b->minSizeY = 400.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(b->sizeY == doctest::Approx(400.0f));
+
+    // A filling child measures as nothing on the axis (its size IS the leftover
+    // this is computing) but still counts across it.
+    b->minSizeY = 0.0f;
+    t.find(kids[0])->visible = true;
+    t.find(kids[1])->slotFill = 1.0f;
+    t.find(kids[1])->sizeX = 200.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(b->sizeY == doctest::Approx(2 * 50.0f + 2 * 5.0f + 20.0f));
+    CHECK(b->sizeX == doctest::Approx(200.0f + 20.0f));
+
+    // Off again: the authored size is the box's own business once more.
+    b->sizeToContent = false;
+    b->sizeY = 777.0f;
+    HE::uiApplyAutoSize(t);
+    CHECK(b->sizeY == doctest::Approx(777.0f));
+}
+
+TEST_CASE("Layout box: nested Size To Content measures inside out")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+    const int outer = t.add(HE::UIWidgetType::VerticalBox);
+    { auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(outer));
+      b->padding = 0.0f; b->spacing = 0.0f; b->sizeToContent = true; }
+    const int inner = t.add(HE::UIWidgetType::VerticalBox);
+    { auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(inner));
+      b->parentId = outer; b->padding = 0.0f; b->spacing = 0.0f; b->sizeToContent = true; }
+    for (int i = 0; i < 2; ++i)
+    {
+        const int c = t.add(HE::UIWidgetType::Panel);
+        t.find(c)->parentId = inner;
+        t.find(c)->sizeY = 30.0f;
+        t.find(c)->sizeX = 40.0f;
+    }
+
+    HE::uiApplyAutoSize(t);
+    // The inner box measures its two panels…
+    CHECK(t.find(inner)->sizeY == doctest::Approx(60.0f));
+    CHECK(t.find(inner)->sizeX == doctest::Approx(40.0f));
+    // …and the outer one measures the inner box, in the SAME pass. Measured
+    // outside-in it would have been one frame behind.
+    CHECK(t.find(outer)->sizeY == doctest::Approx(60.0f));
+    CHECK(t.find(outer)->sizeX == doctest::Approx(40.0f));
+}
+
+TEST_CASE("Layout box: Size To Content round-trips, off by default")
+{
+    HE::UIWidgetTree t;
+    const int v = t.add(HE::UIWidgetType::VerticalBox);
+    auto* b = dynamic_cast<HE::UIBoxBase*>(t.find(v));
+    REQUIRE(b != nullptr);
+    CHECK_FALSE(b->sizeToContent);
+    CHECK(HE::uiWidgetTreeToJson(t).find("sizeToContent") == std::string::npos);
+
+    b->sizeToContent = true;
+    b->minSizeX = 120.0f; b->minSizeY = 60.0f;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    auto* back = dynamic_cast<HE::UIBoxBase*>(r.find(v));
+    REQUIRE(back != nullptr);
+    CHECK(back->sizeToContent);
+    CHECK(back->minSizeX == doctest::Approx(120.0f));
+    CHECK(back->minSizeY == doctest::Approx(60.0f));
+    // By name too — a script can switch it on for a menu that just grew.
+    back->setPropAny("Size To Content", HE::UIPropValue::ofBool(false));
+    CHECK_FALSE(back->sizeToContent);
+    CHECK(back->getPropAny("Min Width").f == doctest::Approx(120.0f));
+}
+
 TEST_CASE("Layout box: the new types round-trip by name and carry their slots")
 {
     HE::UIWidgetTree t;
@@ -1958,6 +2064,130 @@ TEST_CASE("WidgetRef: the embedded tree is grafted in and laid out in its slot")
     // …and it is clickable there.
     CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, true, true));
     CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 300.0f, 300.0f, true, true));
+}
+
+TEST_CASE("WidgetRef: the slot is the embedded widget's screen")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A widget authored on 1000x1000 with a button at an absolute (800, 800):
+    // dropped into a 200x200 slot it must be FITTED, not hung inside, or that
+    // button would sit four times outside its own frame.
+    HE::UIWidgetTree big;
+    big.canvasWidth = 1000.0f; big.canvasHeight = 1000.0f;   // Stretch by default
+    const int b = big.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *big.find(b);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 800.0f; e.posY = 800.0f; e.sizeX = 100.0f; e.sizeY = 100.0f; }
+    registerWidgetAs(cm, "mem://big.hasset", big);
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://big.hasset")); }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    // Scaled by 200/1000: the button lands at (160, 160), 20x20 — inside the
+    // 200x200 slot, where it belongs.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    bool found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(20.0f) && o.size.y == doctest::Approx(20.0f) &&
+            o.position.x == doctest::Approx(160.0f) && o.position.y == doctest::Approx(160.0f))
+            found = true;
+    CHECK(found);
+    // Nothing it emitted leaves the frame.
+    for (const UIRenderObject& o : out)
+    {
+        CHECK(o.position.x >= -0.01f);
+        CHECK(o.position.x + o.size.x <= doctest::Approx(200.0f));
+        CHECK(o.position.y + o.size.y <= doctest::Approx(200.0f));
+    }
+    // …and it is clickable where it is drawn.
+    CHECK(wm.processPointer(400.0f, 400.0f, 170.0f, 170.0f, true, true));
+    CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 850.0f, 850.0f, true, true));
+
+    // Growing the slot scales EVERYTHING in it, not just some of it.
+    page.find(ref)->sizeX = 400.0f;
+    page.find(ref)->sizeY = 400.0f;
+    registerWidget(cm, page);
+    WidgetManager wide;
+    REQUIRE(wide.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    wide.extract(400.0f, 400.0f, out);
+    found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(40.0f) && o.position.x == doctest::Approx(320.0f))
+            found = true;
+    CHECK(found);
+}
+
+TEST_CASE("WidgetRef: an embedded widget's own scale mode decides")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The same widget, but authored to keep its units: its anchors do the
+    // placing inside the slot and nothing is scaled — which is exactly what
+    // anchors are for, and what ConstantPixel means.
+    HE::UIWidgetTree fixed;
+    fixed.canvasWidth = 1000.0f; fixed.canvasHeight = 1000.0f;
+    fixed.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int b = fixed.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *fixed.find(b);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 2);                 // top-RIGHT corner
+      e.pivotX = 1.0f; e.pivotY = 0.0f;
+      e.posX = -10.0f; e.posY = 10.0f; e.sizeX = 80.0f; e.sizeY = 30.0f; }
+    registerWidgetAs(cm, "mem://fixed.hasset", fixed);
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 300.0f; e.sizeY = 200.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://fixed.hasset")); }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    // Its own size in pixels, hung on the slot's right edge: 300 - 10 - 80.
+    bool found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(80.0f) && o.size.y == doctest::Approx(30.0f) &&
+            o.position.x == doctest::Approx(210.0f) && o.position.y == doctest::Approx(10.0f))
+            found = true;
+    CHECK(found);
+
+    // A wider slot pushes it further out and does NOT stretch it — the anchor
+    // does the work, which is the whole point of the mode.
+    page.find(ref)->sizeX = 380.0f;
+    registerWidget(cm, page);
+    WidgetManager wider;
+    REQUIRE(wider.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    wider.extract(400.0f, 400.0f, out);
+    found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(80.0f) && o.position.x == doctest::Approx(290.0f))
+            found = true;
+    CHECK(found);
 }
 
 TEST_CASE("WidgetRef: two copies of one widget do not share element ids")

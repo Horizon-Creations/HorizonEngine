@@ -123,12 +123,19 @@ const char* uiCanvasScaleModeName(UICanvasScaleMode m)
 
 UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vpHeight)
 {
+    return uiResolveCanvasFor(tree.canvasWidth, tree.canvasHeight, tree.scaleMode,
+                              vpWidth, vpHeight);
+}
+
+UIWidgetCanvas uiResolveCanvasFor(float authoredW, float authoredH, UICanvasScaleMode mode,
+                                  float vpWidth, float vpHeight)
+{
     const float vw = std::max(1.0f, vpWidth), vh = std::max(1.0f, vpHeight);
-    const float rw = std::max(1.0f, tree.canvasWidth), rh = std::max(1.0f, tree.canvasHeight);
+    const float rw = std::max(1.0f, authoredW), rh = std::max(1.0f, authoredH);
     const float sx = vw / rw, sy = vh / rh;
 
     UIWidgetCanvas c;
-    if (tree.scaleMode == UICanvasScaleMode::Stretch)
+    if (mode == UICanvasScaleMode::Stretch)
     {
         // The authored canvas IS the layout canvas; the two axes take whatever
         // factor they need to cover the viewport.
@@ -138,7 +145,7 @@ UIWidgetCanvas uiResolveCanvas(const UIWidgetTree& tree, float vpWidth, float vp
     }
 
     float s = 1.0f;
-    switch (tree.scaleMode)
+    switch (mode)
     {
     case UICanvasScaleMode::FitInside:     s = std::min(sx, sy); break;
     case UICanvasScaleMode::FillOutside:   s = std::max(sx, sy); break;
@@ -261,13 +268,19 @@ namespace
         // Read through the property table rather than a cast: every container
         // type declares these two by name, so a Grid or a scroll box added
         // later is laid out by this same code without touching it.
-        const float pad  = std::max(0.0f, box.getProp("Padding").f);
-        const float gap  = std::max(0.0f, box.getProp("Spacing").f);
+        // The box's own numbers are in its widget's units too (a box inside an
+        // embedded widget is padded in that widget's terms).
+        float bus = 1.0f, bvs = 1.0f;
+        uiElementUnitScale(tree, box, bus, bvs, canvas);
         const bool  vert = box.stacksVertically();
+        const float axisScale = vert ? bvs : bus;
+        const float pad  = std::max(0.0f, box.getProp("Padding").f);
+        const float gap  = std::max(0.0f, box.getProp("Spacing").f) * axisScale;
 
-        UIWidgetRect inner{ b.x + pad, b.y + pad,
-                            std::max(0.0f, b.w - 2.0f * pad),
-                            std::max(0.0f, b.h - 2.0f * pad) };
+        const float padX = pad * bus, padY = pad * bvs;
+        UIWidgetRect inner{ b.x + padX, b.y + padY,
+                            std::max(0.0f, b.w - 2.0f * padX),
+                            std::max(0.0f, b.h - 2.0f * padY) };
         const float axisSpace = vert ? inner.h : inner.w;
 
         // One pass over the siblings for the totals, a second to walk to this
@@ -279,8 +292,10 @@ namespace
         {
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
             ++count;
+            // A child's own size is in the same units as the box's (they are in
+            // the same widget), so one axis factor converts both.
             if (sp->slotFill > 0.0f) fillSum += sp->slotFill;
-            else                     fixed += vert ? sp->sizeY : sp->sizeX;
+            else                     fixed += (vert ? sp->sizeY : sp->sizeX) * axisScale;
         }
         const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
         const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
@@ -290,14 +305,14 @@ namespace
         // that makes the shift readable is the ordinary clipChildren.
         float cursor = vert ? inner.y : inner.x;
         if (const auto* sb = dynamic_cast<const UIScrollBox*>(&box))
-            cursor -= sb->scrollOffset;
+            cursor -= sb->scrollOffset * axisScale;
         UIWidgetRect out{ inner.x, inner.y, inner.w, inner.h };
         for (const auto& sp : tree.elements)
         {
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
             const float extent = (sp->slotFill > 0.0f && fillSum > 0.0f)
                 ? leftover * (sp->slotFill / fillSum)
-                : (vert ? sp->sizeY : sp->sizeX);
+                : (vert ? sp->sizeY : sp->sizeX) * axisScale;
             if (sp->id == child.id)
             {
                 if (vert) { out.x = inner.x; out.w = inner.w; out.y = cursor; out.h = extent; }
@@ -307,6 +322,35 @@ namespace
             cursor += extent + gap;
         }
         return out;
+    }
+}
+
+void uiElementUnitScale(const UIWidgetTree& tree, const UIElement& e,
+                        float& outScaleX, float& outScaleY, const UIWidgetCanvas* canvas)
+{
+    outScaleX = outScaleY = 1.0f;
+    // Nearest WidgetRef above this element, if any.
+    int guard = 0;
+    const UIElement* cur = &e;
+    while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+    {
+        const UIElement* p = tree.find(cur->parentId);
+        if (!p) return;
+        if (const auto* ref = dynamic_cast<const UIWidgetRef*>(p))
+        {
+            if (ref->contentW <= 0.0f || ref->contentH <= 0.0f) return;
+            // The ref's rect is that widget's screen, and its own scale mode
+            // decides how its canvas meets it — the same call the real screen
+            // goes through. Its rect already carries any scaling from a
+            // WidgetRef further up, so this one factor is the whole story.
+            const UIWidgetRect r = uiElementRect(tree, *ref, canvas);
+            const UIWidgetCanvas sub = uiResolveCanvasFor(ref->contentW, ref->contentH,
+                                                          ref->contentMode, r.w, r.h);
+            outScaleX = sub.scaleX;
+            outScaleY = sub.scaleY;
+            return;
+        }
+        cur = p;
     }
 }
 
@@ -325,9 +369,14 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
     const float loy = parent.y + e.anchorMinY * parent.h;
     const float hiy = parent.y + e.anchorMaxY * parent.h;
 
+    // Inside an embedded widget the element's own numbers are in THAT widget's
+    // units; the anchors are fractions and need no conversion.
+    float us = 1.0f, vs = 1.0f;
+    uiElementUnitScale(tree, e, us, vs, canvas);
+
     UIWidgetRect r;
-    solveAxis(lox, hix, e.posX, e.sizeX, e.pivotX, r.x, r.w);
-    solveAxis(loy, hiy, e.posY, e.sizeY, e.pivotY, r.y, r.h);
+    solveAxis(lox, hix, e.posX * us, e.sizeX * us, e.pivotX, r.x, r.w);
+    solveAxis(loy, hiy, e.posY * vs, e.sizeY * vs, e.pivotY, r.y, r.h);
     return r;
 }
 
@@ -363,6 +412,50 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
     // wrapping text has to be measured against.
     for (auto& e : tree.elements)
         if (e) e->applyAutoSize(uiElementRect(tree, *e, canvas).w);
+
+    // Then the containers that size themselves to what is in them, INNERMOST
+    // FIRST: a box that holds a box has to be measured after the one inside it
+    // has found its own size, or it would measure last frame's.
+    std::vector<std::pair<int, UIBoxBase*>> boxes;   // (depth, box)
+    for (auto& ep : tree.elements)
+    {
+        auto* box = dynamic_cast<UIBoxBase*>(ep.get());
+        if (!box || !box->sizeToContent) continue;
+        int depth = 0, guard = 0;
+        for (const UIElement* c = box;
+             c->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1;)
+        {
+            const UIElement* p = tree.find(c->parentId);
+            if (!p) break;
+            ++depth; c = p;
+        }
+        boxes.emplace_back(depth, box);
+    }
+    std::sort(boxes.begin(), boxes.end(),
+              [](const auto& a, const auto& b){ return a.first > b.first; });
+
+    for (auto& [depth, box] : boxes)
+    {
+        const bool  vert = box->stacksVertically();
+        const float pad  = std::max(0.0f, box->padding);
+        const float gap  = std::max(0.0f, box->spacing);
+        float along = 0.0f, across = 0.0f;
+        int   count = 0;
+        for (const auto& cp : tree.elements)
+        {
+            if (!cp || cp->parentId != box->id || !cp->visible) continue;
+            ++count;
+            // A filling child's size IS the leftover this is computing, so it
+            // contributes nothing along the axis — across it still counts.
+            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY : cp->sizeX;
+            across = std::max(across, vert ? cp->sizeX : cp->sizeY);
+        }
+        if (count > 1) along += gap * static_cast<float>(count - 1);
+        const float w = (vert ? across : along) + 2.0f * pad;
+        const float h = (vert ? along : across) + 2.0f * pad;
+        box->sizeX = std::max(box->minSizeX, w);
+        box->sizeY = std::max(box->minSizeY, h);
+    }
 }
 
 bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
