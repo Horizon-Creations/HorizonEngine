@@ -165,6 +165,17 @@ HE_API void uiSetAnchorInsetsY(UIElement& e, float top, float bottom);
 // False when the element or any ancestor is invisible.
 HE_API bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e);
 
+// The opacity this element is actually drawn with: its own times every
+// ancestor's, which is what makes one value on a root panel fade a whole menu.
+HE_API float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e);
+
+// False when the element or any ancestor is disabled — inert and drawn dimmed.
+HE_API bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e);
+
+// How much a disabled element's colour is knocked back. One constant so the
+// runtime and the designer preview grey things out identically.
+inline constexpr float kUIDisabledDim = 0.55f;
+
 // The rect this element is cut off at, in canvas units: the intersection of the
 // rects of every ancestor whose clipChildren is on (an element's own flag clips
 // its CHILDREN, never itself). False = no clipping ancestor, `out` untouched.

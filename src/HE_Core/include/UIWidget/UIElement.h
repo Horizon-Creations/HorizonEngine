@@ -188,6 +188,17 @@ public:
     int     layer  = 0;
     bool    visible = true;
 
+    // Opacity of this element AND everything under it, multiplied down the
+    // chain. This is what fades a whole menu in and out: one value on the root
+    // panel instead of an animation per colour of every element in it.
+    float   renderOpacity = 1.0f;
+
+    // Off = greyed out and inert: the element (and its subtree) still draws,
+    // dimmed, but nothing in it hovers, clicks, drags or takes the keyboard.
+    // A disabled button that still reacts is the classic UI lie, so this is
+    // enforced in the hit test, not left to the widget types.
+    bool    enabled = true;
+
     // Optional node-graph material on the quad (empty = solid color). Shared
     // storage; only types with hasMaterialSlot() expose it in the editor.
     std::string material;
@@ -289,6 +300,7 @@ protected:
         dst.anchorMinX = anchorMinX; dst.anchorMinY = anchorMinY;
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
+        dst.renderOpacity = renderOpacity; dst.enabled = enabled;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;

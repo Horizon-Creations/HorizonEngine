@@ -773,6 +773,15 @@ void drawDetails(State& st, AppContext& ctx)
 	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
 	if (ImGui::Checkbox("Visible", &n->visible)) committed = true;
+	ImGui::SameLine();
+	if (ImGui::Checkbox("Enabled", &n->enabled)) committed = true;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Off = greyed out and inert, this element and everything in it.");
+	edit |= ImGui::SliderFloat("Opacity", &n->renderOpacity, 0.0f, 1.0f);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Fades this element AND its children — one value on a\n"
+		                  "root panel fades the whole menu.");
 
 	// Type-specific properties (generic, driven by properties()).
 	const std::vector<UIPropDesc> props = n->properties();
@@ -899,17 +908,25 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 
 // Draw a simplified WYSIWYG preview of one element from its generic properties.
 void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
-                        const ImVec2& mx, float s, void* texHandle = nullptr)
+                        const ImVec2& mx, float s, void* texHandle = nullptr,
+                        float alpha = 1.0f, float dim = 1.0f)
 {
+	// Every colour of the element itself goes through here: faded by the
+	// inherited opacity and knocked back while it is disabled, exactly as
+	// WidgetManager does it to the real quads.
+	const auto C = [&](const glm::vec4& c)
+	{
+		return toCol32({ c.r * dim, c.g * dim, c.b * dim, c.a * alpha });
+	};
 	switch (n.type())
 	{
 	case UIWidgetType::Panel:
 	{
 		if (texHandle)
 			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             toCol32(propColorOr(n, "Color", { 1,1,1,1 })));
+			             C(propColorOr(n, "Color", { 1,1,1,1 })));
 		else
-			dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
+			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
 		break;
 	}
 	case UIWidgetType::Image:
@@ -918,10 +935,10 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		{
 			// The picture itself, tinted the way the runtime tints it.
 			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             toCol32(propColorOr(n, "Tint", { 1,1,1,1 })));
+			             C(propColorOr(n, "Tint", { 1,1,1,1 })));
 			break;
 		}
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Tint", { 1,1,1,1 })));
+		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Tint", { 1,1,1,1 })));
 		if (n.material.empty())
 		{
 			// Placeholder crossed box so an unstyled image is visible.
@@ -941,7 +958,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		const float fs = propFloatOr(n, "FontSize", 22.0f) * s;
 		const std::string txt = propStringOr(n, "Text", "");
-		dl->AddText(nullptr, fs, mn, toCol32(propColorOr(n, "Color", { 1,1,1,1 })),
+		dl->AddText(nullptr, fs, mn, C(propColorOr(n, "Color", { 1,1,1,1 })),
 		            txt.empty() ? "(empty)" : txt.c_str());
 		break;
 	}
@@ -949,9 +966,9 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		if (texHandle)
 			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             toCol32(propColorOr(n, "Normal Color", { 1,1,1,1 })));
+			             C(propColorOr(n, "Normal Color", { 1,1,1,1 })));
 		else
-			dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
+			dl->AddRectFilled(mn, mx, C(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
 		const std::string txt = propStringOr(n, "Text", "");
 		if (!txt.empty())
@@ -960,7 +977,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, txt.c_str());
 			dl->AddText(nullptr, fs,
 				ImVec2((mn.x + mx.x - ts.x) * 0.5f, (mn.y + mx.y - ts.y) * 0.5f),
-				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), txt.c_str());
+				C(propColorOr(n, "Text Color", { 1,1,1,1 })), txt.c_str());
 		}
 		break;
 	}
@@ -969,20 +986,20 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		// Square box on the left + label to its right.
 		const float boxSz = mx.y - mn.y;
 		const ImVec2 bmx(mn.x + boxSz, mx.y);
-		dl->AddRectFilled(mn, bmx, toCol32(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
+		dl->AddRectFilled(mn, bmx, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
 		dl->AddRect(mn, bmx, IM_COL32(200,200,210,90), 3.0f * s);
 		if (propBoolOr(n, "Checked", false))
 		{
 			const float pad = boxSz * 0.22f;
 			dl->AddRectFilled(ImVec2(mn.x + pad, mn.y + pad), ImVec2(bmx.x - pad, bmx.y - pad),
-				toCol32(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })), 2.0f * s);
+				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })), 2.0f * s);
 		}
 		const std::string lbl = propStringOr(n, "Label", "");
 		if (!lbl.empty())
 		{
 			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
 			dl->AddText(nullptr, fs, ImVec2(bmx.x + 6 * s, (mn.y + mx.y - fs) * 0.5f),
-				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
+				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
 		}
 		break;
 	}
@@ -998,26 +1015,26 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const float cy = (mn.y + mx.y) * 0.5f;
 		const float trackH = std::max(2.0f, (mx.y - mn.y) * 0.28f);
 		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(mx.x, cy + trackH * 0.5f),
-			toCol32(propColorOr(n, "Track Color", { 0.20f,0.20f,0.20f,1 })), trackH * 0.5f);
+			C(propColorOr(n, "Track Color", { 0.20f,0.20f,0.20f,1 })), trackH * 0.5f);
 		const float hx = mn.x + t * (mx.x - mn.x);
 		dl->AddRectFilled(ImVec2(mn.x, cy - trackH * 0.5f), ImVec2(hx, cy + trackH * 0.5f),
-			toCol32(propColorOr(n, "Fill Color", { 0.30f,0.60f,0.90f,1 })), trackH * 0.5f);
+			C(propColorOr(n, "Fill Color", { 0.30f,0.60f,0.90f,1 })), trackH * 0.5f);
 		dl->AddCircleFilled(ImVec2(hx, cy), std::max(3.0f, (mx.y - mn.y) * 0.4f),
-			toCol32(propColorOr(n, "Handle Color", { 0.90f,0.90f,0.90f,1 })));
+			C(propColorOr(n, "Handle Color", { 0.90f,0.90f,0.90f,1 })));
 		break;
 	}
 	case UIWidgetType::ProgressBar:
 	{
 		float val = propFloatOr(n, "Value", 0.5f);
 		val = val < 0.0f ? 0.0f : (val > 1.0f ? 1.0f : val);
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
+		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
 		dl->AddRectFilled(mn, ImVec2(mn.x + val * (mx.x - mn.x), mx.y),
-			toCol32(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })), 3.0f * s);
+			C(propColorOr(n, "Fill Color", { 0.30f,0.70f,0.40f,1 })), 3.0f * s);
 		break;
 	}
 	case UIWidgetType::TextInput:
 	{
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.10f,0.10f,0.10f,1 })), 3.0f * s);
+		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.10f,0.10f,0.10f,1 })), 3.0f * s);
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
 		const std::string txt = propStringOr(n, "Text", "");
 		const bool placeholder = txt.empty();
@@ -1027,13 +1044,13 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
 			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
 				placeholder ? IM_COL32(160,160,170,140)
-				            : toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
+				            : C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
 		}
 		break;
 	}
 	case UIWidgetType::ComboBox:
 	{
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
+		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Back Color", { 0.15f,0.15f,0.15f,1 })), 3.0f * s);
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,70), 3.0f * s);
 		// Current option = Options[Selected Index].
 		std::string shown;
@@ -1044,7 +1061,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
 		if (!shown.empty())
 			dl->AddText(nullptr, fs, ImVec2(mn.x + 4 * s, (mn.y + mx.y - fs) * 0.5f),
-				toCol32(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
+				C(propColorOr(n, "Text Color", { 1,1,1,1 })), shown.c_str());
 		// Dropdown arrow.
 		const float ax = mx.x - (mx.y - mn.y) * 0.5f, ay = (mn.y + mx.y) * 0.5f;
 		const float ar = std::max(2.0f, (mx.y - mn.y) * 0.14f);
@@ -1179,7 +1196,13 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		    ctx.contentManager)
 			texHandle = AssetThumbnailCache::get(
 				ctx.contentManager->contentRoot() + "/" + it.n->texture);
-		drawElementPreview(dl, *it.n, mn, mx, s, texHandle);
+		// Inherited opacity and the disabled dim, the same two the runtime
+		// applies — a menu authored at half opacity has to LOOK half in the
+		// designer, or the slider is a number without a picture.
+		const float alpha = HE::uiElementEffectiveOpacity(st.tree, *it.n);
+		const float dim   = HE::uiElementEffectiveEnabled(st.tree, *it.n)
+			? 1.0f : HE::kUIDisabledDim;
+		drawElementPreview(dl, *it.n, mn, mx, s, texHandle, alpha, dim);
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();

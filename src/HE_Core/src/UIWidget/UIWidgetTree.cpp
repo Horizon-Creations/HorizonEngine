@@ -333,6 +333,38 @@ bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
     return p ? uiElementEffectiveVisible(tree, *p) : true;
 }
 
+float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)
+{
+    float a = std::clamp(e.renderOpacity, 0.0f, 1.0f);
+    // Iterative, not recursive: this runs per element per frame, and the guard
+    // bounds a parent chain that a hand-edited file could have made cyclic.
+    int guard = 0;
+    const UIElement* cur = &e;
+    while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+    {
+        const UIElement* p = tree.find(cur->parentId);
+        if (!p) break;
+        a *= std::clamp(p->renderOpacity, 0.0f, 1.0f);
+        cur = p;
+    }
+    return a;
+}
+
+bool uiElementEffectiveEnabled(const UIWidgetTree& tree, const UIElement& e)
+{
+    if (!e.enabled) return false;
+    int guard = 0;
+    const UIElement* cur = &e;
+    while (cur->parentId != 0 && guard++ < static_cast<int>(tree.elements.size()) + 1)
+    {
+        const UIElement* p = tree.find(cur->parentId);
+        if (!p) break;
+        if (!p->enabled) return false;
+        cur = p;
+    }
+    return true;
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // The element writer/reader comes first; the tree serializers are assembled from
 // it, so the per-element form collaboration sends (CollabDocSync) and the on-disk
@@ -369,6 +401,8 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (!e.font.empty())     o["font"]     = e.font;
     if (!e.hitTestable)      o["hitTestable"] = false;
     if (e.clipChildren)      o["clipChildren"] = true;
+    if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
+    if (!e.enabled)          o["enabled"] = false;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
     e.writeJson(o); // type-specific fields
@@ -403,8 +437,10 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->material = o.value("material", std::string());
     e->texture  = o.value("texture", std::string());
     e->font     = o.value("font", std::string());
-    e->hitTestable  = o.value("hitTestable", true);
-    e->clipChildren = o.value("clipChildren", false);
+    e->hitTestable   = o.value("hitTestable", true);
+    e->clipChildren  = o.value("clipChildren", false);
+    e->renderOpacity = o.value("renderOpacity", 1.0f);
+    e->enabled       = o.value("enabled", true);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
     e->readJson(o); // type-specific fields

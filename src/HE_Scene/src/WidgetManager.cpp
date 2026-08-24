@@ -286,6 +286,12 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				// element is a hit candidate if it's interactive OR carries a custom
 				// hover cursor (so decorative elements can drive the cursor too).
 				if (!e.hitTestable) continue;
+				// Disabled is inert, all the way down: a greyed-out button that
+				// still hovers and clicks is the classic UI lie.
+				if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
+				// Faded to nothing means gone — a menu at opacity 0 must not
+				// keep swallowing the clicks meant for what is behind it.
+				if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) continue;
 				if (!isInteractive(w, e) && e.hoverCursor == HE::UICursor::Default) continue;
 				HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
 				// A clipping ancestor cuts the hit area down with the picture:
@@ -558,6 +564,25 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 			// The element draws itself (quads + glyphs) into `out`.
 			const size_t firstQuad = out.size();
 			e.render(px, st, matId, sy, out);
+
+			// Inherited opacity and the disabled dim, applied to whatever the
+			// element emitted — same reason as the clip below: a widget type
+			// with five quads gets both right without knowing they exist.
+			// Multiplied, never assigned: an element's own colours keep their
+			// alpha, they are only faded further.
+			const float alpha = HE::uiElementEffectiveOpacity(w.tree, e);
+			const bool  usable = HE::uiElementEffectiveEnabled(w.tree, e);
+			if (alpha < 1.0f || !usable)
+			{
+				const float dim = usable ? 1.0f : HE::kUIDisabledDim;
+				for (size_t i = firstQuad; i < out.size(); ++i)
+				{
+					out[i].color.r *= dim;
+					out[i].color.g *= dim;
+					out[i].color.b *= dim;
+					out[i].color.a *= alpha;
+				}
+			}
 
 			// Every quad the element just emitted inherits the clip. Stamped
 			// here rather than passed into render(), so no widget type has to

@@ -1652,6 +1652,154 @@ TEST_CASE("WidgetManager: an element's texture path is resolved for the draw")
     CHECK(out[0].textureAssetId == HE::UUID{});
 }
 
+// ═══ Opacity + enabled ═══════════════════════════════════════════════════════
+// Fading a menu meant animating every colour in it, and a button could only be
+// "disabled" by a script remembering not to react. Both are inherited now: one
+// value on the root panel decides for the whole subtree.
+
+TEST_CASE("uiElementEffectiveOpacity: the chain multiplies, and clamps")
+{
+    HE::UIWidgetTree t;
+    const int root  = t.add(HE::UIWidgetType::Panel);
+    const int mid   = t.add(HE::UIWidgetType::Panel);
+    const int leaf  = t.add(HE::UIWidgetType::Text);
+    t.find(mid)->parentId  = root;
+    t.find(leaf)->parentId = mid;
+
+    CHECK(HE::uiElementEffectiveOpacity(t, *t.find(leaf)) == doctest::Approx(1.0f));
+    t.find(root)->renderOpacity = 0.5f;
+    t.find(mid)->renderOpacity  = 0.5f;
+    CHECK(HE::uiElementEffectiveOpacity(t, *t.find(root)) == doctest::Approx(0.5f));
+    CHECK(HE::uiElementEffectiveOpacity(t, *t.find(mid))  == doctest::Approx(0.25f));
+    CHECK(HE::uiElementEffectiveOpacity(t, *t.find(leaf)) == doctest::Approx(0.25f));
+
+    // Values outside 0..1 cannot brighten anything.
+    t.find(root)->renderOpacity = 4.0f;
+    t.find(mid)->renderOpacity  = -1.0f;
+    CHECK(HE::uiElementEffectiveOpacity(t, *t.find(leaf)) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("uiElementEffectiveEnabled: a disabled ancestor disables the subtree")
+{
+    HE::UIWidgetTree t;
+    const int root = t.add(HE::UIWidgetType::Panel);
+    const int leaf = t.add(HE::UIWidgetType::Button);
+    t.find(leaf)->parentId = root;
+
+    CHECK(HE::uiElementEffectiveEnabled(t, *t.find(leaf)));
+    t.find(root)->enabled = false;
+    CHECK_FALSE(HE::uiElementEffectiveEnabled(t, *t.find(root)));
+    CHECK_FALSE(HE::uiElementEffectiveEnabled(t, *t.find(leaf)));
+    t.find(root)->enabled = true;
+    t.find(leaf)->enabled = false;
+    CHECK(HE::uiElementEffectiveEnabled(t, *t.find(root)));   // …and only downward
+    CHECK_FALSE(HE::uiElementEffectiveEnabled(t, *t.find(leaf)));
+}
+
+TEST_CASE("WidgetManager: opacity fades the quads, disabled dims and deadens them")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 200.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int root = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(root);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 200.0f;
+      e.setProp("Color", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f })); }
+    const int btn = t.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *t.find(btn);
+      e.parentId = root;
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      e.setProp("Normal Color", HE::UIPropValue::ofColor({ 1.0f, 1.0f, 1.0f, 1.0f }));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 100.0f; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(200.0f, 200.0f, out);
+    REQUIRE(out.size() >= 2);
+    for (const UIRenderObject& o : out)
+    {
+        CHECK(o.color.a == doctest::Approx(1.0f));
+        CHECK(o.color.r == doctest::Approx(1.0f));
+    }
+    CHECK(wm.processPointer(200.0f, 200.0f, 50.0f, 50.0f, true, true));  // button answers
+
+    // Half opacity on the ROOT reaches the button's own quads: the fade is
+    // inherited, not a property of the panel that happens to be behind them.
+    t.find(root)->renderOpacity = 0.5f;
+    registerWidget(cm, t);
+    WidgetManager faded;
+    REQUIRE(faded.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    faded.extract(200.0f, 200.0f, out);
+    REQUIRE(out.size() >= 2);
+    for (const UIRenderObject& o : out)
+    {
+        CHECK(o.color.a == doctest::Approx(0.5f));
+        CHECK(o.color.r == doctest::Approx(1.0f));   // faded, not darkened
+    }
+    // Opacity alone does not stop the clicks — only 0 does.
+    CHECK(faded.processPointer(200.0f, 200.0f, 50.0f, 50.0f, true, true));
+
+    t.find(root)->renderOpacity = 0.0f;
+    registerWidget(cm, t);
+    WidgetManager gone;
+    REQUIRE(gone.createWidget(cm, "mem://w.hasset") != 0);
+    CHECK_FALSE(gone.processPointer(200.0f, 200.0f, 50.0f, 50.0f, true, true));
+
+    // Disabled on the root: dimmed instead of faded, and inert all the way down.
+    t.find(root)->renderOpacity = 1.0f;
+    t.find(root)->enabled = false;
+    registerWidget(cm, t);
+    WidgetManager off;
+    REQUIRE(off.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    off.extract(200.0f, 200.0f, out);
+    REQUIRE(out.size() >= 2);
+    for (const UIRenderObject& o : out)
+    {
+        CHECK(o.color.a == doctest::Approx(1.0f));                 // still opaque
+        CHECK(o.color.r == doctest::Approx(HE::kUIDisabledDim));   // …but knocked back
+    }
+    CHECK_FALSE(off.processPointer(200.0f, 200.0f, 50.0f, 50.0f, true, true));
+}
+
+TEST_CASE("UIElement: opacity and enabled round-trip and are scriptable")
+{
+    HE::UIWidgetTree t;
+    const int p = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& e = *t.find(p);
+    CHECK(e.enabled);
+    CHECK(e.renderOpacity == doctest::Approx(1.0f));
+    // Defaults write nothing — an existing widget saves byte-identical.
+    CHECK(HE::uiWidgetTreeToJson(t).find("renderOpacity") == std::string::npos);
+    CHECK(HE::uiWidgetTreeToJson(t).find("enabled") == std::string::npos);
+
+    e.renderOpacity = 0.25f;
+    e.enabled = false;
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(r.find(p)->renderOpacity == doctest::Approx(0.25f));
+    CHECK_FALSE(r.find(p)->enabled);
+
+    // By name, and clamped where a script hands over nonsense.
+    e.setPropAny("Render Opacity", HE::UIPropValue::ofFloat(2.0f));
+    CHECK(e.renderOpacity == doctest::Approx(1.0f));
+    e.setPropAny("Render Opacity", HE::UIPropValue::ofFloat(-3.0f));
+    CHECK(e.renderOpacity == doctest::Approx(0.0f));
+    e.setPropAny("Enabled", HE::UIPropValue::ofBool(true));
+    CHECK(e.getPropAny("Enabled").b);
+    CHECK(e.clone()->renderOpacity == doctest::Approx(0.0f));
+}
+
 // ═══ Clipping ════════════════════════════════════════════════════════════════
 // "Clip children" cuts a subtree off at the clipping element's own rect. It is
 // what a list longer than its box, a text wider than its field and eventually a
