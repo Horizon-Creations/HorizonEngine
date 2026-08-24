@@ -955,9 +955,15 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 				    it.r.y + it.r.h <= clip.y || it.r.y >= clip.y + clip.h) continue;
 			}
 
-			// The element draws itself (quads + glyphs) into `out`.
+			// The element draws itself (quads + glyphs) into `out`. The scale
+			// handed over turns one of THIS element's units into a pixel, so an
+			// embedded widget's factor belongs in it: its rect is already
+			// scaled, and a font size that is not would come out 1/factor too
+			// big — the one part of an element that is not a rectangle.
+			float eus = 1.0f, evs = 1.0f;
+			HE::uiElementUnitScale(w.tree, e, eus, evs, &canvas);
 			const size_t firstQuad = out.size();
-			e.render(px, st, matId, sy, out);
+			e.render(px, st, matId, sy * evs, out);
 
 			// Inherited opacity and the disabled dim, applied to whatever the
 			// element emitted — same reason as the clip below: a widget type

@@ -2247,6 +2247,59 @@ TEST_CASE("WidgetRef: the slot is measured in canvas units, not in pixels")
     CHECK(found);
 }
 
+TEST_CASE("WidgetRef: text inside an embedded widget scales with it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The one part of an element that is not a rectangle: a font size is
+    // authored in the widget's own units, so it has to be carried by the same
+    // factor its rect is. A checkbox in a half-size slot whose label stayed
+    // full size is exactly what this catches.
+    HE::UIWidgetTree sub;
+    sub.canvasWidth = 1000.0f; sub.canvasHeight = 1000.0f;
+    const int txt = sub.add(HE::UIWidgetType::Text);
+    { HE::UIElement& e = *sub.find(txt);
+      e.setProp("Text", HE::UIPropValue::ofString("Ay"));
+      e.setProp("FontSize", HE::UIPropValue::ofFloat(100.0f));
+      e.setProp("AutoSize", HE::UIPropValue::ofBool(false));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 200.0f; }
+    registerWidgetAs(cm, "mem://sub.hasset", sub);
+
+    // Straight up: the same tree as a page of its own, one unit = one pixel.
+    HE::UIWidgetTree direct = sub;
+    direct.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    registerWidget(cm, direct);
+    WidgetManager plain;
+    REQUIRE(plain.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> a;
+    plain.extract(1000.0f, 1000.0f, a);
+    float glyphH = 0.0f;
+    for (const UIRenderObject& o : a) if (o.type == 2) glyphH = std::max(glyphH, o.size.y);
+    REQUIRE(glyphH > 0.0f);
+
+    // Embedded into a slot half the size: every glyph must be half as tall.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 1000.0f; page.canvasHeight = 1000.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 500.0f; e.sizeY = 500.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://sub.hasset")); }
+    registerWidget(cm, page);
+    WidgetManager embedded;
+    REQUIRE(embedded.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> b;
+    embedded.extract(1000.0f, 1000.0f, b);
+    float embeddedGlyphH = 0.0f;
+    for (const UIRenderObject& o : b)
+        if (o.type == 2) embeddedGlyphH = std::max(embeddedGlyphH, o.size.y);
+    REQUIRE(embeddedGlyphH > 0.0f);
+    CHECK(embeddedGlyphH == doctest::Approx(glyphH * 0.5f).epsilon(0.02));
+}
+
 TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
 {
     TempWidgetDir dir;

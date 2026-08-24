@@ -411,7 +411,15 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas)
     // where it stretches, it is the span the parent gives it, which is what a
     // wrapping text has to be measured against.
     for (auto& e : tree.elements)
-        if (e) e->applyAutoSize(uiElementRect(tree, *e, canvas).w);
+    {
+        if (!e) continue;
+        // The width is handed over in the element's OWN units: it measures its
+        // content in those (a font size is authored there), and inside an
+        // embedded widget the resolved rect is in the host's units instead.
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, *e, us, vs, canvas);
+        e->applyAutoSize(uiElementRect(tree, *e, canvas).w / std::max(1e-4f, us));
+    }
 
     // Then the containers that size themselves to what is in them, INNERMOST
     // FIRST: a box that holds a box has to be measured after the one inside it
