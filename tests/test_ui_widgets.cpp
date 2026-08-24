@@ -2300,6 +2300,99 @@ TEST_CASE("WidgetRef: text inside an embedded widget scales with it")
     CHECK(embeddedGlyphH == doctest::Approx(glyphH * 0.5f).epsilon(0.02));
 }
 
+TEST_CASE("UICheckBox: the tick box is sized by the label, not by the element")
+{
+    HE::UICheckBox cb;
+    cb.label = "";
+    cb.fontSize = 20.0f;
+
+    // A checkbox stretched over a whole side — to place its label, say — used
+    // to grow a tick box as tall as the element, which is what a stretched
+    // anchor makes it. It stays label-sized.
+    std::vector<UIRenderObject> tall;
+    cb.render({ 0.0f, 0.0f, 400.0f, 300.0f }, {}, HE::UUID{}, 1.0f, tall);
+    REQUIRE_FALSE(tall.empty());
+    CHECK(tall[0].size.x == doctest::Approx(23.0f));   // 20 * 1.15
+    CHECK(tall[0].size.y == doctest::Approx(23.0f));
+    // …and it sits in the middle of the element rather than at its top.
+    CHECK(tall[0].position.y == doctest::Approx((300.0f - 23.0f) * 0.5f));
+
+    // A deliberately tiny one is still capped by the element.
+    std::vector<UIRenderObject> small;
+    cb.render({ 0.0f, 0.0f, 100.0f, 10.0f }, {}, HE::UUID{}, 1.0f, small);
+    REQUIRE_FALSE(small.empty());
+    CHECK(small[0].size.y == doctest::Approx(10.0f));
+
+    // The pixel scale reaches it too: at half scale the box halves with the
+    // text instead of staying put.
+    std::vector<UIRenderObject> scaled;
+    cb.render({ 0.0f, 0.0f, 400.0f, 300.0f }, {}, HE::UUID{}, 0.5f, scaled);
+    REQUIRE_FALSE(scaled.empty());
+    CHECK(scaled[0].size.x == doctest::Approx(11.5f));
+}
+
+TEST_CASE("WidgetRef: a same-size slot draws exactly what the widget draws alone")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The strongest statement there is about embedding: put a widget in a slot
+    // the size of its own canvas and every quad has to land where it lands when
+    // that widget IS the page. A checkbox anchored to the whole right side is
+    // in here on purpose — a stretched anchor is where an off-by-a-factor hides.
+    HE::UIWidgetTree sub;
+    sub.canvasWidth = 1000.0f; sub.canvasHeight = 600.0f;
+    sub.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    {
+        const int cb = sub.add(HE::UIWidgetType::CheckBox);
+        HE::UIElement& e = *sub.find(cb);
+        e.setProp("Label", HE::UIPropValue::ofString("Ay"));
+        HE::uiSetAnchorPreset(e, 14);                 // right edge, stretched down
+        HE::uiSetAnchorInsetsY(e, 280.0f, 280.0f);    // → 40 tall
+        e.pivotX = 1.0f;
+        e.posX = -20.0f; e.sizeX = 160.0f;
+        const int b = sub.add(HE::UIWidgetType::Button);
+        HE::UIElement& eb = *sub.find(b);
+        eb.setProp("Text", HE::UIPropValue::ofString("Go"));
+        HE::uiSetAnchorPreset(eb, 5);                 // centre point
+        eb.posX = 0.0f; eb.posY = 0.0f; eb.sizeX = 200.0f; eb.sizeY = 60.0f;
+    }
+    registerWidgetAs(cm, "mem://sub.hasset", sub);
+
+    // …as a page of its own.
+    registerWidget(cm, sub);
+    WidgetManager alone;
+    REQUIRE(alone.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> a;
+    alone.extract(1000.0f, 600.0f, a);
+    REQUIRE_FALSE(a.empty());
+
+    // …and embedded in a slot of exactly that size, at an offset.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 2000.0f; page.canvasHeight = 1000.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 100.0f; e.posY = 50.0f; e.sizeX = 1000.0f; e.sizeY = 600.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://sub.hasset")); }
+    registerWidget(cm, page);
+    WidgetManager embedded;
+    REQUIRE(embedded.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> b;
+    embedded.extract(2000.0f, 1000.0f, b);
+
+    REQUIRE(b.size() == a.size());
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        INFO("quad ", i);
+        CHECK(b[i].size.x == doctest::Approx(a[i].size.x));
+        CHECK(b[i].size.y == doctest::Approx(a[i].size.y));
+        CHECK(b[i].position.x == doctest::Approx(a[i].position.x + 100.0f));
+        CHECK(b[i].position.y == doctest::Approx(a[i].position.y + 50.0f));
+    }
+}
+
 TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
 {
     TempWidgetDir dir;

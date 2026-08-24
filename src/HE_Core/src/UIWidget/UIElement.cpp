@@ -531,18 +531,25 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
 void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
                         const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
 {
-    const float box = px.h;
+    // The tick box is sized by the LABEL, not by the element: it used to be a
+    // square as tall as the element, so a checkbox stretched over a whole side
+    // (to place its label, say) grew a box the size of half the screen. Capped
+    // at the element's height so a deliberately tiny one still fits, and
+    // centred in it so the box sits with the text rather than above it.
+    const float box = std::min(px.h, fontSize * pxScaleY * 1.15f);
+    const float by  = px.y + (px.h - box) * 0.5f;
     glm::vec4 bc = boxColor;
     if (st.hovered) bc = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
-    quad(out, px.x, px.y, box, box, bc, {}, roundedR(box, box, 4.0f));
+    quad(out, px.x, by, box, box, bc, {}, roundedR(box, box, 4.0f));
     if (checked)
     {
         const float inset = box * 0.22f;
         const float cb = box - 2 * inset;
-        quad(out, px.x + inset, px.y + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
+        quad(out, px.x + inset, by + inset, cb, cb, checkColor, {}, roundedR(cb, cb, 2.0f));
     }
-    const float lx = px.x + box + 8.0f;
-    emitText(*this, label, { lx, px.y }, { px.w - box - 8.0f, px.h },
+    const float gap = 0.4f * box;   // scales with the box, not a fixed 8 px
+    const float lx = px.x + box + gap;
+    emitText(*this, label, { lx, px.y }, { px.w - box - gap, px.h },
              fontSize * pxScaleY, textColor, /*centerH=*/false, out);
 }
 

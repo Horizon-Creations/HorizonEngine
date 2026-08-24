@@ -1142,24 +1142,25 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::CheckBox:
 	{
-		// Square box on the left + label to its right.
-		const float boxSz = mx.y - mn.y;
-		const ImVec2 bmx(mn.x + boxSz, mx.y);
-		dl->AddRectFilled(mn, bmx, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
-		dl->AddRect(mn, bmx, IM_COL32(200,200,210,90), 3.0f * s);
+		// Box sized by the LABEL and capped at the element's height, centred in
+		// it — the same rule UICheckBox::render uses, so the designer does not
+		// show a different checkbox than the game does.
+		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+		const float boxSz = std::min(mx.y - mn.y, fs * 1.15f);
+		const float byTop = mn.y + ((mx.y - mn.y) - boxSz) * 0.5f;
+		const ImVec2 bmn(mn.x, byTop), bmx(mn.x + boxSz, byTop + boxSz);
+		dl->AddRectFilled(bmn, bmx, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })), 3.0f * s);
+		dl->AddRect(bmn, bmx, IM_COL32(200,200,210,90), 3.0f * s);
 		if (propBoolOr(n, "Checked", false))
 		{
 			const float pad = boxSz * 0.22f;
-			dl->AddRectFilled(ImVec2(mn.x + pad, mn.y + pad), ImVec2(bmx.x - pad, bmx.y - pad),
+			dl->AddRectFilled(ImVec2(bmn.x + pad, bmn.y + pad), ImVec2(bmx.x - pad, bmx.y - pad),
 				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })), 2.0f * s);
 		}
 		const std::string lbl = propStringOr(n, "Label", "");
 		if (!lbl.empty())
-		{
-			const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
-			dl->AddText(nullptr, fs, ImVec2(bmx.x + 6 * s, (mn.y + mx.y - fs) * 0.5f),
+			dl->AddText(nullptr, fs, ImVec2(bmx.x + 0.4f * boxSz, (mn.y + mx.y - fs) * 0.5f),
 				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
-		}
 		break;
 	}
 	case UIWidgetType::Slider:
