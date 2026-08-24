@@ -315,4 +315,44 @@ public:
     { return std::make_unique<UIHorizontalBox>(*this); }
 };
 
+// ── ScrollBox ─────────────────────────────────────────────────────────────────
+// A vertical box whose content is allowed to be taller than the box: it clips
+// (that is what clipChildren is for) and shifts its children up by the current
+// offset. The offset is RUNTIME state, like a slider's value while it is being
+// dragged: it lives on the live copy the widget manager holds and is not part
+// of what the asset saves, so reopening a menu starts it at the top.
+class HE_API UIScrollBox final : public UIBoxBase
+{
+public:
+    // How far the content is scrolled, in canvas units, 0 = top. Clamped
+    // against contentExtent every frame (uiUpdateScrollExtents).
+    float scrollOffset = 0.0f;
+    // Total extent of the stacked children, filled in by the layout pass. Not
+    // serialized: it is a measurement of the content, not a setting.
+    float contentExtent = 0.0f;
+    // Width of the scrollbar drawn on the right edge; 0 hides it.
+    float barWidth = 6.0f;
+    glm::vec4 barColor{ 0.75f, 0.75f, 0.80f, 0.65f };
+
+    UIScrollBox() { sizeX = 300.0f; sizeY = 400.0f; clipChildren = true; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::ScrollBox; }
+    const char*  typeName() const override { return "ScrollBox"; }
+    bool stacksVertically() const override { return true; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIScrollBox>(*this); }
+
+    const UIPropTable& propTable() const override;
+    // The furthest it may be scrolled — 0 when everything already fits.
+    float maxScroll() const
+    {
+        const float inner = sizeY - 2.0f * padding;
+        const float over  = contentExtent - inner;
+        return over > 0.0f ? over : 0.0f;
+    }
+    void render(const UIWidgetRect& px, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>& out) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 } // namespace HE

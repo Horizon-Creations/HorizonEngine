@@ -296,9 +296,11 @@ struct AppContext
 	bool*                      playReportOpen = nullptr;
 	std::function<void(bool)> setPlayMode;
 	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
-	// viewport size + LMB state; valid=false while outside/captured.
+	// viewport size + LMB state + this frame's wheel; valid=false while
+	// outside/captured. The wheel rides along because a scroll box under the
+	// cursor has to get it before the editor camera's dolly does.
 	std::function<void(float mx, float my, float vpW, float vpH,
-	                   bool down, bool valid)> reportPlayUIPointer;
+	                   bool down, bool valid, float wheel)> reportPlayUIPointer;
 
 	// ── Scene file management ──────────────────────────────────────────────
 	// currentScenePath is empty for an unsaved/new scene. sceneDirty reflects
@@ -659,6 +661,7 @@ private:
 	float m_uiPointerX = 0.0f, m_uiPointerY = 0.0f;
 	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
 	bool  m_uiPointerDown = false, m_uiPointerValid = false;
+	float m_uiWheel = 0.0f;   // this frame's notches, consumed by the widget pass
 	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor

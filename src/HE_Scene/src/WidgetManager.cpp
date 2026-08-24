@@ -490,6 +490,56 @@ void WidgetManager::inputSubmit()
 	rt().fireOnTextCommitted(w->scriptId, w->focusedElem, ti->text);
 }
 
+bool WidgetManager::processWheel(float vpWidth, float vpHeight,
+                                 float mouseX, float mouseY, float wheel)
+{
+	if (wheel == 0.0f) return false;
+	// One notch moves this many canvas units — the same order as a text line,
+	// so a list of buttons steps rather than jumps.
+	constexpr float kUnitsPerNotch = 48.0f;
+
+	// Topmost widget first, and within it the DEEPEST scroll box under the
+	// cursor: a list inside a list scrolls the one the pointer is in.
+	std::vector<Instance*> sorted;
+	for (auto& w : m_instances) if (w.visible) sorted.push_back(&w);
+	std::stable_sort(sorted.begin(), sorted.end(),
+		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+
+	for (Instance* wp : sorted)
+	{
+		Instance& w = *wp;
+		const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w.tree, vpWidth, vpHeight);
+		HE::uiUpdateScrollExtents(w.tree);
+
+		int   best = 0;
+		int   bestDepth = -1;
+		for (const auto& ep : w.tree.elements)
+		{
+			const HE::UIElement& e = *ep;
+			if (e.type() != HE::UIWidgetType::ScrollBox) continue;
+			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
+			if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
+			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+			const float x0 = r.x * canvas.scaleX, y0 = r.y * canvas.scaleY;
+			const float x1 = (r.x + r.w) * canvas.scaleX, y1 = (r.y + r.h) * canvas.scaleY;
+			if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1) continue;
+			// Depth = how far down the tree, so the innermost box wins.
+			int depth = 0, guard = 0;
+			for (const HE::UIElement* c = &e;
+			     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
+			{
+				const HE::UIElement* p = w.tree.find(c->parentId);
+				if (!p) break;
+				++depth; c = p;
+			}
+			if (depth > bestDepth) { bestDepth = depth; best = e.id; }
+		}
+		if (best != 0 && HE::uiScrollBy(w.tree, best, -wheel * kUnitsPerNotch))
+			return true;
+	}
+	return false;
+}
+
 void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out)
 {
 	// Widgets sorted by zOrder (stable: creation order breaks ties).
@@ -515,6 +565,9 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 		// text/font change made this frame (script, HorizonCode Set Property) is
 		// already reflected in the layout below.
 		HE::uiApplyAutoSize(w.tree, &canvas);
+		// Scroll boxes measure their content after auto-size (a text that grew
+		// changes it) and before any rect is asked for.
+		HE::uiUpdateScrollExtents(w.tree);
 
 		// Draw elements of this widget, painter-ordered by (layer, depth).
 		struct Item { const HE::UIElement* e; int key; HE::UIWidgetRect r; };

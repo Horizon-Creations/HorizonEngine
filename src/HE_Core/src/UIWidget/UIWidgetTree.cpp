@@ -285,7 +285,12 @@ namespace
         const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
         const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
 
+        // A scroll box shifts its whole stack along the axis. It is the only
+        // thing that distinguishes it from a plain vertical box — the clipping
+        // that makes the shift readable is the ordinary clipChildren.
         float cursor = vert ? inner.y : inner.x;
+        if (const auto* sb = dynamic_cast<const UIScrollBox*>(&box))
+            cursor -= sb->scrollOffset;
         UIWidgetRect out{ inner.x, inner.y, inner.w, inner.h };
         for (const auto& sp : tree.elements)
         {
@@ -397,6 +402,42 @@ bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
     if (e.parentId == 0) return true;
     const UIElement* p = tree.find(e.parentId);
     return p ? uiElementEffectiveVisible(tree, *p) : true;
+}
+
+void uiUpdateScrollExtents(UIWidgetTree& tree)
+{
+    for (auto& bp : tree.elements)
+    {
+        auto* sb = dynamic_cast<UIScrollBox*>(bp.get());
+        if (!sb) continue;
+        // The stacked height of the visible children, in the same terms the
+        // slot algorithm uses: own size unless the slot fills, plus the gaps.
+        // A filling child cannot make the content taller than the box — that is
+        // what filling MEANS — so it contributes nothing to the overflow.
+        float total = 0.0f;
+        int   count = 0;
+        for (const auto& cp : tree.elements)
+        {
+            if (!cp || cp->parentId != sb->id || !cp->visible) continue;
+            ++count;
+            if (cp->slotFill <= 0.0f) total += cp->sizeY;
+        }
+        if (count > 1) total += std::max(0.0f, sb->spacing) * static_cast<float>(count - 1);
+        sb->contentExtent = total;
+        sb->scrollOffset = std::clamp(sb->scrollOffset, 0.0f, sb->maxScroll());
+    }
+}
+
+bool uiScrollBy(UIWidgetTree& tree, int id, float delta)
+{
+    auto* sb = dynamic_cast<UIScrollBox*>(tree.find(id));
+    if (!sb) return false;
+    const float maxOff = sb->maxScroll();
+    if (maxOff <= 0.0f) return false;
+    const float before = sb->scrollOffset;
+    sb->scrollOffset = std::clamp(before + delta, 0.0f, maxOff);
+    // At either end the wheel belongs to whatever is behind this box.
+    return sb->scrollOffset != before;
 }
 
 float uiElementEffectiveOpacity(const UIWidgetTree& tree, const UIElement& e)

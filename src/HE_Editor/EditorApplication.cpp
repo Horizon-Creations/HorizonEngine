@@ -2185,9 +2185,16 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
 		{
 			// Widget pointer input first — widgets draw on top of entity UI.
+			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured;
 			m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
-				m_uiPointerDown, m_uiPointerValid && !m_playMouseCaptured);
+				m_uiPointerDown, uiPointerLive);
+
+			// …and this frame's wheel, so a scroll box under the cursor gets it.
+			if (uiPointerLive && m_uiWheel != 0.0f)
+				m_editorWorld->widgets().processWheel(
+					m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY, m_uiWheel);
+			m_uiWheel = 0.0f;
 
 			// Reflect the hovered element's cursor in the PIE viewport. ImGui owns
 			// the cursor in the editor, so route through ImGui::SetMouseCursor.
@@ -4750,11 +4757,12 @@ AppContext EditorApplication::makeContext()
 		.playReportOpen      = &m_playReportOpen,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
-		                              bool down, bool valid)
+		                              bool down, bool valid, float wheel)
 		{
 			m_uiPointerX = mx; m_uiPointerY = my;
 			m_uiViewportW = vpW; m_uiViewportH = vpH;
 			m_uiPointerDown = down; m_uiPointerValid = valid;
+			m_uiWheel = wheel;
 		},
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,

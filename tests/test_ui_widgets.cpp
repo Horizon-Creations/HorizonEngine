@@ -166,6 +166,11 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
         { UIWidgetType::HorizontalBox, {
             { "Padding", UIPropType::Float },
             { "Spacing", UIPropType::Float } } },
+        { UIWidgetType::ScrollBox, {
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float },
+            { "Bar Width", UIPropType::Float },
+            { "Bar Color", UIPropType::Color } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1873,6 +1878,197 @@ TEST_CASE("WidgetManager: a box lays its children out at runtime too")
     // and nowhere near the (999, -999) its own position claims.
     CHECK(wm.processPointer(200.0f, 400.0f, 100.0f, 150.0f, true, true));
     CHECK_FALSE(wm.processPointer(200.0f, 400.0f, 100.0f, 300.0f, true, true));
+}
+
+// ═══ ScrollBox ═══════════════════════════════════════════════════════════════
+// A vertical box whose content may be taller than it is: it clips and shifts
+// the stack up by the current offset. The offset is runtime state — a menu that
+// reopens where it was last scrolled to would be a bug.
+
+namespace
+{
+    // A 200x200 scroll box at the canvas origin with `n` children of `h` each.
+    int scrollBoxWith(HE::UIWidgetTree& t, int n, float h)
+    {
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        const int box = t.add(HE::UIWidgetType::ScrollBox);
+        HE::UIElement& b = *t.find(box);
+        HE::uiSetAnchorPreset(b, 0);
+        b.pivotX = b.pivotY = 0.0f;
+        b.posX = b.posY = 0.0f; b.sizeX = 200.0f; b.sizeY = 200.0f;
+        b.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+        b.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f));
+        b.setProp("Bar Width", HE::UIPropValue::ofFloat(0.0f)); // measured separately
+        for (int i = 0; i < n; ++i)
+        {
+            const int c = t.add(HE::UIWidgetType::Panel);
+            HE::UIElement& e = *t.find(c);
+            e.parentId = box;
+            e.sizeY = h;
+        }
+        return box;
+    }
+}
+
+TEST_CASE("ScrollBox: the offset moves the stack and is clamped to the content")
+{
+    HE::UIWidgetTree t;
+    const int box = scrollBoxWith(t, 5, 100.0f);   // 500 of content in 200
+    const std::vector<int> kids = t.childrenOf(box);
+    HE::uiUpdateScrollExtents(t);
+
+    auto* sb = dynamic_cast<HE::UIScrollBox*>(t.find(box));
+    REQUIRE(sb != nullptr);
+    CHECK(sb->contentExtent == doctest::Approx(500.0f));
+    CHECK(sb->maxScroll() == doctest::Approx(300.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[0])).y == doctest::Approx(0.0f));
+
+    // Scrolling shifts every child up by the same amount.
+    CHECK(HE::uiScrollBy(t, box, 150.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[0])).y == doctest::Approx(-150.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[2])).y == doctest::Approx(50.0f));
+
+    // It stops at the end, and says so by returning false — that is how the
+    // caller knows the wheel was not consumed.
+    CHECK(HE::uiScrollBy(t, box, 1000.0f));
+    CHECK(sb->scrollOffset == doctest::Approx(300.0f));
+    CHECK_FALSE(HE::uiScrollBy(t, box, 10.0f));
+    CHECK_FALSE(HE::uiScrollBy(t, box, 0.0f));
+    // …and at the top the same.
+    CHECK(HE::uiScrollBy(t, box, -1000.0f));
+    CHECK(sb->scrollOffset == doctest::Approx(0.0f));
+    CHECK_FALSE(HE::uiScrollBy(t, box, -5.0f));
+
+    // Content that fits scrolls not at all.
+    for (size_t i = 1; i < kids.size(); ++i) t.find(kids[i])->visible = false;
+    HE::uiUpdateScrollExtents(t);
+    CHECK(sb->maxScroll() == doctest::Approx(0.0f));
+    CHECK_FALSE(HE::uiScrollBy(t, box, 50.0f));
+
+    // A box that shrank below its offset is pulled back, not left past its end.
+    for (size_t i = 1; i < kids.size(); ++i) t.find(kids[i])->visible = true;
+    HE::uiUpdateScrollExtents(t);
+    REQUIRE(HE::uiScrollBy(t, box, 300.0f));
+    t.find(kids[4])->visible = false;
+    t.find(kids[3])->visible = false;
+    HE::uiUpdateScrollExtents(t);
+    CHECK(sb->scrollOffset == doctest::Approx(100.0f));   // the new maximum
+
+    // Not a scroll box → nothing to scroll, and no crash on an unknown id.
+    CHECK_FALSE(HE::uiScrollBy(t, kids[0], 10.0f));
+    CHECK_FALSE(HE::uiScrollBy(t, 9999, 10.0f));
+}
+
+TEST_CASE("ScrollBox: it clips by default and draws a bar only when it can scroll")
+{
+    HE::UIWidgetTree t;
+    const int box = scrollBoxWith(t, 4, 100.0f);
+    auto* sb = dynamic_cast<HE::UIScrollBox*>(t.find(box));
+    REQUIRE(sb != nullptr);
+    CHECK(sb->clipChildren);              // the whole point of the type
+    CHECK(sb->laysOutChildren());
+    CHECK(sb->stacksVertically());
+
+    sb->barWidth = 8.0f;
+    std::vector<UIRenderObject> out;
+    HE::uiUpdateScrollExtents(t);
+    sb->render({ 0.0f, 0.0f, 200.0f, 200.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE(out.size() == 1);             // the thumb
+    const float topY = out[0].position.y;
+    CHECK(out[0].position.x == doctest::Approx(192.0f));   // right edge, inset by the bar
+    CHECK(out[0].size.x == doctest::Approx(8.0f));
+
+    // Scrolled to the end the thumb sits at the bottom of the track.
+    REQUIRE(HE::uiScrollBy(t, box, 1000.0f));
+    out.clear();
+    sb->render({ 0.0f, 0.0f, 200.0f, 200.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].position.y > topY);
+    CHECK(out[0].position.y + out[0].size.y == doctest::Approx(200.0f));
+
+    // Nothing to scroll → no bar at all, rather than a bar that does nothing.
+    for (int id : t.childrenOf(box)) t.find(id)->visible = false;
+    HE::uiUpdateScrollExtents(t);
+    out.clear();
+    sb->render({ 0.0f, 0.0f, 200.0f, 200.0f }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.empty());
+}
+
+TEST_CASE("ScrollBox: the offset is runtime state, the look is authored")
+{
+    HE::UIWidgetTree t;
+    const int box = scrollBoxWith(t, 4, 100.0f);
+    auto* sb = dynamic_cast<HE::UIScrollBox*>(t.find(box));
+    REQUIRE(sb != nullptr);
+    sb->barWidth = 9.0f;
+    sb->barColor = glm::vec4(0.1f, 0.2f, 0.3f, 0.4f);
+    HE::uiUpdateScrollExtents(t);
+    REQUIRE(HE::uiScrollBy(t, box, 100.0f));
+
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("scrollOffset") == std::string::npos);
+    CHECK(json.find("contentExtent") == std::string::npos);
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, r));
+    auto* rb = dynamic_cast<HE::UIScrollBox*>(r.find(box));
+    REQUIRE(rb != nullptr);
+    CHECK(rb->barWidth == doctest::Approx(9.0f));
+    CHECK(rb->barColor.b == doctest::Approx(0.3f));
+    CHECK(rb->scrollOffset == doctest::Approx(0.0f));   // reopened at the top
+}
+
+TEST_CASE("WidgetManager: the wheel scrolls the box under the cursor")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::ScrollBox);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 200.0f;
+      e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+      e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f)); }
+    for (int i = 0; i < 4; ++i)
+    {
+        const int b = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& e = *t.find(b);
+        e.parentId = box;
+        e.setProp("Text", HE::UIPropValue::ofString(""));
+        e.sizeY = 100.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    // The second button covers y 100..200 before scrolling…
+    CHECK(wm.processPointer(400.0f, 400.0f, 50.0f, 150.0f, true, true));
+    // At the top, a notch AWAY from the user (positive, "scroll up") has
+    // nowhere to go and is left for whoever else wants the wheel.
+    CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, 1.0f));
+    // Towards the user scrolls down: the content moves up by 48 units.
+    CHECK(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    // Everything the box emitted is clipped to it — including the parts that
+    // are now scrolled out of view.
+    for (const UIRenderObject& o : out)
+        if (o.clipRect.z > 0.0f)
+        {
+            CHECK(o.clipRect.w == doctest::Approx(200.0f));
+            CHECK(o.position.y >= -200.0f);
+        }
+
+    // The wheel outside the box is not consumed — it belongs to the camera.
+    CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 350.0f, 350.0f, -1.0f));
+    // Scrolled to the end, the wheel stops being consumed too.
+    for (int i = 0; i < 20; ++i) wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f);
+    CHECK_FALSE(wm.processWheel(400.0f, 400.0f, 50.0f, 150.0f, -1.0f));
 }
 
 // ═══ Opacity + enabled ═══════════════════════════════════════════════════════

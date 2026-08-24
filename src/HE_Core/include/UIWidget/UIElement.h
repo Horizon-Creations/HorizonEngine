@@ -46,6 +46,7 @@ enum class UIWidgetType : uint8_t
     // but the enum order is what every table below is indexed by.
     VerticalBox,
     HorizontalBox,
+    ScrollBox,   // a vertical box whose content may be taller than it is
     COUNT
 };
 

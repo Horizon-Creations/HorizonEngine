@@ -22,6 +22,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::ComboBox:    return std::make_unique<UIComboBox>();
         case UIWidgetType::VerticalBox:   return std::make_unique<UIVerticalBox>();
         case UIWidgetType::HorizontalBox: return std::make_unique<UIHorizontalBox>();
+        case UIWidgetType::ScrollBox:     return std::make_unique<UIScrollBox>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -32,7 +33,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Text,
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
-        UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox };
+        UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
+        UIWidgetType::ScrollBox };
     return kAll;
 }
 
@@ -47,7 +49,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
-        "VerticalBox", "HorizontalBox" };
+        "VerticalBox", "HorizontalBox", "ScrollBox" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -106,6 +108,19 @@ const UIPropTable& UIBoxBase::propTable() const
     static const UIPropTable t = {
         uiprop::slot<&UIBoxBase::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
         uiprop::slot<&UIBoxBase::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+    };
+    return t;
+}
+
+const UIPropTable& UIScrollBox::propTable() const
+{
+    // Padding and Spacing keep the names the slot algorithm reads by; the two
+    // extra rows are this type's own.
+    static const UIPropTable t = {
+        uiprop::slot<&UIScrollBox::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIScrollBox::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIScrollBox::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UIScrollBox::barColor>({ "Bar Color", UIPropType::Color }),
     };
     return t;
 }
@@ -555,6 +570,40 @@ void UIBoxBase::writeJson(nlohmann::json& j) const
 { j["padding"] = padding; j["spacing"] = spacing; }
 void UIBoxBase::readJson(const nlohmann::json& j)
 { padding = j.value("padding", padding); spacing = j.value("spacing", spacing); }
+
+// The offset and the measured content extent are runtime state: a menu that
+// reopens where it was last scrolled to is a bug, not a feature.
+void UIScrollBox::writeJson(nlohmann::json& j) const
+{ UIBoxBase::writeJson(j); j["barWidth"] = barWidth; j["barColor"] = colJson(barColor); }
+void UIScrollBox::readJson(const nlohmann::json& j)
+{
+    UIBoxBase::readJson(j);
+    barWidth = j.value("barWidth", barWidth);
+    barColor = colFrom(j.value("barColor", nlohmann::json()), barColor);
+}
+
+// The box itself draws only its scrollbar, and only while there is something to
+// scroll — a bar that is always there but sometimes does nothing is furniture.
+void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
+                         const HE::UUID&, float, std::vector<UIRenderObject>& out) const
+{
+    const float maxOff = maxScroll();
+    if (barWidth <= 0.0f || maxOff <= 0.0f || contentExtent <= 0.0f) return;
+    const float inner = std::max(1.0f, sizeY - 2.0f * padding);
+    // Screen pixels per canvas unit on this axis, so the bar is drawn in the
+    // same space as the rect handed in.
+    const float scaleY = px.h / std::max(1.0f, sizeY);
+    const float scaleX = px.w / std::max(1.0f, sizeX);
+
+    const float visibleFrac = std::min(1.0f, inner / contentExtent);
+    const float trackPx     = inner * scaleY;
+    const float thumbPx     = std::max(12.0f, trackPx * visibleFrac);
+    const float t           = maxOff > 0.0f ? (scrollOffset / maxOff) : 0.0f;
+    const float x = px.x + px.w - (barWidth + padding) * scaleX;
+    const float y = px.y + padding * scaleY + t * (trackPx - thumbPx);
+    quad(out, x, y, barWidth * scaleX, thumbPx, barColor, HE::UUID{},
+         barWidth * scaleX * 0.5f);
+}
 
 void UIImage::writeJson(nlohmann::json& j) const { j["tint"] = colJson(tint); }
 void UIImage::readJson(const nlohmann::json& j)  { tint = colFrom(j.value("tint", nlohmann::json()), tint); }

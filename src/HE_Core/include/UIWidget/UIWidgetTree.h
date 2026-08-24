@@ -188,4 +188,14 @@ HE_API bool uiElementClipRect(const UIWidgetTree& tree, const UIElement& e,
 // each frame (only text elements with AutoSize on do any work).
 HE_API void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas = nullptr);
 
+// Measure every scroll box's content and clamp its offset to what there is to
+// scroll. Run once per frame after auto-size and before the rects are used —
+// a box whose content shrank must not stay scrolled past its own end.
+HE_API void uiUpdateScrollExtents(UIWidgetTree& tree);
+
+// Scroll the box `id` by `delta` canvas units (positive = towards the end),
+// clamped. False when it is not a scroll box or there is nothing to scroll,
+// which is how a caller knows the wheel was NOT consumed.
+HE_API bool uiScrollBy(UIWidgetTree& tree, int id, float delta);
+
 } // namespace HE

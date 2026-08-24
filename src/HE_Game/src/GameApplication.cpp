@@ -764,6 +764,16 @@ void GameApplication::updateUIInput()
 	                                  mx * sx, my * sy,
 	                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
 
+	// The wheel goes to a scroll box under the cursor first; what it does not
+	// consume stays available to whatever else reads the wheel this frame.
+	if (pointerValid)
+	{
+		const float wheel = input().mouse().wheel;
+		if (wheel != 0.0f)
+			m_world->widgets().processWheel(static_cast<float>(pw), static_cast<float>(ph),
+			                                mx * sx, my * sy, wheel);
+	}
+
 	// Show the cursor the hovered widget element requested (default = arrow).
 	if (pointerValid) HE::applyUICursor(m_world->widgets().hoverCursor());
 

@@ -68,6 +68,14 @@ public:
     // Default when nothing is hovered). The app maps it to a system cursor.
     HE::UICursor hoverCursor() const { return m_hoverCursor; }
 
+    // Mouse wheel in render-target pixels: scrolls the scroll box under the
+    // pointer, innermost first (a list inside a list scrolls the one the cursor
+    // is actually in). `wheel` is in notches, positive = away from the user.
+    // Returns true when a box actually moved — false means the wheel was not
+    // consumed and the caller (a camera zoom, say) may still have it.
+    bool processWheel(float vpWidth, float vpHeight,
+                      float mouseX, float mouseY, float wheel);
+
     // Append draw quads for all visible widgets, sorted by (zOrder, layer,
     // depth). Called AFTER the entity-UI extraction, so widgets draw on top.
     void extract(float vpWidth, float vpHeight, std::vector<UIRenderObject>& out);
