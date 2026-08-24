@@ -20,6 +20,8 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::ProgressBar: return std::make_unique<UIProgressBar>();
         case UIWidgetType::TextInput:   return std::make_unique<UITextInput>();
         case UIWidgetType::ComboBox:    return std::make_unique<UIComboBox>();
+        case UIWidgetType::VerticalBox:   return std::make_unique<UIVerticalBox>();
+        case UIWidgetType::HorizontalBox: return std::make_unique<UIHorizontalBox>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -29,7 +31,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
     static const std::vector<UIWidgetType> kAll = {
         UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Text,
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
-        UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox };
+        UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+        UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox };
     return kAll;
 }
 
@@ -43,7 +46,8 @@ const char* uiWidgetTypeName(UIWidgetType t)
 {
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
-        "Slider", "ProgressBar", "TextInput", "ComboBox" };
+        "Slider", "ProgressBar", "TextInput", "ComboBox",
+        "VerticalBox", "HorizontalBox" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -93,6 +97,15 @@ const UIPropTable& UIPanel::propTable() const
 {
     static const UIPropTable t = {
         uiprop::slot<&UIPanel::color>({ "Color", UIPropType::Color }),
+    };
+    return t;
+}
+
+const UIPropTable& UIBoxBase::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIBoxBase::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UIBoxBase::spacing>({ "Spacing", UIPropType::Float, 0.0f, 200.0f }),
     };
     return t;
 }
@@ -233,6 +246,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Clip Children"){ out = UIPropValue::ofBool(e.clipChildren);       return true; }
     if (n == "Enabled")      { out = UIPropValue::ofBool(e.enabled);            return true; }
     if (n == "Render Opacity"){out = UIPropValue::ofFloat(e.renderOpacity);     return true; }
+    if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
     if (n == "Position")     { out = UIPropValue::ofVec2({ e.posX, e.posY });   return true; }
     if (n == "Size")         { out = UIPropValue::ofVec2({ e.sizeX, e.sizeY }); return true; }
     if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
@@ -250,6 +264,7 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     if (n == "Clip Children"){ e.clipChildren = v.b; return true; }
     if (n == "Enabled")      { e.enabled = v.b; return true; }
     if (n == "Render Opacity"){ e.renderOpacity = v.f < 0.0f ? 0.0f : (v.f > 1.0f ? 1.0f : v.f); return true; }
+    if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
     if (n == "Position")     { e.posX  = v.v2.x; e.posY  = v.v2.y; return true; }
     if (n == "Size")         { e.sizeX = v.v2.x; e.sizeY = v.v2.y; return true; }
     if (n == "Layer")        { e.layer = v.i; return true; }
@@ -277,6 +292,7 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Clip Children",UIPropType::Bool });
     out.push_back({ "Enabled",      UIPropType::Bool });
     out.push_back({ "Render Opacity", UIPropType::Float, 0.0f, 1.0f });
+    out.push_back({ "Slot Fill",    UIPropType::Float });
     out.push_back({ "Position",     UIPropType::Vec2 });
     out.push_back({ "Size",         UIPropType::Vec2 });
     out.push_back({ "Layer",        UIPropType::Int });
@@ -534,6 +550,11 @@ namespace
 
 void UIPanel::writeJson(nlohmann::json& j) const { j["color"] = colJson(color); }
 void UIPanel::readJson(const nlohmann::json& j)  { color = colFrom(j.value("color", nlohmann::json()), color); }
+
+void UIBoxBase::writeJson(nlohmann::json& j) const
+{ j["padding"] = padding; j["spacing"] = spacing; }
+void UIBoxBase::readJson(const nlohmann::json& j)
+{ padding = j.value("padding", padding); spacing = j.value("spacing", spacing); }
 
 void UIImage::writeJson(nlohmann::json& j) const { j["tint"] = colJson(tint); }
 void UIImage::readJson(const nlohmann::json& j)  { tint = colFrom(j.value("tint", nlohmann::json()), tint); }

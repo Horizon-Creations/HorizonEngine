@@ -273,4 +273,46 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── Layout boxes ──────────────────────────────────────────────────────────────
+// A box does not draw anything: it hands each of its direct children a slot,
+// one after the other along its axis. A child keeps its own size on that axis
+// unless its slotFill is > 0, in which case the filling children share whatever
+// space is left; across the axis every child gets the box's full inner extent.
+// Invisible children take no space at all, so hiding one closes the gap.
+class HE_API UIBoxBase : public UIElement
+{
+public:
+    float padding = 0.0f;  // inset on all four sides, canvas units
+    float spacing = 4.0f;  // gap between two children
+
+    bool laysOutChildren() const override { return true; }
+    const UIPropTable& propTable() const override;
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override {}
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
+class HE_API UIVerticalBox final : public UIBoxBase
+{
+public:
+    UIVerticalBox() { sizeX = 300.0f; sizeY = 400.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::VerticalBox; }
+    const char*  typeName() const override { return "VerticalBox"; }
+    bool stacksVertically() const override { return true; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIVerticalBox>(*this); }
+};
+
+class HE_API UIHorizontalBox final : public UIBoxBase
+{
+public:
+    UIHorizontalBox() { sizeX = 400.0f; sizeY = 60.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::HorizontalBox; }
+    const char*  typeName() const override { return "HorizontalBox"; }
+    bool stacksVertically() const override { return false; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIHorizontalBox>(*this); }
+};
+
 } // namespace HE

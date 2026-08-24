@@ -652,6 +652,37 @@ void drawDetails(State& st, AppContext& ctx)
 	// Layout — shared base fields.
 	ImGui::SeparatorText("Layout");
 
+	// A child of a layout container does not place itself: anchors, position
+	// and the size on the box's axis are the box's business. Showing the
+	// anchor grid there would be offering a control that does nothing.
+	const UIElement* layoutParent = n->parentId != 0 ? st.tree.find(n->parentId) : nullptr;
+	if (layoutParent && !layoutParent->laysOutChildren()) layoutParent = nullptr;
+	if (layoutParent)
+	{
+		const bool vert = layoutParent->stacksVertically();
+		ImGui::TextDisabled("Placed by the %s above it.", layoutParent->typeName());
+		edit |= ImGui::DragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		if (n->slotFill < 0.0f) n->slotFill = 0.0f;
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("0 = keep my own %s. Above 0 = take a share of the\n"
+			                  "space left over, split between the filling children\n"
+			                  "in proportion (two at 1 each take half).",
+			                  vert ? "height" : "width");
+		// The size across the axis is the box's; the one along it is only used
+		// while this slot does not fill.
+		if (n->slotFill <= 0.0f)
+		{
+			edit |= vert ? ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f)
+			             : ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+		}
+		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+	}
+	else
+	{
+
 	// A stretched axis is not authored as "position and size": the element has
 	// no size of its own there, it has two margins from the anchored edges. So
 	// the two fields ARE the margins on that axis, and stay position/size on
@@ -768,6 +799,7 @@ void drawDetails(State& st, AppContext& ctx)
 		                  "The last row and column stretch it across that whole\n"
 		                  "side; the bottom-right cell fills the parent entirely.\n"
 		                  "Re-anchoring keeps the element exactly where it is.");
+	} // end of the anchored (non-box-child) branch
 
 	int layer = n->layer;
 	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
@@ -952,6 +984,19 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
 				ImVec2(mn.x + 3, mn.y + 3), IM_COL32(220,220,230,140), matName.c_str());
 		}
+		break;
+	}
+	case UIWidgetType::VerticalBox:
+	case UIWidgetType::HorizontalBox:
+	{
+		// A box draws nothing at runtime; in the designer it shows its bounds
+		// and its padding, so an empty one is not an invisible thing you cannot
+		// aim at.
+		dl->AddRect(mn, mx, IM_COL32(120, 190, 255, 90));
+		const float pad = propFloatOr(n, "Padding", 0.0f) * s;
+		if (pad > 0.5f)
+			dl->AddRect(ImVec2(mn.x + pad, mn.y + pad), ImVec2(mx.x - pad, mx.y - pad),
+			            IM_COL32(120, 190, 255, 50));
 		break;
 	}
 	case UIWidgetType::Text:
@@ -1217,6 +1262,19 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 		const ImVec2 mn = toScreen(selRect.mn), mx = toScreen(selRect.mx);
 		dl->AddRect(mn, mx, IM_COL32(255, 170, 40, 255), 0, 0, 2.0f);
 
+		// A child of a layout box is placed BY the box: no anchor marker and no
+		// handles, because dragging either would be a control that does nothing.
+		const UIElement* boxParent = sel->parentId != 0 ? st.tree.find(sel->parentId) : nullptr;
+		if (boxParent && !boxParent->laysOutChildren()) boxParent = nullptr;
+		if (boxParent)
+		{
+			const Rect br = elementCanvasRect(st.tree, *boxParent, layoutCanvas);
+			const ImVec2 bmn = toScreen(br.mn), bmx = toScreen(br.mx);
+			dl->AddRect(bmn, bmx, IM_COL32(120, 190, 255, 160), 0, 0, 1.5f);
+		}
+		else
+		{
+
 		// Anchor marker inside the parent rect: a crosshair while the anchor is
 		// a point, the anchored rectangle itself once it spans a side — that
 		// outline IS the thing the element now follows when the parent resizes,
@@ -1255,6 +1313,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			                  ImVec2(hpos[i].x + hs, hpos[i].y + hs),
 			                  hov ? IM_COL32(255, 210, 120, 255) : IM_COL32(255, 170, 40, 255));
 		}
+		} // end of the freely-placed (non-box-child) branch
 	}
 
 	// ── Mouse interaction ─────────────────────────────────────────────────────
@@ -1285,10 +1344,17 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			if (hit != 0)
 			{
 				UIElement* n2 = st.tree.find(hit);
-				st.dragMode = 1;
-				st.dragStartMouse = mouse;
-				st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
-				st.dragDidEdit = false;
+				// Only elements that place themselves can be dragged: inside a
+				// layout box the position is computed, so a drag would move a
+				// number nothing reads. Re-ordering there is the hierarchy's job.
+				const UIElement* par = n2->parentId != 0 ? st.tree.find(n2->parentId) : nullptr;
+				if (!par || !par->laysOutChildren())
+				{
+					st.dragMode = 1;
+					st.dragStartMouse = mouse;
+					st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
+					st.dragDidEdit = false;
+				}
 			}
 		}
 	}

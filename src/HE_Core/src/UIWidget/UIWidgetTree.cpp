@@ -245,9 +245,75 @@ UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e,
     return a;
 }
 
+namespace
+{
+    // The slot a layout container hands one of its children.
+    //
+    // Along the box's axis every visible child takes its own size, unless its
+    // slotFill is > 0: those share what is left after the fixed ones and the
+    // gaps, in proportion. Across the axis each child gets the full inner
+    // extent. An invisible child takes no space, so hiding one closes the gap
+    // instead of leaving a hole where it used to be.
+    UIWidgetRect boxSlotRect(const UIWidgetTree& tree, const UIElement& box,
+                             const UIElement& child, const UIWidgetCanvas* canvas)
+    {
+        const UIWidgetRect b = uiElementRect(tree, box, canvas);
+        // Read through the property table rather than a cast: every container
+        // type declares these two by name, so a Grid or a scroll box added
+        // later is laid out by this same code without touching it.
+        const float pad  = std::max(0.0f, box.getProp("Padding").f);
+        const float gap  = std::max(0.0f, box.getProp("Spacing").f);
+        const bool  vert = box.stacksVertically();
+
+        UIWidgetRect inner{ b.x + pad, b.y + pad,
+                            std::max(0.0f, b.w - 2.0f * pad),
+                            std::max(0.0f, b.h - 2.0f * pad) };
+        const float axisSpace = vert ? inner.h : inner.w;
+
+        // One pass over the siblings for the totals, a second to walk to this
+        // child. The lists are short (a box holds what fits on a screen), and
+        // this keeps the layout stateless — no cached slot table to invalidate.
+        float fixed = 0.0f, fillSum = 0.0f;
+        int   count = 0;
+        for (const auto& sp : tree.elements)
+        {
+            if (!sp || sp->parentId != box.id || !sp->visible) continue;
+            ++count;
+            if (sp->slotFill > 0.0f) fillSum += sp->slotFill;
+            else                     fixed += vert ? sp->sizeY : sp->sizeX;
+        }
+        const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
+        const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
+
+        float cursor = vert ? inner.y : inner.x;
+        UIWidgetRect out{ inner.x, inner.y, inner.w, inner.h };
+        for (const auto& sp : tree.elements)
+        {
+            if (!sp || sp->parentId != box.id || !sp->visible) continue;
+            const float extent = (sp->slotFill > 0.0f && fillSum > 0.0f)
+                ? leftover * (sp->slotFill / fillSum)
+                : (vert ? sp->sizeY : sp->sizeX);
+            if (sp->id == child.id)
+            {
+                if (vert) { out.x = inner.x; out.w = inner.w; out.y = cursor; out.h = extent; }
+                else      { out.y = inner.y; out.h = inner.h; out.x = cursor; out.w = extent; }
+                break;
+            }
+            cursor += extent + gap;
+        }
+        return out;
+    }
+}
+
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
 {
+    // A child of a layout container does not place itself: the box does, and
+    // the child's own anchors and position are not consulted at all.
+    if (e.parentId != 0)
+        if (const UIElement* p = tree.find(e.parentId); p && p->laysOutChildren())
+            return boxSlotRect(tree, *p, e, canvas);
+
     const UIWidgetRect parent = parentRectOf(tree, e, canvas);
     const float lox = parent.x + e.anchorMinX * parent.w;
     const float hix = parent.x + e.anchorMaxX * parent.w;
@@ -403,6 +469,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.clipChildren)      o["clipChildren"] = true;
     if (e.renderOpacity < 1.0f) o["renderOpacity"] = e.renderOpacity;
     if (!e.enabled)          o["enabled"] = false;
+    if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
     if (e.hoverCursor != HE::UICursor::Default)
         o["hoverCursor"] = static_cast<int>(e.hoverCursor);
     e.writeJson(o); // type-specific fields
@@ -441,6 +508,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->clipChildren  = o.value("clipChildren", false);
     e->renderOpacity = o.value("renderOpacity", 1.0f);
     e->enabled       = o.value("enabled", true);
+    e->slotFill      = o.value("slotFill", 0.0f);
     e->hoverCursor = static_cast<HE::UICursor>(
         o.value("hoverCursor", static_cast<int>(HE::UICursor::Default)));
     e->readJson(o); // type-specific fields

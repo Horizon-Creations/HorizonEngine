@@ -157,6 +157,15 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Back Color", UIPropType::Color },
             { "Text Color", UIPropType::Color },
             { "Highlight Color", UIPropType::Color } } },
+        // The layout boxes share one table: the slot algorithm reads these two
+        // BY NAME (see boxSlotRect), so renaming them silently un-pads every
+        // box in every saved widget.
+        { UIWidgetType::VerticalBox, {
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float } } },
+        { UIWidgetType::HorizontalBox, {
+            { "Padding", UIPropType::Float },
+            { "Spacing", UIPropType::Float } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1650,6 +1659,220 @@ TEST_CASE("WidgetManager: an element's texture path is resolved for the draw")
     wm.extract(100.0f, 100.0f, out);
     REQUIRE(out.size() >= 1);
     CHECK(out[0].textureAssetId == HE::UUID{});
+}
+
+// ═══ Layout boxes ════════════════════════════════════════════════════════════
+// Everything used to be placed by hand: a menu of five buttons was five sets of
+// coordinates, and inserting one meant moving four. A box places its children
+// itself — they keep their own size along its axis unless they fill, and they
+// span it across.
+
+namespace
+{
+    // A vertical box at (0,0) 200x400 in a 1000x1000 canvas, plus `n` children
+    // of the given height. Returns the box id; children follow it in the tree.
+    int boxWithChildren(HE::UIWidgetTree& t, HE::UIWidgetType boxType,
+                        int n, float childExtent, float padding, float spacing)
+    {
+        t.canvasWidth = 1000.0f; t.canvasHeight = 1000.0f;
+        const int box = t.add(boxType);
+        HE::UIElement& b = *t.find(box);
+        HE::uiSetAnchorPreset(b, 0);
+        b.pivotX = b.pivotY = 0.0f;
+        b.posX = 0.0f; b.posY = 0.0f; b.sizeX = 200.0f; b.sizeY = 400.0f;
+        b.setProp("Padding", HE::UIPropValue::ofFloat(padding));
+        b.setProp("Spacing", HE::UIPropValue::ofFloat(spacing));
+        for (int i = 0; i < n; ++i)
+        {
+            const int c = t.add(HE::UIWidgetType::Panel);
+            HE::UIElement& e = *t.find(c);
+            e.parentId = box;
+            e.sizeX = e.sizeY = childExtent;
+            // Deliberately absurd anchors and position: a box child must ignore
+            // both, and this is what proves it.
+            HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+            e.posX = 999.0f; e.posY = -999.0f;
+        }
+        return box;
+    }
+}
+
+TEST_CASE("VerticalBox: children stack in order and ignore their own anchors")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f,
+                                    /*padding=*/10.0f, /*spacing=*/5.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    REQUIRE(kids.size() == 3);
+
+    for (size_t i = 0; i < kids.size(); ++i)
+    {
+        const HE::UIWidgetRect r = HE::uiElementRect(t, *t.find(kids[i]));
+        CHECK(r.x == doctest::Approx(10.0f));            // padded from the left…
+        CHECK(r.w == doctest::Approx(180.0f));           // …and spanning the rest
+        CHECK(r.h == doctest::Approx(50.0f));            // its own height
+        CHECK(r.y == doctest::Approx(10.0f + static_cast<float>(i) * 55.0f));
+    }
+
+    // Hiding one closes the gap instead of leaving a hole.
+    t.find(kids[0])->visible = false;
+    CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(10.0f));
+    CHECK(HE::uiElementRect(t, *t.find(kids[2])).y == doctest::Approx(65.0f));
+}
+
+TEST_CASE("HorizontalBox: the same, along the other axis")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::HorizontalBox, 2, 40.0f,
+                                    /*padding=*/0.0f, /*spacing=*/10.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    REQUIRE(kids.size() == 2);
+
+    const HE::UIWidgetRect a = HE::uiElementRect(t, *t.find(kids[0]));
+    const HE::UIWidgetRect b = HE::uiElementRect(t, *t.find(kids[1]));
+    CHECK(a.x == doctest::Approx(0.0f));
+    CHECK(a.w == doctest::Approx(40.0f));
+    CHECK(a.h == doctest::Approx(400.0f));   // spans the box across the axis
+    CHECK(b.x == doctest::Approx(50.0f));    // 40 + spacing
+}
+
+TEST_CASE("Layout box: filling slots share what is left over")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 100.0f,
+                                    /*padding=*/0.0f, /*spacing=*/0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    // One fixed 100, two filling 1 and 3 → 300 left, split 75 / 225.
+    t.find(kids[1])->slotFill = 1.0f;
+    t.find(kids[2])->slotFill = 3.0f;
+
+    const HE::UIWidgetRect a = HE::uiElementRect(t, *t.find(kids[0]));
+    const HE::UIWidgetRect b = HE::uiElementRect(t, *t.find(kids[1]));
+    const HE::UIWidgetRect c = HE::uiElementRect(t, *t.find(kids[2]));
+    CHECK(a.h == doctest::Approx(100.0f));
+    CHECK(b.h == doctest::Approx(75.0f));
+    CHECK(c.h == doctest::Approx(225.0f));
+    CHECK(b.y == doctest::Approx(100.0f));
+    CHECK(c.y == doctest::Approx(175.0f));
+    // Together they fill the box exactly — no rounding hole at the bottom.
+    CHECK(c.y + c.h == doctest::Approx(400.0f));
+
+    // Overfilled: the fixed children already exceed the box, so there is
+    // nothing to share and a filling slot collapses instead of going negative.
+    t.find(kids[0])->sizeY = 900.0f;
+    CHECK(HE::uiElementRect(t, *t.find(kids[1])).h == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Layout box: it follows its own anchors, and its children follow it")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 1, 50.0f, 0.0f, 0.0f);
+    // Anchor the box itself to the whole canvas: the box is placed the ordinary
+    // way, it is only its CHILDREN that give up their anchors.
+    HE::UIElement& b = *t.find(box);
+    HE::uiSetAnchorPreset(b, HE::kUIAnchorFill);
+    HE::uiSetAnchorInsetsX(b, 100.0f, 100.0f);
+    HE::uiSetAnchorInsetsY(b, 0.0f, 0.0f);
+
+    const HE::UIWidgetRect br = HE::uiElementRect(t, b);
+    CHECK(br.x == doctest::Approx(100.0f));
+    CHECK(br.w == doctest::Approx(800.0f));
+
+    const HE::UIWidgetRect kid = HE::uiElementRect(t, *t.find(t.childrenOf(box)[0]));
+    CHECK(kid.x == doctest::Approx(100.0f));
+    CHECK(kid.w == doctest::Approx(800.0f));   // rode along with the box
+}
+
+TEST_CASE("Layout box: boxes nest, and a box draws nothing itself")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    const int outer = t.add(HE::UIWidgetType::VerticalBox);
+    { HE::UIElement& e = *t.find(outer);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 400.0f;
+      e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+      e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f)); }
+    const int row = t.add(HE::UIWidgetType::HorizontalBox);
+    { HE::UIElement& e = *t.find(row);
+      e.parentId = outer; e.sizeY = 100.0f;
+      e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+      e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f)); }
+    const int cell = t.add(HE::UIWidgetType::Panel);
+    { HE::UIElement& e = *t.find(cell); e.parentId = row; e.sizeX = 60.0f; }
+
+    const HE::UIWidgetRect r = HE::uiElementRect(t, *t.find(row));
+    CHECK(r.h == doctest::Approx(100.0f));
+    CHECK(r.w == doctest::Approx(400.0f));
+    const HE::UIWidgetRect c = HE::uiElementRect(t, *t.find(cell));
+    CHECK(c.w == doctest::Approx(60.0f));
+    CHECK(c.h == doctest::Approx(100.0f));     // the row's full height
+
+    // The boxes themselves emit nothing — only the panel does.
+    std::vector<UIRenderObject> out;
+    t.find(outer)->render({ 0,0,10,10 }, {}, HE::UUID{}, 1.0f, out);
+    t.find(row)->render({ 0,0,10,10 }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.empty());
+    t.find(cell)->render({ 0,0,10,10 }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.size() == 1);
+}
+
+TEST_CASE("Layout box: the new types round-trip by name and carry their slots")
+{
+    HE::UIWidgetTree t;
+    const int v = t.add(HE::UIWidgetType::VerticalBox);
+    const int h = t.add(HE::UIWidgetType::HorizontalBox);
+    t.find(h)->parentId = v;
+    t.find(h)->slotFill = 2.5f;
+    t.find(v)->setProp("Padding", HE::UIPropValue::ofFloat(7.0f));
+    t.find(v)->setProp("Spacing", HE::UIPropValue::ofFloat(3.0f));
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    REQUIRE(r.find(v) != nullptr);
+    CHECK(r.find(v)->type() == HE::UIWidgetType::VerticalBox);
+    CHECK(r.find(h)->type() == HE::UIWidgetType::HorizontalBox);
+    CHECK(r.find(h)->slotFill == doctest::Approx(2.5f));
+    CHECK(r.find(v)->getProp("Padding").f == doctest::Approx(7.0f));
+    CHECK(r.find(v)->getProp("Spacing").f == doctest::Approx(3.0f));
+    CHECK(r.find(v)->laysOutChildren());
+    CHECK(r.find(v)->stacksVertically());
+    CHECK_FALSE(r.find(h)->stacksVertically());
+    // …and slotFill is reachable by name like every other base property.
+    r.find(h)->setPropAny("Slot Fill", HE::UIPropValue::ofFloat(-4.0f));
+    CHECK(r.find(h)->slotFill == doctest::Approx(0.0f));   // clamped, never negative
+}
+
+TEST_CASE("WidgetManager: a box lays its children out at runtime too")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 200.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int box = t.add(HE::UIWidgetType::VerticalBox);
+    { HE::UIElement& e = *t.find(box);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 400.0f;
+      e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+      e.setProp("Spacing", HE::UIPropValue::ofFloat(0.0f)); }
+    for (int i = 0; i < 2; ++i)
+    {
+        const int b = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& e = *t.find(b);
+        e.parentId = box;
+        e.setProp("Text", HE::UIPropValue::ofString(""));
+        e.sizeY = 100.0f;
+    }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    // The second button sits at y 100..200 — that is where the click lands,
+    // and nowhere near the (999, -999) its own position claims.
+    CHECK(wm.processPointer(200.0f, 400.0f, 100.0f, 150.0f, true, true));
+    CHECK_FALSE(wm.processPointer(200.0f, 400.0f, 100.0f, 300.0f, true, true));
 }
 
 // ═══ Opacity + enabled ═══════════════════════════════════════════════════════

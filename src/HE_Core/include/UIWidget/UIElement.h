@@ -39,6 +39,13 @@ enum class UIWidgetType : uint8_t
     ProgressBar, // read-only fill in [0,1]
     TextInput,   // editable single-line text field
     ComboBox,    // dropdown selection from a list
+    // ── Layout containers ────────────────────────────────────────────────────
+    // These do not draw: they PLACE their direct children, stacked along an
+    // axis, and a child of one ignores its own anchors (the box decides). New
+    // types are appended, never inserted — the on-disk form is the type NAME,
+    // but the enum order is what every table below is indexed by.
+    VerticalBox,
+    HorizontalBox,
     COUNT
 };
 
@@ -199,6 +206,13 @@ public:
     // enforced in the hit test, not left to the widget types.
     bool    enabled = true;
 
+    // Only read when the PARENT is a layout container: 0 = keep my own size on
+    // the box's axis, > 0 = take a share of whatever space is left over, split
+    // between the filling children in proportion. Ignored everywhere else, and
+    // that is deliberate — one field on the base beats a parallel "slot" object
+    // that has to be kept in step with the element list.
+    float   slotFill = 0.0f;
+
     // Optional node-graph material on the quad (empty = solid color). Shared
     // storage; only types with hasMaterialSlot() expose it in the editor.
     std::string material;
@@ -261,6 +275,13 @@ public:
     // Types that draw a quad the user may want a picture on.
     virtual bool hasTextureSlot() const { return false; }
 
+    // A layout container PLACES its direct children: they ignore their own
+    // anchors and position, and take the slot the box hands them. Returning
+    // true here is what switches uiElementRect over for every child.
+    virtual bool laysOutChildren() const { return false; }
+    // Which way a container stacks (only asked when laysOutChildren()).
+    virtual bool stacksVertically() const { return true; }
+
     // Emit draw quads for this element. `px` is the element rect in screen
     // pixels; `pxScaleY` maps canvas units → pixels for font sizing; `mat` is
     // the resolved material (nil = none). Text uses the shared UI font atlas.
@@ -301,6 +322,7 @@ protected:
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
         dst.renderOpacity = renderOpacity; dst.enabled = enabled;
+        dst.slotFill = slotFill;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
