@@ -296,6 +296,22 @@ int addElementAt(State& st, UIWidgetType type, int parentId, const ImVec2* canva
 	return st.tree.add(std::move(e));
 }
 
+// Add a WidgetRef that embeds `widgetPath`. Same placement rules as any other
+// element; the path is what turns the empty slot into that widget at runtime.
+int addWidgetRefAt(State& st, const std::string& widgetPath, int parentId,
+                   const ImVec2* canvasPt)
+{
+	const int id = addElementAt(st, UIWidgetType::WidgetRef, parentId, canvasPt);
+	if (UIElement* e = st.tree.find(id))
+	{
+		e->setProp("Widget", HE::UIPropValue::ofString(widgetPath));
+		// Named after the widget it embeds, so the hierarchy reads as a list of
+		// what is on the page rather than three rows of "WidgetRef".
+		e->name = std::filesystem::path(widgetPath).stem().string();
+	}
+	return id;
+}
+
 int duplicateSubtree(State& st, int srcId, int parentId)
 {
 	const UIElement* src = st.tree.find(srcId);
@@ -433,6 +449,13 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 			// New elements nest under Panels; otherwise share the target's parent.
 			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
 			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, nullptr);
+			structureEdit = true;
+		}
+		// …and one of the project's own widgets, embedded as a WidgetRef.
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
+		{
+			const int parent = n->type() == UIWidgetType::Panel ? nodeId : n->parentId;
+			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, nullptr);
 			structureEdit = true;
 		}
 		ImGui::EndDragDropTarget();
@@ -1502,6 +1525,19 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			st.selected = addElementAt(st, static_cast<UIWidgetType>(t), parent, &cpt);
 			commitEdit(st, ctx);
 		}
+		// One of the project's own widgets, dropped where the cursor is.
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
+		{
+			const ImVec2 cpt = toCanvas(mouse);
+			int parent = 0;
+			for (auto it = items.rbegin(); it != items.rend(); ++it)
+				if (it->n->type() == UIWidgetType::Panel &&
+				    cpt.x >= it->r.mn.x && cpt.x <= it->r.mx.x &&
+				    cpt.y >= it->r.mn.y && cpt.y <= it->r.mx.y)
+					{ parent = it->n->id; break; }
+			st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), parent, &cpt);
+			commitEdit(st, ctx);
+		}
 		ImGui::EndDragDropTarget();
 	}
 }
@@ -2503,6 +2539,50 @@ void render(AppContext& ctx, const std::string& assetPath,
 				}
 			}
 
+			// ── User Defined ─────────────────────────────────────────────────
+			// Every other widget in the project, ready to be dropped in as a
+			// WidgetRef. This one is left out: a widget that embeds itself is
+			// refused at runtime, so it is not offered here either.
+			{
+				const auto widgets = HcEditorUtil::listAssets(ctx.contentManager,
+				                                              HE::AssetType::Widget);
+				int offered = 0;
+				for (const auto& a : widgets) if (a.path != st.relPath) ++offered;
+
+				ImGui::Spacing();
+				ImGui::TextDisabled("User Defined");
+				ImGui::Separator();
+				if (offered == 0)
+					ImGui::TextDisabled("(no other widgets yet)");
+				for (const auto& a : widgets)
+				{
+					if (a.path == st.relPath) continue;   // never itself
+					ImGui::PushID(a.path.c_str());
+					const bool clicked = ImGui::Button(a.label.c_str(), ImVec2(-1.0f, 0));
+					if (ImGui::BeginDragDropSource())
+					{
+						// The path travels with the payload (including its
+						// terminator) — the drop sites turn it into a WidgetRef.
+						ImGui::SetDragDropPayload("HE_UIWIDGET_REF", a.path.c_str(),
+						                          a.path.size() + 1);
+						ImGui::TextUnformatted(a.label.c_str());
+						ImGui::EndDragDropSource();
+					}
+					if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+						ImGui::SetTooltip("%s\nEmbedded as a WidgetRef: authored once,\n"
+						                  "used here.", a.path.c_str());
+					if (clicked)
+					{
+						int parent = 0;
+						if (const UIElement* selN = st.tree.find(st.selected))
+							parent = selN->type() == UIWidgetType::Panel ? selN->id : selN->parentId;
+						st.selected = addWidgetRefAt(st, a.path, parent, nullptr);
+						commitEdit(st, ctx);
+					}
+					ImGui::PopID();
+				}
+			}
+
 			ImGui::Spacing();
 			ImGui::TextDisabled("Hierarchy");
 			ImGui::Separator();
@@ -2525,6 +2605,11 @@ void render(AppContext& ctx, const std::string& assetPath,
 				{
 					const int t = *static_cast<const int*>(p->Data);
 					st.selected = addElementAt(st, static_cast<UIWidgetType>(t), 0, nullptr);
+					commitEdit(st, ctx);
+				}
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("HE_UIWIDGET_REF"))
+				{
+					st.selected = addWidgetRefAt(st, static_cast<const char*>(p->Data), 0, nullptr);
 					commitEdit(st, ctx);
 				}
 				ImGui::EndDragDropTarget();
