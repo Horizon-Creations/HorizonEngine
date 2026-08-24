@@ -225,6 +225,10 @@ public:
     // texture node in it. A material, when set, wins: it owns the pixels.
     std::string texture;
     HE::UUID    textureAssetId{}; // transient: resolved from `texture` at runtime
+    // Source size in pixels, transient like the id above. Only 9-slicing needs
+    // it (pixel margins have to become UVs somehow), and only the runtime and
+    // the editor can know it — the element itself never loads anything.
+    uint32_t    textureW = 0, textureH = 0;
 
     // Optional Font asset (content-relative path) for this element's text; empty
     // = the shared default UI font. Resolved to fontAtlasKey at widget creation.
@@ -325,6 +329,7 @@ protected:
         dst.renderOpacity = renderOpacity; dst.enabled = enabled;
         dst.slotFill = slotFill;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
+        dst.textureW = textureW; dst.textureH = textureH;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.clipChildren = clipChildren;

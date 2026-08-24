@@ -849,6 +849,15 @@ void drawDetails(State& st, AppContext& ctx)
 				? ctx.contentManager->loadAsset(n->texture) : HE::UUID{};
 			committed = true;
 		}
+		// The source size, for the same reason the runtime resolves it: 9-slice
+		// margins are in source pixels and have to become UVs somewhere.
+		if (n->textureAssetId != HE::UUID{} && ctx.contentManager)
+		{
+			if (const TextureAsset* ta = ctx.contentManager->getTexture(n->textureAssetId))
+			{ n->textureW = ta->width; n->textureH = ta->height; }
+			if (n->textureW > 0)
+				ImGui::TextDisabled("Source %u x %u px", n->textureW, n->textureH);
+		}
 		if (!n->material.empty())
 			ImGui::TextDisabled("A material is set — it draws instead of this.");
 	}
@@ -965,9 +974,47 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	{
 		if (texHandle)
 		{
-			// The picture itself, tinted the way the runtime tints it.
-			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
-			             C(propColorOr(n, "Tint", { 1,1,1,1 })));
+			const ImU32 tint = C(propColorOr(n, "Tint", { 1,1,1,1 }));
+			// 9-sliced images are drawn as nine pieces here too, from the same
+			// margins the runtime uses — a frame that only looks right in play
+			// mode is a frame nobody can author.
+			const float sl = propFloatOr(n, "Slice Left",   0.0f);
+			const float stp= propFloatOr(n, "Slice Top",    0.0f);
+			const float sr = propFloatOr(n, "Slice Right",  0.0f);
+			const float sb = propFloatOr(n, "Slice Bottom", 0.0f);
+			const bool  sliced = n.textureW > 0 && n.textureH > 0 &&
+			                     (sl > 0.0f || stp > 0.0f || sr > 0.0f || sb > 0.0f);
+			if (!sliced)
+			{
+				dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx,
+				             ImVec2(0, 0), ImVec2(1, 1), tint);
+				break;
+			}
+			const float w = mx.x - mn.x, h = mx.y - mn.y;
+			auto fitPair = [](float a, float b, float extent, float& oa, float& ob)
+			{
+				oa = std::max(0.0f, a); ob = std::max(0.0f, b);
+				const float sum = oa + ob;
+				if (sum > extent && sum > 0.0f) { const float k = extent / sum; oa *= k; ob *= k; }
+			};
+			float l, r, t2, b2;
+			fitPair(sl * s, sr * s, w, l, r);
+			fitPair(stp * s, sb * s, h, t2, b2);
+			const float tw = static_cast<float>(n.textureW), th = static_cast<float>(n.textureH);
+			const float xs[4] = { mn.x, mn.x + l, mx.x - r, mx.x };
+			const float ys[4] = { mn.y, mn.y + t2, mx.y - b2, mx.y };
+			const float us[4] = { 0.0f, sl / tw, 1.0f - sr / tw, 1.0f };
+			const float vs[4] = { 0.0f, stp / th, 1.0f - sb / th, 1.0f };
+			const bool fillCentre = propBoolOr(n, "Slice Fill Centre", true);
+			for (int row = 0; row < 3; ++row)
+				for (int col = 0; col < 3; ++col)
+				{
+					if (row == 1 && col == 1 && !fillCentre) continue;
+					if (xs[col + 1] <= xs[col] || ys[row + 1] <= ys[row]) continue;
+					dl->AddImage(reinterpret_cast<ImTextureID>(texHandle),
+					             ImVec2(xs[col], ys[row]), ImVec2(xs[col + 1], ys[row + 1]),
+					             ImVec2(us[col], vs[row]), ImVec2(us[col + 1], vs[row + 1]), tint);
+				}
 			break;
 		}
 		dl->AddRectFilled(mn, mx, C(propColorOr(n, "Tint", { 1,1,1,1 })));

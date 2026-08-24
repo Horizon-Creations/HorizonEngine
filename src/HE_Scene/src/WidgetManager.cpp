@@ -91,6 +91,13 @@ void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
 	// the backends look up per draw) the picture is part of what the element
 	// emits, so render() needs it without a signature that knows about assets.
 	e.textureAssetId = e.texture.empty() ? HE::UUID{} : m_content->loadAsset(e.texture);
+	// …and its source size, which is what turns 9-slice margins in pixels into
+	// the UVs the quads need. Unknown (not loaded) leaves 0 and the image draws
+	// stretched rather than sliced wrongly.
+	e.textureW = e.textureH = 0;
+	if (e.textureAssetId != HE::UUID{})
+		if (const TextureAsset* ta = m_content->getTexture(e.textureAssetId))
+		{ e.textureW = ta->width; e.textureH = ta->height; }
 
 	// Font path → baked atlas key (0 = shared default font).
 	e.fontAtlasKey = 0;

@@ -36,6 +36,14 @@ class HE_API UIImage final : public UIElement
 {
 public:
     glm::vec4 tint{ 1.0f, 1.0f, 1.0f, 1.0f };
+    // ── 9-slice ──────────────────────────────────────────────────────────────
+    // Margins in SOURCE pixels. All zero (the default) draws the texture as one
+    // stretched quad. Non-zero cuts it into nine: the four corners keep their
+    // pixel size, the edges stretch along one axis and the middle along both.
+    // That is what makes one 64x64 texture a frame, a button and a panel at any
+    // size, instead of a picture that smears when the element grows.
+    float sliceLeft = 0.0f, sliceTop = 0.0f, sliceRight = 0.0f, sliceBottom = 0.0f;
+    bool  sliceFillCentre = true;   // off leaves the middle transparent (a frame)
 
     UIImage() { sizeX = 128.0f; sizeY = 128.0f; }
     UIWidgetType type() const override { return UIWidgetType::Image; }

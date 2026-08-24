@@ -111,7 +111,12 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
         { UIWidgetType::Panel, {
             { "Color", UIPropType::Color } } },
         { UIWidgetType::Image, {
-            { "Tint", UIPropType::Color } } },
+            { "Tint", UIPropType::Color },
+            { "Slice Left", UIPropType::Float },
+            { "Slice Top", UIPropType::Float },
+            { "Slice Right", UIPropType::Float },
+            { "Slice Bottom", UIPropType::Float },
+            { "Slice Fill Centre", UIPropType::Bool } } },
         { UIWidgetType::Text, {
             { "Text", UIPropType::String },
             { "FontSize", UIPropType::Float },
@@ -2398,6 +2403,120 @@ TEST_CASE("UIElement: opacity and enabled round-trip and are scriptable")
     e.setPropAny("Enabled", HE::UIPropValue::ofBool(true));
     CHECK(e.getPropAny("Enabled").b);
     CHECK(e.clone()->renderOpacity == doctest::Approx(0.0f));
+}
+
+// ═══ 9-slice ═════════════════════════════════════════════════════════════════
+// One 64x64 texture has to be able to be a frame, a button and a panel at any
+// size. Stretched as a single quad it smears; sliced, the corners keep their
+// pixel size and only what is between them grows.
+
+TEST_CASE("UIImage 9-slice: nine pieces, corners at their source size")
+{
+    HE::UIImage img;
+    img.textureAssetId = HE::UUID{ 1, 2 };
+    img.textureW = img.textureH = 64;
+    img.sliceLeft = img.sliceTop = img.sliceRight = img.sliceBottom = 16.0f;
+
+    std::vector<UIRenderObject> out;
+    img.render({ 0.0f, 0.0f, 200.0f, 100.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE(out.size() == 9);
+
+    // Top-left corner: 16x16 of destination, and the top-left quarter of the
+    // source in UVs.
+    const UIRenderObject& tl = out[0];
+    CHECK(tl.position.x == doctest::Approx(0.0f));
+    CHECK(tl.size.x == doctest::Approx(16.0f));
+    CHECK(tl.size.y == doctest::Approx(16.0f));
+    CHECK(tl.uvMin.x == doctest::Approx(0.0f));
+    CHECK(tl.uvMax.x == doctest::Approx(0.25f));
+    CHECK(tl.uvMax.y == doctest::Approx(0.25f));
+
+    // The top edge between the corners stretches on X only.
+    const UIRenderObject& top = out[1];
+    CHECK(top.position.x == doctest::Approx(16.0f));
+    CHECK(top.size.x == doctest::Approx(168.0f));   // 200 - 16 - 16
+    CHECK(top.size.y == doctest::Approx(16.0f));
+    CHECK(top.uvMin.x == doctest::Approx(0.25f));
+    CHECK(top.uvMax.x == doctest::Approx(0.75f));
+
+    // Bottom-right corner sits at the far end, still 16x16.
+    const UIRenderObject& br = out[8];
+    CHECK(br.position.x == doctest::Approx(184.0f));
+    CHECK(br.position.y == doctest::Approx(84.0f));
+    CHECK(br.size.x == doctest::Approx(16.0f));
+    CHECK(br.uvMax.x == doctest::Approx(1.0f));
+
+    // Growing the element does not grow the corners — that is the whole point.
+    out.clear();
+    img.render({ 0.0f, 0.0f, 600.0f, 400.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE(out.size() == 9);
+    CHECK(out[0].size.x == doctest::Approx(16.0f));
+    CHECK(out[8].size.x == doctest::Approx(16.0f));
+    CHECK(out[4].size.x == doctest::Approx(568.0f));   // the middle took the rest
+}
+
+TEST_CASE("UIImage 9-slice: the degenerate cases stay sane")
+{
+    HE::UIImage img;
+    img.textureAssetId = HE::UUID{ 1, 2 };
+    img.textureW = img.textureH = 64;
+    std::vector<UIRenderObject> out;
+
+    // No margins → one stretched quad, exactly as before slicing existed.
+    img.render({ 0.0f, 0.0f, 200.0f, 100.0f }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.size() == 1);
+
+    // Margins but no texture size known (not loaded yet) → still one quad.
+    out.clear();
+    img.sliceLeft = img.sliceRight = 16.0f;
+    img.textureW = img.textureH = 0;
+    img.render({ 0.0f, 0.0f, 200.0f, 100.0f }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.size() == 1);
+
+    // Margins wider than the element: they shrink together instead of
+    // overlapping into a flipped corner, and the middle collapses.
+    out.clear();
+    img.textureW = img.textureH = 64;
+    img.sliceLeft = img.sliceRight = 80.0f;   // 160 across a 100-wide element
+    img.render({ 0.0f, 0.0f, 100.0f, 40.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE_FALSE(out.empty());
+    for (const UIRenderObject& o : out)
+    {
+        CHECK(o.size.x >= 0.0f);
+        CHECK(o.size.y >= 0.0f);
+        CHECK(o.position.x >= -0.001f);
+        CHECK(o.position.x + o.size.x <= doctest::Approx(100.0f));
+    }
+
+    // A frame: the middle piece is left out.
+    out.clear();
+    img.sliceLeft = img.sliceTop = img.sliceRight = img.sliceBottom = 16.0f;
+    img.sliceFillCentre = false;
+    img.render({ 0.0f, 0.0f, 200.0f, 100.0f }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.size() == 8);
+}
+
+TEST_CASE("UIImage 9-slice: the margins round-trip, an unsliced image writes none")
+{
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Image);
+    CHECK(HE::uiWidgetTreeToJson(t).find("slice") == std::string::npos);
+
+    auto* img = dynamic_cast<HE::UIImage*>(t.find(id));
+    REQUIRE(img != nullptr);
+    img->sliceLeft = 4.0f; img->sliceTop = 5.0f;
+    img->sliceRight = 6.0f; img->sliceBottom = 7.0f;
+    img->sliceFillCentre = false;
+
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    auto* back = dynamic_cast<HE::UIImage*>(r.find(id));
+    REQUIRE(back != nullptr);
+    CHECK(back->sliceLeft == doctest::Approx(4.0f));
+    CHECK(back->sliceBottom == doctest::Approx(7.0f));
+    CHECK_FALSE(back->sliceFillCentre);
+    // The source size is transient: it is measured, not authored.
+    CHECK(back->textureW == 0);
 }
 
 // ═══ Clipping ════════════════════════════════════════════════════════════════

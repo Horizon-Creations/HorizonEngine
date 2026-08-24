@@ -129,6 +129,11 @@ const UIPropTable& UIImage::propTable() const
 {
     static const UIPropTable t = {
         uiprop::slot<&UIImage::tint>({ "Tint", UIPropType::Color }),
+        uiprop::slot<&UIImage::sliceLeft>  ({ "Slice Left",   UIPropType::Float }),
+        uiprop::slot<&UIImage::sliceTop>   ({ "Slice Top",    UIPropType::Float }),
+        uiprop::slot<&UIImage::sliceRight> ({ "Slice Right",  UIPropType::Float }),
+        uiprop::slot<&UIImage::sliceBottom>({ "Slice Bottom", UIPropType::Float }),
+        uiprop::slot<&UIImage::sliceFillCentre>({ "Slice Fill Centre", UIPropType::Bool }),
     };
     return t;
 }
@@ -401,7 +406,51 @@ void UIPanel::render(const UIWidgetRect& px, const UIElementRenderState&,
 void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
                      const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
 {
-    quad(out, px.x, px.y, px.w, px.h, tint, mat, 0.0f, textureAssetId);
+    // Plain stretch when nothing is sliced, when there is no texture to slice,
+    // or when the source size is not known yet (the runtime fills it in when it
+    // resolves the path — until then a stretched picture beats nothing).
+    const bool sliced = textureAssetId != HE::UUID{} && textureW > 0 && textureH > 0 &&
+        (sliceLeft > 0.0f || sliceTop > 0.0f || sliceRight > 0.0f || sliceBottom > 0.0f);
+    if (!sliced)
+    {
+        quad(out, px.x, px.y, px.w, px.h, tint, mat, 0.0f, textureAssetId);
+        return;
+    }
+
+    const float tw = static_cast<float>(textureW), th = static_cast<float>(textureH);
+    // Margins can be authored larger than the element is: shrink them together
+    // so the two opposite ones never overlap, which would flip a corner.
+    auto fitPair = [](float a, float b, float extent, float& outA, float& outB)
+    {
+        outA = std::max(0.0f, a); outB = std::max(0.0f, b);
+        const float sum = outA + outB;
+        if (sum > extent && sum > 0.0f)
+        {
+            const float k = extent / sum;
+            outA *= k; outB *= k;
+        }
+    };
+    float l, r, t, b;
+    fitPair(sliceLeft, sliceRight,  px.w, l, r);
+    fitPair(sliceTop,  sliceBottom, px.h, t, b);
+
+    // Column and row edges, in destination pixels and in source UVs. The
+    // corners keep their pixel size; what is between them takes the rest.
+    const float xs[4]  = { px.x, px.x + l, px.x + px.w - r, px.x + px.w };
+    const float ys[4]  = { px.y, px.y + t, px.y + px.h - b, px.y + px.h };
+    const float us[4]  = { 0.0f, sliceLeft / tw, 1.0f - sliceRight / tw, 1.0f };
+    const float vs[4]  = { 0.0f, sliceTop / th,  1.0f - sliceBottom / th, 1.0f };
+
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+        {
+            if (row == 1 && col == 1 && !sliceFillCentre) continue;
+            const float w = xs[col + 1] - xs[col];
+            const float h = ys[row + 1] - ys[row];
+            if (w <= 0.0f || h <= 0.0f) continue;   // a margin ate this piece
+            quad(out, xs[col], ys[row], w, h, tint, mat, 0.0f, textureAssetId,
+                 { us[col], vs[row] }, { us[col + 1], vs[row + 1] });
+        }
 }
 
 // ── Text ─────────────────────────────────────────────────────────────────────
@@ -605,8 +654,27 @@ void UIScrollBox::render(const UIWidgetRect& px, const UIElementRenderState&,
          barWidth * scaleX * 0.5f);
 }
 
-void UIImage::writeJson(nlohmann::json& j) const { j["tint"] = colJson(tint); }
-void UIImage::readJson(const nlohmann::json& j)  { tint = colFrom(j.value("tint", nlohmann::json()), tint); }
+void UIImage::writeJson(nlohmann::json& j) const
+{
+    j["tint"] = colJson(tint);
+    // Only written once sliced, so an image authored before 9-slice existed
+    // saves byte-identical.
+    if (sliceLeft > 0.0f || sliceTop > 0.0f || sliceRight > 0.0f || sliceBottom > 0.0f)
+    {
+        j["slice"] = { sliceLeft, sliceTop, sliceRight, sliceBottom };
+        j["sliceFillCentre"] = sliceFillCentre;
+    }
+}
+void UIImage::readJson(const nlohmann::json& j)
+{
+    tint = colFrom(j.value("tint", nlohmann::json()), tint);
+    if (const auto& s = j.value("slice", nlohmann::json::array()); s.size() >= 4)
+    {
+        sliceLeft   = s[0].get<float>(); sliceTop    = s[1].get<float>();
+        sliceRight  = s[2].get<float>(); sliceBottom = s[3].get<float>();
+    }
+    sliceFillCentre = j.value("sliceFillCentre", sliceFillCentre);
+}
 
 void UIText::writeJson(nlohmann::json& j) const
 { j["text"] = text; j["fontSize"] = fontSize; j["color"] = colJson(color);
