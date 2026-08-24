@@ -122,6 +122,10 @@ private:
     HeSaveServices               m_saveServices{};
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
+    // Last frame's UI-navigation buttons (bits: up/down/left/right/activate).
+    // The input layer reports held state, and a held Down must step one entry
+    // rather than run through the whole menu — so the edges are kept here.
+    uint8_t m_uiNavPrev = 0;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)

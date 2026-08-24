@@ -1880,6 +1880,187 @@ TEST_CASE("WidgetManager: a box lays its children out at runtime too")
     CHECK_FALSE(wm.processPointer(200.0f, 400.0f, 100.0f, 300.0f, true, true));
 }
 
+// ═══ Keyboard / gamepad navigation ═══════════════════════════════════════════
+// A menu has to be usable without a mouse. The focus moves SPATIALLY — the
+// nearest interactive element in the pressed direction — so a grid of buttons
+// navigates the way it looks instead of in the order it was authored in.
+
+namespace
+{
+    // Four buttons at the corners of a 400x400 canvas, ids returned in the
+    // order top-left, top-right, bottom-left, bottom-right.
+    std::array<int, 4> cornerButtons(HE::UIWidgetTree& t)
+    {
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        const float xs[4] = { 20.0f, 250.0f, 20.0f, 250.0f };
+        const float ys[4] = { 20.0f,  20.0f, 250.0f, 250.0f };
+        std::array<int, 4> ids{};
+        for (int i = 0; i < 4; ++i)
+        {
+            const int b = t.add(HE::UIWidgetType::Button);
+            HE::UIElement& e = *t.find(b);
+            e.setProp("Text", HE::UIPropValue::ofString(""));
+            HE::uiSetAnchorPreset(e, 0);
+            e.pivotX = e.pivotY = 0.0f;
+            e.posX = xs[i]; e.posY = ys[i];
+            e.sizeX = 120.0f; e.sizeY = 60.0f;
+            ids[i] = b;
+        }
+        return ids;
+    }
+}
+
+TEST_CASE("Navigation: the focus goes where the direction points")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const std::array<int, 4> b = cornerButtons(t);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    using Nav = WidgetManager::NavDir;
+
+    // Nothing focused yet: the first press takes the top-left one.
+    CHECK(wm.focusedElement() == 0);
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[0]);
+
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[1]);
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[3]);
+    CHECK(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[2]);
+    CHECK(wm.navigate(Nav::Up, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[0]);
+
+    // At the edge there is nothing in that direction: the key is NOT consumed,
+    // which is how a caller knows it may still act on it.
+    CHECK_FALSE(wm.navigate(Nav::Up, 400.0f, 400.0f));
+    CHECK_FALSE(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[0]);
+}
+
+TEST_CASE("Navigation: disabled, hidden and clipped-away elements are skipped")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const std::array<int, 4> b = cornerButtons(t);
+    // The one to the right is disabled; the far one below it is hidden.
+    t.find(b[1])->enabled = false;
+    t.find(b[3])->visible = false;
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    using Nav = WidgetManager::NavDir;
+
+    REQUIRE(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[0]);
+    // Right is disabled → nothing to go to.
+    CHECK_FALSE(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    // Down still works: b[2] is neither disabled nor hidden.
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == b[2]);
+    // …and from there, right would be the hidden one.
+    CHECK_FALSE(wm.navigate(Nav::Right, 400.0f, 400.0f));
+}
+
+TEST_CASE("Navigation: activating does what a click does")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int cb = t.add(HE::UIWidgetType::CheckBox);
+    { HE::UIElement& e = *t.find(cb);
+      e.setProp("Label", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 40.0f; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    // Nothing focused → nothing happens.
+    CHECK_FALSE(wm.activateFocused());
+    REQUIRE(wm.navigate(WidgetManager::NavDir::Down, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == cb);
+    // The checkbox toggles, exactly as a click would toggle it.
+    CHECK(wm.activateFocused());
+    CHECK(wm.activateFocused());
+}
+
+TEST_CASE("Navigation: left and right step a focused slider instead of leaving it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int sl = t.add(HE::UIWidgetType::Slider);
+    { HE::UIElement& e = *t.find(sl);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 30.0f;
+      e.setProp("Value", HE::UIPropValue::ofFloat(0.5f)); }
+    const int btn = t.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *t.find(btn);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 250.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 30.0f; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    using Nav = WidgetManager::NavDir;
+    REQUIRE(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    REQUIRE(wm.focusedElement() == sl);
+
+    // Right steps the value and keeps the focus — the button next to it does
+    // NOT steal it, which is the whole point.
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == sl);
+    for (int i = 0; i < 40; ++i) wm.navigate(Nav::Right, 400.0f, 400.0f);
+    // At the maximum the key stops being consumed.
+    CHECK_FALSE(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK(wm.focusedElement() == sl);
+}
+
+TEST_CASE("Navigation: the focused element gets a ring drawn around it")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    const std::array<int, 4> b = cornerButtons(t);
+    (void)b;
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    std::vector<UIRenderObject> before;
+    wm.extract(400.0f, 400.0f, before);
+    REQUIRE(wm.navigate(WidgetManager::NavDir::Down, 400.0f, 400.0f));
+    std::vector<UIRenderObject> after;
+    wm.extract(400.0f, 400.0f, after);
+    // Four hairlines more than before — one per edge.
+    CHECK(after.size() == before.size() + 4);
+
+    // Clearing the focus takes them away again.
+    CHECK(wm.setFocus(1, 0));
+    std::vector<UIRenderObject> cleared;
+    wm.extract(400.0f, 400.0f, cleared);
+    CHECK(cleared.size() == before.size());
+    CHECK(wm.focusedElement() == 0);
+}
+
 // ═══ ScrollBox ═══════════════════════════════════════════════════════════════
 // A vertical box whose content may be taller than it is: it clips and shifts
 // the stack up by the current offset. The offset is runtime state — a menu that

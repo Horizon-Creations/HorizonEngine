@@ -777,6 +777,42 @@ void GameApplication::updateUIInput()
 	// Show the cursor the hovered widget element requested (default = arrow).
 	if (pointerValid) HE::applyUICursor(m_world->widgets().hoverCursor());
 
+	// ── Keyboard / gamepad menu navigation ───────────────────────────────────
+	// A menu has to be usable without a mouse. Arrow keys and the pad's D-Pad
+	// move the focus, Enter/Space and the south button activate it. Not routed
+	// while a text field has the keyboard: there the arrows belong to the text.
+	if (!m_world->widgets().hasFocusedTextField())
+	{
+		Input& in = input();
+		using Nav = WidgetManager::NavDir;
+		// Held state only reaches here, so the edges are tracked in m_uiNavPrev:
+		// holding Down must step ONE entry, not run through the whole menu.
+		const struct { Nav dir; SDL_Scancode key; SDL_GamepadButton pad; } kNav[] = {
+			{ Nav::Up,    SDL_SCANCODE_UP,    SDL_GAMEPAD_BUTTON_DPAD_UP    },
+			{ Nav::Down,  SDL_SCANCODE_DOWN,  SDL_GAMEPAD_BUTTON_DPAD_DOWN  },
+			{ Nav::Left,  SDL_SCANCODE_LEFT,  SDL_GAMEPAD_BUTTON_DPAD_LEFT  },
+			{ Nav::Right, SDL_SCANCODE_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+		};
+		uint8_t now = 0;
+		for (int i = 0; i < 4; ++i)
+			if (in.IsKeyDown(kNav[i].key) || in.isGamepadButtonDown(kNav[i].pad))
+				now |= static_cast<uint8_t>(1u << i);
+		if (in.IsKeyDown(SDL_SCANCODE_RETURN) || in.IsKeyDown(SDL_SCANCODE_SPACE) ||
+		    in.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
+			now |= 1u << 4;
+
+		const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+		m_uiNavPrev = now;
+		for (int i = 0; i < 4; ++i)
+			if (edges & (1u << i))
+			{
+				m_world->widgets().navigate(kNav[i].dir, static_cast<float>(pw),
+				                            static_cast<float>(ph));
+				break;
+			}
+		if (edges & (1u << 4)) m_world->widgets().activateFocused();
+	}
+
 	std::vector<UIInputSystem::PointerEvent> events;
 	UIInputSystem::update(*m_world, m_uiInput,
 	                      static_cast<float>(pw), static_cast<float>(ph),

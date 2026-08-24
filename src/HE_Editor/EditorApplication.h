@@ -662,6 +662,9 @@ private:
 	float m_uiViewportW = 0.0f, m_uiViewportH = 0.0f;
 	bool  m_uiPointerDown = false, m_uiPointerValid = false;
 	float m_uiWheel = 0.0f;   // this frame's notches, consumed by the widget pass
+	// Last frame's UI-navigation buttons (bits: up/down/left/right/activate) —
+	// the input layer reports held state, and holding Down must step one entry.
+	std::uint8_t m_uiNavPrev = 0;
 	bool  m_widgetTextInputActive = false; // SDL text input toggled for a focused widget field
 
 	// Play-in-editor

@@ -68,6 +68,26 @@ public:
     // Default when nothing is hovered). The app maps it to a system cursor.
     HE::UICursor hoverCursor() const { return m_hoverCursor; }
 
+    // ── Keyboard / gamepad navigation ────────────────────────────────────────
+    // A menu has to be usable without a mouse. The focus moves SPATIALLY: from
+    // the focused element towards the given direction, the nearest interactive
+    // element in that direction wins, so a grid of buttons navigates the way it
+    // looks rather than in tree order. With nothing focused yet, the first
+    // direction press takes the topmost candidate.
+    enum class NavDir { Up, Down, Left, Right };
+    // True when the focus moved (or a focused slider took the step) — false
+    // means nothing here wanted the key and the caller may still have it.
+    bool navigate(NavDir dir, float vpWidth, float vpHeight);
+    // Fire what a click would fire on the focused element: a button clicks, a
+    // checkbox toggles, a combo advances. False when nothing is focused.
+    bool activateFocused();
+    // The focused element of the focused widget (0 = none). The focus ring is
+    // drawn around it in extract().
+    int  focusedElement() const;
+    // Move the focus by hand (0 = clear it), e.g. when a menu opens and wants
+    // its first button focused. False when the id is not focusable.
+    bool setFocus(int widgetId, int elementId);
+
     // Mouse wheel in render-target pixels: scrolls the scroll box under the
     // pointer, innermost first (a list inside a list scrolls the one the cursor
     // is actually in). `wheel` is in notches, positive = away from the user.
@@ -102,7 +122,9 @@ private:
         // Transient interaction state (element ids; 0 = none).
         int hoveredElem   = 0;
         int pressedElem   = 0;
-        int focusedElem   = 0;     // focused TextInput
+        // The focused element: a TextInput taking keys, or whatever the
+        // keyboard/gamepad navigation last landed on.
+        int focusedElem   = 0;
         int draggingSlider = 0;    // slider being dragged
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
@@ -125,6 +147,15 @@ private:
     // bound by a pointer-event Event node (an Event with elem 0 makes every
     // element hot).
     bool isInteractive(const Instance& w, const HE::UIElement& e) const;
+
+    // Fire what a click fires: button → OnClicked/OnReleased, checkbox toggles,
+    // combo advances. Shared by the pointer release and by activateFocused(),
+    // so a gamepad and a mouse cannot end up doing different things.
+    void activateElement(Instance& w, int elemId);
+    // Can the keyboard/gamepad focus land here? Interactive, enabled, visible,
+    // and not clipped entirely out of sight.
+    bool isFocusable(const Instance& w, const HE::UIElement& e,
+                     const HE::UIWidgetCanvas& canvas) const;
 
     // Re-resolve one element's Material/Font path to its runtime state (material
     // UUID in w.materials, baked fontAtlasKey) — the same resolution createWidget

@@ -2196,6 +2196,38 @@ void EditorApplication::OnRender(float dt)
 					m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY, m_uiWheel);
 			m_uiWheel = 0.0f;
 
+			// Keyboard / gamepad menu navigation, the same grammar the packaged
+			// game uses: arrows or D-Pad move the focus, Enter/Space or the
+			// south button activate. Held state only, so the edges live here —
+			// and a focused text field keeps the arrows for its own text.
+			if (!m_editorWorld->widgets().hasFocusedTextField())
+			{
+				using Nav = WidgetManager::NavDir;
+				const struct { Nav dir; SDL_Scancode key; SDL_GamepadButton pad; } kNav[] = {
+					{ Nav::Up,    SDL_SCANCODE_UP,    SDL_GAMEPAD_BUTTON_DPAD_UP    },
+					{ Nav::Down,  SDL_SCANCODE_DOWN,  SDL_GAMEPAD_BUTTON_DPAD_DOWN  },
+					{ Nav::Left,  SDL_SCANCODE_LEFT,  SDL_GAMEPAD_BUTTON_DPAD_LEFT  },
+					{ Nav::Right, SDL_SCANCODE_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT },
+				};
+				uint8_t now = 0;
+				for (int i = 0; i < 4; ++i)
+					if (input().IsKeyDown(kNav[i].key) || input().isGamepadButtonDown(kNav[i].pad))
+						now |= static_cast<uint8_t>(1u << i);
+				if (input().IsKeyDown(SDL_SCANCODE_RETURN) ||
+				    input().IsKeyDown(SDL_SCANCODE_SPACE) ||
+				    input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
+					now |= 1u << 4;
+				const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+				m_uiNavPrev = now;
+				for (int i = 0; i < 4; ++i)
+					if (edges & (1u << i))
+					{
+						m_editorWorld->widgets().navigate(kNav[i].dir, m_uiViewportW, m_uiViewportH);
+						break;
+					}
+				if (edges & (1u << 4)) m_editorWorld->widgets().activateFocused();
+			}
+
 			// Reflect the hovered element's cursor in the PIE viewport. ImGui owns
 			// the cursor in the editor, so route through ImGui::SetMouseCursor.
 			if (m_uiPointerValid && !m_playMouseCaptured)

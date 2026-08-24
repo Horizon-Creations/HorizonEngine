@@ -412,40 +412,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		// ── Release ──────────────────────────────────────────────────────────
 		if (releaseEdge)
 		{
-			const bool sameHit = w.pressedElem != 0 && w.pressedElem == hot;
-			if (sameHit)
-			{
-				HE::UIElement* e = w.tree.find(hot);
-				switch (e ? e->type() : HE::UIWidgetType::COUNT)
-				{
-				case HE::UIWidgetType::Button:
-					fireP(&HorizonCode::Runtime::fireOnClicked, hot);
-					fireP(&HorizonCode::Runtime::fireOnReleased, hot);
-					break;
-				case HE::UIWidgetType::Panel:
-				case HE::UIWidgetType::Image:
-					fireP(&HorizonCode::Runtime::fireOnClicked, hot);
-					break;
-				case HE::UIWidgetType::CheckBox:
-					if (auto* cb = dynamic_cast<HE::UICheckBox*>(e))
-					{
-						cb->checked = !cb->checked;
-						rt().fireOnCheckChanged(w.scriptId, hot, cb->checked);
-					}
-					break;
-				case HE::UIWidgetType::ComboBox:
-					if (auto* combo = dynamic_cast<HE::UIComboBox*>(e))
-						if (!combo->options.empty())
-						{
-							combo->selectedIndex =
-								(combo->selectedIndex + 1) % (int)combo->options.size();
-							rt().fireOnSelectionChanged(w.scriptId, hot, combo->selectedIndex);
-						}
-					break;
-				default:
-					break;
-				}
-			}
+			if (w.pressedElem != 0 && w.pressedElem == hot)
+				activateElement(w, hot);
 			w.pressedElem    = 0;
 			w.draggingSlider = 0;
 		}
@@ -488,6 +456,191 @@ void WidgetManager::inputSubmit()
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
 	rt().fireOnTextCommitted(w->scriptId, w->focusedElem, ti->text);
+}
+
+void WidgetManager::activateElement(Instance& w, int elemId)
+{
+	HE::UIElement* e = w.tree.find(elemId);
+	if (!e) return;
+	auto fireP = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int))
+	{ (rt().*fn)(w.scriptId, elemId); };
+
+	switch (e->type())
+	{
+	case HE::UIWidgetType::Button:
+		fireP(&HorizonCode::Runtime::fireOnClicked);
+		fireP(&HorizonCode::Runtime::fireOnReleased);
+		break;
+	case HE::UIWidgetType::Panel:
+	case HE::UIWidgetType::Image:
+		fireP(&HorizonCode::Runtime::fireOnClicked);
+		break;
+	case HE::UIWidgetType::CheckBox:
+		if (auto* cb = dynamic_cast<HE::UICheckBox*>(e))
+		{
+			cb->checked = !cb->checked;
+			rt().fireOnCheckChanged(w.scriptId, elemId, cb->checked);
+		}
+		break;
+	case HE::UIWidgetType::ComboBox:
+		if (auto* combo = dynamic_cast<HE::UIComboBox*>(e))
+			if (!combo->options.empty())
+			{
+				combo->selectedIndex =
+					(combo->selectedIndex + 1) % (int)combo->options.size();
+				rt().fireOnSelectionChanged(w.scriptId, elemId, combo->selectedIndex);
+			}
+		break;
+	default:
+		break;
+	}
+}
+
+bool WidgetManager::isFocusable(const Instance& w, const HE::UIElement& e,
+                                const HE::UIWidgetCanvas& canvas) const
+{
+	if (!isInteractive(w, e)) return false;
+	if (!HE::uiElementEffectiveVisible(w.tree, e)) return false;
+	if (!HE::uiElementEffectiveEnabled(w.tree, e)) return false;
+	if (HE::uiElementEffectiveOpacity(w.tree, e) <= 0.001f) return false;
+	// Scrolled out of its own list, say: not on screen, so not reachable.
+	HE::UIWidgetRect clip{};
+	if (HE::uiElementClipRect(w.tree, e, clip, &canvas))
+	{
+		const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
+		if (r.x + r.w <= clip.x || r.x >= clip.x + clip.w ||
+		    r.y + r.h <= clip.y || r.y >= clip.y + clip.h) return false;
+	}
+	return true;
+}
+
+int WidgetManager::focusedElement() const
+{
+	const Instance* w = find(m_focusWidget);
+	return w ? w->focusedElem : 0;
+}
+
+bool WidgetManager::setFocus(int widgetId, int elementId)
+{
+	Instance* w = find(widgetId);
+	if (!w) return false;
+	if (elementId == 0)
+	{
+		if (w->focusedElem != 0)
+			rt().fireOnUnfocused(w->scriptId, w->focusedElem);
+		w->focusedElem = 0;
+		if (m_focusWidget == widgetId) m_focusWidget = 0;
+		return true;
+	}
+	const HE::UIElement* e = w->tree.find(elementId);
+	if (!e) return false;
+	if (w->focusedElem == elementId) return true;
+	if (w->focusedElem != 0) rt().fireOnUnfocused(w->scriptId, w->focusedElem);
+	w->focusedElem = elementId;
+	m_focusWidget  = widgetId;
+	rt().fireOnFocused(w->scriptId, elementId);
+	return true;
+}
+
+bool WidgetManager::activateFocused()
+{
+	Instance* w = find(m_focusWidget);
+	if (!w || w->focusedElem == 0) return false;
+	// A focused element that has since been disabled or hidden does nothing —
+	// the same rule the pointer obeys.
+	const HE::UIElement* e = w->tree.find(w->focusedElem);
+	if (!e || !HE::uiElementEffectiveEnabled(w->tree, *e) ||
+	    !HE::uiElementEffectiveVisible(w->tree, *e)) return false;
+	activateElement(*w, w->focusedElem);
+	return true;
+}
+
+bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
+{
+	// The widget the focus is in, else the topmost visible one that has
+	// anything focusable at all.
+	Instance* w = find(m_focusWidget);
+	if (!w || !w->visible)
+	{
+		std::vector<Instance*> sorted;
+		for (auto& inst : m_instances) if (inst.visible) sorted.push_back(&inst);
+		std::stable_sort(sorted.begin(), sorted.end(),
+			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		w = sorted.empty() ? nullptr : sorted.front();
+		if (!w) return false;
+	}
+	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(w->tree, vpWidth, vpHeight);
+
+	// A focused slider takes left/right as a value step instead of handing the
+	// focus on — that is what those keys mean while a slider has the focus.
+	if (w->focusedElem != 0 && (dir == NavDir::Left || dir == NavDir::Right))
+		if (auto* s = dynamic_cast<HE::UISlider*>(w->tree.find(w->focusedElem)))
+		{
+			const float span = s->maxValue - s->minValue;
+			if (span > 0.0f)
+			{
+				const float step = span * 0.05f;
+				const float nv = std::clamp(s->value + (dir == NavDir::Right ? step : -step),
+				                            s->minValue, s->maxValue);
+				if (nv != s->value)
+				{
+					s->value = nv;
+					rt().fireOnValueChanged(w->scriptId, w->focusedElem, nv);
+					return true;
+				}
+			}
+			return false;
+		}
+
+	auto centre = [&](const HE::UIElement& e, float& cx, float& cy)
+	{
+		const HE::UIWidgetRect r = HE::uiElementRect(w->tree, e, &canvas);
+		cx = r.x + r.w * 0.5f; cy = r.y + r.h * 0.5f;
+	};
+
+	const HE::UIElement* from = w->focusedElem != 0 ? w->tree.find(w->focusedElem) : nullptr;
+	float fx = 0.0f, fy = 0.0f;
+	if (from) centre(*from, fx, fy);
+
+	int   best = 0;
+	float bestCost = 0.0f;
+	for (const auto& ep : w->tree.elements)
+	{
+		const HE::UIElement& e = *ep;
+		if (e.id == w->focusedElem) continue;
+		if (!isFocusable(*w, e, canvas)) continue;
+
+		float cx = 0.0f, cy = 0.0f;
+		centre(e, cx, cy);
+		float cost = 0.0f;
+		if (!from)
+		{
+			// Nothing focused yet: take the top-most, then left-most candidate,
+			// which is where a menu expects to start.
+			cost = cy * 10000.0f + cx;
+		}
+		else
+		{
+			const float dx = cx - fx, dy = cy - fy;
+			// Along the direction, and how far off to the side. The lateral
+			// term is weighted so a candidate straight ahead beats a nearer one
+			// that is well off to the side — that is what makes a grid feel
+			// like a grid.
+			float along = 0.0f, lateral = 0.0f;
+			switch (dir)
+			{
+			case NavDir::Up:    along = -dy; lateral = std::fabs(dx); break;
+			case NavDir::Down:  along =  dy; lateral = std::fabs(dx); break;
+			case NavDir::Left:  along = -dx; lateral = std::fabs(dy); break;
+			case NavDir::Right: along =  dx; lateral = std::fabs(dy); break;
+			}
+			if (along <= 0.5f) continue;   // not in this direction at all
+			cost = along + lateral * 2.0f;
+		}
+		if (best == 0 || cost < bestCost) { best = e.id; bestCost = cost; }
+	}
+	if (best == 0) return false;
+	return setFocus(w->id, best);
 }
 
 bool WidgetManager::processWheel(float vpWidth, float vpHeight,
@@ -646,6 +799,34 @@ void WidgetManager::extract(float vpWidth, float vpHeight, std::vector<UIRenderO
 				const glm::vec4 r(clip.x * sx, clip.y * sy,
 				                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
 				for (size_t i = firstQuad; i < out.size(); ++i) out[i].clipRect = r;
+			}
+
+			// Focus ring: four hairlines around the element the keyboard or
+			// gamepad is on. Drawn here rather than by the widget types because
+			// every type needs it and none of them should have to know.
+			if (st.focused && m_focusWidget == w.id)
+			{
+				constexpr float kRing = 2.0f;   // pixels
+				const glm::vec4 ringCol(1.0f, 0.78f, 0.25f, 0.95f);
+				const size_t ringFirst = out.size();
+				auto ring = [&](float x, float y, float rw, float rh)
+				{
+					UIRenderObject ro;
+					ro.position = { x, y };
+					ro.size     = { rw, rh };
+					ro.color    = ringCol;
+					out.push_back(ro);
+				};
+				ring(px.x - kRing, px.y - kRing, px.w + 2 * kRing, kRing);              // top
+				ring(px.x - kRing, px.y + px.h,  px.w + 2 * kRing, kRing);              // bottom
+				ring(px.x - kRing, px.y,         kRing,            px.h);               // left
+				ring(px.x + px.w,  px.y,         kRing,            px.h);               // right
+				if (clipped)
+				{
+					const glm::vec4 r(clip.x * sx, clip.y * sy,
+					                  std::max(clip.w * sx, 0.0f), std::max(clip.h * sy, 0.0f));
+					for (size_t i = ringFirst; i < out.size(); ++i) out[i].clipRect = r;
+				}
 			}
 		}
 	}
