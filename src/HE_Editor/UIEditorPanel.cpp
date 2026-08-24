@@ -1287,11 +1287,19 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// by exactly the rule a real screen uses — the same call, and therefore the
 	// same answer the runtime gives. Stretch scales it into the slot;
 	// ConstantPixel leaves its units alone and lets its anchors do the placing.
-	const float slotW = std::max(1.0f, mx.x - mn.x);
-	const float slotH = std::max(1.0f, mx.y - mn.y);
+	//
+	// The slot has to be handed over in CANVAS UNITS, not in the screen pixels
+	// the designer happens to be zoomed to: under Stretch the zoom cancels out
+	// either way, but under ConstantPixel "one unit is one pixel" would have
+	// meant one SCREEN pixel, and the embedded widget came out 1/zoom too big.
+	const float slotW = std::max(1.0f, (mx.x - mn.x) / std::max(0.0001f, s));
+	const float slotH = std::max(1.0f, (mx.y - mn.y) / std::max(0.0001f, s));
 	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(tree, slotW, slotH);
+	// canvas.scale converts one of ITS units into a host canvas unit; `s` then
+	// takes that to the screen.
+	const float subX = canvas.scaleX * s, subY = canvas.scaleY * s;
 	auto toScreen = [&](float x, float y)
-	{ return ImVec2(mn.x + x * canvas.scaleX, mn.y + y * canvas.scaleY); };
+	{ return ImVec2(mn.x + x * subX, mn.y + y * subY); };
 
 	// A copy, because auto-size mutates the tree it measures and the cached one
 	// must stay as the asset wrote it.
@@ -1330,13 +1338,13 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 			                 toScreen(clip.x + clip.w, clip.y + clip.h), true);
 		}
 		// Font sizes and corner radii scale with the EMBEDDED widget's factor,
-		// not the page's: inside here, one of its units is canvas.scale pixels.
-		drawElementIn(dl, ctx, laid, *it.n, emn, emx, canvas.scaleY);
+		// not the page's: inside here, one of its units is subY screen pixels.
+		drawElementIn(dl, ctx, laid, *it.n, emn, emx, subY);
 		// …and a widget inside the embedded widget, one level further down.
 		if (it.n->type() == UIWidgetType::WidgetRef)
 			if (const HE::UIWidgetTree* sub =
 				embeddedTreeFor(ctx, it.n->getProp("Widget").s))
-				drawEmbeddedTree(dl, ctx, *sub, emn, emx, canvas.scaleY, depth + 1);
+				drawEmbeddedTree(dl, ctx, *sub, emn, emx, subY, depth + 1);
 		if (clipped) dl->PopClipRect();
 	}
 }

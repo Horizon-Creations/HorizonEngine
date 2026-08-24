@@ -2190,6 +2190,63 @@ TEST_CASE("WidgetRef: an embedded widget's own scale mode decides")
     CHECK(found);
 }
 
+TEST_CASE("WidgetRef: the slot is measured in canvas units, not in pixels")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The page itself is scaled (a bigger screen, or the designer zoomed in).
+    // An embedded ConstantPixel widget keeps its units relative to the PAGE and
+    // is then carried to the screen by the page's factor — it must not read
+    // "one unit is one screen pixel" and come out 1/scale too big.
+    HE::UIWidgetTree sub;
+    sub.canvasWidth = 1000.0f; sub.canvasHeight = 1000.0f;
+    sub.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int b = sub.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *sub.find(b);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 50.0f; }
+    registerWidgetAs(cm, "mem://sub.hasset", sub);
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 1000.0f; page.canvasHeight = 1000.0f;
+    page.scaleMode = HE::UICanvasScaleMode::MatchWidth;    // a factor of 2 below
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 500.0f; e.sizeY = 500.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://sub.hasset")); }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(2000.0f, 2000.0f, out);       // page scale = 2000/1000 = 2
+    REQUIRE_FALSE(out.empty());
+    // 100x50 of ITS units = 100x50 page units = 200x100 pixels.
+    bool found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(200.0f) && o.size.y == doctest::Approx(100.0f))
+            found = true;
+    CHECK(found);
+
+    // The same widget authored as Stretch is fitted into the slot instead:
+    // 500/1000 → 50x25 page units → 100x50 pixels.
+    sub.scaleMode = HE::UICanvasScaleMode::Stretch;
+    registerWidgetAs(cm, "mem://sub.hasset", sub);
+    registerWidget(cm, page);
+    WidgetManager fitted;
+    REQUIRE(fitted.createWidget(cm, "mem://w.hasset") != 0);
+    out.clear();
+    fitted.extract(2000.0f, 2000.0f, out);
+    found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(100.0f) && o.size.y == doctest::Approx(50.0f))
+            found = true;
+    CHECK(found);
+}
+
 TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
 {
     TempWidgetDir dir;
