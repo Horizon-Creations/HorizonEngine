@@ -59,6 +59,26 @@ namespace HE
 		int Run(int argc = 0, char** argv = nullptr);
 		void Quit();
 
+		// ── Headless-Aufnahmelauf ──────────────────────────────────────────
+		// Wahr, sobald eine der HE_DUMP_*-Variablen den Lauf steuert: er soll ein
+		// Bild, eine Kachel oder eine Profiler-Datei abliefern und sich beenden,
+		// und es sieht niemand zu.
+		//
+		// Wozu: eine Abnahmeserie faehrt solche Laeufe im Dutzend hintereinander,
+		// und jeder riss bisher ein Fenster nach vorn — mitten in das, woran
+		// gerade jemand arbeitet. Sichtbar sein muss dabei nichts; gerendert,
+		// praesentiert und zurueckgelesen wird auf einem versteckten Fenster
+		// genauso.
+		//
+		// Bewusst KEIN eigener Schalter: eine zusaetzliche Variable, die man zu
+		// den zwoelf anderen dazusetzen muss, ist beim dreizehnten Lauf
+		// vergessen. Dass eine Dump-Variable gesetzt ist, IST die Aussage.
+		//
+		// Statisch und oeffentlich, damit GetConfig() sie schon vor dem ersten
+		// Application-Objekt lesen kann — dort entscheidet sich, ob ein Splash
+		// ueberhaupt angefordert wird.
+		static bool isHeadlessCaptureRun();
+
 	protected:
 		// ── Subclass hooks ─────────────────────────────────────────────────
 		// Override to provide startup configuration. Called once before the

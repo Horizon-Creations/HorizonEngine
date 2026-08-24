@@ -23,6 +23,7 @@ const char* rhiName(HE::RendererBackend api)
 	}
 }
 
+
 // Zustand des Zweitfenster-Zeugen (HE_DUMP_SECONDWINDOW). Dateilokal statt als
 // Member, weil es reine Diagnostik ist und die Application-Schnittstelle nichts
 // davon wissen muss — dieselbe Linie, die die HE_DUMP_*-Haken im Editor ziehen.
@@ -38,6 +39,22 @@ bool s_profileWitnessDone  = false;
 
 namespace HE
 {
+	bool Application::isHeadlessCaptureRun()
+	{
+		// Die eine Liste. Kommt ein Zeuge dazu, gehoert seine Variable hierher —
+		// nicht in eine zweite Abfrage irgendwo sonst.
+		static const char* const kVars[] = {
+			"HE_DUMP_PATH",          // Frame-Dump (der haeufigste)
+			"HE_DUMP_THUMB",         // Content-Browser-Kacheln
+			"HE_PREVIEW_DUMP",       // Vorschau-PPM
+			"HE_DUMP_PROFILE",       // Profiler-Aufnahme
+			"HE_DUMP_SECONDWINDOW",  // Zweitfenster-Zeuge
+		};
+		for (const char* v : kVars)
+			if (const char* s = std::getenv(v); s && *s) return true;
+		return false;
+	}
+
 	Application::Application(std::string startupPath)
 	{
 		m_globalState = &GlobalState::getInstance();
@@ -113,6 +130,10 @@ namespace HE
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
 
+		// Ein Aufnahmelauf zeigt kein Fenster. Der Splash braucht hier keine
+		// Sonderbehandlung — GetConfig() fordert in dem Fall gar keinen an.
+		const bool headless = isHeadlessCaptureRun();
+
 		// The splash goes up before anything else can take a second: on this
 		// machine the Metal renderer alone needs ~1.2 s (a Debug build ~80 s),
 		// and until now that time was spent staring at an empty window.
@@ -125,7 +146,11 @@ namespace HE
 		// Hold the primary window back while the splash is up. Nothing draws
 		// into it until the first frame anyway, and the renderer initialises
 		// against a hidden window just as well as a visible one.
-		wp.startHidden = wp.startHidden || m_splash.isOpen();
+		//
+		// Im Aufnahmemodus bleibt es aus demselben Grund die ganze Zeit versteckt:
+		// gerendert, praesentiert und zurueckgelesen wird auf einem versteckten
+		// Fenster genauso, nur ohne jemandem den Fokus zu klauen.
+		wp.startHidden = wp.startHidden || m_splash.isOpen() || headless;
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
@@ -221,7 +246,10 @@ namespace HE
 
 		m_splash.setStatus("Ready", 1.0f);
 		closeSplash();
-		if (wp.startHidden) m_window->Show();
+		// Im Aufnahmemodus NICHT zeigen — das ist die eigentliche Zeile, die den
+		// Fokus-Diebstahl verhindert. Alles davor haelt das Fenster nur bis hier
+		// zurueck.
+		if (wp.startHidden && !headless) m_window->Show();
 
 		m_running = true;
 		m_vsyncEnabled = cfg.windowprops.vsync;

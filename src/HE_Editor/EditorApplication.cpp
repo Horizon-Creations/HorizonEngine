@@ -214,7 +214,13 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
 	}
 	// A headless dump run has nobody to show it to, and on CI there may be no
 	// display to put it on at all.
-	if (const char* p = std::getenv("HE_DUMP_PATH"); p && *p)
+	//
+	// Die Abfrage lief frueher nur auf HE_DUMP_PATH und liess damit die spaeter
+	// hinzugekommenen Zeugen aussen vor — ein Profiler- oder Zweitfenster-Lauf
+	// zog also doch einen Splash hoch. isHeadlessCaptureRun kennt die ganze
+	// Liste an EINER Stelle (Application.h); kommt ein Zeuge dazu, steht seine
+	// Variable dort und wirkt hier mit.
+	if (isHeadlessCaptureRun())
 		cfg.splash.enabled = false;
 
 	return cfg;
