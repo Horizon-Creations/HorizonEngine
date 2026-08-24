@@ -1,4 +1,8 @@
 #version 450
+// Fuer #include unten: shaders/sky_core.glsl ist der gemeinsame analytische
+// Himmelskern. Die Direktive muss vor allen Nicht-Praeprozessor-Tokens stehen,
+// deshalb hier oben und nicht an der Einbindestelle.
+#extension GL_GOOGLE_include_directive : require
 
 // ─── DRIFT WARNING: reduced second copy of the GL sky shader ─────────────────
 // This file is NOT the reference implementation. The engine's sky lives twice:
@@ -13,10 +17,11 @@
 // against the GL source (audit 1a); everything below is present in `kSkyFS` /
 // `kSkyFuncGLSL` and MISSING here:
 //
-//   * atmoScatter / atmoRaySphere — the single-scattering atmosphere (Rayleigh +
-//     Mie + ozone). `skyColor()` below is the OLD hand-tuned day/dusk/night
-//     gradient, so sunset reddening and the blue hour are approximated, not
-//     integrated. This is the biggest visual difference.
+//   * ERLEDIGT — atmoScatter / atmoRaySphere / skyColor kommen jetzt per #include
+//     aus shaders/sky_core.glsl, derselben Datei, aus der GL sein Literal
+//     erzeugt. Das war der groesste sichtbare Unterschied (Sonnenuntergangs-
+//     roetung und blaue Stunde waren hier angenaehert statt integriert) und er
+//     kann nicht wieder auseinanderlaufen: es gibt den Text nur noch einmal.
 //   * applyClouds3D + cloudBillowFbm / cloudCoverFbm — the 3D volumetric cloud
 //     raymarch (cloudMode 1). Only the 2D dome `applyClouds()` exists here.
 //     NOTE: `hgPhase()` IS present — it is used by the 2D cloud path. What is
@@ -46,7 +51,11 @@
 //
 // Audit 1a decision: DOCUMENT the drift, do not port. Porting the features (or
 // better, generating all three backends from one source) is tracked separately.
-// Until then: a change to the GL sky is NOT automatically visible on Vulkan.
+//
+// Stand P3/Scheibe 1: der analytische KERN ist umgestellt (siehe oben), der Rest
+// der Liste steht noch. Fuer den Kern gilt die Warnung also nicht mehr — eine
+// Aenderung an sky_core.glsl ist hier sofort sichtbar. Fuer alles andere in
+// dieser Liste gilt weiterhin: eine Aenderung am GL-Himmel kommt hier NICHT an.
 // ─────────────────────────────────────────────────────────────────────────────
 
 layout(location = 0) in vec2 vNDC;
@@ -65,47 +74,18 @@ layout(set = 0, binding = 0) uniform SkyEnv {
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
 
-// ── Procedural sky ────────────────────────────────────────────────────────────
-vec3 skyColor(vec3 dir, vec3 sunDir)
-{
-    dir    = normalize(dir);
-    sunDir = normalize(sunDir);
-    float sunY = clamp(sunDir.y, -0.2, 1.0);
-    float day  = smoothstep(-0.10, 0.10, sunY);
-    float dusk = smoothstep(-0.06, 0.05, sunY) * (1.0 - smoothstep(0.05, 0.28, sunY));
-    vec3 zenithDay  = vec3(0.08, 0.28, 0.72);
-    vec3 horizDay   = vec3(0.42, 0.62, 0.88);
-    vec3 zenithNite = vec3(0.003, 0.005, 0.015);
-    vec3 horizNite  = vec3(0.006, 0.009, 0.024);
-    vec3 zenith  = mix(zenithNite, zenithDay, day);
-    vec3 horizon = mix(horizNite,  horizDay,  day);
-    vec2  sunAz  = normalize(sunDir.xz + vec2(1e-5));
-    float toward = dot(normalize(dir.xz + vec2(1e-5)), sunAz) * 0.5 + 0.5;
-    toward = pow(clamp(toward, 0.0, 1.0), 1.5);
-    vec3  duskHoriz = mix(vec3(0.52, 0.30, 0.52), vec3(1.20, 0.50, 0.16), toward);
-    horizon = mix(horizon, duskHoriz, dusk);
-    zenith  = mix(zenith,  vec3(0.20, 0.16, 0.40), dusk * 0.6);
-    float h    = clamp(dir.y, 0.0, 1.0);
-    float grad = pow(1.0 - h, 2.5);
-    vec3 sky2 = mix(zenith, horizon, grad);
-    float band = pow(1.0 - h, 8.0) * toward;
-    sky2 += vec3(1.25, 0.62, 0.26) * (band * dusk * 0.8);
-    vec3 ground = mix(vec3(0.02, 0.02, 0.03), vec3(0.24, 0.23, 0.21), day);
-    sky2 = mix(sky2, ground, smoothstep(0.0, -0.25, dir.y));
-    vec3  sunTint = mix(vec3(1.0, 0.42, 0.20), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.25, sunY));
-    float s = max(dot(dir, sunDir), 0.0);
-    float sunVis = max(day, dusk);
-    sky2 += sunTint * (pow(s, 1800.0) * 14.0) * day;
-    sky2 += sunTint * (pow(s, 180.0)  * 2.2) * sunVis;
-    sky2 += sunTint * (pow(s, 22.0)   * 0.7) * sunVis;
-    sky2 += vec3(1.0, 0.5, 0.25) * (pow(s, 5.0) * 0.5) * dusk;
-    float night   = 1.0 - day;
-    vec3  moonDir = normalize(vec3(-sunDir.x, -sunDir.y, sunDir.z));
-    float m       = max(dot(dir, moonDir), 0.0);
-    sky2 += vec3(0.80, 0.86, 1.00) * (pow(m, 60.0) * 0.05) * night;
-    sky2 += vec3(0.015, 0.018, 0.030) * night;
-    return sky2;
-}
+// ── Analytischer Himmel — gemeinsame Quelle ──────────────────────────────────
+// Hier stand bis hierher eine eigene, handgepflegte Kopie von skyColor(): der
+// alte Tag/Daemmerung/Nacht-Gradient mit festen Zenit- und Horizontfarben. GL
+// hat den Kern laengst durch Rayleigh/Mie/Ozon-Streuungsintegrale ersetzt, diese
+// Datei nicht — das war der groesste sichtbare Unterschied zwischen den Backends
+// (und der erste Punkt der DRIFT WARNING oben).
+//
+// Jetzt kommt der Text aus shaders/sky_core.glsl, derselben Datei, aus der auch
+// das GL-Stringliteral erzeugt wird (cmake/embed_glsl.cmake). Signatur und
+// Aufrufstelle bleiben unveraendert: skyColor(dir, sunDir), einmal in main().
+// Der Kern ist uniform- und samplerfrei, deshalb passt er hier ohne Anpassung.
+#include "sky_core.glsl"
 
 // Hash / noise functions (pure math)
 float starHash(vec3 p)

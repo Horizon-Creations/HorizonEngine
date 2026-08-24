@@ -33,7 +33,23 @@ namespace HE::hlsl
 {
 
 // ─── Shared sky colour function ─────────────────────────────────────────────
-// Mirrors kSkyFuncGLSL in OpenGLRenderer.cpp exactly (GLSL→HLSL: lerp/frac/float3).
+// ACHTUNG, der Satz hier hiess bis zuletzt "Mirrors kSkyFuncGLSL in
+// OpenGLRenderer.cpp exactly" — das stimmte seit langem nicht mehr. Was hier
+// steht, ist der ALTE handgestimmte Tag/Daemmerung/Nacht-Gradient mit festen
+// Zenit- und Horizontfarben: 43 Zeilen gegen 173 in shaders/sky_core.glsl, wo
+// GL laengst Rayleigh/Mie/Ozon integriert. Gemessen, nicht vermutet: der Kern
+// dort hat atmoScatter/atmoRaySphere, dieser hier nicht.
+//
+// Vulkans Kopie ist mit P3/Scheibe 1 auf sky_core.glsl umgestellt (per
+// #include, GL bekommt dieselbe Datei als generiertes Literal). D3D steht noch
+// aus und ist der teurere Fall: HLSL kann die GLSL-Datei nicht einbinden, der
+// Kern muss also uebersetzt werden (he::shaderc), und SPIRV-Cross emittiert
+// dabei `skyColor(inout float3 dir, ...)`, weil der Rumpf seine Parameter
+// zuweist — der Scene-Aufruf D3D11:641 uebergibt einen rvalue und bindet nicht
+// an inout. Gemessen mit fxc /T ps_5_0: Sky-Pass 241 statt 98 Slots (1 Aufruf,
+// vertretbar), Scene 558 statt 190 (3 Aufrufe) — deshalb zuerst nur der
+// Himmelspass, wenn es soweit ist.
+//
 // Prepended to the sky PS AND to each backend's own scene source, so skyColor()
 // is in scope for the IBL ambient term there too.
 inline constexpr const char* kSkyFuncHLSL = R"HLSL(

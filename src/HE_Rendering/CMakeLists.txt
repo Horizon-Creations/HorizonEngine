@@ -29,18 +29,42 @@ if(TARGET he_shadercompiler)
     target_compile_definitions(he_materialshader PUBLIC HE_HAVE_SHADERC=1)
 endif()
 
+# ─── Gemeinsamer Himmelskern ───────────────────────────────────────────────────
+# shaders/sky_core.glsl ist die EINZIGE Quelle des analytischen Himmels. Vulkan
+# bindet die Datei per #include ein; OpenGL braucht sie als C++-Stringliteral,
+# weil der GL-Shader zur Laufzeit an den //#SKYFUNC#-Marker gespleisst wird.
+# Dieser Schritt erzeugt genau dieses Literal aus derselben Datei — vorher lag
+# der Kern dreimal im Baum und war in zwei Kopien stehengeblieben.
+set(HE_SKY_CORE_GLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/sky_core.glsl")
+set(HE_SKY_CORE_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(HE_SKY_CORE_HEADER "${HE_SKY_CORE_GEN_DIR}/sky_core_glsl.h")
+file(MAKE_DIRECTORY "${HE_SKY_CORE_GEN_DIR}")
+add_custom_command(OUTPUT "${HE_SKY_CORE_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+            -DIN=${HE_SKY_CORE_GLSL}
+            -DOUT=${HE_SKY_CORE_HEADER}
+            -DVAR=kSkyCoreGLSL
+            -P "${CMAKE_SOURCE_DIR}/cmake/embed_glsl.cmake"
+    DEPENDS "${HE_SKY_CORE_GLSL}" "${CMAKE_SOURCE_DIR}/cmake/embed_glsl.cmake"
+    COMMENT "Erzeuge sky_core_glsl.h aus shaders/sky_core.glsl"
+    VERBATIM)
+add_custom_target(SkyCoreHeader DEPENDS "${HE_SKY_CORE_HEADER}")
+
 # ─── OpenGL Backend ────────────────────────────────────────────────────────────
 find_package(OpenGL REQUIRED)
 
 add_library(RendererOpenGL STATIC
     src/Backends/OpenGL/OpenGLRenderer.cpp
     src/Backends/OpenGL/OpenGLShaderManager.cpp
-    include/Backends/OpenGL/OpenGLShaderManager.h)
+    include/Backends/OpenGL/OpenGLShaderManager.h
+    "${HE_SKY_CORE_HEADER}")
+add_dependencies(RendererOpenGL SkyCoreHeader)
 target_include_directories(RendererOpenGL PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/glad/include
     ${HE_CORE_INCLUDE}
 )
+target_include_directories(RendererOpenGL PRIVATE ${HE_SKY_CORE_GEN_DIR})
 target_link_libraries(RendererOpenGL PRIVATE glad OpenGL::GL glm::glm HorizonCore)
 # Shared cross-backend material shader layer (per-material GL programs). Propagates
 # HE_HAVE_SHADERC=1 so the material path compiles in when the cross-compiler was fetched.
@@ -105,6 +129,11 @@ if(HE_VULKAN_ENABLED)
         set(HE_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
+        # sky.frag zieht shaders/sky_core.glsl per #include — dieselbe Datei, aus
+        # der OpenGL sein Stringliteral bekommt. glslc loest relative Includes vom
+        # einbindenden File aus auf, glslangValidator braucht das -I; beide kriegen
+        # es, damit der Build nicht davon abhaengt, welcher der beiden gefunden wird.
+        set(HE_GLSL_INC "-I${CMAKE_CURRENT_SOURCE_DIR}/shaders")
         foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_smaa.frag postfx_aa_blit.frag
@@ -125,21 +154,21 @@ if(HE_VULKAN_ENABLED)
             if(stage MATCHES "_hw\\.comp$")
                 if(GLSLC_EXECUTABLE MATCHES "glslangValidator")
                     add_custom_command(OUTPUT "${dst}"
-                        COMMAND ${GLSLC_EXECUTABLE} -V --target-env vulkan1.2 "${src}" -o "${dst}"
-                        DEPENDS "${src}" VERBATIM)
+                        COMMAND ${GLSLC_EXECUTABLE} -V ${HE_GLSL_INC} --target-env vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" "${HE_SKY_CORE_GLSL}" VERBATIM)
                 else()
                     add_custom_command(OUTPUT "${dst}"
-                        COMMAND ${GLSLC_EXECUTABLE} --target-env=vulkan1.2 "${src}" -o "${dst}"
-                        DEPENDS "${src}" VERBATIM)
+                        COMMAND ${GLSLC_EXECUTABLE} ${HE_GLSL_INC} --target-env=vulkan1.2 "${src}" -o "${dst}"
+                        DEPENDS "${src}" "${HE_SKY_CORE_GLSL}" VERBATIM)
                 endif()
             elseif(GLSLC_EXECUTABLE MATCHES "glslangValidator")
                 add_custom_command(OUTPUT "${dst}"
-                    COMMAND ${GLSLC_EXECUTABLE} -V "${src}" -o "${dst}"
-                    DEPENDS "${src}" VERBATIM)
+                    COMMAND ${GLSLC_EXECUTABLE} -V ${HE_GLSL_INC} "${src}" -o "${dst}"
+                    DEPENDS "${src}" "${HE_SKY_CORE_GLSL}" VERBATIM)
             else()
                 add_custom_command(OUTPUT "${dst}"
-                    COMMAND ${GLSLC_EXECUTABLE} "${src}" -o "${dst}"
-                    DEPENDS "${src}" VERBATIM)
+                    COMMAND ${GLSLC_EXECUTABLE} ${HE_GLSL_INC} "${src}" -o "${dst}"
+                    DEPENDS "${src}" "${HE_SKY_CORE_GLSL}" VERBATIM)
             endif()
             list(APPEND HE_VULKAN_SPV "${dst}")
         endforeach()

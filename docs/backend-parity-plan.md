@@ -1117,3 +1117,66 @@ Suite deckt nur die CPU-Seite ab (`test_rendergraph`, `test_gi_bvh`, `test_culli
 CI verifiziert ausschließlich, dass kompiliert wird. Jede Phase hier endet deshalb mit einem
 `HE_DUMP_*`-A/B gegen OpenGL bzw. Metal auf echter Hardware; „kompiliert grün" ist in diesem
 Repo nachweislich kein Beleg dafür, dass ein Feature überhaupt läuft — §1.1 ist der Beweis.
+
+---
+
+## STATUS P3 / Scheibe 1 — der analytische Himmelskern hat jetzt EINE Quelle
+
+**Ausgangsbefund, gemessen statt vermutet.** Der Kern lag dreifach im Baum, und *zwei*
+der drei Kopien waren stehengeblieben — nicht nur Vulkans, wie die DRIFT WARNING in
+`sky.frag` nahelegte:
+
+| Ort | Zeilen | `atmoScatter` |
+|---|---|---|
+| `OpenGLRenderer.cpp` `kSkyFuncGLSL` (Referenz) | 173 | ja |
+| `D3D_Shared/HlslSources.h` `kSkyFuncHLSL` | 43 | **nein** |
+| `shaders/sky.frag` (Vulkan) | 41 | **nein** |
+
+D3D11, D3D12 und Vulkan trugen also alle denselben alten handgestimmten
+Tag/Dämmerung/Nacht-Gradienten. Der Kommentar über `kSkyFuncHLSL` behauptete dabei bis
+zuletzt, er spiegele GL „exactly" — er ist jetzt korrigiert.
+
+**Was umgebaut wurde.** `shaders/sky_core.glsl` ist die einzige Quelle. Vulkan bindet sie
+per `#include` ein; OpenGL braucht ein C++-Stringliteral (der Shader wird zur Laufzeit an
+`//#SKYFUNC#` gespleißt), das `cmake/embed_glsl.cmake` aus derselben Datei erzeugt.
+Auseinanderlaufen können die beiden damit nicht mehr.
+
+**Abnahme auf echter Hardware.** Vorher musste das Messinstrument repariert werden: `uTime`
+läuft auf `SDL_GetTicks()`, ein Dump trifft also je Lauf eine andere Wolken- und
+Sternphase — **18 % Rauschboden zwischen zwei Läufen derselben Binary**. Mit gepinnter Uhr
+(`HE_SKY_TIME` für GL, `HE_DUMP_SKYTIME` für die übrigen) sind zwei Läufe byte-identisch,
+auch über einen Rebuild hinweg.
+
+* **OpenGL unverändert:** 0 Bytes Unterschied bei TOD 0.02 und 0.50 — der komplette
+  Umbau ist am Referenzbild spurlos vorbeigegangen.
+* **Vulkan, Kern isoliert** (alles abgeschaltet, was Vulkan ohnehin fehlt), Abstand zu GL:
+
+| TOD | vorher | nachher |
+|---|---|---|
+| 0.02 Nacht | 64,31 % / maxdiff 207 | **0,52 %** / maxdiff 207 |
+| 0.22 Dämmerung | 74,83 % / maxdiff 207 | **0,66 %** / maxdiff 207 |
+| 0.25 Aufgang | 75,00 % / maxdiff 165 | **0,42 %** / maxdiff 162 |
+| 0.35 Vormittag | 73,73 % / maxdiff 46 | **29,77 %** / maxdiff 4 |
+| 0.50 Mittag | 73,41 % / maxdiff 39 | **29,48 %** / maxdiff 2 |
+
+Die Tageswerte lesen sich mit 29 % hoch, sind es aber nicht: `maxdiff` 2–4 heißt, der ganze
+Himmel stimmt bis auf ein bis zwei Stufen von 255. Der Rest bei Nacht/Dämmerung ist
+aufgeklärt: von 6995 abweichenden Pixeln sind 2698 solche, auf denen Vulkan **heller** ist
+— Sterne. Vulkans reduzierter `SkyEnv`-Block hat gar keinen Sternblock, `HE_DUMP_STARDENS=0`
+kommt dort also nicht an. Das ist ein eigener Punkt der DRIFT-WARNING-Liste, nicht der Kern.
+
+**Verworfen, mit Messung.** Die zwei `textureLod`-Zeilen in `starNoise3`/`worleyNoise3`
+(als X3511-Schutz gedacht) sind **nicht** übernommen: der generierte Kern hat 0 Treffer für
+`texture(` und nur konstant begrenzte Schleifen, `fxc /T ps_5_0` übersetzt ihn also ohnehin.
+Der Preis ist trotzdem gemessen, falls eine spätere Scheibe den Stern-/Wolken-Noise
+hineinzieht: 0 Bytes bei Tag, 428 Pixel à ≤4/255 bei Nacht.
+
+**Offen, mit Grund.** D3D bleibt beim alten Gradienten. HLSL kann die GLSL-Datei nicht
+einbinden, der Kern muss übersetzt werden, und SPIRV-Cross emittiert `skyColor(inout float3
+dir, …)`, weil der Rumpf seine Parameter zuweist — der Scene-Aufruf `D3D11:641` übergibt
+einen rvalue und bindet nicht an `inout`. Gemessen mit `fxc /T ps_5_0`: Himmelspass 241
+statt 98 Slots (1 Aufruf, vertretbar), Scene 558 statt 190 (3 Aufrufe). Deshalb zuerst nur
+der Himmelspass. Vulkans `scene.frag` hat aus demselben Grund noch seine eigene
+`skyColor`-Kopie (`:177`, 3 Aufrufstellen) — dort ist der bessere Weg aber nicht der
+eingebundene Kern, sondern GLs gebackene `uSkyEnv`-Cubemap (`SkyEnvBake.h`), die die
+60 Samples pro Aufruf ganz erspart. Das gehört zu P4.

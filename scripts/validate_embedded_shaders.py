@@ -50,6 +50,14 @@ HLSL_SOURCES = {
     "D3D12Renderer.cpp": RENDER / "D3D12" / "D3D12Renderer.cpp",
 }
 GLSL_SOURCE = RENDER / "OpenGL" / "OpenGLRenderer.cpp"
+# Der analytische Himmelskern ist kein Stringliteral mehr, sondern eine echte
+# Shader-Datei — dieselbe, die Vulkans sky.frag per #include zieht. OpenGL
+# bekommt sie ueber einen generierten Header (cmake/embed_glsl.cmake), also
+# findet extract() sie im C++-Text nicht mehr. Ohne diesen Pfad wuerde
+# //#SKYFUNC# durch Leerstring ersetzt und JEDER GL-Shader mit skyColor()
+# faellt mit "no matching overloaded function" um — was beim Umbau auch
+# genau so passiert ist.
+GLSL_SKY_CORE = REPO / "src" / "HE_Rendering" / "shaders" / "sky_core.glsl"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
@@ -200,7 +208,14 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
         return 0, 1, [f"missing {GLSL_SOURCE}"]
 
     strings = extract(GLSL_SOURCE, "GLSL")
-    skyfunc = strings.get("kSkyFuncGLSL", "")
+    # Erst die eigene Datei, dann das alte Literal — letzteres nur noch als
+    # Rueckfall, falls jemand den Kern wieder in den C++-Text zieht.
+    if GLSL_SKY_CORE.exists():
+        skyfunc = "\n" + GLSL_SKY_CORE.read_text(encoding="utf-8", errors="replace")
+    else:
+        skyfunc = strings.get("kSkyFuncGLSL", "")
+    if not skyfunc.strip():
+        return 0, 1, [f"sky core leer — weder {GLSL_SKY_CORE.name} noch kSkyFuncGLSL gefunden"]
     ok_n, failures = 0, []
 
     for name, body in strings.items():
