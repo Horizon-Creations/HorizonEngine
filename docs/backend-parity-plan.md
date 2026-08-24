@@ -1141,6 +1141,11 @@ per `#include` ein; OpenGL braucht ein C++-Stringliteral (der Shader wird zur La
 `//#SKYFUNC#` gespleißt), das `cmake/embed_glsl.cmake` aus derselben Datei erzeugt.
 Auseinanderlaufen können die beiden damit nicht mehr.
 
+Beide Shader-Compiler sind geprüft, nicht nur der gefundene: `glslc` übersetzt
+`sky.frag` im Build, und `glslangValidator -V -I shaders/` tut es ebenfalls (55384
+Bytes SPIR-V, beide). Der `-I`-Zweig in `CMakeLists.txt` ist damit kein toter Code
+für den Fall, dass auf einer anderen Maschine `glslangValidator` gefunden wird.
+
 **Abnahme auf echter Hardware.** Vorher musste das Messinstrument repariert werden: `uTime`
 läuft auf `SDL_GetTicks()`, ein Dump trifft also je Lauf eine andere Wolken- und
 Sternphase — **18 % Rauschboden zwischen zwei Läufen derselben Binary**. Mit gepinnter Uhr
@@ -1170,6 +1175,16 @@ kommt dort also nicht an. Das ist ein eigener Punkt der DRIFT-WARNING-Liste, nic
 `texture(` und nur konstant begrenzte Schleifen, `fxc /T ps_5_0` übersetzt ihn also ohnehin.
 Der Preis ist trotzdem gemessen, falls eine spätere Scheibe den Stern-/Wolken-Noise
 hineinzieht: 0 Bytes bei Tag, 428 Pixel à ≤4/255 bei Nacht.
+
+**Neu entstanden, bewusst in Kauf genommen.** Vor diesem Umbau waren Vulkans Himmel und
+Vulkans Umgebungslicht wenigstens *miteinander* einig — beide der alte Gradient. Jetzt
+integriert `sky.frag` und `scene.frag:177` tut es nicht, also widersprechen sich auf
+Vulkan der Horizont hinter einem Objekt und die Beleuchtung *auf* dem Objekt. Am
+größten ist der Widerspruch bei Dämmerung, wo die beiden Modelle am weitesten
+auseinanderliegen (die 74,83 % oben sind genau dieses Maß). GL hat das Problem nie,
+weil `injectSkyFunc` `kSkyFS` und `kUnlitFS` aus demselben String speist. Wer also auf
+Vulkan eine Dämmerungsbeleuchtung sieht, die nicht zum Himmel passt: das ist dieser
+Punkt und kein neuer Fehler.
 
 **Offen, mit Grund.** D3D bleibt beim alten Gradienten. HLSL kann die GLSL-Datei nicht
 einbinden, der Kern muss übersetzt werden, und SPIRV-Cross emittiert `skyColor(inout float3
