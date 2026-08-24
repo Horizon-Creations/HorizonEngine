@@ -176,6 +176,8 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Spacing", UIPropType::Float },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color } } },
+        { UIWidgetType::WidgetRef, {
+            { "Widget", UIPropType::String } } },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1883,6 +1885,264 @@ TEST_CASE("WidgetManager: a box lays its children out at runtime too")
     // and nowhere near the (999, -999) its own position claims.
     CHECK(wm.processPointer(200.0f, 400.0f, 100.0f, 150.0f, true, true));
     CHECK_FALSE(wm.processPointer(200.0f, 400.0f, 100.0f, 300.0f, true, true));
+}
+
+// ═══ Widget in widget ════════════════════════════════════════════════════════
+// A health bar or a settings row had to be copied into every page that wanted
+// one. A WidgetRef embeds another asset instead: its tree is grafted in (with
+// renumbered ids, so two copies never collide) and its logic runs as its own
+// script instance, which is what keeps events going to the right graph.
+
+namespace
+{
+    // Register a widget asset under a given mem:// path so it can be embedded.
+    HE::UUID registerWidgetAs(ContentManager& cm, const std::string& path,
+                              const HE::UIWidgetTree& tree,
+                              const HorizonCode::Graph* graph = nullptr)
+    {
+        UIWidgetAsset a;
+        a.type = HE::AssetType::Widget;
+        a.name = path;
+        a.path = path;
+        a.treeJson  = HE::uiWidgetTreeToJson(tree);
+        a.graphJson = graph ? HorizonCode::toJson(*graph) : std::string();
+        return cm.registerWidget(std::move(a));
+    }
+
+    // A tiny "row" widget: one button filling a 100x40 canvas.
+    HE::UIWidgetTree rowWidget()
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 100.0f; t.canvasHeight = 40.0f;
+        const int b = t.add(HE::UIWidgetType::Button);
+        HE::UIElement& e = *t.find(b);
+        e.setProp("Text", HE::UIPropValue::ofString(""));
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+        return t;
+    }
+}
+
+TEST_CASE("WidgetRef: the embedded tree is grafted in and laid out in its slot")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://row.hasset", rowWidget());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    { HE::UIElement& e = *page.find(ref);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 50.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 60.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://row.hasset")); }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    const int id = wm.createWidget(cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+
+    // The button came in and fills the ref element's rect — not the canvas of
+    // the widget it was authored in.
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    REQUIRE_FALSE(out.empty());
+    bool found = false;
+    for (const UIRenderObject& o : out)
+        if (o.size.x == doctest::Approx(200.0f) && o.size.y == doctest::Approx(60.0f) &&
+            o.position.x == doctest::Approx(50.0f) && o.position.y == doctest::Approx(100.0f))
+            found = true;
+    CHECK(found);
+    // …and it is clickable there.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, true, true));
+    CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 300.0f, 300.0f, true, true));
+}
+
+TEST_CASE("WidgetRef: two copies of one widget do not share element ids")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    registerWidgetAs(cm, "mem://row.hasset", rowWidget());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    for (int i = 0; i < 2; ++i)
+    {
+        const int ref = page.add(HE::UIWidgetType::WidgetRef);
+        HE::UIElement& e = *page.find(ref);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = static_cast<float>(i) * 100.0f;
+        e.sizeX = 200.0f; e.sizeY = 60.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://row.hasset"));
+    }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    // Both rows exist and answer at their own place — if the ids had collided,
+    // the second graft would have overwritten the first.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f,  30.0f, true, true));
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 130.0f, true, true));
+    CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 100.0f, 250.0f, true, true));
+}
+
+TEST_CASE("WidgetRef: nesting works and a circle is refused")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // inner ← middle ← page, three levels deep.
+    registerWidgetAs(cm, "mem://inner.hasset", rowWidget());
+    HE::UIWidgetTree middle;
+    middle.canvasWidth = 200.0f; middle.canvasHeight = 100.0f;
+    { const int r = middle.add(HE::UIWidgetType::WidgetRef);
+      HE::UIElement& e = *middle.find(r);
+      HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+      HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+      HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://inner.hasset")); }
+    registerWidgetAs(cm, "mem://middle.hasset", middle);
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    { const int r = page.add(HE::UIWidgetType::WidgetRef);
+      HE::UIElement& e = *page.find(r);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+      e.setProp("Widget", HE::UIPropValue::ofString("mem://middle.hasset")); }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    // The button three levels down arrived and fills the outermost slot.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 50.0f, true, true));
+
+    // A widget that embeds ITSELF is refused instead of expanding forever.
+    HE::UIWidgetTree loop;
+    loop.canvasWidth = 100.0f; loop.canvasHeight = 100.0f;
+    { const int r = loop.add(HE::UIWidgetType::WidgetRef);
+      loop.find(r)->setProp("Widget", HE::UIPropValue::ofString("mem://loop.hasset")); }
+    registerWidgetAs(cm, "mem://loop.hasset", loop);
+    WidgetManager wm2;
+    const int loopId = wm2.createWidget(cm, "mem://loop.hasset");
+    CHECK(loopId != 0);        // it still exists…
+    std::vector<UIRenderObject> out;
+    wm2.extract(400.0f, 400.0f, out);
+    CHECK(out.empty());        // …it just brought nothing in
+}
+
+TEST_CASE("WidgetRef: a missing or empty reference is survivable")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    const int empty = page.add(HE::UIWidgetType::WidgetRef);   // no path at all
+    const int gone  = page.add(HE::UIWidgetType::WidgetRef);
+    page.find(gone)->setProp("Widget", HE::UIPropValue::ofString("mem://nope.hasset"));
+    (void)empty;
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    CHECK(wm.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(out.empty());
+}
+
+TEST_CASE("WidgetRef: each copy's logic runs on its own copy")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // A row that reacts to itself: clicking its button writes "OK" into its own
+    // text. Two copies of it must not write into each other.
+    HE::UIWidgetTree row;
+    row.canvasWidth = 200.0f; row.canvasHeight = 100.0f;
+    const int txt = row.add(HE::UIWidgetType::Text);
+    { HE::UIElement& e = *row.find(txt);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 50.0f; }
+    const int btn = row.add(HE::UIWidgetType::Button);
+    { HE::UIElement& e = *row.find(btn);
+      e.setProp("Text", HE::UIPropValue::ofString(""));
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = 0.0f; e.posY = 50.0f; e.sizeX = 200.0f; e.sizeY = 50.0f; }
+
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OK";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = txt;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(evId, 0, setId, 0));
+    REQUIRE(g.connect(litId, 0, setId, 2));
+    registerWidgetAs(cm, "mem://row.hasset", row, &g);
+
+    // Two of them, stacked. The page itself has no logic at all.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    for (int i = 0; i < 2; ++i)
+    {
+        const int r = page.add(HE::UIWidgetType::WidgetRef);
+        HE::UIElement& e = *page.find(r);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = static_cast<float>(i) * 100.0f;
+        e.sizeX = 200.0f; e.sizeY = 100.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://row.hasset"));
+    }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+
+    std::vector<UIRenderObject> out;
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(countGlyphs(out) == 0);        // both texts still empty
+
+    // Click the FIRST row's button (y 50..100 of the first slot).
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 75.0f, true,  true));
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 75.0f, false, true));
+    out.clear();
+    wm.extract(400.0f, 400.0f, out);
+    // Exactly one "OK" — the embedded graph wrote into ITS copy's text and not
+    // into the other one's, which is the whole point of a script instance per
+    // embed.
+    CHECK(countGlyphs(out) == 2);
+
+    // Now the second row: two "OK"s in total, not three.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 175.0f, true,  true));
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 175.0f, false, true));
+    out.clear();
+    wm.extract(400.0f, 400.0f, out);
+    CHECK(countGlyphs(out) == 4);
+}
+
+TEST_CASE("WidgetRef: the type round-trips and keeps its path")
+{
+    HE::UIWidgetTree t;
+    const int r = t.add(HE::UIWidgetType::WidgetRef);
+    t.find(r)->setProp("Widget", HE::UIPropValue::ofString("UI/HealthBar.hasset"));
+
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    REQUIRE(back.find(r) != nullptr);
+    CHECK(back.find(r)->type() == HE::UIWidgetType::WidgetRef);
+    CHECK(back.find(r)->getProp("Widget").s == "UI/HealthBar.hasset");
+    // It draws nothing of its own — what shows up is the embedded tree.
+    std::vector<UIRenderObject> out;
+    back.find(r)->render({ 0,0,10,10 }, {}, HE::UUID{}, 1.0f, out);
+    CHECK(out.empty());
 }
 
 // ═══ Keyboard / gamepad navigation ═══════════════════════════════════════════

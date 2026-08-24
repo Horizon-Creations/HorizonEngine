@@ -836,6 +836,28 @@ void drawDetails(State& st, AppContext& ctx)
 				"This is a Surface material: it will not draw correctly here.");
 	}
 
+	// The widget a WidgetRef embeds. Picked from the project's widgets, and
+	// never itself — a widget that embeds itself is refused at runtime, so the
+	// picker does not offer the trap in the first place.
+	if (n->type() == UIWidgetType::WidgetRef)
+	{
+		ImGui::SeparatorText("Embedded widget");
+		std::string path = n->getProp("Widget").s;
+		if (assetSlot(ctx, "Widget", path, HE::AssetType::Widget, "wref"))
+		{
+			if (path == st.relPath)
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"A widget cannot embed itself.");
+			else
+			{
+				n->setProp("Widget", HE::UIPropValue::ofString(path));
+				committed = true;
+			}
+		}
+		ImGui::TextDisabled("Grafted in when the widget is created; the designer\n"
+		                    "shows the slot it will fill.");
+	}
+
 	// Texture slot: the plain "put this picture on it" path, tinted by the
 	// element's own colour. A material, when set, wins — it owns the pixels.
 	if (n->hasTextureSlot())
@@ -1031,6 +1053,20 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
 				ImVec2(mn.x + 3, mn.y + 3), IM_COL32(220,220,230,140), matName.c_str());
 		}
+		break;
+	}
+	case UIWidgetType::WidgetRef:
+	{
+		// The embedded widget is grafted in at runtime, so the designer can only
+		// show the slot it will fill and which asset that is — with the name,
+		// because an unnamed dashed box is indistinguishable from an empty one.
+		dl->AddRect(mn, mx, IM_COL32(150, 210, 160, 150));
+		const std::string p = propStringOr(n, "Widget", "");
+		const std::string label = p.empty()
+			? std::string("(no widget)")
+			: std::filesystem::path(p).stem().string();
+		dl->AddText(nullptr, 12.0f * std::max(0.6f, s), ImVec2(mn.x + 4, mn.y + 4),
+		            IM_COL32(190, 230, 200, 200), label.c_str());
 		break;
 	}
 	case UIWidgetType::VerticalBox:

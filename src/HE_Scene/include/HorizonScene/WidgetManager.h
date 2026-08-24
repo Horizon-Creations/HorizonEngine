@@ -128,6 +128,22 @@ private:
         int draggingSlider = 0;    // slider being dragged
         // Resolved material references (element id → material asset).
         std::unordered_map<int, HE::UUID> materials;
+
+        // ── Embedded widgets (WidgetRef) ─────────────────────────────────────
+        // A WidgetRef grafts another asset's tree in under itself. The elements
+        // land in THIS tree with their ids shifted by idOffset, so two copies of
+        // the same widget never collide — but that asset's logic graph runs as
+        // its own script instance, and it knows its elements by their ORIGINAL
+        // ids. Every event and every property access therefore goes through the
+        // two translators below.
+        struct Embed
+        {
+            int rootElem = 0;   // the WidgetRef element the tree hangs under
+            int idOffset = 0;   // host id = local id + idOffset
+            int idMax    = 0;   // last host id that belongs to this embed
+            HorizonCode::InstanceId scriptId = 0;
+        };
+        std::vector<Embed> embeds;   // ascending by idOffset; nested ones nest
     };
 
     Instance*       find(int id);
@@ -156,6 +172,23 @@ private:
     // and not clipped entirely out of sight.
     bool isFocusable(const Instance& w, const HE::UIElement& e,
                      const HE::UIWidgetCanvas& canvas) const;
+
+    // ── Embedded-widget translation ──────────────────────────────────────────
+    // Which script owns an element, and what that script calls it. For anything
+    // the host widget itself authored this is (w.scriptId, elemId); for an
+    // element that came in with a WidgetRef it is the embedded instance and the
+    // id it had in its own asset. The INNERMOST embed wins, so widgets nested
+    // three deep still route to the right graph.
+    struct ScriptTarget { HorizonCode::InstanceId scriptId = 0; int elem = 0; };
+    ScriptTarget scriptTargetFor(const Instance& w, int elemId) const;
+    // The reverse: the widget a script instance belongs to, plus the offset
+    // that turns one of ITS element ids into one in the host tree.
+    Instance* resolveScriptOwner(HorizonCode::InstanceId scriptId, int& idOffset);
+    // Graft every WidgetRef's asset into `w`'s tree, recursively. `chain` is the
+    // asset paths already being embedded on this branch — a widget that embeds
+    // itself (directly or in a circle) is refused rather than expanded forever.
+    void embedWidgetRefs(Instance& w, ContentManager& content,
+                         std::vector<std::string>& chain, int depth);
 
     // Re-resolve one element's Material/Font path to its runtime state (material
     // UUID in w.materials, baked fontAtlasKey) — the same resolution createWidget

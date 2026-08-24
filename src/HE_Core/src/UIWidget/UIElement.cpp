@@ -23,6 +23,7 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::VerticalBox:   return std::make_unique<UIVerticalBox>();
         case UIWidgetType::HorizontalBox: return std::make_unique<UIHorizontalBox>();
         case UIWidgetType::ScrollBox:     return std::make_unique<UIScrollBox>();
+        case UIWidgetType::WidgetRef:     return std::make_unique<UIWidgetRef>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -34,7 +35,7 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
         UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
         UIWidgetType::VerticalBox, UIWidgetType::HorizontalBox,
-        UIWidgetType::ScrollBox };
+        UIWidgetType::ScrollBox, UIWidgetType::WidgetRef };
     return kAll;
 }
 
@@ -49,7 +50,7 @@ const char* uiWidgetTypeName(UIWidgetType t)
     static constexpr const char* kNames[] = {
         "Panel", "Image", "Text", "Button", "CheckBox",
         "Slider", "ProgressBar", "TextInput", "ComboBox",
-        "VerticalBox", "HorizontalBox", "ScrollBox" };
+        "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -102,6 +103,17 @@ const UIPropTable& UIPanel::propTable() const
     };
     return t;
 }
+
+const UIPropTable& UIWidgetRef::propTable() const
+{
+    static const UIPropTable t = {
+        uiprop::slot<&UIWidgetRef::widgetPath>({ "Widget", UIPropType::String }),
+    };
+    return t;
+}
+
+void UIWidgetRef::writeJson(nlohmann::json& j) const { j["widget"] = widgetPath; }
+void UIWidgetRef::readJson(const nlohmann::json& j)  { widgetPath = j.value("widget", widgetPath); }
 
 const UIPropTable& UIBoxBase::propTable() const
 {

@@ -47,6 +47,11 @@ enum class UIWidgetType : uint8_t
     VerticalBox,
     HorizontalBox,
     ScrollBox,   // a vertical box whose content may be taller than it is
+    // Another UI Widget asset, embedded here. The runtime grafts that asset's
+    // tree in under this element and runs its logic as its own script instance,
+    // which is what lets a health bar or a settings row be authored once and
+    // used everywhere instead of copied.
+    WidgetRef,
     COUNT
 };
 

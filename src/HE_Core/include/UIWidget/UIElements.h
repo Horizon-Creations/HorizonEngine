@@ -281,6 +281,34 @@ public:
     void readJson(const nlohmann::json&) override;
 };
 
+// ── WidgetRef ─────────────────────────────────────────────────────────────────
+// A whole other UI Widget asset, used as one element. It draws nothing itself:
+// at creation the runtime copies that asset's tree in under this element (with
+// its ids renumbered so two copies of the same widget cannot collide) and gives
+// its logic graph a script instance of its own. Its root elements anchor inside
+// this element's rect, so where this one sits is where the embedded widget is.
+//
+// The path is authoring data; `embedded` says whether the runtime managed to
+// graft it (false in the designer, which shows a placeholder instead).
+class HE_API UIWidgetRef final : public UIElement
+{
+public:
+    std::string widgetPath;        // content-relative path of the widget asset
+    bool        embedded = false;  // transient: the runtime grafted it in
+
+    UIWidgetRef() { sizeX = 300.0f; sizeY = 200.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::WidgetRef; }
+    const char*  typeName() const override { return "WidgetRef"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIWidgetRef>(*this); }
+
+    const UIPropTable& propTable() const override;
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override {}
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
 // ── Layout boxes ──────────────────────────────────────────────────────────────
 // A box does not draw anything: it hands each of its direct children a slot,
 // one after the other along its axis. A child keeps its own size on that axis

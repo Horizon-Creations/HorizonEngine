@@ -43,6 +43,29 @@ WidgetManager::Instance* WidgetManager::findByScript(HorizonCode::InstanceId scr
 	return nullptr;
 }
 
+WidgetManager::ScriptTarget WidgetManager::scriptTargetFor(const Instance& w, int elemId) const
+{
+	// Innermost first: nested embeds have larger offsets, and the last one whose
+	// range contains this id is the deepest widget that owns it.
+	for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
+		if (elemId > it->idOffset && elemId <= it->idMax)
+			return { it->scriptId, elemId - it->idOffset };
+	return { w.scriptId, elemId };
+}
+
+WidgetManager::Instance* WidgetManager::resolveScriptOwner(HorizonCode::InstanceId scriptId,
+                                                           int& idOffset)
+{
+	idOffset = 0;
+	for (auto& w : m_instances)
+	{
+		if (w.scriptId == scriptId) return &w;
+		for (const Instance::Embed& em : w.embeds)
+			if (em.scriptId == scriptId) { idOffset = em.idOffset; return &w; }
+	}
+	return nullptr;
+}
+
 // Host bindings shared by every widget: the central runtime owns the graph +
 // variable state and hands back the InstanceId, so one binding set serves all
 // widgets. Property access + show/hide resolve the widget from the id and act on
@@ -52,8 +75,11 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 	HorizonCode::HostBindings b;
 	b.getProperty = [this](HorizonCode::InstanceId id, int elem, const std::string& prop) -> HorizonCode::Value
 	{
-		Instance* w = findByScript(id);
-		const HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
+		// An embedded widget's graph knows its elements by the ids they had in
+		// its own asset; the offset turns those into ids in the host tree.
+		int off = 0;
+		Instance* w = resolveScriptOwner(id, off);
+		const HE::UIElement* e = w ? w->tree.find(elem + off) : nullptr;
 		// getPropAny/setPropAny: base properties (Visible, Hit Testable,
 		// Position, Size, Layer, Hover Cursor, Material, Font) plus the
 		// type-specific ones — every property is both gettable and settable.
@@ -61,8 +87,9 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 	};
 	b.setProperty = [this](HorizonCode::InstanceId id, int elem, const std::string& prop, const HorizonCode::Value& v)
 	{
-		Instance* w = findByScript(id);
-		HE::UIElement* e = w ? w->tree.find(elem) : nullptr;
+		int off = 0;
+		Instance* w = resolveScriptOwner(id, off);
+		HE::UIElement* e = w ? w->tree.find(elem + off) : nullptr;
 		if (!e) return;
 		e->setPropAny(prop, HE::uiHcValueToProp(v, e->getPropAny(prop).type));
 		// Asset-path properties change what the element draws with — re-resolve
@@ -70,8 +97,20 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		if (prop == "Material" || prop == "Font")
 			refreshElementAssets(*w, *e);
 	};
-	b.showSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = true; };
-	b.hideSelf = [this](HorizonCode::InstanceId id){ if (Instance* w = findByScript(id)) w->visible = false; };
+	// "Self" for an EMBEDDED widget is that widget, not the whole page it sits
+	// on: showing itself shows its WidgetRef element, and nothing around it.
+	auto setSelfVisible = [this](HorizonCode::InstanceId id, bool vis)
+	{
+		int off = 0;
+		Instance* w = resolveScriptOwner(id, off);
+		if (!w) return;
+		if (off == 0) { w->visible = vis; return; }
+		for (const Instance::Embed& em : w->embeds)
+			if (em.scriptId == id)
+				if (HE::UIElement* ref = w->tree.find(em.rootElem)) ref->visible = vis;
+	};
+	b.showSelf = [setSelfVisible](HorizonCode::InstanceId id){ setSelfVisible(id, true); };
+	b.hideSelf = [setSelfVisible](HorizonCode::InstanceId id){ setSelfVisible(id, false); };
 	return b;
 }
 
@@ -113,6 +152,89 @@ void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
 	}
 }
 
+void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
+                                    std::vector<std::string>& chain, int depth)
+{
+	// A widget that embeds itself, directly or around a circle, would expand
+	// forever. Both guards are cheap and both are needed: the chain catches the
+	// circle, the depth catches an honest but absurd nesting.
+	constexpr int kMaxDepth = 8;
+	if (depth > kMaxDepth) return;
+
+	// Snapshot the ids to visit: the loop appends to tree.elements, and a ref
+	// grafted in this pass is expanded by the recursive call, not by this loop.
+	std::vector<int> refIds;
+	for (const auto& ep : w.tree.elements)
+		if (ep && ep->type() == HE::UIWidgetType::WidgetRef) refIds.push_back(ep->id);
+
+	for (const int refId : refIds)
+	{
+		auto* ref = dynamic_cast<HE::UIWidgetRef*>(w.tree.find(refId));
+		if (!ref || ref->embedded || ref->widgetPath.empty()) continue;
+
+		if (std::find(chain.begin(), chain.end(), ref->widgetPath) != chain.end())
+		{
+			HE_LOG_ERROR(Widget, "Widget '%s' embeds itself (directly or in a circle) — "
+			                     "that reference is left empty", ref->widgetPath.c_str());
+			continue;
+		}
+
+		const HE::UUID id = content.loadAsset(ref->widgetPath);
+		const UIWidgetAsset* asset = id == HE::UUID{} ? nullptr : content.getWidget(id);
+		if (!asset)
+		{
+			HE_LOG_WARN(Widget, "WidgetRef: no widget asset at '%s'", ref->widgetPath.c_str());
+			continue;
+		}
+		HE::UIWidgetTree sub;
+		if (!HE::uiWidgetTreeFromJson(asset->treeJson, sub))
+		{
+			HE_LOG_ERROR(Widget, "WidgetRef: unreadable tree in '%s'", ref->widgetPath.c_str());
+			continue;
+		}
+
+		// Renumber into this tree. The offset is the host's nextId - 1, so a
+		// local id 1 becomes the host's next free id; two copies of the same
+		// widget therefore never share an element id.
+		const int offset = w.tree.nextId - 1;
+		Instance::Embed em;
+		em.rootElem = refId;
+		em.idOffset = offset;
+		em.idMax    = offset;
+		for (auto& sp : sub.elements)
+		{
+			if (!sp) continue;
+			sp->id += offset;
+			// A root of the embedded asset hangs under the ref element; anything
+			// else keeps its parent, shifted.
+			sp->parentId = sp->parentId == 0 ? refId : sp->parentId + offset;
+			em.idMax = std::max(em.idMax, sp->id);
+			w.tree.elements.push_back(std::move(sp));
+		}
+		w.tree.nextId = em.idMax + 1;
+
+		// Its logic runs as its own instance, exactly like a top-level widget's
+		// — same compiled-first lookup, same class identity by asset path.
+		HorizonCode::Graph graph;
+		if (!asset->graphJson.empty() && !HorizonCode::fromJson(asset->graphJson, graph))
+			HE_LOG_ERROR(Widget, "WidgetRef '%s' has an unparsable graph — it will render "
+			                     "but have no logic", ref->widgetPath.c_str());
+		const HorizonCode::ClassIdentity cls{ ref->widgetPath, "Object" };
+		if (auto compiled = HorizonCode::compiledClasses().create(ref->widgetPath))
+			em.scriptId = rt().addCompiled(std::move(compiled), makeBindings(), cls);
+		else
+			em.scriptId = rt().add(std::move(graph), makeBindings(), cls);
+
+		w.embeds.push_back(em);
+		ref->embedded = true;
+
+		// …and the widget it just brought in may embed further widgets.
+		chain.push_back(ref->widgetPath);
+		embedWidgetRefs(w, content, chain, depth + 1);
+		chain.pop_back();
+	}
+}
+
 int WidgetManager::createWidget(ContentManager& content, const std::string& assetPath)
 {
 	m_content = &content; // kept for runtime Material/Font re-resolution
@@ -138,6 +260,13 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 		// graph, previously with nothing in the log to say so.
 		HE_LOG_ERROR(Widget, "Widget '%s' has an unparsable HorizonCode graph — it will "
 		                     "render but have no logic", assetPath.c_str());
+
+	// Graft in every embedded widget FIRST: what they bring is part of this
+	// tree from here on, so material/font resolution below covers it too.
+	{
+		std::vector<std::string> chain{ assetPath };
+		embedWidgetRefs(w, content, chain, 0);
+	}
 
 	// Resolve per-element material references once (paths → UUIDs) and bake each
 	// element's Font asset → a stable atlas key its text emits with (0 = the
@@ -170,6 +299,10 @@ int WidgetManager::createWidget(ContentManager& content, const std::string& asse
 	            assetPath.c_str(), stored.id, stored.tree.elements.size(),
 	            graph.nodes.empty() ? "compiled/no" : "interpreted");
 	rt().fireConstruct(stored.scriptId);
+	// Embedded widgets construct too, innermost last — an embed may only be
+	// spoken to once the widget holding it has run its own Construct.
+	for (const Instance::Embed& em : stored.embeds)
+		rt().fireConstruct(em.scriptId);
 	return stored.id;
 }
 
@@ -179,6 +312,10 @@ void WidgetManager::destroyWidget(int id)
 	if (Instance* w = find(id))
 	{
 		HE_LOG_DEBUG(Widget, "Destroying widget id %d", id);
+		// Embedded widgets are instances of their own and have to go with it,
+		// innermost first — otherwise their scripts outlive the tree they act on.
+		for (auto it = w->embeds.rbegin(); it != w->embeds.rend(); ++it)
+			rt().destroy(it->scriptId);
 		rt().destroy(w->scriptId); // fire "Destruct", then drop it
 	}
 	else
@@ -197,7 +334,13 @@ void WidgetManager::clear()
 	// itself destroy widgets, mutating m_instances mid-iteration.
 	std::vector<HorizonCode::InstanceId> ids;
 	ids.reserve(m_instances.size());
-	for (const auto& w : m_instances) ids.push_back(w.scriptId);
+	for (const auto& w : m_instances)
+	{
+		// Embedded instances first: they act on the host's tree.
+		for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
+			ids.push_back(it->scriptId);
+		ids.push_back(w.scriptId);
+	}
 	if (!ids.empty()) HE_LOG_DEBUG(Widget, "Clearing %zu live widget(s)", ids.size());
 	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
 	m_instances.clear();
@@ -245,6 +388,10 @@ void WidgetManager::tick(float dt)
 	{
 		if (!w.visible) continue;
 		rt().fireTick(w.scriptId, dt);
+		// Embedded widgets tick as themselves — a health bar that animates has
+		// its own Tick, and it must run while the page holding it is up.
+		for (const Instance::Embed& em : w.embeds)
+			rt().fireTick(em.scriptId, dt);
 	}
 }
 
@@ -253,8 +400,11 @@ bool WidgetManager::isInteractive(const Instance& w, const HE::UIElement& e) con
 	if (e.interactive()) return true;
 	// Bound by a pointer-event node? (elem 0 = any element.) eventBindingsOf
 	// serves interpreted (Event nodes) and compiled (static tables) scripts alike.
-	for (const auto& b : rt().eventBindingsOf(w.scriptId))
-		if (b.elem == 0 || b.elem == e.id)
+	// The bindings to ask are the ones of the script that OWNS this element, and
+	// they name it by its own id — for an embedded widget both differ.
+	const ScriptTarget target = scriptTargetFor(w, e.id);
+	for (const auto& b : rt().eventBindingsOf(target.scriptId))
+		if (b.elem == 0 || b.elem == target.elem)
 		{
 			const std::string& n = b.name;
 			if (n == "OnClicked" || n == "OnPressed"    || n == "OnReleased" ||
@@ -338,7 +488,12 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 		// one the same named path as before, and both still reach everyone bound
 		// to this widget's script.
 		auto fireP = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int), int elem)
-		{ (rt().*fn)(w.scriptId, elem); };
+		{
+			// An element that came in with a WidgetRef belongs to THAT widget's
+			// script, under the id it has in its own asset.
+			const ScriptTarget t = scriptTargetFor(w, elem);
+			(rt().*fn)(t.scriptId, t.elem);
+		};
 
 		// ── Hover transitions ────────────────────────────────────────────────
 		// Event names differ per type; fire BOTH candidate names — the Runner
@@ -411,7 +566,8 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 				if (nv != s->value)
 				{
 					s->value = nv;
-					rt().fireOnValueChanged(w.scriptId, w.draggingSlider, nv);
+					const ScriptTarget t2 = scriptTargetFor(w, w.draggingSlider);
+					rt().fireOnValueChanged(t2.scriptId, t2.elem, nv);
 				}
 			}
 		}
@@ -438,7 +594,8 @@ void WidgetManager::inputText(const std::string& utf8)
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
 	ti->text += utf8;
-	rt().fireOnTextChanged(w->scriptId, w->focusedElem, ti->text);
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 }
 
 void WidgetManager::inputBackspace()
@@ -452,7 +609,8 @@ void WidgetManager::inputBackspace()
 	size_t n = ti->text.size();
 	do { --n; } while (n > 0 && (static_cast<unsigned char>(ti->text[n]) & 0xC0) == 0x80);
 	ti->text.erase(n);
-	rt().fireOnTextChanged(w->scriptId, w->focusedElem, ti->text);
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+	rt().fireOnTextChanged(t.scriptId, t.elem, ti->text);
 }
 
 void WidgetManager::inputSubmit()
@@ -462,15 +620,17 @@ void WidgetManager::inputSubmit()
 	if (!w || w->focusedElem == 0) return;
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return;
-	rt().fireOnTextCommitted(w->scriptId, w->focusedElem, ti->text);
+	const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+	rt().fireOnTextCommitted(t.scriptId, t.elem, ti->text);
 }
 
 void WidgetManager::activateElement(Instance& w, int elemId)
 {
 	HE::UIElement* e = w.tree.find(elemId);
 	if (!e) return;
+	const ScriptTarget target = scriptTargetFor(w, elemId);
 	auto fireP = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int))
-	{ (rt().*fn)(w.scriptId, elemId); };
+	{ (rt().*fn)(target.scriptId, target.elem); };
 
 	switch (e->type())
 	{
@@ -486,7 +646,7 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 		if (auto* cb = dynamic_cast<HE::UICheckBox*>(e))
 		{
 			cb->checked = !cb->checked;
-			rt().fireOnCheckChanged(w.scriptId, elemId, cb->checked);
+			rt().fireOnCheckChanged(target.scriptId, target.elem, cb->checked);
 		}
 		break;
 	case HE::UIWidgetType::ComboBox:
@@ -495,7 +655,7 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 			{
 				combo->selectedIndex =
 					(combo->selectedIndex + 1) % (int)combo->options.size();
-				rt().fireOnSelectionChanged(w.scriptId, elemId, combo->selectedIndex);
+				rt().fireOnSelectionChanged(target.scriptId, target.elem, combo->selectedIndex);
 			}
 		break;
 	default:
@@ -531,10 +691,16 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 {
 	Instance* w = find(widgetId);
 	if (!w) return false;
+	// Focus events go to whichever script owns the element (see scriptTargetFor).
+	auto fireFocus = [&](void (HorizonCode::Runtime::*fn)(HorizonCode::InstanceId, int), int elem)
+	{
+		const ScriptTarget t = scriptTargetFor(*w, elem);
+		(rt().*fn)(t.scriptId, t.elem);
+	};
 	if (elementId == 0)
 	{
 		if (w->focusedElem != 0)
-			rt().fireOnUnfocused(w->scriptId, w->focusedElem);
+			fireFocus(&HorizonCode::Runtime::fireOnUnfocused, w->focusedElem);
 		w->focusedElem = 0;
 		if (m_focusWidget == widgetId) m_focusWidget = 0;
 		return true;
@@ -542,10 +708,10 @@ bool WidgetManager::setFocus(int widgetId, int elementId)
 	const HE::UIElement* e = w->tree.find(elementId);
 	if (!e) return false;
 	if (w->focusedElem == elementId) return true;
-	if (w->focusedElem != 0) rt().fireOnUnfocused(w->scriptId, w->focusedElem);
+	if (w->focusedElem != 0) fireFocus(&HorizonCode::Runtime::fireOnUnfocused, w->focusedElem);
 	w->focusedElem = elementId;
 	m_focusWidget  = widgetId;
-	rt().fireOnFocused(w->scriptId, elementId);
+	fireFocus(&HorizonCode::Runtime::fireOnFocused, elementId);
 	return true;
 }
 
@@ -592,7 +758,8 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 				if (nv != s->value)
 				{
 					s->value = nv;
-					rt().fireOnValueChanged(w->scriptId, w->focusedElem, nv);
+					const ScriptTarget t = scriptTargetFor(*w, w->focusedElem);
+					rt().fireOnValueChanged(t.scriptId, t.elem, nv);
 					return true;
 				}
 			}
