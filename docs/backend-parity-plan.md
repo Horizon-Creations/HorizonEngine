@@ -253,6 +253,55 @@ größte Einzelkorrektur an der Aufwandsschätzung in diesem Dokument.
 > > `material_function` und `particles` **byte-identisch**, `material_pbr` ein Subpixel
 > > um eins. Übrig bleibt `widget` — dort ist GL der Ausreißer gegenüber Metal.
 >
+> > **Stand 2026-08-23: Weightmap gebunden, Gates angeglichen.**
+> >
+> > Zwei Enden, die der Sampler-Umbau offen gelassen hatte.
+> >
+> > **Die Landschafts-Weightmap** war auf keinem der drei Zielbackends aufgelöst —
+> > `grep -c weightmapTextureId` ergab überall 0. Der Shader konnte sie seit dem Umbau
+> > deklarieren, gefüttert wurde er nicht. Jetzt lösen alle drei sie **pro Draw** auf,
+> > mit demselben Ausdruck wie GL (`dc.weightmapTextureId`, sonst
+> > `kDefaultLayer0WeightTextureId`) und am Klemm-Sampler. D3D12 brauchte dafür einen
+> > UUID→Deskriptor-Weg, den es überhaupt nicht hatte; D3D11 und Vulkan konnten ihre
+> > vorhandenen Caches erweitern. D3D11 und Vulkan haben dabei `InvalidateTexture`
+> > nachgezogen — ohne den zeigt ein übermaltes Terrain für immer den ersten Pinselstrich,
+> > weil `TerrainSystem` die Pixel unter unveränderter UUID ersetzt.
+> >
+> > Beleg über `HE_DUMP_LANDSCAPELAYERS` (grüne Scheibe im roten Feld, blauer Streifen —
+> > drei getrennte Kanäle, damit ein vertauschter sofort auffällt), Kamera von oben:
+> >
+> > | Backend | rot | grün | blau |
+> > |---|---:|---:|---:|
+> > | OpenGL (Referenz) | 12029 | 14900 | 2203 |
+> > | D3D11 | 0 → **11581** | 0 → **14170** | 0 → **2159** |
+> > | D3D12 | 0 → **11581** | 0 → **14170** | 0 → **2159** |
+> > | Vulkan | 0 → **11586** | 0 → **14174** | 0 → **2163** |
+> >
+> > Vorher zeigten alle drei **nichts** — die Landschaft rendert jetzt, Muster und
+> > Kanalzuordnung stimmen, D3D11 und D3D12 sind identisch. Die verbleibenden ~4 %
+> > gegenüber GL sind Schattierung, nicht Weightmap: die drei sind etwas blasser.
+> >
+> > **Die AO- und DDGI-Gates** liefen auseinander — nur D3D12 setzte `fog.w` und
+> > `giProbe.y` für Graph-Materialien, D3D11 und Vulkan nicht, sodass ein Graph-Material
+> > neben einem eingebauten stand und weder SSAO noch DDGI abbekam. Jetzt reichen alle
+> > drei dieselben Bedingungen durch, die ihr eigener eingebauter Pfad schon rechnet, und
+> > jeder, der `giProbe.y` öffnet, füllt auch Gitter-Ursprung, -Größe und `giParams` —
+> > ein offenes Probe-Gate ohne Gitter schattiert Müll. Die frühere Begründung auf D3D11
+> > („das Gitter wird nie gefüllt") war falsch: es wird bei `:2237-2243` berechnet.
+> >
+> > Eine Divergenz hat die Gegenprobe gefunden und sie ist behoben: D3D12 fiel bei nicht
+> > auflösbarer Weightmap auf einen Null-Deskriptor zurück, also **Schwarz**, wo D3D11 und
+> > Vulkan Weiß nehmen — und `DefaultAssets.h:46-49` benennt Schwarz ausdrücklich als die
+> > schlechtere der beiden Fehlfarben. Sichtbar geworden wäre das an der
+> > Content-Browser-Kachel eines Layer-Blend-Materials. Gelöst ohne neue Ressource, über
+> > eine Komponenten-Zuordnung auf die vorhandene 1×1-R8-Weiß-Textur.
+> > Weiß ist selbst nicht die *richtige* Antwort — es mittelt alle Layer, wo (255,0,0,0)
+> > Layer 0 zeigen würde. Es ist dieselbe Antwort wie auf den anderen beiden, und diesen
+> > Pfad erreicht nur, wessen Default-Asset schon nicht auflöst.
+> >
+> > Die fünf festgenagelten Kacheln sind **byte-identisch zum Stand davor** geblieben,
+> > OpenGL unverändert, 0 Validierungsfehler auf allen vier Backends, Tests 1739/1739.
+>
 > **Aber Umnummerieren allein reicht für `ssrComposite` nicht.** Der braucht 19 verschiedene
 > Sampler; `ps_5_0` kennt 16. Da hilft keine Tabelle. Entweder teilen sich mehrere Texturen
 > einen `SamplerState` (SPIRV-Cross erzeugt aus GLSLs kombinierten Samplern je ein eigenes

@@ -46,6 +46,11 @@ public:
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
     void InvalidateMaterial(const HE::UUID& materialId) override;
     void InvalidateMesh(const HE::UUID& meshId) override;
+    // Same for a texture, which this backend now needs because it CACHES graph textures
+    // (the landscape weightmap behind t14 heLandscapeWeights). TerrainSystem rewrites the
+    // weightmap asset in place on every paint stroke and keeps its UUID, so without this
+    // the terrain would stay frozen at whatever the first upload captured.
+    void InvalidateTexture(const HE::UUID& textureId) override;
 
     // Whole-frame GPU time from a per-frame-in-flight timestamp query pair
     // (read back k_frameCount frames late so it never stalls) + CPU counters,

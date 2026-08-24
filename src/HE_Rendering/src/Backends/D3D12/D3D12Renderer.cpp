@@ -2237,18 +2237,31 @@ struct D3D12RendererImpl
     // All of this is inert (never touched) when HE_HAVE_SHADERC is off: m_matReady stays
     // false and the draw path skips it, so behaviour equals today's built-in PBR path.
     // Register mapping: shaderc::compileHlslPinned PINS the fragment stage's
-    // texture/sampler registers (MaterialShaderLibrary::fragment carries the table) —
-    // textures keep their GLSL binding number, samplers are COMPACTED into s0..s15
-    // because ps_5_0 caps at 16 sampler slots and the preamble reaches binding 33.
+    // texture/sampler registers (MaterialShaderLibrary::fragment carries the table).
+    // Every TEXTURE keeps its GLSL binding number as its t-register. SAMPLERS are no
+    // longer compacted: the preamble declares SEPARATE `texture2D`s plus exactly TWO
+    // shared `sampler`s, so a freshly generated fragment needs two s-registers, not
+    // sixteen — heSampWrap (binding 34) → s2, heSampClamp (binding 35) → s0.
     //   b0 HeLighting(FS) | b1 U(VS) | b3 HeParams(FS) | b8/b9 HeLighting/HeParams(WPO VS)
-    //   t2  heTex0        /s2   t4..t7 heTexP0..3 /s4..s7   t10 heGIShadow /s10
-    //   t11 heGILocal     /s11  t12 heCsm[]       /s12      t13 heLocalShadow[] /s13
-    //   t15 heSkyEnvCube  /s15  t16 heAO          /s0       t17 heGIIrradiance  /s1
-    //   t18 heGIVisibility/s3   t31 heSSRFwd      /s8       t32 heGIReflFwd     /s9
-    //   t33 heCloudShadow /s14
-    // t14 is deliberately absent (landscape weightmap — the material preamble never
-    // declares it), which together with the t3 / t8-t9 / t19-t30 holes is why the SRV
-    // table is SIX descriptor ranges rather than one.
+    //   t2  heTex0             t4..t7 heTexP0..3       t10 heGIShadow
+    //   t11 heGILocal          t12 heCsm[]             t13 heLocalShadow[]
+    //   t14 heLandscapeWeights t15 heSkyEnvCube        t16 heAO
+    //   t17 heGIIrradiance     t18 heGIVisibility      t31 heSSRFwd
+    //   t32 heGIReflFwd        t33 heCloudShadow
+    //   s0  heSampClamp (LINEAR/CLAMP)                 s2  heSampWrap (LINEAR/REPEAT)
+    // The static-sampler array below still publishes all sixteen s-registers, and its
+    // `wrap = (i == 2) || (i >= 4 && i <= 7)` predicate is exactly why the pin table
+    // chose s2/s0: the two shared samplers land on registers this backend already had
+    // right. The other fourteen serve PACKAGED content only — a material packaged
+    // before the separate-sampler rewrite ships a combined-sampler fragment whose
+    // heTex0/heTexPn/heLandscapeWeights are pinned one slot along (s4..s8, s13), all
+    // of which this array already publishes with the correct address mode.
+    // t14 (heLandscapeWeights) is emitted by the GRAPH, not by the preamble
+    // (MaterialGraph.cpp, gated on usesLandscapeWeights) and is bound PER DRAW from
+    // the terrain chunk's parent landscape — so it lives in its OWN root parameter
+    // (param 6) rather than in the shared table, and its descriptor comes out of the
+    // graph-texture region below. The t3 / t8-t9 / t14 / t19-t30 holes are why the
+    // shared SRV table is SIX descriptor ranges rather than one.
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     ComPtr<ID3D12RootSignature>  m_matRootSig;
@@ -2272,7 +2285,31 @@ struct D3D12RendererImpl
     static constexpr UINT k_matSrvSSRFwd   = 13; // t31 heSSRFwd        (null → .a = 0)
     static constexpr UINT k_matSrvGIRefl   = 14; // t32 heGIReflFwd     (null → .a = 0)
     static constexpr UINT k_matSrvCloud    = 15; // t33 heCloudShadow   (null, gate stays 0)
-    static constexpr UINT k_matSrvCount    = 16;
+    static constexpr UINT k_matSrvShared   = 16; // count of the slots above = root param 5's table
+
+    // ── t14 heLandscapeWeights: the fallback slot + the graph-texture region ──
+    // Root param 6 is a ONE-descriptor table bound per draw, so it points at whichever
+    // slot in this heap holds the weightmap that draw wants. Two kinds of slot can sit
+    // under it:
+    //   k_matSrvWeightNull — WHITE (1,1,1,1), see where it is filled. A typed null SRV
+    //     would read (0,0,0,0), and the Landscape Layer Blend node's
+    //     `max(wsum, 1e-4)` divide turns every-weight-zero into BLACK — the worse of
+    //     the two wrong colours per DefaultAssets.h:46-49, and the one D3D11 and Vulkan
+    //     do NOT use. Only ever bound when the weightmap cannot be resolved at all (no
+    //     ContentManager, upload refused, region exhausted) and by the material PREVIEW
+    //     path, which — exactly like OpenGL's DrawMaterialPreviewGeometry — binds no
+    //     weightmap of its own.
+    //   [k_matSrvGraphBase .. +k_matGraphTextures) — one slot per CACHED graph texture,
+    //     written ONCE at upload time and never rewritten, so no in-flight descriptor
+    //     is ever overwritten (the per-draw part is the table's GPU handle, not a
+    //     descriptor write). Same monotonic-with-free-list allocator the mesh-texture
+    //     region of sceneSrvHeap uses; InvalidateTexture recycles a slot after frames
+    //     in flight, which matters because a terrain paint stroke rewrites the
+    //     weightmap asset in place on every drag.
+    static constexpr UINT k_matSrvWeightNull  = k_matSrvShared;          // 16
+    static constexpr UINT k_matSrvGraphBase   = k_matSrvWeightNull + 1;  // 17
+    static constexpr UINT k_matGraphTextures  = 64;
+    static constexpr UINT k_matSrvCount       = k_matSrvGraphBase + k_matGraphTextures;
 
     D3D12_CPU_DESCRIPTOR_HANDLE matSrvCpu(UINT slot) const
     {
@@ -2281,6 +2318,27 @@ struct D3D12RendererImpl
                * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         return h;
     }
+    D3D12_GPU_DESCRIPTOR_HANDLE matSrvGpu(UINT slot) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(slot)
+               * device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return h;
+    }
+
+    // ── Graph-texture cache (A4) ─────────────────────────────────────────────
+    // Keyed exactly like OpenGL's m_graphTexCache — "hi:lo" for a UUID, else the asset
+    // path — so the two backends cache the same thing under the same identity. Value is
+    // the resource (kept alive here) plus its slot in the region above; slot = -1 means
+    // "the asset resolved and the upload REFUSED it" (ASTC, wrong channel count, truncated
+    // payload), cached so it isn't retried every frame. An asset that has not been
+    // registered yet is deliberately NOT in here — see resolveGraphTexture.
+    struct GraphTex { ComPtr<ID3D12Resource> tex; int slot = -1; };
+    std::unordered_map<std::string, GraphTex> m_graphTexCache;
+    UINT                             m_matGraphNextSlot = k_matSrvGraphBase; // running allocator
+    std::vector<UINT>                m_matGraphFree;        // recycled, ready to reuse
+    std::vector<std::pair<UINT,int>> m_matGraphFreePending; // (slot, countdown past frames in flight)
+    std::vector<HE::UUID>            m_pendingTexInval;     // InvalidateTexture → drained in DrawScene
     ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
     ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
@@ -2517,16 +2575,21 @@ struct D3D12RendererImpl
     }
 
     // Upload a cooked TextureAsset — RGBA8 or a block format (BC7/BC3) — with its full
-    // pre-baked mip chain to a DEFAULT-heap texture + SRV in the mesh-texture region of
-    // sceneSrvHeap, using the frame's recording command list. GetCopyableFootprints
-    // sizes the row-pitched staging copy for every subresource (COPY_DEST→PIXEL_SHADER_
-    // RESOURCE). Returns the heap slot, or -1 on any miss / heap full / unsupported
-    // format. The DEFAULT texture is handed back via outTex so the caller keeps it alive.
-    int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                        ComPtr<ID3D12Resource>& outTex)
+    // pre-baked mip chain to a DEFAULT-heap texture, using the frame's recording command
+    // list. GetCopyableFootprints sizes the row-pitched staging copy for every
+    // subresource (COPY_DEST→PIXEL_SHADER_RESOURCE). Returns false on any miss /
+    // unsupported format / truncated payload, leaving outTex untouched.
+    //
+    // Deliberately knows NOTHING about descriptor heaps: the caller decides which heap
+    // the SRV goes into. allocAlbedoSlot puts it in sceneSrvHeap's mesh-texture region
+    // for the built-in PBR path; resolveGraphTexture puts it in m_matSrvHeap's
+    // graph-texture region for t14. Before this split there was no way at all from a
+    // texture UUID to a descriptor a GRAPH material could see.
+    bool uploadTextureAsset12(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
+                              ComPtr<ID3D12Resource>& outTex, DXGI_FORMAT& outFmt, UINT& outMips)
     {
-        if (!cl || !sceneSrvHeap || !tex) return -1;
-        if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return -1;
+        if (!cl || !tex) return false;
+        if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
 
         DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
@@ -2534,18 +2597,15 @@ struct D3D12RendererImpl
         case TextureFormat::RGBA8: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
-        default: return -1; // ASTC / unknown → D3D can't sample it
+        default: return false; // ASTC / unknown → D3D can't sample it
         }
         if (isBlock) // BC is core on FL11, but stay defensive.
         {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{ fmt };
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
                 !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D))
-                return -1;
+                return false;
         }
-        // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
-        if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
-            return -1; // heap full → flat
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2560,7 +2620,7 @@ struct D3D12RendererImpl
         ComPtr<ID3D12Resource> gpuTex;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gpuTex))))
-            return -1;
+            return false;
 
         // Per-subresource footprints (D3D-aligned dest row pitch) + total upload size.
         std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mips);
@@ -2573,11 +2633,11 @@ struct D3D12RendererImpl
         // Guard the source payload holds every mip tightly (numRows × rowSize each).
         size_t need = 0;
         for (UINT s = 0; s < mips; ++s) need += static_cast<size_t>(numRows[s]) * rowSizes[s];
-        if (tex->data.size() < need) return -1; // truncated
+        if (tex->data.size() < need) return false; // truncated
 
         void* mapped = nullptr;
         ComPtr<ID3D12Resource> uploadBuf = createUploadBuffer(uploadSize, &mapped);
-        if (!uploadBuf || !mapped) return -1;
+        if (!uploadBuf || !mapped) return false;
         // Copy each mip's tightly-packed source rows into the aligned upload layout.
         size_t srcOff = 0;
         for (UINT s = 0; s < mips; ++s)
@@ -2607,19 +2667,99 @@ struct D3D12RendererImpl
         barrier12(cl, gpuTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-        UINT slot;
-        if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
-        else                      { slot = meshTexNextSlot++; }
+        meshTexUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
+        outTex  = std::move(gpuTex);
+        outFmt  = fmt;
+        outMips = mips;
+        return true;
+    }
+
+    // One 2D SRV, by format + mip count, into one descriptor slot of any heap.
+    void srv2DInto(ID3D12Resource* res, DXGI_FORMAT fmt, UINT mips,
+                   D3D12_CPU_DESCRIPTOR_HANDLE dst) const
+    {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format                  = fmt;
         sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels     = mips;
-        device->CreateShaderResourceView(gpuTex.Get(), &sv, sceneSrvCpu(slot));
+        device->CreateShaderResourceView(res, &sv, dst);
+    }
 
-        meshTexUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
-        outTex = std::move(gpuTex);
+    // Upload a cooked TextureAsset + publish its SRV in the mesh-texture region of
+    // sceneSrvHeap. Returns the heap slot, or -1 on any miss / heap full / unsupported
+    // format. The DEFAULT texture is handed back via outTex so the caller keeps it alive.
+    int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
+                        ComPtr<ID3D12Resource>& outTex)
+    {
+        if (!cl || !sceneSrvHeap || !tex) return -1;
+        // A recycled slot (freed by invalidation, past frames in flight) or the next fresh
+        // one. Checked BEFORE the upload so a full heap costs no GPU resource at all.
+        if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
+            return -1; // heap full → flat
+
+        DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; UINT mips = 1;
+        if (!uploadTextureAsset12(cl, tex, outTex, fmt, mips)) return -1;
+
+        UINT slot;
+        if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
+        else                      { slot = meshTexNextSlot++; }
+        srv2DInto(outTex.Get(), fmt, mips, sceneSrvCpu(slot));
         return static_cast<int>(slot);
+    }
+
+    // ── Graph-material texture resolve (A4) ──────────────────────────────────
+    // UUID/path → a descriptor in m_matSrvHeap's graph-texture region, which is the
+    // only heap a graph-material draw has bound. Cached under OpenGL's key ("hi:lo",
+    // else the path) so both backends cache the same texture under the same identity.
+    //
+    // The SRV is written ONCE, when the texture is first uploaded, and never rewritten:
+    // per draw only the root-parameter-6 GPU handle moves. That is what makes this safe
+    // without any per-frame descriptor ring — but the safety is NOT "written once", it is
+    // "never a slot any SUBMITTED command list could reference": a fresh slot comes off
+    // the monotonic allocator and has been bound by nobody, and a recycled one waited out
+    // k_frameCount + 2 frames in m_matGraphFreePending first. Writing a descriptor into a
+    // shader-visible heap is otherwise a hazard, so keep that invariant if this grows.
+    //
+    // Returns the slot, or -1 when the texture cannot be made available. Callers bind
+    // k_matSrvWeightNull in that case rather than leaving root param 6 unset — and that
+    // reads BLACK, not white, so the two -1 cases below are deliberately different.
+    int resolveGraphTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& id,
+                            const std::string& path, ContentManager* cm)
+    {
+        if (!cl || !cm || !m_matSrvHeap) return -1;
+        const std::string key = id != HE::UUID{}
+            ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+        if (key.empty()) return -1;
+        if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end()) return it->second.slot;
+        // Region exhausted: do NOT cache the miss — a slot may come back from the
+        // pending free list, and a cached -1 would keep this texture black forever.
+        if (m_matGraphFree.empty() && m_matGraphNextSlot >= k_matSrvGraphBase + k_matGraphTextures)
+            return -1;
+
+        // NOT LOADED YET is not the same as UNUSABLE, and only the second may be cached.
+        // A weightmap registered after this draw (streaming, a landscape spawned mid-frame)
+        // would otherwise be pinned at -1 for the whole session with nothing to un-pin it:
+        // InvalidateTexture fires when the pixels CHANGE, not when the asset first arrives.
+        // Same rule resolveMaterialAlbedo applies to a material that isn't resident yet.
+        const TextureAsset* ta = cm->resolveTextureRef(id, path);
+        if (!ta) return -1; // retry next frame, uncached
+
+        GraphTex e;
+        DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; UINT mips = 1;
+        if (uploadTextureAsset12(cl, ta, e.tex, fmt, mips))
+        {
+            UINT slot;
+            if (!m_matGraphFree.empty()) { slot = m_matGraphFree.back(); m_matGraphFree.pop_back(); }
+            else                         { slot = m_matGraphNextSlot++; }
+            srv2DInto(e.tex.Get(), fmt, mips, matSrvCpu(slot));
+            e.slot = static_cast<int>(slot);
+        }
+        // The asset EXISTS and the upload still refused it (ASTC, non-RGBA8 channel count,
+        // truncated mip payload) — retrying cannot change that, so cache the -1 rather than
+        // re-resolving through the ContentManager on every draw of every frame. This is the
+        // only failure that gets cached.
+        return m_graphTexCache.emplace(key, std::move(e)).first->second.slot;
     }
 
     // Resolve + upload a static mesh's base-color texture the first time it is drawn (needs a
@@ -2691,6 +2831,26 @@ struct D3D12RendererImpl
                 m_materialTexCache.erase(it);
             }
         m_pendingMatInval.clear();
+
+        // Graph-texture cache (t14 heLandscapeWeights + any future graph texture).
+        // TerrainSystem::updateTerrains REPLACES the weightmap asset in place on every
+        // paint stroke and keeps the UUID, so without this the first upload would be
+        // frozen on screen for the rest of the session no matter how the terrain is
+        // painted. The slot goes back on the free list rather than being abandoned:
+        // a drag paints for as long as the mouse is down, and abandoning a slot per
+        // stroke would exhaust the 64-slot region in seconds.
+        for (const HE::UUID& id : m_pendingTexInval)
+        {
+            const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+            if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+            {
+                if (it->second.slot >= 0)
+                    m_matGraphFreePending.emplace_back(static_cast<UINT>(it->second.slot), retireN);
+                retire(std::move(it->second.tex));
+                m_graphTexCache.erase(it);
+            }
+        }
+        m_pendingTexInval.clear();
 
         for (const HE::UUID& id : m_pendingMeshInval)
         {
@@ -6924,6 +7084,13 @@ struct D3D12RendererImpl
         cl->SetGraphicsRootSignature(m_matRootSig.Get());
         cl->SetPipelineState(pso12);
         cl->SetGraphicsRootDescriptorTable(5, m_matSrvHeap->GetGPUDescriptorHandleForHeapStart());
+        // t14 heLandscapeWeights (root param 6) — the typed null, deliberately. A preview
+        // has no landscape and no paint, and OpenGL's DrawMaterialPreviewGeometry binds no
+        // weightmap either (its unit 13 keeps whatever the scene left, i.e. nothing in a
+        // preview-only session), so a layer-blend material previews the same on both
+        // backends. The bind itself is not optional: a graph PSO whose shader declares
+        // t14 must not reach the GPU with root parameter 6 unset.
+        cl->SetGraphicsRootDescriptorTable(6, matSrvGpu(k_matSrvWeightNull));
         const D3D12_GPU_VIRTUAL_ADDRESS lightVA = matPvLightCB->GetGPUVirtualAddress();
         const D3D12_GPU_VIRTUAL_ADDRESS objVA   = matPvObjCB->GetGPUVirtualAddress();
         const D3D12_GPU_VIRTUAL_ADDRESS parVA   = matPvParamCB->GetGPUVirtualAddress();
@@ -7166,7 +7333,7 @@ void D3D12RendererImpl::createMaterialResources()
     // signature does not cover is a root-signature MISMATCH: the debug layer reports it
     // and the runtime may drop the draw, so "covers everything declared" is not optional
     // here the way "reads black" is on D3D11.
-    D3D12_ROOT_PARAMETER params[6]{};
+    D3D12_ROOT_PARAMETER params[7]{};
     auto cbv = [&](int i, UINT reg) {
         params[i].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[i].Descriptor       = { reg, 0 };
@@ -7181,10 +7348,13 @@ void D3D12RendererImpl::createMaterialResources()
     // Texture table — one descriptor range per CONTIGUOUS register run, all offsetting
     // into the one m_matSrvHeap (k_matSrv* names it). The runs are what they are because
     // the register space has holes: t3 is unused by the mesh path, t8/t9 are the WPO
-    // custom-vertex UBOs (b8/b9 — not textures), and t14 is the landscape weightmap,
-    // which the material preamble never declares. A range must not cover a register the
-    // shader does not declare AND the heap slot behind it must still be a valid
-    // descriptor, so the holes become range boundaries rather than padding.
+    // custom-vertex UBOs (b8/b9 — not textures), and t14 (heLandscapeWeights) has its
+    // OWN root parameter because it is bound PER DRAW, not per frame.
+    //
+    // Covering a register the shader does not declare would be legal — the mismatch
+    // D3D12 rejects is the reverse, a shader declaring what the root signature omits.
+    // The holes are range boundaries anyway because every slot a range covers must hold
+    // a valid descriptor, and there is nothing sensible to put behind t3/t8/t9/t19..t30.
     //
     //   t2            heTex0             slot 0
     //   t4..t7        heTexP0..3         slots 1..4
@@ -7216,17 +7386,46 @@ void D3D12RendererImpl::createMaterialResources()
     params[5].DescriptorTable.pDescriptorRanges   = texRanges;
     params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // ── Root parameter 6: t14 heLandscapeWeights, ONE descriptor, per DRAW ────
+    // Separate from the table above because the weightmap is a property of the DRAW,
+    // not of the material: two landscapes can share one layer-blend material and still
+    // carry their own paint, so binding it per material would show one terrain's paint
+    // on the other. The table holds a single descriptor at offset 0, so the GPU handle
+    // this is set to IS the slot — the per-draw cost is one SetGraphicsRootDescriptorTable
+    // and no descriptor write at all.
+    //
+    // Always declared, even though only a material whose graph contains a Landscape
+    // Layer Blend node declares t14 at all: a root signature may cover more than the
+    // shader uses, and one root signature for every graph PSO is what keeps this path
+    // to a single PSO cache. Both bind sites set it unconditionally so no draw can
+    // reach the GPU with an unset table.
+    D3D12_DESCRIPTOR_RANGE wmRange{};
+    wmRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    wmRange.NumDescriptors                    = 1;
+    wmRange.BaseShaderRegister                = 14;
+    wmRange.RegisterSpace                     = 0;
+    wmRange.OffsetInDescriptorsFromTableStart = 0;
+    params[6].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[6].DescriptorTable.NumDescriptorRanges = 1;
+    params[6].DescriptorTable.pDescriptorRanges   = &wmRange;
+    params[6].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
     // Static samplers, one per PINNED sampler register — s0..s15, all sixteen of them.
     //
     // Static, not a sampler heap: none of these needs to vary per draw, a static sampler
     // costs no descriptor heap and no root slot, and D3D12_MAX_STATIC_SAMPLERS is 2032 —
-    // sixteen is nowhere near it. The real cap in play is ps_5_0's SIXTEEN sampler slots,
-    // and the pin table uses s0..s15 exactly: there is no room for a seventeenth, which
-    // is why heCloudShadow shares rather than claims one on Metal.
+    // sixteen is nowhere near it.
     //
-    // WRAP only for the four tiling graph textures + heTex0 (s2, s4..s7): everything else
-    // is a screen-space buffer, a shadow array or a cubemap, and wrapping any of those
-    // bleeds the opposite edge in at the viewport border. LINEAR everywhere including AO
+    // A freshly generated fragment now uses only TWO of them: heSampWrap → s2 and
+    // heSampClamp → s0 (the pin table in MaterialShaderLibrary.cpp). The other fourteen
+    // are kept because PACKAGED content still ships combined-sampler fragments whose
+    // heTex0/heTexP0..3/heLandscapeWeights are pinned to s4..s8 and s13 — s13 is CLAMP
+    // under the predicate below, which is what a weightmap spanning the whole terrain
+    // wants anyway.
+    //
+    // WRAP only for the tiling registers (s2, s4..s7): everything else is a screen-space
+    // buffer, a shadow array, a cubemap or the landscape weightmap, and wrapping any of
+    // those bleeds the opposite edge in at the border. LINEAR everywhere including AO
     // (the built-in scene path uses POINT for its AO at s1, but heAO is sampled at exact
     // full-res texel centres via gl_FragCoord/giParams.xy, where the two agree).
     D3D12_STATIC_SAMPLER_DESC samp[16]{};
@@ -7242,7 +7441,7 @@ void D3D12RendererImpl::createMaterialResources()
     }
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters     = 6;
+    rsd.NumParameters     = 7;
     rsd.pParameters       = params;
     rsd.NumStaticSamplers = 16;
     rsd.pStaticSamplers   = samp;
@@ -7321,6 +7520,44 @@ void D3D12RendererImpl::createMaterialResources()
         // cloudShadowB.x (the strength) is never written, so heCloudShadowFactor()
         // returns 1.0 before it ever reaches the texture. See the caveat above.
         null2D(k_matSrvCloud, DXGI_FORMAT_R8_UNORM);
+        // t14 heLandscapeWeights fallback + the whole graph-texture region. The region's
+        // slots are overwritten one at a time by resolveGraphTexture as textures upload;
+        // a slot that never gets a real view is never BOUND either (root param 6 falls
+        // back to k_matSrvWeightNull), but they are typed here anyway so no descriptor in
+        // this heap is ever uninitialised.
+        // WEISS, nicht der getypte Null-Deskriptor. Ein Null-SRV liest (0,0,0,0), und
+        // der Landscape-Layer-Blend teilt danach durch `max(wsum, 1e-4)` — aus jedem
+        // Gewicht null wird also SCHWARZ. DefaultAssets.h:46-49 benennt genau das als
+        // die schlechtere der beiden Fehlfarben. D3D11 (dummyTexture) und Vulkan
+        // (m_whiteAlbedoView) fallen hier auf Weiss zurueck; ohne diese Zeile waere
+        // D3D12 als einziges schwarz, und das ist auf einem Paritaets-Branch teurer
+        // als die Fehlfarbe selbst: sichtbar wuerde es an der Content-Browser-Kachel
+        // eines Layer-Blend-Materials, die den Vorschaupfad nimmt und hier unbedingt
+        // landet.
+        //
+        // Ohne neue Ressource: `ssaoWhiteTex` ist eine 1x1 R8-Weiss-Textur, die
+        // createSSAOPipeline() vor uns anlegt (Reihenfolge geprueft: :3547 vor :3553).
+        // Sie als R8 zu lesen ergaebe (1,0,0,1) — deshalb die Komponenten-Zuordnung,
+        // die ALLE vier Kanaele auf Quellkanal 0 legt und damit (1,1,1,1) liefert.
+        //
+        // Weiss ist selbst nicht die richtige Antwort — es mittelt alle Layer, wo
+        // (255,0,0,0) Layer 0 zeigen wuerde (dieselbe Stelle in DefaultAssets.h). Es
+        // ist hier die GLEICHE Antwort wie auf den anderen beiden Backends, und diesen
+        // Pfad erreicht ohnehin nur, wessen Default-Asset schon nicht aufloest.
+        if (ssaoWhiteTex)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format                  = DXGI_FORMAT_R8_UNORM;
+            sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 0, 0, 0);
+            sv.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, matSrvCpu(k_matSrvWeightNull));
+        }
+        else
+            null2D(k_matSrvWeightNull, DXGI_FORMAT_R8G8B8A8_UNORM);
+        for (UINT i = 0; i < k_matGraphTextures; ++i)
+            null2D(k_matSrvGraphBase + i, DXGI_FORMAT_R8G8B8A8_UNORM);
+
         // t17/t18 DDGI probe atlases — real views land here in ensureGiProbeAtlases();
         // giProbe.y gates the lookup until then. Formats match the atlas formats so the
         // null and the real view are interchangeable.
@@ -7735,6 +7972,13 @@ void D3D12Renderer::Shutdown()
     m_impl->m_pendingMeshInval.clear();
     m_impl->m_freeSlotPending.clear();
     m_impl->m_freeSlots.clear();
+    // Graph-texture cache (t14 weightmaps): the resources die here, and the region's
+    // allocator resets with them so a re-Initialize starts from an empty heap.
+    m_impl->m_graphTexCache.clear();
+    m_impl->m_matGraphNextSlot = D3D12RendererImpl::k_matSrvGraphBase;
+    m_impl->m_matGraphFree.clear();
+    m_impl->m_matGraphFreePending.clear();
+    m_impl->m_pendingTexInval.clear();
     m_impl->m_skinnedPSO.Reset();
     m_impl->m_skinnedHdrPSO.Reset();
     m_impl->skinnedRootSig.Reset();
@@ -8272,6 +8516,22 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             !dc.paramOverride.empty() ? &dc.paramOverride
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
+                        // t14 heLandscapeWeights — resolved BEFORE any state is bound,
+                        // because a first-time resolve records an upload copy. PER DRAW,
+                        // not per material: the weightmap belongs to the terrain chunk's
+                        // parent landscape (RenderExtractor reads it from the parent's
+                        // TerrainComponent), so two landscapes sharing one layer-blend
+                        // material keep their own paint. Same UUID choice as OpenGL,
+                        // fallback included — an UNPAINTED landscape carries a null id and
+                        // resolves to the built-in default weightmap (1×1 RGBA8
+                        // {255,0,0,0}) = layer 0 at full strength, which is what "no paint
+                        // yet" has to look like. A graph material with no Landscape Layer
+                        // Blend node does not declare t14 at all, so for those draws this
+                        // binds a descriptor nothing samples.
+                        const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+                            ? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+                        const int wmSlot = p.resolveGraphTexture(cl, wid, {}, m_contentManager);
+
                         // Switch to the material root sig + material SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
@@ -8279,6 +8539,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         cl->SetPipelineState(matPso);
                         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         cl->SetGraphicsRootDescriptorTable(5, p.m_matSrvHeap->GetGPUDescriptorHandleForHeapStart());
+
+                        // t14 heLandscapeWeights (root param 6), resolved above.
+                        cl->SetGraphicsRootDescriptorTable(6, p.matSrvGpu(
+                            wmSlot >= 0 ? static_cast<UINT>(wmSlot)
+                                        : D3D12RendererImpl::k_matSrvWeightNull));
                         cl->IASetVertexBuffers(0, 1, &m.vbv);
                         cl->IASetIndexBuffer(&m.ibv);
 
@@ -8582,6 +8847,13 @@ void D3D12Renderer::Render()
     for (auto it = p.m_freeSlotPending.begin(); it != p.m_freeSlotPending.end(); )
     {
         if (--it->second <= 0) { p.m_freeSlots.push_back(it->first); it = p.m_freeSlotPending.erase(it); }
+        else                   ++it;
+    }
+    // Same for m_matSrvHeap's graph-texture region (t14 weightmaps): the descriptor a
+    // retired slot still holds may be referenced by a frame that has not retired yet.
+    for (auto it = p.m_matGraphFreePending.begin(); it != p.m_matGraphFreePending.end(); )
+    {
+        if (--it->second <= 0) { p.m_matGraphFree.push_back(it->first); it = p.m_matGraphFreePending.erase(it); }
         else                   ++it;
     }
 
@@ -9178,6 +9450,16 @@ void D3D12Renderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (m_impl && meshId != HE::UUID{})
         m_impl->m_pendingMeshInval.push_back(meshId);
+}
+
+void D3D12Renderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Graph-texture cache only (keyed "hi:lo", like GL's). The caller that matters is
+    // TerrainSystem::updateTerrains, which calls replaceTexture + InvalidateTexture on
+    // every paint stroke: the weightmap UUID stays stable on purpose, so nothing else
+    // would tell this backend the pixels behind it changed.
+    if (m_impl && textureId != HE::UUID{})
+        m_impl->m_pendingTexInval.push_back(textureId);
 }
 
 // ─── Material pipeline warm-up ──────────────────────────────────────────────

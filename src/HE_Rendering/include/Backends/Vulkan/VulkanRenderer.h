@@ -58,6 +58,10 @@ public:
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
 	void InvalidateMaterial(const HE::UUID& materialId) override;
 	void InvalidateMesh(const HE::UUID& meshId) override;
+	// Texture hot-reload: drops the "hi:lo" entry from the node-graph texture cache.
+	// The landscape weightmap is the caller that matters (TerrainSystem re-paints in
+	// place under a STABLE UUID), which is why this override exists at all.
+	void InvalidateTexture(const HE::UUID& textureId) override;
 
 	FrameGpuStats GetFrameGpuStats() const override;
 
@@ -350,6 +354,9 @@ private:
 	std::unordered_map<HE::UUID, MaterialTexVk> m_materialTexCache;
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
+	// Graph-texture invalidations (m_graphTexCache, keyed "hi:lo"): drained by the
+	// same processPendingInvalidations() under the same device idle.
+	std::vector<HE::UUID> m_pendingTexInval;
 	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
 	// iff the material asset is loaded (out->set may be null = no texture → flat); false while
 	// still loading (retry next frame, baked texture stays). Mirrors GL's ResolveMaterialTexture.

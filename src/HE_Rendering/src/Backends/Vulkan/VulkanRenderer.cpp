@@ -2116,10 +2116,21 @@ void VulkanRenderer::createMaterialResources()
     // heLight.ssr.x = 1 against an undeclared descriptor is worse than the dead
     // code it replaces. 14 (heLandscapeWeights) is emitted by the GRAPH, not
     // the preamble, and is declared here for the same reason.
-    // All of the new ones except 31 are DEFAULTS behind gates that stay 0
-    // (fog.w, giProbe.y, giRefl.z, cloudShadowB.x) — this change deliberately
-    // does NOT start feeding them real data, which would alter graph-material
-    // shading and belongs to plan P1.
+    // All of the new ones except 31 STARTED as DEFAULTS behind gates that stay 0
+    // (fog.w, giProbe.y, giRefl.z, cloudShadowB.x), deliberately, because feeding
+    // them real data alters graph-material shading and belonged to plan P1.
+    //
+    // ── 2026-08-23, plan P1: three of them are now fed for real ───────────────
+    // On the SCENE path (DrawScene) 14 carries the draw's landscape weightmap,
+    // and 16/17/18 carry the SSAO blur buffer and the two DDGI probe atlases
+    // whenever this frame actually produced them — with heLight.fog.w and
+    // heLight.giProbe.y opened from the exact conditions the per-frame UBO fill
+    // uses for the BUILT-IN scene shader, so the two shader families can no
+    // longer disagree about whether AO or probe indirect applies. giRefl.z and
+    // cloudShadowB.x stay 0: this backend has no ray-traced reflection pass and
+    // no cloud-shadow pass, so 32/33 remain permanent defaults.
+    // The PREVIEW/TILE path (prepareGraphMaterialDraw) is untouched — see the
+    // note on its binding-14 write for why that is required, not an oversight.
     //
     // ── 2026-08-23: SEPARATE textures + two SHARED samplers ───────────────────
     // Every texture binding below is SAMPLED_IMAGE now, and the sampler STATE
@@ -3717,7 +3728,7 @@ bool VulkanRenderer::resolveMaterialOverride(const HE::UUID& materialId, const M
 
 void VulkanRenderer::processPendingInvalidations()
 {
-    if (m_pendingMatInval.empty() && m_pendingMeshInval.empty()) return;
+    if (m_pendingMatInval.empty() && m_pendingMeshInval.empty() && m_pendingTexInval.empty()) return;
     // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
     // frame references the dropped resources). The idle is a stall, but invalidation is rare
     // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
@@ -3727,6 +3738,26 @@ void VulkanRenderer::processPendingInvalidations()
         if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
         { destroyMaterialTex(it->second); m_materialTexCache.erase(it); }
     m_pendingMatInval.clear();
+
+    // Node-graph texture cache (heTexP0..3 and the landscape weightmap), keyed by
+    // the UUID as "hi:lo" — resolveGraphTexture builds that key, so the drop must
+    // rebuild it identically. The device is idle above, so the frees are safe; the
+    // next draw re-resolves and re-uploads from the ContentManager's new bytes.
+    // A cached MISS (a null view) is erased too, which is deliberate: a texture
+    // that failed to resolve once is otherwise never retried.
+    for (const HE::UUID& id : m_pendingTexInval)
+    {
+        const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+        if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+        {
+            GraphTexVk& gt = it->second;
+            if (gt.view)  vkDestroyImageView(m_device, gt.view,  nullptr);
+            if (gt.image) vkDestroyImage    (m_device, gt.image, nullptr);
+            if (gt.mem)   vkFreeMemory      (m_device, gt.mem,   nullptr);
+            m_graphTexCache.erase(it);
+        }
+    }
+    m_pendingTexInval.clear();
 
     for (const HE::UUID& id : m_pendingMeshInval)
     {
@@ -3990,6 +4021,59 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.camPos[0] = m_renderWorld.camera.position.x;
         lit.camPos[1] = m_renderWorld.camera.position.y;
         lit.camPos[2] = m_renderWorld.camera.position.z;
+        // ── AO + DDGI gates (parity: D3D12's fillMatLight, OpenGL :10321-10345) ──
+        // Both of these used to stay 0 here, which meant a graph material standing
+        // next to a built-in one got neither SSAO nor probe indirect while the
+        // built-in one got both. The conditions below are NOT new — they are
+        // literally the ones this backend's own per-frame UBO fill (a few dozen
+        // lines up) hands the BUILT-IN scene shader, so the two can no longer
+        // disagree:
+        //   fog.w    ← f.viewport.z  (m_ssaoRanThisFrame)
+        //   giProbe.y ← f.giParams.y (m_giRanThisFrame) + the two atlases
+        // Note both flags are false on the LDR-viewport and swapchain paths,
+        // because runSSAO()/runGi() only run on the HDR viewport path — so those
+        // paths keep exactly the pixels they had.
+        //
+        // heAO (binding 16) moves WITH fog.w below; a gate opened over the white
+        // 1x1 would read "fully unoccluded" rather than black, but it would also
+        // be a lie, so the descriptor and the gate are written from one condition.
+        //
+        // The two gates are MUTUALLY EXCLUSIVE on this backend by construction:
+        // the frame only runs runSSAO() when runGi() did not (:393), so
+        // m_ssaoRanThisFrame and m_giRanThisFrame are never both true. That is
+        // the same "probe indirect REPLACES AO" rule the shared preamble encodes
+        // for its G-buffer variant (MaterialShaderLibrary.cpp:1614) — a graph
+        // material cannot end up counting occlusion twice.
+        lit.fog[3] = m_ssaoRanThisFrame ? 1.0f : 0.0f;
+        // DDGI probe field. giProbe.y is the gate; heGIIrradianceAt() walks the
+        // grid with giGridOrigin/giGridCounts, so opening the gate WITHOUT them
+        // would run the lookup against zeros — that shades, but shades garbage.
+        // The four therefore always move together, and the grid values are the
+        // same ones fillPerFrame hands the built-in shaders (:3944-3946).
+        lit.giGridOrigin[0] = m_giGridOrigin.x;
+        lit.giGridOrigin[1] = m_giGridOrigin.y;
+        lit.giGridOrigin[2] = m_giGridOrigin.z;
+        lit.giGridOrigin[3] = kGIProbeSpacing;
+        lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
+        lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
+        lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);
+        lit.giGridCounts[3] = static_cast<float>(m_giProbesPerRow);
+        lit.giProbe[0]      = m_giIndirectIntensity;
+        // The two atlas tests are LOAD-BEARING, not belt-and-braces: runGi sets
+        // m_giRanThisFrame at its end REGARDLESS of whether the probe atlases
+        // exist — `probesActive` (:6802) gates only runGi's own atlas-binding
+        // block — so "GI ran, no probe grid" is reachable (grid never fitted, or
+        // makeAtlas failed). This re-derives probesActive at the point of use,
+        // which is also how GL spells it (`giShadingActive && m_giIrrAtlas &&
+        // m_giVisAtlas`). And note the grid values written just above are NOT
+        // guaranteed to be fitted — if the grid was never built they are still
+        // default-constructed. That is harmless precisely because this gate is
+        // then 0 and heGIIrradianceAt() is never reached, which is the whole
+        // reason the four fields have to be written from one condition.
+        // (`.view`, not `.img`, so this is character-for-character the condition
+        // the b17/b18 descriptor writes below use — gate and binding are one test.)
+        lit.giProbe[1]      = (m_giRanThisFrame && m_giIrrAtlas.view && m_giVisAtlas.view)
+                            ? 1.0f : 0.0f;
         // ── Forward SSR (parity plan P2d) ────────────────────────────────────
         // heSSRFwd has been compiled into every backend's graph materials since
         // the preamble grew bindings 31/32, but nothing outside Metal ever set
@@ -4112,6 +4196,44 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             !dc.paramOverride.empty() ? &dc.paramOverride
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
+                        // ── heLandscapeWeights (binding 14), resolved PER DRAW CALL ──
+                        // The UUID choice is OpenGLRenderer.cpp:10526 verbatim: the
+                        // draw's own weightmap, else kDefaultLayer0WeightTextureId —
+                        // the 1x1 (255,0,0,0) asset that puts full weight on layer 0,
+                        // which is what an unpainted terrain must show (an all-white
+                        // default would average every layer instead).
+                        //
+                        // PER DRAW and not per material on purpose: two landscapes can
+                        // share one layer-blend material and still carry their own
+                        // painting, so a per-material bind would give one of them the
+                        // other's weights. Once per DrawCall is enough though — every
+                        // instance in this batch shares the weightmap (RenderPass.cpp:48
+                        // breaks the batch when it differs), so the lambda below reuses it.
+                        //
+                        // Resolved INLINE, even though resolveGraphTexture uploads
+                        // synchronously and vkQueueWaitIdle's on a cache miss. That is a
+                        // deliberate exception to this path's "no synchronous work while
+                        // recording" habit and it is not a new one: GetOrBuildMaterialPipeline
+                        // a few lines up already runs glslang + SPIRV-Cross +
+                        // vkCreateGraphicsPipelines inside this same recording on a cache
+                        // miss (that is precisely what WarmupMaterials pre-pays). A one-off
+                        // upload of a small weightmap is cheaper than either of those, and
+                        // it is the only way to keep per-draw semantics without a frame of
+                        // lag. heTexP0..3 above still bind white for the DIFFERENT reason
+                        // prepareGraphMaterialDraw states: nothing on this path resolves
+                        // their UUIDs yet at all.
+                        //
+                        // A null view cannot go into a SAMPLED_IMAGE descriptor the way GL
+                        // binds texture 0, so an unresolvable weightmap falls back to the
+                        // white default this binding carried before — i.e. a terrain whose
+                        // weightmap will not load looks exactly like it does today.
+                        VkImageView wmView = m_whiteAlbedoView;
+                        {
+                            const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+                                ? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
+                            if (VkImageView v = resolveGraphTexture(wid, {})) wmView = v;
+                        }
+
                         VkDeviceSize voff = 0;
                         vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &voff);
                         vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
@@ -4222,7 +4344,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // the 1-layer white array view keeps it valid and
                             // lightParams[i].y = 0 means it is never sampled.
                             wr(13, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &csmII);
-                            wr(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heLandscapeWeights
+                            // heLandscapeWeights (14): this draw's landscape layer
+                            // weightmap, resolved above. Sampled through heSampClamp
+                            // (35), never heSampWrap — the weightmap spans the whole
+                            // terrain exactly once, so a repeat at the edge would fold
+                            // the opposite side of the painting back in. The preamble
+                            // already assigns it that sampler; this write only has to
+                            // deliver the image.
+                            VkDescriptorImageInfo wmII{ VK_NULL_HANDLE, wmView,
+                                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &wmII); // heLandscapeWeights
                             // heSkyEnv (15): flat ambient in a 1x1x6 cube — see
                             // m_matSkyCube. Only ever sampled while SSR runs
                             // (heLight.fog.z), and then it reproduces heLitP's
@@ -4231,9 +4362,47 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 m_matSkyCubeView[m_currentFrame],
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &skyII);
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heAO (fog.w = 0)
-                            wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heGIIrradiance
-                            wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &whiteII); // heGIVisibility
+                            // heAO (16): the blurred SSAO buffer the built-in scene
+                            // shader samples at ITS binding 3 — same image, same frame,
+                            // so a graph material and a built-in material are now
+                            // occluded by the same data instead of only one of them
+                            // being. Gated by heLight.fog.w, written from the very same
+                            // m_ssaoRanThisFrame above; when SSAO did not run the white
+                            // 1x1 stays and the gate is 0, so the sample folds away.
+                            VkDescriptorImageInfo aoII{ VK_NULL_HANDLE,
+                                (m_ssaoRanThisFrame && m_ssaoBlurRT.view) ? m_ssaoBlurRT.view
+                                                                          : m_whiteAlbedoView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &aoII); // heAO (gate = fog.w)
+                            // heGIIrradiance/heGIVisibility (17/18): the DDGI probe
+                            // atlases, i.e. the same two images the scene set samples at
+                            // bindings 5/6. They are STORAGE images and live in GENERAL
+                            // (created with SAMPLED_BIT as well and barriered
+                            // COMPUTE→FRAGMENT in runGi), which is legal to sample —
+                            // same dance giLocalII does a few lines up. The white
+                            // fallback is a plain 2D image and is in SHADER_READ_ONLY,
+                            // hence the layout rides along with the view.
+                            //
+                            // Why GENERAL here can never cost a validation line: a
+                            // non-null .view means makeAtlas succeeded for BOTH atlases,
+                            // which means ensureGiProbeAtlas already ran their
+                            // UNDEFINED→GENERAL transition (a partial failure calls
+                            // destroyGiProbeAtlas and clears both), and they never leave
+                            // GENERAL afterwards. Declared layout therefore always
+                            // matches actual — the same reasoning binding 11 has been
+                            // relying on.
+                            const bool giProbesBound =
+                                m_giRanThisFrame && m_giIrrAtlas.view && m_giVisAtlas.view;
+                            VkDescriptorImageInfo giIrrII{ VK_NULL_HANDLE,
+                                giProbesBound ? m_giIrrAtlas.view : m_whiteAlbedoView,
+                                giProbesBound ? VK_IMAGE_LAYOUT_GENERAL
+                                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            VkDescriptorImageInfo giVisII{ VK_NULL_HANDLE,
+                                giProbesBound ? m_giVisAtlas.view : m_whiteAlbedoView,
+                                giProbesBound ? VK_IMAGE_LAYOUT_GENERAL
+                                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giIrrII); // heGIIrradiance
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giVisII); // heGIVisibility
                             // heSSRFwd (31) — plan P2d. THIS is the binding the
                             // forward SSR result lands on; heLight.ssr.x below
                             // is what stops the sample folding to dead code.
@@ -7084,6 +7253,18 @@ void VulkanRenderer::InvalidateMesh(const HE::UUID& meshId)
         m_pendingMeshInval.push_back(meshId);
 }
 
+void VulkanRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Same deferral as the two above (OpenGLRenderer.cpp:8061 is the twin).
+    // This backend had no override at all until the landscape weightmap became a
+    // real per-draw binding: ContentManager::replaceTexture keeps the UUID stable
+    // across a repaint (TerrainSystem.cpp:198), so without this the m_graphTexCache
+    // entry for "hi:lo" would serve the FIRST paint forever and every later brush
+    // stroke would be invisible until a restart.
+    if (textureId != HE::UUID{})
+        m_pendingTexInval.push_back(textureId);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Material warm-up + Content-Browser thumbnails
 //
@@ -9135,6 +9316,15 @@ VkPipeline VulkanRenderer::prepareGraphMaterialDraw(const HE::UUID& materialId,
         wr(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heGILocal
         wr(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &csmII);   // heCsm
         wr(13, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &csmII);   // heLocalShadow (2D array)
+        // heLandscapeWeights (14) stays WHITE here, and that is a decision, not an
+        // omission. The weightmap is a PER-DRAW quantity — it comes off a terrain
+        // chunk's DrawCall (dc.weightmapTextureId), and this path has no DrawCall
+        // at all: a preview/tile is one material on a sphere with no landscape
+        // behind it. OpenGL is the reference and does exactly the same — its
+        // ResolveGraphTexture is called at its three DRAW sites only, so its
+        // preview leaves unit 13 alone. Resolving kDefaultLayer0WeightTextureId
+        // here would look thorough and would silently change the `material` and
+        // `material_function` tiles away from the GL bytes they currently match.
         wr(14, 14, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heLandscapeWeights
         wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &skyII);   // heSkyEnv (CUBE)
         wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  nullptr,  &whiteII); // heAO

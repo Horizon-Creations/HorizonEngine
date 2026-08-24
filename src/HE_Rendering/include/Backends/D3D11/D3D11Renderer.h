@@ -50,6 +50,12 @@ public:
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
     void InvalidateMaterial(const HE::UUID& materialId) override;
     void InvalidateMesh(const HE::UUID& meshId) override;
+    // Texture hot-reload. Was the IRenderer no-op default while this backend cached nothing
+    // by texture id; it now does (the landscape weightmap, via resolveGraphTexture into the
+    // same asset-id → SRV map), and the TerrainSystem REPLACES that texture in place under an
+    // unchanged UUID on every paint stroke — so without this override a repainted terrain
+    // would keep the SRV built from the first stroke forever. Mirrors GL's InvalidateTexture.
+    void InvalidateTexture(const HE::UUID& textureId) override;
 
     // D3D11 timestamp timing (ringed, never stalls): whole frame plus — while the
     // profiler is recording — a per-pass breakdown from timestamp PAIRS inside the

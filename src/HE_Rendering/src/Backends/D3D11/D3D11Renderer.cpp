@@ -2706,12 +2706,23 @@ struct D3D11RendererImpl
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
     // ── MaterialComponent override + hot-reload (A2) ─────────────────────────
-    // Override-material base-color textures cached by material UUID (parallel to the mesh's
-    // baked texture): a draw's dc.materialAssetId, when its material is loaded, wins over the
-    // mesh's baked texture — mirrors GL/Metal. srv==null caches the "loaded, no texture" result
-    // (flat) so it isn't re-resolved every frame. Editor edits push UUIDs to the pending lists,
-    // drained at DrawScene top; dropping the ComPtr is GPU-safe (the D3D11 runtime defers the
-    // release until the GPU is done), so no manual retire is needed unlike D3D12/Vulkan.
+    // One ASSET-UUID → SRV cache with TWO key domains, not two maps:
+    //   * a MATERIAL id  → that material's base-color texture (resolveMaterialOverride).
+    //     A draw's dc.materialAssetId, when its material is loaded, wins over the mesh's
+    //     baked texture — mirrors GL/Metal.
+    //   * a TEXTURE id   → that texture itself (resolveGraphTexture; today the landscape
+    //     weightmap). GL keeps this in a SEPARATE m_graphTexCache; on D3D11 the two want
+    //     byte-identical work (resolveTextureRef + createAlbedoSRV), so they share one map
+    //     rather than standing a second cache beside it.
+    // The two domains cannot collide: a ContentManager asset id is unique across asset
+    // types (see DefaultAssets.h, where materials and textures are numbered out of the
+    // same space). NOTE resolveMaterialOverride's "key present ⇒ material loaded" contract
+    // is a statement about MATERIAL-id keys only.
+    // srv==null caches the "loaded, no texture" result (flat) so it isn't re-resolved every
+    // frame — same policy as GL, which emplaces its 0 unconditionally. Editor edits push
+    // UUIDs to the pending lists, drained at DrawScene top; dropping the ComPtr is GPU-safe
+    // (the D3D11 runtime defers the release until the GPU is done), so no manual retire is
+    // needed unlike D3D12/Vulkan.
     struct MaterialTex { ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv; };
     std::unordered_map<HE::UUID, MaterialTex> materialTexCache;
     std::vector<HE::UUID> pendingMatInval;
@@ -3033,6 +3044,31 @@ struct D3D11RendererImpl
         return true;
     }
 
+    // Resolve a bare TEXTURE asset by UUID to an SRV, cached in the same materialTexCache
+    // under the TEXTURE's id. GL's ResolveGraphTexture line for line — resolveTextureRef +
+    // the shared RGBA8/BC7/BC3 upload — minus GL's separate map, because on this backend
+    // the work and the entry type are identical to the override path's. Returns null when
+    // the asset is missing/unusable; that null is CACHED, same as GL emplacing its 0, so a
+    // bad id costs one lookup per frame and not one upload per frame.
+    //
+    // UUID only, deliberately: this cache is keyed by HE::UUID and the one caller (the
+    // landscape weightmap, whose asset the TerrainSystem registers in memory) always has
+    // one. GL's variant also accepts a bare PATH and keys its map by string for that case —
+    // if the still-missing heTexP0..3 graph-texture binds land here, they carry paths and
+    // will need that second key domain; do NOT bolt it on by skipping the cache, the entry
+    // owns the ComPtr and an uncached return would dangle.
+    ID3D11ShaderResourceView* resolveGraphTexture(const HE::UUID& id, ContentManager* cm)
+    {
+        if (!cm || id == HE::UUID{}) return nullptr;
+        if (auto it = materialTexCache.find(id); it != materialTexCache.end())
+            return it->second.srv.Get();
+        MaterialTex entry;
+        entry.srv = createAlbedoSRV(cm->resolveTextureRef(id, {}));
+        ID3D11ShaderResourceView* out = entry.srv.Get();
+        materialTexCache.emplace(id, std::move(entry));
+        return out;
+    }
+
     // ── A4: node-graph material resources ────────────────────────────────────
     // Three dynamic constant buffers (HeLighting 64 B, U 176 B, HeParams 256 B) filled via
     // Map(WRITE_DISCARD) exactly like the built-in perObject/perFrame CBs, plus a linear-wrap
@@ -3158,8 +3194,15 @@ struct D3D11RendererImpl
     // caller since only it knows the material.
     //
     // Pass nullptr for anything the caller has no real resource for and the typed
-    // default is used. The preview path passes nullptr for all five: it renders
+    // default is used. The preview path passes nullptr for all six: it renders
     // with its own studio light, outside the frame's GI/SSAO entirely.
+    //
+    // wmSrv is the LANDSCAPE WEIGHTMAP (t14) and is the one argument that is
+    // genuinely PER DRAW rather than per frame — two landscapes can share one
+    // material and still carry their own painting, so it cannot be hoisted to a
+    // per-material or per-frame bind. It is a parameter of THIS function (and not
+    // a separate PSSetShaderResources at the call site) so the scene and preview
+    // paths keep a single implementation of the whole t10..t18 window.
     //
     // NOTE the sampler call is PSSetSamplers(0, 16) — one shot for the whole file.
     // The pinned register map consumes every ps_5_0 sampler slot, so a partial
@@ -3169,7 +3212,8 @@ struct D3D11RendererImpl
                               ID3D11ShaderResourceView* giSunMask   = nullptr,
                               ID3D11ShaderResourceView* giLocalMask = nullptr,
                               ID3D11ShaderResourceView* giIrr       = nullptr,
-                              ID3D11ShaderResourceView* giVis       = nullptr)
+                              ID3D11ShaderResourceView* giVis       = nullptr,
+                              ID3D11ShaderResourceView* wmSrv       = nullptr)
     {
         // whiteSRV is 1x1 R8_UNORM white. Every slot it defaults below reads .r
         // only — the two screen-space masks, AO and the cloud transmittance — and
@@ -3179,15 +3223,21 @@ struct D3D11RendererImpl
         // (1, 0, 0, 1), i.e. red, not white.
         ID3D11ShaderResourceView* const white = whiteSRV ? whiteSRV.Get() : dummyTexture.Get();
 
-        // t10..t18 in one call. t14 is the landscape weightmap — no non-landscape
-        // graph material declares it, but it sits inside the range, so it gets the
-        // white 2D dummy rather than a hole.
+        // t10..t18 in one call. t14 is the landscape weightmap: real when the caller
+        // resolved one for THIS draw, otherwise the white 2D dummy — a non-landscape
+        // graph material never declares heLandscapeWeights (MaterialGraph.cpp emits
+        // the binding only for a Landscape Layer Blend graph), but the slot sits
+        // inside the range and gets a typed resource rather than a hole. Sampled
+        // through heSampClamp, which the HLSL pin map already lands on s0 (and s13
+        // for a legacy combined-sampler blob) — both are `clamp` in the array below,
+        // so the weightmap needs NO sampler change: a wrapping sampler here would
+        // fetch the opposite terrain edge, since the map spans the terrain exactly once.
         ID3D11ShaderResourceView* srvs[9] = {
             giSunMask   ? giSunMask   : white,  // t10 heGIShadow      (gate giParams.z)
             giLocalMask ? giLocalMask : white,  // t11 heGILocal       (gate giParams.z)
             m_matWhiteArraySRV.Get(),           // t12 heCsm           ** ARRAY **
             m_matWhiteArraySRV.Get(),           // t13 heLocalShadow   ** ARRAY **
-            dummyTexture.Get(),                 // t14 landscape weightmap (not declared here)
+            wmSrv       ? wmSrv       : dummyTexture.Get(), // t14 heLandscapeWeights
             m_matBlackCubeSRV.Get(),            // t15 heSkyEnv        ** CUBE **
             aoSrv       ? aoSrv       : white,  // t16 heAO            (gate fog.w)
             // t17/t18 read .rgb and .rg (probe radiance / depth moments), so their
@@ -3318,9 +3368,12 @@ struct D3D11RendererImpl
 #endif
     }
 
-    // Drain the editor's material/mesh hot-reload requests at DrawScene top. Dropping the ComPtr
-    // is GPU-safe (the D3D11 runtime keeps the resource alive until pending GPU work finishes),
-    // so the entry can be erased immediately; the mesh/material re-resolves next frame.
+    // Drain the editor's material/texture/mesh hot-reload requests at DrawScene top. Dropping
+    // the ComPtr is GPU-safe (the D3D11 runtime keeps the resource alive until pending GPU work
+    // finishes), so the entry can be erased immediately; the mesh/material/texture re-resolves
+    // next frame. pendingMatInval carries BOTH material ids (InvalidateMaterial) and texture ids
+    // (InvalidateTexture — e.g. a repainted landscape weightmap): one erase, one map, two key
+    // domains. See materialTexCache's comment.
     void processPendingInvalidations()
     {
         for (const HE::UUID& id : pendingMatInval)
@@ -4672,6 +4725,15 @@ struct D3D11RendererImpl
         // csmSplits.w) are all 0, so every one of those samples folds away. They
         // still have to be BOUND and correctly TYPED or the draw trips the debug
         // layer. Also sets s2 + s4..s7 for the graph textures below.
+        //
+        // heLandscapeWeights (t14) stays the WHITE dummy here on purpose. The scene
+        // path resolves a real weightmap per draw, but a thumbnail has no terrain and
+        // no DrawCall to take an id from, and GL's material preview binds NOTHING on
+        // its unit 13 — so resolving kDefaultLayer0WeightTextureId here would be D3D11
+        // inventing behaviour the reference does not have. Consequence, named rather
+        // than hidden: a Landscape Layer Blend material's TILE previews with an equal
+        // blend of all layers on D3D11 (white = every channel 1). Non-landscape graphs
+        // never declare the binding, so every other tile is unaffected.
         bindMaterialPreamble(context.Get());
         // heTex0 (t2) + heTexP0..3 (t4..t7). GL binds the material's real graph
         // textures here via ResolveGraphTexture; D3D11 has NO graph-texture cache
@@ -4742,7 +4804,7 @@ void D3D11Renderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: shutdown");
     m_impl->meshCache.clear();
-    m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
+    m_impl->materialTexCache.clear(); // override-material + graph textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
     m_impl->pendingMeshInval.clear();
     // A4: node-graph material resources (m_matShaderLib.clear() is header-inline → safe
@@ -4941,7 +5003,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     // branch). Now fills the FULL v2 light window from the dominant directional light
     // (was sun-only sky values before — graph materials never saw point/spot lights
     // on D3D11 and stayed sun-lit at night).
-    auto fillMatLight = [&](bool giActive)
+    auto fillMatLight = [&](bool giActive, bool aoActive)
     {
         if (!(p.m_matReady && p.m_matLightCB)) return;
         HE::MaterialShaderLibrary::Lighting lit{};
@@ -4973,6 +5035,41 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
         // csmSplits stays 0 — D3D11 has a single shadow map, no cascade array,
         // so the preamble's heCsmShadow() fallback is inert here.
+        //
+        // fog.z stays 0 as well: heSkyEnv (t15) is a 1x1 black cube because this backend
+        // has no prefiltered sky environment map, so heLitP keeps its flat-ambient fallback.
+        // fog.w is the heAO gate — set on EXACTLY the expression this backend already hands
+        // fillPerFrame for its built-in shaders, so a graph material and a built-in material
+        // standing next to each other are occluded by the same buffer instead of only one of
+        // them being. bindMaterialPreamble hands t16 the white (unoccluded) 1x1 whenever the
+        // frame has no AO result, so a stale true here still reads "unoccluded", not black.
+        // fog.x/.y (fog density/falloff) and weather.* are deliberately NOT filled: neither
+        // D3D12 nor this backend fills them, fog.x/.y are inert while fog.z is 0, and weather
+        // is UNGATED — filling it would change shading on any wet/snowy scene, which is a
+        // different change than aligning the two gates.
+        lit.fog[3] = aoActive ? 1.0f : 0.0f;
+        // DDGI probe field — the same grid values fillPerFrame hands the built-in shaders
+        // (computed at buildGiProbeGrid, ~line 2237), so heGIIrradianceAt() and their
+        // sampleDDGIIrradiance read one grid. giProbe.y is the gate; without origin/counts
+        // beside it the lookup runs against zeros, which still SHADES but shades garbage —
+        // so the three always move together. A previous pass left these unset here on the
+        // grounds that the grid is never filled on D3D11; that was wrong, the values exist.
+        lit.giGridOrigin[0] = p.giGridOrigin.x;
+        lit.giGridOrigin[1] = p.giGridOrigin.y;
+        lit.giGridOrigin[2] = p.giGridOrigin.z;
+        lit.giGridOrigin[3] = D3D11RendererImpl::kGIProbeSpacing;
+        lit.giGridCounts[0] = static_cast<float>(p.giGridCounts.x);
+        lit.giGridCounts[1] = static_cast<float>(p.giGridCounts.y);
+        lit.giGridCounts[2] = static_cast<float>(p.giGridCounts.z);
+        lit.giGridCounts[3] = static_cast<float>(p.giProbesPerRow);
+        lit.giProbe[0]      = p.giIndirectIntensity;
+        // giActive is the caller's giShadingActive, which itself already requires
+        // p.giProbeGridBuilt AND both atlas SRVs — so this can only be 1 once the grid
+        // above has actually been fitted. The two atlas checks are belt-and-braces.
+        lit.giProbe[1]      = (giActive && p.giIrrSRV && p.giVisSRV) ? 1.0f : 0.0f;
+        // ssr.*, giRefl.* and cloudShadowB.x all stay 0: no SSR pass, no ray-traced
+        // reflection pass and no cloud-shadow pass on this backend, so t31/t32 are black
+        // and t33 is white, and every one of those samples folds away.
         D3D11_MAPPED_SUBRESOURCE lm{};
         if (SUCCEEDED(ctx->Map(p.m_matLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &lm)))
         {
@@ -4980,7 +5077,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->Unmap(p.m_matLightCB.Get(), 0);
         }
     };
-    fillMatLight(false);
+    fillMatLight(false, p.ssaoEnabled && p.ssaoReady);
 #endif
 
     const UINT stride = 8 * sizeof(float);
@@ -5153,7 +5250,10 @@ void D3D11Renderer::DrawScene(int width, int height)
             // t31..t33 + s0..s15) is no longer bound here: the built-in path clobbers
             // most of that range every draw, so it is bound per graph-material draw by
             // bindMaterialPreamble() inside drawDC instead of once per frame.
-            fillMatLight(giShadingActive);
+            // aoActive: the SAME expression fillPerFrame got one line above, so the two
+            // shader families agree on whether this frame has usable SSAO.
+            fillMatLight(giShadingActive,
+                         !giShadingActive && p.ssaoEnabled && p.ssaoReady && aoSRV != p.whiteSRV.Get());
 #endif
         }
 
@@ -5244,12 +5344,28 @@ void D3D11Renderer::DrawScene(int width, int height)
                         //   heSkyEnv              1x1x6 CUBE default — no prefiltered env here
                         //   heSSRFwd/heGIReflFwd  black — no SSR, no GI reflections here
                         //   heCloudShadow         white — no cloud-shadow map here
+                        //   heLandscapeWeights    this draw's terrain painting (below)
                         // Also binds s2 + s4..s7 for the graph textures below.
+                        //
+                        // The weightmap is resolved PER DRAW, not per material: two
+                        // landscapes can share one material and still carry their own
+                        // painting. RenderPass.cpp:48 already breaks batching when
+                        // weightmapTextureId differs, so one DrawCall == one weightmap and
+                        // this single bind is correct for the instanced loop below too.
+                        // An unpainted / non-landscape draw carries no id and falls back to
+                        // kDefaultLayer0WeightTextureId — the 1x1 (255,0,0,0) asset, i.e.
+                        // full weight on layer 0, which is what a Landscape Layer Blend
+                        // normalises to. Exactly GL's expression (OpenGLRenderer.cpp:10833).
+                        // If even that asset does not resolve, resolveGraphTexture returns
+                        // null and bindMaterialPreamble keeps the previous white dummy.
+                        const HE::UUID wid = dc.weightmapTextureId != HE::UUID{}
+                            ? dc.weightmapTextureId : HE::kDefaultLayer0WeightTextureId;
                         p.bindMaterialPreamble(ctx, aoSRV,
                             giShadingActive ? giShadowSRV : nullptr,
                             (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get() : nullptr,
                             giShadingActive ? p.giIrrSRV.Get() : nullptr,
-                            giShadingActive ? p.giVisSRV.Get() : nullptr);
+                            giShadingActive ? p.giVisSRV.Get() : nullptr,
+                            p.resolveGraphTexture(wid, m_contentManager));
                         // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS, white default).
                         // t3 is intentionally unused by the mesh path.
                         ctx->PSSetShaderResources(2, 1, &heTex0);
@@ -5959,6 +6075,18 @@ void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (m_impl && meshId != HE::UUID{})
         m_impl->pendingMeshInval.push_back(meshId);
+}
+
+void D3D11Renderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Same deferral, and the SAME pending list: materialTexCache is one asset-id → SRV
+    // map with two key domains (material id → its base texture, texture id → itself), so
+    // the drain at processPendingInvalidations erases the right entry either way and a
+    // second list would buy nothing. Like GL's InvalidateTexture, this evicts the TEXTURE
+    // entry only — a material whose base colour happens to be that texture is refreshed
+    // by its own InvalidateMaterial, which is the same split GL has.
+    if (m_impl && textureId != HE::UUID{})
+        m_impl->pendingMatInval.push_back(textureId);
 }
 
 // ─── Material pipeline warm-up ──────────────────────────────────────────────
