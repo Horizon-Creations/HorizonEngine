@@ -365,6 +365,7 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
         o["anchorMax"] = { e.anchorMaxX, e.anchorMaxY };
     }
     if (!e.material.empty()) o["material"] = e.material;
+    if (!e.texture.empty())  o["texture"]  = e.texture;
     if (!e.font.empty())     o["font"]     = e.font;
     if (!e.hitTestable)      o["hitTestable"] = false;
     if (e.clipChildren)      o["clipChildren"] = true;
@@ -400,6 +401,7 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->layer    = o.value("layer", 0);
     e->visible  = o.value("visible", true);
     e->material = o.value("material", std::string());
+    e->texture  = o.value("texture", std::string());
     e->font     = o.value("font", std::string());
     e->hitTestable  = o.value("hitTestable", true);
     e->clipChildren = o.value("clipChildren", false);

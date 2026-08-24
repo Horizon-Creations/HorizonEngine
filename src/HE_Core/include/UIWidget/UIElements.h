@@ -17,6 +17,7 @@ public:
     UIWidgetType type() const override { return UIWidgetType::Panel; }
     const char*  typeName() const override { return "Panel"; }
     bool hasMaterialSlot() const override { return true; }
+    bool hasTextureSlot()  const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { auto p = std::make_unique<UIPanel>(*this); return p; }
 
@@ -40,6 +41,7 @@ public:
     UIWidgetType type() const override { return UIWidgetType::Image; }
     const char*  typeName() const override { return "Image"; }
     bool hasMaterialSlot() const override { return true; }
+    bool hasTextureSlot()  const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIImage>(*this); }
 
@@ -105,6 +107,7 @@ public:
     UIWidgetType type() const override { return UIWidgetType::Button; }
     const char*  typeName() const override { return "Button"; }
     bool hasMaterialSlot() const override { return true; }
+    bool hasTextureSlot()  const override { return true; }
     bool interactive() const override { return true; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIButton>(*this); }

@@ -192,6 +192,14 @@ public:
     // storage; only types with hasMaterialSlot() expose it in the editor.
     std::string material;
 
+    // Optional Texture asset (content-relative path) drawn on the quad, tinted
+    // by the element's own colour. Shared storage like `material`; only types
+    // with hasTextureSlot() expose it. This is the plain "show me this PNG"
+    // path — before it, an image in the UI needed a material graph with a
+    // texture node in it. A material, when set, wins: it owns the pixels.
+    std::string texture;
+    HE::UUID    textureAssetId{}; // transient: resolved from `texture` at runtime
+
     // Optional Font asset (content-relative path) for this element's text; empty
     // = the shared default UI font. Resolved to fontAtlasKey at widget creation.
     std::string font;
@@ -239,6 +247,8 @@ public:
     // Events this type can fire (Designer "add event" + HorizonCode).
     virtual std::vector<UIEventDesc> events() const { return {}; }
     virtual bool hasMaterialSlot() const { return false; }
+    // Types that draw a quad the user may want a picture on.
+    virtual bool hasTextureSlot() const { return false; }
 
     // Emit draw quads for this element. `px` is the element rect in screen
     // pixels; `pxScaleY` maps canvas units → pixels for font sizing; `mat` is
@@ -279,6 +289,7 @@ protected:
         dst.anchorMinX = anchorMinX; dst.anchorMinY = anchorMinY;
         dst.anchorMaxX = anchorMaxX; dst.anchorMaxY = anchorMaxY;
         dst.layer = layer; dst.visible = visible; dst.material = material;
+        dst.texture = texture; dst.textureAssetId = textureAssetId;
         dst.font = font; dst.fontAtlasKey = fontAtlasKey;
         dst.hitTestable = hitTestable; dst.hoverCursor = hoverCursor;
         dst.clipChildren = clipChildren;

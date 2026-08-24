@@ -6,6 +6,7 @@
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
+#include "AssetThumbnailCache.h"                // texture previews on the designer canvas
 #include "EditorPanelState.h"                   // shared per-tab state map
 #include "EditorWidgets.h"                      // shared Content-Browser asset drop target
 #include "GraphEditor.h"                        // shared node-graph canvas
@@ -771,6 +772,23 @@ void drawDetails(State& st, AppContext& ctx)
 		                       HE::AssetType::Material, "mat");
 	}
 
+	// Texture slot: the plain "put this picture on it" path, tinted by the
+	// element's own colour. A material, when set, wins — it owns the pixels.
+	if (n->hasTextureSlot())
+	{
+		ImGui::SeparatorText("Texture");
+		if (assetSlot(ctx, "Texture", n->texture, HE::AssetType::Texture, "tex"))
+		{
+			// Resolve straight away so the designer shows the picture without
+			// waiting for a play session (the runtime resolves the same way).
+			n->textureAssetId = (!n->texture.empty() && ctx.contentManager)
+				? ctx.contentManager->loadAsset(n->texture) : HE::UUID{};
+			committed = true;
+		}
+		if (!n->material.empty())
+			ImGui::TextDisabled("A material is set — it draws instead of this.");
+	}
+
 	// Font slot for text-bearing elements (a "FontSize" property marks them).
 	bool hasText = false;
 	for (const UIPropDesc& pd : props) if (pd.name == "FontSize") { hasText = true; break; }
@@ -858,17 +876,28 @@ void handleDelta(int handle, const ImVec2& d, ImVec2& dMin, ImVec2& dMax)
 
 // Draw a simplified WYSIWYG preview of one element from its generic properties.
 void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
-                        const ImVec2& mx, float s)
+                        const ImVec2& mx, float s, void* texHandle = nullptr)
 {
 	switch (n.type())
 	{
 	case UIWidgetType::Panel:
 	{
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
+		if (texHandle)
+			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
+			             toCol32(propColorOr(n, "Color", { 1,1,1,1 })));
+		else
+			dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Color", { 0.12f,0.12f,0.12f,0.85f })));
 		break;
 	}
 	case UIWidgetType::Image:
 	{
+		if (texHandle)
+		{
+			// The picture itself, tinted the way the runtime tints it.
+			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
+			             toCol32(propColorOr(n, "Tint", { 1,1,1,1 })));
+			break;
+		}
 		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Tint", { 1,1,1,1 })));
 		if (n.material.empty())
 		{
@@ -895,7 +924,11 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 	}
 	case UIWidgetType::Button:
 	{
-		dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
+		if (texHandle)
+			dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
+			             toCol32(propColorOr(n, "Normal Color", { 1,1,1,1 })));
+		else
+			dl->AddRectFilled(mn, mx, toCol32(propColorOr(n, "Normal Color", { 0.20f,0.20f,0.20f,1 })), 4.0f * s);
 		dl->AddRect(mn, mx, IM_COL32(200,200,210,60), 4.0f * s);
 		const std::string txt = propStringOr(n, "Text", "");
 		if (!txt.empty())
@@ -1115,7 +1148,15 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const ImVec2 cmx = toScreen(ImVec2(clip.x + clip.w, clip.y + clip.h));
 			dl->PushClipRect(cmn, cmx, true);
 		}
-		drawElementPreview(dl, *it.n, mn, mx, s);
+		// A picture on the element is drawn as a picture: the thumbnail cache
+		// already holds one for every texture asset, so the designer shows what
+		// the runtime will instead of a coloured box standing in for it.
+		void* texHandle = nullptr;
+		if (it.n->hasTextureSlot() && !it.n->texture.empty() && it.n->material.empty() &&
+		    ctx.contentManager)
+			texHandle = AssetThumbnailCache::get(
+				ctx.contentManager->contentRoot() + "/" + it.n->texture);
+		drawElementPreview(dl, *it.n, mn, mx, s, texHandle);
 		if (clipped) dl->PopClipRect();
 	}
 	dl->PopClipRect();

@@ -1206,16 +1206,33 @@ vertex UIVert uiVertex(uint vid [[vertex_id]],
     o.luv = uv;                 // 0..1 across the quad (for the rounded-rect SDF)
     return o;
 }
-// shape = { mode, cornerRadius(px), rectW(px), rectH(px) }; mode>0.5 = glyph.
+// shape = { mode, cornerRadius(px), rectW(px), rectH(px) }.
+// mode 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
+// quad (RGBA from texture(0), tinted by colour). Modes 1 and 2 share the slot:
+// a glyph run binds the atlas there, an image its own texture.
 fragment float4 uiFragment(UIVert in [[stage_in]],
                            constant float4& color [[buffer(0)]],
                            constant float4& shape [[buffer(1)]],
                            texture2d<float> atlas [[texture(0)]])
 {
-    if (shape.x > 0.5) {
+    if (shape.x > 0.5 && shape.x < 1.5) {
         constexpr sampler s(filter::linear);
         float a = atlas.sample(s, in.uv).r;
         return float4(color.rgb, color.a * a);
+    }
+    if (shape.x > 1.5) {
+        constexpr sampler s(filter::linear);
+        float4 t = atlas.sample(s, in.uv);
+        float4 c = float4(color.rgb * t.rgb, color.a * t.a);
+        if (shape.y <= 0.0) return c;
+        // A rounded image is the same SDF the solid path uses, applied to the
+        // sampled alpha — that is what makes a rounded avatar possible at all.
+        float2 halfSzT = shape.zw * 0.5;
+        float  rT      = min(shape.y, min(halfSzT.x, halfSzT.y));
+        float2 pT      = (in.luv - 0.5) * shape.zw;
+        float2 qT      = abs(pT) - (halfSzT - rT);
+        float  dT      = length(max(qT, 0.0)) + min(max(qT.x, qT.y), 0.0) - rT;
+        return float4(c.rgb, c.a * clamp(0.5 - dT, 0.0, 1.0));
     }
     if (shape.y <= 0.0) return color; // square quad → crisp, no SDF/AA
     // Solid quad with rounded corners (radius = min(w,h)/2 → circle).
@@ -11086,11 +11103,24 @@ void MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height)
 			[enc setFragmentTexture:atlas atIndex:0];
 			boundAtlasKey = obj.fontAtlasKey;
 		}
+		// A textured quad borrows the same slot; the next glyph rebinds its
+		// atlas because boundAtlasKey is invalidated here.
+		bool textured = false;
+		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+		{
+			if (void* t = ResolveGraphTexture(obj.textureAssetId, std::string()))
+			{
+				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:0];
+				boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
+				textured = true;
+			}
+		}
 		const simd::float4 rect  = { obj.position.x, obj.position.y, obj.size.x, obj.size.y };
 		const simd::float4 color = { obj.color.r, obj.color.g, obj.color.b, obj.color.a };
 		const simd::float4 uvr   = { obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y };
 		// shape = { mode, cornerRadius, rectW, rectH } (see uiFragment).
-		const simd::float4 shape = { obj.type == 2 ? 1.0f : 0.0f, obj.cornerRadius, obj.size.x, obj.size.y };
+		const float mode = obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f);
+		const simd::float4 shape = { mode, obj.cornerRadius, obj.size.x, obj.size.y };
 		[enc setVertexBytes:&rect  length:sizeof(rect)  atIndex:0];
 		[enc setVertexBytes:&uvr   length:sizeof(uvr)   atIndex:2];
 		[enc setFragmentBytes:&color length:sizeof(color) atIndex:0];

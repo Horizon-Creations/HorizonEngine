@@ -236,6 +236,7 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Layer")        { out = UIPropValue::ofInt(e.layer);               return true; }
     if (n == "Hover Cursor") { out = UIPropValue::ofInt((int)e.hoverCursor);    return true; }
     if (n == "Material")     { out = UIPropValue::ofString(e.material);         return true; }
+    if (n == "Texture")      { out = UIPropValue::ofString(e.texture);          return true; }
     if (n == "Font")         { out = UIPropValue::ofString(e.font);             return true; }
     return false;
 }
@@ -256,6 +257,9 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
         return true;
     }
     if (n == "Material")     { e.material = v.s; return true; }
+    // The path is the authored value; the resolved id is transient and the
+    // runtime re-resolves it when this changes (WidgetManager watches both).
+    if (n == "Texture")      { e.texture = v.s; return true; }
     if (n == "Font")         { e.font = v.s; return true; }
     return false;
 }
@@ -276,6 +280,8 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     // the details panel uses).
     if (hasMaterialSlot())
         out.push_back({ "Material", UIPropType::String });
+    if (hasTextureSlot())
+        out.push_back({ "Texture", UIPropType::String });
     for (const UIPropSlot& s : propTable())
         if (s.desc.name == "FontSize")
         {
@@ -303,15 +309,20 @@ void UIElement::setPropAny(const std::string& name, const UIPropValue& v)
 namespace
 {
     void quad(std::vector<UIRenderObject>& out, float x, float y, float w, float h,
-              const glm::vec4& color, const HE::UUID& mat = {}, float cornerRadius = 0.0f)
+              const glm::vec4& color, const HE::UUID& mat = {}, float cornerRadius = 0.0f,
+              const HE::UUID& tex = {}, const glm::vec2& uv0 = { 0.0f, 0.0f },
+              const glm::vec2& uv1 = { 1.0f, 1.0f })
     {
         UIRenderObject ro;
         ro.position = { x, y };
         ro.size     = { w, h };
         ro.color    = color;
         ro.materialAssetId = mat;
+        ro.textureAssetId  = tex;
         ro.type     = 0;
         ro.cornerRadius = cornerRadius;
+        ro.uvMin    = uv0;
+        ro.uvMax    = uv1;
         out.push_back(std::move(ro));
     }
     // Corner radius that matches the editor preview: a small rounding clamped to
@@ -347,13 +358,13 @@ static void emitText(const UIElement& e, const std::string& text, const glm::vec
 void UIPanel::render(const UIWidgetRect& px, const UIElementRenderState&,
                      const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
 {
-    quad(out, px.x, px.y, px.w, px.h, color, mat);
+    quad(out, px.x, px.y, px.w, px.h, color, mat, 0.0f, textureAssetId);
 }
 
 void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
                      const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
 {
-    quad(out, px.x, px.y, px.w, px.h, tint, mat);
+    quad(out, px.x, px.y, px.w, px.h, tint, mat, 0.0f, textureAssetId);
 }
 
 // ── Text ─────────────────────────────────────────────────────────────────────
@@ -402,7 +413,7 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
     glm::vec4 c = color;
     if (st.hovered) c = hoveredColor;
     if (st.pressed) c = pressedColor;
-    quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f));
+    quad(out, px.x, px.y, px.w, px.h, c, mat, roundedR(px.w, px.h, 6.0f), textureAssetId);
     if (!text.empty())
         emitText(*this, text, { px.x, px.y }, { px.w, px.h }, fontSize * pxScaleY,
                  textColor, /*centerH=*/true, out);

@@ -87,6 +87,11 @@ void WidgetManager::refreshElementAssets(Instance& w, HE::UIElement& e)
 		if (mid == HE::UUID{}) w.materials.erase(e.id);
 		else                   w.materials[e.id] = mid;
 	}
+	// Texture path → UUID, straight on the element: unlike the material (which
+	// the backends look up per draw) the picture is part of what the element
+	// emits, so render() needs it without a signature that knows about assets.
+	e.textureAssetId = e.texture.empty() ? HE::UUID{} : m_content->loadAsset(e.texture);
+
 	// Font path → baked atlas key (0 = shared default font).
 	e.fontAtlasKey = 0;
 	if (!e.font.empty())

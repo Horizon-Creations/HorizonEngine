@@ -9,6 +9,10 @@ struct UIRenderObject {
     glm::vec2   size;              // width/height in screen pixels
     glm::vec4   color     = {1.0f, 1.0f, 1.0f, 1.0f};
     HE::UUID    materialAssetId;   // image quads (custom material; nil = solid color)
+    // Texture asset drawn on the quad, tinted by `color` and sampled over
+    // uvMin..uvMax. Nil = no texture (solid colour, or the material above).
+    // A material wins when both are set: it owns the pixels.
+    HE::UUID    textureAssetId;
     // 0 = rect/image, 2 = font-atlas glyph quad (uvMin/uvMax into
     // UISystem::sharedFont atlas). Text is emitted per glyph as type 2, so there
     // is no whole-string kind; 1 is unused and left as a hole to keep the values

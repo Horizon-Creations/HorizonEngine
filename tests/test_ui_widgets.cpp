@@ -1579,6 +1579,79 @@ TEST_CASE("WidgetManager: the hit test follows the canvas scale mode")
     CHECK_FALSE(wm.processPointer(2560.0f, 1080.0f, 240.0f, 50.0f, true, true));
 }
 
+// ═══ Texture on a quad ═══════════════════════════════════════════════════════
+// An Image element had a tint and a material slot and nothing else, so showing
+// a PNG in the UI meant authoring a material graph with a texture node in it.
+// The texture slot is the plain path; a material still wins where both are set.
+
+TEST_CASE("UIElement: the texture slot round-trips and reaches the quad")
+{
+    HE::UIWidgetTree t;
+    const int img = t.add(HE::UIWidgetType::Image);
+    HE::UIElement& e = *t.find(img);
+    CHECK(e.hasTextureSlot());
+    CHECK(t.find(t.add(HE::UIWidgetType::Panel))->hasTextureSlot());
+    CHECK(t.find(t.add(HE::UIWidgetType::Button))->hasTextureSlot());
+    // A text run has no quad to put a picture on.
+    CHECK_FALSE(t.find(t.add(HE::UIWidgetType::Text))->hasTextureSlot());
+
+    // Nothing is written while it is empty.
+    CHECK(HE::uiWidgetTreeToJson(t).find("texture") == std::string::npos);
+    e.texture = "Textures/Logo.hasset";
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), r));
+    CHECK(r.find(img)->texture == "Textures/Logo.hasset");
+
+    // By name, like every other asset slot (HorizonCode, scripts) …
+    e.setPropAny("Texture", HE::UIPropValue::ofString("Textures/Other.hasset"));
+    CHECK(e.getPropAny("Texture").s == "Textures/Other.hasset");
+    // … and it is offered as a property only where the slot exists.
+    auto has = [](const HE::UIElement& el, const char* name)
+    {
+        for (const HE::UIPropDesc& d : el.allProperties()) if (d.name == name) return true;
+        return false;
+    };
+    CHECK(has(e, "Texture"));
+    CHECK_FALSE(has(*t.find(4), "Texture"));   // the Text element added above
+
+    // The resolved id is what render() puts on the quad — the path is authoring
+    // data, the id is what the backend can bind.
+    e.textureAssetId = HE::UUID{ 7, 9 };
+    std::vector<UIRenderObject> out;
+    e.render({ 0.0f, 0.0f, 64.0f, 64.0f }, {}, HE::UUID{}, 1.0f, out);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].textureAssetId == HE::UUID{ 7, 9 });
+    CHECK(out[0].uvMax.x == doctest::Approx(1.0f));   // full source rect
+    CHECK(out[0].uvMax.y == doctest::Approx(1.0f));
+    // A clone carries both (the runtime renders from a deep copy).
+    CHECK(e.clone()->textureAssetId == HE::UUID{ 7, 9 });
+    CHECK(e.clone()->texture == "Textures/Other.hasset");
+}
+
+TEST_CASE("WidgetManager: an element's texture path is resolved for the draw")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 100.0f; t.canvasHeight = 100.0f;
+    const int img = t.add(HE::UIWidgetType::Image);
+    { HE::UIElement& e = *t.find(img);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = e.sizeY = 100.0f;
+      // A path that resolves to nothing must leave a NIL id rather than a
+      // stale/garbage one — the backend then draws the plain tint.
+      e.texture = "Textures/DoesNotExist.hasset"; }
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    REQUIRE(wm.createWidget(cm, "mem://w.hasset") != 0);
+    std::vector<UIRenderObject> out;
+    wm.extract(100.0f, 100.0f, out);
+    REQUIRE(out.size() >= 1);
+    CHECK(out[0].textureAssetId == HE::UUID{});
+}
+
 // ═══ Clipping ════════════════════════════════════════════════════════════════
 // "Clip children" cuts a subtree off at the clipping element's own rect. It is
 // what a list longer than its box, a text wider than its field and eventually a

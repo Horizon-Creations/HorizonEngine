@@ -4666,12 +4666,29 @@ uniform vec4 uRect;         // xy=pos, zw=size (px) — for the SDF
 uniform float uCornerRadius; // px; min(w,h)/2 → circle
 uniform sampler2D uFontAtlas;
 out vec4 FragColor;
+// uMode: 0 = solid colour, 1 = font-atlas glyph (alpha from .r), 2 = textured
+// quad (RGBA, tinted by uColor). Modes 1 and 2 share the sampler: a glyph run
+// binds the atlas on unit 0, an image its own texture.
 void main()
 {
-    if (uMode > 0.5)
+    if (uMode > 0.5 && uMode < 1.5)
     {
         float a = texture(uFontAtlas, vUV).r;
         FragColor = vec4(uColor.rgb, uColor.a * a);
+        return;
+    }
+    if (uMode > 1.5)
+    {
+        vec4 t = texture(uFontAtlas, vUV);
+        vec4 c = vec4(uColor.rgb * t.rgb, uColor.a * t.a);
+        if (uCornerRadius <= 0.0) { FragColor = c; return; }
+        // A rounded image is the solid path's SDF applied to the sampled alpha.
+        vec2 hs = uRect.zw * 0.5;
+        float rr = min(uCornerRadius, min(hs.x, hs.y));
+        vec2 pp = (vLocal - 0.5) * uRect.zw;
+        vec2 qq = abs(pp) - (hs - rr);
+        float dd = length(max(qq, 0.0)) + min(max(qq.x, qq.y), 0.0) - rr;
+        FragColor = vec4(c.rgb, c.a * clamp(0.5 - dd, 0.0, 1.0));
         return;
     }
     if (uCornerRadius <= 0.0) { FragColor = uColor; return; } // square → crisp
@@ -7403,10 +7420,23 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			glBindTexture(GL_TEXTURE_2D, UIFontAtlasTexture(obj.fontAtlasKey));
 			boundAtlasKey = obj.fontAtlasKey;
 		}
+		// A textured quad borrows the same unit; the next glyph rebinds its
+		// atlas because boundAtlasKey is invalidated here.
+		bool textured = false;
+		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
+		{
+			if (const unsigned int t = ResolveGraphTexture(obj.textureAssetId, std::string()))
+			{
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, t);
+				boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
+				textured = true;
+			}
+		}
 		glUniform4f(m_uUIRect,  obj.position.x, obj.position.y, obj.size.x, obj.size.y);
 		glUniform4f(m_uUIColor, obj.color.r, obj.color.g, obj.color.b, obj.color.a);
 		glUniform4f(m_uUIUVRect, obj.uvMin.x, obj.uvMin.y, obj.uvMax.x, obj.uvMax.y);
-		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : 0.0f);
+		glUniform1f(m_uUIMode, obj.type == 2 ? 1.0f : (textured ? 2.0f : 0.0f));
 		glUniform1f(m_uUICornerRadius, obj.cornerRadius);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
