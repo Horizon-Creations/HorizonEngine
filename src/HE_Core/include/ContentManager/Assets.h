@@ -160,6 +160,12 @@ struct MaterialAsset : public RuntimeAsset
 	// (routed into the sorted alpha-blend pass regardless of the scalar opacity).
 	uint8_t blendMode = 0;
 
+	// Domain baked from the graph's Output node (HE::MatDomain as uint8):
+	// 0 Surface (geometry in the world), 1 User Interface (widgets, screen
+	// space, unlit by construction). Derived at load like blendMode, so it is
+	// not part of the on-disk format — the graph is.
+	uint8_t domain = 0;
+
 	// World-Position-Offset vertex BODY (canonical GLSL statements, ends in `vec3 heWpo`),
 	// generated when the graph's WPO pin is connected. Empty → the standard shared vertex.
 	// The renderers wrap it per backend (MaterialShaderLibrary::customVertex) and key the

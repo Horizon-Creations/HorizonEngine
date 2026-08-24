@@ -3057,6 +3057,7 @@ void EditorApplication::dumpFrameHeadless()
 			mat.customShaderGBufGlsl = gen.glslGBuffer;
 			mat.customShaderVertGlsl = gen.vertexBody; // WPO vertex body (if the graph uses it)
 			mat.blendMode            = gen.blendMode;
+			mat.domain               = gen.domain;
 			for (const auto& slot : gen.params)
 			{
 				mat.shaderParamData.insert(mat.shaderParamData.end(),
@@ -3624,6 +3625,7 @@ void EditorApplication::dumpFrameHeadless()
 			fm.customShaderGBufGlsl = gen.glslGBuffer;
 			fm.customShaderVertGlsl = gen.vertexBody;
 			fm.blendMode            = gen.blendMode;
+			fm.domain               = gen.domain;
 			reg.emplace<MaterialComponent>(floorE,
 				MaterialComponent{ contentManager().registerMaterial(std::move(fm)) });
 		}
@@ -3794,6 +3796,7 @@ void EditorApplication::dumpFrameHeadless()
 		lm.customShaderGBufGlsl = gen.glslGBuffer;
 		lm.customShaderVertGlsl = gen.vertexBody;
 		lm.blendMode            = gen.blendMode;
+		lm.domain               = gen.domain;
 		lm.graphLayerNames      = gen.layerNames;
 		const HE::UUID lmId = contentManager().registerMaterial(std::move(lm));
 		s_layerMatId = lmId;
@@ -3888,6 +3891,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat->customShaderGBufGlsl = gen.glslGBuffer;
 				mat->customShaderVertGlsl = gen.vertexBody;
 				mat->blendMode            = gen.blendMode;
+				mat->domain               = gen.domain;
 				mat->graphLayerNames      = gen.layerNames;
 			}
 			HE_LOG_INFO(Editor, "%s",

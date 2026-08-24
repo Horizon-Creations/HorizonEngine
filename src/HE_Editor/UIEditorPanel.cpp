@@ -14,6 +14,7 @@
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
+#include <MaterialGraph/MaterialGraph.h>        // MatDomain (widget materials are UI-domain)
 #include <UIWidget/UIWidgetTree.h>
 #include <UIWidget/UIElement.h>
 #include <UIWidget/UIElements.h>
@@ -313,8 +314,21 @@ int duplicateSubtree(State& st, int srcId, int parentId)
 // a "(none)" entry to clear the slot. The combo is also a drag-drop target for
 // content-browser assets ("HE_ASSET_PATH"), so both workflows write the same
 // content-relative path. Returns true when the path was changed.
+// A material this widget may actually use: only the UI domain is drawn in
+// screen space, and a Surface material on a widget is shaded by a sun that is
+// not there. Anything that cannot be read (not loaded yet) stays listed rather
+// than silently vanishing from the picker.
+bool isUiDomainMaterial(AppContext& ctx, const std::string& relPath)
+{
+	if (!ctx.contentManager) return true;
+	const HE::UUID id = ctx.contentManager->loadAsset(relPath);
+	const MaterialAsset* m = id == HE::UUID{} ? nullptr : ctx.contentManager->getMaterial(id);
+	return !m || m->domain == static_cast<uint8_t>(HE::MatDomain::UserInterface);
+}
+
 bool assetSlot(AppContext& ctx, const char* label, std::string& path,
-               HE::AssetType wantType, const char* idSuffix)
+               HE::AssetType wantType, const char* idSuffix,
+               bool (*accept)(AppContext&, const std::string&) = nullptr)
 {
 	bool changed = false;
 	ImGui::TextUnformatted(label);
@@ -330,11 +344,16 @@ bool assetSlot(AppContext& ctx, const char* label, std::string& path,
 			changed = true;
 		}
 		for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, wantType))
+		{
+			// A rejected asset is still shown when it is the CURRENT value, so
+			// an already-authored reference never disappears from its own slot.
+			if (accept && path != a.path && !accept(ctx, a.path)) continue;
 			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), path == a.path))
 			{
 				path    = a.path;
 				changed = true;
 			}
+		}
 		ImGui::EndCombo();
 	}
 	// The tooltip exists because the combo shows only the file STEM — the whole
@@ -769,7 +788,11 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		ImGui::SeparatorText("Material");
 		committed |= assetSlot(ctx, "Material", n->material,
-		                       HE::AssetType::Material, "mat");
+		                       HE::AssetType::Material, "mat", &isUiDomainMaterial);
+		ImGui::TextDisabled("Only User Interface materials are offered here.");
+		if (!n->material.empty() && !isUiDomainMaterial(ctx, n->material))
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				"This is a Surface material: it will not draw correctly here.");
 	}
 
 	// Texture slot: the plain "put this picture on it" path, tinted by the

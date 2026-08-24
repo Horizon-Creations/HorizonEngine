@@ -639,6 +639,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->customShaderGBufGlsl = gen.glslGBuffer;
 	mat->customShaderVertGlsl = gen.vertexBody;
 	mat->blendMode            = gen.blendMode;
+	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
@@ -695,6 +696,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			inst->graphTexturePaths = gen.textures;
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
 			inst->blendMode            = gen.blendMode;
+			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
 			applyApproxSurface(*inst, g, &ov); // GI-hit colours FOR THE PERMUTATION (switches taken)
 			// A regenerated permutation invalidates any parent-baked shaders.

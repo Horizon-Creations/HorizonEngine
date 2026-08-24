@@ -129,6 +129,23 @@ HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
 //   Translucent — kMatOutputOpacityPin is Opacity: drawn in the sorted alpha-blend pass.
 enum class MatBlendMode : uint8_t { Opaque = 0, Masked = 1, Translucent = 2 };
 
+// ── Material domain ──────────────────────────────────────────────────────────
+// WHERE a material is allowed to be used, and therefore what it may compute.
+//
+// Surface is a material on geometry in the world: the full PBR set, lit by the
+// scene, fogged with it, and available to the deferred G-buffer.
+//
+// UserInterface is a material on a WIDGET. The UI is drawn in screen space
+// after the scene, so there is no lighting to be had, no world position to fog
+// against and no G-buffer to write: the graph's colour IS the pixel. Anything
+// else is not a style choice but a wrong answer — a lit material on a widget
+// used to be shaded by a stand-in sun and fogged as if the pixel it sits on
+// were that many world units away. So the domain forces the unlit tail,
+// scene-dependent nodes are meaningless in it, and the editor offers UI
+// materials only where a widget asks for one.
+enum class MatDomain : uint8_t { Surface = 0, UserInterface = 1 };
+HE_API const char* matDomainName(MatDomain d);
+
 // Output-node input pin indices (see the Output entry in the node registry).
 // Links are stored by pin INDEX, so these are part of the on-disk format: any
 // reorder needs a kMatGraphVersion bump plus a remap in materialGraphFromJson.
@@ -318,6 +335,9 @@ struct MatShaderGen
     // Blend mode baked from the Output node (→ MaterialAsset::blendMode; Translucent
     // routes the material into the sorted alpha-blend pass).
     uint8_t blendMode = 0;
+    // Domain baked from the Output node (→ MaterialAsset::domain). See MatDomain:
+    // a UI material is unlit by construction and never gets a G-buffer variant.
+    uint8_t domain = 0;
     // World-Position-Offset vertex BODY (canonical GLSL statements ending in `vec3 heWpo`).
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).

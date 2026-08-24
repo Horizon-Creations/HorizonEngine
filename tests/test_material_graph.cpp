@@ -1488,3 +1488,96 @@ TEST_CASE("Landscape layer split ignores unconnected layers, and needs one that 
 	CHECK(tap.layerCount == 0);
 	CHECK(tap.baseColor[0] == doctest::Approx(1.0f)); // unchanged default
 }
+
+// ═══ Material domain ═════════════════════════════════════════════════════════
+// A UI material is drawn in screen space after the scene: there is no light to
+// shade it with, no world position to fog it against and no G-buffer to write.
+// The domain is what says so — before it, a lit material on a widget was shaded
+// by a stand-in sun and fogged as if the pixel it sits on were that many world
+// units from the camera.
+
+TEST_CASE("Material domain: the UI domain generates an unlit, G-buffer-less shader")
+{
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	const int col   = g.addNode(MatNodeType::ConstColor);
+	g.findNode(col)->p[0] = 1.0f;
+	REQUIRE(g.connect(col, 0, outId, HE::kMatOutputBaseColorPin));
+
+	// Surface (the default) is unchanged: lit, fogged, with a G-buffer variant.
+	g.findNode(outId)->p[0] = 1.0f;   // Lit
+	HE::MatShaderGen surf = HE::generateFragment(g);
+	CHECK(surf.domain == static_cast<uint8_t>(HE::MatDomain::Surface));
+	CHECK(surf.glsl.find("heLitP") != std::string::npos);
+	CHECK(surf.glsl.find("heApplyFog") != std::string::npos);
+	CHECK_FALSE(surf.glslGBuffer.empty());
+
+	// The same graph in the UI domain: no lighting call, no fog, no G-buffer —
+	// and the Lit toggle cannot bring them back.
+	g.findNode(outId)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+	HE::MatShaderGen ui = HE::generateFragment(g);
+	CHECK(ui.domain == static_cast<uint8_t>(HE::MatDomain::UserInterface));
+	CHECK(ui.glsl.find("heLitP") == std::string::npos);
+	CHECK(ui.glsl.find("heApplyFog") == std::string::npos);
+	CHECK(ui.glslGBuffer.empty());
+	CHECK_FALSE(ui.glsl.empty());
+	// It still computes the graph: the colour is the pixel.
+	CHECK(ui.glsl.find("oColor") != std::string::npos);
+
+	// Nonsense in p[3] is the Surface domain, not an enum that does not exist.
+	g.findNode(outId)->p[3] = 42.0f;
+	CHECK(HE::generateFragment(g).domain == static_cast<uint8_t>(HE::MatDomain::Surface));
+
+	CHECK(std::string(HE::matDomainName(HE::MatDomain::UserInterface)) == "User Interface");
+	CHECK(std::string(HE::matDomainName(HE::MatDomain::Surface)) == "Surface");
+}
+
+TEST_CASE("Material domain: it survives the graph's JSON, old graphs stay Surface")
+{
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	g.findNode(outId)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+
+	MaterialGraph r;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), r));
+	REQUIRE(r.findNode(outId) != nullptr);
+	CHECK(r.findNode(outId)->p[3] == doctest::Approx(1.0f));
+	CHECK(HE::generateFragment(r).domain == static_cast<uint8_t>(HE::MatDomain::UserInterface));
+
+	// A document written before domains existed has no p[3] to read: it loads as
+	// Surface, which is what it was.
+	MaterialGraph old;
+	REQUIRE(HE::materialGraphFromJson(
+		R"J({"nextId":2,"nodes":[{"id":1,"type":"Output","p":[1.0,0.0,0.5],"x":0.0,"y":0.0}],"links":[]})J",
+		old));
+	REQUIRE(old.findNode(1) != nullptr);
+	CHECK(HE::generateFragment(old).domain == static_cast<uint8_t>(HE::MatDomain::Surface));
+}
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("A UI-domain material cross-compiles for Metal and GL")
+{
+	MaterialGraph g;
+	const int outId = g.addNode(MatNodeType::Output);
+	g.findNode(outId)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+	const int uv   = g.addNode(MatNodeType::UV);
+	const int fbm  = g.addNode(MatNodeType::Fbm);
+	REQUIRE(g.connect(uv,  0, fbm,   0));
+	REQUIRE(g.connect(fbm, 0, outId, HE::kMatOutputBaseColorPin));
+
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.glsl.empty());
+
+	HE::MaterialShaderLibrary lib;
+	using B = HE::MaterialShaderLibrary::Backend;
+	const auto& mtl = lib.fragment(1234u, gen.glsl, B::Metal);
+	INFO(mtl.log);
+	CHECK(mtl.ok);
+	const auto& gl = lib.fragment(1234u, gen.glsl, B::GLSL410);
+	INFO(gl.log);
+	CHECK(gl.ok);
+	// The UI vertex stub it pairs with on both backends.
+	CHECK(lib.uiVertex(B::Metal).ok);
+	CHECK(lib.uiVertex(B::GLSL410).ok);
+}
+#endif

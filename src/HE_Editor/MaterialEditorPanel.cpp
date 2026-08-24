@@ -219,6 +219,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->graphTexturePaths = gen.textures;
 	mat->graphLayerNames   = gen.layerNames;   // landscape paint layers
 	mat->blendMode            = gen.blendMode;
+	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
 	st.dirty = true;
 	st.complexity = estimateComplexity(st.lastGlsl);
@@ -587,10 +588,33 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 		}
 		case MatNodeType::Output:
 		{
-			// Only the Lit toggle lives ON the node; the blend mode (which re-shapes the
-			// node's pins) is a MATERIAL-level setting edited in the tab header.
+			// The Lit toggle and the domain live ON the node; the blend mode
+			// (which re-shapes the node's pins) is a MATERIAL-level setting
+			// edited in the tab header.
+			const bool ui = n.p[3] > 0.5f;
 			bool lit = n.p[0] > 0.5f;
+			ImGui::BeginDisabled(ui);   // a UI material has nothing to light it
 			if (ImGui::Checkbox("Lit", &lit)) { n.p[0] = lit ? 1.0f : 0.0f; committed = true; }
+			ImGui::EndDisabled();
+			ImGui::SetNextItemWidth((kNodeW - 24.0f) * scale);
+			int dom = ui ? 1 : 0;
+			static const char* kDomains[] = { "Surface", "User Interface" };
+			if (ImGui::Combo("##domain", &dom, kDomains, 2))
+			{
+				n.p[3] = static_cast<float>(dom);
+				committed = true;
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(
+					"Where this material may be used.\n\n"
+					"Surface: on geometry in the world. The full PBR set, lit by\n"
+					"the scene and fogged with it.\n\n"
+					"User Interface: on a widget. Drawn in screen space after the\n"
+					"scene, so there is no light, no fog and no world position —\n"
+					"the graph's colour IS the pixel. Only a UI material can be\n"
+					"put on a widget, and only a Surface one on a mesh.");
+			if (ui)
+				ImGui::TextDisabled("Unlit: no scene lighting here.");
 			break;
 		}
 		case MatNodeType::ParamFloat:

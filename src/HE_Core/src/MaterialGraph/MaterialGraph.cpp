@@ -35,7 +35,7 @@ const std::vector<MatNodeDesc>& registry()
             { "Normal", F::Vec3, 0.0f },       // 6 — WORLD-space; unconnected = vNormal
             { "Ambient Occlusion", F::Float, 1.0f }, // 7 — scales the ambient term only
             { "World Position Offset", F::Vec3, 0.0f } }, // 8 — vertex stage
-          {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff
+          {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff, p[3] = domain
         { MatNodeType::ConstFloat, "Float", "Constant",
           {}, { { "Value", F::Float, 0 } }, 1 },
         { MatNodeType::ConstColor, "Color", "Constant",
@@ -1008,7 +1008,17 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
     const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
     const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
-    const bool lit = out->p[0] > 0.5f;
+    // The domain (Output p[3]) decides what this material may compute at all. A
+    // UI material is unlit whatever the Lit toggle says: there is no lighting
+    // where it is drawn, so "lit" there means shaded by a stand-in sun and
+    // fogged against a world position that is really a pixel coordinate.
+    // A value that names no domain is the Surface one: falling back to the
+    // default a graph was written with beats clamping UP into a domain that
+    // changes what the material may compute.
+    const bool uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
+    const int  domain   = uiDomain ? static_cast<int>(MatDomain::UserInterface)
+                                   : static_cast<int>(MatDomain::Surface);
+    const bool lit = !uiDomain && out->p[0] > 0.5f;
 
     // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
     const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
@@ -1122,8 +1132,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // preamble, exactly like heLitP in the forward tail). Unlit materials write
     // base+emis as pure emissive with metallic=1 / specular=0 / black base, so
     // the resolve's heLitP contributes nothing and the colour passes through.
-    std::string gb = headerGB + common;
-    if (lit)
+    // A UI material is never deferred — it is drawn in screen space after the
+    // G-buffer has long been resolved — so it gets no G-buffer variant at all
+    // rather than one that writes nonsense into the scene's normals.
+    std::string gb = uiDomain ? std::string() : headerGB + common;
+    if (uiDomain) { /* no G-buffer tail */ }
+    else if (lit)
         gb += "    oGB0 = vec4(" + base + ", " + met + ");\n"
               "    oGB1 = vec4(heOctEncode(normalize(heN)) * 0.5 + 0.5, " + rough + ", " + spec + ");\n"
               "    oGB2 = vec4(" + emis + ", " + ao + ");\n";
@@ -1131,8 +1145,11 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         gb += "    oGB0 = vec4(0.0, 0.0, 0.0, 1.0);\n"
               "    oGB1 = vec4(heOctEncode(normalize(heN)) * 0.5 + 0.5, 1.0, 0.0);\n"
               "    oGB2 = vec4(" + base + " + " + emis + ", 1.0);\n";
-    gb += "    oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0);\n";
-    gb += "}\n";
+    if (!uiDomain)
+    {
+        gb += "    oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0);\n";
+        gb += "}\n";
+    }
 
     // No clamp here any more: the kMatMaxParams budget is enforced in paramSlot(),
     // BEFORE emission, so an over-budget node bakes its default instead of indexing
@@ -1145,8 +1162,14 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.textures = std::move(c.textures);
     gen.switches  = std::move(c.switches);
     gen.blendMode = static_cast<uint8_t>(blendMode);
+    gen.domain    = static_cast<uint8_t>(domain);
     gen.layerNames = std::move(c.layerNames);
     return gen;
+}
+
+const char* matDomainName(MatDomain d)
+{
+    return d == MatDomain::UserInterface ? "User Interface" : "Surface";
 }
 
 std::string generateFragmentGlsl(const MaterialGraph& graph)
