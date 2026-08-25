@@ -102,6 +102,27 @@ std::size_t asMB(std::size_t bytes)
 	return (bytes + kMiB - 1) / kMiB;
 }
 
+// Hosting has three effects that leave this machine and are invisible from the
+// call site: a LAN beacon every two seconds, a port-forward request to whatever
+// router is in reach, and an entry on the public session directory. That is
+// correct for a user who pressed "Host" and wrong for everything else — the
+// test suite hosts twenty-five times per run, and did all three each time:
+// phantom sessions in every colleague's editor on the same segment, UPnP and
+// NAT-PMP traffic at whatever network the machine happened to be on, and
+// twenty-five fake registrations on the live directory.
+//
+// Read once, because a test that flips the variable mid-run would get half a
+// decision, and never negatable to "on": this only ever takes side effects
+// away.
+bool collabOffline()
+{
+	static const bool off = [] {
+		const char* env = std::getenv("HE_COLLAB_OFFLINE");
+		return env && *env && *env != '0';
+	}();
+	return off;
+}
+
 } // namespace
 
 // ─── Scene ↔ session state ───────────────────────────────────────────────────
@@ -222,6 +243,18 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	// editor for as long as the request takes.
 	m_sessionId       = SessionDirectory::newSessionId();
 	m_directoryStatus = "Publishing session...";
+
+	// The session id is minted either way, because a direct join still quotes it
+	// and code below assumes it exists. Only the two calls that leave the machine
+	// are skipped, and the status says so rather than sitting on "Publishing..."
+	// forever — a spinner that never resolves reads as a hang.
+	if (collabOffline())
+	{
+		m_directoryStatus = "Offline mode (HE_COLLAB_OFFLINE) — the session was not "
+		                    "published. Share the address and port directly.";
+		m_portMapStatus.clear();
+		return true;
+	}
 
 	const std::string endpoint = directoryEndpoint();
 	const std::string sid      = m_sessionId;
@@ -1857,6 +1890,11 @@ bool CollabController::assetTypeTravels(HE::AssetType type) const
 
 void CollabController::updateLanDiscovery(std::uint64_t nowMs)
 {
+	// Checked before m_lanEnabled and without touching it: the user setting is
+	// persisted, and a headless run must not write "off" into the preference a
+	// person set for their editor.
+	if (collabOffline()) return;
+
 	if (!m_lanEnabled)
 	{
 		if (m_lanAnnouncer.running()) m_lanAnnouncer.stop();

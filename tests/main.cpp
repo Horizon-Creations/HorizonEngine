@@ -13,6 +13,19 @@ int main(int argc, char** argv)
 		HE::Log::setConsoleEnabled(false);
 	HE::Log::setThreadName("Test");
 
+	// The collab tests host twenty-five sessions, and hosting is not a local act:
+	// it announces itself on the LAN every two seconds, asks the router to
+	// forward a port, and registers the session on the public directory. On a
+	// developer machine that means the editor next door lists twenty-five
+	// sessions called "Anna" that nobody can join, and the live directory
+	// collects the same number of ghosts per run. Loopback traffic between the
+	// test's own host and client is untouched — that is the thing under test.
+#if defined(_WIN32)
+	_putenv_s("HE_COLLAB_OFFLINE", "1");
+#else
+	setenv("HE_COLLAB_OFFLINE", "1", 1);
+#endif
+
 	doctest::Context context;
 	context.applyCommandLine(argc, argv);
 	const int result = context.run();
