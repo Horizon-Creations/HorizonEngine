@@ -576,7 +576,7 @@ void render(AppContext& ctx, State& st)
 		// Options. The overflow target, so it is the one thing never dropped.
 		well(m, rx, kWellPad * 2.0f + m.cell);
 		if (cell(m, rx + kWellPad, m.cell, "##vpOptions", iconSliders, nullptr, false, true,
-		         "Viewport options — snapping, gizmo, camera"))
+		         "Viewport options — snapping, gizmo, camera, ground grid"))
 			ImGui::OpenPopup("##vpOptionsPopup");
 		if (ImGui::BeginPopup("##vpOptionsPopup"))
 		{

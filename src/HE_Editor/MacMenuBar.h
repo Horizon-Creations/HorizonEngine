@@ -31,6 +31,11 @@ namespace MacMenuBar
 		// on that key.
 		Undo, Redo,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
+		// View, continued. No Toggle Full Screen here on purpose: the View menu
+		// already carries the NATIVE one (toggleFullScreen: on the responder
+		// chain, ⌃⌘F), and a second item on SDL's own fullscreen would be a
+		// different behaviour under the same name.
+		ToggleConsole, ToggleGroundGrid,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
 		OpenTutorial, ReportIssue, Documentation,

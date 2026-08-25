@@ -1194,6 +1194,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleEnvironment,   s_showEnvironment);
 		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
+		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
+		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
 		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
 		{
@@ -1224,6 +1226,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleCollab:      togglePanelWindow(s_showCollab, "Collaboration");    break;
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
+			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
+			case MC::ToggleGroundGrid:
+				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -1341,6 +1346,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showSourceControl, "Source Control");
         if (ImGui::MenuItem("Console", "Ctrl+`", s_showConsole))
             togglePanelWindow(s_showConsole, "Console");
+        // Also in the viewport toolbar's options popup. It belongs in both: the
+        // toolbar is where you reach for it while working, this menu is where you
+        // look for it the first time.
+        if (ImGui::MenuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
+                            ctx.projectLoaded))
+            ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))

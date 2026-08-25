@@ -194,6 +194,13 @@ void install()
 			heAddItem(view, @"Collaboration",         C::ToggleCollab,      nil, 0, false));
 		s_toggleItems.emplace_back(C::ToggleSourceControl,
 			heAddItem(view, @"Source Control",        C::ToggleSourceControl, nil, 0, true));
+		s_toggleItems.emplace_back(C::ToggleConsole,
+			heAddItem(view, @"Console",               C::ToggleConsole,     nil, 0, false));
+		// The world grid is not a panel, but it is a View toggle the user looks
+		// for in this menu — on macOS the viewport toolbar's options popup is
+		// otherwise its only route.
+		s_toggleItems.emplace_back(C::ToggleGroundGrid,
+			heAddItem(view, @"Ground Grid",           C::ToggleGroundGrid,  nil, 0, true));
 		[view addItem:[NSMenuItem separatorItem]];
 		heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true);
 		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
