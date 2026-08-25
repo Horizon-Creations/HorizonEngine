@@ -3853,7 +3853,13 @@ void EditorApplication::dumpFrameHeadless()
 		ftc.position = glm::vec3(0.0f, 399.0f, -8.0f); // high above any loaded scene content
 		ftc.scale    = glm::vec3(24.0f, 0.25f, 24.0f);
 		reg.emplace<TransformComponent>(slab, ftc);
-		reg.emplace<MeshComponent>(slab, MeshComponent{ HE::kDefaultCubeMeshId });
+		MeshComponent fmc{ HE::kDefaultCubeMeshId };
+		// "…norecv": the FLOOR stops receiving shadows. Everything else about the
+		// frame is identical, so the cube shadows on it must disappear and nothing
+		// may change — the A/B for receivesShadow that a default-true render
+		// cannot give, since true is a no-op by construction.
+		fmc.receivesShadow = mode.find("norecv") == std::string::npos;
+		reg.emplace<MeshComponent>(slab, fmc);
 
 		auto cube = [&](const char* name, float x)
 		{
