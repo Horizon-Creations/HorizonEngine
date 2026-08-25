@@ -14,7 +14,10 @@
 // The three cases that make this less obvious than "draw a rectangle around
 // w->Pos/w->Size" are spelled out at the implementation.
 
-#ifdef HE_IMGUI_ENABLED
+// Gated on the HEADER, not on HE_IMGUI_ENABLED: this is ImGui and nothing else,
+// and the test target compiles the panels that use it without the editor's
+// define (see EditorTheme.h for the same rule).
+#if __has_include(<imgui.h>)
 
 namespace HE::Ed::Spotlight
 {
@@ -33,4 +36,4 @@ namespace HE::Ed::Spotlight
 	const char* focusedPanel();
 }
 
-#endif // HE_IMGUI_ENABLED
+#endif // __has_include(<imgui.h>)

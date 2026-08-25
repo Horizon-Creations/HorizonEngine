@@ -180,14 +180,14 @@
         },
         {
          "s": "",
-         "t": " registry — one machine-readable table of engine functions that simultaneously powers the Lua and Python bindings, HorizonCode's Engine Call node and the HorizonCode→C++ code generator. Adding an engine function is one registry row; every frontend gets it at once."
+         "t": " registry — one machine-readable table of engine functions that simultaneously powers the Lua and Python bindings, HorizonCode's Engine Call node and the HorizonCode->C++ code generator. Adding an engine function is one registry row; every frontend gets it at once."
         }
        ]
       }
      ],
      "eyebrow": "The big picture",
      "id": "architecture",
-     "text": "Horizon Engine is built from cleanly separated modules. Each layer talks to the ones below through narrow interfaces, so a piece can be extended or replaced without touching the rest. HE_Editor · HE_Game The editor application · the standalone game runtime HE_Scene · HE_Tools ECS world, systems, serialization · project management, importers, packer HE_Rendering Render device abstraction + Metal / OpenGL / D3D11 / D3D12 / Vulkan backends HE_Core App loop, content manager, hpak, script runtimes, HorizonCode, UI widgets, diagnostics Module Responsibility HE_Core Application loop, logging, math, config, the content manager and hpak, the Lua/Python runtimes, the HorizonCode runtime and compiler, UI widget model, input assets, diagnostics. HE_Rendering The render device interface, the render-world extraction, shared shaders and the five graphics backends. HE_Scene Entities, components, all gameplay systems (physics, animation, navigation, particles, audio, widgets at runtime), scene serialisation, the engine API registry. HE_Tools Project management, asset importers, the export pipeline and CLI tools. HE_Editor Panels, asset editor tabs, gizmos and tooling on top of the runtime. HE_Game The standalone runtime an exported game ships with. Entities are backed by an ECS registry; gameplay logic reaches the engine through the HE::api registry — one machine-readable table of engine functions that simultaneously powers the Lua and Python bindings, HorizonCode's Engine Call node and the HorizonCode→C++ code generator. Adding an engine function is one registry row; every frontend gets it at once.",
+     "text": "Horizon Engine is built from cleanly separated modules. Each layer talks to the ones below through narrow interfaces, so a piece can be extended or replaced without touching the rest. HE_Editor · HE_Game The editor application · the standalone game runtime HE_Scene · HE_Tools ECS world, systems, serialization · project management, importers, packer HE_Rendering Render device abstraction + Metal / OpenGL / D3D11 / D3D12 / Vulkan backends HE_Core App loop, content manager, hpak, script runtimes, HorizonCode, UI widgets, diagnostics Module Responsibility HE_Core Application loop, logging, math, config, the content manager and hpak, the Lua/Python runtimes, the HorizonCode runtime and compiler, UI widget model, input assets, diagnostics. HE_Rendering The render device interface, the render-world extraction, shared shaders and the five graphics backends. HE_Scene Entities, components, all gameplay systems (physics, animation, navigation, particles, audio, widgets at runtime), scene serialisation, the engine API registry. HE_Tools Project management, asset importers, the export pipeline and CLI tools. HE_Editor Panels, asset editor tabs, gizmos and tooling on top of the runtime. HE_Game The standalone runtime an exported game ships with. Entities are backed by an ECS registry; gameplay logic reaches the engine through the HE::api registry — one machine-readable table of engine functions that simultaneously powers the Lua and Python bindings, HorizonCode's Engine Call node and the HorizonCode->C++ code generator. Adding an engine function is one registry row; every frontend gets it at once.",
      "title": "Module Architecture"
     },
     {
@@ -367,7 +367,7 @@
          {
           "h": "editor.html#profiler",
           "s": "l",
-          "t": "View ▸ Performance Profiler"
+          "t": "View » Performance Profiler"
          },
          {
           "s": "",
@@ -452,7 +452,7 @@
      ],
      "eyebrow": "When things go wrong",
      "id": "diagnostics",
-     "text": "Profiler — the in-engine profiler measures per-pass GPU time and nested CPU scopes with zero cost while idle; F9 captures a benchmark to JSON in the dumps/ folder, in the editor and in exported games alike. UI: View ▸ Performance Profiler. Logging — HorizonEngine.log next to the executable, truncated per launch. Crash handler — on macOS/Linux, fatal signals write a he_crash_*.crash report (signal + stack trace) to the system temp directory before the OS core dump. Robust config — the editor's config.json is parsed defensively (a corrupt file resets instead of crash-looping) and written atomically. Debug drawing — scripts and graphs can draw lines, spheres and boxes in the viewport via the debug API group.",
+     "text": "Profiler — the in-engine profiler measures per-pass GPU time and nested CPU scopes with zero cost while idle; F9 captures a benchmark to JSON in the dumps/ folder, in the editor and in exported games alike. UI: View » Performance Profiler. Logging — HorizonEngine.log next to the executable, truncated per launch. Crash handler — on macOS/Linux, fatal signals write a he_crash_*.crash report (signal + stack trace) to the system temp directory before the OS core dump. Robust config — the editor's config.json is parsed defensively (a corrupt file resets instead of crash-looping) and written atomically. Debug drawing — scripts and graphs can draw lines, spheres and boxes in the viewport via the debug API group.",
      "title": "Diagnostics"
     },
     {
@@ -1192,7 +1192,7 @@
           },
           {
            "s": "",
-           "t": " require the Local Network permission for the multicast discovery step. Without it the search fails while ordinary internet traffic keeps working — which looks like a routing bug rather than a missing permission. Grant it in System Settings ▸ Privacy & Security ▸ Local Network."
+           "t": " require the Local Network permission for the multicast discovery step. Without it the search fails while ordinary internet traffic keeps working — which looks like a routing bug rather than a missing permission. Grant it in System Settings » Privacy & Security » Local Network."
           }
          ]
         }
@@ -1203,7 +1203,7 @@
      ],
      "eyebrow": "Getting through",
      "id": "discovery",
-     "text": "Two machines on the open internet cannot simply find each other. One sits behind a router that drops unsolicited inbound connections, and neither knows the other's address. HorizonNet addresses both, and is honest about the cases where nothing can. The session directory A host publishes where it can be reached under a short, high-entropy session id; a peer looks that id up. This is address discovery only — no session traffic ever passes through it. The division of responsibility is deliberate. The directory learns an address, a port and a display name. It never learns the join secret: authentication is engine-to-engine, so a compromised directory still cannot join or read a session. The server records the address it sees the request arrive from rather than one supplied in the body, so a client cannot point other peers somewhere else. Registering returns a management token, so merely knowing a session id is not enough to drop or hijack an entry. Anyone holding a session id learns the host's IP address. Ids are generated with high entropy and are short-lived for exactly that reason — treat one like a temporary invitation, not a name. Asking the router for a port Before publishing, the engine tries to open the way in by itself: it discovers the router with an SSDP multicast search, then asks for a port forward over UPnP, falling back to NAT-PMP. Routers generally speak one or the other — an Apple base station answers NAT-PMP and stays silent to SSDP entirely — so a UPnP failure says nothing about the second attempt. For IPv6, where there is no address translation to undo, it asks for a firewall pinhole instead. Then the directory tries to connect back. That verification matters: a mapping can succeed while the host is still unreachable, and publishing an endpoint nobody can dial produces a session that simply never works, with no clue why. When it cannot work A failed mapping is a normal outcome, not a bug. Many routers ship with UPnP disabled — it is a known attack surface — and corporate and campus networks block it deliberately. Behind carrier-grade NAT, common on mobile connections and some ISPs, there is no forwardable port at any level: not automatically, and not by hand either. The editor reports the router result and the reachability result separately, because they can disagree, and then says what you can actually do — forward the port yourself if the router is yours, otherwise put everyone on a mesh VPN such as Tailscale or ZeroTier, whose free tiers relay the traffic. Peers on the same local network always get through without any of it. Under CGNAT the advice deliberately omits manual forwarding: suggesting it would send someone off to spend an afternoon on something that cannot work. macOS Sequoia and later require the Local Network permission for the multicast discovery step. Without it the search fails while ordinary internet traffic keeps working — which looks like a routing bug rather than a missing permission. Grant it in System Settings ▸ Privacy & Security ▸ Local Network.",
+     "text": "Two machines on the open internet cannot simply find each other. One sits behind a router that drops unsolicited inbound connections, and neither knows the other's address. HorizonNet addresses both, and is honest about the cases where nothing can. The session directory A host publishes where it can be reached under a short, high-entropy session id; a peer looks that id up. This is address discovery only — no session traffic ever passes through it. The division of responsibility is deliberate. The directory learns an address, a port and a display name. It never learns the join secret: authentication is engine-to-engine, so a compromised directory still cannot join or read a session. The server records the address it sees the request arrive from rather than one supplied in the body, so a client cannot point other peers somewhere else. Registering returns a management token, so merely knowing a session id is not enough to drop or hijack an entry. Anyone holding a session id learns the host's IP address. Ids are generated with high entropy and are short-lived for exactly that reason — treat one like a temporary invitation, not a name. Asking the router for a port Before publishing, the engine tries to open the way in by itself: it discovers the router with an SSDP multicast search, then asks for a port forward over UPnP, falling back to NAT-PMP. Routers generally speak one or the other — an Apple base station answers NAT-PMP and stays silent to SSDP entirely — so a UPnP failure says nothing about the second attempt. For IPv6, where there is no address translation to undo, it asks for a firewall pinhole instead. Then the directory tries to connect back. That verification matters: a mapping can succeed while the host is still unreachable, and publishing an endpoint nobody can dial produces a session that simply never works, with no clue why. When it cannot work A failed mapping is a normal outcome, not a bug. Many routers ship with UPnP disabled — it is a known attack surface — and corporate and campus networks block it deliberately. Behind carrier-grade NAT, common on mobile connections and some ISPs, there is no forwardable port at any level: not automatically, and not by hand either. The editor reports the router result and the reachability result separately, because they can disagree, and then says what you can actually do — forward the port yourself if the router is yours, otherwise put everyone on a mesh VPN such as Tailscale or ZeroTier, whose free tiers relay the traffic. Peers on the same local network always get through without any of it. Under CGNAT the advice deliberately omits manual forwarding: suggesting it would send someone off to spend an afternoon on something that cannot work. macOS Sequoia and later require the Local Network permission for the multicast discovery step. Without it the search fails while ordinary internet traffic keeps working — which looks like a routing bug rather than a missing permission. Grant it in System Settings » Privacy & Security » Local Network.",
      "title": "Discovery & NAT Traversal"
     },
     {
@@ -1743,7 +1743,7 @@
       },
       {
        "k": "code",
-       "text": "# client → host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host → client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host → client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host → everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft",
+       "text": "# client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft",
        "title": "join flow"
       },
       {
@@ -1822,7 +1822,7 @@
      ],
      "eyebrow": "Protocol",
      "id": "handshake",
-     "text": "Once the encrypted link is up, the collaboration protocol takes over. join flow # client → host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host → client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host → client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host → everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft The order of the checks is deliberate. The version check runs first, so a peer on an older build is told it has the wrong build rather than the wrong project — an older build does not send a project key at all, and reading a missing field would produce exactly that wrong answer. The snapshot is captured before the peer is admitted. If the host cannot produce one, the join is refused instead of completing with a peer that sits on an empty scene believing it is in sync. It is sent in chunks rather than as one blob so the joiner gets a progress bar and never has to accept an arbitrary allocation announced by the other side. Joining replaces the joiner's open scene — it does not merge into it. That is why the project check matters so much: before it existed, joining with the wrong project cost you your own scene and handed you one whose every asset reference dangled.",
+     "text": "Once the encrypted link is up, the collaboration protocol takes over. join flow # client -> host\nJoinRequest        protocol version, display name, project key,\n                   client key, avatar, colour preference,\n                   \"I accept large assets\"\n\n# host -> client — checked in this order, first failure wins\nJoinRejected       VersionMismatch       # different engine build\n                   Banned                # the host ejected you from this session\n                   ProjectMismatch       # different project open (+ the host's project name)\n                   LargeAssetsRequired   # this session carries them and you have not agreed\n                   SessionFull           # participant limit reached\n                   SnapshotFailed        # the host could not capture its own scene\n\n# host -> client, on success\nJoinAccepted       assigned id, state sequence, assigned colour,\n                   \"this session carries large assets\", current roster\nLockTable          every lock that already exists\nSnapshotBegin\nSnapshotChunk…     the scene, chunked (progress bar, bounded allocation)\nSnapshotEnd\n\n# host -> everyone else\nParticipantJoined\n# …and on disconnect\nParticipantLeft The order of the checks is deliberate. The version check runs first, so a peer on an older build is told it has the wrong build rather than the wrong project — an older build does not send a project key at all, and reading a missing field would produce exactly that wrong answer. The snapshot is captured before the peer is admitted. If the host cannot produce one, the join is refused instead of completing with a peer that sits on an empty scene believing it is in sync. It is sent in chunks rather than as one blob so the joiner gets a progress bar and never has to accept an arbitrary allocation announced by the other side. Joining replaces the joiner's open scene — it does not merge into it. That is why the project check matters so much: before it existed, joining with the wrong project cost you your own scene and handed you one whose every asset reference dangled.",
      "title": "The Join Handshake"
     },
     {
@@ -2577,7 +2577,7 @@
         },
         {
          "s": "c",
-         "t": "Preferences ▸ Collaboration"
+         "t": "Preferences » Collaboration"
         },
         {
          "s": "",
@@ -2746,7 +2746,7 @@
      ],
      "eyebrow": "Bandwidth",
      "id": "bigassets",
-     "text": "Meshes, textures, audio and fonts can travel a session, but only when the host has decided the session works that way and everyone in it has agreed to it. It is off by default, because on a metered or slow connection it is the difference between a few kilobytes an hour and a few hundred megabytes. The host decides, you consent The switch lives in Preferences ▸ Collaboration and it means two different things depending on which side of the session you are on. As the host, it decides what this session carries. As a guest, it is your answer to being asked. Joining a session that carries large assets without having agreed is refused, with that as the stated reason — and the editor turns the refusal into a question rather than an error, because the whole point of refusing was to get you asked. Say yes and it retries the same host with the setting on. Say no and you stay out, which is a legitimate answer: someone on a mobile connection should not have a project's textures pushed at them because they clicked a session id. The setting cannot be changed while a session is up, and it locks the moment a join starts connecting rather than when the scene lands — the answer is already on the wire by then. Half a session running one rule and half the other is a group of peers who quietly hold different files, which is exactly what the whole arbitration exists to prevent. How big one file may be Separately from all of that, each machine sets a ceiling on a single transfer — 1 to 512 MiB, 64 MiB by default. It is per machine, not per session: each side refuses what it is not willing to hold, so two peers may disagree and the lower of the two is what actually gets through. That is also why this one can be changed during a session while the switch above cannot — it commits nobody but you. Raising it is not free, and the setting says so where you change it. A file that travels is held whole in memory on both machines — read into one buffer here, queued a second time in the outgoing connection buffer, assembled into a third at the far end before it reaches disk. It also goes out ahead of everything the session still has to say, so a large file on a slow connection makes editing together feel frozen until it is through. And this number is the only thing standing between another peer and an allocation of that size on this machine: the receiving side reserves the announced size before a single byte arrives. That is where 512 MiB comes from — already about a gigabyte and a half of memory on somebody else's say-so, and as far as this is willing to go. The lower bound is 1 MiB because below it ordinary authored assets — a scene, a widget with embedded art — stop travelling, and a session where saves silently fail to arrive is worse than having no control at all. Knowing before you join A session announced on your local network says whether it carries large assets, so the browser can show what it will cost you before you click it. A session you join by session id shows nothing beforehand by design — the directory knows an address, not a policy — so for those the question is asked at the join instead.",
+     "text": "Meshes, textures, audio and fonts can travel a session, but only when the host has decided the session works that way and everyone in it has agreed to it. It is off by default, because on a metered or slow connection it is the difference between a few kilobytes an hour and a few hundred megabytes. The host decides, you consent The switch lives in Preferences » Collaboration and it means two different things depending on which side of the session you are on. As the host, it decides what this session carries. As a guest, it is your answer to being asked. Joining a session that carries large assets without having agreed is refused, with that as the stated reason — and the editor turns the refusal into a question rather than an error, because the whole point of refusing was to get you asked. Say yes and it retries the same host with the setting on. Say no and you stay out, which is a legitimate answer: someone on a mobile connection should not have a project's textures pushed at them because they clicked a session id. The setting cannot be changed while a session is up, and it locks the moment a join starts connecting rather than when the scene lands — the answer is already on the wire by then. Half a session running one rule and half the other is a group of peers who quietly hold different files, which is exactly what the whole arbitration exists to prevent. How big one file may be Separately from all of that, each machine sets a ceiling on a single transfer — 1 to 512 MiB, 64 MiB by default. It is per machine, not per session: each side refuses what it is not willing to hold, so two peers may disagree and the lower of the two is what actually gets through. That is also why this one can be changed during a session while the switch above cannot — it commits nobody but you. Raising it is not free, and the setting says so where you change it. A file that travels is held whole in memory on both machines — read into one buffer here, queued a second time in the outgoing connection buffer, assembled into a third at the far end before it reaches disk. It also goes out ahead of everything the session still has to say, so a large file on a slow connection makes editing together feel frozen until it is through. And this number is the only thing standing between another peer and an allocation of that size on this machine: the receiving side reserves the announced size before a single byte arrives. That is where 512 MiB comes from — already about a gigabyte and a half of memory on somebody else's say-so, and as far as this is willing to go. The lower bound is 1 MiB because below it ordinary authored assets — a scene, a widget with embedded art — stop travelling, and a session where saves silently fail to arrive is worse than having no control at all. Knowing before you join A session announced on your local network says whether it carries large assets, so the browser can show what it will cost you before you click it. A session you join by session id shows nothing beforehand by design — the directory knows an address, not a policy — so for those the question is asked at the join instead.",
      "title": "Large Assets"
     },
     {
@@ -3407,7 +3407,7 @@
          [
           {
            "s": "",
-           "t": "client → host"
+           "t": "client -> host"
           }
          ],
          [
@@ -3427,7 +3427,7 @@
          [
           {
            "s": "",
-           "t": "host → client"
+           "t": "host -> client"
           }
          ],
          [
@@ -3447,7 +3447,7 @@
          [
           {
            "s": "",
-           "t": "host → client"
+           "t": "host -> client"
           }
          ],
          [
@@ -3475,7 +3475,7 @@
          [
           {
            "s": "",
-           "t": "host → clients"
+           "t": "host -> clients"
           }
          ],
          [
@@ -3511,7 +3511,7 @@
          [
           {
            "s": "",
-           "t": "host → client"
+           "t": "host -> client"
           }
          ],
          [
@@ -3539,7 +3539,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3567,7 +3567,7 @@
          [
           {
            "s": "",
-           "t": "client → host"
+           "t": "client -> host"
           }
          ],
          [
@@ -3587,7 +3587,7 @@
          [
           {
            "s": "",
-           "t": "host → clients"
+           "t": "host -> clients"
           }
          ],
          [
@@ -3607,7 +3607,7 @@
          [
           {
            "s": "",
-           "t": "host → one client"
+           "t": "host -> one client"
           }
          ],
          [
@@ -3627,7 +3627,7 @@
          [
           {
            "s": "",
-           "t": "host → joiner"
+           "t": "host -> joiner"
           }
          ],
          [
@@ -3655,7 +3655,7 @@
          [
           {
            "s": "",
-           "t": "client → host → that client"
+           "t": "client -> host -> that client"
           }
          ],
          [
@@ -3683,7 +3683,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3711,7 +3711,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3739,7 +3739,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3775,7 +3775,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3803,7 +3803,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients"
+           "t": "client -> host -> clients"
           }
          ],
          [
@@ -3823,7 +3823,7 @@
          [
           {
            "s": "",
-           "t": "host → one client"
+           "t": "host -> one client"
           }
          ],
          [
@@ -3859,7 +3859,7 @@
          [
           {
            "s": "",
-           "t": "client → host → clients / that client"
+           "t": "client -> host -> clients / that client"
           }
          ],
          [
@@ -3879,7 +3879,7 @@
          [
           {
            "s": "",
-           "t": "client → host"
+           "t": "client -> host"
           }
          ],
          [
@@ -3899,7 +3899,7 @@
          [
           {
            "s": "",
-           "t": "host → one client"
+           "t": "host -> one client"
           }
          ],
          [
@@ -3919,7 +3919,7 @@
          [
           {
            "s": "",
-           "t": "host → clients"
+           "t": "host -> clients"
           }
          ],
          [
@@ -3947,7 +3947,7 @@
          [
           {
            "s": "",
-           "t": "host → the holder → host"
+           "t": "host -> the holder -> host"
           }
          ],
          [
@@ -3975,7 +3975,7 @@
          [
           {
            "s": "",
-           "t": "refuser → host → the sender"
+           "t": "refuser -> host -> the sender"
           }
          ],
          [
@@ -4016,7 +4016,7 @@
      ],
      "eyebrow": "Reference",
      "id": "messages",
-     "text": "The complete collaboration protocol. Client-to-host and host-to-client forms are separate messages on purpose: the client's form carries no participant id at all, so a client cannot claim to be someone else — the host stamps the id from the connection the message arrived on. Message Direction Carries JoinRequest client → host Protocol version, display name, project key JoinAccepted host → client Assigned id, state sequence, roster JoinRejected host → client Reason, plus a detail string ParticipantJoined / ParticipantLeft host → clients Roster updates SnapshotBegin / Chunk / End host → client The scene, chunked PresenceUpdate / PresenceRelay client → host → clients Camera pose, selection LockRequest / LockRelease client → host Subject LockUpdate host → clients Subject, owner, owner name LockDenied host → one client Subject, reason LockTable host → joiner Every lock that already exists LockQuery / LockQueryResult client → host → that client Who holds a subject, authoritatively TransformUpdate / TransformRelay client → host → clients Position, Euler rotation, scale ComponentsUpdate / ComponentsRelay client → host → clients One entity's serialized components StructuralUpdate / StructuralRelay client → host → clients Create / destroy / reparent, plus the subtree AssetBegin / Chunk / End client → host → clients A whole authored file, its create-or-update intent and its revision DocDeltasUpdate / DocDeltasRelay client → host → clients A batch of item-level document changes, plus the revision Removed host → one client You have been ejected from the session AssetCreate / CreateRelay / CreateResult client → host → clients / that client A new asset, the name the host settled on, and whether it had to change AssetOpRequest client → host Delete, rename, folder create or re-import — plus whether it means a folder, and the batch it belongs to AssetOpVerdict host → one client Approved or denied AssetOpApply host → clients Carry it out, everywhere at once AssetEditRequest / AssetEditAnswer host → the holder → host “Ask to edit”, and the holder's answer AssetRefusedReport / AssetRefused refuser → host → the sender A file the far side would not write, and why Identity across peers Entity handles are allocator indices — the same number names different entities on different machines. Everything on the wire therefore uses an entity's stable UUID, which each peer computes from its own world, so no side has to translate the other's numbering.",
+     "text": "The complete collaboration protocol. Client-to-host and host-to-client forms are separate messages on purpose: the client's form carries no participant id at all, so a client cannot claim to be someone else — the host stamps the id from the connection the message arrived on. Message Direction Carries JoinRequest client -> host Protocol version, display name, project key JoinAccepted host -> client Assigned id, state sequence, roster JoinRejected host -> client Reason, plus a detail string ParticipantJoined / ParticipantLeft host -> clients Roster updates SnapshotBegin / Chunk / End host -> client The scene, chunked PresenceUpdate / PresenceRelay client -> host -> clients Camera pose, selection LockRequest / LockRelease client -> host Subject LockUpdate host -> clients Subject, owner, owner name LockDenied host -> one client Subject, reason LockTable host -> joiner Every lock that already exists LockQuery / LockQueryResult client -> host -> that client Who holds a subject, authoritatively TransformUpdate / TransformRelay client -> host -> clients Position, Euler rotation, scale ComponentsUpdate / ComponentsRelay client -> host -> clients One entity's serialized components StructuralUpdate / StructuralRelay client -> host -> clients Create / destroy / reparent, plus the subtree AssetBegin / Chunk / End client -> host -> clients A whole authored file, its create-or-update intent and its revision DocDeltasUpdate / DocDeltasRelay client -> host -> clients A batch of item-level document changes, plus the revision Removed host -> one client You have been ejected from the session AssetCreate / CreateRelay / CreateResult client -> host -> clients / that client A new asset, the name the host settled on, and whether it had to change AssetOpRequest client -> host Delete, rename, folder create or re-import — plus whether it means a folder, and the batch it belongs to AssetOpVerdict host -> one client Approved or denied AssetOpApply host -> clients Carry it out, everywhere at once AssetEditRequest / AssetEditAnswer host -> the holder -> host “Ask to edit”, and the holder's answer AssetRefusedReport / AssetRefused refuser -> host -> the sender A file the far side would not write, and why Identity across peers Entity handles are allocator indices — the same number names different entities on different machines. Everything on the wire therefore uses an entity's stable UUID, which each peer computes from its own world, so no side has to translate the other's numbering.",
      "title": "Message Reference"
     },
     {
@@ -4576,7 +4576,7 @@
          "r": [
           {
            "s": "",
-           "t": "Collaboration is a young feature. It is covered by an extensive automated test suite — including two editors driven over a real socket through the whole open → lock → edit → apply path — but it has seen far less real-world use than the rest of the engine. Treat source control as the safety net it is meant to be, and commit before a long session."
+           "t": "Collaboration is a young feature. It is covered by an extensive automated test suite — including two editors driven over a real socket through the whole open -> lock -> edit -> apply path — but it has seen far less real-world use than the rest of the engine. Treat source control as the safety net it is meant to be, and commit before a long session."
           }
          ]
         }
@@ -4587,7 +4587,7 @@
      ],
      "eyebrow": "Honest scope",
      "id": "limits",
-     "text": "Limit Detail Participants Eight per session by default. Snapshot size Bounded, so a hostile or buggy host cannot announce a size that exhausts the joiner's memory. Binary assets Meshes, textures and audio stay out unless the host turns on large asset sync. Otherwise, source control carries them. Single transfer 1–512 MiB, 64 MiB by default, set per machine. The lower of two peers' ceilings is what gets through. No trash An approved delete removes the file. There is no session-wide undo for it — commit before a long session. Gameplay networking A separate layer, and not yet driven by any runtime — see Gameplay Replication. Same build required See Protocol Versions. Same project required Checked by project id during the handshake. Collaboration is a young feature. It is covered by an extensive automated test suite — including two editors driven over a real socket through the whole open → lock → edit → apply path — but it has seen far less real-world use than the rest of the engine. Treat source control as the safety net it is meant to be, and commit before a long session.",
+     "text": "Limit Detail Participants Eight per session by default. Snapshot size Bounded, so a hostile or buggy host cannot announce a size that exhausts the joiner's memory. Binary assets Meshes, textures and audio stay out unless the host turns on large asset sync. Otherwise, source control carries them. Single transfer 1–512 MiB, 64 MiB by default, set per machine. The lower of two peers' ceilings is what gets through. No trash An approved delete removes the file. There is no session-wide undo for it — commit before a long session. Gameplay networking A separate layer, and not yet driven by any runtime — see Gameplay Replication. Same build required See Protocol Versions. Same project required Checked by project id during the handshake. Collaboration is a young feature. It is covered by an extensive automated test suite — including two editors driven over a real socket through the whole open -> lock -> edit -> apply path — but it has seen far less real-world use than the rest of the engine. Treat source control as the safety net it is meant to be, and commit before a long session.",
      "title": "Limits & Known Gaps"
     }
    ],
@@ -5866,7 +5866,7 @@
        "r": [
         {
          "s": "c",
-         "t": "Assets ▸ Import Asset…"
+         "t": "Assets » Import Asset…"
         },
         {
          "s": "",
@@ -5994,7 +5994,7 @@
          [
           {
            "s": "b",
-           "t": "Ctrl / ⌘ + click"
+           "t": "Ctrl / Cmd + click"
           }
          ],
          [
@@ -6225,7 +6225,7 @@
      ],
      "eyebrow": "Assets",
      "id": "content-browser",
-     "text": "A folder tree on the left, an asset grid on the right. There are up to three roots: Content — your project's assets. Engine — built-in default assets (read-only). Source — the C++ class tree (C++ projects only). Creating assets Right-click the background (or an item's Create Asset submenu) to create an asset; a naming popup follows immediately. Always available: Asset Opens in Scene Scene viewport (.hescene) Material · Material Function Material graph editor Particle System Particle graph editor Animator State Machine State machine editor UI Widget Widget Designer + Graph Input Action · Input Mapping Context Input asset editor Texture · Static Mesh · Skeletal Mesh · Shader · Audio · Font Type-specific inspectors Gameplay-logic assets depend on the project language: HorizonCode Class plus Player Controller / Player Character (HorizonCode projects), Script (Lua/Python projects), or C++ Class (C++ projects — writes a .h/.cpp pair under Source/). Importing Assets ▸ Import Asset… (or a folder's Import context item) dispatches by extension to the mesh, texture, audio, material and font importers. Audio import currently accepts WAV. An imported asset remembers where it came from, so its right-click menu offers Reimport — it re-reads the original file and keeps the asset's identity, which means every reference to it survives. The entry is only there when a source path was actually recorded; nothing guesses one. Finding things The box above the grid searches the folder you are in and everything under it — a search that only looked at the level you already opened would require you to know the answer before asking the question. Beside it, a type filter narrows to scenes, materials, meshes, prefabs, widgets and the rest, and a single × clears both at once. While a search or filter is active the grid shows matches from the whole subtree rather than the current folder's contents, so a hit three folders down is one click away. Selecting, moving, renaming Action What it does Click Select one. Ctrl / ⌘ + click Add or remove one from the selection. Shift + click Select a range. Drag onto a folder Move it — the whole selection if you drag one of the selected tiles, otherwise just the one you grabbed. F2 Rename. Delete Delete, after a confirmation. Enter Open. Moving an asset carries everything that pointed at it — other assets' stored references, the asset's own embedded path, its thumbnail — over to the new location. A move that quietly broke those is how a project loses its materials. With several assets selected, Rename becomes a pattern rename: find and replace inside the name, a prefix, a suffix, and a live preview of every resulting name before anything is written. Renaming twenty files one dialog at a time is the kind of task nobody does, so nobody tidies up. Deleting, and what depended on it Deleting asks first — a red menu entry is not a confirmation — and the confirmation says who still needs the file. The scan runs in the background over the whole project and reports each referrer, plus how it points at the asset: a stored path can be repaired by renaming instead, while a scene's stored id can only dangle once the asset is gone. Deleting a folder scans everything inside it the same way. And when a file cannot be read, the dialog says so rather than reporting “nothing references it” — “I could not check” and “I checked and found nothing” are different answers, and only one of them is safe to act on. There is no trash. A deleted asset is gone from disk — which is one more reason to keep a project under source control. Find References The same scan is available on its own, from any asset's right-click menu, without having to threaten to delete something to see the answer. It reads both encodings a reference can take: the path stored inside another authored asset, and the UUID stored in a scene. In a collaboration session The content browser is part of a session. Creating is open to everyone; deleting, renaming and moving are requests the host answers; an asset somebody else is editing carries a padlock in their colour. See Assets in a Session.",
+     "text": "A folder tree on the left, an asset grid on the right. There are up to three roots: Content — your project's assets. Engine — built-in default assets (read-only). Source — the C++ class tree (C++ projects only). Creating assets Right-click the background (or an item's Create Asset submenu) to create an asset; a naming popup follows immediately. Always available: Asset Opens in Scene Scene viewport (.hescene) Material · Material Function Material graph editor Particle System Particle graph editor Animator State Machine State machine editor UI Widget Widget Designer + Graph Input Action · Input Mapping Context Input asset editor Texture · Static Mesh · Skeletal Mesh · Shader · Audio · Font Type-specific inspectors Gameplay-logic assets depend on the project language: HorizonCode Class plus Player Controller / Player Character (HorizonCode projects), Script (Lua/Python projects), or C++ Class (C++ projects — writes a .h/.cpp pair under Source/). Importing Assets » Import Asset… (or a folder's Import context item) dispatches by extension to the mesh, texture, audio, material and font importers. Audio import currently accepts WAV. An imported asset remembers where it came from, so its right-click menu offers Reimport — it re-reads the original file and keeps the asset's identity, which means every reference to it survives. The entry is only there when a source path was actually recorded; nothing guesses one. Finding things The box above the grid searches the folder you are in and everything under it — a search that only looked at the level you already opened would require you to know the answer before asking the question. Beside it, a type filter narrows to scenes, materials, meshes, prefabs, widgets and the rest, and a single × clears both at once. While a search or filter is active the grid shows matches from the whole subtree rather than the current folder's contents, so a hit three folders down is one click away. Selecting, moving, renaming Action What it does Click Select one. Ctrl / Cmd + click Add or remove one from the selection. Shift + click Select a range. Drag onto a folder Move it — the whole selection if you drag one of the selected tiles, otherwise just the one you grabbed. F2 Rename. Delete Delete, after a confirmation. Enter Open. Moving an asset carries everything that pointed at it — other assets' stored references, the asset's own embedded path, its thumbnail — over to the new location. A move that quietly broke those is how a project loses its materials. With several assets selected, Rename becomes a pattern rename: find and replace inside the name, a prefix, a suffix, and a live preview of every resulting name before anything is written. Renaming twenty files one dialog at a time is the kind of task nobody does, so nobody tidies up. Deleting, and what depended on it Deleting asks first — a red menu entry is not a confirmation — and the confirmation says who still needs the file. The scan runs in the background over the whole project and reports each referrer, plus how it points at the asset: a stored path can be repaired by renaming instead, while a scene's stored id can only dangle once the asset is gone. Deleting a folder scans everything inside it the same way. And when a file cannot be read, the dialog says so rather than reporting “nothing references it” — “I could not check” and “I checked and found nothing” are different answers, and only one of them is safe to act on. There is no trash. A deleted asset is gone from disk — which is one more reason to keep a project under source control. Find References The same scan is available on its own, from any asset's right-click menu, without having to threaten to delete something to see the answer. It reads both encodings a reference can take: the path stored inside another authored asset, and the UUID stored in a scene. In a collaboration session The content browser is part of a session. Creating is open to everyone; deleting, renaming and moving are requests the host answers; an asset somebody else is editing carries a padlock in their colour. See Assets in a Session.",
      "title": "Content Browser"
     },
     {
@@ -6495,7 +6495,7 @@
           {
            "h": "materials.html",
            "s": "l",
-           "t": "Materials →"
+           "t": "Materials ->"
           }
          ]
         ],
@@ -6514,7 +6514,7 @@
           {
            "h": "ui.html",
            "s": "l",
-           "t": "UI →"
+           "t": "UI ->"
           }
          ]
         ],
@@ -6533,7 +6533,7 @@
           {
            "h": "horizoncode.html",
            "s": "l",
-           "t": "HorizonCode →"
+           "t": "HorizonCode ->"
           }
          ]
         ],
@@ -6658,7 +6658,7 @@
           {
            "h": "systems.html#animation",
            "s": "l",
-           "t": "Animation →"
+           "t": "Animation ->"
           }
          ]
         ],
@@ -6677,7 +6677,7 @@
           {
            "h": "systems.html#particles",
            "s": "l",
-           "t": "Particles →"
+           "t": "Particles ->"
           }
          ]
         ],
@@ -6749,7 +6749,7 @@
      ],
      "eyebrow": "Deep dives",
      "id": "asset-editors",
-     "text": "Double-clicking an asset opens a dedicated editor tab next to the Scene tab. Material graphs, HorizonCode graphs, the Level Script, the Game Instance, particle graphs and animator state machines all share one node-graph canvas — learn it once (pan with the right mouse button, box-select with the left, zoom with the wheel) and every graph editor works the same way. Tab What it does Material graph Node-based shader authoring with live preview — the graph is the shader. Materials → UI Widget designer UMG-style Designer (palette, WYSIWYG canvas, hierarchy, per-element details) plus a Graph mode for the widget's logic. UI → HorizonCode Class Event graph, variables and functions of a reusable visual-scripting class. HorizonCode → Level Script (View menu) The current scene's graph — reacts to OnLevelLoaded / OnLevelUnloaded; saved inside the scene. Game Instance (View menu) The app-wide graph that outlives scene changes — OnInit, OnShutdown, OnWindowFocusChanged. Skeletal Mesh editor Joint hierarchy tree, orbit-camera preview, Show Skeleton bone overlay, and an optional animation-clip scrubber. Animator State Machine States as nodes, transitions as links — parameters, thresholds and crossfade durations. Animation → Particle graph Emitter node graph with a live simulated preview. Particles → Input assets Input Action (Button/Axis) and Input Mapping Context (key and axis bindings). Script editor Syntax-highlighted Lua/Python editing in-editor. C++ Class editor A .h/.cpp pair as one tab with a header/source toggle (C++ projects). The UI Widget Designer tab: palette, WYSIWYG canvas and per-element details",
+     "text": "Double-clicking an asset opens a dedicated editor tab next to the Scene tab. Material graphs, HorizonCode graphs, the Level Script, the Game Instance, particle graphs and animator state machines all share one node-graph canvas — learn it once (pan with the right mouse button, box-select with the left, zoom with the wheel) and every graph editor works the same way. Tab What it does Material graph Node-based shader authoring with live preview — the graph is the shader. Materials -> UI Widget designer UMG-style Designer (palette, WYSIWYG canvas, hierarchy, per-element details) plus a Graph mode for the widget's logic. UI -> HorizonCode Class Event graph, variables and functions of a reusable visual-scripting class. HorizonCode -> Level Script (View menu) The current scene's graph — reacts to OnLevelLoaded / OnLevelUnloaded; saved inside the scene. Game Instance (View menu) The app-wide graph that outlives scene changes — OnInit, OnShutdown, OnWindowFocusChanged. Skeletal Mesh editor Joint hierarchy tree, orbit-camera preview, Show Skeleton bone overlay, and an optional animation-clip scrubber. Animator State Machine States as nodes, transitions as links — parameters, thresholds and crossfade durations. Animation -> Particle graph Emitter node graph with a live simulated preview. Particles -> Input assets Input Action (Button/Axis) and Input Mapping Context (key and axis bindings). Script editor Syntax-highlighted Lua/Python editing in-editor. C++ Class editor A .h/.cpp pair as one tab with a header/source toggle (C++ projects). The UI Widget Designer tab: palette, WYSIWYG canvas and per-element details",
      "title": "Asset Editor Tabs"
     },
     {
@@ -6929,7 +6929,7 @@
         {
          "h": "rendering.html#performance",
          "s": "l",
-         "t": "Rendering ▸ Performance"
+         "t": "Rendering » Performance"
         },
         {
          "s": "",
@@ -6949,7 +6949,7 @@
      ],
      "eyebrow": "Terrain",
      "id": "landscape-mode",
-     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering ▸ Performance. Scatter vegetation with the Foliage component.",
+     "text": "Switch the viewport toolbar's mode selector to Landscape and the Quick Settings panel becomes the terrain tool. Create Landscape With no terrain in the scene the panel shows a creation form: Width (X), Depth (Z), Resolution (2–512), Height Scale, and procedural noise — Seed (0 = flat), Octaves, Frequency, Lacunarity, Gain — with a live grid preview. Creating adds a Terrain entity with a default terrain material. The seed noise is baked once into editable heights; from then on the terrain is a plain heightfield your brushes edit directly. Sculpting Six brush tools: Raise, Lower, Smooth, Flatten, Ramp, Roughen, with Radius (0.5–500 m), Falloff and Strength. Drag with the left mouse button in the viewport to sculpt — Flatten pulls toward the height under the drag-start point, Ramp blends between two dragged points. Reset Sculpting clears all edits. Strokes only regenerate the terrain chunks they touch, so sculpting stays fast on large terrains. Terrain renders as a grid of chunk entities with automatic LOD meshes and skirt geometry — details under Rendering » Performance. Scatter vegetation with the Foliage component.",
      "title": "Landscape Mode"
     },
     {
@@ -6959,7 +6959,7 @@
        "r": [
         {
          "s": "c",
-         "t": "View ▸ Environment"
+         "t": "View » Environment"
         },
         {
          "s": "",
@@ -7029,7 +7029,7 @@
      ],
      "eyebrow": "Sky & weather",
      "id": "environment-window",
-     "text": "View ▸ Environment manages the two special scene entities: Sky — Add Sky / Remove Sky. The Sky entity carries the Environment component (atmosphere, day-night cycle, clouds, stars, fog …) and owns the Sun and Moon as child entities. Removing it leaves a flat background colour. Weather — Add Weather / Remove Weather. Requires a Sky to drive; carries the Weather component (presets, precipitation, auto-cycle). The window only adds, removes and selects — the actual settings are edited in the Details panel. The full parameter reference is on Rendering & Environment.",
+     "text": "View » Environment manages the two special scene entities: Sky — Add Sky / Remove Sky. The Sky entity carries the Environment component (atmosphere, day-night cycle, clouds, stars, fog …) and owns the Sun and Moon as child entities. Removing it leaves a flat background colour. Weather — Add Weather / Remove Weather. Requires a Sky to drive; carries the Weather component (presets, precipitation, auto-cycle). The window only adds, removes and selects — the actual settings are edited in the Details panel. The full parameter reference is on Rendering & Environment.",
      "title": "Environment Window"
     },
     {
@@ -7140,7 +7140,7 @@
        "r": [
         {
          "s": "c",
-         "t": "View ▸ Performance Profiler"
+         "t": "View » Performance Profiler"
         },
         {
          "s": "",
@@ -7236,7 +7236,7 @@
      ],
      "eyebrow": "Measure",
      "id": "profiler",
-     "text": "View ▸ Performance Profiler opens the engine's built-in profiler. Three tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget.",
+     "text": "View » Performance Profiler opens the engine's built-in profiler. Three tabs: Tab Shows Overview Always-live HUD: FPS, CPU ms, GPU ms and a frame-time graph. Capture Benchmark capture — start/stop with F9 anywhere (editor or exported game); dumps a profile_<timestamp>.json into the dumps/ folder. Plus single-frame captures. Frame Detail Per-pass GPU timing (Shadow, SSAO, Scene, Bloom, Tonemap …), a nested CPU scope tree, and counters — draw calls, triangles, visible/total objects, VRAM used vs budget.",
      "title": "Performance Profiler"
     },
     {
@@ -7246,7 +7246,7 @@
        "r": [
         {
          "s": "c",
-         "t": "Edit ▸ Preferences"
+         "t": "Edit » Preferences"
         },
         {
          "s": "",
@@ -7304,7 +7304,7 @@
         [
          {
           "s": "b",
-          "t": "Source Control ▸ Repository"
+          "t": "Source Control » Repository"
          },
          {
           "s": "",
@@ -7312,7 +7312,7 @@
          },
          {
           "s": "c",
-          "t": "View ▸ Source Control"
+          "t": "View » Source Control"
          },
          {
           "s": "",
@@ -7322,7 +7322,7 @@
         [
          {
           "s": "b",
-          "t": "Tools ▸ Status"
+          "t": "Tools » Status"
          },
          {
           "s": "",
@@ -7370,7 +7370,7 @@
      ],
      "eyebrow": "Setup",
      "id": "preferences",
-     "text": "Edit ▸ Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control ▸ Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in View ▸ Source Control. Tools ▸ Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
+     "text": "Edit » Preferences (Ctrl/Cmd + ,) holds machine-level settings: Renderer — graphics backend picker (OpenGL everywhere; Metal on macOS; Direct3D 11/12 on Windows; Vulkan where enabled), VSync, GPU weather particles. Post-processing — Bloom (threshold, intensity) and ambient occlusion (method SSAO / HBAO / GTAO, radius, intensity). See Post-Processing. Source Control » Repository — one page for both halves of git: what the machine has (git, Git LFS, your commit identity, the credential helper) and what the project has (initialise, remote, access token, auto-push). Commits and pushes themselves live in View » Source Control. Tools » Status — everything the editor needs from outside itself in one table: git and Git LFS, CMake and a C++ compiler, the local network and the router. Rows that are not green offer a Fix. A \"C++ Toolchain Not Found\" dialog also appears at startup when CMake or the compiler are missing, offering automatic installation — the toolchain is needed for C++ projects and for compiling HorizonCode at export. Collaboration — whether the editor announces and listens for sessions on the local network; whether it will carry large assets (off by default, and greyed out while a session is running); and the ceiling on a single transfer, 1–512 MiB. Your display name, colour and avatar are set in the Collaboration window itself.",
      "title": "Preferences"
     },
     {
@@ -7463,7 +7463,7 @@
           {
            "h": "export.html",
            "s": "l",
-           "t": "Export →"
+           "t": "Export ->"
           }
          ]
         ],
@@ -7492,7 +7492,7 @@
         },
         {
          "s": "c",
-         "t": "⌘N"
+         "t": "CmdN"
         },
         {
          "s": "",
@@ -7500,7 +7500,7 @@
         },
         {
          "s": "c",
-         "t": "⌘O"
+         "t": "CmdO"
         },
         {
          "s": "",
@@ -7508,7 +7508,7 @@
         },
         {
          "s": "c",
-         "t": "⌘S"
+         "t": "CmdS"
         },
         {
          "s": "",
@@ -7516,7 +7516,7 @@
         },
         {
          "s": "c",
-         "t": "⇧⌘S"
+         "t": "ShiftCmdS"
         },
         {
          "s": "",
@@ -7524,7 +7524,7 @@
         },
         {
          "s": "c",
-         "t": "⌘,"
+         "t": "Cmd,"
         },
         {
          "s": "",
@@ -7532,7 +7532,7 @@
         },
         {
          "s": "c",
-         "t": "⌃⌘F"
+         "t": "CtrlCmdF"
         },
         {
          "s": "",
@@ -7543,7 +7543,7 @@
      ],
      "eyebrow": "Reference",
      "id": "menus",
-     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export → Help Documentation, About On macOS the same commands live in the native menu bar (⌘N, ⌘O, ⌘S, ⇧⌘S, ⌘,, ⌃⌘F …), plus the standard app and window menus.",
+     "text": "Menu Items File New / Open / Close Project · New Scene, Open Scene…, Add Scene Additive…, Save Scene, Save Scene As… · Exit Edit Undo, Redo · Cut / Copy / Paste · Preferences View Toggle Fullscreen, Reset Layout · Performance Profiler, Environment · Level Script, Game Instance Assets Import Asset…, Refresh Assets Build Export Project… — profiles, target platform, compression, encryption, mod support, incremental packing, Compile HorizonCode. Export -> Help Documentation, About On macOS the same commands live in the native menu bar (CmdN, CmdO, CmdS, ShiftCmdS, Cmd,, CtrlCmdF …), plus the standard app and window menus.",
      "title": "Menu Reference"
     },
     {
@@ -7883,7 +7883,7 @@
        "r": [
         {
          "s": "c",
-         "t": "Build ▸ Export Project…"
+         "t": "Build » Export Project…"
         },
         {
          "s": "",
@@ -7940,7 +7940,7 @@
         },
         {
          "label": "Translate HorizonCode",
-         "sub": "Every graph → a native C++ class; graphs that fail validation ship interpreted"
+         "sub": "Every graph -> a native C++ class; graphs that fail validation ship interpreted"
         },
         {
          "label": "Compile C++",
@@ -7972,7 +7972,7 @@
      ],
      "eyebrow": "One click",
      "id": "overview",
-     "text": "Build ▸ Export Project… turns a project into a standalone game: the game runtime plus your assets cooked and packed into a single .hpak archive. It runs in its own Build window: Setup, Build (only when there is HorizonCode to compile), Package and Clean up, each with its own progress ring and its own log — click a step to read it. When the run finishes you can start the game, build again, or go back to the settings. Project Content, scenes, graphs, scripts, config Translate HorizonCode Every graph → a native C++ class; graphs that fail validation ship interpreted Compile C++ CMake + host toolchain build HorizonCodeGen.dylib / .dll / .so Cook & Pack Bake meshes, textures, shader variants & binary scenes; compress, encrypt, reuse unchanged entries .hpak + Runtime Archive + game executable with the pak key embedded (re-signed on macOS) Standalone Game Double-clickable — folder, .zip or macOS .app bundle Cooking bakes assets into their runtime form — mesh vertex buffers, texture compression, precompiled material shader variants for the target backends, baked particle shaders — and rewrites all asset references as UUIDs so nothing resolves by fragile file paths at runtime.",
+     "text": "Build » Export Project… turns a project into a standalone game: the game runtime plus your assets cooked and packed into a single .hpak archive. It runs in its own Build window: Setup, Build (only when there is HorizonCode to compile), Package and Clean up, each with its own progress ring and its own log — click a step to read it. When the run finishes you can start the game, build again, or go back to the settings. Project Content, scenes, graphs, scripts, config Translate HorizonCode Every graph -> a native C++ class; graphs that fail validation ship interpreted Compile C++ CMake + host toolchain build HorizonCodeGen.dylib / .dll / .so Cook & Pack Bake meshes, textures, shader variants & binary scenes; compress, encrypt, reuse unchanged entries .hpak + Runtime Archive + game executable with the pak key embedded (re-signed on macOS) Standalone Game Double-clickable — folder, .zip or macOS .app bundle Cooking bakes assets into their runtime form — mesh vertex buffers, texture compression, precompiled material shader variants for the target backends, baked particle shaders — and rewrites all asset references as UUIDs so nothing resolves by fragile file paths at runtime.",
      "title": "How Export Works"
     },
     {
@@ -8165,7 +8165,7 @@
           {
            "h": "horizoncode.html#compiler",
            "s": "l",
-           "t": "Compiler →"
+           "t": "Compiler ->"
           }
          ]
         ],
@@ -8204,7 +8204,7 @@
      ],
      "eyebrow": "Presets",
      "id": "profiles",
-     "text": "Exports are driven by named profiles stored in the project file — every project starts with Development (uncompressed, mods enabled) and Shipping (compressed + encrypted). Profiles are edited right in the export dialog and saved back with Save / Save As. Setting Effect Output Directory Defaults to <Project>/Export/<profile>. Startup Scene The scene the game boots into (defaults to the open scene). Target Platform Host / Windows / macOS / Linux — see below. Compress assets zstd (or LZ4HC) per-asset compression. Encrypt assets AES-256-GCM per-entry encryption — see Encryption. Enable mod support The shipped game mounts overlay paks from a Mods/ folder. Incremental packing Unchanged assets are reused byte-for-byte from the previous export. Compile HorizonCode Translates all graphs to native C++. Compiler → Exclude patterns Content-relative globs (e.g. Debug/*, *_test.hasset) left out of the pak.",
+     "text": "Exports are driven by named profiles stored in the project file — every project starts with Development (uncompressed, mods enabled) and Shipping (compressed + encrypted). Profiles are edited right in the export dialog and saved back with Save / Save As. Setting Effect Output Directory Defaults to <Project>/Export/<profile>. Startup Scene The scene the game boots into (defaults to the open scene). Target Platform Host / Windows / macOS / Linux — see below. Compress assets zstd (or LZ4HC) per-asset compression. Encrypt assets AES-256-GCM per-entry encryption — see Encryption. Enable mod support The shipped game mounts overlay paks from a Mods/ folder. Incremental packing Unchanged assets are reused byte-for-byte from the previous export. Compile HorizonCode Translates all graphs to native C++. Compiler -> Exclude patterns Content-relative globs (e.g. Debug/*, *_test.hasset) left out of the pak.",
      "title": "Export Profiles"
     },
     {
@@ -8482,7 +8482,7 @@
         },
         {
          "s": "",
-         "t": " the pak without parsing it — startup doesn't block on loading everything up front. The startup scene loads, and everything it references streams in on background threads, following the asset reference graph (scene → meshes → materials → textures). Completed loads register on the main thread under a per-frame budget, so even a burst of finished assets never causes a hitch. Additional scenes and zones stream the same way through the "
+         "t": " the pak without parsing it — startup doesn't block on loading everything up front. The startup scene loads, and everything it references streams in on background threads, following the asset reference graph (scene -> meshes -> materials -> textures). Completed loads register on the main thread under a per-frame budget, so even a burst of finished assets never causes a hitch. Additional scenes and zones stream the same way through the "
         },
         {
          "h": "scenes.html#streaming",
@@ -8498,7 +8498,7 @@
      ],
      "eyebrow": "At runtime",
      "id": "streaming",
-     "text": "The exported game mounts the pak without parsing it — startup doesn't block on loading everything up front. The startup scene loads, and everything it references streams in on background threads, following the asset reference graph (scene → meshes → materials → textures). Completed loads register on the main thread under a per-frame budget, so even a burst of finished assets never causes a hitch. Additional scenes and zones stream the same way through the scene API.",
+     "text": "The exported game mounts the pak without parsing it — startup doesn't block on loading everything up front. The startup scene loads, and everything it references streams in on background threads, following the asset reference graph (scene -> meshes -> materials -> textures). Completed loads register on the main thread under a per-frame budget, so even a burst of finished assets never causes a hitch. Additional scenes and zones stream the same way through the scene API.",
      "title": "Streaming at Runtime"
     },
     {
@@ -8923,7 +8923,7 @@
          {
           "h": "https://horizoncreations.dev/HorizonEngine/HE.html#download",
           "s": "l",
-          "t": "Downloads →"
+          "t": "Downloads ->"
          }
         ],
         [
@@ -9003,7 +9003,7 @@
      ],
      "eyebrow": "Step by step",
      "id": "install",
-     "text": "Download a build  Grab the latest package for your platform from the download section on the engine page.   Downloads → Unpack & run  On Windows, extract the .zip and launch HorizonEditor.exe. On macOS, open the .dmg and drag the app into Applications. Verify the install  Launch the editor — you should land in the Project Hub. If the window opens and renders, you're ready to go. macOS Gatekeeper: the build is not yet notarized. Right-click the app and choose Open the first time to bypass the unidentified-developer warning.",
+     "text": "Download a build  Grab the latest package for your platform from the download section on the engine page.   Downloads -> Unpack & run  On Windows, extract the .zip and launch HorizonEditor.exe. On macOS, open the .dmg and drag the app into Applications. Verify the install  Launch the editor — you should land in the Project Hub. If the window opens and renders, you're ready to go. macOS Gatekeeper: the build is not yet notarized. Right-click the app and choose Open the first time to bypass the unidentified-developer warning.",
      "title": "Installation"
     },
     {
@@ -12313,7 +12313,7 @@
           },
           {
            "s": "c",
-           "t": "View ▸ Game Instance"
+           "t": "View » Game Instance"
           },
           {
            "s": "",
@@ -12351,7 +12351,7 @@
           },
           {
            "s": "c",
-           "t": "View ▸ Level Script"
+           "t": "View » Level Script"
           },
           {
            "s": "",
@@ -12398,7 +12398,7 @@
           {
            "h": "ui.html",
            "s": "l",
-           "t": "UI →"
+           "t": "UI ->"
           }
          ]
         ],
@@ -12450,7 +12450,7 @@
      ],
      "eyebrow": "Where graphs live",
      "id": "hosts",
-     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under View ▸ Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under View ▸ Level Script. Widget graph Each UI Widget's logic — Construct, Destruct, Tick and one event per element interaction. UI → HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object. The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
+     "text": "Host Lifetime · events Game Instance One app-wide class that outlives scene changes — OnInit (before anything loads), OnShutdown, OnWindowFocusChanged. Reachable from anywhere via Get Game Instance. Open it under View » Game Instance. Level Script One graph per scene, saved inside the scene — OnLevelLoaded, OnLevelUnloaded. Open it under View » Level Script. Widget graph Each UI Widget's logic — Construct, Destruct, Tick and one event per element interaction. UI -> HorizonCode Class A standalone, reusable class asset — Construct, Destruct plus the custom events it declares. Instantiated with Create Object. The Level Script editor with OnLevelLoaded and OnLevelUnloaded events",
      "title": "The Four Hosts"
     },
     {
@@ -12807,7 +12807,7 @@
         },
         {
          "s": "",
-         "t": " classes (Content Browser ▸ "
+         "t": " classes (Content Browser » "
         },
         {
          "s": "i",
@@ -12871,7 +12871,7 @@
      ],
      "eyebrow": "Input-driven",
      "id": "players",
-     "text": "HorizonCode projects can create Player Controller and Player Character classes (Content Browser ▸ HorizonCode Player). When play begins, the engine spawns one instance of each and feeds it the project's input assets: every mapped action arrives as Input.<Action>.Pressed / .Released / .Axis events, alongside BeginPlay and a per-frame Tick — the natural home for movement and camera logic.",
+     "text": "HorizonCode projects can create Player Controller and Player Character classes (Content Browser » HorizonCode Player). When play begins, the engine spawns one instance of each and feeds it the project's input assets: every mapped action arrives as Input.<Action>.Pressed / .Released / .Axis events, alongside BeginPlay and a per-frame Tick — the natural home for movement and camera logic.",
      "title": "Player Classes"
     },
     {
@@ -13183,7 +13183,7 @@
          "sub": "Generated shader source"
         },
         {
-         "label": "glslang → SPIR-V",
+         "label": "glslang -> SPIR-V",
          "sub": "The generated GLSL compiles to portable SPIR-V bytecode"
         },
         {
@@ -13242,7 +13242,7 @@
      ],
      "eyebrow": "Under the hood",
      "id": "pipeline",
-     "text": "Node Graph Authored in the material editor Canonical GLSL Fragment Generated shader source glslang → SPIR-V The generated GLSL compiles to portable SPIR-V bytecode SPIRV-Cross Translates the SPIR-V into each backend's native shading language Each renderer caches the compiled pipeline per shader hash — identical graphs share one pipeline; edits apply live in the scene. Lit materials go through the engine's standard-lit shading (heLit): sun, ambient and specular are engine-driven, so lighting matches the rest of the scene on every backend. Exports can precompile the shader variants for the target backends into the asset, so a packaged game never generates shaders at runtime.",
+     "text": "Node Graph Authored in the material editor Canonical GLSL Fragment Generated shader source glslang -> SPIR-V The generated GLSL compiles to portable SPIR-V bytecode SPIRV-Cross Translates the SPIR-V into each backend's native shading language Each renderer caches the compiled pipeline per shader hash — identical graphs share one pipeline; edits apply live in the scene. Lit materials go through the engine's standard-lit shading (heLit): sun, ambient and specular are engine-driven, so lighting matches the rest of the scene on every backend. Exports can precompile the shader variants for the target backends into the asset, so a packaged game never generates shaders at runtime.",
      "title": "Compilation Pipeline"
     },
     {
@@ -13272,7 +13272,7 @@
         [
          {
           "s": "",
-          "t": "Drag from pin to pin to connect — types coerce automatically (float splats to vectors, vec3 → vec4 gains alpha 1). Right-click an input pin to disconnect."
+          "t": "Drag from pin to pin to connect — types coerce automatically (float splats to vectors, vec3 -> vec4 gains alpha 1). Right-click an input pin to disconnect."
          }
         ],
         [
@@ -13317,7 +13317,7 @@
      ],
      "eyebrow": "Hands on",
      "id": "editor-usage",
-     "text": "Double-click a material in the Content Browser to open its graph tab. Right-click the canvas for the searchable node palette (type to filter nodes and project material functions). Drag from pin to pin to connect — types coerce automatically (float splats to vectors, vec3 → vec4 gains alpha 1). Right-click an input pin to disconnect. Edits apply live; Save Material persists graph + generated shader + parameters into the asset. Assign the material to entities via the Material component (drag & drop).",
+     "text": "Double-click a material in the Content Browser to open its graph tab. Right-click the canvas for the searchable node palette (type to filter nodes and project material functions). Drag from pin to pin to connect — types coerce automatically (float splats to vectors, vec3 -> vec4 gains alpha 1). Right-click an input pin to disconnect. Edits apply live; Save Material persists graph + generated shader + parameters into the asset. Assign the material to entities via the Material component (drag & drop).",
      "title": "Using the Editor"
     },
     {
@@ -13591,7 +13591,7 @@
         },
         {
          "s": "i",
-         "t": "Create ▸ Material Function"
+         "t": "Create » Material Function"
         },
         {
          "s": "",
@@ -13626,7 +13626,7 @@
      ],
      "eyebrow": "Reuse",
      "id": "functions",
-     "text": "Reusable sub-graphs stored as their own assets (Create ▸ Material Function in the Content Browser). A function's interface is defined by its Function Input / Function Output nodes (each named and typed). Any material — project-wide — can insert it from the palette; the call node shows the function's pins and the compiler inlines the body into the generated shader, so functions have zero runtime cost. Recursion is detected and rejected safely.",
+     "text": "Reusable sub-graphs stored as their own assets (Create » Material Function in the Content Browser). A function's interface is defined by its Function Input / Function Output nodes (each named and typed). Any material — project-wide — can insert it from the palette; the call node shows the function's pins and the compiler inlines the body into the generated shader, so functions have zero runtime cost. Recursion is detected and rejected safely.",
      "title": "Material Functions"
     }
    ],
@@ -13653,7 +13653,7 @@
        "steps": [
         {
          "label": "Extract",
-         "sub": "Scene → RenderWorld: frustum culling, LOD selection, instancing batches"
+         "sub": "Scene -> RenderWorld: frustum culling, LOD selection, instancing batches"
         },
         {
          "label": "Shadow Pass",
@@ -13669,7 +13669,7 @@
         },
         {
          "label": "Bloom",
-         "sub": "Bright-pass over the threshold → blur → added back at intensity"
+         "sub": "Bright-pass over the threshold -> blur -> added back at intensity"
         },
         {
          "label": "Tonemap",
@@ -13681,14 +13681,14 @@
         },
         {
          "label": "UI & Present",
-         "sub": "In-world UI, widgets, debug overlays → swapchain"
+         "sub": "In-world UI, widgets, debug overlays -> swapchain"
         }
        ]
       }
      ],
      "eyebrow": "One frame",
      "id": "pipeline",
-     "text": "The renderer is a physically-based HDR pipeline running on an abstracted render device — the same scene renders identically across Metal, OpenGL, Direct3D and Vulkan because every backend implements one common interface. A frame flows through these stages: Extract Scene → RenderWorld: frustum culling, LOD selection, instancing batches Shadow Pass Cascaded shadow maps for the sun / directional light Scene Pass (HDR) Sky & clouds, opaque PBR geometry, skinned meshes, instanced batches, particles, transparents, fog Ambient Occlusion SSAO / HBAO / GTAO from the depth buffer + blur pass — darkens only the ambient term Bloom Bright-pass over the threshold → blur → added back at intensity Tonemap ACES filmic curve maps HDR to display range, then gamma correction FXAA Fast approximate anti-aliasing on the final image UI & Present In-world UI, widgets, debug overlays → swapchain",
+     "text": "The renderer is a physically-based HDR pipeline running on an abstracted render device — the same scene renders identically across Metal, OpenGL, Direct3D and Vulkan because every backend implements one common interface. A frame flows through these stages: Extract Scene -> RenderWorld: frustum culling, LOD selection, instancing batches Shadow Pass Cascaded shadow maps for the sun / directional light Scene Pass (HDR) Sky & clouds, opaque PBR geometry, skinned meshes, instanced batches, particles, transparents, fog Ambient Occlusion SSAO / HBAO / GTAO from the depth buffer + blur pass — darkens only the ambient term Bloom Bright-pass over the threshold -> blur -> added back at intensity Tonemap ACES filmic curve maps HDR to display range, then gamma correction FXAA Fast approximate anti-aliasing on the final image UI & Present In-world UI, widgets, debug overlays -> swapchain",
      "title": "Frame Pipeline"
     },
     {
@@ -13742,7 +13742,7 @@
         },
         {
          "s": "c",
-         "t": "Edit ▸ Preferences ▸ Renderer"
+         "t": "Edit » Preferences » Renderer"
         },
         {
          "s": "",
@@ -13801,31 +13801,31 @@
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ]
         ],
@@ -13839,31 +13839,31 @@
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅ (basic)"
+           "t": "• (basic)"
           }
          ]
         ],
@@ -13877,31 +13877,31 @@
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ]
         ],
@@ -13915,13 +13915,13 @@
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
@@ -13953,13 +13953,13 @@
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅"
+           "t": "•"
           }
          ],
          [
@@ -13991,13 +13991,13 @@
          [
           {
            "s": "",
-           "t": "✅ transform feedback"
+           "t": "• transform feedback"
           }
          ],
          [
           {
            "s": "",
-           "t": "✅ compute"
+           "t": "• compute"
           }
          ],
          [
@@ -14052,7 +14052,7 @@
      ],
      "eyebrow": "Cross-platform",
      "id": "backends",
-     "text": "Five backends implement the render device: Metal (macOS), OpenGL (everywhere), Direct3D 11 and Direct3D 12 (Windows) and Vulkan. Pick the backend under Edit ▸ Preferences ▸ Renderer. Metal and OpenGL are the flagship backends with the deepest feature set; the others track them. Feature OpenGL Metal D3D11 D3D12 Vulkan PBR geometry, node-graph materials, instancing, GPU skinning, in-game UI ✅ ✅ ✅ ✅ ✅ Procedural sky, IBL ambient, fog, aurora, stars ✅ ✅ ✅ ✅ ✅ (basic) HDR post-FX chain (bloom, ACES, FXAA), SSAO/HBAO/GTAO ✅ ✅ ✅ ✅ ✅ Cascaded shadow maps (3 cascades) ✅ ✅ single map single map single map 3D-volumetric cloud mode, god rays, lens flare, contrails, cirrus, shooting stars ✅ ✅ partial partial partial GPU weather particles (rain/snow simulation on GPU) ✅ transform feedback ✅ compute — — — Note: material node graphs cross-compile to every backend automatically — you never author per-API shaders. See the material pipeline.",
+     "text": "Five backends implement the render device: Metal (macOS), OpenGL (everywhere), Direct3D 11 and Direct3D 12 (Windows) and Vulkan. Pick the backend under Edit » Preferences » Renderer. Metal and OpenGL are the flagship backends with the deepest feature set; the others track them. Feature OpenGL Metal D3D11 D3D12 Vulkan PBR geometry, node-graph materials, instancing, GPU skinning, in-game UI • • • • • Procedural sky, IBL ambient, fog, aurora, stars • • • • • (basic) HDR post-FX chain (bloom, ACES, FXAA), SSAO/HBAO/GTAO • • • • • Cascaded shadow maps (3 cascades) • • single map single map single map 3D-volumetric cloud mode, god rays, lens flare, contrails, cirrus, shooting stars • • partial partial partial GPU weather particles (rain/snow simulation on GPU) • transform feedback • compute — — — Note: material node graphs cross-compile to every backend automatically — you never author per-API shaders. See the material pipeline.",
      "title": "Graphics Backends"
     },
     {
@@ -14228,7 +14228,7 @@
         },
         {
          "s": "c",
-         "t": "Edit ▸ Preferences ▸ Post-processing"
+         "t": "Edit » Preferences » Post-processing"
         },
         {
          "s": "",
@@ -14338,7 +14338,7 @@
      ],
      "eyebrow": "Polish",
      "id": "postfx",
-     "text": "After the HDR scene pass, the frame runs through the post chain. Settings live in Edit ▸ Preferences ▸ Post-processing: Stage What it does · settings Ambient Occlusion Darkens creases and contact points — affects only the image-based ambient term, never direct light. Choose the algorithm: SSAO (kernel sampling), HBAO (horizon-based visibility) or GTAO (ground-truth horizon arcs); tune Radius and Intensity. Disabled = zero cost. Bloom Bright pixels glow past a Threshold, blurred and added back at an Intensity. Tonemap ACES filmic curve maps HDR to display range, followed by gamma correction. FXAA Fast approximate anti-aliasing on the final image.",
+     "text": "After the HDR scene pass, the frame runs through the post chain. Settings live in Edit » Preferences » Post-processing: Stage What it does · settings Ambient Occlusion Darkens creases and contact points — affects only the image-based ambient term, never direct light. Choose the algorithm: SSAO (kernel sampling), HBAO (horizon-based visibility) or GTAO (ground-truth horizon arcs); tune Radius and Intensity. Disabled = zero cost. Bloom Bright pixels glow past a Threshold, blurred and added back at an Intensity. Tonemap ACES filmic curve maps HDR to display range, followed by gamma correction. FXAA Fast approximate anti-aliasing on the final image.",
      "title": "Post-Processing"
     },
     {
@@ -14754,7 +14754,7 @@
          [
           {
            "s": "",
-           "t": "The LOD component swaps meshes by camera distance; terrain chunks generate their own LOD chain automatically (65→33→17→9 vertices per chunk edge) with skirts hiding the seams."
+           "t": "The LOD component swaps meshes by camera distance; terrain chunks generate their own LOD chain automatically (65->33->17->9 vertices per chunk edge) with skirts hiding the seams."
           }
          ]
         ],
@@ -14823,7 +14823,7 @@
           {
            "h": "editor.html#profiler",
            "s": "l",
-           "t": "Editor ▸ Profiler"
+           "t": "Editor » Profiler"
           },
           {
            "s": "",
@@ -14836,7 +14836,7 @@
      ],
      "eyebrow": "Fast",
      "id": "performance",
-     "text": "System What it does Frustum culling Off-screen objects never reach the GPU; the shadow pass culls against the light instead so off-screen casters still shadow. LOD system The LOD component swaps meshes by camera distance; terrain chunks generate their own LOD chain automatically (65→33→17→9 vertices per chunk edge) with skirts hiding the seams. GPU instancing Same-mesh objects batch into one instanced draw automatically, with per-instance tint — foliage, particles and weather ride the same path. Async streaming Assets load on background threads; completed loads register on the main thread under a per-frame budget so bursts never hitch. Exported games stream from the .hpak on demand. Pipeline caching Material shaders cache per hash — identical graphs share one GPU pipeline. Profiler Built-in per-pass GPU and per-scope CPU timing with F9 captures. Editor ▸ Profiler.",
+     "text": "System What it does Frustum culling Off-screen objects never reach the GPU; the shadow pass culls against the light instead so off-screen casters still shadow. LOD system The LOD component swaps meshes by camera distance; terrain chunks generate their own LOD chain automatically (65->33->17->9 vertices per chunk edge) with skirts hiding the seams. GPU instancing Same-mesh objects batch into one instanced draw automatically, with per-instance tint — foliage, particles and weather ride the same path. Async streaming Assets load on background threads; completed loads register on the main thread under a per-frame budget so bursts never hitch. Exported games stream from the .hpak on demand. Pipeline caching Material shaders cache per hash — identical graphs share one GPU pipeline. Profiler Built-in per-pass GPU and per-scope CPU timing with F9 captures. Editor » Profiler.",
      "title": "Performance Features"
     },
     {
@@ -15064,7 +15064,7 @@
           {
            "h": "materials.html",
            "s": "l",
-           "t": "Materials →"
+           "t": "Materials ->"
           }
          ]
         ],
@@ -15306,7 +15306,7 @@
           {
            "h": "systems.html#animation",
            "s": "l",
-           "t": "Animation →"
+           "t": "Animation ->"
           }
          ]
         ],
@@ -15395,7 +15395,7 @@
           {
            "h": "scripting.html",
            "s": "l",
-           "t": "Scripting →"
+           "t": "Scripting ->"
           }
          ]
         ],
@@ -15414,7 +15414,7 @@
           {
            "h": "systems.html#particles",
            "s": "l",
-           "t": "Particles →"
+           "t": "Particles ->"
           }
          ]
         ],
@@ -15441,7 +15441,7 @@
           {
            "h": "systems.html#navigation",
            "s": "l",
-           "t": "Navigation →"
+           "t": "Navigation ->"
           }
          ]
         ],
@@ -15531,7 +15531,7 @@
      ],
      "eyebrow": "Reference",
      "id": "components",
-     "text": "Every component in the engine, grouped by area, with its user-facing properties as they appear in the Details panel. Transforms & rendering Component Properties Transform Position, Rotation (Euler degrees), Scale. Transform 2D Position (xy), Rotation, Scale (xy) — for 2D physics entities. Mesh Mesh asset, LOD Bias, Visible, Casts Shadow, Receives Shadow. Until a mesh asset is assigned, a built-in cube renders. Skeletal Mesh Skeletal mesh asset (drag & drop), Visible, Casts Shadow, Receives Shadow; shows joint and bone-matrix counts. Posed by the Animator components, skinned on the GPU (up to 128 joints, 4 influences per vertex). Material Material asset slot; base colour, metallic, roughness, opacity; texture slots; per-entity parameter overrides for node-graph materials; optional custom fragment shader. Materials → Camera FOV, Near Plane, Far Plane, Main Camera flag, Orthographic. In play mode the camera marked Main renders the game. Light Type (Directional / Point / Spot), Color, Intensity, Range (point/spot), Spot Angle (spot), Visible, Casts Shadow. LOD A list of levels, each with a Max Distance and a mesh — the LOD system swaps the rendered mesh by camera distance. Foliage Density, Draw Distance, Min/Max Scale, Seed, Regenerate. See Foliage. Physics Component Properties Rigid Body Body Type (Static / Dynamic / Kinematic), Mass, Friction, Restitution, 2D Physics toggle. Collider Shape (Box / Sphere / Capsule) with Half Extents / Radius / Height, Is Trigger. Without a collider, a box is derived from the transform scale. Character Controller Slope Limit, Step Height, Skin Width, Mass, Gravity; read-only grounded state and velocity. Driven from scripts via setVelocity / isGrounded. Animation Component Properties Animator One animation clip: clip asset, Speed, Time, Looping, Playing. Animator Blend Two clips (A/B) with a blend alpha — smooth two-clip mixing. Animator State Machine References an Animator State Machine asset; shows the current state and crossfade progress. Live parameters drive the transitions. Animation → Property Animator Plays a property-animation clip — keyframed transform channels (position / rotation / scale) and material channels (colour, metallic, roughness, opacity) for cutscenes and motion design. Audio, scripts & gameplay Component Properties Audio Source Audio asset, mixer Bus, Volume, Pitch, Loop, Play on Start, Spatial (with Inner Range, Range, Rolloff Factor). Audio Listener Master Volume; the first listener in the scene receives 3D audio. Script Lua/Python projects: script asset, Enabled, and auto-generated editors for the script's exposed properties (Float / Int / Bool / String). Scripting → Particle System Particle graph asset, Playing toggle, live particle count. Particles → Nav Mesh Bake settings (Cell Size/Height, Walk Height, Climb, Radius, Max Slope), Bake button, debug overlay toggle. Navigation → Nav Agent Target position, Speed, Stop Distance; path status; Go / Stop buttons. In-world UI Entities can carry canvas-based UI components — UI Canvas (screen-space or world-space), UI Element (anchored rect), UI Text, UI Image and UI Button. For menus and HUDs, prefer the standalone UI Widget system.",
+     "text": "Every component in the engine, grouped by area, with its user-facing properties as they appear in the Details panel. Transforms & rendering Component Properties Transform Position, Rotation (Euler degrees), Scale. Transform 2D Position (xy), Rotation, Scale (xy) — for 2D physics entities. Mesh Mesh asset, LOD Bias, Visible, Casts Shadow, Receives Shadow. Until a mesh asset is assigned, a built-in cube renders. Skeletal Mesh Skeletal mesh asset (drag & drop), Visible, Casts Shadow, Receives Shadow; shows joint and bone-matrix counts. Posed by the Animator components, skinned on the GPU (up to 128 joints, 4 influences per vertex). Material Material asset slot; base colour, metallic, roughness, opacity; texture slots; per-entity parameter overrides for node-graph materials; optional custom fragment shader. Materials -> Camera FOV, Near Plane, Far Plane, Main Camera flag, Orthographic. In play mode the camera marked Main renders the game. Light Type (Directional / Point / Spot), Color, Intensity, Range (point/spot), Spot Angle (spot), Visible, Casts Shadow. LOD A list of levels, each with a Max Distance and a mesh — the LOD system swaps the rendered mesh by camera distance. Foliage Density, Draw Distance, Min/Max Scale, Seed, Regenerate. See Foliage. Physics Component Properties Rigid Body Body Type (Static / Dynamic / Kinematic), Mass, Friction, Restitution, 2D Physics toggle. Collider Shape (Box / Sphere / Capsule) with Half Extents / Radius / Height, Is Trigger. Without a collider, a box is derived from the transform scale. Character Controller Slope Limit, Step Height, Skin Width, Mass, Gravity; read-only grounded state and velocity. Driven from scripts via setVelocity / isGrounded. Animation Component Properties Animator One animation clip: clip asset, Speed, Time, Looping, Playing. Animator Blend Two clips (A/B) with a blend alpha — smooth two-clip mixing. Animator State Machine References an Animator State Machine asset; shows the current state and crossfade progress. Live parameters drive the transitions. Animation -> Property Animator Plays a property-animation clip — keyframed transform channels (position / rotation / scale) and material channels (colour, metallic, roughness, opacity) for cutscenes and motion design. Audio, scripts & gameplay Component Properties Audio Source Audio asset, mixer Bus, Volume, Pitch, Loop, Play on Start, Spatial (with Inner Range, Range, Rolloff Factor). Audio Listener Master Volume; the first listener in the scene receives 3D audio. Script Lua/Python projects: script asset, Enabled, and auto-generated editors for the script's exposed properties (Float / Int / Bool / String). Scripting -> Particle System Particle graph asset, Playing toggle, live particle count. Particles -> Nav Mesh Bake settings (Cell Size/Height, Walk Height, Climb, Radius, Max Slope), Bake button, debug overlay toggle. Navigation -> Nav Agent Target position, Speed, Stop Distance; path status; Go / Stop buttons. In-world UI Entities can carry canvas-based UI components — UI Canvas (screen-space or world-space), UI Element (anchored rect), UI Text, UI Image and UI Button. For menus and HUDs, prefer the standalone UI Widget system.",
      "title": "Component Reference"
     },
     {
@@ -15561,7 +15561,7 @@
         },
         {
          "s": "c",
-         "t": "View ▸ Environment"
+         "t": "View » Environment"
         },
         {
          "s": "",
@@ -15579,7 +15579,7 @@
         {
          "h": "rendering.html#sky",
          "s": "l",
-         "t": "Rendering ▸ Sky & Atmosphere"
+         "t": "Rendering » Sky & Atmosphere"
         },
         {
          "s": "",
@@ -15590,7 +15590,7 @@
      ],
      "eyebrow": "Special entities",
      "id": "sky-weather-entities",
-     "text": "The sky and the weather are ordinary, deletable scene entities — Sky carries the Environment component (the entire procedural sky) and owns the Sun and Moon lights as children; Weather carries the Weather component and drives cloud cover, fog, wind and precipitation into the Environment. Add and remove them via View ▸ Environment; a scene without a Sky renders a flat background and skips the whole sky pass. Game and Simulation project templates seed both into the startup scene. All settings are documented under Rendering ▸ Sky & Atmosphere.",
+     "text": "The sky and the weather are ordinary, deletable scene entities — Sky carries the Environment component (the entire procedural sky) and owns the Sun and Moon lights as children; Weather carries the Weather component and drives cloud cover, fog, wind and precipitation into the Environment. Add and remove them via View » Environment; a scene without a Sky renders a flat background and skips the whole sky pass. Game and Simulation project templates seed both into the startup scene. All settings are documented under Rendering » Sky & Atmosphere.",
      "title": "Sky & Weather Entities"
     },
     {
@@ -15836,7 +15836,7 @@
         },
         {
          "s": "c",
-         "t": "File ▸ Add Scene Additive…"
+         "t": "File » Add Scene Additive…"
         },
         {
          "s": "",
@@ -15908,7 +15908,7 @@
      ],
      "eyebrow": "Big worlds",
      "id": "streaming",
-     "text": "Beyond loading one scene at a time, the engine supports additive loading: merging another scene into the running world as a zone. In the editor, File ▸ Add Scene Additive… merges a scene for editing. At runtime, the scene scripting group drives seamless transitions and streaming: scene.load — switches scenes, swapping the world only after the new one finished building (no half-loaded frame). scene.loadAdditive — streams a zone in at a position, optionally hidden for a later instant reveal. scene.showZone / hideZone / setZonePosition / unloadZone — manage streamed zones by id. The same calls are available to Lua, Python and HorizonCode — see the node reference for the full list.",
+     "text": "Beyond loading one scene at a time, the engine supports additive loading: merging another scene into the running world as a zone. In the editor, File » Add Scene Additive… merges a scene for editing. At runtime, the scene scripting group drives seamless transitions and streaming: scene.load — switches scenes, swapping the world only after the new one finished building (no half-loaded frame). scene.loadAdditive — streams a zone in at a position, optionally hidden for a later instant reveal. scene.showZone / hideZone / setZonePosition / unloadZone — manage streamed zones by id. The same calls are available to Lua, Python and HorizonCode — see the node reference for the full list.",
      "title": "Additive Loading & Zones"
     }
    ],
@@ -15983,7 +15983,7 @@
         },
         {
          "s": "",
-         "t": " → Python, everything else → Lua). Both languages are hosted side by side; an instance is routed to the right runtime automatically."
+         "t": " -> Python, everything else -> Lua). Both languages are hosted side by side; an instance is routed to the right runtime automatically."
         }
        ]
       },
@@ -16244,7 +16244,7 @@
      ],
      "eyebrow": "Attachment & lifecycle",
      "id": "how-scripts-run",
-     "text": "A complete reference for the scripting surface: how a script is attached and run, the lifecycle callbacks, and every function the horizon API exposes. Lua and Python share one underlying API, so the same calls are available in both — only the way you package a script differs. You attach a script to an entity with the Script component, which references a script asset by UUID plus a logical module name. Each script asset is either Lua or Python — the language is stored on the asset and is inferred from the file extension (.py → Python, everything else → Lua). Both languages are hosted side by side; an instance is routed to the right runtime automatically. The lifecycle is driven by the editor's Play Mode. When you enter play mode, every entity that carries an enabled Script component gets one script instance bound to it. Each instance is bound to its entity: the raw entity id is exposed as self.entityId in Lua and self.entity_id in Python. That id is the first argument to nearly every horizon function. Phase When Callback Start Once, when play mode begins (after property overrides are injected). onStart(self) / on_start(self) Update Every play-mode frame. dt is the elapsed time in seconds. onUpdate(self, dt) / on_update(self, dt) Collision enter When another physics body starts touching this entity. otherId is the other entity's id. onCollisionEnter(self, otherId) / on_collision_enter(self, otherId) Collision exit When another body stops touching this entity. onCollisionExit(self, otherId) / on_collision_exit(self, otherId) Every callback is optional — if a script doesn't define one, it's simply skipped. Collision callbacks only fire for entities that also have physics colliders. Current scope: scripts are executed by the editor's Play Mode. The standalone runtime that ships with an exported game does not yet drive script lifecycles, so gameplay scripts run inside the editor for now.",
+     "text": "A complete reference for the scripting surface: how a script is attached and run, the lifecycle callbacks, and every function the horizon API exposes. Lua and Python share one underlying API, so the same calls are available in both — only the way you package a script differs. You attach a script to an entity with the Script component, which references a script asset by UUID plus a logical module name. Each script asset is either Lua or Python — the language is stored on the asset and is inferred from the file extension (.py -> Python, everything else -> Lua). Both languages are hosted side by side; an instance is routed to the right runtime automatically. The lifecycle is driven by the editor's Play Mode. When you enter play mode, every entity that carries an enabled Script component gets one script instance bound to it. Each instance is bound to its entity: the raw entity id is exposed as self.entityId in Lua and self.entity_id in Python. That id is the first argument to nearly every horizon function. Phase When Callback Start Once, when play mode begins (after property overrides are injected). onStart(self) / on_start(self) Update Every play-mode frame. dt is the elapsed time in seconds. onUpdate(self, dt) / on_update(self, dt) Collision enter When another physics body starts touching this entity. otherId is the other entity's id. onCollisionEnter(self, otherId) / on_collision_enter(self, otherId) Collision exit When another body stops touching this entity. onCollisionExit(self, otherId) / on_collision_exit(self, otherId) Every callback is optional — if a script doesn't define one, it's simply skipped. Collision callbacks only fire for entities that also have physics colliders. Current scope: scripts are executed by the editor's Play Mode. The standalone runtime that ships with an exported game does not yet drive script lifecycles, so gameplay scripts run inside the editor for now.",
      "title": "How Scripts Run"
     },
     {
@@ -17437,7 +17437,7 @@
           {
            "h": "horizoncode.html",
            "s": "l",
-           "t": "Guide →"
+           "t": "Guide ->"
           }
          ]
         ],
@@ -17518,7 +17518,7 @@
      ],
      "eyebrow": "Pick one",
      "id": "languages",
-     "text": "The scripting language is chosen per project, at creation — it decides which gameplay assets the editor offers and keeps a project single-language. Widgets, the Level Script and the Game Instance are always HorizonCode graphs, in every project. Language Best for You write HorizonCode Visual-first teams; designers Node graphs — compiled to native C++ on export. Guide → Lua Fast iteration, small footprint Modules with lifecycle callbacks, attached via the Script component. Python Python-fluent teams, tooling-heavy projects horizon.Behavior subclasses (real CPython, full stdlib). C++ Maximum performance, engine-level access A native GameLogic library against IGameLogic, built with your own toolchain.",
+     "text": "The scripting language is chosen per project, at creation — it decides which gameplay assets the editor offers and keeps a project single-language. Widgets, the Level Script and the Game Instance are always HorizonCode graphs, in every project. Language Best for You write HorizonCode Visual-first teams; designers Node graphs — compiled to native C++ on export. Guide -> Lua Fast iteration, small footprint Modules with lifecycle callbacks, attached via the Script component. Python Python-fluent teams, tooling-heavy projects horizon.Behavior subclasses (real CPython, full stdlib). C++ Maximum performance, engine-level access A native GameLogic library against IGameLogic, built with your own toolchain.",
      "title": "Choosing a Language"
     },
     {
@@ -18443,7 +18443,7 @@
          {
           "h": "editor.html#preferences",
           "s": "l",
-          "t": "Preferences ▸ Tools ▸ Status"
+          "t": "Preferences » Tools » Status"
          },
          {
           "s": "",
@@ -18470,7 +18470,7 @@
          {
           "h": "export.html",
           "s": "l",
-          "t": "Export →"
+          "t": "Export ->"
          }
         ]
        ],
@@ -18479,7 +18479,7 @@
      ],
      "eyebrow": "Native",
      "id": "cpp",
-     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface and works with the world directly — full engine headers, no wrapper layer: GameLogic.cpp class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences ▸ Tools ▸ Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export →",
+     "text": "C++ projects ship gameplay as one native GameLogic shared library. The editor scaffolds a compilable Source/ tree at project creation — game runtime, GameInstance, a per-scene level script and a CMakeLists.txt — visible as its own root in the Content Browser, with an in-editor class editor and a New C++ Class workflow. The library implements the three-method IGameLogic interface and works with the world directly — full engine headers, no wrapper layer: GameLogic.cpp class MyGame : public IGameLogic {\n    void onStart(HorizonWorld& world) override;\n    void onUpdate(HorizonWorld& world, float dt) override;\n    void onStop(HorizonWorld& world) override;\n};\n\nextern \"C\" HE_GAME_API IGameLogic* HE_CreateGameLogic()\n{ return new MyGame(); }\nextern \"C\" HE_GAME_API void HE_DestroyGameLogic(IGameLogic* p)\n{ delete p; } Hot reload — rebuild the library and the engine reloads it live (it loads a uniquely-named copy, so the build never fights a locked file). Keep persistent state in the ECS, not in the logic object — the object is recreated on reload, the world survives. Toolchain — needs CMake and a C++ compiler; the editor checks at startup and can install them for you (Preferences » Tools » Status). Shipping — the export copies GameLogic.dll/.dylib/.so next to the game executable. Export ->",
      "title": "Native C++"
     }
    ],
@@ -18824,7 +18824,7 @@
          [
           {
            "s": "",
-           "t": "Mixing two clips with a blend alpha (e.g. walk ↔ run)."
+           "t": "Mixing two clips with a blend alpha (e.g. walk <-> run)."
           }
          ]
         ],
@@ -18921,7 +18921,7 @@
      ],
      "eyebrow": "Move",
      "id": "animation",
-     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk ↔ run). Animator State Machine Full character logic — see below. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
+     "text": "Skeletal meshes are skinned on the GPU (up to 128 joints, four weighted influences per vertex) and posed by a family of animator components — from a single looping clip to a full state machine. All animation systems tick in the editor too, so previews work without pressing Play. Tool Use it for Animator Playing one clip — speed, time, looping. Animator Blend Mixing two clips with a blend alpha (e.g. walk <-> run). Animator State Machine Full character logic — see below. Property Animator Keyframed transform and material properties — cutscenes, moving platforms, pulsing materials. Animator State Machine A standalone asset edited on the shared graph canvas: states are nodes (each with an animation clip and a looping flag), transitions are links with a condition — a named float parameter compared against a threshold (greater / less / equal) — and a crossfade duration. The component on the entity references the asset and holds the live parameter values; gameplay code drives the parameters and the machine blends states automatically. One asset can drive any number of characters. Skeletal Mesh editor Double-click a skeletal mesh asset for a dedicated tab: the joint hierarchy as a tree, an orbit-camera preview with a Show Skeleton bone overlay, and an optional clip slot with play/pause and time scrubbing — inspect a rig without touching any scene.",
      "title": "Animation"
     },
     {
@@ -19569,7 +19569,7 @@
         },
         {
          "s": "c",
-         "t": "Create ▸ UI Widget"
+         "t": "Create » UI Widget"
         },
         {
          "s": "",
@@ -19596,7 +19596,7 @@
      ],
      "eyebrow": "Standalone UI",
      "id": "widgets",
-     "text": "A UI Widget is a standalone asset: a tree of UI elements on a virtual 1920×1080 canvas, plus a HorizonCode graph for its logic. Live widgets exist outside the entity world — they belong to the app, not the scene — so a HUD or menu can survive scene changes and is always drawn on top. Create one with Create ▸ UI Widget in the Content Browser and double-click it to open the widget editor with its two modes: Designer and Graph.",
+     "text": "A UI Widget is a standalone asset: a tree of UI elements on a virtual 1920×1080 canvas, plus a HorizonCode graph for its logic. Live widgets exist outside the entity world — they belong to the app, not the scene — so a HUD or menu can survive scene changes and is always drawn on top. Create one with Create » UI Widget in the Content Browser and double-click it to open the widget editor with its two modes: Designer and Graph.",
      "title": "UI Widgets"
     },
     {
@@ -20347,7 +20347,7 @@
           },
           {
            "s": "",
-           "t": " Menus, HUDs and anything that should survive scene changes → "
+           "t": " Menus, HUDs and anything that should survive scene changes -> "
           },
           {
            "s": "b",
@@ -20355,7 +20355,7 @@
           },
           {
            "s": "",
-           "t": ". Labels and panels attached to things in the world → "
+           "t": ". Labels and panels attached to things in the world -> "
           },
           {
            "s": "b",
@@ -20374,7 +20374,7 @@
      ],
      "eyebrow": "In the world",
      "id": "entity-ui",
-     "text": "For UI that belongs to the scene — a name tag over a character, a world-space info panel — entities can carry the canvas-based UI components: UI Canvas (screen-space or world-space, virtual resolution), UI Element (anchored rect with pivot, rotation and layer), UI Text, UI Image (material + tint) and UI Button (state colours + an on-click script function). Scripts address these through the entity UI calls — setUIText, setUIColor, setUIVisible, setUIPosition, setUISize, setUIMaterialParam — and scripts on the entity receive onClick, onHoverEnter and onHoverExit. Which one to use? Menus, HUDs and anything that should survive scene changes → UI Widgets. Labels and panels attached to things in the world → entity UI.",
+     "text": "For UI that belongs to the scene — a name tag over a character, a world-space info panel — entities can carry the canvas-based UI components: UI Canvas (screen-space or world-space, virtual resolution), UI Element (anchored rect with pivot, rotation and layer), UI Text, UI Image (material + tint) and UI Button (state colours + an on-click script function). Scripts address these through the entity UI calls — setUIText, setUIColor, setUIVisible, setUIPosition, setUISize, setUIMaterialParam — and scripts on the entity receive onClick, onHoverEnter and onHoverExit. Which one to use? Menus, HUDs and anything that should survive scene changes -> UI Widgets. Labels and panels attached to things in the world -> entity UI.",
      "title": "In-World Entity UI"
     }
    ],

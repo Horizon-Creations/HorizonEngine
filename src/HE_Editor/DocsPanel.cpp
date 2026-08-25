@@ -1,11 +1,18 @@
 #include "DocsPanel.h"
 
 #include "DocsLibrary.h"
-#include "EditorApplication.h"   // AppContext — fonts and the renderer (figures)
 #include "EditorHelp.h"          // topic → the panel it is about ("Show me")
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "PanelSpotlight.h"
+
+// Only the AppContext adapter at the bottom needs this, and it is the one part
+// of the file that belongs to the editor build alone: AppContext's own layout
+// depends on HE_IMGUI_ENABLED, so a translation unit that does not define it
+// must not see the panel through that type.
+#ifdef HE_IMGUI_ENABLED
+#include "EditorApplication.h"
+#endif
 
 #include <Diagnostics/Log.h>
 #include <Renderer/IRenderer.h>
@@ -21,7 +28,12 @@
 #include <utility>
 #include <vector>
 
-#ifdef HE_IMGUI_ENABLED
+// Gated on the HEADER rather than on HE_IMGUI_ENABLED, like EditorTheme and
+// EditorDockState: everything below is ImGui plus the docs library, so it
+// compiles wherever ImGui does — which is what lets the test target render the
+// reader and look at it (tests/test_ui_shot.cpp).
+#if __has_include(<imgui.h>)
+#define HE_DOCS_PANEL_IMPL 1
 #include <imgui.h>
 #include "vendor/stb_image.h"
 #endif
@@ -32,7 +44,20 @@ namespace DocsPanel
 {
 namespace
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
+
+	// ── What the reader was handed, resolved ─────────────────────────────────
+	// DocsPanel::Host keeps its font pointers opaque so the header stays
+	// ImGui-free; this is the same thing with types, and it is what every
+	// drawing function below takes.
+	struct Ctx
+	{
+		ImFont*    body = nullptr;
+		ImFont*    sub  = nullptr;
+		ImFont*    head = nullptr;
+		ImFont*    code = nullptr;
+		IRenderer* renderer = nullptr;
+	};
 
 	// ── State ────────────────────────────────────────────────────────────────
 	bool  s_open        = false;
@@ -67,7 +92,7 @@ namespace
 	struct Figure { ImTextureID tex = 0; int w = 0, h = 0; bool tried = false; };
 	std::unordered_map<std::string, Figure> s_figures;
 
-	const Figure& figure(AppContext& ctx, const std::string& file)
+	const Figure& figure(const Ctx& ctx, const std::string& file)
 	{
 		Figure& f = s_figures[file];
 		if (f.tried) return f;
@@ -136,7 +161,11 @@ namespace
 
 	void ensureLoaded()
 	{
-		if (s_loadTried) return;
+		// Already loaded by someone else — a test that pointed the library at the
+		// bundle in the source tree, or a second reader — is not a reason to read
+		// it again, and re-reading would REPLACE a good copy with whatever this
+		// process can find next to its own executable.
+		if (s_loadTried || docs::library().loaded()) { s_loadTried = true; return; }
 		s_loadTried = true;
 		const char* base = SDL_GetBasePath();
 		docs::Library& lib = docs::library();
@@ -209,7 +238,7 @@ namespace
 		}
 	}
 
-	void drawRuns(AppContext& ctx, const std::vector<docs::Run>& runs)
+	void drawRuns(const Ctx& ctx, const std::vector<docs::Run>& runs)
 	{
 		const std::vector<Word> words = splitWords(runs);
 		if (words.empty()) { ImGui::NewLine(); return; }
@@ -218,8 +247,10 @@ namespace
 			ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
 		const float spaceW = ImGui::CalcTextSize(" ").x;
 
-		// Words are placed with SameLine(0, gap), so the style's item spacing
-		// must not add a second gap of its own.
+		// Words are placed with SameLine(0, gap), so the style's item spacing must
+		// not add a second gap of its own — and the VERTICAL half is what sets the
+		// leading between the wrapped lines of a paragraph. Tight, because these
+		// are lines of one paragraph rather than separate controls.
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
 		                    ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.25f));
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -228,21 +259,27 @@ namespace
 		for (std::size_t i = 0; i < words.size(); ++i)
 		{
 			const Word& w = words[i];
-			if (w.breakBefore && !lineStart) { ImGui::NewLine(); lineStart = true; }
+			// A hard break needs nothing done to it: an item that was NOT put on
+			// the previous line with SameLine already starts a new one. Calling
+			// NewLine() here would leave a blank line behind — which is exactly
+			// what wrapping did until the first screenshot of this panel showed
+			// paragraphs at double leading (tests/test_ui_shot.cpp).
+			if (w.breakBefore) lineStart = true;
 
 			const bool isCode = w.style == docs::Style::Code;
-			if (isCode && ctx.codeFont) ImGui::PushFont(ctx.codeFont, 0.0f);
+			if (isCode && ctx.code) ImGui::PushFont(ctx.code, 0.0f);
 
 			const float gap = (lineStart || !w.spaceBefore) ? 0.0f : spaceW;
 			const ImVec2 size = ImGui::CalcTextSize(w.text.c_str());
 			const float  pad  = isCode ? 3.0f : 0.0f;
-			// Wrap before drawing when this word cannot fit on the line any
-			// more. A single word wider than the column still gets drawn (and
-			// overflows) rather than looping forever on an impossible fit.
+			// Keep the word on this line only if it still fits. Otherwise simply
+			// do not call SameLine and let it fall to the next one — a single word
+			// wider than the column then overflows rather than looping forever on
+			// an impossible fit.
 			if (!lineStart)
 			{
 				const float x = ImGui::GetItemRectMax().x + gap;
-				if (x + size.x + pad * 2.0f > rightEdge) { ImGui::NewLine(); lineStart = true; }
+				if (x + size.x + pad * 2.0f > rightEdge) lineStart = true;
 				else                                     ImGui::SameLine(0.0f, gap);
 			}
 
@@ -257,7 +294,7 @@ namespace
 			ImGui::PushStyleColor(ImGuiCol_Text, colorFor(w.style));
 			ImGui::TextUnformatted(w.text.c_str());
 			ImGui::PopStyleColor();
-			if (isCode && ctx.codeFont) ImGui::PopFont();
+			if (isCode && ctx.code) ImGui::PopFont();
 			lineStart = false;
 
 			if (w.href)
@@ -288,11 +325,11 @@ namespace
 	}
 
 	// ── Blocks ───────────────────────────────────────────────────────────────
-	void drawBlock(AppContext& ctx, const docs::Block& b);
+	void drawBlock(const Ctx& ctx, const docs::Block& b);
 
-	void drawCells(AppContext& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
+	void drawCells(const Ctx& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
 
-	void drawTable(AppContext& ctx, const docs::Block& b)
+	void drawTable(const Ctx& ctx, const docs::Block& b)
 	{
 		const int cols = static_cast<int>(
 			!b.head.empty() ? b.head.size()
@@ -342,7 +379,7 @@ namespace
 		ImGui::Spacing();
 	}
 
-	void drawCode(AppContext& ctx, const docs::Block& b)
+	void drawCode(const Ctx& ctx, const docs::Block& b)
 	{
 		ImGui::Spacing();
 		if (!b.title.empty())
@@ -356,7 +393,7 @@ namespace
 		// paragraph after it off the bottom of the panel.
 		int lines = 1;
 		for (char c : b.text) if (c == '\n') ++lines;
-		if (ctx.codeFont) ImGui::PushFont(ctx.codeFont, 0.0f);
+		if (ctx.code) ImGui::PushFont(ctx.code, 0.0f);
 		const float h = std::min(ImGui::GetTextLineHeightWithSpacing() * (lines + 1) + 8.0f,
 		                         340.0f);
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.075f));
@@ -370,13 +407,13 @@ namespace
 		}
 		ImGui::EndChild();
 		ImGui::PopStyleColor();
-		if (ctx.codeFont) ImGui::PopFont();
+		if (ctx.code) ImGui::PopFont();
 
 		if (ImGui::SmallButton("Copy##code")) ImGui::SetClipboardText(b.text.c_str());
 		ImGui::Spacing();
 	}
 
-	void drawCallout(AppContext& ctx, const docs::Block& b)
+	void drawCallout(const Ctx& ctx, const docs::Block& b)
 	{
 		using namespace HE::Ed::Theme;
 		const ImVec4 accent = b.tone == docs::Tone::Warning ? ImVec4(0.90f, 0.55f, 0.30f, 1.0f)
@@ -402,7 +439,7 @@ namespace
 		ImGui::Spacing();
 	}
 
-	void drawFlow(AppContext& ctx, const docs::Block& b)
+	void drawFlow(const Ctx& ctx, const docs::Block& b)
 	{
 		// The website draws these as a chain of boxes with arrows. A docked panel
 		// has no width for that, and the arrows say nothing the order does not —
@@ -429,7 +466,7 @@ namespace
 		}
 	}
 
-	void drawFigure(AppContext& ctx, const docs::Block& b)
+	void drawFigure(const Ctx& ctx, const docs::Block& b)
 	{
 		const Figure& f = figure(ctx, b.src);
 		ImGui::Spacing();
@@ -450,7 +487,7 @@ namespace
 		ImGui::Spacing();
 	}
 
-	void drawBlock(AppContext& ctx, const docs::Block& b)
+	void drawBlock(const Ctx& ctx, const docs::Block& b)
 	{
 		switch (b.kind)
 		{
@@ -469,11 +506,11 @@ namespace
 			break;
 		case docs::BlockKind::Heading:
 			ImGui::Spacing();
-			if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			drawRuns(ctx, b.runs);
 			ImGui::PopStyleColor();
-			if (ctx.fontSubheading) ImGui::PopFont();
+			if (ctx.sub) ImGui::PopFont();
 			ImGui::Spacing();
 			break;
 		case docs::BlockKind::Bullets:
@@ -521,16 +558,16 @@ namespace
 	}
 
 	// ── The page body ────────────────────────────────────────────────────────
-	void drawPage(AppContext& ctx)
+	void drawPage(const Ctx& ctx)
 	{
 		const docs::Library& lib = docs::library();
 		const docs::Page& page = lib.pages()[static_cast<std::size_t>(s_page)];
 
-		if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading, 0.0f);
+		if (ctx.head) ImGui::PushFont(ctx.head, 0.0f);
 		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		ImGui::TextUnformatted(page.title.c_str());
 		ImGui::PopStyleColor();
-		if (ctx.fontHeading) ImGui::PopFont();
+		if (ctx.head) ImGui::PopFont();
 		if (!page.summary.empty())
 		{
 			EditorWidgets::WrapText wrap;
@@ -558,11 +595,11 @@ namespace
 				ImGui::TextUnformatted(sec.eyebrow.c_str());
 				ImGui::PopStyleColor();
 			}
-			if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading, 0.0f);
+			if (ctx.sub) ImGui::PushFont(ctx.sub, 0.0f);
 			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 			ImGui::TextUnformatted(sec.title.c_str());
 			ImGui::PopStyleColor();
-			if (ctx.fontSubheading) ImGui::PopFont();
+			if (ctx.sub) ImGui::PopFont();
 
 			// "Show me": this section is about a panel, and the reader can point
 			// at it. Only where the mapping actually knows one — a button that
@@ -693,7 +730,7 @@ namespace
 	}
 
 	// ── Top bar ──────────────────────────────────────────────────────────────
-	void drawToolbar(AppContext& ctx)
+	void drawToolbar(const Ctx& ctx)
 	{
 		const docs::Library& lib = docs::library();
 
@@ -736,12 +773,12 @@ namespace
 		ImGui::SetItemTooltip("Open this page on horizoncreations.dev");
 	}
 
-#endif // HE_IMGUI_ENABLED
+#endif // HE_DOCS_PANEL_IMPL
 } // namespace
 
 void setPanelOpener(PanelOpener opener)
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	s_panelOpener = opener;
 #else
 	(void)opener;
@@ -750,7 +787,7 @@ void setPanelOpener(PanelOpener opener)
 
 void open()
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
 	s_focusSearch = true;
@@ -760,7 +797,7 @@ void open()
 
 void openTopic(const char* topic)
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
 	s_query[0] = '\0';
@@ -775,7 +812,7 @@ void openTopic(const char* topic)
 
 void openSearch(const char* query)
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
 	std::snprintf(s_query, sizeof(s_query), "%s", query ? query : "");
@@ -788,23 +825,31 @@ void openSearch(const char* query)
 
 void close()
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	s_open = false;
 #endif
 }
 
 bool isOpen()
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
 	return s_open;
 #else
 	return false;
 #endif
 }
 
-void draw(AppContext& ctx)
+void draw(const Host& host)
 {
-#ifdef HE_IMGUI_ENABLED
+#ifdef HE_DOCS_PANEL_IMPL
+	const Ctx ctx{
+		static_cast<ImFont*>(host.fontBody),
+		static_cast<ImFont*>(host.fontSubheading),
+		static_cast<ImFont*>(host.fontHeading),
+		static_cast<ImFont*>(host.fontCode),
+		host.renderer,
+	};
+
 	// The spotlight outlives the click that started it, and has to keep drawing
 	// even while the reader is scrolled elsewhere — so it is here, before the
 	// early return for a closed window.
@@ -901,8 +946,23 @@ void draw(AppContext& ctx)
 
 	ImGui::End();
 #else
-	(void)ctx;
+	(void)host;
 #endif
 }
+
+// The adapter the editor calls: pull the four fonts and the renderer out of the
+// AppContext and hand the panel the little it actually needs.
+#ifdef HE_IMGUI_ENABLED
+void draw(AppContext& ctx)
+{
+	Host host;
+	host.fontBody       = ctx.fontBody;
+	host.fontSubheading = ctx.fontSubheading;
+	host.fontHeading    = ctx.fontHeading;
+	host.fontCode       = ctx.codeFont;
+	host.renderer       = ctx.renderer;
+	draw(host);
+}
+#endif
 
 } // namespace DocsPanel

@@ -1,6 +1,6 @@
 #include "PanelSpotlight.h"
 
-#ifdef HE_IMGUI_ENABLED
+#if __has_include(<imgui.h>)
 
 #include <imgui.h>
 #include <imgui_internal.h>   // FindWindowByName, ImGuiDockNode — no public equivalent
@@ -90,4 +90,4 @@ const char* focusedPanel()
 
 } // namespace HE::Ed::Spotlight
 
-#endif // HE_IMGUI_ENABLED
+#endif // __has_include(<imgui.h>)

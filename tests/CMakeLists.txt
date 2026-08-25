@@ -83,6 +83,9 @@ add_executable(he_tests
     test_tutorial.cpp
     test_docs_library.cpp
     test_editor_help.cpp
+    # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
+    test_ui_shot.cpp
+    ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
@@ -150,6 +153,13 @@ add_executable(he_tests
     # still exists in the documentation bundle. It is also linked because
     # EditorRowWidgets.cpp (below) looks its rows up in it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorHelp.cpp
+    # The documentation reader itself, so test_ui_shot.cpp can render the real
+    # panel rather than a stand-in. It is ImGui plus the library above; the two
+    # files after it are what it leans on (window placement, the panel outline).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorWidgets.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcEditorUtil.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
@@ -197,6 +207,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_widgets.cpp
+    # InputText over a std::string — the editor panels compiled in here use it.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/misc/cpp/imgui_stdlib.cpp
 )
 
 target_include_directories(he_tests PRIVATE
@@ -221,6 +233,11 @@ target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
 # runner and a packaged test binary.
 target_compile_definitions(he_tests PRIVATE
     HE_DOCS_BUNDLE_PATH="${CMAKE_SOURCE_DIR}/EditorDeps/Docs/he-docs.json")
+# The editor's own font, for the UI screenshots (test_ui_shot.cpp). Without it
+# they still render, in ImGui's default font — but half of what a UI shot shows
+# is line height and spacing, and those belong to the font.
+target_compile_definitions(he_tests PRIVATE
+    HE_EDITOR_DEPS_DIR="${CMAKE_SOURCE_DIR}/EditorDeps")
 # Mirror the codec availability macros so hpak tests can assert compression
 # actually happened (the writer silently falls back to Store when unavailable).
 if(HE_HAVE_LZ4)

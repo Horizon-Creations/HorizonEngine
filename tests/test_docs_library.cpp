@@ -2,7 +2,11 @@
 
 #include "DocsLibrary.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <set>
 #include <string>
+#include <vector>
 
 // ── The in-editor manual ─────────────────────────────────────────────────────
 // Two things are checked here, and they fail for very different reasons.
@@ -188,6 +192,72 @@ TEST_CASE("docs bundle: figures name a file that was actually copied")
 					CHECK(b.src.find('\\') == std::string::npos);
 					CHECK(b.src.find("..") == std::string::npos);
 				}
+}
+
+TEST_CASE("docs bundle: nothing in it needs a glyph the editor cannot draw")
+{
+	// The website is read in a browser, which finds SOME font for an arrow or a
+	// check mark. The editor has exactly one face, and a codepoint missing from
+	// it is drawn as an empty box — which nothing else in this build would
+	// notice, because it is a rendering result, not an error.
+	//
+	// scripts/build_docs_bundle.py substitutes the ones Roboto Condensed lacks
+	// (arrows, ticks, the Mac key symbols). This is the list of what may survive
+	// that: the typography the face does carry. A new character in the docs that
+	// is not on it fails here rather than in a screenshot months later.
+	static const std::vector<unsigned> kAllowed = {
+		0x2014,  // — em dash
+		0x2013,  // – en dash
+		0x2026,  // … ellipsis
+		0x00B7,  // · middle dot
+		0x00BB,  // » menu path separator (the substitute for ▸)
+		0x00AB,  // «
+		0x2022,  // • bullet (the substitute for a tick)
+		0x201C, 0x201D, 0x2018, 0x2019,   // curly quotes
+		0x00D7,  // × dimensions
+		0x2212,  // − minus
+		0x00B2, 0x00B3,   // ² ³
+		0x00B0,  // ° degrees
+		0x00E9, 0x00E8, 0x00FC, 0x00F6, 0x00E4, 0x00DF,  // the occasional accent
+		0x2264, 0x2265,   // ≤ ≥
+	};
+
+	Library lib = loadShipped();
+	REQUIRE(lib.loaded());
+
+	// Walk the bundle's text as UTF-8 and collect every codepoint above ASCII.
+	std::set<unsigned> seen;
+	auto scan = [&](const std::string& s) {
+		for (std::size_t i = 0; i < s.size();)
+		{
+			const unsigned char c = static_cast<unsigned char>(s[i]);
+			if (c < 0x80) { ++i; continue; }
+			unsigned cp = 0; int len = 0;
+			if ((c & 0xE0) == 0xC0) { cp = c & 0x1Fu; len = 2; }
+			else if ((c & 0xF0) == 0xE0) { cp = c & 0x0Fu; len = 3; }
+			else if ((c & 0xF8) == 0xF0) { cp = c & 0x07u; len = 4; }
+			else { ++i; continue; }
+			if (i + static_cast<std::size_t>(len) > s.size()) break;
+			for (int k = 1; k < len; ++k)
+				cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3Fu);
+			seen.insert(cp);
+			i += static_cast<std::size_t>(len);
+		}
+	};
+	for (const Page& p : lib.pages())
+	{
+		scan(p.title);
+		scan(p.summary);
+		for (const Section& s : p.sections) { scan(s.title); scan(s.eyebrow); scan(s.text); }
+	}
+
+	for (unsigned cp : seen)
+	{
+		const bool allowed = std::find(kAllowed.begin(), kAllowed.end(), cp) != kAllowed.end();
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "U+%04X", cp);
+		CHECK_MESSAGE(allowed, "codepoint the editor's font may not have: ", std::string(buf));
+	}
 }
 
 TEST_CASE("docs library: blocks survive the round trip")

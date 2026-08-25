@@ -1,6 +1,7 @@
 #pragma once
 
 struct AppContext;
+class  IRenderer;
 
 // ── Help ▸ Documentation, inside the editor ──────────────────────────────────
 // The reader over the shipped documentation bundle (see DocsLibrary.h): a
@@ -27,7 +28,28 @@ namespace DocsPanel
 	void close();
 	bool isOpen();
 
+	// ── What the reader needs from the editor ────────────────────────────────
+	// Four fonts and a renderer — not an AppContext. The panel used to take one,
+	// which meant it could only be drawn by something that had a project, a
+	// world and a GPU behind it; and that in turn meant the reader could not be
+	// rendered headless, which is the only way anyone was ever going to LOOK at
+	// it (tests/test_ui_shot.cpp). A narrow struct costs one adapter and buys
+	// that, the same trade TutorialPanel::UiFlags makes.
+	//
+	// A null renderer is allowed and means "no figures" — the screenshots are
+	// skipped, everything else draws.
+	struct Host
+	{
+		void*      fontBody       = nullptr;   // ImFont*, kept opaque so this
+		void*      fontSubheading = nullptr;   // header stays ImGui-free
+		void*      fontHeading    = nullptr;
+		void*      fontCode       = nullptr;
+		IRenderer* renderer       = nullptr;
+	};
+
 	// Once per frame, on either screen. Draws nothing while closed.
+	void draw(const Host& host);
+	// The adapter every call site in the editor uses.
 	void draw(AppContext& ctx);
 
 	// ── "Show me" ────────────────────────────────────────────────────────────

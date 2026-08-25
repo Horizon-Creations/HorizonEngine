@@ -164,11 +164,46 @@ INLINE_STYLE = {"strong": "b", "b": "b", "em": "i", "i": "i", "code": "c"}
 
 WS = re.compile(r"\s+")
 
+# ── Characters the editor's font cannot draw ─────────────────────────────────
+# The website is read in a browser, which will find SOME font for an arrow or a
+# check mark. The editor has exactly one face — Roboto Condensed Bold, deployed
+# next to the executable — and a codepoint missing from it comes out as an empty
+# box. Its cmap has no arrows, no check marks and none of the Mac key symbols,
+# and those are common in the docs: 148 arrows and 42 check marks in the current
+# set alone.
+#
+# So they are substituted HERE, once, for something the font does have, rather
+# than left to be discovered one screenshot at a time. The typography the font
+# does carry — em dash, ellipsis, middle dot, ×, ², curly quotes — is untouched:
+# replacing that would make the offline manual read worse than the website for
+# no reason.
+FONT_SUBSTITUTIONS = {
+    "→": "->",     # →  no arrows in the face at all
+    "←": "<-",     # ←
+    "↔": "<->",    # ↔
+    "▸": "»", # ▸  menu paths: "View » Console"
+    "▶": "»", # ▶
+    "✅": "•", # ✅ feature tables: a bullet, since a tick is missing too
+    "✓": "•", # ✓
+    "✔": "•", # ✔
+    "⌘": "Cmd",    # ⌘  the shortcut tables spell the Mac keys out instead
+    "⇧": "Shift",  # ⇧
+    "⌃": "Ctrl",   # ⌃
+    "⌥": "Alt",    # ⌥
+}
+
+
+def substitute(text: str) -> str:
+    for src, dst in FONT_SUBSTITUTIONS.items():
+        if src in text:
+            text = text.replace(src, dst)
+    return text
+
 
 def _runs(node: Node, style: str, href: str, out: list[dict]) -> None:
     for k in node.kids:
         if k.tag == "":
-            text = WS.sub(" ", k.text)
+            text = substitute(WS.sub(" ", k.text))
             if not text:
                 continue
             if out and out[-1]["s"] == style and out[-1].get("h", "") == href:
@@ -420,7 +455,7 @@ def copy_figures(docs_dir: Path, img_dir: Path, images: set[str]) -> int:
 
 def dedent_code(text: str) -> str:
     """Strip the HTML indentation a <pre> inherits from its place in the page."""
-    lines = text.replace("\r\n", "\n").split("\n")
+    lines = substitute(text.replace("\r\n", "\n")).split("\n")
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
