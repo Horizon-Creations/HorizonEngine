@@ -81,6 +81,7 @@ add_executable(he_tests
     test_export_profiles.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
+    test_docs_library.cpp
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
@@ -138,6 +139,11 @@ add_executable(he_tests
     # ImGui-free (TutorialPanel.cpp holds everything that is not), so the step
     # tables can be asserted here without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TutorialSteps.cpp
+    # The in-editor manual: the bundle model and its search, ImGui-free for the
+    # same reason (DocsPanel.cpp is the skin). The test loads the SHIPPED bundle,
+    # so a docs conversion that dropped the tables fails here rather than in a
+    # blank panel nobody opens until after the release.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsLibrary.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
@@ -203,6 +209,12 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+# The documentation bundle the editor ships (EditorDeps is copied next to the
+# executable at build time). Handed to the test as a path rather than found by
+# walking up from the working directory, which differs between ctest, an IDE
+# runner and a packaged test binary.
+target_compile_definitions(he_tests PRIVATE
+    HE_DOCS_BUNDLE_PATH="${CMAKE_SOURCE_DIR}/EditorDeps/Docs/he-docs.json")
 # Mirror the codec availability macros so hpak tests can assert compression
 # actually happened (the writer silently falls back to Store when unavailable).
 if(HE_HAVE_LZ4)
