@@ -1,0 +1,901 @@
+#include "DocsPanel.h"
+
+#include "DocsLibrary.h"
+#include "EditorApplication.h"   // AppContext — fonts and the renderer (figures)
+#include "EditorHelp.h"          // topic → the panel it is about ("Show me")
+#include "EditorTheme.h"
+#include "EditorWidgets.h"
+#include "PanelSpotlight.h"
+
+#include <Diagnostics/Log.h>
+#include <Renderer/IRenderer.h>
+
+#include <SDL3/SDL.h>
+
+#include <algorithm>
+#include <cfloat>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#ifdef HE_IMGUI_ENABLED
+#include <imgui.h>
+#include "vendor/stb_image.h"
+#endif
+
+namespace docs = HE::Ed::Docs;
+
+namespace DocsPanel
+{
+namespace
+{
+#ifdef HE_IMGUI_ENABLED
+
+	// ── State ────────────────────────────────────────────────────────────────
+	bool  s_open        = false;
+	bool  s_loadTried   = false;
+	int   s_page        = 0;
+	int   s_section     = -1;
+	int   s_scrollTo    = -1;    // section to scroll to on the next draw
+	bool  s_focusSearch = false;
+	char  s_query[128]  = "";
+
+	// Where the reader has been, so Back means what it does in a browser. Pairs
+	// of (page, section); -1 for "the top of the page".
+	std::vector<std::pair<int, int>> s_history;
+	int s_historyPos = -1;
+
+	PanelOpener s_panelOpener = nullptr;
+	// The panel a "Show me" is currently pointing at, and until when.
+	const char* s_spotlightWindow = nullptr;
+	double      s_spotlightUntil  = 0.0;
+
+	constexpr const char* kWindowTitle = "Documentation";
+	// Every figure in the manual is a screenshot at 1280 px; drawn at its full
+	// width the text in it is smaller than the text around it and the panel
+	// scrolls sideways. This is the cap in editor pixels.
+	constexpr float kFigureMaxWidth = 720.0f;
+
+	// ── Figures ──────────────────────────────────────────────────────────────
+	// Loaded the first time a page that uses one is drawn, never before: opening
+	// the manual must not cost eight texture uploads for pictures on pages the
+	// reader may not visit. Failures are cached as a null handle so a missing
+	// file is not re-read every frame.
+	struct Figure { ImTextureID tex = 0; int w = 0, h = 0; bool tried = false; };
+	std::unordered_map<std::string, Figure> s_figures;
+
+	const Figure& figure(AppContext& ctx, const std::string& file)
+	{
+		Figure& f = s_figures[file];
+		if (f.tried) return f;
+		f.tried = true;
+		if (!ctx.renderer) return f;
+
+		const char* base = SDL_GetBasePath();
+		const std::string path = docs::imageDir(base ? base : "") + file;
+		int w = 0, h = 0, ch = 0;
+		if (unsigned char* px = stbi_load(path.c_str(), &w, &h, &ch, 4))
+		{
+			if (void* handle = ctx.renderer->CreateImGuiTexture(px, w, h))
+			{
+				f.tex = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(handle));
+				f.w = w;
+				f.h = h;
+			}
+			stbi_image_free(px);
+		}
+		else
+		{
+			HE_LOG_WARN(Editor, "%s", ("DocsPanel: figure not found — " + path).c_str());
+		}
+		return f;
+	}
+
+	// ── Navigation ───────────────────────────────────────────────────────────
+	void go(int page, int section, bool record = true)
+	{
+		const docs::Library& lib = docs::library();
+		if (page < 0 || page >= static_cast<int>(lib.pages().size())) return;
+		if (record && (page != s_page || section != s_section))
+		{
+			// A new destination truncates the forward history, exactly as a
+			// browser does — the path not taken is gone.
+			if (s_historyPos >= 0 &&
+			    s_historyPos + 1 < static_cast<int>(s_history.size()))
+				s_history.resize(static_cast<std::size_t>(s_historyPos) + 1);
+			s_history.emplace_back(page, section);
+			s_historyPos = static_cast<int>(s_history.size()) - 1;
+		}
+		s_page     = page;
+		s_section  = section;
+		s_scrollTo = section;
+	}
+
+	void goTopic(const char* topic)
+	{
+		int page = -1, section = -1;
+		if (docs::library().resolve(topic ? topic : "", page, section))
+			go(page, section);
+	}
+
+	// A link inside the manual: another topic, or a URL for anything off-site.
+	void followLink(const std::string& href)
+	{
+		if (href.empty()) return;
+		if (href.rfind("http", 0) == 0 || href.rfind("mailto:", 0) == 0)
+		{
+			SDL_OpenURL(href.c_str());
+			return;
+		}
+		int page = -1, section = -1;
+		if (docs::library().resolve(href, page, section)) go(page, section);
+	}
+
+	void ensureLoaded()
+	{
+		if (s_loadTried) return;
+		s_loadTried = true;
+		const char* base = SDL_GetBasePath();
+		docs::Library& lib = docs::library();
+		if (!lib.load(docs::bundlePath(base ? base : "")))
+			HE_LOG_WARN(Editor, "%s", ("DocsPanel: " + lib.error()).c_str());
+	}
+
+	// ── Inline text ──────────────────────────────────────────────────────────
+	// ImGui wraps a STRING; a paragraph here is a sequence of differently styled
+	// runs, and there is no call that wraps across them. So the runs are broken
+	// into words once and placed by hand: draw a word, then ask whether the next
+	// one still fits before putting it on the same line.
+	//
+	// Deciding AFTER the item rather than before is what makes this simple —
+	// GetItemRectMax() is the true right edge of what was just drawn, including
+	// the padding a code span adds, which a CalcTextSize before the fact is not.
+	struct Word
+	{
+		std::string       text;
+		docs::Style       style = docs::Style::Body;
+		const std::string* href = nullptr;
+		bool              spaceBefore = false;
+		bool              breakBefore = false;   // a hard newline from the source
+	};
+
+	std::vector<Word> splitWords(const std::vector<docs::Run>& runs)
+	{
+		std::vector<Word> out;
+		bool pendingSpace = false;
+		bool pendingBreak = false;
+		for (const docs::Run& r : runs)
+		{
+			std::size_t i = 0;
+			while (i < r.text.size())
+			{
+				const char c = r.text[i];
+				if (c == '\n') { pendingBreak = true; pendingSpace = false; ++i; continue; }
+				if (c == ' ' || c == '\t') { pendingSpace = true; ++i; continue; }
+				std::size_t end = i;
+				while (end < r.text.size() && r.text[end] != ' ' &&
+				       r.text[end] != '\t' && r.text[end] != '\n') ++end;
+				Word w;
+				w.text        = r.text.substr(i, end - i);
+				w.style       = r.style;
+				w.href        = r.href.empty() ? nullptr : &r.href;
+				w.spaceBefore = pendingSpace && !out.empty();
+				w.breakBefore = pendingBreak;
+				pendingSpace = pendingBreak = false;
+				out.push_back(std::move(w));
+				i = end;
+			}
+		}
+		return out;
+	}
+
+	ImVec4 colorFor(docs::Style s)
+	{
+		using namespace HE::Ed::Theme;
+		switch (s)
+		{
+		// Bold and code both carry emphasis, and the editor's only font is
+		// already a bold weight — so emphasis is COLOUR here, not another face.
+		// Bold takes the heading gold; code the brighter gold plus a plate, so
+		// an API name still reads as a token rather than as a stressed word.
+		case docs::Style::Bold:   return TextHeading;
+		case docs::Style::Italic: return mix(Text, TextDim, 0.35f);
+		case docs::Style::Code:   return AccentBright;
+		case docs::Style::Link:   return AccentHi;
+		default:                  return Text;
+		}
+	}
+
+	void drawRuns(AppContext& ctx, const std::vector<docs::Run>& runs)
+	{
+		const std::vector<Word> words = splitWords(runs);
+		if (words.empty()) { ImGui::NewLine(); return; }
+
+		const float rightEdge =
+			ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+		const float spaceW = ImGui::CalcTextSize(" ").x;
+
+		// Words are placed with SameLine(0, gap), so the style's item spacing
+		// must not add a second gap of its own.
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+		                    ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.25f));
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+
+		bool lineStart = true;
+		for (std::size_t i = 0; i < words.size(); ++i)
+		{
+			const Word& w = words[i];
+			if (w.breakBefore && !lineStart) { ImGui::NewLine(); lineStart = true; }
+
+			const bool isCode = w.style == docs::Style::Code;
+			if (isCode && ctx.codeFont) ImGui::PushFont(ctx.codeFont, 0.0f);
+
+			const float gap = (lineStart || !w.spaceBefore) ? 0.0f : spaceW;
+			const ImVec2 size = ImGui::CalcTextSize(w.text.c_str());
+			const float  pad  = isCode ? 3.0f : 0.0f;
+			// Wrap before drawing when this word cannot fit on the line any
+			// more. A single word wider than the column still gets drawn (and
+			// overflows) rather than looping forever on an impossible fit.
+			if (!lineStart)
+			{
+				const float x = ImGui::GetItemRectMax().x + gap;
+				if (x + size.x + pad * 2.0f > rightEdge) { ImGui::NewLine(); lineStart = true; }
+				else                                     ImGui::SameLine(0.0f, gap);
+			}
+
+			if (isCode)
+			{
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				dl->AddRectFilled(ImVec2(p.x - pad, p.y - 1.0f),
+				                  ImVec2(p.x + size.x + pad, p.y + size.y + 1.0f),
+				                  ImGui::GetColorU32(HE::Ed::Theme::warm(0.19f)), 3.0f);
+			}
+
+			ImGui::PushStyleColor(ImGuiCol_Text, colorFor(w.style));
+			ImGui::TextUnformatted(w.text.c_str());
+			ImGui::PopStyleColor();
+			if (isCode && ctx.codeFont) ImGui::PopFont();
+			lineStart = false;
+
+			if (w.href)
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin();
+				const ImVec2 mx = ImGui::GetItemRectMax();
+				const bool hovered = ImGui::IsItemHovered();
+				dl->AddLine(ImVec2(mn.x, mx.y - 1.0f), ImVec2(mx.x, mx.y - 1.0f),
+				            ImGui::GetColorU32(colorFor(docs::Style::Link)),
+				            hovered ? 1.4f : 1.0f);
+				if (hovered)
+				{
+					ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+					if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					{
+						// Copied, not referenced: following the link reloads the
+						// page and frees the runs this pointer lives in.
+						const std::string target = *w.href;
+						ImGui::PopStyleVar();
+						followLink(target);
+						return;
+					}
+				}
+			}
+		}
+		ImGui::PopStyleVar();
+	}
+
+	// ── Blocks ───────────────────────────────────────────────────────────────
+	void drawBlock(AppContext& ctx, const docs::Block& b);
+
+	void drawCells(AppContext& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
+
+	void drawTable(AppContext& ctx, const docs::Block& b)
+	{
+		const int cols = static_cast<int>(
+			!b.head.empty() ? b.head.size()
+			                : (b.rows.empty() ? 0 : b.rows.front().size()));
+		if (cols <= 0) return;
+
+		ImGui::Spacing();
+		// Borders and a striped body: these are reference tables read a row at a
+		// time, and a row that cannot be followed across is the one thing worse
+		// than no table.
+		const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+		                              ImGuiTableFlags_SizingStretchProp |
+		                              ImGuiTableFlags_NoHostExtendX;
+		if (!ImGui::BeginTable("##docsTable", cols, flags)) return;
+
+		// The first column is a term ("Panel", "Node", "Setting") and the rest is
+		// its explanation, so the term column gets a smaller share and stops the
+		// prose from being squeezed into a two-word column.
+		if (cols >= 2)
+		{
+			ImGui::TableSetupColumn("##c0", ImGuiTableColumnFlags_WidthStretch, 0.34f);
+			for (int c = 1; c < cols; ++c)
+				ImGui::TableSetupColumn("##c", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		}
+
+		if (!b.head.empty())
+		{
+			ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+			for (int c = 0; c < cols; ++c)
+			{
+				ImGui::TableSetColumnIndex(c);
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+				if (c < static_cast<int>(b.head.size())) drawCells(ctx, b.head[c]);
+				ImGui::PopStyleColor();
+			}
+		}
+		for (const docs::Cells& row : b.rows)
+		{
+			ImGui::TableNextRow();
+			for (int c = 0; c < cols; ++c)
+			{
+				ImGui::TableSetColumnIndex(c);
+				if (c < static_cast<int>(row.size())) drawCells(ctx, row[c]);
+			}
+		}
+		ImGui::EndTable();
+		ImGui::Spacing();
+	}
+
+	void drawCode(AppContext& ctx, const docs::Block& b)
+	{
+		ImGui::Spacing();
+		if (!b.title.empty())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::TextUnformatted(b.title.c_str());
+			ImGui::PopStyleColor();
+		}
+
+		// Sized to the listing, capped: a forty-line example must not push the
+		// paragraph after it off the bottom of the panel.
+		int lines = 1;
+		for (char c : b.text) if (c == '\n') ++lines;
+		if (ctx.codeFont) ImGui::PushFont(ctx.codeFont, 0.0f);
+		const float h = std::min(ImGui::GetTextLineHeightWithSpacing() * (lines + 1) + 8.0f,
+		                         340.0f);
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, HE::Ed::Theme::warm(0.075f));
+		ImGui::BeginChild("##code", ImVec2(0.0f, h), ImGuiChildFlags_Borders,
+		                  ImGuiWindowFlags_HorizontalScrollbar);
+		{
+			// No WrapText guard on purpose: code is the one thing that must NOT
+			// wrap — a broken line changes what the example says. It scrolls
+			// horizontally instead.
+			ImGui::TextUnformatted(b.text.c_str());
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleColor();
+		if (ctx.codeFont) ImGui::PopFont();
+
+		if (ImGui::SmallButton("Copy##code")) ImGui::SetClipboardText(b.text.c_str());
+		ImGui::Spacing();
+	}
+
+	void drawCallout(AppContext& ctx, const docs::Block& b)
+	{
+		using namespace HE::Ed::Theme;
+		const ImVec4 accent = b.tone == docs::Tone::Warning ? ImVec4(0.90f, 0.55f, 0.30f, 1.0f)
+		                    : b.tone == docs::Tone::Tip     ? ImVec4(0.55f, 0.80f, 0.55f, 1.0f)
+		                                                    : AccentHi;
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, warm(0.135f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+		ImGui::BeginChild("##callout", ImVec2(0.0f, 0.0f),
+		                  ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders);
+		{
+			for (const docs::Block& inner : b.blocks) drawBlock(ctx, inner);
+		}
+		ImGui::EndChild();
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor();
+		// The tone bar, painted over the child's left edge once its rect is
+		// known — which is only after EndChild.
+		const ImVec2 mn = ImGui::GetItemRectMin();
+		const ImVec2 mx = ImGui::GetItemRectMax();
+		ImGui::GetWindowDrawList()->AddRectFilled(mn, ImVec2(mn.x + 3.0f, mx.y),
+		                                          ImGui::GetColorU32(accent), 2.0f);
+		ImGui::Spacing();
+	}
+
+	void drawFlow(AppContext& ctx, const docs::Block& b)
+	{
+		// The website draws these as a chain of boxes with arrows. A docked panel
+		// has no width for that, and the arrows say nothing the order does not —
+		// so it becomes a numbered sequence, with every word kept.
+		ImGui::Spacing();
+		int n = 1;
+		for (const docs::Block::Step& s : b.steps)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::Text("%d.", n++);
+			ImGui::PopStyleColor();
+			ImGui::SameLine(0.0f, 8.0f);
+			ImGui::BeginGroup();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			ImGui::TextUnformatted(s.label.c_str());
+			ImGui::PopStyleColor();
+			if (!s.sub.empty())
+			{
+				EditorWidgets::WrapText wrap;
+				ImGui::TextUnformatted(s.sub.c_str());
+			}
+			ImGui::EndGroup();
+			ImGui::Spacing();
+		}
+	}
+
+	void drawFigure(AppContext& ctx, const docs::Block& b)
+	{
+		const Figure& f = figure(ctx, b.src);
+		ImGui::Spacing();
+		if (f.tex && f.w > 0)
+		{
+			const float avail = ImGui::GetContentRegionAvail().x;
+			const float w = std::min({ avail, kFigureMaxWidth, static_cast<float>(f.w) });
+			const float h = w * static_cast<float>(f.h) / static_cast<float>(f.w);
+			ImGui::Image(f.tex, ImVec2(w, h));
+		}
+		if (!b.alt.empty())
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::TextUnformatted(b.alt.c_str());
+			ImGui::PopStyleColor();
+		}
+		ImGui::Spacing();
+	}
+
+	void drawBlock(AppContext& ctx, const docs::Block& b)
+	{
+		switch (b.kind)
+		{
+		case docs::BlockKind::Lead:
+			// The opening sentence, in the heading tint rather than a larger
+			// font: a second size in a narrow panel reads as a heading, and the
+			// section already has one of those.
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			drawRuns(ctx, b.runs);
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+			break;
+		case docs::BlockKind::Paragraph:
+			drawRuns(ctx, b.runs);
+			ImGui::Spacing();
+			break;
+		case docs::BlockKind::Heading:
+			ImGui::Spacing();
+			if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading, 0.0f);
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			drawRuns(ctx, b.runs);
+			ImGui::PopStyleColor();
+			if (ctx.fontSubheading) ImGui::PopFont();
+			ImGui::Spacing();
+			break;
+		case docs::BlockKind::Bullets:
+		case docs::BlockKind::Numbers:
+		{
+			int n = 1;
+			for (const docs::Cell& item : b.items)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+				if (b.kind == docs::BlockKind::Numbers) ImGui::Text("%d.", n++);
+				else                                    ImGui::TextUnformatted("\xe2\x80\xa2");
+				ImGui::PopStyleColor();
+				ImGui::SameLine(0.0f, 8.0f);
+				ImGui::BeginGroup();
+				drawRuns(ctx, item);
+				ImGui::EndGroup();
+			}
+			ImGui::Spacing();
+			break;
+		}
+		case docs::BlockKind::Table:   drawTable(ctx, b);   break;
+		case docs::BlockKind::Code:    drawCode(ctx, b);    break;
+		case docs::BlockKind::Callout: drawCallout(ctx, b); break;
+		case docs::BlockKind::Flow:    drawFlow(ctx, b);    break;
+		case docs::BlockKind::Figure:  drawFigure(ctx, b);  break;
+		case docs::BlockKind::Tile:
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			const bool clicked = ImGui::Selectable(b.title.c_str(), false, 0,
+			                                       ImVec2(0.0f, 0.0f));
+			ImGui::PopStyleColor();
+			if (!b.sub.empty())
+			{
+				EditorWidgets::WrapText wrap;
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+				ImGui::TextUnformatted(b.sub.c_str());
+				ImGui::PopStyleColor();
+			}
+			if (clicked) followLink(b.href);
+			ImGui::Spacing();
+			break;
+		}
+		case docs::BlockKind::Unknown: break;
+		}
+	}
+
+	// ── The page body ────────────────────────────────────────────────────────
+	void drawPage(AppContext& ctx)
+	{
+		const docs::Library& lib = docs::library();
+		const docs::Page& page = lib.pages()[static_cast<std::size_t>(s_page)];
+
+		if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading, 0.0f);
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+		ImGui::TextUnformatted(page.title.c_str());
+		ImGui::PopStyleColor();
+		if (ctx.fontHeading) ImGui::PopFont();
+		if (!page.summary.empty())
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::TextUnformatted(page.summary.c_str());
+			ImGui::PopStyleColor();
+		}
+		ImGui::Spacing();
+
+		for (int i = 0; i < static_cast<int>(page.sections.size()); ++i)
+		{
+			const docs::Section& sec = page.sections[static_cast<std::size_t>(i)];
+			ImGui::PushID(i);
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			// The scroll lands here, on the section's first item — set while the
+			// section is being submitted, which is the only moment ImGui can turn
+			// "this one" into a scroll offset.
+			if (s_scrollTo == i) ImGui::SetScrollHereY(0.0f);
+
+			if (!sec.eyebrow.empty())
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+				ImGui::TextUnformatted(sec.eyebrow.c_str());
+				ImGui::PopStyleColor();
+			}
+			if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading, 0.0f);
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			ImGui::TextUnformatted(sec.title.c_str());
+			ImGui::PopStyleColor();
+			if (ctx.fontSubheading) ImGui::PopFont();
+
+			// "Show me": this section is about a panel, and the reader can point
+			// at it. Only where the mapping actually knows one — a button that
+			// opens the wrong window would be worse than no button.
+			const std::string topic = lib.topicOf(s_page, i);
+			if (const HE::Ed::Help::PanelTopic* pt = HE::Ed::Help::panelForTopic(topic);
+			    pt && s_panelOpener)
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Show me"))
+				{
+					if (s_panelOpener(pt->window))
+					{
+						ImGui::SetWindowFocus(pt->window);
+						s_spotlightWindow = pt->window;
+						s_spotlightUntil  = ImGui::GetTime() + 4.0;
+					}
+				}
+				if (ImGui::BeginItemTooltip())
+				{
+					ImGui::Text("Highlight the %s panel", pt->window);
+					if (pt->menu[0]) ImGui::TextDisabled("%s", pt->menu);
+					ImGui::EndTooltip();
+				}
+			}
+			ImGui::Spacing();
+
+			for (const docs::Block& b : sec.blocks) drawBlock(ctx, b);
+			ImGui::Spacing();
+			ImGui::PopID();
+		}
+		s_scrollTo = -1;
+	}
+
+	// ── Search results ───────────────────────────────────────────────────────
+	void drawResults(const char* query)
+	{
+		const docs::Library& lib = docs::library();
+		const std::vector<docs::Hit> hits = lib.search(query);
+
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		if (hits.empty()) ImGui::Text("Nothing in the manual matches \"%s\".", query);
+		else              ImGui::Text("%d result%s for \"%s\"", static_cast<int>(hits.size()),
+		                              hits.size() == 1 ? "" : "s", query);
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+
+		// Enter opens the best hit, so a search can be finished without leaving
+		// the keyboard — the whole point of a search box in a tool window.
+		if (!hits.empty() && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
+		{
+			s_query[0] = '\0';
+			go(hits[0].page, hits[0].section);
+			return;
+		}
+
+		for (std::size_t i = 0; i < hits.size(); ++i)
+		{
+			const docs::Hit& h = hits[i];
+			const docs::Page& p = lib.pages()[static_cast<std::size_t>(h.page)];
+			const docs::Section& s = p.sections[static_cast<std::size_t>(h.section)];
+
+			ImGui::PushID(static_cast<int>(i));
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			const bool clicked = ImGui::Selectable(s.title.c_str());
+			ImGui::PopStyleColor();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			// The breadcrumb, so two similarly named sections on different pages
+			// are told apart before either is opened.
+			ImGui::Text("%s \xc2\xb7 %s", p.title.c_str(), s.eyebrow.empty()
+			                                                  ? p.id.c_str()
+			                                                  : s.eyebrow.c_str());
+			ImGui::TextUnformatted(h.snippet.c_str());
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+			ImGui::PopID();
+
+			if (clicked)
+			{
+				s_query[0] = '\0';
+				go(h.page, h.section);
+				return;
+			}
+		}
+	}
+
+	// ── Sidebar ──────────────────────────────────────────────────────────────
+	void drawNav()
+	{
+		const docs::Library& lib = docs::library();
+		for (const docs::Group& g : lib.groups())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::TextUnformatted(g.title.c_str());
+			ImGui::PopStyleColor();
+			for (int idx : g.pages)
+			{
+				const docs::Page& p = lib.pages()[static_cast<std::size_t>(idx)];
+				ImGui::PushID(idx);
+				if (ImGui::Selectable(p.title.c_str(), idx == s_page)) go(idx, -1);
+
+				// The current page's sections, indented under it — the "on this
+				// page" list, which is how a long reference page is navigated at
+				// all. Only for the open page: all of them at once would be a
+				// hundred and twelve rows.
+				if (idx == s_page)
+				{
+					ImGui::Indent(12.0f);
+					for (int si = 0; si < static_cast<int>(p.sections.size()); ++si)
+					{
+						ImGui::PushID(si);
+						ImGui::PushStyleColor(ImGuiCol_Text,
+						                      si == s_section ? HE::Ed::Theme::TextHeading
+						                                      : HE::Ed::Theme::TextDim);
+						if (ImGui::Selectable(p.sections[static_cast<std::size_t>(si)]
+						                          .title.c_str(),
+						                      si == s_section))
+							go(idx, si);
+						ImGui::PopStyleColor();
+						ImGui::PopID();
+					}
+					ImGui::Unindent(12.0f);
+				}
+				ImGui::PopID();
+			}
+			ImGui::Spacing();
+		}
+	}
+
+	// ── Top bar ──────────────────────────────────────────────────────────────
+	void drawToolbar(AppContext& ctx)
+	{
+		const docs::Library& lib = docs::library();
+
+		ImGui::BeginDisabled(s_historyPos <= 0);
+		if (ImGui::ArrowButton("##back", ImGuiDir_Left) && s_historyPos > 0)
+		{
+			--s_historyPos;
+			go(s_history[static_cast<std::size_t>(s_historyPos)].first,
+			   s_history[static_cast<std::size_t>(s_historyPos)].second, false);
+		}
+		ImGui::EndDisabled();
+		ImGui::SetItemTooltip("Back");
+
+		ImGui::SameLine(0.0f, 4.0f);
+		ImGui::BeginDisabled(s_historyPos < 0 ||
+		                     s_historyPos + 1 >= static_cast<int>(s_history.size()));
+		if (ImGui::ArrowButton("##fwd", ImGuiDir_Right) &&
+		    s_historyPos + 1 < static_cast<int>(s_history.size()))
+		{
+			++s_historyPos;
+			go(s_history[static_cast<std::size_t>(s_historyPos)].first,
+			   s_history[static_cast<std::size_t>(s_historyPos)].second, false);
+		}
+		ImGui::EndDisabled();
+		ImGui::SetItemTooltip("Forward");
+
+		ImGui::SameLine(0.0f, 8.0f);
+		if (ImGui::Button("Start")) go(0, -1);
+		ImGui::SetItemTooltip("The first page of the manual");
+
+		ImGui::SameLine(0.0f, 12.0f);
+		if (s_focusSearch) { ImGui::SetKeyboardFocusHere(); s_focusSearch = false; }
+		ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x - 190.0f));
+		ImGui::InputTextWithHint("##docsSearch", "Search the manual...",
+		                         s_query, sizeof(s_query));
+
+		ImGui::SameLine(0.0f, 8.0f);
+		if (ImGui::Button("Online"))
+			SDL_OpenURL(lib.url(s_page, s_section).c_str());
+		ImGui::SetItemTooltip("Open this page on horizoncreations.dev");
+	}
+
+#endif // HE_IMGUI_ENABLED
+} // namespace
+
+void setPanelOpener(PanelOpener opener)
+{
+#ifdef HE_IMGUI_ENABLED
+	s_panelOpener = opener;
+#else
+	(void)opener;
+#endif
+}
+
+void open()
+{
+#ifdef HE_IMGUI_ENABLED
+	ensureLoaded();
+	s_open = true;
+	s_focusSearch = true;
+	if (s_history.empty()) go(0, -1);
+#endif
+}
+
+void openTopic(const char* topic)
+{
+#ifdef HE_IMGUI_ENABLED
+	ensureLoaded();
+	s_open = true;
+	s_query[0] = '\0';
+	goTopic(topic);
+	// Even an unknown topic leaves the manual open at whatever was last read:
+	// a keypress that appears to do nothing is worse than the wrong page.
+	if (s_history.empty()) go(0, -1);
+#else
+	(void)topic;
+#endif
+}
+
+void openSearch(const char* query)
+{
+#ifdef HE_IMGUI_ENABLED
+	ensureLoaded();
+	s_open = true;
+	std::snprintf(s_query, sizeof(s_query), "%s", query ? query : "");
+	s_focusSearch = true;
+	if (s_history.empty()) go(0, -1);
+#else
+	(void)query;
+#endif
+}
+
+void close()
+{
+#ifdef HE_IMGUI_ENABLED
+	s_open = false;
+#endif
+}
+
+bool isOpen()
+{
+#ifdef HE_IMGUI_ENABLED
+	return s_open;
+#else
+	return false;
+#endif
+}
+
+void draw(AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	// The spotlight outlives the click that started it, and has to keep drawing
+	// even while the reader is scrolled elsewhere — so it is here, before the
+	// early return for a closed window.
+	if (s_spotlightWindow)
+	{
+		if (ImGui::GetTime() < s_spotlightUntil)
+			HE::Ed::Spotlight::outline(s_spotlightWindow,
+			                           static_cast<float>(ImGui::GetTime()), false);
+		else
+			s_spotlightWindow = nullptr;
+	}
+
+	if (!s_open) return;
+	ensureLoaded();
+
+	ImGui::SetNextWindowSize(ImVec2(1000.0f, 680.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(520.0f, 320.0f), ImVec2(FLT_MAX, FLT_MAX));
+	if (!ImGui::Begin(kWindowTitle, &s_open, ImGuiWindowFlags_NoScrollbar))
+	{
+		ImGui::End();
+		return;
+	}
+	// Kept inside the editor window: multi-viewport would otherwise hand a
+	// dragged-out reader its own OS window, which the window manager can bury
+	// behind the editor while it is still open (see EditorWidgets.h).
+	EditorWidgets::clampCurrentWindowToEditorWindow();
+
+	const docs::Library& lib = docs::library();
+	if (!lib.loaded())
+	{
+		EditorWidgets::WrapText wrap;
+		ImGui::TextUnformatted("The offline manual could not be loaded.");
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		ImGui::TextUnformatted(lib.error().c_str());
+		ImGui::TextUnformatted("It ships next to the editor as Docs/he-docs.json.");
+		ImGui::PopStyleColor();
+		ImGui::Spacing();
+		if (EditorWidgets::primaryButton("Open the manual online"))
+			SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
+		ImGui::End();
+		return;
+	}
+
+	// Keyboard, while the reader has the focus. Ctrl/Cmd+F is where every reader
+	// puts search; Escape backs out one step at a time — the results first, the
+	// window only once there is nothing left to leave.
+	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+	{
+		const ImGuiIO& io = ImGui::GetIO();
+		if ((io.KeyCtrl || io.KeySuper) && ImGui::IsKeyPressed(ImGuiKey_F, false))
+			s_focusSearch = true;
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !io.WantTextInput)
+		{
+			if (s_query[0]) s_query[0] = '\0';
+			else            s_open = false;
+		}
+	}
+
+	drawToolbar(ctx);
+	ImGui::Separator();
+
+	const float navWidth = 230.0f;
+	ImGui::BeginChild("##docsNav", ImVec2(navWidth, 0.0f), ImGuiChildFlags_Borders);
+	{
+		drawNav();
+	}
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+
+	ImGui::BeginChild("##docsBody", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
+	{
+		// Everything in the body is prose in a narrow column, so the wrap
+		// position is pushed once for the whole child (see EditorWidgets::
+		// WrapText — this is the BeginChild case, where the guard's own block
+		// ends before EndChild).
+		EditorWidgets::WrapText wrap;
+		if (s_query[0]) drawResults(s_query);
+		else            drawPage(ctx);
+
+		ImGui::Spacing();
+		ImGui::Separator();
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+		ImGui::Text("Offline copy of the manual, generated %s.", lib.generated().c_str());
+		ImGui::PopStyleColor();
+	}
+	ImGui::EndChild();
+
+	ImGui::End();
+#else
+	(void)ctx;
+#endif
+}
+
+} // namespace DocsPanel

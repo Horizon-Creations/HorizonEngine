@@ -40,6 +40,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
+#include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
@@ -178,9 +179,49 @@ static bool s_showSourceControl = false;
 // Toggled by View > Console (and Ctrl/Cmd+`); drives the log window.
 static bool s_showConsole = false;
 
-// Help ▸ Documentation. The published manual, not a file in the repo: an editor
-// installed from a DMG has no docs/ folder next to it.
+// Help ▸ Documentation Online. The published manual on the website; the OFFLINE
+// copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
+// is what Help ▸ Documentation opens.
 static constexpr const char* kDocsUrl = "https://horizoncreations.dev/HorizonEngineDocs/";
+
+// ── The docs reader's "Show me" ──────────────────────────────────────────────
+// An article about a panel offers to point at it. Putting a panel on screen
+// means flipping one of the file statics below, which is why the reader is
+// handed this function instead of reaching for them: it takes an ImGui window
+// name and returns whether it knew what to do with it.
+//
+// Registered per frame and only while a project is loaded (see render()) — on
+// the Project Hub none of these windows exist, and a "Show me" that silently
+// does nothing is worse than one that is not offered.
+static bool docsPanelOpener(const char* window)
+{
+	if (!window || !window[0]) return false;
+
+	// The View-menu panels: closed until asked for, so this both opens and
+	// focuses (revealFloatingWindow's two-frame latch covers a window that does
+	// not exist yet at the moment of the click).
+	struct Toggle { const char* name; bool* flag; };
+	const Toggle toggles[] = {
+		{ "Performance Profiler", &s_showProfiler      },
+		{ "Environment",          &s_showEnvironment   },
+		{ "Collaboration",        &s_showCollab        },
+		{ "Source Control",       &s_showSourceControl },
+		{ "Console",              &s_showConsole       },
+	};
+	for (const Toggle& t : toggles)
+		if (std::strcmp(window, t.name) == 0) { revealFloatingWindow(*t.flag, window); return true; }
+
+	// The panels that are always part of the docked layout. They are submitted
+	// every frame, so there is nothing to open — focusing one selects its tab,
+	// which is what "show me" means for a panel that is already there.
+	static const char* const kAlwaysSubmitted[] = {
+		"Scene", "World Outliner", "Details", "Content Browser", "Quick Settings",
+	};
+	for (const char* name : kAlwaysSubmitted)
+		if (std::strcmp(window, name) == 0) { ImGui::SetWindowFocus(window); return true; }
+
+	return false;
+}
 
 // ── Remembering which panels were open ───────────────────────────────────────
 // A panel the user docked into the layout is part of how their editor looks;
@@ -548,6 +589,16 @@ void EditorUI::render(AppContext& ctx, float dt)
     // opening a project as after, and the macOS Help menu is reachable in both.
     ReportIssueDialog::DrawReportIssueDialog(ctx);
 
+    // ── Help ▸ Documentation ─────────────────────────────────────────────────
+    // Before the branch, so the manual is readable on the Project Hub as well as
+    // in the editor. That is not symmetry for its own sake: "how do I start a
+    // project" is the question the user has BEFORE a project exists, and the Hub
+    // is exactly where they are while they have it.
+    //
+    // "Show me" is only offered with a project open — see docsPanelOpener.
+    DocsPanel::setPanelOpener(ctx.projectLoaded ? &docsPanelOpener : nullptr);
+    DocsPanel::draw(ctx);
+
     // ── Route to either the Project Hub or the full Editor UI ─────────────────
     if (ctx.projectLoaded)
     {
@@ -562,6 +613,27 @@ void EditorUI::render(AppContext& ctx, float dt)
         // Drawn after the hub so the welcome card sits on top of it. Draws nothing
         // once the user has answered it once (persisted in the editor config).
         TutorialPanel::renderWelcome(ctx);
+    }
+
+    // ── The tooltip of whatever the mouse is on ──────────────────────────────
+    // Last of everything, and that placement is the point: a tooltip drawn where
+    // the control is would overwrite ImGui's "last item" with the tooltip
+    // window's own, and the Details panel commits its undo steps off exactly
+    // that (IsItemDeactivatedAfterEdit, immediately after the control). So the
+    // controls only QUEUE their help and it is drawn here, once, when every
+    // panel has been submitted. See EditorWidgets.h.
+    //
+    // F1 belongs to whatever is under the mouse: over a control with an entry it
+    // opens the manual at the section that explains it, and anywhere else it
+    // opens the manual.
+    if (const char* topic = EditorWidgets::drawQueuedHelp())
+    {
+        DocsPanel::openTopic(topic);
+    }
+    else if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F1, false))
+    {
+        if (DocsPanel::isOpen()) DocsPanel::close();
+        else                     DocsPanel::open();
     }
 
     ImGui::Render();
@@ -1240,7 +1312,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
-			case MC::Documentation:   SDL_OpenURL(kDocsUrl);                                 break;
+			case MC::Documentation:       DocsPanel::open();                                 break;
+			case MC::SearchDocumentation: DocsPanel::openSearch("");                         break;
+			case MC::DocumentationOnline: SDL_OpenURL(kDocsUrl);                             break;
 #ifdef HE_HAVE_LIBSSH2
 			case MC::PublishEngineContent:       EngineContentPublishDialog::open(ctx);                break;
 			case MC::RebuildManifestFromServer:  EngineContentPublishDialog::openRebuildFromServer(ctx); break;
@@ -1395,13 +1469,21 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	}
 	if (ImGui::BeginMenu("Help"))
 	{
+		// The manual first, and in the editor: it is the answer to most of what
+		// brings anyone into this menu, and the version that opens a browser is
+		// the one that loses whatever the user was in the middle of.
+		if (ImGui::MenuItem("Documentation", "F1", DocsPanel::isOpen()))
+			DocsPanel::open();
+		if (ImGui::MenuItem("Search the Documentation...", "Ctrl+F1"))
+			DocsPanel::openSearch("");
+		if (ImGui::MenuItem("Documentation (Website)")) SDL_OpenURL(kDocsUrl);
+		ImGui::Separator();
 		if (ImGui::MenuItem("Interactive Tutorial", nullptr, TutorialPanel::isOpen()))
 			TutorialPanel::open();
 		ImGui::Separator();
 		if (ImGui::MenuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
 			ReportIssueDialog::open();
 		ImGui::Separator();
-		if (ImGui::MenuItem("Documentation")) SDL_OpenURL(kDocsUrl);
 		if (ImGui::MenuItem("About")) openAboutPopup = true;
 		ImGui::EndMenu();
 	}
@@ -1433,7 +1515,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::Spacing();
         ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
         ImGui::Spacing();
-        if (ImGui::SmallButton("Documentation")) SDL_OpenURL(kDocsUrl);
+        if (ImGui::SmallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
         if (ImGui::SmallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
         ImGui::Separator();

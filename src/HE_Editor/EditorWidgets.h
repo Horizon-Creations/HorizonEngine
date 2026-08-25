@@ -146,6 +146,51 @@ namespace Row
 // read half of is worse than no hint at all.
 void hint(const char* fmt, ...) IM_FMTARGS(1);
 
+// ── Help tooltips ────────────────────────────────────────────────────────────
+// "What is this control for?", answered from the table in EditorHelp.h.
+//
+// The Row helpers below call helpForLabel() themselves, so every labelled
+// setting row in the editor gets its explanation from the registry with no call
+// site involved: a component section pushes a HE::Ed::Help::Scope, and the rows
+// inside it are looked up as "<component>/<label>". Controls drawn by hand ask
+// by key instead.
+//
+// ── Why the tooltip is drawn LATE ────────────────────────────────────────────
+// These do not draw anything where they are called; they remember what to show
+// and drawQueuedHelp() puts it on screen at the end of the frame. That is not
+// tidiness — ImGui::Begin (which BeginTooltip goes through) overwrites
+// g.LastItemData with the tooltip window's own, and the Details panel reads
+// exactly that immediately after the control it just submitted
+// (IsItemActivated / IsItemDeactivatedAfterEdit is what commits an undo step).
+// Drawing the tooltip in place would silently break every undo in the panel.
+//
+// A single queue also settles precedence for free: whichever hovered item
+// asked last is the one under the mouse.
+
+// Ask for help for the item that was just submitted, by the label the user can
+// see ("Metallic", or the full "Density##fog" — both are tried). Returns true
+// if an entry exists AND the item is hovered long enough to want a tooltip.
+bool helpForLabel(const char* label);
+// The same by explicit key ("viewport.play").
+bool helpForKey(const char* key);
+
+// A dimmed "?" after a control that carries the same entry — for the places
+// where hovering the control itself is not discoverable enough (a section
+// heading, a group of buttons). Draws on the current line.
+void helpMarker(const char* key);
+
+// Draw whatever was queued this frame, once, late — after every panel has been
+// submitted. Returns the entry's documentation topic when the user pressed F1
+// while it was showing, so the caller can open the manual there; null
+// otherwise. (The caller does that rather than this, because the reader panel
+// is an editor thing and these widgets are deliberately ImGui-only.)
+const char* drawQueuedHelp();
+
+// ImGui::Checkbox with the help lookup wired in. Same signature and same
+// return; the only difference is that a checkbox drawn with this one can
+// explain itself.
+bool checkbox(const char* label, bool* v);
+
 // A section caption inside a component (Details panel) — "Surface",
 // "Precipitation". Same role as ImGui::SeparatorText, but styled as a heading
 // so the eye can find the group boundaries in a long component.

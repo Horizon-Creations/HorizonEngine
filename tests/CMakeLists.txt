@@ -82,6 +82,7 @@ add_executable(he_tests
     test_cpp_scaffold.cpp
     test_tutorial.cpp
     test_docs_library.cpp
+    test_editor_help.cpp
     test_lod.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
@@ -144,6 +145,11 @@ add_executable(he_tests
     # so a docs conversion that dropped the tables fails here rather than in a
     # blank panel nobody opens until after the release.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/DocsLibrary.cpp
+    # The help table behind the editor's tooltips. Plain data, no ImGui — which
+    # is what lets the test walk it and check that every topic it points at
+    # still exists in the documentation bundle. It is also linked because
+    # EditorRowWidgets.cpp (below) looks its rows up in it.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorHelp.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen

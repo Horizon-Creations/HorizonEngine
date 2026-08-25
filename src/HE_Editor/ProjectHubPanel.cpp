@@ -6,6 +6,7 @@
                                          // one that must not look like a different
                                          // product than the window that preceded it
 #include "TutorialPanel.h"               // Help ▸ Interactive Tutorial → sandbox offer
+#include "DocsPanel.h"                   // Help ▸ Documentation — readable before a project exists
 #include "HorizonVersion.h"
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -72,11 +73,15 @@ void render(AppContext& ctx)
             case MC::OpenProject: s_hubOpenBrowseRequested = true;   break;
             // No project to tour yet — the tutorial's answer here is its sandbox offer.
             case MC::OpenTutorial: TutorialPanel::showWelcome();      break;
-            // Help ▸ Documentation is the one Help item that needs no project, so
-            // it answers on the Hub too. The URL is spelled out rather than shared
-            // with EditorUI.cpp: kDocsUrl is a file-static there, and one literal
-            // is cheaper than a header for it.
-            case MC::Documentation:
+            // The Help items need no project, so they answer on the Hub too — and
+            // this is where they are needed most: "how do I start a project" is a
+            // question you have before there is one. EditorUI draws the reader on
+            // both screens for the same reason. The website URL is spelled out
+            // rather than shared with EditorUI.cpp: kDocsUrl is a file-static
+            // there, and one literal is cheaper than a header for it.
+            case MC::Documentation:       DocsPanel::open();          break;
+            case MC::SearchDocumentation: DocsPanel::openSearch("");  break;
+            case MC::DocumentationOnline:
                 SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
                 break;
             default: break;   // project-scoped / editor-only items: no-op here

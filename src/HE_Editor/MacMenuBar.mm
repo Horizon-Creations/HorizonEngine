@@ -245,10 +245,17 @@ void install()
 	// with no project open is most likely to reach for.
 	{
 		NSMenu* help = heAddSubmenu(main, @"Help");
+		// The offline manual first — the item most of this menu exists for. No
+		// key equivalent: F1 is wired inside the editor (EditorUI), and a native
+		// one would swallow the keystroke before the panel that is meant to
+		// answer it in context ever sees it, exactly like the Edit menu's ⌘Z.
+		heAddItem(help, @"Documentation",             C::Documentation,       nil, 0, false);
+		heAddItem(help, @"Search the Documentation…", C::SearchDocumentation, nil, 0, false);
+		heAddItem(help, @"Documentation (Website)",   C::DocumentationOnline, nil, 0, false);
+		[help addItem:[NSMenuItem separatorItem]];
 		s_toggleItems.emplace_back(C::OpenTutorial,
 			heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false));
 		[help addItem:[NSMenuItem separatorItem]];
-		heAddItem(help, @"Documentation",  C::Documentation, nil, 0, false);
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
 		NSApp.helpMenu = help;
 	}

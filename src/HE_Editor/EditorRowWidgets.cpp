@@ -1,4 +1,5 @@
 #include "EditorWidgets.h"
+#include "EditorHelp.h"       // the tooltip table every labelled row is looked up in
 #include "EditorTheme.h"      // the brand accent behind primaryButton
 
 #include <imgui_internal.h>   // PushMultiItemsWidths — the same splitter DragFloatN uses
@@ -6,6 +7,7 @@
 #include <cfloat>
 #include <cstdarg>
 #include <cstring>
+#include <string>
 
 // ─── Labelled rows + wrapped hints ───────────────────────────────────────────
 // Split out of EditorWidgets.cpp on purpose: everything here depends on ImGui
@@ -116,8 +118,15 @@ bool row(const char* label, F&& body)
 		ImGui::TextUnformatted(label, hash);
 	else
 		ImGui::TextUnformatted(label);
+	// The label counts as part of the control for help: it is the wider target,
+	// and it is what the eye is on when the question "what IS this?" arises.
+	const bool labelHelp = helpForLabel(label);
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	const bool changed = body();
+	// After the control, so the LAST item is still the caller's — nothing here
+	// submits an item, and the tooltip itself is drawn at the end of the frame
+	// (see drawQueuedHelp).
+	if (!labelHelp) helpForLabel(label);
 	ImGui::PopID();
 	return changed;
 }
@@ -261,6 +270,105 @@ void subHeading(const char* text)
 {
 	ImGui::Spacing();
 	ImGui::SeparatorText(text);
+}
+
+// ── Help tooltips (see the header for why they are drawn late) ───────────────
+namespace
+{
+// What the mouse is over, decided fresh every frame. A raw pointer into the
+// help table is safe to keep: the table is `constexpr` static storage.
+const HE::Ed::Help::Entry* s_queued     = nullptr;
+const HE::Ed::Help::Entry* s_lastQueued = nullptr;   // for the F1 press
+
+bool queueIfHovered(const HE::Ed::Help::Entry* entry)
+{
+	if (!entry) return false;
+	// ForTooltip is the flag set that carries ImGui's own tooltip manners:
+	// a short delay, and Stationary — the tooltip does not fire while the
+	// pointer is merely sweeping across the panel on its way somewhere else.
+	// That is half of what separates a useful tooltip from a nuisance.
+	// AllowWhenDisabled is in there too, which is exactly right here: a greyed
+	// control is the one people most want an explanation for.
+	if (!ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) return false;
+	s_queued = entry;
+	return true;
+}
+} // namespace
+
+bool helpForLabel(const char* label)
+{
+	return queueIfHovered(HE::Ed::Help::find(label ? label : ""));
+}
+
+bool helpForKey(const char* key)
+{
+	return queueIfHovered(HE::Ed::Help::findKey(key ? key : ""));
+}
+
+void helpMarker(const char* key)
+{
+	const HE::Ed::Help::Entry* e = HE::Ed::Help::findKey(key ? key : "");
+	if (!e) return;
+	ImGui::SameLine(0.0f, 4.0f);
+	ImGui::TextDisabled("(?)");
+	queueIfHovered(e);
+}
+
+bool checkbox(const char* label, bool* v)
+{
+	const bool changed = ImGui::Checkbox(label, v);
+	helpForLabel(label);
+	return changed;
+}
+
+const char* drawQueuedHelp()
+{
+	const HE::Ed::Help::Entry* e = s_queued;
+	s_queued = nullptr;
+	s_lastQueued = e;
+	if (!e) return nullptr;
+
+	// Wrapped at a fixed width rather than the window's: a tooltip window sizes
+	// itself to its widest line, so wrapping at its own edge feeds back into the
+	// measurement and the box shrinks a little more every frame.
+	const float wrapW = 380.0f * ImGui::GetFontSize() / 16.0f;
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+	if (ImGui::BeginTooltip())
+	{
+		if (e->title[0])
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
+			ImGui::TextUnformatted(e->title);
+			ImGui::PopStyleColor();
+		}
+		ImGui::PushTextWrapPos(wrapW);
+		ImGui::TextUnformatted(e->body);
+		ImGui::PopTextWrapPos();
+
+		if (e->shortcut[0] || e->topic[0])
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			if (e->shortcut[0])
+			{
+				const std::string sc = HE::Ed::Help::shortcutLabel(e->shortcut);
+				ImGui::TextUnformatted(sc.c_str());
+				if (e->topic[0]) ImGui::SameLine(0.0f, 12.0f);
+			}
+			// Only advertised where there is a page to open. A hint that does
+			// nothing on a third of the controls teaches people to ignore it.
+			if (e->topic[0]) ImGui::TextUnformatted("F1  documentation");
+			ImGui::PopStyleColor();
+		}
+		ImGui::EndTooltip();
+	}
+	ImGui::PopStyleVar();
+
+	// F1 belongs to whatever is under the mouse right now, which is what the
+	// tooltip above is showing. Checked here rather than in a global shortcut
+	// block for exactly that reason.
+	if (e->topic[0] && ImGui::IsKeyPressed(ImGuiKey_F1, false)) return e->topic;
+	return nullptr;
 }
 
 } // namespace EditorWidgets

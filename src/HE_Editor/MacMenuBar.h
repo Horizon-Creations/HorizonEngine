@@ -38,7 +38,12 @@ namespace MacMenuBar
 		ToggleConsole, ToggleGroundGrid,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
-		OpenTutorial, ReportIssue, Documentation,
+		OpenTutorial, ReportIssue,
+		// Help ▸ Documentation opens the manual INSIDE the editor (DocsPanel);
+		// DocumentationOnline is the website. Both exist because they answer
+		// different needs — one keeps you where you are, the other is
+		// shareable and always current.
+		Documentation, SearchDocumentation, DocumentationOnline,
 		// Only added to the menu when HE_HAVE_LIBSSH2 AND ContentManager::
 		// isEngineContentDevMode() are both true — see install()'s Assets block.
 		PublishEngineContent, RebuildManifestFromServer,

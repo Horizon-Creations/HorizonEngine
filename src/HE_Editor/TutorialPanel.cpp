@@ -4,6 +4,7 @@
 #include "EditorWidgets.h"       // dialog placement (stay inside the editor window)
 #include "EditorTheme.h"         // brand palette (the action line)
 #include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
+#include "PanelSpotlight.h"      // the pulsing panel outline, shared with the docs reader
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -286,61 +287,16 @@ namespace
 
 #ifdef HE_IMGUI_ENABLED
 	// ── Panel highlight ───────────────────────────────────────────────────────
-	// The outline has to land on the panel the step is actually talking about, in
-	// every layout the user can produce. Three things make that non-obvious:
-	//
-	//  * A DOCKED window's Pos/Size is the node's *inner* rect — it excludes the
-	//    tab bar. Outlining that draws a box that does not line up with what the
-	//    user perceives as the panel, so the dock node's rect is used instead.
-	//  * A docked window whose tab is NOT selected is inactive and has a stale
-	//    rect. Outlining it would put the box on top of whatever tab IS showing —
-	//    the wrong panel entirely. The node is outlined in that case, so the box
-	//    frames the tab bar the user has to click.
-	//  * A window that does not exist yet (never opened, or opened into another
-	//    viewport) must not be outlined at all rather than at {0,0}.
-	//
-	// Drawn on the target viewport's foreground list, so it sits over docked
-	// windows and lands in the right OS window when a panel was dragged out.
+	// The outline itself lives in PanelSpotlight now: the documentation reader's
+	// "Show me" points at panels the same way, and the three layout cases it has
+	// to get right (docked node vs window rect, unselected tab, window that does
+	// not exist yet) are subtle enough that a second copy would drift.
 	//
 	// Returns false when there was nothing to outline, which is how the card knows
 	// to tell the user the panel is closed instead of silently pointing at nothing.
 	bool outlineWindow(const char* name, float time, bool dimmed)
 	{
-		if (!name || name[0] == '\0') return false;
-		ImGuiWindow* w = ImGui::FindWindowByName(name);
-		if (!w) return false;
-
-		ImVec2 pos, size;
-		if (ImGuiDockNode* node = w->DockNode; node && node->HostWindow)
-		{
-			// The whole docked slot, tab bar included — and valid even while another
-			// tab of the same node is the visible one. The host must be on screen,
-			// though: a node inside a hidden host has a stale rect that would put the
-			// outline somewhere the user is not looking.
-			if (!node->HostWindow->WasActive) return false;
-			pos  = node->Pos;
-			size = node->Size;
-		}
-		else
-		{
-			if (!w->WasActive || w->Hidden || w->Collapsed) return false;
-			pos  = w->Pos;
-			size = w->Size;
-		}
-		if (size.x < 8.0f || size.y < 8.0f) return false;
-
-		const float pulse = dimmed ? 0.22f
-		                           : 0.45f + 0.35f * (0.5f + 0.5f * std::sin(time * 3.2f));
-		const ImVec4 col = dimmed ? ImVec4(0.45f, 0.85f, 0.55f, pulse)   // already done
-		                          : ImVec4(0.45f, 0.72f, 1.00f, pulse);
-		ImDrawList* dl = ImGui::GetForegroundDrawList(w->Viewport);
-		// Inset by half the stroke so the rectangle sits ON the panel edge instead
-		// of half outside it (which reads as covering the neighbouring panel).
-		const float inset = 2.0f;
-		dl->AddRect(ImVec2(pos.x + inset, pos.y + inset),
-		            ImVec2(pos.x + size.x - inset, pos.y + size.y - inset),
-		            ImGui::GetColorU32(col), 6.0f, 0, 3.0f);
-		return true;
+		return HE::Ed::Spotlight::outline(name, time, dimmed);
 	}
 
 	// Outline every '|'-separated entry of `list`. On a PanelsVisited step the ones
@@ -365,24 +321,10 @@ namespace
 	}
 
 	// The window the user last clicked into, as the tour's "visited" signal.
-	// RootWindow deliberately does NOT cross dock nodes, so a docked panel reports
-	// itself while a child window inside it (the Content Browser's asset grid, the
-	// Details scroll region) reports the panel — which is what the user clicked.
-	//
-	// Everything from "###" on is stripped: the left panel is "Landscape###Quick
-	// Settings" in Landscape mode and "Quick Settings###Quick Settings" otherwise,
-	// and the step tables name panels by the stable id, not by the visible title.
+	// Same identity question the spotlight answers, so it lives next to it.
 	std::string focusedPanelName()
 	{
-		ImGuiContext* g = ImGui::GetCurrentContext();
-		if (!g || !g->NavWindow) return {};
-		const ImGuiWindow* w = g->NavWindow->RootWindow ? g->NavWindow->RootWindow
-		                                                : g->NavWindow;
-		if (!w->Name) return {};
-		std::string name = w->Name;
-		if (const size_t hash = name.find("###"); hash != std::string::npos)
-			name = name.substr(hash + 3);
-		return name;
+		return HE::Ed::Spotlight::focusedPanel();
 	}
 
 	// TextWrapped over a body whose paragraphs are '\n'-separated, with a blank
