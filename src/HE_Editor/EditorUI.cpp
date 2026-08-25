@@ -1434,8 +1434,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     }
 	if (ImGui::BeginMenu("Assets"))
 	{
-		if (ImGui::MenuItem("Import Asset...", nullptr, false, ctx.projectLoaded))
-			triggerImportAsset();
+		const bool doImport = ImGui::MenuItem("Import Asset...", nullptr, false,
+		                                      ctx.projectLoaded);
+		EditorWidgets::helpForKey("content.import");
+		if (doImport) triggerImportAsset();
 		// The same rescan an import raises — the Content Browser picks the flag up
 		// and re-walks the content tree, which is what makes a file dropped in
 		// from the Finder appear.

@@ -75,6 +75,13 @@ public:
 	Scope& operator=(const Scope&) = delete;
 };
 
+// Rename the innermost scope in place. For the panels where ONE function walks
+// a list of sections in sequence rather than nesting them — the Details panel
+// draws all thirty-four components in a single call, and each componentHeader()
+// is the start of the next section, not the start of a new C++ scope. Pair it
+// with a Scope at the top of that function, which is what unwinds it.
+void setScope(const char* name);
+
 // The current scope ("" when none) — for the widgets that build a key by hand.
 const char* currentScope();
 

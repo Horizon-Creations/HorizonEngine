@@ -335,8 +335,10 @@ void render(AppContext& ctx)
                 {
                     const bool editable = !isRoot && !ctx.isPlaying;
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, editable) &&
-                        ctx.duplicateEntity)
+                    const bool doDuplicate =
+                        ImGui::MenuItem("Duplicate", "Ctrl+D", false, editable);
+                    EditorWidgets::helpForKey("outliner.duplicate");
+                    if (doDuplicate && ctx.duplicateEntity)
                         ctx.duplicateEntity();
                     if (ImGui::MenuItem("Copy", "Ctrl+C", false, editable) && ctx.copyEntity)
                         ctx.copyEntity();
@@ -350,7 +352,9 @@ void render(AppContext& ctx)
                         ctx.pasteEntity();
                     ImGui::Separator();
                 }
-                if (!isRoot && ImGui::MenuItem("Save as Prefab") && ctx.contentManager)
+                const bool doPrefab = !isRoot && ImGui::MenuItem("Save as Prefab");
+                if (!isRoot) EditorWidgets::helpForKey("outliner.prefab");
+                if (doPrefab && ctx.contentManager)
                 {
                     // Entity names are free text, and a '/' in one would reach
                     // saveAsset's create_directories: "Arm/Left" would silently
@@ -420,7 +424,9 @@ void render(AppContext& ctx)
                     else
                         HE_LOG_ERROR(Editor, "%s", ("Editor: failed to save prefab " + relPath).c_str());
                 }
-                if (!isRoot && EditorWidgets::dangerMenuItem("Delete"))
+                const bool doDelete = !isRoot && EditorWidgets::dangerMenuItem("Delete");
+                if (!isRoot) EditorWidgets::helpForKey("outliner.delete");
+                if (doDelete)
                 {
                     if (ctx.selectedEntity == node.entity)
                         ctx.selectedEntity = entt::null;

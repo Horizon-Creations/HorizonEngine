@@ -1,4 +1,6 @@
 #include "EditorToolbar.h"
+#include "EditorHelp.h"      // the table a cell's helpKey names
+#include "EditorWidgets.h"   // helpForKey — the queued, late-drawn tooltip
 
 #ifdef HE_IMGUI_ENABLED
 
@@ -43,8 +45,13 @@ namespace
 // differing only in how the foreground colour is decided.
 bool cellImpl(const Metrics& m, float x, float w, const char* id, IconFn icon,
               const char* label, bool on, bool enabled, const char* tooltip,
-              const ImU32* forcedFg)
+              const ImU32* forcedFg, const char* helpKey = nullptr)
 {
+	// A cell with an entry in the help table gets the full tooltip — heading,
+	// sentence, shortcut, and F1 into the manual — instead of the one-liner the
+	// caller passed. Both are never shown: the plain one is the fallback for the
+	// cells that have no entry (yet).
+	const bool hasHelp = helpKey && HE::Ed::Help::findKey(helpKey) != nullptr;
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 p0(x, m.y + kWellPad);
 	const ImVec2 p1(x + w, p0.y + m.cell);
@@ -54,7 +61,12 @@ bool cellImpl(const Metrics& m, float x, float w, const char* id, IconFn icon,
 	const bool pressed = ImGui::InvisibleButton(id, ImVec2(w, m.cell));
 	const bool hovered = ImGui::IsItemHovered();
 	const bool held    = ImGui::IsItemActive();
-	if (tooltip && enabled) ImGui::SetItemTooltip("%s", tooltip);
+	// Note the asymmetry, and it is deliberate: the plain tooltip is suppressed
+	// on a dimmed cell (it only repeats the label), but the help entry is NOT —
+	// "why can I not press this" is exactly the question a greyed control
+	// raises, and the entry is where the answer is.
+	if (hasHelp)                 EditorWidgets::helpForKey(helpKey);
+	else if (tooltip && enabled) ImGui::SetItemTooltip("%s", tooltip);
 	if (!enabled) ImGui::EndDisabled();
 
 	const ImU32 bg = on      ? (hovered ? kOnBgHover : kOnBg)
@@ -83,9 +95,10 @@ bool cellImpl(const Metrics& m, float x, float w, const char* id, IconFn icon,
 } // namespace
 
 bool cell(const Metrics& m, float x, float w, const char* id, IconFn icon,
-          const char* label, bool on, bool enabled, const char* tooltip)
+          const char* label, bool on, bool enabled, const char* tooltip,
+          const char* helpKey)
 {
-	return cellImpl(m, x, w, id, icon, label, on, enabled, tooltip, nullptr);
+	return cellImpl(m, x, w, id, icon, label, on, enabled, tooltip, nullptr, helpKey);
 }
 
 bool cellTinted(const Metrics& m, float x, float w, const char* id, IconFn icon,

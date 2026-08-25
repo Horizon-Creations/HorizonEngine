@@ -2,6 +2,9 @@
 
 #include "DocsLibrary.h"
 #include "EditorHelp.h"
+#include "EditorWidgets.h"
+
+#include <imgui.h>
 
 #include <set>
 #include <string>
@@ -181,6 +184,92 @@ TEST_CASE("editor help: shortcuts are shown in the modifier the keyboard has")
 	// Anything without a modifier is left exactly as written.
 	CHECK(Help::shortcutLabel("F1") == "F1");
 	CHECK(Help::shortcutLabel("") == "");
+}
+
+// ── The wiring, driven for real ──────────────────────────────────────────────
+// Everything above tests the table. This tests the mechanism the table is
+// useless without: that a plain labelled row inside a component's scope really
+// does find its entry, hover really does queue it, and F1 really does come back
+// with the topic to open. ImGui runs headless given a context and a display
+// size, so all of that is drivable — including the hover delay, which is the
+// part most likely to be silently wrong.
+namespace
+{
+	struct ImGuiCtx
+	{
+		ImGuiCtx()
+		{
+			ImGui::CreateContext();
+			ImGuiIO& io = ImGui::GetIO();
+			io.DisplaySize = ImVec2(1280.0f, 720.0f);
+			io.DeltaTime   = 1.0f / 60.0f;
+			io.IniFilename = nullptr;
+			io.LogFilename = nullptr;
+			// No renderer: claim texture support so ImGui never waits on a
+			// backend to upload the font atlas (1.92's dynamic-font path).
+			io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+		}
+		~ImGuiCtx() { ImGui::DestroyContext(); }
+	};
+} // namespace
+
+TEST_CASE("editor help: a Details row explains itself with no call site of its own")
+{
+	ImGuiCtx guard;
+	ImGuiIO& io = ImGui::GetIO();
+
+	float value = 12.0f;
+	ImVec2 control{ -1.0f, -1.0f };
+	const char* topic = nullptr;
+
+	// One frame of a Details-like panel: a component scope, one labelled row.
+	// Exactly what InspectorPanel does, minus the entity.
+	auto frame = [&](const char* scopeName) {
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f));
+		ImGui::Begin("panel", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		{
+			HE::Ed::Help::Scope scope(scopeName);
+			EditorWidgets::Row::dragFloat("Mass", &value, 0.1f);
+			const ImVec2 mn = ImGui::GetItemRectMin();
+			const ImVec2 mx = ImGui::GetItemRectMax();
+			control = ImVec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+		}
+		ImGui::End();
+		topic = EditorWidgets::drawQueuedHelp();
+		ImGui::EndFrame();
+	};
+
+	// Away from the panel first, so the first hover is a real transition.
+	io.AddMousePosEvent(1200.0f, 700.0f);
+	frame("Rigid Body");
+	REQUIRE(control.x > 0.0f);
+	CHECK(topic == nullptr);
+
+	// Now rest the pointer on the control. ImGui's tooltip flags require the
+	// mouse to be STATIONARY for a moment before a tooltip is owed — which is
+	// the behaviour that keeps a tooltip from flashing at everything the pointer
+	// sweeps across — so this takes more than one frame.
+	io.AddMousePosEvent(control.x, control.y);
+	for (int i = 0; i < 40; ++i) frame("Rigid Body");
+
+	// F1 while it is showing hands back the section of the manual to open.
+	io.AddKeyEvent(ImGuiKey_F1, true);
+	frame("Rigid Body");
+	REQUIRE(topic != nullptr);
+	CHECK(std::string(topic) == "systems#physics");
+	io.AddKeyEvent(ImGuiKey_F1, false);
+	frame("Rigid Body");
+
+	// The same row in a component that has no "Mass" entry: nothing is queued,
+	// so F1 over it opens nothing rather than the wrong page.
+	for (int i = 0; i < 40; ++i) frame("Foliage");
+	io.AddKeyEvent(ImGuiKey_F1, true);
+	frame("Foliage");
+	CHECK(topic == nullptr);
 }
 
 TEST_CASE("editor help: a topic without its own panel falls back to its page")

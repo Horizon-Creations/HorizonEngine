@@ -730,6 +730,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow
 										 | ImGuiTreeNodeFlags_SpanAvailWidth;
 			bool rootOpen = ImGui::TreeNodeEx("Engine", rootFlags);
+			// The one place the three roots are visible next to each other, and
+			// the question "why can I not edit anything in here" is answered.
+			EditorWidgets::helpForKey("content.roots");
 			folderDropTarget(engineFolder.fullPath); // move to the engine root
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
@@ -2881,7 +2884,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// In the Source root a C++ class is a .h/.cpp pair; renaming it means
 			// renaming both files AND rewriting the class name/registration inside —
 			// a refactor best left to the user's C++ toolchain, so Rename is hidden.
-			if (!engineLocked && s_selectedRootKind != 2 && ImGui::MenuItem("Rename"))
+			const bool renameShown = !engineLocked && s_selectedRootKind != 2;
+			const bool doRename    = renameShown && ImGui::MenuItem("Rename");
+			if (renameShown) EditorWidgets::helpForKey("content.rename");
+			if (doRename)
 			{
 				s_renameTarget   = s_ctxMenuItem;
 				s_renameIsFolder = s_ctxMenuIsFolder;
@@ -2974,7 +2980,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// the one browser operation that destroys work the user cannot see from
 			// where they clicked, so anything but an empty folder has to pass a
 			// confirmation that names every asset going with it.
-			if (!engineLocked && s_ctxMenuIsFolder && EditorWidgets::dangerMenuItem("Delete"))
+			const bool deleteShown = !engineLocked && s_ctxMenuIsFolder;
+			const bool doDelete    = deleteShown && EditorWidgets::dangerMenuItem("Delete");
+			if (deleteShown) EditorWidgets::helpForKey("content.delete");
+			if (doDelete)
 			{
 				s_deleteFolderTarget = s_ctxMenuItem;
 				s_deleteFolderFiles  = collectFolderContents(s_ctxMenuItem);
@@ -3008,7 +3017,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			if (!engineLocked && s_selectedRootKind != 2)
 			{
 				ImGui::Separator();
-				if (ImGui::BeginMenu("Create Asset"))
+				const bool createOpen = ImGui::BeginMenu("Create Asset");
+				EditorWidgets::helpForKey("content.create");
+				if (createOpen)
 				{
 					const std::string createDir = s_ctxMenuIsFolder
 						? s_ctxMenuItem

@@ -6,6 +6,7 @@
 #include "EditorCamera.h"
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
 #include "EditorToolbar.h"        // palette, metrics, cell/well — shared with the SC bar
+#include "EditorWidgets.h"        // helpForKey — the bar's controls explain themselves
 
 #include <imgui.h>
 #include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
@@ -290,8 +291,7 @@ void optionsPopup(AppContext& ctx, State& st)
 	bool grid = ViewportPanel::groundGridEnabled();
 	if (ImGui::Checkbox("Ground grid", &grid))
 		ViewportPanel::setGroundGridEnabled(grid);
-	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("The world grid under the scene — off while playing either way");
+	EditorWidgets::helpForKey("viewport.grid");
 	int pxW = 0, pxH = 0;
 	ViewportPanel::renderSizePx(pxW, pxH);
 	ImGui::Text("Render target: %d \xc3\x97 %d px", pxW, pxH);
@@ -406,12 +406,12 @@ void render(AppContext& ctx, State& st)
 		float cx = x + kWellPad;
 		if (cell(m, cx, wView, "##vpModeView", iconCursor, labels ? "View" : nullptr,
 		         ctx.editorConfig.mode == EditorMode::View, true,
-		         "View mode — select and transform entities"))
+		         "View mode — select and transform entities", "viewport.mode"))
 			ctx.editorConfig.mode = EditorMode::View;
 		cx += wView + kSegGap;
 		if (cell(m, cx, wLand, "##vpModeLand", iconTerrain, labels ? "Landscape" : nullptr,
 		         ctx.editorConfig.mode == EditorMode::Landscape, true,
-		         "Landscape mode — sculpt and paint terrain"))
+		         "Landscape mode — sculpt and paint terrain", "viewport.mode"))
 			ctx.editorConfig.mode = EditorMode::Landscape;
 		x += kWellPad * 2.0f + wView + kSegGap + wLand + kGroupGap;
 	}
@@ -423,15 +423,17 @@ void render(AppContext& ctx, State& st)
 	{
 		well(m, x, kWellPad * 2.0f + m.cell * 3.0f + kSegGap * 2.0f);
 		float cx = x + kWellPad;
-		struct Tool { const char* id; IconFn icon; ImGuizmo::OPERATION op; const char* tip; };
+		struct Tool { const char* id; IconFn icon; ImGuizmo::OPERATION op;
+		              const char* tip; const char* help; };
 		const Tool tools[3] = {
-			{ "##vpMove",   iconMove,   ImGuizmo::TRANSLATE, "Move (W)"   },
-			{ "##vpRotate", iconRotate, ImGuizmo::ROTATE,    "Rotate (E)" },
-			{ "##vpScale",  iconScale,  ImGuizmo::SCALE,     "Scale (R)"  },
+			{ "##vpMove",   iconMove,   ImGuizmo::TRANSLATE, "Move (W)",   "viewport.translate" },
+			{ "##vpRotate", iconRotate, ImGuizmo::ROTATE,    "Rotate (E)", "viewport.rotate"    },
+			{ "##vpScale",  iconScale,  ImGuizmo::SCALE,     "Scale (R)",  "viewport.scale"     },
 		};
 		for (const Tool& t : tools)
 		{
-			if (cell(m, cx, m.cell, t.id, t.icon, nullptr, st.op == t.op, gizmoUsable, t.tip))
+			if (cell(m, cx, m.cell, t.id, t.icon, nullptr, st.op == t.op, gizmoUsable,
+			         t.tip, t.help))
 				st.op = t.op;
 			cx += m.cell + kSegGap;
 		}
@@ -448,7 +450,8 @@ void render(AppContext& ctx, State& st)
 		         labels ? orientLabel : nullptr, false, gizmoUsable,
 		         st.mode == ImGuizmo::WORLD
 		             ? "World axes — click for Local (object) axes"
-		             : "Local axes — click for World (axis-aligned) axes"))
+		             : "Local axes — click for World (axis-aligned) axes",
+		         "viewport.space"))
 			st.mode = (st.mode == ImGuizmo::WORLD) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
 		x += kWellPad * 2.0f + w + kGroupGap;
 	}
@@ -459,7 +462,8 @@ void render(AppContext& ctx, State& st)
 	{
 		well(m, x, kWellPad * 2.0f + m.cell + kSegGap + snapValW);
 		if (cell(m, x + kWellPad, m.cell, "##vpSnap", iconGrid, nullptr,
-		         st.snapEnabled, gizmoUsable, "Snap to grid while dragging the gizmo"))
+		         st.snapEnabled, gizmoUsable, "Snap to grid while dragging the gizmo",
+		         "viewport.snap"))
 			st.snapEnabled = !st.snapEnabled;
 
 		char buf[32];
@@ -504,8 +508,10 @@ void render(AppContext& ctx, State& st)
 		const bool pressed = ImGui::InvisibleButton("##vpPlay", ImVec2(playW, m.cell));
 		const bool hovered = ImGui::IsItemHovered();
 		const bool held    = ImGui::IsItemActive();
-		ImGui::SetItemTooltip("%s", playing ? "Stop — return to the edited scene"
-		                                    : "Play — run the scene in the viewport");
+		// The one control in the bar that is not a cell(), so it asks for its
+		// help itself. Worth the entry more than any other: what play mode
+		// DISCARDS when it stops is the thing nobody is told until it bites.
+		EditorWidgets::helpForKey("viewport.play");
 		if (hovered || held)
 			dl->AddRectFilled(p0, ImVec2(p0.x + playW, p0.y + m.cell),
 			                  held ? kDownBg : kHoverBg, kCellRound);
@@ -532,13 +538,14 @@ void render(AppContext& ctx, State& st)
 		if (cell(m, tx, m.cell, "##vpPause", EditorToolbar::iconPause, nullptr,
 		         paused, playing,
 		         paused ? "Resume — let the world tick again"
-		                : "Pause — freeze the world, keep drawing it") &&
+		                : "Pause — freeze the world, keep drawing it",
+		         "viewport.pause") &&
 		    ctx.setPaused)
 			ctx.setPaused(!paused);
 
 		tx += m.cell + kSegGap;
 		if (cell(m, tx, m.cell, "##vpStep", iconStep, nullptr, false, playing,
-		         "Step — advance one frame, then pause") &&
+		         "Step — advance one frame, then pause", "viewport.step") &&
 		    ctx.stepFrame)
 			ctx.stepFrame();
 	}
@@ -569,7 +576,7 @@ void render(AppContext& ctx, State& st)
 				ctx.editorCamera->setFlySpeed(ctx.editorConfig.EditorCameraSpeed);
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
-			ImGui::SetItemTooltip("Editor fly-camera speed (units/second) — drag or double-click");
+			EditorWidgets::helpForKey("viewport.camera-speed");
 			rx += w + kGroupGap;
 		}
 

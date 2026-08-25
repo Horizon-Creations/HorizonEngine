@@ -104,8 +104,15 @@ float cellWidth(const Metrics& m, const char* label);
 // One interactive cell inside a well. Returns true when clicked. `on` paints the
 // armed state, `enabled == false` dims it and swallows the click. A null `label`
 // makes it a square icon cell; a null `icon` a text-only one.
+//
+// `helpKey` names an entry in the help table (EditorHelp.h). Where there is one
+// it REPLACES `tooltip` with the full version — heading, sentence, shortcut, and
+// F1 into the manual — and it is shown on a dimmed cell too, since "why can I
+// not press this" is the question a greyed control raises. `tooltip` stays the
+// fallback for cells with no entry, so passing both is correct.
 bool cell(const Metrics& m, float x, float w, const char* id, IconFn icon,
-          const char* label, bool on, bool enabled, const char* tooltip);
+          const char* label, bool on, bool enabled, const char* tooltip,
+          const char* helpKey = nullptr);
 
 // Same, but with the foreground colour forced — for a cell whose job is to
 // report a state (ahead/behind, conflicts) rather than to arm a tool.

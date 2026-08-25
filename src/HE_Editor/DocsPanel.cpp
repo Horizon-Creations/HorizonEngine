@@ -273,8 +273,9 @@ namespace
 					ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 					if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 					{
-						// Copied, not referenced: following the link reloads the
-						// page and frees the runs this pointer lives in.
+						// Copied before navigating: `w.href` points into the runs
+						// of the page being drawn, and following a link is the one
+						// call here that can decide to load a different bundle.
 						const std::string target = *w.href;
 						ImGui::PopStyleVar();
 						followLink(target);
@@ -834,15 +835,21 @@ void draw(AppContext& ctx)
 	const docs::Library& lib = docs::library();
 	if (!lib.loaded())
 	{
-		EditorWidgets::WrapText wrap;
-		ImGui::TextUnformatted("The offline manual could not be loaded.");
-		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
-		ImGui::TextUnformatted(lib.error().c_str());
-		ImGui::TextUnformatted("It ships next to the editor as Docs/he-docs.json.");
-		ImGui::PopStyleColor();
-		ImGui::Spacing();
-		if (EditorWidgets::primaryButton("Open the manual online"))
-			SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
+		// The guard needs its own block: its destructor pops the wrap position
+		// off the CURRENT window, and ImGui::End() has by then switched that to
+		// the parent (see EditorWidgets.h — this is the case the rule exists for,
+		// an End() at the same level as the guard).
+		{
+			EditorWidgets::WrapText wrap;
+			ImGui::TextUnformatted("The offline manual could not be loaded.");
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+			ImGui::TextUnformatted(lib.error().c_str());
+			ImGui::TextUnformatted("It ships next to the editor as Docs/he-docs.json.");
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+			if (EditorWidgets::primaryButton("Open the manual online"))
+				SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
+		}
 		ImGui::End();
 		return;
 	}

@@ -5,6 +5,7 @@
 #include "EditorTheme.h"                 // brand palette (emphasis text, search marker)
 #include "GitMissingDialog.h"            // install remedies shared with the startup dialog
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
+#include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
@@ -119,6 +120,12 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	// own column's edge and not at the window's, which would run it under the pin.
 	EditorWidgets::WrapText wrap;
 
+	// Every row below is looked up as "Preferences/<its label>" in the help
+	// table, which is what gives the whole catalogue its tooltips without a
+	// single changed call site. Scoped, so the docked Quick Settings panel —
+	// which draws through here too — does not leave it set for the next panel.
+	HE::Ed::Help::Scope helpScope("Preferences");
+
 	EditorConfig& cfg = ctx.editorConfig;
 	const char* lastCat = nullptr;
 	int shown = 0;
@@ -207,7 +214,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
-	row("vsync", "Display", [&]{ if (ImGui::Checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
+	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
 		// the high-FPS mouse-look stays smooth and idle GPU load drops; ignored with VSync on.
@@ -255,7 +262,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		const bool specOK = (ctx.backend == HE::RendererBackend::Metal ||
 		                     ctx.backend == HE::RendererBackend::OpenGL);
 		ImGui::BeginDisabled(!specOK);
-		ImGui::Checkbox("Specular AA", &cfg.SpecularAA);
+		EditorWidgets::checkbox("Specular AA", &cfg.SpecularAA);
 		const bool specHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.SpecularAA);
@@ -276,13 +283,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("Specular AA fixes crawling highlights — no edge filter can.");
 	});
 	row("bloom", "Post-Processing", [&]{
-		ImGui::Checkbox("Bloom", &cfg.BloomEnabled);
+		EditorWidgets::checkbox("Bloom", &cfg.BloomEnabled);
 		SubGroup sub(cfg.BloomEnabled);
 		Row::sliderFloat("Bloom Threshold", &cfg.BloomThreshold, 0.0f, 4.0f, "%.2f");
 		Row::sliderFloat("Bloom Intensity", &cfg.BloomIntensity, 0.0f, 2.0f, "%.2f");
 	});
 	row("ssao", "Post-Processing", [&]{
-		ImGui::Checkbox("AO", &cfg.SSAOEnabled);
+		EditorWidgets::checkbox("AO", &cfg.SSAOEnabled);
 		SubGroup sub(cfg.SSAOEnabled);
 		// AO method: SSAO (kernel), HBAO (horizon bitmask), or GTAO (analytic arc).
 		const char* kAOMethods[] = { "SSAO", "HBAO", "GTAO" };
@@ -293,7 +300,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
 		ImGui::BeginDisabled(!supported);
-		ImGui::Checkbox("Screen-Space Reflections", &cfg.SSREnabled);
+		EditorWidgets::checkbox("Screen-Space Reflections", &cfg.SSREnabled);
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.SSREnabled);
@@ -316,7 +323,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("gi", "Global Illumination", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGlobalIllumination;
 		ImGui::BeginDisabled(!supported);
-		ImGui::Checkbox("Global Illumination (ray-traced, Metal)", &cfg.GlobalIlluminationEnabled);
+		EditorWidgets::checkbox("Global Illumination (ray-traced, Metal)", &cfg.GlobalIlluminationEnabled);
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.GlobalIlluminationEnabled);
@@ -332,7 +339,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("girefl", "Global Illumination", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGIReflections;
 		ImGui::BeginDisabled(!supported);
-		ImGui::Checkbox("GI Reflections (ray-traced)", &cfg.GIReflectionsEnabled);
+		EditorWidgets::checkbox("GI Reflections (ray-traced)", &cfg.GIReflectionsEnabled);
 		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.GIReflectionsEnabled);
@@ -363,7 +370,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			// lobe), so it narrows as the tier rises. Off shows the raw trace at
 			// the tier's resolution and ray count — the direct way to tell
 			// whether a soft reflection is the blur or something else.
-			ImGui::Checkbox("GI Refl Blur", &cfg.GIReflBlur);
+			EditorWidgets::checkbox("GI Refl Blur", &cfg.GIReflBlur);
 		}
 		ImGui::EndDisabled();
 		if (!supported && hovered)
@@ -375,7 +382,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	row("gpuparticles", "Effects", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsGpuParticles;
 		ImGui::BeginDisabled(!supported);
-		ImGui::Checkbox("GPU Weather Particles", &cfg.GpuParticles);
+		EditorWidgets::checkbox("GPU Weather Particles", &cfg.GpuParticles);
 		ImGui::EndDisabled();
 		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Not available on this backend (needs OpenGL / transform feedback).");
@@ -384,7 +391,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 	});
 
 	row("landiscovery", "Collaboration", [&]{
-		ImGui::Checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
+		EditorWidgets::checkbox("Find Sessions on the Local Network", &cfg.CollabLanDiscovery);
 		hint("Hosts announce a session on the local network and guests see it in "
 		     "a list, so nobody has to exchange an address or a session ID. This "
 		     "is also the only route that works when the router will not forward "
@@ -406,7 +413,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// change closes at connect, not when the snapshot lands.
 		const bool locked = ctx.collab && ctx.collab->largeAssetSyncLocked();
 		ImGui::BeginDisabled(locked);
-		ImGui::Checkbox("Sync Large Assets (Meshes, Textures, Audio)", &cfg.CollabSyncLargeAssets);
+		EditorWidgets::checkbox("Sync Large Assets (Meshes, Textures, Audio)", &cfg.CollabSyncLargeAssets);
 		// Read the hover state off the checkbox itself, before anything else can
 		// become the "last item" — a tooltip that only appears on the enabled
 		// control would never be seen, since it exists to explain the disabled one.
@@ -544,7 +551,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// the CPU-side copy of every asset either way — which is what lets the
 		// NavMesh bake and the CPU BVH read mesh vertices at all.
 		ImGui::BeginDisabled();
-		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
+		EditorWidgets::checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
 		ImGui::EndDisabled();
 		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Not implemented — CPU asset data is always kept.");
@@ -750,7 +757,7 @@ void drawRepositorySection(AppContext& ctx)
 		ImGui::SetNextItemWidth(180.0f);
 		ImGui::InputText("Name##gh", s_ghRepoName, sizeof(s_ghRepoName));
 		ImGui::SameLine();
-		ImGui::Checkbox("Private", &s_ghPrivate);
+		EditorWidgets::checkbox("Private", &s_ghPrivate);
 
 		ImGui::SetNextItemWidth(-140.0f);
 		ImGui::InputTextWithHint("##ghtoken", "Personal access token",
@@ -799,7 +806,7 @@ void drawRepositorySection(AppContext& ctx)
 		// controller, and three copies of the same lazy load is two too many.
 		// The footer status runs every frame with a project open, so by the time
 		// anyone gets here it has already happened.
-		if (ImGui::Checkbox("Push automatically after each commit",
+		if (EditorWidgets::checkbox("Push automatically after each commit",
 		                    &git->autoPushAfterCommit))
 		{
 			GlobalState::getInstance().setCustomConfigEntry(
@@ -811,7 +818,7 @@ void drawRepositorySection(AppContext& ctx)
 		// than as "fetch": the reason to want it is that "3 behind" stops being
 		// whatever was true when the project was opened. Nothing on disk moves,
 		// which is exactly why this one is safe to automate and pulling is not.
-		if (ImGui::Checkbox("Check the remote for new commits periodically",
+		if (EditorWidgets::checkbox("Check the remote for new commits periodically",
 		                    &git->autoFetch))
 		{
 			GlobalState::getInstance().setCustomConfigEntry("GitAutoFetch", git->autoFetch);

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorUndo, panel plumbing
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
+#include "EditorHelp.h"                  // per-component scope for the property tooltips
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/NavigationSystem.h>
@@ -138,6 +139,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	const bool quiet = (collect != nullptr) || removeMatching;
 	bool structuralChange = false;
 
+	// The slot componentHeader renames as it walks the components. It exists for
+	// the whole call, so an early return out of any section still unwinds it and
+	// no later panel inherits "Rigid Body" as its tooltip scope.
+	HE::Ed::Help::Scope helpScope("");
+
 	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
 	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
 	// entity was selected (the terrain's sculptHeights alone is 263k floats). An edit
@@ -162,12 +168,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	auto componentHeader = [&](const char* label, bool removable, bool& removed) -> bool
 	{
 		removed = false;
+		// Also the one place that knows which component's rows come next, which
+		// is what every property tooltip below is looked up under ("Light/Range"
+		// rather than a bare "Range" that four components would answer to). Set
+		// before the early returns so the silent modes leave it alone.
+		HE::Ed::Help::setScope(label);
 		if (collect) { collect->push_back(label); return false; }
 		if (only && std::strcmp(only, label) != 0) return false;
 		// Removal mode: report it as removed and draw nothing — the section's
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
 		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		// What the component IS, on the header itself — the question that comes
+		// before any of its properties.
+		{
+			char key[96];
+			std::snprintf(key, sizeof(key), "Component/%s", label);
+			EditorWidgets::helpForKey(key);
+		}
 		if (removable && ImGui::BeginPopupContextItem())
 		{
 			if (ImGui::MenuItem("Remove Component"))
@@ -214,7 +232,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			inertEnvironmentNote(entity == world.environmentEntity(), "Sky");
 		if (componentHeader("Environment", false, removed))
 		{
-			ImGui::Checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
+			EditorWidgets::checkbox("Day-Night Cycle", &env->dayNightCycle); trackEdit();
 
 			// Format the 0..1 time as a HH:MM clock shown inside the slider.
 			int minutes = static_cast<int>(env->timeOfDay * 1440.0f) % 1440;
@@ -229,7 +247,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				? "Drives the sun, sky & shadows."
 				: "Move the slider to start a day-night cycle.");
 
-			if (ImGui::Checkbox("Auto-Advance", &env->autoAdvance) && env->autoAdvance)
+			if (EditorWidgets::checkbox("Auto-Advance", &env->autoAdvance) && env->autoAdvance)
 				env->dayNightCycle = true;
 			trackEdit();
 			// Day length is a property of the WORLD (how long a day lasts once time
@@ -259,7 +277,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				                 mp < 0.78f ? "Last Quarter" : "Waning Crescent";
 				if (Row::sliderFloat("Phase", &env->moonPhase, 0.0f, 1.0f, "%.3f")) trackEdit();
 				hint("%s", nm);
-				if (ImGui::Checkbox("Auto Lunar Cycle", &env->moonPhaseAuto)) trackEdit();
+				if (EditorWidgets::checkbox("Auto Lunar Cycle", &env->moonPhaseAuto)) trackEdit();
 				hint("Advances the phase on its own — needs Auto-Advance above.");
 				ImGui::BeginDisabled(!env->moonPhaseAuto);
 				if (Row::sliderFloat("Lunar Cycle Length", &env->moonCycleDays, 1.0f, 60.0f, "%.1f days")) trackEdit();
@@ -294,7 +312,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					     "sunlit tops over blue-grey bellies and a silver lining.");
 					if (env->cloudStyle == 1)
 					{
-						if (ImGui::Checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
+						if (EditorWidgets::checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
 						hint("Extends the sun march so tall towers darken clouds behind them. "
 						     "Slightly more expensive (scales with Quality).");
 						Row::sliderFloat("Evolution", &env->cloudEvolution, 0.0f, 2.0f); trackEdit();
@@ -311,7 +329,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				int q = (env->cloudQuality < 0) ? 0 : (env->cloudQuality > 2 ? 2 : env->cloudQuality);
 				if (Row::combo("Quality", &q, cloudQ, 3)) { env->cloudQuality = q; trackEdit(); }
 				hint("Lower = cheaper. Clouds are a top GPU cost; Low ~halves their step count.");
-				if (ImGui::Checkbox("Low-res clouds (quarter-res pass)", &env->lowResClouds)) trackEdit();
+				if (EditorWidgets::checkbox("Low-res clouds (quarter-res pass)", &env->lowResClouds)) trackEdit();
 				hint("Raymarch clouds at 1/4 res + upsample. Big win in open-sky views. "
 				     "Toggle + F9 to A/B the cost. (Metal first.)");
 			}
@@ -323,7 +341,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::sliderFloat("Wind Direction", &env->windDirection, 0.0f, 360.0f, "%.0f\xc2\xb0"); trackEdit();
 			Row::sliderFloat("Wind Speed", &env->windSpeed, 0.0f, 4.0f); trackEdit();
 			// Cloud shadows: the layer projected along the sun onto the scene.
-			if (ImGui::Checkbox("Cast Cloud Shadows", &env->cloudShadows)) trackEdit();
+			if (EditorWidgets::checkbox("Cast Cloud Shadows", &env->cloudShadows)) trackEdit();
 			hint("The cloud layer casts moving shadows onto the scene (sun-projected; "
 			     "one small map pass per frame). Metal + OpenGL.");
 			if (env->cloudShadows)
@@ -388,8 +406,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::TreePop(); } // end Stars & Milky Way
 
 			if (ImGui::TreeNodeEx("Nebula")) {
-			Row::sliderFloat("Intensity", &env->nebulaIntensity, 0.0f, 1.0f); trackEdit();
-			Row::sliderFloat("Coverage", &env->nebulaCoverage, 0.0f, 1.0f); trackEdit();
+			// "##neb" the way "Density##fog" already does it: the tree node keeps
+			// the ImGui ids apart on its own, but the help lookup is by label
+			// within the COMPONENT, and this component has three Intensities and
+			// two Coverages. The suffix is what tells the tooltips apart.
+			Row::sliderFloat("Intensity##neb", &env->nebulaIntensity, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Coverage##neb", &env->nebulaCoverage, 0.0f, 1.0f); trackEdit();
 			{
 				// Combo index == nebulaQuality (0 Performance, 1 High, 2 Max).
 				int nebQ = env->nebulaQuality < 0 ? 0 : (env->nebulaQuality > 2 ? 2 : env->nebulaQuality);
@@ -399,7 +421,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				if (nebQ == 2)
 					hint("Extra filament octaves + crisper lines (night sky; pricier). Metal/OpenGL.");
 			}
-			Row::sliderFloat("Seed", &env->nebulaSeed, 0.0f, 50.0f, "%.1f"); trackEdit();
+			Row::sliderFloat("Seed##neb", &env->nebulaSeed, 0.0f, 50.0f, "%.1f"); trackEdit();
 			Row::colorEdit3("Nebula Color 1", &env->nebulaColor.x,  ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Nebula Color 2", &env->nebulaColor2.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Nebula Color 3", &env->nebulaColor3.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -407,7 +429,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::TreePop(); } // end Nebula
 
 			if (ImGui::TreeNodeEx("Aurora")) {
-			Row::sliderFloat("Intensity", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
+			Row::sliderFloat("Intensity##aur", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
 			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			ImGui::BeginDisabled(env->auroraIntensity <= 0.0f);
@@ -459,7 +481,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				Row::sliderFloat("Intensity",  &w->intensity, 0.0f, 1.0f); trackEdit();
 				Row::sliderFloat("Transition", &w->transitionDuration, 0.0f, 30.0f, "%.1f s"); trackEdit();
-				ImGui::Checkbox("Auto-Cycle", &w->autoCycle); trackEdit();
+				EditorWidgets::checkbox("Auto-Cycle", &w->autoCycle); trackEdit();
 				ImGui::BeginDisabled(!w->autoCycle);
 				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                 ImGuiSliderFlags_Logarithmic); trackEdit();
@@ -551,9 +573,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 				ImGui::SetTooltip("Not implemented — LOD level is chosen by camera distance "
 				                  "(LOD Component) only.");
-			ImGui::Checkbox("Visible",         &m->visible); trackEdit();
-			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
-			ImGui::Checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
+			EditorWidgets::checkbox("Visible",         &m->visible); trackEdit();
+			EditorWidgets::checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Off means the surface is lit as if nothing shadowed it: "
 				                  "cascades, the point/spot atlas and the ray-traced masks "
@@ -579,9 +601,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					ImGui::Text("Joints: %d | Bone matrices: %d",
 					    (int)asset->skeleton.size(), (int)sm->boneMatrices.size());
 			}
-			ImGui::Checkbox("Visible",         &sm->visible);        trackEdit();
-			ImGui::Checkbox("Casts Shadow",    &sm->castsShadow);    trackEdit();
-			ImGui::Checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
+			EditorWidgets::checkbox("Visible",         &sm->visible);        trackEdit();
+			EditorWidgets::checkbox("Casts Shadow",    &sm->castsShadow);    trackEdit();
+			EditorWidgets::checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Off means the surface is lit as if nothing shadowed it. "
 				                  "Forward path only — the deferred resolve has no free "
@@ -611,9 +633,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Playback controls
 			Row::dragFloat("Speed##an",    &an->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 			Row::dragFloat("Time##an",     &an->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
-			ImGui::Checkbox("Looping##an",   &an->looping); trackEdit();
+			EditorWidgets::checkbox("Looping##an",   &an->looping); trackEdit();
 			ImGui::SameLine();
-			ImGui::Checkbox("Playing##an",   &an->playing); trackEdit();
+			EditorWidgets::checkbox("Playing##an",   &an->playing); trackEdit();
 
 			if (cur)
 				ImGui::Text("Duration: %.3f s  |  Channels: %d",
@@ -638,9 +660,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::sliderFloat("Blend##ab",  &ab->blendAlpha,    0.0f, 1.0f, "%.2f"); trackEdit();
 			Row::dragFloat("Speed##ab",    &ab->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 			Row::dragFloat("Time##ab",     &ab->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
-			ImGui::Checkbox("Looping##ab",   &ab->looping); trackEdit();
+			EditorWidgets::checkbox("Looping##ab",   &ab->looping); trackEdit();
 			ImGui::SameLine();
-			ImGui::Checkbox("Playing##ab",   &ab->playing); trackEdit();
+			EditorWidgets::checkbox("Playing##ab",   &ab->playing); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorBlendComponent>(entity); }
 	}
@@ -694,9 +716,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			Row::dragFloat("Speed##pa",  &pa->playbackSpeed, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 			Row::dragFloat("Time##pa",   &pa->playbackTime,  0.01f,  0.0f, 999.0f, "%.3f s"); trackEdit();
-			ImGui::Checkbox("Looping##pa", &pa->looping); trackEdit();
+			EditorWidgets::checkbox("Looping##pa", &pa->looping); trackEdit();
 			ImGui::SameLine();
-			ImGui::Checkbox("Playing##pa", &pa->playing); trackEdit();
+			EditorWidgets::checkbox("Playing##pa", &pa->playing); trackEdit();
 
 			if (cur)
 			{
@@ -742,7 +764,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				                  "included — and rebuilds the NavMesh from it. Moving bodies, "
 				                  "characters and triggers are left out.");
 			ImGui::SameLine();
-			ImGui::Checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
+			EditorWidgets::checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
 	}
@@ -896,7 +918,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 							case HE::MatParamKind::Bool:
 							{
 								bool b = val[0] > 0.5f;
-								if (ImGui::Checkbox(label, &b)) { val[0] = b ? 1.0f : 0.0f; edited = true; }
+								if (EditorWidgets::checkbox(label, &b)) { val[0] = b ? 1.0f : 0.0f; edited = true; }
 								break;
 							}
 							default: // Float
@@ -1000,8 +1022,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("FOV",        &c->fovDegrees, 0.5f, 1.0f, 179.0f); trackEdit();
 			Row::dragFloat("Near Plane", &c->nearPlane,  0.01f, 0.001f, 100.0f); trackEdit();
 			Row::dragFloat("Far Plane",  &c->farPlane,   1.0f,  0.1f, 100000.0f); trackEdit();
-			ImGui::Checkbox("Main Camera", &c->isMain); trackEdit();
-			ImGui::Checkbox("Orthographic", &c->orthographic); trackEdit();
+			EditorWidgets::checkbox("Main Camera", &c->isMain); trackEdit();
+			EditorWidgets::checkbox("Orthographic", &c->orthographic); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraComponent>(entity); }
 	}
@@ -1012,7 +1034,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (componentHeader("Movement", true, removed))
 		{
 			Row::dragFloat("Max Speed", &mv->maxSpeed, 0.1f, 0.0f, 100.0f); trackEdit();
-			ImGui::Checkbox("Orient To Movement", &mv->orientToMovement); trackEdit();
+			EditorWidgets::checkbox("Orient To Movement", &mv->orientToMovement); trackEdit();
 			if (mv->orientToMovement)
 			{
 				Row::dragFloat("Turn Rate", &mv->turnRate, 5.0f, 0.0f, 3600.0f, "%.0f\xc2\xb0/s");
@@ -1098,7 +1120,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				Row::dragFloat3("Arm Offset", &rig->armOffset.x, 0.05f, -20.0f, 20.0f); trackEdit();
 				Row::dragFloat("Arm Length", &rig->armLength, 0.05f, 0.0f, 100.0f); trackEdit();
-				ImGui::Checkbox("Collide With World", &rig->collision); trackEdit();
+				EditorWidgets::checkbox("Collide With World", &rig->collision); trackEdit();
 				if (rig->collision)
 				{
 					// The radius IS the clearance the camera keeps from surfaces,
@@ -1111,7 +1133,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			else
 			{
-				ImGui::Checkbox("Hide Target Mesh", &rig->hideTargetMesh); trackEdit();
+				EditorWidgets::checkbox("Hide Target Mesh", &rig->hideTargetMesh); trackEdit();
 			}
 
 			// Rotation coupling. Free lets the character turn on its own; Follow
@@ -1127,7 +1149,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// is degrees per SECOND at full deflection — one number cannot be
 			// right for both units.
 			Row::dragFloat("Stick Sensitivity", &rig->stickSensitivity, 1.0f, 10.0f, 720.0f, "%.0f \xc2\xb0/s"); trackEdit();
-			ImGui::Checkbox("Invert Stick Y", &rig->stickInvertY); trackEdit();
+			EditorWidgets::checkbox("Invert Stick Y", &rig->stickInvertY); trackEdit();
 			Row::dragFloat("Yaw",         &rig->yaw,   0.5f, -180.0f, 180.0f, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch",       &rig->pitch, 0.5f, rig->pitchMin, rig->pitchMax, "%.1f"); trackEdit();
 			Row::dragFloat("Pitch Min",   &rig->pitchMin, 0.5f, -89.0f, 0.0f, "%.1f"); trackEdit();
@@ -1159,8 +1181,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::dragFloat("Cull Distance", &l->cullDistance, 0.5f, 0.0f, 100000.0f); trackEdit();
 				hint("Deactivate this light beyond this camera distance (0 = never).");
 			}
-			ImGui::Checkbox("Visible##light",      &l->visible);     trackEdit();
-			ImGui::Checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Visible##light",      &l->visible);     trackEdit();
+			EditorWidgets::checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<LightComponent>(entity); }
 	}
@@ -1194,7 +1216,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Mass",        &r->mass,        0.1f, 0.0f, 100000.0f); trackEdit();
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
-			ImGui::Checkbox("2D Physics",   &r->is2D); trackEdit();
+			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -1224,7 +1246,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::dragFloat("Total Height", &col->height, 0.01f, 0.001f, 100.0f); trackEdit();
 				break;
 			}
-			ImGui::Checkbox("Is Trigger", &col->isTrigger); trackEdit();
+			EditorWidgets::checkbox("Is Trigger", &col->isTrigger); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ColliderComponent>(entity); }
 	}
@@ -1241,7 +1263,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Gravity (m/s²)",     &cc->gravity,    0.1f, 0.0f, 30.0f); trackEdit();
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
-			ImGui::Checkbox("Is Grounded", &cc->isGrounded);
+			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
 			float v[3] = { cc->velocity.x, cc->velocity.y, cc->velocity.z };
 			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();
@@ -1254,7 +1276,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	{
 		if (componentHeader("Save State", true, removed))
 		{
-			ImGui::Checkbox("Enabled", &ss->enabled); trackEdit();
+			EditorWidgets::checkbox("Enabled", &ss->enabled); trackEdit();
 			hint("Lets scripts write this entity's state into the active save "
 			     "(entity.saveState) and re-apply it later (entity.applySavedState). "
 			     "Play mode only; the attributes below choose WHAT is captured.");
@@ -1263,8 +1285,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// COMPONENT HEADERS further up. ImGui derives an id from the label,
 			// so two of them in one window are the same widget as far as it is
 			// concerned — which is what the "conflicting ID" warning reports.
-			ImGui::Checkbox("Transform##savestate", &ss->saveTransform); trackEdit();
-			ImGui::Checkbox("Visibility##savestate", &ss->saveVisibility); trackEdit();
+			EditorWidgets::checkbox("Transform##savestate", &ss->saveTransform); trackEdit();
+			EditorWidgets::checkbox("Visibility##savestate", &ss->saveVisibility); trackEdit();
 			ImGui::EndDisabled();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
@@ -1330,7 +1352,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			hint("Logical name matching ScriptEngine::loadScript(name, source). The script "
 			     "must export onStart(self) and/or onUpdate(self, dt). Ignored for a "
 			     "HorizonCode class.");
-			ImGui::Checkbox("Enabled", &s->enabled); trackEdit();
+			EditorWidgets::checkbox("Enabled", &s->enabled); trackEdit();
 
 			// ── Declared properties (M.properties table) ──────────────────
 			if (ctx.propScriptEngine && ctx.contentManager && !s->moduleName.empty())
@@ -1364,7 +1386,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 								if (Row::dragInt(def.name.c_str(), &val.i)) trackEdit();
 								break;
 							case ScriptPropType::Bool:
-								if (ImGui::Checkbox(def.name.c_str(), &val.b)) trackEdit();
+								if (EditorWidgets::checkbox(def.name.c_str(), &val.b)) trackEdit();
 								break;
 							case ScriptPropType::String:
 							{
@@ -1446,9 +1468,9 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (Row::inputText("Bus##as", busBuf, sizeof(busBuf))) { a->busName = busBuf; trackEdit(); }
 			Row::dragFloat("Volume##as", &a->volume, 0.01f, 0.0f, 2.0f); trackEdit();
 			Row::dragFloat("Pitch##as",  &a->pitch,  0.01f, 0.1f, 4.0f); trackEdit();
-			ImGui::Checkbox("Loop##as",        &a->loop);        trackEdit();
-			ImGui::Checkbox("Play on Start##as",&a->playOnStart); trackEdit();
-			ImGui::Checkbox("Spatial##as",     &a->spatial);     trackEdit();
+			EditorWidgets::checkbox("Loop##as",        &a->loop);        trackEdit();
+			EditorWidgets::checkbox("Play on Start##as",&a->playOnStart); trackEdit();
+			EditorWidgets::checkbox("Spatial##as",     &a->spatial);     trackEdit();
 			if (a->spatial)
 			{
 				Row::dragFloat("Inner Range##as",   &a->innerRange,    0.1f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
@@ -1485,7 +1507,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					/*showClear=*/true) != EditorWidgets::SlotAction::None)
 				ParticleSystem::markConfigDirty(*ps);
 
-			ImGui::Checkbox("Playing##ps", &ps->playing); trackEdit();
+			EditorWidgets::checkbox("Playing##ps", &ps->playing); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
@@ -1580,7 +1602,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					ImGui::SetTooltip("Not supported yet — canvases are drawn in screen space.");
 				ImGui::EndCombo();
 			}
-			ImGui::Checkbox("Active##cv", &cv->active); trackEdit();
+			EditorWidgets::checkbox("Active##cv", &cv->active); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UICanvasComponent>(entity); }
 	}
@@ -1602,7 +1624,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				el->anchor = static_cast<UIAnchor>(anch); trackEdit();
 			}
 			Row::dragInt("Layer##el",  &el->layer, 1); trackEdit();
-			ImGui::Checkbox("Active##el", &el->active); trackEdit();
+			EditorWidgets::checkbox("Active##el", &el->active); trackEdit();
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIElementComponent>(entity); }
 	}
@@ -1661,6 +1683,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		                     + ImGui::GetCursorPosX());
 		if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
 			ImGui::OpenPopup("##add_component");
+		// The most important control in the panel for anyone who has not built a
+		// scene before: an entity is nothing until it is given components, and
+		// nothing on screen says so.
+		EditorWidgets::helpForKey("details.add-component");
 
 		if (ImGui::BeginPopup("##add_component"))
 		{
