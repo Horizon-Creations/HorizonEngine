@@ -262,7 +262,7 @@ there with no script changes at all.
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |
 | **Time** | 6 | `deltaTime`, `elapsed`, `frameCount`, `setTimeScale`, `timeScale`, `unscaledDeltaTime` |
 | **Player** | 6 | `possess`, `unpossess`, `possessed`, `controllerOf`, `controller`, `character` |
-| **Input** | 8 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta`, `gamepadConnected`, `gamepadButton`, `gamepadAxis` |
+| **Input** | 12 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta`, `gamepadConnected`, `gamepadButton`, `gamepadAxis`, `setModeGameOnly`, `setModeGameAndUI`, `setModeUIOnly`, `mode` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
 | **Environment** | 10 | `get/setTimeOfDay`, `get/setCloudCoverage`, `get/setFogDensity`, `get/setWindDirection`, `get/setWindSpeed` |
 | **Audio** | 7 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition` |
@@ -334,6 +334,29 @@ Notes:
     timer semantics). On, it counts real seconds — immune to the scale, and the
     only kind that can finish while the game is paused. Widgets share the
     runtime, so that pin is what lets a pause menu time anything at all.
+- **Input routing decides who a frame's input belongs to.** The PlayerController
+  flips it with **Set Input Mode: Game Only / Game and UI / UI Only**, and
+  **Input Mode** reads it back as a string.
+  - *Game and UI* is the **default** and the behaviour that existed before the
+    modes did: both get input, and a pointer sitting on an interactive element
+    belongs to the UI, so that click is masked out of gameplay instead of firing
+    the weapon behind the button.
+  - *Game Only* leaves the UI on screen and deaf: no hover, no click, no wheel,
+    no focus navigation, no text entry. Gameplay gets everything unmasked.
+  - *UI Only* is the reverse: gameplay reads no keys, no mouse buttons and no
+    gamepad (`gamepadConnected` answers false). The mouse **position** still
+    reads true, because a widget graph asking where the pointer is should get
+    the truth and a position alone drives nothing.
+  - The one thing that still reaches gameplay under *UI Only* is an action whose
+    InputAction asset ticks **"Fires while the game is paused"** — otherwise the
+    key that opened a menu could not close it. That flag already answers "does
+    this still work when the game is stopped", so it answers this too rather
+    than growing a second flag that can disagree with it.
+  - The **cursor is not part of the mode**: `cursor.setVisible` stays its own
+    decision, because a cutscene with no cursor is still Game Only and a pause
+    menu may want the cursor the game already showed.
+  - The mode is **session state**: starting or stopping play resets it to Game
+    and UI, so a session never inherits the menu state of the last one.
 - `vec3` values ride in a `Color` value on the boundary (spread as 4 numbers in
   Lua/Python).
 

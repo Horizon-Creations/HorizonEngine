@@ -911,7 +911,13 @@ void GameApplication::updateUIInput()
 
 	// While the fly-look holds the mouse captive there is no visible cursor —
 	// hover states clear and nothing is clickable (Esc releases the mouse).
-	const bool pointerValid = !m_mouseCaptured && w != nullptr;
+	//
+	// Game-only routing joins that condition rather than skipping this function:
+	// processPointer still has to RUN with an invalid pointer, because that is
+	// what clears a hover the UI is already showing. Returning early would leave
+	// the last hovered button lit for as long as the mode lasts.
+	const bool uiTakesInput = HE::api::input::mode() != HE::api::input::Mode::GameOnly;
+	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput;
 
 	// Widget pointer input first — widgets draw on top of entity UI. The answer
 	// ("the pointer is on something clickable") is kept, not dropped: it is what
@@ -939,7 +945,7 @@ void GameApplication::updateUIInput()
 	// A menu has to be usable without a mouse. Arrow keys and the pad's D-Pad
 	// move the focus, Enter/Space and the south button activate it. Not routed
 	// while a text field has the keyboard: there the arrows belong to the text.
-	if (!m_world->widgets().hasFocusedTextField())
+	if (uiTakesInput && !m_world->widgets().hasFocusedTextField())
 	{
 		Input& in = input();
 		using Nav = WidgetManager::NavDir;
@@ -1068,7 +1074,11 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 
 	// A focused in-game text field owns the keyboard: route text + edit keys to
 	// the widget and swallow them so they don't drive the camera/gameplay.
-	if (m_world && m_world->widgets().hasFocusedTextField())
+	// Not under game-only routing: there the UI receives nothing, and a field
+	// that still held focus from before the switch would otherwise keep eating
+	// the movement keys with no way for the player to take them back.
+	if (m_world && HE::api::input::mode() != HE::api::input::Mode::GameOnly &&
+	    m_world->widgets().hasFocusedTextField())
 	{
 		if (event.type == SDL_EVENT_TEXT_INPUT)
 		{
@@ -1167,12 +1177,30 @@ void GameApplication::OnRender(float deltaTime)
 	// straight out of this snapshot — so they are masked out of the snapshot
 	// itself, which is the one place every frontend reads them from. Movement is
 	// deliberately left alone: only the buttons are the UI's.
-	if (m_uiWantsPointer)
+	const auto inputMode = HE::api::input::mode();
+	if (inputMode == HE::api::input::Mode::UIOnly)
+	{
+		// UI-only is the stronger form of the masking below: not "the click
+		// landed on a button" but "gameplay is not being played right now".
+		// Keys, buttons and the wheel go; the POSITION stays, because a widget
+		// graph asking where the pointer is deserves the truth and a position on
+		// its own moves nothing.
+		HE::api::input::setKeysDown({});
+		HE::api::input::setMouse(HE::api::input::mousePosition(), glm::vec2(0.0f), 0u, 0.0f);
+	}
+	else if (m_uiWantsPointer)
 		HE::api::input::setMouse(HE::api::input::mousePosition(),
 		                         HE::api::input::mouseDelta(), 0u,
 		                         HE::api::input::scrollDelta());
 	// Gamepad snapshot: PUSHED from Input's merged frame, deadzone-filtered —
 	// the snapshot never polls SDL itself (one owner per device stream).
+	// Reported as disconnected under UI-only: the pad is the menu's now, and a
+	// gameplay graph polling it must see the same nothing the keyboard shows.
+	if (inputMode == HE::api::input::Mode::UIOnly)
+	{
+		HE::api::input::setGamepad(false, nullptr, 0, nullptr, 0);
+	}
+	else
 	{
 		float axes[SDL_GAMEPAD_AXIS_COUNT];
 		for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
@@ -1275,7 +1303,8 @@ void GameApplication::OnRender(float deltaTime)
 	// it is masked while the pointer sits on a UI element, the same way the
 	// editor blanks this very frame outside capture.
 	MouseFrame playerMouse = input().mouse();
-	if (m_uiWantsPointer) playerMouse.buttons = 0;
+	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
+		playerMouse.buttons = 0;
 	m_playerHost.tick(input(), gameDt, playerMouse);
 	// Entity classes: Tick, plus reaping the ones whose entity is gone.
 	m_entityHost.tick(gameDt);

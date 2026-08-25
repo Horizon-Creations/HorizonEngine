@@ -1761,13 +1761,30 @@ void EditorApplication::OnRender(float dt)
 		// down), which is what the packaged game does too, and the capture check
 		// is what guarantees a player who is looking around and shooting is never
 		// masked: while captured there is no pointer over any widget.
-		if (!m_playMouseCaptured && m_editorWorld && m_editorWorld->widgets().pointerOverUI())
+		//
+		// UI-only routing is the stronger form of the same idea and takes
+		// precedence: there gameplay is not being played at all, so the keys and
+		// the pad go too, not just the buttons under the pointer.
+		const auto inputMode = HE::api::input::mode();
+		if (inputMode == HE::api::input::Mode::UIOnly)
+		{
+			HE::api::input::setKeysDown({});
+			HE::api::input::setMouse(HE::api::input::mousePosition(), glm::vec2(0.0f), 0u, 0.0f);
+		}
+		else if (!m_playMouseCaptured && m_editorWorld &&
+		         m_editorWorld->widgets().pointerOverUI())
 			HE::api::input::setMouse(HE::api::input::mousePosition(),
 			                         HE::api::input::mouseDelta(), 0u,
 			                         HE::api::input::scrollDelta());
 		// Gamepad snapshot: unlike the mouse it is NOT gated on the capture —
 		// a pad has no cursor to fight ImGui over, so while playing it always
 		// belongs to the game. Pushed from Input's merged frame, filtered.
+		// Under UI-only the pad is the menu's, so gameplay sees it as absent.
+		if (inputMode == HE::api::input::Mode::UIOnly)
+		{
+			HE::api::input::setGamepad(false, nullptr, 0, nullptr, 0);
+		}
+		else
 		{
 			float axes[SDL_GAMEPAD_AXIS_COUNT];
 			for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; ++a)
@@ -2294,7 +2311,12 @@ void EditorApplication::OnRender(float dt)
 			// not go through to the world behind it as well (the packaged game
 			// does the same with m_uiWantsPointer). Scripts reading the raw mouse
 			// get the same verdict through ui.pointerOverUI.
-			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured;
+			// Game-only routing joins the capture condition instead of skipping
+			// the call: processPointer still has to run with an invalid pointer,
+			// because that is what clears a hover the UI is already showing.
+			const bool uiTakesInput =
+				HE::api::input::mode() != HE::api::input::Mode::GameOnly;
+			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured && uiTakesInput;
 			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
 				m_uiPointerDown, uiPointerLive);
@@ -2309,7 +2331,7 @@ void EditorApplication::OnRender(float dt)
 			// game uses: arrows or D-Pad move the focus, Enter/Space or the
 			// south button activate. Held state only, so the edges live here —
 			// and a focused text field keeps the arrows for its own text.
-			if (!m_editorWorld->widgets().hasFocusedTextField())
+			if (uiTakesInput && !m_editorWorld->widgets().hasFocusedTextField())
 			{
 				using Nav = WidgetManager::NavDir;
 				const struct { Nav dir; SDL_Scancode key; SDL_GamepadButton pad; } kNav[] = {
@@ -5319,6 +5341,10 @@ void EditorApplication::setPlayMode(bool play)
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;
 	m_stepFrame = false;
+	// Same reasoning for the input routing: it is session state. A game that
+	// stopped while its pause menu was up left the mode on UI-only, and without
+	// this the NEXT session would start with gameplay deaf for no visible reason.
+	HE::api::input::setMode(HE::api::input::Mode::GameAndUI);
 
 	const std::filesystem::path snapshot =
 		std::filesystem::temp_directory_path() / "he_play_snapshot.hescene_bin";

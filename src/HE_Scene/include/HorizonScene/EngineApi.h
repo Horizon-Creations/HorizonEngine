@@ -751,6 +751,49 @@ namespace input {
     bool  gamepadConnected();
     bool  gamepadButton(const std::string& name);
     float gamepadAxis(const std::string& name);
+
+    // ── Input routing: whose input this frame is ─────────────────────────────
+    // The switch a PlayerController flips between "the game is being played"
+    // and "a menu is up". Three states, the same three Unreal names:
+    //
+    //   GameOnly   the UI still DRAWS, but receives nothing: no hover, no
+    //              click, no wheel, no focus navigation, no text entry.
+    //              Gameplay gets every input unmasked.
+    //   GameAndUI  both. A pointer over an interactive element belongs to the
+    //              UI and is masked out of gameplay; everything else passes
+    //              through. This is the default and it is exactly what the
+    //              engine did before modes existed, so no project changes
+    //              behaviour by upgrading.
+    //   UIOnly     the UI has it all. Gameplay reads no keys, no mouse
+    //              buttons, no gamepad. Mouse POSITION still reads true: a
+    //              widget graph asking where the pointer is should get an
+    //              answer, and position alone drives nothing.
+    //
+    // The ONE exception in UIOnly is an input action whose author ticked
+    // "run while paused". Without it the key that opens a menu could not close
+    // it, and that flag already means "this action still works when the game is
+    // stopped" — the same question, so it gets the same answer rather than a
+    // second flag that can disagree with the first.
+    //
+    // The cursor is deliberately not part of this. cursor.setVisible exists and
+    // the two are separate decisions: a cutscene with no cursor is still
+    // GameOnly, and a pause menu may want the cursor its game already showed.
+    enum class Mode : std::uint8_t { GameOnly = 0, GameAndUI = 1, UIOnly = 2 };
+    // Host + C++ side. The apps read mode() every frame to route; setMode is
+    // what the three script functions below land on, and what an app calls to
+    // put the mode back to the default when a play session begins or ends.
+    void setMode(Mode m);
+    Mode mode();
+
+    // Script side. Three functions rather than one taking a number, because
+    // that is what a node palette can read: "Set Input Mode: UI Only" says
+    // what it does, "Set Input Mode(2)" does not.
+    void setModeGameOnly();
+    void setModeGameAndUI();
+    void setModeUIOnly();
+    // "GameOnly" / "GameAndUI" / "UIOnly" — for a debug readout, and so a graph
+    // can branch on the state it did not set itself.
+    std::string modeName();
 }
 
 // ── Machine-readable registry ─────────────────────────────────────────────────

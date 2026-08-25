@@ -1591,6 +1591,30 @@ float gamepadAxis(const std::string& name)
     const SDL_GamepadAxis a = SDL_GetGamepadAxisFromString(name.c_str());
     return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
+
+// Deliberately NOT part of Snapshot: the snapshot is this frame's readings and
+// is overwritten wholesale every frame, while the mode is a decision that has to
+// outlive the frame that made it. A mode inside Snapshot would be reset by the
+// next pushSdlSnapshot, which is the bug this comment exists to prevent.
+Mode& modeState() { static Mode m = Mode::GameAndUI; return m; }
+
+void setMode(Mode m) { modeState() = m; }
+Mode mode()          { return modeState(); }
+
+void setModeGameOnly()  { setMode(Mode::GameOnly); }
+void setModeGameAndUI() { setMode(Mode::GameAndUI); }
+void setModeUIOnly()    { setMode(Mode::UIOnly); }
+
+std::string modeName()
+{
+    switch (mode())
+    {
+    case Mode::GameOnly:  return "GameOnly";
+    case Mode::UIOnly:    return "UIOnly";
+    case Mode::GameAndUI: break;
+    }
+    return "GameAndUI";
+}
 } // namespace input
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -1926,6 +1950,19 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
 
+        // Input routing — see input::Mode in the header for what each one gates.
+        // Three rows rather than one taking a number: the palette entry has to
+        // say which mode it sets, and the registry's one-callee-per-row rule
+        // wants three functions anyway.
+        t.push_back({ "input.setModeGameOnly", "Input", true, {}, {}, "HE::api::input::setModeGameOnly",
+            [](Ctx&, const VV&){ input::setModeGameOnly(); return VV{}; } });
+        t.push_back({ "input.setModeGameAndUI", "Input", true, {}, {}, "HE::api::input::setModeGameAndUI",
+            [](Ctx&, const VV&){ input::setModeGameAndUI(); return VV{}; } });
+        t.push_back({ "input.setModeUIOnly", "Input", true, {}, {}, "HE::api::input::setModeUIOnly",
+            [](Ctx&, const VV&){ input::setModeUIOnly(); return VV{}; } });
+        t.push_back({ "input.mode", "Input", false, {}, {{"mode", P::String}}, "HE::api::input::modeName",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(input::modeName()) }; } });
+
         // Entity queries
         t.push_back({ "entity.findByName", "Entity", false, {{"name", P::String}}, {{"entity", P::Int}}, "HE::api::entity::findByName",
             [](Ctx& c, const VV& a){ return VV{ Value::ofInt((int)entity::findByName(c, aS(a, 0))) }; } });
@@ -2249,6 +2286,10 @@ const std::vector<ApiFn>& registry()
             { "input.gamepadConnected", "Gamepad Connected" },
             { "input.gamepadButton", "Gamepad Button" },
             { "input.gamepadAxis", "Gamepad Axis" },
+            { "input.setModeGameOnly", "Set Input Mode: Game Only" },
+            { "input.setModeGameAndUI", "Set Input Mode: Game and UI" },
+            { "input.setModeUIOnly", "Set Input Mode: UI Only" },
+            { "input.mode", "Input Mode" },
             { "entity.findByName", "Find By Name" },  { "entity.exists", "Entity Exists" },
             { "entity.setVisible", "Set Entity Visible" }, { "entity.getVisible", "Get Entity Visible" },
             { "entity.saveState", "Save Entity State" },

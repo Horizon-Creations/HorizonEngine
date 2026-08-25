@@ -630,6 +630,39 @@ TEST_CASE("Input: the pushed snapshot reflects through the registry")
     HE::api::input::clear();
 }
 
+TEST_CASE("Input mode: three exec rows, a readable name, and GameAndUI by default")
+{
+    Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // The default matters more than it looks: it is what every project that
+    // never touches the mode gets, and it has to be the behaviour that existed
+    // before modes did, or upgrading changes a game nobody edited.
+    HE::api::input::setMode(HE::api::input::Mode::GameAndUI);
+    CHECK(HE::api::input::mode() == HE::api::input::Mode::GameAndUI);
+    CHECK(call("input.mode", {})[0].s == "GameAndUI");
+
+    call("input.setModeUIOnly", {});
+    CHECK(HE::api::input::mode() == HE::api::input::Mode::UIOnly);
+    CHECK(call("input.mode", {})[0].s == "UIOnly");
+
+    call("input.setModeGameOnly", {});
+    CHECK(HE::api::input::mode() == HE::api::input::Mode::GameOnly);
+    CHECK(call("input.mode", {})[0].s == "GameOnly");
+
+    call("input.setModeGameAndUI", {});
+    CHECK(HE::api::input::mode() == HE::api::input::Mode::GameAndUI);
+
+    // The mode is a decision, the snapshot is this frame's readings. Pushing a
+    // frame must not undo the decision — the reason the mode does not live in
+    // Snapshot, and the regression this check exists for.
+    call("input.setModeUIOnly", {});
+    HE::api::input::clear();
+    CHECK(HE::api::input::mode() == HE::api::input::Mode::UIOnly);
+
+    HE::api::input::setMode(HE::api::input::Mode::GameAndUI);
+}
+
 TEST_CASE("Input: the pushed gamepad state reflects through the registry")
 {
     Ctx c{};

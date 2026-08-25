@@ -146,9 +146,18 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	// resume. Events that fall in a pause are dropped, never queued.
 	const bool paused = HE::api::time::isPaused();
 
+	// UI-only routing silences gameplay input for the same reason a pause does,
+	// and lets the same actions through: the one the author marked "run while
+	// paused". Without that exception the key that opened a menu could not close
+	// it, because in UI-only mode nothing else reaches the controller. Both
+	// conditions ask "is the game being played right now", so they share the
+	// author's answer rather than growing a second flag that can contradict it.
+	const bool uiOnly = HE::api::input::mode() == HE::api::input::Mode::UIOnly;
+	const bool silenced = paused || uiOnly;
+
 	for (const ActionInfo& a : m_actions)
 	{
-		if (paused && !a.runWhilePaused) continue;
+		if (silenced && !a.runWhilePaused) continue;
 		switch (a.kind)
 		{
 		case ActionKind::Axis:
