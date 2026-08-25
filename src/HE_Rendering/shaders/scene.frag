@@ -76,7 +76,11 @@ layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
 // Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
 layout(set = 0, binding = 2) uniform MatUBO {
     vec4 baseColorMet;  // rgb = baseColor, a = metallic
-    vec4 roughPad;      // x = roughness, y = opacity, z = hasTexture (0/1)
+    // x = roughness, y = opacity, z = hasTexture (0/1),
+    // w = 1 when the object IGNORES shadows (MeshComponent::receivesShadow ==
+    //     false). Inverted on purpose: a fill site that leaves the lane at 0
+    //     keeps shadowing rather than silently losing every shadow.
+    vec4 roughPad;
 } mat_ubo;
 
 // Per-mesh base-color texture (set = 2, binding = 0), bound per draw. Untextured
@@ -333,6 +337,9 @@ void main()
                 sh = texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx];
             giLocalIdx++;
         }
+        // "Receives Shadow" off: the object is lit as if nothing occluded it.
+        // After BOTH branches so it covers the shadow map and the GI masks alike.
+        if (mat_ubo.roughPad.w > 0.5) sh = 1.0;
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
     }
     // Atmospheric fog

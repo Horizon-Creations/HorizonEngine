@@ -32,6 +32,9 @@ extern "C" {
 static const char* kWorldKey   = "__horizonWorld";
 static const char* kPhysicsKey = "__horizonPhysics";
 static const char* kContentKey = "__horizonContent";
+// Points AT the owning context's m_quitHandler rather than holding a copy, so a
+// later setQuitHandler is visible without re-registering anything.
+static const char* kQuitKey    = "__horizonQuit";
 
 static HorizonWorld* getWorld(lua_State* L)
 {
@@ -55,6 +58,14 @@ static ContentManager* getContent(lua_State* L)
     auto* cm = static_cast<ContentManager*>(lua_touserdata(L, -1));
     lua_pop(L, 1);
     return cm;
+}
+
+static const std::function<void()>* getQuit(lua_State* L)
+{
+    lua_getfield(L, LUA_REGISTRYINDEX, kQuitKey);
+    auto* q = static_cast<const std::function<void()>*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return q;
 }
 
 // ─── Lua C functions ─────────────────────────────────────────────────────────
@@ -763,6 +774,9 @@ static int lua_engine_dispatch(lua_State* L)
     const auto* fn = static_cast<const HE::api::ApiFn*>(lua_touserdata(L, lua_upvalueindex(1)));
     if (!fn) return 0;
     HE::api::Ctx c{ getWorld(L), getPhysics(L), getContent(L) };
+    // What "quit" means, as the host bound it — horizon.app.quit is a logged
+    // no-op without it, so a Lua-only project could not close its own game.
+    if (const std::function<void()>* quit = getQuit(L)) c.requestQuit = *quit;
     std::vector<HorizonCode::Value> args; args.reserve(fn->params.size());
     int idx = 1;
     for (const auto& p : fn->params) args.push_back(luaReadValue(L, idx, p.type));
@@ -1103,6 +1117,11 @@ void ScriptContext::registerHorizonApi()
     lua_pushlightuserdata(L, nullptr);
     lua_setfield(L, LUA_REGISTRYINDEX, kContentKey);
 
+    // The quit hook is registered as the ADDRESS of the member, once: the member
+    // outlives this state, so setQuitHandler only has to assign it.
+    lua_pushlightuserdata(L, &m_quitHandler);
+    lua_setfield(L, LUA_REGISTRYINDEX, kQuitKey);
+
     // Create `horizon` global table and register all functions
     luaL_newlib(L, kHorizonFuncs);
     lua_setglobal(L, "horizon");
@@ -1130,6 +1149,36 @@ void ScriptContext::setContentManager(ContentManager* cm)
     lua_setfield(L, LUA_REGISTRYINDEX, kContentKey);
 
     if (m_py) m_py->setContentManager(cm);
+}
+
+// The published copy of the active context's quit handler. It sits at file scope
+// because its reader is in ANOTHER module — the CPython plugin, which has no
+// ScriptContext to ask and reaches it through hostQuitHandler() below.
+static std::function<void()> s_hostQuitHandler;
+// Who published it, so a context that dies clears only its own handler and never
+// a newer context's.
+static const ScriptContext* s_quitPublisher = nullptr;
+
+const std::function<void()>& ScriptContext::hostQuitHandler() { return s_hostQuitHandler; }
+
+ScriptContext::~ScriptContext()
+{
+    if (s_quitPublisher == this)
+    {
+        s_hostQuitHandler = nullptr;
+        s_quitPublisher   = nullptr;
+    }
+}
+
+void ScriptContext::setQuitHandler(std::function<void()> fn)
+{
+    m_quitHandler = std::move(fn);
+    // Lua already sees the member through the registry pointer. Python cannot:
+    // its backend is a separate library that builds its own Ctx, so the handler
+    // is published where that module can read it — one source for both, instead
+    // of quit working in one language and not the other.
+    s_hostQuitHandler = m_quitHandler;
+    s_quitPublisher   = this;
 }
 
 // ─── Backend routing ───────────────────────────────────────────────────────────

@@ -3872,9 +3872,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
             if (m_matUBO)
             {
-                struct MatData { float r,g,b,met; float rough,opacity,hasTex,pad; } md{
+                struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
                     dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
-                    dc.roughness, dc.opacity, textured ? 1.0f : 0.0f, 0.0f
+                    dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
+                    dc.receivesShadow ? 0.0f : 1.0f
                 };
                 vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
                 VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
@@ -4024,9 +4025,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 // Update material UBO (same as drawDCVk).
                 if (m_matUBO)
                 {
-                    struct MatData { float r,g,b,met; float rough,opacity,hasTex,pad; } md{
+                    struct MatData { float r,g,b,met; float rough,opacity,hasTex,noShadow; } md{
                         dc.baseColor.r, dc.baseColor.g, dc.baseColor.b, dc.metallic,
-                        dc.roughness, dc.opacity, textured ? 1.0f : 0.0f, 0.0f
+                        dc.roughness, dc.opacity, textured ? 1.0f : 0.0f,
+                        dc.receivesShadow ? 0.0f : 1.0f
                     };
                     vkCmdUpdateBuffer(cmd, m_matUBO, 0, sizeof(md), &md);
                     VkBufferMemoryBarrier bar{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };

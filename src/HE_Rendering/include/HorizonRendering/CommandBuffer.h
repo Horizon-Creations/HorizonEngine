@@ -22,6 +22,10 @@ struct DrawCall {
     uint32_t     entityId      = 0;                    // editor picking / debug
     uint8_t      lod           = 0;
     bool         contributesAO = true;                 // false → skipped by the SSAO prepass
+    // See RenderObject::receivesShadow. Shared across the whole batch when
+    // instanceTransforms is non-empty: GeometryPass only batches runs that agree
+    // on it, so a backend can hand it to the shader once per draw.
+    bool         receivesShadow = true;
     // PBR material scalars resolved from MaterialAsset at extract time.
     glm::vec3    baseColor     = { 1.0f, 1.0f, 1.0f };
     float        metallic      = 0.0f;

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/AudioEngine.h"
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
@@ -259,8 +260,29 @@ RaycastHit raycast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float maxDist
     const auto r = ScriptApi::raycast(c.physics, o, d, maxDist);
     return { r.hit, r.entityId, r.point, r.normal, r.distance };
 }
+// The rest reach PhysicsWorld directly rather than through ScriptApi. ScriptApi
+// exists to serve the flat Lua/Python bindings, and those are frozen (adding to
+// them changes a script-visible arity, see the note in ScriptContext.cpp) — a
+// shim there would be a function nothing can ever call.
+RaycastHit sphereCast(Ctx& c, const glm::vec3& o, const glm::vec3& d, float radius, float maxDist)
+{
+    RaycastHit out;
+    if (!c.physics) return out;
+    const PhysicsWorld::RaycastHit r = c.physics->sphereCast(o, d, radius, maxDist);
+    return { r.hit, r.entityId, r.point, r.normal, r.distance };
+}
+std::vector<Entity> overlapSphere(Ctx& c, const glm::vec3& center, float radius)
+{
+    return c.physics ? c.physics->overlapSphere(center, radius) : std::vector<Entity>{};
+}
+bool addForce(Ctx& c, Entity e, const glm::vec3& f)   { return c.physics && c.physics->addForce(e, f); }
+bool addImpulse(Ctx& c, Entity e, const glm::vec3& i) { return c.physics && c.physics->addImpulse(e, i); }
+bool addTorque(Ctx& c, Entity e, const glm::vec3& t)  { return c.physics && c.physics->addTorque(e, t); }
 void setVelocity(Ctx& c, Entity e, const glm::vec3& v) { ScriptApi::setVelocity(c.physics, e, v); }
+glm::vec3 getVelocity(Ctx& c, Entity e)                { return c.physics ? c.physics->getVelocity(e) : glm::vec3(0.0f); }
 bool isGrounded(Ctx& c, Entity e)                      { return ScriptApi::isGrounded(c.physics, e); }
+void setGravity(Ctx& c, const glm::vec3& g)            { if (c.physics) c.physics->setGravity(g); }
+glm::vec3 getGravity(Ctx& c)                           { return c.physics ? c.physics->gravity() : glm::vec3(0.0f); }
 } // namespace physics
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -389,6 +411,7 @@ void        setPosition(Ctx& c, Entity e, const glm::vec2& p){ if (c.world) Scri
 glm::vec2   getSize(Ctx& c, Entity e)                        { return c.world ? ScriptApi::getUISize(*c.world, e) : glm::vec2(0.0f); }
 void        setSize(Ctx& c, Entity e, const glm::vec2& s)    { if (c.world) ScriptApi::setUISize(*c.world, e, s); }
 bool        setMaterialParam(Ctx& c, Entity e, const std::string& n, const glm::vec4& v) { return c.world ? ScriptApi::setUIMaterialParam(*c.world, c.content, e, n, v) : false; }
+bool        pointerOverUI(Ctx& c)                            { return c.world ? ScriptApi::pointerOverUI(*c.world) : false; }
 } // namespace ui
 
 // ── Live widgets ─────────────────────────────────────────────────────────────
@@ -406,6 +429,22 @@ bool callFunction(Ctx& c, int id, const std::string& fn) { return c.world ? Scri
 namespace cursor {
 void setVisible(Ctx&, bool show) { ScriptApi::setCursorVisible(show); }
 } // namespace cursor
+
+// ── Application ──────────────────────────────────────────────────────────────
+namespace app {
+void quit(Ctx& c)
+{
+    // Loud, because "my Quit button does nothing" is otherwise unexplainable
+    // from the graph: the row is bound, the host just never said what quitting
+    // means here (an editor tool window, a test rig).
+    if (!c.requestQuit)
+    {
+        HE_LOG_WARN(Script, "%s", "app.quit: no quit handler bound by the host — ignored");
+        return;
+    }
+    c.requestQuit();
+}
+} // namespace app
 
 // ── Camera ───────────────────────────────────────────────────────────────────
 namespace {
@@ -1661,6 +1700,32 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ physics::setVelocity(c, (Entity)aI(a, 0), aV3(a, 1)); return VV{}; } });
         t.push_back({ "physics.isGrounded", "Physics", false, {{"entity", P::Int}}, {{"grounded", P::Bool}}, "HE::api::physics::isGrounded",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::isGrounded(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "physics.sphereCast", "Physics", false,
+            {{"origin", P::Vec3}, {"direction", P::Vec3}, {"radius", P::Float}, {"maxDistance", P::Float}},
+            {{"hit", P::Bool}, {"entity", P::Int}, {"point", P::Vec3}, {"normal", P::Vec3}, {"distance", P::Float}},
+            "HE::api::physics::sphereCast",
+            [](Ctx& c, const VV& a){ auto r = physics::sphereCast(c, aV3(a, 0), aV3(a, 1), aF(a, 2), aF(a, 3));
+                return VV{ Value::ofBool(r.hit), Value::ofInt((int)r.entity), v3(r.point), v3(r.normal), Value::ofFloat(r.distance) }; } });
+        t.push_back({ "physics.overlapSphere", "Physics", false,
+            {{"center", P::Vec3}, {"radius", P::Float}}, {{"entities", P::Int, /*isArray=*/true}},
+            "HE::api::physics::overlapSphere",
+            [](Ctx& c, const VV& a){
+                Value arr; arr.isArray = true; arr.type = P::Int;
+                for (Entity e : physics::overlapSphere(c, aV3(a, 0), aF(a, 1)))
+                    arr.items.push_back(Value::ofInt((int)e));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "physics.addForce", "Physics", true, {{"entity", P::Int}, {"force", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addForce",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addForce(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.addImpulse", "Physics", true, {{"entity", P::Int}, {"impulse", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addImpulse",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addImpulse(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.addTorque", "Physics", true, {{"entity", P::Int}, {"torque", P::Vec3}}, {{"ok", P::Bool}}, "HE::api::physics::addTorque",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(physics::addTorque(c, (Entity)aI(a, 0), aV3(a, 1))) }; } });
+        t.push_back({ "physics.getVelocity", "Physics", false, {{"entity", P::Int}}, {{"velocity", P::Vec3}}, "HE::api::physics::getVelocity",
+            [](Ctx& c, const VV& a){ return VV{ v3(physics::getVelocity(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "physics.setGravity", "Physics", true, {{"gravity", P::Vec3}}, {}, "HE::api::physics::setGravity",
+            [](Ctx& c, const VV& a){ physics::setGravity(c, aV3(a, 0)); return VV{}; } });
+        t.push_back({ "physics.getGravity", "Physics", false, {}, {{"gravity", P::Vec3}}, "HE::api::physics::getGravity",
+            [](Ctx& c, const VV&){ return VV{ v3(physics::getGravity(c)) }; } });
 
         // Materials
         t.push_back({ "material.getParam", "Material", false, {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Color}}, "HE::api::material::getParam",
@@ -1724,6 +1789,9 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ ui::setSize(c, (Entity)aI(a, 0), aV2(a, 1)); return VV{}; } });
         t.push_back({ "ui.setMaterialParam", "UI", true, {{"entity", P::Int}, {"name", P::String}, {"value", P::Color}}, {{"ok", P::Bool}}, "HE::api::ui::setMaterialParam",
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(ui::setMaterialParam(c, (Entity)aI(a, 0), aS(a, 1), aV4(a, 2))) }; } });
+        // Pure: a snapshot the app refreshes once per frame, like the input rows.
+        t.push_back({ "ui.pointerOverUI", "UI", false, {}, {{"over", P::Bool}}, "HE::api::ui::pointerOverUI",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(ui::pointerOverUI(c)) }; } });
 
         // Live widgets
         t.push_back({ "widget.create", "Widget", true, {{"path", P::String}}, {{"widget", P::Int}}, "HE::api::widget::create",
@@ -1744,6 +1812,10 @@ const std::vector<ApiFn>& registry()
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
             [](Ctx& c, const VV& a){ cursor::setVisible(c, aB(a, 0)); return VV{}; } });
+
+        // Application — what a main menu's last button does.
+        t.push_back({ "app.quit", "App", true, {}, {}, "HE::api::app::quit",
+            [](Ctx& c, const VV&){ app::quit(c); return VV{}; } });
 
         // Math (pure)
         auto unary  = [&](const char* id, const char* cpp, float(*fn)(float)) {
@@ -2124,6 +2196,14 @@ const std::vector<ApiFn>& registry()
             { "locomotion.setOrientToMovement", "Set Orient To Movement" },
             { "physics.raycast", "Raycast" }, { "physics.setVelocity", "Set Velocity" },
             { "physics.isGrounded", "Is Grounded" },
+            { "physics.sphereCast", "Sphere Cast" },   { "physics.overlapSphere", "Overlap Sphere" },
+            { "physics.addForce", "Add Force" },       { "physics.addImpulse", "Add Impulse" },
+            { "physics.addTorque", "Add Torque" },
+            { "physics.setGravity", "Set Gravity" },   { "physics.getGravity", "Get Gravity" },
+            // Suffixed like "Length (Vec2)"/"Length (Vec3)": Movement already
+            // owns a "Get Velocity", and the drag-off menu lists the registry
+            // flat, where two identically named rows are a coin toss.
+            { "physics.getVelocity", "Get Velocity (Physics)" },
             { "material.getParam", "Get Material Param" }, { "material.setParam", "Set Material Param" },
             { "ui.getText", "Get UI Text" },        { "ui.setText", "Set UI Text" },
             { "ui.getColor", "Get UI Color" },      { "ui.setColor", "Set UI Color" },
@@ -2131,11 +2211,13 @@ const std::vector<ApiFn>& registry()
             { "ui.getPosition", "Get UI Position" },{ "ui.setPosition", "Set UI Position" },
             { "ui.getSize", "Get UI Size" },        { "ui.setSize", "Set UI Size" },
             { "ui.setMaterialParam", "Set UI Material Param" },
+            { "ui.pointerOverUI", "Is Pointer Over UI" },
             { "widget.create", "Create Widget" },   { "widget.destroy", "Destroy Widget" },
             { "widget.show", "Show Widget" },       { "widget.hide", "Hide Widget" },
             { "widget.setZOrder", "Set Widget Z-Order" }, { "widget.isVisible", "Is Widget Visible" },
             { "widget.callFunction", "Call Widget Function" },
             { "cursor.setVisible", "Set Cursor Visible" },
+            { "app.quit", "Quit Game" },
             { "math.sin", "Sine" },   { "math.cos", "Cosine" }, { "math.tan", "Tangent" },
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
@@ -2240,7 +2322,19 @@ bool isScriptGroup(std::string_view group)
     static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
                                                     "string", "camera", "env", "entity", "audio",
                                                     "debug", "fs", "save", "scene", "player",
-                                                    "animator", "movement", "locomotion" };
+                                                    "animator", "movement", "locomotion",
+                                                    // "physics" carries the whole force/overlap
+                                                    // surface, and the flat bindings only ever
+                                                    // got raycast/setVelocity/isGrounded — so
+                                                    // this is the only door a text script has
+                                                    // to it at all.
+                                                    "physics",
+                                                    // "ui" adds no capability the flat
+                                                    // setUIText/… bindings lack — except
+                                                    // ui.pointerOverUI, which has no flat twin
+                                                    // and is exactly what a script needs to
+                                                    // stop a menu click reaching the game.
+                                                    "ui", "app" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

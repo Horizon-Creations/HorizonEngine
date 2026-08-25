@@ -61,6 +61,12 @@ public:
                         float mouseX, float mouseY,
                         bool primaryDown, bool valid);
 
+    // What the last processPointer answered. Both apps drop that return value,
+    // so this is how anyone else — gameplay code and scripts, through
+    // HE::api::ui::pointerOverUI — finds out that this frame's click belongs to
+    // the UI: pressing "Start" in a menu must not also fire into the world.
+    bool pointerOverUI() const { return m_pointerOverUI; }
+
     // Keyboard routing for the focused TextInput (the apps call these). All are
     // no-ops when no TextInput is focused.
     void inputText(const std::string& utf8); // insert at the caret, replacing any selection
@@ -231,6 +237,7 @@ private:
     HorizonCode::Runtime  m_ownRuntime;        // fallback when none is injected
     HorizonCode::Runtime* m_runtime = nullptr; // injected shared runtime (null → own)
     bool m_wasDown = false;
+    bool m_pointerOverUI = false;  // last processPointer verdict (see pointerOverUI)
     int  m_focusWidget = 0;        // widget id owning the focused TextInput
     HE::UICursor m_hoverCursor = HE::UICursor::Default; // cursor the hovered element wants
 };

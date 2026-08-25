@@ -10,7 +10,7 @@
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/UIButtonComponent.h"
 #include "ContentManager/ContentManager.h"
-#include <cstdio>
+#include <Diagnostics/Log.h>
 
 namespace {
 
@@ -30,7 +30,12 @@ namespace ScriptApi
 
 void log(const char* message)
 {
-	std::printf("[Script] %s\n", message ? message : "");
+	// Through the engine log, not printf: an app started from Finder or a
+	// desktop shortcut has no terminal to print into, and every sink hanging off
+	// HE::Log (the log file, the editor's console) only sees what goes there.
+	// The bare printf is gone rather than kept alongside — HE::Log echoes to
+	// stdout itself, so keeping it would print every script line twice.
+	HE_LOG_INFO(Script, "%s", message ? message : "");
 }
 
 std::string getName(HorizonWorld& world, uint32_t entityId)
@@ -108,7 +113,7 @@ RaycastResult raycast(PhysicsWorld* physics, const glm::vec3& origin,
 
 void setVelocity(PhysicsWorld* physics, uint32_t entityId, const glm::vec3& v)
 {
-	if (physics) physics->setCharacterVelocity(entityId, v);
+	if (physics) physics->setVelocity(entityId, v);
 }
 
 bool isGrounded(PhysicsWorld* physics, uint32_t entityId)
@@ -265,6 +270,8 @@ bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn
 {
 	return world.widgets().callFunction(widgetId, fn);
 }
+
+bool pointerOverUI(HorizonWorld& world) { return world.widgets().pointerOverUI(); }
 
 // ── Cursor ────────────────────────────────────────────────────────────────────
 

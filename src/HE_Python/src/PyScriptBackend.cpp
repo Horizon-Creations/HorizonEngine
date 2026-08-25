@@ -12,7 +12,8 @@
 // the question instead of two that had to agree.
 
 #include "HorizonScene/ScriptApi.h"
-#include "HorizonScene/EngineApi.h"   // HE::api registry (registry-driven groups)
+#include "HorizonScene/EngineApi.h"      // HE::api registry (registry-driven groups)
+#include "HorizonScene/ScriptContext.h"  // ScriptContext::hostQuitHandler (app.quit)
 #define PY_SSIZE_T_CLEAN
 // Most Windows Python installs (incl. python.org's) ship release-only libs — no
 // python3xx_d.lib. Debug builds define _DEBUG, which makes Python.h demand the
@@ -656,6 +657,11 @@ PyObject* py_engineCall(PyObject*, PyObject* args)
 	if (!fn) { PyErr_Format(PyExc_KeyError, "unknown engine function '%s'", id ? id : "?"); return nullptr; }
 
 	HE::api::Ctx c{ g_world, g_physics, g_content };
+	// The quit hook is NOT a file-static here: this plugin has no channel through
+	// which the host could hand it one (IScriptBackend carries the world/physics/
+	// content pointers, nothing else). It is read from the engine module instead,
+	// which is the same handler the Lua side gets — see ScriptContext.
+	c.requestQuit = ScriptContext::hostQuitHandler();
 	std::vector<HorizonCode::Value> in; in.reserve(fn->params.size());
 	Py_ssize_t idx = 1;                                   // arg 0 is the id
 	for (const auto& p : fn->params) in.push_back(pyReadValue(args, idx, p.type));

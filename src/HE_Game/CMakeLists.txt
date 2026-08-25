@@ -22,6 +22,13 @@ if(APPLE)
     )
 endif()
 
+# The game picks its backend from config.json ("GameBackend"), so it has to know
+# which ones this runtime can actually create — RendererFactory throws for one
+# that was never compiled in. Same define the editor takes for its backend list.
+if(HE_VULKAN_ENABLED)
+	target_compile_definitions(HorizonGame PRIVATE HE_VULKAN_ENABLED)
+endif()
+
 # ── Development-only hotkeys ─────────────────────────────────────────────────
 # Debug keys that must NOT be live in a shipped game (today: V = VSync toggle —
 # a player has no settings menu to undo it with, and a stray V would silently

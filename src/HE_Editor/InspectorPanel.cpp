@@ -539,12 +539,26 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				HE::AssetType::StaticMesh, "meshslot",
 				"(none — drop a mesh here; renders fallback cube)", "static mesh",
 				/*showClear=*/true);
+			// LOD Bias reaches RenderObject::lod and stops there — no backend and
+			// no LODSystem reads it, LOD selection is purely distance-based. Shown
+			// disabled rather than removed: it is serialized authoring data, and a
+			// control that silently does nothing is the worse of the two.
+			ImGui::BeginDisabled();
 			int lod = m->lodBias;
 			if (Row::inputInt("LOD Bias", &lod))
 				m->lodBias = static_cast<uint8_t>(std::clamp(lod, 0, 255));
+			ImGui::EndDisabled();
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Not implemented — LOD level is chosen by camera distance "
+				                  "(LOD Component) only.");
 			ImGui::Checkbox("Visible",         &m->visible); trackEdit();
 			ImGui::Checkbox("Casts Shadow",    &m->castsShadow); trackEdit();
 			ImGui::Checkbox("Receives Shadow", &m->receivesShadow); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Off means the surface is lit as if nothing shadowed it: "
+				                  "cascades, the point/spot atlas and the ray-traced masks "
+				                  "are all skipped for it. Forward path only — the deferred "
+				                  "resolve has no free G-buffer channel for the flag.");
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MeshComponent>(entity); }
 	}
@@ -568,6 +582,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::Checkbox("Visible",         &sm->visible);        trackEdit();
 			ImGui::Checkbox("Casts Shadow",    &sm->castsShadow);    trackEdit();
 			ImGui::Checkbox("Receives Shadow", &sm->receivesShadow); trackEdit();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Off means the surface is lit as if nothing shadowed it. "
+				                  "Forward path only — the deferred resolve has no free "
+				                  "G-buffer channel for the flag.");
 
 			// Drag-drop asset slot
 			if (EditorWidgets::assetDropSlot(ctx, "Asset", sm->meshAssetId,
@@ -710,8 +728,19 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::Button("Bake##nm"))
 			{
 				if (undo) undo->snapshotNow();
+				// Collect FIRST. The component's geometry is a cache of the scene's
+				// static meshes and nothing but the serializer ever filled it, so
+				// this button used to rebuild from whatever the last load restored
+				// — in a freshly authored scene, nothing at all.
+				if (ctx.contentManager)
+					NavigationSystem::collectStaticGeometry(world, *ctx.contentManager,
+					                                        nmc->geometry);
 				NavigationSystem::bake(*nmc);
 			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Collects every visible static mesh in the scene — terrain "
+				                  "included — and rebuilds the NavMesh from it. Moving bodies, "
+				                  "characters and triggers are left out.");
 			ImGui::SameLine();
 			ImGui::Checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
 		}
@@ -1527,9 +1556,29 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		{
 			Row::dragFloat("Width##cv",  &cv->width,  1.0f, 1.0f, 7680.0f); trackEdit();
 			Row::dragFloat("Height##cv", &cv->height, 1.0f, 1.0f, 4320.0f); trackEdit();
-			int rm = static_cast<int>(cv->renderMode);
-			if (Row::comboZ("Render Mode##cv", &rm, "Screen Space\0World Space\0")) {
-				cv->renderMode = static_cast<UIRenderMode>(rm); trackEdit();
+			// World Space is authored data with no reader anywhere in the engine:
+			// every canvas is drawn in screen space. Offering it as a choice
+			// promises something that does not happen, so the entry is disabled —
+			// but still shown, so a scene that already carries the value can be
+			// switched back. Hand-rolled instead of Row::comboZ because only the
+			// one entry is disabled; snapshotNow() rather than trackEdit() because
+			// the last-item state after EndCombo is the popup's, not the combo's.
+			const bool worldSpace = (cv->renderMode == UIRenderMode::WorldSpace);
+			ImGui::TextUnformatted("Render Mode");
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			if (ImGui::BeginCombo("##cvmode", worldSpace ? "World Space" : "Screen Space"))
+			{
+				if (ImGui::Selectable("Screen Space", !worldSpace) && worldSpace)
+				{
+					if (undo) undo->snapshotNow();
+					cv->renderMode = UIRenderMode::ScreenSpace;
+				}
+				ImGui::BeginDisabled();
+				ImGui::Selectable("World Space", worldSpace);
+				ImGui::EndDisabled();
+				if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+					ImGui::SetTooltip("Not supported yet — canvases are drawn in screen space.");
+				ImGui::EndCombo();
 			}
 			ImGui::Checkbox("Active##cv", &cv->active); trackEdit();
 		}

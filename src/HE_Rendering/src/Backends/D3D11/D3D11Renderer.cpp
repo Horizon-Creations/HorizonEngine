@@ -373,7 +373,11 @@ cbuffer PerObject : register(b0)
     float4x4 uMVP;
     float4x4 uModel;
     float4   uColor;    // rgb = base color, a = hasTexture (0/1)
-    float4   uPBR;      // x = metallic, y = roughness, z = opacity
+    // x = metallic, y = roughness, z = opacity,
+    // w = 1 when the object IGNORES shadows (MeshComponent::receivesShadow ==
+    //     false). Inverted on purpose: every zero-initialised PerObjectCB fill
+    //     (shadow pass, GI G-buffer, previews) then keeps shadowing.
+    float4   uPBR;
 };
 cbuffer PerFrame : register(b1)
 {
@@ -625,6 +629,9 @@ float4 PSMain(VSOut i) : SV_TARGET
                 sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
             giLocalIdx++;
         }
+        // "Receives Shadow" off: the object is lit as if nothing occluded it.
+        // After BOTH branches so it covers the shadow map and the GI masks alike.
+        if (uPBR.w > 0.5f) sh = 1.0;
         result += BRDF(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     // Atmospheric fog
@@ -3662,14 +3669,18 @@ void D3D11Renderer::DrawScene(int width, int height)
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
 
+    // `noShadow` is the inverted DrawCall::receivesShadow (1 = ignore shadows).
+    // Defaulted so the depth-only shadow pass, which shades nothing, can keep
+    // calling this unchanged.
     auto uploadObject = [&](const glm::mat4& mvp, const glm::mat4& model,
                             const glm::vec3& baseColor, float hasTex,
-                            float metallic, float roughness, float opacity = 1.0f)
+                            float metallic, float roughness, float opacity = 1.0f,
+                            float noShadow = 0.0f)
     {
         PerObjectCB o{};
         o.mvp   = mvp; o.model = model;
         o.color = glm::vec4(baseColor, hasTex);
-        o.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+        o.pbr   = glm::vec4(metallic, roughness, opacity, noShadow);
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
         {
@@ -4022,7 +4033,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                     // … one PerObject CB (batch-constant colour/pbr; the instanced VS reads
                     // mvp/model from t3) … then ONE instanced draw.
                     uploadObject(glm::mat4(1.0f), glm::mat4(1.0f), dc.baseColor, hasTex,
-                                 dc.metallic, dc.roughness, dc.opacity);
+                                 dc.metallic, dc.roughness, dc.opacity,
+                                 dc.receivesShadow ? 0.0f : 1.0f);
                     ctx->VSSetShader(p.vsInstanced.Get(), nullptr, 0);
                     ctx->VSSetShaderResources(3, 1, p.instanceSRV.GetAddressOf());
                     ctx->DrawIndexedInstanced(m.indexCount, count, 0, 0, 0);
@@ -4037,7 +4049,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                 {
                     for (const glm::mat4& t : dc.instanceTransforms) { // fallback: transparent / ring full
                         uploadObject(viewProj * t, t, dc.baseColor, hasTex,
-                                     dc.metallic, dc.roughness, dc.opacity);
+                                     dc.metallic, dc.roughness, dc.opacity,
+                                     dc.receivesShadow ? 0.0f : 1.0f);
                         ctx->DrawIndexed(m.indexCount, 0, 0);
                         ++p.counters.draws;
                         p.counters.tris += m.indexCount / 3;
@@ -4046,7 +4059,8 @@ void D3D11Renderer::DrawScene(int width, int height)
             }
             else {
                 uploadObject(viewProj * dc.transform, dc.transform,
-                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
+                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity,
+                             dc.receivesShadow ? 0.0f : 1.0f);
                 ctx->DrawIndexed(m.indexCount, 0, 0);
                 ++p.counters.draws;
                 p.counters.tris += m.indexCount / 3;
@@ -4094,7 +4108,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                 // Per-object CB (reuse the uploadObject lambda in scope)
                 const float hasTex = albedo ? 1.0f : 0.0f;
                 uploadObject(viewProj * dc.transform, dc.transform,
-                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity);
+                             dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity,
+                             dc.receivesShadow ? 0.0f : 1.0f);
 
                 // Bind three vertex buffer slots
                 const UINT strides[3] = { 32u, 16u, 16u };

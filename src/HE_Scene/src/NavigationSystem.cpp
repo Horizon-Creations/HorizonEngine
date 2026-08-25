@@ -1,8 +1,17 @@
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/NavMeshComponent.h>
 #include <HorizonScene/Components/NavAgentComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
+#include <HorizonScene/Components/ColliderComponent.h>
+#include <HorizonScene/Components/CharacterControllerComponent.h>
+
+#include <ContentManager/ContentManager.h>
 
 #include <Recast.h>
 #include <DetourNavMesh.h>
@@ -13,8 +22,140 @@
 #include <Diagnostics/Log.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <cmath>
+
+// ── Static geometry collection ────────────────────────────────────────────────
+namespace
+{
+    // Append one mesh's triangles in world space. A mirrored transform (negative
+    // determinant) reverses the winding, and Recast decides walkability from the
+    // triangle normal — so the winding is put back for those.
+    void appendMeshGeometry(const StaticMeshAsset& mesh, const glm::mat4& xform,
+                            NavMeshGeometry& out)
+    {
+        // The same two layouts the backends upload: cooked = interleaved
+        // pos3+norm3+uv2, loose/editor = tightly packed positions.
+        const float* pos    = nullptr;
+        std::size_t  count  = 0;
+        std::size_t  stride = 0;
+        if (mesh.cooked && !mesh.interleaved.empty())
+        {
+            count  = mesh.vertexCount;
+            stride = 8;
+            if (mesh.interleaved.size() < count * stride) return;  // short cooked blob
+            pos = mesh.interleaved.data();
+        }
+        else if (!mesh.vertices.empty())
+        {
+            pos    = mesh.vertices.data();
+            count  = mesh.vertices.size() / 3;
+            stride = 3;
+        }
+        if (!pos || count == 0 || mesh.indices.size() < 3) return;
+
+        const int base = static_cast<int>(out.verts.size() / 3);
+        out.verts.reserve(out.verts.size() + count * 3);
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const glm::vec3 p = glm::vec3(xform * glm::vec4(pos[i * stride + 0],
+                                                            pos[i * stride + 1],
+                                                            pos[i * stride + 2], 1.0f));
+            out.verts.push_back(p.x);
+            out.verts.push_back(p.y);
+            out.verts.push_back(p.z);
+        }
+
+        const bool flipped = glm::determinant(glm::mat3(xform)) < 0.0f;
+        out.tris.reserve(out.tris.size() + mesh.indices.size());
+        for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3)
+        {
+            const std::uint32_t a = mesh.indices[i + 0];
+            const std::uint32_t b = mesh.indices[i + 1];
+            const std::uint32_t c = mesh.indices[i + 2];
+            if (a >= count || b >= count || c >= count) continue;  // malformed asset
+            out.tris.push_back(base + static_cast<int>(a));
+            out.tris.push_back(base + static_cast<int>(flipped ? c : b));
+            out.tris.push_back(base + static_cast<int>(flipped ? b : c));
+        }
+    }
+
+    // A navmesh describes where an agent can walk when nothing has moved yet, so
+    // anything that moves must stay out of it: a dynamic or kinematic body baked at
+    // its authoring position leaves a permanent hole in the walkable surface once
+    // it rolls away. The test walks up the parent chain because a crate parented to
+    // a moving platform carries no body of its own.
+    bool movesAtRuntime(const entt::registry& reg, entt::entity e)
+    {
+        for (entt::entity cur = e; cur != entt::null; )
+        {
+            if (const auto* rb = reg.try_get<RigidBodyComponent>(cur);
+                rb && rb->type != HE::RigidBodyType::Static) return true;
+            if (reg.try_get<CharacterControllerComponent>(cur)) return true;
+            if (reg.try_get<NavAgentComponent>(cur)) return true;
+            const auto* h = reg.try_get<HierarchyComponent>(cur);
+            cur = h ? h->parent : entt::null;
+        }
+        return false;
+    }
+}
+
+std::size_t NavigationSystem::collectStaticGeometry(HorizonWorld& world, ContentManager& content,
+                                                    NavMeshGeometry& out)
+{
+    out.verts.clear();
+    out.tris.clear();
+
+    // worldMatrix is derived state that normally only the render extractor
+    // refreshes. A bake runs from a panel, before extraction, so without this an
+    // entity moved this frame would be collected at where it was last frame.
+    HE::propagateTransforms(world);
+
+    entt::registry& registry = world.registry();
+    // Read-only handle for the per-entity probes below: registry::try_get never
+    // creates a pool, but reaching for it through the const reference keeps that
+    // guarantee visible — adding storage while a view is being iterated is the
+    // classic way to invalidate it.
+    const entt::registry& reg = registry;
+    std::size_t meshes = 0;
+    for (auto [e, mc, tc] : registry.view<MeshComponent, TransformComponent>().each())
+    {
+        // Hidden meshes are hidden for a reason (zone hiding) and triggers are
+        // sensors the player is meant to walk through — neither is an obstacle.
+        // Everything else visible stays in, including props with no physics at
+        // all: they read as solid on screen, and Recast has no second source of
+        // level geometry to fall back on.
+        if (!mc.visible) continue;
+        if (const auto* col = reg.try_get<ColliderComponent>(e); col && col->isTrigger) continue;
+        if (movesAtRuntime(reg, e)) continue;
+
+        // LOD0 rather than MeshComponent::meshAssetId: LODSystem overwrites that
+        // every frame with whatever level suits the camera's current distance, so
+        // baking from it would make the result depend on where the user was
+        // standing. Terrain chunks are ordinary LOD entities here — that is how
+        // the landscape gets in at all, the Landscape entity itself has no mesh.
+        HE::UUID meshId = mc.meshAssetId;
+        if (const auto* lod = reg.try_get<LODComponent>(e); lod && !lod->levels.empty())
+            meshId = lod->levels.front().meshId;
+        if (meshId == HE::UUID{}) continue;
+
+        if (const StaticMeshAsset* mesh = content.getStaticMesh(meshId))
+        {
+            appendMeshGeometry(*mesh, tc.worldMatrix, out);
+            ++meshes;
+        }
+    }
+
+    const std::size_t tris = out.tris.size() / 3;
+    HE_LOG_INFO(Nav, "NavMesh input collected: %zu triangle(s) from %zu mesh(es)", tris, meshes);
+    // A full-resolution landscape alone is half a million triangles, and Recast
+    // voxelises every one of them. Say so before the bake stalls the editor.
+    if (tris > 250000)
+        HE_LOG_WARN(Nav, "NavMesh input is %zu triangles — baking it will take a while. "
+                         "Consider a smaller terrain resolution or a coarser Cell Size.", tris);
+    return tris;
+}
 
 // ── NavMesh baking ────────────────────────────────────────────────────────────
 bool NavigationSystem::bake(NavMeshComponent& nmc)
@@ -85,6 +226,19 @@ bool NavigationSystem::bake(NavMeshComponent& nmc)
     rcCalcGridSize(bmin, bmax, cfg.cellSize, &rcCfg.width, &rcCfg.height);
     std::memcpy(rcCfg.bmin, bmin, sizeof(bmin));
     std::memcpy(rcCfg.bmax, bmax, sizeof(bmax));
+
+    // rcCreateHeightfield allocates width*height span pointers up front. Now that a
+    // whole landscape can reach this function, a kilometre of terrain at the default
+    // 0.3 m cell asks for hundreds of megabytes and the editor simply stops
+    // responding — refuse, and name the one setting that fixes it.
+    constexpr long long kMaxGridCells = 4096ll * 4096ll;
+    if (static_cast<long long>(rcCfg.width) * static_cast<long long>(rcCfg.height) > kMaxGridCells)
+    {
+        HE_LOG_ERROR(Nav, "NavMesh bake refused: a %dx%d cell grid at cellSize %.3f is beyond "
+                          "the %lld-cell budget — raise Cell Size or bake a smaller area",
+                     rcCfg.width, rcCfg.height, rcCfg.cs, kMaxGridCells);
+        return false;
+    }
 
     rcContext ctx;
 

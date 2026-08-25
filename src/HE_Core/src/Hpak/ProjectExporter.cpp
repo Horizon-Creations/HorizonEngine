@@ -939,6 +939,34 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     return std::nullopt;
 }
 
+// Phase 7b: config.json — the graphics + window settings the game boots with.
+// It goes to dataDir, next to project.hcfg, because that is the one directory a
+// shipped game can find on every platform (SDL_GetBasePath, so Contents/
+// Resources inside a bundle). Before finalizeAppBundle on purpose: the .app is
+// codesigned last, and a file added afterwards breaks the seal.
+static std::optional<ExportResult> writeGameConfig(const ExportSettings& settings,
+                                                   const ExportContext&  ctx)
+{
+    if (settings.gameConfigJson.empty()) return std::nullopt;
+
+    // Validated, not copied blind: this writes a shipping build, and a malformed
+    // config.json does not fail loudly in the game — it silently resets every
+    // graphics setting to the engine default, which is exactly the bug this
+    // file exists to close.
+    const auto parsed = nlohmann::json::parse(settings.gameConfigJson, nullptr,
+                                              /*allow_exceptions=*/false);
+    if (parsed.is_discarded() || !parsed.is_object())
+        return ExportResult{false, "Game settings are not a JSON object", ctx.assetsPacked};
+
+    const auto dst = ctx.dataDir / "config.json";
+    std::ofstream out(dst, std::ios::trunc);
+    out << settings.gameConfigJson;
+    out.flush();
+    if (!out.good())
+        return ExportResult{false, "Failed to write " + dst.string(), ctx.assetsPacked};
+    return std::nullopt;
+}
+
 // Phase 8: finalize the .app — Info.plist makes Contents/ a real bundle (so
 // SDL_GetBasePath resolves Resources), then an ad-hoc codesign of the whole
 // thing — the key patch already re-signed the bare executable, but adding
@@ -990,6 +1018,7 @@ ExportResult ProjectExporter::exportProject(
     stage("config");
     if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
         return *fail;
+    if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
     stage("bundle");
     if (auto fail = finalizeAppBundle(projectName, ctx))                        return *fail;
 

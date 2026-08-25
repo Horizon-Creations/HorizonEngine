@@ -48,32 +48,177 @@
 // leaked `fs` into every consumer of that header.
 namespace fs = std::filesystem;
 
+namespace
+{
+// What this platform ran on before the config could name a backend, and what an
+// unusable choice falls back to.
+constexpr HE::RendererBackend kDefaultBackend =
+#ifdef __APPLE__
+	HE::RendererBackend::Metal;
+#else
+	HE::RendererBackend::OpenGL;
+#endif
+
+// Backends by NAME (the editor's getRHIName spelling), because config.json is a
+// file a player or a support ticket edits by hand: "Metal" survives a
+// renumbering of the enum, a bare 4 does not.
+bool backendFromName(const std::string& name, HE::RendererBackend& out)
+{
+	if (name == "OpenGL") { out = HE::RendererBackend::OpenGL; return true; }
+	if (name == "Vulkan") { out = HE::RendererBackend::Vulkan; return true; }
+	if (name == "D3D11")  { out = HE::RendererBackend::D3D11;  return true; }
+	if (name == "D3D12")  { out = HE::RendererBackend::D3D12;  return true; }
+	if (name == "Metal")  { out = HE::RendererBackend::Metal;  return true; }
+	return false;
+}
+
+// Whether THIS runtime can create that backend at all. RendererFactory throws
+// for one whose implementation was not compiled in, so the same #ifdef set has
+// to be answered here — a config authored for another platform must fall back,
+// not abort the game before its window opens.
+bool backendAvailable(HE::RendererBackend backend)
+{
+	switch (backend)
+	{
+	case HE::RendererBackend::OpenGL: return true;
+#ifdef HE_VULKAN_ENABLED
+	case HE::RendererBackend::Vulkan: return true;
+#endif
+#ifdef _WIN32
+	case HE::RendererBackend::D3D11:
+	case HE::RendererBackend::D3D12:  return true;
+#endif
+#ifdef __APPLE__
+	case HE::RendererBackend::Metal:  return true;
+#endif
+	default: return false;
+	}
+}
+
+bool windowModeFromName(const std::string& name, HE::WindowMode& out)
+{
+	if (name == "Windowed")   { out = HE::WindowMode::Windowed;   return true; }
+	if (name == "Fullscreen") { out = HE::WindowMode::Fullscreen; return true; }
+	if (name == "Borderless") { out = HE::WindowMode::Borderless; return true; }
+	return false;
+}
+
+// The settings the export wrote next to the game data, laid OVER whatever
+// GlobalState resolved. Reading them here rather than leaving it to GlobalState
+// is not redundancy: its search order is "the working directory, then the
+// per-user data dir", and a shipped game matches neither — a macOS .app
+// launched from Finder runs with "/" as its working directory, and the per-user
+// file is shared with the editor and every other Horizon game on the machine.
+// The overlay restores, on every platform, the precedence GlobalState documents
+// for an executable-adjacent config. Returns how many entries were applied.
+size_t overlayShippedConfig(const fs::path& exeDir)
+{
+	const fs::path path = exeDir / "config.json";
+	std::ifstream in(path);
+	if (!in) return 0;
+
+	const auto j = nlohmann::json::parse(in, nullptr, /*allow_exceptions=*/false);
+	if (!j.is_object())
+	{
+		HE_LOG_WARN(Core, "GameApplication: %s is corrupt — running on the built-in settings",
+		            path.string().c_str());
+		return 0;
+	}
+	const auto entries = j.find("CustomConfig");
+	if (entries == j.end() || !entries->is_array()) return 0;
+
+	size_t applied = 0;
+	for (const auto& e : *entries)
+	{
+		if (!e.is_object()) continue;
+		const auto key   = e.find("Key");
+		const auto value = e.find("Value");
+		if (key == e.end() || !key->is_string() || value == e.end()) continue;
+		GlobalState::getInstance().setCustomConfigEntry(key->get<std::string>(), *value);
+		++applied;
+	}
+	return applied;
+}
+} // namespace
+
 
 GameApplication::GameApplication(std::string startupPath)
-	: HE::Application(std::move(startupPath)) {}
+	: HE::Application(std::move(startupPath))
+{
+	applyShippedConfig();
+}
 GameApplication::~GameApplication() = default;
+
+void GameApplication::applyShippedConfig()
+{
+	m_backend = kDefaultBackend;
+
+	// Before a single shipped key is laid over the in-memory config: the game
+	// must not persist any of it. configFilePath() resolves to the per-user file
+	// the EDITOR uses on a developer machine, and ~Application writes it on the
+	// way out — so without this, running an export once would stamp that game's
+	// graphics settings onto the editor's preferences.
+	GlobalState::getInstance().setConfigPersistent(false);
+
+	// SDL_GetBasePath needs no SDL_Init, and inside a macOS .app it resolves to
+	// Contents/Resources — the same directory OnInit reads project.hcfg and the
+	// pak from, and where the exporter puts config.json.
+	const char* baseRaw = SDL_GetBasePath();
+	if (!baseRaw)
+		HE_LOG_WARN(Core, "%s",
+			"GameApplication: SDL_GetBasePath returned null — the shipped graphics "
+			"settings cannot be located");
+	else if (const size_t applied = overlayShippedConfig(fs::path(baseRaw)); applied > 0)
+		HE_LOG_INFO(Core, "GameApplication: applied %zu shipped setting(s) from config.json",
+		            applied);
+
+	// An absent key keeps what the member already holds, which is what a game
+	// shipped before any of this existed: 1280x720 fullscreen, VSync on, on the
+	// platform's built-in backend. Existing exports therefore boot unchanged.
+	GlobalState& gs = GlobalState::getInstance();
+	const int w = gs.getCustomConfigInt("GameWindowWidth",  static_cast<int>(m_windowWidth));
+	const int h = gs.getCustomConfigInt("GameWindowHeight", static_cast<int>(m_windowHeight));
+	if (w > 0 && h > 0)
+	{
+		m_windowWidth  = static_cast<uint32_t>(w);
+		m_windowHeight = static_cast<uint32_t>(h);
+	}
+	if (const std::string mode = gs.getCustomConfigString("GameWindowMode");
+	    !mode.empty() && !windowModeFromName(mode, m_windowMode))
+		HE_LOG_WARN(Core, "GameApplication: unknown window mode '%s' — keeping the default",
+		            mode.c_str());
+	m_vsyncOn = gs.getCustomConfigBool("GameVSync", m_vsyncOn);
+
+	if (const std::string name = gs.getCustomConfigString("GameBackend"); !name.empty())
+	{
+		HE::RendererBackend wanted = kDefaultBackend;
+		if (!backendFromName(name, wanted))
+			HE_LOG_WARN(Core, "GameApplication: unknown graphics backend '%s' — using the default",
+			            name.c_str());
+		else if (!backendAvailable(wanted))
+			HE_LOG_WARN(Core, "GameApplication: graphics backend '%s' is not in this build — using the default",
+			            name.c_str());
+		else
+			m_backend = wanted;
+	}
+}
 
 HE::ApplicationConfig GameApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
 	cfg.windowprops.title  = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
-	cfg.windowprops.width  = 1280;
-	cfg.windowprops.height = 720;
-	cfg.windowprops.vsync  = true;
-	cfg.windowprops.mode   = HE::WindowMode::Fullscreen;
-#ifdef __APPLE__
-	cfg.backend = HE::RendererBackend::Metal;
-#else
-	cfg.backend = HE::RendererBackend::OpenGL;
-#endif
+	cfg.windowprops.width  = m_windowWidth;
+	cfg.windowprops.height = m_windowHeight;
+	cfg.windowprops.vsync  = m_vsyncOn;
+	cfg.windowprops.mode   = m_windowMode;
+	cfg.backend            = m_backend;
 	return cfg;
 }
 
 std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 {
-	const auto backend = GetConfig().backend;
 	HE_LOG_INFO(Core, "%s", "GameApplication: creating renderer");
-	return RendererFactory::Create(backend);
+	return RendererFactory::Create(m_backend);
 }
 
 void GameApplication::OnInit()
@@ -325,9 +470,14 @@ void GameApplication::OnInit()
 			-> std::vector<HorizonCode::Value> {
 			const HE::api::ApiFn* fn = HE::api::find(id);
 			if (!fn) return {};
-			// The caller travels along — see the editor's twin.
+			// The caller travels along — see the editor's twin. So does what
+			// "quit" means here: the shipped game IS the application, so app.quit
+			// leaves the loop for real (the editor binds the same hook to
+			// stopping play mode instead). A main menu's Exit button has nothing
+			// else to call.
 			HE::api::Ctx c{ m_world.get(), m_physicsWorld.get(), &contentManager(), &m_audioEngine,
-			                &m_gameInstance.runtime(), self, &m_entityHost };
+			                &m_gameInstance.runtime(), self, &m_entityHost,
+			                [this]{ Quit(); } };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -721,6 +871,10 @@ void GameApplication::startScripts()
 	m_scriptContext = std::make_unique<ScriptContext>(*m_world);
 	m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
 	m_scriptContext->setContentManager(&contentManager());
+	// The same meaning of "quit" the HorizonCode services bind in OnInit: the
+	// shipped game IS the application, so horizon.app.quit leaves the loop for
+	// real. Bound BEFORE the scripts start — an onStart may already call it.
+	m_scriptContext->setQuitHandler([this]{ Quit(); });
 
 	const int started = m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
 	if (started > 0)
@@ -759,10 +913,14 @@ void GameApplication::updateUIInput()
 	// hover states clear and nothing is clickable (Esc releases the mouse).
 	const bool pointerValid = !m_mouseCaptured && w != nullptr;
 
-	// Widget pointer input first — widgets draw on top of entity UI.
-	m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
-	                                  mx * sx, my * sy,
-	                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
+	// Widget pointer input first — widgets draw on top of entity UI. The answer
+	// ("the pointer is on something clickable") is kept, not dropped: it is what
+	// masks the mouse buttons out of gameplay next frame, so pressing a menu
+	// button does not also fire the weapon behind it.
+	m_uiWantsPointer =
+		m_world->widgets().processPointer(static_cast<float>(pw), static_cast<float>(ph),
+		                                  mx * sx, my * sy,
+		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid);
 
 	// The wheel goes to a scroll box under the cursor first; what it does not
 	// consume stays available to whatever else reads the wheel this frame.
@@ -1004,6 +1162,15 @@ void GameApplication::OnRender(float deltaTime)
 	// scripts read fresh values this frame (before the ECS/script updates below).
 	HE::api::time::advance(deltaTime);
 	HE::api::input::pushSdlSnapshot(input().mouse().dx, input().mouse().dy);
+	// A click that landed on a UI element belongs to the UI alone. Swallowing it
+	// at the widget call site would not be enough — scripts poll the buttons
+	// straight out of this snapshot — so they are masked out of the snapshot
+	// itself, which is the one place every frontend reads them from. Movement is
+	// deliberately left alone: only the buttons are the UI's.
+	if (m_uiWantsPointer)
+		HE::api::input::setMouse(HE::api::input::mousePosition(),
+		                         HE::api::input::mouseDelta(), 0u,
+		                         HE::api::input::scrollDelta());
 	// Gamepad snapshot: PUSHED from Input's merged frame, deadzone-filtered —
 	// the snapshot never polls SDL itself (one owner per device stream).
 	{
@@ -1101,11 +1268,15 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Player instances: Tick + Input.<Action>.* events (mapping ticked against
 	// the app Input state, which ProcessEvent keeps current).
-	// A running game always owns the mouse — there is no editor UI competing for
-	// it — so the frame's movement goes straight through to the input mapping.
-	// Capture only decides whether the OS keeps the cursor in the window; an
-	// uncaptured game still gets motion while the pointer is over it.
-	m_playerHost.tick(input(), gameDt, input().mouse());
+	// The frame's MOVEMENT goes straight through to the input mapping: capture
+	// only decides whether the OS keeps the cursor in the window, and an
+	// uncaptured game still gets motion while the pointer is over it. The
+	// BUTTONS are the exception — a mouse-button action binding is gameplay, so
+	// it is masked while the pointer sits on a UI element, the same way the
+	// editor blanks this very frame outside capture.
+	MouseFrame playerMouse = input().mouse();
+	if (m_uiWantsPointer) playerMouse.buttons = 0;
+	m_playerHost.tick(input(), gameDt, playerMouse);
 	// Entity classes: Tick, plus reaping the ones whose entity is gone.
 	m_entityHost.tick(gameDt);
 
@@ -1143,13 +1314,27 @@ void GameApplication::OnRender(float deltaTime)
 		// of extraction, which consumes the bone matrices.
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost);
 
-		// Global Illumination: same GlobalState config.json key the editor's
-		// Preferences checkbox writes (GlobalIlluminationEnabled/GIIndirectIntensity/
-		// GILightRadius), read directly here — mirrors the GpuParticles pattern above,
-		// NOT the SSAO/Bloom gap (those settings are never pushed by the packaged
-		// game at all). Capability-gated so non-Metal/non-raytracing builds no-op.
+		// Post-process + lighting settings, all read from the same config.json
+		// keys the editor's Preferences write, so a shipped game looks like the
+		// editor preview it was authored in. Capability-gated where a backend can
+		// be unable to do it at all.
 		if (r)
 		{
+			// Bloom + AO. The packaged game pushed neither for a long time, which
+			// meant a shipped build ran on the renderer's built-in defaults no
+			// matter what the project was set to.
+			r->SetBloomSettings(IRenderer::BloomSettings{
+				GlobalState::getInstance().getCustomConfigBool("BloomEnabled", true),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("BloomThreshold", 1.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("BloomIntensity", 0.6f))});
+			r->SetSSAOSettings(IRenderer::SSAOSettings{
+				GlobalState::getInstance().getCustomConfigBool("SSAOEnabled", true),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
+				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+
+			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
+			// GILightRadius, capability-gated so non-Metal/non-raytracing builds no-op.
 			const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
 			                       r->GetCapabilities().supportsGlobalIllumination;
 			r->SetGISettings(IRenderer::GISettings{
@@ -1180,6 +1365,7 @@ void GameApplication::OnRender(float deltaTime)
 			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
 			gr.quality      = GlobalState::getInstance().getCustomConfigInt("GIReflQuality", 1);
 			gr.bounces      = GlobalState::getInstance().getCustomConfigInt("GIReflBounces", 1);
+			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", true);
 			r->SetGIReflectionSettings(gr);
 
 			// Anti-aliasing — same config.json keys the editor's Preferences write

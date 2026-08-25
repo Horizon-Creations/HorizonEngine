@@ -47,6 +47,13 @@ struct RenderObject {
     // they are NOT instanced) — and so rain/snow don't wrongly cast shadows or darken AO.
     bool         castsShadow    = true;
     bool         contributesAO  = true;
+    // Authored per-mesh opt-out (MeshComponent/SkeletalMeshComponent). False =
+    // the object is lit as if nothing occluded it: every shadow source drops out
+    // of its shading (cascades, the point/spot atlas, the ray-traced GI masks and
+    // the cloud layer), which is what "fully lit" has to mean for a decorative or
+    // self-lit prop. Reaches the shaders as an INVERTED per-object lane so every
+    // fill site that zero-inits its uniforms keeps shadowing — see the backends.
+    bool         receivesShadow = true;
     // Per-entity node-graph param override: empty = use the material's own
     // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
     // floats) the backend uploads instead. Filled by the extractor from

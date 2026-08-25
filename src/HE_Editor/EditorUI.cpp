@@ -27,6 +27,7 @@
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
+#include "ConsolePanel.h"                // View > Console — every HE_LOG record, all levels
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
@@ -43,6 +44,7 @@
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
+#include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
 #endif
@@ -173,6 +175,12 @@ static bool s_showEnvironment = false;
 static bool s_showCollab = false;
 // Toggled by View > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
+// Toggled by View > Console (and Ctrl/Cmd+`); drives the log window.
+static bool s_showConsole = false;
+
+// Help ▸ Documentation. The published manual, not a file in the repo: an editor
+// installed from a DMG has no docs/ folder next to it.
+static constexpr const char* kDocsUrl = "https://horizoncreations.dev/HorizonEngineDocs/";
 
 // ── Remembering which panels were open ───────────────────────────────────────
 // A panel the user docked into the layout is part of how their editor looks;
@@ -203,6 +211,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Environment",          "PanelOpenEnvironment",   &s_showEnvironment   },
 	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
+	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 };
 static bool s_panelPrefsLoaded = false;
 
@@ -249,7 +258,7 @@ static void updatePanelVisibility(AppContext& ctx)
 			dirty     = true;
 		}
 	}
-	// One write for however many changed together (Reset Layout moves all four).
+	// One write for however many changed together (Reset Layout moves all five).
 	if (dirty) ctx.globalState->writeConfig();
 }
 
@@ -308,6 +317,10 @@ static void BuildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size)
 	ImGui::DockBuilderDockWindow("World Outliner", dockRight);
 	ImGui::DockBuilderDockWindow("Details",        dockRightBottom);
 	ImGui::DockBuilderDockWindow("Content Browser", dockDown);
+	// The Console shares the bottom node with the Content Browser: output belongs
+	// next to the assets it is about, and a tab there costs no space until it is
+	// opened.
+	ImGui::DockBuilderDockWindow("Console",        dockDown);
 	ImGui::DockBuilderDockWindow("Scene",          dockMain);
 	ImGui::DockBuilderFinish(dockspaceId);
 }
@@ -1120,6 +1133,38 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
 	auto openExportDialog = [&]() { ExportDialogPanel::open(ctx); };
+	// ── Entity editing ───────────────────────────────────────────────────────
+	// One predicate behind the Edit menu AND the keyboard, so a greyed-out menu
+	// item and a shortcut that quietly does nothing can never disagree. The
+	// gestures themselves re-check all of this (EditorApplication) — this is only
+	// what decides whether the UI offers them.
+	//
+	// Not while PLAYING: the play session runs on a throwaway copy of the world
+	// that is restored on stop, so an edit made there is work the user watches
+	// disappear.
+	auto canEditEntity = [&]() -> bool
+	{
+		return ctx.projectLoaded && !ctx.isPlaying && ctx.world
+		    && ctx.selectedEntity != entt::null
+		    && ctx.world->registry().valid(ctx.selectedEntity)
+		    && !ctx.world->isBuiltin(ctx.selectedEntity);
+	};
+	// Paste needs no selection — it lands beside whatever is selected, or under
+	// the world root when nothing is.
+	auto canPasteEntity = [&]() -> bool
+	{
+		return ctx.projectLoaded && !ctx.isPlaying && ctx.world && ctx.entityClipboardFull;
+	};
+	// Window::SetFullscreen is write-only, so the current state is read back off
+	// the SDL window rather than mirrored in a static that drifts the first time
+	// the user goes fullscreen through the window manager instead of this menu.
+	auto toggleFullscreen = [&]()
+	{
+		if (!ctx.window) return;
+		SDL_Window* win = ctx.window->GetNativeWindow();
+		if (!win) return;
+		ctx.window->SetFullscreen((SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) == 0);
+	};
 	auto beginNewProject = [&]()
 	{
 		ctx.hubProjectName[0] = '\0';
@@ -1133,6 +1178,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// like any Mac app, and the in-window ImGui menu row is dropped entirely.
 	bool nativeMenu = false;
 	bool openNewProjectPopup = false;
+	bool openAboutPopup = false;
 #ifdef __APPLE__
 	MacMenuBar::install();   // idempotent; needs NSApp, which SDL created long ago
 	nativeMenu = MacMenuBar::available();
@@ -1164,6 +1210,14 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
+			// Same guards the footer buttons use — the native items carry no
+			// enabled-state of their own, so an empty stack has to be checked here.
+			case MC::Undo:
+				if (ctx.undoSys && ctx.undoSys->canUndo() && ctx.undo) ctx.undo();
+				break;
+			case MC::Redo:
+				if (ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo) ctx.redo();
+				break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
 			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
@@ -1177,9 +1231,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				if (ctx.projectLoaded) openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
 				break;
 			case MC::ImportAsset:     triggerImportAsset();                                  break;
+			case MC::RefreshAssets:   if (ctx.projectLoaded) ctx.contentRefreshPending = true; break;
 			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
+			case MC::Documentation:   SDL_OpenURL(kDocsUrl);                                 break;
 #ifdef HE_HAVE_LIBSSH2
 			case MC::PublishEngineContent:       EngineContentPublishDialog::open(ctx);                break;
 			case MC::RebuildManifestFromServer:  EngineContentPublishDialog::openRebuildFromServer(ctx); break;
@@ -1244,13 +1300,28 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         else
         {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
-            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+            // The same stack the footer's two buttons and Ctrl+Z drive — there is
+            // one undo history in the editor, and this is a second door onto it.
+            const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
+            const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, canUndo) && ctx.undo) ctx.undo();
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, canRedo) && ctx.redo) ctx.redo();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Cut",   "Ctrl+X")) {}
-        if (ImGui::MenuItem("Copy",  "Ctrl+C")) {}
-        if (ImGui::MenuItem("Paste", "Ctrl+V")) {}
+        // Cut/Copy/Paste act on the SELECTED ENTITY, not on text: an editor's Edit
+        // menu is the scene's, and the text fields inside panels handle their own
+        // clipboard through ImGui.
+        {
+            const bool canEdit  = canEditEntity();
+            const bool canPaste = canPasteEntity();
+            if (ImGui::MenuItem("Cut",   "Ctrl+X", false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
+            if (ImGui::MenuItem("Copy",  "Ctrl+C", false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
+            if (ImGui::MenuItem("Paste", "Ctrl+V", false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, canEdit) && ctx.duplicateEntity)
+                ctx.duplicateEntity();
+            if (ImGui::MenuItem("Delete", "Del", false, canEdit) && ctx.deleteEntity)
+                ctx.deleteEntity();
+        }
         ImGui::Separator();
 		if (ImGui::MenuItem("Preferences", "Ctrl+,"))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
@@ -1258,7 +1329,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     }
     if (ImGui::BeginMenu("View"))
     {
-        if (ImGui::MenuItem("Toggle Fullscreen", "F11")) {}
+        if (ImGui::MenuItem("Toggle Fullscreen", "F11")) toggleFullscreen();
         if (ImGui::MenuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (ImGui::MenuItem("Performance Profiler", nullptr, s_showProfiler))
             togglePanelWindow(s_showProfiler, "Performance Profiler");
@@ -1268,6 +1339,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showCollab, "Collaboration");
         if (ImGui::MenuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
+        if (ImGui::MenuItem("Console", "Ctrl+`", s_showConsole))
+            togglePanelWindow(s_showConsole, "Console");
         if (ImGui::MenuItem("Level Script", nullptr, false, ctx.projectLoaded))
             openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         if (ImGui::MenuItem("Game Instance", nullptr, false, ctx.projectLoaded))
@@ -1278,7 +1351,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		if (ImGui::MenuItem("Import Asset...", nullptr, false, ctx.projectLoaded))
 			triggerImportAsset();
-		if (ImGui::MenuItem("Refresh Assets")) {}
+		// The same rescan an import raises — the Content Browser picks the flag up
+		// and re-walks the content tree, which is what makes a file dropped in
+		// from the Finder appear.
+		if (ImGui::MenuItem("Refresh Assets", nullptr, false, ctx.projectLoaded))
+			ctx.contentRefreshPending = true;
 #ifdef HE_HAVE_LIBSSH2
 		// Dev-only: publishes the local EngineContent library to the SFTP
 		// server other Editors download it from on demand (see HE_ContentSync).
@@ -1313,8 +1390,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (ImGui::MenuItem("Report Issue...", nullptr, ReportIssueDialog::isOpen()))
 			ReportIssueDialog::open();
 		ImGui::Separator();
-		if (ImGui::MenuItem("Documentation")) {}
-		if (ImGui::MenuItem("About")) {}
+		if (ImGui::MenuItem("Documentation")) SDL_OpenURL(kDocsUrl);
+		if (ImGui::MenuItem("About")) openAboutPopup = true;
 		ImGui::EndMenu();
 	}
     ImGui::EndMainMenuBar();
@@ -1323,6 +1400,35 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
     if (openNewProjectPopup)
         ImGui::OpenPopup("##NewProjectPopup");
+
+    // ── About ───────────────────────────────────────────────────────────────
+    // Windows and Linux only in practice: macOS drops the ImGui menu row and
+    // answers Help ▸ About from the App menu's standard panel (MacMenuBar.mm),
+    // which carries the same version string from the bundle's Info.plist.
+    if (openAboutPopup)
+        ImGui::OpenPopup("About Horizon Engine##about");
+    // Only while the popup is actually up: pinDialogToEditorWindow sets ImGui's
+    // NEXT-window position, and an unconditional call would hand it to whatever
+    // window opens after this one instead.
+    if (ImGui::IsPopupOpen("About Horizon Engine##about"))
+        EditorWidgets::pinDialogToEditorWindow();
+    if (ImGui::BeginPopupModal("About Horizon Engine##about", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
+        ImGui::TextUnformatted("Horizon Engine");
+        if (ctx.fontSubheading) ImGui::PopFont();
+        ImGui::TextDisabled("Version %s", HE_VERSION_FULL);
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
+        ImGui::Spacing();
+        if (ImGui::SmallButton("Documentation")) SDL_OpenURL(kDocsUrl);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(120.0f, 0.0f))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 
     // ── Export Project modal ────────────────────────────────────────────────
     ExportDialogPanel::render(ctx);
@@ -1684,6 +1790,32 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
         if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
             openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
+        // Ctrl/Cmd+` toggles the Console — the console key every engine uses, but
+        // NOT the bare one. This block runs before the asset tabs are dispatched,
+        // and the code editor is ImGuiColorTextEdit: it captures the keyboard by
+        // writing io.WantTextInput itself, which ImGui recomputes at the next
+        // NewFrame, so the guard above cannot see it. A modifier-free ` would
+        // therefore open the console every time somebody typed a backtick into a
+        // Lua string.
+        //
+        // It also carries more weight than the other two shortcuts here: on macOS
+        // the ImGui menu row above does not exist (the native bar replaces it, and
+        // an item there needs MacMenuBar), so until the Console has an entry in
+        // that bar this is the only way a Mac user reaches the panel.
+        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false))
+            togglePanelWindow(s_showConsole, "Console");
+        // The two shortcuts the menu has always advertised and never had. F11
+        // carries no modifier, so WantTextInput is the whole guard — a function
+        // key cannot be typed into a field, but a code editor holding the
+        // keyboard should still not have the window change shape under it.
+        // (⌘O never gets here on macOS — the native bar's key equivalent takes
+        // it first and dispatches the same action. F11 stays wired everywhere,
+        // though a Mac usually claims that key for the system before we see it;
+        // the native View menu's ⌃⌘F is the reliable route there.)
+        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_O, false))
+            requestGuarded(GuardedAction::OpenProjectDialog);
+        if (!kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F11, false))
+            toggleFullscreen();
     }
 
     if (!ctx.hubOpenError.empty())
@@ -2230,6 +2362,56 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size())
         || ctx.tabs[ctx.activeTab].assetPath.empty();
 
+    // ── Entity gestures: Ctrl+D / X / C / V and Delete ───────────────────────
+    // Here rather than up with the save shortcuts because of the one guard that
+    // matters: `sceneTabActive`. The material graph, the UI editor and the
+    // HorizonCode canvas all bind these same keys for their OWN nodes, and each
+    // of them IS a top-level tab — so gating on the scene tab is what keeps one
+    // Ctrl+D from duplicating a material node and a scene entity at once.
+    //
+    // WantTextInput on top of it, or renaming an entity in the Details panel
+    // would delete it at the first Delete keystroke, and IsAnyItemActive with
+    // it: a field that holds keyboard focus without being "active" this frame
+    // still owns what is typed into it (same rule as UIEditorPanel).
+    //
+    // Delete only, never Backspace: Backspace is the text-editing key and a
+    // near-miss on it used to destroy the selection in the other editors.
+    {
+        const ImGuiIO& kio = ImGui::GetIO();
+        const bool typing = kio.WantTextInput || ImGui::IsAnyItemActive();
+
+        // The scene tab is not enough on its own: the Content Browser is docked
+        // into it and binds Delete for its own asset deletion
+        // (ContentBrowserPanel.cpp), so one press would delete an asset AND the
+        // selected entity. Walk the child chain, because a focused child inside a
+        // panel still belongs to that panel — same NavWindow lookup the tutorial
+        // overlay uses.
+        const auto panelOwnsKeys = [](const char* title) {
+            const ImGuiContext* g = ImGui::GetCurrentContext();
+            if (!g || !g->NavWindow) return false;
+            for (const ImGuiWindow* w = g->NavWindow; w; w = w->ParentWindow)
+                if (std::strcmp(w->Name, title) == 0) return true;
+            return false;
+        };
+        if (sceneTabActive && !typing && !panelOwnsKeys("Content Browser"))
+        {
+            const bool mod = kio.KeyCtrl || kio.KeySuper;
+            if (canEditEntity())
+            {
+                if (mod && ImGui::IsKeyPressed(ImGuiKey_D, false) && ctx.duplicateEntity)
+                    ctx.duplicateEntity();
+                if (mod && ImGui::IsKeyPressed(ImGuiKey_C, false) && ctx.copyEntity)
+                    ctx.copyEntity();
+                if (mod && ImGui::IsKeyPressed(ImGuiKey_X, false) && ctx.cutEntity)
+                    ctx.cutEntity();
+                if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ctx.deleteEntity)
+                    ctx.deleteEntity();
+            }
+            if (mod && ImGui::IsKeyPressed(ImGuiKey_V, false) && canPasteEntity() && ctx.pasteEntity)
+                ctx.pasteEntity();
+        }
+    }
+
     // The dockspace itself is only drawn on the scene tab (below). On every other
     // tab it still has to be declared alive, or the windows docked into it that
     // ARE submitted on this tab — the View-menu panels, the play report — get
@@ -2576,6 +2758,11 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
     EnvironmentPanel::DrawEnvironmentWindow(ctx, s_showEnvironment);
     CollabPanel::DrawCollabWindow(ctx, s_showCollab);
 	SourceControlPanel::DrawSourceControlWindow(ctx, s_showSourceControl);
+	// Here for the reason this whole function exists, and it earns it more than
+	// most: output is watched from INSIDE a script or a graph tab, and left
+	// FLOATING the console keeps working there — which is where renderEditor has
+	// already returned.
+	ConsolePanel::DrawConsoleWindow(ctx, s_showConsole);
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

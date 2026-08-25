@@ -19,6 +19,7 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
@@ -39,6 +40,7 @@ JPH_SUPPRESS_WARNINGS
 #include <glm/gtc/quaternion.hpp>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -663,6 +665,78 @@ private:
     bool     m_skipSensors;
 };
 
+// Collects the ENTITIES an overlap test touched, rather than the hits.
+//
+// It has to be a custom collector: on the CollideShape path Jolt never fills
+// CollideShapeResult::mBodyID2 (only the shape-cast path does), so the hit
+// alone cannot say what was hit. The body is knowable exactly while it is being
+// reported, and Jolt offers it as OnBody() right before the narrow-phase test —
+// no body lock needed, unlike reading it back afterwards.
+//
+// Dedup lives here for the same reason it is needed at all: one body reports
+// once per sub shape (compound and mesh shapes), and "the crate is in the
+// blast" is true exactly once. Insertion order is the query's own.
+class HEOverlapCollector final : public JPH::CollideShapeCollector
+{
+public:
+    void OnBody(const JPH::Body& inBody) override
+    {
+        m_current = static_cast<uint32_t>(inBody.GetUserData());
+    }
+
+    void AddHit(const JPH::CollideShapeResult&) override
+    {
+        if (m_current == PhysicsWorld::kNoEntity)
+            return;
+        if (m_seen.insert(m_current).second)
+            m_entities.push_back(m_current);
+    }
+
+    std::vector<uint32_t> take() { return std::move(m_entities); }
+
+private:
+    uint32_t                     m_current = PhysicsWorld::kNoEntity;
+    std::unordered_set<uint32_t> m_seen;
+    std::vector<uint32_t>        m_entities;
+};
+
+// The body a script's push should land on, plus why it cannot land when it
+// does not. The verdict is separated from the LOGGING so every public call can
+// name itself in its own throttled message — one shared log site would let
+// whichever call fired first silence all the others for the whole cooldown.
+struct BodyTarget
+{
+    JPH::BodyID id;
+    bool        exists  = false;   // the entity has a body at all
+    bool        dynamic = false;   // …and the solver will accept a force on it
+    bool        movable = false;   // …or at least a velocity (kinematic counts)
+};
+
+BodyTarget bodyTarget(const std::unordered_map<uint32_t, JPH::BodyID>& bodies,
+                      const JPH::BodyInterface&                        bodyInterface,
+                      uint32_t                                         entityId)
+{
+    BodyTarget target;
+    const auto it = bodies.find(entityId);
+    if (it == bodies.end())
+        return target;
+    const JPH::EMotionType motion = bodyInterface.GetMotionType(it->second);
+    target.id      = it->second;
+    target.exists  = true;
+    target.dynamic = motion == JPH::EMotionType::Dynamic;
+    target.movable = motion != JPH::EMotionType::Static;
+    return target;
+}
+
+// Both refusals, spelled once. They say what to DO about it, because whoever
+// reads them wrote a game script, not the engine.
+constexpr const char* kNoBodyReason =
+    "the entity has no physics body — bodies are built at scene start from a "
+    "RigidBodyComponent, so an entity spawned at runtime has none";
+constexpr const char* kNotDynamicReason =
+    "its rigid body is not Dynamic — a Static or Kinematic body has no solver "
+    "state to push";
+
 } // namespace
 
 PhysicsWorld::RaycastHit PhysicsWorld::raycast(
@@ -788,6 +862,134 @@ PhysicsWorld::RaycastHit PhysicsWorld::sphereCast(
     return result;
 }
 
+std::vector<uint32_t> PhysicsWorld::overlapSphere(
+    const glm::vec3& center,
+    float            radius,
+    uint32_t         ignoreEntityId) const
+{
+    std::vector<uint32_t> result;
+    if (!m_impl || !m_impl->initialized || radius <= 0.0f)
+        return result;
+
+    JPH::Ref<JPH::Shape> sphere = new JPH::SphereShape(radius);
+    const JPH::RVec3     at(center.x, center.y, center.z);
+
+    JPH::CollideShapeSettings settings;
+    HEOverlapCollector        collector;
+    const HEQueryFilter       bodyFilter(ignoreEntityId, /*skipSensors=*/false);
+
+    // Results are expressed relative to `at` rather than the world origin, the
+    // same reason sphereCast passes its origin as the base offset: it is what
+    // keeps the test itself precise far from the origin.
+    m_impl->physicsSystem.GetNarrowPhaseQuery().CollideShape(
+        sphere, JPH::Vec3::sReplicate(1.0f), JPH::RMat44::sTranslation(at),
+        settings, at, collector, {}, {}, bodyFilter);
+
+    return collector.take();
+}
+
+bool PhysicsWorld::addForce(uint32_t entityId, const glm::vec3& force)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addForce on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddForce(target.id, JPH::Vec3(force.x, force.y, force.z));
+    return true;
+}
+
+bool PhysicsWorld::addImpulse(uint32_t entityId, const glm::vec3& impulse)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addImpulse on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddImpulse(target.id, JPH::Vec3(impulse.x, impulse.y, impulse.z));
+    return true;
+}
+
+bool PhysicsWorld::addTorque(uint32_t entityId, const glm::vec3& torque)
+{
+    if (!m_impl) return false;
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.dynamic)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "addTorque on entity %u did nothing: %s",
+                        entityId, target.exists ? kNotDynamicReason : kNoBodyReason);
+        return false;
+    }
+    bodyInterface.AddTorque(target.id, JPH::Vec3(torque.x, torque.y, torque.z));
+    return true;
+}
+
+bool PhysicsWorld::setVelocity(uint32_t entityId, const glm::vec3& velocity)
+{
+    if (!m_impl) return false;
+
+    // The character first — see the header for why the two representations
+    // share one call and why this order is the one that changes nothing.
+    const auto character = m_impl->entityToCharacter.find(entityId);
+    if (character != m_impl->entityToCharacter.end())
+    {
+        character->second->SetLinearVelocity(JPH::Vec3(velocity.x, velocity.y, velocity.z));
+        return true;
+    }
+
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    const BodyTarget target = bodyTarget(m_impl->entityToBody, bodyInterface, entityId);
+    if (!target.movable)
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "setVelocity on entity %u did nothing: %s",
+                        entityId,
+                        target.exists ? "its rigid body is Static, which never moves"
+                                      : kNoBodyReason);
+        return false;
+    }
+    // Jolt wakes the body here as long as the velocity is not near zero, which
+    // is the rule we want: a body told to stand still may stay asleep, a
+    // sleeping crate handed a real velocity starts moving.
+    bodyInterface.SetLinearVelocity(target.id, JPH::Vec3(velocity.x, velocity.y, velocity.z));
+    return true;
+}
+
+glm::vec3 PhysicsWorld::getVelocity(uint32_t entityId) const
+{
+    if (!m_impl) return glm::vec3(0.0f);
+
+    const auto character = m_impl->entityToCharacter.find(entityId);
+    if (character != m_impl->entityToCharacter.end())
+    {
+        const JPH::Vec3 v = character->second->GetLinearVelocity();
+        return { v.GetX(), v.GetY(), v.GetZ() };
+    }
+
+    const auto body = m_impl->entityToBody.find(entityId);
+    if (body == m_impl->entityToBody.end())
+    {
+        HE_LOG_THROTTLE(Physics, Warning, 5.0, "getVelocity on entity %u reads zero: %s",
+                        entityId, kNoBodyReason);
+        return glm::vec3(0.0f);
+    }
+    // A static body answers zero without complaint: that is its true velocity,
+    // not a lookup that failed.
+    const JPH::Vec3 v = m_impl->physicsSystem.GetBodyInterface().GetLinearVelocity(body->second);
+    return { v.GetX(), v.GetY(), v.GetZ() };
+}
+
 void PhysicsWorld::setCharacterVelocity(uint32_t entityId, const glm::vec3& velocity)
 {
     if (!m_impl) return;
@@ -802,6 +1004,28 @@ bool PhysicsWorld::isCharacterGrounded(uint32_t entityId) const
     auto it = m_impl->entityToCharacter.find(entityId);
     if (it == m_impl->entityToCharacter.end()) return false;
     return it->second->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+}
+
+void PhysicsWorld::setGravity(const glm::vec3& gravity)
+{
+    if (!m_impl) return;
+    m_impl->physicsSystem.SetGravity(JPH::Vec3(gravity.x, gravity.y, gravity.z));
+
+    // Wake everything that had settled. Gravity is read per step from the
+    // system, but a sleeping body is not stepped at all — so without this,
+    // flipping gravity leaves every crate that had come to rest hanging in the
+    // air until something else happens to touch it.
+    auto& bodyInterface = m_impl->physicsSystem.GetBodyInterface();
+    for (const auto& entry : m_impl->entityToBody)
+        if (bodyInterface.GetMotionType(entry.second) != JPH::EMotionType::Static)
+            bodyInterface.ActivateBody(entry.second);
+}
+
+glm::vec3 PhysicsWorld::gravity() const
+{
+    if (!m_impl) return glm::vec3(0.0f);
+    const JPH::Vec3 g = m_impl->physicsSystem.GetGravity();
+    return { g.GetX(), g.GetY(), g.GetZ() };
 }
 
 std::vector<PhysicsWorld::CollisionEvent> PhysicsWorld::pollCollisionEnter()

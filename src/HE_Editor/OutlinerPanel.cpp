@@ -327,6 +327,29 @@ void render(AppContext& ctx)
                     s_entityRenameBuf[sizeof(s_entityRenameBuf) - 1] = '\0';
                     s_openEntityRename = true;
                 }
+                // ── Duplicate / cut / copy / paste ────────────────────────
+                // The SAME hooks the Edit menu and the keyboard use. They act on
+                // the SELECTION, which is this row: opening this popup selects it
+                // (top of the block), so the two can never disagree. Not while
+                // playing — play runs on a copy of the world, thrown away on stop.
+                {
+                    const bool editable = !isRoot && !ctx.isPlaying;
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, editable) &&
+                        ctx.duplicateEntity)
+                        ctx.duplicateEntity();
+                    if (ImGui::MenuItem("Copy", "Ctrl+C", false, editable) && ctx.copyEntity)
+                        ctx.copyEntity();
+                    if (ImGui::MenuItem("Cut", "Ctrl+X", false, editable) && ctx.cutEntity)
+                        ctx.cutEntity();
+                    // Paste needs no row of its own to be meaningful — it lands
+                    // beside this one, under the same parent.
+                    if (ImGui::MenuItem("Paste", "Ctrl+V", false,
+                                        ctx.entityClipboardFull && !ctx.isPlaying) &&
+                        ctx.pasteEntity)
+                        ctx.pasteEntity();
+                    ImGui::Separator();
+                }
                 if (!isRoot && ImGui::MenuItem("Save as Prefab") && ctx.contentManager)
                 {
                     // Entity names are free text, and a '/' in one would reach

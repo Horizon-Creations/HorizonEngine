@@ -17,6 +17,7 @@
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
 #include <Math/AABB.h>
+#include <DebugDraw/DebugDraw.h>          // the ground grid rides the editor's debug-line channel
 #include <glm/gtc/type_ptr.hpp>
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
@@ -26,6 +27,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -35,6 +37,120 @@
 
 namespace ViewportPanel
 {
+
+// ── Ground grid ─────────────────────────────────────────────────────────────
+// Outside the ImGui guard on purpose: this is pure geometry pushed into a debug
+// line buffer, and keeping the toggle next to the only code that reads it is
+// what stops a second copy of "is the grid on" from appearing.
+static bool s_groundGrid = true;
+
+bool groundGridEnabled()        { return s_groundGrid; }
+void setGroundGridEnabled(bool on) { s_groundGrid = on; }
+
+void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& out)
+{
+	if (playing || !s_groundGrid) return;
+
+	const glm::vec3 eye  = cam.position();
+	const float     camX = eye.x;
+	const float     camZ = eye.z;
+
+	// Cell size follows the camera's height over the grid plane. A fixed metre
+	// grid is the thing that fails at both ends: from 500 m up it is a solid grey
+	// smear, and it says nothing at all about the door handle you are looking at
+	// from 20 cm. Snapped to a 1 / 2.5 / 5 / 10 ladder, because the grid is only
+	// a scale reference if the spacing is a number somebody can count in.
+	// The floor keeps a camera sitting exactly on the ground plane from asking
+	// for an infinitely fine grid.
+	const float height = std::max(2.0f, std::abs(eye.y));
+	const float target = height * 0.12f;
+	const float decade = std::pow(10.0f, std::floor(std::log10(target)));
+	const float lead   = target / decade;  // 1 … 10
+	const float step   = decade * (lead <= 1.0f ? 1.0f
+	                             : lead <= 2.5f ? 2.5f
+	                             : lead <= 5.0f ? 5.0f : 10.0f);
+
+	// Outer edge, and the point where the minor lines give up. Both are measured
+	// in cells so the grid always shows the same amount of ground no matter how
+	// far up the camera is.
+	const float radiusMajor = step * 40.0f;
+	const float radiusMinor = radiusMajor * 0.55f;
+
+	// LINEAR HDR values: the debug-line pass writes straight into the scene's
+	// RGBA16F target and resolves through ACES + gamma, which lifts them a long
+	// way (WorldPreviewGrid.h documents the same calibration for the studio
+	// grid). Read them as "minor ≈ 0.38 on screen, major ≈ 0.50" — brighter than
+	// the preview grid's, because this one sits over a lit sky rather than over a
+	// dark studio backdrop.
+	const glm::vec3 colMinor(0.115f, 0.115f, 0.125f);
+	const glm::vec3 colMajor(0.210f, 0.210f, 0.225f);
+	// The two axes through the world origin, in the gizmo's own red/blue: without
+	// them the grid says how big things are but not which way they face.
+	const glm::vec3 colAxisX(0.290f, 0.070f, 0.070f);
+	const glm::vec3 colAxisZ(0.070f, 0.100f, 0.330f);
+
+	// One grid line, clipped to a DISC around the camera and split into pieces
+	// that dim toward the rim.
+	//
+	// A disc rather than a square because a square's corners reach 40% further
+	// than its sides — which is exactly where the lines pile into a smear — and
+	// its straight edge reads as a wall standing in the scene.
+	//
+	// The dimming is only half of the fade-out: the debug-line pass has no alpha
+	// (opaque vec3 into an HDR target), so a line can be darkened but never made
+	// transparent, and over a bright ground a darkened line stays a visible dark
+	// streak. The half that actually does the work is the minor lines stopping at
+	// `radiusMinor`, leaving a thinning major-line mesh where a full-density grid
+	// would otherwise turn into a solid band at the horizon.
+	auto emitLine = [&](bool alongZ, float offset, float radius, const glm::vec3& color)
+	{
+		// Perpendicular distance from the camera's ground point to the line; past
+		// the radius it misses the disc entirely.
+		const float d      = offset - (alongZ ? camX : camZ);
+		const float chord2 = radius * radius - d * d;
+		if (chord2 <= 0.0f) return;
+
+		const float halfChord = std::sqrt(chord2);
+		const float centre    = alongZ ? camZ : camX; // the disc's midpoint ALONG the line
+		constexpr int kSegments = 12;
+		for (int s = 0; s < kSegments; ++s)
+		{
+			const float t0 = centre - halfChord + 2.0f * halfChord * (static_cast<float>(s)     / kSegments);
+			const float t1 = centre - halfChord + 2.0f * halfChord * (static_cast<float>(s + 1) / kSegments);
+			const float tm = (t0 + t1) * 0.5f;
+			const float r  = std::sqrt(d * d + (tm - centre) * (tm - centre));
+			// Full brightness over the inner half, then an ease-out to nothing at
+			// the rim.
+			const float u    = std::clamp((r / radius - 0.5f) * 2.0f, 0.0f, 1.0f);
+			const float fade = 1.0f - u * u;
+			if (fade <= 0.02f) continue;
+			const glm::vec3 a = alongZ ? glm::vec3(offset, 0.0f, t0) : glm::vec3(t0, 0.0f, offset);
+			const glm::vec3 b = alongZ ? glm::vec3(offset, 0.0f, t1) : glm::vec3(t1, 0.0f, offset);
+			out.line(a, b, color * fade);
+		}
+	};
+
+	// Lines are anchored to WORLD coordinates, not to the camera: a grid that
+	// slides along under the camera is a texture, not a ruler. Only the index
+	// range follows the camera.
+	auto emitFamily = [&](bool alongZ, float centreCoord, const glm::vec3& axisColor)
+	{
+		const int first = static_cast<int>(std::floor((centreCoord - radiusMajor) / step));
+		const int last  = static_cast<int>(std::ceil ((centreCoord + radiusMajor) / step));
+		for (int i = first; i <= last; ++i)
+		{
+			const bool axis  = (i == 0);
+			const bool major = (i % 10 == 0);
+			emitLine(alongZ, static_cast<float>(i) * step,
+			         (axis || major) ? radiusMajor : radiusMinor,
+			         axis ? axisColor : (major ? colMajor : colMinor));
+		}
+	};
+
+	// The line at x = 0 runs along Z and IS the Z axis, and vice versa.
+	emitFamily(/*alongZ=*/true,  camX, colAxisZ);
+	emitFamily(/*alongZ=*/false, camZ, colAxisX);
+}
 
 #ifdef HE_IMGUI_ENABLED
 
@@ -87,6 +203,13 @@ static const HE::AABB* meshBounds(ContentManager& cm, const HE::UUID& meshId)
 	return it->second.isValid() ? &it->second : nullptr;
 }
 
+// What an entity without a readable mesh asset is measured as: the built-in
+// fallback cube's own local box. Shared by picking and by the F-key framing, so
+// clicking a thing and focusing it never disagree about how big it is.
+static const HE::AABB s_fallbackBox = []{
+	HE::AABB b; b.expand({ -0.5f, -0.5f, -0.5f }); b.expand({ 0.5f, 0.5f, 0.5f }); return b;
+}();
+
 // Mesh geometry for HE::ScenePick, served straight out of the content manager
 // (plus the bounds cache above, so the cheap box reject costs nothing here).
 // Cooked assets keep their vertices interleaved with normals and UVs and leave
@@ -105,6 +228,80 @@ static HE::ScenePick::MeshLookup meshLookup(ContentManager& cm)
 		out.bounds      = meshBounds(cm, id);
 		return true;
 	};
+}
+
+// ── Focus on selection (F) ──────────────────────────────────────────────────
+
+// Every entity under (and including) the selected one. F frames a SELECTION and
+// a selection is a subtree: the root of a group carries no geometry of its own,
+// so framing it alone would park the camera in front of an empty point.
+static void collectSubtree(entt::registry& reg, Entity e,
+                           std::unordered_set<uint32_t>& out)
+{
+	// The insert doubles as the recursion guard: HorizonWorld::reparentEntity
+	// refuses to build a cycle, but a hand-edited .hescene never went through it.
+	if (!out.insert(static_cast<uint32_t>(e)).second) return;
+	if (const auto* h = reg.try_get<HierarchyComponent>(e))
+		for (const Entity child : h->children)
+			if (reg.valid(child)) collectSubtree(reg, child, out);
+}
+
+// The bounding sphere the F key frames, measured from the selection's REAL
+// geometry. It used to come out of TransformComponent::scale, which is not a
+// size at all: a 50 m building authored at scale 1 asked for a radius of 1.8 and
+// the camera landed inside the walls, which reads as a broken shortcut rather
+// than as a mismeasured one.
+//
+// The boxes come from the mesh assets (the cache picking already pays for),
+// transformed by each render object's world matrix — NOT from
+// RenderObject::worldBounds, which this viewport's own extractor leaves invalid
+// because it runs without a ContentManager. Entities that draw nothing — a
+// light, a camera, an empty group — fall back to the spread of their transforms.
+static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
+                                 const RenderWorld& snapshot,
+                                 glm::vec3& centerOut, float& radiusOut)
+{
+	auto& reg = world.registry();
+	if (!reg.valid(sel)) return false;
+
+	std::unordered_set<uint32_t> subtree;
+	collectSubtree(reg, sel, subtree);
+
+	HE::AABB geometry;   // what the selection actually draws
+	HE::AABB pivots;     // where its entities sit, drawn or not
+
+	auto expandFromObject = [&](const RenderObject& obj)
+	{
+		if (subtree.find(obj.entityId) == subtree.end()) return;
+		const HE::AABB* local = (cm && obj.meshAssetId != HE::UUID{})
+		                      ? meshBounds(*cm, obj.meshAssetId) : nullptr;
+		geometry.expand((local ? *local : s_fallbackBox).transformed(obj.transform));
+	};
+	for (const RenderObject& obj : snapshot.objects)               expandFromObject(obj);
+	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects) expandFromObject(obj);
+
+	for (const uint32_t raw : subtree)
+		if (const auto* t = reg.try_get<TransformComponent>(static_cast<Entity>(raw)))
+			pivots.expand(glm::vec3(t->worldMatrix[3]));
+
+	if (!geometry.isValid() && !pivots.isValid()) return false;
+
+	if (geometry.isValid())
+	{
+		centerOut = geometry.center();
+		// Circumscribed sphere; the floor keeps a flat or degenerate mesh (a
+		// ground plane, a single quad) from asking for a zero-distance framing.
+		radiusOut = std::max(glm::length(geometry.extents()), 0.25f);
+	}
+	else
+	{
+		// Nothing here has a size, so the radius is a viewing distance rather
+		// than a measurement: close enough to see the light, far enough to see
+		// what it is lighting. A group of them still frames the whole spread.
+		centerOut = pivots.center();
+		radiusOut = glm::length(pivots.extents()) + 2.0f;
+	}
+	return true;
 }
 
 // Both of these are now EditorViewportNav's — the capture is a property of the
@@ -205,6 +402,20 @@ void render(AppContext& ctx, float dt)
 				const bool viewportHovered = ImGui::IsItemHovered();
 				ImGuiIO& io = ImGui::GetIO();
 
+				// Camera + object snapshot, identical to what the backend
+				// renders with (extractor recomputes world matrices). The
+				// editor camera overrides any scene camera so the gizmo and
+				// picking ray match exactly what is on screen.
+				//
+				// Declared ahead of the camera block because the F key measures
+				// the selection out of it, and the camera has to be settled
+				// BEFORE the extract runs (the extract is what the gizmo, the
+				// picking ray and the drop probe all read this frame). F therefore
+				// frames against last frame's boxes, which is exactly as accurate:
+				// nothing resizes between two frames of holding a key down.
+				static RenderExtractor s_extractor;
+				static RenderWorld     s_sceneSnapshot;
+
 				// ── Editor camera: drive from viewport input ────────────────
 				// In play mode the game's scene camera takes over, so the
 				// override is cleared and editor navigation is disabled.
@@ -243,18 +454,19 @@ void render(AppContext& ctx, float dt)
 					EditorCamera::Input cin;
 					navigating = EditorViewportNav::gather(ctx, navOwner(), imageHovered,
 					                                      dt, avail.y, cin);
-					// Focus on selection (F) — frame the selected entity.
+					// Focus on selection (F) — frame the selected entity and
+					// everything parented under it (see selectionFocusSphere).
 					if (imageHovered && !io.WantTextInput && !navigating &&
 					    ImGui::IsKeyPressed(ImGuiKey_F) &&
 					    ctx.world && ctx.selectedEntity != entt::null &&
 					    ctx.world->registry().valid(ctx.selectedEntity))
 					{
-						if (auto* t = ctx.world->registry().try_get<TransformComponent>(ctx.selectedEntity))
-						{
-							const glm::vec3 center = glm::vec3(t->worldMatrix[3]);
-							const float     radius = glm::length(t->scale) * 0.75f + 0.5f;
+						glm::vec3 center(0.0f);
+						float     radius = 0.0f;
+						if (selectionFocusSphere(*ctx.world, ctx.contentManager,
+						                         ctx.selectedEntity, s_sceneSnapshot,
+						                         center, radius))
 							cam.focusOn(center, radius);
-						}
 					}
 
 					cam.update(cin);
@@ -262,12 +474,6 @@ void render(AppContext& ctx, float dt)
 					ctx.renderer->SetEditorCamera(cam.makeOverride());
 				}
 
-				// Camera + object snapshot, identical to what the backend
-				// renders with (extractor recomputes world matrices). The
-				// editor camera overrides any scene camera so the gizmo and
-				// picking ray match exactly what is on screen.
-				static RenderExtractor s_extractor;
-				static RenderWorld     s_sceneSnapshot;
 				const EditorCameraOverride camOverride =
 					(ctx.editorCamera && !ctx.isPlaying) ? ctx.editorCamera->makeOverride()
 					                                     : EditorCameraOverride{};
@@ -454,10 +660,8 @@ void render(AppContext& ctx, float dt)
 					const glm::vec3 rayDir(glm::vec3(pFar) - glm::vec3(pNear));
 
 					// Local-space AABBs per mesh asset, cached (file-scope).
-					// Entities without an asset use the built-in fallback cube's box.
-					static const HE::AABB s_cubeBox = []{
-						HE::AABB b; b.expand({-0.5f,-0.5f,-0.5f}); b.expand({0.5f,0.5f,0.5f}); return b;
-					}();
+					// Entities without an asset use the built-in fallback cube's
+					// box — s_fallbackBox, the same one the F-key framing measures.
 
 					// Real mesh entities take priority over terrain: a terrain
 					// chunk's bounding box is huge and loose (its near face sits
@@ -472,7 +676,7 @@ void render(AppContext& ctx, float dt)
 					Entity terrainHit = entt::null; float terrainDist = std::numeric_limits<float>::max();
 					for (const RenderObject& obj : s_sceneSnapshot.objects)
 					{
-						HE::AABB box = s_cubeBox;
+						HE::AABB box = s_fallbackBox;
 						if (obj.meshAssetId != HE::UUID{} && ctx.contentManager)
 							if (const HE::AABB* b = meshBounds(*ctx.contentManager, obj.meshAssetId))
 								box = *b;

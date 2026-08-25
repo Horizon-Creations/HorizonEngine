@@ -32,7 +32,12 @@ struct NavMeshGeometry {
 
 struct NavMeshComponent {
     NavMeshConfig    config;
-    NavMeshGeometry  geometry;  // source geometry — set before calling bake
+    // Source geometry for bake(). Filled by NavigationSystem::collectStaticGeometry
+    // (the editor's Bake button does exactly that, then bakes). It is SERIALIZED
+    // even though it is a cache of the scene's meshes: a loaded scene re-bakes from
+    // it directly, and re-collecting at load time would not work anyway — the
+    // terrain's chunk entities do not exist until TerrainSystem has ticked.
+    NavMeshGeometry  geometry;
 
     // Runtime (not serialized): owning pointers to Recast/Detour objects.
     // Null until bake() succeeds.

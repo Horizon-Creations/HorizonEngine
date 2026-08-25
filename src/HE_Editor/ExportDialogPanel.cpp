@@ -67,6 +67,106 @@ static bool   s_exportCompileHC   = false;         // compile HorizonCode → C+
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
+// The window + backend the exported game starts in. They are NOT part of the
+// ExportProfile: the profile lives in the .heproj, and these are shipped
+// through config.json instead — so they persist in the editor's own settings
+// under the very keys the game reads them by. Defaults are what a game shipped
+// with before the config could carry them, so an untouched dialog changes
+// nothing about the output.
+static int    s_exportWindowWidth  = 1280;
+static int    s_exportWindowHeight = 720;
+static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen | Borderless
+static bool   s_exportGameVSync    = true;
+static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
+
+// The platform the export really lands on ("Host" resolved against this build).
+static std::string exportTargetPlatformName(const std::string& platform)
+{
+    if (platform != "Host") return platform;
+#if defined(_WIN32)
+    return "Windows";
+#elif defined(__APPLE__)
+    return "macOS";
+#else
+    return "Linux";
+#endif
+}
+
+// The graphics backends a game built for `platform` can create. The TARGET
+// decides, not this editor: offering DirectX for a Linux build would only hand
+// the player a name their runtime falls back from at startup. Names are the
+// getRHIName spelling — that is what the game parses.
+static std::vector<const char*> exportBackendChoices(const std::string& platform)
+{
+    const std::string target = exportTargetPlatformName(platform);
+    if (target == "Windows") return { "OpenGL", "Vulkan", "D3D11", "D3D12" };
+    if (target == "macOS")   return { "Metal", "OpenGL" };
+    return { "OpenGL", "Vulkan" };
+}
+
+// The settings the shipped game boots with, written in config.json's own shape
+// (the "CustomConfig" array GlobalState reads — a flat object would parse and
+// then be ignored). The graphics half is the editor's LIVE configuration:
+// whatever the project was authored and previewed with is what the player gets,
+// instead of the engine defaults every export shipped with until now. The window
+// half comes from this dialog, because the editor's own window is not the game's.
+//
+// Only keys GameApplication actually reads are shipped. config.json ends up in
+// the player's hands, and a setting in it that does nothing is a support
+// question waiting to happen.
+static std::string buildGameConfigJson(const AppContext& ctx)
+{
+    const EditorConfig& cfg = ctx.editorConfig;
+    json entries = json::array();
+    const auto put = [&entries](const char* key, const json& value)
+    {
+        entries.push_back({ { "Key", key }, { "Value", value } });
+    };
+
+    put("GpuParticles",              cfg.GpuParticles);
+    put("BloomEnabled",              cfg.BloomEnabled);
+    put("BloomThreshold",            cfg.BloomThreshold);
+    put("BloomIntensity",            cfg.BloomIntensity);
+    put("SSAOEnabled",               cfg.SSAOEnabled);
+    put("SSAORadius",                cfg.SSAORadius);
+    put("SSAOIntensity",             cfg.SSAOIntensity);
+    put("SSAOMethod",                cfg.SSAOMethod);
+    put("AntiAliasing",              cfg.AntiAliasing);
+    put("AASharpness",               cfg.AASharpness);
+    put("RenderScale",               cfg.RenderScale);
+    put("SpecularAA",                cfg.SpecularAA);
+    put("SpecularAAStrength",        cfg.SpecularAAStrength);
+    put("RenderPath",                cfg.RenderPath);
+    put("GlobalIlluminationEnabled", cfg.GlobalIlluminationEnabled);
+    put("GIIndirectIntensity",       cfg.GIIndirectIntensity);
+    put("GILightRadius",             cfg.GILightRadius);
+    put("SSREnabled",                cfg.SSREnabled);
+    put("SSRIntensity",              cfg.SSRIntensity);
+    put("SSRMaxRoughness",           cfg.SSRMaxRoughness);
+    put("SSRQuality",                cfg.SSRQuality);
+    put("GIReflectionsEnabled",      cfg.GIReflectionsEnabled);
+    put("GIReflIntensity",           cfg.GIReflIntensity);
+    put("GIReflMaxRoughness",        cfg.GIReflMaxRoughness);
+    put("GIReflQuality",             cfg.GIReflQuality);
+    put("GIReflBounces",             cfg.GIReflBounces);
+    put("GIReflBlur",                cfg.GIReflBlur);
+
+    put("GameWindowWidth",  s_exportWindowWidth);
+    put("GameWindowHeight", s_exportWindowHeight);
+    put("GameWindowMode",   s_exportWindowMode);
+    put("GameVSync",        s_exportGameVSync);
+    // Left out entirely when no backend was picked: an absent key is what tells
+    // the game to keep its own platform default, and that is a different answer
+    // from naming a backend the target might not have.
+    if (!s_exportBackend.empty()) put("GameBackend", s_exportBackend);
+
+    json j;
+    j["CustomConfig"] = std::move(entries);
+    // Same "replace" error handler the engine's own config writer uses: a stray
+    // invalid UTF-8 byte anywhere in here would otherwise throw out of the
+    // export worker, which has no handler above it.
+    return j.dump(4, ' ', false, json::error_handler_t::replace);
+}
 
 // True when the selected target produces macOS binaries the editor can bundle +
 // sign — i.e. this editor runs on macOS and targets Host or macOS. Building a
@@ -362,6 +462,19 @@ void open(AppContext& ctx)
 		it.increment(ec);
 	}
 
+	// The window/backend rows are not part of the profile — they ride to the game
+	// in config.json and live in the editor's own settings under the keys the game
+	// reads them by. Reload them so the dialog opens on what the last export shipped.
+	if (ctx.globalState)
+	{
+		GlobalState& gs = *ctx.globalState;
+		s_exportWindowWidth  = gs.getCustomConfigInt("GameWindowWidth",     s_exportWindowWidth);
+		s_exportWindowHeight = gs.getCustomConfigInt("GameWindowHeight",    s_exportWindowHeight);
+		s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
+		s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
+		s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
+	}
+
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 	s_showExportModal = true;
 }
@@ -493,7 +606,16 @@ void render(AppContext& ctx)
             {
                 for (const char* name : { "Host", "Windows", "macOS", "Linux" })
                     if (ImGui::Selectable(name, s_exportPlatform == name))
+                    {
                         s_exportPlatform = name;
+                        // A backend the new target does not have would ship as a
+                        // name the game can only fall back from — drop it rather
+                        // than carry it across the switch.
+                        bool stillOffered = s_exportBackend.empty();
+                        for (const char* b : exportBackendChoices(s_exportPlatform))
+                            if (s_exportBackend == b) { stillOffered = true; break; }
+                        if (!stillOffered) s_exportBackend.clear();
+                    }
                 ImGui::EndCombo();
             }
             {
@@ -533,6 +655,51 @@ void render(AppContext& ctx)
                 if (plat != ExportPlatform::Host)
                     ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
+
+            // ── How the game starts ─────────────────────────────────────────
+            // These ride to the player in config.json rather than in the pak, so
+            // they stay editable after the fact — and so the graphics settings
+            // this editor is set to reach the shipped build at all.
+            ImGui::Spacing();
+            ImGui::Text("Game Window:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(70.0f);
+            if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
+                s_exportWindowWidth = std::max(320, s_exportWindowWidth);
+            ImGui::SameLine();
+            ImGui::TextUnformatted("x");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(70.0f);
+            if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
+                s_exportWindowHeight = std::max(240, s_exportWindowHeight);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
+            {
+                for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
+                    if (ImGui::Selectable(mode, s_exportWindowMode == mode))
+                        s_exportWindowMode = mode;
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("VSync", &s_exportGameVSync);
+
+            ImGui::Text("Graphics Backend:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::BeginCombo("##gameBackend",
+                                  s_exportBackend.empty() ? "(platform default)"
+                                                          : s_exportBackend.c_str()))
+            {
+                if (ImGui::Selectable("(platform default)", s_exportBackend.empty()))
+                    s_exportBackend.clear();
+                for (const char* name : exportBackendChoices(s_exportPlatform))
+                    if (ImGui::Selectable(name, s_exportBackend == name))
+                        s_exportBackend = name;
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
+                                "the target runtime lacks falls back to its default.");
 
             ImGui::Spacing();
             ImGui::Checkbox("Compress assets",       &s_exportCompress);
@@ -1009,6 +1176,19 @@ void startExport(AppContext& ctx)
                 else
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
+                // The settings the game boots with, shipped as a config.json next
+                // to its data. Built HERE, on the UI thread — it reads the editor's
+                // live configuration, which the export worker must not touch — and
+                // the window rows are remembered for the next export.
+                es.gameConfigJson   = buildGameConfigJson(ctx);
+                if (ctx.globalState)
+                {
+                    ctx.globalState->setCustomConfigEntry("GameWindowWidth",  s_exportWindowWidth);
+                    ctx.globalState->setCustomConfigEntry("GameWindowHeight", s_exportWindowHeight);
+                    ctx.globalState->setCustomConfigEntry("GameWindowMode",   s_exportWindowMode);
+                    ctx.globalState->setCustomConfigEntry("GameVSync",        s_exportGameVSync);
+                    ctx.globalState->setCustomConfigEntry("GameBackend",      s_exportBackend);
+                }
                 es.gameRuntimeDir   = runtimeDir;
                 // Engine-wide default content (primitive meshes, default materials)
                 // ships INSIDE the pak under "Engine/…": it lives next to the editor,

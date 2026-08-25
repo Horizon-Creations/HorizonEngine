@@ -68,6 +68,16 @@ public:
 	void readConfig();
 	bool writeConfig();
 
+	// A packaged game turns this off. It lays the settings the export shipped
+	// next to it over the in-memory config, and configFilePath() resolves to the
+	// per-user file that is SHARED with the editor and every other Horizon game
+	// on the machine — so the write-back in ~Application would quietly stamp one
+	// game's shipped settings onto the developer's editor preferences. The game
+	// has nothing of its own to persist today, so refusing the write is the whole
+	// fix; a game that later grows a settings menu needs its own file, not this.
+	void setConfigPersistent(bool on) { m_configPersistent = on; }
+	bool configPersistent() const     { return m_configPersistent; }
+
 	// Where config.json actually lives.
 	//
 	// It used to be the bare relative name, i.e. resolved against the working
@@ -165,6 +175,7 @@ private:
 	//Structs
 	EngineStatus m_engineStatus;
 	std::string  m_diagnosticsDir;   // where the log (and dumps/) of this run live
+	bool         m_configPersistent = true;   // see setConfigPersistent
 	HE::Folder m_contentFolder;
 	mutable std::shared_mutex m_contentFolderMutex;
 

@@ -195,7 +195,11 @@ struct Uniforms {
 	float4x4 mvp;
 	float4x4 model;
 	float4   color;   // rgb: base-color tint
-	float4   flags;   // x: hasTexture
+	// x: hasTexture
+	// y: 1 = this object IGNORES shadows (MeshComponent::receivesShadow == false).
+	//    Stored inverted on purpose: every fill site that zero-fills `flags` —
+	//    previews, thumbnails, the shadow depth pass — then keeps shadowing.
+	float4   flags;
 	float4   pbr;     // x: metallic, y: roughness
 };
 
@@ -284,6 +288,7 @@ struct VSOut {
 	float  metallic;
 	float  roughness;
 	float  opacity;
+	float  noShadow;   // u.flags.y — constant over the draw, so interpolation is a no-op
 };
 
 vertex VSOut vertexMain(uint vid [[vertex_id]],
@@ -302,6 +307,7 @@ vertex VSOut vertexMain(uint vid [[vertex_id]],
 	out.metallic   = u.pbr.x;
 	out.roughness  = u.pbr.y;
 	out.opacity    = u.pbr.z;
+	out.noShadow   = u.flags.y;
 	return out;
 }
 
@@ -343,6 +349,7 @@ vertex VSOut skinnedVertex(uint vid [[vertex_id]],
     out.metallic   = u.pbr.x;
     out.roughness  = u.pbr.y;
     out.opacity    = u.pbr.z;
+    out.noShadow   = u.flags.y;
     return out;
 }
 
@@ -734,6 +741,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 				sh = min(sh, giLocalMask.sample(giLocalSmp, in.position.xy / scene.viewport.xy)[giLocalIdx]);
 			giLocalIdx++;
 		}
+		// "Receives Shadow" off: the object is lit as if nothing occluded it.
+		// Placed after BOTH branches so it covers every source at once — cascades,
+		// GI sun/local masks, the cloud layer and the local atlas.
+		if (in.noShadow > 0.5) sh = 1.0;
 
 		float diff = max(dot(N, L), 0.0);
 		float3 H   = normalize(L + V);
@@ -11301,7 +11312,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		bool  hasTex = ResolveMaterialTexture(obj.materialAssetId, matTex);
 		void* effectiveTex = hasTex ? matTex : smesh->texture;
 		void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
-		u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
+		u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, obj.receivesShadow ? 0.0f : 1.0f, 0, 0);
 		glm::vec3 baseColor(1.0f); float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
 		bool hasMat = ResolveMaterialParams(obj.materialAssetId, baseColor, metallic, roughness, opacity);
 		if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
@@ -11816,7 +11827,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
 			void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
 			id<MTLTexture> texture = (__bridge id<MTLTexture>)texPtr;
-			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
+			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, dc.receivesShadow ? 0.0f : 1.0f, 0, 0);
 
 			// Base tint: material baseColor if assigned, else white when textured
 			// (texture unchanged) or the flat fallback color when not.
@@ -13603,7 +13614,10 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
 			void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
 			id<MTLTexture> texture = (__bridge id<MTLTexture>)texPtr;
-			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, 0, 0, 0);
+			// gbufferMain drops the shadow lane (the resolve has no per-object
+			// channel), but translucent draws leave this loop as TPDraws replayed
+			// through the FORWARD fragment, which reads it.
+			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, dc.receivesShadow ? 0.0f : 1.0f, 0, 0);
 
 			glm::vec3 baseColor = cBaseColor;
 			if (!cHasMat)

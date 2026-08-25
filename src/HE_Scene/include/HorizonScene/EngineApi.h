@@ -70,6 +70,12 @@ struct Ctx
     // Null outside a play session — the affected row then returns 0, like every
     // other null-Ctx call.
     EntityHost*           entities = nullptr;
+    // What "quit" means to the host. A callback rather than a handle because
+    // HE_Scene has no Application to call, and because the answer differs per
+    // host: the packaged game closes its window, the editor stops PIE. Unset is
+    // an ordinary state, like every null handle above — app::quit then says so
+    // and does nothing.
+    std::function<void()> requestQuit;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -127,7 +133,11 @@ namespace transform {
     void      setScale(Ctx&, Entity e, const glm::vec3& s);
 }
 
-// ── Physics (queries + character-controller helpers) ─────────────────────────
+// ── Physics (queries, forces, and the character-controller helpers) ──────────
+// Everything here is a no-op / neutral default without a PhysicsWorld in the
+// Ctx. WITH one, a call that cannot land (no body on that entity, wrong motion
+// type) says so in the log rather than doing nothing quietly — see
+// PhysicsWorld, which owns those rules.
 namespace physics {
     struct RaycastHit {
         bool      hit = false;
@@ -137,8 +147,37 @@ namespace physics {
         float     distance = 0.0f;
     };
     RaycastHit raycast(Ctx&, const glm::vec3& origin, const glm::vec3& dir, float maxDist);
+    // A sphere is what a ray is not: it has width, so it does not slip through
+    // the corner the caller would have hit. Same hit shape as raycast, but it
+    // ignores triggers — a sweep asks what would BLOCK it, and a trigger blocks
+    // nothing.
+    RaycastHit sphereCast(Ctx&, const glm::vec3& origin, const glm::vec3& dir,
+                          float radius, float maxDist);
+    // Every entity in range, in one call: the query an explosion and a melee
+    // swing are both built from. Empty without physics.
+    std::vector<Entity> overlapSphere(Ctx&, const glm::vec3& center, float radius);
+
+    // Pushing a rigid body around. A force is continuous and has to be applied
+    // every frame, an impulse lands once, a torque spins. All three need a
+    // DYNAMIC rigid body on the entity and answer false when there is none.
+    bool addForce(Ctx&, Entity e, const glm::vec3& force);
+    bool addImpulse(Ctx&, Entity e, const glm::vec3& impulse);
+    bool addTorque(Ctx&, Entity e, const glm::vec3& torque);
+
+    // Velocity in m/s — ONE pair for characters and rigid bodies. It addresses
+    // the character controller when the entity has one and the rigid body
+    // otherwise, which is precisely what setVelocity did while it was
+    // character-only: an existing project keeps its behaviour, and a crate
+    // becomes steerable through the call that was already there. The full
+    // argument lives on PhysicsWorld::setVelocity.
     void       setVelocity(Ctx&, Entity e, const glm::vec3& v);
+    glm::vec3  getVelocity(Ctx&, Entity e);
     bool       isGrounded(Ctx&, Entity e);
+
+    // World gravity in m/s². Rigid bodies only — a character controller falls
+    // by its own component's gravity value.
+    void      setGravity(Ctx&, const glm::vec3& g);
+    glm::vec3 getGravity(Ctx&);
 }
 
 // ── Animator (the state machine's parameters) ────────────────────────────────
@@ -207,6 +246,11 @@ namespace ui {
     glm::vec2   getSize(Ctx&, Entity e);
     void        setSize(Ctx&, Entity e, const glm::vec2& s);
     bool        setMaterialParam(Ctx&, Entity e, const std::string& name, const glm::vec4& v);
+    // Is the pointer over an interactive UI element this frame (a live widget's
+    // button, slider, text field…)? The one question a game has to ask before
+    // acting on a click of its own: a press on "Start" must not also shoot.
+    // False without a world, and while the mouse is captured for FPS look.
+    bool        pointerOverUI(Ctx&);
 }
 
 // ── Live widgets (WidgetManager — exist OUTSIDE the entity world) ────────────
@@ -223,6 +267,14 @@ namespace widget {
 // ── Cursor (host-app hook) ───────────────────────────────────────────────────
 namespace cursor {
     void setVisible(Ctx&, bool show);
+}
+
+// ── Application (host-app hook) ──────────────────────────────────────────────
+// Ending the session is the other half of a main menu, and the half no script
+// could reach: without this a shipped game has no way to close itself. Goes
+// through Ctx::requestQuit — see there for why the host supplies it.
+namespace app {
+    void quit(Ctx&);
 }
 
 // ── Camera (the world's main camera: isMain, else the first CameraComponent) ──

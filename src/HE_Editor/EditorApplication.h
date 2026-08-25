@@ -288,6 +288,8 @@ struct AppContext
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
+	// Transport pause. Meaningful only while playing, and always false outside it.
+	bool isPaused  = false;
 	// Post-PIE report: the warnings/errors captured during the last play session
 	// (guarded by playLogMutex — workers may still append while the UI reads),
 	// and the open-flag for the report window (set when play stops with entries).
@@ -295,6 +297,11 @@ struct AppContext
 	std::mutex*                playLogMutex = nullptr;
 	bool*                      playReportOpen = nullptr;
 	std::function<void(bool)> setPlayMode;
+	// Freeze / thaw the world tick, and let exactly one frame through. stepFrame
+	// pauses first when the scene is still running, so "step" is one gesture from
+	// any transport state.
+	std::function<void(bool)> setPaused;
+	std::function<void()>     stepFrame;
 	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
 	// viewport size + LMB state + this frame's wheel; valid=false while
 	// outside/captured. The wheel rides along because a scroll box under the
@@ -321,6 +328,25 @@ struct AppContext
 	EditorUndo* undoSys = nullptr;
 	std::function<void()> undo;
 	std::function<void()> redo;
+
+	// ── Entity editing gestures ──────────────────────────────────────────────
+	// Duplicate / cut / copy / paste / delete of the SELECTED entity, one
+	// implementation behind the Edit menu, the Outliner's context menu and the
+	// keyboard. Each one snapshots for undo itself, so callers just call.
+	//
+	// The clipboard behind them is a prefab BLOB, not an entity handle: the
+	// entity it came from is gone after a cut, and the whole world is replaced
+	// by an undo, so a handle would name something else by the time it is
+	// pasted. It is also why the components are not copied by hand — the
+	// serializer already knows all of them, and the next component added to the
+	// engine would otherwise be the one nobody remembers to copy.
+	std::function<void()> duplicateEntity;
+	std::function<void()> copyEntity;
+	std::function<void()> cutEntity;
+	std::function<void()> pasteEntity;
+	std::function<void()> deleteEntity;
+	// Is there anything to paste? Drives the Paste item's enabled state.
+	bool entityClipboardFull = false;
 
 	// Editor/hub flags (mutable)
 	bool& projectLoaded;
@@ -581,6 +607,19 @@ private:
 	// Outliner/inspector selection
 	Entity m_selectedEntity = entt::null;
 
+	// ── Duplicate / cut / copy / paste / delete ──────────────────────────────
+	// Exposed through AppContext (see the block there for what the clipboard
+	// holds and why). A copy taken from a scene that was since closed stays
+	// valid — it is self-contained data, not a reference into a world.
+	std::vector<std::uint8_t> m_entityClipboard;
+	void duplicateSelectedEntity();
+	void copySelectedEntity(bool cut);
+	void pasteEntityClipboard();
+	void deleteSelectedEntity();
+	// Where a copy of `source` belongs: beside it, under the same parent. Shared
+	// by duplicate and paste so the two land in the same place.
+	Entity siblingParentFor(Entity source) const;
+
 	// Editor scene-view camera
 	EditorCamera m_editorCamera;
 
@@ -669,11 +708,24 @@ private:
 
 	// Play-in-editor
 	bool m_isPlaying = false;
+	// Transport pause + single step. The pause GATES THE WORLD TICK; it must never
+	// write time::setTimeScale, because that knob belongs to the game — a title
+	// with its own pause menu sets it itself, and two owners of one variable fight
+	// each other. m_stepFrame lets exactly one tick through and is consumed by the
+	// frame that used it, so the pause re-arms on its own.
+	bool m_isPaused  = false;
+	bool m_stepFrame = false;
 	// Play-session log capture (see PlayLogEntry / the post-PIE report window).
 	std::vector<PlayLogEntry> m_playLog;
 	std::mutex                m_playLogMutex;
 	bool                      m_playReportOpen = false;
 	void setPlayMode(bool play);
+	// app.quit() from a script asks to leave PLAY mode, not to close the editor —
+	// a game testing its own main menu must not take the editor down with it. The
+	// request is parked rather than acted on where it arrives: it comes out of a
+	// running graph, and setPlayMode tears the runtime that graph is executing in
+	// down. Consumed at the top of OnRender.
+	bool m_playStopRequested = false;
 
 	// Mouse-captured free-fly camera while playing in the editor — mirrors the
 	// packaged game so PIE is navigable. Captured on play-enter, released on exit,

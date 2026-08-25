@@ -17,6 +17,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonCode/HorizonCode.h>
+#include <UIWidget/UIWidgetTree.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Hpak/ProjectExporter.h>
 #include <cstring>
@@ -226,6 +227,155 @@ TEST_CASE("EngineApi: null handles return neutral defaults, never crash")
 
     // log with a null ctx must be safe too
     CHECK_NOTHROW(HE::api::find("log")->invoke(c, { Value::ofString("hello from a null ctx") }));
+}
+
+// ═══ Physics surface ══════════════════════════════════════════════════════════
+
+TEST_CASE("Physics: forces, velocity, overlap and gravity are on the registry")
+{
+    using HE::api::find;
+
+    // Actions are exec nodes, questions are pure data nodes — a graph that got
+    // this wrong would either re-roll a push per pin read or need an exec wire
+    // to ask a question.
+    for (const char* id : { "physics.addForce", "physics.addImpulse",
+                            "physics.addTorque", "physics.setGravity" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        CHECK(row->isExec);
+    }
+    for (const char* id : { "physics.getVelocity", "physics.getGravity",
+                            "physics.overlapSphere", "physics.sphereCast" })
+    {
+        INFO("row: " << id);
+        const auto* row = find(id);
+        REQUIRE(row != nullptr);
+        CHECK_FALSE(row->isExec);
+    }
+
+    // setVelocity keeps the exact signature it shipped with: a result pin added
+    // here would change every graph that already carries the node.
+    const auto* setVel = find("physics.setVelocity");
+    REQUIRE(setVel != nullptr);
+    REQUIRE(setVel->params.size() == 2);
+    CHECK(setVel->results.empty());
+
+    const auto* overlap = find("physics.overlapSphere");
+    REQUIRE(overlap->results.size() == 1);
+    CHECK(overlap->results[0].isArray);
+    CHECK(overlap->results[0].type == P::Int);
+
+    const auto* sweep = find("physics.sphereCast");
+    REQUIRE(sweep->params.size() == 4);      // origin, direction, radius, maxDistance
+    REQUIRE(sweep->results.size() == 5);     // same hit shape as raycast
+    CHECK(sweep->results[0].type == P::Bool);
+
+    // Lua and Python reach the whole group through horizon.physics.* — the flat
+    // bindings only ever had raycast/setVelocity/isGrounded.
+    CHECK(HE::api::isScriptGroup("physics"));
+}
+
+TEST_CASE("Physics: every call is neutral without a PhysicsWorld")
+{
+    Ctx c{};   // no world, no physics
+
+    CHECK_FALSE(HE::api::physics::addForce(c, 1, glm::vec3(1.0f)));
+    CHECK_FALSE(HE::api::physics::addImpulse(c, 1, glm::vec3(1.0f)));
+    CHECK_FALSE(HE::api::physics::addTorque(c, 1, glm::vec3(1.0f)));
+    CHECK(HE::api::physics::getVelocity(c, 1) == glm::vec3(0.0f));
+    CHECK(HE::api::physics::getGravity(c) == glm::vec3(0.0f));
+    CHECK(HE::api::physics::overlapSphere(c, glm::vec3(0.0f), 5.0f).empty());
+    CHECK_FALSE(HE::api::physics::sphereCast(c, glm::vec3(0.0f), glm::vec3(0, 0, 1), 1.0f, 10.0f).hit);
+    CHECK_NOTHROW(HE::api::physics::setGravity(c, glm::vec3(0.0f, -1.0f, 0.0f)));
+    CHECK_NOTHROW(HE::api::physics::setVelocity(c, 1, glm::vec3(1.0f)));
+
+    // …and through the registry thunks, where the array result must still come
+    // back as an empty ARRAY rather than a scalar zero.
+    auto out = HE::api::find("physics.overlapSphere")->invoke(c,
+        { Value::ofVec3(glm::vec3(0.0f)), Value::ofFloat(3.0f) });
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].isArray);
+    CHECK(out[0].items.empty());
+
+    auto pushed = HE::api::find("physics.addImpulse")->invoke(c,
+        { Value::ofInt(1), Value::ofVec3(glm::vec3(0.0f, 1.0f, 0.0f)) });
+    REQUIRE(pushed.size() == 1);
+    CHECK(pushed[0].b == false);
+}
+
+// ═══ Quitting + the UI pointer verdict ════════════════════════════════════════
+
+TEST_CASE("App: quit calls the host's handler, and only warns without one")
+{
+    const auto* row = HE::api::find("app.quit");
+    REQUIRE(row != nullptr);
+    CHECK(row->isExec);
+    CHECK(row->params.empty());
+    CHECK(row->results.empty());
+
+    // Nobody bound a handler (a test rig, an editor tool window): the call has
+    // to stay a no-op, because the alternative is a graph that can kill a
+    // process the host never offered to end.
+    Ctx unbound{};
+    CHECK_NOTHROW(row->invoke(unbound, {}));
+
+    int quits = 0;
+    Ctx c{};
+    c.requestQuit = [&quits]{ ++quits; };
+    row->invoke(c, {});
+    CHECK(quits == 1);
+    HE::api::app::quit(c);   // and the direct C++ call is the same thing
+    CHECK(quits == 2);
+}
+
+TEST_CASE("UI: pointerOverUI answers the last widget hit test")
+{
+    ContentManager cm;
+    {
+        HE::UIWidgetTree tree;
+        const int btn = tree.add(HE::UIWidgetType::Button);
+        HE::uiSetAnchorPreset(*tree.find(btn), 0);   // top-left
+        tree.find(btn)->pivotX = 0.0f; tree.find(btn)->pivotY = 0.0f;
+        tree.find(btn)->posX   = 0.0f; tree.find(btn)->posY   = 0.0f;
+        tree.find(btn)->sizeX  = 200.0f; tree.find(btn)->sizeY = 50.0f;
+        UIWidgetAsset a;
+        a.treeJson = HE::uiWidgetTreeToJson(tree);
+        a.path     = "mem://api_pointer.hasset";
+        cm.registerWidget(std::move(a));
+    }
+
+    HorizonWorld world;
+    Ctx c{ &world, nullptr, &cm };
+    REQUIRE(HE::api::widget::create(c, "mem://api_pointer.hasset") != 0);
+
+    const auto* row = HE::api::find("ui.pointerOverUI");
+    REQUIRE(row != nullptr);
+    CHECK(row->isExec == false);        // a per-frame snapshot, like the input rows
+    auto over = [&]{ return row->invoke(c, {})[0].b; };
+
+    CHECK(over() == false);             // no pointer seen yet
+
+    // The authored canvas is 1920x1080 and stretches onto the same viewport, so
+    // canvas units and pixels line up: (100,25) is inside the button.
+    world.widgets().processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true);
+    CHECK(over() == true);
+    world.widgets().processPointer(1920.0f, 1080.0f, 1900.0f, 1000.0f, false, true);
+    CHECK(over() == false);
+
+    // Captured mouse (FPS look) means no cursor at all, so nothing is over the UI.
+    world.widgets().processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, false);
+    CHECK(over() == false);
+
+    // …and a torn-down world leaves no stale verdict behind.
+    world.widgets().processPointer(1920.0f, 1080.0f, 100.0f, 25.0f, false, true);
+    REQUIRE(over() == true);
+    world.clear();
+    CHECK(over() == false);
+
+    Ctx none{};
+    CHECK(HE::api::ui::pointerOverUI(none) == false);
 }
 
 // ═══ EngineCall node: interpreter routes through the registry ═════════════════

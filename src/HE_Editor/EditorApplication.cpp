@@ -8,6 +8,8 @@
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
+#include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
@@ -234,6 +236,12 @@ void EditorApplication::OnInit()
 	// the user instead of scrolling past in a file they do not have open. It
 	// throttles itself — see NotificationStore::attachToEngineLog.
 	m_notifications.attachToEngineLog();
+
+	// The other reading of the same stream, and the complement of the bell: every
+	// record at every level, unthrottled, in a window (ConsolePanel.h). Attached
+	// here rather than when the panel first opens, so opening it AFTER something
+	// went wrong still shows what went wrong.
+	ConsolePanel::attachToEngineLog();
 
 	// ── Structural replication ───────────────────────────────────────────────
 	// The editor creates and deletes entities from many places (outliner menus,
@@ -985,6 +993,11 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
+	// The ground grid's switch. It lives in ViewportPanel next to the only code
+	// that reads it, so the config talks to that state directly rather than
+	// keeping a second copy in EditorConfig for the two of them to disagree over.
+	ViewportPanel::setGroundGridEnabled(
+		globalstate.getCustomConfigBool("ViewportGroundGrid", ViewportPanel::groundGridEnabled()));
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
 	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
@@ -1226,8 +1239,14 @@ void EditorApplication::OnInit()
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 			// The caller travels along: a few rows answer "who am I" — which
 			// entity this object sits on, above all — and world state cannot.
+			//
+			// So does what "quit" means here, and in the editor it is NOT closing
+			// the editor: a game being played in a viewport is a preview, and its
+			// main menu's Exit button must end the preview, not the tool. Parked
+			// rather than run — see m_playStopRequested.
 			HE::api::Ctx c{ m_editorWorld.get(), m_physicsWorld.get(), &contentManager(),
-			                &m_audioEngine, &m_gameInstance.runtime(), self, &m_entityHost };
+			                &m_audioEngine, &m_gameInstance.runtime(), self, &m_entityHost,
+			                [this]{ m_playStopRequested = true; } };
 			return fn->invoke(c, args);
 		};
 		m_gameInstance.runtime().setServices(std::move(svc));
@@ -1699,16 +1718,53 @@ void EditorApplication::OnRender(float dt)
 #ifdef HE_IMGUI_ENABLED
 	if (m_imguiReady) healStuckImGuiKeys(dt);
 #endif
+	// A script asked to quit. Honoured here, between frames, because the request
+	// arrives from inside a running graph and stopping play destroys the runtime
+	// that graph is executing in. setPlayMode already no-ops when not playing.
+	if (m_playStopRequested)
+	{
+		m_playStopRequested = false;
+		setPlayMode(false);
+	}
+
+	// ── Transport: pause and single step ─────────────────────────────────────
+	// The pause gates the WORLD TICK and deliberately leaves time::setTimeScale
+	// alone: the scale belongs to the game (a title with its own pause menu writes
+	// it), and an editor button sharing that variable would fight it. A step lets
+	// exactly one tick through; the request is consumed here, so the pause re-arms
+	// without anyone having to press it again.
+	const bool stepping   = m_isPaused && m_stepFrame;
+	m_stepFrame           = false;
+	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
+
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
 	if (m_isPlaying)
 	{
-		HE::api::time::advance(dt);
+		// A frozen frame advances the game clock by NOTHING rather than skipping
+		// the call: deltaTime() keeps its last value when nobody advances it, and
+		// every consumer below reads exactly that — so a skip would tick the world
+		// straight through the pause. It also freezes elapsed(), which would
+		// otherwise jump the moment play resumes.
+		HE::api::time::advance(simulating ? dt : 0.0f);
 		// Same ownership rule as the player host below: the Mouse Delta node
 		// reads a movement only while play mode holds the mouse.
 		HE::api::input::pushSdlSnapshot(
 			m_playMouseCaptured ? input().mouse().dx : 0.0f,
 			m_playMouseCaptured ? input().mouse().dy : 0.0f);
+		// A click that landed on an in-game widget belongs to the UI alone.
+		// Swallowing it where the widgets are processed would not be enough —
+		// scripts poll the buttons straight out of this snapshot — so they are
+		// masked out of the snapshot itself, the one place every frontend reads
+		// them from. Movement is deliberately left alone: only the buttons are
+		// the UI's. This is LAST frame's verdict (processPointer runs further
+		// down), which is what the packaged game does too, and the capture check
+		// is what guarantees a player who is looking around and shooting is never
+		// masked: while captured there is no pointer over any widget.
+		if (!m_playMouseCaptured && m_editorWorld && m_editorWorld->widgets().pointerOverUI())
+			HE::api::input::setMouse(HE::api::input::mousePosition(),
+			                         HE::api::input::mouseDelta(), 0u,
+			                         HE::api::input::scrollDelta());
 		// Gamepad snapshot: unlike the mouse it is NOT gated on the capture —
 		// a pad has no cursor to fight ImGui over, so while playing it always
 		// belongs to the game. Pushed from Input's merged frame, filtered.
@@ -1793,6 +1849,12 @@ void EditorApplication::OnRender(float dt)
 	// Two things deliberately keep the raw dt even while playing: the widget
 	// tick (a pause menu frozen at scale 0 could never unpause itself) and the
 	// timed debug primitives (which would otherwise never expire).
+	//
+	// The editor's own pause arrives through the same number — advance() above
+	// fed it a zero — so everything driven by gameDt (physics accumulator, the
+	// camera rig, particles, weather, animation, the day-night cycle) freezes
+	// without a second gate. What needs the explicit `simulating` below is only
+	// what runs per frame regardless of dt: script callbacks and the hosts.
 	const float gameDt = m_isPlaying ? HE::api::time::deltaTime() : dt;
 
 	// ── Window title ─────────────────────────────────────────────────────
@@ -1939,6 +2001,10 @@ void EditorApplication::OnRender(float dt)
 		{
 			m_hotReloadTimer = 0.0f;
 			auto changed = contentManager().pollHotReload();
+			// One recompile per MODULE, not per entity running it: a script on
+			// twenty entities is one module, and reloading it twenty times only
+			// costs twenty compiles of the same source.
+			std::unordered_set<std::string> reloadedModules;
 			for (const HE::UUID& id : changed)
 			{
 				switch (contentManager().assetType(id))
@@ -1956,6 +2022,34 @@ void EditorApplication::OnRender(float dt)
 					for (const HE::UUID& matId : contentManager().enumerateIds(HE::AssetType::Material))
 						renderer()->InvalidateMaterial(matId);
 					break;
+				case HE::AssetType::Script:
+				{
+					// Only a LIVE session has anything to patch — outside play mode
+					// the reload above already put the new source in the
+					// ContentManager, and the next play start compiles from there.
+					// Not gated on the transport pause: fixing the code that misfires
+					// and then stepping into it is exactly what a pause is for.
+					if (!m_isPlaying || !m_scriptContext || !m_editorWorld) break;
+					const ScriptAsset* script = contentManager().getScript(id);
+					if (!script || script->sourceCode.empty()) break;
+					// The module is loaded under the COMPONENT's moduleName, not
+					// under the asset's name: the two are separate fields and the
+					// user types the first one by hand. Reloading under the asset
+					// name would compile a module no instance is bound to, and
+					// report success while nothing in the scene changed.
+					for (auto [entity, sc] : m_editorWorld->registry().view<ScriptComponent>().each())
+					{
+						if (sc.scriptAssetId != id || sc.moduleName.empty()) continue;
+						if (!reloadedModules.insert(sc.moduleName).second) continue;
+						// A module that never loaded (script disabled, or it failed
+						// to compile at play start) is not an error worth a
+						// notification every 1.5 s — hotReloadScript logs one.
+						if (!m_scriptContext->isScriptLoaded(sc.moduleName, script->language)) continue;
+						m_scriptContext->hotReloadScript(sc.moduleName, script->sourceCode,
+						                                 script->language);
+					}
+					break;
+				}
 				default:
 					break;
 				}
@@ -2108,8 +2202,11 @@ void EditorApplication::OnRender(float dt)
 			}
 		}
 
-		// Per-frame script update
-		if (m_isPlaying && m_scriptContext)
+		// Per-frame script update. `simulating`, not m_isPlaying: onUpdate runs once
+		// per frame whatever dt says, so a paused session would keep executing it
+		// with a zero dt — and a script that counts frames rather than seconds would
+		// run right through the pause.
+		if (simulating && m_scriptContext)
 		{
 			HE_PROFILE_SCOPE_N("ScriptUpdate");
 			for (auto& [entityId, instId] : m_scriptInstances)
@@ -2117,7 +2214,7 @@ void EditorApplication::OnRender(float dt)
 		}
 
 		// Dispatch collision events to scripts (after physics has stepped this frame)
-		if (m_isPlaying && m_physicsWorld && m_scriptContext)
+		if (simulating && m_physicsWorld && m_scriptContext)
 		{
 			HE_PROFILE_SCOPE_N("CollisionDispatch");
 			// ONE call: polling drains the queues, so Lua/Python and HorizonCode
@@ -2127,7 +2224,13 @@ void EditorApplication::OnRender(float dt)
 		}
 
 		// Live widgets: per-frame logic tick (EventTick).
-		if (m_isPlaying && m_editorWorld)
+		//
+		// Under the EDITOR's pause this stops with everything else, raw dt or not.
+		// The raw dt exists so a game that scales its own clock to zero can still
+		// drive the menu doing the unpausing; the editor's transport has its own
+		// button for that, and a widget graph is script code — letting it free-run
+		// between steps would make "one step = one frame of world" a lie.
+		if (simulating && m_editorWorld)
 		{
 			// Raw dt — see the gameDt note above: the pause menu keeps ticking.
 			m_editorWorld->widgets().tick(dt);
@@ -2182,11 +2285,17 @@ void EditorApplication::OnRender(float dt)
 		// In-game UI pointer input (hover/click) + script event dispatch. The
 		// viewport panel feeds the pointer (reportPlayUIPointer); while the PIE
 		// mouse capture is engaged there is no cursor, so the pointer is invalid.
-		if (m_isPlaying && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
+		// Frozen with the rest of the session: this ends in callOnUIEvent, and a
+		// click that runs script code while the world stands still is not a pause.
+		if (simulating && m_editorWorld && m_uiViewportW > 0.0f && m_uiViewportH > 0.0f)
 		{
-			// Widget pointer input first — widgets draw on top of entity UI.
+			// Widget pointer input first — widgets draw on top of entity UI. The
+			// answer is kept, not dropped: a click that landed on a widget must
+			// not go through to the world behind it as well (the packaged game
+			// does the same with m_uiWantsPointer). Scripts reading the raw mouse
+			// get the same verdict through ui.pointerOverUI.
 			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured;
-			m_editorWorld->widgets().processPointer(
+			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
 				m_uiPointerDown, uiPointerLive);
 
@@ -2246,12 +2355,16 @@ void EditorApplication::OnRender(float dt)
 				ImGui::SetMouseCursor(mc);
 			}
 
+			// Entity UI (canvas elements in the scene) runs BEHIND the widgets, so
+			// it is told the pointer is not there at all while a widget has it —
+			// which clears its hover and stops the release from completing a click,
+			// rather than firing both.
 			std::vector<UIInputSystem::PointerEvent> uiEvents;
 			UIInputSystem::update(*m_editorWorld, m_uiInputState,
 			                      m_uiViewportW, m_uiViewportH,
 			                      m_uiPointerX, m_uiPointerY,
 			                      m_uiPointerDown,
-			                      m_uiPointerValid && !m_playMouseCaptured,
+			                      uiPointerLive && !uiWantsPointer,
 			                      uiEvents);
 			if (m_scriptContext)
 				for (const auto& ev : uiEvents)
@@ -2488,17 +2601,25 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// The ground grid, last of the editor's own lines: it is the biggest
+			// contributor by far, and appending it after the gizmos keeps the
+			// things the user is actually working on at the front of the buffer.
+			// It draws itself only outside play mode (editor furniture), which is
+			// why m_isPlaying travels along rather than being checked here.
+			ViewportPanel::appendGroundGrid(m_editorCamera, m_isPlaying, dbg);
+
 			// Timed debug primitives from HC/script debug.* calls ride along with
 			// the editor's own gizmo lines (they age with real dt in play mode,
-			// and stay frozen while paused/editing).
+			// and stay frozen while paused/editing) — which is what makes a paused
+			// frame inspectable: the line drawn by the last live tick is still there.
 			std::vector<DebugLine> merged = dbg.lines();
-			HE::api::debug::collect(m_isPlaying ? dt : 0.0f, merged);
+			HE::api::debug::collect(simulating ? dt : 0.0f, merged);
 			renderer()->SetDebugLines(merged);
 		}
 		else
 		{
 			std::vector<DebugLine> apiDbg;
-			HE::api::debug::collect(m_isPlaying ? dt : 0.0f, apiDbg);
+			HE::api::debug::collect(simulating ? dt : 0.0f, apiDbg);
 			renderer()->SetDebugLines(apiDbg);
 		}
 	}
@@ -4750,6 +4871,104 @@ void EditorApplication::applyAssetBytes(const std::string& relativePath,
 		contentManager().loadAsset(relativePath);
 }
 
+// ─── Duplicate / cut / copy / paste / delete ──────────────────────────────────
+// All five go through the prefab serializer rather than touching components:
+// serializeSubtree captures the entity AND everything parented under it, with
+// every component the save path knows, and instantiatePrefab mints fresh entity
+// UUIDs for the result — which is exactly right here (EntityIdComponent.h: two
+// copies of one thing are two identities, or every reference that names one of
+// them is ambiguous).
+
+Entity EditorApplication::siblingParentFor(Entity source) const
+{
+	if (!m_editorWorld) return entt::null;
+	const auto& reg = m_editorWorld->registry();
+	if (source == entt::null || !reg.valid(source)) return m_editorWorld->rootEntity();
+	const auto* hier = reg.try_get<HierarchyComponent>(source);
+	if (!hier || hier->parent == entt::null || !reg.valid(hier->parent))
+		return m_editorWorld->rootEntity();
+	return hier->parent;
+}
+
+void EditorApplication::duplicateSelectedEntity()
+{
+	if (!m_editorWorld) return;
+	const Entity src = m_selectedEntity;
+	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
+	    m_editorWorld->isBuiltin(src))
+		return;
+
+	SceneSerializer serializer;
+	const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
+	if (blob.empty()) return;
+
+	const Entity parent = siblingParentFor(src);
+	m_undo.snapshotNow();
+	const Entity copy = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+	if (copy == entt::null)
+	{
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: duplicate failed — the captured subtree did not read back");
+		return;
+	}
+	// Selecting the copy is what makes the gesture useful: the next drag moves
+	// the new object, not the one it came from.
+	m_selectedEntity = copy;
+	m_editorWorld->markHierarchyDirty();
+}
+
+void EditorApplication::copySelectedEntity(bool cut)
+{
+	if (!m_editorWorld) return;
+	const Entity src = m_selectedEntity;
+	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
+	    m_editorWorld->isBuiltin(src))
+		return;
+
+	SceneSerializer serializer;
+	std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
+	if (blob.empty()) return;
+	// Only overwrite the clipboard once the capture worked — a failed copy that
+	// silently emptied it would lose whatever the user had put there before.
+	m_entityClipboard = std::move(blob);
+
+	if (!cut) return;
+	m_selectedEntity = entt::null;
+	m_undo.snapshotNow();
+	m_editorWorld->destroyEntity(src);
+}
+
+void EditorApplication::pasteEntityClipboard()
+{
+	if (!m_editorWorld || m_entityClipboard.empty()) return;
+
+	// Beside the selection, not inside it: pasting a cube while a cube is
+	// selected should give two cubes side by side, not one parented to the other.
+	const Entity parent = siblingParentFor(m_selectedEntity);
+	SceneSerializer serializer;
+	m_undo.snapshotNow();
+	const Entity pasted = serializer.instantiatePrefab(*m_editorWorld, m_entityClipboard, parent);
+	if (pasted == entt::null)
+	{
+		HE_LOG_ERROR(Editor, "%s", "EditorApplication: paste failed — the clipboard is not a readable subtree");
+		return;
+	}
+	m_selectedEntity = pasted;
+	m_editorWorld->markHierarchyDirty();
+}
+
+void EditorApplication::deleteSelectedEntity()
+{
+	if (!m_editorWorld) return;
+	const Entity target = m_selectedEntity;
+	if (target == entt::null || !m_editorWorld->registry().valid(target) ||
+	    m_editorWorld->isBuiltin(target))
+		return;
+
+	m_selectedEntity = entt::null;
+	m_undo.snapshotNow();
+	m_editorWorld->destroyEntity(target);
+}
+
 AppContext EditorApplication::makeContext()
 {
 	m_sdlDialogBridge.pendingDirResult  = &m_pendingDirResult;
@@ -4784,10 +5003,21 @@ AppContext EditorApplication::makeContext()
 		.editorCamera        = &m_editorCamera,
 		.selectedEntity      = m_selectedEntity,
 		.isPlaying           = m_isPlaying,
+		.isPaused            = m_isPaused,
 		.playLog             = &m_playLog,
 		.playLogMutex        = &m_playLogMutex,
 		.playReportOpen      = &m_playReportOpen,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
+		// Both refuse to freeze an edit-mode session: there is no world tick to
+		// gate there, and a pause that outlived play mode would silently swallow
+		// the first frames of the NEXT one.
+		.setPaused           = [this](bool paused){ m_isPaused = m_isPlaying && paused; },
+		.stepFrame           = [this]
+		{
+			if (!m_isPlaying) return;
+			m_isPaused  = true;   // stepping a running scene pauses it first
+			m_stepFrame = true;
+		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid, float wheel)
 		{
@@ -4806,6 +5036,12 @@ AppContext EditorApplication::makeContext()
 		.undoSys             = &m_undo,
 		.undo                = [this]{ if (m_undo.undo()) m_selectedEntity = entt::null; },
 		.redo                = [this]{ if (m_undo.redo()) m_selectedEntity = entt::null; },
+		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },
+		.copyEntity          = [this]{ copySelectedEntity(false); },
+		.cutEntity           = [this]{ copySelectedEntity(true);  },
+		.pasteEntity         = [this]{ pasteEntityClipboard();    },
+		.deleteEntity        = [this]{ deleteSelectedEntity();    },
+		.entityClipboardFull = !m_entityClipboard.empty(),
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
 		.contentRefreshDone  = m_contentRefreshDone,
@@ -5073,6 +5309,11 @@ void EditorApplication::setPlayMode(bool play)
 	if (play == m_isPlaying || !m_editorWorld)
 		return;
 
+	// Either direction lands unpaused: a pause is play-session state, and a
+	// session that started frozen would look exactly like an editor that hung.
+	m_isPaused  = false;
+	m_stepFrame = false;
+
 	const std::filesystem::path snapshot =
 		std::filesystem::temp_directory_path() / "he_play_snapshot.hescene_bin";
 	SceneSerializer serializer;
@@ -5137,6 +5378,12 @@ void EditorApplication::setPlayMode(bool play)
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
 		m_scriptContext->setPhysicsWorld(m_physicsWorld.get());
 		m_scriptContext->setContentManager(&contentManager()); // horizon.setMaterialParam
+		// horizon.app.quit from Lua/Python, and the same answer the HorizonCode
+		// services give in OnInit: in the editor "quit" ends the PREVIEW, not the
+		// tool. Parked rather than acted on — the call arrives from inside a
+		// running script and setPlayMode tears that script's context down.
+		// Bound BEFORE the scripts start: an onStart may already call it.
+		m_scriptContext->setQuitHandler([this]{ m_playStopRequested = true; });
 		// Same call the packaged game's startScripts() makes, so PIE and a shipped
 		// game bring scripts up identically.
 		m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
@@ -5603,6 +5850,9 @@ void EditorApplication::OnShutdown()
 	// everything those threads still had to say made it in.
 	m_notifications.detachFromEngineLog();
 	HE::Ed::setGlobalNotifications(nullptr);
+	// Same rule, same reason, same moment: after the joins, so a worker's last
+	// words still land, and before the ImGui teardown below.
+	ConsolePanel::detachFromEngineLog();
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;
@@ -5702,6 +5952,7 @@ void EditorApplication::OnShutdown()
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
+	globalstate.setCustomConfigEntry("ViewportGroundGrid",         ViewportPanel::groundGridEnabled());
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
 	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
 	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);

@@ -25,10 +25,15 @@ namespace MacMenuBar
 		// the scene); SaveAll = every unsaved asset plus a dirty scene.
 		NewScene, OpenScene, AddSceneAdditive, Save, SaveAll, SaveSceneAs,
 		Quit, Preferences,
+		// Edit. Deliberately WITHOUT key equivalents — see install()'s Edit block:
+		// a native ⌘Z would swallow the keystroke before the app sees it, and the
+		// per-panel undo stacks (material graph, UI editor, text fields) all live
+		// on that key.
+		Undo, Redo,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
 		OpenLevelScript, OpenGameInstance,
-		ImportAsset, ExportProject,
-		OpenTutorial, ReportIssue,
+		ImportAsset, RefreshAssets, ExportProject,
+		OpenTutorial, ReportIssue, Documentation,
 		// Only added to the menu when HE_HAVE_LIBSSH2 AND ContentManager::
 		// isEngineContentDevMode() are both true — see install()'s Assets block.
 		PublishEngineContent, RebuildManifestFromServer,

@@ -239,12 +239,31 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		}
 		// Render scale is independent of the AA mode: < 1 renders smaller and
 		// upscales (with TAA that becomes TAAU), > 1 is plain supersampling.
+		// Only Metal sizes its render targets by it — the other four never read
+		// renderScale, so the slider moved and nothing happened. Gated on the
+		// ACTIVE backend rather than on a new IRenderer capability: one slider
+		// does not justify a change in five backends.
+		const bool scaleOK = (ctx.backend == HE::RendererBackend::Metal);
+		ImGui::BeginDisabled(!scaleOK);
 		Row::sliderFloat("Render Scale", &cfg.RenderScale, 0.5f, 2.0f, "%.2f");
+		ImGui::EndDisabled();
+		if (!scaleOK && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Metal only — the other backends always render at the "
+			                  "window's own resolution.");
+		// Same story one step further: the normal-variance term is in the Metal and
+		// OpenGL shading paths, Vulkan and both DirectX backends ignore it.
+		const bool specOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                     ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!specOK);
 		ImGui::Checkbox("Specular AA", &cfg.SpecularAA);
+		const bool specHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 		{
 			SubGroup sub(cfg.SpecularAA);
 			Row::sliderFloat("Specular AA Strength", &cfg.SpecularAAStrength, 0.0f, 2.0f, "%.2f");
 		}
+		ImGui::EndDisabled();
+		if (!specOK && specHovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
@@ -253,7 +272,7 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
 			hint("Edge search + analytic coverage: sharper than FXAA, no diagonals.");
-		else
+		else if (specOK)
 			hint("Specular AA fixes crawling highlights — no edge filter can.");
 	});
 	row("bloom", "Post-Processing", [&]{
@@ -519,7 +538,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::sliderFloat("UI Font Scale", &cfg.UiFontScale, 0.5f, 2.0f, "%.2fx");
 	});
 
-	row("cpucache", "Content Browser", [&]{ ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets); });
+	row("cpucache", "Content Browser", [&]{
+		// Persisted and restored, and that is the whole of it: nothing outside this
+		// panel and the config writer ever reads KeepCPUAssets. ContentManager keeps
+		// the CPU-side copy of every asset either way — which is what lets the
+		// NavMesh bake and the CPU BVH read mesh vertices at all.
+		ImGui::BeginDisabled();
+		ImGui::Checkbox("Keep CPU Asset Cache", &cfg.KeepCPUAssets);
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Not implemented — CPU asset data is always kept.");
+	});
 	row("cbrefresh", "Content Browser", [&]{
 		Row::inputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;

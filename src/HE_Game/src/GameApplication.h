@@ -38,6 +38,13 @@ protected:
     std::unique_ptr<IRenderer> CreateRenderer()      override;
 
 private:
+    // Read the graphics + window settings the export shipped next to the game
+    // data and lay them over whatever GlobalState resolved, then settle the
+    // startup window and backend from them. Called from the constructor: Run()
+    // asks for GetConfig() before OnInit, so this is the last moment at which
+    // the window and the RHI can still be chosen.
+    void applyShippedConfig();
+
     // Grab/release the mouse for FPS-style look: relative mode + hidden cursor.
     // The packaged game starts captured; Esc toggles it so the cursor is
     // reachable (e.g. to quit) without trapping the player.
@@ -126,6 +133,19 @@ private:
     // The input layer reports held state, and a held Down must step one entry
     // rather than run through the whole menu — so the edges are kept here.
     uint8_t m_uiNavPrev = 0;
+    // True while the pointer sits on an interactive UI element (the return value
+    // of WidgetManager::processPointer, kept from the last updateUIInput). The
+    // mouse BUTTONS are masked out of everything gameplay reads while it holds,
+    // so a click on a menu button is not also a shot — the mirror image of the
+    // keyboard swallow in OnEvent while a text field has focus.
+    bool m_uiWantsPointer = false;
+    // Startup window + backend, settled once by applyShippedConfig. The values
+    // here are the ones a game shipped with before the config could carry them,
+    // so an export without those keys behaves exactly as it always did.
+    uint32_t            m_windowWidth  = 1280;
+    uint32_t            m_windowHeight = 720;
+    HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
+    HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
 
     std::unique_ptr<ScriptContext> m_scriptContext; // ECS Lua/Python scripts (null until OnInit)

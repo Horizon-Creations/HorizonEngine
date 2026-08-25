@@ -29,6 +29,9 @@ constexpr ImU32 kStopFg   = kBad;
 constexpr ImU32 kPlayWell = kGoodWell;
 constexpr ImU32 kStopWell = kBadWell;
 constexpr ImU32 kPlayTint = IM_COL32(222, 92, 92, 16);   // whole-bar wash while running
+// …and its frozen counterpart. A paused session is still a session — the bar has
+// to stay washed, or a pause reads as "back in the editor" from across the room.
+constexpr ImU32 kPauseTint = IM_COL32(230, 176, 86, 16); // kWarn, same weight
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 // Drawn as vectors rather than shipped as textures: the bar has to look right at
@@ -186,6 +189,17 @@ void iconStop(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddRectFilled({ c.x - h, c.y - h }, { c.x + h, c.y + h }, col, 1.5f);
 }
 
+// Play into a wall — one frame forward, then frozen again. Pause is the shared
+// EditorToolbar glyph; this one has no home outside the transport.
+void iconStep(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, r = s * 0.44f, bar = s * 0.13f;
+	dl->AddTriangleFilled({ c.x - r, c.y - h },
+	                      { c.x - r, c.y + h },
+	                      { c.x + r - bar * 2.2f, c.y }, col);
+	dl->AddRectFilled({ c.x + r - bar, c.y - h }, { c.x + r, c.y + h }, col, 1.0f);
+}
+
 // Snap increment for the armed operation, formatted for the value cell.
 void snapText(const State& st, ImGuizmo::OPERATION op, char* buf, size_t n)
 {
@@ -270,6 +284,14 @@ void optionsPopup(AppContext& ctx, State& st)
 	ImGui::Spacing();
 	ImGui::TextDisabled("Viewport");
 	ImGui::Separator();
+	// Read back through the getter every frame instead of caching it in State:
+	// the grid's switch belongs to ViewportPanel (the only code that draws it),
+	// and the config restores it there at startup without this bar being told.
+	bool grid = ViewportPanel::groundGridEnabled();
+	if (ImGui::Checkbox("Ground grid", &grid))
+		ViewportPanel::setGroundGridEnabled(grid);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("The world grid under the scene — off while playing either way");
 	int pxW = 0, pxH = 0;
 	ViewportPanel::renderSizePx(pxW, pxH);
 	ImGui::Text("Render target: %d \xc3\x97 %d px", pxW, pxH);
@@ -296,15 +318,17 @@ void render(AppContext& ctx, State& st)
 	const float  barW   = ImGui::GetContentRegionAvail().x;
 	const Metrics m     = metrics(origin.y);
 	const bool   playing = ctx.isPlaying;
+	const bool   paused  = playing && ctx.isPaused;
 
 	// ── The strip itself ────────────────────────────────────────────────────
 	// Its own darker band plus a hairline, so it reads as chrome rather than as
 	// controls floating on the panel background. While the scene is running the
 	// band is washed red and the hairline turns red with it — the "am I editing
 	// or playing?" answer belongs in peripheral vision, not in a button icon.
+	// A paused session washes amber instead: still running, but frozen.
 	EditorToolbar::bar(origin, barW, m,
-	                   playing ? kPlayTint : 0u,
-	                   playing ? kStopFg : kBarLine,
+	                   playing ? (paused ? kPauseTint : kPlayTint) : 0u,
+	                   playing ? (paused ? kWarn : kStopFg) : kBarLine,
 	                   playing ? 2.0f : 1.0f);
 
 	// The Scene panel starts with its dock tab bar hidden, and ImGui's way back —
@@ -338,6 +362,10 @@ void render(AppContext& ctx, State& st)
 	const float snapValW    = std::floor(ImGui::CalcTextSize("88.88\xc2\xb0").x + kCellPadX * 2.0f);
 	const float camValW     = std::floor(ImGui::CalcTextSize("88.8 u/s").x + kCellPadX * 2.0f);
 	const float playW       = std::floor(m.cell * 2.0f);
+	// Play/Stop, Pause, Step in one well. Pause and Step are measured in even
+	// while the scene is stopped — they dim rather than vanish, so the button the
+	// eye looks for first does not move on the press that happens most.
+	const float centreW     = kWellPad * 2.0f + playW + (kSegGap + m.cell) * 2.0f;
 
 	auto leftWidth = [&](bool labels, bool snap)
 	{
@@ -355,7 +383,6 @@ void render(AppContext& ctx, State& st)
 		return w;
 	};
 
-	const float centreW = playW + kWellPad * 2.0f;
 	const float slack   = edgeL + kEdgeGap + kGroupGap * 2.0f;     // breathing room around the transport
 	bool labels = true, showCamera = true, showSnap = true;
 	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera) + slack <= barW; };
@@ -495,6 +522,25 @@ void render(AppContext& ctx, State& st)
 		else              iconPlay(dl, c, g, fg);
 
 		if (pressed && ctx.setPlayMode) ctx.setPlayMode(!playing);
+
+		// Pause freezes the world tick — physics, scripts, animation, particles —
+		// while the viewport keeps drawing, which is what makes a frozen frame
+		// worth looking at. It does NOT touch the game's time scale: that knob
+		// belongs to the game's own pause menu, and two owners of one variable
+		// fight each other.
+		float tx = p0.x + playW + kSegGap;
+		if (cell(m, tx, m.cell, "##vpPause", EditorToolbar::iconPause, nullptr,
+		         paused, playing,
+		         paused ? "Resume — let the world tick again"
+		                : "Pause — freeze the world, keep drawing it") &&
+		    ctx.setPaused)
+			ctx.setPaused(!paused);
+
+		tx += m.cell + kSegGap;
+		if (cell(m, tx, m.cell, "##vpStep", iconStep, nullptr, false, playing,
+		         "Step — advance one frame, then pause") &&
+		    ctx.stepFrame)
+			ctx.stepFrame();
 	}
 
 	// ── Right zone: how the viewport looks ──────────────────────────────────

@@ -113,6 +113,7 @@ namespace
 			uint32_t  entId;
 			int       lod;
 			bool      castsShadow;
+			bool      receivesShadow;
 			HE::AABB  localBounds; // real mesh AABB; invalid → world bounds stay invalid (never culled)
 			std::vector<float> paramOverride; // merged HeParams block, or empty
 			HE::UUID  weightmapId;            // landscape layer weights (chunks only)
@@ -202,7 +203,8 @@ namespace
 					}
 			d.entId  = static_cast<uint32_t>(e);
 			d.lod    = mesh.lodBias;
-			d.castsShadow = mesh.castsShadow;
+			d.castsShadow    = mesh.castsShadow;
+			d.receivesShadow = mesh.receivesShadow;
 			// Look up the real object-space bounds here (sequential — the
 			// ContentManager read must not race the parallel_for below).
 			if (contentManager)
@@ -237,6 +239,7 @@ namespace
 			obj.entityId        = d.entId;
 			obj.lod             = d.lod;
 			obj.castsShadow     = d.castsShadow;
+			obj.receivesShadow  = d.receivesShadow;
 			obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
@@ -428,6 +431,7 @@ namespace
 			obj.transform       = t.worldMatrix;
 			obj.worldBounds     = kUnitCube.transformed(t.worldMatrix);
 			obj.entityId        = static_cast<uint32_t>(e);
+			obj.receivesShadow  = smc.receivesShadow;
 			obj.boneMatrices    = smc.boneMatrices.empty()
 			                    ? std::vector<glm::mat4>{ glm::mat4(1.0f) }
 			                    : smc.boneMatrices;

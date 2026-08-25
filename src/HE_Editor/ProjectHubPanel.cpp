@@ -72,6 +72,13 @@ void render(AppContext& ctx)
             case MC::OpenProject: s_hubOpenBrowseRequested = true;   break;
             // No project to tour yet — the tutorial's answer here is its sandbox offer.
             case MC::OpenTutorial: TutorialPanel::showWelcome();      break;
+            // Help ▸ Documentation is the one Help item that needs no project, so
+            // it answers on the Hub too. The URL is spelled out rather than shared
+            // with EditorUI.cpp: kDocsUrl is a file-static there, and one literal
+            // is cheaper than a header for it.
+            case MC::Documentation:
+                SDL_OpenURL("https://horizoncreations.dev/HorizonEngineDocs/");
+                break;
             default: break;   // project-scoped / editor-only items: no-op here
             }
         }

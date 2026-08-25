@@ -157,6 +157,25 @@ void install()
 		          NSEventModifierFlagCommand | NSEventModifierFlagOption, true);
 	}
 
+	// ── Edit ───────────────────────────────────────────────────────────────
+	// Until now macOS had no Edit menu at all, so undo was reachable only through
+	// ⌘Z or the footer button — and a menu bar with no Edit menu reads as an app
+	// that cannot undo.
+	//
+	// NO KEY EQUIVALENTS here, and that is the whole design of this block. A
+	// native ⌘Z wins over anything the app does with the key (the same rule that
+	// forced Save As off ⇧⌘S above), so it would reach this menu INSTEAD of the
+	// editor — and every panel with its own undo stack (material graph, UI
+	// editor, HorizonCode canvas) plus every text field would lose the key to a
+	// command that only knows about the scene. ⌘Z keeps going to the app, which
+	// routes it per context; these two items are the visible door onto the same
+	// scene stack the footer buttons drive.
+	{
+		NSMenu* edit = heAddSubmenu(main, @"Edit");
+		heAddItem(edit, @"Undo", C::Undo, nil, 0, true);
+		heAddItem(edit, @"Redo", C::Redo, nil, 0, true);
+	}
+
 	// ── View ───────────────────────────────────────────────────────────────
 	{
 		NSMenu* view = heAddSubmenu(main, @"View");
@@ -183,7 +202,8 @@ void install()
 	// ── Assets / Build ─────────────────────────────────────────────────────
 	{
 		NSMenu* assets = heAddSubmenu(main, @"Assets");
-		heAddItem(assets, @"Import Asset…", C::ImportAsset, nil, 0, true);
+		heAddItem(assets, @"Import Asset…",  C::ImportAsset,   nil, 0, true);
+		heAddItem(assets, @"Refresh Assets", C::RefreshAssets, nil, 0, true);
 #ifdef HE_HAVE_LIBSSH2
 		// Mirrors EditorUI.cpp's ImGui Assets menu exactly, including the same
 		// dev-mode gate — see MacMenuBar.h's header comment for why this can't
@@ -221,6 +241,7 @@ void install()
 		s_toggleItems.emplace_back(C::OpenTutorial,
 			heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false));
 		[help addItem:[NSMenuItem separatorItem]];
+		heAddItem(help, @"Documentation",  C::Documentation, nil, 0, false);
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
 		NSApp.helpMenu = help;
 	}

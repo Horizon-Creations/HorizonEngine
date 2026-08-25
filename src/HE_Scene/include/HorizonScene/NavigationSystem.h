@@ -1,11 +1,21 @@
 #pragma once
 #include <HorizonScene/Components/NavMeshComponent.h>
 #include <glm/glm.hpp>
+#include <cstddef>
 
 class HorizonWorld;
+class ContentManager;
 class DebugDrawBuffer;
 
 namespace NavigationSystem {
+    // Gather the scene's static, visible mesh geometry — terrain chunks included —
+    // into `out` as world-space triangles, replacing whatever it held. This is the
+    // missing half of baking: NavMeshComponent::geometry used to have no writer but
+    // the serializer, so the editor's Bake button had nothing to build from.
+    // Returns the number of triangles collected.
+    std::size_t collectStaticGeometry(HorizonWorld& world, ContentManager& content,
+                                      NavMeshGeometry& out);
+
     // Build (or rebuild) the NavMesh stored in the given component.
     // Returns true on success. Must be called after geometry is provided.
     bool bake(NavMeshComponent& nmc);

@@ -5,6 +5,7 @@
 #include <Scripting/PythonPluginAbi.h>
 #include <Platform/DynLib.h>
 #include <entt/entt.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -35,7 +36,10 @@ class ScriptContext
 {
 public:
     explicit ScriptContext(HorizonWorld& world);
-    ~ScriptContext() = default;
+    // Out of line: it has to withdraw this context's quit handler from the
+    // file-scope copy the CPython plugin reads, or a context that dies before
+    // its host leaves a std::function pointing at nothing.
+    ~ScriptContext();
 
     ScriptContext(const ScriptContext&)            = delete;
     ScriptContext& operator=(const ScriptContext&) = delete;
@@ -131,6 +135,21 @@ public:
     // getMaterialParam. Pass nullptr to disable (default) — those calls then no-op.
     void setContentManager(ContentManager* cm);
 
+    // What "quit" means to the host: this is what horizon.app.quit calls, in Lua
+    // and in Python. HE_Scene owns no Application, and the answer differs per
+    // host — the packaged game leaves its loop, the editor stops play mode — so
+    // the host supplies it. Unset (the default) leaves app.quit a logged no-op,
+    // which is the right answer for a context with no session to end (editor
+    // property inspection, tests).
+    void setQuitHandler(std::function<void()> fn);
+
+    // The same handler for a backend that lives in ANOTHER module: the CPython
+    // plugin builds its own HE::api::Ctx and never holds a ScriptContext, so it
+    // reads the hook from here. Process-wide and last-writer-wins, like the
+    // world/physics/content pointers that backend already keeps in file-statics.
+    // Empty until a host binds one.
+    static const std::function<void()>& hostQuitHandler();
+
     ScriptEngine& engine() { return m_engine; }
 
 private:
@@ -173,6 +192,10 @@ private:
     HorizonWorld*   m_world;
     PhysicsWorld*   m_physicsWorld   = nullptr;
     ContentManager* m_contentManager = nullptr;
+    // The Lua side reaches this through a registry pointer registered once, so
+    // the address must stay put — which it does: the context is neither copyable
+    // nor movable, and its lua_State dies with it.
+    std::function<void()> m_quitHandler;
     ScriptEngine  m_engine;                        // Lua
     // The backend only; the plugin MODULE is process-wide and outlives every
     // context (ScriptContext.cpp explains why unloading it is not allowed).

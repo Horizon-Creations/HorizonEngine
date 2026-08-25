@@ -43,6 +43,9 @@ void GeometryPass::execute(const RenderWorld&           world,
 			// tint. Identity tint (the default for everything else) always matches
 			// identity, so non-particle batching is unaffected.
 			if (next.instanceTint != first.instanceTint) break;
+			// The shadow opt-out is one per-draw uniform lane, so a batch may only
+			// hold objects that answer it the same way.
+			if (next.receivesShadow != first.receivesShadow) break;
 			// Landscape chunks of DIFFERENT terrains share mesh+material but each
 			// samples its own painted weightmap, so they can't share a draw.
 			if (next.weightmapTextureId != first.weightmapTextureId) break;
@@ -59,6 +62,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.entityId        = first.entityId;
 		dc.lod             = first.lod;
 		dc.contributesAO   = first.contributesAO;
+		dc.receivesShadow  = first.receivesShadow; // batching guarantees the whole run shares this
 		dc.baseColor       = first.baseColor;
 		dc.metallic        = first.metallic;
 		dc.roughness       = first.roughness;
@@ -92,6 +96,7 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.instanceCount = 1;
 		dc.entityId      = obj.entityId;
 		dc.lod           = obj.lod;
+		dc.receivesShadow  = obj.receivesShadow;
 		dc.boneMatrices  = obj.boneMatrices;
 		dc.paramOverride = obj.paramOverride; // per-entity HeParams block (empty = none)
 		outCmds.recordSkinnedDraw(dc);

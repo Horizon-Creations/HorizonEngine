@@ -351,6 +351,9 @@ void WidgetManager::clear()
 	for (const HorizonCode::InstanceId sid : ids) rt().destroy(sid);
 	m_instances.clear();
 	m_focusWidget = 0;
+	// Nothing is left to hover, so the pointer is over nothing — otherwise the
+	// last verdict would outlive the widgets it was about.
+	m_pointerOverUI = false;
 }
 
 void WidgetManager::showWidget(int id)  { if (Instance* w = find(id)) w->visible = true; }
@@ -605,7 +608,10 @@ bool WidgetManager::processPointer(float vpWidth, float vpHeight,
 	}
 
 	m_wasDown = primaryDown;
-	return topW != nullptr;
+	// Remembered, not just returned: both apps discard the return value, and a
+	// script asking "is the pointer on the UI?" runs long after this call.
+	m_pointerOverUI = topW != nullptr;
+	return m_pointerOverUI;
 }
 
 // The focused text field, or nullptr. Every editing entry point starts here,

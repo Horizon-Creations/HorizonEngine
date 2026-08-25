@@ -110,6 +110,10 @@ uniform int       uSSAOEnabled;      // 1 = darken the ambient by SSAO
 uniform float     uWetness;          // 0..1 wet-surface darken + gloss
 uniform float     uSnow;             // 0..1 snow cover on up-facing surfaces
 uniform float     uSpecAA;           // specular-AA strength (0 = off)
+// true = this object IGNORES shadows (MeshComponent::receivesShadow == false).
+// Stored inverted on purpose: an un-set uniform reads false, so any draw path
+// that forgets it keeps shadowing rather than silently losing every shadow.
+uniform bool      uNoShadow;
 
 // ─── Specular anti-aliasing (docs/anti-aliasing-plan.md A6) ──────────────────
 // A curved or normal-mapped surface packs more than one normal into one pixel;
@@ -516,6 +520,10 @@ void main()
 				sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uViewport)[giLocalIdx]);
 			giLocalIdx++;
 		}
+		// "Receives Shadow" off: the object is lit as if nothing occluded it.
+		// Placed after BOTH branches so it covers every source at once — cascades,
+		// GI sun/local masks, the cloud layer and the local atlas.
+		if (uNoShadow) sh = 1.0;
 
 		float diff = max(dot(N, L), 0.0);
 		vec3  H    = normalize(L + V);
@@ -4892,6 +4900,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uMetallic    = glGetUniformLocation(m_unlitProgram, "uMetallic");
 	m_uRoughness   = glGetUniformLocation(m_unlitProgram, "uRoughness");
 	m_uOpacity     = glGetUniformLocation(m_unlitProgram, "uOpacity");
+	m_uNoShadow    = glGetUniformLocation(m_unlitProgram, "uNoShadow");
 	m_uLightCount  = glGetUniformLocation(m_unlitProgram, "uLightCount");
 	m_uLightPos    = glGetUniformLocation(m_unlitProgram, "uLightPos");
 	m_uLightDir    = glGetUniformLocation(m_unlitProgram, "uLightDir");
@@ -5355,6 +5364,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedMetallic     = loc("uMetallic");
 	m_uSkinnedRoughness    = loc("uRoughness");
 	m_uSkinnedOpacity      = loc("uOpacity");
+	m_uSkinnedNoShadow     = loc("uNoShadow");
 	m_uSkinnedLightCount   = loc("uLightCount");
 	m_uSkinnedLightPos     = loc("uLightPos");
 	m_uSkinnedLightDir     = loc("uLightDir");
@@ -5413,6 +5423,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstMetallic         = loc("uMetallic");
 	m_uInstRoughness        = loc("uRoughness");
 	m_uInstOpacity          = loc("uOpacity");
+	m_uInstNoShadow         = loc("uNoShadow");
 	m_uInstLightCount       = loc("uLightCount");
 	m_uInstLightPos         = loc("uLightPos");
 	m_uInstLightDir         = loc("uLightDir");
@@ -10355,6 +10366,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// pass after the opaque geometry + sky so they composite correctly.
 		struct TPDraw { glm::mat4 mvp, model; glm::vec3 baseColor; float metallic, roughness, opacity;
 		                unsigned int tex, vao; int indexCount; float distSq;
+		                // DrawCall::receivesShadow, carried to the replay — the pass
+		                // runs long after the draw's own uniforms were overwritten.
+		                bool receivesShadow = true;
 		                // Custom translucent material: its GL program + param block +
 		                // node-graph textures (0 → the built-in blend program).
 		                unsigned int matProg = 0; std::vector<float> params;
@@ -10555,6 +10569,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 						           RenderSorter::backToFrontKey(t, camPos) };
+						tp.receivesShadow = dc.receivesShadow;
 						tp.matProg = matProg;
 						tp.params  = mParams;
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
@@ -10598,6 +10613,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// No G-buffer variant → forward replay after the resolve.
 					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+					tp.receivesShadow = dc.receivesShadow;
 					tp.matProg = matProg;
 					tp.params  = mParams;
 					for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
@@ -10765,6 +10781,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 					           RenderSorter::backToFrontKey(t, camPos) };
+					tp.receivesShadow = dc.receivesShadow;
 					tp.matProg = tpProg;
 					tp.params  = tpParams;
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
@@ -10794,6 +10811,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1f(m_uInstMetallic,   cMetallic);
 				glUniform1f(m_uInstRoughness,  cRoughness);
 				glUniform1f(m_uInstOpacity,    1.0f);
+				glUniform1i(m_uInstNoShadow,   !dc.receivesShadow);
 				glBindVertexArray(vao);
 				glUniform1i(m_uInstHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
@@ -10928,6 +10946,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform3fv(m_uColor, 1, glm::value_ptr(baseColor));
 				glUniform1f(m_uMetallic,  cMetallic);
 				glUniform1f(m_uRoughness, cRoughness);
+				glUniform1i(m_uNoShadow,  !dc.receivesShadow);
 				glBindVertexArray(vao);
 				glUniform1i(m_uHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
@@ -11125,6 +11144,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1f(m_uMetallic,  t.metallic);
 				glUniform1f(m_uRoughness, t.roughness);
 				glUniform1f(m_uOpacity,   1.0f);
+				glUniform1i(m_uNoShadow,  !t.receivesShadow);
 				glUniform1i(m_uHasTexture, t.tex != 0);
 				glBindVertexArray(t.vao);
 				glBindTexture(GL_TEXTURE_2D, t.tex);
@@ -11209,6 +11229,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1f(m_uSkinnedMetallic,     metallic);
 				glUniform1f(m_uSkinnedRoughness,    roughness);
 				glUniform1f(m_uSkinnedOpacity,      1.0f);
+				glUniform1i(m_uSkinnedNoShadow,     !dc.receivesShadow);
 				glUniform1i(m_uSkinnedHasTex,       tex != 0);
 				glActiveTexture(GL_TEXTURE0);
 				glBindTexture(GL_TEXTURE_2D, tex);
@@ -11295,6 +11316,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1f(m_uMetallic,  t.metallic);
 				glUniform1f(m_uRoughness, t.roughness);
 				glUniform1f(m_uOpacity,   t.opacity);
+				glUniform1i(m_uNoShadow,  !t.receivesShadow);
 				glUniform1i(m_uHasTexture, t.tex != 0);
 				glBindVertexArray(t.vao);
 				glBindTexture(GL_TEXTURE_2D, t.tex);

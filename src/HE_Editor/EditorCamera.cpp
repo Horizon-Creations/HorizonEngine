@@ -109,7 +109,11 @@ void EditorCamera::focusOn(const glm::vec3& center, float radius)
 	ensureInit();
 	radius = std::max(radius, 0.1f);
 	// Distance so the bounding sphere fits the vertical field of view, with margin.
-	const float dist = radius / std::tan(glm::radians(m_fov * 0.5f)) * 1.5f;
+	// Capped short of the far plane: framing something kilometre-sized (a whole
+	// landscape) otherwise parks the camera outside its own frustum, and then the
+	// subject it was asked to show is the one thing clipped away.
+	const float dist = std::min(radius / std::tan(glm::radians(m_fov * 0.5f)) * 1.5f,
+	                            m_far * 0.9f);
 	m_pivotDistance  = std::max(kMinPivot, dist);
 	m_position       = center - forward() * m_pivotDistance;
 	m_initialised    = true; // keep current orientation, don't re-derive

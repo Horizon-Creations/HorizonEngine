@@ -43,7 +43,11 @@ namespace ScriptApi
 	RaycastResult raycast(PhysicsWorld* physics, const glm::vec3& origin,
 	                      const glm::vec3& dir, float maxDist);
 
-	// Character-controller helpers; physics may be null (no-op / false).
+	// Movement helpers; physics may be null (no-op / false). setVelocity drives
+	// the entity's character controller when it has one and its rigid body
+	// otherwise (PhysicsWorld::setVelocity decides) — so the call a script
+	// already knows now pushes a crate too, without meaning anything different
+	// on a character than it always did.
 	void setVelocity(PhysicsWorld* physics, uint32_t entityId, const glm::vec3& v);
 	bool isGrounded(PhysicsWorld* physics, uint32_t entityId);
 
@@ -89,6 +93,10 @@ namespace ScriptApi
 	// Call a PUBLIC graph function on the widget (the engine routes the call;
 	// private functions and unknown names return false).
 	bool callWidgetFunction(HorizonWorld& world, int widgetId, const std::string& fn);
+	// Is the pointer currently over an interactive widget element? The verdict
+	// of the last WidgetManager::processPointer — what gameplay needs to skip a
+	// click that belongs to the menu it just landed in.
+	bool pointerOverUI(HorizonWorld& world);
 
 	// ── Cursor (host-app hook) ──────────────────────────────────────────────
 	// show = release the mouse capture and show the OS cursor (UI interaction);

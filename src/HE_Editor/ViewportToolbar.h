@@ -10,16 +10,20 @@
 //
 // This is that bar as three zones, drawn by hand:
 //
-//   [ mode | move rotate scale | local/world | snap ]   ( ▶ )   [ speed | ⚙ ]
-//    ← what the mouse does in the viewport                      ← how it looks
-//                                       ↑ what the editor is doing
+//   [ mode | move rotate scale | local/world | snap ]   ( ▶ ⏸ ▶| )   [ speed | ⚙ ]
+//    ← what the mouse does in the viewport                           ← how it looks
+//                                         ↑ what the editor is doing
 //
 // Related controls sit in one rounded "well" and are separated from the next
-// group by a gap, so the row parses as four things instead of eight. Play/Stop
-// is genuinely centred (measured, not guessed) and tinted, and play mode also
-// colours the bar's bottom edge — from the corner of the eye it is obvious
-// whether the scene is live. Everything is icon-first with a tooltip carrying
-// the keyboard shortcut.
+// group by a gap, so the row parses as four things instead of eight. The
+// transport — Play/Stop, Pause, Step — is genuinely centred (measured, not
+// guessed) and tinted, and play mode also colours the bar's bottom edge: red
+// while the scene runs, amber while it is frozen. From the corner of the eye it
+// is obvious whether the scene is live. Everything is icon-first with a tooltip
+// carrying the keyboard shortcut.
+//
+// Pause and Step keep their place while the scene is stopped, dimmed rather than
+// dropped, so the press that happens most often never moves the row.
 //
 // The bar shrinks in defined steps rather than overflowing: first the text
 // labels go, then the right-hand zone, then the snap group. Whatever gets

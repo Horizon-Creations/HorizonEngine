@@ -275,6 +275,10 @@ void GlobalState::readConfig()
 
 bool GlobalState::writeConfig()
 {
+	// A packaged game reads a shipped config into this object but must never
+	// write it back: the file it would land in is shared with the editor.
+	if (!m_configPersistent) return true;
+
 	json j;
 	j["RHI"] = m_engineStatus.selectedRHI;
 	j["LastProjectPath"] = m_engineStatus.lastProjectPath;

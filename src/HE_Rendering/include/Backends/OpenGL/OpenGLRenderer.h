@@ -400,6 +400,7 @@ private:
 	int          m_uMetallic      = -1;
 	int          m_uRoughness     = -1;
 	int          m_uOpacity       = -1;   // surface alpha (transparency pass)
+	int          m_uNoShadow      = -1;   // 1 = object opts out of shadow reception
 	int          m_uLightCount    = -1;
 	int          m_uLightPos      = -1;
 	int          m_uLightDir      = -1;
@@ -443,6 +444,7 @@ private:
 	int          m_uSkinnedMetallic = -1;
 	int          m_uSkinnedRoughness= -1;
 	int          m_uSkinnedOpacity  = -1;
+	int          m_uSkinnedNoShadow = -1;
 	int          m_uSkinnedLightCount= -1;
 	int          m_uSkinnedLightPos  = -1;
 	int          m_uSkinnedLightDir  = -1;
@@ -481,6 +483,7 @@ private:
 	int          m_uInstMetallic            = -1;
 	int          m_uInstRoughness           = -1;
 	int          m_uInstOpacity             = -1;
+	int          m_uInstNoShadow            = -1;
 	int          m_uInstLightCount          = -1;
 	int          m_uInstLightPos            = -1;
 	int          m_uInstLightDir            = -1;

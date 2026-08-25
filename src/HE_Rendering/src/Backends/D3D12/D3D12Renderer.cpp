@@ -400,7 +400,11 @@ cbuffer PerObject : register(b0)
     float4x4 uMVP;
     float4x4 uModel;
     float4   uColor;    // rgb = base color, a = hasTexture (0/1)
-    float4   uPBR;      // x = metallic, y = roughness, z = opacity
+    // x = metallic, y = roughness, z = opacity,
+    // w = 1 when the object IGNORES shadows (MeshComponent::receivesShadow ==
+    //     false). Inverted on purpose: every zero-initialised PerObjectCB fill
+    //     (shadow pass, GI G-buffer, previews) then keeps shadowing.
+    float4   uPBR;
 };
 cbuffer PerFrame : register(b1)
 {
@@ -636,6 +640,9 @@ float4 PSMain(VSOut i) : SV_TARGET
                 sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
             giLocalIdx++;
         }
+        // "Receives Shadow" off: the object is lit as if nothing occluded it.
+        // After BOTH branches so it covers the shadow map and the GI masks alike.
+        if (uPBR.w > 0.5f) sh = 1.0;
         result += BRDF12(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
     }
     if (uFog.x > 0.0f) {
@@ -6608,7 +6615,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 o.mvp   = viewProj * model;
                 o.model = model;
                 o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
-                o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity,
+                                    dc.receivesShadow ? 0.0f : 1.0f);
                 if (ringPtr)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                 cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -6645,7 +6653,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     // VS reads mvp/model from t3, so the CB's mvp/model are unused here).
                     PerObjectCB o{};
                     o.color = glm::vec4(dc.baseColor, textured ? 1.0f : 0.0f);
-                    o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                    o.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity,
+                                        dc.receivesShadow ? 0.0f : 1.0f);
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                     cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
                     cl->SetGraphicsRootShaderResourceView(4,
@@ -6723,7 +6732,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 o.mvp   = viewProj * sdc.transform;
                 o.model = sdc.transform;
                 o.color = glm::vec4(sdc.baseColor, textured ? 1.0f : 0.0f);
-                o.pbr   = glm::vec4(sdc.metallic, sdc.roughness, sdc.opacity, 0.0f);
+                o.pbr   = glm::vec4(sdc.metallic, sdc.roughness, sdc.opacity,
+                                    sdc.receivesShadow ? 0.0f : 1.0f);
                 if (ringPtr)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                 cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);

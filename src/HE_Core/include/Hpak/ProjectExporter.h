@@ -92,6 +92,15 @@ struct HE_API ExportSettings {
     // shaderBackends above. (nodeGraphJson, backend bitmask) → PPSD-encoded bytes —
     // see Hpak::PackSettings::compileParticleShaderVariants.
     std::function<std::vector<uint8_t>(const std::string&, uint32_t)> compileParticleShaderVariants;
+    // The graphics + window settings the shipped game boots with, already
+    // serialized in config.json's own shape (the object GlobalState reads:
+    // "CustomConfig": [{"Key":…,"Value":…}, …]). Written next to the game data,
+    // i.e. where SDL_GetBasePath resolves — inside a macOS .app that is
+    // Contents/Resources, and the game reads it from there before its window
+    // opens. WITHOUT it a shipped game has no source for those settings at all
+    // and starts on the engine defaults, whatever the project was authored with.
+    // Empty → no config.json is written (the previous behaviour).
+    std::string gameConfigJson;
     // Path of the freshly built HorizonCodeGen shared library (the compiled
     // HorizonCode classes). When non-empty it is copied beside the data under
     // the canonical loader name and project.hcfg records horizonCodeCompiled.
