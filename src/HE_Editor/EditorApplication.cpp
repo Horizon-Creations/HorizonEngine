@@ -1183,7 +1183,8 @@ void EditorApplication::OnInit()
 		svc.showWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().showWidget(id); };
 		svc.hideWidget    = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().hideWidget(id); };
 		svc.destroyWidget = [this](int id){ if (m_editorWorld) m_editorWorld->widgets().destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p) -> uint32_t {
+		svc.createObject  = [this](const std::string& p, const float* pos,
+		                          const float* rot) -> uint32_t {
 			const HE::UUID id = contentManager().loadAsset(p);
 			const HorizonCodeClassAsset* a = contentManager().getHorizonCodeClass(id);
 			if (!a) return 0u;
@@ -1197,7 +1198,21 @@ void EditorApplication::OnInit()
 			// it one. Creating it here instead would produce a half-object: it
 			// would answer a Cast to Entity, own no entity, and never tick.
 			if (HorizonCode::engineClassIsA(rc.engineBase, "Entity") && m_entityHost.running())
-				return m_entityHost.spawn(a->path).instance;
+			{
+				// Placement travels with the spawn (null = authored), so
+				// Construct/BeginPlay already run at the destination.
+				const HorizonCode::InstanceId inst =
+					m_entityHost.spawn(a->path, entt::null, pos, rot).instance;
+				// The PlayerHost no longer creates characters, so this is the only
+				// place it can learn that one exists — and it has to, or a project
+				// without a controller loses its input in PIE.
+				if (HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
+					m_playerHost.addCharacter(inst);
+				return inst;
+			}
+			// Below here the object has no body at all, so a placement has nothing
+			// to be written to: pos/rot are deliberately dropped, not defaulted.
+			//
 			// The asset's OWN path is the class key, not the string the node
 			// happened to spell: it is the same value the compiled class table
 			// is keyed by, so an interpreted and a compiled instance of one
@@ -5264,9 +5279,15 @@ void EditorApplication::updatePlayCameraController(float dt)
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
+	// Ask POSSESSION, not spawn order: characters come out of the game's own
+	// Create Object now, so the one a controller is steering is the only one that
+	// is "the player" — the same question the shipped game asks.
 	Entity possessed = entt::null;
-	for (HorizonCode::InstanceId inst : m_playerHost.characters())
-		if ((possessed = m_entityHost.entityOf(inst)) != entt::null) break;
+	for (const HorizonCode::InstanceId ctrl : m_playerHost.controllers())
+	{
+		const HorizonCode::InstanceId pawn = HE::api::player::possessed(ctrl);
+		if (pawn != 0 && (possessed = m_entityHost.entityOf(pawn)) != entt::null) break;
+	}
 	// Physics only exists while playing, and this whole function is gated on
 	// m_isPlaying — so the boom collides in PIE exactly as it will in the game.
 	HE::CameraLookInput look;
@@ -5425,12 +5446,15 @@ void EditorApplication::setPlayMode(bool play)
 		// fires the matching "OnLevelUnloaded".
 		m_editorWorld->fireLevelLoaded();
 
-		// Player controller/character classes + input events, mirroring the
-		// packaged game: spawn after the level is up (Construct + BeginPlay),
-		// pump Tick/Input.* per frame while playing.
-		// The entity host FIRST: the player host spawns its characters through it,
-		// so they arrive with the components their class carries.
+		// Player controller classes + input events, mirroring the packaged game:
+		// spawn after the level is up (Construct + BeginPlay), pump Tick/Input.*
+		// per frame while playing.
+		// The entity host FIRST: a controller's BeginPlay is where the game spawns
+		// its character with Create Object, and that spawn is only served with a
+		// body while the entity host is running.
 		m_entityHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
+		// Handed the entity host so it can find the characters the LEVEL already
+		// placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.

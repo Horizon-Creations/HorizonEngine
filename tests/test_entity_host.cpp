@@ -505,7 +505,9 @@ TEST_CASE("a Tick that spawns and destroys entity classes does not walk a mutati
 	// A host binding that spawns and destroys DURING the tick, which is exactly
 	// what a graph doing Create Object / Destroy Object in its Tick amounts to.
 	Runtime::Services svc;
-	svc.createObject = [&](const std::string& p) -> uint32_t
+	// Placement is not what this test is about: it hands the spawn nothing, which
+	// is the "leave it where the class authored it" case.
+	svc.createObject = [&](const std::string& p, const float*, const float*) -> uint32_t
 	{ return host.spawn(p).instance; };
 	svc.destroyObject = [&](uint32_t ref) { rt.destroy(ref); };
 	rt.setServices(std::move(svc));

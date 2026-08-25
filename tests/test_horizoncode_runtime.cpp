@@ -425,7 +425,7 @@ TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the r
 
 	int createCount = 0; InstanceId createdRef = 0, destroyedRef = 0; bool builtAfterConstruct = false;
 	Runtime::Services svc;
-	svc.createObject = [&](const std::string& /*path*/) -> uint32_t {
+	svc.createObject = [&](const std::string& /*path*/, const float*, const float*) -> uint32_t {
 		++createCount;
 		const InstanceId id = rt.add(classGraph);
 		rt.fireEvent(id, "Construct");
@@ -437,7 +437,7 @@ TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the r
 	rt.setServices(svc);
 
 	// Caller: Go → CreateObject → DestroyObject(<created ref>).
-	// CreateObject: execIn 0 / execOut 1 / Object dataOut 2.
+	// CreateObject: execIn 0 / execOut 1 / Location dataIn 2 / Rotation dataIn 3 / Object dataOut 4.
 	// DestroyObject: execIn 0 / execOut 1 / Object dataIn 2.
 	Graph caller;
 	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = caller.addNode(ev);
@@ -445,7 +445,7 @@ TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the r
 	Node de; de.type = NodeType::DestroyObject; const int d = caller.addNode(de);
 	REQUIRE(caller.connect(e, 0, c, 0)); // exec
 	REQUIRE(caller.connect(c, 1, d, 0)); // exec
-	REQUIRE(caller.connect(c, 2, d, 2)); // ref out → ref in
+	REQUIRE(caller.connect(c, 4, d, 2)); // ref out → ref in
 
 	const InstanceId callerId = rt.add(std::move(caller));
 	rt.fireEvent(callerId, "Go");
@@ -455,6 +455,184 @@ TEST_CASE("Create/Destroy Object instantiate a class, run Construct, cache the r
 	CHECK(createdRef != 0);
 	CHECK(destroyedRef == createdRef);    // the cached ref flowed into Destroy Object
 	CHECK_FALSE(rt.alive(createdRef));    // and the instance is gone
+}
+
+namespace
+{
+	// What the host saw for one spawn. Both pointers are recorded as
+	// "was it null" plus the values, because null is the whole contract here.
+	struct SpawnCapture
+	{
+		bool      posNull = true, rotNull = true;
+		glm::vec3 pos{ -1.0f }, rot{ -1.0f };
+		int       calls = 0;
+	};
+
+	// Binds a createObject that records what it was handed. Returns a graph with
+	// Event "Go" → CreateObject; the caller wires the placement pins (or not).
+	// CreateObject pins: execIn 0 / execOut 1 / Location 2 / Rotation 3 / Object 4.
+	Graph spawnGraph(int& createNodeOut)
+	{
+		Graph g;
+		Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+		Node co; co.type = NodeType::CreateObject; co.s = "SpawnMe";
+		createNodeOut = g.addNode(co);
+		REQUIRE(g.connect(e, 0, createNodeOut, 0));
+		return g;
+	}
+
+	// A Make Vector 3 whose X/Y/Z ride in as pin defaults — a real wired Vec3
+	// source without three extra literal nodes.
+	int vec3Node(Graph& g, float x, float y, float z)
+	{
+		Node mv; mv.type = NodeType::MakeVector3;
+		mv.pinDefaults[0] = Value::ofFloat(x);
+		mv.pinDefaults[1] = Value::ofFloat(y);
+		mv.pinDefaults[2] = Value::ofFloat(z);
+		return g.addNode(mv);
+	}
+}
+
+TEST_CASE("Create Object with unwired placement pins spawns where the class authored it")
+{
+	Runtime rt;
+	SpawnCapture cap;
+	Runtime::Services svc;
+	svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+		++cap.calls;
+		cap.posNull = (p == nullptr);
+		cap.rotNull = (r == nullptr);
+		return 7u;
+	};
+	rt.setServices(svc);
+
+	int create = -1;
+	Graph g = spawnGraph(create);
+
+	// The anchor: a graph authored before these pins existed has no links on
+	// them, and an inline pin DEFAULT must not count as "the author placed it".
+	// The node is asked by WIRE, so this (0,0,0)-ish default is deliberately
+	// ignored — otherwise every old spawn would silently move to the origin.
+	Node* co = g.findNode(create);
+	REQUIRE(co != nullptr);
+	co->pinDefaults[0] = Value::ofVec3({ 9.0f, 9.0f, 9.0f });
+
+	rt.fireEvent(rt.add(std::move(g)), "Go");
+
+	CHECK(cap.calls == 1);
+	CHECK(cap.posNull);   // nullptr, not (0,0,0) and not the pin default
+	CHECK(cap.rotNull);
+}
+
+TEST_CASE("Create Object with wired placement pins hands the host the values")
+{
+	SUBCASE("both pins wired")
+	{
+		Runtime rt;
+		SpawnCapture cap;
+		Runtime::Services svc;
+		svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+			++cap.calls;
+			cap.posNull = (p == nullptr);
+			cap.rotNull = (r == nullptr);
+			if (p) cap.pos = { p[0], p[1], p[2] };
+			if (r) cap.rot = { r[0], r[1], r[2] };
+			return 7u;
+		};
+		rt.setServices(svc);
+
+		int create = -1;
+		Graph g = spawnGraph(create);
+		const int loc = vec3Node(g, 1.0f, 2.0f, 3.0f);
+		const int rot = vec3Node(g, 0.0f, 90.0f, 0.0f);
+		REQUIRE(g.connect(loc, 3, create, 2)); // MakeVector3 dataOut 3 → Location
+		REQUIRE(g.connect(rot, 3, create, 3)); // → Rotation
+
+		rt.fireEvent(rt.add(std::move(g)), "Go");
+
+		CHECK(cap.calls == 1);
+		CHECK_FALSE(cap.posNull);
+		CHECK_FALSE(cap.rotNull);
+		CHECK(cap.pos.x == doctest::Approx(1.0f));
+		CHECK(cap.pos.y == doctest::Approx(2.0f));
+		CHECK(cap.pos.z == doctest::Approx(3.0f));
+		CHECK(cap.rot.y == doctest::Approx(90.0f)); // euler degrees, straight through
+	}
+
+	SUBCASE("one pin wired — the other stays authored")
+	{
+		Runtime rt;
+		SpawnCapture cap;
+		Runtime::Services svc;
+		svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+			++cap.calls;
+			cap.posNull = (p == nullptr);
+			cap.rotNull = (r == nullptr);
+			if (p) cap.pos = { p[0], p[1], p[2] };
+			return 7u;
+		};
+		rt.setServices(svc);
+
+		int create = -1;
+		Graph g = spawnGraph(create);
+		const int loc = vec3Node(g, 5.0f, 0.0f, -5.0f);
+		REQUIRE(g.connect(loc, 3, create, 2)); // Location only
+
+		rt.fireEvent(rt.add(std::move(g)), "Go");
+
+		CHECK(cap.calls == 1);
+		CHECK_FALSE(cap.posNull);
+		CHECK(cap.pos.x == doctest::Approx(5.0f));
+		CHECK(cap.pos.z == doctest::Approx(-5.0f));
+		CHECK(cap.rotNull);   // Rotation untouched → keep the authored rotation
+	}
+}
+
+TEST_CASE("A graph saved before the placement pins keeps its Object wire")
+{
+	// Adding two data inputs moved Create Object's Object output from absolute
+	// pin 2 to pin 4, and links are stored as absolute pin numbers with no
+	// version stamp. This is the on-disk shape of such a graph: the link
+	// ORIGINATES at pin 2, which only an old file can do (pin 2 is now the
+	// Location input, and links never originate at an input).
+	const std::string oldJson = R"({
+		"nodes": [
+			{ "id": 1, "type": "Event",          "s": "Go" },
+			{ "id": 2, "type": "Create Object",  "s": "MyClass" },
+			{ "id": 3, "type": "Destroy Object" }
+		],
+		"links": [ [1, 0, 2, 0], [2, 1, 3, 0], [2, 2, 3, 2] ],
+		"variables": []
+	})";
+
+	Graph g;
+	REQUIRE(fromJson(oldJson, g));
+
+	// The ref wire was re-based onto the new output pin; the exec wires, which
+	// sit below the data pins, are untouched.
+	const Link* ref = nullptr;
+	for (const Link& l : g.links)
+		if (l.srcNode == 2 && l.dstNode == 3 && l.dstPin == 2) ref = &l;
+	REQUIRE(ref != nullptr);
+	CHECK(ref->srcPin == 4);
+
+	// And it still behaves: the created ref reaches Destroy Object, with the
+	// spawn left exactly where the class authored it.
+	Runtime rt;
+	bool posNull = false, rotNull = false;
+	uint32_t destroyed = 0;
+	Runtime::Services svc;
+	svc.createObject = [&](const std::string&, const float* p, const float* r) -> uint32_t {
+		posNull = (p == nullptr); rotNull = (r == nullptr); return 55u;
+	};
+	svc.destroyObject = [&](uint32_t id){ destroyed = id; };
+	rt.setServices(svc);
+
+	rt.fireEvent(rt.add(std::move(g)), "Go");
+
+	CHECK(destroyed == 55u);  // the output still flows down the migrated wire
+	CHECK(posNull);
+	CHECK(rotNull);
 }
 
 TEST_CASE("Widget nodes call the runtime services and cache CreateWidget's id")

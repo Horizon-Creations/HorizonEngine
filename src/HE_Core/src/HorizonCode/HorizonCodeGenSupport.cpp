@@ -22,9 +22,12 @@ void warnArrayGet(int idx, size_t size)
          std::to_string(size) + ")").c_str());
 }
 
-uint32_t createObject(const Context& c, const char* classPath)
+// Defaults live in the header only — repeating them here is ill-formed.
+uint32_t createObject(const Context& c, const char* classPath,
+                      const float* position, const float* rotationEuler)
 {
-    const uint32_t ref = c.createObject ? c.createObject(classPath) : 0u;
+    const uint32_t ref = c.createObject
+        ? c.createObject(classPath, position, rotationEuler) : 0u;
     if (ref == 0u)
         HE_LOG_ERROR(HorizonCode, "%s",
             ("HorizonCode: Create Object failed — class '" + std::string(classPath) +

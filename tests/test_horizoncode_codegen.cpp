@@ -191,7 +191,8 @@ namespace
 			s.destroyWidget = [this](int wid) { trace.push_back("destroyWidget " + std::to_string(wid)); };
 			// Create Object instantiates the class in THIS world's backend and
 			// fires "Construct" — the same shape as the app's svc.createObject.
-			s.createObject  = [this](const std::string& path) -> uint32_t
+			s.createObject  = [this](const std::string& path,
+			                         const float* pos, const float* rot) -> uint32_t
 			{
 				InstanceId nid = 0;
 				// The class identity travels with the instance in BOTH worlds,
@@ -214,7 +215,17 @@ namespace
 					for (auto& src : hcfix::all())
 						if (src.key == path) { nid = rt.add(std::move(src.graph), {}, cls); break; }
 				}
-				trace.push_back("createObject " + path + " -> " + std::to_string(nid));
+				// Placement joins the traced text only when a pin is actually
+				// wired, so the two backends have to agree on WHICH pins were
+				// wired as well as on the values. Every fixture leaves them
+				// unwired, so this line is unchanged for all of them.
+				std::string place;
+				auto vec = [](const float* v)
+				{ return "(" + std::to_string(v[0]) + "," + std::to_string(v[1]) + ","
+				         + std::to_string(v[2]) + ")"; };
+				if (pos) place += " at " + vec(pos);
+				if (rot) place += " rot " + vec(rot);
+				trace.push_back("createObject " + path + place + " -> " + std::to_string(nid));
 				if (nid) rt.fireEvent(nid, "Construct");
 				return nid;
 			};
@@ -740,6 +751,20 @@ TEST_CASE("codegen parity: refs_objects (create/destroy, external access, warn p
 	CHECK(obj != 0);
 	p.checkInstance(obj);
 	CHECK(p.interp.rt.getVariable(obj, "constructed").f == 1.0f);   // Construct fired
+
+	// The fixture WIRES Create Object's Location and Rotation, so the placement
+	// has to reach the host. checkParity() alone cannot say this: it compares the
+	// two backends against each other, and two backends that both dropped the
+	// placement would agree perfectly. Assert the text so the check is not
+	// vacuous — this is also the only place the codegen's wired branch (a named
+	// `const glm::vec3` per pin, so its address can be taken) is exercised.
+	{
+		const auto it = std::find_if(p.interp.trace.begin(), p.interp.trace.end(),
+			[](const std::string& t){ return t.rfind("createObject ", 0) == 0; });
+		REQUIRE(it != p.interp.trace.end());
+		CHECK(it->find(" at (10.000000,2.500000,-7.000000)") != std::string::npos);
+		CHECK(it->find(" rot (0.000000,90.000000,0.000000)") != std::string::npos);
+	}
 
 	p.fire("Poke");
 	p.checkInstance(obj);

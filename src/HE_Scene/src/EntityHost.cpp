@@ -109,7 +109,8 @@ HorizonCode::InstanceId EntityHost::bind(Entity entity, const std::string& class
 	return inst;
 }
 
-EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity parent)
+EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity parent,
+                                      const float* position, const float* rotationEuler)
 {
 	Spawned out;
 	if (!m_runtime || !m_content || !m_world) return out;
@@ -137,6 +138,22 @@ EntityHost::Spawned EntityHost::spawn(const std::string& classPath, Entity paren
 		out.entity = m_world->createEntity(stem.empty() ? "Entity" : stem);
 		if (parent != entt::null && m_world->registry().valid(parent))
 			m_world->reparentEntity(out.entity, parent);
+	}
+
+	// Placement BEFORE bind(), because bind() fires Construct and BeginPlay: a
+	// graph that reads its own position, raycasts down for the ground or hands
+	// its transform to physics has to see the spawn point, not the origin it
+	// would be teleported away from a frame later. Each pointer is honoured on
+	// its own — a wired Location with an authored Rotation is a legal request.
+	// get_or_emplace, not try_get: a class whose component list is empty comes
+	// out of createEntity() above without a transform, and asking for a placement
+	// is what makes it need one.
+	if (position || rotationEuler)
+	{
+		auto& t = m_world->registry().get_or_emplace<TransformComponent>(out.entity);
+		if (position)      t.position = glm::vec3(position[0], position[1], position[2]);
+		if (rotationEuler) t.rotation = glm::vec3(rotationEuler[0], rotationEuler[1], rotationEuler[2]);
+		t.dirty = true;
 	}
 
 	out.instance = bind(out.entity, classPath);

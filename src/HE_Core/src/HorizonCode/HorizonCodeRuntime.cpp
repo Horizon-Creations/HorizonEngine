@@ -478,8 +478,12 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     ctx.showWidget    = [this](int id_) { if (m_services.showWidget) m_services.showWidget(id_); };
     ctx.hideWidget    = [this](int id_) { if (m_services.hideWidget) m_services.hideWidget(id_); };
     ctx.destroyWidget = [this](int id_) { if (m_services.destroyWidget) m_services.destroyWidget(id_); };
-    ctx.createObject  = [this](const std::string& path) -> uint32_t
-    { return m_services.createObject ? m_services.createObject(path) : 0u; };
+    // Straight passthrough, including the nullptr-means-"as authored" pointers:
+    // the call is synchronous, so the caller's vec3 locals outlive it and there
+    // is nothing here to own or copy.
+    ctx.createObject  = [this](const std::string& path, const float* pos,
+                               const float* rot) -> uint32_t
+    { return m_services.createObject ? m_services.createObject(path, pos, rot) : 0u; };
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };

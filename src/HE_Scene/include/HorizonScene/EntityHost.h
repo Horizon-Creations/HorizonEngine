@@ -49,8 +49,18 @@ public:
     // component list (CHUNK_HCCP, a prefab-shaped subtree) into the world and
     // binds the new root to a fresh instance. Returns 0 on failure. `parent` may
     // be entt::null for the world root.
+    //
+    // `position` / `rotationEuler` (3 floats each, rotation in DEGREES) place the
+    // new root, each independently of the other. nullptr means "leave it where
+    // the class authored it" — which is why these are pointers and not values: a
+    // zero vector is a placement, and a caller that never wired a location must
+    // be able to say so. Applied BEFORE Construct and BeginPlay fire, so the
+    // graph's first frame already sees where it stands. Spawning and moving
+    // afterwards was always possible (entity.owned + transform.setPosition); it
+    // just runs BeginPlay at the wrong place.
     struct Spawned { HorizonCode::InstanceId instance = 0; Entity entity = entt::null; };
-    Spawned spawn(const std::string& classPath, Entity parent = entt::null);
+    Spawned spawn(const std::string& classPath, Entity parent = entt::null,
+                  const float* position = nullptr, const float* rotationEuler = nullptr);
 
     // Per-frame: fire Tick on every entity instance, and reap the ones whose
     // entity has gone away (see the lifetime rule in the .cpp). No-op when not

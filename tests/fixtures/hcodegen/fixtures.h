@@ -1199,10 +1199,29 @@ inline HE::hccg::ClassSource fxRefsObjects()
     f.var("meRef", PT::Ref);
     f.var("giRef", PT::Ref);
 
-    // Spawn: create the target, keep the ref.
+    // Spawn: create the target at an explicit place, keep the ref.
     const int evS = f.event("Spawn");
     Node co; co.type = NT::CreateObject; co.s = "fix/ref_target";
     const int create = f.add(co);
+    // Location AND Rotation wired. This is the only fixture that wires them, and
+    // it is the ONLY thing that ever compiles the codegen's wired branch: that
+    // branch emits a named `const glm::vec3` per pin (you cannot take the address
+    // of a prvalue, and the host takes `const float*`), which no amount of
+    // interpreting would catch. It also makes the parity harness check that both
+    // backends agree on WHICH pins were wired, not just on the values — the
+    // harness only appends " at "/" rot " to the trace for a non-null pointer.
+    {
+        const int loc = f.op(NT::MakeVector3);
+        f.data(f.constF(10.0f), 0, loc, 0);
+        f.data(f.constF(2.5f),  0, loc, 1);
+        f.data(f.constF(-7.0f), 0, loc, 2);
+        f.data(loc, 0, create, 0);
+        const int rot = f.op(NT::MakeVector3);
+        f.data(f.constF(0.0f),  0, rot, 0);
+        f.data(f.constF(90.0f), 0, rot, 1);
+        f.data(f.constF(0.0f),  0, rot, 2);
+        f.data(rot, 0, create, 1);
+    }
     f.exec(evS, create);
     const int sObj = f.setVar("obj", PT::Ref);
     f.data(create, 0, sObj, 0);

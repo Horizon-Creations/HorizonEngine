@@ -243,7 +243,12 @@ public:
         std::function<void(int)> showWidget;
         std::function<void(int)> hideWidget;
         std::function<void(int)> destroyWidget;
-        std::function<uint32_t(const std::string& classPath)> createObject;
+        // position/rotationEuler are 3 floats each, or nullptr for "spawn where
+        // the class authored it" (see Context::createObject — a zero vector is
+        // NOT the same thing, which is why these are pointers).
+        std::function<uint32_t(const std::string& classPath,
+                               const float* position,
+                               const float* rotationEuler)> createObject;
         std::function<void(uint32_t)> destroyObject;
         // Generic engine-API dispatch, forwarded to every instance's Context so any
         // EngineCall node reaches the HE::api registry. The app binds it to the

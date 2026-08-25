@@ -193,6 +193,12 @@ void signatureInto(const Node& n, NodeSig& s)
     case T::CreateObject:
         s.execIns  = { { "", P::Exec } };
         s.execOuts = { { "", P::Exec } };
+        // Optional placement. WIRED means "put it there"; UNWIRED means "leave
+        // it where the class authored it" — the interpreter and the codegen both
+        // decide on the LINK, never on the value, so an unwired pin is not the
+        // same as one wired to (0,0,0). Adding these shifted the Object output's
+        // absolute pin index (2 → 4); fromJson migrates graphs saved before that.
+        s.dataIns  = { { "Location", P::Vec3 }, { "Rotation", P::Vec3 } };
         s.dataOuts = { { "Object", P::Ref } };
         break;
     case T::DestroyObject:
@@ -741,7 +747,9 @@ const char* nodeTooltip(NodeType t)
             return "Destroys the widget identified by the Widget input; its id becomes invalid.";
         case T::CreateObject:
             return "Instantiates the chosen HorizonCode class as a live object and outputs\n"
-                   "a reference to it (its Construct event fires).";
+                   "a reference to it (its Construct event fires).\n"
+                   "Location and Rotation (euler degrees) place the new object; leave a pin\n"
+                   "UNWIRED to keep the placement the class was authored with.";
         case T::DestroyObject:
             return "Destroys the object referenced by the input (its Destruct event fires);\n"
                    "the reference becomes invalid.";
@@ -1722,6 +1730,21 @@ bool fromJson(const std::string& json, Graph& out)
         if (g.findNode(l.srcNode) && g.findNode(l.dstNode))
             g.links.push_back(l);
     }
+    // MIGRATION — Create Object gained the Location/Rotation data inputs, and a
+    // node's pin numbers are absolute (pinRanges: dataOut0 = dataIn0 + dataIns),
+    // so its Object output moved from pin 2 to pin 4. Pin counts are NOT stored
+    // per node for this type — the layout is derived from NodeType alone — so an
+    // old file is recognised by the only thing that gives it away: a link
+    // ORIGINATING at pin 2, which in the new layout is the Location *input*.
+    // Links never originate at an input, so this is unambiguous and idempotent.
+    // Without it, codegen would emit `n<id>_o-2` (srcPin - dataOut0) and fail to
+    // compile for every graph that ever wired a spawned object up.
+    for (Link& l : g.links)
+    {
+        const Node* src = g.findNode(l.srcNode);
+        if (src && src->type == NodeType::CreateObject && l.srcPin == 2)
+            l.srcPin = 4;
+    }
     for (const auto& e : j.value("variables", nlohmann::json::array()))
     {
         Variable v;
@@ -2621,7 +2644,17 @@ void Runner::execNode(const Node& n, int depth)
     case T::DestroyWidget: if (m_ctx.destroyWidget) m_ctx.destroyWidget((int)evalInput(n, 0, depth + 1).ref); break;
     case T::CreateObject:
     {
-        const uint32_t ref = m_ctx.createObject ? m_ctx.createObject(n.s) : 0u;
+        // Placement is decided by the WIRE, not the value: an unwired pin hands
+        // the host nullptr ("leave it where the class authored it"), so a graph
+        // that predates these pins spawns exactly where it always did. The
+        // locals must outlive the call — hence named, not evalInput(...).v3.
+        glm::vec3 pos{ 0.0f }, rot{ 0.0f };
+        const bool hasPos = inputLinked(n, 0), hasRot = inputLinked(n, 1);
+        if (hasPos) pos = evalInput(n, 0, depth + 1).v3;
+        if (hasRot) rot = evalInput(n, 1, depth + 1).v3;
+        const uint32_t ref = m_ctx.createObject
+            ? m_ctx.createObject(n.s, hasPos ? &pos.x : nullptr, hasRot ? &rot.x : nullptr)
+            : 0u;
         if (ref == 0u)
             HE_LOG_ERROR(HorizonCode, "%s",
                 ("HorizonCode: Create Object failed — class '" + n.s + "' not found").c_str());
@@ -2839,6 +2872,15 @@ Value Runner::evalInput(const Node& n, int dataInIndex, int depth)
     }
     Value v; v.type = dataPinType(n, true, dataInIndex);
     return v;
+}
+
+bool Runner::inputLinked(const Node& n, int dataInIndex) const
+{
+    const int pin = pinRanges(n).dataIn0 + dataInIndex;
+    for (const auto& l : m_graph.links)
+        if (l.dstNode == n.id && l.dstPin == pin && m_graph.findNode(l.srcNode))
+            return true;
+    return false;
 }
 
 Value Runner::evalData(const Node& n, int dataOutPin, int depth)

@@ -542,7 +542,14 @@ inline uint32_t createWidget(const Context& c, const char* path)
 inline void showWidget(const Context& c, int id)    { if (c.showWidget) c.showWidget(id); }
 inline void hideWidget(const Context& c, int id)    { if (c.hideWidget) c.hideWidget(id); }
 inline void destroyWidget(const Context& c, int id) { if (c.destroyWidget) c.destroyWidget(id); }
-HE_API uint32_t createObject(const Context& c, const char* classPath); // logs the fail like :1019
+// logs the fail like :1019. position/rotationEuler are 3 floats each, or nullptr
+// for "place it as the class authored it" (see Context::createObject). The
+// DEFAULTS are load-bearing: the codegen emits the plain two-argument call for a
+// Create Object whose placement pins are unwired, so every graph written before
+// those pins existed still generates byte-identical text.
+HE_API uint32_t createObject(const Context& c, const char* classPath,
+                             const float* position = nullptr,
+                             const float* rotationEuler = nullptr);
 inline void destroyObject(const Context& c, uint32_t ref)
 { if (c.destroyObject) c.destroyObject(ref); }
 inline Value getExternal(const Context& c, uint32_t target, const char* var)

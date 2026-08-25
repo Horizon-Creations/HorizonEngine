@@ -149,7 +149,7 @@ what a container can and cannot nest with.
 ### Objects, references & members
 | Node | Purpose |
 |------|---------|
-| **Create Object** (`CreateObject`) | Instantiate a HorizonCode Class asset → `Ref`. Fires its `Construct`. |
+| **Create Object** (`CreateObject`) | Instantiate a HorizonCode Class asset → `Ref`. Fires its `Construct`. Two data inputs place it: **Location** (Vec3) and **Rotation** (Vec3, Euler degrees). Leaving a pin **unwired** keeps what the class authored — the difference is the WIRE, not the value, so an unwired pin is not "spawn at 0,0,0". Placement is applied before `Construct`/`BeginPlay` run, so the graph's first frame already sees where it stands. |
 | **Destroy Object** (`DestroyObject`) | Destroy a referenced object (fires `Destruct`). |
 | **Call Function** (`FunctionCall`) | Call a function in this graph. |
 | **Call Function (Ref)** (`CallExternal`) | Call a public function on another instance, passing typed args + returns. |
@@ -219,9 +219,31 @@ every `Input.<Action>.*` event reaches **every** controller, always, whether or
 not it possesses anything. A controller that possesses a PlayerCharacter also has
 that same event delivered to the character — possessing makes the controller
 forward input, it does not make it passive. A project with no PlayerController at
-all keeps the older behaviour and gets input straight on its characters. Exactly
-one controller and one character in a project → they are possessed
-automatically; anything else is the game's call, in the controller's `BeginPlay`.
+all keeps the older behaviour and gets input straight on its characters.
+
+**Who spawns the character.** The engine spawns **PlayerControllers** only — one
+instance per controller class in the project, so something is always running. It
+does **not** spawn PlayerCharacters: where a body stands is a game decision, not
+an engine guess. A project whose character classes nobody spawns gets told so in
+the log (`N PlayerCharacter classes found, none spawned automatically`).
+
+The recipe, in the controller's `BeginPlay`:
+
+1. **Create Object** on the character class, with **Location** (and optionally
+   **Rotation**) wired to the spawn point. Leave them unwired to use the class's
+   authored placement.
+2. **Engine Call → Possess** (`player.possess`) with **Get Self** as the
+   controller and the Create Object `Ref` as the character.
+
+That is also what makes the camera work: a `CameraRigComponent` with no explicit
+target follows the character its controller **possesses**, so nothing follows
+anything until step 2 has run. Possession is always the game's decision now —
+there is no automatic possession, not even for a single controller and a single
+character.
+
+To reach the spawned character's **entity** (to set a transform, add force, find
+its children), feed the `Ref` into **Get Entity Of** (`entity.owned`). It answers
+the entity a HorizonCode object owns, `0` for a bodiless one.
 
 ### Debug
 **Print** (`Print`) — log a value.

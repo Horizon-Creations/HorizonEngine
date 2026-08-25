@@ -121,8 +121,10 @@ namespace
 		}
 
 		// Test taps into the bound Context (what generated code calls internally).
+		// nullptr placement = the unwired Location/Rotation pins, which is what
+		// generated code emits for a Create Object nobody wired a position into.
 		uint32_t ctxCreateObject(const std::string& path)
-		{ return m_ctx.createObject ? m_ctx.createObject(path) : 0u; }
+		{ return m_ctx.createObject ? m_ctx.createObject(path, nullptr, nullptr) : 0u; }
 		Value ctxGetExternal(uint32_t target, const std::string& var)
 		{ return m_ctx.getExternal ? m_ctx.getExternal(target, var) : Value{}; }
 		void ctxSetExternal(uint32_t target, const std::string& var, const Value& v)
@@ -394,7 +396,7 @@ TEST_CASE("Services bound AFTER addCompiled still reach the compiled instance")
 	CHECK(m->ctxCreateObject("Content/X.hasset") == 0u);   // …no services yet
 
 	Runtime::Services svc;                       // …services arrive afterwards
-	svc.createObject = [](const std::string&) -> uint32_t { return 77u; };
+	svc.createObject = [](const std::string&, const float*, const float*) -> uint32_t { return 77u; };
 	rt.setServices(std::move(svc));
 	CHECK(m->ctxCreateObject("Content/X.hasset") == 77u);
 }

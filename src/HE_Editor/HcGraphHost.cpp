@@ -1464,7 +1464,9 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 					{ n.s = c.path; edit(true); }
 			ImGui::EndCombo();
 		}
-		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.");
+		ImGui::TextDisabled("Instantiates a HorizonCode class as a\nlive object. Outputs a reference to it.\n"
+		                    "Wire Location/Rotation to place it;\nleave them unwired to keep the\n"
+		                    "placement the class was authored with.");
 		return true;
 	}
 

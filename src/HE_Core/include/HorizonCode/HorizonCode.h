@@ -162,7 +162,11 @@ enum class NodeType : uint8_t
     CreateWidget,    // s = widget asset path; dataOut Widget (Int id)
     ShowWidget, HideWidget, DestroyWidget, // dataIn Widget (Int id)
     // Instantiate a HorizonCode class asset as a live runtime object.
-    CreateObject,    // s = HorizonCode class asset path; dataOut Object (Ref)
+    // s = class asset path; dataIn Location (Vec3) + Rotation (Vec3, euler deg);
+    // dataOut Object (Ref). Both inputs are OPTIONAL and read by WIRE, not by
+    // value: an unwired pin spawns the object exactly where the class authored
+    // it, which is what every graph written before these pins existed expects.
+    CreateObject,
     DestroyObject,   // dataIn Object (Ref)
     // Read/write a PUBLIC variable on a referenced instance (s = variable name).
     GetExternal,     // dataIn Target (Ref); dataOut Value (propType)
@@ -787,7 +791,15 @@ struct Context
     std::function<void(int widgetId)> destroyWidget;
     // Instantiate a HorizonCode class asset → the new instance's Ref (0 on fail);
     // destroyObject removes a live instance by Ref.
-    std::function<uint32_t(const std::string& classPath)> createObject;
+    //
+    // position/rotationEuler are 3 floats each, or nullptr. nullptr means
+    // "place it as the class authored it" — NOT the origin. The distinction is
+    // the backward-compatibility anchor: a graph that never wired the Location
+    // pin must keep spawning where it spawns today, and a zero vector would
+    // silently teleport every such spawn to (0,0,0). Hence a pointer, not a value.
+    std::function<uint32_t(const std::string& classPath,
+                           const float* position,      // 3 floats, or nullptr
+                           const float* rotationEuler)> createObject; // 3 floats, degrees, or nullptr
     std::function<void(uint32_t objectRef)>               destroyObject;
 
     // Reference-based delegation (bound by the Runtime). All optional.
@@ -890,6 +902,10 @@ private:
     void execNode(const Node& n, int depth);
     Value evalData(const Node& n, int dataOutPin, int depth);
     Value evalInput(const Node& n, int dataInIndex, int depth);
+    // Is a data input actually WIRED? evalInput can't answer this: it quietly
+    // falls back to the pin default and then to the type's zero, so an optional
+    // pin (Create Object's Location) cannot tell "left alone" from "set to 0".
+    bool inputLinked(const Node& n, int dataInIndex) const;
     const Link* execLinkFrom(int nodeId, int pin) const;
 
     // One active function invocation: the argument values the call passed in

@@ -58,9 +58,9 @@ private:
     // camera isMain / releasing the mouse.
     void updateCameraController(float dt);
 
-    // The scene entity of the first player character the PlayerHost spawned, so
-    // a rig with no explicit target follows the player. entt::null when there is
-    // none (no player class, or one that brings no entity).
+    // The scene entity of the character a PlayerController actually possesses,
+    // so a rig with no explicit target follows the player. entt::null when there
+    // is none (no controller, nothing possessed, or a pawn without an entity).
     Entity possessedCharacterEntity() const;
 
     // Build the physics world for the CURRENT scene. Called BEFORE startScripts,

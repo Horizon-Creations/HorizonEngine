@@ -405,7 +405,8 @@ void GameApplication::OnInit()
 		svc.showWidget    = [this](int id){ m_widgets.showWidget(id); };
 		svc.hideWidget    = [this](int id){ m_widgets.hideWidget(id); };
 		svc.destroyWidget = [this](int id){ m_widgets.destroyWidget(id); };
-		svc.createObject  = [this](const std::string& p) -> uint32_t {
+		svc.createObject  = [this](const std::string& p, const float* pos,
+		                          const float* rot) -> uint32_t {
 			// An Entity class has a BODY, so it goes through the host that gives
 			// it one — before the compiled shortcut below, because it needs that
 			// body whichever backend ends up serving its logic (EntityHost::bind
@@ -421,8 +422,22 @@ void GameApplication::OnInit()
 					const HorizonCode::ResolvedClass rc =
 						HorizonCode::resolveClassAsset(contentManager(), ea->path);
 					if (HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
-						return m_entityHost.spawn(ea->path).instance;
+					{
+						// Placement travels with the spawn (null = authored), so
+						// Construct/BeginPlay already run at the destination.
+						const HorizonCode::InstanceId inst =
+							m_entityHost.spawn(ea->path, entt::null, pos, rot).instance;
+						// The PlayerHost no longer creates characters, so this is
+						// the only place it can learn that one exists — and it has
+						// to, or a project without a controller loses its input.
+						if (HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
+							m_playerHost.addCharacter(inst);
+						return inst;
+					}
 				}
+			// Below here the object has no body at all, so a placement has nothing
+			// to be written to: pos/rot are deliberately dropped, not defaulted.
+			//
 			// Compiled class first (the whole per-asset hybrid is this lookup);
 			// miss → the interpreted asset path, unchanged.
 			if (auto compiled = HorizonCode::compiledClasses().create(p))
@@ -526,15 +541,18 @@ void GameApplication::OnInit()
 	}
 	setWorld(m_world.get());
 
-	// Player controller/character classes + input events: discover the project's
-	// input assets, spawn the player instances on the shared runtime (Construct +
-	// BeginPlay) and start pumping Tick/Input.* events (OnRender). After the scene
-	// load so BeginPlay can reach scene entities through the engine-call API.
+	// Player controller classes + input events: discover the project's input
+	// assets, spawn the controllers on the shared runtime (Construct + BeginPlay)
+	// and start pumping Tick/Input.* events (OnRender). After the scene load so
+	// BeginPlay can reach scene entities through the engine-call API.
 	startPhysics();
-	// The entity host FIRST: the player host spawns its characters through it,
-	// so they arrive with the components their class carries.
+	// The entity host FIRST: a controller's BeginPlay is where the game spawns its
+	// character with Create Object, and that spawn is only served with a body
+	// while the entity host is running.
 	if (m_world)
 		m_entityHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
+	// The entity host is handed over so the player host can find the characters
+	// the LEVEL already placed; it never spawns through it.
 	m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
 	// Last of the hosts: a player character spawned just above may be the very
 	// entity whose state machine needs a sync graph.
@@ -1017,9 +1035,15 @@ void GameApplication::setMouseCaptured(bool captured)
 
 Entity GameApplication::possessedCharacterEntity() const
 {
-	for (HorizonCode::InstanceId inst : m_playerHost.characters())
+	// Ask POSSESSION, not spawn order. Characters come out of the game's own
+	// Create Object now, so "the first character that exists" could be an NPC,
+	// a corpse or a spawn the player never took — the camera has to follow the
+	// one a controller is actually steering.
+	for (const HorizonCode::InstanceId ctrl : m_playerHost.controllers())
 	{
-		const Entity e = m_entityHost.entityOf(inst);
+		const HorizonCode::InstanceId pawn = HE::api::player::possessed(ctrl);
+		if (pawn == 0) continue;
+		const Entity e = m_entityHost.entityOf(pawn);
 		if (e != entt::null) return e;
 	}
 	return entt::null;

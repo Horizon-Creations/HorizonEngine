@@ -2257,8 +2257,35 @@ private:
             b.line("hc::destroyWidget(m_ctx, (int)(" + input(n, 0, fnCtx) + "));");
             break;
         case NT::CreateObject:
-            b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ");");
+        {
+            // Same wire-not-value rule as the interpreter, decided statically.
+            const bool hasPos = dataLinkTo(n.id, r.dataIn0 + 0) != nullptr;
+            const bool hasRot = dataLinkTo(n.id, r.dataIn0 + 1) != nullptr;
+            if (!hasPos && !hasRot)
+            {
+                // Neither pin wired: emit the call exactly as it was emitted
+                // before the pins existed. The shim defaults both pointers to
+                // nullptr ("as authored"), so every pre-existing graph generates
+                // byte-identical text and the traced parity text is unchanged.
+                b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ");");
+                break;
+            }
+            // Wired: the host takes `const float*`, and you cannot take the
+            // address of a prvalue — the vectors need names that outlive the
+            // call. Node-scoped names inside a block so two Create Objects in
+            // one scope cannot collide.
+            const std::string nid = std::to_string(n.id);
+            b.line("{");
+            ++b.indent;
+            if (hasPos) b.line("const glm::vec3 n" + nid + "_pos = " + input(n, 0, fnCtx) + ";");
+            if (hasRot) b.line("const glm::vec3 n" + nid + "_rot = " + input(n, 1, fnCtx) + ";");
+            b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ", "
+                   + (hasPos ? "&n" + nid + "_pos.x" : "nullptr") + ", "
+                   + (hasRot ? "&n" + nid + "_rot.x" : "nullptr") + ");");
+            --b.indent;
+            b.line("}");
             break;
+        }
         case NT::DestroyObject:
             b.line("hc::destroyObject(m_ctx, " + input(n, 0, fnCtx) + ");");
             break;

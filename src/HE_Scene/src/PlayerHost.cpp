@@ -6,10 +6,11 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HcClassResolve.h>
-#include <HorizonScene/EntityHost.h>
 #include <HorizonScene/EngineApi.h>         // HE::api::player (the possession table)
+#include <HorizonScene/EntityHost.h>        // the already-bound level characters
 #include <Application/InputAssets.h>
 #include <Diagnostics/Logger.h>
+#include <algorithm>
 #include <filesystem>
 #include <unordered_set>
 
@@ -24,7 +25,8 @@ std::vector<HE::UUID> discoverAssets(ContentManager& cm, HE::AssetType type)
 }
 } // namespace
 
-void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, EntityHost* entities)
+void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
+                       const EntityHost* entities)
 {
 	end();
 	m_runtime = &runtime;
@@ -46,7 +48,9 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 		if (const InputMappingContextAsset* m = cm.getInputMappingContext(id))
 			bound += HE::applyInputMappingContext(m_mapping, m->json);
 
-	// Player classes: one instance per PlayerController/PlayerCharacter asset.
+	// Player classes: one instance per PlayerController asset. Characters are
+	// only COUNTED — see the "What is NOT spawned here" note in the header.
+	size_t characterClasses = 0;
 	for (const HE::UUID id : discoverAssets(cm, HE::AssetType::HorizonCodeClass))
 	{
 		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(id);
@@ -55,56 +59,87 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm, Entity
 		// another class that is a PlayerController is one too, and asking the
 		// asset alone would miss every derived player in the project.
 		HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(cm, a->path);
-		const bool isController = HorizonCode::engineClassIsA(rc.engineBase, "PlayerController");
-		const bool isCharacter  = HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter");
-		if (!isController && !isCharacter) continue;
+		if (HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
+		{
+			++characterClasses;
+			continue;
+		}
+		if (!HorizonCode::engineClassIsA(rc.engineBase, "PlayerController")) continue;
 
+		// A controller is not something you place in a level, so it stays a bare
+		// instance with no entity of its own.
+		//
+		// Compiled class first (same per-asset hybrid as createObject), keyed by
+		// the content-relative asset path; miss → the interpreted graph. Both
+		// branches pass the identity from the ASSET rather than letting the
+		// compiled one report its own: the asset is the authority on which base
+		// class it derives from, and a generated library that predates a
+		// baseClass edit would otherwise disagree with the editor.
+		const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
 		HorizonCode::InstanceId inst = 0;
-		// A character gets a scene entity — it is an Entity class, and a player
-		// without a body cannot be moved, collided with or rendered. A controller
-		// is not something you place in a level, so it stays a bare instance.
-		bool owned = true;
-		if (isCharacter && entities)
-		{
-			inst  = entities->spawn(a->path).instance;
-			owned = false;   // that host ticks and destroys it
-		}
+		if (auto compiled = HorizonCode::compiledClasses().create(a->path))
+			inst = runtime.addCompiled(std::move(compiled), {}, cls);
 		else
-		{
-			// Compiled class first (same per-asset hybrid as createObject), keyed
-			// by the content-relative asset path; miss → the interpreted graph.
-			// Both branches pass the identity from the ASSET rather than letting
-			// the compiled one report its own: the asset is the authority on
-			// which base class it derives from, and a generated library that
-			// predates a baseClass edit would otherwise disagree with the editor.
-			const HorizonCode::ClassIdentity cls{ a->path, rc.engineBase, rc.chain };
-			if (auto compiled = HorizonCode::compiledClasses().create(a->path))
-				inst = runtime.addCompiled(std::move(compiled), {}, cls);
-			else
-				inst = runtime.addLevels(std::move(rc.levels), {}, cls);
-			runtime.fireConstruct(inst);
-			runtime.fireBeginPlay(inst);
-		}
+			inst = runtime.addLevels(std::move(rc.levels), {}, cls);
 		if (!inst) continue;
 
-		if (owned) m_owned.push_back(inst);
-		(isController ? m_controllers : m_characters).push_back(inst);
+		m_controllers.push_back(inst);
 	}
 
+	// Every controller is registered BEFORE any of them runs. A controller's
+	// BeginPlay is now where the game spawns and possesses its character, so it
+	// is graph code that asks player.controller() / player.possessed() — and it
+	// must not get an answer that depends on which controller happens to start
+	// first. That is why lifecycle firing is a second pass and not part of the
+	// loop above.
 	HE::api::player::setControllers(m_controllers);
-	// Auto-possess the unambiguous case, so the common single-player project
-	// needs no wiring at all. Anything else is the game's decision and belongs
-	// in the controller's BeginPlay (player.possess) — guessing there would be
-	// worse than doing nothing.
-	if (m_controllers.size() == 1 && m_characters.size() == 1)
-		HE::api::player::possess(m_controllers.front(), m_characters.front());
 
-	if (!m_controllers.empty() || !m_characters.empty())
+	// The characters that were already in the level, bound by EntityHost::begin
+	// before this host started. They are picked up BEFORE any BeginPlay runs, so
+	// a controller that possesses a placed character in its BeginPlay finds the
+	// list already complete — and so does the no-controller fallback, which is
+	// the only thing that reads it. Asking the runtime for the base class rather
+	// than re-resolving the asset: the instance already carries the identity the
+	// asset gave it, and that identity is what possession and Cast agree on.
+	if (entities)
+		for (const auto& [entityId, inst] : entities->instances())
+			if (HorizonCode::engineClassIsA(runtime.baseClassOf(inst), "PlayerCharacter"))
+				addCharacter(inst);
+
+	for (const HorizonCode::InstanceId inst : m_controllers)
+	{
+		runtime.fireConstruct(inst);
+		runtime.fireBeginPlay(inst);
+	}
+
+	if (!m_controllers.empty() || characterClasses > 0)
 		HE_LOG_INFO(Input, "%s",
-			("PlayerHost: spawned " + std::to_string(m_controllers.size()) + " controller(s) and " +
-			 std::to_string(m_characters.size()) + " character(s), " +
+			("PlayerHost: spawned " + std::to_string(m_controllers.size()) + " controller(s), " +
 			 std::to_string(m_actions.size()) + " action(s), " +
 			 std::to_string(bound) + " binding entrie(s)").c_str());
+	// The one line that saves the half hour of "why is my character not there":
+	// nothing is missing, nobody asked for it.
+	if (characterClasses > 0)
+		HE_LOG_INFO(Input, "%s",
+			(std::to_string(characterClasses) + " PlayerCharacter classes found, none spawned "
+			 "automatically - spawn one from your PlayerController with Create Object").c_str());
+}
+
+void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
+{
+	if (instance == 0) return;
+	// Reap on the way in. A project WITH controllers never reaches the fallback
+	// in fireInputEvent, so pruning only there would let this list grow for every
+	// character the level ever spawned — and characters are spawned and destroyed
+	// all game long now. The runtime may not be up yet: an entity class's
+	// BeginPlay can Create Object before begin() ever runs.
+	if (m_runtime)
+		std::erase_if(m_characters,
+		              [this](HorizonCode::InstanceId i){ return !m_runtime->alive(i); });
+	// A class spawned twice is two characters, but the SAME instance registered
+	// twice would be fired at twice per event.
+	if (std::find(m_characters.begin(), m_characters.end(), instance) != m_characters.end()) return;
+	m_characters.push_back(instance);
 }
 
 void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Value& arg)
@@ -113,6 +148,14 @@ void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Val
 	// whose characters handle their own input keeps working unchanged.
 	if (m_controllers.empty())
 	{
+		// Reap first. This list is fed by begin()'s scan and by addCharacter(),
+		// and nothing else ever removes from it — a level that spawns and
+		// destroys characters would otherwise grow it forever and fire at dead
+		// instances. Guarded like addCharacter's copy: the two must not disagree
+		// about whether a runtime is required to prune.
+		if (m_runtime)
+			std::erase_if(m_characters,
+			              [this](HorizonCode::InstanceId i){ return !m_runtime->alive(i); });
 		for (const HorizonCode::InstanceId inst : m_characters)
 			m_runtime->fireEvent(inst, event, 0, arg);
 		return;
@@ -136,7 +179,7 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	// Tick still fires while paused — with dt 0, so anything integrating against
 	// it stands still. That is what lets a controller keep driving a pause menu
 	// without a second, pause-only tick channel.
-	for (const HorizonCode::InstanceId inst : m_owned)
+	for (const HorizonCode::InstanceId inst : m_controllers)
 		m_runtime->fireTick(inst, dt);
 
 	// A pause silences input by DEFAULT: without that the player keeps shooting
@@ -190,9 +233,8 @@ void PlayerHost::end()
 {
 	HE::api::player::clear();
 	if (m_runtime)
-		for (const HorizonCode::InstanceId inst : m_owned)
+		for (const HorizonCode::InstanceId inst : m_controllers)
 			m_runtime->destroy(inst); // fires "Destruct"
-	m_owned.clear();
 	m_controllers.clear();
 	m_characters.clear();
 	m_actions.clear();
