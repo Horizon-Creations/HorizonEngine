@@ -632,8 +632,12 @@ void EditorUI::render(AppContext& ctx, float dt)
     }
     else if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F1, false))
     {
-        if (DocsPanel::isOpen()) DocsPanel::close();
-        else                     DocsPanel::open();
+        // Ctrl/Cmd+F1 goes straight to the search box — the label the Help menu
+        // carries, and it has to be honoured HERE or it would fall through to
+        // the toggle below and do something else entirely.
+        if (io.KeyCtrl || io.KeySuper)     DocsPanel::openSearch("");
+        else if (DocsPanel::isOpen())      DocsPanel::close();
+        else                               DocsPanel::open();
     }
 
     ImGui::Render();

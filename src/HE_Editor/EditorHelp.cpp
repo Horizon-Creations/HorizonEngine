@@ -737,11 +737,11 @@ namespace
 	{ "Weather/Cycle Time", "",
 	  "Roughly how long one weather state lasts before the cycle moves on.",
 	  "", "rendering#weather" },
-	{ "Weather/Rain", "",
+	{ "Environment/Rain", "",
 	  "Rain strength for the state being shown, 0 to 1.", "", "rendering#weather" },
-	{ "Weather/Snow", "",
+	{ "Environment/Snow", "",
 	  "Snow strength for the state being shown, 0 to 1.", "", "rendering#weather" },
-	{ "Weather/Wetness", "",
+	{ "Environment/Wetness", "",
 	  "How wet surfaces look once it has been raining.", "", "rendering#weather" },
 	{ "Weather/Max Rain Particles", "",
 	  "Hard ceiling on live raindrops. Emission throttles itself to stay under it, "
@@ -803,6 +803,106 @@ namespace
 	  "What happens when the button is clicked — a graph event, or a script "
 	  "function by name.",
 	  "", "ui#graph" },
+
+	// ── The rows the passes above left uncovered ─────────────────────────────
+	// Found by walking the panels' labels against these keys rather than by
+	// re-reading the table: a component whose rows carry an "##id" suffix looks
+	// covered from here and is not, because the lookup tries the suffixed
+	// spelling first. Every one of these is a row somebody can hover today.
+	{ "Transform 2D/Position", "",
+	  "Where the entity sits in the XY plane. Z is not a position here — draw "
+	  "order is the UI layer or the sprite's own sorting.",
+	  "", "scenes#components" },
+	{ "Transform 2D/Rotation", "",
+	  "One angle, in degrees, about the axis pointing at the viewer.",
+	  "", "scenes#components" },
+	{ "Transform 2D/Scale", "", "Size multiplier in X and Y.", "", "scenes#components" },
+	{ "Skeletal Mesh/Visible", "",
+	  "Off hides the character entirely — no draw call, no shadow. Its animation "
+	  "keeps running.",
+	  "", "systems#animation" },
+	{ "Skeletal Mesh/Casts Shadow", "",
+	  "Whether the animated mesh appears in the shadow maps. It is skinned again "
+	  "for the shadow pass, so this one is not free.",
+	  "", "rendering#shadows" },
+	{ "Skeletal Mesh/Receives Shadow", "",
+	  "Whether shadows from other objects darken this character.",
+	  "", "rendering#shadows" },
+	{ "Animator/Playing", "",
+	  "Runs the clip. Off freezes the pose where it stands, which is what makes "
+	  "the Time row worth dragging.",
+	  "", "systems#animation" },
+	{ "Animator/Looping", "",
+	  "Start the clip over when it ends, instead of holding the last pose.",
+	  "", "systems#animation" },
+	{ "Animator Blend/Speed", "",
+	  "Playback rate for both clips at once, so the blend stays in step.",
+	  "", "systems#animation" },
+	{ "Animator Blend/Time", "",
+	  "Where both clips are, in seconds. Drag it to scrub the blended pose.",
+	  "", "systems#animation" },
+	{ "Animator Blend/Playing", "",
+	  "Runs both clips. Off freezes the blended pose.", "", "systems#animation" },
+	{ "Animator Blend/Looping", "",
+	  "Start over at the end. Both clips loop together, on the longer one's clock.",
+	  "", "systems#animation" },
+	{ "Animator State Machine/Speed", "",
+	  "Playback rate for whichever state is running.", "", "systems#animation" },
+	{ "Property Animator/Speed", "",
+	  "Playback rate of the property clip: 1 is as authored, negative runs it "
+	  "backwards.",
+	  "", "systems#animation" },
+	{ "Property Animator/Time", "",
+	  "Where the clip is, in seconds. Drag it to scrub the animated properties.",
+	  "", "systems#animation" },
+	{ "Property Animator/Playing", "",
+	  "Runs the clip. Off leaves the properties wherever it last put them.",
+	  "", "systems#animation" },
+	{ "Property Animator/Looping", "",
+	  "Start over at the end — what a moving platform or a pulsing light wants.",
+	  "", "systems#animation" },
+	{ "Particle System/Playing", "",
+	  "Emits in the editor, so an effect can be judged without entering play "
+	  "mode.",
+	  "", "systems#particles" },
+	{ "Decal/Color", "",
+	  "Tints the projected texture; the alpha channel fades the whole decal.",
+	  "", "rendering#postfx" },
+	{ "Script/Enabled", "",
+	  "Off leaves the script attached but never calls it — neither onStart nor "
+	  "onUpdate. The way to take one out of the picture without losing its "
+	  "property values.",
+	  "", "scripting#attach" },
+	{ "Save State/Enabled", "",
+	  "Include this entity in savegames. Off, it is whatever the scene file says "
+	  "every time the game is loaded.",
+	  "", "scenes#scene-files" },
+	{ "Save State/Transform", "",
+	  "Remember where this entity ended up. For anything the player moves or "
+	  "that moves itself.",
+	  "", "scenes#scene-files" },
+	{ "Save State/Visibility", "",
+	  "Remember whether it was visible — a door that was opened, a pickup that "
+	  "was taken.",
+	  "", "scenes#scene-files" },
+	{ "UI Canvas/Active", "",
+	  "Off hides the whole canvas and everything on it, and it stops receiving "
+	  "clicks.",
+	  "", "ui#entity-ui" },
+	{ "Environment/Auto-Advance", "",
+	  "Let the moon phase move with the days on its own.", "", "rendering#sky" },
+	{ "Preferences/Private", "",
+	  "Create the new repository as private. It can be made public later on the "
+	  "hosting side; the other direction is the awkward one.",
+	  "", "editor#layout" },
+	{ "Preferences/Push automatically after each commit", "",
+	  "Send every commit to the remote as it is made. Convenient alone, and a "
+	  "way to publish half-finished work when several people share the branch.",
+	  "", "editor#layout" },
+	{ "Preferences/Check the remote for new commits periodically", "",
+	  "Poll for what the others have pushed, so the footer's status is about the "
+	  "repository rather than about the last time you looked.",
+	  "", "editor#layout" },
 
 	// ── The viewport and its toolbar ─────────────────────────────────────────
 	{ "viewport.play", "Play",

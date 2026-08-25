@@ -130,8 +130,10 @@ Zeilenabstand und die fehlenden Glyphen.
   scrollt auf den Abschnitt, nicht auf die Zeile.
 - **Kein Command-Palette-Ersatz.** „Wo ist X" beantwortet heute die Suche plus „Show me";
   eine Palette über Menübefehle und Einstellungen wäre der nächste Schritt.
-- Die Hilfe-Tabelle deckt Details, Preferences, Viewport-Leiste, Outliner und Content
-  Browser ab. **Die Asset-Editoren (Material-Graph, Widget-Designer, Partikel) haben noch
-  keine Einträge.**
+- Die Hilfe-Tabelle deckt **alle 252 beschrifteten Zeilen** von Details-Panel und
+  Preferences ab (gegengeprüft, indem die Labels der Panels gegen die Schlüssel gelaufen
+  sind — Zeilen mit `##id` sehen von der Tabelle aus gedeckt aus und sind es nicht),
+  dazu Viewport-Leiste, Outliner und Content Browser. **Die Asset-Editoren (Material-Graph,
+  Widget-Designer, Partikel) haben noch keine Einträge.**
 - Der Reader wurde **nie in der echten GUI bedient** — verifiziert ist er über die
   Software-Renderings und die Tests.

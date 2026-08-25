@@ -100,7 +100,15 @@ void render(AppContext& ctx)
         ImGuiWindowFlags_NoMove       |
         ImGuiWindowFlags_NoScrollbar  |
         ImGuiWindowFlags_NoCollapse   |
-        ImGuiWindowFlags_NoDocking;
+        ImGuiWindowFlags_NoDocking    |
+        // The Hub fills the viewport and is opaque, so anything it comes to the
+        // front of is not merely behind it — it is gone. Without this flag,
+        // clicking the Hub (into the project name field, onto a recent project)
+        // raises it over the windows drawn ON TOP of it: the documentation
+        // reader, which is meant to be readable here precisely because there is
+        // no project yet, and the tutorial welcome card. A backdrop never needs
+        // raising.
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
