@@ -361,7 +361,73 @@ if(TARGET he_materialshader)
     target_compile_definitions(he_tests PRIVATE HE_TESTS_HAVE_SHADERC=1)
 endif()
 
-add_test(NAME he_tests COMMAND he_tests)
+# One ctest entry per test SOURCE FILE, not one for the whole binary.
+#
+# The suite is wait-bound, not CPU-bound: it spawns real git processes, kills
+# child processes, shakes hands over loopback sockets and polls with sleeps.
+# Measured on an M-series Mac: one serial process needs ~430 s (CI: 442 s),
+# while the test bodies themselves sum to ~31 s and the same 1893 cases spread
+# over eight processes finish in 11 s. Splitting the registration is what lets
+# `ctest -j` turn that waiting into overlap; nothing about the tests changes.
+#
+# Each entry gets its OWN temp directory. Several tests write fixed file names
+# into temp_directory_path(), which is harmless in sequence and a race the
+# moment two processes do it at once.
+#
+# The root has to sit OUTSIDE this repository, not under the build directory:
+# the git tests assert that a plain directory is NOT a repository, and
+# findRepoRoot walks upwards — a temp directory inside the checkout finds
+# HorizonEngine's own .git and the assertion flips.
+if(WIN32)
+    set(_he_tmp_root "$ENV{TEMP}/he_tests")
+elseif(DEFINED ENV{TMPDIR})
+    set(_he_tmp_root "$ENV{TMPDIR}/he_tests")
+else()
+    set(_he_tmp_root "/tmp/he_tests")
+endif()
+# Windows hands back backslashes, which CMake would read as escapes inside the
+# ENVIRONMENT property.
+file(TO_CMAKE_PATH "${_he_tmp_root}" _he_tmp_root)
+
+get_target_property(_he_test_sources he_tests SOURCES)
+foreach(_src IN LISTS _he_test_sources)
+    get_filename_component(_name "${_src}" NAME)
+    # main.cpp and proc_child_main.cpp carry no test cases (the latter is the
+    # helper binary's entry point, compiled in but never a test on its own).
+    if(NOT _name MATCHES "^test_.*\\.cpp$")
+        continue()
+    endif()
+    get_filename_component(_stem "${_name}" NAME_WE)
+    set(_tmp "${_he_tmp_root}/${_stem}")
+    file(MAKE_DIRECTORY "${_tmp}")
+    add_test(NAME ${_stem} COMMAND he_tests --source-file=*${_name})
+    # TMPDIR is what std::filesystem::temp_directory_path() reads on macOS and
+    # Linux, TMP/TEMP on Windows. Set all three so the isolation holds anywhere.
+    set_tests_properties(${_stem} PROPERTIES
+        ENVIRONMENT "TMPDIR=${_tmp};TMP=${_tmp};TEMP=${_tmp}")
+endforeach()
+
+# The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
+# multicast) and hand sessions between two live endpoints. Letting two of them
+# run at the same instant makes a failure depend on the scheduler, which is the
+# one thing a test may never do. They share a lock, so they serialise against
+# each other while the other hundred files still run in parallel.
+set(_he_net_tests test_net_tcp test_net_secure test_net_discovery test_net_collab
+                  test_net_directory test_collab_controller)
+foreach(_t IN LISTS _he_net_tests)
+    if(TEST ${_t})
+        set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK he_net)
+    endif()
+endforeach()
+
+# The two-endpoint collaboration test is the one that measures time rather than
+# just using it: it pumps both ends until a deadline and fails if the handshake
+# has not landed by then. Under a full -j load it missed that deadline once in
+# four runs — a scheduler-dependent failure, which is worse than a slow test.
+# RUN_SERIAL gives it the machine for the four seconds it needs.
+if(TEST test_collab_controller)
+    set_tests_properties(test_collab_controller PROPERTIES RUN_SERIAL TRUE)
+endif()
 
 # On Windows the test binary is in tests/ but the engine DLLs are in per-target
 # subdirectories. There is no rpath equivalent, so copy the DLLs next to the exe
