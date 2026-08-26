@@ -13,6 +13,7 @@
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
 #include "HcEditorUtil.h"                       // Create Object class picker
+#include "HcRenameDialog.h"                     // "that rename reaches other files"
 #include <HorizonScene/EngineApi.h>             // HE::api registry (Engine Call nodes)
 #include <HorizonScene/HcCodegen.h>             // in-editor compile check (Compile button)
 #include <MaterialGraph/MaterialGraph.h>        // MatDomain (widget materials are UI-domain)
@@ -2305,9 +2306,18 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 		HcEditorUtil::seedFunctionName(*n, st.fnNameEdit);
 		ImGui::InputText("Name", &st.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
-		if (ImGui::IsItemDeactivatedAfterEdit() &&
-		    HcEditorUtil::commitFunctionName(st.graph, *n, st.fnNameEdit, st.relPath))
-			committed = true;
+		if (ImGui::IsItemDeactivatedAfterEdit())
+		{
+			const std::string before = n->s;
+			if (HcEditorUtil::commitFunctionName(st.graph, *n, st.fnNameEdit, st.relPath))
+			{
+				committed = true;
+				// This graph is done; the rest of the project is asked about, never
+				// rewritten behind the user's back.
+				HcRenameDialog::requestAfterRename(
+					ctx, { st.relPath, HcRename::Member::Function, before, n->s }, { st.relPath });
+			}
+		}
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "Public\0Private\0"))
 			{ n->access = access; committed = true; }

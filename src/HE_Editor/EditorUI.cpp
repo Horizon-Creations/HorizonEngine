@@ -36,6 +36,7 @@
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
+#include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
@@ -584,6 +585,13 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
+
+    // ── "That rename reaches other files" ────────────────────────────────────
+    // Raised by the graph editors after a HorizonCode member was renamed. Drawn
+    // here rather than in either of them because both raise it, and because it
+    // outlives the panel that asked: it writes assets, so it must not vanish
+    // because a tab was switched while it stood open.
+    HcRenameDialog::Draw(ctx);
 
     // ── Help ▸ Report Issue… ─────────────────────────────────────────────────
     // Drawn here too: something worth reporting can just as easily happen while

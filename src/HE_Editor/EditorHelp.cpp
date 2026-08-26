@@ -2699,6 +2699,17 @@ namespace
 	  "the first match wins, so a second function with the same name is dead "
 	  "code that still looks live.",
 	  "", "horizoncode#functions" },
+	// The dialog raised after a rename that reaches beyond its own graph. Both
+	// buttons are looked up under a fixed key: the first one's text counts the
+	// hits, so it is built at run time and has no stable label to key on.
+	{ "Rename Across Project/Rename in place", "Rename everywhere",
+	  "Rewrites and SAVES the listed assets, so every call, read and handler goes "
+	  "on naming the same member. Undo only reaches the graph you renamed it in.",
+	  "", "horizoncode#functions" },
+	{ "Rename Across Project/Leave the others alone", "Rename here only",
+	  "Keeps the rename inside the graph you are editing. Everything listed goes "
+	  "on naming the old one, which for a call means it now names nothing.",
+	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "
 	  "Python, and through a Call Function (Ref) node on a reference to this "
@@ -3268,6 +3279,7 @@ namespace
 		{ "HorizonCode Node/",           "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "HorizonCode Default Value/",  "editor-horizoncode", "HorizonCode Editor", "Default values" },
 		{ "Function Return/",            "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
+		{ "Rename Across Project/",      "editor-horizoncode", "HorizonCode Editor", "Renaming a member" },
 		{ "Node Parameter/",             "editor-horizoncode", "HorizonCode Editor", "Nodes in any graph" },
 		{ "Class Components/",           "editor-horizoncode", "HorizonCode Editor", "Class components" },
 		{ "Type Editor/",                "editor-horizoncode", "HorizonCode Editor", "Struct, enum and savegame types" },

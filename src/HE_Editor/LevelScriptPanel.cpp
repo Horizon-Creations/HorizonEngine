@@ -7,6 +7,7 @@
 #include "GameInstancePanel.h"
 #include "HorizonCodeClassPanel.h"
 #include "HcEditorUtil.h"
+#include "HcRenameDialog.h"     // "that rename reaches other files"
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
@@ -775,6 +776,32 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 // bind), the Lua/Python wording on FunctionEntry, the unnamed-function filter on
 // FunctionCall, and the "script" wording on Bind/Emit Event.
 // HcGraphHost::drawCommonNodeDetails lists the same split from the other side.
+// A rename that just happened in one of these graphs and still has to be offered
+// to the rest of the project. The details rows have no AppContext — they are
+// reached through drawGraphBody, which is given a ContentManager and nothing
+// else — so the rename is parked here and picked up by the panel entry points,
+// which do. Consumed the same frame; never more than one rename per frame,
+// because a rename takes an InputText losing focus.
+HcRename::Target s_pendingRename;
+
+bool takePendingRename(HcRename::Target& out)
+{
+	if (s_pendingRename.oldName.empty()) return false;
+	out = s_pendingRename;
+	s_pendingRename = {};
+	return true;
+}
+
+// Offer it to the rest of the project. Called at the end of each panel entry
+// point — after ImGui::End(), because the dialog is a modal and must not open
+// inside somebody else's window.
+void raisePendingRename(AppContext& ctx)
+{
+	HcRename::Target t;
+	if (takePendingRename(t))
+		HcRenameDialog::requestAfterRename(ctx, t, { t.classKey });
+}
+
 // `derivable` = this graph belongs to a CLASS asset, i.e. something another
 // class can derive from. Only there does "Overridable" mean anything.
 void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
@@ -877,9 +904,19 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		HcEditorUtil::seedFunctionName(*n, g.fnNameEdit);
 		ImGui::InputText("Name", &g.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
-		if (ImGui::IsItemDeactivatedAfterEdit() &&
-		    HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit, g.graphFor))
-			edited = true;
+		if (ImGui::IsItemDeactivatedAfterEdit())
+		{
+			const std::string before = n->s;
+			if (HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit, g.graphFor))
+			{
+				edited = true;
+				// This graph is renamed; the rest of the project is OFFERED, not
+				// rewritten behind the user's back. Parked rather than raised here
+				// because that needs the AppContext this row does not have — see
+				// takePendingRename.
+				s_pendingRename = { g.graphFor, HcRename::Member::Function, before, n->s };
+			}
+		}
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "public\0private\0"))
 		{
@@ -1358,6 +1395,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
 	}
 	ImGui::End();
+	raisePendingRename(ctx);
 }
 
 void LevelScriptPanel::forgetAllGraphContexts()
@@ -1388,6 +1426,7 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 		if (edited && ctx.commitGameInstance) ctx.commitGameInstance();
 	}
 	ImGui::End();
+	raisePendingRename(ctx);
 }
 
 // ── HorizonCode Class tab (a standalone .hasset graph) ────────────────────────
@@ -2580,4 +2619,5 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		              st.inputActions);
 	if (edited) st.dirty = true;
 	ImGui::End();
+	raisePendingRename(ctx);
 }
