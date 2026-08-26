@@ -906,6 +906,37 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 	}
 }
 
+void seedFunctionName(const HorizonCode::Node& entry, FnNameEdit& e)
+{
+	// Typing changes `buf` and nothing else, so `seed` still matches the node —
+	// which is exactly when the buffer must be left alone.
+	if (e.node == entry.id && e.seed == entry.s) return;
+	e.buf  = entry.s;
+	e.node = entry.id;
+	e.seed = entry.s;
+}
+
+bool commitFunctionName(HorizonCode::Graph& g, HorizonCode::Node& entry, FnNameEdit& e)
+{
+	using T = HorizonCode::NodeType;
+	const std::string oldName = entry.s;
+	if (e.buf == oldName) return false;
+
+	entry.s = e.buf;
+	// An empty name on either side is not a name, it is the absence of one, and
+	// matching on it would sweep up every call that has picked no function yet.
+	if (!oldName.empty() && !e.buf.empty())
+		for (HorizonCode::Node& c : g.nodes)
+			if ((c.type == T::FunctionCall || c.type == T::FunctionReturn) && c.s == oldName)
+				c.s = e.buf;
+
+	// The field goes on showing what it just committed instead of being re-seeded
+	// from the node it changed.
+	e.node = entry.id;
+	e.seed = entry.s;
+	return true;
+}
+
 bool drawReturnFunctionPicker(HorizonCode::Graph& g, HorizonCode::Node& ret)
 {
 	using namespace HorizonCode;

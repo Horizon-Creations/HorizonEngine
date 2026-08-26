@@ -100,6 +100,8 @@ struct State
 	bool   gOpenVarDrop = false;     // request to open the variable Get/Set popup next frame
 	std::string gEvtNameEdit;        // scratch buffer for a widget-scope Event name (uniqueness)
 	int    gEvtNameEditFor = 0;
+	// …and for a function's name, which its Call/Return nodes are renamed with.
+	HcEditorUtil::FnNameEdit fnNameEdit;
 	// In-editor compile check (Compile button in the graph header): the last
 	// result for THIS widget's graph; an error anchors to a node (red halo).
 	bool        compileHas = false;
@@ -2296,18 +2298,16 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 	// widget-specific (horizon.callWidgetFunction, not Lua/Python).
 	case NT::FunctionEntry:
 	{
-		std::string oldName = n->s;
-		ImGui::InputText("Name", &n->s);
+		// Through a scratch buffer, so the Call + Return nodes can be renamed with
+		// it: InputText writes into the node per keystroke, so a name read here at
+		// the top of the frame is already the NEW one by the time the edit ends.
+		// See HcEditorUtil::seedFunctionName.
+		HcEditorUtil::seedFunctionName(*n, st.fnNameEdit);
+		ImGui::InputText("Name", &st.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
-		if (ImGui::IsItemDeactivatedAfterEdit())
-		{
-			// Rename the matching Call + Return nodes so the wiring stays valid.
-			if (!n->s.empty() && n->s != oldName)
-				for (auto& c : st.graph.nodes)
-					if ((c.type == NT::FunctionCall || c.type == NT::FunctionReturn) && c.s == oldName)
-						c.s = n->s;
+		if (ImGui::IsItemDeactivatedAfterEdit() &&
+		    HcEditorUtil::commitFunctionName(st.graph, *n, st.fnNameEdit))
 			committed = true;
-		}
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "Public\0Private\0"))
 			{ n->access = access; committed = true; }

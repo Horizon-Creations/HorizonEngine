@@ -2018,8 +2018,8 @@ namespace
 	  "", "ui#graph" },
 
 	{ "UI Graph Node/Name", "",
-	  "What this function is called. Calls resolve by name, so a Call node "
-	  "elsewhere in the graph goes on naming whatever it named before.",
+	  "What this function is called. Calls resolve by name, so renaming it "
+	  "renames the Call and Return nodes that named it and the wiring survives.",
 	  "", "ui#graph" },
 	{ "UI Graph Node/Access", "",
 	  "Public makes the function callable from a script through "
@@ -2693,14 +2693,11 @@ namespace
 	  "picked from the list; a class names its own instead. Two Event nodes may "
 	  "not share a name, so one that is already handled is greyed out.",
 	  "", "horizoncode#communication" },
-	// No claim that the rename carries to the Call and Return nodes: the code
-	// meant to do that cannot run (it compares against a name it re-reads every
-	// frame), so saying so would be documenting an intention. The bug is filed;
-	// when it is fixed the sentence belongs back here.
 	{ "Script Node/Name", "",
-	  "What this function is called. Calls resolve by name and the first match "
-	  "wins, so a second function with the same name is dead code that still "
-	  "looks live.",
+	  "What this function is called. Renaming it renames the Call and Return "
+	  "nodes that named it, so the wiring survives. Calls resolve by name and "
+	  "the first match wins, so a second function with the same name is dead "
+	  "code that still looks live.",
 	  "", "horizoncode#functions" },
 	{ "Script Node/Access", "",
 	  "Public functions can be called from outside the graph: from Lua and "

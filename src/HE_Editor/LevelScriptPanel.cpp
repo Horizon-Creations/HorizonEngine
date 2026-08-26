@@ -109,6 +109,8 @@ struct LSState
 	std::string varNameErrorName;
 	std::string evtNameEdit;        // scratch buffer for a custom Event name (uniqueness)
 	int         evtNameEditFor = 0;
+	// …and for a function's name, which its Call/Return nodes are renamed with.
+	HcEditorUtil::FnNameEdit fnNameEdit;
 	std::string dropVar;            // variable dragged onto the canvas
 	bool        openVarDrop = false;
 	// In-editor compile check (the Compile button): the last result for the
@@ -868,17 +870,16 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 	}
 	case NT::FunctionEntry:
 	{
-		std::string oldName = n->s;
-		ImGui::InputText("Name", &n->s);
+		// Through a scratch buffer, so the Call + Return nodes can be renamed with
+		// it: InputText writes into the node per keystroke, so a name read here at
+		// the top of the frame is already the NEW one by the time the edit ends.
+		// See HcEditorUtil::seedFunctionName.
+		HcEditorUtil::seedFunctionName(*n, g.fnNameEdit);
+		ImGui::InputText("Name", &g.fnNameEdit.buf);
 		EditorWidgets::helpForLabel("Name");
-		if (ImGui::IsItemDeactivatedAfterEdit())
-		{
-			if (!n->s.empty() && n->s != oldName)
-				for (auto& c : graph.nodes)
-					if ((c.type == NT::FunctionCall || c.type == NT::FunctionReturn) && c.s == oldName)
-						c.s = n->s;
+		if (ImGui::IsItemDeactivatedAfterEdit() &&
+		    HcEditorUtil::commitFunctionName(graph, *n, g.fnNameEdit))
 			edited = true;
-		}
 		int access = n->access;
 		if (ImGui::Combo("Access", &access, "public\0private\0"))
 		{

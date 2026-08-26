@@ -16,6 +16,7 @@ add_executable(he_tests
     test_horizoncode_runtime.cpp
     test_horizoncode_compiled.cpp
     test_horizoncode_shortcuts.cpp
+    test_hc_function_rename.cpp
     test_graph_editor_keys.cpp
     test_preview_pick.cpp
     test_gizmo_pick.cpp
