@@ -111,12 +111,11 @@ antwortet llvmpipe überhaupt nicht: das ist eine zusätzliche DLL, keine kleine
 Advanced-**an**-Apps auf treiberlosen Windows-Kisten bleibt llvmpipe eine Zeile wert, mehr
 nicht.
 
-**Offen und nachzufragen:** „der OpenGL-Forward-Renderer" schließt wörtlich Metal aus und
-widerspräche der Entscheidung vom Vortag. Ich lese es als „der Forward-Pfad statt des
-deferred", also Metal auf macOS und GL sonst. Die wörtliche Lesart hätte einen echten Vorteil:
-**ein einziger Shader-Dialekt** (GLSL410) für die vorkompilierten UI-Material-Varianten statt
-MSL und GLSL nebeneinander. Auf die Zahl der Binärsätze wirkt sich das nicht aus, jede
-Plattform baut ohnehin ihre eigenen.
+**Geklärt am 27.08.2026:** gemeint war eine Forward-*Implementierung*, um sich die
+Feature-Last des vollen Renderers in der Binärgröße zu sparen, nicht GL statt Metal. Metal auf
+macOS bleibt. Was die Messung dazu sagt, steht in A3b: der Feature-Kram kostet 0,6 MB, die
+Abhängigkeit zum Shader-Übersetzer kostet 5, also wird die gekappt statt ein Renderer
+geschrieben.
 
 **Die 4.1 ist keine Anforderung, sie ist eine Untergrenze.** Erste Fassung dieses Abschnitts
 wollte den Kontext außerhalb von macOS auf 4.1 herunterziehen. Das war unbegründet: die 4.1
@@ -150,23 +149,27 @@ braucht es `SDL_WaitEvent` mit Timeout plus ein Dirty-Flag: neu zeichnen, wenn e
 ankam, ein Widget sich geändert hat, eine Animation läuft oder ein Timer fällig ist. Sonst
 schlafen. Das ist der Unterschied zwischen 0,3 % und 40 % CPU im Leerlauf.
 
-**A3 Schlanker Runtime.** Gemessen statt geschätzt, an `out/deploy/Game` (macOS, Release):
+**A3 Schlanker Runtime.** *Korrektur: die erste Fassung dieser Tabelle nannte 123 MB. Die Zahlen
+stammten aus dem Deploy-Baum im Worktree, der kein Release-Build ist. Gemessen am
+Release-Stand (`cmake-build-release`, deckungsgleich mit dem Deploy im Hauptcheckout):*
 
 | Bestandteil | Größe | Braucht eine App das? |
 |---|---:|---|
-| Python (`libpython3.14` + `python314.zip` + `lib-dynload`) | **52,9 MB** | nur bei Python-Projekten, **schon gegated** (`settings.bundlePython`) |
-| `libHorizonScene` | 25,4 MB | nein: enthält Jolt, Recast/Detour, Terrain, Animation, Partikel |
-| `libHorizonRendering` | 22,7 MB | zum kleinen Teil: alle Backends + glslang/SPIRV-Cross |
-| `libHorizonCore` | 12,0 MB | ja, aber inklusive Lua und der Textur-Encoder (Cook-Zeit) |
-| `libcrypto.3` | 4,8 MB | nur bei verschlüsselter Pak |
-| `libSDL3` | 4,3 MB | ja |
-| `libHorizonNet` | 2,5 MB | nur mit Netzwerk |
-| `HorizonGame` | 2,0 MB | ja |
-| zstd + lz4 | 0,8 MB | ja |
-| **Summe** | **123 MB**, ohne Python **≈ 70 MB** | |
+| Python (`libpython3.14` 13,6 + `python314.zip` 10,1 + `lib-dynload` 28) | **51,7 MB** | nur bei Python-Projekten, **schon gegated** (`settings.bundlePython`) |
+| `libHorizonRendering` | 6,8 MB | **davon ~5 MB glslang + SPIRV-Cross** (7652 Symbole), Renderercode nur 1,4 |
+| `libHorizonScene` | 6,5 MB | nein: Jolt (3,7 statisch), Recast/Detour, Terrain, Animation |
+| `libcrypto.3` | 4,6 MB | nur bei verschlüsselter Pak |
+| `libHorizonCore` | 3,1 MB | ja, inklusive Lua (0,4) und der Textur-Encoder |
+| `libSDL3` | 2,4 MB | ja |
+| Net, zstd, exe, lz4, HorizonPython | 2,0 MB | teils |
+| **Summe** | **77 MB**, ohne Python **≈ 25 MB** | |
 
-Eine Todo-App in HorizonCode wiegt heute also rund 70 MB. **Ziel: unter 25 MB**, und die Zahl
-gehört als Schwelle in einen ctest oder CI-Schritt, sonst kriecht sie zurück.
+Eine Todo-App in HorizonCode wiegt heute also schon rund **25 MB**, nicht 70. Die alte Zielmarke
+„unter 25 MB" war damit bereits erfüllt und taugt nicht. Neue Marke: **höchstens 15 MB**,
+erreichbar über shaderc raus (~4,5), crypto optional (4,6), Jolt und Recast aus Scene heraus
+(~4), Net (0,6). Die Zahl gehört als Schwelle in einen ctest oder CI-Schritt, **gemessen am
+Release-Artefakt** — dass ein falscher Baum die erste Tabelle ruiniert hat, ist genau der
+Grund, warum die Messstelle mit in die Schwelle gehört.
 
 **A3a Diät zur Linkzeit, billig.** Nichts davon ist Umbau, nur Weglassen:
 - Python: schon erledigt, ein Nicht-Python-Projekt trägt die 52,9 MB nicht.
@@ -187,10 +190,32 @@ der Plattform, allein. Beides geht, weil `IRenderer` nur vier rein virtuelle Met
 die anderen 37 Standard-Rümpfe haben, und weil die Renderer schon eigene statische
 Bibliotheken sind.
 
-Für den Advanced-an-Fall bleibt zu entscheiden, ob dort wirklich der volle Forward-Renderer
-gelinkt wird oder ein **dünner `UIRenderer`**, der nur Clear, UI-Pass und Present kann. Der
-volle ist billiger zu haben (existiert), der dünne ist kleiner. Vorschlag: erst den vollen
-nehmen, messen, und den dünnen nur bauen, wenn die 25-MB-Marke sonst reißt.
+**Für den Advanced-an-Fall sagt die Messung etwas anderes, als die Intuition erwartet.** Der
+Wunsch war eine eigene Forward-Implementierung, „um sich den unnötigen Feature-Kram von
+OpenGL in der Binärgröße zu sparen". Nachgemessen an den Objektdateien:
+
+| Artefakt | Größe |
+|---|---:|
+| `libRendererOpenGL.a` (der **ganze** Renderer, deferred, GI, SSR, CSM, clustered) | **0,6 MB** |
+| `libRendererMetal.a` | 0,8 MB |
+| `libglad.a` | 0,2 MB |
+| glslang + SPIRV-Cross im fertigen `libHorizonRendering.dylib` | **~5 MB** |
+
+Der Feature-Kram im Renderer kostet also **eine halbe Megabyte**. Was der volle Renderer
+wirklich kostet, ist nicht sein Code, sondern seine **Abhängigkeitskante** zum
+Shader-Übersetzer. Und die kappt man ohne einen dritten Renderer: mit den vorkompilierten
+Varianten (beide Hälften weiter unten) und `HE_ENABLE_SHADERC=OFF`. Geprüft: beide Renderer
+haben dafür schon Wächter, `HE_HAVE_SHADERC` kommt in `OpenGLRenderer.cpp` 15 mal und in
+`MetalRenderer.mm` 18 mal vor, ein shaderc-freier Build ist also vorgesehen und nicht neu.
+
+**Empfehlung deshalb: für Advanced-an den vorhandenen Forward-Pfad nehmen, ohne
+Shader-Übersetzer gebaut, und keinen zweiten Renderer schreiben.** Was von der Intuition
+gültig bleibt, ist nicht die Binärgröße, sondern die **Laufzeit**: ob der volle Renderer beim
+Start Schattenatlas, G-Buffer, SSAO- und GI-Ziele anlegt, die eine App nie benutzt, und wie
+viele der eingebauten Shader er beim Start übersetzt. Die SSAO-Ziele werden faul angelegt
+(`EnsureSSAOTargets` aus dem Pass heraus), der Rest ist zur Laufzeit nachzumessen. Fällt das
+ins Gewicht, ist die Antwort „der App-Modus legt diese Ziele nicht an", nicht „ein neuer
+Renderer".
 
 Bedingung in jedem Fall: den UI-Pass **einmal** herausziehen und von jedem Renderer benutzen
 lassen, sonst driften Kopien auseinander. Genau diese Extraktion ist auch das, was das
@@ -523,6 +548,10 @@ Rändern und Snap-Verhalten auf Windows.
 > Dieser Block hat zwei Rückstufungen und eine Rehabilitierung hinter sich. Stand jetzt: er
 > ist **nicht optional**, sondern der Renderer, den jedes Werkzeugprojekt ohne Advanced
 > Shader Effects benutzt, und damit der Normalfall statt der Ausnahme. Siehe A0.
+>
+> Und die Begründung ist ausdrücklich **nicht** die Binärgröße: die Messung in A3 zeigt, dass
+> ein GPU-Renderer selbst nur 0,6 bis 0,8 MB wiegt. Der Grund ist, dass eine App ohne Effekte
+> dann **gar keine GPU und keinen Treiber** mehr voraussetzt.
 
 Nicht „ein Software-Renderer für die Engine". Ein **Software-Backend, das nur UI zeichnet**.
 Der Unterschied ist der ganze Punkt: 3D auf der CPU (PBR, Schatten, GI, Terrain) wäre ein
