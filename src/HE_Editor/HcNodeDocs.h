@@ -50,4 +50,10 @@ bool hasEngineCall(std::string_view id);
 int         explicitCount();
 const char* explicitId(int i);
 
+// The sky FIELD names the env.* rows are composed from — the same drift check in
+// the other half of the table: a field removed from the engine's X-list leaves a
+// sentence here that nothing will ever show.
+int         envFieldCount();
+const char* envFieldName(int i);
+
 } // namespace HE::Ed::NodeDocs

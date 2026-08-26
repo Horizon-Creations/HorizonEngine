@@ -630,7 +630,13 @@ void EditorUI::render(AppContext& ctx, float dt)
     {
         DocsPanel::openTopic(topic);
     }
-    else if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F1, false))
+    // The `openedThisFrame` guard is what keeps this from undoing an F1 that was
+    // already answered: a graph node's hover tooltip consumes F1 inline, while
+    // the canvas is being drawn, and opens the manual at that node's entry. This
+    // block runs afterwards, sees the same still-pressed key, and would toggle
+    // the reader it just opened straight back shut.
+    else if (!io.WantTextInput && !DocsPanel::openedThisFrame() &&
+             ImGui::IsKeyPressed(ImGuiKey_F1, false))
     {
         // Ctrl/Cmd+F1 goes straight to the search box — the label the Help menu
         // carries, and it has to be honoured HERE or it would fall through to

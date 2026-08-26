@@ -202,6 +202,20 @@ TEST_CASE("docs bundle: figures name a file that was actually copied")
 					CHECK(b.src.find('/') == std::string::npos);
 					CHECK(b.src.find('\\') == std::string::npos);
 					CHECK(b.src.find("..") == std::string::npos);
+
+					// And the file has to BE there. A figure placed by the
+					// generator's FIGURES table, or by the generated node
+					// reference, names an image somebody has to have published
+					// (scripts/he_uishot.py --docs) — otherwise the reader draws
+					// the caption over empty space and nothing says why.
+#ifdef HE_EDITOR_DEPS_DIR
+					const std::string path =
+						std::string(HE_EDITOR_DEPS_DIR) + "/Docs/img/" + b.src;
+					std::FILE* f = std::fopen(path.c_str(), "rb");
+					CHECK_MESSAGE(f != nullptr, "figure is referenced but not published: ",
+					              b.src);
+					if (f) std::fclose(f);
+#endif
 				}
 }
 

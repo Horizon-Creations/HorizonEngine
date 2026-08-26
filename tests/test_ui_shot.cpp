@@ -538,6 +538,39 @@ TEST_CASE("ui shot: the generated node reference")
 	DocsPanel::close();
 }
 
+TEST_CASE("docs reader: an F1 that was already answered is not toggled back shut")
+{
+	// The interaction this whole feature exists for: F1 over a node opens the
+	// manual at that node's entry. Two handlers meet in one frame — the graph
+	// canvas consumes F1 inline while drawing, and the editor has a global F1
+	// that toggles the reader at the end of the frame. Without the guard, the
+	// second undoes the first and the key appears to do nothing.
+	Harness harness(400, 300);
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+	DocsPanel::close();
+
+	ImGui::NewFrame();
+	CHECK_FALSE(DocsPanel::openedThisFrame());
+	DocsPanel::openTopic("horizoncode-nodes#physics.addImpulse");
+	CHECK(DocsPanel::isOpen());
+	// Within the same frame the editor's F1 block must stand down.
+	CHECK(DocsPanel::openedThisFrame());
+	ImGui::Render();
+	ImGui::EndFrame();
+
+	// And on the NEXT frame the toggle is free again, or F1 could never close
+	// the reader at all.
+	ImGui::NewFrame();
+	CHECK_FALSE(DocsPanel::openedThisFrame());
+	ImGui::Render();
+	ImGui::EndFrame();
+	DocsPanel::close();
+}
+
 TEST_CASE("ui shot: searching the manual from the reader")
 {
 	constexpr int W = 1000, H = 640;

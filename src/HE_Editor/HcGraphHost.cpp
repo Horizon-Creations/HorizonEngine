@@ -537,6 +537,8 @@ GraphEditor::Model buildModel(const Host& h)
 	// up opens the manual at that node's own entry — the reference is generated
 	// per function, so this lands on the call itself and not on its category.
 	m.drawNodeTooltip = [&graph](int id){
+		// A node the host cannot resolve draws nothing rather than an empty
+		// tooltip box — the component has already opened one by the time it asks.
 		const HC::Node* n = graph.findNode(id);
 		if (!n) return;
 		const std::string topic = HcEditorUtil::drawNodeDoc(*n);

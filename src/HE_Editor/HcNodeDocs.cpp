@@ -737,5 +737,7 @@ bool hasEngineCall(std::string_view id)
 
 int         explicitCount()      { return static_cast<int>(std::size(kDocs)); }
 const char* explicitId(int i)    { return kDocs[i].id; }
+int         envFieldCount()      { return static_cast<int>(std::size(kEnvFields)); }
+const char* envFieldName(int i)  { return kEnvFields[i].name; }
 
 } // namespace HE::Ed::NodeDocs

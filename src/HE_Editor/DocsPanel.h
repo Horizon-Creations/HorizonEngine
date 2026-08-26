@@ -28,6 +28,16 @@ namespace DocsPanel
 	void close();
 	bool isOpen();
 
+	// True when one of the three calls above ran during THIS ImGui frame.
+	//
+	// F1 has two handlers, and they meet in one frame: a node's hover tooltip
+	// consumes it inline while the graph canvas is being drawn, and the editor
+	// has a global F1 at the end of the frame that toggles the reader. Without
+	// this, opening the manual at a node's entry was immediately followed by the
+	// toggle seeing the same still-pressed key and closing it again — the one
+	// interaction this whole feature exists for, doing nothing.
+	bool openedThisFrame();
+
 	// ── What the reader needs from the editor ────────────────────────────────
 	// Four fonts and a renderer — not an AppContext. The panel used to take one,
 	// which meant it could only be drawn by something that had a project, a

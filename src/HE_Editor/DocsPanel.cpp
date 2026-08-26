@@ -73,6 +73,9 @@ namespace
 	// final height yet (fonts, wrapped paragraphs, tables), so the offset ImGui
 	// computes lands near the section rather than on it.
 	int   s_scrollFrames = 0;
+	// The ImGui frame in which the reader was last opened. See
+	// DocsPanel::openedThisFrame() — F1 has two handlers in one frame.
+	int   s_openedFrame = -1;
 
 	// Where the reader has been, so Back means what it does in a browser. Pairs
 	// of (page, section); -1 for "the top of the page".
@@ -915,6 +918,7 @@ void open()
 #ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
+	s_openedFrame = ImGui::GetFrameCount();
 	s_focusSearch = true;
 	if (s_history.empty()) go(0, -1);
 #endif
@@ -925,6 +929,7 @@ void openTopic(const char* topic)
 #ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
+	s_openedFrame = ImGui::GetFrameCount();
 	s_query[0] = '\0';
 	goTopic(topic);
 	// Even an unknown topic leaves the manual open at whatever was last read:
@@ -940,6 +945,7 @@ void openSearch(const char* query)
 #ifdef HE_DOCS_PANEL_IMPL
 	ensureLoaded();
 	s_open = true;
+	s_openedFrame = ImGui::GetFrameCount();
 	std::snprintf(s_query, sizeof(s_query), "%s", query ? query : "");
 	s_focusSearch = true;
 	if (s_history.empty()) go(0, -1);
@@ -959,6 +965,15 @@ bool isOpen()
 {
 #ifdef HE_DOCS_PANEL_IMPL
 	return s_open;
+#else
+	return false;
+#endif
+}
+
+bool openedThisFrame()
+{
+#ifdef HE_DOCS_PANEL_IMPL
+	return s_openedFrame == ImGui::GetFrameCount();
 #else
 	return false;
 #endif

@@ -147,4 +147,16 @@ TEST_CASE("node docs: the generated sky rows are covered by the field list")
 	}
 	INFO("sky properties documented: " << env);
 	CHECK(env >= 80);
+
+	// The other direction: a field sentence whose row was removed from the
+	// engine's X-list would sit here forever, describing something that no
+	// longer exists and that nothing will ever show.
+	std::set<std::string> ids;
+	for (const HE::api::ApiFn& fn : HE::api::registry()) ids.insert(fn.id ? fn.id : "");
+	for (int i = 0; i < NodeDocs::envFieldCount(); ++i)
+	{
+		const std::string name(NodeDocs::envFieldName(i));
+		CHECK_MESSAGE(ids.count("env.get" + name) == 1,
+		              "described sky field is not in the engine's list: ", name);
+	}
 }
