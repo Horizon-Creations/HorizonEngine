@@ -2434,6 +2434,117 @@ namespace
 	  "benchmark.",
 	  "", "editor#profiler" },
 
+	// ── The animator state machine ───────────────────────────────────────────
+	// A transition row is six abbreviations in a narrow column: From, To, Op,
+	// Param, Thresh, Duration. Together they are the whole condition under which
+	// a character changes what it is doing, which is more weight than six short
+	// words can carry on their own.
+	{ "State Machine/Add State", "",
+	  "Adds a state at the point on the canvas where you opened the menu. It "
+	  "starts with no clip: drop an Animation Clip from the Content Browser onto "
+	  "the node's slot to give it one. With Start State left empty, the first "
+	  "state in the list is the one an entity enters.",
+	  "", "systems#animation" },
+	{ "State Machine/Loop", "",
+	  "Play this state's clip over and over instead of stopping at its end. Off, "
+	  "the clip runs once and the pose holds on the last frame. Either way the "
+	  "state does not leave by itself when the clip ends; only a transition moves "
+	  "the machine on.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/From", "From State",
+	  "The state this transition leaves, written as that state's name. Names, not "
+	  "ids, are how a transition points at its endpoints, so a name matching no "
+	  "state means the transition is never considered and no link is drawn for it "
+	  "on the canvas. Renaming a state in the canvas rewrites this field for you.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/To", "To State",
+	  "The state this transition enters, written as that state's name. A name "
+	  "that matches no state still lets the transition fire: the crossfade blends "
+	  "towards an empty pose, logs one error saying so, and leaves the machine "
+	  "sitting in a state that does not exist — at which point the character "
+	  "stops animating altogether.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/Op", "Comparison",
+	  "How the parameter is held against the threshold: greater than, less than, "
+	  "or equal to. Equal is an exact floating-point comparison, so it fits a "
+	  "parameter something sets to that value outright and not one that arrives "
+	  "there by arithmetic.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/Param", "Parameter",
+	  "Which of the machine's parameters this transition watches, by name. It has "
+	  "to be one the machine actually carries, either declared under Default "
+	  "Params or written at run time. A transition whose parameter has no value "
+	  "never fires.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/Thresh", "Threshold",
+	  "The number the parameter is compared against. With the comparison it is "
+	  "the whole condition — nothing about the clip or its length is consulted. "
+	  "The machine still only looks at transitions leaving the state it is in, "
+	  "and only when it is not already mid-crossfade.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/Duration", "Crossfade Duration",
+	  "How long the blend into the new state lasts, in seconds. Both clips are "
+	  "sampled and mixed for that long, which is what smooths a hard change of "
+	  "pose; zero makes the swap immediate. While a crossfade is running the "
+	  "machine considers no further transition.",
+	  "", "systems#animation" },
+	{ "State Machine Transitions/+ Transition", "Add Transition",
+	  "Appends an empty transition to the list. It stays inert until you name a "
+	  "state at each end and give it a parameter to watch — a row with no "
+	  "parameter never fires. Dragging from one state's Out pin to another's In "
+	  "pin on the canvas produces the same row with both ends already filled in.",
+	  "", "systems#animation" },
+	{ "State Machine Parameters/+ Param", "Add Parameter",
+	  "Declares the parameter named in the field beside it and gives it a "
+	  "starting value of 0. Every entity running this machine is seeded with "
+	  "these defaults, which is what lets a transition read a parameter before "
+	  "any script has written to it.",
+	  "", "systems#animation" },
+	{ "Sync Graph/Show node", "",
+	  "Selects the node the compile check blamed and brings the canvas to it. It "
+	  "appears only after a check that failed, beside the line saying this graph "
+	  "will ship interpreted instead of translated to C++.",
+	  "", "horizoncode#compiler" },
+
+	// ── The audio and mesh tabs ──────────────────────────────────────────────
+	{ "Audio Editor/Volume", "Preview Volume",
+	  "How loud this tab plays the clip, from silent to twice the recorded level. "
+	  "It moves a preview that is already running. Preview only: an Audio Source "
+	  "component in the scene carries its own volume.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Pitch", "Preview Pitch",
+	  "Playback rate for the preview, from a quarter speed to double. Speed and "
+	  "pitch move together, so raising it both shortens the clip and lifts it. "
+	  "Preview only, like the volume above it.",
+	  "", "systems#audio" },
+	{ "Audio Editor/Import as Audio Asset", "",
+	  "Turns the source .wav open in this tab into an asset the project can "
+	  "reference, at the path printed under the button. It only appears for a raw "
+	  ".wav, not for a clip that is already an asset. Engine content is read-only "
+	  "unless the editor is in engine-content dev mode, so a .wav from the engine "
+	  "library normally lands in the project's own content instead.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Sky", "Sky lighting",
+	  "Lights the preview with the sky at a chosen hour, so the mesh can be "
+	  "judged in the light it will actually stand in. The time slider below picks "
+	  "the hour.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Studio", "Studio lighting",
+	  "Lights the preview with one fixed key light and no colour cast — the shape "
+	  "alone, without the sky's opinion about it. It is the same light every "
+	  "asset thumbnail is rendered under.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Ground grid", "",
+	  "Draws the ground plane, its grid and the origin marker under the mesh, "
+	  "which is what tells the eye how big the model is and where its origin "
+	  "sits. A view aid in this tab only; nothing about the asset changes.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Clip:", "Preview Clip",
+	  "An animation clip to pose this skeleton with, dropped from the Content "
+	  "Browser. Empty leaves it in its bind pose. It is preview state on this "
+	  "tab, so it is not saved with the asset and pushes no undo step.",
+	  "", "systems#animation" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2590,7 +2701,13 @@ namespace
 		{ "New Landscape/",       "editor-landscape", "Landscape Tools", "Creating a landscape" },
 		{ "Landscape/",           "editor-landscape", "Landscape Tools", "Sculpting and painting" },
 		{ "Environment Window/",  "editor-landscape", "Landscape Tools", "Environment window" },
-		{ "anim.",     "editor-animation", "Animation Editors", "Animator" },
+		{ "anim.",                      "editor-animation", "Animation Editors", "Animator" },
+		{ "State Machine/",             "editor-animation", "Animation Editors", "State machine" },
+		{ "State Machine Transitions/", "editor-animation", "Animation Editors", "Transitions" },
+		{ "State Machine Parameters/",  "editor-animation", "Animation Editors", "Parameters" },
+		{ "Sync Graph/",                "editor-animation", "Animation Editors", "Sync graph" },
+		{ "Audio Editor/",              "editor-animation", "Animation Editors", "Audio editor" },
+		{ "Mesh Viewer/",               "editor-animation", "Animation Editors", "Mesh viewer" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },

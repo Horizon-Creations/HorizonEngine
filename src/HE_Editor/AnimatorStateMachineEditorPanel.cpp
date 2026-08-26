@@ -4,6 +4,7 @@
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
+#include "EditorHelp.h"             // "State Machine/<label>" scopes for the tooltips
 #include "EditorWidgets.h"          // shared Content-Browser asset drop target
 #include "GraphEditor.h"            // shared node-graph canvas frontend
 #include "HcGraphHost.h"            // the HorizonCode half of that canvas (sync graph)
@@ -293,6 +294,7 @@ static void drawSyncGraph(AppContext& ctx, State& st);
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
 	State& st = stateFor(assetPath, ctx);
+	HE::Ed::Help::Scope helpScope("State Machine");
 
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
@@ -434,7 +436,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		};
 		m.drawAddMenu = [&st]() -> int {
 			int created = 0;
-			if (ImGui::Selectable("Add State"))
+			if (EditorWidgets::selectable("Add State"))
 			{
 				int maxId = 0;
 				for (const auto& s : st.graph.states) maxId = std::max(maxId, s.id);
@@ -477,7 +479,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			}
 			structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
 			ImGui::SameLine();
-			ImGui::Checkbox("Loop##st", &s->looping);
+			EditorWidgets::checkbox("Loop##st", &s->looping);
 			structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
 
 			// Clip drag-drop slot (same whole-row-is-the-drop-target pattern as
@@ -540,6 +542,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		if (ImGui::TreeNodeEx("Transitions##sm", ImGuiTreeNodeFlags_DefaultOpen))
 		{
+			// A transition row is six abbreviations: From, To, Op, Param, Thresh,
+			// Duration. Its own scope, because "Duration" here is a crossfade and
+			// "Duration" elsewhere is a clip length.
+			HE::Ed::Help::Scope helpScope("State Machine Transitions");
 			const char* opNames[] = { ">", "<", "==" };
 			int transToDelete = -1;
 			for (int i = 0; i < static_cast<int>(st.graph.transitions.size()); ++i)
@@ -552,27 +558,34 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				std::snprintf(pb, sizeof(pb), "%s", t.paramName.c_str());
 				ImGui::TextDisabled("%s -> %s", t.fromState.c_str(), t.toState.c_str());
 				if (ImGui::InputText("From##t", fb, sizeof(fb)))  { t.fromState = fb; structuralEdit = true; }
+				EditorWidgets::helpForLabel("From##t");
 				if (ImGui::InputText("To##t",   tb, sizeof(tb)))  { t.toState   = tb; structuralEdit = true; }
+				EditorWidgets::helpForLabel("To##t");
 				int opIdx = static_cast<int>(t.op);
 				if (ImGui::Combo("Op##t", &opIdx, opNames, 3))
 				{ t.op = static_cast<HE::TransitionOp>(opIdx); structuralEdit = true; }
+				EditorWidgets::helpForLabel("Op##t");
 				if (ImGui::InputText("Param##t", pb, sizeof(pb))) { t.paramName = pb; structuralEdit = true; }
+				EditorWidgets::helpForLabel("Param##t");
 				ImGui::DragFloat("Thresh##t", &t.threshold, 0.01f, -999.0f, 999.0f, "%.2f");
 				structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
+				EditorWidgets::helpForLabel("Thresh##t");
 				ImGui::DragFloat("Duration##t", &t.duration, 0.01f, 0.0f, 10.0f, "%.2f s");
 				structuralEdit |= ImGui::IsItemDeactivatedAfterEdit();
+				EditorWidgets::helpForLabel("Duration##t");
 				if (EditorWidgets::dangerSmallButton("Remove##t")) transToDelete = i;
 				ImGui::Separator();
 				ImGui::PopID();
 			}
 			if (transToDelete >= 0)
 			{ st.graph.transitions.erase(st.graph.transitions.begin() + transToDelete); structuralEdit = true; }
-			if (ImGui::SmallButton("+ Transition##sm")) { st.graph.transitions.push_back({}); structuralEdit = true; }
+			if (EditorWidgets::smallButton("+ Transition##sm")) { st.graph.transitions.push_back({}); structuralEdit = true; }
 			ImGui::TreePop();
 		}
 
 		if (ImGui::TreeNodeEx("Default Params##sm", ImGuiTreeNodeFlags_None))
 		{
+			HE::Ed::Help::Scope helpScope("State Machine Parameters");
 			std::string paramToDelete;
 			for (auto& [k, v] : st.graph.defaultParams)
 			{
@@ -589,7 +602,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::SetNextItemWidth(-70.0f);
 			ImGui::InputText("##newParamName", s_newParamName, sizeof(s_newParamName));
 			ImGui::SameLine();
-			if (ImGui::SmallButton("+ Param") && s_newParamName[0] != '\0')
+			if (EditorWidgets::smallButton("+ Param") && s_newParamName[0] != '\0')
 			{
 				st.graph.defaultParams[s_newParamName] = 0.0f;
 				s_newParamName[0] = '\0';
@@ -613,6 +626,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 static void drawSyncGraph(AppContext& ctx, State& st)
 {
 	namespace HC = HorizonCode;
+	HE::Ed::Help::Scope helpScope("Sync Graph");
 
 	bool edited = false;
 	HcGraphHost::Host h;
@@ -633,7 +647,7 @@ static void drawSyncGraph(AppContext& ctx, State& st)
 		if (st.syncCompileNode != 0)
 		{
 			ImGui::SameLine();
-			if (ImGui::SmallButton("Show node"))
+			if (EditorWidgets::smallButton("Show node"))
 				if (const HC::Node* n = st.syncGraph.findNode(st.syncCompileNode))
 				{
 					st.syncSelected     = n->id;

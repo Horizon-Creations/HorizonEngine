@@ -242,6 +242,21 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Profiler",     "Start Benchmark Capture  (F9)" },
 		{ "Profiler",     "Detailed GPU pass timing (serializes GPU — capture only)" },
 		{ "Profiler",     "clear" },
+		// The animator, audio and mesh tabs. A transition row's six labels are
+		// looked up with their "##t" spelling and fall back to the visible name.
+		{ "State Machine",             "Loop##st" },
+		{ "State Machine",             "Add State" },
+		{ "State Machine Transitions", "From##t" },
+		{ "State Machine Transitions", "Thresh##t" },
+		{ "State Machine Transitions", "Duration##t" },
+		{ "State Machine Transitions", "+ Transition##sm" },
+		{ "State Machine Parameters",  "+ Param" },
+		{ "Sync Graph",                "Show node" },
+		{ "Audio Editor",              "Pitch" },
+		{ "Audio Editor",              "Import as Audio Asset" },
+		{ "Mesh Viewer",               "Ground grid" },
+		{ "Mesh Viewer",               "Studio" },
+		{ "Mesh Viewer",               "Clip:" },
 	};
 	for (const Case& c : cases)
 	{

@@ -4,6 +4,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map + lazy asset open
 #include "EditorInput.h"          // pointer-device grammar (trackpad swipe vs mouse wheel)
+#include "EditorHelp.h"           // "Audio Editor/<label>" scope for the tooltips
 #include "EditorWidgets.h"        // WrapText
 #include "AudioImporter.h"        // raw .wav decode + the Import button
 #include <ContentManager/ContentManager.h>
@@ -556,6 +557,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 {
 	State& st = s_states[assetPath];
 	st.audio  = ctx.audioEngine;
+	HE::Ed::Help::Scope helpScope("Audio Editor");
 
 	if (!st.loaded)
 	{
@@ -766,8 +768,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			ImGui::TextDisabled("No audio device.");
 		if (ImGui::SliderFloat("Volume", &st.volume, 0.0f, 2.0f, "%.2f") && st.handle)
 			st.audio->setSoundVolume(st.handle, st.volume);
+		EditorWidgets::helpForLabel("Volume");
 		if (ImGui::SliderFloat("Pitch", &st.pitch, 0.25f, 2.0f, "%.2f") && st.handle)
 			st.audio->setSoundPitch(st.handle, st.pitch);
+		EditorWidgets::helpForLabel("Pitch");
 		ImGui::TextDisabled("Preview only — an Audio Source component\ncarries its own volume and pitch.");
 
 		// ── Import, for a raw .wav ───────────────────────────────────────────
@@ -804,7 +808,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				ImGui::TextDisabled("Open a project to import.");
 			else
 			{
-				if (ImGui::Button("Import as Audio Asset", ImVec2(-FLT_MIN, 0.0f)))
+				if (EditorWidgets::button("Import as Audio Asset", ImVec2(-FLT_MIN, 0.0f)))
 				{
 					if (AudioImporter::import(src, root, relDir))
 						ctx.contentRefreshPending = true;

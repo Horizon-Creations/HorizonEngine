@@ -149,7 +149,8 @@ den Test zu beruhigen.
 | 5 · Input | erledigt (6 Einträge, ein Scope) | 0 |
 | 6 · Landschaft | erledigt (33 Einträge, drei Scopes, Werkzeugleiste nachgerüstet) | 0 |
 | 7 · Export + Profiler | erledigt (37 Einträge, drei Scopes, vier „(?)"-Tooltips aufgelöst) | 0 |
-| 8–10 | offen | 82 |
+| 8 · Animation, Audio, Mesh | erledigt (24 Einträge, sechs Scopes) | 0 |
+| 9–10 | offen | 67 |
 
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren

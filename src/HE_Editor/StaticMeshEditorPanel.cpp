@@ -5,6 +5,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h" // shared per-tab state map + lazy asset open
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
+#include "EditorHelp.h"             // "Mesh Viewer/<label>" scope for the tooltips
 #include "EditorWidgets.h"          // WrapText — text wraps at the pane edge, never runs off it
 #include "EditorCamera.h"           // the Scene window's camera, one per tab
 #include "EditorViewportNav.h"      // …and its navigation grammar, shared
@@ -317,6 +318,7 @@ void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, const ImVec2& size)
 {
 	State& st = s_states[assetPath];
+	HE::Ed::Help::Scope helpScope("Mesh Viewer");
 	if (!st.loaded && ctx.contentManager)
 	{
 		st.meshId = openPanelAsset(ctx, assetPath, st.name, st.relPath);
@@ -477,11 +479,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			// given hour, or the shape alone under a fixed key light with no
 			// colour cast — the light every thumbnail is rendered under.
 			if (ImGui::RadioButton("Sky", st.useSky)) st.useSky = true;
+			EditorWidgets::helpForLabel("Sky");
 			ImGui::SameLine();
 			if (ImGui::RadioButton("Studio", !st.useSky)) st.useSky = false;
+			EditorWidgets::helpForLabel("Studio");
 			// A labelled checkbox, not just the toolbar icon: an unlabelled grid
 			// glyph among four others is not something anyone finds.
-			ImGui::Checkbox("Ground grid", &st.showGrid3d);
+			EditorWidgets::checkbox("Ground grid", &st.showGrid3d);
 
 			// One slider, because one number is what actually changes the answer:
 			// where the sun is. Everything else about the sky follows from it.

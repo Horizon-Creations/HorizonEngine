@@ -6,6 +6,7 @@
 #include "EditorApplication.h"      // AppContext
 #include "EditorAssetTypeCache.h"   // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"       // shared per-tab state map + lazy asset open
+#include "EditorHelp.h"             // "Mesh Viewer/<label>" scope for the tooltips
 #include "EditorWidgets.h"          // asset drop slot + WrapText (text wraps, never runs off)
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include <ContentManager/ContentManager.h>
@@ -193,6 +194,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		// below it. The preview image and the orbit hit-area are laid out by hand
 		// and touch no window text, so nothing here can be pushed out of place.
 		EditorWidgets::WrapText wrap;
+		HE::Ed::Help::Scope helpScope("Mesh Viewer");
 
 		// undo = false: the scrub clip is preview state on this tab, not a scene edit,
 		// so it must not push an undo snapshot of the world.
@@ -200,6 +202,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				"skelClipSlot", "(bind pose — drop a clip)", /*rejectNoun=*/nullptr,
 				/*showClear=*/false, /*undo=*/false) == EditorWidgets::SlotAction::Assigned)
 			st.clipTime = 0.0f;
+		// The slot draws its label and then its button; the lookup lands on the
+		// button, which is the thing being pointed at anyway.
+		EditorWidgets::helpForLabel("Clip:");
 
 		const AnimationClipAsset* clip = (st.clipId != HE::UUID{} && ctx.contentManager)
 			? ctx.contentManager->getAnimationClip(st.clipId) : nullptr;
