@@ -127,3 +127,42 @@ TEST_CASE("Asset nodes name their asset in the header")
 	// A path with no stem must not produce a dangling colon.
 	CHECK(assetNodeTitle("Create Widget", "Content/UI/") == "Create Widget");
 }
+
+// ── The add menu's engine-call sections ──────────────────────────────────────
+// The palette used to draw registry rows under "Engine · <Category>" headers,
+// in a second pass below the node categories — so "UI" appeared twice and a
+// reader had to know which half a call lived in. The sections are merged now,
+// which makes the category list the menu's backbone: it decides which headings
+// exist at all.
+TEST_CASE("Add menu: engine-call categories are listed once, filtered, and hide what the nodes cover")
+{
+	const auto all = HcEditorUtil::engineApiCategories("");
+	REQUIRE(!all.empty());
+
+	// No duplicates: one heading per category, or the merge gains nothing.
+	for (size_t i = 0; i < all.size(); ++i)
+		for (size_t j = i + 1; j < all.size(); ++j)
+			CHECK(std::string(all[i]) != std::string(all[j]));
+
+	auto has = [](const std::vector<const char*>& v, const char* c) {
+		for (const char* s : v) if (std::string(s) == c) return true;
+		return false;
+	};
+	CHECK(has(all, "Transform"));
+	CHECK(has(all, "Physics"));
+
+	// The group filter reaches this list too. Filtering only the rows and not
+	// the headings would leave empty sections behind.
+	const auto onlyPhysics = HcEditorUtil::engineApiCategories("", { "physics" });
+	CHECK(has(onlyPhysics, "Physics"));
+	CHECK_FALSE(has(onlyPhysics, "Transform"));
+
+	// "log" is deliberately not in the palette: the Print node does that job,
+	// and two entries for one thing is what the hidden list exists to stop. The
+	// row itself stays — Lua and Python call it as horizon.log — so this can only
+	// be checked through the menu, which is what makes the assertion worth having.
+	// Nothing else in the registry answers to "log", so an empty result IS the
+	// proof; if the hiding regressed, "Debug" would show up here.
+	CHECK(HcEditorUtil::engineApiCategories("log").empty());
+	CHECK_FALSE(HcEditorUtil::engineApiCategories("physics").empty());
+}

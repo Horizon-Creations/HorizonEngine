@@ -14,6 +14,7 @@
 #include <imgui_internal.h>      // CurrentItemFlags — detect a BeginDisabled scope
 #include <algorithm>
 #include <cctype>
+#include <cstring>       // strcmp — category names are const char*, compared by value
 #include <filesystem>
 #include <functional>
 
@@ -508,11 +509,19 @@ GraphEditor::Model buildModel(const Host& h)
 		for (const auto& l : graph.links) { const HC::Node* s = graph.findNode(l.srcNode);
 			if (s && s->subgraph == h.currentGraph) ls.push_back({ l.srcNode, l.srcPin, l.dstNode, l.dstPin }); }
 		return ls; };
-	m.connect = [&graph](int oN, int oP, int iN, int iP){
+	m.connect = [&h, &graph](int oN, int oP, int iN, int iP){
 		// ForEach is generic until wired: adopt the source array's element type
 		// (Array/Element pins retype + recolor) before the typed connect.
 		HC::adoptForEachElementType(graph, oN, oP, iN, iP);
-		if (!graph.connect(oN, oP, iN, iP)) return false;
+		// A wire the types refused is not always a dead end: when ONE node would
+		// carry it (Float into a String pin → To String) that node is built and
+		// wired here, half-way down the wire. It also re-infers user types, so
+		// this path needs no inferUserTypeNames of its own.
+		// The frontend's hidden types are handed over: a conversion must not be a
+		// way around a node the palette deliberately does not offer.
+		if (!graph.connect(oN, oP, iN, iP))
+			return HC::connectWithConversion(graph, oN, oP, iN, iP,
+				h.menus ? h.menus->addExcluded : std::vector<HC::NodeType>{});
 		// A user-defined type node that had no definition can learn it from what
 		// it was just wired to — an "Enum to String" hanging off a Mood output
 		// IS a Mood one, and asking the panel to pick would be asking twice.
@@ -641,9 +650,34 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	{ return q.empty() || lower(name).find(q) != std::string::npos
 	      || lower(cat).find(q) != std::string::npos; };
 
+	// Spawn the EngineCall node one registry pick stands for. Shared, because the
+	// rows now appear in two places: merged into a node category below, and in
+	// their own sections for the categories no node uses.
+	const std::vector<const char*> apiGroups =
+		h.menus ? h.menus->apiGroups : std::vector<const char*>{};
+	auto createEngineCall = [&](const std::string& id)
+	{
+		const HE::api::ApiFn* fn = HE::api::find(id);
+		if (!fn) return;
+		const int nid = addNode(graph, NT::EngineCall, drop, h.currentGraph);
+		HC::Node* nn = graph.findNode(nid);
+		nn->s = fn->id;
+		nn->hasArg = fn->isExec;             // exec node vs pure data node
+		nn->params.clear(); nn->results.clear();
+		for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
+		for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+		created = nid;
+	};
+
 	// Generic node categories. Which ones a frontend lists is host data: the
 	// widget editor has Property/Widget (self) nodes, a level script does not —
 	// there the id-based widget nodes under "UI" are the only widget access.
+	//
+	// The engine calls of the SAME category are drawn inside this loop, under the
+	// same header. A "UI" section holding the UI nodes and the UI engine calls is
+	// one place to look; the old split put them in a node section and a second
+	// "Engine · UI" section far below it, which asked the reader to know which
+	// half a call lives in before they could find it.
 	for (const char* cat : h.menus->addCategories)
 	{
 		bool header = false;
@@ -670,6 +704,11 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 				ImGui::EndTooltip();
 			}
 		}
+		// …and this category's engine calls, under the header the nodes just
+		// drew (or drawing it themselves if no node matched).
+		if (std::string picked = HcEditorUtil::drawEngineApiMenu(q, apiGroups, cat, &header);
+		    !picked.empty())
+		{ createEngineCall(picked); ImGui::CloseCurrentPopup(); }
 		if (header) ImGui::Spacing();
 	}
 
@@ -704,26 +743,24 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	}
 	if (fh) ImGui::Spacing();
 
-	// Engine API calls — the HE::api registry surfaced as one generic
-	// EngineCall node per function, grouped by subsystem, same search box.
-	if (std::string picked = HcEditorUtil::drawEngineApiMenu(
-	        q, h.menus ? h.menus->apiGroups : std::vector<const char*>{});
-	    !picked.empty())
+	// The engine-call categories NO node category covers — Physics, Player, Save,
+	// Transform and the rest. Each gets its own section, named after the
+	// subsystem and nothing else: a reader looking for "Set Position" should find
+	// a "Transform" heading, not have to know that the engine calls used to live
+	// in a separate half of this menu.
+	for (const char* cat : HcEditorUtil::engineApiCategories(q, apiGroups))
 	{
-		if (const HE::api::ApiFn* fn = HE::api::find(picked))
-		{
-			const int id = addNode(graph, NT::EngineCall, drop, h.currentGraph);
-			HC::Node* nn = graph.findNode(id);
-			nn->s = fn->id;
-			nn->hasArg = fn->isExec;             // exec node vs pure data node
-			nn->params.clear(); nn->results.clear();
-			for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
-			for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
-			created = id;
-		}
-		ImGui::CloseCurrentPopup();
+		bool covered = false;
+		for (const char* c : h.menus->addCategories)
+			if (std::strcmp(c, cat) == 0) { covered = true; break; }
+		if (covered) continue;   // already drawn, merged into the loop above
+
+		bool header = false;
+		if (std::string picked = HcEditorUtil::drawEngineApiMenu(q, apiGroups, cat, &header);
+		    !picked.empty())
+		{ createEngineCall(picked); ImGui::CloseCurrentPopup(); }
+		if (header) ImGui::Spacing();
 	}
-	ImGui::Spacing();
 
 	// Get/Set for each declared variable (locals only inside their function).
 	bool vh = false;

@@ -204,8 +204,23 @@ namespace HcEditorUtil
 	// `allowedGroups` restricts which HE::api groups are offered ("player",
 	// "math", …). Empty = everything, which is what every general-purpose editor
 	// passes. See HcGraphHost::MenuOpts::apiGroups.
+	//
+	// `onlyCategory` limits the walk to one category, and `headerDrawn` then lets
+	// the caller SHARE a header with something else: the add menu draws one
+	// "UI" section holding the UI nodes AND the UI engine calls, rather than a
+	// node section and a second "Engine · UI" section under it. Pass nullptr for
+	// both to get the whole registry with its own lazy per-category headers.
 	std::string drawEngineApiMenu(const std::string& lowerQuery,
-	                              const std::vector<const char*>& allowedGroups = {});
+	                              const std::vector<const char*>& allowedGroups = {},
+	                              const char* onlyCategory = nullptr,
+	                              bool* headerDrawn = nullptr);
+
+	// The registry categories that have at least one row matching `lowerQuery`
+	// and `allowedGroups`, in registry order and without duplicates. The add menu
+	// needs the list to know which sections exist beyond the node categories its
+	// frontend declares.
+	std::vector<const char*> engineApiCategories(const std::string& lowerQuery,
+	                                             const std::vector<const char*>& allowedGroups = {});
 
 	// Is this api id in `allowedGroups`? Empty list = yes. Thin pass-through to
 	// HE::api::groupAllowed, which is where the rule lives — the two menus that

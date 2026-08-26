@@ -973,24 +973,76 @@ bool apiGroupAllowed(const char* apiId, const std::vector<const char*>& allowedG
 	return !apiId || HE::api::groupAllowed(apiId, allowedGroups);
 }
 
-std::string drawEngineApiMenu(const std::string& lowerQuery,
-                              const std::vector<const char*>& allowedGroups)
+namespace
 {
-	auto lower = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
-		[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+	// Registry rows the PALETTE does not offer, though the row itself stays —
+	// scripts and saved graphs still call them.
+	//
+	// "log" is the one case: the Print node does the same job, is a proper node
+	// with an exec pass-through, and Lua/Python reach the row directly as
+	// horizon.log. Two entries doing one thing is what this list exists to stop;
+	// deleting the row instead would take the script binding with it.
+	constexpr const char* kPaletteHidden[] = { "log" };
+
+	bool paletteHidden(const char* id)
+	{
+		for (const char* h : kPaletteHidden)
+			if (id && std::strcmp(id, h) == 0) return true;
+		return false;
+	}
+
+	// One place for "does this row belong in the menu right now", so the listing
+	// and the category scan below can never disagree about it.
+	bool apiRowMatches(const HE::api::ApiFn& fn, const std::string& lowerQuery,
+	                   const std::vector<const char*>& allowedGroups)
+	{
+		if (paletteHidden(fn.id))                      return false;
+		if (!apiGroupAllowed(fn.id, allowedGroups))    return false;
+		if (lowerQuery.empty())                        return true;
+		auto low = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
+			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+		const char* shown = fn.displayName ? fn.displayName : fn.id;
+		return low(shown).find(lowerQuery) != std::string::npos
+		    || low(fn.id).find(lowerQuery) != std::string::npos
+		    || low(fn.category).find(lowerQuery) != std::string::npos;
+	}
+} // namespace
+
+std::vector<const char*> engineApiCategories(const std::string& lowerQuery,
+                                             const std::vector<const char*>& allowedGroups)
+{
+	std::vector<const char*> out;
+	for (const HE::api::ApiFn& fn : HE::api::registry())
+	{
+		if (!apiRowMatches(fn, lowerQuery, allowedGroups)) continue;
+		bool seen = false;
+		for (const char* c : out) if (std::strcmp(c, fn.category) == 0) { seen = true; break; }
+		if (!seen) out.push_back(fn.category);
+	}
+	return out;
+}
+
+std::string drawEngineApiMenu(const std::string& lowerQuery,
+                              const std::vector<const char*>& allowedGroups,
+                              const char* onlyCategory,
+                              bool* headerDrawn)
+{
 	std::string picked;
 	const char* header = nullptr; // current category header, drawn lazily
 	for (const HE::api::ApiFn& fn : HE::api::registry())
 	{
-		if (!apiGroupAllowed(fn.id, allowedGroups)) continue;
+		if (onlyCategory && std::strcmp(fn.category, onlyCategory) != 0) continue;
+		if (!apiRowMatches(fn, lowerQuery, allowedGroups)) continue;
 		const char* shown = fn.displayName ? fn.displayName : fn.id; // readable name
-		const bool match = lowerQuery.empty()
-			|| lower(shown).find(lowerQuery) != std::string::npos
-			|| lower(fn.id).find(lowerQuery) != std::string::npos
-			|| lower(fn.category).find(lowerQuery) != std::string::npos;
-		if (!match) continue;
-		if (!header || std::string(header) != fn.category)
-		{ ImGui::TextDisabled("Engine · %s", fn.category); header = fn.category; }
+		// Shared header: the caller already drew (or is about to draw) one for
+		// this section, so only the flag is touched.
+		if (headerDrawn)
+		{
+			if (!*headerDrawn)
+			{ ImGui::TextDisabled("%s", onlyCategory ? onlyCategory : fn.category); *headerDrawn = true; }
+		}
+		else if (!header || std::string(header) != fn.category)
+		{ ImGui::TextDisabled("%s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
 		if (searchMenuItem(std::string(shown) + "##" + fn.id)) picked = fn.id;
 		if (ImGui::IsItemHovered())
