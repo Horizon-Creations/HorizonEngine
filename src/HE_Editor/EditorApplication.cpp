@@ -5437,14 +5437,6 @@ void EditorApplication::setPlayMode(bool play)
 		// running script and setPlayMode tears that script's context down.
 		// Bound BEFORE the scripts start: an onStart may already call it.
 		m_scriptContext->setQuitHandler([this]{ m_playStopRequested = true; });
-		// Same call the packaged game's startScripts() makes, so PIE and a shipped
-		// game bring scripts up identically.
-		m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
-
-		// The level script's "OnLevelLoaded" fires once, after per-entity
-		// scripts have started. Leaving play mode routes through clear(), which
-		// fires the matching "OnLevelUnloaded".
-		m_editorWorld->fireLevelLoaded();
 
 		// Player controller classes + input events, mirroring the packaged game:
 		// spawn after the level is up (Construct + BeginPlay), pump Tick/Input.*
@@ -5459,6 +5451,25 @@ void EditorApplication::setPlayMode(bool play)
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
+
+		// Lua/Python entity scripts start AFTER the hosts, the same order the
+		// packaged game has (GameApplication: hosts, then startScripts). PIE used
+		// to start them first, so an onStart asking horizon.player.controller()
+		// got an answer in the shipped game and nothing here — the same
+		// divergence as the level script below, one layer up.
+		m_scriptContext->startWorldScripts(contentManager(), m_scriptInstances);
+
+		// The level script's "OnLevelLoaded" fires LAST, after the hosts — which
+		// is the order the packaged game has always had (GameApplication brings
+		// the hosts up, then startScripts, then fireLevelLoaded). PIE used to
+		// fire it BEFORE them, and that one line of difference meant a level
+		// script calling Get Player Controller found the controller in the
+		// shipped game and nothing in the editor: the possession table is filled
+		// by PlayerHost::begin. A divergence like that costs an evening, because
+		// the thing that works is the one you cannot step through.
+		// Leaving play mode routes through clear(), which fires the matching
+		// "OnLevelUnloaded".
+		m_editorWorld->fireLevelLoaded();
 
 		// The fallback camera goes up AFTER the player spawns, mirroring the
 		// packaged game: a PlayerCharacter class brings its own camera, and that

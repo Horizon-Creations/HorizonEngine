@@ -245,6 +245,31 @@ To reach the spawned character's **entity** (to set a transform, add force, find
 its children), feed the `Ref` into **Get Entity Of** (`entity.owned`). It answers
 the entity a HorizonCode object owns, `0` for a bodiless one.
 
+#### Possessing from outside the controller
+
+The controller's `BeginPlay` is the usual place, not the only one. Two global
+nodes hand any graph — a level script, a widget, another object — a reference
+into the player layer:
+
+- **Get Player Controller** (`player.controller`) — the session's first player
+  controller. Available from the moment `PlayerHost` has started, which is
+  before any level script runs.
+- **Get Player Character** (`player.character`) — what that controller
+  **possesses**. It answers `0` until something has possessed, which is the
+  honest answer and not a bug: nothing is possessed automatically any more.
+
+Both hand out a `Ref` to the generic engine class, so feed it through **Cast**
+to reach your own class's variables and functions — `Cast` succeeds on the exact
+class, on any HorizonCode ancestor, and on the engine base (`PlayerController`,
+`PlayerCharacter`, `Entity`).
+
+A character that is not possessed yet has no player-layer node to find it,
+because it is not the player's anything until a controller takes it. Reach it
+the way you reach any other object: **Find By Name** (`entity.findByName`)
+→ **Get Object On Entity** (`entity.instance`) → **Cast**. Then **Possess** with the
+controller from above. That is the whole "possess from a level script" path, and
+it needs nothing the controller's own `BeginPlay` does not also use.
+
 ### Debug
 **Print** (`Print`) — log a value.
 
