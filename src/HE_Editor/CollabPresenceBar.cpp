@@ -2,6 +2,7 @@
 
 #include "CollabController.h"
 #include "EditorApplication.h"
+#include "EditorHelp.h"   // "Session Participants/<label>" — the roster is drawn twice
 #include "EditorWidgets.h"
 
 #include <Renderer/IRenderer.h>
@@ -422,6 +423,9 @@ namespace
 	// underneath does not close and take the dialog's context with it.
 	bool drawBanModal(CollabController& collab)
 	{
+		// Its own scope: the roster's "Block" opens this question, and this
+		// window's "Block" answers it. Same word, two acts.
+		HE::Ed::Help::Scope helpScope("Block Participant");
 		if (s_openBanModal)
 		{
 			// Opened here rather than at the button: a popup has to be opened at
@@ -520,6 +524,7 @@ void DrawOverlay(AppContext& ctx)
 void DrawRoster(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+	HE::Ed::Help::Scope helpScope("Session Participants");
 	CollabController* collab = ctx.collab;
 	if (!collab) return;
 
@@ -574,14 +579,14 @@ void DrawRoster(AppContext& ctx)
 				ImGui::SetTooltip("End the session for %s. They can join again.",
 				                  p.name.c_str());
 			ImGui::SameLine(0.0f, 4.0f);
+			// Remove keeps its per-person tooltip: it names who is being removed,
+			// which an entry cannot. Block's said the same thing about a person
+			// and about the rule, and the rule is the half worth an entry.
 			if (EditorWidgets::dangerSmallButton("Block"))
 			{
 				RequestBan(p.id, p.name);
 				s_pinned = true;   // keep the menu up behind the dialog
 			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Remove %s and refuse them if they try to rejoin this "
-				                  "session.", p.name.c_str());
 		}
 
 		ImGui::PopID();
@@ -604,7 +609,7 @@ void DrawRoster(AppContext& ctx)
 			ImGui::SameLine();
 			ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 			                     std::max(0.0f, ImGui::GetContentRegionAvail().x - 58.0f));
-			if (ImGui::SmallButton("Allow")) collab->unban(blocked[i]);
+			if (EditorWidgets::smallButton("Allow")) collab->unban(blocked[i]);
 			ImGui::PopID();
 		}
 	}

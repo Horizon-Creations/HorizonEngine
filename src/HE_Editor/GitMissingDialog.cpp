@@ -1,5 +1,6 @@
 #include "GitMissingDialog.h"
 #include "EditorApplication.h"        // AppContext
+#include "EditorHelp.h"               // the Preferences page's "Source Control" scope, reused
 #include "EditorWidgets.h"            // pinDialogToEditorWindow
 
 #include <SourceControl/GitProbe.h>
@@ -30,11 +31,15 @@ namespace {
 void remedyButtons(const char* buttonLabel, const char* command,
                    const char* linkLabel, const char* url)
 {
-	if (ImGui::SmallButton(buttonLabel)) ImGui::SetClipboardText(command);
+	// Through the wrapper, so each remedy explains itself. The label is a
+	// run-time argument here, but the lookup is done on the string that is
+	// actually drawn — and both places these are drawn (this dialog and
+	// Preferences » Source Control) have the "Source Control" scope open.
+	if (EditorWidgets::smallButton(buttonLabel)) ImGui::SetClipboardText(command);
 	if (linkLabel && url)
 	{
 		ImGui::SameLine();
-		if (ImGui::SmallButton(linkLabel)) SDL_OpenURL(url);
+		if (EditorWidgets::smallButton(linkLabel)) SDL_OpenURL(url);
 	}
 }
 
@@ -143,6 +148,11 @@ void DrawGitMissingDialog(AppContext& ctx)
 	if (!ImGui::BeginPopupModal("##SourceControlUnavailable", nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
 		return;
+
+	// The SAME scope the Preferences page pushes, on purpose: this dialog and
+	// that page state the same facts about the same machine, so "Save Identity"
+	// here and there is one entry, not two that will drift.
+	HE::Ed::Help::Scope helpScope("Source Control");
 
 	if (s_last.ready())
 	{
@@ -310,11 +320,11 @@ void DrawGitMissingDialog(AppContext& ctx)
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		ImGui::Checkbox("Don't show this again", &s_dontShowAgain);
+		EditorWidgets::checkbox("Don't show this again", &s_dontShowAgain);
 		ImGui::Spacing();
 
 		if (s_checking) ImGui::BeginDisabled();
-		if (ImGui::Button("Recheck") && ctx.recheckGit) ctx.recheckGit();
+		if (EditorWidgets::button("Recheck") && ctx.recheckGit) ctx.recheckGit();
 		if (s_checking) ImGui::EndDisabled();
 		ImGui::SameLine();
 

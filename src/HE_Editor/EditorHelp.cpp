@@ -2733,6 +2733,286 @@ namespace
 	  "instead of the button.",
 	  "", "" },
 
+	// ── The collaboration window ─────────────────────────────────────────────
+	// "Collaboration Session" rather than "Collaboration": the shorter name is
+	// the viewport's lock banner and already owns keys.
+	{ "Collaboration Session/Display name", "",
+	  "The name everyone else in the session sees, stored with your picture so it "
+	  "is set once instead of typed on every join. The identity is read when a "
+	  "session starts, so changing it during one takes effect at the next join.",
+	  "", "collaboration#presence" },
+	{ "Collaboration Session/Auto", "Automatic colour",
+	  "Lets the host give you a colour that is still free, instead of picking one "
+	  "yourself. It is the only choice that can never collide, and the colour is "
+	  "what marks your camera, your selection and your locks for the others.",
+	  "", "collaboration#presence" },
+	{ "Collaboration Session/Custom", "Custom colour",
+	  "Picks a colour of your own. Nothing here is a promise: the host settles "
+	  "collisions, so if somebody already had the colour you asked for you are "
+	  "given a free one and the panel says so.",
+	  "", "collaboration#presence" },
+	{ "Collaboration Session/Port", "",
+	  "The port guests connect to when you host. 0 lets the system pick a free "
+	  "one. This is the session itself; the announcements that put it in other "
+	  "people's lists go over a separate socket of their own.",
+	  "", "collaboration#discovery" },
+	{ "Collaboration Session/Open session", "",
+	  "Starts hosting on the port above. The editor opens the port, generates a "
+	  "session ID and a join code, and publishes where it can be reached, so a "
+	  "guest needs those two values and never an address. Your open scene becomes "
+	  "the session's scene.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Announce this session on the local network", "",
+	  "Announces that a session exists here, so people on the same network find "
+	  "it in their list and join without an address. The join code is never "
+	  "announced, so it still has to be given out. It is one switch for both "
+	  "halves of discovery: while you are not hosting, the same setting listens "
+	  "for other people's sessions.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Look for sessions on this network", "",
+	  "Listens for hosts announcing themselves nearby and lists what it hears: "
+	  "who is hosting, which project, and how many people are in it. Picking a "
+	  "row fills in the session ID for you; the join code is still typed, because "
+	  "it is the only thing keeping strangers on this network out.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Join code", "",
+	  "The code the host gives you, and the only thing keeping strangers out of a "
+	  "session they can otherwise see. It is never announced on the network and "
+	  "is not kept between runs, so it is typed for each join.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Session ID", "",
+	  "The host's session ID. It is looked up in the session directory, which "
+	  "turns it into an address, so no IP address and no port are needed.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Join this session", "",
+	  "Joins the session picked above, at the address it announced rather than "
+	  "through the directory — a router usually refuses to let a machine reach "
+	  "its own network by its public address. Your open scene is replaced by the "
+	  "host's, so save anything you want to keep first.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Join", "",
+	  "Connects to the session named by the ID and the code above; both are "
+	  "required. Your open scene is replaced by the host's, so save anything you "
+	  "want to keep first.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Enable and join", "",
+	  "Agrees to this session's larger assets — meshes, textures and audio — and "
+	  "dials the same host again straight away. The setting is remembered and "
+	  "applies to every session from then on; it can be turned off again in "
+	  "Preferences while you are not in a session. It can use considerably more "
+	  "data than an ordinary session.",
+	  "", "collaboration#bigassets" },
+	{ "Collaboration Session/Approve", "",
+	  "Lets this delete or rename go through, for everyone including you. Nothing "
+	  "happens to the file until you say so. A row that says \"Delete folder\" "
+	  "removes everything underneath it, with no trash and no undo.",
+	  "", "collaboration#assets" },
+	{ "Collaboration Session/Approve all", "",
+	  "Answers a whole bundle at once: the files somebody selected and deleted or "
+	  "renamed in one action, which arrive as one decision rather than twenty. "
+	  "Open the row first to answer them one by one — \"all but that one\" is a "
+	  "real answer.",
+	  "", "collaboration#assets" },
+	{ "Collaboration Session/Hand over", "",
+	  "Gives the asset to whoever asked for it. Your lock is released and theirs "
+	  "granted in one step, so no third person can take it in between. You keep "
+	  "what you have already done; what you have open on it simply stops "
+	  "accepting edits.",
+	  "", "collaboration#locks" },
+	{ "Collaboration Session/Leave session", "",
+	  "Disconnects you and puts the panel back to the host-or-join form. As the "
+	  "host it ends the session for everyone: the announcements stop, and the "
+	  "port forward and the directory entry are given back rather than left "
+	  "standing for people to click on.",
+	  "", "collaboration#starting" },
+	{ "Collaboration Session/Dismiss", "",
+	  "Clears the failure above and puts the panel back to the host-or-join form. "
+	  "It retries nothing: the attempt it is reporting has already ended.",
+	  "", "collaboration#starting" },
+
+	{ "Session Participants/Block", "",
+	  "Removes this person from the session and refuses them if they try to "
+	  "rejoin. It asks first. The block lasts as long as this session — it does "
+	  "not affect a session you open later, and it can be lifted again in the "
+	  "blocked list below.",
+	  "", "collaboration#overview" },
+	{ "Session Participants/Allow", "",
+	  "Lifts the block on someone you removed, so this session will have them "
+	  "back. It does not reconnect them: they have to join again the way they did "
+	  "the first time.",
+	  "", "collaboration#overview" },
+	{ "Block Participant/Block", "Block participant",
+	  "Confirms it: the person is removed from the session, and a further attempt "
+	  "to join is refused without you being asked again. The block lasts until "
+	  "you close this session and can be lifted again from the participant list.",
+	  "", "collaboration#overview" },
+
+	// ── The Source Control window ────────────────────────────────────────────
+	// "Source Control Panel", because "Source Control" is the Preferences page
+	// that installs and configures git. Several of these carry no topic: the
+	// shipped manual has no source-control chapter, and a link to a near-miss is
+	// worse than none.
+	{ "Source Control Panel/New branch…", "New branch",
+	  "Opens the branch dialog, starting from the current state of the project "
+	  "rather than from a commit in the history. It is unavailable while a git "
+	  "command is running and before the first commit exists, since there is "
+	  "nothing yet to branch from.",
+	  "", "" },
+	{ "Source Control Panel/Tree view", "",
+	  "Shows the changed files as a folder tree, with single-child folders folded "
+	  "into one row. The choice is remembered between sessions.",
+	  "", "" },
+	{ "Source Control Panel/Flat list", "",
+	  "Shows every changed file as one row carrying its full path from the "
+	  "project root, instead of as a folder tree. The choice is remembered "
+	  "between sessions.",
+	  "", "" },
+	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
+	  "Opens the Preferences page that owns the setup: initialising the "
+	  "repository, the remote, the access token, auto-push and the fetch "
+	  "schedule. This window only commits, pushes, pulls and shows the history.",
+	  "", "editor#preferences" },
+	{ "Source Control Panel/Set up in Preferences…", "Set up in Preferences",
+	  "Opens the Preferences page where a project folder is turned into a git "
+	  "repository and a remote is added. Until it is one, this window has nothing "
+	  "to show.",
+	  "", "editor#preferences" },
+	{ "Source Control Panel/Create branch from this commit…", "Create branch from this commit",
+	  "Opens the branch dialog with this commit as the starting point rather than "
+	  "the current state. Creating a branch only writes a reference, so it stays "
+	  "available with uncommitted changes; it is SWITCHING to the new branch that "
+	  "needs a clean project.",
+	  "", "" },
+	{ "Source Control Panel/Restore project to this commit…", "Restore project to this commit",
+	  "Puts every file in the project folder back to how it was at this commit: "
+	  "files added since are removed, changed files are reverted, deleted files "
+	  "come back. Your history is kept, because the restore is recorded as a new "
+	  "commit — so it can be undone by restoring to a later one. It needs a clean "
+	  "project and is refused while anything is uncommitted.",
+	  "", "" },
+	{ "Source Control Panel/Switch to it right away", "",
+	  "Checks the new branch out as soon as it is created. It needs a clean "
+	  "project: with uncommitted changes the branch is still created, but this is "
+	  "switched off and you move to it once you have committed.",
+	  "", "" },
+	{ "sc.commit", "Commit",
+	  "Records every changed file in one commit with the message above; the "
+	  "button says how many that is. It stays unavailable without a message, with "
+	  "nothing changed, and while a conflict is unresolved — a commit that keeps "
+	  "conflict markers preserves the mess for good. With auto-push on, the "
+	  "commit goes to the remote as it is made.",
+	  "", "editor#preferences" },
+
+	// ── The startup dialog for a missing git ─────────────────────────────────
+	// Under the Preferences page's scope on purpose: the dialog and that page
+	// state the same facts about the same machine, and its remedy buttons are
+	// drawn by helpers the page calls too. "Save Identity" is already an entry
+	// there and is deliberately not repeated here.
+	{ "Source Control/Don't show this again", "",
+	  "Stops this dialog appearing at startup. Nothing is installed or configured "
+	  "by dismissing it: source control stays unavailable, and Preferences still "
+	  "says so.",
+	  "", "editor#preferences" },
+	{ "Source Control/Recheck", "",
+	  "Looks for git and Git LFS again, without restarting the editor. A clean "
+	  "result closes this dialog by itself, so this is what to press once an "
+	  "install has finished elsewhere.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy 'xcode-select --install'", "Copy the Xcode tools command",
+	  "Puts the command on the clipboard, to run in your own terminal. On macOS "
+	  "git arrives with the Xcode Command Line Tools, so that one command is the "
+	  "whole install.",
+	  "", "editor#preferences" },
+	{ "Source Control/git-scm.com", "git-scm.com",
+	  "Opens git's own download page in a browser, for installing it by hand "
+	  "instead of through a package manager.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy winget Command", "Copy the winget command",
+	  "Puts a winget install command on the clipboard, to run in your own shell. "
+	  "It is the command for whichever piece this bullet is about — git itself, "
+	  "or Git LFS. After installing Git for Windows, restart the editor so it "
+	  "picks up the new PATH.",
+	  "", "editor#preferences" },
+	{ "Source Control/Download Page", "Download Page",
+	  "Opens the Git for Windows download page, which is where git comes from on "
+	  "Windows.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy 'sudo apt install git'", "Copy the apt command",
+	  "Puts the command on the clipboard, to run in your own terminal. The editor "
+	  "does not install git for you on Linux; it only says what is missing.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy 'brew install git-lfs'", "Copy the brew command",
+	  "Puts the command on the clipboard, to run in your own terminal. Press "
+	  "Recheck afterwards rather than restarting.",
+	  "", "editor#preferences" },
+	{ "Source Control/git-lfs.com", "git-lfs.com",
+	  "Opens the Git LFS home page, where it can be downloaded and installed by "
+	  "hand.",
+	  "", "editor#preferences" },
+	{ "Source Control/Copy 'sudo apt install git-lfs'", "Copy the apt command for Git LFS",
+	  "Puts the command on the clipboard, to run in your own terminal. Git LFS is "
+	  "what keeps meshes, textures and audio out of the repository's own history, "
+	  "so a clone does not drag down every version of every asset.",
+	  "", "editor#preferences" },
+
+	// ── The issue reporter ───────────────────────────────────────────────────
+	{ "Report Issue/Attach the engine log", "",
+	  "Adds recent log lines to the report. They travel inside the issue text, "
+	  "and filing directly also uploads the complete log file as a secret gist "
+	  "and links it. A browser link cannot carry a file, so on that route the "
+	  "rest has to be dragged in by hand.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Warnings & errors", "",
+	  "Attaches only the lines logged as a warning or an error. Few lines survive "
+	  "the length limit of a browser link, so which ones they are matters more "
+	  "than how many. It is the default whenever anything was logged as a problem "
+	  "this run.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Everything", "",
+	  "Attaches the tail of the whole log rather than the problems alone. It is "
+	  "the right choice for a bug that never logged a word — wrong pixels, a "
+	  "frozen gizmo — where a filtered log would be empty.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Show Log File", "",
+	  "Opens the folder the engine log sits in, so the file can be dragged into "
+	  "an issue in the browser. It is the complete log; what the report carries "
+	  "is only the tail of it.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Copy Log Path", "",
+	  "Puts the full path of the log file on the clipboard, for opening it in "
+	  "something else or pasting it into a message.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Create a token", "",
+	  "Opens GitHub's personal access token page. A token with issues and gist "
+	  "access is what lets the editor file the report and upload the whole log "
+	  "for you; it is used once and never stored.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/File on GitHub", "",
+	  "Files the issue from here, under your own GitHub account, and uploads the "
+	  "complete log as a secret gist. It needs a title, because GitHub rejects an "
+	  "issue without one, and either an account the credential helper already "
+	  "holds or a token in the field above.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Open in Browser", "",
+	  "Opens the pre-filled issue form on GitHub instead of filing it from here, "
+	  "so nothing is sent until you submit it there. It needs no account. A link "
+	  "can only carry so much: if the report does not fit, the full text is put "
+	  "on your clipboard to paste over the form.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Copy Report", "",
+	  "Puts the whole report on the clipboard — the title, what you wrote, your "
+	  "engine version and this machine, and the log lines you chose — for sending "
+	  "it somewhere other than GitHub.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Open Issue", "",
+	  "Opens the issue that has just been filed in your browser. Its address is "
+	  "shown above and stays there until this dialog is closed.",
+	  "", "advanced#diagnostics" },
+	{ "Report Issue/Copy Link", "",
+	  "Puts the address of the issue that has just been filed on the clipboard. "
+	  "The report itself is already on GitHub; this is only the way back to it.",
+	  "", "advanced#diagnostics" },
+
 	// ── Windows and panels ───────────────────────────────────────────────────
 	{ "panel.console", "Console",
 	  "Everything the engine logged this session — warnings, errors, script "
@@ -2911,7 +3191,14 @@ namespace
 		{ "Build Window/", "editor-export", "Export & Diagnostics", "Build window" },
 		{ "Profiler/",     "editor-export", "Export & Diagnostics", "Profiler" },
 		{ "collab.",   "editor-collab",    "Collaboration & Source Control", "Collaboration" },
-		{ "sc.",       "editor-collab",    "Collaboration & Source Control", "Source control" },
+		{ "sc.",                    "editor-collab", "Collaboration & Source Control", "Source control" },
+		{ "Collaboration Session/", "editor-collab", "Collaboration & Source Control", "Collaboration window" },
+		{ "Session Participants/",  "editor-collab", "Collaboration & Source Control", "Participants" },
+		{ "Block Participant/",     "editor-collab", "Collaboration & Source Control", "Participants" },
+		{ "Source Control Panel/",  "editor-collab", "Collaboration & Source Control", "Source control" },
+		// The bug reporter is neither collaboration nor source control: it
+		// attaches the engine log and files an issue, which is diagnostics.
+		{ "Report Issue/",          "editor-export", "Export & Diagnostics", "Report an issue" },
 	};
 
 	// Every component scope maps to the component page, with the component as

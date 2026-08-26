@@ -150,7 +150,13 @@ den Test zu beruhigen.
 | 6 · Landschaft | erledigt (33 Einträge, drei Scopes, Werkzeugleiste nachgerüstet) | 0 |
 | 7 · Export + Profiler | erledigt (37 Einträge, drei Scopes, vier „(?)"-Tooltips aufgelöst) | 0 |
 | 8 · Animation, Audio, Mesh | erledigt (24 Einträge, sechs Scopes) | 0 |
-| 9–10 | offen | 67 |
+| 9 · HorizonCode-Panels | erledigt (33 Einträge, acht Scopes) | 0 |
+| 10 · Zusammenarbeit + Source Control | erledigt (50 Einträge, fünf Scopes) | 0 |
+
+**Damit ist der Audit geschlossen: 576 von 576 Bedienelementen, 792 Einträge, jede
+Baseline auf 0.** Die Zahl in Abschnitt 2 war 574 Bedienelemente bei 257 gedeckten; sie
+ist heute höher, weil getrennte Scopes Bedienelemente sichtbar machen, die der Scan
+vorher nach `(Scope, Label)` zusammengefasst hat.
 
 Die 39 des UI-Designers sind mehr als die 32, die der Audit vorher gezählt hat, und das
 ist kein Fehler: der Scan entdoppelt nach `(Scope, Label)`, und ohne Scopes waren
@@ -216,6 +222,20 @@ Aus Stufe 7:
   `"\xe2\x80\x94"` im Quelltext ist für den Compiler ein Geviertstrich und für das
   Audit-Skript, das die Datei als Text liest, ein Backslash. Die Zeile muss den echten
   Strich tragen.
+Aus den Stufen 9 und 10:
+
+* **Ein Tooltip an der falschen Stelle ist schlimmer als keiner.** Die Checkbox „Announce
+  this session on the local network" hatte ihr `IsItemHovered()` hinter dem ganzen
+  Status-Block, also fragte es nach der zuletzt gezeichneten TEXTZEILE und nicht nach der
+  Checkbox. Die Erklärung erschien über „Announced 3 times." oder über gar nichts.
+* **`cancelButton` hat nie nachgeschlagen**, obwohl der Kommentar im Header seit Stufe 2
+  behauptet hat, alle drei Bestätigungs-Knöpfe täten es. `primaryButton` und
+  `dangerButton` gehen durch `filledButton`, `cancelButton` nicht.
+* **Ein geteilter Helfer braucht den Scope in sich selbst.** `HcGraphHost` und
+  `HcEditorUtil` zeichnen dieselben Knoten-Zeilen für vier Editoren,
+  `GitMissingDialog::drawGitInstallRemedy` wird vom Startdialog und von den Einstellungen
+  aufgerufen. Der Scope gehört in die geteilte Datei, und der Satz muss an jeder
+  Aufrufstelle stimmen.
 * **`Bar::item` konnte gar keinen Hilfe-Schlüssel nennen.** `cellImpl` kann es seit dem
   Umbau der Werkzeugleiste, `Bar::item` reichte ihn nur nicht durch. Der Fall, der das
   wichtig macht: der Einzeiler einer Zelle wird unterdrückt, solange sie ausgegraut ist,

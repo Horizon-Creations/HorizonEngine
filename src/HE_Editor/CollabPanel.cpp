@@ -1,5 +1,6 @@
 #include "CollabPanel.h"
 #include "EditorWidgets.h"    // primary/danger/cancel buttons
+#include "EditorHelp.h"       // "Collaboration Session/<label>" scope for the tooltips
 #include "EditorTheme.h"      // brand palette (emphasis text)
 
 #include "CollabController.h"
@@ -108,6 +109,9 @@ namespace
 	// also shows what was actually assigned once a session is running.
 	void DrawColorChoice(AppContext& ctx, bool editable)
 	{
+		// Not "Collaboration": that scope belongs to the viewport's lock banner
+		// and already owns keys of its own.
+		HE::Ed::Help::Scope helpScope("Collaboration Session");
 		using HE::Net::ParticipantColor;
 
 		ImGui::Spacing();
@@ -146,12 +150,10 @@ namespace
 		const bool automatic = mine.unset();
 		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, automatic ? 2.0f : 0.0f);
 		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, automatic ? 1.0f : 0.0f));
-		if (ImGui::Button("Auto", ImVec2(0.0f, kSwatch)))
+		if (EditorWidgets::button("Auto", ImVec2(0.0f, kSwatch)))
 			CollabController::setLocalColor(ParticipantColor{});
 		ImGui::PopStyleColor();
 		ImGui::PopStyleVar();
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("Let the host pick a colour that is still free.");
 
 		float custom[3] = { mine.r / 255.0f, mine.g / 255.0f, mine.b / 255.0f };
 		ImGui::SetNextItemWidth(160.0f);
@@ -167,6 +169,7 @@ namespace
 			if (picked.unset()) picked.r = picked.g = picked.b = 1;
 			CollabController::setLocalColor(picked);
 		}
+		EditorWidgets::helpForLabel("Custom");
 		ImGui::SameLine();
 		ImGui::TextDisabled("custom");
 
@@ -203,6 +206,7 @@ namespace
 	// look at again until the next join. Saying so beats silently doing nothing.
 	void DrawIdentity(AppContext& ctx, bool editable)
 	{
+		HE::Ed::Help::Scope helpScope("Collaboration Session");
 		SyncDisplayNameFromIdentity();
 
 		ImGui::SeparatorText("You");
@@ -219,6 +223,7 @@ namespace
 		// Written when the field is left, not on every keystroke: setLocalName
 		// rewrites config.json, and a name is a dozen characters.
 		if (ImGui::IsItemDeactivatedAfterEdit()) CollabController::setLocalName(s_displayName);
+		EditorWidgets::helpForLabel("Display name");
 
 		const bool hasPicture = CollabController::localIdentity().avatarSize > 0;
 		if (ImGui::Button(hasPicture ? "Change picture..." : "Choose picture..."))
@@ -283,6 +288,7 @@ namespace
 
 	void DrawLargeAssetPrompt(AppContext& ctx)
 	{
+		HE::Ed::Help::Scope helpScope("Collaboration Session");
 		CollabController* collab = ctx.collab;
 		if (!collab) return;
 
@@ -427,6 +433,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 	ImGui::SetNextWindowSize(ImVec2(440, 400), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("Collaboration", &open)) { ImGui::End(); return; }
+	HE::Ed::Help::Scope helpScope("Collaboration Session");
 
 	CollabController* collab = ctx.collab;
 	if (!collab)
@@ -465,10 +472,13 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::SetNextItemWidth(120);
 		ImGui::InputInt("Port", &s_hostPort);
 		s_hostPort = std::clamp(s_hostPort, 0, 65535);
-		ImGui::SameLine();
-		ImGui::TextDisabled("(?)");
-		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("0 lets the system pick a free port.");
+		EditorWidgets::helpForLabel("Port");
+		// The hand-rolled "(?)" that sat here carried a SetTooltip of its own,
+		// which would now be a second tooltip beside the field's. helpMarker
+		// draws the same mark from the same entry, so there is one sentence and
+		// one place to change it. It goes AFTER the lookup above: it submits an
+		// item of its own, and the lookup reads the last one.
+		EditorWidgets::helpMarker("Collaboration Session/Port");
 
 		if (EditorWidgets::primaryButton("Open session", ImVec2(170, 0)))
 			collab->startHosting(static_cast<std::uint16_t>(s_hostPort), s_displayName);
@@ -536,7 +546,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			// editor pushes it down every frame, so this both takes effect
 			// immediately and survives a restart.
 			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
-			if (ImGui::Checkbox("Announce this session on the local network", &lanOn))
+			// Its tooltip used to be written out below, after the whole status
+			// block — so IsItemHovered() there asked about the last LINE OF TEXT
+			// drawn, not about this checkbox, and the explanation appeared over
+			// "Announced 3 times." or over nothing at all. As an entry it hangs
+			// on the checkbox itself, which is what it was always about.
+			if (EditorWidgets::checkbox("Announce this session on the local network", &lanOn))
 				ctx.editorConfig.CollabLanDiscovery = lanOn;
 
 			// Whether anything is actually leaving this machine. Without it,
@@ -569,13 +584,6 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						                    "back to it, so the network carries them.");
 				}
 			}
-			if (ImGui::IsItemHovered())
-			{
-				ImGui::SetTooltip(
-					"People on the same network see your session in their list and\n"
-					"join without an address. Your join code is NOT announced.\n"
-					"Turn this off on a network you do not want to be seen on.");
-			}
 		}
 
 		// ── Join ──
@@ -588,19 +596,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 			// Same switch as the host side's — one feature, one setting. Written
 			// to the config, which the editor pushes into the controller.
 			bool lanOn = ctx.editorConfig.CollabLanDiscovery;
-			if (ImGui::Checkbox("Look for sessions on this network", &lanOn))
+			if (EditorWidgets::checkbox("Look for sessions on this network", &lanOn))
 			{
 				ctx.editorConfig.CollabLanDiscovery = lanOn;
 				// The list is gone either way; a selection into it is not worth
 				// carrying across the switch.
 				s_lanPicked = 0;
-			}
-			if (ImGui::IsItemHovered())
-			{
-				ImGui::SetTooltip(
-					"Hosts announce themselves on the local network, so a session\n"
-					"here needs no address and no session ID. The join code is\n"
-					"never announced — you still get that from the host.");
 			}
 
 			if (lanOn)
@@ -740,6 +741,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						ImGui::SetNextItemWidth(220);
 						ImGui::InputText("Join code##lan", s_lanJoinCode,
 						                 sizeof(s_lanJoinCode));
+						EditorWidgets::helpForLabel("Join code##lan");
 						ImGui::BeginDisabled(s_lanJoinCode[0] == '\0');
 						if (EditorWidgets::primaryButton("Join this session", ImVec2(190, 0)))
 						{
@@ -767,7 +769,9 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::Spacing();
 		ImGui::TextDisabled("Or join by ID:");
 		ImGui::InputText("Session ID", s_joinSessionId, sizeof(s_joinSessionId));
+		EditorWidgets::helpForLabel("Session ID");
 		ImGui::InputText("Join code",  s_joinCode,      sizeof(s_joinCode));
+		EditorWidgets::helpForLabel("Join code");
 
 		const bool canJoin = s_joinSessionId[0] != '\0' && s_joinCode[0] != '\0';
 		ImGui::BeginDisabled(!canJoin);
@@ -1277,7 +1281,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 
 		ImGui::Spacing();
 		ImGui::Separator();
-		if (ImGui::Button("Leave session", ImVec2(170, 0))) collab->leave();
+		if (EditorWidgets::button("Leave session", ImVec2(170, 0))) collab->leave();
 	}
 
 	// Being thrown out looks exactly like the host's network dying unless it is
@@ -1301,7 +1305,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
 		ImGui::TextWrapped("%s", collab->lastError().c_str());
 		ImGui::PopStyleColor();
-		if (ImGui::Button("Dismiss")) collab->leave();
+		if (EditorWidgets::button("Dismiss")) collab->leave();
 	}
 
 	ImGui::End();

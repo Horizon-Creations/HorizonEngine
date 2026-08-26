@@ -3,6 +3,7 @@
 #include "EditorSettingsPanel.h"  // repo/remote setup lives in the Preferences tab
 #include "EditorToolbar.h"     // shared toolbar look (Scene bar uses the same)
 #include "EditorTheme.h"       // brand palette (emphasis text)
+#include "EditorHelp.h"        // "Source Control Panel/<label>" scope for the tooltips
 #include "EditorWidgets.h"     // primary/danger/cancel buttons
 #include "GitController.h"
 
@@ -310,6 +311,9 @@ void drawChangeList(const HE::Sc::RepoStatus& st)
 
 void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 {
+	// "Source Control Panel", not "Source Control": that scope belongs to the
+	// Preferences page that INSTALLS git, and this is the window that uses it.
+	HE::Ed::Help::Scope helpScope("Source Control Panel");
 	ImGui::TextDisabled("Branches");
 	ImGui::Separator();
 	if (git.branches().empty())
@@ -326,7 +330,7 @@ void drawBranchPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	}
 	ImGui::Separator();
 	ImGui::BeginDisabled(git.busy() || st.initialCommit || !git.mayModify());
-	if (ImGui::MenuItem("New branch…"))
+	if (EditorWidgets::menuItem("New branch…"))
 	{
 		s_branchFromOid.clear();          // empty start = branch off HEAD
 		s_branchFromSubject.clear();
@@ -352,15 +356,16 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	// The scope is the function body, which ends before the caller's EndPopup() —
 	// the pop has to happen while this popup is still the current window.
 	EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 26.0f);
+	HE::Ed::Help::Scope helpScope("Source Control Panel");
 
 	ImGui::TextDisabled("Changes");
 	ImGui::Separator();
-	if (ImGui::MenuItem("Tree view", nullptr, s_treeView))
+	if (EditorWidgets::menuItem("Tree view", nullptr, s_treeView))
 	{
 		s_treeView = true;
 		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", true);
 	}
-	if (ImGui::MenuItem("Flat list", nullptr, !s_treeView))
+	if (EditorWidgets::menuItem("Flat list", nullptr, !s_treeView))
 	{
 		s_treeView = false;
 		GlobalState::getInstance().setCustomConfigEntry("GitChangesTreeView", false);
@@ -388,7 +393,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 
 	ImGui::Spacing();
 	ImGui::Separator();
-	if (ImGui::MenuItem("Open source-control settings…"))
+	if (EditorWidgets::menuItem("Open source-control settings…"))
 		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 }
 
@@ -601,6 +606,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 		ImGui::End();
 		return;
 	}
+	HE::Ed::Help::Scope helpScope("Source Control Panel");
 
 	if (!git)
 	{
@@ -633,7 +639,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			ImGui::TextWrapped("Repository setup (init, remote, GitHub token) lives "
 			                   "in Preferences \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
-			if (ImGui::Button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
+			if (EditorWidgets::button("Set up in Preferences…", ImVec2(240.0f, 0.0f)))
 				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::Repository);
 		}
 
@@ -737,6 +743,10 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			s_commitMessage[0] = '\0';
 		}
 		ImGui::EndDisabled();
+		// By key, not by label: the label is built at run time ("Commit 3
+		// changes"), so there is no fixed string to key the table on. The lookup
+		// allows a disabled item, which is exactly when this gets asked.
+		EditorWidgets::helpForKey("sc.commit");
 
 		if (hasConflicts)
 		{
@@ -823,7 +833,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 					// ref, so it stays available with a dirty tree — the
 					// dialog's "switch to it" is what the guard applies to.
 					ImGui::BeginDisabled(git->busy());
-					if (ImGui::MenuItem("Create branch from this commit…"))
+					if (EditorWidgets::menuItem("Create branch from this commit…"))
 					{
 						s_branchFromOid     = c.shortOid;
 						s_branchFromSubject = c.subject;
@@ -834,7 +844,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 					ImGui::EndDisabled();
 
 					ImGui::BeginDisabled(git->busy() || st.dirtyCount() != 0);
-					if (ImGui::MenuItem("Restore project to this commit…"))
+					if (EditorWidgets::menuItem("Restore project to this commit…"))
 					{
 						s_restoreOid     = c.shortOid;
 						s_restoreSubject = c.subject;
@@ -914,7 +924,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 
 			const bool dirty = st.dirtyCount() != 0;
 			ImGui::BeginDisabled(dirty);
-			ImGui::Checkbox("Switch to it right away", &s_branchCheckout);
+			EditorWidgets::checkbox("Switch to it right away", &s_branchCheckout);
 			ImGui::EndDisabled();
 			if (dirty)
 			{

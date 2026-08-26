@@ -277,6 +277,24 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Class Components",           "Add Child" },
 		{ "Type Editor",                "+ Add Field" },
 		{ "Type Editor",                "Set as Project Default" },
+		// Collaboration and source control. The git-remedy buttons are drawn by
+		// helpers that BOTH the startup dialog and the Preferences page call, so
+		// one scope has to serve both call sites.
+		{ "Collaboration Session", "Display name" },
+		{ "Collaboration Session", "Port" },
+		{ "Collaboration Session", "Join code##lan" },
+		{ "Collaboration Session", "Hand over" },
+		{ "Collaboration Session", "Enable and join" },
+		{ "Session Participants",  "Block" },
+		{ "Block Participant",     "Block" },
+		{ "Source Control Panel",  "New branch…" },
+		{ "Source Control Panel",  "Restore project to this commit…" },
+		{ "Source Control",        "Recheck" },
+		{ "Source Control",        "Copy winget Command" },
+		{ "Source Control",        "git-scm.com" },
+		{ "Source Control",        "Save Identity" },
+		{ "Report Issue",          "File on GitHub" },
+		{ "Report Issue",          "Warnings & errors" },
 	};
 	for (const Case& c : cases)
 	{
@@ -297,6 +315,9 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		"Landscape/Sculpt",   "Landscape/Paint",
 		"Landscape/Raise",    "Landscape/Lower",   "Landscape/Smooth",
 		"Landscape/Flatten",  "Landscape/Ramp",    "Landscape/Roughen",
+		// The Source Control window's commit button says "Commit 3 changes", so
+		// there is no fixed label either.
+		"sc.commit",
 	};
 	for (const char* k : byKey)
 	{

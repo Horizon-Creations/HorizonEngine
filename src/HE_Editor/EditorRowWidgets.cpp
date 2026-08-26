@@ -178,6 +178,10 @@ bool cancelButton(const char* label, const ImVec2& size)
 	const bool pressed = ImGui::Button(label, size);
 	ImGui::PopStyleVar();
 	ImGui::PopStyleColor(3);
+	// This one does not go through filledButton, so it needs its own lookup —
+	// the header promised all three of these look their label up, and until now
+	// this was the one that did not.
+	helpForLabel(label);
 	return pressed;
 }
 

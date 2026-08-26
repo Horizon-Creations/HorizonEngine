@@ -8,6 +8,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include "EditorApplication.h"          // AppContext (renderer backend name)
+#include "EditorHelp.h"                 // "Report Issue/<label>" scope for the tooltips
 #include "EditorWidgets.h"              // pinDialogToEditorWindow
 #include "HorizonVersion.h"             // HE_VERSION_STRING / HE_VERSION_CODENAME
 #include <Diagnostics/GlobalState.h>    // project path — cwd for the credential probe
@@ -635,6 +636,8 @@ bool isOpen()
 void DrawReportIssueDialog(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+	HE::Ed::Help::Scope helpScope("Report Issue");
+
 	// Join a worker that finished while the dialog was closed, so a shut dialog
 	// never leaves a joinable thread lying around.
 	reapWorker();
@@ -737,7 +740,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 	ImGui::Separator();
 	ImGui::Spacing();
 
-	ImGui::Checkbox("Attach the engine log", &s_includeLog);
+	EditorWidgets::checkbox("Attach the engine log", &s_includeLog);
 	ImGui::SameLine();
 	ImGui::TextDisabled("(%s this run)", s_logCounts.c_str());
 
@@ -748,8 +751,10 @@ void DrawReportIssueDialog(AppContext& ctx)
 		// Only a dozen or two lines survive the URL limit, so which lines they
 		// are matters more than how many: warnings and errors first.
 		if (ImGui::RadioButton("Warnings & errors", s_problemsOnly)) s_problemsOnly = true;
+		EditorWidgets::helpForLabel("Warnings & errors");
 		ImGui::SameLine();
 		if (ImGui::RadioButton("Everything", !s_problemsOnly)) s_problemsOnly = false;
+		EditorWidgets::helpForLabel("Everything");
 		ImGui::SameLine();
 		ImGui::TextDisabled("(%d of %d lines)",
 		                    static_cast<int>(chosenLogLines().size()),
@@ -787,9 +792,9 @@ void DrawReportIssueDialog(AppContext& ctx)
 		ImGui::PopTextWrapPos();
 		if (!s_logPath.empty())
 		{
-			if (ImGui::SmallButton("Show Log File")) revealLogFile();
+			if (EditorWidgets::smallButton("Show Log File")) revealLogFile();
 			ImGui::SameLine();
-			if (ImGui::SmallButton("Copy Log Path")) ImGui::SetClipboardText(s_logPath.c_str());
+			if (EditorWidgets::smallButton("Copy Log Path")) ImGui::SetClipboardText(s_logPath.c_str());
 			ImGui::SameLine();
 			// An absolute log path never fits after two buttons. It wraps onto
 			// further lines rather than being cut at the edge — the tail of a path
@@ -847,9 +852,9 @@ void DrawReportIssueDialog(AppContext& ctx)
 			ImGui::PopTextWrapPos();
 		}
 		ImGui::Spacing();
-		if (ImGui::Button("Open Issue", ImVec2(150.0f, 0.0f))) SDL_OpenURL(w.issueUrl.c_str());
+		if (EditorWidgets::button("Open Issue", ImVec2(150.0f, 0.0f))) SDL_OpenURL(w.issueUrl.c_str());
 		ImGui::SameLine();
-		if (ImGui::Button("Copy Link", ImVec2(120.0f, 0.0f)))
+		if (EditorWidgets::button("Copy Link", ImVec2(120.0f, 0.0f)))
 			ImGui::SetClipboardText(w.issueUrl.c_str());
 		ImGui::SameLine();
 		if (ImGui::Button("Close", ImVec2(100.0f, 0.0f)))
@@ -900,7 +905,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 		ImGui::InputTextWithHint("##ri_token", "GitHub token (optional)", &s_pastedToken,
 		                         ImGuiInputTextFlags_Password);
 		ImGui::SameLine();
-		if (ImGui::SmallButton("Create a token"))
+		if (EditorWidgets::smallButton("Create a token"))
 			SDL_OpenURL("https://github.com/settings/tokens");
 	}
 
@@ -921,7 +926,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 	const bool haveToken   = !w.login.empty() || !s_pastedToken.empty();
 	const bool canFile     = !busy && haveToken && !s_title.empty();
 	if (!canFile) ImGui::BeginDisabled();
-	if (ImGui::Button("File on GitHub", ImVec2(150.0f, 0.0f)))
+	if (EditorWidgets::button("File on GitHub", ImVec2(150.0f, 0.0f)))
 	{
 		s_status.clear();
 		Report report = currentReport();
@@ -929,8 +934,9 @@ void DrawReportIssueDialog(AppContext& ctx)
 		wipe(s_pastedToken);
 	}
 	if (!canFile) ImGui::EndDisabled();
-	if (!busy && haveToken && s_title.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-		ImGui::SetTooltip("GitHub needs a title for the issue.");
+	// The hand-written "GitHub needs a title" tooltip stood here. The entry says
+	// it now, and it is shown on the disabled button too, which is where it was
+	// needed — two tooltips on one control is one too many.
 	ImGui::SameLine();
 
 	if (busy) ImGui::BeginDisabled();
@@ -938,7 +944,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 	// Something has to be said; the rest can be filled in on the web form.
 	const bool submittable = !s_title.empty() || !s_what.empty();
 	if (!submittable) ImGui::BeginDisabled();
-	if (ImGui::Button("Open in Browser", ImVec2(150.0f, 0.0f)))
+	if (EditorWidgets::button("Open in Browser", ImVec2(150.0f, 0.0f)))
 	{
 		const Preview& p = preview();
 		SDL_OpenURL(p.url.c_str());
@@ -968,7 +974,7 @@ void DrawReportIssueDialog(AppContext& ctx)
 	if (!submittable) ImGui::EndDisabled();
 
 	ImGui::SameLine();
-	if (ImGui::Button("Copy Report", ImVec2(120.0f, 0.0f)))
+	if (EditorWidgets::button("Copy Report", ImVec2(120.0f, 0.0f)))
 	{
 		ImGui::SetClipboardText((s_title + "\n\n" + preview().body).c_str());
 		s_status = "Full report copied to the clipboard.";
