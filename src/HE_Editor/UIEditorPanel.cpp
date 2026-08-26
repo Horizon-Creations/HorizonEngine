@@ -2399,6 +2399,8 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.currentGraph = st.currentGraph;
 	host.content      = ctx.contentManager;
 	host.giGraph      = ctx.gameInstanceGraph;
+	// What a Get Self resolves to — the same key the cross-asset rename uses.
+	host.selfKey      = st.relPath;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (st.compileHas && !st.compileOk) ? st.compileNode : 0;
 	host.title        = [&st](const HC::Node& n){ return graphNodeTitle(st, n); };

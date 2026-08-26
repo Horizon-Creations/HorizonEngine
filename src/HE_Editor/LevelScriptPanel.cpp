@@ -982,6 +982,9 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.content      = content;
 	host.giGraph      = giGraph;
 	host.selfBaseClass = baseClass;
+	// What a Get Self resolves to — the same key the cross-asset rename uses, so
+	// the Target Class row can name this graph instead of shrugging at it.
+	host.selfKey      = g.graphFor;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };

@@ -1010,6 +1010,11 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		};
 		HC::Graph scratch;
 		const HC::Graph* cls = resolveClassGraph(src, graph, h.giGraph, h.content, scratch);
+		// The key behind that graph, recorded on whatever this menu creates: the
+		// menu already knows which class it is offering members of, and writing it
+		// down here is what lets a rename find these nodes later without re-walking
+		// a wire that may since have been re-routed.
+		const std::string clsKey = HcRename::classOfRefSource(graph, src, h.selfKey, "Game Instance");
 		if (cls)
 		{
 			// SNAPSHOT the offered signatures first: with a "Get Self" source,
@@ -1030,6 +1035,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 						const int id = addNode(graph, NT::CallExternal, pos, h.currentGraph);
 						HC::Node* nn = graph.findNode(id);
 						nn->s = fn.s; nn->params = fn.params; nn->results = fn.results; // typed signature
+						nn->className = clsKey;   // whose function this is, while the menu still knows
 						wire(id); created = id; ImGui::CloseCurrentPopup();
 					}
 				}
@@ -1040,9 +1046,9 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 					if (!vh && (matches("Get " + var.name) || matches("Set " + var.name)))
 					{ ImGui::TextDisabled("Variables"); vh = true; }
 					if (matches("Get " + var.name) && HcEditorUtil::searchMenuItem("Get " + var.name))
-					{ const int id = addNode(graph, NT::GetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					{ const int id = addNode(graph, NT::GetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; nn->className = clsKey; wire(id); created = id; ImGui::CloseCurrentPopup(); }
 					if (matches("Set " + var.name) && HcEditorUtil::searchMenuItem("Set " + var.name))
-					{ const int id = addNode(graph, NT::SetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; wire(id); created = id; ImGui::CloseCurrentPopup(); }
+					{ const int id = addNode(graph, NT::SetExternal, pos, h.currentGraph); HC::Node* nn = graph.findNode(id); nn->s = var.name; nn->propType = var.type; nn->className = clsKey; wire(id); created = id; ImGui::CloseCurrentPopup(); }
 				}
 			if (fh || vh) ImGui::Separator();
 		}
@@ -1372,6 +1378,138 @@ bool drawEventPicker(HC::Graph& g, HC::Node& n, const char* label)
 	return changed;
 }
 
+// ── Target Class + member, for the three nodes that reach into another object ─
+// Call (Ref), Get (Ref) and Set (Ref) name a member of ANOTHER class, and used to
+// do it with a bare text field: the target is whatever the reference turns out to
+// be at run time, so there was nothing to offer a list from. There is now,
+// because the graph can usually say what the Target is — Create Object and Cast
+// name their class, a Ref variable records one, Get Self is this graph — and
+// where it cannot, the node can be told and remembers (Node::className).
+//
+// Recording it is what makes renaming that member possible later: HcRename reads
+// exactly this, and a node that knows which class it meant is a node a rename can
+// find without guessing.
+
+// The graph whose members are offered. For a target that IS this graph, the copy
+// on screen wins over the one on disk: it has the function the user just added.
+const HC::Graph* memberSource(const Host& h, const HC::Graph& g, const std::string& cls,
+                              HC::Graph& scratch)
+{
+	if (cls.empty()) return nullptr;
+	if (cls == h.selfKey) return &g;
+	return loadClassGraph(h.content, cls, scratch) ? &scratch : nullptr;
+}
+
+// Which class this node's Target is. Returns it, so the member row below knows
+// what to offer; "" when neither the node nor the wire can say.
+std::string drawTargetClassRow(const Host& h, HC::Graph& g, HC::Node& n)
+{
+	// A shared helper scopes itself: the callers push this same scope, but a
+	// reader walking this file top to bottom (the help audit does exactly that)
+	// would otherwise file these rows under whatever scope was opened last.
+	HE::Ed::Help::Scope helpScope("HorizonCode Node");
+
+	const std::string fromWire = n.className.empty()
+		? HcRename::targetClassOf(g, n, h.selfKey, "Game Instance")
+		: std::string();
+	const std::string resolved = n.className.empty() ? fromWire : n.className;
+
+	std::string preview;
+	if (!n.className.empty())   preview = HcEditorUtil::castTargetLabel(n.className);
+	else if (!fromWire.empty()) preview = "From the wire: " + HcEditorUtil::castTargetLabel(fromWire);
+	else                        preview = "(unknown)";
+
+	const bool open = ImGui::BeginCombo("Target Class", preview.c_str());
+	if (!open) EditorWidgets::helpForLabel("Target Class");
+	if (open)
+	{
+		// Leaving it to the wire is the DEFAULT, and it is the better answer
+		// whenever the wire can answer: one place to change instead of two.
+		if (ImGui::Selectable("From the wire", n.className.empty()) && !n.className.empty())
+		{ n.className.clear(); if (h.onEdit) h.onEdit(true); }
+		ImGui::Separator();
+		for (const auto& c : HcEditorUtil::listHorizonCodeClasses(h.content))
+			if (ImGui::Selectable((c.label + "##" + c.path).c_str(), n.className == c.path) &&
+			    n.className != c.path)
+			{ n.className = c.path; if (h.onEdit) h.onEdit(true); }
+		ImGui::EndCombo();
+	}
+	return resolved;
+}
+
+// The member itself. False = nothing could be offered, so the caller falls back
+// to the text field that was the only thing here before.
+bool drawTargetMemberRow(const Host& h, HC::Graph& g, HC::Node& n, const std::string& cls,
+                         bool functions)
+{
+	HE::Ed::Help::Scope helpScope("HorizonCode Node");   // see drawTargetClassRow
+
+	HC::Graph scratch;
+	const HC::Graph* src = memberSource(h, g, cls, scratch);
+	if (!src) return false;
+
+	// A name the class does not have is not hidden behind a tidy dropdown: it is
+	// what a rename somewhere else leaves behind, and it is the one thing worth
+	// seeing at a glance.
+	const char* label = functions ? "Function" : "Variable";
+	bool known = false;
+	if (functions)
+		for (const HC::Node& fn : src->nodes)
+			known = known || (fn.type == NT::FunctionEntry && fn.access == 0 && fn.s == n.s);
+	else
+		for (const HC::Variable& v : src->variables)
+			known = known || (v.access == 0 && v.name == n.s);
+
+	std::string preview = n.s.empty() ? std::string("(none)") : n.s;
+	if (!n.s.empty() && !known) preview += "  — not on " + HcEditorUtil::castTargetLabel(cls);
+
+	const bool open = ImGui::BeginCombo(label, preview.c_str());
+	if (!open) EditorWidgets::helpForLabel(label);
+	if (open)
+	{
+		if (functions)
+		{
+			// Snapshot first: picking one edits this very nodes-vector when the
+			// target is this graph, and the loop's iterator would not survive it.
+			std::vector<HC::Node> fns;
+			for (const HC::Node& fn : src->nodes)
+				if (fn.type == NT::FunctionEntry && fn.access == 0 && !fn.s.empty()) fns.push_back(fn);
+			for (const HC::Node& fn : fns)
+				if (ImGui::Selectable(fn.s.c_str(), n.s == fn.s) && n.s != fn.s)
+				{
+					// The pins ARE the signature, so every data wire on the node was
+					// measured against the old one. Target (the first data input)
+					// survives; the rest cannot.
+					const PinRanges r = pinRanges(n);
+					for (int pin = r.dataIn0 + 1; pin < r.end; ++pin) removePinLinks(g, n.id, pin);
+					n.s = fn.s; n.params = fn.params; n.results = fn.results;
+					if (h.onEdit) h.onEdit(true);
+				}
+		}
+		else
+		{
+			std::vector<HC::Variable> vars;
+			for (const HC::Variable& v : src->variables)
+				if (v.access == 0 && v.scope == 0) vars.push_back(v);
+			for (const HC::Variable& v : vars)
+				if (ImGui::Selectable(v.name.c_str(), n.s == v.name) && n.s != v.name)
+				{
+					if (v.type != n.propType)
+					{
+						const PinRanges r = pinRanges(n);
+						const int valuePin = n.type == NT::GetExternal ? r.dataOut0 : (r.dataIn0 + 1);
+						removePinLinks(g, n.id, valuePin);
+						n.propType = v.type;
+					}
+					n.s = v.name;
+					if (h.onEdit) h.onEdit(true);
+				}
+		}
+		ImGui::EndCombo();
+	}
+	return true;
+}
+
 bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 {
 	if (!h.graph) return false;
@@ -1640,11 +1778,17 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 		return true;
 
 	case NT::CallExternal:
-		ImGui::InputText("Function", &n.s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
-		EditorWidgets::helpForLabel("Function");
+	{
+		const std::string cls = drawTargetClassRow(h, g, n);
+		if (!drawTargetMemberRow(h, g, n, cls, /*functions=*/true))
+		{
+			ImGui::InputText("Function", &n.s);
+			if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+			EditorWidgets::helpForLabel("Function");
+		}
 		ImGui::TextDisabled("Calls a public function on the\nTarget instance (a reference).");
 		return true;
+	}
 
 	case NT::CreateWidget:
 	{
@@ -1710,9 +1854,13 @@ bool drawCommonNodeDetails(const Host& h, HC::Node& n)
 	case NT::GetExternal:
 	case NT::SetExternal:
 	{
-		ImGui::InputText("Variable", &n.s);
-		if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
-		EditorWidgets::helpForLabel("Variable");
+		const std::string cls = drawTargetClassRow(h, g, n);
+		if (!drawTargetMemberRow(h, g, n, cls, /*functions=*/false))
+		{
+			ImGui::InputText("Variable", &n.s);
+			if (ImGui::IsItemDeactivatedAfterEdit()) edit(true);
+			EditorWidgets::helpForLabel("Variable");
+		}
 		int t = (int)n.propType;
 		if (ImGui::Combo("Type", &t, "Exec\0Float\0Bool\0Int\0String\0Vec2\0Color\0Object\0"))
 		{

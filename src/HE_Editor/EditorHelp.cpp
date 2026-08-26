@@ -2731,15 +2731,24 @@ namespace
 	  "choose from this graph's own variables plus the public ones a base class "
 	  "brings, and a function-local only when the node itself sits in that "
 	  "function's sub-graph; the node then takes that variable's type, and a wire "
-	  "the pin can no longer carry is dropped. Get (Ref) and Set (Ref) take a "
-	  "typed name instead: the public "
-	  "variable of that name on the object wired to Target.",
+	  "the pin can no longer carry is dropped. Get (Ref) and Set (Ref) name a "
+	  "public variable on the object wired to Target instead, picked from the "
+	  "Target Class above once that is known.",
 	  "", "horizoncode#functions" },
 	{ "HorizonCode Node/Function", "",
-	  "The name of the public function to call on the object wired to Target. It "
-	  "is typed rather than picked from a list, because the target is any object "
-	  "that has a function of that name — so the spelling here has to match the "
-	  "one declared there.",
+	  "Which public function to call on the object wired to Target. Once the "
+	  "Target Class above is known the list holds that class's own functions, and "
+	  "picking one mirrors its parameters and results onto the node. A name that "
+	  "class does not have is shown as such rather than hidden, because that is "
+	  "what a rename elsewhere leaves behind.",
+	  "", "horizoncode#communication" },
+	{ "HorizonCode Node/Target Class", "",
+	  "Which class the object wired to Target is expected to be. Left on \"From "
+	  "the wire\" it is read off whatever produces the reference — a Create "
+	  "Object, a Cast, a typed object variable, Get Self — which is one place to "
+	  "change instead of two. Naming it here is for the cases the wire cannot "
+	  "answer, and it is also what lets renaming a member of that class find this "
+	  "node instead of leaving it pointing at a name nothing has.",
 	  "", "horizoncode#communication" },
 	{ "HorizonCode Node/Struct", "",
 	  "Which struct definition this node is bound to. Rebinding re-mirrors the "
