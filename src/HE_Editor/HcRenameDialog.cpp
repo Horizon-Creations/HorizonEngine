@@ -1,6 +1,7 @@
 #include "HcRenameDialog.h"
 #include "HcRenameSweep.h"
 
+#include "AnimatorStateMachineEditorPanel.h"  // its sync graph is one of the four the sweep writes
 #include "CollabController.h"
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"
@@ -46,7 +47,12 @@ namespace
 	{
 		if (ctx.collab && ctx.collab->assetLockedByOther(relPath))
 			return "locked by someone else in this session";
-		if (UIEditorPanel::isDirty(relPath) || HorizonCodeClassPanel::isDirty(relPath))
+		// Every panel that owns one of the graph kinds the sweep writes has to be
+		// asked. Its tab holds its own copy, so writing the file underneath it just
+		// means the copy wins at the next save — the rename would look like it took
+		// and then quietly come undone.
+		if (UIEditorPanel::isDirty(relPath) || HorizonCodeClassPanel::isDirty(relPath) ||
+		    AnimatorStateMachineEditorPanel::isDirty(relPath))
 			return "open with unsaved changes";
 		return {};
 	}
