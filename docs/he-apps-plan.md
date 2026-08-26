@@ -241,6 +241,59 @@ und veränderbar:
 *Dashboard*, *Formular/Editor*, *Werkzeug mit Werkzeugleiste*. Wer eine Vorlage nimmt und
 F5 drückt, sieht sofort eine echte App.
 
+**D5 Effekte und Materialien: drei Schichten.** Der Spagat zwischen „viel vordefiniert" und
+„eigene Shader per Material-Graph" löst sich nur, wenn beides **nicht dasselbe** ist.
+
+*Schicht 0, „Stil": Eigenschaften am Element, kein Shader.* Eckenradius pro Ecke, Rahmen mit
+Breite und Farbe, linearer und radialer Verlauf, Schlagschatten (ein zweites Quad mit
+Abfall), Innenschatten. Umgesetzt als Feldern an `UIRenderObject` plus Feature-Bits im
+**eingebauten** UI-Shader jedes Backends. Geschlossenes Vokabular, überall identisch, kein
+Shader-Übersetzen, kein Kompilieren, und vom Software-Rasterizer (Block G) darstellbar.
+**Hier lebt der Großteil dessen, was „vordefiniert" bedeutet**, weil es genau das ist, was
+Apps jeden Tag brauchen.
+
+*Schicht 1, „Material": der Graph als Ausweg.* `MatDomain::UserInterface` existiert und
+erzwingt schon den unlit-Schwanz. Der `uiVertex` liefert dem Fragment bereits `vUV` (das
+UV-Rechteck des Quads), `vColor` (den Farbton), `vWorldPos` (die Bildschirmposition in Pixeln)
+und über den Time-Node die Zeit. Damit sind Verlaufsanimationen, Rauschen, Puls, Wellen,
+Scanlines und Ähnliches schon heute baubar. Es fehlt:
+- **Parameter pro Instanz** (siehe die Falle unten), sonst teilen sich alle Nutzer eines
+  Materials einen Wert.
+- **UI-Nodes**: `ElementSize` in Pixeln, `ElementUV`, `RoundedRectSDF`, `BorderDistance`,
+  und **Element-Zustand** (hover / gedrückt / fokussiert / deaktiviert) als Eingang. Den
+  Zustand kennt der WidgetManager beim Extrahieren ohnehin, und er ist der Grund, warum ein
+  einziges mitgeliefertes „Button-Glow" ohne Verdrahtung pro Widget funktionieren kann.
+- **Mitgelieferte Bausteine als `MaterialFunction`-Assets.** Der `FunctionCall`-Node und
+  MaterialFunction-Assets existieren bereits, das ist der fertige Mechanismus für eine
+  Effektbibliothek, die sich im Graph-Editor zusammenstecken lässt statt kopiert zu werden.
+
+*Schicht 2, der Rückfall-Vertrag.* Wo ein Graph nicht laufen kann (Software-Backend, und
+heute D3D und Vulkan), zeichnet ein Material-Quad **Schicht 0 plus Farbton**. Dokumentiert,
+nicht stillschweigend. Daraus folgt die Regel für die Bibliothek: was eine App täglich
+braucht, gehört in Schicht 0 und läuft überall; das Auffällige darf ein Graph sein und
+degradiert sauber. „Viel vordefiniert" darf nicht heimlich heißen „nichts davon auf Windows
+oder im Software-Modus".
+
+**Zwei Funde, die dabei aufgefallen sind:**
+
+1. **`ui.setMaterialParam` ist eine Falle, keine Lösung.** Es läuft über
+   `ScriptApi::setUIMaterialParam` und damit erstens ausschließlich über die ECS-
+   `UIImageComponent`, also über genau das UI-System, das Abschnitt 9 einfrieren will, und
+   zweitens schreibt es `content->setMaterialParam(materialAssetId, …)`, verändert also das
+   **geteilte Asset**: zwei Widgets mit demselben Material ändern sich beide. Parameter pro
+   Instanz brauchen einen echten Mechanismus, entweder einen Parameterblock pro Quad am
+   `UIRenderObject` oder eine Instanz-Tabelle, die erst beim Zeichnen aufgelöst wird.
+
+2. **Ein Backdrop-Node ist kein Node, sondern ein Arbeitspaket.** Weichzeichnen hinter dem
+   Element (Glas, Milchglas, moderne Dialoge) heißt, dass der UI-Pass lesen muss, was hinter
+   ihm liegt: Texturkopie auf GL und D3D, Framebuffer-Fetch oder Tile-Tricks auf Metal. Das
+   ist ein eigener Punkt mit ehrlichen Kosten, nicht ein Kästchen im Graph-Editor. Es speist
+   danach sowohl einen Schicht-1-Node als auch jede Glas-Komponente aus D2.
+
+**Eine Falle für den App-Modus:** der Time-Node liest `heLight.sunDir.w`. Ohne Welt füllt
+niemand den Szenen-Lichtblock, also müsste der UI-Pass die Zeit ausdrücklich einspeisen,
+sonst steht jedes animierte Material auf 0. Billig jetzt, ärgerlich später.
+
 **D4 Layout-Hilfen.** Abstände aus der Theme-Skala statt Zahlen, Ausrichtungshilfen und
 Einrasten im Designer, „an Inhalt anpassen" als Größenmodus, Mindest-/Maximalgrößen.
 
@@ -275,9 +328,14 @@ kein „Escape beendet". Klingt trivial, ist der Unterschied zwischen profession
 
 ## 8. Block F: Plattform-Parität
 
-**F1 Texturen auf D3D11/D3D12/Vulkan.** Widget-Bilder zeichnen dort heute nur den reinen
-Farbton. Eine App ohne Bilder und Icons auf Windows ist kein Produkt. Das ist ein Blocker,
-kein Feinschliff.
+**F1 UI-Renderpfad-Parität auf D3D11/D3D12/Vulkan.** Korrektur gegenüber der ersten Fassung,
+die nur von Texturen sprach: die Lücke ist größer. Der UI-Pass dieser drei Backends zeichnet
+**ausschließlich** einfarbige Quads, Glyphen, Clip und Rotation. Der D3D11-Konstantenpuffer
+hat kein Feld für den Eckenradius, und `cornerRadius` kommt in D3D11, D3D12 und Vulkan
+überhaupt nicht vor (Metal und GL: ja). Es fehlen dort also **Eckenradius, Texturen und
+Materialien** zugleich. Ein abgerundeter Knopf ist auf Windows heute ein Rechteck. Das ist
+ein Blocker für Apps auf Windows, kein Feinschliff, und es ist zugleich die Vorarbeit für
+Schicht 0 aus D5.
 
 **F2 HiDPI.** Die Pixel-Größe kennt das Fenster schon. Ob der Canvas-Skalierungsmodus die
 Systemskalierung auf Windows und Linux korrekt aufnimmt, ist ungeprüft.
@@ -320,9 +378,15 @@ Abtasten für Glyphen und Texturen, Source-over-Blending, Scissor. Realistisch 6
 Zeilen, plus Präsentation ins Fenster.
 
 **Die harte Grenze, ausdrücklich:** `materialAssetId` kann ein CPU-Backend nicht bedienen, ein
-Material ist ein übersetzter Shader-Graph. Vorschlag: Quads mit Material zeichnen den reinen
-Farbton, genau wie D3D und Vulkan es heute mit Texturen tun. Das gehört dokumentiert, nicht
-stillschweigend gemacht.
+Material ist ein übersetzter Shader-Graph. Hier greift der Rückfall-Vertrag aus D5: ein
+Material-Quad zeichnet **Schicht 0 plus Farbton**, also Eckenradius, Rahmen, Verlauf und
+Schatten, nur ohne den Graph. Deshalb ist Schicht 0 als geschlossenes Vokabular gebaut und
+nicht als Sammlung von Graphen. Das gehört dokumentiert, nicht stillschweigend gemacht.
+
+Eine dritte Möglichkeit gäbe es: einen kleinen **CPU-Interpreter für UI-Material-Graphen**.
+Der Graph ist ein DAG aus einfachen Operationen, und für App-große Quads wäre das machbar.
+Ich empfehle ihn **nicht** für Welle 2. Der Rückfall-Vertrag macht ihn entbehrlich, und es ist
+genau die Sorte Punkt, die im Umfang explodiert.
 
 **Mechanik:**
 - `RendererBackend::Software = 5` **angehängt**, nie eingefügt. Der Kommentar an `Metal = 4`
@@ -384,18 +448,20 @@ die im Leerlauf nichts verbraucht. Alles, was dafür nicht nötig ist, kommt sp�
 
 **Welle 2, brauchbar**
 - G Software-Backend (hängt an A1; bringt zugleich den headless App-Test)
+- D5 Schicht 0: Eckenradius pro Ecke, Rahmen, Verläufe, Schatten in allen Backends
+- F1 UI-Renderpfad-Parität auf D3D/Vulkan (dieselbe Arbeit, anderes Ende)
 - D1 Theme-System
 - D2 erste zwölf Komponenten
 - B2 ListView, B3 Grid, B4 Dialoge/Kontextmenü/Tooltip
 - C: `fs` entsperrt mit Dialog-Erteilung, `datetime`, `process`
 - E3 echte Designer-Vorschau
-- F1 Texturen auf D3D/Vulkan
 
 **Welle 3, konkurrenzfähig**
 - A6 Menüleiste, A7 Icon und Dateitypen
 - B1b mehrzeiliges Textfeld, B5 Tabs/Splitter, B6 RichText, B7 Drag & Drop, B8 Animationen
 - C: `http`, `notify`
 - D3 alle App-Vorlagen
+- D5 Schicht 1: Parameter pro Instanz, UI-Nodes, MaterialFunction-Effektbibliothek, Backdrop
 - A3 schlanker Runtime
 
 **Welle 4, Kür**
