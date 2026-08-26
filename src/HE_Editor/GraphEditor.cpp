@@ -114,6 +114,19 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
+    // The canvas button covers everything and is submitted FIRST, so without
+    // this every on-node widget would be dead: ItemHoverable refuses a later
+    // item while an earlier one owns HoveredId/ActiveId unless that earlier one
+    // allowed overlap (imgui.cpp, ItemHoverable). The on-node editors used to
+    // live in child windows, which sidestepped the question — the child was the
+    // hovered WINDOW, so this button was never hoverable under it. They are
+    // groups in this window now (that is what stopped them floating above every
+    // node), which brings the question back and this is the answer to it.
+    //
+    // It also restores the other half of what the child window did: with
+    // AllowOverlap, IsItemHovered() below reports false while a later item
+    // covers the cursor, so editing a body widget does not also drag the node.
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton(id, size,
         ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
         ImGuiButtonFlags_MouseButtonMiddle);
@@ -143,8 +156,9 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     // Deliberately NOT gated on IsAnyItemActive: the canvas InvisibleButton
     // itself becomes the active item on press, so that guard would make
     // `interact` false on the very click that should start a node drag /
-    // box-select. Hovering a node-body child window already turns `hovered`
-    // off, so editing a body widget doesn't trigger canvas interaction.
+    // box-select. Hovering an on-node widget already turns `hovered` off — see
+    // the SetNextItemAllowOverlap above — so editing a body widget doesn't
+    // trigger canvas interaction.
     const bool interact = hovered && !st.suppressInteraction && !behindConsumed;
 
     // Owning the keyboard is NOT the same as `interact`: that only means the
@@ -366,9 +380,10 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         for (float y = origin.y + oy; y < origin.y + size.y; y += grid)
             dl->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + size.x, y), IM_COL32(255,255,255,10));
     }
-    // No manual clip rect here: the host already draws the canvas inside a
-    // clipping child window, and pushing a draw-list clip around the node loop
-    // would collide with the BeginChild used for on-node body widgets.
+    // No manual clip rect around the whole node loop: the host already draws the
+    // canvas inside a clipping child window. The on-node widgets push their own
+    // rect per node instead (see the body block below) — they used to sit in
+    // child windows, which is what put every one of them above every node.
     if (model.drawBehind) model.drawBehind(dl, origin, st.pan, st.zoom);
 
     // ── Links (behind nodes) ─────────────────────────────────────────────────
@@ -587,28 +602,48 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             // before the canvas and edits don't start a node drag.
             if (p.input && !p.isExec && pinInlineEditor(n.id, p.id))
             {
+                // A GROUP, not a child window, and that is the whole point.
+                // AddWindowToDrawData (imgui.cpp) appends a window's own draw
+                // list FIRST and every child window after it, so anything drawn
+                // in a child sits above ALL of the parent's primitives — every
+                // node background on this canvas included. That is why an inline
+                // editor used to shine through the node lying on top of it.
+                // In the parent's list it is just one more command in node
+                // order, and since nodes draw back-to-front the node in front
+                // covers it, which is what a reader expects.
+                //
+                // The group is what a child window was really being used for:
+                // BeginGroup sets DC.Indent to the cursor column, so a line
+                // break returns to the group's left edge instead of the canvas's.
+                // The clip rect replaces the child's other job, keeping a wide
+                // widget inside the node — for hit-testing too, since ItemAdd
+                // honours it.
                 const float ew = 58.0f * st.zoom, eh = 17.0f * st.zoom;
+                const ImVec2 emin(labelEndX, pp.y - eh * 0.5f);
                 ImGui::PushID(n.id * 4096 + p.id);
-                ImGui::SetCursorScreenPos(ImVec2(labelEndX, pp.y - eh * 0.5f));
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-                ImGui::BeginChild("##pindefault", ImVec2(ew, eh), ImGuiChildFlags_None,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-                    ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::PushClipRect(emin, ImVec2(emin.x + ew, emin.y + eh), true);
+                ImGui::SetCursorScreenPos(emin);
+                ImGui::BeginGroup();
                 ImGui::SetWindowFontScale(st.zoom);
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3.0f * st.zoom, 1.0f * st.zoom));
                 model.drawPinInlineEditor(n.id, p.id);
                 ImGui::PopStyleVar();
                 ImGui::SetWindowFontScale(1.0f);
-                ImGui::EndChild();
-                ImGui::PopStyleVar();
+                ImGui::EndGroup();
+                ImGui::PopClipRect();
                 ImGui::PopID();
             }
         }
 
-        // On-node body widgets (material params etc.). Wrapped in a child window
-        // anchored to the node so ImGui line breaks reset the cursor to the
-        // node's left edge (not the canvas window's) — otherwise multi-widget
-        // bodies flow down the left margin instead of stacking on the node.
+        // On-node body widgets (material params, HorizonCode literals). A GROUP
+        // anchored to the node, so ImGui line breaks reset the cursor to the
+        // node's left edge (not the canvas window's) — BeginGroup sets DC.Indent
+        // to the cursor column, which is exactly that. It used to be a child
+        // WINDOW, and that was the bug: AddWindowToDrawData appends a window's
+        // own draw list first and its children afterwards, so every widget in a
+        // child floated above every node background on the canvas. Drawn into
+        // the parent's list it takes its place in node order instead, and the
+        // node in front covers it.
         if (model.drawNodeBody && model.nodeBodyHeight && model.nodeBodyHeight(n.id) > 0.0f)
         {
             int left = 0, right = 0;
@@ -617,13 +652,14 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             const ImVec2 bmin(n.pos.x + 6, pinsBottom + 2);
             const ImVec2 bmax(br.x - 6, br.y - 4);
             ImGui::PushID(n.id);
+            // The clip rect does the other half of the child window's old job:
+            // a body widget wider than the node stays inside it, and ItemAdd
+            // honours the same rect, so a clipped-away control is not clickable
+            // either.
+            ImGui::PushClipRect(bmin, ImVec2(std::max(bmax.x, bmin.x + 1.0f),
+                                             std::max(bmax.y, bmin.y + 1.0f)), true);
             ImGui::SetCursorScreenPos(bmin);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-            ImGui::BeginChild("##nodebody",
-                ImVec2(std::max(bmax.x - bmin.x, 1.0f), std::max(bmax.y - bmin.y, 1.0f)),
-                ImGuiChildFlags_None,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+            ImGui::BeginGroup();
             // Body widgets scale with the canvas zoom like everything else on the
             // node: font via the window font scale, paddings via style vars (the
             // body rect is already zoom-sized, so unscaled widgets overflow it
@@ -635,8 +671,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             model.drawNodeBody(n.id, bmin, bmax, st.zoom);
             ImGui::PopStyleVar(3);
             ImGui::SetWindowFontScale(1.0f);
-            ImGui::EndChild();
-            ImGui::PopStyleVar();
+            ImGui::EndGroup();
+            ImGui::PopClipRect();
             ImGui::PopID();
         }
 

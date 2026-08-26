@@ -9,6 +9,7 @@
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"
 #include "HcNodeReference.h"
+#include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
@@ -681,4 +682,89 @@ TEST_CASE("ui shot: searching the manual from the reader")
 	REQUIRE(img.valid());
 	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
 	DocsPanel::close();
+}
+
+// ── On-node controls must not float above the node in front of them ─────────
+// Reported as "Steuerelemente auf HC-Nodes rendern immer ganz oben, auch über
+// anderen Node-Bodies", and it was structural rather than a z-order slip: the
+// inline editors and node bodies were drawn inside ImGui::BeginChild, and
+// AddWindowToDrawData (imgui.cpp) appends a window's OWN draw list first and
+// every child window after it. Every widget in a child therefore sat above
+// every node background on the canvas, whatever the node order was.
+//
+// This is the measurement, not an argument: two overlapping nodes, the BACK one
+// carrying a body widget in a colour nothing else on the canvas uses, and a
+// pixel read inside the overlap. Before the fix that pixel was the widget's
+// colour. It has to be the front node's body.
+TEST_CASE("Graph canvas: a node in front covers the widgets of the node behind it")
+{
+	constexpr int W = 320, H = 240;
+	Harness harness(W, H);
+
+	// A colour no node background, header, border or grid line uses, so a single
+	// pixel read is unambiguous about which of the two it came from.
+	constexpr ImU32 kLoud = IM_COL32(255, 0, 255, 255);
+
+	GraphEditor::Model m;
+	GraphEditor::State st;
+	st.pan  = ImVec2(0.0f, 0.0f);
+	st.zoom = 1.0f;
+
+	// Node 1 sits back-left and owns the loud body; node 2 is drawn after it and
+	// therefore in front, overlapping node 1's body area.
+	m.nodeIds = []{ return std::vector<int>{ 1, 2 }; };
+	m.getPos  = [](int id, float& x, float& y)
+	{ x = (id == 1) ? 40.0f : 90.0f; y = (id == 1) ? 40.0f : 60.0f; };
+	m.setPos  = [](int, float, float){};
+	m.title   = [](int id){ return id == 1 ? std::string("Back") : std::string("Front"); };
+	m.headerColor = [](int){ return IM_COL32(60, 60, 70, 255); };
+	m.pins    = [](int){ return std::vector<GraphEditor::Pin>{}; };
+	m.links   = []{ return std::vector<std::array<int, 4>>{}; };
+	m.connect = [](int, int, int, int){ return false; };
+	// BOTH nodes reserve a body, so the front one's box is tall enough to
+	// actually lie over the back one's. Only the back one PAINTS into its body —
+	// the front one stays its plain background, which is what the sample below
+	// expects to find there.
+	m.nodeBodyHeight = [](int){ return 60.0f; };
+	m.drawNodeBody   = [&](int id, ImVec2 bmin, ImVec2 bmax, float)
+	{ if (id == 1) ImGui::GetWindowDrawList()->AddRectFilled(bmin, bmax, kLoud); };
+
+	const he_ui::Image img = shoot("graph-node-overlap", W, H, 3, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##canvas", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		GraphEditor::draw("##ge", m, st, ImVec2((float)W, (float)H));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+
+	auto loudPixels = [&](int x0, int y0, int x1, int y1)
+	{
+		int n = 0;
+		for (int y = y0; y < y1; ++y)
+			for (int x = x0; x < x1; ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (r > 200 && g < 60 && b > 200) ++n;
+			}
+		return n;
+	};
+
+	// The body must be drawn at all — otherwise the assertion below would pass
+	// for the wrong reason (nothing drawn is also "not on top").
+	CHECK(loudPixels(0, 0, W, H) > 0);
+
+	// …and it must be drawn where we think it is, or the sample below could sit
+	// beside the overlap and pass while the bug is still there.
+	CHECK(loudPixels(60, 80, 90, 120) > 0);
+
+	// The sample: well inside the FRONT node's box, in the region where the two
+	// boxes overlap. Graph (90,60) with pan 0 and zoom 1, node width ~177 and a
+	// 60-unit body, so this rectangle is inside both nodes. Nothing loud may
+	// reach it — that is what "the node in front covers what is behind it" means.
+	CHECK(loudPixels(110, 85, 200, 120) == 0);
 }
