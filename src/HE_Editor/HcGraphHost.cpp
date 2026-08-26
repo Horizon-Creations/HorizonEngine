@@ -313,6 +313,11 @@ std::string defaultNodeTitle(const HC::Node& n)
 		case NT::SetExternal:  return n.s.empty() ? std::string("Set (Ref)")  : ("Set " + n.s);
 		case NT::EngineCall:   return HcEditorUtil::engineCallTitle(n.s);
 		case NT::Cast:         return HcEditorUtil::castTitle(n.s);
+		// Which widget / which class, in the header. Both store an asset path in
+		// `s`, and without this a graph full of them says only "Create Widget"
+		// five times over.
+		case NT::CreateWidget:
+		case NT::CreateObject: return HcEditorUtil::assetNodeTitle(base, n.s);
 		// The action, not the event names it answers to — those are the wire's
 		// business. "(Axis)" because the pin layout differs and the reason for
 		// it should be readable off the node.

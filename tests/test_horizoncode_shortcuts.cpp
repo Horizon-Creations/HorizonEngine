@@ -4,6 +4,7 @@
 #include <string>
 
 #include "HcGraphShortcuts.h"
+#include "HcEditorUtil.h"   // assetNodeTitle — the header a Create node draws
 
 // The quick-spawn bindings are a hand-maintained table, and a table is exactly the
 // kind of thing that rots: two nodes silently claiming the same key, a binding for
@@ -102,4 +103,27 @@ TEST_CASE("HorizonCode graph shortcuts: the Blueprint five keep their keys")
 		REQUIRE(it != binds.end());
 		CHECK(it->type == e.type);
 	}
+}
+
+// ── Node headers that name their asset ───────────────────────────────────────
+// Create Widget and Create Object both store an asset path and both used to
+// draw as the bare node name, so a graph with five of them said "Create Widget"
+// five times and the only way to tell them apart was clicking each one. The
+// header now carries the asset, the same answer Cast gives with "Cast To X".
+// Asserted here rather than looked at, because the failure mode is a title that
+// silently falls back to the base name.
+TEST_CASE("Asset nodes name their asset in the header")
+{
+	using HcEditorUtil::assetNodeTitle;
+
+	CHECK(assetNodeTitle("Create Widget", "Content/UI/PauseMenu.hasset")
+	      == "Create Widget: PauseMenu");
+	// Nested folders change nothing: the stem is what every other asset picker
+	// in the editor shows, so the header agrees with the combo box above it.
+	CHECK(assetNodeTitle("Create Object", "Content/Enemies/Boss/Goblin.hasset")
+	      == "Create Object: Goblin");
+	// Not chosen yet — the node still has to say what KIND it is.
+	CHECK(assetNodeTitle("Create Widget", "") == "Create Widget");
+	// A path with no stem must not produce a dangling colon.
+	CHECK(assetNodeTitle("Create Widget", "Content/UI/") == "Create Widget");
 }

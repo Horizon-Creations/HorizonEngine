@@ -1030,6 +1030,14 @@ std::string castTargetLabel(const std::string& targetKey)
 	return std::filesystem::path(targetKey).stem().string();
 }
 
+std::string assetNodeTitle(const char* base, const std::string& assetPath)
+{
+	const std::string fallback = base ? base : "";
+	if (assetPath.empty()) return fallback;
+	const std::string stem = std::filesystem::path(assetPath).stem().string();
+	return stem.empty() ? fallback : (fallback + ": " + stem);
+}
+
 std::string castTitle(const std::string& targetKey)
 {
 	const std::string label = castTargetLabel(targetKey);

@@ -228,6 +228,17 @@ namespace HcEditorUtil
 	// depend on the target.
 	std::string castTargetLabel(const std::string& targetKey);
 	std::string castTitle(const std::string& targetKey);
+
+	// A node whose whole job is "make one of THIS asset" — Create Widget, Create
+	// Object — reading as the bare "Create Widget" means the graph does not say
+	// which one, and five of them side by side are indistinguishable until you
+	// click each. Same answer Cast gives: put the asset in the header.
+	//
+	// The stem, like every other asset picker in the editor shows (ClassRef's
+	// label is the stem too). The node's DISPLAY NAME stays the bare one — that
+	// string is a key a saved graph is read back by and must not depend on the
+	// target, which is the rule the Cast block above states.
+	std::string assetNodeTitle(const char* base, const std::string& assetPath);
 	// Point a Cast node at `targetKey` and mirror the readable output-pin name
 	// ("As Goblin") onto the node, the same way an EngineCall mirrors its
 	// descriptor's params: PinDesc::name is a borrowed pointer, so the label has
