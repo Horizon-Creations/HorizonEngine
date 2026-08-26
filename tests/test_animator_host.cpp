@@ -161,7 +161,7 @@ TEST_CASE("A sync graph's palette is restricted by GROUP, not by wishful thinkin
 	// The ones a sync graph has no business doing from inside the animation pass.
 	CHECK_FALSE(HE::api::groupAllowed("scene.load", allowed));
 	CHECK_FALSE(HE::api::groupAllowed("save.setNumber", allowed));
-	CHECK_FALSE(HE::api::groupAllowed("widget.create", allowed));
+	CHECK_FALSE(HE::api::groupAllowed("widget.setZOrder", allowed));
 	CHECK_FALSE(HE::api::groupAllowed("audio.play", allowed));
 
 	// A prefix that merely starts the same must not slip through — the group is

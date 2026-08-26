@@ -99,6 +99,41 @@ TEST_CASE("EngineApi: find() resolves ids, rejects unknown")
     CHECK(HE::api::find("") == nullptr);
 }
 
+TEST_CASE("EngineApi: widget lifecycle is the built-in nodes, not the registry")
+{
+    // There used to be two halves of the same feature that could not be wired
+    // together: the built-in Create Widget node hands its id out as a Ref, the
+    // registry rows took an Int, and Ref/Int do not convert. The nodes won — Create
+    // Widget picks its asset from a list, where a row could only take a typed path
+    // — so the four lifecycle rows are gone and the rest speak Ref.
+    for (const char* id : { "widget.create", "widget.destroy", "widget.show", "widget.hide" })
+    {
+        INFO("id: " << id);
+        CHECK(HE::api::find(id) == nullptr);
+    }
+
+    // Only the ROWS went — HE::api::widget::create and friends are the C++ shape of
+    // the same operations and keep their callers. What survives on the registry
+    // takes the Ref a Create Widget node outputs, which is the whole point: as Int
+    // these three had no source for the id at all once the create row was gone.
+    const auto* z = HE::api::find("widget.setZOrder");
+    REQUIRE(z != nullptr);
+    REQUIRE(z->params.size() == 2);
+    CHECK(z->params[0].type == P::Ref);
+    CHECK(z->params[1].type == P::Int);      // the z-order itself is a plain number
+
+    const auto* vis = HE::api::find("widget.isVisible");
+    REQUIRE(vis != nullptr);
+    REQUIRE(vis->params.size() == 1);
+    CHECK(vis->params[0].type == P::Ref);
+
+    const auto* call = HE::api::find("widget.callFunction");
+    REQUIRE(call != nullptr);
+    REQUIRE(call->params.size() == 2);
+    CHECK(call->params[0].type == P::Ref);
+    CHECK(call->params[1].type == P::String);
+}
+
 TEST_CASE("EngineApi: side-effect classification is correct")
 {
     // Getters / queries / pure math are data nodes; setters / actions are exec.

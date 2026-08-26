@@ -242,22 +242,15 @@ namespace
 	  "that acts on the world, so a press on a button does not also shoot." },
 
 	// ── Widget ───────────────────────────────────────────────────────────────
-	{ "widget.create",
-	  "Instantiates a widget asset and returns its id. Nothing is on screen until "
-	  "Show; keep the id, it is the only handle to it." },
-	{ "widget.destroy",
-	  "Destroys the widget and invalidates its id. Hiding is enough for a screen "
-	  "that comes back; destroy the ones that will not." },
-	{ "widget.show",
-	  "Puts a created widget on screen." },
-	{ "widget.hide",
-	  "Takes it off screen without destroying it — its state and its graph stay as "
-	  "they are." },
+	// Creating, showing, hiding and destroying are the Create/Show/Hide/Destroy
+	// Widget nodes, not engine calls; these three take the Widget those nodes hand
+	// out.
 	{ "widget.setZOrder",
 	  "Which widget draws over which: higher is nearer the front. For keeping a "
-	  "pause menu above a HUD." },
+	  "pause menu above a HUD. Takes the Widget from a Create Widget node." },
 	{ "widget.isVisible",
-	  "Is this widget on screen? False for an id that was destroyed." },
+	  "Is this widget on screen? A new widget starts visible, so this is false "
+	  "only after Hide Widget, or for a Widget that was destroyed." },
 	{ "widget.callFunction",
 	  "Calls a public function on the widget's own graph by name — the way the "
 	  "outside talks to a screen. Ok is false when the widget or the function is "

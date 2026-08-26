@@ -142,9 +142,14 @@ what a container can and cannot nest with.
 ### Widgets
 | Node | Purpose |
 |------|---------|
-| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset by path → Widget id. |
-| **Show Widget** / **Hide Widget** / **Destroy Widget** | Act on a widget by id. |
+| **Create Widget** (`CreateWidget`) | Instantiate a UI Widget asset (picked from a list in Details) → Widget, a `Ref`. |
+| **Show Widget** / **Hide Widget** / **Destroy Widget** | Act on that Widget. |
 | **Show Self** / **Hide Self** | A widget graph shows/hides its own widget. |
+
+A widget's lifecycle runs through these four nodes only — there are no engine-call
+twins for them, because a registry row could only take a typed path where the node
+offers the asset list. The three `widget.*` calls in §3 are the extras, and they
+take the same `Ref` the Create Widget node outputs.
 
 ### Objects, references & members
 | Node | Purpose |
@@ -303,7 +308,7 @@ there with no script changes at all.
 | **Physics** | 3 | `raycast`, `setVelocity`, `isGrounded` |
 | **Material** | 2 | `getParam`, `setParam` |
 | **UI** | 11 | element access: `getText`/`setText`, `getColor`/`setColor`, `getVisible`/`setVisible`, `getPosition`/`setPosition`, `getSize`/`setSize`, `setMaterialParam` |
-| **Widget** | 7 | `create`, `destroy`, `show`, `hide`, `setZOrder`, `isVisible`, `callFunction` |
+| **Widget** | 3 | `setZOrder`, `isVisible`, `callFunction` — each takes the `Ref` a **Create Widget** node outputs. Creating/showing/hiding/destroying is that node and its three siblings (§2 *Widgets*), not an engine call |
 | **Cursor** | 1 | `setVisible` |
 | **Math** | 11 | `clamp`, `lerp`, `length`, `distance`, `radians`, `degrees`, `length3`, `distance3`, `normalize3`, `dot3`, `cross` (plus per-op nodes in §2) |
 | **Random** | 5 | `seed`, `value`, `range`, `rangeInt`, `chance` |

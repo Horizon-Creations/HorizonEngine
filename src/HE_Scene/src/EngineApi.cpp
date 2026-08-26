@@ -1840,21 +1840,20 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "ui.pointerOverUI", "UI", false, {}, {{"over", P::Bool}}, "HE::api::ui::pointerOverUI",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(ui::pointerOverUI(c)) }; } });
 
-        // Live widgets
-        t.push_back({ "widget.create", "Widget", true, {{"path", P::String}}, {{"widget", P::Int}}, "HE::api::widget::create",
-            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(widget::create(c, aS(a, 0))) }; } });
-        t.push_back({ "widget.destroy", "Widget", true, {{"widget", P::Int}}, {}, "HE::api::widget::destroy",
-            [](Ctx& c, const VV& a){ widget::destroy(c, aI(a, 0)); return VV{}; } });
-        t.push_back({ "widget.show", "Widget", true, {{"widget", P::Int}}, {}, "HE::api::widget::show",
-            [](Ctx& c, const VV& a){ widget::show(c, aI(a, 0)); return VV{}; } });
-        t.push_back({ "widget.hide", "Widget", true, {{"widget", P::Int}}, {}, "HE::api::widget::hide",
-            [](Ctx& c, const VV& a){ widget::hide(c, aI(a, 0)); return VV{}; } });
-        t.push_back({ "widget.setZOrder", "Widget", true, {{"widget", P::Int}, {"z", P::Int}}, {}, "HE::api::widget::setZOrder",
-            [](Ctx& c, const VV& a){ widget::setZOrder(c, aI(a, 0), aI(a, 1)); return VV{}; } });
-        t.push_back({ "widget.isVisible", "Widget", false, {{"widget", P::Int}}, {{"visible", P::Bool}}, "HE::api::widget::isVisible",
-            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::isVisible(c, aI(a, 0))) }; } });
-        t.push_back({ "widget.callFunction", "Widget", true, {{"widget", P::Int}, {"function", P::String}}, {{"ok", P::Bool}}, "HE::api::widget::callFunction",
-            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::callFunction(c, aI(a, 0), aS(a, 1))) }; } });
+        // Live widgets — the EXTRAS only. A widget's lifecycle belongs to the four
+        // built-in nodes (Create/Show/Hide/Destroy Widget), which are the better
+        // half: Create Widget picks its asset from a list instead of a typed path.
+        // Registry twins of those four existed and were a trap, because the node
+        // hands its id out as a Ref and these rows took an Int — and Ref/Int do not
+        // convert (canConvertPinType), so the two halves could not be wired
+        // together at all. Hence Ref here too: the id IS the widget reference
+        // (widget id == scriptId), so these three plug straight into the node.
+        t.push_back({ "widget.setZOrder", "Widget", true, {{"widget", P::Ref}, {"z", P::Int}}, {}, "HE::api::widget::setZOrder",
+            [](Ctx& c, const VV& a){ widget::setZOrder(c, (int)aR(a, 0), aI(a, 1)); return VV{}; } });
+        t.push_back({ "widget.isVisible", "Widget", false, {{"widget", P::Ref}}, {{"visible", P::Bool}}, "HE::api::widget::isVisible",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::isVisible(c, (int)aR(a, 0))) }; } });
+        t.push_back({ "widget.callFunction", "Widget", true, {{"widget", P::Ref}, {"function", P::String}}, {{"ok", P::Bool}}, "HE::api::widget::callFunction",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(widget::callFunction(c, (int)aR(a, 0), aS(a, 1))) }; } });
 
         // Cursor
         t.push_back({ "cursor.setVisible", "Cursor", true, {{"show", P::Bool}}, {}, "HE::api::cursor::setVisible",
@@ -2274,8 +2273,6 @@ const std::vector<ApiFn>& registry()
             { "ui.getSize", "Get UI Size" },        { "ui.setSize", "Set UI Size" },
             { "ui.setMaterialParam", "Set UI Material Param" },
             { "ui.pointerOverUI", "Is Pointer Over UI" },
-            { "widget.create", "Create Widget" },   { "widget.destroy", "Destroy Widget" },
-            { "widget.show", "Show Widget" },       { "widget.hide", "Hide Widget" },
             { "widget.setZOrder", "Set Widget Z-Order" }, { "widget.isVisible", "Is Widget Visible" },
             { "widget.callFunction", "Call Widget Function" },
             { "cursor.setVisible", "Set Cursor Visible" },

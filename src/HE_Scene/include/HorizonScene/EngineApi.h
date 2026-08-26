@@ -269,11 +269,21 @@ namespace ui {
 }
 
 // ── Live widgets (WidgetManager — exist OUTSIDE the entity world) ────────────
+// Only the last three have a registry row. A widget's lifecycle is the job of the
+// built-in Create/Show/Hide/Destroy Widget nodes (Create Widget picks its asset
+// from a list, where a registry row could only take a typed path), and those nodes
+// call the host's own hooks rather than coming through here. The first four stay
+// anyway, as the C++ shape of the same operations — but be honest about what
+// that means today: only create() has callers (two in tests), and destroy/show/
+// hide have none at all since their rows went. They are kept, not used, so
+// whoever finds them looking dead is looking correctly.
 namespace widget {
     int  create(Ctx&, const std::string& path);   // 0 on failure
     void destroy(Ctx&, int id);
     void show(Ctx&, int id);
     void hide(Ctx&, int id);
+    // The id doubles as the widget's runtime Ref (widget id == scriptId), which is
+    // what the registry rows below take — see the "Live widgets" block in the .cpp.
     void setZOrder(Ctx&, int id, int z);
     bool isVisible(Ctx&, int id);
     bool callFunction(Ctx&, int id, const std::string& fn);   // PUBLIC fns only
